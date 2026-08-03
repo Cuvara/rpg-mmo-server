@@ -34,8 +34,5 @@ Thumbs.db
 .env
 .env.local
 
-# Claude Code (ephemeral)
-.claude/plans/
-.claude/tasks/
-.claude/teams/
-.claude/settings.*
+# Claude Code
+.claude/
