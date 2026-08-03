@@ -1,0 +1,1325 @@
+<mxfile host="app.diagrams.net" pages="10">
+  <diagram name="1. Kiến trúc tổng thể" id="arch-overview">
+    <mxGraphModel grid="1" page="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" pageScale="1" pageWidth="1650" pageHeight="1050" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="p0-1" value="🎮 Unity Client (Mobile / PC)" style="rounded=1;whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="490" y="30" width="300" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-2" value="Meta Services — HTTPS / WebSocket" style="rounded=1;whiteSpace=wrap;verticalAlign=top;fontStyle=1;fontSize=13;align=left;spacingLeft=10;spacingTop=5;fillColor=#f5f9ff;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="50" y="170" width="530" height="400" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-3" value="Nakama&#xa;(Game Services)" style="rounded=1;whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="200" y="220" width="200" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-4" value="Authentication" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="80" y="310" width="140" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-5" value="Economy&#xa;+ Storage" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="240" y="310" width="140" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-6" value="Leaderboard" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="400" y="310" width="140" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-7" value="Party / Chat&#xa;/ Friends" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="80" y="380" width="140" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-8" value="Notifications&#xa;+ Presence" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="240" y="380" width="140" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-30" value="Matchmaking&#xa;Queue" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="400" y="380" width="140" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-9" value="PostgreSQL&#xa;(Meta Data — accounts, storage, leaderboard)" style="shape=cylinder3;whiteSpace=wrap;boundedLbl=1;size=12;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="150" y="490" width="300" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-10" value="Realtime Layer — UDP / KCP" style="rounded=1;whiteSpace=wrap;verticalAlign=top;fontStyle=1;fontSize=13;align=left;spacingLeft=10;spacingTop=5;fillColor=#fff8f0;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="650" y="170" width="560" height="250" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-11" value="Gateway&#xa;(UDP/KCP Router)" style="rounded=1;whiteSpace=wrap;fillColor=#ffe6cc;strokeColor=#d79b00;fontStyle=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="830" y="220" width="200" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-12" value="Session Manager" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="680" y="310" width="160" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-13" value="Server Registry" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="860" y="310" width="140" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-14" value="Pub/Sub Events" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1020" y="310" width="150" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-15" value="Redis&#xa;(Session · Registry · Pub/Sub · Cache)" style="shape=cylinder3;whiteSpace=wrap;boundedLbl=1;size=12;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="770" y="460" width="280" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-16" value="Agones on k3s — Game Server Lifecycle" style="rounded=1;whiteSpace=wrap;verticalAlign=top;fontStyle=1;fontSize=13;align=left;spacingLeft=10;spacingTop=5;fillColor=#f3fff3;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="200" y="640" width="1010" height="300" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-17" value="Agones Controller&#xa;(Allocation / Lifecycle / Health)" style="rounded=1;whiteSpace=wrap;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="500" y="690" width="280" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-18" value="Map Server 1&#xa;Combat · Skill · Movement&#xa;(10-15 Hz tick)" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="230" y="790" width="250" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-19" value="Map Server 2&#xa;AI · NPC · Spawn" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="510" y="790" width="240" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-20" value="Dungeon Server&#xa;World State · Loot · Quest&#xa;(instance per party)" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="780" y="790" width="260" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-31" value="PostgreSQL&#xa;(Game State — persistent)" style="shape=cylinder3;whiteSpace=wrap;boundedLbl=1;size=12;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="510" y="890" width="250" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-21" value="HTTPS / WebSocket" style="edgeStyle=orthogonalEdgeStyle;rounded=1;labelBackgroundColor=#ffffff;fontSize=11;" edge="1" parent="1" source="p0-1" target="p0-2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-22" value="UDP / KCP" style="edgeStyle=orthogonalEdgeStyle;rounded=1;labelBackgroundColor=#ffffff;fontSize=11;" edge="1" parent="1" source="p0-1" target="p0-10">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-23" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" parent="1" source="p0-3" target="p0-9">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-24" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" parent="1" source="p0-11" target="p0-15">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-25" value="lookup / allocate" style="edgeStyle=orthogonalEdgeStyle;rounded=1;labelBackgroundColor=#ffffff;fontSize=10;" edge="1" parent="1" source="p0-15" target="p0-17">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-26" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" parent="1" source="p0-17" target="p0-18">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-27" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" parent="1" source="p0-17" target="p0-19">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-28" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" parent="1" source="p0-17" target="p0-20">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-29" value="verify session" style="edgeStyle=orthogonalEdgeStyle;rounded=1;dashed=1;strokeColor=#888888;fontColor=#666666;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="p0-3" target="p0-11">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-32" value="heartbeat / state" style="edgeStyle=orthogonalEdgeStyle;rounded=1;dashed=1;strokeColor=#888888;fontColor=#666666;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="p0-18" target="p0-15">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-33" value="cross-server events" style="edgeStyle=orthogonalEdgeStyle;rounded=1;dashed=1;strokeColor=#888888;fontColor=#666666;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="p0-14" target="p0-20">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-34" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" parent="1" source="p0-18" target="p0-31">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-35" style="edgeStyle=orthogonalEdgeStyle;rounded=1;" edge="1" parent="1" source="p0-20" target="p0-31">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-36" value="📊 Deployment (VPS + k3s)&#xa;&#xa;Tier 1 — Dev ($40-60/mo)&#xa;  • 1 VPS 4vCPU/8GB&#xa;  • k3s + Agones + all services&#xa;  • &lt; 200 CCU&#xa;&#xa;Tier 2 — Beta ($80-150/mo)&#xa;  • 2 VPS (app + DB)&#xa;  • + CDN cho assets&#xa;  • 200-500 CCU&#xa;&#xa;Tier 3 — Launch ($200-400/mo)&#xa;  • 3 VPS (Nakama, Gateway, DB)&#xa;  • Redis dedicated&#xa;  • 500-2,000 CCU&#xa;&#xa;Tier 4 — Growth ($400-1000/mo)&#xa;  • Multi-node k3s cluster&#xa;  • Managed DB (optional)&#xa;  • 2,000-5,000+ CCU&#xa;&#xa;✅ Nakama, k3s, Agones, Redis = $0 license&#xa;💰 Chi phí = VPS + bandwidth + CDN" style="rounded=1;whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;align=left;spacingLeft=10;verticalAlign=top;spacingTop=8;fontFamily=monospace;" vertex="1" parent="1">
+          <mxGeometry x="1280" y="30" width="320" height="540" as="geometry" />
+        </mxCell>
+        <mxCell id="p0-37" value="Indie Optimizations:&#xa;• JWT verify local tại Gateway (shared secret)&#xa;• Redis Streams thay Pub/Sub cho event quan trọng&#xa;• Game server = Go binary (nhẹ, ~50MB RAM/pod)&#xa;• k3s thay K8s full (~500MB vs 2GB+ control plane)&#xa;• PostgreSQL: 2 instance (meta + game state)&#xa;• Rate limiting tại Gateway + Nakama RPC" style="rounded=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;fontSize=10;align=left;spacingLeft=8;verticalAlign=top;spacingTop=8;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="1280" y="590" width="320" height="160" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="2. Auth + Session" id="auth-session">
+    <mxGraphModel pageWidth="1400" pageHeight="1300">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="p1-30" value="loop  [mỗi N giây]" style="shape=umlFrame;whiteSpace=wrap;width=140;height=26;fillColor=none;verticalAlign=top;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="20" y="920" width="1320" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p1-31" value="alt  [token hết hạn]" style="shape=umlFrame;whiteSpace=wrap;width=150;height=26;fillColor=none;verticalAlign=top;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="20" y="1050" width="1320" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="p1-32" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="125" y="80" as="sourcePoint" /><mxPoint x="125" y="1240" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-33" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="365" y="80" as="sourcePoint" /><mxPoint x="365" y="1240" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-34" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="605" y="80" as="sourcePoint" /><mxPoint x="605" y="1240" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-35" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="845" y="80" as="sourcePoint" /><mxPoint x="845" y="1240" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-36" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1085" y="80" as="sourcePoint" /><mxPoint x="1085" y="1240" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-37" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1265" y="80" as="sourcePoint" /><mxPoint x="1265" y="1240" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-1" value="Phase 1 — Login (HTTPS)" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="115" width="1290" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p1-2" value="1. Authenticate (device / email / social)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="125" y="170" as="sourcePoint" /><mxPoint x="365" y="170" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-3" value="2. Validate credentials" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="365" y="210" as="sourcePoint" /><mxPoint x="605" y="210" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-4" value="3. Query / create account" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="605" y="250" as="sourcePoint" /><mxPoint x="845" y="250" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-5" value="4. Account record" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="845" y="290" as="sourcePoint" /><mxPoint x="605" y="290" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-6" value="5. Auth OK" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="605" y="330" as="sourcePoint" /><mxPoint x="365" y="330" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-7" value="6. Session Token (JWT) + Refresh Token" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="365" y="370" as="sourcePoint" /><mxPoint x="125" y="370" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-8" value="Phase 2 — Load profile + realtime handshake" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="410" width="1290" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p1-9" value="7. Get profile / wallet / inventory (HTTPS)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="125" y="465" as="sourcePoint" /><mxPoint x="365" y="465" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-10" value="8. Load player data" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="365" y="505" as="sourcePoint" /><mxPoint x="845" y="505" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-11" value="9. Player data" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="845" y="545" as="sourcePoint" /><mxPoint x="365" y="545" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-12" value="10. Profile + last map info" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="365" y="585" as="sourcePoint" /><mxPoint x="125" y="585" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-13" value="11. UDP/KCP Connect + Session Token" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="125" y="625" as="sourcePoint" /><mxPoint x="1085" y="625" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-38" value="JWT verify LOCAL — shared secret, không gọi Nakama" style="text;align=left;fontSize=10;fontStyle=2;fontColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="1095" y="635" width="300" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p1-14" value="12. SET session:{user_id} = conn (TTL)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1085" y="675" as="sourcePoint" /><mxPoint x="1265" y="675" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-15" value="13. OK" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1265" y="715" as="sourcePoint" /><mxPoint x="1085" y="715" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-16" value="14. Realtime channel established (UDP)" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1085" y="755" as="sourcePoint" /><mxPoint x="125" y="755" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-17" value="Phase 3 — Heartbeat + reconnect" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="870" width="1290" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p1-18" value="15. Heartbeat (KCP ping)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="125" y="960" as="sourcePoint" /><mxPoint x="1085" y="960" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-19" value="16. Refresh session TTL" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1085" y="990" as="sourcePoint" /><mxPoint x="1265" y="990" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-20" value="17. Refresh token (HTTPS)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="125" y="1090" as="sourcePoint" /><mxPoint x="365" y="1090" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-21" value="18. New session token" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="365" y="1130" as="sourcePoint" /><mxPoint x="125" y="1130" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-22" value="19. Re-auth on UDP connection" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="125" y="1170" as="sourcePoint" /><mxPoint x="1085" y="1170" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p1-23" value="Unity Client" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p1-24" value="Nakama" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="280" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p1-25" value="Authentication" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="520" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p1-26" value="PostgreSQL (Meta)" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="760" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p1-27" value="Gateway (UDP/KCP)" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p1-28" value="Redis" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="3. Map Assignment" id="map-assign">
+    <mxGraphModel pageWidth="1200" pageHeight="1450">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="p2-30" value="alt  [còn server trống (capacity OK)]" style="shape=umlFrame;whiteSpace=wrap;width=230;height=26;fillColor=none;verticalAlign=top;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="20" y="250" width="1120" height="340" as="geometry" />
+        </mxCell>
+        <mxCell id="p2-31" style="endArrow=none;dashed=1;strokeColor=#b0b0b0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="25" y="330" as="sourcePoint" /><mxPoint x="1135" y="330" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-32" value="loop  [vài giây]" style="shape=umlFrame;whiteSpace=wrap;width=120;height=26;fillColor=none;verticalAlign=top;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="20" y="1060" width="1120" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="p2-33" value="alt  [server rỗng / idle timeout]" style="shape=umlFrame;whiteSpace=wrap;width=210;height=26;fillColor=none;verticalAlign=top;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="20" y="1170" width="1120" height="170" as="geometry" />
+        </mxCell>
+        <mxCell id="p2-40" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="125" y="80" as="sourcePoint" /><mxPoint x="125" y="1390" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-41" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="80" as="sourcePoint" /><mxPoint x="355" y="1390" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-42" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="585" y="80" as="sourcePoint" /><mxPoint x="585" y="1390" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-43" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="80" as="sourcePoint" /><mxPoint x="815" y="1390" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-44" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1045" y="80" as="sourcePoint" /><mxPoint x="1045" y="1390" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-1" value="Map Assignment / Enter World" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="115" width="1090" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p2-2" value="1. EnterWorld(map_id) — UDP/KCP" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="125" y="170" as="sourcePoint" /><mxPoint x="355" y="170" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-3" value="2. Lookup: server khả dụng cho map_id" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="210" as="sourcePoint" /><mxPoint x="585" y="210" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-4" value="3. server_addr + capacity info" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="585" y="290" as="sourcePoint" /><mxPoint x="355" y="290" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-5" value="[hết chỗ / chưa có server]" style="text;align=left;fontSize=11;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="35" y="308" width="250" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p2-6" value="4. No available server" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="585" y="365" as="sourcePoint" /><mxPoint x="355" y="365" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-7" value="5. Allocate new GameServer (map_id)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="405" as="sourcePoint" /><mxPoint x="815" y="405" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-8" value="6. Spin up Map Server pod (k3s)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="445" as="sourcePoint" /><mxPoint x="1045" y="445" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-9" value="7. Register: server_id, map_id, addr, capacity" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1045" y="485" as="sourcePoint" /><mxPoint x="585" y="485" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-10" value="8. Ready" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1045" y="525" as="sourcePoint" /><mxPoint x="815" y="525" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-11" value="9. Allocated server_addr" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="555" as="sourcePoint" /><mxPoint x="355" y="555" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-12" value="Player joins map" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="620" width="1090" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p2-13" value="10. Reserve slot (user_id, session token)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="675" as="sourcePoint" /><mxPoint x="1045" y="675" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-14" value="11. Update player_count / capacity" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1045" y="715" as="sourcePoint" /><mxPoint x="585" y="715" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-15" value="12. Reservation OK + join_token" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1045" y="755" as="sourcePoint" /><mxPoint x="355" y="755" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-16" value="13. Redirect: map server addr + join_token" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="795" as="sourcePoint" /><mxPoint x="125" y="795" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-17" value="14. Connect (join_token) — UDP/KCP direct" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="125" y="835" as="sourcePoint" /><mxPoint x="1045" y="835" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-18" style="endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1045" y="870" as="sourcePoint" /><mxPoint x="1045" y="898" as="targetPoint" />
+            <Array as="points"><mxPoint x="1105" y="870" /><mxPoint x="1105" y="898" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p2-19" value="15. Validate join_token, load player state" style="text;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1115" y="868" width="280" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p2-20" value="16. SET player:{user_id} location = server_id" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1045" y="925" as="sourcePoint" /><mxPoint x="585" y="925" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-21" value="17. World snapshot (entities, NPC, world state)" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1045" y="965" as="sourcePoint" /><mxPoint x="125" y="965" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-22" value="Server lifecycle" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="1010" width="1090" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p2-23" value="18. Heartbeat: player_count, health, load" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1045" y="1100" as="sourcePoint" /><mxPoint x="585" y="1100" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-24" value="19. Request shutdown" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1045" y="1210" as="sourcePoint" /><mxPoint x="815" y="1210" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-25" value="20. Deregister from registry" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1045" y="1250" as="sourcePoint" /><mxPoint x="585" y="1250" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-26" value="21. Drain + terminate pod (k3s)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="1290" as="sourcePoint" /><mxPoint x="1045" y="1290" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p2-34" value="Unity Client" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p2-35" value="Gateway" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="270" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p2-36" value="Redis (Registry)" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="500" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p2-37" value="Agones (k3s)" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="730" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p2-38" value="Map Server" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="960" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="4. Gameplay Realtime" id="gameplay-rt">
+    <mxGraphModel pageWidth="1600" pageHeight="1300">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="p3-30" value="loop  [mỗi tick — 10-15 Hz]" style="shape=umlFrame;whiteSpace=wrap;width=200;height=26;fillColor=none;verticalAlign=top;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="20" y="170" width="1520" height="340" as="geometry" />
+        </mxCell>
+        <mxCell id="p3-31" value="loop  [async — mỗi 30-60s]" style="shape=umlFrame;whiteSpace=wrap;width=200;height=26;fillColor=none;verticalAlign=top;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="20" y="850" width="1520" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="p3-32" value="alt  [player disconnect]" style="shape=umlFrame;whiteSpace=wrap;width=180;height=26;fillColor=none;verticalAlign=top;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="20" y="980" width="1520" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="p3-40" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="125" y="80" as="sourcePoint" /><mxPoint x="125" y="1230" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-41" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="365" y="80" as="sourcePoint" /><mxPoint x="365" y="1230" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-42" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="605" y="80" as="sourcePoint" /><mxPoint x="605" y="1230" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-43" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="845" y="80" as="sourcePoint" /><mxPoint x="845" y="1230" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-44" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1085" y="80" as="sourcePoint" /><mxPoint x="1085" y="1230" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-45" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1325" y="80" as="sourcePoint" /><mxPoint x="1325" y="1230" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-46" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1445" y="80" as="sourcePoint" /><mxPoint x="1445" y="1230" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-1" value="Tick loop — Combat / Skill / Movement (server authoritative)" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="115" width="1500" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p3-2" value="1. Input: move / skill / attack (UDP/KCP)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="125" y="210" as="sourcePoint" /><mxPoint x="365" y="210" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-3" style="endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="365" y="250" as="sourcePoint" /><mxPoint x="365" y="278" as="targetPoint" />
+            <Array as="points"><mxPoint x="425" y="250" /><mxPoint x="425" y="278" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p3-4" value="2. Validate (anti-cheat, cooldown, range, speed)" style="text;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="435" y="248" width="350" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p3-5" value="3. Update NPC behavior / aggro" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="365" y="305" as="sourcePoint" /><mxPoint x="605" y="305" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-6" value="4. NPC actions" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="605" y="345" as="sourcePoint" /><mxPoint x="365" y="345" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-7" value="5. Apply damage, update HP, world state" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="365" y="385" as="sourcePoint" /><mxPoint x="845" y="385" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-8" value="6. Combat results (dmg, death, drops)" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="845" y="425" as="sourcePoint" /><mxPoint x="365" y="425" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-9" value="7. State snapshot / delta (AOI-based broadcast)" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="365" y="465" as="sourcePoint" /><mxPoint x="125" y="465" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-10" value="Kết thúc combat — Loot &amp; Quest" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="535" width="1500" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p3-11" value="8. Roll loot (server-side), update quest" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="365" y="590" as="sourcePoint" /><mxPoint x="845" y="590" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-12" value="9. Loot items + quest update" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="845" y="630" as="sourcePoint" /><mxPoint x="365" y="630" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-13" value="10. Loot notification + quest progress" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="365" y="670" as="sourcePoint" /><mxPoint x="125" y="670" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-14" value="11. PUBLISH: boss_killed / rare_drop (Redis Streams)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="365" y="710" as="sourcePoint" /><mxPoint x="1085" y="710" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-47" value="Redis Streams = persistent, có ACK" style="text;align=left;fontSize=10;fontStyle=2;fontColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="1095" y="715" width="250" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p3-15" value="12. Cross-server event → other servers" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1085" y="750" as="sourcePoint" /><mxPoint x="1325" y="750" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-16" value="Persistence (async — không block tick)" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="800" width="1500" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p3-17" value="13. Batch save player states (HP, pos, inventory)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="365" y="890" as="sourcePoint" /><mxPoint x="1445" y="890" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-18" value="14. ACK" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1445" y="920" as="sourcePoint" /><mxPoint x="365" y="920" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-19" value="15. Hold entity 30s (reconnect window)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="365" y="1020" as="sourcePoint" /><mxPoint x="1085" y="1020" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-20" value="16. Final save + DEL location + update capacity" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="365" y="1060" as="sourcePoint" /><mxPoint x="1445" y="1060" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-21" value="17. PUBLISH: player_offline" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="365" y="1100" as="sourcePoint" /><mxPoint x="1085" y="1100" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p3-33" value="Unity Client" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p3-34" value="Map Server" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="280" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p3-35" value="AI / NPC" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="520" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p3-36" value="World State / Loot" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="760" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p3-37" value="Redis (Pub/Sub)" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p3-38" value="Other Servers" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1240" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p3-39" value="PostgreSQL" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1360" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="5. Economy + Leaderboard" id="economy-lb">
+    <mxGraphModel pageWidth="1600" pageHeight="1500">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="p4-50" value="alt  [balance đủ]" style="shape=umlFrame;whiteSpace=wrap;width=130;height=26;fillColor=none;verticalAlign=top;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="20" y="330" width="1520" height="420" as="geometry" />
+        </mxCell>
+        <mxCell id="p4-51" style="endArrow=none;dashed=1;strokeColor=#b0b0b0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="25" y="580" as="sourcePoint" /><mxPoint x="1535" y="580" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-52" value="alt  [season reset]" style="shape=umlFrame;whiteSpace=wrap;width=140;height=26;fillColor=none;verticalAlign=top;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="20" y="1310" width="1520" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="p4-60" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="125" y="80" as="sourcePoint" /><mxPoint x="125" y="1460" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-61" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="80" as="sourcePoint" /><mxPoint x="355" y="1460" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-62" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="585" y="80" as="sourcePoint" /><mxPoint x="585" y="1460" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-63" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="80" as="sourcePoint" /><mxPoint x="815" y="1460" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-64" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1045" y="80" as="sourcePoint" /><mxPoint x="1045" y="1460" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-65" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1275" y="80" as="sourcePoint" /><mxPoint x="1275" y="1460" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-66" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1445" y="80" as="sourcePoint" /><mxPoint x="1445" y="1460" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-1" value="Economy — mua item (HTTPS/WebSocket)" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="115" width="1500" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p4-2" value="1. BuyItem(item_id, currency, idempotency_key)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="125" y="170" as="sourcePoint" /><mxPoint x="355" y="170" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-3" style="endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="210" as="sourcePoint" /><mxPoint x="355" y="238" as="targetPoint" />
+            <Array as="points"><mxPoint x="415" y="210" /><mxPoint x="415" y="238" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p4-4" value="2. Rate limit check + idempotency guard" style="text;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="425" y="208" width="300" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p4-5" value="3. Process transaction" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="265" as="sourcePoint" /><mxPoint x="585" y="265" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-6" value="4. BEGIN TX: check balance" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="585" y="300" as="sourcePoint" /><mxPoint x="1045" y="300" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-7" value="[balance đủ + item còn]" style="text;align=left;fontSize=11;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="35" y="332" width="250" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p4-8" value="5. Deduct currency + add item (atomic)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="585" y="380" as="sourcePoint" /><mxPoint x="1045" y="380" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-9" value="6. COMMIT OK" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1045" y="420" as="sourcePoint" /><mxPoint x="585" y="420" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-10" value="7. Transaction success" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="585" y="455" as="sourcePoint" /><mxPoint x="355" y="455" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-11" value="8. Updated wallet + inventory" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="490" as="sourcePoint" /><mxPoint x="125" y="490" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-12" value="9. XADD inventory_changed (Redis Streams — có ACK)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="530" as="sourcePoint" /><mxPoint x="1275" y="530" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-67" value="Redis Streams — persistent, consumer group ACK" style="text;align=left;fontSize=10;fontStyle=2;fontColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="1285" y="535" width="280" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p4-13" value="10. Map Server refresh player inventory" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1275" y="560" as="sourcePoint" /><mxPoint x="1445" y="560" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-14" value="[balance không đủ / item hết]" style="text;align=left;fontSize=11;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="35" y="582" width="250" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p4-15" value="11. ROLLBACK" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1045" y="620" as="sourcePoint" /><mxPoint x="585" y="620" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-16" value="12. Transaction failed (reason)" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="585" y="655" as="sourcePoint" /><mxPoint x="355" y="655" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-17" value="13. Error: insufficient funds" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="690" as="sourcePoint" /><mxPoint x="125" y="690" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-18" value="Reward từ gameplay (server-authoritative)" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="780" width="1500" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p4-19" value="14. Grant reward (Map Server → Nakama internal RPC, signed)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1445" y="835" as="sourcePoint" /><mxPoint x="355" y="835" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-68" value="internal call — không fail qua network" style="text;align=left;fontSize=10;fontStyle=2;fontColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="365" y="845" width="280" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p4-20" value="15. Credit currency / items" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="880" as="sourcePoint" /><mxPoint x="585" y="880" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-21" value="16. Update wallet + inventory" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="585" y="920" as="sourcePoint" /><mxPoint x="1045" y="920" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-22" value="17. Submit score (kills, level, clear_time)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="960" as="sourcePoint" /><mxPoint x="815" y="960" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-23" value="Leaderboard" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="1000" width="1500" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p4-24" value="18. Write score record" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="1055" as="sourcePoint" /><mxPoint x="1045" y="1055" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-25" style="endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="1095" as="sourcePoint" /><mxPoint x="815" y="1123" as="targetPoint" />
+            <Array as="points"><mxPoint x="875" y="1095" /><mxPoint x="875" y="1123" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p4-26" value="19. Update ranking (Nakama sorted set — O(log N))" style="text;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="885" y="1093" width="350" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p4-27" value="20. GetLeaderboard(type, range)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="125" y="1155" as="sourcePoint" /><mxPoint x="355" y="1155" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-28" value="21. Query rankings" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="1195" as="sourcePoint" /><mxPoint x="815" y="1195" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-29" value="22. Top N + player rank" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="1235" as="sourcePoint" /><mxPoint x="355" y="1235" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-30" value="23. Leaderboard data" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="1270" as="sourcePoint" /><mxPoint x="125" y="1270" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-31" value="24. Archive season, distribute rewards" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="1350" as="sourcePoint" /><mxPoint x="1045" y="1350" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-32" value="25. XADD season_ended (Redis Streams)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="1390" as="sourcePoint" /><mxPoint x="1275" y="1390" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p4-40" value="Unity Client" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p4-41" value="Nakama" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="270" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p4-42" value="Economy" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="500" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p4-43" value="Leaderboard" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="730" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p4-44" value="PostgreSQL (Meta)" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="960" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p4-45" value="Redis (Streams)" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1190" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p4-46" value="Map Server" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1360" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="6. Dungeon Instance" id="dungeon-inst">
+    <mxGraphModel pageWidth="1600" pageHeight="1750">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="p5-50" value="loop  [dungeon run]" style="shape=umlFrame;whiteSpace=wrap;width=150;height=26;fillColor=none;verticalAlign=top;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="20" y="820" width="1520" height="170" as="geometry" />
+        </mxCell>
+        <mxCell id="p5-51" value="alt  [dungeon cleared]" style="shape=umlFrame;whiteSpace=wrap;width=170;height=26;fillColor=none;verticalAlign=top;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="20" y="1070" width="1520" height="290" as="geometry" />
+        </mxCell>
+        <mxCell id="p5-52" style="endArrow=none;dashed=1;strokeColor=#b0b0b0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="25" y="1280" as="sourcePoint" /><mxPoint x="1535" y="1280" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-60" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="125" y="80" as="sourcePoint" /><mxPoint x="125" y="1700" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-61" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="80" as="sourcePoint" /><mxPoint x="355" y="1700" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-62" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="585" y="80" as="sourcePoint" /><mxPoint x="585" y="1700" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-63" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="80" as="sourcePoint" /><mxPoint x="815" y="1700" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-64" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1045" y="80" as="sourcePoint" /><mxPoint x="1045" y="1700" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-65" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1275" y="80" as="sourcePoint" /><mxPoint x="1275" y="1700" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-66" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1445" y="80" as="sourcePoint" /><mxPoint x="1445" y="1700" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-1" value="Phase 1 — Tạo dungeon instance" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="115" width="1500" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p5-2" value="1. Request enter dungeon (party, dungeon_id)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="125" y="170" as="sourcePoint" /><mxPoint x="355" y="170" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-3" style="endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="210" as="sourcePoint" /><mxPoint x="355" y="238" as="targetPoint" />
+            <Array as="points"><mxPoint x="415" y="210" /><mxPoint x="415" y="238" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p5-4" value="2. Validate: level, quest, ticket, party ready" style="text;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="425" y="208" width="300" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p5-5" value="3. Allocate dungeon instance (dungeon_id, party_size)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="265" as="sourcePoint" /><mxPoint x="585" y="265" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-6" value="4. Spin up Dungeon Server pod (k3s)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="585" y="305" as="sourcePoint" /><mxPoint x="815" y="305" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-7" value="5. Register: instance_id, addr, party_ids" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="345" as="sourcePoint" /><mxPoint x="1045" y="345" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-8" value="6. Ready" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="385" as="sourcePoint" /><mxPoint x="585" y="385" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-9" value="7. Instance addr + instance_token" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="585" y="425" as="sourcePoint" /><mxPoint x="355" y="425" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-10" value="Phase 2 — Transfer party vào instance" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="465" width="1500" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p5-11" value="8. Save checkpoint (trước khi rời map)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="520" as="sourcePoint" /><mxPoint x="1445" y="520" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-12" value="9. Update player location = instance_id" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="560" as="sourcePoint" /><mxPoint x="1045" y="560" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-13" value="10. Transfer: dungeon addr + token" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="600" as="sourcePoint" /><mxPoint x="125" y="600" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-14" value="11. Connect (instance_token) — UDP/KCP" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="125" y="640" as="sourcePoint" /><mxPoint x="815" y="640" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-15" value="12. Load player state" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="680" as="sourcePoint" /><mxPoint x="1445" y="680" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-16" value="13. Dungeon snapshot (rooms, mobs, objectives)" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="720" as="sourcePoint" /><mxPoint x="125" y="720" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-17" value="Phase 3 — Gameplay trong dungeon" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="760" width="1500" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p5-67" value="reconnect policy: 60s window (party đang chờ)" style="text;align=left;fontSize=10;fontStyle=2;fontColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="825" y="795" width="300" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p5-18" value="14. Combat / movement input" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="125" y="860" as="sourcePoint" /><mxPoint x="815" y="860" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-19" style="endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="900" as="sourcePoint" /><mxPoint x="815" y="928" as="targetPoint" />
+            <Array as="points"><mxPoint x="875" y="900" /><mxPoint x="875" y="928" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p5-20" value="15. Boss AI, mechanics, wipe check" style="text;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="885" y="898" width="300" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p5-21" value="16. State updates → party" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="955" as="sourcePoint" /><mxPoint x="125" y="955" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-22" value="Phase 4 — Kết thúc (clear hoặc fail)" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="1020" width="1500" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p5-23" value="[cleared]" style="text;align=left;fontSize=11;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="35" y="1072" width="150" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p5-24" style="endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="1110" as="sourcePoint" /><mxPoint x="815" y="1138" as="targetPoint" />
+            <Array as="points"><mxPoint x="875" y="1110" /><mxPoint x="875" y="1138" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p5-25" value="17. Roll loot per player (server-side)" style="text;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="885" y="1108" width="300" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p5-26" value="18. Grant rewards + submit clear time (internal RPC → Nakama)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="1165" as="sourcePoint" /><mxPoint x="1275" y="1165" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-27" value="19. Update inventory, wallet, leaderboard" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1275" y="1205" as="sourcePoint" /><mxPoint x="1445" y="1205" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-28" value="20. Result screen: loot + stats" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="1245" as="sourcePoint" /><mxPoint x="125" y="1245" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-29" value="[wipe / timeout / abandon]" style="text;align=left;fontSize=11;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="35" y="1282" width="200" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p5-30" value="21. Dungeon failed" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="1320" as="sourcePoint" /><mxPoint x="125" y="1320" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-31" value="Cleanup — transfer back" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="1390" width="1500" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p5-32" value="22. Final save all player states" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="1445" as="sourcePoint" /><mxPoint x="1445" y="1445" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-33" value="23. Update player location = origin map" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="1485" as="sourcePoint" /><mxPoint x="1045" y="1485" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-34" value="24. Transfer back: origin map addr" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="1525" as="sourcePoint" /><mxPoint x="125" y="1525" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-35" value="25. Reconnect to Map Server" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="125" y="1565" as="sourcePoint" /><mxPoint x="355" y="1565" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-36" value="26. Deregister instance" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="1605" as="sourcePoint" /><mxPoint x="1045" y="1605" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-37" value="27. Shutdown pod (k3s reclaim — 5min idle)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="1645" as="sourcePoint" /><mxPoint x="585" y="1645" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p5-40" value="Client (Party)" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p5-41" value="Map Server" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="270" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p5-42" value="Agones (k3s)" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="500" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p5-43" value="Dungeon Server" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="730" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p5-44" value="Redis" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="960" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p5-45" value="Nakama" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1190" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p5-46" value="PostgreSQL" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1360" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="7. Party &amp; Social" id="party-social">
+    <mxGraphModel pageWidth="900" pageHeight="1200">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="p6-20" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="150" y="80" as="sourcePoint" /><mxPoint x="150" y="1150" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p6-21" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="440" y="80" as="sourcePoint" /><mxPoint x="440" y="1150" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p6-22" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="730" y="80" as="sourcePoint" /><mxPoint x="730" y="1150" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p6-1" value="Party (Nakama Party API)" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="115" width="820" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p6-2" value="1. CreateParty(open=true, max=4)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="150" y="170" as="sourcePoint" /><mxPoint x="440" y="170" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p6-3" value="2. Party created (party_id)" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="440" y="210" as="sourcePoint" /><mxPoint x="150" y="210" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p6-4" value="3. InvitePartyMember(player_b)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="150" y="250" as="sourcePoint" /><mxPoint x="440" y="250" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p6-5" value="4. Party invitation (WS notification)" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="440" y="290" as="sourcePoint" /><mxPoint x="730" y="290" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p6-6" value="5. AcceptPartyMember(party_id)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="730" y="330" as="sourcePoint" /><mxPoint x="440" y="330" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p6-7" value="6. Party updated (member_joined)" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="440" y="370" as="sourcePoint" /><mxPoint x="150" y="370" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p6-8" value="7. SendPartyData (chat / ready check)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="150" y="410" as="sourcePoint" /><mxPoint x="440" y="410" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p6-9" value="8. Relay to all party members" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="440" y="450" as="sourcePoint" /><mxPoint x="730" y="450" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p6-10" value="Friends (Nakama built-in)" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="500" width="820" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p6-11" value="9. AddFriends(player_b_id)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="150" y="555" as="sourcePoint" /><mxPoint x="440" y="555" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p6-12" value="10. Friend request notification" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="440" y="595" as="sourcePoint" /><mxPoint x="730" y="595" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p6-13" value="11. AddFriends(player_a_id) — accept" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="730" y="635" as="sourcePoint" /><mxPoint x="440" y="635" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p6-14" value="12. Friend added notification" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="440" y="675" as="sourcePoint" /><mxPoint x="150" y="675" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p6-15" value="Chat (Nakama Channels — ROOM / GROUP / DM)" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="730" width="820" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p6-16" value="13. JoinChat(room=&quot;world&quot;)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="150" y="785" as="sourcePoint" /><mxPoint x="440" y="785" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p6-17" value="14. WriteChatMessage(content)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="150" y="825" as="sourcePoint" /><mxPoint x="440" y="825" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p6-18" value="15. Broadcast to channel members" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="440" y="865" as="sourcePoint" /><mxPoint x="730" y="865" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p6-23" value="Guild = Nakama Groups API&#xa;Presence = StatusFollow/Update&#xa;Party chat = SendPartyData" style="rounded=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#999999;fontSize=10;align=left;spacingLeft=8;verticalAlign=top;spacingTop=5;" vertex="1" parent="1">
+          <mxGeometry x="35" y="920" width="250" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="p6-19" value="Player A" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="65" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p6-26" value="Nakama" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="355" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p6-27" value="Player B" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="645" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="8. Client Architecture (DOTS + GO)" id="client-arch">
+    <mxGraphModel dx="1000" dy="800" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="p7-1" value="GameObject World — Presentation &amp;&amp; UI" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontSize=13;fontStyle=1;align=left;spacingLeft=10;spacingTop=6;fillColor=#f5f9ff;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="900" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-2" value="Bridge Layer — ECS ⇄ GameObject" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontSize=13;fontStyle=1;align=left;spacingLeft=10;spacingTop=6;fillColor=#fff2e6;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="40" y="280" width="900" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-3" value="DOTS World — Simulation (ECS)" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontSize=13;fontStyle=1;align=left;spacingLeft=10;spacingTop=6;fillColor=#f3fff3;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="40" y="470" width="900" height="260" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-4" value="Netcode Layer — Dual Transport" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontSize=13;fontStyle=1;align=left;spacingLeft=10;spacingTop=6;fillColor=#fdf0f5;strokeColor=#b5739d;" vertex="1" parent="1">
+          <mxGeometry x="40" y="770" width="900" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-5" value="Client Services" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontSize=13;fontStyle=1;align=left;spacingLeft=10;spacingTop=6;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="980" y="40" width="300" height="560" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-6" value="UI Screens (uGUI / UI Toolkit)&#xa;HUD · Inventory · Shop · Leaderboard" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="70" y="85" width="300" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-7" value="UI Manager&#xa;Screen Stack · Popup" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="400" y="85" width="210" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-8" value="View Models&#xa;(reactive binding)" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="640" y="85" width="170" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-9" value="VFX / Audio / Camera&#xa;(GO pooling · Cinemachine)" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="70" y="160" width="300" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-10" value="Event Bus&#xa;UI Command → ECS · ECS Event → UI" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffe6cc;strokeColor=#d79b00;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="70" y="330" width="300" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-11" value="Presentation Sync&#xa;ECS transform/anim → GO" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="400" y="330" width="260" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-12" value="View Pool Binder&#xa;entity ⇄ GO" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="690" y="330" width="210" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-13" value="Input Systems&#xa;touch/joystick → InputCommand" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="70" y="520" width="250" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-14" value="Prediction &amp;&amp; Reconciliation&#xa;rewind + replay" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="350" y="520" width="250" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-15" value="Movement · Combat · Skill&#xa;(mirror server logic)" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="630" y="520" width="280" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-16" value="Remote Entity Interpolation&#xa;snapshot buffer 2-3 tick" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="70" y="640" width="250" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-17" value="Spawn/Despawn · SubScene&#xa;Baking · AOI culling" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="350" y="640" width="300" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-18" value="KCP/UDP Transport&#xa;(realtime gameplay)" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="70" y="820" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-19" value="Snapshot Decoder&#xa;delta + jitter buffer" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#b5739d;" vertex="1" parent="1">
+          <mxGeometry x="300" y="820" width="190" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-20" value="Input Sender&#xa;(per tick)" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#b5739d;" vertex="1" parent="1">
+          <mxGeometry x="520" y="820" width="140" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-21" value="Nakama Client (HTTPS/WS)&#xa;auth · economy · social" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#b5739d;" vertex="1" parent="1">
+          <mxGeometry x="690" y="820" width="220" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-22" value="Auth / Session" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="90" width="240" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-23" value="Inventory &amp;&amp; Wallet Cache" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="145" width="240" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-24" value="Addressables · Asset Streaming" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="200" width="240" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-25" value="IAP + Receipt Validation" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="255" width="240" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-26" value="Telemetry / Analytics" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="310" width="240" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-27" value="Settings / Local Save" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="365" width="240" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-28" value="Crash Reporter" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="420" width="240" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-29" value="☁️ Gateway / Map Server&#xa;(UDP/KCP)" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="150" y="970" width="280" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-30" value="☁️ Nakama Backend&#xa;(HTTPS/WebSocket)" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="580" y="970" width="280" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-31" value="UI cmd" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;" edge="1" parent="1" source="p7-6" target="p7-10">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-32" value="ECB" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;" edge="1" parent="1" source="p7-10" target="p7-13">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-33" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;" edge="1" parent="1" source="p7-13" target="p7-14">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-34" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;" edge="1" parent="1" source="p7-14" target="p7-15">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-35" value="input" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;" edge="1" parent="1" source="p7-14" target="p7-20">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-36" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;" edge="1" parent="1" source="p7-20" target="p7-18">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-37" value="UDP/KCP" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;" edge="1" parent="1" source="p7-18" target="p7-29">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-38" value="snapshot" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;dashed=1;strokeColor=#888888;" edge="1" parent="1" source="p7-29" target="p7-18">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-39" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;" edge="1" parent="1" source="p7-18" target="p7-19">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-40" value="auth state" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;" edge="1" parent="1" source="p7-19" target="p7-14">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-41" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;" edge="1" parent="1" source="p7-19" target="p7-16">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-42" value="HTTPS/WS" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;" edge="1" parent="1" source="p7-21" target="p7-30">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-43" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;" edge="1" parent="1" source="p7-15" target="p7-11">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-44" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;" edge="1" parent="1" source="p7-11" target="p7-9">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-45" value="event" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;" edge="1" parent="1" source="p7-10" target="p7-8">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p7-46" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;" edge="1" parent="1" source="p7-8" target="p7-6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="9. Client Netcode &amp; Tick Flow" id="client-netcode">
+    <mxGraphModel pageWidth="1200" pageHeight="1300">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="p8-30" value="loop  [mỗi simulation tick]" style="shape=umlFrame;whiteSpace=wrap;width=200;height=26;fillColor=none;verticalAlign=top;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="20" y="170" width="1120" height="530" as="geometry" />
+        </mxCell>
+        <mxCell id="p8-31" value="alt  [mất snapshot / lag spike]" style="shape=umlFrame;whiteSpace=wrap;width=200;height=26;fillColor=none;verticalAlign=top;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="20" y="780" width="1120" height="420" as="geometry" />
+        </mxCell>
+        <mxCell id="p8-32" style="endArrow=none;dashed=1;strokeColor=#b0b0b0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="25" y="960" as="sourcePoint" /><mxPoint x="1135" y="960" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p8-33" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="125" y="80" as="sourcePoint" /><mxPoint x="125" y="1250" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p8-34" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="80" as="sourcePoint" /><mxPoint x="355" y="1250" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p8-35" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="585" y="80" as="sourcePoint" /><mxPoint x="585" y="1250" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p8-36" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="80" as="sourcePoint" /><mxPoint x="815" y="1250" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p8-37" style="endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1045" y="80" as="sourcePoint" /><mxPoint x="1045" y="1250" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p8-1" value="Simulation tick cố định (10-15Hz) — render 60fps độc lập" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="115" width="1090" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p8-2" style="endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="585" y="210" as="sourcePoint" /><mxPoint x="585" y="238" as="targetPoint" />
+            <Array as="points"><mxPoint x="645" y="210" /><mxPoint x="645" y="238" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p8-3" value="1. Gather input (touch/joystick → InputCommand)" style="text;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="655" y="208" width="350" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p8-4" style="endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="585" y="265" as="sourcePoint" /><mxPoint x="585" y="293" as="targetPoint" />
+            <Array as="points"><mxPoint x="645" y="265" /><mxPoint x="645" y="293" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p8-5" value="2. Client prediction: apply input ngay" style="text;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="655" y="263" width="350" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p8-6" value="3. Enqueue InputCommand (tick N)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="585" y="320" as="sourcePoint" /><mxPoint x="815" y="320" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p8-7" value="4. Send input batch (UDP/KCP, sequenced)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="360" as="sourcePoint" /><mxPoint x="1045" y="360" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p8-8" value="5. Snapshot / delta (server tick M, AOI)" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1045" y="400" as="sourcePoint" /><mxPoint x="815" y="400" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p8-9" style="endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="440" as="sourcePoint" /><mxPoint x="815" y="468" as="targetPoint" />
+            <Array as="points"><mxPoint x="875" y="440" /><mxPoint x="875" y="468" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p8-10" value="6. Jitter buffer + delta decompress" style="text;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="885" y="438" width="250" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p8-11" value="7. Apply authoritative state" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="495" as="sourcePoint" /><mxPoint x="585" y="495" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p8-12" style="endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="585" y="530" as="sourcePoint" /><mxPoint x="585" y="558" as="targetPoint" />
+            <Array as="points"><mxPoint x="645" y="530" /><mxPoint x="645" y="558" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p8-13" value="8. Reconcile: rewind &amp;&amp; replay nếu lệch" style="text;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="655" y="528" width="350" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p8-14" style="endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="585" y="585" as="sourcePoint" /><mxPoint x="585" y="613" as="targetPoint" />
+            <Array as="points"><mxPoint x="645" y="585" /><mxPoint x="645" y="613" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p8-15" value="9. Interpolate remote entities (buffer 2-3 snapshot)" style="text;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="655" y="583" width="350" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p8-16" value="10. Presentation events (dmg, death, VFX)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="585" y="640" as="sourcePoint" /><mxPoint x="355" y="640" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p8-17" value="11. Update HUD (HP bar, damage numbers)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="670" as="sourcePoint" /><mxPoint x="125" y="670" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p8-18" value="Xử lý mạng xấu (mobile)" style="whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="35" y="735" width="1090" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p8-19" style="endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="585" y="820" as="sourcePoint" /><mxPoint x="585" y="848" as="targetPoint" />
+            <Array as="points"><mxPoint x="645" y="820" /><mxPoint x="645" y="848" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p8-20" value="12. Extrapolate (dead reckoning, ~200ms max)" style="text;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="655" y="818" width="350" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p8-21" value="13. Request full snapshot" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="880" as="sourcePoint" /><mxPoint x="1045" y="880" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p8-22" value="14. Full snapshot" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1045" y="920" as="sourcePoint" /><mxPoint x="815" y="920" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p8-23" value="[mất kết nối UDP]" style="text;align=left;fontSize=11;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="35" y="938" width="200" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p8-24" style="endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="1000" as="sourcePoint" /><mxPoint x="815" y="1028" as="targetPoint" />
+            <Array as="points"><mxPoint x="875" y="1000" /><mxPoint x="875" y="1028" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p8-25" value="15. Reconnect (server giữ entity 30s)" style="text;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="885" y="998" width="250" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="p8-26" value="16. Re-handshake + rejoin (session token)" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="815" y="1055" as="sourcePoint" /><mxPoint x="1045" y="1055" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p8-27" value="17. Full snapshot + resume" style="endArrow=open;dashed=1;fontSize=11;labelBackgroundColor=#ffffff;fontColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1045" y="1095" as="sourcePoint" /><mxPoint x="815" y="1095" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p8-28" value="18. Hiện &quot;Reconnecting...&quot;" style="endArrow=block;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="355" y="1135" as="sourcePoint" /><mxPoint x="125" y="1135" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="p8-38" value="GameObject UI" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p8-39" value="Bridge (Event Bus)" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="270" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p8-40" value="DOTS Simulation" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="500" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p8-41" value="Netcode (KCP/UDP)" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="730" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p8-42" value="Map Server" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="960" y="40" width="170" height="40" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="10. Deployment &amp; Scaling" id="deploy-cost">
+    <mxGraphModel grid="1" page="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" pageScale="1" pageWidth="1600" pageHeight="950" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="p9-1" value="Tier 1 — Dev / Alpha&#xa;$40-60/month" style="rounded=1;whiteSpace=wrap;verticalAlign=top;fontStyle=1;fontSize=12;align=center;spacingTop=5;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="340" height="400" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-2" value="1 VPS (4 vCPU, 8GB RAM)&#xa;Hetzner / Contabo / DigitalOcean" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="100" width="300" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-3" value="k3s (lightweight K8s)" style="rounded=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="80" y="160" width="260" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-4" value="Nakama + PostgreSQL (meta)" style="rounded=1;whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="80" y="200" width="260" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-5" value="Gateway + Redis" style="rounded=1;whiteSpace=wrap;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="80" y="240" width="260" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-6" value="Agones + 2-3 Game Server pods" style="rounded=1;whiteSpace=wrap;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="80" y="280" width="260" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-7" value="PostgreSQL (game state)" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="80" y="320" width="260" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-8" value="&lt; 200 CCU · All-in-one · pg_dump daily" style="text;fontSize=10;fontColor=#666666;align=left;" vertex="1" parent="1">
+          <mxGeometry x="80" y="365" width="260" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-9" value="Tier 2 — Beta&#xa;$80-150/month" style="rounded=1;whiteSpace=wrap;verticalAlign=top;fontStyle=1;fontSize=12;align=center;spacingTop=5;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="420" y="40" width="340" height="400" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-10" value="VPS 1 — App (4vCPU, 8GB)&#xa;k3s + Nakama + Gateway + Redis + Agones" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="440" y="100" width="300" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-11" value="VPS 2 — DB (2vCPU, 4GB)&#xa;PostgreSQL meta + game state" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="440" y="165" width="300" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-12" value="CDN (CloudFlare R2 / BunnyCDN)&#xa;$5-15/mo" style="rounded=1;whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="440" y="230" width="300" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-13" value="Monitoring: Grafana Cloud free" style="rounded=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="440" y="290" width="300" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-14" value="200-500 CCU · WAL archiving · Alerting" style="text;fontSize=10;fontColor=#666666;align=left;" vertex="1" parent="1">
+          <mxGeometry x="460" y="335" width="260" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-15" value="Tier 3 — Soft Launch&#xa;$200-400/month" style="rounded=1;whiteSpace=wrap;verticalAlign=top;fontStyle=1;fontSize=12;align=center;spacingTop=5;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="800" y="40" width="340" height="400" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-16" value="VPS 1 — Nakama + Gateway (8vCPU)" style="rounded=1;whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="820" y="100" width="300" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-17" value="VPS 2 — k3s Game Servers (8vCPU)" style="rounded=1;whiteSpace=wrap;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="820" y="145" width="300" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-18" value="VPS 3 — PostgreSQL dedicated" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="820" y="190" width="300" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-19" value="Redis dedicated (same VPS hoặc riêng)" style="rounded=1;whiteSpace=wrap;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="820" y="235" width="300" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-20" value="CDN + Monitoring + Alerting" style="rounded=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="820" y="280" width="300" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-21" value="500-2,000 CCU · Streaming replication&#xa;Automated failover" style="text;fontSize=10;fontColor=#666666;align=left;" vertex="1" parent="1">
+          <mxGeometry x="840" y="325" width="260" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-22" value="Tier 4 — Growth&#xa;$400-1,000+/month" style="rounded=1;whiteSpace=wrap;verticalAlign=top;fontStyle=1;fontSize=12;align=center;spacingTop=5;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="40" width="370" height="400" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-23" value="k3s Multi-node cluster (3+ nodes)" style="rounded=1;whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="100" width="330" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-24" value="Managed PostgreSQL (optional)" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="145" width="330" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-25" value="Redis Sentinel / Cluster" style="rounded=1;whiteSpace=wrap;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="190" width="330" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-26" value="Load Balancer + Auto-scaling pods" style="rounded=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="235" width="330" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-27" value="2,000-5,000+ CCU · Multi-region optional&#xa;Dedicated game servers scale horizontal" style="text;fontSize=10;fontColor=#666666;align=left;" vertex="1" parent="1">
+          <mxGeometry x="1220" y="285" width="280" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-28" value="→" style="text;fontSize=24;fontStyle=1;fontColor=#82b366;align=center;" vertex="1" parent="1">
+          <mxGeometry x="380" y="180" width="40" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-29" value="→" style="text;fontSize=24;fontStyle=1;fontColor=#6c8ebf;align=center;" vertex="1" parent="1">
+          <mxGeometry x="760" y="180" width="40" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-30" value="→" style="text;fontSize=24;fontStyle=1;fontColor=#d6b656;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1140" y="180" width="40" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-31" value="Tech Stack — tất cả open-source" style="rounded=1;whiteSpace=wrap;verticalAlign=top;fontStyle=1;fontSize=12;align=left;spacingLeft=10;spacingTop=5;fillColor=#f5f5f5;strokeColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="40" y="490" width="750" height="400" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-32" value="Game Backend:     Nakama (Go) — Apache 2.0&#xa;Game Servers:     Custom Go binary — self-owned&#xa;Orchestration:    k3s + Agones — Apache 2.0&#xa;Database:         PostgreSQL — free&#xa;Cache / PubSub:   Redis — BSD&#xa;Client Engine:    Unity 2022 LTS+&#xa;Client ECS:       Unity DOTS&#xa;Realtime:         KCP/UDP (custom Gateway)&#xa;Serialization:    Protobuf / FlatBuffers&#xa;CDN:              CloudFlare R2 / BunnyCDN&#xa;Monitoring:       Grafana Cloud free tier&#xa;CI/CD:            GitHub Actions free tier&#xa;Crash Report:     Sentry / Firebase free tier&#xa;Auth:             Nakama built-in (device → email → social)" style="text;fontSize=11;fontColor=#333333;align=left;spacingLeft=15;spacingTop=10;whiteSpace=wrap;fontFamily=monospace;" vertex="1" parent="1">
+          <mxGeometry x="60" y="530" width="700" height="340" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-33" value="Monitoring Stack" style="rounded=1;whiteSpace=wrap;verticalAlign=top;fontStyle=1;fontSize=12;align=left;spacingLeft=10;spacingTop=5;fillColor=#f5f5f5;strokeColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="830" y="490" width="720" height="400" as="geometry" />
+        </mxCell>
+        <mxCell id="p9-34" value="Nakama Console        — built-in admin UI&#xa;Grafana Cloud          — CCU, match count, RPC latency&#xa;Prometheus export      — Nakama + game server metrics&#xa;Sentry / Crashlytics   — client crash reports&#xa;pg_stat_statements     — query performance&#xa;Redis INFO + MONITOR   — cache hit rate, memory&#xa;Uptime Robot           — external health check&#xa;k3s kubectl top        — pod resource usage&#xa;&#xa;Alerting:&#xa;  • Error rate &gt; threshold → Slack/Discord&#xa;  • High latency → auto-scale pods&#xa;  • Disk &gt; 80% → alert&#xa;  • Game server crash → auto-restart (k3s)" style="text;fontSize=11;fontColor=#333333;align=left;spacingLeft=15;spacingTop=10;whiteSpace=wrap;fontFamily=monospace;" vertex="1" parent="1">
+          <mxGeometry x="850" y="530" width="680" height="340" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

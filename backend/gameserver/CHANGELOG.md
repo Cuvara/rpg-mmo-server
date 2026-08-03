@@ -1,0 +1,10 @@
+# Changelog — GameServer Module
+
+All notable changes to the GameServer module will be documented in this file.
+Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [Unreleased]
+
+### Added
+- Initial module setup with go.mod (`github.com/duycuong/rpg-mmo/gameserver`)
+- CLAUDE.md agent instructions for GameServer Engineer role

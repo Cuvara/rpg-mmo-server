@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "lsp": {
+      "type": "stdio",
+      "command": "agent-lsp",
+      "args": [
+        "go:gopls"
+      ]
+    },
+    "pg-aiguide": {
+      "type": "http",
+      "url": "https://mcp.tigerdata.com/docs?disable_mcp_skills=1"
+    }
+  }
+}

@@ -1,0 +1,40 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/backend/*/cmd/*/main
+/backend/gameserver/cmd/gameserver/gameserver
+/backend/gateway/cmd/gateway/gateway
+
+# Test binary
+*.test
+
+# Output
+*.out
+/bin/
+/dist/
+
+# Go
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Claude Code
+.claude/plans/
+.claude/tasks/
+.claude/teams/
