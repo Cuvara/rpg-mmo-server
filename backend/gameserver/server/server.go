@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/duycuong/rpg-mmo/shared/config"
@@ -26,6 +27,7 @@ type Server struct {
 	handler     *input.Handler
 	playerStore storage.PlayerStore
 	registry    storage.ServerRegistry
+	mu          sync.Mutex
 	listener    net.Listener
 	serverID    string
 	mapID       string
@@ -67,11 +69,13 @@ func New(opts ServerOpts) *Server {
 
 // Run starts the server. Blocks until Shutdown() or listener error.
 func (s *Server) Run(addr string) error {
-	var err error
-	s.listener, err = net.Listen("tcp", addr)
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
+	s.mu.Lock()
+	s.listener = ln
+	s.mu.Unlock()
 	s.logger.Info("game server started", "addr", s.listener.Addr().String(), "map", s.mapID, "server_id", s.serverID)
 
 	// Register in server registry
@@ -108,10 +112,13 @@ func (s *Server) Run(addr string) error {
 
 // Addr returns the listener address. Only valid after Run() starts.
 func (s *Server) Addr() string {
-	if s.listener == nil {
+	s.mu.Lock()
+	ln := s.listener
+	s.mu.Unlock()
+	if ln == nil {
 		return ""
 	}
-	return s.listener.Addr().String()
+	return ln.Addr().String()
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
@@ -219,8 +226,11 @@ func (s *Server) onMessage(conn *Connection, env messages.Envelope) {
 func (s *Server) Shutdown() {
 	s.logger.Info("game server shutting down", "server_id", s.serverID)
 
-	if s.listener != nil {
-		s.listener.Close()
+	s.mu.Lock()
+	ln := s.listener
+	s.mu.Unlock()
+	if ln != nil {
+		ln.Close()
 	}
 	if s.tick != nil {
 		s.tick.Stop()
