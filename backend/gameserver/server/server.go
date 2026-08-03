@@ -12,6 +12,7 @@ import (
 	"github.com/duycuong/rpg-mmo/shared/jwt"
 	"github.com/duycuong/rpg-mmo/shared/messages"
 	"github.com/duycuong/rpg-mmo/shared/storage"
+	"github.com/duycuong/rpg-mmo/gameserver/agones"
 	"github.com/duycuong/rpg-mmo/gameserver/game"
 	"github.com/duycuong/rpg-mmo/gameserver/input"
 	"github.com/duycuong/rpg-mmo/gameserver/persistence"
@@ -27,6 +28,8 @@ type Server struct {
 	handler     *input.Handler
 	playerStore storage.PlayerStore
 	registry    storage.ServerRegistry
+	agonesSDK   agones.SDK
+	agonesStop  chan struct{}
 	mu          sync.Mutex
 	listener    net.Listener
 	serverID    string
@@ -41,6 +44,7 @@ type ServerOpts struct {
 	PlayerStore storage.PlayerStore
 	Registry    storage.ServerRegistry
 	EventStream storage.EventStream
+	AgonesSDK   agones.SDK // nil = no Agones integration
 	ServerID    string
 	MapID       string
 	Capacity    int
@@ -60,6 +64,8 @@ func New(opts ServerOpts) *Server {
 		handler:     handler,
 		playerStore: opts.PlayerStore,
 		registry:    opts.Registry,
+		agonesSDK:   opts.AgonesSDK,
+		agonesStop:  make(chan struct{}),
 		serverID:    opts.ServerID,
 		mapID:       opts.MapID,
 		capacity:    opts.Capacity,
@@ -90,6 +96,14 @@ func (s *Server) Run(addr string) error {
 		if err := s.registry.Register(context.Background(), info); err != nil {
 			s.logger.Error("registry register failed", "err", err)
 		}
+	}
+
+	// Agones: mark ready + start health loop
+	if s.agonesSDK != nil {
+		if err := s.agonesSDK.Ready(); err != nil {
+			s.logger.Error("agones ready failed", "err", err)
+		}
+		go agones.StartHealthLoop(s.agonesSDK, 2*time.Second, s.agonesStop, s.logger)
 	}
 
 	// Start tick loop
@@ -225,6 +239,14 @@ func (s *Server) onMessage(conn *Connection, env messages.Envelope) {
 // Shutdown stops the server gracefully.
 func (s *Server) Shutdown() {
 	s.logger.Info("game server shutting down", "server_id", s.serverID)
+
+	// Stop Agones health loop and mark shutdown
+	if s.agonesSDK != nil {
+		close(s.agonesStop)
+		if err := s.agonesSDK.Shutdown(); err != nil {
+			s.logger.Error("agones shutdown failed", "err", err)
+		}
+	}
 
 	s.mu.Lock()
 	ln := s.listener

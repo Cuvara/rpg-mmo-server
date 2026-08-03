@@ -1,0 +1,11 @@
+# Example GameServerAllocation — used by Gateway to allocate a server
+# Apply via: kubectl create -f allocation.yaml
+apiVersion: allocation.agones.dev/v1
+kind: GameServerAllocation
+metadata:
+  namespace: rpg-realtime
+spec:
+  selectors:
+    - matchLabels:
+        agones.dev/fleet: map-servers
+  scheduling: Packed

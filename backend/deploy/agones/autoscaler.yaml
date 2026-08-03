@@ -1,0 +1,13 @@
+apiVersion: autoscaling.agones.dev/v1
+kind: FleetAutoscaler
+metadata:
+  name: map-servers-autoscaler
+  namespace: rpg-realtime
+spec:
+  fleetName: map-servers
+  policy:
+    type: Buffer
+    buffer:
+      bufferSize: 2        # Keep 2 ready servers as buffer
+      minReplicas: 1        # Minimum 1 server always running
+      maxReplicas: 10       # Scale up to 10

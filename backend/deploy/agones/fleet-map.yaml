@@ -1,0 +1,35 @@
+apiVersion: agones.dev/v1
+kind: Fleet
+metadata:
+  name: map-servers
+  namespace: rpg-realtime
+spec:
+  replicas: 2
+  scheduling: Packed
+  template:
+    spec:
+      ports:
+        - name: game
+          containerPort: 9000
+          protocol: TCP  # Switch to UDP for KCP in production
+      health:
+        initialDelaySeconds: 5
+        periodSeconds: 5
+        failureThreshold: 3
+      template:
+        spec:
+          containers:
+            - name: gameserver
+              image: ghcr.io/dycuong03/rpg-mmo-gameserver:latest
+              args:
+                - "--mode=map"
+                - "--map-id=map_01"
+                - "--agones"
+                - "--addr=:9000"
+              resources:
+                requests:
+                  memory: "64Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "128Mi"
+                  cpu: "500m"
