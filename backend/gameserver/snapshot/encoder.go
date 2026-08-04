@@ -6,7 +6,7 @@ import (
 )
 
 // EncodeSnapshot builds a SnapshotMessage from a tick number and entity list.
-func EncodeSnapshot(tick uint64, entities []*game.Entity) messages.SnapshotMessage {
+func EncodeSnapshot(tick uint64, entities []game.Entity) messages.SnapshotMessage {
 	snaps := make([]messages.EntitySnapshot, 0, len(entities))
 	for _, e := range entities {
 		snaps = append(snaps, messages.EntitySnapshot{

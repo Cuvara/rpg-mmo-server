@@ -309,9 +309,15 @@ func (s *Server) acquireEntity(userID string) *game.Entity {
 	}
 	s.holdMu.Unlock()
 
-	if e := s.world.GetEntity(userID); e != nil {
-		s.logger.Info("player reattached to held entity", "user", userID, "x", e.X, "y", e.Y, "hp", e.HP)
-		return e
+	var held *game.Entity
+	s.world.View(func(get func(string) *game.Entity) {
+		if e := get(userID); e != nil {
+			held = e
+			s.logger.Info("player reattached to held entity", "user", userID, "x", e.X, "y", e.Y, "hp", e.HP)
+		}
+	})
+	if held != nil {
+		return held
 	}
 
 	playerEntity := &game.Entity{

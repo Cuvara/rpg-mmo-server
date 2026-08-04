@@ -52,10 +52,11 @@ func (s *Saver) Stop() {
 	close(s.stopCh)
 }
 
-// SaveAll persists all player entities in the world.
+// SaveAll persists all player entities in the world. It works on value
+// copies taken under the world lock, so it never races the tick loop.
 func (s *Saver) SaveAll() {
 	ctx := context.Background()
-	players := s.world.PlayerEntities()
+	players := s.world.PlayerStates()
 	for _, p := range players {
 		state := &storage.PlayerState{
 			UserID: p.ID,

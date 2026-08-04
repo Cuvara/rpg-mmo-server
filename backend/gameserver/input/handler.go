@@ -33,9 +33,19 @@ func (h *Handler) SetDeathHandler(fn DeathFunc) {
 	h.onDeath = fn
 }
 
-// ProcessInput validates and applies a player's input to the world.
+// ProcessInput validates and applies a player's input to the world. It takes
+// the world write lock for the whole operation; batch callers (the tick loop)
+// should prefer ProcessInputLocked inside a single World.Update.
 func (h *Handler) ProcessInput(userID string, input messages.InputMessage) {
-	entity := h.world.GetEntity(userID)
+	h.world.Update(func(get func(string) *game.Entity) {
+		h.ProcessInputLocked(get, userID, input)
+	})
+}
+
+// ProcessInputLocked applies one input using the unlocked getter provided by
+// World.Update. Must only be called from inside a World.Update closure.
+func (h *Handler) ProcessInputLocked(get func(string) *game.Entity, userID string, input messages.InputMessage) {
+	entity := get(userID)
 	if entity == nil || entity.Dead {
 		return
 	}
@@ -58,7 +68,7 @@ func (h *Handler) ProcessInput(userID string, input messages.InputMessage) {
 
 	// Attack
 	if input.AttackTargetID != "" {
-		target := h.world.GetEntity(input.AttackTargetID)
+		target := get(input.AttackTargetID)
 		now := time.Now()
 		if err := ValidateAttack(entity, target, now); err != nil {
 			h.logger.Debug("attack rejected", "user", userID, "err", err)

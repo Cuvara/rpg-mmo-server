@@ -48,17 +48,52 @@ func (w *World) GetEntity(id string) *Entity {
 	return w.entities[id]
 }
 
-// GetEntitiesInRange returns all entities within radius of (cx, cy).
-func (w *World) GetEntitiesInRange(cx, cy, radius float32) []*Entity {
+// GetEntitiesInRange returns value copies of all entities within radius of
+// (cx, cy). Copies are taken under the read lock so callers can use them
+// without racing entity mutations done under Update.
+func (w *World) GetEntitiesInRange(cx, cy, radius float32) []Entity {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	r2 := radius * radius
-	var result []*Entity
+	var result []Entity
 	for _, e := range w.entities {
 		dx := e.X - cx
 		dy := e.Y - cy
 		if dx*dx+dy*dy <= r2 {
-			result = append(result, e)
+			result = append(result, *e)
+		}
+	}
+	return result
+}
+
+// Update runs fn while holding the world write lock. Every entity field
+// mutation that can be observed from another goroutine (tick loop, saver,
+// reconnect reattach, tests) must go through here. get returns live entity
+// pointers without additional locking — do not retain them past fn.
+func (w *World) Update(fn func(get func(id string) *Entity)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	fn(func(id string) *Entity { return w.entities[id] })
+}
+
+// View runs fn while holding the world read lock, for multi-entity reads
+// that must be consistent with writers using Update. get returns live entity
+// pointers — read-only, do not retain them past fn.
+func (w *World) View(fn func(get func(id string) *Entity)) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	fn(func(id string) *Entity { return w.entities[id] })
+}
+
+// PlayerStates returns value copies of all player entities, taken under the
+// read lock so they are safe to persist from the saver goroutine.
+func (w *World) PlayerStates() []Entity {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	var result []Entity
+	for _, e := range w.entities {
+		if e.Type == "player" {
+			result = append(result, *e)
 		}
 	}
 	return result

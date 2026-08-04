@@ -215,8 +215,10 @@ func TestReconnect_WithinHoldWindow_PreservesState(t *testing.T) {
 	waitFor(t, 2*time.Second, "entity spawn", func() bool {
 		return h.srv.World().GetEntity("u-hold") != nil
 	})
-	e := h.srv.World().GetEntity("u-hold")
-	e.X, e.Y, e.HP = 12.5, -3.25, 47
+	h.srv.World().Update(func(get func(string) *game.Entity) {
+		e := get("u-hold")
+		e.X, e.Y, e.HP = 12.5, -3.25, 47
+	})
 
 	conn.Close()
 
@@ -234,7 +236,13 @@ func TestReconnect_WithinHoldWindow_PreservesState(t *testing.T) {
 	}
 	waitFor(t, 2*time.Second, "hold cancelled", func() bool { return h.srv.HeldCount() == 0 })
 
-	got := h.srv.World().GetEntity("u-hold")
+	var got *game.Entity
+	h.srv.World().View(func(get func(string) *game.Entity) {
+		if e := get("u-hold"); e != nil {
+			cp := *e
+			got = &cp
+		}
+	})
 	if got == nil {
 		t.Fatal("entity missing after reconnect")
 	}
@@ -258,8 +266,10 @@ func TestReconnect_AfterHoldExpiry_EntityRemoved(t *testing.T) {
 	waitFor(t, 2*time.Second, "entity spawn", func() bool {
 		return h.srv.World().GetEntity("u-exp") != nil
 	})
-	e := h.srv.World().GetEntity("u-exp")
-	e.X, e.HP = 8, 33
+	h.srv.World().Update(func(get func(string) *game.Entity) {
+		e := get("u-exp")
+		e.X, e.HP = 8, 33
+	})
 
 	conn.Close()
 

@@ -64,19 +64,32 @@ func (t *TickRunner) TickOnce() {
 func (t *TickRunner) tickOnce() {
 	t.tick++
 
-	// 1. Drain and process all pending inputs
+	// 1. Drain and process all pending inputs under one world write lock.
 	inputs := t.world.DrainInputs()
-	for _, pi := range inputs {
-		t.handler.ProcessInput(pi.UserID, pi.Input)
+	if len(inputs) > 0 {
+		t.world.Update(func(get func(string) *game.Entity) {
+			for _, pi := range inputs {
+				t.handler.ProcessInputLocked(get, pi.UserID, pi.Input)
+			}
+		})
 	}
 
-	// 2. Build and send snapshots per player (AOI-filtered)
+	// 2. Build and send snapshots per player (AOI-filtered). The AOI query
+	// returns value copies taken under the world lock, so encoding and
+	// sending happen without holding it.
 	t.connections.ForEach(func(conn *Connection) {
-		entity := t.world.GetEntity(conn.UserID)
-		if entity == nil {
+		var cx, cy float32
+		found := false
+		t.world.View(func(get func(string) *game.Entity) {
+			if e := get(conn.UserID); e != nil {
+				cx, cy = e.X, e.Y
+				found = true
+			}
+		})
+		if !found {
 			return
 		}
-		nearby := snapshot.GetNearbyEntities(t.world, entity.X, entity.Y, t.aoiRadius)
+		nearby := snapshot.GetNearbyEntities(t.world, cx, cy, t.aoiRadius)
 		snap := snapshot.EncodeSnapshot(t.tick, nearby)
 
 		env, err := messages.NewEnvelope(messages.MsgSnapshot, snap)

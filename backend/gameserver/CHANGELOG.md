@@ -5,6 +5,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Data race between the tick loop, the persistence saver, and reconnect
+  reattach (caught by `-race` in CI): entity field access is now disciplined
+  through `World.Update` (write lock) / `World.View` (read lock); AOI queries
+  and `PlayerStates` return value copies taken under the lock.
+
 ### Added
 - Reconnect hold window: a disconnect now holds the player entity for
   `constants.EntityHoldTTL` (30s, map) or `constants.DungeonHoldTTL` (60s, `--mode=dungeon`)
