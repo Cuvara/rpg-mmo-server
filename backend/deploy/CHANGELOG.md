@@ -6,6 +6,30 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `docker/Dockerfile.gateway` and `docker/Dockerfile.gameserver` — real
+  container images for the realtime services (previously the Agones fleets
+  referenced images that were never built). Multi-stage:
+  `golang:1.26-alpine` builder (`CGO_ENABLED=0`, `-trimpath`,
+  `-ldflags "-s -w"`, `go mod download` layer-cached) →
+  `gcr.io/distroless/static-debian12:nonroot` runtime (no shell, non-root
+  uid 65532). Build context must be `backend/` (`replace ... => ../shared`).
+  Measured sizes: gateway 16.1 MB, gameserver 37.4 MB. `EXPOSE` 8000 / 9000,
+  the latter matching `containerPort` in `agones/fleet-{map,dungeon}.yaml`.
+- `scripts/build-all.sh --images` — builds both images via the existing
+  docker/docker.exe auto-detection, cwd-relative from `backend/deploy/`.
+  Tag overridable with `IMAGE_PREFIX` / `IMAGE_TAG` (default `rpg-mmo/*:dev`).
+- `docker-compose.yml`: profile-gated `gateway` + `gameserver` services
+  (`profiles: ["realtime"]`) wired to `redis:6379` and
+  `postgres-game:5432`, published on host ports 8100 / 9300. Off by default —
+  `docker compose up` behaviour is unchanged; they exist for container-parity
+  testing while normal local dev keeps both processes on the host.
+- `.github/workflows/cd.yml`: `build_images` boolean `workflow_dispatch` input
+  plus GHCR build & push steps (`docker/login-action@v3`,
+  `docker/build-push-action@v6`, gha layer cache, `packages: write` on the
+  `build-test` job). Gated to run only when the resolved environment is
+  `production` **or** `build_images=true`. Tags
+  `ghcr.io/dycuong03/rpg-mmo-{gateway,gameserver}:<short-sha>` and `:latest`,
+  matching the Agones fleet manifests.
 - `postgres-game` service in `docker-compose.yml`: second PostgreSQL instance
   (`postgres:16.4-alpine`) for game state, separate from the Nakama meta DB —
   DB/user `gamestate`/`game`, host port `${POSTGRES_GAME_PORT:-5433}`, own

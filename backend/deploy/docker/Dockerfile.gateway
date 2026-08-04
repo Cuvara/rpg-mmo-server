@@ -1,0 +1,57 @@
+# Gateway container image (TCP router / session manager / server registry).
+#
+# IMPORTANT: the build context must be `backend/` — NOT `backend/gateway/` and
+# NOT the repo root. backend/gateway/go.mod has
+# `replace github.com/duycuong/rpg-mmo/shared => ../shared`, so both `gateway/`
+# and `shared/` must be visible to the build (same rule as
+# nakama-plugin.Dockerfile).
+#
+# Build (from backend/deploy — cwd-relative paths, WSL `docker.exe` cannot
+# resolve absolute /mnt/* paths):
+#   docker build -f docker/Dockerfile.gateway -t rpg-mmo/gateway:dev ..
+#
+# Or from the repo root with a Linux docker CLI:
+#   docker build -f backend/deploy/docker/Dockerfile.gateway \
+#     -t ghcr.io/dycuong03/rpg-mmo-gateway:latest backend/
+#
+# Runtime base: gcr.io/distroless/static-debian12:nonroot.
+#   - The binary is fully static (CGO_ENABLED=0), so no libc is needed.
+#   - distroless/static has no shell and no package manager => smallest
+#     attack surface, ~2MB base. Chosen over alpine because nothing in the
+#     runtime path needs busybox: the process takes only flags/env, logs to
+#     stdout, and liveness is a plain TCP connect (compose/k8s do the probing,
+#     not an in-container `nc`).
+#   - :nonroot tag runs as uid/gid 65532 — no USER juggling required.
+ARG GO_VERSION=1.26
+
+FROM golang:${GO_VERSION}-alpine AS builder
+
+ENV CGO_ENABLED=0 \
+    GOOS=linux
+
+WORKDIR /backend
+
+# Copy manifests first so `go mod download` caches across source-only changes.
+COPY shared/go.mod shared/go.sum shared/
+COPY gateway/go.mod gateway/go.sum gateway/
+RUN cd gateway && go mod download
+
+COPY shared/ shared/
+COPY gateway/ gateway/
+
+# -trimpath: reproducible paths. -s -w: strip DWARF + symbol table.
+RUN cd gateway && go build \
+    -trimpath \
+    -ldflags "-s -w" \
+    -o /out/gateway ./cmd/gateway/
+
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+
+COPY --from=builder /out/gateway /usr/local/bin/gateway
+
+# Client realtime TCP port (GATEWAY_ADDR / --addr default :8000).
+EXPOSE 8000
+
+USER nonroot:nonroot
+
+ENTRYPOINT ["/usr/local/bin/gateway"]

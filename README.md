@@ -147,6 +147,8 @@ GitHub Actions pipeline: test shared → test gameserver + gateway (parallel) �
 
 CD deploys run a post-deploy smoke test (`backend/smoketest`) that exercises the full login → gameplay flow against the freshly deployed stack; any broken step fails the deploy.
 
+Alongside the binary bundle, CD builds distroless container images for gateway and gameserver (`backend/deploy/docker/`) and pushes them to `ghcr.io/dycuong03/rpg-mmo-{gateway,gameserver}` — production refs only, or `workflow_dispatch` with `build_images=true`. These are the images the Agones fleets pull. Locally: `scripts/build-all.sh --images`.
+
 ## Project Structure
 
 ```

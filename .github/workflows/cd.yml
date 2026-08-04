@@ -26,6 +26,11 @@ on:
         type: boolean
         required: false
         default: false
+      build_images:
+        description: Build & push gateway/gameserver images to ghcr.io
+        type: boolean
+        required: false
+        default: false
 
 # One deploy at a time per environment; a newer push supersedes a queued one.
 concurrency:
@@ -79,6 +84,11 @@ jobs:
     name: Build, vet & test (+ nakama plugin)
     runs-on: ubuntu-latest
     needs: resolve
+    # packages: write is needed only by the (conditional) ghcr push steps
+    # below; it is harmless for the rest of the job.
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -99,6 +109,73 @@ jobs:
         run: |
           chmod +x scripts/build-all.sh
           ./scripts/build-all.sh --plugin $SKIP
+
+      # ---------------------------------------------------- container images
+      # Gateway + gameserver images are built and pushed to GHCR ONLY when:
+      #   * the ref resolves to the production environment (release-* branch,
+      #     or workflow_dispatch with environment=production), OR
+      #   * workflow_dispatch was run with build_images=true.
+      # Dev/staging deploys keep using host binaries from the artifact bundle,
+      # so the common path stays fast and does not publish packages.
+      # Image names MUST match backend/deploy/agones/fleet-{map,dungeon}.yaml.
+      - name: Resolve image build gate
+        id: images
+        env:
+          TARGET_ENV: ${{ needs.resolve.outputs.environment }}
+          DISPATCH_BUILD_IMAGES: ${{ github.event.inputs.build_images }}
+        run: |
+          set -euo pipefail
+          if [ "${TARGET_ENV}" = "production" ] || [ "${DISPATCH_BUILD_IMAGES}" = "true" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to ghcr.io
+        if: steps.images.outputs.enabled == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Context is backend/ — both go.mod files have `replace ... => ../shared`.
+      - name: Build & push gateway image
+        if: steps.images.outputs.enabled == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/deploy/docker/Dockerfile.gateway
+          push: true
+          tags: |
+            ghcr.io/dycuong03/rpg-mmo-gateway:${{ steps.images.outputs.short_sha }}
+            ghcr.io/dycuong03/rpg-mmo-gateway:latest
+          cache-from: type=gha,scope=gateway
+          cache-to: type=gha,scope=gateway,mode=max
+
+      - name: Build & push gameserver image
+        if: steps.images.outputs.enabled == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/deploy/docker/Dockerfile.gameserver
+          push: true
+          tags: |
+            ghcr.io/dycuong03/rpg-mmo-gameserver:${{ steps.images.outputs.short_sha }}
+            ghcr.io/dycuong03/rpg-mmo-gameserver:latest
+          cache-from: type=gha,scope=gameserver
+          cache-to: type=gha,scope=gameserver,mode=max
+
+      - name: Image summary
+        if: steps.images.outputs.enabled == 'true'
+        run: |
+          {
+            echo "### Container images pushed"
+            echo ""
+            echo "- \`ghcr.io/dycuong03/rpg-mmo-gateway:${{ steps.images.outputs.short_sha }}\` (+ \`:latest\`)"
+            echo "- \`ghcr.io/dycuong03/rpg-mmo-gameserver:${{ steps.images.outputs.short_sha }}\` (+ \`:latest\`)"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Stage deployment bundle
         run: |

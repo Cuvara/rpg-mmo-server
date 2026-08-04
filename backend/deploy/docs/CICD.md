@@ -22,7 +22,13 @@ scripts/build-all.sh                 # vet + test + build all modules
 scripts/build-all.sh --skip-tests    # vet + build only (fast compile check)
 scripts/build-all.sh --race          # add -race (needs gcc/cgo — plain WSL often lacks it)
 scripts/build-all.sh --plugin        # also build backend/deploy/modules/nakama.so via docker
+scripts/build-all.sh --images        # also build the gateway + gameserver container images
 ```
+
+`--images` builds `backend/deploy/docker/Dockerfile.{gateway,gameserver}` with
+context `backend/`, tagging `$IMAGE_PREFIX/<svc>:$IMAGE_TAG`
+(default `rpg-mmo/<svc>:dev`). Same docker/docker.exe auto-detection as
+`--plugin`.
 
 Coverage, in order (fail-fast):
 
@@ -87,7 +93,7 @@ Layout (override with `RPG_DEPLOY_DIR`, default `/opt/rpg-mmo`):
 | Job | Runner | What it does |
 |-----|--------|--------------|
 | `resolve` | `ubuntu-latest` | Maps the ref (or the dispatch input) to an environment name and a runner-label JSON array. Unmapped refs fail loudly. |
-| `build-test` | `ubuntu-latest` | Checkout → Go 1.26 → Buildx → `scripts/build-all.sh --plugin --race` → stage `dist/` → upload artifact `deploy-bundle-<sha>` (binaries, `nakama.so`, `docker-compose.yml`, `Makefile`, `.env.example`, `deploy-local.sh`, `COMMIT`). 14-day retention. |
+| `build-test` | `ubuntu-latest` | Checkout → Go 1.26 → Buildx → `scripts/build-all.sh --plugin --race` → (conditionally) build & push the gateway/gameserver images to GHCR → stage `dist/` → upload artifact `deploy-bundle-<sha>` (binaries, `nakama.so`, `docker-compose.yml`, `Makefile`, `.env.example`, `deploy-local.sh`, `COMMIT`). 14-day retention. |
 | `deploy` | `${{ fromJSON(resolve.runner_labels) }}` | Download bundle → `install` into `$RPG_DEPLOY_DIR` (keeping `.prev` binaries) → write `.env` from Environment secrets → `docker compose up -d` → `deploy-local.sh restart` → `health` + `status` → job summary. |
 
 ### Ref → environment → runner labels
@@ -99,8 +105,19 @@ Layout (override with `RPG_DEPLOY_DIR`, default `/opt/rpg-mmo`):
 | `release-*` | `production` | `self-hosted`, `production` |
 
 `workflow_dispatch` accepts an `environment` choice (`dev` / `staging` /
-`production`) that overrides the ref mapping, plus a `skip_tests` boolean for
-emergency builds.
+`production`) that overrides the ref mapping, a `skip_tests` boolean for
+emergency builds, and a `build_images` boolean.
+
+### Container images (GHCR)
+
+The `build-test` job pushes `ghcr.io/dycuong03/rpg-mmo-gateway` and
+`ghcr.io/dycuong03/rpg-mmo-gameserver` (tags: `<short-sha>` + `latest`) **only
+when** the resolved environment is `production` **or** `workflow_dispatch` set
+`build_images=true`. Auth is `docker/login-action@v3` with the built-in
+`GITHUB_TOKEN` (`permissions: packages: write` on that job); layers are cached
+with `type=gha`. Dev/staging deploys skip this entirely and keep using the host
+binaries from the artifact bundle. The gameserver image name must stay in sync
+with `agones/fleet-map.yaml` and `agones/fleet-dungeon.yaml`.
 
 ### Concurrency
 
