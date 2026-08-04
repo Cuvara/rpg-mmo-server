@@ -120,6 +120,8 @@ jobs:
           path: dist/
           retention-days: 14
           if-no-files-found: error
+          # dist/deploy/.env.example is a dotfile; v4 drops hidden files by default.
+          include-hidden-files: true
 
   # ----------------------------------------------------------------- deploy
   deploy:
