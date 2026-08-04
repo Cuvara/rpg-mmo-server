@@ -1,0 +1,113 @@
+# Local dev meta stack: PostgreSQL (meta DB) + Nakama (with our Go plugin).
+#
+# Realtime services (gateway, gameserver) are NOT part of this stack — run them
+# on the host with `go run` (see docs/RUNBOOK-local-dev.md).
+#
+# Usage:
+#   make plugin && make up
+#
+# All image tags are pinned. Bump NAKAMA_VERSION in .env and in
+# nakama-plugin.Dockerfile together — the plugin ABI must match the server.
+
+name: rpg-mmo-meta
+
+services:
+  postgres:
+    image: postgres:16.4-alpine
+    container_name: rpg-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-nakama}
+      POSTGRES_USER: ${POSTGRES_USER:-nakama}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-localdev}
+      # Faster startup for a throwaway dev volume.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nakama} -d ${POSTGRES_DB:-nakama}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  nakama:
+    image: heroiclabs/nakama:${NAKAMA_VERSION:-3.40.0}
+    container_name: rpg-nakama
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Shared HS256 secret. MUST match JWT_SECRET used by gateway/gameserver
+      # (backend/shared/config: env JWT_SECRET, default "dev-secret-change-me").
+      # Nakama signs client session tokens with session.encryption_key, so the
+      # gateway can verify them locally with no roundtrip.
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        /nakama/nakama migrate up \
+          --database.address "${POSTGRES_USER:-nakama}:${POSTGRES_PASSWORD:-localdev}@postgres:5432/${POSTGRES_DB:-nakama}"
+        exec /nakama/nakama \
+          --name rpg-nakama-local \
+          --database.address "${POSTGRES_USER:-nakama}:${POSTGRES_PASSWORD:-localdev}@postgres:5432/${POSTGRES_DB:-nakama}" \
+          --logger.level DEBUG \
+          --session.token_expiry_sec 7200 \
+          --session.encryption_key "$${JWT_SECRET}" \
+          --session.refresh_encryption_key "$${JWT_SECRET}-refresh" \
+          --runtime.path /nakama/data/modules \
+          --console.username "${NAKAMA_CONSOLE_USER:-admin}" \
+          --console.password "${NAKAMA_CONSOLE_PASSWORD:-password}" \
+          --socket.server_key "${NAKAMA_SERVER_KEY:-defaultkey}" \
+          --metrics.prometheus_port 9100
+    ports:
+      - "7349:7349"   # gRPC API
+      - "7350:7350"   # HTTP API / client
+      - "7351:7351"   # Console (web UI)
+      - "9100:9100"   # Prometheus metrics
+    volumes:
+      # Compiled Go plugin (nakama.so) is dropped here by `make plugin`.
+      - ./modules:/nakama/data/modules
+    healthcheck:
+      test: ["CMD", "/nakama/nakama", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: rpg-redis
+    restart: unless-stopped
+    environment:
+      # Empty = no auth, matching backend/shared/config default (REDIS_PASSWORD="").
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    # --requirepass is added only when REDIS_PASSWORD is non-empty.
+    # AOF on: session/registry keys survive a container restart during dev.
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        exec redis-server \
+          --appendonly yes \
+          --appendfsync everysec \
+          --save 60 1000 \
+          $${REDIS_PASSWORD:+--requirepass "$${REDIS_PASSWORD}"}
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli $${REDIS_PASSWORD:+-a \"$${REDIS_PASSWORD}\"} --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+volumes:
+  postgres-data:
+  redis-data:

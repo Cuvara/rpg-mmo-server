@@ -1,0 +1,3 @@
+# Local dev secrets and build output
+.env
+modules/*.so
