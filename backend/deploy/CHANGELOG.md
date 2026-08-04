@@ -6,6 +6,40 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `k3s/setup-dev.sh` — idempotent dev-cluster bootstrap: resolves kubectl
+  (Linux `kubectl` → `kubectl.exe` → Docker Desktop's bundled path), preflights
+  the cluster, installs Agones **1.59.0** (pinned to `agones.dev/agones` in
+  `gameserver/go.mod`) with `apply --server-side --force-conflicts` (the CRDs
+  exceed the 262 kB client-side apply annotation), waits for `agones-system`
+  Available *and* for the `agones.dev/v1` webhook to actually serve Fleets,
+  applies namespaces + dev Secret/ConfigMap + fleets, then blocks until a
+  `GameServer` reaches `Ready`. Flags: `--with-dungeon`, `--with-autoscaler`,
+  `--prod-fleets`, `--skip-agones`.
+- `k3s/teardown-dev.sh` — reverse order (autoscalers → fleets → stray
+  GameServers → config → namespaces, `--all` also uninstalls Agones);
+  `--fleets-only` keeps the namespaces.
+- `k3s/lib.sh` — shared helpers covering the WSL2 quirks: kubectl resolution,
+  `kube_apply_file`/`kube_delete_file` that always pipe local manifests through
+  stdin (kubectl.exe cannot read Linux paths), fail-fast `require_cluster` that
+  checks `current-context` before touching the network (an empty kubeconfig
+  otherwise makes kubectl burn ~25 s retrying `localhost:8080`), `retry`/`wait_for`.
+- `k3s/namespaces.yaml` — `rpg-realtime` / `rpg-meta` / `rpg-data`.
+- `k3s/validate-manifests.py` — offline manifest validation. `kubectl apply
+  --dry-run=client` cannot check a `Fleet` without a live API server, so this
+  extracts each CRD's `openAPIV3Schema` from the pinned Agones `install.yaml`
+  (cached under `~/.cache/rpg-mmo/`) and validates with `jsonschema`, translating
+  OpenAPI-3.0-isms (`x-kubernetes-*`, `nullable`, boolean `exclusiveMinimum`).
+- `agones/fleet-map-dev.yaml`, `agones/fleet-dungeon-dev.yaml` — dev variants
+  using the local `rpg-mmo/gameserver:dev` image with
+  `imagePullPolicy: IfNotPresent` (the ghcr.io image is not published yet),
+  literal env, and **no external dependencies** (in-memory registry + player
+  store) so they reach `Ready` on a bare laptop cluster.
+- `agones/autoscaler-dev.yaml` (buffer 1, max 2) and `agones/allocation-dev.yaml`.
+- `docs/K3S.md` — cluster-option comparison and why Docker Desktop Kubernetes
+  was chosen over k3d/native k3s on this box, bootstrap/teardown usage, image
+  import per cluster type, `host.docker.internal` wiring, offline validation and
+  its limits, graduation path to a real k3s VPS (kubeconfig secret + CD job
+  sketch), and a WSL2 troubleshooting table.
 - `docker/Dockerfile.gateway` and `docker/Dockerfile.gameserver` — real
   container images for the realtime services (previously the Agones fleets
   referenced images that were never built). Multi-stage:
@@ -43,6 +77,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `POSTGRES_GAME_PASSWORD`, `POSTGRES_GAME_PORT`.
 
 ### Changed
+- `agones/fleet-map.yaml`, `agones/fleet-dungeon.yaml` — reality-pass against
+  `gameserver/cmd/gameserver/main.go` and `gameserver/agones/sdk.go`:
+  `portPolicy: Dynamic` made explicit (Agones assigns the host port; the
+  container always binds `:9000`), `initialDelaySeconds` 5 → 10 to cover the
+  Postgres migration on start, `--redis` added so gateway and gameservers share
+  one registry/event stream, and `JWT_SECRET` / `REDIS_ADDR` / `GAME_DB_URL`
+  wired to Secret `rpg-realtime-secrets` + ConfigMap `gameserver-config` with
+  `optional: true` so the fleets still start before those objects exist. Added
+  `app.kubernetes.io/part-of` / `rpg-mmo/role` labels.
+- `agones/allocation.yaml` — documented that `GameServerAllocation` is a
+  create-only aggregated-API resource (`kubectl create`, never `apply`).
 - `docs/RUNBOOK-local-dev.md`: documents the two-PostgreSQL layout, port 5433,
   game-state verification/reset steps, and the host gameserver wiring
   `GAME_DB_URL=postgres://game:localdev@localhost:5433/gamestate?sslmode=disable`.

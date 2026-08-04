@@ -1,0 +1,15 @@
+# DEV autoscaler — buffer of 1, capped at 2 replicas so a laptop cluster does
+# not spawn a fleet of pods. Applied only with `setup-dev.sh --with-autoscaler`.
+apiVersion: autoscaling.agones.dev/v1
+kind: FleetAutoscaler
+metadata:
+  name: map-servers-dev-autoscaler
+  namespace: rpg-realtime
+spec:
+  fleetName: map-servers-dev
+  policy:
+    type: Buffer
+    buffer:
+      bufferSize: 1
+      minReplicas: 1
+      maxReplicas: 2

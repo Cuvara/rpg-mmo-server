@@ -1,0 +1,19 @@
+# Allocate one dev dungeon server on demand.
+#
+#   kubectl create -f agones/allocation-dev.yaml
+#
+# GameServerAllocation is a "create-only" virtual resource: the response object
+# carries status.state (Allocated/UnAllocated), the GameServer name and the
+# host address/port to hand back to the client. `kubectl apply` does NOT work.
+#
+# This is the manual stand-in for what the Gateway allocator will eventually
+# call through the Agones allocation API (gateway/registry).
+apiVersion: allocation.agones.dev/v1
+kind: GameServerAllocation
+metadata:
+  namespace: rpg-realtime
+spec:
+  selectors:
+    - matchLabels:
+        agones.dev/fleet: dungeon-servers-dev
+  scheduling: Packed
