@@ -7,10 +7,10 @@
 ## Responsibilities
 
 ### 1. Docker
-- Dockerfile for each binary: nakama (plugin), gateway, gameserver
+- Dockerfile for each binary: nakama (plugin), gateway (Go), gameserver-dotnet (C# NativeAOT)
 - Multi-stage builds (builder + runtime)
 - Minimal runtime images (distroless or alpine)
-- Shared base image for Go binaries
+- Go binaries share a base image; C# gameserver uses .NET 10 SDK for NativeAOT publish
 
 ### 2. Kubernetes / k3s Manifests
 - k3s cluster setup scripts
@@ -39,6 +39,7 @@
 
 ### 6. CI/CD (GitHub Actions)
 - Build pipeline: lint -> test -> build -> push images
+- `ci-dotnet.yml`: C# gameserver build + test pipeline (dotnet build/test)
 - Deploy pipeline: per-tier deployment
 - Migration pipeline: run DB migrations safely
 - Proto generation pipeline
@@ -81,7 +82,7 @@ deploy/
   docker/
     Dockerfile.nakama
     Dockerfile.gateway
-    Dockerfile.gameserver
+    Dockerfile.gameserver-dotnet
   k3s/
     setup.sh             # k3s installation script
     namespaces.yaml

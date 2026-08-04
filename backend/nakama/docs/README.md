@@ -85,7 +85,7 @@ nakama:
 
 | Env var | Default | Purpose |
 |---------|---------|---------|
-| `JWT_SECRET` | `dev-secret-change-me` (from `shared/config`) | HS256 secret for realtime tokens. MUST match the Gateway's, otherwise every realtime token is rejected. |
+| `JWT_SECRET` | `dev-secret-change-me` (from `shared/config`) | HS256 secret for realtime tokens. MUST match the Gateway and gameserver-dotnet, otherwise every realtime token is rejected. |
 
 The plugin reads env vars from the Nakama runtime environment
 (`runtime.RUNTIME_CTX_ENV`) first and falls back to the process environment via

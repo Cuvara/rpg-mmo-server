@@ -5,6 +5,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- Replaced Go gameserver integration tests with dotnet interop tests following
+  the gameserver migration from Go to C# .NET 10.
+
 ### Added
 - `dotnet_interop_test.go` — Go Gateway ↔ C# GameServer cross-language E2E tests
   (build tag `integration`). Seven tests covering: full client flow through gateway

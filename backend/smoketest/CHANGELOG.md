@@ -5,6 +5,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- Game server migrated from Go to C# .NET 10 (`backend/gameserver-dotnet/`).
+  Smoke test unchanged — the `gameserver_join` step connects to whatever address
+  the `EnterWorldResponse` returns, same wire protocol.
+
 ### Added
 - `TRANSPORT` env / `--transport` flag selects the transport for the gateway
   hop (`tcp` or `kcp`, default `tcp` — CD smoke is unchanged). The game server

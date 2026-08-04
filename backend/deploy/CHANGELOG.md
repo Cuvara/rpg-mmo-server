@@ -6,6 +6,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- Removed `docker/Dockerfile.gameserver` (Go). Added
+  `docker/Dockerfile.gameserver-dotnet` (C# .NET 10 NativeAOT multi-stage build:
+  `dotnet/sdk:10.0` builder → `distroless/static-debian12:nonroot` runtime).
+- `cd.yml` updated to build the C# gameserver image instead of the Go one.
+- Added `ci-dotnet.yml` workflow for C# gameserver build + test.
+
+### Changed
 - Fleet manifests (`agones/fleet-map.yaml`, `fleet-dungeon.yaml`,
   `fleet-map-dev.yaml`, `fleet-dungeon-dev.yaml`) inject `POD_NAME` via the
   downward API (`fieldRef: metadata.name`). The gameserver uses it as its

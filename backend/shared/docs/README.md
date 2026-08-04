@@ -1,6 +1,6 @@
 # Shared Module
 
-Foundation module for RPG MMO backend. Contains all shared definitions, types, and utilities used by nakama, gateway, and gameserver modules.
+Foundation module for RPG MMO backend. Contains all shared definitions, types, and utilities used by nakama, gateway, and gameserver-dotnet modules.
 
 ## Contents
 

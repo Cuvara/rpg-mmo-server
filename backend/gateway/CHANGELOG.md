@@ -5,6 +5,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- Game servers migrated from Go to C# .NET 10 (`backend/gameserver-dotnet/`).
+  Gateway wire protocol unchanged (4-byte BE length prefix + JSON, `snake_case`
+  fields) — no gateway code changes required for compatibility.
+
 ### Added
 - Opt-in KCP/UDP listener for the realtime path: `--transport=tcp|kcp`
   (`GATEWAY_TRANSPORT`, default `tcp`) and the `server.WithTransport` option.

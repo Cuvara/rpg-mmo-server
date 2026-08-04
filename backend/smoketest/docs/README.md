@@ -1,7 +1,8 @@
 # Smoketest Module
 
 Post-deploy smoke test — a headless client binary that exercises the **entire**
-login → gameplay flow against a running stack and exits non-zero on any failure.
+login → gameplay flow against a running stack (including the C# .NET 10 game
+server) and exits non-zero on any failure.
 The CD pipeline runs it right after the post-deploy healthcheck; a failing smoke
 test fails the deploy.
 
@@ -60,7 +61,7 @@ JWT_SECRET=dev-secret-change-me TRANSPORT=kcp GATEWAY_ADDR=127.0.0.1:8200 \
 
 ## Run locally
 
-Bring up the dev stack (meta stack via `backend/deploy`, gateway + gameserver
+Bring up the dev stack (meta stack via `backend/deploy`, gateway + gameserver-dotnet
 with a shared Redis registry), then:
 
 ```bash

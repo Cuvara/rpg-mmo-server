@@ -1,6 +1,6 @@
 # Gateway Module
 
-Custom Go binary — router between Unity clients and Game Servers. Stateless
+Custom Go binary — router between Unity clients and Game Servers (C# .NET 10). Stateless
 (all state lives in the configured stores), horizontally scalable.
 
 Transport today is **TCP + length-prefixed JSON** (`shared/messages`); KCP/UDP is the
@@ -9,7 +9,7 @@ production target and swaps in behind the same handler code.
 ## Architecture
 
 ```
-Unity Client --[TCP (KCP planned)]--> Gateway --> (join token) --> Game Server
+Unity Client --[TCP (KCP planned)]--> Gateway --> (join token) --> Game Server (C# .NET 10)
                                         |
                                         +--> SessionStore   (memory | Redis)
                                         +--> ServerRegistry (memory | Redis)
@@ -93,7 +93,7 @@ All three Redis stores share one client/pool.
 | Env | Default | Used for |
 |-----|---------|----------|
 | `GATEWAY_ADDR` | `:8000` | Listen address |
-| `JWT_SECRET` | `dev-secret-change-me` | Local auth-token + join-token signing (shared with Nakama and gameserver) |
+| `JWT_SECRET` | `dev-secret-change-me` | Local auth-token + join-token signing (shared with Nakama and gameserver-dotnet) |
 | `GATEWAY_TRANSPORT` | `tcp` | Realtime transport (`tcp` or `kcp`) |
 | `REDIS_ADDR` | `localhost:6379` | Redis endpoint (also the auto backend switch) |
 | `REDIS_PASSWORD` | — | Redis auth |

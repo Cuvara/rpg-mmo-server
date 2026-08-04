@@ -5,6 +5,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- `Envelope.Payload` type changed from `[]byte` to `json.RawMessage` for C#
+  interop — `System.Text.Json` on the gameserver-dotnet side expects a raw JSON
+  object, not a base64-encoded byte array.
+
 ### Added
 - `transport` package — pluggable realtime transport. `Listen(kind, addr)` /
   `Dial(kind, addr, timeout)` over `tcp` and `kcp`

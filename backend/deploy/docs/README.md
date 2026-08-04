@@ -11,7 +11,7 @@ All open-source, $0 license: Docker, k3s, Agones, PostgreSQL, Redis, Grafana, Pr
 | Agones game server fleets | `agones/fleet-map.yaml`, `agones/fleet-dungeon.yaml`, `agones/autoscaler.yaml`, `agones/allocation.yaml` | ✅ Manifests authored |
 | Build automation | `scripts/build-all.sh` (repo root) | ✅ Usable |
 | CD pipeline | `.github/workflows/cd.yml`, `scripts/deploy-local.sh` | ✅ Authored (needs a live runner) |
-| Gateway / gameserver images | `docker/Dockerfile.gateway`, `docker/Dockerfile.gameserver` | ✅ Built + smoke-tested |
+| Gateway / gameserver images | `docker/Dockerfile.gateway`, `docker/Dockerfile.gameserver-dotnet` | ✅ Built + smoke-tested |
 | k3s / Agones dev bootstrap | `k3s/setup-dev.sh`, `k3s/teardown-dev.sh`, `k3s/lib.sh`, `k3s/namespaces.yaml`, `k3s/validate-manifests.py` | ✅ Authored + manifests schema-validated (needs a live cluster) |
 | k8s base/overlays (Nakama, Gateway, Redis, Postgres) | — | Planned |
 | DB init + backup scripts, prod Redis config (Sentinel, eviction) | — | Planned |
@@ -36,8 +36,8 @@ Docs:
 
 The realtime services (gateway, gameserver) do have container images (see
 "Gateway & gameserver container images" below), but the default local-dev flow
-still runs them on the host with `go run`, sharing `JWT_SECRET` and `REDIS_ADDR`
-with the stack:
+still runs them on the host (`go run` for gateway, `dotnet run` for
+gameserver-dotnet), sharing `JWT_SECRET` and `REDIS_ADDR` with the stack:
 
 ```bash
 export JWT_SECRET=dev-secret-change-me
@@ -100,28 +100,39 @@ Environment secrets and are written to `.env` by the CD workflow — see
 
 ## Gateway & gameserver container images
 
-`docker/Dockerfile.gateway` and `docker/Dockerfile.gameserver` produce the images
-the Agones fleets reference. Both are multi-stage:
+`docker/Dockerfile.gateway` and `docker/Dockerfile.gameserver-dotnet` produce the
+images the Agones fleets reference.
+
+**Gateway** (Go, multi-stage):
 
 | Stage | Base | Notes |
 |-------|------|-------|
 | builder | `golang:1.26-alpine` | matches the `go 1.26` toolchain in every `go.mod`; `CGO_ENABLED=0`, `-trimpath`, `-ldflags "-s -w"` |
-| runtime | `gcr.io/distroless/static-debian12:nonroot` | static binary → no libc; no shell/package manager; runs as uid 65532 |
+| runtime | `gcr.io/distroless/static-debian12:nonroot` | static binary; runs as uid 65532 |
 
-Sizes (measured): **gateway ≈ 16.1 MB**, **gameserver ≈ 37.4 MB** (~30s cold
-build each, ~2s warm). `EXPOSE 8000` (gateway) / `9000` (gameserver, matching
-`containerPort` in the fleet manifests).
+Size: **gateway ~ 16.1 MB**.
 
-The build **context must be `backend/`** — both `go.mod` files carry
+**Game Server** (C# .NET 10 NativeAOT, multi-stage):
+
+| Stage | Base | Notes |
+|-------|------|-------|
+| builder | `mcr.microsoft.com/dotnet/sdk:10.0` | `dotnet publish -c Release -r linux-x64 /p:PublishAot=true` |
+| runtime | `gcr.io/distroless/static-debian12:nonroot` | NativeAOT self-contained binary; runs as uid 65532 |
+
+`EXPOSE 8000` (gateway) / `9000` (gameserver, matching `containerPort` in the
+fleet manifests).
+
+The gateway build **context must be `backend/`** — `go.mod` carries
 `replace github.com/duycuong/rpg-mmo/shared => ../shared`, so `shared/` has to be
-visible. Same rule as `nakama-plugin.Dockerfile`.
+visible. Same rule as `nakama-plugin.Dockerfile`. The gameserver-dotnet build
+context is `backend/gameserver-dotnet/`.
 
 ```bash
 # local (WSL: use docker.exe and run from backend/deploy — absolute /mnt/* paths
 # do not survive the Windows CLI's path translation, cwd-relative ones do)
 cd backend/deploy
-docker build -f docker/Dockerfile.gateway    -t rpg-mmo/gateway:dev    ..
-docker build -f docker/Dockerfile.gameserver -t rpg-mmo/gameserver:dev ..
+docker build -f docker/Dockerfile.gateway            -t rpg-mmo/gateway:dev    ..
+docker build -f docker/Dockerfile.gameserver-dotnet  -t rpg-mmo/gameserver:dev ../gameserver-dotnet
 
 # or via the build script (auto-detects docker vs docker.exe)
 scripts/build-all.sh --images                        # -> rpg-mmo/{gateway,gameserver}:dev

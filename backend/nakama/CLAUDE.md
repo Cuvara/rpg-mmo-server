@@ -56,13 +56,13 @@ This module contains Nakama Go runtime plugins. All code runs inside Nakama proc
 ## Key Design Constraints
 - All code = Nakama Go plugin hooks (InitModule pattern)
 - Economy = ALWAYS atomic DB transactions
-- Rewards from GameServer = internal RPC only (signed, no external network)
+- Rewards from GameServer (C# .NET 10) = internal RPC only (signed, no external network)
 - Rate limiting on all client-facing RPCs
 - All storage uses Nakama Storage Engine or direct PostgreSQL
 
 ## Integration Points
 - **With Gateway**: JWT shared secret (Gateway verifies locally, no roundtrip to Nakama)
-- **With GameServer**: Internal RPC for reward granting (signed)
+- **With GameServer (C# .NET 10)**: Internal RPC for reward granting (signed). The game server is now `backend/gameserver-dotnet/` (C# .NET 10), replacing the original Go binary. Wire protocol unchanged.
 - **With Redis**: Streams for cross-service events (inventory_changed, season_ended)
 - **With PostgreSQL (meta)**: accounts, storage, leaderboard data
 

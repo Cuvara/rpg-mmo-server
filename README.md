@@ -47,12 +47,14 @@ Unity Client
 ### Run Tests
 
 ```bash
-# All modules (each is its own Go module — cd first)
+# Go modules (each is its own Go module — cd first)
 cd backend/shared && go test ./... -race
-cd backend/gameserver && go test ./... -race
 cd backend/gateway && go test ./... -race
 cd backend/nakama && go test ./... -race
 cd backend/integration_test && go test -v -race -timeout 120s
+
+# C# game server (.NET 10)
+cd backend/gameserver-dotnet && dotnet test
 ```
 
 `-race` needs cgo (a C toolchain). Drop it if `gcc` is unavailable — the suites
@@ -63,11 +65,11 @@ are identical otherwise.
 In-memory mode (single process each, no external dependencies):
 
 ```bash
-# Terminal 1 — Game Server
-cd backend/gameserver
-go run ./cmd/gameserver/ --addr=:9000 --map-id=map_01
+# Terminal 1 — Game Server (C# .NET 10)
+cd backend/gameserver-dotnet
+dotnet run --project src/GameServer/ -- --addr=:9000 --map-id=map_01
 
-# Terminal 2 — Gateway
+# Terminal 2 — Gateway (Go)
 cd backend/gateway
 go run ./cmd/gateway/ --addr=:8000
 ```
@@ -79,9 +81,9 @@ the gateway to see game servers running in other processes):
 # Terminal 0 — Redis
 redis-server --port 6379
 
-# Terminal 1 — Game Server (--redis opts in; --redis-addr overrides REDIS_ADDR)
-cd backend/gameserver
-go run ./cmd/gameserver/ --addr=:9000 --map-id=map_01 --redis --redis-addr=localhost:6379
+# Terminal 1 — Game Server (C# .NET 10)
+cd backend/gameserver-dotnet
+dotnet run --project src/GameServer/ -- --addr=:9000 --map-id=map_01 --redis --redis-addr=localhost:6379
 
 # Terminal 2 — Gateway (an exported REDIS_ADDR selects the redis backend;
 # --backend=redis forces it explicitly)
@@ -121,7 +123,7 @@ nc localhost 8000
 | Module | Tests | Status |
 |--------|-------|--------|
 | shared | 39 | ✅ |
-| gameserver | 30 | ✅ |
+| gameserver-dotnet | 30 | ✅ |
 | gateway | 36 | ✅ |
 | nakama | 11 | ✅ |
 | integration (E2E) | 10 | ✅ |
@@ -143,11 +145,13 @@ All open-source stack: Nakama, k3s, Agones, PostgreSQL, Redis — $0 license.
 
 ## CI/CD
 
-GitHub Actions pipeline: test shared → test gameserver + gateway (parallel) → integration test → build binaries.
+GitHub Actions pipeline: test shared → test gameserver-dotnet + gateway (parallel) → integration test → build binaries.
 
 CD deploys run a post-deploy smoke test (`backend/smoketest`) that exercises the full login → gameplay flow against the freshly deployed stack; any broken step fails the deploy.
 
-Alongside the binary bundle, CD builds distroless container images for gateway and gameserver (`backend/deploy/docker/`) and pushes them to `ghcr.io/dycuong03/rpg-mmo-{gateway,gameserver}` — production refs only, or `workflow_dispatch` with `build_images=true`. These are the images the Agones fleets pull. Locally: `scripts/build-all.sh --images`.
+Alongside the binary bundle, CD builds container images for gateway (distroless) and gameserver-dotnet (NativeAOT) (`backend/deploy/docker/`) and pushes them to `ghcr.io/dycuong03/rpg-mmo-{gateway,gameserver}` — production refs only, or `workflow_dispatch` with `build_images=true`. These are the images the Agones fleets pull. Locally: `scripts/build-all.sh --images`.
+
+A separate `ci-dotnet.yml` workflow handles the C# game server: `dotnet build` + `dotnet test` on each push.
 
 ## Project Structure
 
@@ -161,15 +165,10 @@ backend/
 │   ├── logger/          # slog wrapper
 │   ├── messages/        # Wire protocol (Envelope + codec)
 │   └── storage/         # Interfaces + in-memory impls
-├── gameserver/          # Depends on shared
-│   ├── cmd/gameserver/  # Entry point
-│   ├── game/            # Entity, World
-│   ├── server/          # Server lifecycle, tick loop, connections
-│   ├── input/           # Input handler + validator
-│   ├── combat/          # Damage calc, death
-│   ├── snapshot/        # AOI + encoder
-│   ├── persistence/     # Async batch saver
-│   └── events/          # Event publisher
+├── gameserver-dotnet/   # C# .NET 10 game server (NativeAOT)
+│   ├── src/GameServer/  # Entry point, tick loop, combat, AOI, persistence
+│   ├── src/Shared.GameLogic/  # Shared game logic lib (also used by Unity client)
+│   └── tests/           # Unit + integration tests
 ├── gateway/             # Depends on shared
 │   ├── cmd/gateway/     # Entry point
 │   ├── server/          # Gateway server, connections

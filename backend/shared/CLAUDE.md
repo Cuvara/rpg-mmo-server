@@ -51,6 +51,7 @@
 - Keep imports minimal — this is the dependency root
 - Protobuf generated code goes to `proto/gen/` subdirectory
 - All public types need GoDoc comments
+- The C# game server (`gameserver-dotnet`) has its own `Shared.GameLogic` library and does NOT import Go shared. Wire protocol compatibility is maintained via Protobuf/JSON message definitions
 
 ## Documentation Requirements
 - `docs/README.md` — Module overview, how to generate proto

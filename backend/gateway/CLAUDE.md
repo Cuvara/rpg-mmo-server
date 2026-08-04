@@ -60,7 +60,7 @@ Custom Go binary — UDP/KCP router between Unity clients and Game Servers. Stan
 
 ## Integration Points
 - **With Clients**: KCP/UDP (realtime), initial handshake with JWT
-- **With Game Servers**: KCP/UDP forwarding, join_token protocol
+- **With Game Servers (C# .NET 10)**: KCP/UDP forwarding, join_token protocol. Wire protocol unchanged (JSON/Protobuf envelopes) — the game server language is transparent to the gateway
 - **With Redis**: Session store, server registry, pub/sub relay
 - **With Agones**: Allocation requests for new Game Server pods
 - **With Nakama**: NONE at runtime (JWT shared secret only)
