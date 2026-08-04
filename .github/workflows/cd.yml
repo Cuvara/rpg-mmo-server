@@ -104,7 +104,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/bin dist/deploy dist/scripts
-          cp bin/gateway bin/gameserver dist/bin/
+          cp bin/gateway bin/gameserver bin/smoketest dist/bin/
           cp backend/deploy/modules/nakama.so dist/deploy/
           cp backend/deploy/docker-compose.yml dist/deploy/
           cp backend/deploy/Makefile dist/deploy/
@@ -148,6 +148,7 @@ jobs:
           done
           install -m 0755 dist/bin/gateway     "$RPG_DEPLOY_DIR/bin/gateway"
           install -m 0755 dist/bin/gameserver  "$RPG_DEPLOY_DIR/bin/gameserver"
+          install -m 0755 dist/bin/smoketest   "$RPG_DEPLOY_DIR/bin/smoketest"
           install -m 0755 dist/scripts/deploy-local.sh "$RPG_DEPLOY_DIR/scripts/deploy-local.sh"
           mkdir -p "$RPG_DEPLOY_DIR/deploy/modules"
           install -m 0644 dist/deploy/nakama.so          "$RPG_DEPLOY_DIR/deploy/modules/nakama.so"
@@ -230,6 +231,22 @@ jobs:
           set -euo pipefail
           "$RPG_DEPLOY_DIR/scripts/deploy-local.sh" health
           "$RPG_DEPLOY_DIR/scripts/deploy-local.sh" status
+
+      # Full-flow smoke test against the freshly deployed stack: Nakama health,
+      # device auth, gateway_token RPC, gateway MsgAuth + MsgEnterWorld, game
+      # server join, input/snapshot loop, clean disconnect. Any broken step
+      # fails the deploy. Env (JWT_SECRET, GATEWAY_ADDR, NAKAMA_SERVER_KEY, …)
+      # is sourced from the same file the services read; values are not echoed.
+      - name: Post-deploy smoke test
+        env:
+          RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
+        run: |
+          set -euo pipefail
+          set -a
+          # shellcheck disable=SC1091
+          . "$RPG_DEPLOY_DIR/deploy/.env"
+          set +a
+          "$RPG_DEPLOY_DIR/bin/smoketest"
 
       - name: Deployment summary
         if: always()

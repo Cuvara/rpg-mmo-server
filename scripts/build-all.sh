@@ -12,7 +12,7 @@
 #   scripts/build-all.sh --plugin        # also build nakama.so via docker
 #
 # Outputs:
-#   bin/gateway, bin/gameserver
+#   bin/gateway, bin/gameserver, bin/smoketest
 #   backend/deploy/modules/nakama.so     (only with --plugin)
 #
 set -euo pipefail
@@ -105,6 +105,7 @@ MODULES=(
 	"backend/gateway|./cmd/gateway/|gateway"
 	"backend/gameserver|./cmd/gameserver/|gameserver"
 	"backend/nakama|./...|-"
+	"backend/smoketest|./cmd/smoketest/|smoketest"
 )
 
 step "Toolchain"
