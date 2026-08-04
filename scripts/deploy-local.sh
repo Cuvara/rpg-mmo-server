@@ -16,7 +16,9 @@
 #   $RPG_DEPLOY_DIR/logs/*.log                 stdout+stderr (nohup mode)
 #
 # Env is sourced from the first file that exists:
-#   /etc/rpg-mmo/env   then   $RPG_DEPLOY_DIR/.env
+#   /etc/rpg-mmo/env   then   $RPG_DEPLOY_DIR/deploy/.env   then   $RPG_DEPLOY_DIR/.env
+# ($RPG_DEPLOY_DIR/deploy/.env is what the CD workflow writes — the same file
+# docker compose reads, keeping realtime services and the meta stack in sync.)
 # Never printed — the script only echoes which file was loaded.
 #
 set -euo pipefail
@@ -40,7 +42,7 @@ mkdir -p "$BIN_DIR" "$RUN_DIR" "$LOG_DIR"
 # ------------------------------------------------------------------- env load
 load_env() {
 	local f
-	for f in /etc/rpg-mmo/env "$DEPLOY_DIR/.env"; do
+	for f in /etc/rpg-mmo/env "$DEPLOY_DIR/deploy/.env" "$DEPLOY_DIR/.env"; do
 		if [ -r "$f" ]; then
 			# shellcheck disable=SC1090
 			set -a && . "$f" && set +a
@@ -48,7 +50,7 @@ load_env() {
 			return 0
 		fi
 	done
-	info "no env file found (/etc/rpg-mmo/env, $DEPLOY_DIR/.env) — using process env + defaults"
+	info "no env file found (/etc/rpg-mmo/env, $DEPLOY_DIR/deploy/.env, $DEPLOY_DIR/.env) — using process env + defaults"
 }
 
 # Loaded up-front: the service table below reads GATEWAY_ADDR/GAMESERVER_ADDR
