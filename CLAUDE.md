@@ -72,7 +72,7 @@ Each module has its own `CLAUDE.md` with detailed role-specific instructions, pl
 
 | Layer | MVP (current) | Production |
 |-------|---------------|------------|
-| Transport | TCP | KCP (`xtaci/kcp-go`) |
+| Transport | TCP (default) — KCP/UDP available opt-in via `shared/transport` + `--transport=kcp` | KCP everywhere, with per-session encryption |
 | Encoding | JSON structs | Protobuf |
 | Player/Session/Registry stores | In-memory | PostgreSQL (`pgx`) / Redis |
 | Event stream | Go channels | Redis Streams (consumer group ACK) |

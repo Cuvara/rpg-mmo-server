@@ -6,6 +6,22 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `transport_flow_test.go` — `TestFullFlow_TransportMatrix` runs the full
+  client -> gateway -> gameserver flow over all four per-hop transport
+  combinations (kcp/kcp, tcp/kcp, kcp/tcp, tcp/tcp), asserting the registry
+  carries the game server's transport, that `EnterWorldResponse.Transport`
+  announces it, and that the client can complete auth, join, input and
+  snapshots after dialing what was announced.
+- `TestEnterWorld_LegacyRegistryEntryIsTCP` — a registry entry with no
+  transport field makes the gateway omit the response field, which every
+  client reads as TCP.
+
+### Changed
+- `MockClient` can now dial any transport: `NewMockClientTransport(kind, addr)`.
+  `NewMockClient(addr)` is unchanged and still means TCP.
+
+
+### Added
 - `redis_flow_test.go` — E2E coverage of the full core flow against a shared
   Redis (miniredis), plus reusable helpers (`startGameServer`, `authAndEnterWorld`,
   `joinGameServer`, `awaitEntity`, deadline-based `waitFor` / `waitAddr`).

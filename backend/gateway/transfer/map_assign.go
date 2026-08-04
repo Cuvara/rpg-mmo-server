@@ -8,9 +8,14 @@ import (
 )
 
 // AssignResult holds the result of a map assignment.
+//
+// Transport is the realtime transport the target game server speaks, taken
+// from its registry entry. Empty means TCP (backward compatible with entries
+// written before the transport field existed).
 type AssignResult struct {
 	ServerAddr string
 	JoinToken  string
+	Transport  string
 }
 
 // AssignMap finds an available server for the given map and generates a join token.
@@ -28,5 +33,6 @@ func AssignMap(ctx context.Context, userID, mapID string, reg *registry.Registry
 	return AssignResult{
 		ServerAddr: srv.Addr,
 		JoinToken:  token,
+		Transport:  srv.Transport,
 	}, nil
 }

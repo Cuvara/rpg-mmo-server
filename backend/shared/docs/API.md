@@ -211,11 +211,53 @@ if err := store.Migrate(ctx); err != nil { return err }
 var players storage.PlayerStore = store
 ```
 
+## `transport` — pluggable realtime transport
+
+Listen/dial abstraction for the realtime path. The wire codec in
+`shared/messages` is a 4-byte length prefix over an `io.Reader`/`io.Writer`, so
+it works on any `net.Conn`; this package only decides which `net.Conn` the
+servers get.
+
+| Function | Signature | Notes |
+|----------|-----------|-------|
+| `Listen` | `Listen(kind, addr string) (net.Listener, error)` | `kind` is `"tcp"`, `"kcp"` or `""` (= tcp) |
+| `Dial` | `Dial(kind, addr string, timeout time.Duration) (net.Conn, error)` | `timeout` bounds the TCP handshake only |
+| `Normalize` | `Normalize(kind string) string` | lowercases; `""` → `"tcp"` |
+| `Validate` | `Validate(kind string) error` | `""`/`tcp`/`kcp` are valid |
+| `Kinds` | `Kinds() []string` | `["tcp", "kcp"]` |
+
+```go
+ln, err := transport.Listen("kcp", ":9000")   // net.Listener
+conn, err := transport.Dial("kcp", addr, 2*time.Second) // net.Conn
+```
+
+KCP is `github.com/xtaci/kcp-go/v5` with a game profile applied to every
+session (exported as constants so callers can log/inspect them):
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `KCPNoDelay` / `KCPInterval` / `KCPResend` / `KCPNoCongestion` | `1 / 10 / 2 / 1` | kcp-go "turbo" profile |
+| `KCPSendWindow` / `KCPRecvWindow` | `128 / 128` | packets in flight per direction |
+| `KCPMTU` | `1350` | stays under common path MTUs |
+| `KCPDataShards` / `KCPParityShards` | `0 / 0` | FEC disabled |
+| `KCPSocketBuffer` | 4 MiB | shared UDP socket buffer |
+
+Sessions also get `SetStreamMode(true)`, `SetWriteDelay(false)` and
+`SetACKNoDelay(true)`. Rationale in `shared/docs/DESIGN.md`.
+
+**Behaviour difference callers must know:** KCP runs over UDP and has no
+connection handshake, so `Dial("kcp", deadAddr, …)` *succeeds*. Liveness only
+surfaces as a read timeout on the first application reply. Equally, a dropped
+KCP client is invisible until the reconnect hold expires — well-behaved clients
+send `MsgDisconnect` first.
+
 ## `config`
 
 | Field | Env | Default |
 |-------|-----|---------|
 | `GameDBURL` | `GAME_DB_URL` | *(empty)* — empty means "no PostgreSQL configured"; services fall back to their in-memory store |
+| `GatewayTransport` | `GATEWAY_TRANSPORT` | `tcp` — realtime transport the gateway listens with (`tcp` or `kcp`) |
+| `GameServerTransport` | `GAMESERVER_TRANSPORT` | `tcp` — realtime transport the game server listens with (`tcp` or `kcp`) |
 
 Example: `postgres://game:localdev@localhost:5433/gamestate?sslmode=disable`
 (the `postgres-game` service in `backend/deploy/docker-compose.yml`).

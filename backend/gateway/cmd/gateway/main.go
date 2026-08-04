@@ -16,6 +16,7 @@ import (
 	"github.com/duycuong/rpg-mmo/shared/logger"
 	"github.com/duycuong/rpg-mmo/shared/storage"
 	"github.com/duycuong/rpg-mmo/shared/storage/redisstore"
+	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
 // Backend selects which storage implementations the gateway runs against.
@@ -27,6 +28,7 @@ const (
 func main() {
 	addr := flag.String("addr", "", "Listen address (overrides GATEWAY_ADDR)")
 	backend := flag.String("backend", "", "Store backend: memory or redis (default: redis when REDIS_ADDR is set, else memory)")
+	transportKind := flag.String("transport", "", "Realtime transport: tcp or kcp (overrides GATEWAY_TRANSPORT, default tcp)")
 	instanceID := flag.String("instance-id", "", "Gateway instance id, used as the event-stream consumer name (default: hostname)")
 	flag.Parse()
 
@@ -36,6 +38,15 @@ func main() {
 	listenAddr := cfg.GatewayAddr
 	if *addr != "" {
 		listenAddr = *addr
+	}
+
+	listenTransport := cfg.GatewayTransport
+	if *transportKind != "" {
+		listenTransport = *transportKind
+	}
+	if err := transport.Validate(listenTransport); err != nil {
+		log.Error("invalid transport", "err", err)
+		os.Exit(1)
 	}
 
 	mode, err := resolveBackend(*backend)
@@ -86,7 +97,8 @@ func main() {
 	var gw *server.Gateway
 	relay := events.NewRelay(eventStream, events.DefaultStream,
 		events.SinkFunc(func(ev storage.Event) { gw.OnEvent(ev) }), log)
-	gw = server.New(sessions, reg, cfg.JWTSecret, log, server.WithEventRelay(relay))
+	gw = server.New(sessions, reg, cfg.JWTSecret, log,
+		server.WithEventRelay(relay), server.WithTransport(listenTransport))
 
 	// Graceful shutdown on SIGINT/SIGTERM.
 	sigCh := make(chan os.Signal, 1)
@@ -103,7 +115,10 @@ func main() {
 		}
 	}()
 
-	log.Info("starting gateway", slog.String("addr", listenAddr), slog.String("backend", mode))
+	log.Info("starting gateway",
+		slog.String("addr", listenAddr),
+		slog.String("backend", mode),
+		slog.String("transport", transport.Normalize(listenTransport)))
 	if err := gw.Run(listenAddr); err != nil {
 		log.Error("gateway exited with error", "err", err)
 		os.Exit(1)

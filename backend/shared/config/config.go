@@ -11,6 +11,10 @@ type Config struct {
 	GatewayAddr    string
 	GameServerAddr string
 	TickRate       int
+	// GatewayTransport / GameServerTransport select the realtime transport
+	// ("tcp" or "kcp") each service listens with. See shared/transport.
+	GatewayTransport    string
+	GameServerTransport string
 
 	// Auth
 	JWTSecret string
@@ -39,6 +43,10 @@ func Load() Config {
 		GatewayAddr:    envOrDefault("GATEWAY_ADDR", ":8000"),
 		GameServerAddr: envOrDefault("GAMESERVER_ADDR", ":9000"),
 		TickRate:       envOrDefaultInt("TICK_RATE", 10),
+
+		GatewayTransport:    envOrDefault("GATEWAY_TRANSPORT", "tcp"),
+		GameServerTransport: envOrDefault("GAMESERVER_TRANSPORT", "tcp"),
+
 		JWTSecret:      envOrDefault("JWT_SECRET", "dev-secret-change-me"),
 		MetaDBURL:      envOrDefault("META_DB_URL", "postgres://localhost:5432/rpg_meta?sslmode=disable"),
 		GameStateDBURL: envOrDefault("GAMESTATE_DB_URL", "postgres://localhost:5432/rpg_gamestate?sslmode=disable"),

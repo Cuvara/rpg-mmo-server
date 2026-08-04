@@ -125,3 +125,27 @@ I/O only on that goroutine. `Server.loadOrCreatePlayer` treats any load error as
 respawned at defaults during an outage. Distinguishing `storage.ErrNotFound`
 from real failures (and refusing the join on the latter) is the follow-up.
 
+
+
+## 2026-08-04 — Opt-in KCP listener, transport published in the registry
+
+`Server.Run` listens through `shared/transport.Listen(kind, addr)` instead of
+`net.Listen("tcp", …)`; the kind comes from `ServerOpts.Transport`
+(`--transport` / `GAMESERVER_TRANSPORT`, default `tcp`). `handleConnection`,
+the join-token handshake, the tick loop and the snapshot writer take a
+`net.Conn` and are byte-identical on both transports — the length-prefixed
+codec in `shared/messages` does not care what carries the bytes.
+
+`register()` publishes the normalized kind as `storage.ServerInfo.Transport`, so
+the gateway can tell the client what to dial without any out-of-band config.
+This is the only reason the field exists on the registry entry: the game server
+is the only component that knows the truth.
+
+**Disconnect detection changes on KCP.** UDP has no FIN: a client that drops its
+socket is not observable, so `ReadLoop` does not return and the final `SaveAll`
+does not run until the reconnect hold expires. That is exactly what the hold
+window (`EntityHoldTTL` / `DungeonHoldTTL`) already exists for, so behaviour
+degrades to "state saved when the hold expires" rather than breaking — but
+clients should send `MsgDisconnect` before closing, which the smoke test and the
+integration suite both do. A KCP-level idle timeout is the follow-up if the hold
+window proves too coarse for dungeon pod reclaim.

@@ -14,6 +14,7 @@ import (
 
 	"github.com/duycuong/rpg-mmo/shared/jwt"
 	"github.com/duycuong/rpg-mmo/shared/messages"
+	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
 // Runner executes the smoke flow step by step, carrying state between steps.
@@ -26,6 +27,7 @@ type Runner struct {
 	userID       string // Nakama user id (step c)
 	gatewayJWT   string // gateway realtime token (step c)
 	serverAddr   string // game server addr from EnterWorldResponse (step e)
+	serverTrans  string // game server transport from EnterWorldResponse (step e)
 	joinToken    string // join token from EnterWorldResponse (step e)
 
 	results []StepResult
@@ -46,7 +48,7 @@ func (r *Runner) Run() bool {
 		{"nakama_health", r.stepNakamaHealth},
 		{"device_auth", r.stepDeviceAuth},
 		{"gateway_token_rpc", r.stepGatewayToken},
-		{"gateway_auth", r.stepGatewayAuthEnter}, // MsgAuth + MsgEnterWorld share one conn
+		{"gateway_auth", r.stepGatewayAuthEnter},  // MsgAuth + MsgEnterWorld share one conn
 		{"gameserver_join", r.stepGameServerFlow}, // MsgJoinToken + inputs + snapshots + disconnect
 	}
 	for _, s := range steps {
@@ -177,7 +179,7 @@ func (r *Runner) stepGatewayToken() (string, error) {
 // ---------------------------------------------------------------- steps d+e
 
 func (r *Runner) stepGatewayAuthEnter() (string, error) {
-	conn, err := r.dial(r.cfg.GatewayAddr)
+	conn, err := r.dial(r.cfg.Transport, r.cfg.GatewayAddr)
 	if err != nil {
 		return "", err
 	}
@@ -210,13 +212,18 @@ func (r *Runner) stepGatewayAuthEnter() (string, error) {
 	}
 	r.serverAddr = enterResp.ServerAddr
 	r.joinToken = enterResp.JoinToken
-	return "map=" + r.cfg.MapID + " server=" + enterResp.ServerAddr, nil
+	// The gateway tells us which transport the target game server speaks; an
+	// omitted field means TCP (servers registered before the field existed).
+	r.serverTrans = transport.Normalize(enterResp.Transport)
+	return "transport=" + transport.Normalize(r.cfg.Transport) +
+		" map=" + r.cfg.MapID +
+		" server=" + enterResp.ServerAddr + " (" + r.serverTrans + ")", nil
 }
 
 // ---------------------------------------------------------------- steps f+g+h
 
 func (r *Runner) stepGameServerFlow() (string, error) {
-	conn, err := r.dial(r.serverAddr)
+	conn, err := r.dial(r.serverTrans, r.serverAddr)
 	if err != nil {
 		return "", err
 	}
@@ -319,20 +326,26 @@ drain:
 		return "", fmt.Errorf("position did not move as expected: X=%.2f, want >= %.2f", lastX, minX)
 	}
 
-	// Clean disconnect: polite MsgDisconnect, then close (deferred).
+	// Clean disconnect: polite MsgDisconnect, then close (deferred). This
+	// matters on KCP — UDP has no FIN, so without it the server only notices
+	// the client is gone when the reconnect hold expires. KCP flushes on its
+	// 10ms update tick and Close() does not drain, hence the short pause.
 	if env, err := messages.NewEnvelope(messages.MsgDisconnect, struct{}{}); err == nil {
 		_ = r.send(conn, env)
+		time.Sleep(100 * time.Millisecond)
 	}
 	return fmt.Sprintf("snapshots=%d final_x=%.2f", snapshots, lastX), nil
 }
 
 // ---------------------------------------------------------------- wire utils
 
-func (r *Runner) dial(addr string) (net.Conn, error) {
+// dial connects over the given transport kind (empty means tcp), rewriting
+// listen-style addresses into dialable loopback ones.
+func (r *Runner) dial(kind, addr string) (net.Conn, error) {
 	target := NormalizeDialAddr(addr)
-	conn, err := net.DialTimeout("tcp", target, r.cfg.Timeout)
+	conn, err := transport.Dial(kind, target, r.cfg.Timeout)
 	if err != nil {
-		return nil, fmt.Errorf("dial %s: %w", target, err)
+		return nil, fmt.Errorf("dial %s over %s: %w", target, transport.Normalize(kind), err)
 	}
 	return conn, nil
 }
