@@ -35,7 +35,18 @@ resolve_kubectl() {
     kubectl.exe
     "/mnt/c/Program Files/Docker/Docker/resources/bin/kubectl.exe"
   )
+  # Prefer a binary that actually has a kube context: on WSL the Linux kubectl
+  # often exists with an EMPTY kubeconfig while kubectl.exe holds the
+  # docker-desktop context (they read different kubeconfig files).
   local c
+  for c in "${candidates[@]}"; do
+    if command -v "$c" >/dev/null 2>&1 &&
+      [[ -n "$("$c" config current-context 2>/dev/null)" ]]; then
+      KUBECTL_BIN="$c"
+      return
+    fi
+  done
+  # Fall back to the first binary that exists (fail-fast messaging downstream).
   for c in "${candidates[@]}"; do
     if command -v "$c" >/dev/null 2>&1; then
       KUBECTL_BIN="$c"

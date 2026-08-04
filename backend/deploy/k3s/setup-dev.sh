@@ -61,7 +61,10 @@ else
   log "installing Agones $AGONES_VERSION"
   # --server-side: the CRDs blow past the 262kB last-applied-configuration
   # annotation limit that client-side apply uses.
-  kube apply --server-side --force-conflicts -f "$AGONES_INSTALL_URL"
+  # The pinned install.yaml does not reliably create the namespace before the
+# namespaced resources hit the API server — create it first (idempotent).
+kube get namespace agones-system >/dev/null 2>&1 || kube create namespace agones-system
+kube apply --server-side --force-conflicts -f "$AGONES_INSTALL_URL"
 
   wait_for 300 "agones-system deployments Available" \
     kube wait --for=condition=Available --timeout=10s deployment --all -n agones-system
@@ -85,6 +88,17 @@ kube_apply_file "$SCRIPT_DIR/namespaces.yaml"
 # ---------------------------------------------------------------------------
 # The dev fleets carry literal env, but the PROD fleets read these (optional)
 # refs — create them so --prod-fleets works on a local cluster too.
+# Agones only pre-creates the sidecar service account in the `default`
+# namespace. Any other namespace hosting GameServers needs its own agones-sdk
+# SA + rolebinding, or pods are rejected with "serviceaccount agones-sdk not
+# found" and the fleet churns Error-state gameservers forever.
+log "ensuring agones-sdk service account in $NAMESPACE"
+kube get serviceaccount agones-sdk -n "$NAMESPACE" >/dev/null 2>&1 ||
+  kube create serviceaccount agones-sdk -n "$NAMESPACE"
+kube get rolebinding agones-sdk-access -n "$NAMESPACE" >/dev/null 2>&1 ||
+  kube create rolebinding agones-sdk-access --clusterrole=agones-sdk \
+    --serviceaccount="$NAMESPACE:agones-sdk" -n "$NAMESPACE"
+
 log "applying dev Secret/ConfigMap in $NAMESPACE"
 kube create secret generic rpg-realtime-secrets \
   --namespace "$NAMESPACE" \

@@ -5,6 +5,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- k3s bootstrap hardening from the first live run on Docker Desktop Kubernetes:
+  kubectl resolution now prefers the binary that actually has a kube context
+  (WSL: Linux kubectl often has an empty kubeconfig while kubectl.exe holds
+  docker-desktop); agones-system namespace is created before applying the
+  pinned install.yaml; agones-sdk ServiceAccount + rolebinding are created in
+  the GameServer namespace (Agones only pre-creates them in `default`).
+
 ### Added
 - `k3s/setup-dev.sh` — idempotent dev-cluster bootstrap: resolves kubectl
   (Linux `kubectl` → `kubectl.exe` → Docker Desktop's bundled path), preflights
