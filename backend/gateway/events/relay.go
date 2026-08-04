@@ -2,11 +2,18 @@ package events
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
+	"sync"
 
-	gameerrors "github.com/duycuong/rpg-mmo/shared/errors"
+	"github.com/duycuong/rpg-mmo/shared/storage"
 )
 
-// EventRelay forwards cross-server events from Redis Streams to clients.
+// DefaultStream is the logical stream name the gateway subscribes to. The
+// concrete store prefixes it (constants.EventStreamPrefix for Redis Streams).
+const DefaultStream = "global"
+
+// EventRelay consumes cross-server events and hands them to the gateway.
 type EventRelay interface {
 	// Start begins consuming events from the stream.
 	Start(ctx context.Context) error
@@ -14,15 +21,98 @@ type EventRelay interface {
 	Stop() error
 }
 
-// StubEventRelay is a placeholder that always returns ErrNotImplemented.
-type StubEventRelay struct{}
-
-// Start returns ErrNotImplemented.
-func (s *StubEventRelay) Start(_ context.Context) error {
-	return gameerrors.New(gameerrors.ErrNotImplemented, "event relay not implemented")
+// Sink receives every event the relay consumes. The gateway implements it and
+// decides what to do with each event.
+type Sink interface {
+	// OnEvent is called once per consumed event, from the consumer goroutine.
+	OnEvent(ev storage.Event)
 }
 
-// Stop returns nil (nothing to clean up).
-func (s *StubEventRelay) Stop() error {
+// SinkFunc adapts a plain function to the Sink interface.
+type SinkFunc func(ev storage.Event)
+
+// OnEvent calls f.
+func (f SinkFunc) OnEvent(ev storage.Event) { f(ev) }
+
+// Relay is the real EventRelay: it subscribes to a storage.EventStream
+// (MemoryEventStream in dev/tests, redisstore.EventStream with consumer-group
+// ACK in production) and dispatches every event to a Sink.
+//
+// MVP limitation: shared/messages has no client-facing event message type (ids
+// stop at MsgDisconnect), so the gateway's sink logs and counts events rather
+// than pushing them down client sockets. Adding a MsgEvent to shared/messages
+// (owned by agent-shared) is the only missing piece — the plumbing here is
+// complete and exercised against both stream implementations.
+type Relay struct {
+	stream storage.EventStream
+	name   string
+	sink   Sink
+	logger *slog.Logger
+
+	mu      sync.Mutex
+	started bool
+	stopped bool
+}
+
+// NewRelay builds a Relay over the given event stream. streamName defaults to
+// DefaultStream when empty.
+func NewRelay(stream storage.EventStream, streamName string, sink Sink, logger *slog.Logger) *Relay {
+	if streamName == "" {
+		streamName = DefaultStream
+	}
+	return &Relay{stream: stream, name: streamName, sink: sink, logger: logger}
+}
+
+// Stream returns the logical stream name the relay consumes.
+func (r *Relay) Stream() string { return r.name }
+
+// Start subscribes to the stream. Delivery runs in the background; Start
+// returns once the subscription is established.
+func (r *Relay) Start(ctx context.Context) error {
+	r.mu.Lock()
+	if r.started {
+		r.mu.Unlock()
+		return fmt.Errorf("event relay: already started")
+	}
+	r.started = true
+	r.mu.Unlock()
+
+	if err := r.stream.Subscribe(ctx, r.name, r.dispatch); err != nil {
+		return fmt.Errorf("event relay subscribe %s: %w", r.name, err)
+	}
+	if r.logger != nil {
+		r.logger.Info("event relay started", "stream", r.name)
+	}
 	return nil
 }
+
+func (r *Relay) dispatch(ev storage.Event) {
+	if r.sink != nil {
+		r.sink.OnEvent(ev)
+	}
+}
+
+// Stop closes the underlying stream subscription. Safe to call more than once.
+func (r *Relay) Stop() error {
+	r.mu.Lock()
+	if r.stopped {
+		r.mu.Unlock()
+		return nil
+	}
+	r.stopped = true
+	r.mu.Unlock()
+
+	if err := r.stream.Close(); err != nil {
+		return fmt.Errorf("event relay stop: %w", err)
+	}
+	return nil
+}
+
+// StubEventRelay is a no-op relay used when no event stream is configured.
+type StubEventRelay struct{}
+
+// Start does nothing and succeeds.
+func (s *StubEventRelay) Start(_ context.Context) error { return nil }
+
+// Stop returns nil (nothing to clean up).
+func (s *StubEventRelay) Stop() error { return nil }

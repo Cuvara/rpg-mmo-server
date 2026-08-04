@@ -6,11 +6,14 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 
+	"github.com/duycuong/rpg-mmo/gateway/events"
 	"github.com/duycuong/rpg-mmo/gateway/registry"
 	"github.com/duycuong/rpg-mmo/gateway/session"
 	"github.com/duycuong/rpg-mmo/gateway/transfer"
 	"github.com/duycuong/rpg-mmo/shared/messages"
+	"github.com/duycuong/rpg-mmo/shared/storage"
 )
 
 // Gateway is the main TCP server that handles client authentication
@@ -21,10 +24,22 @@ type Gateway struct {
 	jwtSecret string
 	logger    *slog.Logger
 
+	relay      events.EventRelay
+	eventCount atomic.Int64
+
 	mu       sync.Mutex
 	listener net.Listener
 	conns    map[*ClientConn]struct{}
 	done     chan struct{}
+}
+
+// Option customises a Gateway at construction time.
+type Option func(*Gateway)
+
+// WithEventRelay attaches a cross-server event relay. The gateway starts it in
+// Run and stops it in Shutdown.
+func WithEventRelay(relay events.EventRelay) Option {
+	return func(g *Gateway) { g.relay = relay }
 }
 
 // New creates a new Gateway instance.
@@ -33,8 +48,9 @@ func New(
 	reg *registry.RegistryService,
 	jwtSecret string,
 	logger *slog.Logger,
+	opts ...Option,
 ) *Gateway {
-	return &Gateway{
+	g := &Gateway{
 		sessions:  sessions,
 		registry:  reg,
 		jwtSecret: jwtSecret,
@@ -42,10 +58,46 @@ func New(
 		conns:     make(map[*ClientConn]struct{}),
 		done:      make(chan struct{}),
 	}
+	for _, opt := range opts {
+		opt(g)
+	}
+	return g
+}
+
+// OnEvent implements events.Sink: it receives every cross-server event consumed
+// by the relay.
+//
+// MVP limitation: shared/messages has no client-facing event message type, so
+// events are logged and counted instead of being pushed to connected clients.
+// Once agent-shared adds a MsgEvent, this method becomes the fan-out point
+// (iterate g.conns, cc.Send). See gateway/docs/DESIGN.md.
+func (g *Gateway) OnEvent(ev storage.Event) {
+	g.eventCount.Add(1)
+	g.logger.Info("relayed event",
+		"type", ev.Type,
+		"bytes", len(ev.Payload),
+		"clients", g.ConnCount(),
+	)
+}
+
+// EventCount returns how many events the relay has delivered so far.
+func (g *Gateway) EventCount() int64 { return g.eventCount.Load() }
+
+// ConnCount returns the number of currently tracked client connections.
+func (g *Gateway) ConnCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.conns)
 }
 
 // Run starts the gateway TCP listener on the given address.
 func (g *Gateway) Run(addr string) error {
+	if g.relay != nil {
+		if err := g.relay.Start(context.Background()); err != nil {
+			return fmt.Errorf("start event relay: %w", err)
+		}
+	}
+
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
@@ -83,6 +135,12 @@ func (g *Gateway) Shutdown() {
 		cc.Close()
 	}
 	g.mu.Unlock()
+
+	if g.relay != nil {
+		if err := g.relay.Stop(); err != nil {
+			g.logger.Error("stop event relay", "err", err)
+		}
+	}
 }
 
 // Addr returns the listener address, or empty string if not running.
@@ -108,6 +166,10 @@ func (g *Gateway) trackConn(cc *ClientConn, add bool) {
 
 func (g *Gateway) handleConn(cc *ClientConn) {
 	defer func() {
+		// A dropped socket must not leave a session record behind, otherwise the
+		// store leaks entries until the TTL expires (and a Redis-backed store
+		// would keep reporting the player as online).
+		g.cleanupSession(cc)
 		cc.Close()
 		g.trackConn(cc, false)
 	}()
@@ -116,15 +178,69 @@ func (g *Gateway) handleConn(cc *ClientConn) {
 	cc.ReadLoop(g.handleMessage)
 }
 
+// cleanupSession destroys the session bound to a connection, if any.
+func (g *Gateway) cleanupSession(cc *ClientConn) {
+	if cc.State == StateConnected || cc.UserID == "" {
+		return
+	}
+	if err := g.sessions.DestroySession(context.Background(), session.SessionKey(cc.UserID)); err != nil {
+		g.logger.Warn("destroy session", "user", cc.UserID, "err", err)
+	}
+	cc.State = StateConnected
+	cc.UserID = ""
+}
+
 func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
+	// MsgAuth is the only frame accepted without a live session.
+	if env.Type != messages.MsgAuth && !g.checkSession(cc, env.Type) {
+		return
+	}
+
 	switch env.Type {
 	case messages.MsgAuth:
 		g.handleAuth(cc, env)
 	case messages.MsgEnterWorld:
 		g.handleEnterWorld(cc, env)
+	case messages.MsgDisconnect:
+		g.handleDisconnect(cc)
 	default:
 		g.logger.Warn("unexpected message type", "type", env.Type, "state", cc.State)
 	}
+}
+
+// checkSession validates that the connection still owns a live session in the
+// store and refreshes its TTL (activity heartbeat). Returns false — after
+// replying with the appropriate error — when the session is gone.
+func (g *Gateway) checkSession(cc *ClientConn, msgType messages.MsgType) bool {
+	if cc.State == StateConnected || cc.UserID == "" {
+		if msgType == messages.MsgEnterWorld {
+			g.sendEnterWorldError(cc, "not authenticated")
+		} else {
+			g.sendAuthError(cc, "not authenticated")
+		}
+		return false
+	}
+
+	ctx := context.Background()
+	key := session.SessionKey(cc.UserID)
+	userID, err := g.sessions.ValidateSession(ctx, key)
+	if err != nil || userID != cc.UserID {
+		g.logger.Info("session expired", "user", cc.UserID, "err", err)
+		cc.State = StateConnected
+		cc.UserID = ""
+		if msgType == messages.MsgEnterWorld {
+			g.sendEnterWorldError(cc, "session expired")
+		} else {
+			g.sendAuthError(cc, "session expired")
+		}
+		return false
+	}
+
+	// Sliding TTL: any client activity keeps the session alive.
+	if err := g.sessions.RefreshSession(ctx, key); err != nil {
+		g.logger.Warn("refresh session", "user", cc.UserID, "err", err)
+	}
+	return true
 }
 
 func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
@@ -173,7 +289,7 @@ func (g *Gateway) sendAuthError(cc *ClientConn, msg string) {
 }
 
 func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
-	if cc.State != StateAuthenticated {
+	if cc.State != StateAuthenticated && cc.State != StateInWorld {
 		g.sendEnterWorldError(cc, "not authenticated")
 		return
 	}
@@ -202,6 +318,14 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 		return
 	}
 	cc.Send(resp)
+}
+
+// handleDisconnect processes an explicit client MsgDisconnect: destroy the
+// session, then close the socket.
+func (g *Gateway) handleDisconnect(cc *ClientConn) {
+	g.logger.Info("client disconnect", "user", cc.UserID)
+	g.cleanupSession(cc)
+	cc.Close()
 }
 
 func (g *Gateway) sendEnterWorldError(cc *ClientConn, msg string) {

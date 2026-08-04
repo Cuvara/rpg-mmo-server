@@ -6,5 +6,37 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Selectable store backends in `cmd/gateway`: `memory` (default) or `redis`
+  (`redisstore.SessionStore` / `ServerRegistry` / `EventStream` sharing one client).
+  Resolved from `--backend`, `GATEWAY_BACKEND`, or an exported `REDIS_ADDR`
+- `--addr` and `--instance-id` flags for `cmd/gateway` (`--instance-id` names the
+  event-stream consumer within the `gateway` consumer group)
+- Session validation + sliding TTL refresh on every non-auth frame (`checkSession`)
+- `MsgDisconnect` handling and session cleanup on socket close
+- `session.SessionKey` and `SessionManager.RefreshSession`
+- Real `events.Relay` over any `storage.EventStream`, plus `events.Sink`/`SinkFunc`;
+  wired into the gateway via `server.WithEventRelay` (started in `Run`, stopped in
+  `Shutdown`). Sink logs/counts events — no client fan-out until `shared/messages`
+  gains a client-facing event type
+- `Gateway.OnEvent`, `Gateway.EventCount`, `Gateway.ConnCount`
+- `registry.NewRegistryServiceWithAllocator` and `RegistryService.GetServer`
+- Tests: session lifecycle, relay, and registry lookup covered against both the memory
+  and Redis (miniredis) backends
+- `docs/API.md` and `docs/DESIGN.md`
+
+### Changed
+- `RegistryService.FindServer` picks the least-loaded server with spare capacity instead
+  of the first match; falls back to the allocator when one is configured
+- `server.New` takes variadic `Option`s (existing 4-arg calls unchanged)
+- `StubEventRelay.Start` is now a no-op instead of returning `ErrNotImplemented`, so a
+  gateway configured without a stream still starts
+- `docs/README.md`: run modes, flags, backend selection and env table
+- Bump Go version to 1.26 (align with CI and gameserver)
+
+### Fixed
+- Sessions were write-only: never read back, never refreshed, never destroyed — they
+  leaked until TTL and left ghost-online players in a shared store
+
+### Added (initial)
 - Initial module setup with go.mod (`github.com/duycuong/rpg-mmo/gateway`)
 - CLAUDE.md agent instructions for Gateway Engineer role
