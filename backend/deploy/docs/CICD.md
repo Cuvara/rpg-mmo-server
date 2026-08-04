@@ -1,14 +1,37 @@
 # CI/CD — Build automation & continuous deployment
 
-Two workflows, distinct jobs:
+Two workflows plus one reusable building block:
 
 | Workflow | File | Trigger | Purpose |
 |----------|------|---------|---------|
-| CI | `.github/workflows/ci.yml` | push/PR to `main`/`master`, `backend/**` paths | Validate — per-module test + vet + build. Never deploys. |
+| CI | `.github/workflows/ci.yml` | push/PR to `main`/`master` (`backend/**`, `.github/workflows/**`), `workflow_dispatch` | Validate — per-module vet + test + build. Never deploys. |
 | CD | `.github/workflows/cd.yml` | push to `develop`, `staging`, `release-*`; `workflow_dispatch` | Build the deployable bundle, then deploy it to a self-hosted runner. |
+| _(reusable)_ | `.github/workflows/_go-module.yml` | `workflow_call` only | vet + test (+ optional build / artifact upload) for **one** Go module. |
 
-Both delegate the actual build to one script so local and CI builds cannot drift:
-`scripts/build-all.sh`.
+Every job that touches Go in either workflow is a call of `_go-module.yml`, so
+the per-module recipe (checkout, setup-go with a module-scoped cache, vet, test,
+build) exists in exactly one place. **Adding a module or a binary to both
+pipelines is one additive `uses:` block** — no step duplication.
+
+`_go-module.yml` inputs:
+
+| Input | Type | Default | Meaning |
+|-------|------|---------|---------|
+| `module_dir` | string | *(required)* | Module path from the repo root, e.g. `backend/gateway`. All steps run with this as working directory. |
+| `go_version` | string | `1.26` | Toolchain version. |
+| `cache_dependency_path` | string | `<module_dir>/go.sum` | `setup-go` cache key file. Modules with **no external deps have no `go.sum`** (`backend/smoketest`) — pass their `go.mod` instead, otherwise `setup-go` fails to resolve the path. |
+| `run_tests` | bool | `true` | `false` skips `go test` (used by build-only jobs and by the CD `skip_tests` dispatch input, which keeps the job graph intact instead of skipping jobs). |
+| `test_flags` | string | `-race -timeout 120s` | Appended to `go test ./...`. |
+| `needs_docker` | bool | `false` | Sets up Docker Buildx before `run_build` (used by the nakama plugin job). |
+| `run_build` | string | `''` | Optional shell command run after vet/test. Empty = no build step. |
+| `artifact_name` / `artifact_path` | string | `''` | If `artifact_name` is set, `artifact_path` (repo-root relative) is uploaded. |
+| `artifact_retention_days` | number | `14` | Artifact retention. |
+
+`scripts/build-all.sh` remains the **local dev** one-shot (vet + test + build
+every module, `--plugin`, `--images`). CI/CD no longer call it — they run the
+per-module commands directly so each module is its own job with its own log,
+cache and failure signal. Keep the module list in `build-all.sh` and the job
+list in the workflows in sync when adding a module.
 
 ---
 
@@ -38,6 +61,7 @@ Coverage, in order (fail-fast):
 | `backend/gateway` | ✅ | ✅ | `bin/gateway` |
 | `backend/gameserver` | ✅ | ✅ | `bin/gameserver` |
 | `backend/nakama` | ✅ | ✅ | compile check only (real artifact is `-buildmode=plugin`, built in Docker) |
+| `backend/smoketest` | ✅ | ✅ | `bin/smoketest` |
 | `backend/integration_test` | — | ✅ (E2E, `-v`) | — |
 
 Toolchain detection:
@@ -90,11 +114,55 @@ Layout (override with `RPG_DEPLOY_DIR`, default `/opt/rpg-mmo`):
 
 ## 3. `cd.yml` — jobs
 
+Every job is single-purpose; scaling out (a new module, a new binary, a new
+environment) adds a job instead of growing an existing one.
+
+```
+resolve ──────────────────────────────────────────────────────────┐
+                                                                  │
+test-shared ─┬─ test-gateway ─────┬─ build-gateway ───────────┐    │
+             ├─ test-gameserver ──┼─ build-gameserver ────────┤    │
+             ├─ test-smoketest ───┼─ build-smoketest ─────────┤    │
+             ├─ test-nakama ──────┴─ build-plugin ────────────┤    │
+             └──────────────────── test-integration ──────────┤    │
+                                                              ▼    │
+                                   build-images (*)         bundle │
+                                                              │    │
+                                                              ▼    ▼
+                                                            deploy
+                                                              │
+                                                              ▼
+                                                    post-deploy-smoke
+                                                              │
+                                                              ▼
+                                                     summary (always)
+```
+
+`(*)` `build-images` needs `resolve` + the two binary builds and only runs for
+production / `build_images=true`; it is **not** on the deploy path.
+
 | Job | Runner | What it does |
 |-----|--------|--------------|
-| `resolve` | `ubuntu-latest` | Maps the ref (or the dispatch input) to an environment name and a runner-label JSON array. Unmapped refs fail loudly. |
-| `build-test` | `ubuntu-latest` | Checkout → Go 1.26 → Buildx → `scripts/build-all.sh --plugin --race` → (conditionally) build & push the gateway/gameserver images to GHCR → stage `dist/` → upload artifact `deploy-bundle-<sha>` (binaries, `nakama.so`, `docker-compose.yml`, `Makefile`, `.env.example`, `deploy-local.sh`, `COMMIT`). 14-day retention. |
-| `deploy` | `${{ fromJSON(resolve.runner_labels) }}` | Download bundle → `install` into `$RPG_DEPLOY_DIR` (keeping `.prev` binaries) → write `.env` from Environment secrets → `docker compose up -d` → `deploy-local.sh restart` → `health` + `status` → job summary. |
+| `resolve` | `ubuntu-latest` | Maps the ref (or the dispatch input) to an environment name and a runner-label JSON array. Unmapped refs fail loudly. Runs in parallel with all test jobs. |
+| `test-shared` | `ubuntu-latest` | `_go-module.yml` on `backend/shared`. Gate for the other module tests. |
+| `test-gateway`, `test-gameserver`, `test-nakama`, `test-smoketest` | `ubuntu-latest` | `_go-module.yml`, one job per module, all parallel after `test-shared`. |
+| `test-integration` | `ubuntu-latest` | `_go-module.yml` on `backend/integration_test` (E2E, gateway + gameserver in-process). Needs the four module tests. |
+| `build-gateway` / `build-gameserver` / `build-smoketest` | `ubuntu-latest` | `_go-module.yml` with `run_tests: false`; each needs only *its own* module test, so it starts before integration finishes. Uploads `bin-<name>-<sha>`. |
+| `build-plugin` | `ubuntu-latest` | `_go-module.yml` with `needs_docker: true` → `docker build -f nakama-plugin.Dockerfile --target export` → uploads `nakama-plugin-<sha>`. Parallel with the binary builds. |
+| `build-images` | `ubuntu-latest` | Gateway + gameserver container images → GHCR. Conditional (see below). |
+| `bundle` | `ubuntu-latest` | Downloads `bin-*-<sha>` (`merge-multiple`) + `nakama-plugin-<sha>`, adds `docker-compose.yml`, `Makefile`, `.env.example`, `deploy-local.sh`, `COMMIT`, asserts every expected file is present, uploads `deploy-bundle-<sha>` (14 days, `include-hidden-files` for `.env.example`). Compiles nothing. |
+| `deploy` | `${{ fromJSON(resolve.runner_labels) }}` | Download bundle → `install` into `$RPG_DEPLOY_DIR` (keeping `.prev` binaries) → write `.env` from Environment secrets → `docker compose up -d` → `deploy-local.sh restart` → `health` + `status`. Outputs `deploy_dir`. |
+| `post-deploy-smoke` | same labels as `deploy` | Sources `$RPG_DEPLOY_DIR/deploy/.env` and runs `bin/smoketest` (Nakama health → device auth → `gateway_token` RPC → gateway `MsgAuth`/`MsgEnterWorld` → game server join → input/snapshot → disconnect). Separate job so "deploy broke" and "the flow broke" are distinguishable at a glance. Takes the deploy dir from `needs.deploy.outputs.deploy_dir`, so it needs no `environment:` (no second production approval). |
+| `summary` | `ubuntu-latest` | `if: always()` — step-summary table with ref, commit, runner, deploy dir and the `deploy` / `post-deploy-smoke` results. |
+
+**Artifact flow:** `bin-{gateway,gameserver,smoketest}-<sha>` + `nakama-plugin-<sha>`
+→ `bundle` → `deploy-bundle-<sha>` → `deploy`. All names carry `<sha>` so
+re-runs and concurrent branches never collide. Artifact uploads do not preserve
+the executable bit, which is why `deploy` uses `install -m 0755`.
+
+**`skip_tests`** flips `run_tests: false` on the test jobs rather than skipping
+them, keeping the `needs:` graph (and therefore the deploy path) intact — the
+jobs still run `go vet`.
 
 ### Ref → environment → runner labels
 
@@ -110,7 +178,7 @@ emergency builds, and a `build_images` boolean.
 
 ### Container images (GHCR)
 
-The `build-test` job pushes `ghcr.io/dycuong03/rpg-mmo-gateway` and
+The `build-images` job pushes `ghcr.io/dycuong03/rpg-mmo-gateway` and
 `ghcr.io/dycuong03/rpg-mmo-gameserver` (tags: `<short-sha>` + `latest`) **only
 when** the resolved environment is `production` **or** `workflow_dispatch` set
 `build_images=true`. Auth is `docker/login-action@v3` with the built-in

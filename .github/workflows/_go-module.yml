@@ -1,0 +1,112 @@
+name: Go module
+
+# Reusable building block: vet + test (+ optional build / artifact) for ONE Go
+# module. Every module in this repo is an independent go module (own go.mod,
+# `replace ... => ../shared`), so one job per module is the natural unit.
+#
+# Called by both ci.yml and cd.yml — the per-module recipe lives here only.
+#
+# Adding a module to the pipelines = one `uses: ./.github/workflows/_go-module.yml`
+# block in the caller. Nothing else changes.
+
+on:
+  workflow_call:
+    inputs:
+      module_dir:
+        description: Path of the module, relative to the repo root (e.g. backend/gateway).
+        type: string
+        required: true
+      go_version:
+        description: Go toolchain version.
+        type: string
+        required: false
+        default: '1.26'
+      cache_dependency_path:
+        description: >
+          File the setup-go module cache is keyed on. Defaults to
+          <module_dir>/go.sum; pass <module_dir>/go.mod for modules that have no
+          external dependencies and therefore no go.sum (e.g. backend/smoketest).
+        type: string
+        required: false
+        default: ''
+      run_tests:
+        description: Run `go test`. Set false for emergency skip-tests builds.
+        type: boolean
+        required: false
+        default: true
+      test_flags:
+        description: Flags appended to `go test ./...`.
+        type: string
+        required: false
+        default: '-race -timeout 120s'
+      needs_docker:
+        description: Set up Docker Buildx before run_build (plugin/image builds).
+        type: boolean
+        required: false
+        default: false
+      run_build:
+        description: >
+          Optional shell command executed with working-directory=<module_dir>
+          after vet+test (e.g. `go build ./cmd/gateway/`). Empty = no build step.
+        type: string
+        required: false
+        default: ''
+      artifact_name:
+        description: If set, upload artifact_path under this name after run_build.
+        type: string
+        required: false
+        default: ''
+      artifact_path:
+        description: Path (file or dir, repo-root relative) uploaded as artifact_name.
+        type: string
+        required: false
+        default: ''
+      artifact_retention_days:
+        type: number
+        required: false
+        default: 14
+
+permissions:
+  contents: read
+
+jobs:
+  go-module:
+    name: ${{ inputs.module_dir }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go ${{ inputs.go_version }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go_version }}
+          cache-dependency-path: ${{ inputs.cache_dependency_path != '' && inputs.cache_dependency_path || format('{0}/go.sum', inputs.module_dir) }}
+
+      - name: Set up Docker Buildx
+        if: inputs.needs_docker
+        uses: docker/setup-buildx-action@v3
+
+      - name: go vet ./...
+        working-directory: ${{ inputs.module_dir }}
+        run: go vet ./...
+
+      - name: go test ./... ${{ inputs.test_flags }}
+        if: inputs.run_tests
+        working-directory: ${{ inputs.module_dir }}
+        run: go test ./... ${{ inputs.test_flags }}
+
+      - name: build
+        if: inputs.run_build != ''
+        working-directory: ${{ inputs.module_dir }}
+        run: ${{ inputs.run_build }}
+
+      - name: Upload ${{ inputs.artifact_name }}
+        if: inputs.artifact_name != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: ${{ inputs.artifact_path }}
+          retention-days: ${{ inputs.artifact_retention_days }}
+          if-no-files-found: error
+          include-hidden-files: true

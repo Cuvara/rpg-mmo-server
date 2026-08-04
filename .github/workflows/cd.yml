@@ -9,6 +9,21 @@ name: CD — Build & Deploy
 # rollback path: re-run a previous successful run of this workflow).
 #
 # ci.yml still owns PR/main validation — this workflow does not replace it.
+#
+# Job graph (each box is one job; per-module test/build jobs are calls of the
+# reusable .github/workflows/_go-module.yml):
+#
+#   resolve ─────────────────────────────────────────────┐
+#   test-shared ─┬─ test-gateway ──── build-gateway ──┐   │
+#                ├─ test-gameserver ─ build-gameserver┤   │
+#                ├─ test-smoketest ── build-smoketest ┤   │
+#                ├─ test-nakama ───── build-plugin ───┤   │
+#                └─ test-integration ────────────────►bundle
+#                                     build-images(*)     │
+#                                                         ▼
+#                                        deploy ─► post-deploy-smoke ─► summary
+#   (*) build-images runs only for production / build_images=true and is not
+#       on the deploy path.
 
 on:
   push:
@@ -22,7 +37,7 @@ on:
         default: dev
         options: [dev, staging, production]
       skip_tests:
-        description: Skip Go tests in the build job (emergency only)
+        description: Skip Go tests in the test jobs (emergency only)
         type: boolean
         required: false
         default: false
@@ -39,9 +54,6 @@ concurrency:
 
 permissions:
   contents: read
-
-env:
-  GO_VERSION: '1.26'
 
 jobs:
   # ---------------------------------------------------------------- resolve
@@ -79,13 +91,131 @@ jobs:
           echo "runner_labels=${labels}"     >> "$GITHUB_OUTPUT"
           echo "Deploying ref '${REF_NAME}' to '${target}' on runner ${labels}" >> "$GITHUB_STEP_SUMMARY"
 
-  # ------------------------------------------------------------- build-test
-  build-test:
-    name: Build, vet & test (+ nakama plugin)
+  # ----------------------------------------------------------- module tests
+  # Independent of `resolve` — they start immediately, in parallel with it.
+  test-shared:
+    name: Test shared
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/shared
+      run_tests: ${{ github.event.inputs.skip_tests != 'true' }}
+
+  test-gateway:
+    name: Test gateway
+    needs: test-shared
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/gateway
+      run_tests: ${{ github.event.inputs.skip_tests != 'true' }}
+
+  test-gameserver:
+    name: Test gameserver
+    needs: test-shared
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/gameserver
+      run_tests: ${{ github.event.inputs.skip_tests != 'true' }}
+
+  test-nakama:
+    name: Test nakama
+    needs: test-shared
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/nakama
+      run_tests: ${{ github.event.inputs.skip_tests != 'true' }}
+
+  test-smoketest:
+    name: Test smoketest
+    needs: test-shared
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/smoketest
+      # No external deps -> no go.sum; key the module cache on go.mod instead.
+      cache_dependency_path: backend/smoketest/go.mod
+      run_tests: ${{ github.event.inputs.skip_tests != 'true' }}
+
+  test-integration:
+    name: Integration tests
+    needs: [test-gateway, test-gameserver, test-nakama, test-smoketest]
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/integration_test
+      run_tests: ${{ github.event.inputs.skip_tests != 'true' }}
+      test_flags: '-v -race -timeout 120s'
+
+  # --------------------------------------------------------- build binaries
+  # One job per binary; each starts as soon as its own module tests pass.
+  build-gateway:
+    name: Build gateway binary
+    needs: test-gateway
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/gateway
+      run_tests: false
+      run_build: go build -o ../../bin/gateway ./cmd/gateway/
+      artifact_name: bin-gateway-${{ github.sha }}
+      artifact_path: bin/gateway
+
+  build-gameserver:
+    name: Build gameserver binary
+    needs: test-gameserver
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/gameserver
+      run_tests: false
+      run_build: go build -o ../../bin/gameserver ./cmd/gameserver/
+      artifact_name: bin-gameserver-${{ github.sha }}
+      artifact_path: bin/gameserver
+
+  build-smoketest:
+    name: Build smoketest binary
+    needs: test-smoketest
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/smoketest
+      cache_dependency_path: backend/smoketest/go.mod
+      run_tests: false
+      run_build: go build -o ../../bin/smoketest ./cmd/smoketest/
+      artifact_name: bin-smoketest-${{ github.sha }}
+      artifact_path: bin/smoketest
+
+  # ------------------------------------------------------------ nakama plugin
+  # -buildmode=plugin is ABI-locked to the Nakama server image, so the .so is
+  # built inside the matching container (see backend/deploy/nakama-plugin.Dockerfile).
+  build-plugin:
+    name: Build nakama plugin
+    needs: test-nakama
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/nakama
+      run_tests: false
+      needs_docker: true
+      # Build context MUST be backend/ — backend/nakama/go.mod has
+      # `replace ... => ../shared`. The `export` stage emits nakama.so only.
+      run_build: >-
+        cd ../deploy &&
+        DOCKER_BUILDKIT=1 docker build
+        -f nakama-plugin.Dockerfile
+        --build-arg NAKAMA_VERSION=3.40.0
+        --target export
+        --output type=local,dest=modules
+        ..
+      artifact_name: nakama-plugin-${{ github.sha }}
+      artifact_path: backend/deploy/modules/nakama.so
+
+  # --------------------------------------------------------- container images
+  # Gateway + gameserver images are built and pushed to GHCR ONLY when:
+  #   * the ref resolves to the production environment (release-* branch, or
+  #     workflow_dispatch with environment=production), OR
+  #   * workflow_dispatch was run with build_images=true.
+  # Dev/staging deploys keep using host binaries from the artifact bundle, so
+  # the common path stays fast and does not publish packages.
+  # Image names MUST match backend/deploy/agones/fleet-{map,dungeon}.yaml.
+  build-images:
+    name: Build & push container images
+    needs: [resolve, build-gateway, build-gameserver]
+    if: needs.resolve.outputs.environment == 'production' || github.event.inputs.build_images == 'true'
     runs-on: ubuntu-latest
-    needs: resolve
-    # packages: write is needed only by the (conditional) ghcr push steps
-    # below; it is harmless for the rest of the job.
     permissions:
       contents: read
       packages: write
@@ -93,47 +223,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Single source of truth for the build — the same script devs run in WSL.
-      # -race is enabled here (CI has gcc); locally it is opt-in via --race.
-      - name: Run build-all.sh
-        env:
-          SKIP: ${{ github.event.inputs.skip_tests == 'true' && '--skip-tests' || '--race' }}
-        run: |
-          chmod +x scripts/build-all.sh
-          ./scripts/build-all.sh --plugin $SKIP
-
-      # ---------------------------------------------------- container images
-      # Gateway + gameserver images are built and pushed to GHCR ONLY when:
-      #   * the ref resolves to the production environment (release-* branch,
-      #     or workflow_dispatch with environment=production), OR
-      #   * workflow_dispatch was run with build_images=true.
-      # Dev/staging deploys keep using host binaries from the artifact bundle,
-      # so the common path stays fast and does not publish packages.
-      # Image names MUST match backend/deploy/agones/fleet-{map,dungeon}.yaml.
-      - name: Resolve image build gate
-        id: images
-        env:
-          TARGET_ENV: ${{ needs.resolve.outputs.environment }}
-          DISPATCH_BUILD_IMAGES: ${{ github.event.inputs.build_images }}
-        run: |
-          set -euo pipefail
-          if [ "${TARGET_ENV}" = "production" ] || [ "${DISPATCH_BUILD_IMAGES}" = "true" ]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
-          echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - name: Short sha
+        id: meta
+        run: echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to ghcr.io
-        if: steps.images.outputs.enabled == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -142,52 +239,74 @@ jobs:
 
       # Context is backend/ — both go.mod files have `replace ... => ../shared`.
       - name: Build & push gateway image
-        if: steps.images.outputs.enabled == 'true'
         uses: docker/build-push-action@v6
         with:
           context: backend
           file: backend/deploy/docker/Dockerfile.gateway
           push: true
           tags: |
-            ghcr.io/dycuong03/rpg-mmo-gateway:${{ steps.images.outputs.short_sha }}
+            ghcr.io/dycuong03/rpg-mmo-gateway:${{ steps.meta.outputs.short_sha }}
             ghcr.io/dycuong03/rpg-mmo-gateway:latest
           cache-from: type=gha,scope=gateway
           cache-to: type=gha,scope=gateway,mode=max
 
       - name: Build & push gameserver image
-        if: steps.images.outputs.enabled == 'true'
         uses: docker/build-push-action@v6
         with:
           context: backend
           file: backend/deploy/docker/Dockerfile.gameserver
           push: true
           tags: |
-            ghcr.io/dycuong03/rpg-mmo-gameserver:${{ steps.images.outputs.short_sha }}
+            ghcr.io/dycuong03/rpg-mmo-gameserver:${{ steps.meta.outputs.short_sha }}
             ghcr.io/dycuong03/rpg-mmo-gameserver:latest
           cache-from: type=gha,scope=gameserver
           cache-to: type=gha,scope=gameserver,mode=max
 
       - name: Image summary
-        if: steps.images.outputs.enabled == 'true'
         run: |
           {
             echo "### Container images pushed"
             echo ""
-            echo "- \`ghcr.io/dycuong03/rpg-mmo-gateway:${{ steps.images.outputs.short_sha }}\` (+ \`:latest\`)"
-            echo "- \`ghcr.io/dycuong03/rpg-mmo-gameserver:${{ steps.images.outputs.short_sha }}\` (+ \`:latest\`)"
+            echo "- \`ghcr.io/dycuong03/rpg-mmo-gateway:${{ steps.meta.outputs.short_sha }}\` (+ \`:latest\`)"
+            echo "- \`ghcr.io/dycuong03/rpg-mmo-gameserver:${{ steps.meta.outputs.short_sha }}\` (+ \`:latest\`)"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ------------------------------------------------------------------ bundle
+  # Assemble everything the runner needs into one artifact. Nothing is compiled
+  # here — only artifacts + repo files are collected.
+  bundle:
+    name: Assemble deployment bundle
+    needs: [test-integration, build-gateway, build-gameserver, build-smoketest, build-plugin]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*-${{ github.sha }}
+          merge-multiple: true
+          path: dist/bin
+
+      - name: Download nakama plugin
+        uses: actions/download-artifact@v4
+        with:
+          name: nakama-plugin-${{ github.sha }}
+          path: dist/deploy
 
       - name: Stage deployment bundle
         run: |
           set -euo pipefail
           mkdir -p dist/bin dist/deploy dist/scripts
-          cp bin/gateway bin/gameserver bin/smoketest dist/bin/
-          cp backend/deploy/modules/nakama.so dist/deploy/
           cp backend/deploy/docker-compose.yml dist/deploy/
           cp backend/deploy/Makefile dist/deploy/
           cp backend/deploy/.env.example dist/deploy/
           cp scripts/deploy-local.sh dist/scripts/
           echo "${GITHUB_SHA}" > dist/COMMIT
+          for f in bin/gateway bin/gameserver bin/smoketest deploy/nakama.so; do
+            [ -f "dist/$f" ] || { echo "::error::missing dist/$f"; exit 1; }
+          done
           ls -lhR dist
 
       - name: Upload deployment bundle
@@ -203,10 +322,18 @@ jobs:
   # ----------------------------------------------------------------- deploy
   deploy:
     name: Deploy to ${{ needs.resolve.outputs.environment }}
-    needs: [resolve, build-test]
+    needs: [resolve, bundle]
     runs-on: ${{ fromJSON(needs.resolve.outputs.runner_labels) }}
     environment: ${{ needs.resolve.outputs.environment }}
+    outputs:
+      deploy_dir: ${{ steps.paths.outputs.deploy_dir }}
     steps:
+      - name: Resolve deploy dir
+        id: paths
+        env:
+          RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
+        run: echo "deploy_dir=${RPG_DEPLOY_DIR}" >> "$GITHUB_OUTPUT"
+
       - name: Download deployment bundle
         uses: actions/download-artifact@v4
         with:
@@ -309,14 +436,21 @@ jobs:
           "$RPG_DEPLOY_DIR/scripts/deploy-local.sh" health
           "$RPG_DEPLOY_DIR/scripts/deploy-local.sh" status
 
-      # Full-flow smoke test against the freshly deployed stack: Nakama health,
-      # device auth, gateway_token RPC, gateway MsgAuth + MsgEnterWorld, game
-      # server join, input/snapshot loop, clean disconnect. Any broken step
-      # fails the deploy. Env (JWT_SECRET, GATEWAY_ADDR, NAKAMA_SERVER_KEY, …)
-      # is sourced from the same file the services read; values are not echoed.
-      - name: Post-deploy smoke test
+  # ------------------------------------------------------- post-deploy smoke
+  # Full-flow smoke test against the freshly deployed stack: Nakama health,
+  # device auth, gateway_token RPC, gateway MsgAuth + MsgEnterWorld, game server
+  # join, input/snapshot loop, clean disconnect. Runs on the same runner as
+  # `deploy` (same labels) and reads env from the file the services read; values
+  # are never echoed. Deliberately a separate job so a broken smoke test is
+  # visibly distinct from a broken deploy.
+  post-deploy-smoke:
+    name: Post-deploy smoke test
+    needs: [resolve, deploy]
+    runs-on: ${{ fromJSON(needs.resolve.outputs.runner_labels) }}
+    steps:
+      - name: Run smoketest
         env:
-          RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
+          RPG_DEPLOY_DIR: ${{ needs.deploy.outputs.deploy_dir }}
         run: |
           set -euo pipefail
           set -a
@@ -325,19 +459,24 @@ jobs:
           set +a
           "$RPG_DEPLOY_DIR/bin/smoketest"
 
-      - name: Deployment summary
-        if: always()
-        env:
-          RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
+  # ----------------------------------------------------------------- summary
+  summary:
+    name: Pipeline summary
+    needs: [resolve, deploy, post-deploy-smoke]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write step summary
         run: |
           {
-            echo "### Deploy — ${{ needs.resolve.outputs.environment }}"
+            echo "### CD — ${{ needs.resolve.outputs.environment }}"
             echo ""
             echo "| field | value |"
             echo "|---|---|"
             echo "| ref | \`${{ github.ref_name }}\` |"
             echo "| commit | \`${{ github.sha }}\` |"
             echo "| runner | \`${{ join(fromJSON(needs.resolve.outputs.runner_labels), ', ') }}\` |"
-            echo "| deploy dir | \`${RPG_DEPLOY_DIR}\` |"
-            echo "| result | ${{ job.status }} |"
+            echo "| deploy dir | \`${{ needs.deploy.outputs.deploy_dir }}\` |"
+            echo "| deploy | ${{ needs.deploy.result }} |"
+            echo "| smoke test | ${{ needs['post-deploy-smoke'].result }} |"
           } >> "$GITHUB_STEP_SUMMARY"
