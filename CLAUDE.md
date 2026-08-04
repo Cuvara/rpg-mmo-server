@@ -4,9 +4,82 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Indie RPG MMO game — mobile/PC client with server-authoritative multiplayer. Open-world maps + instanced dungeons. All notes, comments, and code in English.
+Indie RPG MMO — mobile/PC Unity client with server-authoritative multiplayer. Open-world maps + instanced dungeons. This repo contains the Go backend. All notes, comments, and code in English.
 
-## Architecture
+## Commands
+
+Each backend module is a separate Go module (own `go.mod`, linked via `replace` directives to `../shared`). Always `cd` into the module directory first — there is no root go.work.
+
+```bash
+# Tests (per module; CI runs Go 1.26)
+cd backend/shared      && go test ./... -race
+cd backend/gameserver  && go test ./... -race
+cd backend/gateway     && go test ./... -race
+cd backend/integration_test && go test -v -race -timeout 60s   # E2E: real gateway + gameserver in-process
+
+# Single test
+cd backend/gameserver && go test ./server/ -run TestTickLoop -race -v
+
+# Vet (CI enforces)
+go vet ./...
+
+# Build binaries
+cd backend/gameserver && go build ./cmd/gameserver/
+cd backend/gateway    && go build ./cmd/gateway/
+
+# Run locally (two terminals)
+cd backend/gameserver && go run ./cmd/gameserver/ --addr=:9000 --map-id=map_01
+cd backend/gateway    && go run ./cmd/gateway/ --addr=:8000
+```
+
+CI (`.github/workflows/ci.yml`): test shared → gameserver + gateway (parallel) → integration → build. Triggered on `backend/**` paths only.
+
+## Repo Structure & Current State
+
+The MVP is intentionally interface-driven: current implementations are TCP + JSON + in-memory stores; production swaps (KCP, Protobuf, PostgreSQL/Redis, Agones) plug in behind the same interfaces with zero business-logic changes.
+
+| Module | Path | Status | Contents |
+|--------|------|--------|----------|
+| shared | `backend/shared/` | ✅ | Foundation, no deps: config, constants (tick rates, TTLs, Redis keys), error codes, JWT (HS256), logger (slog), wire protocol (`messages/` — Envelope + codec), storage interfaces + in-memory impls |
+| gameserver | `backend/gameserver/` | ✅ | Tick loop (`server/tick.go`), world/entities (`game/`), input validation + anti-cheat (`input/`), combat (`combat/`), AOI snapshots (`snapshot/`), async batch persistence (`persistence/`), event publisher (`events/`), Agones SDK integration (`agones/`) |
+| gateway | `backend/gateway/` | ✅ | TCP router, JWT auth + session manager (`session/`), server registry + allocator (`registry/`), join-token/map transfer (`transfer/`), event relay stub (`events/`) |
+| integration_test | `backend/integration_test/` | ✅ | E2E tests spinning up gateway + gameserver together |
+| nakama | `backend/nakama/` | Planned | Nakama Go plugins — auth, economy, leaderboard, social |
+| deploy | `backend/deploy/` | Partial | Agones fleet manifests (`agones/fleet-map.yaml`, `fleet-dungeon.yaml`, autoscaler, allocation) |
+
+Each module has its own `CLAUDE.md` with detailed role-specific instructions, plus `docs/` and `CHANGELOG.md`. Read the module CLAUDE.md before working in a module. `backend/TEAM.md` defines cross-module contracts and mandatory rules:
+
+- **Changelog**: every change gets a `CHANGELOG.md` entry (Keep a Changelog format) in the touched module.
+- **Docs**: update module `docs/` (README/API/DESIGN/RUNBOOK) before marking work complete.
+- **Errors**: always wrap — `fmt.Errorf("context: %w", err)`.
+- **Tests**: table-driven, `_test.go` alongside source.
+- **Git**: branch `feat/<module>/<feature>`, conventional commits (`feat(gateway): ...`).
+
+### Connection Flow (wire protocol in `shared/messages/`)
+
+```
+1. Client → Gateway:    MsgAuth { JWT }            (JWT verified locally, shared secret — no Nakama roundtrip)
+2. Gateway → Client:    MsgAuthResp { OK, UserID }
+3. Client → Gateway:    MsgEnterWorld { MapID }
+4. Gateway → Client:    MsgEnterWorldResp { ServerAddr, JoinToken }
+5. Client → GameServer: MsgJoinToken { Token }
+6. GameServer → Client: MsgJoinTokenResp { OK }
+7. Client → GameServer: MsgInput { MoveX, MoveY, AttackTargetID }  (per tick)
+8. GameServer → Client: MsgSnapshot { Tick, Entities[] }           (per tick)
+```
+
+### Extension Seams (MVP → Production)
+
+| Layer | MVP (current) | Production |
+|-------|---------------|------------|
+| Transport | TCP | KCP (`xtaci/kcp-go`) |
+| Encoding | JSON structs | Protobuf |
+| Player/Session/Registry stores | In-memory | PostgreSQL (`pgx`) / Redis |
+| Event stream | Go channels | Redis Streams (consumer group ACK) |
+| AOI | Brute-force | Spatial grid / quadtree |
+| Orchestration | Manual | Agones on k3s (SDK already integrated in gameserver) |
+
+## Target Architecture
 
 ### Two Communication Channels
 - **Meta (HTTPS/WebSocket)**: Unity Client <-> Nakama — auth, economy, social, leaderboard, inventory
@@ -14,42 +87,27 @@ Indie RPG MMO game — mobile/PC client with server-authoritative multiplayer. O
 
 ### Server Stack
 - **Nakama (Go)**: Meta services — authentication (device/email/social), economy + storage, leaderboard, party/chat/friends, notifications + presence, matchmaking queue
-- **Gateway (Go, custom)**: UDP/KCP router, session manager, server registry, pub/sub events. JWT verified locally (shared secret, no Nakama roundtrip)
+- **Gateway (Go, custom)**: UDP/KCP router, session manager, server registry, pub/sub events
 - **Game Servers (Go binaries, ~50MB RAM/pod)**: Map servers (combat/skill/movement at 10-15Hz tick) and Dungeon servers (instanced per party, 60s reconnect window)
 - **Agones on k3s**: Game server lifecycle — allocation, health checks, scaling. k3s chosen over full K8s (~500MB vs 2GB+ control plane)
-- **PostgreSQL**: 2 instances — meta (accounts, storage, leaderboard) and game state (persistent world state)
-- **Redis**: Sessions (TTL), server registry, pub/sub, cache. Redis Streams (persistent with ACK) for cross-server events (boss_killed, rare_drop, inventory_changed, season_ended)
-
-### Client Stack (Unity 2022 LTS+ with DOTS)
-Four layers, top to bottom:
-1. **GameObject World (Presentation)**: UI screens (uGUI/UI Toolkit — HUD, inventory, shop, leaderboard), VFX/audio/camera (GO pooling, Cinemachine), view models (reactive binding)
-2. **Bridge Layer**: Event Bus (UI Command <-> ECS events), Presentation Sync (ECS transform/anim -> GO), View Pool Binder (entity <-> GO)
-3. **DOTS World (Simulation ECS)**: Input systems, client prediction + reconciliation (rewind + replay), movement/combat/skill (mirror server logic), remote entity interpolation (2-3 snapshot buffer), spawn/despawn + SubScene baking + AOI culling
-4. **Netcode Layer**: KCP/UDP transport (realtime gameplay), snapshot decoder (delta + jitter buffer), input sender (per tick), Nakama client (HTTPS/WS for auth/economy/social)
-
-### Client Services (Standalone)
-Auth/session, inventory/wallet cache, Addressables + asset streaming, IAP + receipt validation, telemetry/analytics, settings/local save, crash reporter
+- **PostgreSQL**: 2 instances — meta (accounts, storage, leaderboard) and game state
+- **Redis**: Sessions (TTL), server registry, pub/sub, cache. Redis Streams (persistent with ACK) for cross-server events
 
 ### Netcode Model
 - **Simulation tick**: Fixed 10-15Hz, render at 60fps independent
-- **Client prediction**: Apply input immediately, send to server
-- **Server authoritative**: Validate anti-cheat, cooldown, range, speed
-- **Reconciliation**: On server snapshot, rewind + replay if divergent
-- **Remote entities**: Interpolation with 2-3 snapshot buffer
-- **Bad network (mobile)**: Extrapolate (dead reckoning, ~200ms max), request full snapshot on lag spike
-- **Disconnect**: Server holds entity 30s (60s in dungeon), client re-handshake with session token
-- **Serialization**: Protobuf / FlatBuffers
+- **Server authoritative**: validate anti-cheat, cooldown, range, speed; client predicts + reconciles (rewind/replay)
+- **Remote entities**: interpolation with 2-3 snapshot buffer; dead reckoning ~200ms max on bad mobile networks
+- **Disconnect**: server holds entity 30s (60s in dungeon), client re-handshakes with session token
 
 ## Key Design Patterns
 
 - **Economy transactions**: Atomic (BEGIN TX -> check balance -> deduct + add -> COMMIT), idempotency_key guard, rate limiting at Nakama RPC
 - **Gameplay rewards**: Server-authoritative — Map Server -> Nakama internal RPC (signed, no external network)
-- **Cross-server events**: Redis Streams with consumer group ACK (not plain pub/sub)
 - **Loot**: Server-side roll only
-- **State persistence**: Async batch save every 30-60s (does not block tick loop)
+- **State persistence**: Async batch save every 30-60s (never blocks tick loop)
 - **Dungeon lifecycle**: Allocate instance -> save checkpoint -> transfer party -> gameplay -> loot/fail -> final save -> transfer back to origin map -> shutdown pod (5min idle reclaim)
-- **Leaderboard**: Nakama sorted set (O(log N)), season reset with archive + reward distribution
-- **Social**: Nakama built-in — Party API (max 4, open/invite), Friends, Chat channels (room/group/DM), Guild via Groups API, Presence via StatusFollow/Update
+- **Leaderboard**: Nakama sorted set, season reset with archive + reward distribution
+- **Social**: Nakama built-in — Party API (max 4), Friends, Chat channels, Guild via Groups API
 
 ## Deployment Tiers (VPS + k3s, all open-source $0 license)
 
@@ -62,26 +120,14 @@ Auth/session, inventory/wallet cache, Addressables + asset streaming, IAP + rece
 
 ## Tech Stack Reference
 
-| Component | Technology | License |
-|-----------|-----------|---------|
-| Game Backend | Nakama (Go) | Apache 2.0 |
-| Game Servers | Custom Go binary | Self-owned |
-| Orchestration | k3s + Agones | Apache 2.0 |
-| Database | PostgreSQL | Free |
-| Cache/PubSub | Redis | BSD |
-| Client Engine | Unity 2022 LTS+ | - |
-| Client ECS | Unity DOTS | - |
-| Realtime Transport | KCP/UDP (custom Gateway) | - |
-| Serialization | Protobuf / FlatBuffers | - |
-| CDN | CloudFlare R2 / BunnyCDN | - |
-| Monitoring | Grafana Cloud free + Prometheus | - |
-| CI/CD | GitHub Actions free tier | - |
-| Crash Reporting | Sentry / Firebase free tier | - |
-| Auth | Nakama built-in (device -> email -> social) | - |
-
-## Monitoring & Alerting
-- Nakama Console (built-in admin UI), Grafana Cloud (CCU, match count, RPC latency)
-- Prometheus export from Nakama + game servers, pg_stat_statements for query perf
-- Redis INFO + MONITOR for cache hit rate
-- Uptime Robot for external health, k3s kubectl top for pod resources
-- Alerts: error rate -> Slack/Discord, high latency -> auto-scale, disk >80%, game server crash -> auto-restart (k3s)
+| Component | Technology |
+|-----------|-----------|
+| Game Backend | Nakama (Go) |
+| Game Servers / Gateway | Custom Go binaries |
+| Orchestration | k3s + Agones |
+| Database / Cache | PostgreSQL / Redis |
+| Client | Unity 2022 LTS+ with DOTS |
+| Realtime Transport | KCP/UDP (custom Gateway) |
+| Serialization | Protobuf / FlatBuffers (target) |
+| Monitoring | Grafana Cloud free + Prometheus |
+| CI/CD | GitHub Actions |

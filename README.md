@@ -13,6 +13,8 @@ Unity Client
                      └── PostgreSQL (meta DB + game state DB)
 ```
 
+📖 **[Core Flow](backend/docs/CORE_FLOW.md)** — canonical end-to-end walkthrough: login→gameplay sequence, tick loop internals, cross-server events, deployment topology, extension seams (with ✅/🟡/⬜ implementation status).
+
 ### Backend Modules
 
 | Module | Path | Description |
@@ -40,19 +42,25 @@ Unity Client
 
 ### Prerequisites
 
-- Go 1.24+
+- Go 1.26+
 
 ### Run Tests
 
 ```bash
-# All modules
+# All modules (each is its own Go module — cd first)
 cd backend/shared && go test ./... -race
 cd backend/gameserver && go test ./... -race
 cd backend/gateway && go test ./... -race
-cd backend/integration_test && go test -v -race -timeout 30s
+cd backend/nakama && go test ./... -race
+cd backend/integration_test && go test -v -race -timeout 120s
 ```
 
+`-race` needs cgo (a C toolchain). Drop it if `gcc` is unavailable — the suites
+are identical otherwise.
+
 ### Run Servers
+
+In-memory mode (single process each, no external dependencies):
 
 ```bash
 # Terminal 1 — Game Server
@@ -62,6 +70,23 @@ go run ./cmd/gameserver/ --addr=:9000 --map-id=map_01
 # Terminal 2 — Gateway
 cd backend/gateway
 go run ./cmd/gateway/ --addr=:8000
+```
+
+Redis mode (shared server registry, sessions and event stream — required for
+the gateway to see game servers running in other processes):
+
+```bash
+# Terminal 0 — Redis
+redis-server --port 6379
+
+# Terminal 1 — Game Server (--redis opts in; --redis-addr overrides REDIS_ADDR)
+cd backend/gameserver
+go run ./cmd/gameserver/ --addr=:9000 --map-id=map_01 --redis --redis-addr=localhost:6379
+
+# Terminal 2 — Gateway (an exported REDIS_ADDR selects the redis backend;
+# --backend=redis forces it explicitly)
+cd backend/gateway
+REDIS_ADDR=localhost:6379 go run ./cmd/gateway/ --addr=:8000 --backend=redis
 ```
 
 ### Test with netcat
@@ -95,11 +120,15 @@ nc localhost 8000
 
 | Module | Tests | Status |
 |--------|-------|--------|
-| shared | 16 | ✅ |
-| gameserver | 17 | ✅ |
-| gateway | 18 | ✅ |
-| integration | 4 | ✅ |
-| **Total** | **55** | **All green** |
+| shared | 39 | ✅ |
+| gameserver | 30 | ✅ |
+| gateway | 36 | ✅ |
+| nakama | 11 | ✅ |
+| integration (E2E) | 10 | ✅ |
+| **Total** | **126** | **All green** |
+
+Counts are top-level `go test` functions (most are table-driven with several
+subtests each).
 
 ## Deployment Tiers
 

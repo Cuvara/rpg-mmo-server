@@ -1,7 +1,7 @@
 # Backend Agent Team
 
 RPG MMO Indie — Backend Agent Team Definition.
-All agents share: Go 1.24.5, Protobuf/FlatBuffers serialization, PostgreSQL + Redis.
+All agents share: Go 1.26, Protobuf/FlatBuffers serialization, PostgreSQL + Redis.
 
 ## Team Roster
 
@@ -98,7 +98,7 @@ Rules:
 ## Development Standards
 
 ### All Agents
-- Language: Go 1.24.5
+- Language: Go 1.26
 - Error handling: `fmt.Errorf("context: %w", err)` — always wrap
 - Logging: structured (zerolog or slog)
 - Config: env vars with defaults, validated at startup
