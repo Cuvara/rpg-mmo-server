@@ -62,6 +62,10 @@ GATEWAY_ADDR="${GATEWAY_ADDR:-:8000}"
 GAMESERVER_ADDR="${GAMESERVER_ADDR:-:9000}"
 GAMESERVER_MAP_ID="${GAMESERVER_MAP_ID:-map_01}"
 
+# Select which gameserver binary to run. Set GAMESERVER_RUNTIME=dotnet to use
+# the C# NativeAOT binary (gameserver-dotnet) instead of the Go binary.
+GAMESERVER_RUNTIME="${GAMESERVER_RUNTIME:-go}"
+
 # The gateway picks its redis backend from REDIS_ADDR automatically; the
 # gameserver needs the explicit --redis flag, so add it when REDIS_ADDR is set.
 GAMESERVER_ARGS="--addr=${GAMESERVER_ADDR} --map-id=${GAMESERVER_MAP_ID}"
@@ -69,9 +73,20 @@ if [ -n "${REDIS_ADDR:-}" ]; then
 	GAMESERVER_ARGS="$GAMESERVER_ARGS --redis"
 fi
 
+# C# gameserver uses the same CLI flags but a different binary name.
+GAMESERVER_DOTNET_ARGS="--addr=${GAMESERVER_ADDR} --map-id=${GAMESERVER_MAP_ID}"
+
+if [ "$GAMESERVER_RUNTIME" = "dotnet" ]; then
+	GAMESERVER_BIN="gameserver-dotnet"
+	GAMESERVER_FINAL_ARGS="$GAMESERVER_DOTNET_ARGS"
+else
+	GAMESERVER_BIN="gameserver"
+	GAMESERVER_FINAL_ARGS="$GAMESERVER_ARGS"
+fi
+
 SERVICES=(
 	"gateway|gateway|--addr=${GATEWAY_ADDR}|${GATEWAY_ADDR##*:}"
-	"gameserver|gameserver|${GAMESERVER_ARGS}|${GAMESERVER_ADDR##*:}"
+	"gameserver|${GAMESERVER_BIN}|${GAMESERVER_FINAL_ARGS}|${GAMESERVER_ADDR##*:}"
 )
 
 # --------------------------------------------------------------- systemd mode

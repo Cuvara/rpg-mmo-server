@@ -16,6 +16,14 @@ MVP baseline: **TCP + length-prefixed JSON + in-memory stores**. Production targ
 (KCP, Protobuf, Redis, PostgreSQL, Agones runtime) plug in behind the interfaces listed
 in §5.
 
+**GameServer**: The game server has been migrated from Go to C# .NET 10
+(`backend/gameserver-dotnet/`). The Go gameserver directory has been removed. The C#
+version uses the same wire protocol (4-byte BE length prefix + JSON, `snake_case` fields)
+and is fully compatible with the Go gateway. The C# server includes `Shared.GameLogic`,
+a pure C# library shared with the Unity DOTS client for identical client-prediction logic.
+Code references below point to the original Go codebase architecture; the C# port mirrors
+the same structure.
+
 ---
 
 ## 1. Login → Gameplay
@@ -28,7 +36,7 @@ sequenceDiagram
     participant C as Unity Client
     participant N as Nakama (meta)
     participant GW as Gateway
-    participant GS as GameServer
+    participant GS as GameServer (C# .NET 10)
     participant ST as Stores (memory → Redis/PG)
 
     Note over C,N: Meta channel — HTTPS/gRPC
@@ -104,8 +112,10 @@ sequenceDiagram
 
 ## 2. Tick loop internals
 
-Owner: `gameserver/server/tick.go`. Started at `gameserver/server/server.go:110`, rate from
-`config.TickRate` (env `TICK_RATE`, default 10; `constants.DefaultTickRate=10`, `Max=15`, `Min=5`).
+Owner: `gameserver/server/tick.go` (Go, legacy) / `gameserver-dotnet/GameServer/` (C# .NET 10).
+Go version: started at `gameserver/server/server.go:110`, rate from `config.TickRate`
+(env `TICK_RATE`, default 10; `constants.DefaultTickRate=10`, `Max=15`, `Min=5`).
+C# version: same architecture, default 15Hz, game logic from `Shared.GameLogic`.
 
 ```
 net read goroutine (per conn)          tick goroutine (1/server)              saver goroutine (1/server)

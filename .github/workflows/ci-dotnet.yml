@@ -1,0 +1,84 @@
+name: CI — GameServer .NET
+
+on:
+  push:
+    branches: [main, master, develop]
+    paths:
+      - 'backend/gameserver-dotnet/**'
+      - '.github/workflows/ci-dotnet.yml'
+  pull_request:
+    branches: [main, master, develop]
+    paths:
+      - 'backend/gameserver-dotnet/**'
+      - '.github/workflows/ci-dotnet.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-dotnet-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test & Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend/gameserver-dotnet
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore -c Release
+
+      - name: Test
+        run: >-
+          dotnet test --no-build -c Release
+          --verbosity normal
+          --logger "trx;LogFileName=test-results.trx"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: backend/gameserver-dotnet/**/test-results.trx
+          retention-days: 7
+
+  publish:
+    name: Publish AOT
+    needs: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend/gameserver-dotnet
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install AOT prerequisites
+        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+
+      - name: Publish NativeAOT
+        run: dotnet publish GameServer/GameServer.csproj -c Release -o ./publish
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: gameserver-dotnet
+          path: backend/gameserver-dotnet/publish/
+          retention-days: 7

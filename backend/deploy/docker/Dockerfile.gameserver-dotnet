@@ -1,0 +1,54 @@
+# Dockerfile.gameserver-dotnet — Multi-stage NativeAOT build
+#
+# Build context: backend/   (same as Go gameserver)
+#   docker build -f deploy/docker/Dockerfile.gameserver-dotnet -t rpg-mmo/gameserver-dotnet:dev .
+#
+# The resulting image is ~30-40 MB (Alpine + single static binary).
+
+# ---------------------------------------------------------------------------
+# Stage 1: Build (SDK + native toolchain for AOT compilation)
+# ---------------------------------------------------------------------------
+FROM mcr.microsoft.com/dotnet/sdk:10.0-alpine AS build
+
+# NativeAOT on Alpine requires clang, linker, and zlib headers.
+RUN apk add --no-cache clang build-base zlib-dev
+
+WORKDIR /src
+
+# -- Restore layer (changes rarely, cached aggressively) --------------------
+COPY gameserver-dotnet/Shared.GameLogic/Shared.GameLogic.csproj Shared.GameLogic/
+COPY gameserver-dotnet/GameServer/GameServer.csproj GameServer/
+
+# Restore NuGet packages (cached until a .csproj changes).
+RUN dotnet restore GameServer/GameServer.csproj
+
+# -- Source layer ------------------------------------------------------------
+COPY gameserver-dotnet/Shared.GameLogic/ Shared.GameLogic/
+COPY gameserver-dotnet/GameServer/ GameServer/
+
+# -- Publish NativeAOT (single file, no IL, no JIT) -------------------------
+# NativeAOT on Alpine requires -r linux-musl-x64. We let publish run its own
+# RID-specific restore pass (fast — packages already cached from the layer above).
+RUN dotnet publish GameServer/GameServer.csproj \
+      -c Release \
+      -r linux-musl-x64 \
+      -o /app
+
+# ---------------------------------------------------------------------------
+# Stage 2: Runtime (minimal Alpine image — no SDK, no IL runtime)
+# ---------------------------------------------------------------------------
+FROM mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine-extra AS runtime
+
+# Non-root user matching distroless UID convention.
+RUN addgroup -g 65532 -S nonroot && \
+    adduser -u 65532 -S nonroot -G nonroot
+
+WORKDIR /app
+COPY --from=build /app .
+
+USER 65532:65532
+
+# Game traffic (TCP for framed messages, UDP reserved for future KCP).
+EXPOSE 9000/tcp 9000/udp
+
+ENTRYPOINT ["./GameServer"]

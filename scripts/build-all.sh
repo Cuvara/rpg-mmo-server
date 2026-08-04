@@ -11,11 +11,13 @@
 #   scripts/build-all.sh --race          # add -race to go test (needs gcc/cgo)
 #   scripts/build-all.sh --plugin        # also build nakama.so via docker
 #   scripts/build-all.sh --images        # also build gateway+gameserver images
+#   scripts/build-all.sh --dotnet        # also build+test C# gameserver-dotnet
 #
 # Outputs:
 #   bin/gateway, bin/gameserver, bin/smoketest
 #   backend/deploy/modules/nakama.so     (only with --plugin)
 #   $IMAGE_PREFIX/{gateway,gameserver}:$IMAGE_TAG docker images (only with --images)
+#   backend/gameserver-dotnet/publish/   (only with --dotnet)
 #
 set -euo pipefail
 
@@ -30,6 +32,7 @@ NAKAMA_VERSION="${NAKAMA_VERSION:-3.40.0}"
 SKIP_TESTS=0
 WITH_PLUGIN=0
 WITH_IMAGES=0
+WITH_DOTNET=0
 IMAGE_PREFIX="${IMAGE_PREFIX:-rpg-mmo}"
 IMAGE_TAG="${IMAGE_TAG:-dev}"
 RACE=0
@@ -41,6 +44,7 @@ for arg in "$@"; do
 	--skip-tests) SKIP_TESTS=1 ;;
 	--plugin) WITH_PLUGIN=1 ;;
 	--images) WITH_IMAGES=1 ;;
+	--dotnet) WITH_DOTNET=1 ;;
 	--race) RACE=1 ;;
 	-h | --help)
 		sed -n '2,18p' "${BASH_SOURCE[0]}"
@@ -120,6 +124,7 @@ info "go:     $GO ($("$GO" version))"
 info "tests:  $([ "$SKIP_TESTS" -eq 1 ] && echo skipped || echo "enabled (race=$RACE, timeout=$TEST_TIMEOUT)")"
 info "plugin: $([ "$WITH_PLUGIN" -eq 1 ] && echo requested || echo off)"
 info "images: $([ "$WITH_IMAGES" -eq 1 ] && echo "requested ($IMAGE_PREFIX/*:$IMAGE_TAG)" || echo off)"
+info "dotnet: $([ "$WITH_DOTNET" -eq 1 ] && echo requested || echo off)"
 
 mkdir -p "$BIN_DIR"
 
@@ -208,6 +213,33 @@ if [ "$WITH_IMAGES" -eq 1 ]; then
 		"$DOCKER" images --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep "^$IMAGE_PREFIX/" || true
 	else
 		fail "--images requested but no working docker CLI found (tried 'docker', 'docker.exe')"
+	fi
+fi
+
+# ------------------------------------------------------- gameserver-dotnet (C#)
+if [ "$WITH_DOTNET" -eq 1 ]; then
+	step "C# GameServer (gameserver-dotnet)"
+	DOTNET_DIR="$REPO_ROOT/backend/gameserver-dotnet"
+	[ -f "$DOTNET_DIR/GameServer.sln" ] || fail "gameserver-dotnet: no GameServer.sln"
+
+	info "dotnet build -c Release"
+	(cd "$DOTNET_DIR" && dotnet build -c Release) || fail "gameserver-dotnet: dotnet build"
+
+	if [ "$SKIP_TESTS" -eq 0 ]; then
+		info "dotnet test -c Release --no-build"
+		(cd "$DOTNET_DIR" && dotnet test -c Release --no-build) || fail "gameserver-dotnet: dotnet test"
+	fi
+
+	if [ "$WITH_IMAGES" -eq 1 ]; then
+		if DOCKER="$(detect_docker)"; then
+			img="$IMAGE_PREFIX/gameserver-dotnet:$IMAGE_TAG"
+			info "building $img"
+			( cd "$DEPLOY_DIR" && DOCKER_BUILDKIT=1 "$DOCKER" build \
+				-f "docker/Dockerfile.gameserver-dotnet" \
+				-t "$img" \
+				.. ) || fail "gameserver-dotnet image: docker build"
+			"$DOCKER" image inspect "$img" >/dev/null 2>&1 || fail "gameserver-dotnet image: $img not produced"
+		fi
 	fi
 fi
 

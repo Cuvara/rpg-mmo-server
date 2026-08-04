@@ -6,6 +6,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `dotnet_interop_test.go` — Go Gateway ↔ C# GameServer cross-language E2E tests
+  (build tag `integration`). Seven tests covering: full client flow through gateway
+  to C# server (auth → enter world → join → input → snapshot), invalid JWT
+  rejection, wrong server ID rejection, multiple concurrent clients, client
+  disconnect handling, gateway auth validation, and wire protocol JSON compatibility.
+
+### Added
 - `transport_flow_test.go` — `TestFullFlow_TransportMatrix` runs the full
   client -> gateway -> gameserver flow over all four per-hop transport
   combinations (kcp/kcp, tcp/kcp, kcp/tcp, tcp/tcp), asserting the registry

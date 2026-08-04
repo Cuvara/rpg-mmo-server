@@ -1,5 +1,7 @@
 package messages
 
+import "encoding/json"
+
 // MsgType identifies the type of message in an Envelope.
 type MsgType uint8
 
@@ -16,9 +18,12 @@ const (
 )
 
 // Envelope is the top-level wire message. Type selects the payload schema.
+//
+// Payload is json.RawMessage so it serializes as inline JSON (not base64),
+// ensuring wire compatibility with non-Go implementations (e.g. C#/.NET).
 type Envelope struct {
-	Type    MsgType `json:"type"`
-	Payload []byte  `json:"payload"`
+	Type    MsgType         `json:"type"`
+	Payload json.RawMessage `json:"payload"`
 }
 
 // --- Inner message types ---

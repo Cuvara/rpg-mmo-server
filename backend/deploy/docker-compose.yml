@@ -199,6 +199,30 @@ services:
     ports:
       - "${GAMESERVER_CONTAINER_PORT:-9300}:9000"
 
+  # C# (.NET 10 NativeAOT) gameserver — drop-in replacement for the Go binary.
+  # Profile-gated like the Go variant above; use `--profile realtime-dotnet`.
+  # Build first:
+  #   docker build -f docker/Dockerfile.gameserver-dotnet -t rpg-mmo/gameserver-dotnet:dev ..
+  # Host port 9400 avoids clashing with the Go gameserver on 9300 or host on 9000.
+  gameserver-dotnet:
+    profiles: ["realtime-dotnet"]
+    image: ${GAMESERVER_DOTNET_IMAGE:-rpg-mmo/gameserver-dotnet:dev}
+    container_name: rpg-gameserver-dotnet
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    command:
+      - "--addr=:9000"
+      - "--map-id=${GAMESERVER_MAP_ID:-map_01}"
+    environment:
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      GAMESERVER_ADDR: ":9000"
+      MAP_ID: ${GAMESERVER_MAP_ID:-map_01}
+      SERVER_ID: ${GAMESERVER_DOTNET_SERVER_ID:-gs-dotnet-01}
+    ports:
+      - "${GAMESERVER_DOTNET_CONTAINER_PORT:-9400}:9000"
+
 volumes:
   postgres-data:
   postgres-game-data:

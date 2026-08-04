@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
+    <PackageReference Include="xunit" Version="2.*" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.*" />
+    <PackageReference Include="coverlet.collector" Version="6.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <Using Include="Shared.GameLogic.Components" />
+    <Using Include="Shared.GameLogic.Systems" />
+    <Using Include="GameServer.Net" />
+    <Using Include="GameServer.World" />
+    <Using Include="GameServer.Server" />
+    <Using Include="GameServer.Input" />
+    <Using Include="GameServer.Persistence" />
+    <Using Include="GameServer.Events" />
+    <Using Include="GameServer.Agones" />
+    <Using Include="GameServer.Snapshot" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Shared.GameLogic\Shared.GameLogic.csproj" />
+    <ProjectReference Include="..\GameServer\GameServer.csproj" />
+  </ItemGroup>
+
+</Project>

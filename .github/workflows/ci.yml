@@ -6,11 +6,10 @@ name: CI — Backend
 #
 # Graph:
 #   test-shared
-#     ├─► test-gameserver ─┐
-#     ├─► test-gateway ────┤
+#     ├─► test-gateway ────┐
 #     ├─► test-nakama ─────┤
 #     └─► test-smoketest ──┘
-#               └─► test-integration ─► build-{gateway,gameserver,smoketest}
+#               └─► test-integration ─► build-{gateway,smoketest}
 
 on:
   push:
@@ -36,15 +35,6 @@ jobs:
     with:
       module_dir: backend/shared
       test_flags: '-v -race -timeout 60s'
-
-  test-gameserver:
-    name: Test gameserver
-    needs: test-shared
-    uses: ./.github/workflows/_go-module.yml
-    with:
-      module_dir: backend/gameserver
-      test_flags: '-v -race -timeout 60s'
-      run_build: go build ./cmd/gameserver/
 
   test-gateway:
     name: Test gateway
@@ -79,7 +69,7 @@ jobs:
 
   test-integration:
     name: Integration tests
-    needs: [test-gameserver, test-gateway, test-nakama, test-smoketest]
+    needs: [test-gateway, test-nakama, test-smoketest]
     uses: ./.github/workflows/_go-module.yml
     with:
       module_dir: backend/integration_test
@@ -96,18 +86,6 @@ jobs:
       run_build: go build -o ../../bin/gateway ./cmd/gateway/
       artifact_name: bin-gateway
       artifact_path: bin/gateway
-      artifact_retention_days: 7
-
-  build-gameserver:
-    name: Build gameserver
-    needs: test-integration
-    uses: ./.github/workflows/_go-module.yml
-    with:
-      module_dir: backend/gameserver
-      run_tests: false
-      run_build: go build -o ../../bin/gameserver ./cmd/gameserver/
-      artifact_name: bin-gameserver
-      artifact_path: bin/gameserver
       artifact_retention_days: 7
 
   build-smoketest:

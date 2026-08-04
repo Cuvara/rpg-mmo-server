@@ -6,7 +6,7 @@ plus the path from a laptop cluster to a real k3s VPS.
 - Scripts: `backend/deploy/k3s/`
 - Manifests: `backend/deploy/agones/`
 - Agones version: **1.59.0**, pinned to match `agones.dev/agones v1.59.0` in
-  `backend/gameserver/go.mod`. Override with `AGONES_VERSION=…`.
+  the Agones SDK. Override with `AGONES_VERSION=…`.
 
 ---
 
@@ -110,8 +110,8 @@ and with `--all` Agones itself. `--fleets-only` keeps the namespaces.
 
 ### Reality-pass applied to the fleets
 
-Checked against `backend/gameserver/cmd/gameserver/main.go`,
-`gameserver/agones/sdk.go` and `docker/Dockerfile.gameserver`:
+Checked against the game server configuration
+and `docker/Dockerfile.gameserver-dotnet`:
 
 - **Port `9000`** matches `GAMESERVER_ADDR` default `:9000`, `--addr=:9000` in the
   fleet args, and `EXPOSE 9000` in the Dockerfile. `portPolicy: Dynamic` is now
