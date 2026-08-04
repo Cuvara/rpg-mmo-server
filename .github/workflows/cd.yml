@@ -1,0 +1,247 @@
+name: CD — Build & Deploy
+
+# Branch strategy:
+#   develop    -> dev environment        (runner labels: self-hosted, dev)
+#   staging    -> staging environment    (runner labels: self-hosted, staging)
+#   release-*  -> production environment (runner labels: self-hosted, production)
+#
+# workflow_dispatch lets you deploy any ref to a chosen environment (also the
+# rollback path: re-run a previous successful run of this workflow).
+#
+# ci.yml still owns PR/main validation — this workflow does not replace it.
+
+on:
+  push:
+    branches: [develop, staging, 'release-*']
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        required: true
+        default: dev
+        options: [dev, staging, production]
+      skip_tests:
+        description: Skip Go tests in the build job (emergency only)
+        type: boolean
+        required: false
+        default: false
+
+# One deploy at a time per environment; a newer push supersedes a queued one.
+concurrency:
+  group: cd-${{ github.event.inputs.environment || (github.ref_name == 'develop' && 'dev') || (github.ref_name == 'staging' && 'staging') || 'production' }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: '1.26'
+
+jobs:
+  # ---------------------------------------------------------------- resolve
+  resolve:
+    name: Resolve target environment
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.map.outputs.environment }}
+      runner_labels: ${{ steps.map.outputs.runner_labels }}
+    steps:
+      - id: map
+        name: Map ref -> environment + runner labels
+        env:
+          DISPATCH_ENV: ${{ github.event.inputs.environment }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "${DISPATCH_ENV}" ]; then
+            target="${DISPATCH_ENV}"
+          else
+            case "${REF_NAME}" in
+              develop)    target=dev ;;
+              staging)    target=staging ;;
+              release-*)  target=production ;;
+              *) echo "::error::no environment mapping for ref '${REF_NAME}'"; exit 1 ;;
+            esac
+          fi
+          case "${target}" in
+            dev)        labels='["self-hosted","dev"]' ;;
+            staging)    labels='["self-hosted","staging"]' ;;
+            production) labels='["self-hosted","production"]' ;;
+            *) echo "::error::unknown environment '${target}'"; exit 1 ;;
+          esac
+          echo "environment=${target}"       >> "$GITHUB_OUTPUT"
+          echo "runner_labels=${labels}"     >> "$GITHUB_OUTPUT"
+          echo "Deploying ref '${REF_NAME}' to '${target}' on runner ${labels}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ------------------------------------------------------------- build-test
+  build-test:
+    name: Build, vet & test (+ nakama plugin)
+    runs-on: ubuntu-latest
+    needs: resolve
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Single source of truth for the build — the same script devs run in WSL.
+      # -race is enabled here (CI has gcc); locally it is opt-in via --race.
+      - name: Run build-all.sh
+        env:
+          SKIP: ${{ github.event.inputs.skip_tests == 'true' && '--skip-tests' || '--race' }}
+        run: |
+          chmod +x scripts/build-all.sh
+          ./scripts/build-all.sh --plugin $SKIP
+
+      - name: Stage deployment bundle
+        run: |
+          set -euo pipefail
+          mkdir -p dist/bin dist/deploy dist/scripts
+          cp bin/gateway bin/gameserver dist/bin/
+          cp backend/deploy/modules/nakama.so dist/deploy/
+          cp backend/deploy/docker-compose.yml dist/deploy/
+          cp backend/deploy/Makefile dist/deploy/
+          cp backend/deploy/.env.example dist/deploy/
+          cp scripts/deploy-local.sh dist/scripts/
+          echo "${GITHUB_SHA}" > dist/COMMIT
+          ls -lhR dist
+
+      - name: Upload deployment bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-bundle-${{ github.sha }}
+          path: dist/
+          retention-days: 14
+          if-no-files-found: error
+
+  # ----------------------------------------------------------------- deploy
+  deploy:
+    name: Deploy to ${{ needs.resolve.outputs.environment }}
+    needs: [resolve, build-test]
+    runs-on: ${{ fromJSON(needs.resolve.outputs.runner_labels) }}
+    environment: ${{ needs.resolve.outputs.environment }}
+    steps:
+      - name: Download deployment bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: deploy-bundle-${{ github.sha }}
+          path: dist
+
+      - name: Sync bundle into the deploy directory
+        env:
+          RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RPG_DEPLOY_DIR"/{bin,deploy,scripts,run,logs}
+          # Keep the previous binaries so a manual rollback is one `mv` away.
+          for b in gateway gameserver; do
+            [ -f "$RPG_DEPLOY_DIR/bin/$b" ] && cp -f "$RPG_DEPLOY_DIR/bin/$b" "$RPG_DEPLOY_DIR/bin/$b.prev" || true
+          done
+          install -m 0755 dist/bin/gateway     "$RPG_DEPLOY_DIR/bin/gateway"
+          install -m 0755 dist/bin/gameserver  "$RPG_DEPLOY_DIR/bin/gameserver"
+          install -m 0755 dist/scripts/deploy-local.sh "$RPG_DEPLOY_DIR/scripts/deploy-local.sh"
+          mkdir -p "$RPG_DEPLOY_DIR/deploy/modules"
+          install -m 0644 dist/deploy/nakama.so          "$RPG_DEPLOY_DIR/deploy/modules/nakama.so"
+          install -m 0644 dist/deploy/docker-compose.yml "$RPG_DEPLOY_DIR/deploy/docker-compose.yml"
+          install -m 0644 dist/deploy/Makefile           "$RPG_DEPLOY_DIR/deploy/Makefile"
+          install -m 0644 dist/deploy/.env.example       "$RPG_DEPLOY_DIR/deploy/.env.example"
+          cp dist/COMMIT "$RPG_DEPLOY_DIR/COMMIT"
+
+      # Secrets come from the GitHub Environment (dev / staging / production).
+      # Written with umask 077 and never echoed.
+      - name: Write environment file
+        env:
+          RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          NAKAMA_CONSOLE_PASSWORD: ${{ secrets.NAKAMA_CONSOLE_PASSWORD }}
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          NAKAMA_SERVER_KEY: ${{ secrets.NAKAMA_SERVER_KEY }}
+          NAKAMA_VERSION: ${{ vars.NAKAMA_VERSION || '3.40.0' }}
+          POSTGRES_DB: ${{ vars.POSTGRES_DB || 'nakama' }}
+          POSTGRES_USER: ${{ vars.POSTGRES_USER || 'nakama' }}
+          NAKAMA_CONSOLE_USER: ${{ vars.NAKAMA_CONSOLE_USER || 'admin' }}
+          GATEWAY_ADDR: ${{ vars.GATEWAY_ADDR || ':8000' }}
+          GAMESERVER_ADDR: ${{ vars.GAMESERVER_ADDR || ':9000' }}
+          GAMESERVER_MAP_ID: ${{ vars.GAMESERVER_MAP_ID || 'map_01' }}
+          REDIS_ADDR: ${{ vars.REDIS_ADDR || 'localhost:6379' }}
+        run: |
+          set -euo pipefail
+          for required in JWT_SECRET POSTGRES_PASSWORD NAKAMA_CONSOLE_PASSWORD; do
+            if [ -z "${!required}" ]; then
+              echo "::error::environment secret ${required} is not set"
+              exit 1
+            fi
+          done
+          umask 077
+          envfile="$RPG_DEPLOY_DIR/deploy/.env"
+          {
+            echo "# Generated by CD ($GITHUB_RUN_ID) — do not edit by hand."
+            echo "NAKAMA_VERSION=${NAKAMA_VERSION}"
+            echo "POSTGRES_DB=${POSTGRES_DB}"
+            echo "POSTGRES_USER=${POSTGRES_USER}"
+            echo "POSTGRES_PASSWORD=${POSTGRES_PASSWORD}"
+            echo "REDIS_PASSWORD=${REDIS_PASSWORD}"
+            echo "REDIS_ADDR=${REDIS_ADDR}"
+            echo "JWT_SECRET=${JWT_SECRET}"
+            echo "NAKAMA_CONSOLE_USER=${NAKAMA_CONSOLE_USER}"
+            echo "NAKAMA_CONSOLE_PASSWORD=${NAKAMA_CONSOLE_PASSWORD}"
+            echo "NAKAMA_SERVER_KEY=${NAKAMA_SERVER_KEY:-defaultkey}"
+            echo "GATEWAY_ADDR=${GATEWAY_ADDR}"
+            echo "GAMESERVER_ADDR=${GAMESERVER_ADDR}"
+            echo "GAMESERVER_MAP_ID=${GAMESERVER_MAP_ID}"
+          } > "$envfile"
+          chmod 600 "$envfile"
+          echo "wrote $envfile ($(wc -l < "$envfile") vars, values redacted)"
+
+      # postgres + redis + nakama. The plugin .so is mounted from ./modules.
+      - name: Start / update the meta stack (docker compose)
+        env:
+          RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
+        working-directory: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
+        run: |
+          set -euo pipefail
+          cd "$RPG_DEPLOY_DIR/deploy"
+          docker compose pull --quiet || true
+          docker compose up -d --remove-orphans
+          docker compose ps
+
+      - name: Restart realtime services (systemd, else nohup)
+        env:
+          RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
+        run: |
+          set -euo pipefail
+          chmod +x "$RPG_DEPLOY_DIR/scripts/deploy-local.sh"
+          "$RPG_DEPLOY_DIR/scripts/deploy-local.sh" restart
+
+      - name: Post-deploy healthcheck
+        env:
+          RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
+        run: |
+          set -euo pipefail
+          "$RPG_DEPLOY_DIR/scripts/deploy-local.sh" health
+          "$RPG_DEPLOY_DIR/scripts/deploy-local.sh" status
+
+      - name: Deployment summary
+        if: always()
+        env:
+          RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
+        run: |
+          {
+            echo "### Deploy — ${{ needs.resolve.outputs.environment }}"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| ref | \`${{ github.ref_name }}\` |"
+            echo "| commit | \`${{ github.sha }}\` |"
+            echo "| runner | \`${{ join(fromJSON(needs.resolve.outputs.runner_labels), ', ') }}\` |"
+            echo "| deploy dir | \`${RPG_DEPLOY_DIR}\` |"
+            echo "| result | ${{ job.status }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
