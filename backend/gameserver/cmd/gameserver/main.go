@@ -10,14 +10,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/duycuong/rpg-mmo/gameserver/agones"
-	"github.com/duycuong/rpg-mmo/gameserver/server"
 	"github.com/duycuong/rpg-mmo/shared/config"
 	"github.com/duycuong/rpg-mmo/shared/logger"
 	"github.com/duycuong/rpg-mmo/shared/storage"
 	"github.com/duycuong/rpg-mmo/shared/storage/pgstore"
 	"github.com/duycuong/rpg-mmo/shared/storage/redisstore"
 	"github.com/duycuong/rpg-mmo/shared/transport"
+
+	"github.com/duycuong/rpg-mmo/gameserver/agones"
+	"github.com/duycuong/rpg-mmo/gameserver/server"
 )
 
 func main() {
@@ -40,7 +41,7 @@ func main() {
 		cfg.GameServerAddr = *addr
 	}
 	if *serverID == "" {
-		*serverID = fmt.Sprintf("gs-%s-%s", *mode, *mapID)
+		*serverID = resolveServerID(*mode, *mapID)
 	}
 	if *transportKind != "" {
 		cfg.GameServerTransport = *transportKind
@@ -152,6 +153,24 @@ func main() {
 		log.Error("server error", "err", err)
 		os.Exit(1)
 	}
+}
+
+// resolveServerID derives the server id when --server-id is not given.
+//
+// Server-id contract with the gateway: an Agones allocation answers with the
+// GameServer name, and the gateway mints the join token's sid from it. A pod
+// must therefore register under that same name, so POD_NAME (injected by the
+// fleet manifests through the downward API, fieldRef metadata.name) wins over
+// the gs-<mode>-<map_id> default — that default collides across replicas of a
+// fleet and is only useful for a single process run by hand.
+func resolveServerID(mode, mapID string) string {
+	if id := os.Getenv("GAMESERVER_ID"); id != "" {
+		return id
+	}
+	if id := os.Getenv("POD_NAME"); id != "" {
+		return id
+	}
+	return fmt.Sprintf("gs-%s-%s", mode, mapID)
 }
 
 // redactDSN strips the password from a postgres DSN so it is safe to log.

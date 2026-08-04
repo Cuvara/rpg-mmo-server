@@ -13,7 +13,28 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   registry entry, so the client knows which transport to dial for hop 2.
   `transfer.AssignResult` gained the matching `Transport` field. Empty means
   `tcp` — servers registered before the field existed keep working.
+- Real Agones allocator (`registry.AgonesAllocator`): `POST` to the aggregated
+  `allocation.agones.dev/v1` `GameServerAllocation` endpoint using `client-go`
+  credential resolution (in-cluster ServiceAccount, else `--allocator-kubeconfig`
+  / `$KUBECONFIG` / `~/.kube/config`). Fleet selection by
+  `agones.dev/fleet` label, `KindMap`/`KindDungeon` mapped from config.
+  Wire types are modelled locally instead of importing the Agones clientset —
+  see `docs/DESIGN.md` for the rationale.
+- `registry.ErrNoCapacity` sentinel for `state: UnAllocated`, plus
+  `registry.KindAllocator` / `AllocationRequest` for kind-aware allocation.
+- `cmd/gateway` flags `--allocator` (`none`|`agones`), `--allocator-namespace`,
+  `--allocator-fleet-map`, `--allocator-fleet-dungeon`, `--allocator-kubeconfig`
+  with matching `ALLOCATOR*` env vars. Default stays `none`, so nothing changes
+  unless allocation is explicitly enabled.
+- Tests: table-driven allocator client tests against an `httptest` fake API server
+  (success, `UnAllocated`, API error with `Status.message`, malformed body, missing
+  port, timeout, request shape/URL per kind) and a gateway-level enter-world test
+  asserting allocation only fires for unserved maps and that the join token's
+  `sid` is the allocated GameServer name.
 
+### Changed
+- `cmd/gateway` wires the registry with the Agones allocator when
+  `--allocator=agones`; a bad Kubernetes config is fatal at boot.
 
 ### Fixed
 - Cross-server event stream name mismatch: gameserver published to

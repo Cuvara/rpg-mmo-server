@@ -1,5 +1,85 @@
 # Gateway — Design Decisions
 
+## 2026-08-04 — Real Agones allocator (GameServerAllocation API)
+
+### Context
+
+`MsgEnterWorld` for a map no live server hosts used to be a dead end: the registry
+returned "no available server" because the only `Allocator` implementation was
+`StubAllocator`. The drawio "lookup / allocate" edge (page 3) needed a real
+implementation against the Agones control plane running on k3s.
+
+### Decisions
+
+**1. Talk to the aggregated allocation API over REST, not agones-allocator gRPC.**
+
+Agones exposes two ways to allocate:
+
+| Option | Why not / why |
+|--------|---------------|
+| `agones-allocator` gRPC service | Separate deployment, requires client TLS certs + a `Secret` per caller and a LoadBalancer/NodePort. Its reason to exist is *multi-cluster* allocation. Our gateway is one hop from the same cluster's API server. |
+| Aggregated API `POST /apis/allocation.agones.dev/v1/namespaces/{ns}/gameserverallocations` | **Chosen.** Same auth as everything else (ServiceAccount token in-cluster, kubeconfig out of cluster), no extra component, no cert plumbing. Identical semantics — it is the API `kubectl create -f allocation.yaml` hits. |
+
+Multi-cluster allocation, when we get there, is an additive change: the same
+request body is what `agones-allocator` proxies.
+
+**2. Thin hand-rolled types instead of the Agones clientset.**
+
+`agones.dev/agones/pkg/apis/allocation/v1` transitively drags `viper`, `hcl`,
+`fsnotify` and friends into the gateway binary (via `agones/pkg/util/runtime`),
+for a payload that is ~6 fields. The gateway therefore models the request and the
+`status` it reads (`state`, `gameServerName`, `address`, `ports[]`) locally in
+`registry/agones_allocator.go` and JSON-decodes leniently — unknown fields are
+ignored, so Agones can add fields without breaking us. `k8s.io/client-go` is still
+a real dependency: it owns credential resolution (in-cluster SA token, kubeconfig
+including exec plugins, CA bundle, proxy) — precisely the part worth *not*
+hand-rolling. `rest.HTTPClientFor(cfg)` gives an `*http.Client` already carrying
+that auth, so the allocator is one `http.Post` away.
+
+**3. Fleet selection by label, kind → fleet mapping in config.**
+
+The request selects `agones.dev/fleet=<fleet>`, with `KindMap`/`KindDungeon`
+mapped to `--allocator-fleet-map` / `--allocator-fleet-dungeon`
+(`map-servers-dev` / `dungeon-servers-dev` by default, matching
+`deploy/agones/*-dev.yaml`). `AgonesAllocator` satisfies both the existing
+`Allocator` (map path, used by `RegistryService`) and the richer `KindAllocator`
+(the seam the dungeon transfer will use).
+
+**4. Server-id contract: GameServer name == pod name == registered server id.**
+
+An allocation answers with a `gameServerName`; the gateway signs it into the join
+token as `sid`. For the game server to accept that token it must have registered
+under the same id — but pods derived their id as `gs-<mode>-<map_id>`, which is
+identical for every replica of a fleet. Fix (surgical, in `gameserver/cmd`):
+`resolveServerID` prefers `GAMESERVER_ID`, then `POD_NAME`, then the old default,
+and the four fleet manifests inject `POD_NAME` via the downward API
+(`fieldRef: metadata.name`). Standalone `go run` behaviour is unchanged.
+
+**5. Opt-in, fail-fast wiring.**
+
+`--allocator=none|agones` (env `ALLOCATOR`), default `none` — no Kubernetes
+config, no behaviour change, CI and integration tests untouched. With `agones`,
+a bad kubeconfig is fatal at boot rather than a surprise on the first player.
+
+### Consequences
+
+- An unserved map now costs one API round trip (10s timeout) instead of an error.
+- `ErrNoCapacity` (`state: UnAllocated`) is distinguishable from transport/API
+  failures via `errors.Is`, so autoscaler-backoff logic can be added later.
+- The gateway needs RBAC to `create gameserverallocations` in its namespace when
+  it runs in-cluster (out-of-cluster it inherits the kubeconfig user).
+- Allocated servers are registered in the gateway's registry with the returned
+  name/address, so a second player entering the same map reuses it instead of
+  allocating again.
+
+### Still open
+
+- Dungeon allocation is wired at the allocator (`KindDungeon`) but
+  `transfer.StubDungeonTransfer` still does not call it.
+- No `Deallocate` / shutdown path: reclaiming is left to Agones idle handling.
+- The gateway does not read `status.state` changes afterwards — a GameServer that
+  dies after allocation is only noticed via the registry heartbeat TTL.
+
 ## 2026-08-04 — Selectable store backends, session lifecycle, event relay wiring
 
 ### Context

@@ -25,11 +25,22 @@ const (
 	backendRedis  = "redis"
 )
 
+// Allocator modes: how the gateway reacts to a map no live server serves.
+const (
+	allocatorNone   = "none"
+	allocatorAgones = "agones"
+)
+
 func main() {
 	addr := flag.String("addr", "", "Listen address (overrides GATEWAY_ADDR)")
 	backend := flag.String("backend", "", "Store backend: memory or redis (default: redis when REDIS_ADDR is set, else memory)")
 	transportKind := flag.String("transport", "", "Realtime transport: tcp or kcp (overrides GATEWAY_TRANSPORT, default tcp)")
 	instanceID := flag.String("instance-id", "", "Gateway instance id, used as the event-stream consumer name (default: hostname)")
+	allocatorMode := flag.String("allocator", "", "Game server allocator: none or agones (overrides ALLOCATOR; default none)")
+	allocNamespace := flag.String("allocator-namespace", "", "Kubernetes namespace holding the Agones fleets (overrides ALLOCATOR_NAMESPACE)")
+	allocFleetMap := flag.String("allocator-fleet-map", "", "Agones Fleet for map servers (overrides ALLOCATOR_FLEET_MAP)")
+	allocFleetDungeon := flag.String("allocator-fleet-dungeon", "", "Agones Fleet for dungeon servers (overrides ALLOCATOR_FLEET_DUNGEON)")
+	allocKubeconfig := flag.String("allocator-kubeconfig", "", "Kubeconfig path for the allocator (default: in-cluster config, then $KUBECONFIG, then ~/.kube/config)")
 	flag.Parse()
 
 	cfg := config.Load()
@@ -88,9 +99,37 @@ func main() {
 	}
 
 	sessions := session.NewSessionManager(sessionStore)
-	// Allocator is still a stub (Agones allocation not implemented); the registry
-	// falls back to an error when no live server has capacity.
+
+	// Allocator: with --allocator=agones the registry asks the Agones allocation
+	// API for a GameServer whenever no live server can serve a map. Without it
+	// an unserved map is simply an error (the pre-Agones behaviour).
 	reg := registry.NewRegistryService(serverRegistry)
+	allocMode, err := resolveAllocator(*allocatorMode)
+	if err != nil {
+		log.Error("invalid allocator", "err", err)
+		os.Exit(1)
+	}
+	if allocMode == allocatorAgones {
+		agonesCfg := registry.AgonesConfig{
+			Namespace:    firstNonEmpty(*allocNamespace, os.Getenv("ALLOCATOR_NAMESPACE"), registry.DefaultNamespace),
+			FleetMap:     firstNonEmpty(*allocFleetMap, os.Getenv("ALLOCATOR_FLEET_MAP"), registry.DefaultFleetMap),
+			FleetDungeon: firstNonEmpty(*allocFleetDungeon, os.Getenv("ALLOCATOR_FLEET_DUNGEON"), registry.DefaultFleetDungeon),
+			Kubeconfig:   firstNonEmpty(*allocKubeconfig, os.Getenv("ALLOCATOR_KUBECONFIG")),
+		}
+		alloc, aerr := registry.NewAgonesAllocator(agonesCfg)
+		if aerr != nil {
+			log.Error("agones allocator init failed", "err", aerr)
+			os.Exit(1)
+		}
+		reg = registry.NewRegistryServiceWithAllocator(serverRegistry, alloc)
+		log.Info("agones allocator enabled",
+			"namespace", agonesCfg.Namespace,
+			"fleet_map", agonesCfg.FleetMap,
+			"fleet_dungeon", agonesCfg.FleetDungeon,
+		)
+	} else {
+		log.Info("allocator disabled (unserved maps return an error)")
+	}
 
 	// The relay's sink is the gateway and the gateway owns the relay, so the sink
 	// is a closure: it only fires after Run starts the relay, when gw is set.
@@ -145,4 +184,30 @@ func resolveBackend(flagValue string) (string, error) {
 		return "", fmt.Errorf("unknown backend %q (want %q or %q)", mode, backendMemory, backendRedis)
 	}
 	return mode, nil
+}
+
+// resolveAllocator picks the allocator mode from the --allocator flag or the
+// ALLOCATOR env var, defaulting to none.
+func resolveAllocator(flagValue string) (string, error) {
+	mode := flagValue
+	if mode == "" {
+		mode = os.Getenv("ALLOCATOR")
+	}
+	if mode == "" {
+		mode = allocatorNone
+	}
+	if mode != allocatorNone && mode != allocatorAgones {
+		return "", fmt.Errorf("unknown allocator %q (want %q or %q)", mode, allocatorNone, allocatorAgones)
+	}
+	return mode, nil
+}
+
+// firstNonEmpty returns the first non-empty string, or "" when all are empty.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

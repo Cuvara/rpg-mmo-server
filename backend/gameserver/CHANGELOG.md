@@ -14,6 +14,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`storage.ServerInfo.Transport`), which the gateway forwards to clients in
   `EnterWorldResponse.Transport`.
 
+### Changed
+- Server-id derivation (`cmd/gameserver`): `--server-id` now falls back to
+  `GAMESERVER_ID`, then `POD_NAME`, before the legacy `gs-<mode>-<map_id>`
+  default. The old default is identical for every replica of an Agones fleet,
+  which broke the gateway's join-token `sid` contract — an allocated GameServer
+  must register under its GameServer (pod) name. Standalone runs are unchanged.
 
 ### Fixed
 - Cross-server event stream name mismatch: gameserver published to
