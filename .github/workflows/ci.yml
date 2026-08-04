@@ -1,89 +1,124 @@
 name: CI — Backend
 
+# Validation only — never deploys. Every job is one call of the reusable
+# per-module workflow (.github/workflows/_go-module.yml), so adding a module is
+# a single additive block here.
+#
+# Graph:
+#   test-shared
+#     ├─► test-gameserver ─┐
+#     ├─► test-gateway ────┤
+#     ├─► test-nakama ─────┤
+#     └─► test-smoketest ──┘
+#               └─► test-integration ─► build-{gateway,gameserver,smoketest}
+
 on:
   push:
     branches: [main, master]
-    paths: ['backend/**']
+    paths: ['backend/**', '.github/workflows/**']
   pull_request:
     branches: [main, master]
-    paths: ['backend/**']
+    paths: ['backend/**', '.github/workflows/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  # ------------------------------------------------------------- module tests
   test-shared:
-    name: Test shared module
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend/shared
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-      - run: go test ./... -v -race -timeout 60s
-      - run: go vet ./...
+    name: Test shared
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/shared
+      test_flags: '-v -race -timeout 60s'
 
   test-gameserver:
-    name: Test gameserver module
+    name: Test gameserver
     needs: test-shared
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend/gameserver
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-      - run: go test ./... -v -race -timeout 60s
-      - run: go vet ./...
-      - run: go build ./cmd/gameserver/
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/gameserver
+      test_flags: '-v -race -timeout 60s'
+      run_build: go build ./cmd/gameserver/
 
   test-gateway:
-    name: Test gateway module
+    name: Test gateway
     needs: test-shared
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend/gateway
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-      - run: go test ./... -v -race -timeout 60s
-      - run: go vet ./...
-      - run: go build ./cmd/gateway/
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/gateway
+      test_flags: '-v -race -timeout 60s'
+      run_build: go build ./cmd/gateway/
+
+  test-nakama:
+    name: Test nakama
+    needs: test-shared
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/nakama
+      test_flags: '-v -race -timeout 60s'
+      # The shipped artifact is -buildmode=plugin (built in Docker by cd.yml);
+      # here we only prove the packages compile.
+      run_build: go build -o /dev/null ./...
+
+  test-smoketest:
+    name: Test smoketest
+    needs: test-shared
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/smoketest
+      # No external deps -> no go.sum; key the module cache on go.mod instead.
+      cache_dependency_path: backend/smoketest/go.mod
+      test_flags: '-v -race -timeout 60s'
+      run_build: go build ./cmd/smoketest/
 
   test-integration:
     name: Integration tests
-    needs: [test-gameserver, test-gateway]
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend/integration_test
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-      - run: go test -v -race -timeout 60s
+    needs: [test-gameserver, test-gateway, test-nakama, test-smoketest]
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/integration_test
+      test_flags: '-v -race -timeout 60s'
 
-  build-all:
-    name: Build all binaries
+  # ----------------------------------------------------------- build binaries
+  build-gateway:
+    name: Build gateway
     needs: test-integration
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-      - name: Build gameserver
-        run: cd backend/gameserver && go build -o ../../bin/gameserver ./cmd/gameserver/
-      - name: Build gateway
-        run: cd backend/gateway && go build -o ../../bin/gateway ./cmd/gateway/
-      - name: Upload binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: backend-binaries
-          path: bin/
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/gateway
+      run_tests: false
+      run_build: go build -o ../../bin/gateway ./cmd/gateway/
+      artifact_name: bin-gateway
+      artifact_path: bin/gateway
+      artifact_retention_days: 7
+
+  build-gameserver:
+    name: Build gameserver
+    needs: test-integration
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/gameserver
+      run_tests: false
+      run_build: go build -o ../../bin/gameserver ./cmd/gameserver/
+      artifact_name: bin-gameserver
+      artifact_path: bin/gameserver
+      artifact_retention_days: 7
+
+  build-smoketest:
+    name: Build smoketest
+    needs: test-integration
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/smoketest
+      cache_dependency_path: backend/smoketest/go.mod
+      run_tests: false
+      run_build: go build -o ../../bin/smoketest ./cmd/smoketest/
+      artifact_name: bin-smoketest
+      artifact_path: bin/smoketest
+      artifact_retention_days: 7

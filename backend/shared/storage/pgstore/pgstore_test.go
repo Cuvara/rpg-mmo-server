@@ -117,9 +117,22 @@ func newTestStore(t *testing.T) (*PostgresPlayerStore, context.Context) {
 	dsn := startPostgres(t)
 	ctx := context.Background()
 
-	store, err := NewPlayerStore(ctx, dsn)
-	if err != nil {
-		t.Fatalf("NewPlayerStore() error: %v", err)
+	// The postgres entrypoint runs initdb against a temporary server that
+	// listens on the unix socket only, then restarts it for real. `pg_isready`
+	// (run inside the container) therefore reports "ready" while TCP clients
+	// still get their connection reset. Retry until the real server answers.
+	var store *PostgresPlayerStore
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		var err error
+		store, err = NewPlayerStore(ctx, dsn)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("NewPlayerStore() error: %v", err)
+		}
+		time.Sleep(time.Second)
 	}
 	t.Cleanup(store.Close)
 
