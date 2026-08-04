@@ -104,6 +104,19 @@ func (w *World) DrainInputs() []PendingInput {
 	return inputs
 }
 
+// LastInputTick returns the last acknowledged client input tick for a player,
+// or 0 if the entity is unknown. Exposed for input acknowledgement until the
+// wire protocol carries an ack field (see docs/DESIGN.md).
+func (w *World) LastInputTick(id string) uint64 {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	e := w.entities[id]
+	if e == nil {
+		return 0
+	}
+	return e.LastInputTick
+}
+
 // EntityCount returns the number of entities in the world.
 func (w *World) EntityCount() int {
 	w.mu.RLock()

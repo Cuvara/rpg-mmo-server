@@ -11,10 +11,15 @@ import (
 
 const attackCooldown = 500 * time.Millisecond
 
+// DeathFunc is called when an entity dies. killer may be nil (environment kill).
+// It runs inside the tick loop, so implementations must not block.
+type DeathFunc func(victim, killer *game.Entity)
+
 // Handler processes incoming input messages against the world.
 type Handler struct {
-	world  *game.World
-	logger *slog.Logger
+	world   *game.World
+	logger  *slog.Logger
+	onDeath DeathFunc
 }
 
 // NewHandler creates an input handler.
@@ -22,11 +27,23 @@ func NewHandler(world *game.World, logger *slog.Logger) *Handler {
 	return &Handler{world: world, logger: logger}
 }
 
+// SetDeathHandler registers a callback invoked whenever an entity dies as a
+// result of processed input. Passing nil disables the hook.
+func (h *Handler) SetDeathHandler(fn DeathFunc) {
+	h.onDeath = fn
+}
+
 // ProcessInput validates and applies a player's input to the world.
 func (h *Handler) ProcessInput(userID string, input messages.InputMessage) {
 	entity := h.world.GetEntity(userID)
 	if entity == nil || entity.Dead {
 		return
+	}
+
+	// Track the client tick for acknowledgement. Monotonic: stale/replayed
+	// frames never lower the acked tick.
+	if input.Tick > entity.LastInputTick {
+		entity.LastInputTick = input.Tick
 	}
 
 	// Movement
@@ -52,6 +69,8 @@ func (h *Handler) ProcessInput(userID string, input messages.InputMessage) {
 		entity.CooldownUntil = now.Add(attackCooldown)
 		h.logger.Debug("attack hit", "attacker", userID, "target", input.AttackTargetID, "dmg", dmg, "targetHP", target.HP)
 
-		combat.HandleDeath(target)
+		if combat.HandleDeath(target) && h.onDeath != nil {
+			h.onDeath(target, entity)
+		}
 	}
 }

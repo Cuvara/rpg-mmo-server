@@ -10,6 +10,7 @@ import (
 	"github.com/duycuong/rpg-mmo/shared/config"
 	"github.com/duycuong/rpg-mmo/shared/logger"
 	"github.com/duycuong/rpg-mmo/shared/storage"
+	"github.com/duycuong/rpg-mmo/shared/storage/redisstore"
 	"github.com/duycuong/rpg-mmo/gameserver/agones"
 	"github.com/duycuong/rpg-mmo/gameserver/server"
 )
@@ -21,6 +22,8 @@ func main() {
 	serverID := flag.String("server-id", "", "Unique server ID")
 	capacity := flag.Int("capacity", 100, "Max player capacity")
 	useAgones := flag.Bool("agones", false, "Enable Agones SDK integration")
+	useRedis := flag.Bool("redis", false, "Use Redis-backed server registry and event stream (default: in-memory)")
+	redisAddr := flag.String("redis-addr", "", "Redis address (overrides REDIS_ADDR)")
 	flag.Parse()
 
 	cfg := config.Load()
@@ -31,6 +34,9 @@ func main() {
 	}
 	if *serverID == "" {
 		*serverID = fmt.Sprintf("gs-%s-%s", *mode, *mapID)
+	}
+	if *redisAddr != "" {
+		cfg.RedisAddr = *redisAddr
 	}
 
 	// Initialize Agones SDK
@@ -56,10 +62,28 @@ func main() {
 		"agones", *useAgones,
 	)
 
-	// Use in-memory stores for MVP
+	// Player state is still in-memory (PostgreSQL swap pending).
 	playerStore := storage.NewMemoryPlayerStore()
-	registry := storage.NewMemoryServerRegistry()
-	events := storage.NewMemoryEventStream()
+
+	// Registry + event stream: in-memory by default, Redis with --redis so that
+	// gateway and game servers share one registry across processes.
+	var (
+		registry storage.ServerRegistry
+		events   storage.EventStream
+	)
+	if *useRedis {
+		log.Info("using redis-backed registry and event stream", "addr", cfg.RedisAddr)
+		redisRegistry := redisstore.NewServerRegistry(cfg.RedisAddr, cfg.RedisPassword)
+		redisStream := redisstore.NewEventStream(cfg.RedisAddr, cfg.RedisPassword, "gameserver", *serverID)
+		defer redisRegistry.Close()
+		defer redisStream.Close()
+		registry = redisRegistry
+		events = redisStream
+	} else {
+		log.Info("using in-memory registry and event stream")
+		registry = storage.NewMemoryServerRegistry()
+		events = storage.NewMemoryEventStream()
+	}
 
 	srv := server.New(server.ServerOpts{
 		Config:      cfg,
@@ -69,6 +93,7 @@ func main() {
 		AgonesSDK:   agonesSDK,
 		ServerID:    *serverID,
 		MapID:       *mapID,
+		Mode:        *mode,
 		Capacity:    *capacity,
 		Logger:      log,
 	})
