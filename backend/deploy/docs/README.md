@@ -12,7 +12,8 @@ All open-source, $0 license: Docker, k3s, Agones, PostgreSQL, Redis, Grafana, Pr
 | Build automation | `scripts/build-all.sh` (repo root) | ✅ Usable |
 | CD pipeline | `.github/workflows/cd.yml`, `scripts/deploy-local.sh` | ✅ Authored (needs a live runner) |
 | Gateway / gameserver images | `docker/Dockerfile.gateway`, `docker/Dockerfile.gameserver` | ✅ Built + smoke-tested |
-| k3s setup scripts, k8s base/overlays | — | Planned |
+| k3s / Agones dev bootstrap | `k3s/setup-dev.sh`, `k3s/teardown-dev.sh`, `k3s/lib.sh`, `k3s/namespaces.yaml`, `k3s/validate-manifests.py` | ✅ Authored + manifests schema-validated (needs a live cluster) |
+| k8s base/overlays (Nakama, Gateway, Redis, Postgres) | — | Planned |
 | DB init + backup scripts, prod Redis config (Sentinel, eviction) | — | Planned |
 | Monitoring (Prometheus/Grafana) | — | Planned |
 
@@ -20,6 +21,8 @@ Docs:
 - `RUNBOOK-local-dev.md` — start/stop/debug/reset the local stack, verification steps, REDIS_ADDR wiring.
 - `CICD.md` — `build-all.sh` / `deploy-local.sh` usage, `cd.yml` job matrix, self-hosted
   runner registration + labels, Environment secrets, branch strategy, rollback.
+- `K3S.md` — dev cluster bootstrap (`k3s/setup-dev.sh`), Agones install + fleets,
+  cluster options on WSL2, offline manifest validation, graduation to a real k3s VPS.
 
 ## Local dev backing stack
 

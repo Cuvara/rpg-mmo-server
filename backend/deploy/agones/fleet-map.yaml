@@ -1,19 +1,41 @@
+# Production map-server fleet.
+#
+# For a local cluster use fleet-map-dev.yaml instead (local image, literal env,
+# no external dependencies) — k3s/setup-dev.sh applies that one.
+#
+# Config comes from objects that live in the same namespace:
+#   Secret    rpg-realtime-secrets  key jwt-secret   -> JWT_SECRET
+#   ConfigMap gameserver-config     keys redis-addr, game-db-url
+# Both refs are `optional: true`, so the fleet still starts (with the binary's
+# own defaults) before those objects exist. Drop `optional` once the real
+# secret/configmap are managed by the deploy pipeline.
 apiVersion: agones.dev/v1
 kind: Fleet
 metadata:
   name: map-servers
   namespace: rpg-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    rpg-mmo/role: map
 spec:
   replicas: 2
   scheduling: Packed
   template:
+    metadata:
+      labels:
+        rpg-mmo/role: map
     spec:
+      # Dynamic (the default): Agones picks the host port and reports it on
+      # GameServer.status.ports; the container always binds :9000.
       ports:
         - name: game
           containerPort: 9000
           protocol: TCP  # Switch to UDP for KCP in production
+          portPolicy: Dynamic
+      # Health is SDK-driven (gameserver/agones/sdk.go StartHealthLoop calls
+      # sdk.Health()). The runtime image is distroless, so no exec/HTTP probe.
       health:
-        initialDelaySeconds: 5
+        initialDelaySeconds: 10
         periodSeconds: 5
         failureThreshold: 3
       template:
@@ -24,8 +46,31 @@ spec:
               args:
                 - "--mode=map"
                 - "--map-id=map_01"
+                # Required: without --agones the binary uses the noop SDK, never
+                # calls Ready(), and Agones tears the pod down.
                 - "--agones"
                 - "--addr=:9000"
+                # Shared registry + event stream across gateway and gameservers.
+                - "--redis"
+              env:
+                - name: JWT_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: rpg-realtime-secrets
+                      key: jwt-secret
+                      optional: true
+                - name: REDIS_ADDR
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: redis-addr
+                      optional: true
+                - name: GAME_DB_URL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: game-db-url
+                      optional: true
               resources:
                 requests:
                   memory: "64Mi"

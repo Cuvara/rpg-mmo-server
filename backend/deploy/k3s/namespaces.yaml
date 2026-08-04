@@ -1,0 +1,31 @@
+# Namespace layout (deploy/CLAUDE.md §2).
+#
+#   rpg-realtime — Gateway + Agones Fleets (map / dungeon game servers)
+#   rpg-meta     — Nakama
+#   rpg-data     — PostgreSQL (meta + gamestate), Redis
+#
+# Only rpg-realtime is exercised by the dev bootstrap today; the other two are
+# created up front so future manifests land in a stable layout.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rpg-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    rpg-mmo/tier: realtime
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rpg-meta
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    rpg-mmo/tier: meta
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rpg-data
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    rpg-mmo/tier: data

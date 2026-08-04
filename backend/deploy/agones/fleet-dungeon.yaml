@@ -1,19 +1,30 @@
+# Production dungeon-server fleet. See fleet-map.yaml for the config-source
+# contract (Secret rpg-realtime-secrets / ConfigMap gameserver-config).
+#
+# For a local cluster use fleet-dungeon-dev.yaml instead.
 apiVersion: agones.dev/v1
 kind: Fleet
 metadata:
   name: dungeon-servers
   namespace: rpg-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    rpg-mmo/role: dungeon
 spec:
   replicas: 0  # Scale from 0 — allocate on demand
   scheduling: Packed
   template:
+    metadata:
+      labels:
+        rpg-mmo/role: dungeon
     spec:
       ports:
         - name: game
           containerPort: 9000
           protocol: TCP
+          portPolicy: Dynamic
       health:
-        initialDelaySeconds: 5
+        initialDelaySeconds: 10
         periodSeconds: 5
         failureThreshold: 3
       template:
@@ -25,6 +36,26 @@ spec:
                 - "--mode=dungeon"
                 - "--agones"
                 - "--addr=:9000"
+                - "--redis"
+              env:
+                - name: JWT_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: rpg-realtime-secrets
+                      key: jwt-secret
+                      optional: true
+                - name: REDIS_ADDR
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: redis-addr
+                      optional: true
+                - name: GAME_DB_URL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: game-db-url
+                      optional: true
               resources:
                 requests:
                   memory: "64Mi"

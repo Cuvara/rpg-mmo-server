@@ -1,5 +1,15 @@
-# Example GameServerAllocation — used by Gateway to allocate a server
-# Apply via: kubectl create -f allocation.yaml
+# Example GameServerAllocation — used by Gateway to allocate a map server.
+#
+#   kubectl create -f allocation.yaml
+#
+# `kubectl apply` does NOT work: GameServerAllocation is a create-only virtual
+# resource served by the agones-allocator aggregated API (not a CRD, so it also
+# has no schema for k3s/validate-manifests.py to check). The RESPONSE object
+# carries status.state (Allocated/UnAllocated), the GameServer name, and the
+# address/port to hand back to the client.
+#
+# Manual stand-in for what gateway/registry will eventually call through the
+# Agones allocation API. Dev equivalent: allocation-dev.yaml.
 apiVersion: allocation.agones.dev/v1
 kind: GameServerAllocation
 metadata:
