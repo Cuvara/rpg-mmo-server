@@ -5,6 +5,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- CD post-deploy smoke phase: `bin/smoketest` (new `backend/smoketest` module)
+  is staged into the deployment bundle, installed to `$RPG_DEPLOY_DIR/bin`, and
+  run after the healthcheck with env sourced from `$RPG_DEPLOY_DIR/deploy/.env`.
+  It exercises the full flow (Nakama health → device auth → `gateway_token` RPC
+  → gateway auth/enter-world → game server join → input/snapshot loop → clean
+  disconnect) and fails the deploy on any broken step (`SMOKE=FAIL`).
+
 ### Fixed
 - Nakama refuses to start when `session.encryption_key` equals
   `session.refresh_encryption_key` — compose now derives the refresh key as

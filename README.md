@@ -145,6 +145,8 @@ All open-source stack: Nakama, k3s, Agones, PostgreSQL, Redis — $0 license.
 
 GitHub Actions pipeline: test shared → test gameserver + gateway (parallel) → integration test → build binaries.
 
+CD deploys run a post-deploy smoke test (`backend/smoketest`) that exercises the full login → gameplay flow against the freshly deployed stack; any broken step fails the deploy.
+
 ## Project Structure
 
 ```
