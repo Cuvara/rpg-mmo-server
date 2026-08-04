@@ -132,8 +132,12 @@ start_one() {
 	[ -x "$exe" ] || fail "missing or non-executable binary: $exe"
 	local log="$LOG_DIR/$name.log"
 	info "starting $name: $exe $args  (log: $log)"
+	# setsid + cleared RUNNER_TRACKING_ID: when invoked from a GitHub Actions
+	# self-hosted runner, the runner's post-job cleanup kills every process it
+	# can trace to the job (tracked via RUNNER_TRACKING_ID). Detach the session
+	# and drop the marker so deployed services outlive the deploy job.
 	# shellcheck disable=SC2086
-	nohup "$exe" $args >>"$log" 2>&1 &
+	RUNNER_TRACKING_ID= setsid nohup "$exe" $args >>"$log" 2>&1 &
 	echo $! >"$(pidfile "$name")"
 	sleep 1
 	is_running "$name" || fail "$name exited immediately — see $log"
