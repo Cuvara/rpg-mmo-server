@@ -40,6 +40,7 @@ func main() {
 	allocNamespace := flag.String("allocator-namespace", "", "Kubernetes namespace holding the Agones fleets (overrides ALLOCATOR_NAMESPACE)")
 	allocFleetMap := flag.String("allocator-fleet-map", "", "Agones Fleet for map servers (overrides ALLOCATOR_FLEET_MAP)")
 	allocFleetDungeon := flag.String("allocator-fleet-dungeon", "", "Agones Fleet for dungeon servers (overrides ALLOCATOR_FLEET_DUNGEON)")
+	allocTransport := flag.String("allocator-transport", "", "Realtime transport the allocated fleet's game servers listen with: tcp or kcp (overrides ALLOCATOR_TRANSPORT; defaults to --transport)")
 	allocKubeconfig := flag.String("allocator-kubeconfig", "", "Kubeconfig path for the allocator (default: in-cluster config, then $KUBECONFIG, then ~/.kube/config)")
 	flag.Parse()
 
@@ -115,6 +116,15 @@ func main() {
 			FleetMap:     firstNonEmpty(*allocFleetMap, os.Getenv("ALLOCATOR_FLEET_MAP"), registry.DefaultFleetMap),
 			FleetDungeon: firstNonEmpty(*allocFleetDungeon, os.Getenv("ALLOCATOR_FLEET_DUNGEON"), registry.DefaultFleetDungeon),
 			Kubeconfig:   firstNonEmpty(*allocKubeconfig, os.Getenv("ALLOCATOR_KUBECONFIG")),
+			// Allocated servers are announced to clients before the pod's own
+			// registration lands, so the allocator must know what the fleet
+			// speaks. Falls back to the gateway's own transport, which is the
+			// right guess for a uniform rollout.
+			Transport: firstNonEmpty(*allocTransport, os.Getenv("ALLOCATOR_TRANSPORT"), listenTransport),
+		}
+		if terr := transport.Validate(agonesCfg.Transport); terr != nil {
+			log.Error("invalid allocator transport", "err", terr)
+			os.Exit(1)
 		}
 		alloc, aerr := registry.NewAgonesAllocator(agonesCfg)
 		if aerr != nil {
@@ -126,6 +136,7 @@ func main() {
 			"namespace", agonesCfg.Namespace,
 			"fleet_map", agonesCfg.FleetMap,
 			"fleet_dungeon", agonesCfg.FleetDungeon,
+			"transport", agonesCfg.Transport,
 		)
 	} else {
 		log.Info("allocator disabled (unserved maps return an error)")

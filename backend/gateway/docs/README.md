@@ -55,6 +55,7 @@ go run ./cmd/gateway/ --backend=redis --instance-id=gw-1
 | `--allocator-namespace` | `rpg-realtime` | Namespace holding the Agones fleets |
 | `--allocator-fleet-map` | `map-servers-dev` | Fleet used for map allocations |
 | `--allocator-fleet-dungeon` | `dungeon-servers-dev` | Fleet used for dungeon allocations |
+| `--allocator-transport` | `ALLOCATOR_TRANSPORT` → `--transport` | Transport the allocated fleet's game servers listen with. Must match the fleet manifest's `--transport` argument |
 | `--allocator-kubeconfig` | in-cluster → `$KUBECONFIG` → `~/.kube/config` | Credential source for the allocation API |
 
 ### Agones allocator

@@ -13,6 +13,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   registry entry, so the client knows which transport to dial for hop 2.
   `transfer.AssignResult` gained the matching `Transport` field. Empty means
   `tcp` — servers registered before the field existed keep working.
+- `--allocator-transport` / `ALLOCATOR_TRANSPORT` (defaults to `--transport`):
+  the transport stamped onto a ServerInfo synthesized by the Agones allocator,
+  since the allocation API reports no transport and the pod has not registered
+  itself yet. Must match the fleet manifest's `--transport` argument.
 - Real Agones allocator (`registry.AgonesAllocator`): `POST` to the aggregated
   `allocation.agones.dev/v1` `GameServerAllocation` endpoint using `client-go`
   credential resolution (in-cluster ServiceAccount, else `--allocator-kubeconfig`

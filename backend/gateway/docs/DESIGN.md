@@ -182,3 +182,14 @@ Why the gateway does not simply mirror its own transport onto the response: map
 servers and dungeon servers can be rolled to KCP independently of the gateway
 fleet (they are separate Agones fleets), so a per-server value is the only one
 that stays correct during a partial rollout.
+
+**Agones allocation is the one case the registry cannot answer.** When
+`FindServer` falls through to the allocator, the gateway synthesizes the
+`ServerInfo` itself from the allocation response and registers it — the pod has
+not registered yet, and the allocation API says nothing about transports. So
+`AgonesConfig.Transport` (`--allocator-transport` / `ALLOCATOR_TRANSPORT`,
+defaulting to the gateway's own `--transport`) is stamped onto the allocated
+entry. It **must match the fleet manifest's** `--transport` argument; a mismatch
+sends the first client of a freshly allocated pod to the wrong transport, until
+the pod's own registration overwrites the entry. The default (inherit the
+gateway's transport) is correct for a uniform rollout, which is the normal case.
