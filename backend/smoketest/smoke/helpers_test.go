@@ -58,6 +58,9 @@ func TestLoadConfig(t *testing.T) {
 				if c.MapID != DefaultMapID {
 					t.Errorf("MapID = %q", c.MapID)
 				}
+				if c.Transport != DefaultTransport {
+					t.Errorf("Transport = %q, want %q", c.Transport, DefaultTransport)
+				}
 				if c.Timeout != DefaultTimeout {
 					t.Errorf("Timeout = %s", c.Timeout)
 				}
@@ -124,6 +127,44 @@ func TestLoadConfig(t *testing.T) {
 			}
 			if !tt.wantErr && tt.check != nil {
 				tt.check(t, c)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_Transport(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     map[string]string
+		args    []string
+		want    string
+		wantErr bool
+	}{
+		{name: "default is tcp", env: map[string]string{"JWT_SECRET": "s"}, want: "tcp"},
+		{name: "env kcp", env: map[string]string{"JWT_SECRET": "s", "TRANSPORT": "kcp"}, want: "kcp"},
+		{
+			name: "flag overrides env",
+			env:  map[string]string{"JWT_SECRET": "s", "TRANSPORT": "tcp"},
+			args: []string{"--transport=kcp"},
+			want: "kcp",
+		},
+		{
+			name:    "unknown transport rejected",
+			env:     map[string]string{"JWT_SECRET": "s", "TRANSPORT": "quic"},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := LoadConfig(fakeEnv(tt.env), tt.args)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("LoadConfig() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if cfg.Transport != tt.want {
+				t.Errorf("Transport = %q, want %q", cfg.Transport, tt.want)
 			}
 		})
 	}

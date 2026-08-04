@@ -16,6 +16,7 @@ import (
 	"github.com/duycuong/rpg-mmo/shared/logger"
 	"github.com/duycuong/rpg-mmo/shared/storage"
 	"github.com/duycuong/rpg-mmo/shared/storage/redisstore"
+	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
 // Backend selects which storage implementations the gateway runs against.
@@ -33,11 +34,13 @@ const (
 func main() {
 	addr := flag.String("addr", "", "Listen address (overrides GATEWAY_ADDR)")
 	backend := flag.String("backend", "", "Store backend: memory or redis (default: redis when REDIS_ADDR is set, else memory)")
+	transportKind := flag.String("transport", "", "Realtime transport: tcp or kcp (overrides GATEWAY_TRANSPORT, default tcp)")
 	instanceID := flag.String("instance-id", "", "Gateway instance id, used as the event-stream consumer name (default: hostname)")
 	allocatorMode := flag.String("allocator", "", "Game server allocator: none or agones (overrides ALLOCATOR; default none)")
 	allocNamespace := flag.String("allocator-namespace", "", "Kubernetes namespace holding the Agones fleets (overrides ALLOCATOR_NAMESPACE)")
 	allocFleetMap := flag.String("allocator-fleet-map", "", "Agones Fleet for map servers (overrides ALLOCATOR_FLEET_MAP)")
 	allocFleetDungeon := flag.String("allocator-fleet-dungeon", "", "Agones Fleet for dungeon servers (overrides ALLOCATOR_FLEET_DUNGEON)")
+	allocTransport := flag.String("allocator-transport", "", "Realtime transport the allocated fleet's game servers listen with: tcp or kcp (overrides ALLOCATOR_TRANSPORT; defaults to --transport)")
 	allocKubeconfig := flag.String("allocator-kubeconfig", "", "Kubeconfig path for the allocator (default: in-cluster config, then $KUBECONFIG, then ~/.kube/config)")
 	flag.Parse()
 
@@ -47,6 +50,15 @@ func main() {
 	listenAddr := cfg.GatewayAddr
 	if *addr != "" {
 		listenAddr = *addr
+	}
+
+	listenTransport := cfg.GatewayTransport
+	if *transportKind != "" {
+		listenTransport = *transportKind
+	}
+	if err := transport.Validate(listenTransport); err != nil {
+		log.Error("invalid transport", "err", err)
+		os.Exit(1)
 	}
 
 	mode, err := resolveBackend(*backend)
@@ -104,6 +116,15 @@ func main() {
 			FleetMap:     firstNonEmpty(*allocFleetMap, os.Getenv("ALLOCATOR_FLEET_MAP"), registry.DefaultFleetMap),
 			FleetDungeon: firstNonEmpty(*allocFleetDungeon, os.Getenv("ALLOCATOR_FLEET_DUNGEON"), registry.DefaultFleetDungeon),
 			Kubeconfig:   firstNonEmpty(*allocKubeconfig, os.Getenv("ALLOCATOR_KUBECONFIG")),
+			// Allocated servers are announced to clients before the pod's own
+			// registration lands, so the allocator must know what the fleet
+			// speaks. Falls back to the gateway's own transport, which is the
+			// right guess for a uniform rollout.
+			Transport: firstNonEmpty(*allocTransport, os.Getenv("ALLOCATOR_TRANSPORT"), listenTransport),
+		}
+		if terr := transport.Validate(agonesCfg.Transport); terr != nil {
+			log.Error("invalid allocator transport", "err", terr)
+			os.Exit(1)
 		}
 		alloc, aerr := registry.NewAgonesAllocator(agonesCfg)
 		if aerr != nil {
@@ -115,6 +136,7 @@ func main() {
 			"namespace", agonesCfg.Namespace,
 			"fleet_map", agonesCfg.FleetMap,
 			"fleet_dungeon", agonesCfg.FleetDungeon,
+			"transport", agonesCfg.Transport,
 		)
 	} else {
 		log.Info("allocator disabled (unserved maps return an error)")
@@ -125,7 +147,8 @@ func main() {
 	var gw *server.Gateway
 	relay := events.NewRelay(eventStream, events.DefaultStream,
 		events.SinkFunc(func(ev storage.Event) { gw.OnEvent(ev) }), log)
-	gw = server.New(sessions, reg, cfg.JWTSecret, log, server.WithEventRelay(relay))
+	gw = server.New(sessions, reg, cfg.JWTSecret, log,
+		server.WithEventRelay(relay), server.WithTransport(listenTransport))
 
 	// Graceful shutdown on SIGINT/SIGTERM.
 	sigCh := make(chan os.Signal, 1)
@@ -142,7 +165,10 @@ func main() {
 		}
 	}()
 
-	log.Info("starting gateway", slog.String("addr", listenAddr), slog.String("backend", mode))
+	log.Info("starting gateway",
+		slog.String("addr", listenAddr),
+		slog.String("backend", mode),
+		slog.String("transport", transport.Normalize(listenTransport)))
 	if err := gw.Run(listenAddr); err != nil {
 		log.Error("gateway exited with error", "err", err)
 		os.Exit(1)

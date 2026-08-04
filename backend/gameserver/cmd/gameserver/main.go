@@ -15,6 +15,8 @@ import (
 	"github.com/duycuong/rpg-mmo/shared/storage"
 	"github.com/duycuong/rpg-mmo/shared/storage/pgstore"
 	"github.com/duycuong/rpg-mmo/shared/storage/redisstore"
+	"github.com/duycuong/rpg-mmo/shared/transport"
+
 	"github.com/duycuong/rpg-mmo/gameserver/agones"
 	"github.com/duycuong/rpg-mmo/gameserver/server"
 )
@@ -24,6 +26,7 @@ func main() {
 	addr := flag.String("addr", "", "Listen address (overrides config)")
 	mapID := flag.String("map-id", "map_01", "Map ID to host")
 	serverID := flag.String("server-id", "", "Unique server ID")
+	transportKind := flag.String("transport", "", "Realtime transport: tcp or kcp (overrides GAMESERVER_TRANSPORT, default tcp)")
 	capacity := flag.Int("capacity", 100, "Max player capacity")
 	useAgones := flag.Bool("agones", false, "Enable Agones SDK integration")
 	useRedis := flag.Bool("redis", false, "Use Redis-backed server registry and event stream (default: in-memory)")
@@ -39,6 +42,13 @@ func main() {
 	}
 	if *serverID == "" {
 		*serverID = resolveServerID(*mode, *mapID)
+	}
+	if *transportKind != "" {
+		cfg.GameServerTransport = *transportKind
+	}
+	if err := transport.Validate(cfg.GameServerTransport); err != nil {
+		log.Error("invalid transport", "err", err)
+		os.Exit(1)
 	}
 	if *redisAddr != "" {
 		cfg.RedisAddr = *redisAddr
@@ -67,6 +77,7 @@ func main() {
 		"map_id", *mapID,
 		"server_id", *serverID,
 		"addr", cfg.GameServerAddr,
+		"transport", transport.Normalize(cfg.GameServerTransport),
 		"agones", *useAgones,
 	)
 
@@ -125,6 +136,7 @@ func main() {
 		ServerID:    *serverID,
 		MapID:       *mapID,
 		Mode:        *mode,
+		Transport:   cfg.GameServerTransport,
 		Capacity:    *capacity,
 		Logger:      log,
 	})
@@ -161,6 +173,8 @@ func resolveServerID(mode, mapID string) string {
 	return fmt.Sprintf("gs-%s-%s", mode, mapID)
 }
 
+// redactDSN strips the password from a postgres DSN so it is safe to log.
+// Falls back to a fully redacted string if the DSN cannot be parsed.
 func redactDSN(dsn string) string {
 	u, err := url.Parse(dsn)
 	if err != nil {

@@ -73,6 +73,7 @@ func (r *ServerRegistry) Register(ctx context.Context, info storage.ServerInfo) 
 		"server_id", info.ServerID,
 		"map_id", info.MapID,
 		"addr", info.Addr,
+		"transport", info.Transport,
 		"capacity", info.Capacity,
 		"player_count", info.PlayerCount,
 	)
@@ -191,6 +192,7 @@ func infoFromFields(f map[string]string) storage.ServerInfo {
 		ServerID:    f["server_id"],
 		MapID:       f["map_id"],
 		Addr:        f["addr"],
+		Transport:   f["transport"],
 		Capacity:    capacity,
 		PlayerCount: count,
 	}

@@ -33,6 +33,7 @@ the database is unreachable.
 | `--addr` | `GAMESERVER_ADDR` | Listen address override. |
 | `--map-id` | `map_01` | Map/dungeon id hosted by this instance; registered in the server registry. |
 | `--server-id` | `gs-<mode>-<map-id>` | Unique server id. Join tokens must carry this value in their `sid` claim. |
+| `--transport` | `GAMESERVER_TRANSPORT` (`tcp`) | Realtime transport: `tcp` or `kcp` (KCP/UDP). Published in the registry so the gateway can tell clients what to dial. |
 | `--capacity` | `100` | Max players; the gateway's allocator filters on it. |
 | `--agones` | `false` | Use the real Agones SDK instead of the noop SDK. |
 | `--redis` | `false` | Use the Redis-backed server registry + event stream instead of in-memory. |
@@ -44,6 +45,7 @@ the database is unreachable.
 | Var | Default | Used for |
 |-----|---------|----------|
 | `GAMESERVER_ADDR` | `:9000` | Listen address |
+| `GAMESERVER_TRANSPORT` | `tcp` | Realtime transport (`tcp` or `kcp`) |
 | `TICK_RATE` | `10` | Simulation Hz (min 5, max 15) |
 | `JWT_SECRET` | `dev-secret-change-me` | Join-token verification (shared with Nakama/Gateway) |
 | `REDIS_ADDR` | `localhost:6379` | Registry + event stream when `--redis` is set |

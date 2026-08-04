@@ -8,16 +8,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/duycuong/rpg-mmo/shared/config"
-	"github.com/duycuong/rpg-mmo/shared/constants"
-	"github.com/duycuong/rpg-mmo/shared/jwt"
-	"github.com/duycuong/rpg-mmo/shared/messages"
-	"github.com/duycuong/rpg-mmo/shared/storage"
 	"github.com/duycuong/rpg-mmo/gameserver/agones"
 	"github.com/duycuong/rpg-mmo/gameserver/events"
 	"github.com/duycuong/rpg-mmo/gameserver/game"
 	"github.com/duycuong/rpg-mmo/gameserver/input"
 	"github.com/duycuong/rpg-mmo/gameserver/persistence"
+	"github.com/duycuong/rpg-mmo/shared/config"
+	"github.com/duycuong/rpg-mmo/shared/constants"
+	"github.com/duycuong/rpg-mmo/shared/jwt"
+	"github.com/duycuong/rpg-mmo/shared/messages"
+	"github.com/duycuong/rpg-mmo/shared/storage"
+	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
 // ModeDungeon is the --mode value that selects dungeon behavior (longer
@@ -41,15 +42,18 @@ type Server struct {
 	hbInterval  time.Duration
 	mu          sync.Mutex
 	listener    net.Listener
-	serverID    string
-	mapID       string
-	mode        string
-	capacity    int
-	holdTTL     time.Duration
-	holdMu      sync.Mutex
-	holds       map[string]*time.Timer
-	shutdownOne sync.Once
-	logger      *slog.Logger
+	// transportKind is the realtime transport this server listens with
+	// ("tcp" or "kcp"); immutable after New, so Run reads it lock-free.
+	transportKind string
+	serverID      string
+	mapID         string
+	mode          string
+	capacity      int
+	holdTTL       time.Duration
+	holdMu        sync.Mutex
+	holds         map[string]*time.Timer
+	shutdownOne   sync.Once
+	logger        *slog.Logger
 }
 
 // ServerOpts holds options for creating a game server.
@@ -62,7 +66,11 @@ type ServerOpts struct {
 	ServerID    string
 	MapID       string
 	Mode        string // "map" (default) or "dungeon"
-	Capacity    int
+	// Transport selects the realtime transport ("tcp" or "kcp"). Empty means
+	// TCP. The value is published in the registry so the gateway can tell
+	// clients which transport to dial.
+	Transport string
+	Capacity  int
 	// HoldTTL overrides the disconnect hold window. Zero selects
 	// constants.EntityHoldTTL (map) or constants.DungeonHoldTTL (dungeon).
 	HoldTTL time.Duration
@@ -91,23 +99,24 @@ func New(opts ServerOpts) *Server {
 	}
 
 	s := &Server{
-		cfg:         opts.Config,
-		world:       world,
-		conns:       conns,
-		handler:     handler,
-		playerStore: opts.PlayerStore,
-		registry:    opts.Registry,
-		agonesSDK:   opts.AgonesSDK,
-		agonesStop:  make(chan struct{}),
-		hbStop:      make(chan struct{}),
-		hbInterval:  hbInterval,
-		serverID:    opts.ServerID,
-		mapID:       opts.MapID,
-		mode:        opts.Mode,
-		capacity:    opts.Capacity,
-		holdTTL:     holdTTL,
-		holds:       make(map[string]*time.Timer),
-		logger:      opts.Logger,
+		cfg:           opts.Config,
+		world:         world,
+		conns:         conns,
+		handler:       handler,
+		playerStore:   opts.PlayerStore,
+		registry:      opts.Registry,
+		agonesSDK:     opts.AgonesSDK,
+		agonesStop:    make(chan struct{}),
+		hbStop:        make(chan struct{}),
+		hbInterval:    hbInterval,
+		serverID:      opts.ServerID,
+		mapID:         opts.MapID,
+		mode:          opts.Mode,
+		transportKind: transport.Normalize(opts.Transport),
+		capacity:      opts.Capacity,
+		holdTTL:       holdTTL,
+		holds:         make(map[string]*time.Timer),
+		logger:        opts.Logger,
 	}
 	if opts.EventStream != nil {
 		s.publisher = events.NewPublisher(opts.EventStream, opts.Logger)
@@ -118,14 +127,18 @@ func New(opts ServerOpts) *Server {
 
 // Run starts the server. Blocks until Shutdown() or listener error.
 func (s *Server) Run(addr string) error {
-	ln, err := net.Listen("tcp", addr)
+	ln, err := transport.Listen(s.transportKind, addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
 	s.mu.Lock()
 	s.listener = ln
 	s.mu.Unlock()
-	s.logger.Info("game server started", "addr", s.listener.Addr().String(), "map", s.mapID, "server_id", s.serverID)
+	s.logger.Info("game server started",
+		"addr", ln.Addr().String(),
+		"transport", s.transportKind,
+		"map", s.mapID,
+		"server_id", s.serverID)
 
 	// Register in server registry and keep the entry alive with heartbeats.
 	if s.registry != nil {
@@ -266,6 +279,7 @@ func (s *Server) register(ctx context.Context) error {
 		ServerID:    s.serverID,
 		MapID:       s.mapID,
 		Addr:        s.Addr(),
+		Transport:   s.transportKind,
 		Capacity:    s.capacity,
 		PlayerCount: s.conns.Count(),
 	}

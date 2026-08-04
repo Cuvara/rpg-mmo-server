@@ -12,8 +12,8 @@ test fails the deploy.
 | `nakama_health` | `GET {NAKAMA_URL}/healthcheck` | Nakama HTTP is up |
 | `device_auth` | `POST /v2/account/authenticate/device?create=true` with a random-suffix device id | Auth path + plugin-loaded Nakama accepts logins |
 | `gateway_token_rpc` | `POST /v2/rpc/gateway_token` (Bearer session token, body `"{}"`) | RPC issues a JWT; verified **locally** with `shared/jwt` + `JWT_SECRET`; `sub` claim matches the Nakama user id |
-| `gateway_auth` | TCP to `GATEWAY_ADDR`: `MsgAuth` then `MsgEnterWorld map_01` | Gateway verifies the JWT locally, registry lookup returns `ServerAddr` + `JoinToken` |
-| `gameserver_join` | TCP to `ServerAddr`: `MsgJoinToken`, then ~10 `MsgInput` at 100 ms; requires ≥ 5 `MsgSnapshot` and the player entity moved as expected (X ≈ input count); clean `MsgDisconnect` | Join handshake, tick loop, input validation, AOI snapshot broadcast |
+| `gateway_auth` | `TRANSPORT` (tcp/kcp) to `GATEWAY_ADDR`: `MsgAuth` then `MsgEnterWorld map_01` | Gateway verifies the JWT locally, registry lookup returns `ServerAddr` + `JoinToken` |
+| `gameserver_join` | Dials `ServerAddr` with the transport announced in `EnterWorldResponse.Transport`: `MsgJoinToken`, then ~10 `MsgInput` at 100 ms; requires ≥ 5 `MsgSnapshot` and the player entity moved as expected (X ≈ input count); clean `MsgDisconnect` | Join handshake, tick loop, input validation, AOI snapshot broadcast |
 
 Every network operation has a timeout (default 10s) — the binary cannot hang CI.
 Output is a per-step `PASS`/`FAIL` line with latency, plus a machine-readable
@@ -37,7 +37,8 @@ All endpoints are overridable via env and/or flags (flags win):
 |-----|------|---------|---------|
 | `NAKAMA_URL` | `--nakama-url` | `http://localhost:7350` | Nakama HTTP base URL |
 | `NAKAMA_SERVER_KEY` | `--server-key` | `defaultkey` | Nakama socket server key |
-| `GATEWAY_ADDR` | `--gateway-addr` | `:8000` | Gateway TCP address (listen-style addrs are normalized to loopback) |
+| `GATEWAY_ADDR` | `--gateway-addr` | `:8000` | Gateway address (listen-style addrs are normalized to loopback) |
+| `TRANSPORT` | `--transport` | `tcp` | Transport for the **gateway** hop: `tcp` or `kcp` |
 | `JWT_SECRET` | `--jwt-secret` | — (**required**) | Shared HS256 secret for local JWT verification |
 | `SMOKE_MAP_ID` | `--map-id` | `map_01` | Map to enter |
 | `SMOKE_TIMEOUT` | `--timeout` | `10s` | Per-operation network timeout |
@@ -46,7 +47,16 @@ All endpoints are overridable via env and/or flags (flags win):
 | — | `--min-snapshots` | `5` | Minimum `MsgSnapshot` count to pass |
 
 The game server address is **not** configured — it comes from the
-`EnterWorldResponse`, exactly like a real client.
+`EnterWorldResponse`, exactly like a real client. Neither is the game server
+*transport*: the runner dials whatever `EnterWorldResponse.Transport` announces
+(empty = `tcp`), so a gateway on TCP in front of KCP game servers works without
+any extra flag.
+
+```bash
+# Full flow with both hops on KCP
+JWT_SECRET=dev-secret-change-me TRANSPORT=kcp GATEWAY_ADDR=127.0.0.1:8200 \
+  SMOKE_MAP_ID=map_kcp bin/smoketest
+```
 
 ## Run locally
 

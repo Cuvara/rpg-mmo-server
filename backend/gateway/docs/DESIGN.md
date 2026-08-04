@@ -157,4 +157,39 @@ the registry allocates and registers the new instance. `StubAllocator` still ret
 
 - No `MsgEvent` on the wire → relay is log-only (blocked on `shared`).
 - Agones allocation, dungeon transfer, and `player:location:{user_id}` tracking remain stubs.
-- Transport is TCP; KCP swap untouched.
+
+## 2026-08-04 — Opt-in KCP listener + per-hop transport announcement
+
+`Gateway.Run` now listens through `shared/transport.Listen(kind, addr)` instead
+of `net.Listen("tcp", …)`, with the kind supplied by the new
+`server.WithTransport` option (`--transport` / `GATEWAY_TRANSPORT`, default
+`tcp`). Accepted connections are `net.Conn` either way, so `ClientConn`,
+`ReadLoop`/`WriteLoop` and every handler are unchanged.
+
+The client's two hops are negotiated independently: the gateway may speak TCP
+while the assigned game server speaks KCP, or vice versa. `AssignResult` gained
+`Transport`, copied from the target server's `storage.ServerInfo.Transport`, and
+`handleEnterWorld` forwards it in `EnterWorldResponse.Transport`. Empty means
+`tcp`, so registry entries written by game servers that predate the field still
+produce a response every existing client understands.
+
+The gateway does **not** verify that it can itself reach the game server over
+the announced transport — the registry is the single source of truth, exactly as
+it already is for `Addr`. A misconfigured game server is a deploy bug, not a
+runtime negotiation the gateway can fix.
+
+Why the gateway does not simply mirror its own transport onto the response: map
+servers and dungeon servers can be rolled to KCP independently of the gateway
+fleet (they are separate Agones fleets), so a per-server value is the only one
+that stays correct during a partial rollout.
+
+**Agones allocation is the one case the registry cannot answer.** When
+`FindServer` falls through to the allocator, the gateway synthesizes the
+`ServerInfo` itself from the allocation response and registers it — the pod has
+not registered yet, and the allocation API says nothing about transports. So
+`AgonesConfig.Transport` (`--allocator-transport` / `ALLOCATOR_TRANSPORT`,
+defaulting to the gateway's own `--transport`) is stamped onto the allocated
+entry. It **must match the fleet manifest's** `--transport` argument; a mismatch
+sends the first client of a freshly allocated pod to the wrong transport, until
+the pod's own registration overwrites the entry. The default (inherit the
+gateway's transport) is correct for a uniform rollout, which is the normal case.

@@ -149,3 +149,53 @@ docker-less dev box still gets a green `go test ./...`.
 `errors.Is(err, storage.ErrNotFound)` check works against memory, Redis and
 PostgreSQL.
 
+
+
+## 2026-08-04 — KCP/UDP transport for the realtime path (`shared/transport`)
+
+**Decision.** Add `shared/transport`, a `Listen(kind, addr)` / `Dial(kind, addr,
+timeout)` abstraction over `tcp` and `kcp` (`github.com/xtaci/kcp-go/v5`), and
+route gateway + game server listeners through it. TCP stays the default; KCP is
+opt-in per service via a flag/env var. This closes the "Transport: TCP → KCP"
+extension seam without touching a line of business logic.
+
+**Why it is a zero-cost seam.** `messages.Encode/Decode` is a 4-byte length
+prefix over `io.Reader`/`io.Writer`, and a tuned KCP session is a reliable,
+ordered byte stream that satisfies `net.Conn`. Handlers, the tick loop, the
+snapshot writer and the join-token handshake are byte-identical on both kinds —
+only the two `net.Listen("tcp", …)` call sites changed.
+
+**Why KCP at all.** TCP's recovery is tuned for throughput: a lost segment
+stalls the stream for an RTO that grows on retry, which on a mobile link means a
+multi-hundred-millisecond freeze of an authoritative 10-15Hz simulation. KCP's
+ARQ retransmits after 2 duplicate ACKs at a fixed 10ms cadence, so the same loss
+costs roughly one RTT. The trade is bandwidth (KCP is deliberately less polite);
+that is acceptable for a small, near-constant realtime bitrate.
+
+**Parameters and rationale** (constants in `shared/transport`, quoted with the
+kcp-go names):
+
+| Setting | Value | Why |
+|---------|-------|-----|
+| `SetNoDelay(1, 10, 2, 1)` | turbo | nodelay ARQ on; 10ms update tick matches a 10-15Hz server tick (a slower interval would add up to a full tick of jitter); fast retransmit after 2 dup ACKs; **congestion control off** — the realtime path carries a small near-constant bitrate, so a congestion window only ever delays state the client already needs |
+| `SetWindowSize(128, 128)` | ~170 KB in flight | never the limiting factor on a bad mobile link, still bounds per-session memory (~350 KB both directions) at a few thousand CCU per pod |
+| `SetMtu(1350)` | kcp-go default | under the common 1400-1500B path MTU (PPPoE/VPN/carrier), so KCP segments are never IP-fragmented |
+| FEC `0/0` | disabled | FEC trades bandwidth for latency but needs per-game measurement; enabling it blind costs bandwidth for nothing. Revisit with client telemetry |
+| encryption | none | **MVP only.** TODO(production): the realtime path must be encrypted before public launch — kcp-go takes a pluggable `BlockCrypt` (e.g. `kcp.NewAESBlockCrypt` with a per-session key delivered in `EnterWorldResponse`). Until then the short-TTL signed join token is the only protection |
+| `SetStreamMode(true)` | byte stream | what the length-prefixed codec expects; in message mode a write larger than the MTU would not reassemble the way `Decode` assumes |
+| `SetWriteDelay(false)` | flush now | one less update interval of added latency per frame |
+| socket buffers | 4 MiB | one UDP socket multiplexes every session on a listener, so it needs far more room than a per-connection TCP socket |
+
+**Per-hop negotiation, not global.** The client's two hops (gateway, game
+server) are independent. `storage.ServerInfo` gains `Transport`, set by the game
+server at registration; the gateway copies it into the new
+`EnterWorldResponse.Transport` field so the client knows what to dial for hop 2.
+Both fields are `omitempty` and empty means `tcp`, so registry entries and
+clients that predate the field keep working unchanged — verified by
+`TestEnterWorld_LegacyRegistryEntryIsTCP`.
+
+**Known UDP semantics the callers inherit.** There is no connection handshake:
+dialing a dead KCP port succeeds and only fails on the first read, and a client
+that drops its socket is invisible to the server until the reconnect hold
+expires. Both are documented on the package API; clients send `MsgDisconnect`
+before closing, and the existing hold window covers the rest.

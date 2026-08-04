@@ -5,6 +5,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Opt-in KCP/UDP listener for the realtime path: `--transport=tcp|kcp`
+  (`GAMESERVER_TRANSPORT`, default `tcp`) and `ServerOpts.Transport`.
+  `Server.Run` listens through `shared/transport`; the join handshake, tick
+  loop and snapshot writer are unchanged.
+- The server publishes its transport in the registry
+  (`storage.ServerInfo.Transport`), which the gateway forwards to clients in
+  `EnterWorldResponse.Transport`.
+
 ### Changed
 - Server-id derivation (`cmd/gameserver`): `--server-id` now falls back to
   `GAMESERVER_ID`, then `POD_NAME`, before the legacy `gs-<mode>-<map_id>`

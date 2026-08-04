@@ -5,18 +5,25 @@ import (
 	"time"
 
 	"github.com/duycuong/rpg-mmo/shared/messages"
+	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
-// MockClient simulates a game client connecting over TCP with length-prefixed
-// JSON envelopes. Used in integration tests to drive the full flow:
+// MockClient simulates a game client speaking length-prefixed JSON envelopes
+// over any transport kind. Used in integration tests to drive the full flow:
 // gateway auth -> enter world -> gameserver join -> input/snapshot cycle.
 type MockClient struct {
 	conn net.Conn
 }
 
-// NewMockClient dials the given TCP address with a 2-second timeout.
+// NewMockClient dials the given address over TCP with a 2-second timeout.
 func NewMockClient(addr string) (*MockClient, error) {
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	return NewMockClientTransport(transport.KindTCP, addr)
+}
+
+// NewMockClientTransport dials addr over the given transport kind ("tcp" or
+// "kcp"; empty means tcp) with a 2-second timeout.
+func NewMockClientTransport(kind, addr string) (*MockClient, error) {
+	conn, err := transport.Dial(kind, addr, 2*time.Second)
 	if err != nil {
 		return nil, err
 	}

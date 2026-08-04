@@ -5,6 +5,26 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `transport` package — pluggable realtime transport. `Listen(kind, addr)` /
+  `Dial(kind, addr, timeout)` over `tcp` and `kcp`
+  (`github.com/xtaci/kcp-go/v5`), plus `Normalize`/`Validate`/`Kinds`. KCP
+  sessions get a documented game profile (nodelay 1/10/2/1, window 128/128,
+  MTU 1350, stream mode, no FEC, no encryption — see `docs/DESIGN.md` for the
+  production encryption TODO). Table-driven tests cover both kinds:
+  round-trip through the `messages` codec, 50 sequential frames, 16 concurrent
+  connections, a payload 8x the MTU (fragmentation), and dead-port dial
+  semantics.
+- `config`: `GatewayTransport` (`GATEWAY_TRANSPORT`) and `GameServerTransport`
+  (`GAMESERVER_TRANSPORT`), both defaulting to `tcp`.
+- `messages.EnterWorldResponse.Transport` — tells the client which transport
+  the assigned game server speaks. `omitempty`; empty means `tcp`.
+- `storage.ServerInfo.Transport` — the transport a registered game server
+  listens with, persisted by `redisstore.ServerRegistry` as the `transport`
+  hash field. `omitempty`; empty means `tcp`, so entries written by older game
+  servers stay valid.
+
+
 ### Fixed
 - `pgstore` container tests were flaky in CI: the postgres entrypoint runs
   initdb against a temporary unix-socket-only server before restarting the real

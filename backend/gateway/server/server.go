@@ -14,6 +14,7 @@ import (
 	"github.com/duycuong/rpg-mmo/gateway/transfer"
 	"github.com/duycuong/rpg-mmo/shared/messages"
 	"github.com/duycuong/rpg-mmo/shared/storage"
+	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
 // Gateway is the main TCP server that handles client authentication
@@ -27,6 +28,10 @@ type Gateway struct {
 	relay      events.EventRelay
 	eventCount atomic.Int64
 
+	// transportKind is the realtime transport the gateway listens with
+	// ("tcp" or "kcp"); it is immutable after New, so Run reads it lock-free.
+	transportKind string
+
 	mu       sync.Mutex
 	listener net.Listener
 	conns    map[*ClientConn]struct{}
@@ -35,6 +40,13 @@ type Gateway struct {
 
 // Option customises a Gateway at construction time.
 type Option func(*Gateway)
+
+// WithTransport selects the realtime transport the gateway listens with.
+// Accepts transport.KindTCP or transport.KindKCP; the empty string keeps the
+// default (TCP).
+func WithTransport(kind string) Option {
+	return func(g *Gateway) { g.transportKind = kind }
+}
 
 // WithEventRelay attaches a cross-server event relay. The gateway starts it in
 // Run and stops it in Shutdown.
@@ -51,12 +63,13 @@ func New(
 	opts ...Option,
 ) *Gateway {
 	g := &Gateway{
-		sessions:  sessions,
-		registry:  reg,
-		jwtSecret: jwtSecret,
-		logger:    logger,
-		conns:     make(map[*ClientConn]struct{}),
-		done:      make(chan struct{}),
+		transportKind: transport.KindTCP,
+		sessions:      sessions,
+		registry:      reg,
+		jwtSecret:     jwtSecret,
+		logger:        logger,
+		conns:         make(map[*ClientConn]struct{}),
+		done:          make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(g)
@@ -90,7 +103,8 @@ func (g *Gateway) ConnCount() int {
 	return len(g.conns)
 }
 
-// Run starts the gateway TCP listener on the given address.
+// Run starts the gateway listener on the given address, using the transport
+// selected with WithTransport (TCP by default).
 func (g *Gateway) Run(addr string) error {
 	if g.relay != nil {
 		if err := g.relay.Start(context.Background()); err != nil {
@@ -98,14 +112,16 @@ func (g *Gateway) Run(addr string) error {
 		}
 	}
 
-	ln, err := net.Listen("tcp", addr)
+	ln, err := transport.Listen(g.transportKind, addr)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
 	g.mu.Lock()
 	g.listener = ln
 	g.mu.Unlock()
-	g.logger.Info("gateway listening", "addr", ln.Addr().String())
+	g.logger.Info("gateway listening",
+		"addr", ln.Addr().String(),
+		"transport", transport.Normalize(g.transportKind))
 
 	for {
 		conn, err := ln.Accept()
@@ -312,6 +328,7 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 	resp, err := messages.NewEnvelope(messages.MsgEnterWorldResp, messages.EnterWorldResponse{
 		ServerAddr: result.ServerAddr,
 		JoinToken:  result.JoinToken,
+		Transport:  result.Transport,
 	})
 	if err != nil {
 		g.logger.Error("marshal enter world response", "err", err)

@@ -34,6 +34,9 @@ Unity Client --[TCP (KCP planned)]--> Gateway --> (join token) --> Game Server
 # In-memory backend (default — single process, dev/tests)
 go run ./cmd/gateway/ --addr=:8000
 
+# KCP/UDP instead of TCP for the realtime path (opt-in)
+go run ./cmd/gateway/ --addr=:8000 --transport=kcp
+
 # Redis backend (multi-instance; shared sessions, registry, event stream)
 REDIS_ADDR=127.0.0.1:6379 go run ./cmd/gateway/
 # or explicitly
@@ -45,12 +48,14 @@ go run ./cmd/gateway/ --backend=redis --instance-id=gw-1
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--addr` | `GATEWAY_ADDR` (`:8000`) | Listen address; overrides the env value |
+| `--transport` | `GATEWAY_TRANSPORT` (`tcp`) | Realtime transport: `tcp` or `kcp` (KCP/UDP). Overrides the env value |
 | `--backend` | auto (see below) | `memory` or `redis` |
 | `--instance-id` | hostname | Consumer name inside the `gateway` event-stream consumer group |
 | `--allocator` | `ALLOCATOR` (`none`) | `none` or `agones` — allocate a GameServer when no live server serves a map |
 | `--allocator-namespace` | `rpg-realtime` | Namespace holding the Agones fleets |
 | `--allocator-fleet-map` | `map-servers-dev` | Fleet used for map allocations |
 | `--allocator-fleet-dungeon` | `dungeon-servers-dev` | Fleet used for dungeon allocations |
+| `--allocator-transport` | `ALLOCATOR_TRANSPORT` → `--transport` | Transport the allocated fleet's game servers listen with. Must match the fleet manifest's `--transport` argument |
 | `--allocator-kubeconfig` | in-cluster → `$KUBECONFIG` → `~/.kube/config` | Credential source for the allocation API |
 
 ### Agones allocator
@@ -89,6 +94,7 @@ All three Redis stores share one client/pool.
 |-----|---------|----------|
 | `GATEWAY_ADDR` | `:8000` | Listen address |
 | `JWT_SECRET` | `dev-secret-change-me` | Local auth-token + join-token signing (shared with Nakama and gameserver) |
+| `GATEWAY_TRANSPORT` | `tcp` | Realtime transport (`tcp` or `kcp`) |
 | `REDIS_ADDR` | `localhost:6379` | Redis endpoint (also the auto backend switch) |
 | `REDIS_PASSWORD` | — | Redis auth |
 | `GATEWAY_BACKEND` | — | `memory` \| `redis` |
