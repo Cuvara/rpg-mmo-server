@@ -402,6 +402,7 @@ jobs:
             echo "GAMESERVER_ADDR=${GAMESERVER_ADDR}"
             echo "GAMESERVER_MAP_ID=${GAMESERVER_MAP_ID}"
             echo "GAMESERVER_RUNTIME=dotnet"
+            echo "GAMESERVER_ID=gs-dotnet-${GAMESERVER_MAP_ID}"
             echo "GAME_DB_URL=${GAME_DB_URL}"
           } > "$envfile"
           chmod 600 "$envfile"

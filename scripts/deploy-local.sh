@@ -230,6 +230,36 @@ do_start() {
 		IFS='|' read -r name bin args _ <<<"$entry"
 		start_one "$name" "$bin" "$args"
 	done
+
+	# The C# gameserver does not (yet) register itself in Redis.
+	# Pre-register it so the gateway can discover it via FindByMapID.
+	if [ -n "${REDIS_ADDR:-}" ] && command -v redis-cli >/dev/null 2>&1; then
+		local gs_id="${GAMESERVER_ID:-gs-dotnet-${GAMESERVER_MAP_ID:-map_01}}"
+		local gs_addr="${GAMESERVER_ADDR:-:9000}"
+		local gs_map="${GAMESERVER_MAP_ID:-map_01}"
+		local redis_host="${REDIS_ADDR%%:*}"
+		local redis_port="${REDIS_ADDR##*:}"
+		local redis_auth=""
+		[ -n "${REDIS_PASSWORD:-}" ] && redis_auth="-a ${REDIS_PASSWORD}"
+		info "registering gameserver in Redis: servers:id:${gs_id} map=${gs_map} addr=${gs_addr}"
+		# shellcheck disable=SC2086
+		redis-cli -h "${redis_host:-localhost}" -p "${redis_port:-6379}" ${redis_auth} \
+			HSET "servers:id:${gs_id}" \
+			server_id "${gs_id}" \
+			map_id "${gs_map}" \
+			addr "${gs_addr}" \
+			transport "tcp" \
+			capacity 100 \
+			player_count 0 >/dev/null 2>&1 || info "WARN: redis HSET failed (non-fatal)"
+		# shellcheck disable=SC2086
+		redis-cli -h "${redis_host:-localhost}" -p "${redis_port:-6379}" ${redis_auth} \
+			SADD "servers:map:${gs_map}" "${gs_id}" >/dev/null 2>&1 || true
+		# Set TTL matching Go's constants.ServerHeartbeatTTL (30s) — the server
+		# doesn't heartbeat yet, so use a long TTL (1 hour) until that's added.
+		# shellcheck disable=SC2086
+		redis-cli -h "${redis_host:-localhost}" -p "${redis_port:-6379}" ${redis_auth} \
+			EXPIRE "servers:id:${gs_id}" 3600 >/dev/null 2>&1 || true
+	fi
 }
 
 do_status() {
