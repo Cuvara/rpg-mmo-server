@@ -7,7 +7,8 @@
 #
 # Usage:
 #   make plugin && make up
-#   docker compose --profile realtime up -d   # + containerized gateway/gameserver
+#   docker compose --profile realtime up -d     # + containerized gateway/gameserver
+#   docker compose --profile monitoring up -d   # + prometheus/grafana (make monitoring-up)
 #
 # All image tags are pinned. Bump NAKAMA_VERSION in .env and in
 # nakama-plugin.Dockerfile together — the plugin ABI must match the server.
@@ -199,7 +200,80 @@ services:
     ports:
       - "${GAMESERVER_CONTAINER_PORT:-9300}:9000"
 
+  # ----------------------------------------------------------- monitoring
+  # Profile-gated: `docker compose --profile monitoring up -d` (or
+  # `make monitoring-up`). Off by default so the everyday dev loop stays at
+  # four containers.
+  #
+  # Scrape topology: nakama is reached over the compose network by container
+  # name; gateway + gameserver normally run on the HOST, so Prometheus reaches
+  # them through host.docker.internal (mapped below for engines that don't
+  # provide it natively). Config lives in ./monitoring/prometheus/.
+  prometheus:
+    profiles: ["monitoring"]
+    image: prom/prometheus:v3.1.0
+    container_name: rpg-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      # 7 days is plenty for a laptop; keeps the volume small.
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      - prometheus-data:/prometheus
+    extra_hosts:
+      # No-op on Docker Desktop (already provided); required on plain Linux
+      # engines so the host-run gateway/gameserver targets resolve.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  # Datasource + dashboards are provisioned from ./monitoring/grafana/ — the
+  # JSON in git is the source of truth, UI edits are disabled. Anonymous
+  # viewer access is on so `curl` and a browser can read dashboards without
+  # logging in; the admin password still guards writes.
+  grafana:
+    profiles: ["monitoring"]
+    image: grafana/grafana:11.5.1
+    container_name: rpg-grafana
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-localdev}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      # Land straight on the overview dashboard instead of the empty home.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/rpg-overview.json
+      GF_LOG_LEVEL: warn
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
 volumes:
   postgres-data:
   postgres-game-data:
   redis-data:
+  prometheus-data:
+  grafana-data:

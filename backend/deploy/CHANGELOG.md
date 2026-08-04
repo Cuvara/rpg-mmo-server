@@ -5,6 +5,53 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Monitoring stack — Prometheus + Grafana behind a `monitoring` compose profile.**
+  `docker compose --profile monitoring up -d` (or `make monitoring-up`) adds
+  `rpg-prometheus` (`prom/prometheus:v3.1.0`, `${PROMETHEUS_PORT:-9090}`, 7d
+  retention, volume `prometheus-data`) and `rpg-grafana`
+  (`grafana/grafana:11.5.1`, `${GRAFANA_PORT:-3000}`, volume `grafana-data`).
+  Default `make up` is untouched.
+- `monitoring/prometheus/prometheus.yml` — 15s scrape interval,
+  `env=dev`/`cluster=local-compose` external labels, four jobs: `nakama`
+  (`rpg-nakama:9100`, over the compose network), `gateway`
+  (`host.docker.internal:9102`), `gameserver` (`host.docker.internal:9101`),
+  and `prometheus` itself. Prometheus gets
+  `extra_hosts: host.docker.internal:host-gateway` so host-run gateway/gameserver
+  resolve on non-Desktop engines too.
+- `monitoring/prometheus/alert-rules.yml` — starter rules: `TickBudgetExceeded`
+  (p99 `gameserver_tick_duration_seconds` > 66ms for 5m — the full 15Hz budget),
+  `SaveErrors` (any `gameserver_save_errors_total` rate for 5m),
+  `HighAuthFailureRate` (>25% `gateway_auth_total{result="fail"}` for 10m),
+  `ServiceDown` (`up == 0` for 2m). Each carries a `runbook` annotation pointing
+  at the matching `docs/MONITORING.md` section. **Alertmanager is deliberately
+  omitted** — add it once a notification channel (Slack/Discord webhook) is
+  chosen; alerts are visible at `/alerts` meanwhile.
+- `monitoring/grafana/provisioning/` — datasource (uid `rpg-prometheus`,
+  default, read-only) and dashboard provider (folder "RPG MMO",
+  `allowUiUpdates: false` so the JSON in git stays the source of truth).
+- `monitoring/grafana/dashboards/rpg-overview.json` — 14 panels: `up{}` status
+  table with UP/DOWN colour mapping; stat row (players online, gateway
+  connections, snapshots/sec, Nakama presences); tick duration p50/p95/p99 with
+  a 66ms threshold; players online per map; gateway auth + enter_world rates by
+  result; active connections; snapshot broadcast rate; saves vs save errors;
+  and Nakama request rate / mean latency / PostgreSQL pool.
+- `docs/MONITORING.md` — stack overview and scrape topology, metric-name
+  contract with the gateway/gameserver `/metrics` listeners, panel-by-panel
+  dashboard guide, alert meanings + response procedures, the
+  Prometheus-vs-Zabbix/Nagios rationale, and the kube-prometheus-stack
+  graduation path for k3s.
+- `Makefile`: `monitoring-up`, `monitoring-down`, `monitoring-logs`, plus
+  `monitoring-targets` (prints job/instance/health from the targets API).
+- `.env.example`: `PROMETHEUS_PORT`, `GRAFANA_PORT`, `GRAFANA_ADMIN_USER`,
+  `GRAFANA_ADMIN_PASSWORD`.
+
+  Live-verified against the running local stack: `nakama` and `prometheus`
+  targets `up`; `gateway`/`gameserver` `down` as expected until those metrics
+  listeners exist. Grafana `/login` 200, datasource provisioned and health-probed
+  OK, dashboard `rpg-overview` present in folder "RPG MMO" with all 14 panels,
+  and `nakama_presences` queried successfully through the Grafana datasource proxy.
+
 ### Changed
 - Fleet manifests (`agones/fleet-map.yaml`, `fleet-dungeon.yaml`,
   `fleet-map-dev.yaml`, `fleet-dungeon-dev.yaml`) inject `POD_NAME` via the

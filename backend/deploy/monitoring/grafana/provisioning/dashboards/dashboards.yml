@@ -1,0 +1,17 @@
+# Dashboard provider — loads every .json under ./dashboards into the
+# "RPG MMO" folder. foldersFromFilesStructure is off: one flat folder is
+# enough at this size.
+apiVersion: 1
+
+providers:
+  - name: rpg-mmo
+    orgId: 1
+    folder: RPG MMO
+    type: file
+    # Dashboards are code: block UI edits from being saved back, so the JSON
+    # in git stays the source of truth.
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

@@ -88,3 +88,28 @@ health: ## Curl the Nakama healthcheck + ping Redis
 .PHONY: console
 console: ## Print the console URL + default credentials
 	@echo "http://localhost:7351  user=admin  password=password"
+
+# ------------------------------------------------------------- monitoring
+# Prometheus + Grafana live behind the `monitoring` compose profile, so the
+# default `make up` stack is untouched. They can be started/stopped
+# independently of it — `monitoring-down` only removes these two services.
+
+.PHONY: monitoring-up
+monitoring-up: ## Start prometheus + grafana (monitoring profile)
+	$(COMPOSE) --profile monitoring up -d prometheus grafana
+	@echo "Grafana:    http://localhost:$${GRAFANA_PORT:-3000}  (anonymous viewer; admin / $${GRAFANA_ADMIN_PASSWORD:-localdev} to edit)"
+	@echo "Prometheus: http://localhost:$${PROMETHEUS_PORT:-9090}/targets"
+
+.PHONY: monitoring-down
+monitoring-down: ## Stop prometheus + grafana only (keeps their volumes)
+	$(COMPOSE) --profile monitoring rm -sf prometheus grafana
+
+.PHONY: monitoring-logs
+monitoring-logs: ## Tail prometheus + grafana logs
+	$(COMPOSE) --profile monitoring logs -f --tail=100 prometheus grafana
+
+.PHONY: monitoring-targets
+monitoring-targets: ## Print scrape target health (job / instance / state)
+	@curl -fsS http://localhost:$${PROMETHEUS_PORT:-9090}/api/v1/targets \
+		| grep -oE '"(job|instance|health)":"[^"]*"' \
+		| paste - - -

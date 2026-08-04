@@ -1,0 +1,64 @@
+# Prometheus config for the LOCAL DEV stack (docker compose --profile monitoring).
+#
+# Topology note — this is the only tricky part:
+#   * nakama runs INSIDE the compose network  -> scrape it by service name.
+#   * gateway + gameserver run on the HOST     -> scrape via host.docker.internal
+#     (docker-compose.yml maps that to host-gateway for non-Desktop engines).
+#
+# The k3s deployment does NOT reuse this file: there, kube-prometheus-stack
+# discovers pods via ServiceMonitor/PodMonitor. See docs/MONITORING.md.
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  # Attached to every scraped series AND to every alert — lets a future
+  # multi-env Prometheus/Grafana tell dev apart from beta/prod.
+  external_labels:
+    env: dev
+    cluster: local-compose
+
+rule_files:
+  - /etc/prometheus/alert-rules.yml
+
+# No alertmanagers block on purpose: Alertmanager is not part of the local
+# stack (no notification channel chosen yet). Alerts still evaluate and are
+# visible at http://localhost:9090/alerts. See docs/MONITORING.md §Alerting.
+
+scrape_configs:
+  # ---------------------------------------------------------------- meta
+  - job_name: nakama
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["rpg-nakama:9100"]
+        labels:
+          env: dev
+          component: meta
+
+  # ------------------------------------------------------------ realtime
+  # Both of these stay DOWN until the gateway/gameserver metrics listeners
+  # exist. That is expected on a fresh checkout — a red target here is the
+  # signal that the app is not running, which is exactly what we want.
+  - job_name: gateway
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:9102"]
+        labels:
+          env: dev
+          component: realtime
+
+  - job_name: gameserver
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:9101"]
+        labels:
+          env: dev
+          component: realtime
+
+  # -------------------------------------------------------------- self
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+        labels:
+          env: dev
+          component: monitoring

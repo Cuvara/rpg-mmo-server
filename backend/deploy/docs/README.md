@@ -15,7 +15,7 @@ All open-source, $0 license: Docker, k3s, Agones, PostgreSQL, Redis, Grafana, Pr
 | k3s / Agones dev bootstrap | `k3s/setup-dev.sh`, `k3s/teardown-dev.sh`, `k3s/lib.sh`, `k3s/namespaces.yaml`, `k3s/validate-manifests.py` | ✅ Authored + manifests schema-validated (needs a live cluster) |
 | k8s base/overlays (Nakama, Gateway, Redis, Postgres) | — | Planned |
 | DB init + backup scripts, prod Redis config (Sentinel, eviction) | — | Planned |
-| Monitoring (Prometheus/Grafana) | — | Planned |
+| Monitoring (Prometheus/Grafana) | `monitoring/prometheus/`, `monitoring/grafana/`, `docker-compose.yml` (`monitoring` profile) | ✅ Local stack live-verified |
 
 Docs:
 - `RUNBOOK-local-dev.md` — start/stop/debug/reset the local stack, verification steps, REDIS_ADDR wiring.
@@ -23,6 +23,9 @@ Docs:
   runner registration + labels, Environment secrets, branch strategy, rollback.
 - `K3S.md` — dev cluster bootstrap (`k3s/setup-dev.sh`), Agones install + fleets,
   cluster options on WSL2, offline manifest validation, graduation to a real k3s VPS.
+- `MONITORING.md` — Prometheus + Grafana compose profile (`make monitoring-up`),
+  metric contract, dashboard guide, alert meanings + response, kube-prometheus-stack
+  graduation path.
 
 ## Local dev backing stack
 

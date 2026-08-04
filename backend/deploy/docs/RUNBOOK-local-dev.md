@@ -186,6 +186,8 @@ docker compose exec -T postgres psql -U nakama -d nakama -t \
 | 7350 | nakama | HTTP API + client socket, `/healthcheck` |
 | 7351 | nakama | Console web UI |
 | 9100 | nakama | Prometheus metrics |
+| 3000 | grafana | Dashboards — `monitoring` profile only (`GRAFANA_PORT` override; 3000 collides often, see MONITORING.md) |
+| 9090 | prometheus | UI, `/targets`, `/alerts` — `monitoring` profile only (`PROMETHEUS_PORT` override) |
 
 ## 5. Debug
 

@@ -1,0 +1,20 @@
+# Provisioned datasource — Grafana reads this at boot, no clicking required.
+# `prometheus` is the compose service name; 9090 is the container port (the
+# host port is remappable via PROMETHEUS_PORT and is irrelevant in-network).
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    # Stable UID: the dashboard JSON references it directly, so it must not
+    # change or every panel loses its datasource.
+    uid: rpg-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # Must match prometheus.yml global.scrape_interval so $__rate_interval
+      # resolves to a sane window.
+      timeInterval: 15s
+      httpMethod: POST

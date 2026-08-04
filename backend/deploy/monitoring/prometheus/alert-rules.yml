@@ -1,0 +1,65 @@
+# Starter alert rules. Evaluated by Prometheus every 15s; with no Alertmanager
+# wired up they surface at http://localhost:9090/alerts only.
+#
+# Each rule carries a `runbook` annotation pointing at the matching section of
+# backend/deploy/docs/MONITORING.md — keep the two in sync.
+
+groups:
+  - name: realtime-health
+    rules:
+      # Tick budget: the sim runs at 15Hz => 66ms per tick. If p99 tick work
+      # exceeds the whole budget the loop is already slipping and snapshots
+      # arrive late/jittery on the client.
+      - alert: TickBudgetExceeded
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le, map_id) (rate(gameserver_tick_duration_seconds_bucket[5m]))
+          ) > 0.066
+        for: 5m
+        labels:
+          severity: critical
+          component: gameserver
+        annotations:
+          summary: "p99 tick duration over the 66ms budget on {{ $labels.map_id }}"
+          description: "p99 tick = {{ $value | humanizeDuration }} (budget 66ms @15Hz). The tick loop is slipping."
+          runbook: "docs/MONITORING.md#tickbudgetexceeded"
+
+      - alert: SaveErrors
+        expr: rate(gameserver_save_errors_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          component: gameserver
+        annotations:
+          summary: "Async batch persistence is failing"
+          description: "{{ $value | printf \"%.3f\" }} save errors/s over 5m — player state is being lost."
+          runbook: "docs/MONITORING.md#saveerrors"
+
+      - alert: HighAuthFailureRate
+        expr: |
+          sum(rate(gateway_auth_total{result="fail"}[5m]))
+            /
+          clamp_min(sum(rate(gateway_auth_total[5m])), 0.001)
+            > 0.25
+        for: 10m
+        labels:
+          severity: warning
+          component: gateway
+        annotations:
+          summary: "Over 25% of gateway auth attempts are failing"
+          description: "JWT secret drift between Nakama and the gateway, an expired-token storm, or a credential-stuffing attempt."
+          runbook: "docs/MONITORING.md#highauthfailurerate"
+
+  - name: availability
+    rules:
+      # Deliberately fires for ANY job, including prometheus itself.
+      - alert: ServiceDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} target {{ $labels.instance }} is down"
+          description: "Prometheus has failed to scrape {{ $labels.instance }} for 2m."
+          runbook: "docs/MONITORING.md#servicedown"

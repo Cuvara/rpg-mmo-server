@@ -1,0 +1,4 @@
+# Placeholder. Mounting ./provisioning read-only replaces the image default,
+# so these dirs must exist or Grafana logs an error at boot.
+# Grafana-managed alert rules would go here; ours live in Prometheus
+# (monitoring/prometheus/alert-rules.yml) instead.

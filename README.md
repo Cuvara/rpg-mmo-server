@@ -141,6 +141,10 @@ subtests each).
 
 All open-source stack: Nakama, k3s, Agones, PostgreSQL, Redis — $0 license.
 
+## Monitoring
+
+Prometheus + Grafana run locally behind a compose profile (`cd backend/deploy && make monitoring-up`) — Grafana on `:3000`, Prometheus on `:9090`, scraping Nakama plus the gateway/gameserver `/metrics` endpoints. See [`backend/deploy/docs/MONITORING.md`](backend/deploy/docs/MONITORING.md).
+
 ## CI/CD
 
 GitHub Actions pipeline: test shared → test gameserver + gateway (parallel) → integration test → build binaries.
