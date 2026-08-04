@@ -60,9 +60,16 @@ GATEWAY_ADDR="${GATEWAY_ADDR:-:8000}"
 GAMESERVER_ADDR="${GAMESERVER_ADDR:-:9000}"
 GAMESERVER_MAP_ID="${GAMESERVER_MAP_ID:-map_01}"
 
+# The gateway picks its redis backend from REDIS_ADDR automatically; the
+# gameserver needs the explicit --redis flag, so add it when REDIS_ADDR is set.
+GAMESERVER_ARGS="--addr=${GAMESERVER_ADDR} --map-id=${GAMESERVER_MAP_ID}"
+if [ -n "${REDIS_ADDR:-}" ]; then
+	GAMESERVER_ARGS="$GAMESERVER_ARGS --redis"
+fi
+
 SERVICES=(
 	"gateway|gateway|--addr=${GATEWAY_ADDR}|${GATEWAY_ADDR##*:}"
-	"gameserver|gameserver|--addr=${GAMESERVER_ADDR} --map-id=${GAMESERVER_MAP_ID}|${GAMESERVER_ADDR##*:}"
+	"gameserver|gameserver|${GAMESERVER_ARGS}|${GAMESERVER_ADDR##*:}"
 )
 
 # --------------------------------------------------------------- systemd mode
