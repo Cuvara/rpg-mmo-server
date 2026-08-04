@@ -21,7 +21,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   resolve on non-Desktop engines too.
 - `monitoring/prometheus/alert-rules.yml` — starter rules: `TickBudgetExceeded`
   (p99 `gameserver_tick_duration_seconds` > 66ms for 5m — the full 15Hz budget),
-  `SaveErrors` (any `gameserver_save_errors_total` rate for 5m),
+  `SaveErrors` (any `gameserver_player_saves_total{status="error"}` rate for 5m),
   `HighAuthFailureRate` (>25% `gateway_auth_total{result="fail"}` for 10m),
   `ServiceDown` (`up == 0` for 2m). Each carries a `runbook` annotation pointing
   at the matching `docs/MONITORING.md` section. **Alertmanager is deliberately
@@ -30,12 +30,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `monitoring/grafana/provisioning/` — datasource (uid `rpg-prometheus`,
   default, read-only) and dashboard provider (folder "RPG MMO",
   `allowUiUpdates: false` so the JSON in git stays the source of truth).
-- `monitoring/grafana/dashboards/rpg-overview.json` — 14 panels: `up{}` status
+- `monitoring/grafana/dashboards/rpg-overview.json` — 18 panels: `up{}` status
   table with UP/DOWN colour mapping; stat row (players online, gateway
   connections, snapshots/sec, Nakama presences); tick duration p50/p95/p99 with
   a 66ms threshold; players online per map; gateway auth + enter_world rates by
-  result; active connections; snapshot broadcast rate; saves vs save errors;
-  and Nakama request rate / mean latency / PostgreSQL pool.
+  result; active connections; snapshot broadcast rate; player saves split by
+  `status`; Nakama request rate / mean latency / PostgreSQL pool; and a Detail
+  row covering entities + reconnect holds, processed inputs + events published
+  by type, snapshot bandwidth, and gateway allocations + relayed events.
 - `docs/MONITORING.md` — stack overview and scrape topology, metric-name
   contract with the gateway/gameserver `/metrics` listeners, panel-by-panel
   dashboard guide, alert meanings + response procedures, the

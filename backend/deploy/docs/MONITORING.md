@@ -89,11 +89,21 @@ listeners. This stack scrapes these names:
 | `gameserver_tick_duration_seconds` | histogram | gameserver | Wall time of one simulation tick. Labels: `map_id` |
 | `gameserver_players_online` | gauge | gameserver | Players currently simulated. Labels: `map_id` |
 | `gameserver_snapshots_sent_total` | counter | gameserver | AOI snapshots broadcast |
-| `gameserver_saves_total` | counter | gameserver | Async batch persistence flushes |
-| `gameserver_save_errors_total` | counter | gameserver | Failed flushes |
+| `gameserver_snapshot_bytes_total` | counter | gameserver | Outbound snapshot bytes |
+| `gameserver_player_saves_total` | counter | gameserver | Async persistence flushes. Labels: `status="ok"\|"error"` |
+| `gameserver_entities` | gauge | gameserver | All simulated entities (players + NPCs) |
+| `gameserver_reconnect_holds` | gauge | gameserver | Disconnected players whose entity is still parked |
+| `gameserver_tick_processed_inputs_total` | counter | gameserver | Client inputs applied |
+| `gameserver_events_published_total` | counter | gameserver | Events emitted. Labels: `type` |
 | `gateway_connections_active` | gauge | gateway | Live client sessions |
 | `gateway_auth_total` | counter | gateway | `MsgAuth` attempts. Labels: `result="ok"\|"fail"` |
-| `gateway_enter_world_total` | counter | gateway | `MsgEnterWorld` attempts. Labels: `result` |
+| `gateway_enter_world_total` | counter | gateway | `MsgEnterWorld` attempts. Labels: `result="ok"\|"fail"` |
+| `gateway_allocations_total` | counter | gateway | Server-registry/Agones allocations. Labels: `result` |
+| `gateway_relay_events_total` | counter | gateway | Cross-server events relayed |
+
+Note that persistence is **one** counter split by a `status` label, not a
+success metric plus a separate error metric — so the error rate is a label
+selector: `rate(gameserver_player_saves_total{status="error"}[5m])`.
 
 Nakama's names are its own (`nakama_presences`, `nakama_overall_latency_ms_*`,
 `nakama_db_*`, `nakama_Rpc_count`, …) and are not ours to choose.
@@ -127,7 +137,22 @@ normal state of a fresh checkout, and exactly the signal you want.
 - **Gateway: active connections** — a sawtooth that never drains ⇒ sessions not
   reaped on disconnect.
 - **Snapshot broadcast rate** — per instance.
-- **Persistence: saves vs save errors** — errors are red; anything sustained is data loss.
+- **Persistence: saves vs save errors** — `gameserver_player_saves_total` split by
+  `status`; `error` is forced red. Anything sustained is data loss.
+
+**Detail row:**
+
+- **World: entities & reconnect holds** — `gameserver_entities` is the real driver
+  of tick cost (AOI is O(n²) in the MVP), and it counts NPCs, so it can climb
+  while player count is flat. A reconnect-hold floor that never drains means
+  holds are not expiring.
+- **Inputs processed & events published** — the inbound half of the realtime
+  loop, alongside event fan-out by `type`.
+- **Snapshot bandwidth** — bytes/sec. Watch against snapshots/sec: a rise here
+  with a flat rate there means snapshots are getting *fatter*, which is what
+  actually hurts mobile clients.
+- **Gateway: allocations & relayed events** — allocation failures mean EnterWorld
+  can't place a player even though auth succeeded.
 
 **Nakama:** request rate by API, mean API latency, PostgreSQL connection pool.
 

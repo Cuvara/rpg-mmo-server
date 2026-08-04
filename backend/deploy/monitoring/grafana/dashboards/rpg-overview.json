@@ -212,17 +212,17 @@
       "id": 31,
       "type": "timeseries",
       "title": "Persistence: saves vs save errors",
-      "description": "Async batch persistence (every 30-60s, off the tick loop). ANY sustained error rate means player state is being dropped — SaveErrors alert fires after 5m.",
+      "description": "Async batch persistence (every 30-60s, off the tick loop), split by the status label of gameserver_player_saves_total. ANY sustained error rate means player state is being dropped — SaveErrors alert fires after 5m.",
       "datasource": { "type": "prometheus", "uid": "rpg-prometheus" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
       "targets": [
-        { "refId": "A", "expr": "sum(rate(gameserver_saves_total[$__rate_interval]))", "legendFormat": "saves/s" },
-        { "refId": "B", "expr": "sum(rate(gameserver_save_errors_total[$__rate_interval]))", "legendFormat": "errors/s" }
+        { "refId": "A", "expr": "sum by (status) (rate(gameserver_player_saves_total[$__rate_interval]))", "legendFormat": "{{status}}" }
       ],
       "fieldConfig": {
         "defaults": { "unit": "ops", "min": 0, "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never" } },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "errors/s" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
+          { "matcher": { "id": "byName", "options": "error" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
+          { "matcher": { "id": "byName", "options": "ok" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] }
         ]
       },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi" } }
@@ -278,6 +278,75 @@
         { "refId": "C", "expr": "nakama_db_max_open_conns", "legendFormat": "max open" }
       ],
       "fieldConfig": { "defaults": { "unit": "short", "min": 0, "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 0, "showPoints": "never" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+
+    {
+      "id": 50,
+      "type": "row",
+      "title": "Detail",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 38 },
+      "panels": []
+    },
+    {
+      "id": 51,
+      "type": "timeseries",
+      "title": "World: entities & reconnect holds",
+      "description": "gameserver_entities is everything simulated (players + NPCs) — the real driver of tick cost, since AOI is O(n²) in the MVP. gameserver_reconnect_holds counts disconnected players whose entity is still parked (30s map / 60s dungeon); a growing floor means holds are not expiring.",
+      "datasource": { "type": "prometheus", "uid": "rpg-prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 39 },
+      "targets": [
+        { "refId": "A", "expr": "sum(gameserver_entities)", "legendFormat": "entities" },
+        { "refId": "B", "expr": "sum(gameserver_reconnect_holds)", "legendFormat": "reconnect holds" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5, "showPoints": "never" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 52,
+      "type": "timeseries",
+      "title": "Inputs processed & events published",
+      "description": "rate(gameserver_tick_processed_inputs_total) is the inbound half of the realtime loop — pair it with the snapshot rate to see both directions. Events are broken out by type.",
+      "datasource": { "type": "prometheus", "uid": "rpg-prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 39 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(gameserver_tick_processed_inputs_total[$__rate_interval]))", "legendFormat": "inputs/s" },
+        { "refId": "B", "expr": "sum by (type) (rate(gameserver_events_published_total[$__rate_interval]))", "legendFormat": "event {{type}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "min": 0, "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5, "showPoints": "never" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 53,
+      "type": "timeseries",
+      "title": "Snapshot bandwidth",
+      "description": "rate(gameserver_snapshot_bytes_total) — outbound bytes/sec. The number that decides whether mobile clients survive; watch it against snapshots/sec to catch snapshots growing fatter rather than more frequent.",
+      "datasource": { "type": "prometheus", "uid": "rpg-prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 39 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(gameserver_snapshot_bytes_total[$__rate_interval]))", "legendFormat": "snapshot bytes/s" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "Bps", "min": 0, "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 54,
+      "type": "timeseries",
+      "title": "Gateway: allocations & relayed events",
+      "description": "gateway_allocations_total{result} is server-registry/Agones allocation outcomes — failures here mean EnterWorld cannot place a player even though auth succeeded. gateway_relay_events_total is cross-server event fan-out.",
+      "datasource": { "type": "prometheus", "uid": "rpg-prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 39 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (result) (rate(gateway_allocations_total[$__rate_interval]))", "legendFormat": "alloc {{result}}" },
+        { "refId": "B", "expr": "sum(rate(gateway_relay_events_total[$__rate_interval]))", "legendFormat": "relayed events" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "min": 0, "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5, "showPoints": "never" } },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": ".*fail.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
+        ]
+      },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     }
   ]
