@@ -1,0 +1,74 @@
+# DEV variant of fleet-map.yaml for the .NET (C#) game server.
+#
+# Identical to fleet-map-dev.yaml except:
+#   * image        : rpg-mmo/gameserver-dotnet:dev
+#   * resources    : higher baseline (NativeAOT binary uses ~30-45MB vs Go ~20MB)
+#                    requests 200m CPU / 128Mi, limits 500m CPU / 256Mi
+#
+# Image must be present in the cluster's image store:
+#   Docker Desktop k8s : nothing to do — it shares the Docker image store.
+#   k3d                : k3d image import rpg-mmo/gameserver-dotnet:dev -c rpg-dev
+#   real k3s           : docker save rpg-mmo/gameserver-dotnet:dev | \
+#                          sudo k3s ctr images import -
+apiVersion: agones.dev/v1
+kind: Fleet
+metadata:
+  name: map-servers-dotnet-dev
+  namespace: rpg-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    rpg-mmo/role: map
+    rpg-mmo/runtime: dotnet
+spec:
+  replicas: 1
+  scheduling: Packed
+  template:
+    metadata:
+      labels:
+        rpg-mmo/role: map
+        rpg-mmo/runtime: dotnet
+    spec:
+      ports:
+        - name: game
+          containerPort: 9000
+          protocol: TCP
+          portPolicy: Dynamic
+      health:
+        initialDelaySeconds: 10
+        periodSeconds: 5
+        failureThreshold: 3
+      template:
+        spec:
+          containers:
+            - name: gameserver
+              image: rpg-mmo/gameserver-dotnet:dev
+              imagePullPolicy: IfNotPresent
+              args:
+                - "--mode=map"
+                - "--map-id=map_01"
+                - "--addr=:9000"
+                - "--agones"
+                # Uncomment to share the registry/event stream with a gateway
+                # running outside the cluster (needs REDIS_ADDR below):
+                # - "--redis"
+              env:
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                - name: JWT_SECRET
+                  value: "dev-secret-change-me"
+                - name: REDIS_ADDR
+                  value: "host.docker.internal:6379"
+                # Leave GAME_DB_URL unset => in-memory player store. To persist:
+                # - name: GAME_DB_URL
+                #   value: "postgres://game:localdev@host.docker.internal:5433/gamestate?sslmode=disable"
+                - name: LOG_LEVEL
+                  value: "debug"
+              resources:
+                requests:
+                  memory: "128Mi"
+                  cpu: "200m"
+                limits:
+                  memory: "256Mi"
+                  cpu: "500m"
