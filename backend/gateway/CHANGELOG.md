@@ -5,6 +5,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Cross-server event stream name mismatch: gameserver published to
+  "events:game" (double-prefixed to "events:events:game" by the store) while
+  the gateway relay subscribed to "global" — events never arrived. Both sides
+  now share constants.GameEventStream ("game", store adds the prefix once).
+
 ### Added
 - Selectable store backends in `cmd/gateway`: `memory` (default) or `redis`
   (`redisstore.SessionStore` / `ServerRegistry` / `EventStream` sharing one client).
