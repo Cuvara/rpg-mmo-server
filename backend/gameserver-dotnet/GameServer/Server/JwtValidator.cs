@@ -17,10 +17,10 @@ public static partial class JwtValidator
     /// <summary>Internal JSON model for the JWT claims payload.</summary>
     private sealed class JwtClaimsJson
     {
-        [JsonPropertyName("user_id")]
+        [JsonPropertyName("sub")]
         public string? UserId { get; set; }
 
-        [JsonPropertyName("server_id")]
+        [JsonPropertyName("sid")]
         public string? ServerId { get; set; }
 
         [JsonPropertyName("exp")]

@@ -21,7 +21,7 @@ Unity Client
 |--------|------|-------------|
 | **shared** | `backend/shared/` | Config, JWT, wire protocol, storage interfaces, error codes |
 | **gateway** | `backend/gateway/` | TCP/KCP router, JWT auth, session manager, server registry, map assignment |
-| **gameserver** | `backend/gameserver/` | Tick loop (10-15Hz), world state, combat, input validation, AOI snapshots, persistence |
+| **gameserver-dotnet** | `backend/gameserver-dotnet/` | C# .NET 10 game server — tick loop, combat, input validation, AOI, persistence. Shared game logic with Unity client |
 | **nakama** | `backend/nakama/` | Nakama Go plugins — auth, economy, leaderboard, social (planned) |
 | **deploy** | `backend/deploy/` | Docker, k3s/Agones manifests, CI/CD, monitoring (planned) |
 

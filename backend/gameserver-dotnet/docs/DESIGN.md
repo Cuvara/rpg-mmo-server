@@ -18,7 +18,7 @@ The Go gateway remains unchanged. It routes traffic to whichever backend
 ## Shared.GameLogic Constraints
 
 These constraints exist so the library compiles cleanly in both a standard
-.NET 9 project and a Unity 2022+ project with an Assembly Definition:
+.NET 10 project and a Unity 2022+ project with an Assembly Definition:
 
 - **Zero Unity dependencies** — must compile as a standard .NET class library.
   No `UnityEngine`, `Unity.Mathematics`, or `Unity.Collections` references.

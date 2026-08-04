@@ -9,13 +9,13 @@ The solution contains three projects:
 ```
 gameserver-dotnet/
   Shared.GameLogic/      Pure C# game logic library (shared with Unity client)
-  GameServer/            Server application (.NET 9 console, NativeAOT)
+  GameServer/            Server application (.NET 10 console, NativeAOT)
   GameServer.Tests/      xUnit test suite
 ```
 
 ### Shared.GameLogic
 
-A standard .NET 9 class library with **zero Unity dependencies**. Contains all
+A standard .NET 10 class library with **zero Unity dependencies**. Contains all
 deterministic game logic: movement validation, combat calculations, cooldown
 checks, AOI (Area of Interest) queries, and game constants.
 
@@ -25,7 +25,7 @@ paths on both server and client.
 
 ### GameServer
 
-A .NET 9 console application that hosts the authoritative game world. It speaks
+A .NET 10 console application that hosts the authoritative game world. It speaks
 the same wire protocol as the Go game server, so the Go gateway cannot
 distinguish between Go and C# backends.
 
@@ -38,7 +38,7 @@ and integration scenarios.
 
 ### Prerequisites
 
-- [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0)
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 - For NativeAOT publishing: `clang` and `zlib` development headers
 
 ### Build & Run
@@ -153,6 +153,82 @@ public partial struct PlayerMovementSystem : ISystem
 **Important**: `Shared.GameLogic` must never reference Unity-specific assemblies.
 If you need Unity math types, create thin adapter methods in the client project
 that convert between `System.Numerics` and `Unity.Mathematics`.
+
+### Detailed Unity Integration Guide
+
+There are three ways to add `Shared.GameLogic` to a Unity 2022+ project:
+
+#### Option A: Git Submodule (recommended for team workflows)
+
+```bash
+# From Unity project root
+git submodule add https://github.com/dyCuong03/rpg-mmo-indie.git \
+  Packages/com.rpgmmo.shared-gamelogic
+```
+
+Add to `Packages/manifest.json`:
+```json
+{
+  "dependencies": {
+    "com.rpgmmo.shared-gamelogic": "file:com.rpgmmo.shared-gamelogic/backend/gameserver-dotnet/Shared.GameLogic"
+  }
+}
+```
+
+The `Shared.GameLogic/` folder needs a `package.json` for UPM:
+```json
+{
+  "name": "com.rpgmmo.shared-gamelogic",
+  "version": "0.1.0",
+  "displayName": "RPG MMO Shared Game Logic",
+  "description": "Pure C# game logic shared between server and client",
+  "unity": "2022.3"
+}
+```
+
+And an Assembly Definition (`Shared.GameLogic.asmdef`):
+```json
+{
+  "name": "Shared.GameLogic",
+  "rootNamespace": "Shared.GameLogic",
+  "references": [],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": true
+}
+```
+
+#### Option B: Local Folder / Symlink
+
+```bash
+# Symlink into Assets (works on Linux/macOS; on Windows use mklink /D)
+ln -s /path/to/backend/gameserver-dotnet/Shared.GameLogic \
+  Assets/Plugins/Shared.GameLogic
+```
+
+Then create the `.asmdef` file as shown above. Reference from your DOTS
+assemblies via the `references` array.
+
+#### Option C: Copy (simplest, no auto-sync)
+
+Copy `Shared.GameLogic/*.cs` files into `Assets/Plugins/Shared.GameLogic/`.
+Add the `.asmdef` file. Manually sync when the server version updates.
+
+#### Unity Type Adapters
+
+`Shared.GameLogic` uses `System.Numerics.Vector2` for positions. Create a thin
+adapter in the client project:
+
+```csharp
+using Unity.Mathematics;
+using SysVec2 = System.Numerics.Vector2;
+
+public static class MathAdapter
+{
+    public static float2 ToFloat2(this SysVec2 v) => new(v.X, v.Y);
+    public static SysVec2 ToSysVec2(this float2 v) => new(v.x, v.y);
+}
+```
 
 ## Wire Protocol
 

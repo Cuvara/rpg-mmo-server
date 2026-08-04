@@ -15,7 +15,6 @@ name: CD — Build & Deploy
 #
 #   resolve ─────────────────────────────────────────────┐
 #   test-shared ─┬─ test-gateway ──── build-gateway ──┐   │
-#                ├─ test-gameserver ─ build-gameserver┤   │
 #                ├─ test-smoketest ── build-smoketest ┤   │
 #                ├─ test-nakama ───── build-plugin ───┤   │
 #                └─ test-integration ────────────────►bundle
@@ -108,14 +107,6 @@ jobs:
       module_dir: backend/gateway
       run_tests: ${{ github.event.inputs.skip_tests != 'true' }}
 
-  test-gameserver:
-    name: Test gameserver
-    needs: test-shared
-    uses: ./.github/workflows/_go-module.yml
-    with:
-      module_dir: backend/gameserver
-      run_tests: ${{ github.event.inputs.skip_tests != 'true' }}
-
   test-nakama:
     name: Test nakama
     needs: test-shared
@@ -136,7 +127,7 @@ jobs:
 
   test-integration:
     name: Integration tests
-    needs: [test-gateway, test-gameserver, test-nakama, test-smoketest]
+    needs: [test-gateway, test-nakama, test-smoketest]
     uses: ./.github/workflows/_go-module.yml
     with:
       module_dir: backend/integration_test
@@ -155,17 +146,6 @@ jobs:
       run_build: go build -o ../../bin/gateway ./cmd/gateway/
       artifact_name: bin-gateway-${{ github.sha }}
       artifact_path: bin/gateway
-
-  build-gameserver:
-    name: Build gameserver binary
-    needs: test-gameserver
-    uses: ./.github/workflows/_go-module.yml
-    with:
-      module_dir: backend/gameserver
-      run_tests: false
-      run_build: go build -o ../../bin/gameserver ./cmd/gameserver/
-      artifact_name: bin-gameserver-${{ github.sha }}
-      artifact_path: bin/gameserver
 
   build-smoketest:
     name: Build smoketest binary
@@ -213,7 +193,7 @@ jobs:
   # Image names MUST match backend/deploy/agones/fleet-{map,dungeon}.yaml.
   build-images:
     name: Build & push container images
-    needs: [resolve, build-gateway, build-gameserver]
+    needs: [resolve, build-gateway]
     if: needs.resolve.outputs.environment == 'production' || github.event.inputs.build_images == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -250,17 +230,17 @@ jobs:
           cache-from: type=gha,scope=gateway
           cache-to: type=gha,scope=gateway,mode=max
 
-      - name: Build & push gameserver image
+      - name: Build & push gameserver-dotnet image
         uses: docker/build-push-action@v6
         with:
           context: backend
-          file: backend/deploy/docker/Dockerfile.gameserver
+          file: backend/deploy/docker/Dockerfile.gameserver-dotnet
           push: true
           tags: |
-            ghcr.io/dycuong03/rpg-mmo-gameserver:${{ steps.meta.outputs.short_sha }}
-            ghcr.io/dycuong03/rpg-mmo-gameserver:latest
-          cache-from: type=gha,scope=gameserver
-          cache-to: type=gha,scope=gameserver,mode=max
+            ghcr.io/dycuong03/rpg-mmo-gameserver-dotnet:${{ steps.meta.outputs.short_sha }}
+            ghcr.io/dycuong03/rpg-mmo-gameserver-dotnet:latest
+          cache-from: type=gha,scope=gameserver-dotnet
+          cache-to: type=gha,scope=gameserver-dotnet,mode=max
 
       - name: Image summary
         run: |
@@ -268,7 +248,7 @@ jobs:
             echo "### Container images pushed"
             echo ""
             echo "- \`ghcr.io/dycuong03/rpg-mmo-gateway:${{ steps.meta.outputs.short_sha }}\` (+ \`:latest\`)"
-            echo "- \`ghcr.io/dycuong03/rpg-mmo-gameserver:${{ steps.meta.outputs.short_sha }}\` (+ \`:latest\`)"
+            echo "- \`ghcr.io/dycuong03/rpg-mmo-gameserver-dotnet:${{ steps.meta.outputs.short_sha }}\` (+ \`:latest\`)"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ------------------------------------------------------------------ bundle
@@ -276,7 +256,7 @@ jobs:
   # here — only artifacts + repo files are collected.
   bundle:
     name: Assemble deployment bundle
-    needs: [test-integration, build-gateway, build-gameserver, build-smoketest, build-plugin]
+    needs: [test-integration, build-gateway, build-smoketest, build-plugin]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -304,7 +284,7 @@ jobs:
           cp backend/deploy/.env.example dist/deploy/
           cp scripts/deploy-local.sh dist/scripts/
           echo "${GITHUB_SHA}" > dist/COMMIT
-          for f in bin/gateway bin/gameserver bin/smoketest deploy/nakama.so; do
+          for f in bin/gateway bin/smoketest deploy/nakama.so; do
             [ -f "dist/$f" ] || { echo "::error::missing dist/$f"; exit 1; }
           done
           ls -lhR dist
@@ -347,11 +327,10 @@ jobs:
           set -euo pipefail
           mkdir -p "$RPG_DEPLOY_DIR"/{bin,deploy,scripts,run,logs}
           # Keep the previous binaries so a manual rollback is one `mv` away.
-          for b in gateway gameserver; do
+          for b in gateway; do
             [ -f "$RPG_DEPLOY_DIR/bin/$b" ] && cp -f "$RPG_DEPLOY_DIR/bin/$b" "$RPG_DEPLOY_DIR/bin/$b.prev" || true
           done
           install -m 0755 dist/bin/gateway     "$RPG_DEPLOY_DIR/bin/gateway"
-          install -m 0755 dist/bin/gameserver  "$RPG_DEPLOY_DIR/bin/gameserver"
           install -m 0755 dist/bin/smoketest   "$RPG_DEPLOY_DIR/bin/smoketest"
           install -m 0755 dist/scripts/deploy-local.sh "$RPG_DEPLOY_DIR/scripts/deploy-local.sh"
           mkdir -p "$RPG_DEPLOY_DIR/deploy/modules"
@@ -379,8 +358,6 @@ jobs:
           GAMESERVER_ADDR: ${{ vars.GAMESERVER_ADDR || ':9000' }}
           GAMESERVER_MAP_ID: ${{ vars.GAMESERVER_MAP_ID || 'map_01' }}
           REDIS_ADDR: ${{ vars.REDIS_ADDR || 'localhost:6379' }}
-          # Empty = gameserver keeps its in-memory player store (see
-          # backend/gameserver/cmd/gameserver/main.go).
           GAME_DB_URL: ${{ vars.GAME_DB_URL || '' }}
         run: |
           set -euo pipefail

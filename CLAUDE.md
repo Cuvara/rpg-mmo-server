@@ -4,35 +4,52 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Indie RPG MMO — mobile/PC Unity client with server-authoritative multiplayer. Open-world maps + instanced dungeons. This repo contains the Go backend. All notes, comments, and code in English.
+Indie RPG MMO — mobile/PC Unity client with server-authoritative multiplayer. Open-world maps + instanced dungeons. This repo contains the backend (Go gateway + C# .NET 10 game server, shared game logic library). All notes, comments, and code in English.
 
 ## Commands
 
-Each backend module is a separate Go module (own `go.mod`, linked via `replace` directives to `../shared`). Always `cd` into the module directory first — there is no root go.work.
+Go modules are separate (own `go.mod`, linked via `replace` directives to `../shared`). Always `cd` into the module directory first — there is no root go.work. The C# game server is a separate .NET 10 solution.
 
 ```bash
+# === Go modules (gateway, shared, integration_test) ===
 # Tests (per module; CI runs Go 1.26)
 cd backend/shared      && go test ./... -race
-cd backend/gameserver  && go test ./... -race
 cd backend/gateway     && go test ./... -race
-cd backend/integration_test && go test -v -race -timeout 60s   # E2E: real gateway + gameserver in-process
-
-# Single test
-cd backend/gameserver && go test ./server/ -run TestTickLoop -race -v
+cd backend/integration_test && go test -v -race -timeout 60s -tags integration   # E2E: gateway + C# gameserver
 
 # Vet (CI enforces)
 go vet ./...
 
 # Build binaries
-cd backend/gameserver && go build ./cmd/gameserver/
 cd backend/gateway    && go build ./cmd/gateway/
 
 # Run locally (two terminals)
-cd backend/gameserver && go run ./cmd/gameserver/ --addr=:9000 --map-id=map_01
 cd backend/gateway    && go run ./cmd/gateway/ --addr=:8000
+
+# === C# game server (.NET 10) ===
+cd backend/gameserver-dotnet
+
+# Build
+dotnet build
+dotnet build -c Release
+
+# Test
+dotnet test
+dotnet test --verbosity normal
+
+# Run server locally
+dotnet run --project GameServer -- --addr=:9000 --map-id=map_01
+
+# Publish NativeAOT binary
+dotnet publish GameServer/GameServer.csproj -c Release -o ./publish
+
+# Docker build (from backend/ directory)
+cd backend/
+docker build -f deploy/docker/Dockerfile.gameserver-dotnet -t rpg-mmo/gameserver-dotnet:dev .
 ```
 
-CI (`.github/workflows/ci.yml`): test shared → gameserver + gateway (parallel) → integration → build. Triggered on `backend/**` paths only.
+CI: Go — `.github/workflows/ci.yml`: test shared → gateway → integration → build. Triggered on `backend/**` paths only.
+CI: C# — `.github/workflows/ci-dotnet.yml`: build + test gameserver-dotnet. Triggered on `backend/gameserver-dotnet/**` paths.
 
 ## Repo Structure & Current State
 
@@ -41,9 +58,9 @@ The MVP is intentionally interface-driven: current implementations are TCP + JSO
 | Module | Path | Status | Contents |
 |--------|------|--------|----------|
 | shared | `backend/shared/` | ✅ | Foundation, no deps: config, constants (tick rates, TTLs, Redis keys), error codes, JWT (HS256), logger (slog), wire protocol (`messages/` — Envelope + codec), storage interfaces + in-memory impls |
-| gameserver | `backend/gameserver/` | ✅ | Tick loop (`server/tick.go`), world/entities (`game/`), input validation + anti-cheat (`input/`), combat (`combat/`), AOI snapshots (`snapshot/`), async batch persistence (`persistence/`), event publisher (`events/`), Agones SDK integration (`agones/`) |
+| gameserver-dotnet | `backend/gameserver-dotnet/` | ✅ | C# .NET 10 game server (primary). `Shared.GameLogic/` (pure C# logic shared with Unity client), `GameServer/` (NativeAOT console app), `GameServer.Tests/` (xUnit). Wire-compatible with Go gateway |
 | gateway | `backend/gateway/` | ✅ | TCP router, JWT auth + session manager (`session/`), server registry + allocator (`registry/`), join-token/map transfer (`transfer/`), event relay stub (`events/`) |
-| integration_test | `backend/integration_test/` | ✅ | E2E tests spinning up gateway + gameserver together |
+| integration_test | `backend/integration_test/` | ✅ | E2E tests: gateway + C# gameserver interop (build tag `integration`) |
 | nakama | `backend/nakama/` | Planned | Nakama Go plugins — auth, economy, leaderboard, social |
 | deploy | `backend/deploy/` | Partial | Agones fleet manifests (`agones/fleet-map.yaml`, `fleet-dungeon.yaml`, autoscaler, allocation) |
 
@@ -78,6 +95,7 @@ Each module has its own `CLAUDE.md` with detailed role-specific instructions, pl
 | Event stream | Go channels | Redis Streams (consumer group ACK) |
 | AOI | Brute-force | Spatial grid / quadtree |
 | Orchestration | Manual | Agones on k3s (SDK already integrated in gameserver) |
+| GameServer language | C# .NET 10 | C# .NET 10 with NativeAOT — shared game logic with Unity client via `Shared.GameLogic` |
 
 ## Target Architecture
 
@@ -88,7 +106,7 @@ Each module has its own `CLAUDE.md` with detailed role-specific instructions, pl
 ### Server Stack
 - **Nakama (Go)**: Meta services — authentication (device/email/social), economy + storage, leaderboard, party/chat/friends, notifications + presence, matchmaking queue
 - **Gateway (Go, custom)**: UDP/KCP router, session manager, server registry, pub/sub events
-- **Game Servers (Go binaries, ~50MB RAM/pod)**: Map servers (combat/skill/movement at 10-15Hz tick) and Dungeon servers (instanced per party, 60s reconnect window)
+- **Game Servers (C# .NET 10 NativeAOT, ~30-45MB RAM/pod)**: Map servers (combat/skill/movement at 10-15Hz tick) and Dungeon servers (instanced per party, 60s reconnect window). Shared game logic (`Shared.GameLogic`) used by both server and Unity client
 - **Agones on k3s**: Game server lifecycle — allocation, health checks, scaling. k3s chosen over full K8s (~500MB vs 2GB+ control plane)
 - **PostgreSQL**: 2 instances — meta (accounts, storage, leaderboard) and game state
 - **Redis**: Sessions (TTL), server registry, pub/sub, cache. Redis Streams (persistent with ACK) for cross-server events
@@ -123,7 +141,8 @@ Each module has its own `CLAUDE.md` with detailed role-specific instructions, pl
 | Component | Technology |
 |-----------|-----------|
 | Game Backend | Nakama (Go) |
-| Game Servers / Gateway | Custom Go binaries |
+| Game Servers | C# .NET 10 (NativeAOT) |
+| Gateway | Custom Go binary |
 | Orchestration | k3s + Agones |
 | Database / Cache | PostgreSQL / Redis |
 | Client | Unity 2022 LTS+ with DOTS |

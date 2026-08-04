@@ -105,8 +105,10 @@ public sealed class GameServerHost : IAsyncDisposable
             port);
         _listener.Start();
 
+        // Log the actual bound address (important when port=0 for ephemeral port allocation)
+        var actualAddr = _listener.LocalEndpoint.ToString()!;
         _logger.LogInformation("Game server listening on {Addr} (mode={Mode}, map={MapId}, id={ServerId})",
-            addr, _options.Mode, _options.MapId, _options.ServerId);
+            actualAddr, _options.Mode, _options.MapId, _options.ServerId);
 
         // Mark ready with Agones
         await _agonesSdk.ReadyAsync();

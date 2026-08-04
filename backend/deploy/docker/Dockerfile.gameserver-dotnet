@@ -18,6 +18,8 @@ WORKDIR /src
 # -- Restore layer (changes rarely, cached aggressively) --------------------
 COPY gameserver-dotnet/Shared.GameLogic/Shared.GameLogic.csproj Shared.GameLogic/
 COPY gameserver-dotnet/GameServer/GameServer.csproj GameServer/
+
+# Restore NuGet packages (cached until a .csproj changes).
 RUN dotnet restore GameServer/GameServer.csproj
 
 # -- Source layer ------------------------------------------------------------
@@ -25,10 +27,12 @@ COPY gameserver-dotnet/Shared.GameLogic/ Shared.GameLogic/
 COPY gameserver-dotnet/GameServer/ GameServer/
 
 # -- Publish NativeAOT (single file, no IL, no JIT) -------------------------
+# NativeAOT on Alpine requires -r linux-musl-x64. We let publish run its own
+# RID-specific restore pass (fast — packages already cached from the layer above).
 RUN dotnet publish GameServer/GameServer.csproj \
       -c Release \
-      -o /app \
-      --no-restore
+      -r linux-musl-x64 \
+      -o /app
 
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime (minimal Alpine image — no SDK, no IL runtime)

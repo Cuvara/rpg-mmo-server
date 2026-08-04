@@ -49,8 +49,8 @@ internal static class TestHelpers
         var header = new { alg = "HS256", typ = "JWT" };
         var payload = new Dictionary<string, object>
         {
-            ["user_id"] = userId,
-            ["server_id"] = serverId,
+            ["sub"] = userId,
+            ["sid"] = serverId,
             ["iat"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
         };
 
