@@ -6,6 +6,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- `pgstore` container tests were flaky in CI: the postgres entrypoint runs
+  initdb against a temporary unix-socket-only server before restarting the real
+  one, so `pg_isready` reported ready while TCP clients still got
+  "connection reset by peer". `newTestStore` now retries `NewPlayerStore` for up
+  to 60s instead of failing on the first connect.
 - Cross-server event stream name mismatch: gameserver published to
   "events:game" (double-prefixed to "events:events:game" by the store) while
   the gateway relay subscribed to "global" — events never arrived. Both sides

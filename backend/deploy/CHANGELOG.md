@@ -5,7 +5,43 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **CI/CD topology — two fat jobs split into single-purpose jobs.** `cd.yml`'s
+  `build-test` (vet + test + build + plugin + images + bundle) and `deploy`
+  (sync + env + compose + restart + smoke + summary) were monoliths where one
+  slow or flaky step blocked everything and a failure told you nothing about
+  *what* broke. New graph:
+  `resolve` ∥ `test-shared` → {`test-gateway`, `test-gameserver`, `test-nakama`,
+  `test-smoketest`} → `test-integration`; `build-{gateway,gameserver,smoketest}`
+  and `build-plugin` each hang off their own module test; `build-images`
+  (GHCR, production / `build_images=true` only) off the binary builds; `bundle`
+  assembles the artifacts; `deploy` → `post-deploy-smoke` → `summary`
+  (`if: always()`). Deploy step contents are unchanged; the smoke test and the
+  summary are now their own jobs, so "deploy failed" and "the flow failed" are
+  distinguishable. Job graph documented in `docs/CICD.md` §3.
+
 ### Added
+- `.github/workflows/_go-module.yml` — reusable `workflow_call` workflow that
+  runs checkout + `setup-go` (cache keyed on the module's own `go.sum` via
+  `cache-dependency-path`) + `go vet` + `go test` + an optional build and
+  artifact upload for **one** Go module. Inputs: `module_dir`, `go_version`,
+  `cache_dependency_path`, `run_tests`, `test_flags`, `needs_docker`,
+  `run_build`, `artifact_name`, `artifact_path`, `artifact_retention_days`.
+  Both `ci.yml` and `cd.yml` call it, so the per-module recipe exists once and
+  adding a module is one additive `uses:` block.
+- `ci.yml` now covers `backend/nakama` and `backend/smoketest` (previously
+  untested in CI), gained `workflow_dispatch`, a `ci-<ref>` concurrency group,
+  `.github/workflows/**` in its path filter, and per-binary build jobs.
+- CD artifact flow is now per-binary: `bin-{gateway,gameserver,smoketest}-<sha>`
+  and `nakama-plugin-<sha>` are merged by the `bundle` job into
+  `deploy-bundle-<sha>` (still `include-hidden-files: true` for `.env.example`).
+- CD `deploy` now passes `GAME_DB_URL` (from the environment variable
+  `vars.GAME_DB_URL`, default empty) into the generated `deploy/.env`, wiring
+  the PostgreSQL game-state persistence into deployed gameservers. Empty keeps
+  the in-memory player store. Because the gameserver opens the DSN at boot and
+  exits 1 when it cannot connect, the compose step now waits for the
+  `rpg-postgres-game` container healthcheck before restarting the realtime
+  services.
 - `docker/Dockerfile.gateway` and `docker/Dockerfile.gameserver` — real
   container images for the realtime services (previously the Agones fleets
   referenced images that were never built). Multi-stage:
