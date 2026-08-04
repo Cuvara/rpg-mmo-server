@@ -379,6 +379,9 @@ jobs:
           GAMESERVER_ADDR: ${{ vars.GAMESERVER_ADDR || ':9000' }}
           GAMESERVER_MAP_ID: ${{ vars.GAMESERVER_MAP_ID || 'map_01' }}
           REDIS_ADDR: ${{ vars.REDIS_ADDR || 'localhost:6379' }}
+          # Empty = gameserver keeps its in-memory player store (see
+          # backend/gameserver/cmd/gameserver/main.go).
+          GAME_DB_URL: ${{ vars.GAME_DB_URL || '' }}
         run: |
           set -euo pipefail
           for required in JWT_SECRET POSTGRES_PASSWORD NAKAMA_CONSOLE_PASSWORD; do
@@ -404,6 +407,7 @@ jobs:
             echo "GATEWAY_ADDR=${GATEWAY_ADDR}"
             echo "GAMESERVER_ADDR=${GAMESERVER_ADDR}"
             echo "GAMESERVER_MAP_ID=${GAMESERVER_MAP_ID}"
+            echo "GAME_DB_URL=${GAME_DB_URL}"
           } > "$envfile"
           chmod 600 "$envfile"
           echo "wrote $envfile ($(wc -l < "$envfile") vars, values redacted)"
@@ -419,6 +423,15 @@ jobs:
           docker compose pull --quiet || true
           docker compose up -d --remove-orphans
           docker compose ps
+          # The gameserver opens GAME_DB_URL at boot and exits(1) if postgres-game
+          # is not accepting connections yet, so wait for its healthcheck before
+          # the restart step below.
+          for _ in $(seq 1 60); do
+            state="$(docker inspect -f '{{.State.Health.Status}}' rpg-postgres-game 2>/dev/null || echo missing)"
+            echo "postgres-game: ${state}"
+            [ "${state}" = healthy ] && break
+            sleep 2
+          done
 
       - name: Restart realtime services (systemd, else nohup)
         env:

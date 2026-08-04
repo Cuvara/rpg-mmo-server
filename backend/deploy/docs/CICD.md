@@ -281,7 +281,18 @@ Optional **variables** (`vars.*`, non-secret, per environment) with defaults:
 `RPG_DEPLOY_DIR` (`/opt/rpg-mmo`), `NAKAMA_VERSION` (`3.40.0`), `POSTGRES_DB`
 (`nakama`), `POSTGRES_USER` (`nakama`), `NAKAMA_CONSOLE_USER` (`admin`),
 `GATEWAY_ADDR` (`:8000`), `GAMESERVER_ADDR` (`:9000`), `GAMESERVER_MAP_ID`
-(`map_01`), `REDIS_ADDR` (`localhost:6379`).
+(`map_01`), `REDIS_ADDR` (`localhost:6379`), `GAME_DB_URL` (*empty*).
+
+`GAME_DB_URL` is the game-state PostgreSQL DSN the gameserver opens at boot.
+**Empty (the default) keeps the in-memory player store** — state is lost on
+restart. Point it at the `postgres-game` compose service as the *host* sees it,
+e.g. dev uses
+`postgres://game:localdev@localhost:5433/gamestate?sslmode=disable` (the
+gameserver is run on the host by `deploy-local.sh`, not in the compose network).
+A wrong or unreachable DSN is fatal: the gameserver logs
+`postgres player store init failed` and exits 1, which fails the deploy
+healthcheck. The compose step therefore waits for `rpg-postgres-game` to report
+`healthy` before restarting the realtime services.
 
 **Secrets are never echoed.** They are passed to a step as env vars, checked for
 emptiness by name only, and written to `$RPG_DEPLOY_DIR/deploy/.env` under

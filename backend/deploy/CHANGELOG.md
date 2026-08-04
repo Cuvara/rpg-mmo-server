@@ -35,6 +35,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - CD artifact flow is now per-binary: `bin-{gateway,gameserver,smoketest}-<sha>`
   and `nakama-plugin-<sha>` are merged by the `bundle` job into
   `deploy-bundle-<sha>` (still `include-hidden-files: true` for `.env.example`).
+- CD `deploy` now passes `GAME_DB_URL` (from the environment variable
+  `vars.GAME_DB_URL`, default empty) into the generated `deploy/.env`, wiring
+  the PostgreSQL game-state persistence into deployed gameservers. Empty keeps
+  the in-memory player store. Because the gameserver opens the DSN at boot and
+  exits 1 when it cannot connect, the compose step now waits for the
+  `rpg-postgres-game` container healthcheck before restarting the realtime
+  services.
 - `docker/Dockerfile.gateway` and `docker/Dockerfile.gameserver` — real
   container images for the realtime services (previously the Agones fleets
   referenced images that were never built). Multi-stage:
