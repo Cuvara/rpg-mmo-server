@@ -62,11 +62,38 @@ func SignWithServer(userID, serverID, secret string, expiry time.Duration) (stri
 	return sigInput + "." + sig, nil
 }
 
+// verifyHeader decodes the JWT header segment and enforces the only algorithm
+// and token type this package supports (HS256 / JWT). This rejects algorithm
+// confusion attacks such as `"alg":"none"` before any signature work happens.
+func verifyHeader(seg string) error {
+	hdrJSON, err := base64.RawURLEncoding.DecodeString(seg)
+	if err != nil {
+		return fmt.Errorf("decode header: %w", err)
+	}
+
+	var h header
+	if err := json.Unmarshal(hdrJSON, &h); err != nil {
+		return fmt.Errorf("unmarshal header: %w", err)
+	}
+
+	if h.Alg != defaultHeader.Alg {
+		return fmt.Errorf("unsupported alg %q, want %q", h.Alg, defaultHeader.Alg)
+	}
+	if h.Typ != defaultHeader.Typ {
+		return fmt.Errorf("unsupported typ %q, want %q", h.Typ, defaultHeader.Typ)
+	}
+	return nil
+}
+
 // Verify validates a HS256 JWT and returns its claims.
 func Verify(token, secret string) (Claims, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return Claims{}, fmt.Errorf("invalid token format")
+	}
+
+	if err := verifyHeader(parts[0]); err != nil {
+		return Claims{}, fmt.Errorf("invalid header: %w", err)
 	}
 
 	sigInput := parts[0] + "." + parts[1]

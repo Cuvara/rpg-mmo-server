@@ -158,3 +158,99 @@ func TestMemoryEventStream(t *testing.T) {
 		t.Error("Publish() should fail after Close()")
 	}
 }
+
+func TestMemorySessionStore_Refresh(t *testing.T) {
+	store := NewMemorySessionStore()
+	ctx := context.Background()
+
+	if err := store.Set(ctx, "session:u1", []byte("u1"), 50*time.Millisecond); err != nil {
+		t.Fatalf("Set() error: %v", err)
+	}
+	if err := store.Refresh(ctx, "session:u1", time.Hour); err != nil {
+		t.Fatalf("Refresh() error: %v", err)
+	}
+	time.Sleep(60 * time.Millisecond)
+	if _, err := store.Get(ctx, "session:u1"); err != nil {
+		t.Errorf("Get() after Refresh error: %v", err)
+	}
+
+	if err := store.Refresh(ctx, "session:missing", time.Hour); err == nil {
+		t.Error("Refresh() on missing key should fail")
+	}
+
+	if err := store.Set(ctx, "session:u2", []byte("u2"), time.Millisecond); err != nil {
+		t.Fatalf("Set() error: %v", err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if err := store.Refresh(ctx, "session:u2", time.Hour); err == nil {
+		t.Error("Refresh() on expired key should fail")
+	}
+}
+
+func TestMemoryServerRegistry_GetServerAndHeartbeat(t *testing.T) {
+	reg := NewMemoryServerRegistry()
+	ctx := context.Background()
+	info := ServerInfo{ServerID: "gs-1", MapID: "map_01", Addr: "127.0.0.1:9000", Capacity: 100}
+
+	if err := reg.Register(ctx, info); err != nil {
+		t.Fatalf("Register() error: %v", err)
+	}
+	got, err := reg.GetServer(ctx, "gs-1")
+	if err != nil {
+		t.Fatalf("GetServer() error: %v", err)
+	}
+	if got != info {
+		t.Errorf("GetServer() = %+v, want %+v", got, info)
+	}
+	if err := reg.Heartbeat(ctx, "gs-1"); err != nil {
+		t.Errorf("Heartbeat() error: %v", err)
+	}
+	if _, err := reg.GetServer(ctx, "ghost"); err == nil {
+		t.Error("GetServer(ghost) should fail")
+	}
+	if err := reg.Heartbeat(ctx, "ghost"); err == nil {
+		t.Error("Heartbeat(ghost) should fail")
+	}
+}
+
+func TestMemoryServerRegistry_TTLExpiry(t *testing.T) {
+	ctx := context.Background()
+	info := ServerInfo{ServerID: "gs-1", MapID: "map_01", Capacity: 10}
+
+	tests := []struct {
+		name      string
+		ttl       time.Duration
+		wait      time.Duration
+		heartbeat bool
+		wantFound int
+	}{
+		{"no ttl never expires", 0, 30 * time.Millisecond, false, 1},
+		{"alive within ttl", 100 * time.Millisecond, 10 * time.Millisecond, false, 1},
+		{"expired without heartbeat", 20 * time.Millisecond, 40 * time.Millisecond, false, 0},
+		{"heartbeat keeps alive", 40 * time.Millisecond, 30 * time.Millisecond, true, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := NewMemoryServerRegistryWithTTL(tt.ttl)
+			if err := reg.Register(ctx, info); err != nil {
+				t.Fatalf("Register() error: %v", err)
+			}
+			if tt.heartbeat {
+				time.Sleep(tt.wait / 2)
+				if err := reg.Heartbeat(ctx, "gs-1"); err != nil {
+					t.Fatalf("Heartbeat() error: %v", err)
+				}
+			}
+			time.Sleep(tt.wait)
+
+			found, err := reg.FindByMapID(ctx, "map_01")
+			if err != nil {
+				t.Fatalf("FindByMapID() error: %v", err)
+			}
+			if len(found) != tt.wantFound {
+				t.Errorf("FindByMapID() = %d servers, want %d", len(found), tt.wantFound)
+			}
+		})
+	}
+}
