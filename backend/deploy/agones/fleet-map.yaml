@@ -53,6 +53,15 @@ spec:
                 # Shared registry + event stream across gateway and gameservers.
                 - "--redis"
               env:
+                # Server-id contract: the gameserver uses POD_NAME as its
+                # --server-id (gameserver/cmd/gameserver resolveServerID), so the
+                # id it registers equals the GameServer name the gateway gets
+                # back from a GameServerAllocation — that name is what the
+                # gateway signs into the join token's sid.
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
                 - name: JWT_SECRET
                   valueFrom:
                     secretKeyRef:

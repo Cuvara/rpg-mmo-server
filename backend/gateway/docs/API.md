@@ -61,6 +61,44 @@ This keeps a Redis-backed store from reporting ghost-online players after a drop
 `constants.JoinTokenTTL` (30s), claims `{sub: userID, sid: serverID}`. The game server
 verifies it with the same shared secret as the first frame on its socket.
 
+## Server allocation (added 2026-08-04)
+
+`MsgEnterWorld` for a map that no registered server hosts (or where every server is
+full) triggers an Agones allocation when the gateway runs with `--allocator=agones`:
+
+```
+MsgEnterWorld{map_id}
+  -> registry.FindServer            # storage.ServerRegistry lookup, capacity filtered
+  -> (miss) AgonesAllocator.Allocate
+       POST {apiserver}/apis/allocation.agones.dev/v1/namespaces/{ns}/gameserverallocations
+       {"apiVersion":"allocation.agones.dev/v1","kind":"GameServerAllocation",
+        "metadata":{"namespace":"rpg-realtime"},
+        "spec":{"selectors":[{"matchLabels":{"agones.dev/fleet":"map-servers-dev"}}],
+                "scheduling":"Packed"}}
+  <- status{state:"Allocated", gameServerName, address, ports:[{name:"game",port}]}
+  -> register {server_id: gameServerName, addr: "address:port"}
+  -> MsgEnterWorldResp{server_addr, join_token(sid = gameServerName)}
+```
+
+`state: "UnAllocated"` (fleet exhausted) surfaces as `registry.ErrNoCapacity`, wrapped
+into the `MsgEnterWorldResp.error` string. Non-2xx responses report the Kubernetes
+`Status.message`.
+
+**Server-id contract**: `sid` in the join token is the allocated `gameServerName`.
+Pods must register under that same id — `gameserver/cmd/gameserver` resolves
+`--server-id` from `GAMESERVER_ID`, then `POD_NAME` (injected by the fleet manifests
+through the downward API), then the legacy `gs-<mode>-<map_id>` default.
+
+### Allocator flags / env (cmd/gateway)
+
+| Flag | Env | Default | Description |
+|------|-----|---------|-------------|
+| `--allocator` | `ALLOCATOR` | `none` | `none` or `agones` |
+| `--allocator-namespace` | `ALLOCATOR_NAMESPACE` | `rpg-realtime` | Namespace holding the fleets |
+| `--allocator-fleet-map` | `ALLOCATOR_FLEET_MAP` | `map-servers-dev` | Fleet for map allocations |
+| `--allocator-fleet-dungeon` | `ALLOCATOR_FLEET_DUNGEON` | `dungeon-servers-dev` | Fleet for dungeon allocations |
+| `--allocator-kubeconfig` | `ALLOCATOR_KUBECONFIG` | in-cluster, then `$KUBECONFIG`, then `~/.kube/config` | Credential source |
+
 ## Go API additions
 
 | Symbol | Package | Description |
@@ -68,6 +106,9 @@ verifies it with the same shared secret as the first frame on its socket.
 | `session.SessionKey(userID) string` | `gateway/session` | Canonical `session:{user_id}` key |
 | `(*SessionManager).RefreshSession(ctx, sessionID) error` | `gateway/session` | Re-arms the session TTL; errors when the session is gone |
 | `registry.NewRegistryServiceWithAllocator(reg, alloc)` | `gateway/registry` | Registry that asks an `Allocator` for a new instance when nothing has capacity |
+| `registry.NewAgonesAllocator(AgonesConfig) (*AgonesAllocator, error)` | `gateway/registry` | Allocator backed by the Agones `GameServerAllocation` API |
+| `registry.AllocationRequest` / `KindAllocator` | `gateway/registry` | Kind-aware allocation (`KindMap`, `KindDungeon`) |
+| `registry.ErrNoCapacity` | `gateway/registry` | Sentinel for `state: UnAllocated` (fleet exhausted) |
 | `(*RegistryService).GetServer(ctx, serverID)` | `gateway/registry` | Single live server lookup |
 | `events.NewRelay(stream, name, sink, logger) *Relay` | `gateway/events` | Real `EventRelay` over any `storage.EventStream` |
 | `events.Sink` / `events.SinkFunc` | `gateway/events` | Per-event callback contract |

@@ -5,6 +5,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- Fleet manifests (`agones/fleet-map.yaml`, `fleet-dungeon.yaml`,
+  `fleet-map-dev.yaml`, `fleet-dungeon-dev.yaml`) inject `POD_NAME` via the
+  downward API (`fieldRef: metadata.name`). The gameserver uses it as its
+  `--server-id`, so the id it registers equals the `gameServerName` the gateway
+  receives from a `GameServerAllocation` and signs into the join token.
+
 ### Fixed
 - k3s bootstrap hardening from the first live run on Docker Desktop Kubernetes:
   kubectl resolution now prefers the binary that actually has a kube context
