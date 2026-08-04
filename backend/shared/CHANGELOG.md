@@ -5,6 +5,24 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `storage/pgstore` — PostgreSQL implementation of `storage.PlayerStore`
+  (`PostgresPlayerStore`, pgx v5 / `pgxpool`) targeting the game state database:
+  upsert on save (`ON CONFLICT (user_id) DO UPDATE`), `storage.ErrNotFound`
+  mapping on a missing row, connect-time `Ping` so a bad DSN fails at boot, and
+  an idempotent `Migrate(ctx)` that applies the embedded `schema.sql`
+  (`player_states` + `player_states_map_id_idx`). `SchemaSQL()` exposes the SQL.
+  New dependency: `github.com/jackc/pgx/v5` (isolated in its own package, like
+  `redisstore`, so in-memory-only modules are unaffected).
+- `config.Config.GameDBURL` from `GAME_DB_URL`, default empty — empty means "no
+  PostgreSQL configured" and services fall back to their in-memory store.
+- `pgstore` tests run against a real `postgres:16.4-alpine` started through the
+  docker CLI on a random host port (save/load roundtrip, upsert overwrite +
+  single-row assertion, delete, missing row → `ErrNotFound`, repeated `Migrate`,
+  bad DSN). They `t.Skip` when no working docker CLI is available. A further test
+  asserts `storage/pgstore/schema.sql` and
+  `backend/deploy/db/init-gamestate.sql` stay byte-identical.
+
 ### Security
 - `jwt.Verify` now validates the token header: `alg` must be `HS256` and `typ` must be
   `JWT`, checked before signature verification. Rejects `alg: none`, `HS512`, `RS256`,

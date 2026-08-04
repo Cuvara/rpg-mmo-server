@@ -33,6 +33,36 @@ services:
       retries: 12
       start_period: 10s
 
+  # Second PostgreSQL instance: game state (player_states, ...). Deliberately
+  # separate from the Nakama meta DB above — see root CLAUDE.md ("PostgreSQL:
+  # 2 instances"). Host port defaults to 5433 so both can run side by side.
+  # Host-run gameserver connects with:
+  #   GAME_DB_URL=postgres://game:localdev@localhost:5433/gamestate?sslmode=disable
+  postgres-game:
+    image: postgres:16.4-alpine
+    container_name: rpg-postgres-game
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_GAME_DB:-gamestate}
+      POSTGRES_USER: ${POSTGRES_GAME_USER:-game}
+      POSTGRES_PASSWORD: ${POSTGRES_GAME_PASSWORD:-localdev}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      - "${POSTGRES_GAME_PORT:-5433}:5432"
+    volumes:
+      - postgres-game-data:/var/lib/postgresql/data
+      # Applied once, on an empty data volume. The gameserver also runs the
+      # same (idempotent) schema at boot via pgstore.Migrate, so an existing
+      # volume is upgraded too. Keep in sync with
+      # backend/shared/storage/pgstore/schema.sql.
+      - ./db/init-gamestate.sql:/docker-entrypoint-initdb.d/10-init-gamestate.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_GAME_USER:-game} -d ${POSTGRES_GAME_DB:-gamestate}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
   nakama:
     image: heroiclabs/nakama:${NAKAMA_VERSION:-3.40.0}
     container_name: rpg-nakama
@@ -110,4 +140,5 @@ services:
 
 volumes:
   postgres-data:
+  postgres-game-data:
   redis-data:

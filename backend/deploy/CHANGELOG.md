@@ -6,6 +6,24 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `postgres-game` service in `docker-compose.yml`: second PostgreSQL instance
+  (`postgres:16.4-alpine`) for game state, separate from the Nakama meta DB —
+  DB/user `gamestate`/`game`, host port `${POSTGRES_GAME_PORT:-5433}`, own
+  `postgres-game-data` volume, `pg_isready` healthcheck, and
+  `db/init-gamestate.sql` mounted into `/docker-entrypoint-initdb.d/`.
+- `db/init-gamestate.sql` — `player_states` schema for first boot of an empty
+  volume. Byte-identical to `backend/shared/storage/pgstore/schema.sql` (a Go
+  test enforces this); the gameserver applies the same idempotent DDL at boot.
+- `make psql-game` — psql shell on the game state DB.
+- `.env.example`: `POSTGRES_GAME_DB`, `POSTGRES_GAME_USER`,
+  `POSTGRES_GAME_PASSWORD`, `POSTGRES_GAME_PORT`.
+
+### Changed
+- `docs/RUNBOOK-local-dev.md`: documents the two-PostgreSQL layout, port 5433,
+  game-state verification/reset steps, and the host gameserver wiring
+  `GAME_DB_URL=postgres://game:localdev@localhost:5433/gamestate?sslmode=disable`.
+
+### Added
 - CD post-deploy smoke phase: `bin/smoketest` (new `backend/smoketest` module)
   is staged into the deployment bundle, installed to `$RPG_DEPLOY_DIR/bin`, and
   run after the healthcheck with env sourced from `$RPG_DEPLOY_DIR/deploy/.env`.

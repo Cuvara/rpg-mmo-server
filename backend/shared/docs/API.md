@@ -150,6 +150,76 @@ go func() {
 _ = events.Subscribe(ctx, "world", func(e storage.Event) { handle(e) }) // ACK after handler returns
 ```
 
+## `storage/pgstore` — PostgreSQL implementations (game state DB)
+
+Import path: `github.com/duycuong/rpg-mmo/shared/storage/pgstore`.
+Own package for the same reason as `redisstore`: modules that stay in-memory
+never pull in `pgx`. Targets the **game state** PostgreSQL instance, which is
+separate from the Nakama meta DB.
+
+```go
+// PostgresPlayerStore implements storage.PlayerStore.
+func NewPlayerStore(ctx context.Context, dsn string) (*PostgresPlayerStore, error) // connects + pings
+func NewPlayerStoreWithPool(pool *pgxpool.Pool) *PostgresPlayerStore              // shared pool / tests
+func (s *PostgresPlayerStore) Migrate(ctx context.Context) error                  // idempotent DDL
+func (s *PostgresPlayerStore) SavePlayer(ctx context.Context, state *storage.PlayerState) error
+func (s *PostgresPlayerStore) LoadPlayer(ctx context.Context, userID string) (*storage.PlayerState, error)
+func (s *PostgresPlayerStore) DeletePlayer(ctx context.Context, userID string) error
+func (s *PostgresPlayerStore) Ping(ctx context.Context) error
+func (s *PostgresPlayerStore) Pool() *pgxpool.Pool
+func (s *PostgresPlayerStore) Close()
+
+func SchemaSQL() string // the embedded migration SQL
+```
+
+Semantics:
+
+- `SavePlayer` is an **upsert** (`ON CONFLICT (user_id) DO UPDATE`), so the
+  gameserver's batch saver never needs an existence check. `updated_at` is set
+  to `now()` on every write.
+- `LoadPlayer` returns an error wrapping `storage.ErrNotFound` when the row is
+  missing — test with `errors.Is(err, storage.ErrNotFound)`.
+- `DeletePlayer` on a missing row is a no-op (matches `MemoryPlayerStore`).
+- `NewPlayerStore` pings before returning: a bad DSN or a down database fails at
+  boot, not on the first save. It does **not** migrate — call `Migrate`
+  explicitly.
+- `Close()` shuts the pool down only when the store created it.
+
+### Schema (`player_states`)
+
+| Column | Type | Note |
+|--------|------|------|
+| `user_id` | `text` | primary key |
+| `map_id` | `text` | indexed (`player_states_map_id_idx`) |
+| `x`, `y` | `real` | matches `PlayerState.X/Y` (`float32`) |
+| `hp`, `max_hp` | `integer` | |
+| `updated_at` | `timestamptz` | set by the store on every write |
+
+The DDL lives in `storage/pgstore/schema.sql` (embedded via `go:embed`) with a
+byte-identical copy at `backend/deploy/db/init-gamestate.sql` mounted into the
+`postgres-game` container's `/docker-entrypoint-initdb.d/`. A test asserts the
+two files do not drift.
+
+### Usage
+
+```go
+store, err := pgstore.NewPlayerStore(ctx, cfg.GameDBURL)
+if err != nil { return fmt.Errorf("game db: %w", err) }
+defer store.Close()
+if err := store.Migrate(ctx); err != nil { return err }
+
+var players storage.PlayerStore = store
+```
+
+## `config`
+
+| Field | Env | Default |
+|-------|-----|---------|
+| `GameDBURL` | `GAME_DB_URL` | *(empty)* — empty means "no PostgreSQL configured"; services fall back to their in-memory store |
+
+Example: `postgres://game:localdev@localhost:5433/gamestate?sslmode=disable`
+(the `postgres-game` service in `backend/deploy/docker-compose.yml`).
+
 ## `constants`
 
 `ServerHeartbeatTTL` (15s) is now wired: it is the default liveness window of

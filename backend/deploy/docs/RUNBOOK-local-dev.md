@@ -104,8 +104,12 @@ Verified build (17.2 MB `modules/nakama.so`, ~18 s compile) followed by
 make up        # docker compose up -d
 make ps        # service status
 make down      # stop, data volumes preserved
-make reset     # stop + delete postgres-data & redis-data volumes + modules/nakama.so
+make reset     # stop + delete postgres-data, postgres-game-data & redis-data volumes + modules/nakama.so
 ```
+
+The stack contains **two** PostgreSQL instances: `postgres` (Nakama meta DB,
+host port 5432) and `postgres-game` (game state DB — `player_states`, host port
+5433). They are deliberately separate; never point the gameserver at the meta DB.
 
 Startup order is enforced: `nakama` waits for `postgres` to report healthy
 (`pg_isready`), then runs `nakama migrate up` and only afterwards starts the
@@ -124,8 +128,13 @@ docker compose exec -T redis redis-cli ping
 #
 # `make health` runs both (a) and (a2).
 
+# a3) Game state DB — expects the player_states table to exist
+docker compose exec -T postgres-game \
+  psql -U game -d gamestate -c '\d player_states'
+# or: make psql-game
+
 # b) Container health status
-docker compose ps         # all three services should read "healthy"
+docker compose ps         # all four services should read "healthy"
 
 # c) Console login
 open http://localhost:7351     # user: admin  password: password (from .env)
@@ -170,7 +179,8 @@ docker compose exec -T postgres psql -U nakama -d nakama -t \
 
 | Port | Service | Purpose |
 |------|---------|---------|
-| 5432 | postgres | Meta DB (host-exposed for `psql` / GUI clients) |
+| 5432 | postgres | Meta DB — Nakama (host-exposed for `psql` / GUI clients) |
+| 5433 | postgres-game | Game state DB — `player_states` (`POSTGRES_GAME_PORT` override) |
 | 6379 | redis | Sessions, server registry, event streams (`REDIS_PORT` override) |
 | 7349 | nakama | gRPC API |
 | 7350 | nakama | HTTP API + client socket, `/healthcheck` |
@@ -224,7 +234,8 @@ Volume-only reset:
 
 ```bash
 docker compose down
-docker volume rm rpg-mmo-meta_postgres-data     # meta DB
+docker volume rm rpg-mmo-meta_postgres-data       # meta DB
+docker volume rm rpg-mmo-meta_postgres-game-data  # game state DB (player_states)
 docker volume rm rpg-mmo-meta_redis-data        # sessions / registry / streams
 docker compose up -d
 ```
@@ -254,6 +265,8 @@ export JWT_SECRET=dev-secret-change-me      # must equal .env JWT_SECRET
 export REDIS_ADDR=localhost:6379            # match REDIS_PORT if you changed it
 export REDIS_PASSWORD=                      # must equal .env REDIS_PASSWORD
 export META_DB_URL='postgres://nakama:localdev@localhost:5432/nakama?sslmode=disable'
+# Game state DB — omit to keep the in-memory player store (state lost on restart).
+export GAME_DB_URL='postgres://game:localdev@localhost:5433/gamestate?sslmode=disable'
 
 cd backend/gameserver && go run ./cmd/gameserver/ --addr=:9000 --map-id=map_01
 cd backend/gateway    && go run ./cmd/gateway/    --addr=:8000
@@ -263,6 +276,14 @@ Container-to-container the address is `redis:6379` (service name); only host
 processes use `localhost`. If you later containerize gateway/gameserver into
 this compose file, set `REDIS_ADDR=redis:6379` and add
 `depends_on: redis: condition: service_healthy`.
+
+The gameserver applies the `player_states` schema itself on boot
+(`pgstore.Migrate`, idempotent), so it works against an existing volume too;
+`backend/deploy/db/init-gamestate.sql` only covers the first-boot case of an
+empty volume. It logs `using postgres player store` with a password-redacted
+DSN, or `using in-memory player store` when `GAME_DB_URL` is unset, and exits
+non-zero if the DSN is set but unreachable. `--game-db-url` overrides the env
+var. Container-to-container the DSN host is `postgres-game:5432`.
 
 Redis persistence is AOF (`appendfsync everysec`) plus an RDB snapshot rule, on
 the `redis-data` volume — sessions and registry entries survive a restart.
