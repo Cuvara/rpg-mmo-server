@@ -72,6 +72,10 @@ ps: ## Show service status
 psql: ## Open a psql shell on the meta DB
 	$(COMPOSE) exec postgres psql -U $${POSTGRES_USER:-nakama} -d $${POSTGRES_DB:-nakama}
 
+.PHONY: psql-game
+psql-game: ## Open a psql shell on the game state DB (player_states)
+	$(COMPOSE) exec postgres-game psql -U $${POSTGRES_GAME_USER:-game} -d $${POSTGRES_GAME_DB:-gamestate}
+
 .PHONY: redis-cli
 redis-cli: ## Open a redis-cli shell (auth applied if REDIS_PASSWORD is set)
 	$(COMPOSE) exec redis sh -c 'redis-cli $${REDIS_PASSWORD:+-a "$${REDIS_PASSWORD}"} --no-auth-warning'

@@ -1,10 +1,13 @@
 # Local dev meta stack: PostgreSQL (meta DB) + Nakama (with our Go plugin).
 #
-# Realtime services (gateway, gameserver) are NOT part of this stack — run them
-# on the host with `go run` (see docs/RUNBOOK-local-dev.md).
+# Realtime services (gateway, gameserver) are NOT part of the default stack —
+# run them on the host with `go run` (see docs/RUNBOOK-local-dev.md). They are
+# available behind the `realtime` compose profile purely for container-parity
+# testing; `docker compose up` without --profile behaves exactly as before.
 #
 # Usage:
 #   make plugin && make up
+#   docker compose --profile realtime up -d   # + containerized gateway/gameserver
 #
 # All image tags are pinned. Bump NAKAMA_VERSION in .env and in
 # nakama-plugin.Dockerfile together — the plugin ABI must match the server.
@@ -28,6 +31,36 @@ services:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nakama} -d ${POSTGRES_DB:-nakama}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # Second PostgreSQL instance: game state (player_states, ...). Deliberately
+  # separate from the Nakama meta DB above — see root CLAUDE.md ("PostgreSQL:
+  # 2 instances"). Host port defaults to 5433 so both can run side by side.
+  # Host-run gameserver connects with:
+  #   GAME_DB_URL=postgres://game:localdev@localhost:5433/gamestate?sslmode=disable
+  postgres-game:
+    image: postgres:16.4-alpine
+    container_name: rpg-postgres-game
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_GAME_DB:-gamestate}
+      POSTGRES_USER: ${POSTGRES_GAME_USER:-game}
+      POSTGRES_PASSWORD: ${POSTGRES_GAME_PASSWORD:-localdev}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      - "${POSTGRES_GAME_PORT:-5433}:5432"
+    volumes:
+      - postgres-game-data:/var/lib/postgresql/data
+      # Applied once, on an empty data volume. The gameserver also runs the
+      # same (idempotent) schema at boot via pgstore.Migrate, so an existing
+      # volume is upgraded too. Keep in sync with
+      # backend/shared/storage/pgstore/schema.sql.
+      - ./db/init-gamestate.sql:/docker-entrypoint-initdb.d/10-init-gamestate.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_GAME_USER:-game} -d ${POSTGRES_GAME_DB:-gamestate}"]
       interval: 5s
       timeout: 5s
       retries: 12
@@ -108,6 +141,65 @@ services:
       retries: 12
       start_period: 5s
 
+  # ------------------------------------------------------------- realtime
+  # Profile-gated: only started with `docker compose --profile realtime up`.
+  # Default local dev keeps gateway + gameserver on the HOST (`go run`) so you
+  # get instant rebuilds and a debugger; these services exist to validate the
+  # container images (backend/deploy/docker/) against the same backing stack.
+  #
+  # Build them first (context must be backend/, see the Dockerfile headers):
+  #   docker build -f docker/Dockerfile.gateway    -t rpg-mmo/gateway:dev ..
+  #   docker build -f docker/Dockerfile.gameserver -t rpg-mmo/gameserver:dev ..
+  # or: scripts/build-all.sh --images
+  #
+  # Host ports are deliberately offset (8100 / 9300) so a host-run gateway on
+  # :8000 and gameserver on :9000 can coexist with the containers.
+  #
+  # No healthcheck: the runtime is distroless (no shell, no nc, no curl).
+  # Probe from the host instead — `nc -z localhost 8100` — or in k8s use a
+  # tcpSocket probe (Agones already health-checks the gameserver via its SDK).
+  gateway:
+    profiles: ["realtime"]
+    image: ${GATEWAY_IMAGE:-rpg-mmo/gateway:dev}
+    container_name: rpg-gateway
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["--addr=:8000", "--backend=redis"]
+    environment:
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    ports:
+      - "${GATEWAY_CONTAINER_PORT:-8100}:8000"
+
+  gameserver:
+    profiles: ["realtime"]
+    image: ${GAMESERVER_IMAGE:-rpg-mmo/gameserver:dev}
+    container_name: rpg-gameserver
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres-game:
+        condition: service_healthy
+    command:
+      - "--addr=:9000"
+      - "--mode=map"
+      - "--map-id=${GAMESERVER_MAP_ID:-map_01}"
+      - "--redis"
+    environment:
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      # Container-to-container DSN: service name + internal port 5432
+      # (host-run gameserver uses localhost:5433 instead).
+      GAME_DB_URL: postgres://${POSTGRES_GAME_USER:-game}:${POSTGRES_GAME_PASSWORD:-localdev}@postgres-game:5432/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable
+    ports:
+      - "${GAMESERVER_CONTAINER_PORT:-9300}:9000"
+
 volumes:
   postgres-data:
+  postgres-game-data:
   redis-data:

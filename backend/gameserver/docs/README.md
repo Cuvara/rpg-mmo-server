@@ -13,7 +13,17 @@ go run ./cmd/gameserver/ --mode=dungeon --map-id=boss_cave
 
 # Shared Redis registry + event stream (gateway can then find this server)
 go run ./cmd/gameserver/ --mode=map --map-id=forest_01 --redis --redis-addr=localhost:6379
+
+# Durable player state in PostgreSQL (postgres-game from backend/deploy/docker-compose.yml)
+GAME_DB_URL='postgres://game:localdev@localhost:5433/gamestate?sslmode=disable' \
+  go run ./cmd/gameserver/ --mode=map --map-id=map_01
 ```
+
+On boot the server logs which player store is active:
+`using postgres player store` (with a password-redacted DSN) or
+`using in-memory player store`. With PostgreSQL it runs the idempotent
+`player_states` migration before accepting connections and exits non-zero if
+the database is unreachable.
 
 ## Flags
 
@@ -27,6 +37,7 @@ go run ./cmd/gameserver/ --mode=map --map-id=forest_01 --redis --redis-addr=loca
 | `--agones` | `false` | Use the real Agones SDK instead of the noop SDK. |
 | `--redis` | `false` | Use the Redis-backed server registry + event stream instead of in-memory. |
 | `--redis-addr` | `REDIS_ADDR` | Redis address override (only meaningful with `--redis`). |
+| `--game-db-url` | `GAME_DB_URL` | PostgreSQL DSN for game state. Empty = in-memory player store. |
 
 ## Environment
 
@@ -37,6 +48,7 @@ go run ./cmd/gameserver/ --mode=map --map-id=forest_01 --redis --redis-addr=loca
 | `JWT_SECRET` | `dev-secret-change-me` | Join-token verification (shared with Nakama/Gateway) |
 | `REDIS_ADDR` | `localhost:6379` | Registry + event stream when `--redis` is set |
 | `REDIS_PASSWORD` | *(empty)* | Redis auth |
+| `GAME_DB_URL` | *(empty)* | Game state PostgreSQL DSN. Empty = in-memory player store (state lost on restart). Example: `postgres://game:localdev@localhost:5433/gamestate?sslmode=disable` |
 | `LOG_LEVEL` | `info` | slog level |
 
 Timing constants come from `shared/constants`: `EntityHoldTTL` 30s, `DungeonHoldTTL` 60s,

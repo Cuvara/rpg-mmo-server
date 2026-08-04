@@ -105,3 +105,47 @@ retention numbers exist; the interface does not change when they land.
 **Blocking model**: `XREADGROUP` blocks for `SetBlockTimeout` (default 500ms) per call
 rather than indefinitely, so `Close()` — which cancels the consumer context and waits for
 in-flight handlers — returns promptly instead of hanging on a blocked socket.
+
+## 2026-08-04 — PostgreSQL player persistence (`storage/pgstore`)
+
+**Decision.** `PostgresPlayerStore` (pgx v5 / `pgxpool`) implements
+`storage.PlayerStore` against a `player_states` table in the **game state**
+PostgreSQL instance — separate from the Nakama meta DB, as in the target
+architecture. It lives in its own package (`storage/pgstore`) so modules that
+still run in-memory never pull `pgx` into their `go.sum`, mirroring the
+`redisstore` split.
+
+**Upsert, not read-modify-write.** `SavePlayer` is a single
+`INSERT ... ON CONFLICT (user_id) DO UPDATE`. The gameserver's batch saver
+writes the full authoritative state every 30-60s and has no interest in what was
+there before; a check-then-write would double the round trips and open a race
+between two servers holding the same player during a map transfer. Last write
+wins, which is correct because the world is server-authoritative and only one
+server owns a player at a time.
+
+**Migrations: embedded and idempotent, no version table.** The whole schema is a
+single `schema.sql` embedded with `go:embed` and applied by `Migrate(ctx)` on
+every boot; every statement is `IF NOT EXISTS`. There is no migration-version
+table yet — with one table and additive changes, a golang-migrate style ledger
+buys ordering guarantees the schema does not need. The trade-off is that
+destructive changes (column drops/renames) cannot be expressed and will force a
+real migration tool later; that is the intended trigger to adopt one.
+
+**Duplicated SQL file, guarded by a test.** `backend/deploy/db/init-gamestate.sql`
+is a byte-identical copy of `schema.sql`, mounted into the compose container's
+`/docker-entrypoint-initdb.d/` so a fresh volume is usable before any gameserver
+connects. `go:embed` cannot reach outside its package directory, so the copy is
+unavoidable; `TestSchemaMatchesDeployInitScript` fails the build if the two
+drift.
+
+**Tests run against a real PostgreSQL.** Unlike Redis (miniredis) there is no
+credible in-process fake for `ON CONFLICT`, `real` column rounding or
+`timestamptz`. The tests start `postgres:16.4-alpine` through the docker CLI on a
+random host port and skip cleanly when no working docker CLI is present, so a
+docker-less dev box still gets a green `go test ./...`.
+
+**`ErrNotFound` mapping.** `pgx.ErrNoRows` is translated to a wrapped
+`storage.ErrNotFound` so callers stay backend-agnostic — the same
+`errors.Is(err, storage.ErrNotFound)` check works against memory, Redis and
+PostgreSQL.
+

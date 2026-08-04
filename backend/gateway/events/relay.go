@@ -6,12 +6,14 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/duycuong/rpg-mmo/shared/constants"
 	"github.com/duycuong/rpg-mmo/shared/storage"
 )
 
-// DefaultStream is the logical stream name the gateway subscribes to. The
-// concrete store prefixes it (constants.EventStreamPrefix for Redis Streams).
-const DefaultStream = "global"
+// DefaultStream is the logical stream name the gateway subscribes to. It must
+// match what game servers publish to (constants.GameEventStream); the concrete
+// store adds the prefix (constants.EventStreamPrefix for Redis Streams).
+const DefaultStream = constants.GameEventStream
 
 // EventRelay consumes cross-server events and hands them to the gateway.
 type EventRelay interface {

@@ -100,3 +100,28 @@ this module.
 and `EntitySnapshot` has no per-player ack field; `shared` is owned by another agent, so
 nothing was added there. Until `SnapshotMessage` carries e.g. `AckInputTick`, the value is
 only observable server-side and client reconciliation remains blocked.
+
+## 2026-08-04 — Player state persisted to PostgreSQL (opt-in)
+
+**Decision.** `cmd/gameserver` selects the `storage.PlayerStore` implementation
+at boot: `pgstore.PostgresPlayerStore` when `GAME_DB_URL` (or `--game-db-url`)
+is set, otherwise the in-memory store. The chosen backend is logged, with the
+DSN password redacted.
+
+**Opt-in, not default.** Unit tests, the integration suite and a bare `go run`
+must keep working with no database around, so an unset `GAME_DB_URL` keeps the
+old in-memory behaviour. But a *set-yet-broken* DSN is fatal: the process runs
+`Migrate` and exits non-zero rather than silently accepting players whose
+progress will be dropped on shutdown.
+
+**Migrate at boot, from the game server.** The DDL is idempotent, so every
+replica applying it concurrently is safe, and it means a pod scheduled against a
+freshly provisioned database is self-sufficient — no init-container ordering.
+
+**Nothing in the tick loop changed.** `persistence.Saver` already talks to the
+interface and runs off-tick every 30s; swapping the implementation adds network
+I/O only on that goroutine. `Server.loadOrCreatePlayer` treats any load error as
+"new player", which now includes a transient database error — a player could be
+respawned at defaults during an outage. Distinguishing `storage.ErrNotFound`
+from real failures (and refusing the join on the latter) is the follow-up.
+

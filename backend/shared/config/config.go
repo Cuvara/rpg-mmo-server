@@ -18,6 +18,12 @@ type Config struct {
 	// Database
 	MetaDBURL      string
 	GameStateDBURL string
+	// GameDBURL is the DSN of the game-state PostgreSQL instance actually used
+	// at runtime. Empty (the default) means "no PostgreSQL configured" and
+	// services fall back to their in-memory stores — set GAME_DB_URL to switch
+	// the gameserver to pgstore.PostgresPlayerStore.
+	// Example: postgres://game:localdev@localhost:5433/gamestate?sslmode=disable
+	GameDBURL string
 
 	// Redis
 	RedisAddr     string
@@ -36,6 +42,7 @@ func Load() Config {
 		JWTSecret:      envOrDefault("JWT_SECRET", "dev-secret-change-me"),
 		MetaDBURL:      envOrDefault("META_DB_URL", "postgres://localhost:5432/rpg_meta?sslmode=disable"),
 		GameStateDBURL: envOrDefault("GAMESTATE_DB_URL", "postgres://localhost:5432/rpg_gamestate?sslmode=disable"),
+		GameDBURL:      envOrDefault("GAME_DB_URL", ""),
 		RedisAddr:      envOrDefault("REDIS_ADDR", "localhost:6379"),
 		RedisPassword:  envOrDefault("REDIS_PASSWORD", ""),
 		LogLevel:       envOrDefault("LOG_LEVEL", "info"),

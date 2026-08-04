@@ -9,8 +9,9 @@ import (
 	"github.com/duycuong/rpg-mmo/shared/storage"
 )
 
-// GameStream is the cross-server stream game servers publish gameplay events to.
-const GameStream = constants.EventStreamPrefix + "game"
+// GameStream is the cross-server stream game servers publish gameplay events
+// to. Logical name only — the storage layer adds constants.EventStreamPrefix.
+const GameStream = constants.GameEventStream
 
 // Event type identifiers carried in storage.Event.Type.
 const (

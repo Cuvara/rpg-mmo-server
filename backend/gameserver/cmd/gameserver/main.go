@@ -1,15 +1,19 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/duycuong/rpg-mmo/shared/config"
 	"github.com/duycuong/rpg-mmo/shared/logger"
 	"github.com/duycuong/rpg-mmo/shared/storage"
+	"github.com/duycuong/rpg-mmo/shared/storage/pgstore"
 	"github.com/duycuong/rpg-mmo/shared/storage/redisstore"
 	"github.com/duycuong/rpg-mmo/gameserver/agones"
 	"github.com/duycuong/rpg-mmo/gameserver/server"
@@ -24,6 +28,7 @@ func main() {
 	useAgones := flag.Bool("agones", false, "Enable Agones SDK integration")
 	useRedis := flag.Bool("redis", false, "Use Redis-backed server registry and event stream (default: in-memory)")
 	redisAddr := flag.String("redis-addr", "", "Redis address (overrides REDIS_ADDR)")
+	gameDBURL := flag.String("game-db-url", "", "PostgreSQL DSN for game state (overrides GAME_DB_URL); empty = in-memory player store")
 	flag.Parse()
 
 	cfg := config.Load()
@@ -37,6 +42,9 @@ func main() {
 	}
 	if *redisAddr != "" {
 		cfg.RedisAddr = *redisAddr
+	}
+	if *gameDBURL != "" {
+		cfg.GameDBURL = *gameDBURL
 	}
 
 	// Initialize Agones SDK
@@ -62,8 +70,31 @@ func main() {
 		"agones", *useAgones,
 	)
 
-	// Player state is still in-memory (PostgreSQL swap pending).
-	playerStore := storage.NewMemoryPlayerStore()
+	// Player state: PostgreSQL when GAME_DB_URL / --game-db-url is set,
+	// otherwise in-memory (state lost on restart — dev only).
+	var playerStore storage.PlayerStore
+	if cfg.GameDBURL != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		pgPlayerStore, err := pgstore.NewPlayerStore(ctx, cfg.GameDBURL)
+		if err != nil {
+			cancel()
+			log.Error("postgres player store init failed", "err", err)
+			os.Exit(1)
+		}
+		if err := pgPlayerStore.Migrate(ctx); err != nil {
+			cancel()
+			pgPlayerStore.Close()
+			log.Error("postgres player store migrate failed", "err", err)
+			os.Exit(1)
+		}
+		cancel()
+		defer pgPlayerStore.Close()
+		log.Info("using postgres player store", "dsn", redactDSN(cfg.GameDBURL))
+		playerStore = pgPlayerStore
+	} else {
+		log.Info("using in-memory player store (set GAME_DB_URL for postgres persistence)")
+		playerStore = storage.NewMemoryPlayerStore()
+	}
 
 	// Registry + event stream: in-memory by default, Redis with --redis so that
 	// gateway and game servers share one registry across processes.
@@ -110,4 +141,19 @@ func main() {
 		log.Error("server error", "err", err)
 		os.Exit(1)
 	}
+}
+
+// redactDSN strips the password from a postgres DSN so it is safe to log.
+// Falls back to a fully redacted string if the DSN cannot be parsed.
+func redactDSN(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "(unparseable dsn)"
+	}
+	if u.User != nil {
+		if _, hasPassword := u.User.Password(); hasPassword {
+			u.User = url.UserPassword(u.User.Username(), "xxxxx")
+		}
+	}
+	return u.Redacted()
 }

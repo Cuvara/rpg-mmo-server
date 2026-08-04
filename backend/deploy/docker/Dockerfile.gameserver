@@ -1,0 +1,57 @@
+# Game server container image (tick loop / world / combat / AOI snapshots).
+#
+# This is the image referenced by the Agones fleets:
+#   agones/fleet-map.yaml, agones/fleet-dungeon.yaml
+#     -> ghcr.io/dycuong03/rpg-mmo-gameserver:latest
+# Keep the tag/name in sync with .github/workflows/cd.yml.
+#
+# IMPORTANT: the build context must be `backend/` — NOT `backend/gameserver/`
+# and NOT the repo root. backend/gameserver/go.mod has
+# `replace github.com/duycuong/rpg-mmo/shared => ../shared`, so both
+# `gameserver/` and `shared/` must be visible to the build.
+#
+# Build (from backend/deploy — cwd-relative paths, WSL `docker.exe` cannot
+# resolve absolute /mnt/* paths):
+#   docker build -f docker/Dockerfile.gameserver -t rpg-mmo/gameserver:dev ..
+#
+# Runtime base: gcr.io/distroless/static-debian12:nonroot.
+#   - Static binary (CGO_ENABLED=0, pgx is pure Go), so no libc needed.
+#   - No shell / package manager => minimal attack surface, ~2MB base.
+#     Agones health checking is done by the SDK sidecar (--agones), and
+#     compose parity testing uses a TCP port check — neither needs `nc`,
+#     so busybox/alpine buys nothing here.
+#   - :nonroot tag runs as uid/gid 65532.
+ARG GO_VERSION=1.26
+
+FROM golang:${GO_VERSION}-alpine AS builder
+
+ENV CGO_ENABLED=0 \
+    GOOS=linux
+
+WORKDIR /backend
+
+# Copy manifests first so `go mod download` caches across source-only changes.
+COPY shared/go.mod shared/go.sum shared/
+COPY gameserver/go.mod gameserver/go.sum gameserver/
+RUN cd gameserver && go mod download
+
+COPY shared/ shared/
+COPY gameserver/ gameserver/
+
+# -trimpath: reproducible paths. -s -w: strip DWARF + symbol table.
+RUN cd gameserver && go build \
+    -trimpath \
+    -ldflags "-s -w" \
+    -o /out/gameserver ./cmd/gameserver/
+
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+
+COPY --from=builder /out/gameserver /usr/local/bin/gameserver
+
+# Realtime game port (GAMESERVER_ADDR / --addr default :9000). Matches
+# containerPort in the Agones fleet manifests.
+EXPOSE 9000
+
+USER nonroot:nonroot
+
+ENTRYPOINT ["/usr/local/bin/gameserver"]

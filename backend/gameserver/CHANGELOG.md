@@ -6,6 +6,22 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- Cross-server event stream name mismatch: gameserver published to
+  "events:game" (double-prefixed to "events:events:game" by the store) while
+  the gateway relay subscribed to "global" — events never arrived. Both sides
+  now share constants.GameEventStream ("game", store adds the prefix once).
+
+### Added
+- Player state can now be persisted to PostgreSQL: setting `GAME_DB_URL` (or the
+  new `--game-db-url` flag) makes the server use
+  `shared/storage/pgstore.PostgresPlayerStore` instead of the in-memory store.
+  The schema migration runs at boot (idempotent) and the active store is logged
+  (`using postgres player store` with a password-redacted DSN, or
+  `using in-memory player store`). An unreachable/invalid DSN is fatal at
+  startup instead of silently losing progress; unset keeps the previous
+  in-memory behaviour.
+
+### Fixed
 - Data race between the tick loop, the persistence saver, and reconnect
   reattach (caught by `-race` in CI): entity field access is now disciplined
   through `World.Update` (write lock) / `World.View` (read lock); AOI queries
