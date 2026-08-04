@@ -32,7 +32,7 @@ NAKAMA_VERSION="${NAKAMA_VERSION:-3.40.0}"
 SKIP_TESTS=0
 WITH_PLUGIN=0
 WITH_IMAGES=0
-WITH_DOTNET=0
+WITH_DOTNET=1  # C# gameserver is the primary — always build
 IMAGE_PREFIX="${IMAGE_PREFIX:-rpg-mmo}"
 IMAGE_TAG="${IMAGE_TAG:-dev}"
 RACE=0
@@ -113,7 +113,7 @@ fi
 MODULES=(
 	"backend/shared|-|-"
 	"backend/gateway|./cmd/gateway/|gateway"
-	"backend/gameserver|./cmd/gameserver/|gameserver"
+	# Go gameserver removed — C# .NET 10 gameserver-dotnet is built separately below
 	"backend/nakama|./...|-"
 	"backend/smoketest|./cmd/smoketest/|smoketest"
 )

@@ -275,6 +275,22 @@ jobs:
           name: nakama-plugin-${{ github.sha }}
           path: dist/deploy
 
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install NativeAOT prerequisites
+        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+
+      - name: Build C# gameserver (NativeAOT)
+        working-directory: backend/gameserver-dotnet
+        run: |
+          dotnet publish GameServer/GameServer.csproj -c Release -o ../../dist/bin/dotnet-publish
+          mv ../../dist/bin/dotnet-publish/GameServer ../../dist/bin/gameserver-dotnet
+          rm -rf ../../dist/bin/dotnet-publish
+          chmod +x ../../dist/bin/gameserver-dotnet
+
       - name: Stage deployment bundle
         run: |
           set -euo pipefail
@@ -284,7 +300,7 @@ jobs:
           cp backend/deploy/.env.example dist/deploy/
           cp scripts/deploy-local.sh dist/scripts/
           echo "${GITHUB_SHA}" > dist/COMMIT
-          for f in bin/gateway bin/smoketest deploy/nakama.so; do
+          for f in bin/gateway bin/smoketest bin/gameserver-dotnet deploy/nakama.so; do
             [ -f "dist/$f" ] || { echo "::error::missing dist/$f"; exit 1; }
           done
           ls -lhR dist
@@ -327,11 +343,12 @@ jobs:
           set -euo pipefail
           mkdir -p "$RPG_DEPLOY_DIR"/{bin,deploy,scripts,run,logs}
           # Keep the previous binaries so a manual rollback is one `mv` away.
-          for b in gateway; do
+          for b in gateway gameserver-dotnet; do
             [ -f "$RPG_DEPLOY_DIR/bin/$b" ] && cp -f "$RPG_DEPLOY_DIR/bin/$b" "$RPG_DEPLOY_DIR/bin/$b.prev" || true
           done
-          install -m 0755 dist/bin/gateway     "$RPG_DEPLOY_DIR/bin/gateway"
-          install -m 0755 dist/bin/smoketest   "$RPG_DEPLOY_DIR/bin/smoketest"
+          install -m 0755 dist/bin/gateway            "$RPG_DEPLOY_DIR/bin/gateway"
+          install -m 0755 dist/bin/gameserver-dotnet   "$RPG_DEPLOY_DIR/bin/gameserver-dotnet"
+          install -m 0755 dist/bin/smoketest           "$RPG_DEPLOY_DIR/bin/smoketest"
           install -m 0755 dist/scripts/deploy-local.sh "$RPG_DEPLOY_DIR/scripts/deploy-local.sh"
           mkdir -p "$RPG_DEPLOY_DIR/deploy/modules"
           install -m 0644 dist/deploy/nakama.so          "$RPG_DEPLOY_DIR/deploy/modules/nakama.so"
@@ -384,6 +401,7 @@ jobs:
             echo "GATEWAY_ADDR=${GATEWAY_ADDR}"
             echo "GAMESERVER_ADDR=${GAMESERVER_ADDR}"
             echo "GAMESERVER_MAP_ID=${GAMESERVER_MAP_ID}"
+            echo "GAMESERVER_RUNTIME=dotnet"
             echo "GAME_DB_URL=${GAME_DB_URL}"
           } > "$envfile"
           chmod 600 "$envfile"

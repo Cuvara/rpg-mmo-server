@@ -62,9 +62,9 @@ GATEWAY_ADDR="${GATEWAY_ADDR:-:8000}"
 GAMESERVER_ADDR="${GAMESERVER_ADDR:-:9000}"
 GAMESERVER_MAP_ID="${GAMESERVER_MAP_ID:-map_01}"
 
-# Select which gameserver binary to run. Set GAMESERVER_RUNTIME=dotnet to use
-# the C# NativeAOT binary (gameserver-dotnet) instead of the Go binary.
-GAMESERVER_RUNTIME="${GAMESERVER_RUNTIME:-go}"
+# The Go gameserver has been removed. C# .NET 10 NativeAOT binary is the default.
+# Set GAMESERVER_RUNTIME=go only if you have a legacy Go binary to test against.
+GAMESERVER_RUNTIME="${GAMESERVER_RUNTIME:-dotnet}"
 
 # The gateway picks its redis backend from REDIS_ADDR automatically; the
 # gameserver needs the explicit --redis flag, so add it when REDIS_ADDR is set.
@@ -73,8 +73,15 @@ if [ -n "${REDIS_ADDR:-}" ]; then
 	GAMESERVER_ARGS="$GAMESERVER_ARGS --redis"
 fi
 
-# C# gameserver uses the same CLI flags but a different binary name.
-GAMESERVER_DOTNET_ARGS="--addr=${GAMESERVER_ADDR} --map-id=${GAMESERVER_MAP_ID}"
+# C# gameserver uses similar CLI flags. JWT_SECRET is passed explicitly so the
+# binary works even if env inheritance is incomplete (setsid/nohup).
+GAMESERVER_DOTNET_ARGS="--addr=${GAMESERVER_ADDR} --map-id=${GAMESERVER_MAP_ID} --jwt-secret=${JWT_SECRET:-}"
+if [ -n "${REDIS_ADDR:-}" ]; then
+	GAMESERVER_DOTNET_ARGS="$GAMESERVER_DOTNET_ARGS --redis-addr=${REDIS_ADDR}"
+fi
+if [ -n "${GAME_DB_URL:-}" ]; then
+	GAMESERVER_DOTNET_ARGS="$GAMESERVER_DOTNET_ARGS --game-db-url=${GAME_DB_URL}"
+fi
 
 if [ "$GAMESERVER_RUNTIME" = "dotnet" ]; then
 	GAMESERVER_BIN="gameserver-dotnet"
