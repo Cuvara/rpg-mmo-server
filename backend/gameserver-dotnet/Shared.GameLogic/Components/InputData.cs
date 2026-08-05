@@ -5,6 +5,13 @@ namespace Shared.GameLogic.Components;
 /// <summary>
 /// Player input for one simulation tick. Ported from Go InputMessage.
 /// JSON field names match the Go wire protocol exactly.
+///
+/// <para>
+/// <b>MoveX/MoveY are a direction, not a displacement.</b> The server integrates
+/// <c>direction * speed * dt</c> once per tick; a vector with magnitude &gt; 1 is
+/// normalized (so diagonals are not faster than cardinals) and a grossly invalid
+/// vector is dropped. Sending more input packets does not move the player further.
+/// </para>
 /// </summary>
 public readonly struct InputData
 {
