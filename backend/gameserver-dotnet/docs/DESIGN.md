@@ -182,6 +182,68 @@ The planned client loop:
 The prerequisite for step 2/3 is that snapshots carry the acked input tick per
 entity; that is the next piece of work on the wire format.
 
+## Player State Persistence (2026-08-05)
+
+### What it replaced
+
+The Go game server persisted player state through
+`shared/storage/pgstore.PostgresPlayerStore`. The C# migration shipped with only
+`MemoryPlayerStore`, so every restart silently wiped player state while the
+`rpg-postgres-game` container sat idle with nothing writing to it. The Go
+package is now orphaned; `GameServer/Persistence/PostgresPlayerStore.cs` is a
+direct port of its semantics.
+
+### Npgsql, and why no ORM
+
+`Npgsql` 10.0.3 is the only new dependency. It is the reference PostgreSQL
+driver for .NET and is annotated for trimming and NativeAOT.
+
+The AOT constraint drives the entire shape of the store: `PublishAot` is on, so
+anything resolved by reflection at runtime is unsafe. The store therefore uses
+raw `NpgsqlCommand` objects, parameters with an explicit `NpgsqlDbType`, and
+positional reader accessors (`GetString(0)`, `GetFloat(2)`, ...). There is no
+ORM, no `[Table]`/`[Column]` mapping, no anonymous-type projection and no
+runtime type inference — every access path is statically resolvable. Dapper or
+EF Core would each reintroduce reflection-based materialisation.
+
+Connections are pooled through a single `NpgsqlDataSource` built once at boot.
+Every command carries an explicit `CommandTimeout` (5s for queries, 30s for the
+migration) so a stalled database can never wedge the async saver.
+
+### Upsert, not read-modify-write
+
+`SavePlayerAsync` is a single `INSERT ... ON CONFLICT (user_id) DO UPDATE` that
+also refreshes `updated_at`. The async batch saver can call it unconditionally
+for every player each cycle with no prior existence check, no transaction, and
+no read round-trip — one statement per player per save tick. `LoadPlayerAsync`
+returns `null` for a missing row, matching `MemoryPlayerStore`, so join
+handling needs no store-specific branch.
+
+Persistence stays off the tick thread: `AsyncSaver` runs as its own background
+task, and a save failure increments
+`gameserver_player_saves_total{status="error"}` instead of propagating into the
+simulation.
+
+### Migration on boot
+
+`MigrateAsync` applies `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT
+EXISTS` DDL on every start; concurrent servers are serialised by PostgreSQL's
+own DDL locking. The SQL is duplicated in
+`backend/deploy/db/init-gamestate.sql`, which seeds a fresh container volume
+before any server connects. Both files carry a cross-reference comment and
+`SchemaSql_MatchesInitGamestateSql` fails the build if they drift.
+
+### Fail fast on an unreachable database
+
+`GAME_DB_URL` unset means the operator asked for a memory store, which is fine
+for local development. `GAME_DB_URL` set but unreachable means the operator
+asked for durability and is not getting it. Falling back to memory there would
+produce a server that looks healthy, accepts players, and discards their
+progress — a silent data-loss mode that only surfaces as player complaints.
+So the server logs a critical error and exits 1, which surfaces immediately as
+a crash-looping pod. DSN passwords are masked in every log line and in the
+exception message.
+
 ## Anti-Cheat
 
 All validation is server-authoritative:

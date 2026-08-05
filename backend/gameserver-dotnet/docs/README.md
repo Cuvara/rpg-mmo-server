@@ -62,6 +62,48 @@ dotnet run --project GameServer -- \
   --redis=localhost:6379
 ```
 
+### Configuration
+
+Every flag has an environment-variable equivalent; the flag wins when both are
+set. Flags are **space-separated** (`--addr :9000`).
+
+| Flag | Environment variable | Default | Description |
+|------|----------------------|---------|-------------|
+| `--mode` | `GAMESERVER_MODE` | `map` | `map` or `dungeon` (dungeon uses a 60s reconnect hold) |
+| `--addr` | `GAMESERVER_ADDR` | `:9000` | Game traffic listen address |
+| `--map-id` | `GAMESERVER_MAP_ID` | `map_01` | Map identifier, also the `map_id` metric label |
+| `--server-id` | `GAMESERVER_ID` / `POD_NAME` | random | Server identity checked against the join token |
+| `--capacity` | `GAMESERVER_CAPACITY` | `100` | Maximum concurrent players |
+| `--tick-rate` | `GAMESERVER_TICK_RATE` | `15` | Simulation ticks per second |
+| `--map-width` | `GAMESERVER_MAP_WIDTH` | `1000` | Map width in world units |
+| `--map-height` | `GAMESERVER_MAP_HEIGHT` | `1000` | Map height in world units |
+| `--jwt-secret` | `JWT_SECRET` | *(empty)* | HS256 secret shared with the gateway |
+| `--metrics-addr` | `METRICS_ADDR` | `:9101` | Prometheus `/metrics` + `/healthz`; empty disables |
+| `--game-db-url` | `GAME_DB_URL` | *(unset)* | Game-state PostgreSQL DSN — see below |
+| `--agones` | `AGONES_ENABLED=true` | off | Enable the Agones SDK integration |
+
+#### Player state persistence (`GAME_DB_URL`)
+
+When set, player state is persisted to the game-state PostgreSQL database and
+survives a server restart. When unset the server falls back to an in-memory
+store and **all player state is lost on restart** — the startup log says which
+store is active.
+
+```bash
+dotnet run --project GameServer -- \
+  --addr :9000 \
+  --game-db-url 'postgres://game:localdev@localhost:5433/gamestate?sslmode=disable'
+```
+
+Accepted formats are a libpq URL (above) or a native Npgsql keyword string
+(`Host=...;Database=...;Username=...;Password=...`). The password is masked in
+every log line.
+
+The schema is created on boot if missing (idempotent), so pointing at an empty
+database is enough. If the database is configured but unreachable the server
+logs a critical error and **exits with status 1** rather than silently
+degrading to the memory store and losing writes.
+
 ### Run Tests
 
 ```bash

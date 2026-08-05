@@ -20,7 +20,7 @@ public class PostgresPlayerStoreTests
 
     private async Task<PostgresPlayerStore> MigratedStoreAsync()
     {
-        var store = await PostgresPlayerStore.ConnectAsync(_pg.Dsn);
+        var store = await _pg.ConnectStoreAsync();
         await store.MigrateAsync();
         return store;
     }

@@ -30,7 +30,7 @@ public class PostgresPersistenceIntegrationTests
         int port = FreeTcpPort();
 
         // ── Boot #1: postgres-backed server ──
-        var store = await PostgresPlayerStore.ConnectAsync(_pg.Dsn);
+        var store = await _pg.ConnectStoreAsync();
         await store.MigrateAsync();
 
         var options = new ServerOptions
@@ -95,7 +95,7 @@ public class PostgresPersistenceIntegrationTests
         await store.DisposeAsync();
 
         // ── Boot #2: a brand-new store (simulating a process restart) reloads it ──
-        await using var restarted = await PostgresPlayerStore.ConnectAsync(_pg.Dsn);
+        await using var restarted = await _pg.ConnectStoreAsync();
         await restarted.MigrateAsync();
 
         var reloaded = await restarted.LoadPlayerAsync(userId, default);

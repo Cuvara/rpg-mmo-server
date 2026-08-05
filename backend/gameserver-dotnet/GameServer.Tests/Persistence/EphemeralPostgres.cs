@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using Npgsql;
 
 namespace GameServer.Tests.Persistence;
 
@@ -80,29 +81,44 @@ internal sealed class EphemeralPostgres : IAsyncDisposable
     private async Task<bool> WaitReadyAsync(TimeSpan timeout, CancellationToken ct)
     {
         var deadline = DateTime.UtcNow + timeout;
+        int consecutiveSuccesses = 0;
+
         while (DateTime.UtcNow < deadline)
         {
             ct.ThrowIfCancellationRequested();
 
             var probe = Exec(_docker, $"exec {ContainerName} pg_isready -U {User} -d {Database}",
                 TimeSpan.FromSeconds(15));
-            if (probe.ExitCode == 0 && await CanConnectAsync(ct)) return true;
 
-            await Task.Delay(500, ct);
+            // The postgres entrypoint boots a temporary local-only server to run the
+            // init scripts, then restarts it. pg_isready answers "up" during that
+            // window, so a single successful handshake is not proof of readiness —
+            // require two in a row before handing the DSN to a test.
+            if (probe.ExitCode == 0 && await CanQueryAsync(ct))
+            {
+                if (++consecutiveSuccesses >= 2) return true;
+            }
+            else
+            {
+                consecutiveSuccesses = 0;
+            }
+
+            await Task.Delay(750, ct);
         }
         return false;
     }
 
-    /// <summary>
-    /// pg_isready only proves the server is up inside the container; the published
-    /// port mapping can lag behind, so confirm an actual TCP connect from the host.
-    /// </summary>
-    private async Task<bool> CanConnectAsync(CancellationToken ct)
+    /// <summary>Full protocol-level probe: connect from the host and run a query.</summary>
+    private async Task<bool> CanQueryAsync(CancellationToken ct)
     {
         try
         {
-            using var client = new TcpClient();
-            await client.ConnectAsync(IPAddress.Loopback, Port, ct);
+            await using var conn = new NpgsqlConnection(
+                $"Host=127.0.0.1;Port={Port};Database={Database};Username={User};Password={Password};" +
+                "SSL Mode=Disable;Timeout=5;Pooling=false");
+            await conn.OpenAsync(ct);
+            await using var cmd = new NpgsqlCommand("SELECT 1", conn) { CommandTimeout = 5 };
+            await cmd.ExecuteScalarAsync(ct);
             return true;
         }
         catch
@@ -137,7 +153,34 @@ internal sealed class EphemeralPostgres : IAsyncDisposable
         return port;
     }
 
+    /// <summary>
+    /// Run a process and capture its output. Never throws: a launch failure is
+    /// reported as a non-zero exit code so callers degrade into "docker unavailable"
+    /// (test skips) instead of failing with an environment error.
+    /// </summary>
     private static (int ExitCode, string StdOut, string StdErr) Exec(string file, string args, TimeSpan timeout)
+    {
+        // Spawning processes can fail transiently under memory pressure
+        // (Windows: "The paging file is too small for this operation to complete").
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return ExecOnce(file, args, timeout);
+            }
+            catch (Exception ex) when (attempt < 2)
+            {
+                Console.WriteLine($"[EphemeralPostgres] '{file} {args}' failed to start ({ex.Message}); retrying");
+                Thread.Sleep(2000);
+            }
+            catch (Exception ex)
+            {
+                return (-127, "", ex.Message);
+            }
+        }
+    }
+
+    private static (int ExitCode, string StdOut, string StdErr) ExecOnce(string file, string args, TimeSpan timeout)
     {
         using var proc = new Process
         {
@@ -180,6 +223,26 @@ public sealed class PostgresFixture : IAsyncLifetime
 
     /// <summary>DSN of the shared container (empty when unavailable).</summary>
     public string Dsn => Container?.Dsn ?? "";
+
+    /// <summary>
+    /// Connect a store to the shared container with retries. The Windows
+    /// docker port proxy occasionally resets a fresh connection under full-suite
+    /// load; production keeps fail-fast semantics, tests absorb the transient.
+    /// </summary>
+    public async Task<GameServer.Persistence.PostgresPlayerStore> ConnectStoreAsync(int attempts = 4)
+    {
+        for (int i = 1; ; i++)
+        {
+            try
+            {
+                return await GameServer.Persistence.PostgresPlayerStore.ConnectAsync(Dsn);
+            }
+            catch when (i < attempts)
+            {
+                await Task.Delay(400 * i);
+            }
+        }
+    }
 
     public async Task InitializeAsync() => Container = await EphemeralPostgres.TryStartAsync();
 
