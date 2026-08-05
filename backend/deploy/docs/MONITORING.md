@@ -81,8 +81,8 @@ Targets:
 | `nakama` | `nakama:9100` | compose service, `--metrics.prometheus_port 9100` |
 | `gateway` | `host.docker.internal:9102` | host-run `go run ./cmd/gateway/` |
 | `gameserver` | `host.docker.internal:9101` | host-run C# `dotnet run` |
-| `gateway-container` | `gateway:9102` | only up with `--profile realtime` |
-| `gameserver-container` | `gameserver-dotnet:9101` | only up with `--profile realtime-dotnet` |
+| `gateway-container` | `gateway:9102` | up with `--profile realtime` (i.e. `DEPLOY_MODE=containers`) |
+| `gameserver-container` | `gameserver-dotnet:9101` | same profile — see the wildcard caveat below |
 
 `host.docker.internal` resolves inside the container because the service
 declares `extra_hosts: host.docker.internal:host-gateway` (needed on a plain
@@ -110,6 +110,39 @@ Exposed on a **separate listener** from the realtime port — `--metrics-addr`
 Plus the standard `go_*` and `process_*` collectors. Both `result` label values
 are pre-created at startup so `rate()` has a zero baseline instead of a series
 that pops into existence on the first failure.
+
+### The C# metrics endpoint cannot bind a wildcard
+
+`METRICS_ADDR=:9101` (or `0.0.0.0:9101`, or `*:9101`) **does not work**. The
+server maps an empty host to the HttpListener wildcard `http://+:9101/`, and
+OpenTelemetry's `PrometheusHttpListener` then runs that string through
+`UriBuilder`, which rejects `+`:
+
+```
+fail: Program[0]
+      Failed to start metrics endpoint on http://+:9101/
+      System.InvalidOperationException: PrometheusExporter HttpListener could not be started.
+       ---> System.UriFormatException: Invalid URI: The hostname could not be parsed.
+```
+
+The process keeps running and serving the game — only observability is lost —
+which is why this went unnoticed: **the host-mode `gameserver` scrape target has
+simply been DOWN**, indistinguishable from "the process is not running".
+
+A *resolvable* host binds fine, so containers mode sets
+`METRICS_ADDR=gameserver-dotnet:9101` (the compose service name). Docker's DNS
+resolves it to the container, and Prometheus scrapes it under exactly that name,
+so the request's `Host` header matches the registered prefix. The consequence:
+probing the published port from the host needs the header too, or HttpListener
+answers 404:
+
+```bash
+curl -H 'Host: gameserver-dotnet:9101' http://127.0.0.1:9101/healthz   # ok
+curl http://127.0.0.1:9101/healthz                                     # 404
+```
+
+The real fix belongs in `GameServer/Observability/MetricsEndpoint.cs` (owner:
+`agent-gameserver-dotnet`) — until then, keep `GAMESERVER_METRICS_ADDR` a name.
 
 ### Game server (C#, `:9101`)
 

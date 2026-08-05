@@ -50,5 +50,7 @@ USER 65532:65532
 
 # Game traffic (TCP for framed messages, UDP reserved for future KCP).
 EXPOSE 9000/tcp 9000/udp
+# Observability: /metrics + /healthz (METRICS_ADDR, default :9101).
+EXPOSE 9101/tcp
 
 ENTRYPOINT ["./GameServer"]

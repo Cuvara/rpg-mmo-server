@@ -1,9 +1,10 @@
 # Local dev meta stack: PostgreSQL (meta DB) + Nakama (with our Go plugin).
 #
-# Realtime services (gateway, gameserver) are NOT part of the default stack —
-# run them on the host with `go run` (see docs/RUNBOOK-local-dev.md). They are
-# available behind the `realtime` compose profile purely for container-parity
-# testing; `docker compose up` without --profile behaves exactly as before.
+# Realtime services (gateway, gameserver) are NOT in the default stack — plain
+# `docker compose up` still brings up only the backing services. They live
+# behind the `realtime` profile, which is what CD's DEPLOY_MODE=containers uses
+# and what container-parity testing uses locally; DEPLOY_MODE=host and
+# interactive dev instead run them on the host (see docs/RUNBOOK-local-dev.md).
 #
 # Usage:
 #   make plugin && make up
@@ -142,22 +143,24 @@ services:
       start_period: 5s
 
   # ------------------------------------------------------------- realtime
-  # Profile-gated: only started with `docker compose --profile realtime up`.
-  # Default local dev keeps gateway + gameserver on the HOST (`go run`) so you
-  # get instant rebuilds and a debugger; these services exist to validate the
-  # container images (backend/deploy/docker/) against the same backing stack.
+  # Profile-gated: started with `docker compose --profile realtime up -d`.
   #
-  # Build them first (context must be backend/, see the Dockerfile headers):
-  #   docker build -f docker/Dockerfile.gateway    -t rpg-mmo/gateway:dev ..
-  #   docker build -f docker/Dockerfile.gameserver -t rpg-mmo/gameserver:dev ..
+  # This is the DEPLOY_MODE=containers path (see docs/CICD.md): CD builds both
+  # images on the runner and brings them up here, and they take over the
+  # canonical ports. DEPLOY_MODE=host instead runs the same binaries directly
+  # from $RPG_DEPLOY_DIR/bin via scripts/deploy-local.sh, and this profile stays
+  # down. Interactive local dev normally keeps using the host path (`go run` /
+  # `dotnet run`) for instant rebuilds and a debugger.
+  #
+  # Build them first (contexts differ, see the Dockerfile headers):
+  #   docker build -f docker/Dockerfile.gateway           -t rpg-mmo/gateway:dev ..
+  #   docker build -f docker/Dockerfile.gameserver-dotnet -t rpg-mmo/gameserver-dotnet:dev ..
   # or: scripts/build-all.sh --images
   #
-  # Host ports are deliberately offset (8100 / 9300) so a host-run gateway on
-  # :8000 and gameserver on :9000 can coexist with the containers.
-  #
-  # No healthcheck: the runtime is distroless (no shell, no nc, no curl).
-  # Probe from the host instead — `nc -z localhost 8100` — or in k8s use a
-  # tcpSocket probe (Agones already health-checks the gameserver via its SDK).
+  # Published host ports default to the OFFSET values (8100 / 9200 / …) so a
+  # host-run gateway on :8000 can coexist; CD's containers mode overrides
+  # GATEWAY_CONTAINER_PORT=8000 in deploy/.env so the containers own the
+  # canonical ports instead.
   gateway:
     profiles: ["realtime"]
     image: ${GATEWAY_IMAGE:-rpg-mmo/gateway:dev}
@@ -177,10 +180,18 @@ services:
     ports:
       - "${GATEWAY_CONTAINER_PORT:-8100}:8000"
       - "${GATEWAY_METRICS_PORT:-9102}:9102"
+    # The runtime image is distroless — no shell, no curl, no nc — so a compose
+    # healthcheck is impossible. /healthz on the metrics port is published, so
+    # probe from the host (CD does exactly that) or use a k8s httpGet probe.
 
-  gameserver:
+  # C# (.NET 10 NativeAOT) game server. The Go gameserver module was removed;
+  # this is the only game server.
+  #
+  # Service name stays `gameserver-dotnet` because monitoring/prometheus.yaml
+  # scrapes it by service DNS name; the container is named rpg-gameserver.
+  gameserver-dotnet:
     profiles: ["realtime"]
-    image: ${GAMESERVER_IMAGE:-rpg-mmo/gameserver:dev}
+    image: ${GAMESERVER_IMAGE:-rpg-mmo/gameserver-dotnet:dev}
     container_name: rpg-gameserver
     restart: unless-stopped
     depends_on:
@@ -188,44 +199,42 @@ services:
         condition: service_healthy
       postgres-game:
         condition: service_healthy
-    command:
-      - "--addr=:9000"
-      - "--mode=map"
-      - "--map-id=${GAMESERVER_MAP_ID:-map_01}"
-      - "--redis"
-    environment:
-      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
-      REDIS_ADDR: redis:6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
-      # Container-to-container DSN: service name + internal port 5432
-      # (host-run gameserver uses localhost:5433 instead).
-      GAME_DB_URL: postgres://${POSTGRES_GAME_USER:-game}:${POSTGRES_GAME_PASSWORD:-localdev}@postgres-game:5432/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable
-    ports:
-      - "${GAMESERVER_CONTAINER_PORT:-9300}:9000"
-
-  # C# (.NET 10 NativeAOT) gameserver — drop-in replacement for the Go binary.
-  # Profile-gated like the Go variant above; use `--profile realtime-dotnet`.
-  # Build first:
-  #   docker build -f docker/Dockerfile.gameserver-dotnet -t rpg-mmo/gameserver-dotnet:dev ..
-  # Host port 9400 avoids clashing with the Go gameserver on 9300 or host on 9000.
-  gameserver-dotnet:
-    profiles: ["realtime-dotnet"]
-    image: ${GAMESERVER_DOTNET_IMAGE:-rpg-mmo/gameserver-dotnet:dev}
-    container_name: rpg-gameserver-dotnet
-    restart: unless-stopped
-    depends_on:
-      redis:
-        condition: service_healthy
-    command:
-      - "--addr=:9000"
-      - "--map-id=${GAMESERVER_MAP_ID:-map_01}"
+    # NOTE: the C# arg parser only matches SPACE-separated flags (`--addr :9000`,
+    # not `--addr=:9000`) — GameServer/Program.cs GetArg. Configuration is
+    # therefore done through the environment below, which works either way.
     environment:
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
       GAMESERVER_ADDR: ":9000"
-      MAP_ID: ${GAMESERVER_MAP_ID:-map_01}
-      SERVER_ID: ${GAMESERVER_DOTNET_SERVER_ID:-gs-dotnet-01}
+      GAMESERVER_MODE: map
+      GAMESERVER_MAP_ID: ${GAMESERVER_MAP_ID:-map_01}
+      GAMESERVER_ID: ${GAMESERVER_ID:-gs-dotnet-${GAMESERVER_MAP_ID:-map_01}}
+      # /metrics + /healthz, scraped in-network as gameserver-dotnet:9101.
+      #
+      # NOT ":9101". The C# server turns an empty/0.0.0.0/* host into the
+      # HttpListener wildcard "http://+:9101/", and the OpenTelemetry
+      # PrometheusHttpListener then pushes that through UriBuilder, which
+      # rejects "+" with `UriFormatException: Invalid URI: The hostname could
+      # not be parsed` — the endpoint never starts (this is why the host-mode
+      # `gameserver` scrape target has been DOWN). A resolvable host binds fine,
+      # so we use the compose service name: Docker's DNS resolves it to this
+      # container, and Prometheus scrapes it under exactly that name, so the
+      # Host header matches the registered prefix.
+      #
+      # Probing it from the HOST therefore needs the header too:
+      #   curl -H 'Host: gameserver-dotnet:9101' http://127.0.0.1:9101/healthz
+      # Revert this to ":9101" once GameServer/Observability/MetricsEndpoint.cs
+      # can bind a wildcard (owner: agent-gameserver-dotnet).
+      METRICS_ADDR: ${GAMESERVER_METRICS_ADDR:-gameserver-dotnet:9101}
+      # Not read by the C# server yet (it has no Redis/Npgsql client — the
+      # registry entry is written externally by scripts/register-gameserver.sh,
+      # and persistence is the in-memory store). Set here so the day the C#
+      # module gains those clients, no deploy config has to change.
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      GAME_DB_URL: postgres://${POSTGRES_GAME_USER:-game}:${POSTGRES_GAME_PASSWORD:-localdev}@postgres-game:5432/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable
     ports:
-      - "${GAMESERVER_DOTNET_CONTAINER_PORT:-9400}:9000"
+      - "${GAMESERVER_CONTAINER_PORT:-9200}:9000"
+      - "${GAMESERVER_METRICS_PORT:-9101}:9101"
 
   # ----------------------------------------------------------- monitoring
   # Profile-gated dev observability: `docker compose --profile monitoring up -d`.

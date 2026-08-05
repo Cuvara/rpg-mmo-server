@@ -6,6 +6,69 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Full-docker deploy mode (`vars.DEPLOY_MODE=containers`)** — the `deploy` job
+  can now run the realtime services as containers instead of host binaries.
+  Same secrets, same ports, same smoke test; the switch is one environment
+  variable and is reversible.
+  - New steps, all gated on the mode: stop host-mode services (so they release
+    the ports), build `rpg-mmo/{gateway,gameserver-dotnet}:<sha>` **on the
+    runner** from `docker/Dockerfile.{gateway,gameserver-dotnet}`, bring up the
+    compose `realtime` profile alongside `monitoring`, register the game server,
+    then probe `/healthz` on both metrics ports plus TCP on both game ports.
+    Host mode keeps `deploy-local.sh restart` + `health` untouched.
+  - Images are built on the target, not pulled: dev/staging have no registry
+    credentials. `build-images` (GHCR) remains the production/k8s path.
+  - `deploy` now checks out the repo (needed for the image build) and outputs
+    `deploy_mode`; the pipeline summary reports it.
+  - New environment variables: `DEPLOY_MODE`, `GATEWAY_CONTAINER_PORT`,
+    `GAMESERVER_CONTAINER_PORT`, `GATEWAY_METRICS_PORT`,
+    `GAMESERVER_METRICS_PORT`, `GAMESERVER_METRICS_ADDR`,
+    `GAMESERVER_PUBLIC_ADDR`. The container ports default to the ports
+    `GATEWAY_ADDR` / `GAMESERVER_ADDR` already name, so `:8000` / `:9200` hold
+    in either mode.
+- **`scripts/bootstrap-vps.sh`** — idempotent one-command VPS preparation for
+  Ubuntu 22.04/24.04: Docker CE + compose plugin from the official apt repo, a
+  deploy user and directory, a GitHub Actions runner registered and installed as
+  a systemd service, and a ufw policy (SSH + game ports tcp/udp open, Grafana
+  denied with an `--admin-ip` allowlist option and a matching `DOCKER-USER`
+  rule, because Docker's iptables rules bypass ufw). `--dry-run` prints every
+  action without executing it.
+- **`scripts/register-gameserver.sh`** — writes the game server's Redis registry
+  entry (`servers:id:*` / `servers:map:*`), extracted from `deploy-local.sh` so
+  both deploy modes share one implementation. `GAMESERVER_PUBLIC_ADDR` is the
+  address handed to clients — the single value that must change on a VPS.
+- `docs/CICD.md`: §2b (register-gameserver.sh), §2c (bootstrap-vps.sh), §3b
+  (deploy modes) and §8 "Moving to a VPS — what actually changes", a single
+  table whose punchline is that no code changes.
+
+### Changed
+- `docker-compose.yml`: the `realtime` profile now holds the gateway **and** the
+  C# game server (`container_name: rpg-gameserver`, published on
+  `GAMESERVER_CONTAINER_PORT`, default 9200, plus its metrics port). Both are
+  parameterized so CD can hand them the canonical ports.
+- `Dockerfile.gameserver-dotnet` documents the metrics port with `EXPOSE 9101`.
+- `deploy-local.sh` delegates registry writes to `register-gameserver.sh`.
+- `bundle` ships `register-gameserver.sh` and asserts both scripts are present.
+
+### Fixed
+- The C# game server's env var names in compose were wrong (`MAP_ID` /
+  `SERVER_ID`); the code reads `GAMESERVER_MAP_ID` / `GAMESERVER_ID`, so those
+  settings were silently ignored. The `command:` array was also using
+  `--flag=value`, which that server's arg parser does not match — configuration
+  now goes through the environment, which works either way.
+- Removed the dead `gameserver` compose service, which still referenced the
+  deleted Go module's `rpg-mmo/gameserver:dev` image.
+
+### Known issues (not fixed here — owned by `agent-gameserver-dotnet`)
+- The C# metrics endpoint **cannot bind a wildcard**: `METRICS_ADDR=:9101`
+  produces `http://+:9101/`, which OpenTelemetry's `PrometheusHttpListener`
+  rejects (`UriFormatException: Invalid URI: The hostname could not be
+  parsed`), so `/metrics` and `/healthz` never start. This is why the host-mode
+  `gameserver` scrape target has been DOWN. Containers mode works around it with
+  a resolvable prefix (`GAMESERVER_METRICS_ADDR=gameserver-dotnet:9101`);
+  documented in `docs/MONITORING.md`.
+
+### Added
 - **Monitoring now deploys through CD (VPS-ready)** — `cd.yml` brings the
   `monitoring` profile up on every environment; no hand-run `make monitoring-up`.
   - `bundle` stages `backend/deploy/monitoring/` **and** `backend/deploy/db/`

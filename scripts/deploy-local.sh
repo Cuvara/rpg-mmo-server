@@ -27,6 +27,7 @@
 #
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="${RPG_DEPLOY_DIR:-/opt/rpg-mmo}"
 BIN_DIR="$DEPLOY_DIR/bin"
 RUN_DIR="$DEPLOY_DIR/run"
@@ -65,6 +66,9 @@ load_env
 GATEWAY_ADDR="${GATEWAY_ADDR:-:8000}"
 GAMESERVER_ADDR="${GAMESERVER_ADDR:-:9000}"
 GAMESERVER_MAP_ID="${GAMESERVER_MAP_ID:-map_01}"
+# Exported so register-gameserver.sh (a separate process) sees the same values
+# whether they came from deploy/.env or from these defaults.
+export GAMESERVER_ADDR GAMESERVER_MAP_ID
 
 # The Go gameserver has been removed. C# .NET 10 NativeAOT binary is the default.
 # Set GAMESERVER_RUNTIME=go only if you have a legacy Go binary to test against.
@@ -256,48 +260,17 @@ do_start() {
 		start_one "$name" "$bin" "$args"
 	done
 
-	# The C# gameserver does not (yet) register itself in Redis.
-	# Pre-register it so the gateway can discover it via FindByMapID.
+	# The C# gameserver does not (yet) register itself in Redis, so publish its
+	# registry entry here or the gateway answers MsgEnterWorld with "no available
+	# server for map <id>". Shared with DEPLOY_MODE=containers, which calls the
+	# same script from the CD deploy job — see its header for the address
+	# semantics (GAMESERVER_PUBLIC_ADDR is what clients are told to dial).
 	if [ -n "${REDIS_ADDR:-}" ]; then
-		local gs_id="${GAMESERVER_ID:-gs-dotnet-${GAMESERVER_MAP_ID:-map_01}}"
-		local gs_addr="${GAMESERVER_ADDR:-:9000}"
-		local gs_map="${GAMESERVER_MAP_ID:-map_01}"
-		local redis_host="${REDIS_ADDR%%:*}"
-		local redis_port="${REDIS_ADDR##*:}"
-		local redis_auth=""
-		[ -n "${REDIS_PASSWORD:-}" ] && redis_auth="-a ${REDIS_PASSWORD}"
-		info "registering gameserver in Redis: servers:id:${gs_id} map=${gs_map} addr=${gs_addr}"
-
-		# Try native redis-cli first, fall back to docker exec (Redis may run in container)
-		local rcli=""
-		if command -v redis-cli >/dev/null 2>&1; then
-			rcli="redis-cli -h ${redis_host:-localhost} -p ${redis_port:-6379} ${redis_auth}"
-		elif docker ps --format '{{.Names}}' 2>/dev/null | grep -q redis; then
-			local redis_container
-			redis_container="$(docker ps --format '{{.Names}}' | grep redis | head -1)"
-			if [ -n "${REDIS_PASSWORD:-}" ]; then
-				rcli="docker exec ${redis_container} redis-cli -a ${REDIS_PASSWORD}"
-			else
-				rcli="docker exec ${redis_container} redis-cli"
-			fi
-		fi
-
-		if [ -n "$rcli" ]; then
-			# shellcheck disable=SC2086
-			$rcli HSET "servers:id:${gs_id}" \
-				server_id "${gs_id}" \
-				map_id "${gs_map}" \
-				addr "${gs_addr}" \
-				transport "tcp" \
-				capacity 100 \
-				player_count 0 >/dev/null 2>&1 && info "redis HSET OK" || info "WARN: redis HSET failed"
-			# shellcheck disable=SC2086
-			$rcli SADD "servers:map:${gs_map}" "${gs_id}" >/dev/null 2>&1 || true
-			# Long TTL until heartbeat is implemented in C# server
-			# shellcheck disable=SC2086
-			$rcli EXPIRE "servers:id:${gs_id}" 3600 >/dev/null 2>&1 || true
+		local reg="$SCRIPT_DIR/register-gameserver.sh"
+		if [ -x "$reg" ]; then
+			"$reg" register || info "WARN: gameserver registration failed"
 		else
-			info "WARN: no redis-cli available (neither native nor docker) — gateway may not find gameserver"
+			info "WARN: $reg not found or not executable — gateway may not find gameserver"
 		fi
 	fi
 }
