@@ -10,7 +10,7 @@ All modules share: Protobuf/FlatBuffers serialization, PostgreSQL + Redis.
 |------|--------|-------------|----------------------|
 | **Shared Architect** | `shared/` | `agent-shared` | Proto definitions, common types, DB models, Redis wrappers, error codes |
 | **Nakama Engineer** | `nakama/` | `agent-nakama` | Auth, economy, leaderboard, social, matchmaking — Nakama Go plugins |
-| **Gateway Engineer** | `gateway/` | `agent-gateway` | UDP/KCP router, session manager, server registry, JWT verify, pub/sub |
+| **Gateway Engineer** | `gateway/` | `agent-gateway` | TCP/KCP listener (auth + redirect, not a gameplay proxy), session manager, server registry, JWT verify, event-stream relay |
 | **GameServer Engineer (C#)** | `gameserver-dotnet/` | `agent-gameserver-dotnet` | C# .NET 10 game server: tick loop, combat/skill, AI/NPC, loot. `Shared.GameLogic` shared with Unity client |
 | **DevOps Engineer** | `deploy/` | `agent-devops` | k3s + Agones manifests, Docker, CI/CD, monitoring, DB migrations |
 
@@ -30,10 +30,10 @@ deploy (depends on all above — build artifacts)
 ### Communication Channels
 - **Nakama <-> Gateway**: JWT shared secret for local verification (no roundtrip)
 - **Nakama <-> GameServer**: Internal RPC (signed) for reward granting
-- **Gateway (Go) <-> GameServer (C# .NET 10)**: TCP wire protocol (4-byte BE length prefix + JSON, `snake_case` fields). Gateway forwards opaquely — cannot distinguish Go vs C# backends. Join token handoff via HS256 JWT with shared secret
-- **Gateway <-> Redis**: Session store (TTL), server registry
-- **GameServer <-> Redis**: Heartbeat, pub/sub events (Redis Streams with ACK)
-- **GameServer <-> PostgreSQL**: Async batch save (30-60s), checkpoint on transfer
+- **Gateway (Go) <-> GameServer (C# .NET 10)**: no runtime connection. The gateway never talks to a game server; it issues a join token and the *client* dials the server directly (ADR-3). Both speak the same wire protocol (4-byte BE length prefix + JSON, `snake_case`), joined by an HS256 join token whose `sid` names the target server
+- **Gateway <-> Redis**: Session store (TTL), server registry, event-stream consumer
+- **GameServer <-> Redis**: ⬜ **not implemented** — the C# server has no Redis client. It cannot self-register or heartbeat (a deploy script does it) and its events go to a noop stream (ADR-1, ADR-5)
+- **GameServer <-> PostgreSQL**: Async batch save every 30s + save on entity removal. No checkpoint-on-transfer yet (ADR-6)
 
 ### Shared Definitions (owned by agent-shared, Go)
 - Protobuf message types (input, snapshot, events)

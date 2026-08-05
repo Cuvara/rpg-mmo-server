@@ -7,20 +7,30 @@ Server-authoritative multiplayer RPG — mobile/PC client with open-world maps +
 ```
 Unity Client
   ├── HTTPS/WebSocket ──→ Nakama (auth, economy, social, leaderboard)
-  └── UDP/KCP ──→ Gateway ──→ Game Servers (combat, movement, world state)
-                     │
-                     ├── Redis (sessions, registry, pub/sub)
-                     └── PostgreSQL (meta DB + game state DB)
+  │
+  ├── TCP/KCP ──→ Gateway          (auth + "which server?" ONLY)
+  │                  │  returns {ServerAddr, JoinToken}
+  │                  ├── Redis (sessions, registry, event streams)
+  │                  └── PostgreSQL (meta DB via Nakama)
+  │
+  └── TCP/KCP ──→ Game Servers     (combat, movement, world state)
+                     └── PostgreSQL (game state DB)
 ```
 
-📖 **[Core Flow](backend/docs/CORE_FLOW.md)** — canonical end-to-end walkthrough: login→gameplay sequence, tick loop internals, cross-server events, deployment topology, extension seams (with ✅/🟡/⬜ implementation status).
+The gateway is a **redirector, not a proxy**: it authenticates the client and tells
+it which game server to use, then the client opens a *second, direct* connection to
+that server. Gameplay traffic never passes through the gateway.
+
+📖 **[Architecture Decisions](backend/docs/ARCHITECTURE-DECISIONS.md)** — data ownership, sharding policy, gateway role, Redis roles, event delivery, crash recovery, and the benchmark plan. **Start here.**
+
+📖 **[Core Flow](backend/docs/CORE_FLOW.md)** — end-to-end walkthrough: login→gameplay sequence, tick loop internals, cross-server events, deployment topology, extension seams. ⚠️ Written against the deleted Go game server; parts of it are stale — Architecture Decisions wins any conflict.
 
 ### Backend Modules
 
 | Module | Path | Description |
 |--------|------|-------------|
 | **shared** | `backend/shared/` | Config, JWT, wire protocol, storage interfaces, error codes |
-| **gateway** | `backend/gateway/` | TCP/KCP router, JWT auth, session manager, server registry, map assignment |
+| **gateway** | `backend/gateway/` | TCP/KCP listener (auth + redirect, not a gameplay proxy), JWT auth, session manager, server registry, map assignment, event relay |
 | **gameserver-dotnet** | `backend/gameserver-dotnet/` | C# .NET 10 game server — tick loop, combat, input validation, AOI, persistence. Shared game logic with Unity client |
 | **nakama** | `backend/nakama/` | Nakama Go plugins — auth, economy, leaderboard, social (planned) |
 | **deploy** | `backend/deploy/` | Docker, k3s/Agones manifests, CI/CD, dev observability (`grafana/otel-lgtm` — see `backend/deploy/docs/MONITORING.md`) |
@@ -108,12 +118,12 @@ nc localhost 8000
 
 | Layer | MVP (current) | Production |
 |-------|---------------|------------|
-| Transport | TCP | KCP (`xtaci/kcp-go`) |
-| Encoding | JSON structs | Protobuf |
-| Player Store | In-memory | PostgreSQL (`pgx`) |
-| Session Store | In-memory | Redis (`go-redis`) |
-| Server Registry | In-memory | Redis hash |
-| Event Stream | Go channels | Redis Streams |
+| Transport | TCP default; KCP implemented (`xtaci/kcp-go`, `--transport=kcp`) | KCP everywhere |
+| Encoding | JSON structs | Protobuf (not started) |
+| Player Store | In-memory default; PostgreSQL implemented (`GAME_DB_URL`) | PostgreSQL |
+| Session Store | In-memory default; Redis implemented (`--backend=redis`) | Redis |
+| Server Registry | In-memory default; Redis implemented (`--backend=redis`) | Redis hash |
+| Event Stream | Go channels default; Redis Streams implemented (+ACK). C# publishes into a noop | Redis Streams end to end |
 | JWT | Custom HS256 | `golang-jwt/jwt/v5` |
 | AOI | Brute-force | Spatial grid / quadtree |
 | Orchestration | Manual | Agones on k3s |
@@ -133,6 +143,9 @@ Counts are top-level `go test` functions (most are table-driven with several
 subtests each).
 
 ## Deployment Tiers
+
+> **⚠️ ESTIMATES — UNBENCHMARKED.** No load test has been run against this stack.
+> See [ADR-7](backend/docs/ARCHITECTURE-DECISIONS.md) for the benchmark plan.
 
 | Tier | Cost/mo | CCU |
 |------|---------|-----|

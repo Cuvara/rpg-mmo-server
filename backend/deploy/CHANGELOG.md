@@ -5,6 +5,19 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Redis now starts with an explicit `--maxmemory-policy noeviction`. This Redis is
+  a system of record for the server registry and the event stream, not a cache:
+  evicting a registry hash silently drops a live game server out of matchmaking,
+  and trimming a stream drops unacked cross-server events. `noeviction` was already
+  the Redis default, so behaviour is unchanged — the point is that adding a
+  `--maxmemory` limit later can no longer silently turn this into an LRU cache.
+  See `backend/docs/ARCHITECTURE-DECISIONS.md`, ADR-4.
+
+### Changed
+- Tier cost/CCU tables in `CLAUDE.md` and `docs/README.md` marked as unbenchmarked
+  estimates (ADR-7)
+
 ### Added
 - **Full-docker deploy mode (`vars.DEPLOY_MODE=containers`)** — the `deploy` job
   can now run the realtime services as containers instead of host binaries.

@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Player state is now persisted when a reconnect hold expires, before the entity is
+  removed from the world. Previously `OnPlayerDisconnected` removed the entity
+  without saving, so once it left the world the periodic `AsyncSaver` sweep could no
+  longer see it and everything the player did since the last 30s tick was discarded.
+  New `AsyncSaver.SavePlayerAsync(userId)` saves a single entity by id.
+  See `backend/docs/ARCHITECTURE-DECISIONS.md`, ADR-6.
+- Removed a dead conditional that selected `NoopAgonesSdk` in **both** branches of
+  the `--agones` / `AGONES_ENABLED` flag. The flag never had any effect; it now
+  logs a warning saying so, instead of implying that Agones health reporting works.
+  No real Agones SDK client exists for the C# server yet (ADR-6 follow-up).
+
 ### Added
 - `GameServer.Persistence.PostgresPlayerStore` — PostgreSQL-backed `IPlayerStore`
   restoring the player-state persistence that was lost in the Go -> C# migration

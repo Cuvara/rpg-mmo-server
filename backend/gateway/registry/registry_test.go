@@ -34,6 +34,63 @@ func TestRegistryService_RegisterAndFind(t *testing.T) {
 	}
 }
 
+// A map served by several equally-loaded servers must always resolve to the same
+// one. Registry order is non-deterministic (Go map iteration / Redis SMEMBERS), so
+// without an explicit tiebreak two players entering the same map could be sent to
+// different instances — which, with no cross-instance handoff, silently splits a
+// party across two copies of the world. See ARCHITECTURE-DECISIONS.md ADR-2.
+func TestRegistryService_FindServer_DeterministicTieBreak(t *testing.T) {
+	ctx := context.Background()
+
+	for attempt := 0; attempt < 50; attempt++ {
+		reg := NewRegistryService(storage.NewMemoryServerRegistry())
+		for _, id := range []string{"srv-c", "srv-a", "srv-b"} {
+			if err := reg.RegisterServer(ctx, storage.ServerInfo{
+				ServerID:    id,
+				MapID:       "map_forest",
+				Addr:        id + ":9000",
+				Capacity:    100,
+				PlayerCount: 10, // identical load: the tiebreak decides
+			}); err != nil {
+				t.Fatalf("RegisterServer(%s) error: %v", id, err)
+			}
+		}
+
+		found, err := reg.FindServer(ctx, "map_forest")
+		if err != nil {
+			t.Fatalf("FindServer() error: %v", err)
+		}
+		if found.ServerID != "srv-a" {
+			t.Fatalf("attempt %d: ServerID = %q, want %q (lowest id wins a tie)",
+				attempt, found.ServerID, "srv-a")
+		}
+	}
+}
+
+// Load still beats the id tiebreak.
+func TestRegistryService_FindServer_PrefersLeastLoaded(t *testing.T) {
+	reg := NewRegistryService(storage.NewMemoryServerRegistry())
+	ctx := context.Background()
+
+	servers := []storage.ServerInfo{
+		{ServerID: "srv-a", MapID: "map_forest", Addr: "a:9000", Capacity: 100, PlayerCount: 90},
+		{ServerID: "srv-z", MapID: "map_forest", Addr: "z:9000", Capacity: 100, PlayerCount: 5},
+	}
+	for _, s := range servers {
+		if err := reg.RegisterServer(ctx, s); err != nil {
+			t.Fatalf("RegisterServer(%s) error: %v", s.ServerID, err)
+		}
+	}
+
+	found, err := reg.FindServer(ctx, "map_forest")
+	if err != nil {
+		t.Fatalf("FindServer() error: %v", err)
+	}
+	if found.ServerID != "srv-z" {
+		t.Errorf("ServerID = %q, want %q (least loaded wins over id order)", found.ServerID, "srv-z")
+	}
+}
+
 func TestRegistryService_FindNoCapacity(t *testing.T) {
 	reg := NewRegistryService(storage.NewMemoryServerRegistry())
 	ctx := context.Background()

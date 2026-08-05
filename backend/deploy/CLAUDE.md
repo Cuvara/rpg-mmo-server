@@ -51,6 +51,10 @@
 - Uptime Robot health endpoints
 
 ### 8. Tier-Specific Configs (Drawio Page 10)
+
+> **⚠️ ESTIMATES — UNBENCHMARKED.** Costs and CCU below are planning figures; no
+> load test has been run. See `backend/docs/ARCHITECTURE-DECISIONS.md` ADR-7.
+
 - **Dev/Alpha ($40-60)**: 1 VPS all-in-one, pg_dump daily, < 200 CCU
 - **Beta ($80-150)**: 2 VPS (app + DB), CDN, Grafana, 200-500 CCU
 - **Soft Launch ($200-400)**: 3 VPS, Redis dedicated, 500-2000 CCU

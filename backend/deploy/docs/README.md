@@ -209,6 +209,10 @@ kubectl apply -f agones/
 
 ## Tiers
 
+> **⚠️ ESTIMATES — UNBENCHMARKED.** No load test has been run against this stack.
+> See `backend/docs/ARCHITECTURE-DECISIONS.md` ADR-7 for the benchmark plan and
+> acceptance thresholds.
+
 | Tier | Cost/mo | Setup | CCU |
 |------|---------|-------|-----|
 | Dev/Alpha | $40-60 | 1 VPS all-in-one | < 200 |

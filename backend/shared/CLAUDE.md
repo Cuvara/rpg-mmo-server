@@ -32,8 +32,10 @@
 - Connection pool wrapper with health check
 - Session store interface (SET/GET/DEL with TTL)
 - Server registry interface (register, deregister, lookup by map_id)
-- Redis Streams wrapper (XADD, XREADGROUP, XACK) for cross-server events
-- Pub/Sub wrapper for simple notifications
+- Redis Streams wrapper (XADD, XREADGROUP, XACK) for cross-server events — the
+  **only** cross-server event mechanism (ADR-5)
+- Raw Redis Pub/Sub is deliberately NOT used and must not be added without an ADR
+  entry justifying why message loss is acceptable for that signal
 
 ### 5. Configuration
 - Shared config struct (DB, Redis, Nakama, ports, tick rates)

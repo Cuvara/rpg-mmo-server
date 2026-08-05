@@ -84,6 +84,34 @@ public sealed class AsyncSaver
         _logger.LogInformation("AsyncSaver stopped");
     }
 
+    /// <summary>
+    /// Save a single player entity by id. Used when an entity is about to leave
+    /// the world (reconnect hold expiry): once it is removed, the periodic
+    /// <see cref="SaveAllAsync"/> sweep can no longer see it, so anything the
+    /// player did since the last sweep would be lost.
+    /// </summary>
+    /// <returns>True when the entity existed and was persisted.</returns>
+    public async Task<bool> SavePlayerAsync(string userId)
+    {
+        var entity = _world.GetEntity(userId);
+        if (entity == null || entity.Value.Type != "player") return false;
+
+        var p = entity.Value;
+        try
+        {
+            var state = new PlayerState(p.Id, p.Position.X, p.Position.Y, p.Hp, p.MaxHp, _mapId);
+            await _store.SavePlayerAsync(state, CancellationToken.None);
+            _metrics?.RecordPlayerSaveOk();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _metrics?.RecordPlayerSaveError();
+            _logger.LogWarning(ex, "Failed to save player {UserId} on removal", p.Id);
+            return false;
+        }
+    }
+
     /// <summary>Save all current player entities to the store.</summary>
     public async Task SaveAllAsync()
     {
