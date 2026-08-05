@@ -5,6 +5,36 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`docs/VPS-SETUP.md`** — the canonical, zero-prior-context runbook for
+  bringing a new machine online as a deploy target: prerequisites and where to
+  get a runner registration token, the one bootstrap command with its full flag
+  reference, the **complete** secret + variable catalogue per environment
+  (verified to match `cd.yml` exactly — every `secrets.*` and `vars.*` the
+  workflow reads is documented, and nothing documented is stale), first deploy
+  job-by-job with the resulting `$RPG_DEPLOY_DIR` layout, a verification
+  checklist, how to move an environment between machines, and troubleshooting
+  for the traps actually hit (runner post-job cleanup vs `RUNNER_TRACKING_ID`,
+  concurrency cancellation, GHCR packages private by default, ufw vs Docker's
+  `DOCKER-USER` chain, the named-prefix metrics 404).
+- **`scripts/setup-github-env.sh`** — creates a GitHub Environment and populates
+  every secret and variable `cd.yml` reads. Secrets come from flags, the
+  environment, an interactive hidden prompt, or `--generate`, and are passed to
+  `gh` on stdin so they never appear in argv. `production` (or `--strict`)
+  enforces >= 32 characters and rejects placeholder values (`dev-secret`,
+  `localdev`, `password`, `changeme`, `defaultkey`, ...). `--dry-run` prints
+  every `gh` command without executing it.
+
+### Changed
+- `docs/CICD.md` no longer duplicates setup instructions that now live in
+  `VPS-SETUP.md`: §2c (bootstrap), §4 (runner setup) and §8 (moving to a VPS)
+  became pointers, and §5 keeps only how the pipeline *treats* secrets
+  (required-checks, `umask 077` handling, environment-vs-repo scoping) instead
+  of a second copy of the catalogue that would drift. §4 retains the host-mode
+  systemd units, which are pipeline behaviour rather than machine setup.
+- Root `README.md` gained a **Deploy** section linking `VPS-SETUP.md` as the
+  entry point, with the two-command summary.
+
 ### Fixed
 - Redis now starts with an explicit `--maxmemory-policy noeviction`. This Redis is
   a system of record for the server registry and the event stream, not a cache:

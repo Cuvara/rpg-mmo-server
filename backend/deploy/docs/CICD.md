@@ -149,43 +149,18 @@ Delete the script the day the C# server registers itself.
 
 ## 2c. `scripts/bootstrap-vps.sh` — prepare a fresh VPS
 
-One idempotent command turns a bare Ubuntu 22.04/24.04 box into a deploy target.
-Run it as root on the VPS:
+One idempotent command turns a bare Ubuntu 22.04/24.04 box into a deploy target:
+Docker CE, the deploy user and directory, the Actions runner as a systemd
+service, and a ufw policy.
 
 ```bash
 sudo RUNNER_TOKEN=<registration-token> ./scripts/bootstrap-vps.sh --labels staging
-sudo ./scripts/bootstrap-vps.sh --dry-run --skip-runner      # preview, change nothing
+./scripts/bootstrap-vps.sh --dry-run --skip-runner      # preview, change nothing
 ```
 
-What it does:
-
-1. **Docker CE + compose plugin** from the official apt repo, service enabled.
-2. **Deploy user** (`--deploy-user`, default `rpg`) added to the `docker` group,
-   plus `$RPG_DEPLOY_DIR` (default `/opt/rpg-mmo`) with the `bin/ deploy/
-   scripts/ run/ logs/` layout the deploy job expects.
-3. **GitHub Actions runner** downloaded, registered `--unattended --replace` with
-   labels `self-hosted,<--labels>`, and installed as a systemd service
-   (`svc.sh install/start`) so it survives reboot and logout. The registration
-   token is passed to one command and never written to disk.
-4. **ufw**: default deny incoming; allow SSH, and the gateway + game server
-   ports on **both tcp and udp** (udp reserved for the KCP transport, so the
-   firewall does not need a second visit). Grafana is **denied**, with an
-   `--admin-ip` flag for the allowlist variant. Because Docker's `DOCKER-USER`
-   iptables chain is traversed *before* ufw's INPUT — a published container port
-   ignores `ufw deny` — it also adds a matching `DOCKER-USER` DROP rule and warns
-   that the rule is not reboot-persistent. Keeping `GRAFANA_BIND=127.0.0.1` and
-   using an SSH tunnel remains the recommended posture.
-
-Key flags (each has an env equivalent; the flag wins): `--runner-token`,
-`--labels`, `--repo-url`, `--runner-name`, `--runner-version`, `--deploy-user`,
-`--deploy-dir`, `--gateway-port`, `--gameserver-port`, `--ssh-port`,
-`--grafana-port`, `--admin-ip`, `--skip-{docker,runner,firewall,user}`,
-`--dry-run`. It exits non-zero on an unknown flag, a flag missing its value, a
-non-numeric port, or a missing `RUNNER_TOKEN` (unless `--skip-runner`).
-
-It finishes by printing the GitHub-side steps that remain — creating the
-Environment, its secrets and its variables. There is no code change anywhere in
-that list; see §8.
+**Full flag reference and the reasoning behind each step live in
+[`VPS-SETUP.md`](VPS-SETUP.md) §1** — kept in one place so they cannot drift
+from the script.
 
 ---
 
@@ -305,136 +280,90 @@ Two `release-*` branches therefore share the production lock, which is intended.
 ## 4. Self-hosted runner setup (per environment)
 
 The runner machine **is** the target — your VPS, or your own machine for `dev`.
-On a fresh VPS, `scripts/bootstrap-vps.sh` (§2c) does everything in this section
-plus Docker, the deploy user and the firewall in one command; the manual steps
-below are the reference for what it automates.
 
-1. **GitHub → Settings → Actions → Runners → New self-hosted runner**, pick Linux
-   x64, follow the shown `./config.sh` command, and add the labels:
+**Setting one up is documented once, in [`VPS-SETUP.md`](VPS-SETUP.md) §1**, and
+automated by `scripts/bootstrap-vps.sh`: Docker CE, the deploy user and
+directory, the runner registered with the right labels and installed as a
+systemd service, and the firewall. Do not duplicate those steps here — they
+drift.
 
-   ```bash
-   ./config.sh --url https://github.com/<owner>/rpg-mmo-server \
-     --token <REGISTRATION_TOKEN> \
-     --name rpg-dev-01 \
-     --labels dev            # or: staging | production
-   ```
+What this pipeline relies on the runner providing:
 
-   `self-hosted` is added automatically; you only supply the tier label.
+| Requirement | Why |
+|-------------|-----|
+| Labels `self-hosted` + the environment name (`dev` / `staging` / `production`) | `resolve` emits those labels and `deploy` runs on them. A missing label means the run queues forever. |
+| `docker` + `docker compose` v2, runner user in the `docker` group | The meta stack, and the image builds in containers mode. |
+| `curl`, and `nc` or bash `/dev/tcp` | Health probes. |
+| Write access to `$RPG_DEPLOY_DIR` | The bundle is installed there. |
+| Installed as a systemd service | Deploys survive logout and reboot. |
 
-2. **Install it as a service** so deploys survive logout:
+Go and the .NET SDK are **not** needed — only prebuilt binaries land there.
 
-   ```bash
-   sudo ./svc.sh install && sudo ./svc.sh start && sudo ./svc.sh status
-   ```
+### Optional: systemd units for host mode
 
-3. **Prerequisites on the runner**: `docker` + `docker compose` v2 (runner user in
-   the `docker` group), `curl`, `netcat` (`nc`), and write access to
-   `$RPG_DEPLOY_DIR` (default `/opt/rpg-mmo`):
+Recommended for staging/production when `DEPLOY_MODE=host`. `deploy-local.sh`
+auto-detects `rpg-gateway.service` / `rpg-gameserver.service` and uses
+`systemctl` instead of its nohup fallback, which gives you restart-on-crash and
+survival across reboots.
 
-   ```bash
-   sudo mkdir -p /opt/rpg-mmo && sudo chown -R "$USER" /opt/rpg-mmo
-   ```
+```ini
+# /etc/systemd/system/rpg-gateway.service
+[Unit]
+Description=RPG MMO Gateway
+After=network.target docker.service
 
-   Go is **not** needed on the runner — only prebuilt binaries land there.
+[Service]
+Type=simple
+EnvironmentFile=-/etc/rpg-mmo/env
+ExecStart=/opt/rpg-mmo/bin/gateway --addr=:8000
+Restart=always
+RestartSec=3
+User=rpg
 
-4. **Optional systemd units** (recommended for staging/production). Create
-   `/etc/systemd/system/rpg-gateway.service`:
+[Install]
+WantedBy=multi-user.target
+```
 
-   ```ini
-   [Unit]
-   Description=RPG MMO Gateway
-   After=network.target docker.service
+…and `rpg-gameserver.service` with
+`ExecStart=/opt/rpg-mmo/bin/gameserver-dotnet --addr=:9200 --map-id=map_01`.
+Then `sudo systemctl daemon-reload && sudo systemctl enable --now rpg-gateway rpg-gameserver`,
+and grant the runner user passwordless restart rights in
+`/etc/sudoers.d/rpg-mmo`:
 
-   [Service]
-   Type=simple
-   EnvironmentFile=-/etc/rpg-mmo/env
-   ExecStart=/opt/rpg-mmo/bin/gateway --addr=:8000
-   Restart=always
-   RestartSec=3
-   User=rpg
+```
+runner ALL=(root) NOPASSWD: /bin/systemctl restart rpg-gateway, /bin/systemctl stop rpg-gateway, /bin/systemctl restart rpg-gameserver, /bin/systemctl stop rpg-gameserver
+```
 
-   [Install]
-   WantedBy=multi-user.target
-   ```
-
-   …and `rpg-gameserver.service` with
-   `ExecStart=/opt/rpg-mmo/bin/gameserver --addr=:9000 --map-id=map_01`.
-   Then `sudo systemctl daemon-reload && sudo systemctl enable --now rpg-gateway rpg-gameserver`.
-   `deploy-local.sh` auto-detects the units and uses `systemctl` instead of nohup.
-   Grant the runner user passwordless restart rights, e.g. in
-   `/etc/sudoers.d/rpg-mmo`:
-
-   ```
-   runner ALL=(root) NOPASSWD: /bin/systemctl restart rpg-gateway, /bin/systemctl stop rpg-gateway, /bin/systemctl restart rpg-gameserver, /bin/systemctl stop rpg-gameserver
-   ```
+In `DEPLOY_MODE=containers` none of this applies — `restart: unless-stopped`
+does the same job.
 
 ---
 
 ## 5. Secrets & variables (GitHub Environments)
 
-Create three Environments — **dev**, **staging**, **production** (Settings →
-Environments). Add protection rules (required reviewers, branch restriction to
-`release-*`) on **production**.
+**The complete catalogue — every secret and variable, with meaning, default and
+whether it is required — is [`VPS-SETUP.md`](VPS-SETUP.md) §2**, along with
+`scripts/setup-github-env.sh`, which sets all of them for a new environment in
+one command. This section covers only how the pipeline *treats* them.
 
-Required **secrets** per environment — the deploy job fails if any is empty:
+Environments are `dev`, `staging` and `production` (Settings → Environments).
+Put protection rules (required reviewers, branch restriction to `release-*`) on
+**production**.
 
-| Secret | Used for |
-|--------|----------|
-| `JWT_SECRET` | HS256 secret shared by Nakama, gateway, gameserver. Nakama signs client session tokens with it so the gateway verifies locally with no roundtrip. |
-| `POSTGRES_PASSWORD` | Nakama meta DB password. |
-| `NAKAMA_CONSOLE_PASSWORD` | Nakama admin console login. |
-| `GRAFANA_ADMIN_PASSWORD` | Grafana admin login (`GF_SECURITY_ADMIN_PASSWORD` on the `lgtm` container). Required **unless** `vars.MONITORING_ENABLED` is exactly `false` — a Grafana published with a default password is an open door. |
+**Hard requirements.** The deploy job fails loudly if any of these is empty:
+`JWT_SECRET`, `POSTGRES_PASSWORD`, `NAKAMA_CONSOLE_PASSWORD` — plus
+`GRAFANA_ADMIN_PASSWORD` whenever `vars.MONITORING_ENABLED` is not exactly
+`false`, because a Grafana published with a default password is an open door.
 
-Optional secrets: `REDIS_PASSWORD` (empty = no auth), `NAKAMA_SERVER_KEY`
-(defaults to `defaultkey` — change it outside dev).
+**Handling.** Secrets are passed to the step as environment variables, checked
+for emptiness *by name only*, and written to `$RPG_DEPLOY_DIR/deploy/.env` under
+`umask 077` + `chmod 600`. The log prints the variable count, never a value.
+That single `.env` is what both `docker compose` and the host binaries read, so
+the meta stack and the realtime services cannot disagree about a secret.
 
-Optional **variables** (`vars.*`, non-secret, per environment) with defaults:
-`RPG_DEPLOY_DIR` (`/opt/rpg-mmo`), `NAKAMA_VERSION` (`3.40.0`), `POSTGRES_DB`
-(`nakama`), `POSTGRES_USER` (`nakama`), `NAKAMA_CONSOLE_USER` (`admin`),
-`GATEWAY_ADDR` (`:8000`), `GAMESERVER_ADDR` (`:9000`), `GAMESERVER_MAP_ID`
-(`map_01`), `REDIS_ADDR` (`localhost:6379`), `GAME_DB_URL` (*empty*).
-
-Deploy-mode variables (all optional; see §3b):
-
-| Variable | Default | Effect |
-|----------|---------|--------|
-| `DEPLOY_MODE` | `host` | `containers` runs the realtime services as containers. Any other value fails the deploy loudly. |
-| `GATEWAY_CONTAINER_PORT` | port of `GATEWAY_ADDR` | Host port the gateway container publishes. |
-| `GAMESERVER_CONTAINER_PORT` | port of `GAMESERVER_ADDR` | Host port the game server container publishes. |
-| `GAMESERVER_PUBLIC_ADDR` | `:<gameserver container port>` | **Address handed to clients.** Must be `<public-host>:<port>` on a VPS — the default resolves to loopback. |
-| `GATEWAY_METRICS_PORT` / `GAMESERVER_METRICS_PORT` | `9102` / `9101` | Published `/metrics` + `/healthz` ports. |
-| `GAMESERVER_METRICS_ADDR` | `gameserver-dotnet:9101` | Listen address of the C# metrics endpoint *inside* its container. Must stay a **resolvable name** — see `docs/MONITORING.md` § "The C# metrics endpoint cannot bind a wildcard". |
-
-Monitoring variables (all optional; see `docs/MONITORING.md` §Deploying to a VPS
-for the full table and firewall guidance):
-
-| Variable | Default | Effect |
-|----------|---------|--------|
-| `MONITORING_ENABLED` | `true` | `false` deploys the plain meta stack — the compose step drops `--profile monitoring`, and `--remove-orphans` then removes a running `rpg-lgtm`. |
-| `GRAFANA_USER` | `admin` | Grafana admin username. |
-| `GRAFANA_PORT` / `GRAFANA_BIND` | `3000` / `0.0.0.0` | Published Grafana port + host interface. Use `127.0.0.1` on a public VPS and reach it over an SSH tunnel or a TLS reverse proxy. |
-| `PROMETHEUS_PORT` / `PROMETHEUS_BIND` | `9090` / `127.0.0.1` | Bundled Prometheus — unauthenticated, keep on loopback. |
-| `OTLP_GRPC_PORT` / `OTLP_HTTP_PORT` / `OTLP_BIND` | `4317` / `4318` / `127.0.0.1` | OTLP ingest — unauthenticated, keep on loopback. |
-| `OTEL_LGTM_VERSION` | `0.11.15` | `grafana/otel-lgtm` image tag. |
-
-Because the monitoring stack is plain compose config plus one secret, a new
-environment gets observability by *setting `GRAFANA_ADMIN_PASSWORD`* — there is
-no separate workflow or manual bring-up step.
-
-`GAME_DB_URL` is the game-state PostgreSQL DSN the gameserver opens at boot.
-**Empty (the default) keeps the in-memory player store** — state is lost on
-restart. Point it at the `postgres-game` compose service as the *host* sees it,
-e.g. dev uses
-`postgres://game:localdev@localhost:5433/gamestate?sslmode=disable` (the
-gameserver is run on the host by `deploy-local.sh`, not in the compose network).
-A wrong or unreachable DSN is fatal: the gameserver logs
-`postgres player store init failed` and exits 1, which fails the deploy
-healthcheck. The compose step therefore waits for `rpg-postgres-game` to report
-`healthy` before restarting the realtime services.
-
-**Secrets are never echoed.** They are passed to a step as env vars, checked for
-emptiness by name only, and written to `$RPG_DEPLOY_DIR/deploy/.env` under
-`umask 077` + `chmod 600`. The log prints the variable count, not the values.
+**Scope matters.** These are *environment*-scoped. A repository-level secret of
+the same name does not satisfy `secrets.X` inside a job with
+`environment: <name>` — it resolves to empty and fails the check above.
 
 > **Nakama key constraint (runtime-fatal):** `session.encryption_key` and
 > `session.refresh_encryption_key` must differ — Nakama refuses to start when they
@@ -485,30 +414,21 @@ feature/*  ──PR──►  main      (ci.yml validates; no deploy)
    `NAKAMA_VERSION`; roll back by setting the environment variable to the old tag
    and re-running the deploy. Postgres/Redis volumes are untouched by deploys.
 
-## 8. Moving to a VPS — what actually changes
+## 8. Moving to a VPS
 
-**Nothing in the code, and nothing in this repository's workflows.** A VPS is
-just another self-hosted runner with its own GitHub Environment. The whole
-delta:
+**Nothing in the code, and nothing in these workflows.** A VPS is just another
+self-hosted runner with its own GitHub Environment: bootstrap the box, create
+the environment, push the branch.
 
-| # | What | Where | Value |
-|---|------|-------|-------|
-| 1 | Prepare the box | on the VPS, once | `sudo RUNNER_TOKEN=… ./scripts/bootstrap-vps.sh --labels staging` (§2c) — installs Docker, the deploy user/dir, the runner, the firewall |
-| 2 | Environment secrets | GitHub → Environments → `staging` | `JWT_SECRET`, `POSTGRES_PASSWORD`, `NAKAMA_CONSOLE_PASSWORD`, `GRAFANA_ADMIN_PASSWORD` — freshly generated, never the dev values |
-| 3 | Run as containers | same Environment, variables | `DEPLOY_MODE=containers` |
-| 4 | Deploy directory | variable | `RPG_DEPLOY_DIR=/opt/rpg-mmo` (whatever `bootstrap-vps.sh --deploy-dir` created) |
-| 5 | **Client-dialable game server address** | variable | `GAMESERVER_PUBLIC_ADDR=<public-host-or-ip>:9200` — the one value that is *wrong* by default off-box: clients normalize the default `:9200` to their own loopback |
-| 6 | Lock down Grafana | variable | `GRAFANA_BIND=127.0.0.1` (reach it over `ssh -L`), or `--admin-ip` at bootstrap time |
-| 7 | Ports, if non-default | variables | `GATEWAY_CONTAINER_PORT`, `GAMESERVER_CONTAINER_PORT` — must match what `bootstrap-vps.sh --gateway-port/--gameserver-port` opened |
-| 8 | Deploy | git | push the branch that maps to the environment (`staging`), or dispatch `cd.yml` with `environment=staging` |
+The step-by-step is [`VPS-SETUP.md`](VPS-SETUP.md) — §1 bootstrap, §2
+environment, §3 first deploy, §4 verification checklist, §5 moving an
+environment between machines.
 
-The post-deploy smoke job is the acceptance test: it exercises Nakama auth →
-gateway `MsgAuth`/`MsgEnterWorld` → game server join → input/snapshot on the
-real box.
+The one value that is *wrong* by default off-box is
+`GAMESERVER_PUBLIC_ADDR`: it defaults to a listen-style `:9200`, which every
+client normalizes to its own loopback. Set it to `<public-host-or-ip>:<port>`.
 
-Not covered by the above, and still open: TLS/reverse proxy in front of Grafana
-and Nakama, DB backups, and `GAME_DB_URL` (empty keeps the in-memory player
-store — and the C# server does not read it yet regardless).
+---
 
 ## 9. Known limits / unverified
 
