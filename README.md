@@ -166,6 +166,19 @@ Alongside the binary bundle, CD builds container images for gateway (distroless)
 
 A separate `ci-dotnet.yml` workflow handles the C# game server: `dotnet build` + `dotnet test` on each push.
 
+## Deploy
+
+🚀 **[VPS Setup](backend/deploy/docs/VPS-SETUP.md)** — bring a new machine online as a deploy target, start to finish: bootstrap the box, create the GitHub Environment (complete secret/variable reference), first deploy, verification checklist, moving an environment between machines, troubleshooting. **Start here for anything deployment-related.**
+
+Two commands, no code changes:
+
+```bash
+sudo RUNNER_TOKEN=<token> ./scripts/bootstrap-vps.sh --labels staging   # on the VPS
+./scripts/setup-github-env.sh staging --generate                        # anywhere with gh
+```
+
+Supporting docs: [CICD.md](backend/deploy/docs/CICD.md) (pipeline internals, deploy modes, rollback) · [MONITORING.md](backend/deploy/docs/MONITORING.md) (Grafana/Prometheus) · [RUNBOOK-local-dev.md](backend/deploy/docs/RUNBOOK-local-dev.md) (laptop stack) · [K3S.md](backend/deploy/docs/K3S.md) (k3s + Agones tier).
+
 ## Project Structure
 
 ```
