@@ -244,14 +244,21 @@ services:
     container_name: rpg-lgtm
     restart: unless-stopped
     environment:
-      # Grafana admin login for http://localhost:3000.
+      # Grafana admin login. The otel-lgtm image runs a stock Grafana, so the
+      # standard GF_SECURITY_* env vars apply. CD writes GRAFANA_ADMIN_PASSWORD
+      # into deploy/.env from the environment secret of the same name.
       GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-localdev}
+    # Bind addresses are parameterised for VPS deploys: Grafana defaults to
+    # 0.0.0.0 (put it behind a firewall rule / reverse proxy — see
+    # docs/MONITORING.md §Deploying to a VPS), while the OTLP ingest and the
+    # bundled Prometheus default to loopback since nothing off-box talks to
+    # them yet. Set *_BIND in deploy/.env (CD: environment `vars`) to change.
     ports:
-      - "${GRAFANA_PORT:-3000}:3000"        # Grafana UI
-      - "${OTLP_GRPC_PORT:-4317}:4317"      # OTLP gRPC (traces/metrics/logs)
-      - "${OTLP_HTTP_PORT:-4318}:4318"      # OTLP HTTP
-      - "${PROMETHEUS_PORT:-9090}:9090"     # bundled Prometheus (targets/query)
+      - "${GRAFANA_BIND:-0.0.0.0}:${GRAFANA_PORT:-3000}:3000"        # Grafana UI
+      - "${OTLP_BIND:-127.0.0.1}:${OTLP_GRPC_PORT:-4317}:4317"       # OTLP gRPC (traces/metrics/logs)
+      - "${OTLP_BIND:-127.0.0.1}:${OTLP_HTTP_PORT:-4318}:4318"       # OTLP HTTP
+      - "${PROMETHEUS_BIND:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090" # bundled Prometheus (targets/query)
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

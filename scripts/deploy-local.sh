@@ -15,6 +15,10 @@
 #   $RPG_DEPLOY_DIR/run/*.pid                  pidfiles (nohup mode)
 #   $RPG_DEPLOY_DIR/logs/*.log                 stdout+stderr (nohup mode)
 #
+# `health` also probes the meta stack (Nakama) and, when MONITORING_ENABLED is
+# not "false", Grafana on GRAFANA_PORT. Both are WARN-ONLY: only the realtime
+# services can fail a deploy.
+#
 # Env is sourced from the first file that exists:
 #   /etc/rpg-mmo/env   then   $RPG_DEPLOY_DIR/deploy/.env   then   $RPG_DEPLOY_DIR/.env
 # ($RPG_DEPLOY_DIR/deploy/.env is what the CD workflow writes — the same file
@@ -195,6 +199,31 @@ health_nakama() {
 	fi
 }
 
+# Grafana (grafana/otel-lgtm, compose `monitoring` profile).
+#
+# WARN-ONLY BY DESIGN: observability is not on the gameplay critical path, so a
+# dead Grafana must never fail a deploy that put a healthy game stack on the
+# box. A red monitoring line in the deploy log is the signal; the deploy still
+# succeeds. (Gateway/gameserver failures below are hard failures — they are the
+# game.) Skipped entirely when MONITORING_ENABLED=false.
+health_monitoring() {
+	if [ "${MONITORING_ENABLED:-true}" = "false" ]; then
+		info "monitoring disabled (MONITORING_ENABLED=false) — skipping Grafana healthcheck"
+		return 0
+	fi
+	local port="${GRAFANA_PORT:-3000}"
+	local url="${GRAFANA_HEALTH_URL:-http://127.0.0.1:${port}/api/health}"
+	if ! command -v curl >/dev/null 2>&1; then
+		info "curl not installed — skipping Grafana healthcheck"
+		return 0
+	fi
+	if curl -fsS --max-time 5 "$url" >/dev/null 2>&1; then
+		info "grafana healthy ($url)"
+	else
+		info "WARN: grafana healthcheck failed ($url) — monitoring stack down or still starting (not fatal)"
+	fi
+}
+
 do_health() {
 	step "Healthcheck"
 	local rc=0 entry name bin args port
@@ -206,6 +235,7 @@ do_health() {
 		}
 	done
 	health_nakama
+	health_monitoring
 	return $rc
 }
 

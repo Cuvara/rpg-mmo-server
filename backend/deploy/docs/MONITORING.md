@@ -9,7 +9,7 @@ make monitoring-up          # docker compose --profile monitoring up -d
 
 | URL | What |
 |-----|------|
-| http://localhost:3000 | Grafana (`admin` / `admin`, override with `GRAFANA_USER` / `GRAFANA_PASSWORD`) |
+| http://localhost:3000 | Grafana (`admin` / `localdev`, override with `GRAFANA_USER` / `GRAFANA_ADMIN_PASSWORD`) |
 | http://localhost:9090/targets | Bundled Prometheus — scrape health |
 | `localhost:4317` / `localhost:4318` | OTLP gRPC / HTTP ingest (traces, logs, metrics — for later) |
 
@@ -153,6 +153,85 @@ they are not vendored. Once the matching exporter exists, import in Grafana via
 | 763 | Redis Dashboard for Prometheus Redis Exporter | `redis_exporter` |
 | 9628 | PostgreSQL Database | `postgres_exporter` |
 | 12740 | Kubernetes / Agones-friendly cluster view | kube-state-metrics (k3s tier) |
+
+## Deploying to a VPS
+
+The monitoring stack is **not** a localhost-only convenience — `cd.yml` deploys
+it to every environment, exactly like the meta stack. There is nothing to run by
+hand on the box.
+
+### How it ships
+
+1. **bundle** stages `backend/deploy/monitoring/` (and `db/`) into the artifact
+   alongside `docker-compose.yml`. Every bind-mount source travels with the
+   compose file; a missing one would make Docker create an empty *directory*
+   where a config file was expected, and Grafana/Prometheus would start with
+   defaults instead of failing loudly.
+2. **deploy** installs them into `$RPG_DEPLOY_DIR/deploy/` (replacing the
+   previous copies wholesale, so a file deleted in git disappears on the host).
+3. The env-file step writes the `GRAFANA_*` / `PROMETHEUS_*` / `OTLP_*` values
+   into `$RPG_DEPLOY_DIR/deploy/.env` (mode 0600).
+4. The compose step runs `docker compose --profile monitoring up -d
+   --remove-orphans`.
+
+Getting monitoring on **staging or production is therefore just setting the
+environment secret** — no new workflow, no manual `make monitoring-up`.
+
+### Secrets & variables per environment
+
+| Kind | Name | Default | Notes |
+|------|------|---------|-------|
+| **secret** | `GRAFANA_ADMIN_PASSWORD` | *(none — required)* | `GF_SECURITY_ADMIN_PASSWORD`. The deploy **fails** with `::error` if unset while monitoring is enabled. |
+| var | `MONITORING_ENABLED` | `true` | Set to exactly `false` to deploy the plain meta stack; `--remove-orphans` then tears the running lgtm container down. |
+| var | `GRAFANA_USER` | `admin` | |
+| var | `GRAFANA_PORT` | `3000` | dev uses `3001` — `3000` is a popular port. |
+| var | `GRAFANA_BIND` | `0.0.0.0` | Host interface for the published Grafana port. See firewall guidance below. |
+| var | `PROMETHEUS_PORT` / `PROMETHEUS_BIND` | `9090` / `127.0.0.1` | Loopback-only: the bundled Prometheus has no auth at all. |
+| var | `OTLP_GRPC_PORT` / `OTLP_HTTP_PORT` / `OTLP_BIND` | `4317` / `4318` / `127.0.0.1` | Loopback-only — nothing off-box pushes OTLP yet. Widen `OTLP_BIND` only when a remote collector needs it, and put TLS + auth in front first. |
+| var | `OTEL_LGTM_VERSION` | `0.11.15` | Re-copy the `otlp:`/`storage:` blocks into `prometheus.yaml` when bumping. |
+
+The healthcheck in `scripts/deploy-local.sh` curls Grafana's `/api/health` and
+is **warn-only by design**: observability is not on the gameplay critical path,
+so a dead Grafana must never fail a deploy that otherwise put a healthy game
+stack on the box. Gateway/gameserver stay hard failures.
+
+### Firewall / exposure
+
+`GRAFANA_BIND=0.0.0.0` publishes Grafana on every interface, which on a public
+VPS means the whole internet sees a login page. Pick one of these before the
+first non-dev deploy — in rough order of preference:
+
+1. **SSH tunnel, nothing published.** Set `GRAFANA_BIND=127.0.0.1` and reach it
+   with `ssh -L 3000:127.0.0.1:3000 user@vps`. Zero attack surface, no TLS to
+   manage. Best default for a single-operator project.
+2. **Reverse proxy + TLS.** Keep `GRAFANA_BIND=127.0.0.1` and terminate TLS in
+   front (Caddy gives automatic Let's Encrypt with a two-line Caddyfile:
+   `grafana.example.com { reverse_proxy 127.0.0.1:3000 }`). Required if
+   non-admins need dashboards. Add Grafana OAuth once there is more than one
+   viewer. *(Not implemented here — this is guidance, not a shipped component.)*
+3. **Firewall allowlist.** If the port must be published directly, restrict it
+   to the admin IP:
+
+   ```bash
+   sudo ufw default deny incoming
+   sudo ufw allow OpenSSH
+   sudo ufw allow from <ADMIN_IP> to any port 3000 proto tcp   # Grafana
+   sudo ufw enable
+   ```
+
+   Note that Docker's `iptables` rules normally **bypass** ufw's `INPUT` chain —
+   a published port stays reachable despite a `deny` rule. Either bind to
+   loopback (options 1/2, which sidesteps the problem entirely) or add the rule
+   in `DOCKER-USER`:
+
+   ```bash
+   sudo iptables -I DOCKER-USER -p tcp --dport 3000 ! -s <ADMIN_IP> -j DROP
+   ```
+
+Whatever the exposure, `GRAFANA_ADMIN_PASSWORD` must be a real generated secret
+per environment — never the `localdev` compose default. Prometheus (`:9090`) and
+OTLP (`:4317`/`:4318`) have **no authentication whatsoever**; leave them on
+loopback.
 
 ## Graduation paths
 

@@ -298,9 +298,20 @@ jobs:
           cp backend/deploy/docker-compose.yml dist/deploy/
           cp backend/deploy/Makefile dist/deploy/
           cp backend/deploy/.env.example dist/deploy/
+          # Everything docker-compose.yml bind-mounts must travel with it, or
+          # `compose up` on a fresh host fails (or, worse, docker creates an
+          # empty DIRECTORY where a config file was expected):
+          #   monitoring/  -> lgtm (prometheus.yaml, dashboards provider + JSON)
+          #   db/          -> postgres-game init SQL
+          cp -r backend/deploy/monitoring dist/deploy/monitoring
+          cp -r backend/deploy/db         dist/deploy/db
           cp scripts/deploy-local.sh dist/scripts/
           echo "${GITHUB_SHA}" > dist/COMMIT
-          for f in bin/gateway bin/smoketest bin/gameserver-dotnet deploy/nakama.so; do
+          for f in bin/gateway bin/smoketest bin/gameserver-dotnet deploy/nakama.so \
+                   deploy/monitoring/prometheus.yaml \
+                   deploy/monitoring/grafana-dashboards.yaml \
+                   deploy/monitoring/dashboards/rpg-gameplay.json \
+                   deploy/db/init-gamestate.sql; do
             [ -f "dist/$f" ] || { echo "::error::missing dist/$f"; exit 1; }
           done
           ls -lhR dist
@@ -355,6 +366,13 @@ jobs:
           install -m 0644 dist/deploy/docker-compose.yml "$RPG_DEPLOY_DIR/deploy/docker-compose.yml"
           install -m 0644 dist/deploy/Makefile           "$RPG_DEPLOY_DIR/deploy/Makefile"
           install -m 0644 dist/deploy/.env.example       "$RPG_DEPLOY_DIR/deploy/.env.example"
+          # Compose bind-mount sources. Replaced wholesale so a file deleted in
+          # git also disappears on the host; docker re-reads them on `up`.
+          for d in monitoring db; do
+            rm -rf "$RPG_DEPLOY_DIR/deploy/$d"
+            cp -r "dist/deploy/$d" "$RPG_DEPLOY_DIR/deploy/$d"
+            chmod -R a+rX "$RPG_DEPLOY_DIR/deploy/$d"
+          done
           cp dist/COMMIT "$RPG_DEPLOY_DIR/COMMIT"
 
       # Secrets come from the GitHub Environment (dev / staging / production).
@@ -376,6 +394,18 @@ jobs:
           GAMESERVER_MAP_ID: ${{ vars.GAMESERVER_MAP_ID || 'map_01' }}
           REDIS_ADDR: ${{ vars.REDIS_ADDR || 'localhost:6379' }}
           GAME_DB_URL: ${{ vars.GAME_DB_URL || '' }}
+          # --- monitoring (compose `monitoring` profile / grafana-otel-lgtm) ---
+          MONITORING_ENABLED: ${{ vars.MONITORING_ENABLED || 'true' }}
+          GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+          GRAFANA_USER: ${{ vars.GRAFANA_USER || 'admin' }}
+          GRAFANA_PORT: ${{ vars.GRAFANA_PORT || '3000' }}
+          GRAFANA_BIND: ${{ vars.GRAFANA_BIND || '0.0.0.0' }}
+          PROMETHEUS_PORT: ${{ vars.PROMETHEUS_PORT || '9090' }}
+          PROMETHEUS_BIND: ${{ vars.PROMETHEUS_BIND || '127.0.0.1' }}
+          OTLP_GRPC_PORT: ${{ vars.OTLP_GRPC_PORT || '4317' }}
+          OTLP_HTTP_PORT: ${{ vars.OTLP_HTTP_PORT || '4318' }}
+          OTLP_BIND: ${{ vars.OTLP_BIND || '127.0.0.1' }}
+          OTEL_LGTM_VERSION: ${{ vars.OTEL_LGTM_VERSION || '0.11.15' }}
         run: |
           set -euo pipefail
           for required in JWT_SECRET POSTGRES_PASSWORD NAKAMA_CONSOLE_PASSWORD; do
@@ -384,6 +414,14 @@ jobs:
               exit 1
             fi
           done
+          # Monitoring is on unless vars.MONITORING_ENABLED is exactly 'false'.
+          # When it is on, the Grafana admin password is as mandatory as the
+          # other secrets: a Grafana published on 0.0.0.0 with a default
+          # password is an open door.
+          if [ "${MONITORING_ENABLED}" != "false" ] && [ -z "${GRAFANA_ADMIN_PASSWORD}" ]; then
+            echo "::error::environment secret GRAFANA_ADMIN_PASSWORD is not set (required while vars.MONITORING_ENABLED != 'false')"
+            exit 1
+          fi
           umask 077
           envfile="$RPG_DEPLOY_DIR/deploy/.env"
           {
@@ -404,21 +442,46 @@ jobs:
             echo "GAMESERVER_RUNTIME=dotnet"
             echo "GAMESERVER_ID=gs-dotnet-${GAMESERVER_MAP_ID}"
             echo "GAME_DB_URL=${GAME_DB_URL}"
+            echo "MONITORING_ENABLED=${MONITORING_ENABLED}"
+            echo "OTEL_LGTM_VERSION=${OTEL_LGTM_VERSION}"
+            echo "GRAFANA_USER=${GRAFANA_USER}"
+            echo "GRAFANA_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}"
+            echo "GRAFANA_PORT=${GRAFANA_PORT}"
+            echo "GRAFANA_BIND=${GRAFANA_BIND}"
+            echo "PROMETHEUS_PORT=${PROMETHEUS_PORT}"
+            echo "PROMETHEUS_BIND=${PROMETHEUS_BIND}"
+            echo "OTLP_GRPC_PORT=${OTLP_GRPC_PORT}"
+            echo "OTLP_HTTP_PORT=${OTLP_HTTP_PORT}"
+            echo "OTLP_BIND=${OTLP_BIND}"
           } > "$envfile"
           chmod 600 "$envfile"
           echo "wrote $envfile ($(wc -l < "$envfile") vars, values redacted)"
 
-      # postgres + redis + nakama. The plugin .so is mounted from ./modules.
+      # postgres + redis + nakama (+ the `monitoring` profile: grafana/otel-lgtm).
+      # The plugin .so is mounted from ./modules, monitoring configs from
+      # ./monitoring — both installed by the sync step above.
       - name: Start / update the meta stack (docker compose)
         env:
           RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
+          MONITORING_ENABLED: ${{ vars.MONITORING_ENABLED || 'true' }}
         working-directory: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
         run: |
           set -euo pipefail
           cd "$RPG_DEPLOY_DIR/deploy"
-          docker compose pull --quiet || true
-          docker compose up -d --remove-orphans
-          docker compose ps
+          # Monitoring ships by default; set vars.MONITORING_ENABLED='false' on
+          # an environment to deploy the plain meta stack instead. With the
+          # profile off, --remove-orphans also tears the lgtm container down,
+          # so the flag is a real on/off switch and not just "stop deploying it".
+          profile_args=()
+          if [ "${MONITORING_ENABLED}" != "false" ]; then
+            profile_args=(--profile monitoring)
+            echo "monitoring profile: ENABLED"
+          else
+            echo "monitoring profile: disabled (vars.MONITORING_ENABLED=false)"
+          fi
+          docker compose "${profile_args[@]}" pull --quiet || true
+          docker compose "${profile_args[@]}" up -d --remove-orphans
+          docker compose "${profile_args[@]}" ps
           # The gameserver opens GAME_DB_URL at boot and exits(1) if postgres-game
           # is not accepting connections yet, so wait for its healthcheck before
           # the restart step below.

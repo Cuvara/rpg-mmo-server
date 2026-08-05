@@ -88,7 +88,7 @@ health: ## Curl the Nakama healthcheck + ping Redis
 .PHONY: monitoring-up
 monitoring-up: ## Start the otel-lgtm observability stack (Grafana+Prometheus+Loki+Tempo)
 	$(COMPOSE) --profile monitoring up -d
-	@echo "Grafana:    http://localhost:$${GRAFANA_PORT:-3000}  ($${GRAFANA_USER:-admin} / $${GRAFANA_PASSWORD:-admin})"
+	@echo "Grafana:    http://localhost:$${GRAFANA_PORT:-3000}  ($${GRAFANA_USER:-admin} / $${GRAFANA_ADMIN_PASSWORD:-localdev})"
 	@echo "Prometheus: http://localhost:$${PROMETHEUS_PORT:-9090}/targets"
 	@echo "OTLP:       grpc :$${OTLP_GRPC_PORT:-4317}  http :$${OTLP_HTTP_PORT:-4318}"
 
