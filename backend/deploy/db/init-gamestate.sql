@@ -1,11 +1,16 @@
 -- Game state schema (PostgreSQL "Game State" instance — NOT the Nakama meta DB).
 --
--- SINGLE SOURCE OF TRUTH FOR THE SCHEMA IS THIS FILE.
--- It is embedded into the binary (see migrate.go, go:embed) and applied on
--- startup by PostgresPlayerStore.Migrate. A byte-identical copy lives at
--- backend/deploy/db/init-gamestate.sql so a fresh docker-compose volume is
--- initialised even before any gameserver connects. Keep the two in sync —
--- pgstore_test.go asserts they match.
+-- This file initialises a fresh postgres-game volume (mounted into the
+-- container's /docker-entrypoint-initdb.d/) before any gameserver connects.
+--
+-- The same statements are duplicated as PostgresPlayerStore.SchemaSql in
+-- backend/gameserver-dotnet/GameServer/Persistence/PostgresPlayerStore.cs and
+-- applied by PostgresPlayerStore.MigrateAsync on every server boot. Keep the two
+-- in sync — PostgresPlayerStoreTests.SchemaSql_MatchesInitGamestateSql asserts
+-- they match.
+--
+-- (The Go shared/storage/pgstore package that used to embed this schema via
+-- go:embed is orphaned since the C# gameserver migration.)
 --
 -- Every statement MUST be idempotent: Migrate runs on every boot.
 
