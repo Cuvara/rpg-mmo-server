@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using GameServer.Agones;
 using GameServer.Events;
+using GameServer.Observability;
 using GameServer.Persistence;
 using GameServer.Server;
 
@@ -14,6 +15,10 @@ int capacity = int.TryParse(GetArg(args, "--capacity") ?? Env("GAMESERVER_CAPACI
 int tickRate = int.TryParse(GetArg(args, "--tick-rate") ?? Env("GAMESERVER_TICK_RATE"), out var tr) ? tr : 15;
 bool useAgones = HasFlag(args, "--agones") || Env("AGONES_ENABLED") == "true";
 string jwtSecret = GetArg(args, "--jwt-secret") ?? Env("JWT_SECRET") ?? "";
+// Metrics listen address. Unset -> ":9101"; explicitly empty -> metrics disabled.
+string metricsAddr = GetArg(args, "--metrics-addr")
+    ?? Environment.GetEnvironmentVariable("METRICS_ADDR")
+    ?? ":9101";
 
 // ── Logging ──
 
@@ -32,6 +37,7 @@ logger.LogInformation("  ServerId:  {ServerId}", serverId);
 logger.LogInformation("  Capacity:  {Capacity}", capacity);
 logger.LogInformation("  TickRate:  {TickRate}Hz", tickRate);
 logger.LogInformation("  Agones:    {Agones}", useAgones);
+logger.LogInformation("  Metrics:   {Metrics}", string.IsNullOrWhiteSpace(metricsAddr) ? "disabled" : metricsAddr);
 
 // ── Validate ──
 
@@ -39,6 +45,11 @@ if (string.IsNullOrEmpty(jwtSecret))
 {
     logger.LogWarning("JWT_SECRET not set -- token validation will reject all tokens in production");
 }
+
+// ── Metrics (OpenTelemetry -> Prometheus) ──
+
+using var metrics = new GameMetrics(mapId);
+await using var metricsEndpoint = MetricsEndpoint.TryStart(metricsAddr, metrics, serverId, logger);
 
 // ── Build server options ──
 
@@ -56,7 +67,8 @@ var options = new ServerOptions
     PlayerStore = new MemoryPlayerStore(),
     AgonesSdk = useAgones ? new NoopAgonesSdk() : new NoopAgonesSdk(), // Real SDK added later
     EventStream = new NoopEventStream(),
-    LoggerFactory = loggerFactory
+    LoggerFactory = loggerFactory,
+    Metrics = metrics
 };
 
 // ── Graceful shutdown on SIGINT / SIGTERM ──

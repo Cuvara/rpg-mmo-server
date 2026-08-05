@@ -1,0 +1,224 @@
+using System.Net;
+using System.Text;
+using Microsoft.Extensions.Logging;
+using OpenTelemetry;
+using OpenTelemetry.Exporter;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
+
+namespace GameServer.Observability;
+
+/// <summary>
+/// Hosts the observability HTTP surface of the game server:
+/// <c>/metrics</c> (OpenTelemetry Prometheus exposition) and <c>/healthz</c>.
+///
+/// Both paths live on the same TCP port but are served by two independent
+/// <see cref="HttpListener"/> registrations (the OpenTelemetry exporter owns
+/// its own listener). Everything runs on background threads — the tick loop is
+/// never blocked, and gauge callbacks execute on the scrape thread.
+/// </summary>
+public sealed class MetricsEndpoint : IAsyncDisposable
+{
+    /// <summary>Histogram bucket boundaries in seconds, sized for 10-15Hz ticks.</summary>
+    private static readonly double[] TickDurationBuckets =
+    [
+        0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 1.0
+    ];
+
+    private readonly MeterProvider _meterProvider;
+    private readonly HttpListener _healthListener;
+    private readonly CancellationTokenSource _cts = new();
+    private readonly ILogger _logger;
+    private Task? _healthTask;
+
+    /// <summary>Prefix the Prometheus exporter is bound to (e.g. <c>http://+:9101/</c>).</summary>
+    public string UriPrefix { get; }
+
+    private MetricsEndpoint(MeterProvider meterProvider, HttpListener healthListener, string uriPrefix, ILogger logger)
+    {
+        _meterProvider = meterProvider;
+        _healthListener = healthListener;
+        _logger = logger;
+        UriPrefix = uriPrefix;
+    }
+
+    /// <summary>
+    /// Start the metrics endpoint, or return <c>null</c> when disabled.
+    /// </summary>
+    /// <param name="addr">
+    /// Listen address in Go style (<c>":9101"</c>, <c>"0.0.0.0:9101"</c>,
+    /// <c>"localhost:9101"</c>). Null or empty disables metrics entirely.
+    /// </param>
+    /// <param name="metrics">Instrument set whose meter is registered on the provider.</param>
+    /// <param name="serviceInstanceId">Server ID reported as the OTel service instance.</param>
+    /// <param name="logger">Logger for startup / scrape errors.</param>
+    /// <returns>The running endpoint, or <c>null</c> if metrics are disabled.</returns>
+    public static MetricsEndpoint? TryStart(
+        string? addr,
+        GameMetrics metrics,
+        string serviceInstanceId,
+        ILogger logger)
+    {
+        if (string.IsNullOrWhiteSpace(addr))
+        {
+            logger.LogInformation("Metrics endpoint disabled (METRICS_ADDR is empty)");
+            return null;
+        }
+
+        var (host, port) = ParseAddr(addr);
+
+        // On Windows, binding the "+" wildcard prefix requires an URL ACL
+        // (admin-only). Fall back to localhost so unprivileged dev runs still
+        // get a working endpoint; Linux (the production target) binds "+" fine.
+        var hostCandidates = host == "+" && OperatingSystem.IsWindows()
+            ? new[] { "+", "localhost" }
+            : new[] { host };
+
+        foreach (var candidate in hostCandidates)
+        {
+            var endpoint = TryStartOn(candidate, port, metrics, serviceInstanceId, logger,
+                suppressError: candidate != hostCandidates[^1]);
+            if (endpoint != null)
+            {
+                return endpoint;
+            }
+        }
+        return null;
+    }
+
+    private static MetricsEndpoint? TryStartOn(
+        string host,
+        int port,
+        GameMetrics metrics,
+        string serviceInstanceId,
+        ILogger logger,
+        bool suppressError)
+    {
+        string prefix = $"http://{host}:{port}/";
+
+        MeterProvider? provider = null;
+        HttpListener? health = null;
+        try
+        {
+            provider = Sdk.CreateMeterProviderBuilder()
+                .ConfigureResource(r => r.AddService(
+                    serviceName: "gameserver",
+                    serviceInstanceId: serviceInstanceId))
+                .AddMeter(metrics.MeterName)
+                .AddView(
+                    GameMetrics.TickDurationInstrument,
+                    new ExplicitBucketHistogramConfiguration { Boundaries = TickDurationBuckets })
+                .AddPrometheusHttpListener(options =>
+                {
+                    options.Host = host;
+                    options.Port = port;
+                    options.ScrapeEndpointPath = "/metrics";
+                    // Keep the exposition clean: no otel_scope_* labels, and the
+                    // standard name translation (dots -> underscores, unit and
+                    // _total suffixes) that docs/METRICS.md documents.
+                    options.ScopeInfoEnabled = false;
+                    options.TranslationStrategy =
+                        PrometheusTranslationStrategy.UnderscoreEscapingWithSuffixes;
+                })
+                .Build();
+
+            health = new HttpListener();
+            health.Prefixes.Add(prefix + "healthz/");
+            health.Start();
+
+            var endpoint = new MetricsEndpoint(provider!, health, prefix, logger);
+            endpoint._healthTask = Task.Run(() => endpoint.HealthLoopAsync(endpoint._cts.Token));
+
+            logger.LogInformation("Metrics endpoint listening on {Prefix} (/metrics, /healthz)", prefix);
+            return endpoint;
+        }
+        catch (Exception ex)
+        {
+            if (suppressError)
+            {
+                logger.LogWarning("Could not bind metrics endpoint on {Prefix} ({Reason}); trying fallback", prefix, ex.Message);
+            }
+            else
+            {
+                logger.LogError(ex, "Failed to start metrics endpoint on {Prefix}", prefix);
+            }
+            try { health?.Close(); } catch { /* ignore */ }
+            provider?.Dispose();
+            return null;
+        }
+    }
+
+    private async Task HealthLoopAsync(CancellationToken ct)
+    {
+        byte[] body = Encoding.UTF8.GetBytes("ok");
+
+        while (!ct.IsCancellationRequested)
+        {
+            HttpListenerContext ctx;
+            try
+            {
+                ctx = await _healthListener.GetContextAsync();
+            }
+            catch (ObjectDisposedException) { break; }
+            catch (HttpListenerException) { break; }
+            catch (OperationCanceledException) { break; }
+
+            try
+            {
+                ctx.Response.StatusCode = 200;
+                ctx.Response.ContentType = "text/plain; charset=utf-8";
+                ctx.Response.ContentLength64 = body.Length;
+                await ctx.Response.OutputStream.WriteAsync(body, ct);
+                ctx.Response.Close();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Health response failed");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Split a Go-style listen address into host and port.
+    /// A wildcard or missing host becomes <c>+</c> so the listener binds all interfaces.
+    /// </summary>
+    internal static (string Host, int Port) ParseAddr(string addr)
+    {
+        string host;
+        string port;
+
+        int colon = addr.LastIndexOf(':');
+        if (colon < 0)
+        {
+            host = "";
+            port = addr;
+        }
+        else
+        {
+            host = addr[..colon];
+            port = addr[(colon + 1)..];
+        }
+
+        if (string.IsNullOrEmpty(host) || host is "*" or "0.0.0.0" or "+")
+        {
+            host = "+";
+        }
+
+        return (host, int.Parse(port));
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _cts.Cancel();
+        try { _healthListener.Close(); } catch { /* ignore */ }
+
+        if (_healthTask != null)
+        {
+            try { await _healthTask.WaitAsync(TimeSpan.FromSeconds(2)); }
+            catch { /* ignore */ }
+        }
+
+        _meterProvider.Dispose();
+        _cts.Dispose();
+    }
+}
