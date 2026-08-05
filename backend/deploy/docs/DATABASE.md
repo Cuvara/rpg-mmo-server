@@ -280,7 +280,7 @@ Relevant environment settings:
 | Setting | Kind | Default | Purpose |
 |---------|------|---------|---------|
 | `GAME_DB_URL` | var | *(unset)* | Game-state DSN. Unset ⇒ migration skipped, gameserver uses the memory store. |
-| `BACKUP_DIR` | var | `/var/backups/rpg-mmo` | Where CD writes dumps on the runner. |
+| `BACKUP_DIR` | var | `$RPG_DEPLOY_DIR/backups` | Where CD writes dumps. The script itself defaults to `/var/backups/rpg-mmo`; CD overrides it because that path is root-only and CD does not run as root. |
 | `BACKUP_KEEP` | var | `7` | Archives kept per database. |
 | `POSTGRES_USER` / `POSTGRES_DB` | var | `nakama` | Meta credentials for `pg_dump`. |
 

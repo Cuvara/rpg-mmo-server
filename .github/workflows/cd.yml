@@ -375,7 +375,10 @@ jobs:
 
       - name: Back up both databases
         env:
-          BACKUP_DIR: ${{ vars.BACKUP_DIR || '/var/backups/rpg-mmo' }}
+          # Default under the deploy dir, which the runner owns. /var/backups is
+          # root-only on a stock host and CD does not run as root; point
+          # vars.BACKUP_DIR at a provisioned path when there is one.
+          BACKUP_DIR: ${{ vars.BACKUP_DIR || format('{0}/backups', vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo') }}
           BACKUP_KEEP: ${{ vars.BACKUP_KEEP || '7' }}
           POSTGRES_DB: ${{ vars.POSTGRES_DB || 'nakama' }}
           POSTGRES_USER: ${{ vars.POSTGRES_USER || 'nakama' }}

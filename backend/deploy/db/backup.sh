@@ -177,7 +177,10 @@ prune() {
 }
 
 # ----------------------------------------------------------------------- main
-mkdir -p "$BACKUP_DIR"
+mkdir -p "$BACKUP_DIR" 2>/dev/null ||
+	die "cannot create '$BACKUP_DIR' (permission denied?) -- set BACKUP_DIR to a writable path or pre-create it"
+[ -w "$BACKUP_DIR" ] || die "'$BACKUP_DIR' is not writable by $(id -un)"
+
 log "destination: $BACKUP_DIR (keep $BACKUP_KEEP per database)"
 
 if [ "$WHICH_DB" = "meta" ] || [ "$WHICH_DB" = "all" ]; then
