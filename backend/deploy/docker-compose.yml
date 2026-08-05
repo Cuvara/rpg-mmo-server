@@ -55,10 +55,10 @@ services:
       - "${POSTGRES_GAME_PORT:-5433}:5432"
     volumes:
       - postgres-game-data:/var/lib/postgresql/data
-      # Applied once, on an empty data volume. The gameserver also runs the
-      # same (idempotent) schema at boot via pgstore.Migrate, so an existing
-      # volume is upgraded too. Keep in sync with
-      # backend/shared/storage/pgstore/schema.sql.
+      # Applied once, on an empty data volume. Schema changes do NOT go here —
+      # the gameserver applies numbered migrations from db/migrations/gamestate/
+      # at boot (and CD runs them explicitly beforehand), which is what upgrades
+      # an existing volume. See backend/deploy/docs/DATABASE.md.
       - ./db/init-gamestate.sql:/docker-entrypoint-initdb.d/10-init-gamestate.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_GAME_USER:-game} -d ${POSTGRES_GAME_DB:-gamestate}"]

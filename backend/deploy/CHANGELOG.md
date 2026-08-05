@@ -6,6 +6,39 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Numbered database migrations** for the game-state DB.
+  `db/migrations/gamestate/001_init.sql` holds the current schema; every future
+  change is a new numbered file. The gameserver applies them transactionally,
+  in order, exactly once, with checksum verification of anything already applied
+  (see `backend/gameserver-dotnet` CHANGELOG for the runner). The Nakama meta DB
+  is untouched — it migrates itself.
+- **`db/backup.sh`** — `pg_dump -Fc` of both instances through `docker exec`,
+  timestamped into `$BACKUP_DIR` (default `/var/backups/rpg-mmo`) with
+  per-database retention (`--keep`, default 7). Every dump is verified with
+  `pg_restore --list` and only then renamed off `.partial`, so a corrupt or
+  interrupted run never leaves a file that looks like a usable backup.
+  `--skip-missing` makes absent containers a warning instead of a failure.
+- **`db/restore.sh`** — restores an archive into the live database or, with
+  `--target`, into a scratch database so restores can be rehearsed without
+  risking live data. Refuses to run without `--yes`, verifies the archive first,
+  and prints per-table row counts afterwards.
+- **`db-migrate` CD job** between `bundle` and `deploy`: backs up both databases,
+  then runs `gameserver-dotnet --migrate-only` against `GAME_DB_URL`. `deploy`
+  now depends on it, so a failed migration stops the rollout with the previous
+  version still serving. New environment settings: `BACKUP_DIR`, `BACKUP_KEEP`.
+- **`docs/DATABASE.md`** — migration workflow (how to add `002_*.sql`, the
+  backward-compatibility rule that CD's migrate-before-deploy ordering implies),
+  backup/restore usage, and a disaster-recovery runbook covering game-state loss,
+  meta loss, a migration that fails mid-deploy, and checksum drift.
+
+### Changed
+- `db/init-gamestate.sql` is now documented as a **first-boot seed only** — schema
+  changes go into numbered migrations. Its content is unchanged; the header was
+  rewritten (and mirrored into the orphaned `shared/storage/pgstore/schema.sql`,
+  which a Go test byte-compares against it).
+- Bundle validation now also requires `db/migrations/gamestate/001_init.sql`,
+  `db/backup.sh` and `db/restore.sh`.
+
 - **Full-docker deploy mode (`vars.DEPLOY_MODE=containers`)** — the `deploy` job
   can now run the realtime services as containers instead of host binaries.
   Same secrets, same ports, same smoke test; the switch is one environment

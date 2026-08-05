@@ -20,6 +20,9 @@ name: CD — Build & Deploy
 #                └─ test-integration ────────────────►bundle
 #                                     build-images(*)     │
 #                                                         ▼
+#                                      db-migrate (backup + schema)
+#                                                         │
+#                                                         ▼
 #                                        deploy ─► post-deploy-smoke ─► summary
 #   (*) build-images runs only for production / build_images=true and is not
 #       on the deploy path.
@@ -320,7 +323,10 @@ jobs:
                    deploy/monitoring/prometheus.yaml \
                    deploy/monitoring/grafana-dashboards.yaml \
                    deploy/monitoring/dashboards/rpg-gameplay.json \
-                   deploy/db/init-gamestate.sql; do
+                   deploy/db/init-gamestate.sql \
+                   deploy/db/migrations/gamestate/001_init.sql \
+                   deploy/db/backup.sh \
+                   deploy/db/restore.sh; do
             [ -f "dist/$f" ] || { echo "::error::missing dist/$f"; exit 1; }
           done
           ls -lhR dist
@@ -335,10 +341,70 @@ jobs:
           # dist/deploy/.env.example is a dotfile; v4 drops hidden files by default.
           include-hidden-files: true
 
+  # ------------------------------------------------------------- db-migrate
+  # Schema work happens here, on the deploy runner, BEFORE any new binary is
+  # installed or restarted. Ordering rationale:
+  #
+  #   1. Back up first. The backup is worthless if it is taken after a bad
+  #      migration, so it is the first thing that happens and a failure here
+  #      aborts the deploy (except on a first-ever deploy, where the containers
+  #      do not exist yet — --skip-missing turns that into a warning).
+  #   2. Migrate with the NEW binary against the OLD running servers. Migrations
+  #      must therefore be backward compatible with the currently-deployed code,
+  #      which is the normal expand/contract rule.
+  #   3. Only then does `deploy` install and restart the binaries.
+  #
+  # The gameserver also migrates at boot (idempotently, under an advisory lock),
+  # so this job is about determinism and a backup checkpoint, not correctness:
+  # if it is skipped the schema still converges, just at an unpredictable moment
+  # and with no backup taken.
+  db-migrate:
+    name: Back up + migrate databases
+    needs: [resolve, bundle]
+    runs-on: ${{ fromJSON(needs.resolve.outputs.runner_labels) }}
+    environment: ${{ needs.resolve.outputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download deployment bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: deploy-bundle-${{ github.sha }}
+          path: dist
+
+      - name: Back up both databases
+        env:
+          BACKUP_DIR: ${{ vars.BACKUP_DIR || '/var/backups/rpg-mmo' }}
+          BACKUP_KEEP: ${{ vars.BACKUP_KEEP || '7' }}
+          POSTGRES_DB: ${{ vars.POSTGRES_DB || 'nakama' }}
+          POSTGRES_USER: ${{ vars.POSTGRES_USER || 'nakama' }}
+        run: |
+          set -euo pipefail
+          # --skip-missing: on a first-ever deploy the postgres containers do not
+          # exist yet, and "nothing to back up" must not block the first deploy.
+          bash backend/deploy/db/backup.sh --skip-missing
+
+      - name: Apply pending migrations
+        env:
+          GAME_DB_URL: ${{ vars.GAME_DB_URL || '' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GAME_DB_URL}" ]; then
+            echo "GAME_DB_URL is not set for this environment — the gameserver runs on the"
+            echo "in-memory store, so there is no schema to migrate. Skipping."
+            echo "- db-migrate: skipped (GAME_DB_URL unset)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          chmod +x dist/bin/gameserver-dotnet
+          # Exits non-zero on unreachable DB, failed migration, or checksum drift.
+          ./dist/bin/gameserver-dotnet --migrate-only --game-db-url "${GAME_DB_URL}"
+          echo "- db-migrate: migrations applied" >> "$GITHUB_STEP_SUMMARY"
+
   # ----------------------------------------------------------------- deploy
   deploy:
     name: Deploy to ${{ needs.resolve.outputs.environment }}
-    needs: [resolve, bundle]
+    needs: [resolve, bundle, db-migrate]
     runs-on: ${{ fromJSON(needs.resolve.outputs.runner_labels) }}
     environment: ${{ needs.resolve.outputs.environment }}
     outputs:

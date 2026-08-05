@@ -214,29 +214,9 @@ public class PostgresPlayerStoreTests
             PostgresPlayerStore.BuildConnectionString("postgres://game:pw@localhost:5432/"));
     }
 
-    [Fact]
-    public void SchemaSql_MatchesInitGamestateSql()
-    {
-        string? path = FindRepoFile(Path.Combine("backend", "deploy", "db", "init-gamestate.sql"));
-        if (path is null)
-        {
-            Console.WriteLine("[SKIP] init-gamestate.sql not found (running outside the repo tree)");
-            return;
-        }
-
-        // The two files carry different comment headers; compare the SQL statements only.
-        Assert.Equal(NormalizeSql(File.ReadAllText(path)), NormalizeSql(PostgresPlayerStore.SchemaSql));
-    }
-
     // ── Helpers ──
 
-    private static string NormalizeSql(string sql)
-    {
-        var stripped = Regex.Replace(sql, "--[^\n]*", " ");
-        return Regex.Replace(stripped, @"\s+", " ").Trim();
-    }
-
-    private static string? FindRepoFile(string relative)
+    internal static string? FindRepoFile(string relative)
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir is not null)

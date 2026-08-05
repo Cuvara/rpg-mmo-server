@@ -28,6 +28,9 @@ string metricsAddr = GetArg(args, "--metrics-addr")
     ?? ":9101";
 // Game-state database DSN. Unset -> in-memory player store (state lost on restart).
 string? gameDbUrl = GetArg(args, "--game-db-url") ?? Env("GAME_DB_URL");
+// Migrate-only mode: apply pending schema migrations, then exit without listening.
+// CD runs this before the deploy step so migrations happen at a deterministic point.
+bool migrateOnly = HasFlag(args, "--migrate-only") || Env("GAMESERVER_MIGRATE_ONLY") == "true";
 
 // ── Logging ──
 
@@ -50,6 +53,35 @@ logger.LogInformation("  Agones:    {Agones}", useAgones);
 logger.LogInformation("  Metrics:   {Metrics}", string.IsNullOrWhiteSpace(metricsAddr) ? "disabled" : metricsAddr);
 logger.LogInformation("  GameDB:    {GameDb}",
     string.IsNullOrWhiteSpace(gameDbUrl) ? "memory" : PostgresPlayerStore.MaskDsn(gameDbUrl));
+
+// ── Migrate-only mode (CD schema step) ──
+//
+// Applies pending migrations and exits. No listener, no tick loop, no metrics —
+// this is meant to run as a one-shot step before the servers are (re)started, so
+// the schema is already current by the time any of them boot.
+
+if (migrateOnly)
+{
+    if (string.IsNullOrWhiteSpace(gameDbUrl))
+    {
+        logger.LogCritical("--migrate-only requires --game-db-url / GAME_DB_URL");
+        return 2;
+    }
+
+    try
+    {
+        await using var migrateStore = await PostgresPlayerStore.ConnectAsync(gameDbUrl, CancellationToken.None);
+        var result = await migrateStore.MigrateAsync(CancellationToken.None, logger);
+        logger.LogInformation("migrate-only complete ({Applied} applied, {Existing} already present)",
+            result.Applied.Count, result.AlreadyApplied.Count);
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        logger.LogCritical(ex, "migration failed ({Dsn})", PostgresPlayerStore.MaskDsn(gameDbUrl));
+        return 1;
+    }
+}
 
 // ── Validate ──
 

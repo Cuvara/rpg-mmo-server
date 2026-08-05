@@ -25,4 +25,12 @@
     <ProjectReference Include="..\Shared.GameLogic\Shared.GameLogic.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Numbered schema migrations, embedded so the binary is self-contained and
+         the migrate-only mode needs no files on disk. Resource names become
+         GameServer.Persistence.Migrations.<file>.sql; Migrator reads them via
+         GetManifestResourceStream, which is NativeAOT-safe. -->
+    <EmbeddedResource Include="Persistence\Migrations\*.sql" />
+  </ItemGroup>
+
 </Project>

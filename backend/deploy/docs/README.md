@@ -22,6 +22,9 @@ Docs:
 - `RUNBOOK-local-dev.md` — start/stop/debug/reset the local stack, verification steps, REDIS_ADDR wiring.
 - `CICD.md` — `build-all.sh` / `deploy-local.sh` usage, `cd.yml` job matrix, self-hosted
   runner registration + labels, Environment secrets, branch strategy, rollback.
+- `DATABASE.md` — numbered game-state migrations (how to add one, the
+  backward-compatibility rule), `db/backup.sh` / `db/restore.sh`, and the disaster
+  recovery runbook.
 - `MONITORING.md` — `make monitoring-up` (one `grafana/otel-lgtm` container), scrape
   targets, the "RPG Gameplay" dashboard, metric contracts, Grafana Cloud / k3s paths.
 - `K3S.md` — dev cluster bootstrap (`k3s/setup-dev.sh`), Agones install + fleets,

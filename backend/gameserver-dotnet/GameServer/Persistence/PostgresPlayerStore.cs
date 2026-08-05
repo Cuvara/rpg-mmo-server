@@ -1,5 +1,7 @@
 using System.Data;
 using System.Text;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using NpgsqlTypes;
 
@@ -28,33 +30,6 @@ public sealed class PostgresPlayerStore : IPlayerStore, IAsyncDisposable
 {
     /// <summary>Default per-command timeout, in seconds.</summary>
     public const int DefaultCommandTimeoutSeconds = 5;
-
-    /// <summary>Timeout applied to the DDL run by <see cref="MigrateAsync"/>, in seconds.</summary>
-    public const int MigrationTimeoutSeconds = 30;
-
-    /// <summary>
-    /// Game-state schema, applied by <see cref="MigrateAsync"/> on every boot.
-    ///
-    /// SYNC CONTRACT: this must stay byte-equivalent (modulo comments/whitespace) with
-    /// <c>backend/deploy/db/init-gamestate.sql</c>, which seeds a fresh postgres-game
-    /// container volume before any gameserver connects.
-    /// <c>PostgresPlayerStoreTests.SchemaSql_MatchesInitGamestateSql</c> asserts the match.
-    ///
-    /// Every statement MUST be idempotent — this runs on every process start.
-    /// </summary>
-    public const string SchemaSql = """
-        CREATE TABLE IF NOT EXISTS player_states (
-            user_id    text        PRIMARY KEY,
-            map_id     text        NOT NULL DEFAULT '',
-            x          real        NOT NULL DEFAULT 0,
-            y          real        NOT NULL DEFAULT 0,
-            hp         integer     NOT NULL DEFAULT 0,
-            max_hp     integer     NOT NULL DEFAULT 0,
-            updated_at timestamptz NOT NULL DEFAULT now()
-        );
-
-        CREATE INDEX IF NOT EXISTS player_states_map_id_idx ON player_states (map_id);
-        """;
 
     private const string UpsertPlayerSql = """
         INSERT INTO player_states (user_id, map_id, x, y, hp, max_hp, updated_at)
@@ -123,15 +98,17 @@ public sealed class PostgresPlayerStore : IPlayerStore, IAsyncDisposable
     }
 
     /// <summary>
-    /// Apply <see cref="SchemaSql"/>. Idempotent — safe to call on every process
-    /// start; concurrent callers are serialised by PostgreSQL's own DDL locking.
+    /// Apply every pending numbered migration (see <see cref="Migrator"/>).
+    /// Idempotent — safe on every process start; concurrent servers are serialised
+    /// by an advisory lock.
     /// </summary>
-    public async Task MigrateAsync(CancellationToken ct = default)
-    {
-        await using var cmd = _dataSource.CreateCommand(SchemaSql);
-        cmd.CommandTimeout = MigrationTimeoutSeconds;
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
+    /// <param name="ct">Cancellation token.</param>
+    /// <param name="logger">Optional destination for per-migration progress lines.</param>
+    /// <exception cref="MigrationDriftException">
+    /// An already-applied migration was edited after it shipped.
+    /// </exception>
+    public Task<MigrationResult> MigrateAsync(CancellationToken ct = default, ILogger? logger = null)
+        => new Migrator(_dataSource, logger ?? NullLogger.Instance).ApplyAsync(ct);
 
     /// <summary>Verify the connection is usable (health / readiness probes).</summary>
     public async Task PingAsync(CancellationToken ct = default)

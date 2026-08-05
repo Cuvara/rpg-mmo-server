@@ -7,6 +7,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `GameServer.Persistence.Migrator` — numbered, checksummed, transactional schema
+  migrations. Scripts live in `GameServer/Persistence/Migrations/NNN_*.sql` and are
+  embedded as assembly resources (read via `GetManifestResourceStream`, which is
+  NativeAOT-safe), so the binary carries its own schema history.
+  - Each pending script commits in its own transaction together with its
+    `schema_migrations` row, so a failing migration leaves no partial schema and
+    no version record and can simply be fixed and re-run.
+  - Checksums of already-applied migrations are verified on every run; editing a
+    shipped migration fails loudly with `MigrationDriftException`. Checksums cover
+    statements, not comments, so rewording a comment is safe.
+  - Concurrent runners are serialised by a PostgreSQL advisory lock — a whole
+    fleet can boot at once. A database ahead of the binary warns instead of
+    failing, so rollbacks still start.
+- `--migrate-only` / `GAMESERVER_MIGRATE_ONLY=true` — apply pending migrations and
+  exit without listening (exit 0 applied/current, 1 failure, 2 no DSN). CD uses it
+  to migrate at a deterministic point before restarting servers.
+- `001_init.sql` — the existing `player_states` schema as the first migration.
+  Ops copies live in `backend/deploy/db/migrations/gamestate/`; tests assert the
+  embedded scripts, the ops copies and `db/init-gamestate.sql` all agree.
+
+### Changed
+- `PostgresPlayerStore.MigrateAsync` now runs the migration set instead of a single
+  hardcoded `CREATE TABLE IF NOT EXISTS` block, and returns a `MigrationResult`.
+  The `SchemaSql` constant is gone — schema lives in migration files now.
+
 - `GameServer.Persistence.PostgresPlayerStore` — PostgreSQL-backed `IPlayerStore`
   restoring the player-state persistence that was lost in the Go -> C# migration
   (ported from the now-orphaned Go `shared/storage/pgstore`). Saves are upserts on
