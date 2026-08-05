@@ -1,8 +1,19 @@
 # Core Flow — End-to-End Tech Stack
 
+> **⚠️ PARTIALLY STALE — last fully verified against the Go game server, which has
+> since been deleted.** Code references below of the form `gameserver/...` point at
+> a Go codebase that no longer exists; the game server is now C# at
+> `backend/gameserver-dotnet/`. Several §6 "Known gaps" have since been fixed
+> (notably #2 Redis registry, #3 `sid` enforcement, #4 `alg` validation, #6
+> reconnect holds, #7 event wiring) — each is annotated inline below.
+>
+> **For architecture decisions and current limitations, read
+> [`ARCHITECTURE-DECISIONS.md`](ARCHITECTURE-DECISIONS.md) first.** Where the two
+> documents disagree, that one is newer and wins.
+
 Canonical reference for how a player goes from cold start to gameplay, and what the
-backend actually does per tick. Every statement about current behavior was read out of
-the code at the referenced `path:line`.
+backend actually does per tick. Statements about current behavior were read out of
+the code at the referenced `path:line` **at the time of writing**.
 
 **Status legend**
 
@@ -191,6 +202,8 @@ the party → gameplay → loot/fail → final save → transfer back to origin 
 Common to all tiers: two channels — meta over HTTPS/WS to Nakama, realtime over TCP (→KCP)
 to Gateway/GameServers. All components are open source, $0 license.
 
+> **⚠️ ESTIMATES — UNBENCHMARKED.** See ARCHITECTURE-DECISIONS.md ADR-7.
+
 | Tier | ~$/mo | CCU | Topology |
 |------|-------|-----|----------|
 | **Dev / Alpha** | 40–60 | <200 | 1 VPS, all-in-one. Today: `deploy/docker-compose.yml` brings up PostgreSQL 16 + Nakama 3.40 (+ our plugin at `/nakama/data/modules`); gateway and gameserver run on the host via `go run`. `pg_dump` daily. |
@@ -230,40 +243,63 @@ Every swap below is a constructor change at a `cmd/` entry point — no business
 
 ## 6. Known gaps between docs and code
 
-Read this before trusting any higher-level diagram.
+Read this before trusting any higher-level diagram. **Items marked ✅ FIXED below
+were resolved after this list was written** — re-verified 2026-08-05 against
+`develop` @ `3ca99b3`.
 
 1. **The Gateway does not relay realtime traffic.** It is a redirector: authenticate → hand
    back `{ServerAddr, JoinToken}` → the client opens a *second* socket straight to the game
    server (`integration_test.go:322`). Root `README.md` (`Gateway ──→ Game Servers`) reads as
    a proxy; it isn't one.
-2. **Registry is per-process in-memory.** `cmd/gateway/main.go` and `cmd/gameserver/main.go`
-   each build their *own* `storage.NewMemoryServerRegistry()`. The two-terminal quick start in
-   `README.md` therefore cannot complete `MsgEnterWorld` — the gateway sees an empty registry.
-   E2E only passes because `integration_test.go` shares one store in-process. Fix = Redis registry.
-3. **Join token `sid` claim is not enforced.** `gameserver/server/server.go:159` verifies the
-   signature and reads `claims.UserID` but ignores `claims.ServerID` — a token minted for
-   server A is accepted by server B.
-4. **JWT header `alg` is not validated.** `shared/jwt/jwt.go:66` splits, recomputes HMAC-SHA256
-   and compares; `parts[0]` is never decoded or checked.
+2. ✅ **FIXED — Registry is per-process in-memory.** A Redis registry now exists
+   (`shared/storage/redisstore/registry.go`) and the gateway selects it with
+   `--backend=redis`. Note the C# server still cannot register itself (no Redis
+   client); `scripts/register-gameserver.sh` does it. See ADR-1/ADR-2.
+3. ✅ **FIXED — Join token `sid` claim is not enforced.** The C# server compares
+   `claims.ServerId` against its own id
+   (`gameserver-dotnet/GameServer/Server/GameServer.cs:225-233`). Caveat: the check
+   is skipped when either value is empty — ADR-3 follow-up makes it unconditional.
+4. ✅ **FIXED — JWT header `alg` is not validated.** Both sides validate it now:
+   `shared/jwt/jwt.go:65-86` (`verifyHeader`, rejects `alg:none`) and
+   `gameserver-dotnet/GameServer/Server/JwtValidator.cs:61`.
 5. **Sessions are write-only.** `CreateSession` is called on auth; `ValidateSession` and
    `DestroySession` have no callers outside tests.
-6. **Reconnect hold windows do not exist.** `EntityHoldTTL` / `DungeonHoldTTL` are declared
-   and unreferenced; entities are removed on TCP close.
-7. **Events are dead wiring.** `ServerOpts.EventStream` is accepted and never stored;
-   `events.NewPublisher` has zero callers; both stubs (`StubEventRelay`, `StubAllocator`,
-   `StubDungeonTransfer`) return `ErrNotImplemented` and are never instantiated.
-8. **Also unused:** `constants.ServerHeartbeatTTL`, `constants.PlayerLocationKey`,
-   `constants.EventStreamPrefix`; `config.MetaDBURL` / `GameStateDBURL` / `RedisAddr` /
-   `RedisPassword`.
-9. **Hardcoded values that CLAUDE.md presents as tunable:** AOI radius 50 (`tick.go:32`),
-   save interval 30s (`server.go:114`), attack cooldown 500 ms (`input/handler.go:12`), move
-   cap 5.0/tick and attack range 3.0 (`input/validator.go:13-15`), spawn stats
-   (`server.go:183`).
+6. ✅ **FIXED — Reconnect hold windows do not exist.** The C# server implements
+   them (30s map / 60s dungeon): `GameServer.cs:333-365`, cancelled on reconnect at
+   `:245-251`, covered by `integration_test` `TestReconnect_HoldWindow`. The C#
+   server uses inline literals rather than the Go `constants` values, which remain
+   unreferenced on the Go side.
+7. 🟡 **PARTLY FIXED — Events are dead wiring.** The Go half is real: Redis Streams
+   `EventStream` (XADD/XREADGROUP/XACK) and a live `events.NewRelay` wired in
+   `cmd/gateway/main.go:159-162`. The Agones allocator is also real
+   (`--allocator=agones`). **Still dead end-to-end**: the C# server publishes
+   `entity_killed` into `NoopEventStream` (no Redis client), and the gateway's sink
+   only logs because `shared/messages` has no `MsgEvent`. See ADR-5.
+8. 🟡 **PARTLY FIXED — unused constants/config.** `ServerHeartbeatTTL`,
+   `EventStreamPrefix`, `RedisAddr`/`RedisPassword` and `GameStateDBURL` are now
+   wired. Still dead: `constants.PlayerLocationKey` (no consumer anywhere), and
+   `ServerRegistry.Heartbeat` exists but **has no caller**, so registry TTLs are
+   armed once and never refreshed (ADR-2).
+9. 🟡 **Hardcoded values that CLAUDE.md presents as tunable:** AOI radius 50, save
+   interval 30s, attack cooldown 500 ms, spawn stats. (Go paths below are dead; the
+   C# equivalents are `Shared.GameLogic/Components/GameConstants.cs`,
+   `GameServer/Program.cs` and `GameServer/Server/ServerDefaults.cs`.) The per-tick
+   move cap is gone — movement is now `direction * speed * dt` with map bounds, and
+   map size *is* tunable via `--map-width`/`--map-height`.
 10. **Attack cooldown is wall-clock (`time.Now`), not tick-based** — behavior drifts with tick
     rate and is not deterministic for replay.
-11. **`--mode=dungeon` is cosmetic** — only affects the default `server-id` string.
+11. 🟡 **`--mode=dungeon` is nearly cosmetic** — it now also selects the 60s
+    reconnect hold (`GameServer/Program.cs`), but there is still no dungeon
+    instancing, no party transfer and no checkpointing (ADR-6).
 12. **Root `README.md` marks `nakama/` and `deploy/` as "planned"** — both now have code
     (`nakama/auth/{config,token}.go`, `deploy/agones/*.yaml`, `deploy/docker-compose.yml`).
-13. **No client-prediction support server-side**: `InputMessage.Tick` is ignored, snapshots are
-    full-state and unacknowledged, so the rewind/replay model described in CLAUDE.md has no
-    server counterpart yet.
+13. 🟡 **PARTLY FIXED — client-prediction support.** `InputMessage.Tick` is no
+    longer ignored: the C# server tracks it as `LastInputTick` and movement is a
+    deterministic `direction * speed * dt` function in `Shared.GameLogic`, which the
+    Unity client links and runs identically. Still missing: snapshots do not carry
+    the acked input tick per entity, and they remain full-state with no delta, so
+    the client cannot yet reconcile/replay.
+
+14. **Data ownership, sharding, gateway role, Redis roles, event delivery, crash
+    recovery and capacity claims** are all analysed in
+    [`ARCHITECTURE-DECISIONS.md`](ARCHITECTURE-DECISIONS.md) with current evidence.

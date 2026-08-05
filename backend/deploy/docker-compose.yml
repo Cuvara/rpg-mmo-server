@@ -122,6 +122,15 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
     # --requirepass is added only when REDIS_PASSWORD is non-empty.
     # AOF on: session/registry keys survive a container restart during dev.
+    #
+    # maxmemory-policy MUST stay `noeviction`. This Redis is a system of record
+    # for the server registry (servers:*) and the event stream (events:*), not a
+    # cache: evicting a registry hash silently removes a live game server from
+    # matchmaking, and trimming a stream drops unacked cross-server events.
+    # Sessions are the only genuinely expendable keys and they carry their own
+    # TTL. `noeviction` is already the Redis default, but it is set explicitly so
+    # that adding a `--maxmemory` limit later cannot silently turn this into an
+    # LRU cache. See backend/docs/ARCHITECTURE-DECISIONS.md, ADR-4.
     command:
       - /bin/sh
       - -ec
@@ -130,6 +139,7 @@ services:
           --appendonly yes \
           --appendfsync everysec \
           --save 60 1000 \
+          --maxmemory-policy noeviction \
           $${REDIS_PASSWORD:+--requirepass "$${REDIS_PASSWORD}"}
     ports:
       - "${REDIS_PORT:-6379}:6379"

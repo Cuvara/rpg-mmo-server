@@ -352,6 +352,12 @@ public sealed class GameServerHost : IAsyncDisposable
             {
                 await Task.Delay(holdTtl, holdCts.Token);
 
+                // Persist BEFORE removing: once the entity leaves the world the
+                // periodic AsyncSaver can no longer see it, so skipping this
+                // would discard everything the player did since the last save
+                // tick (up to SaveInterval, 30s) instead of at most one tick.
+                await _saver.SavePlayerAsync(userId);
+
                 // Hold expired, remove entity
                 _world.RemoveEntity(userId);
                 _holds.TryRemove(userId, out _);

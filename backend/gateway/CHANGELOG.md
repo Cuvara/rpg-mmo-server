@@ -6,6 +6,22 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `registry.WithLogger` option. `FindServer` now logs a warning when a `map_id`
+  resolves to more than one live game server — the MVP invariant is one server per
+  map, and two instances are two disconnected copies of the world
+  (`backend/docs/ARCHITECTURE-DECISIONS.md`, ADR-2)
+
+### Changed
+- `RegistryService.FindServer` breaks `PlayerCount` ties on `ServerID` so server
+  selection is deterministic. Previously ties resolved in Go map / Redis `SMEMBERS`
+  order, so two equally-loaded servers could split a party across instances
+- Docs corrected to describe the gateway as a **redirector, not a router/proxy**:
+  it never forwards gameplay traffic, and no `router.go` exists (ADR-3). Affects
+  `CLAUDE.md` and `docs/README.md`. Performance targets marked as unbenchmarked
+  estimates, and the meaningless "packet forwarding latency" target replaced with
+  auth latency (ADR-7)
+
+### Added
 - Prometheus instrumentation (`metrics/`): `gateway_connections_active` (gauge),
   `gateway_auth_total`, `gateway_enter_world_total`, `gateway_allocations_total`
   (counters labelled `result=ok|fail`) and `gateway_relay_events_total`, plus the

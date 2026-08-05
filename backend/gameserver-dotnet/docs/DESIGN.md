@@ -12,8 +12,10 @@ The primary motivation is **shared game logic** between server and client:
 - A single language for the gameplay team reduces context-switching between
   Go and C# when implementing new skills, items, or mechanics.
 
-The Go gateway remains unchanged. It routes traffic to whichever backend
-(Go or C#) is allocated by Agones. The wire protocol is identical.
+The Go gateway remains unchanged. It assigns a client to whichever backend is
+allocated by Agones and hands back a join token; the client then connects to that
+server directly, so the gateway never sees gameplay traffic (see
+`backend/docs/ARCHITECTURE-DECISIONS.md`, ADR-3). The wire protocol is identical.
 
 ## Shared.GameLogic Constraints
 

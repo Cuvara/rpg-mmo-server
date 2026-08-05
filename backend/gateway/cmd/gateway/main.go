@@ -115,7 +115,7 @@ func main() {
 	// Allocator: with --allocator=agones the registry asks the Agones allocation
 	// API for a GameServer whenever no live server can serve a map. Without it
 	// an unserved map is simply an error (the pre-Agones behaviour).
-	reg := registry.NewRegistryService(serverRegistry, registry.WithMetrics(met))
+	reg := registry.NewRegistryService(serverRegistry, registry.WithMetrics(met), registry.WithLogger(log))
 	allocMode, err := resolveAllocator(*allocatorMode)
 	if err != nil {
 		log.Error("invalid allocator", "err", err)
@@ -142,7 +142,7 @@ func main() {
 			log.Error("agones allocator init failed", "err", aerr)
 			os.Exit(1)
 		}
-		reg = registry.NewRegistryServiceWithAllocator(serverRegistry, alloc, registry.WithMetrics(met))
+		reg = registry.NewRegistryServiceWithAllocator(serverRegistry, alloc, registry.WithMetrics(met), registry.WithLogger(log))
 		log.Info("agones allocator enabled",
 			"namespace", agonesCfg.Namespace,
 			"fleet_map", agonesCfg.FleetMap,

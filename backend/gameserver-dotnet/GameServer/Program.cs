@@ -47,6 +47,12 @@ logger.LogInformation("  Capacity:  {Capacity}", capacity);
 logger.LogInformation("  TickRate:  {TickRate}Hz", tickRate);
 logger.LogInformation("  MapSize:   {Width}x{Height} world units (centered on origin)", mapWidth, mapHeight);
 logger.LogInformation("  Agones:    {Agones}", useAgones);
+if (useAgones)
+{
+    logger.LogWarning("--agones/AGONES_ENABLED is set but has NO effect: the C# server " +
+                      "still uses the no-op Agones SDK (no Ready/Health/Shutdown is reported " +
+                      "to the sidecar). Do not rely on Agones health checks for this server yet.");
+}
 logger.LogInformation("  Metrics:   {Metrics}", string.IsNullOrWhiteSpace(metricsAddr) ? "disabled" : metricsAddr);
 logger.LogInformation("  GameDB:    {GameDb}",
     string.IsNullOrWhiteSpace(gameDbUrl) ? "memory" : PostgresPlayerStore.MaskDsn(gameDbUrl));
@@ -107,7 +113,13 @@ var options = new ServerOptions
     HoldTtl = mode == "dungeon" ? TimeSpan.FromSeconds(60) : TimeSpan.FromSeconds(30),
     SaveInterval = TimeSpan.FromSeconds(30),
     PlayerStore = playerStore,
-    AgonesSdk = useAgones ? new NoopAgonesSdk() : new NoopAgonesSdk(), // Real SDK added later
+    // Both branches are intentionally Noop: no real Agones SDK client exists for
+    // the C# server yet, so --agones/AGONES_ENABLED currently changes nothing.
+    // The flag is kept so deployment manifests do not have to change when the
+    // real SDK lands. See backend/docs/ARCHITECTURE-DECISIONS.md, ADR-6.
+    AgonesSdk = new NoopAgonesSdk(),
+    // Always Noop: the C# server has no Redis client, so cross-server events are
+    // generated (entity_killed) and then discarded. See ADR-5.
     EventStream = new NoopEventStream(),
     LoggerFactory = loggerFactory,
     Metrics = metrics

@@ -1,19 +1,28 @@
 # Gateway Module
 
-Custom Go binary — router between Unity clients and Game Servers (C# .NET 10). Stateless
-(all state lives in the configured stores), horizontally scalable.
+Custom Go binary — the entry point for Unity clients. Stateless (all state lives in
+the configured stores), horizontally scalable.
 
-Transport today is **TCP + length-prefixed JSON** (`shared/messages`); KCP/UDP is the
-production target and swaps in behind the same handler code.
+Transport today is **TCP + length-prefixed JSON** (`shared/messages`); KCP/UDP is
+available with `--transport=kcp` and swaps in behind the same handler code.
+
+**The gateway is a redirector, not a proxy.** It answers "who am I?" and "which
+server serves this map?", then gets out of the way — the client opens a second,
+direct connection to the game server. No gameplay traffic transits this process.
+Rationale and tradeoffs: `backend/docs/ARCHITECTURE-DECISIONS.md`, ADR-3.
 
 ## Architecture
 
 ```
-Unity Client --[TCP (KCP planned)]--> Gateway --> (join token) --> Game Server (C# .NET 10)
-                                        |
-                                        +--> SessionStore   (memory | Redis)
-                                        +--> ServerRegistry (memory | Redis)
-                                        +--> EventStream    (memory | Redis Streams)
+Unity Client --[TCP|KCP]--> Gateway          (auth, map assignment)
+     |                         |
+     |                         +--> SessionStore   (memory | Redis)
+     |                         +--> ServerRegistry (memory | Redis)
+     |                         +--> EventStream    (memory | Redis Streams)
+     |
+     |   returns {ServerAddr, JoinToken}; client then dials the server itself:
+     |
+     +---[TCP|KCP]----------> Game Server (C# .NET 10)   <-- gameplay lives here
 ```
 
 ## Features
