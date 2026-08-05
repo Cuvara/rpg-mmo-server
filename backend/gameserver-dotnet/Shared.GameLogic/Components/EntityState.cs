@@ -27,7 +27,11 @@ public struct EntityState
     /// <summary>Defense power. Go: Defense int.</summary>
     public int Defense;
 
-    /// <summary>Movement speed multiplier. Go: Speed float32.</summary>
+    /// <summary>
+    /// Movement speed in <b>world units per second</b>. Consumed by
+    /// <c>MovementSystem.Integrate</c> as <c>position += direction * Speed * dt</c>.
+    /// A non-positive value means the entity cannot move.
+    /// </summary>
     public float Speed;
 
     /// <summary>Whether this entity is dead. Go: Dead bool.</summary>

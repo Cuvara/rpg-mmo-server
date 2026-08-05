@@ -4,7 +4,7 @@ namespace Shared.GameLogic.Systems;
 
 /// <summary>
 /// Combined anti-cheat validation for player input.
-/// Delegates to <see cref="MovementLogic"/> and <see cref="CombatLogic"/>.
+/// Delegates to <see cref="MovementSystem"/> and <see cref="CombatLogic"/>.
 /// </summary>
 public static class ValidationLogic
 {
@@ -24,13 +24,11 @@ public static class ValidationLogic
         if (entity.Dead)
             return "entity is dead";
 
-        // Validate movement if any movement input is present.
-        if (input.MoveX != 0f || input.MoveY != 0f)
-        {
-            string? moveError = MovementLogic.ValidateMove(entity, input.MoveX, input.MoveY);
-            if (moveError != null)
-                return moveError;
-        }
+        // Validate the movement direction. This is timestep-independent: the actual
+        // displacement is produced by MovementSystem.Integrate, which cannot exceed
+        // speed * dt by construction, so only the input vector needs auditing here.
+        if (MovementSystem.ResolveDirection(input.MoveX, input.MoveY, out _) == MoveResult.Rejected)
+            return $"invalid move direction ({input.MoveX}, {input.MoveY})";
 
         // Validate attack if a target is specified.
         if (!string.IsNullOrEmpty(input.AttackTargetId))

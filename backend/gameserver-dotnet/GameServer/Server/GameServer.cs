@@ -24,6 +24,9 @@ public class ServerOptions
     public int TickRate { get; set; } = GameConstants.DefaultTickRate;
     public int Capacity { get; set; } = 100;
     public string JwtSecret { get; set; } = "";
+    /// <summary>Play area for this map. Movement is clamped into these bounds.</summary>
+    public MapBounds MapBounds { get; set; } = MapBounds.Default;
+
     public TimeSpan HoldTtl { get; set; } = TimeSpan.FromSeconds(30);
     public TimeSpan SaveInterval { get; set; } = TimeSpan.FromSeconds(30);
     public IPlayerStore? PlayerStore { get; set; }
@@ -82,7 +85,9 @@ public sealed class GameServerHost : IAsyncDisposable
         _inputHandler = new InputHandler(
             _world,
             _loggerFactory.CreateLogger<InputHandler>(),
-            OnEntityDeath);
+            OnEntityDeath,
+            options.TickRate,
+            options.MapBounds);
 
         _tickLoop = new TickLoop(
             _world,
@@ -255,7 +260,9 @@ public sealed class GameServerHost : IAsyncDisposable
                 {
                     Id = userId,
                     Type = "player",
-                    Position = new Vec2(saved?.X ?? 0, saved?.Y ?? 0),
+                    // Clamp restored/spawn positions: a map may have been resized since
+                    // the state was saved, and an out-of-bounds entity must not persist.
+                    Position = _options.MapBounds.Clamp(new Vec2(saved?.X ?? 0, saved?.Y ?? 0)),
                     Hp = saved?.Hp ?? ServerDefaults.DefaultPlayerHp,
                     MaxHp = saved?.MaxHp ?? ServerDefaults.DefaultPlayerHp,
                     Speed = ServerDefaults.DefaultPlayerSpeed,
