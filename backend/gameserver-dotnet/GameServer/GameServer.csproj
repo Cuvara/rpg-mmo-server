@@ -14,6 +14,9 @@
     <PackageReference Include="System.Text.Json" Version="10.0.*" />
     <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.*" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.*" />
+    <!-- Npgsql 10.x is trim/NativeAOT-annotated; PostgresPlayerStore uses raw
+         commands + typed parameters only (no ORM, no reflection mapping). -->
+    <PackageReference Include="Npgsql" Version="10.0.3" />
     <PackageReference Include="OpenTelemetry" Version="1.17.0" />
     <PackageReference Include="OpenTelemetry.Exporter.Prometheus.HttpListener" Version="1.17.0-beta.1" />
   </ItemGroup>

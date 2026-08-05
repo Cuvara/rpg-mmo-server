@@ -26,6 +26,8 @@ string jwtSecret = GetArg(args, "--jwt-secret") ?? Env("JWT_SECRET") ?? "";
 string metricsAddr = GetArg(args, "--metrics-addr")
     ?? Environment.GetEnvironmentVariable("METRICS_ADDR")
     ?? ":9101";
+// Game-state database DSN. Unset -> in-memory player store (state lost on restart).
+string? gameDbUrl = GetArg(args, "--game-db-url") ?? Env("GAME_DB_URL");
 
 // ── Logging ──
 
@@ -46,6 +48,8 @@ logger.LogInformation("  TickRate:  {TickRate}Hz", tickRate);
 logger.LogInformation("  MapSize:   {Width}x{Height} world units (centered on origin)", mapWidth, mapHeight);
 logger.LogInformation("  Agones:    {Agones}", useAgones);
 logger.LogInformation("  Metrics:   {Metrics}", string.IsNullOrWhiteSpace(metricsAddr) ? "disabled" : metricsAddr);
+logger.LogInformation("  GameDB:    {GameDb}",
+    string.IsNullOrWhiteSpace(gameDbUrl) ? "memory" : PostgresPlayerStore.MaskDsn(gameDbUrl));
 
 // ── Validate ──
 
@@ -58,6 +62,35 @@ if (string.IsNullOrEmpty(jwtSecret))
 
 using var metrics = new GameMetrics(mapId);
 await using var metricsEndpoint = MetricsEndpoint.TryStart(metricsAddr, metrics, serverId, logger);
+
+// ── Player store (postgres when GAME_DB_URL is set, otherwise in-memory) ──
+
+IPlayerStore playerStore = new MemoryPlayerStore();
+PostgresPlayerStore? postgresStore = null;
+
+if (!string.IsNullOrWhiteSpace(gameDbUrl))
+{
+    // Fail fast: a configured-but-unreachable database must not silently degrade
+    // to a memory store, which would lose player state without any signal.
+    try
+    {
+        postgresStore = await PostgresPlayerStore.ConnectAsync(gameDbUrl, CancellationToken.None);
+        await postgresStore.MigrateAsync(CancellationToken.None);
+        playerStore = postgresStore;
+        logger.LogInformation("using postgres player store ({Dsn})", PostgresPlayerStore.MaskDsn(gameDbUrl));
+    }
+    catch (Exception ex)
+    {
+        logger.LogCritical(ex, "postgres player store unavailable ({Dsn}) -- refusing to start",
+            PostgresPlayerStore.MaskDsn(gameDbUrl));
+        if (postgresStore is not null) await postgresStore.DisposeAsync();
+        return 1;
+    }
+}
+else
+{
+    logger.LogInformation("using in-memory player store (GAME_DB_URL unset -- state is lost on restart)");
+}
 
 // ── Build server options ──
 
@@ -73,7 +106,7 @@ var options = new ServerOptions
     JwtSecret = jwtSecret,
     HoldTtl = mode == "dungeon" ? TimeSpan.FromSeconds(60) : TimeSpan.FromSeconds(30),
     SaveInterval = TimeSpan.FromSeconds(30),
-    PlayerStore = new MemoryPlayerStore(),
+    PlayerStore = playerStore,
     AgonesSdk = useAgones ? new NoopAgonesSdk() : new NoopAgonesSdk(), // Real SDK added later
     EventStream = new NoopEventStream(),
     LoggerFactory = loggerFactory,
@@ -98,7 +131,7 @@ AppDomain.CurrentDomain.ProcessExit += (_, _) =>
 
 // ── Run ──
 
-await using var server = new GameServerHost(options);
+var server = new GameServerHost(options);
 
 try
 {
@@ -113,8 +146,15 @@ catch (Exception ex)
     logger.LogCritical(ex, "Game server crashed");
     Environment.ExitCode = 1;
 }
+finally
+{
+    // Order matters: drain the server (final save) before closing the DB pool.
+    await server.DisposeAsync();
+    if (postgresStore is not null) await postgresStore.DisposeAsync();
+}
 
 logger.LogInformation("GameServer .NET exited");
+return Environment.ExitCode;
 
 // ── Helpers ──
 
