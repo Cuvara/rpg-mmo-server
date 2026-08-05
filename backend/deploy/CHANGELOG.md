@@ -59,6 +59,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Removed the dead `gameserver` compose service, which still referenced the
   deleted Go module's `rpg-mmo/gameserver:dev` image.
 
+- Game server metrics were reaching Prometheus under **dotted** OpenTelemetry
+  names (`gameserver.players.online`), because Prometheus 3 negotiates UTF-8
+  metric names and the C# exporter then serves the raw instrument names. Every
+  "RPG Gameplay" panel queried the underscore form and returned *No data* while
+  the scrape target read UP. `monitoring/prometheus.yaml` now pins
+  `metric_name_escaping_scheme: underscores` on both game server jobs.
+
 ### Known issues (not fixed here — owned by `agent-gameserver-dotnet`)
 - The C# metrics endpoint **cannot bind a wildcard**: `METRICS_ADDR=:9101`
   produces `http://+:9101/`, which OpenTelemetry's `PrometheusHttpListener`

@@ -144,6 +144,24 @@ curl http://127.0.0.1:9101/healthz                                     # 404
 The real fix belongs in `GameServer/Observability/MetricsEndpoint.cs` (owner:
 `agent-gameserver-dotnet`) — until then, keep `GAMESERVER_METRICS_ADDR` a name.
 
+### C# metric names arrive with dots unless the scrape says otherwise
+
+The C# exporter serves **OpenTelemetry instrument names**, which contain dots
+(`gameserver.tick.duration`). Prometheus 3 negotiates UTF-8 metric names by
+default, so it accepts and stores them verbatim — and every dashboard panel,
+which queries `gameserver_tick_duration_seconds_bucket`, returns *No data*
+against a target that reads perfectly **UP**. A green target list is therefore
+not proof the dashboard works.
+
+`monitoring/prometheus.yaml` pins `metric_name_escaping_scheme: underscores` on
+both game server jobs, which makes the exporter emit the underscore form the
+dashboard expects. Verify after any Prometheus or exporter bump:
+
+```bash
+curl -s http://127.0.0.1:9090/api/v1/label/__name__/values | grep -o 'gameserver[^"]*' | head
+# want gameserver_players_online, NOT gameserver.players.online
+```
+
 ### Game server (C#, `:9101`)
 
 Owned by the game server module. The dashboard consumes
