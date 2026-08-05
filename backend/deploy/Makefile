@@ -85,6 +85,27 @@ health: ## Curl the Nakama healthcheck + ping Redis
 	curl -fsS http://localhost:7350/healthcheck && echo " nakama OK"
 	$(COMPOSE) exec -T redis sh -c 'redis-cli $${REDIS_PASSWORD:+-a "$${REDIS_PASSWORD}"} --no-auth-warning ping'
 
+.PHONY: monitoring-up
+monitoring-up: ## Start the otel-lgtm observability stack (Grafana+Prometheus+Loki+Tempo)
+	$(COMPOSE) --profile monitoring up -d
+	@echo "Grafana:    http://localhost:$${GRAFANA_PORT:-3000}  ($${GRAFANA_USER:-admin} / $${GRAFANA_PASSWORD:-admin})"
+	@echo "Prometheus: http://localhost:$${PROMETHEUS_PORT:-9090}/targets"
+	@echo "OTLP:       grpc :$${OTLP_GRPC_PORT:-4317}  http :$${OTLP_HTTP_PORT:-4318}"
+
+.PHONY: monitoring-down
+monitoring-down: ## Stop the observability stack (keeps the lgtm data volume)
+	$(COMPOSE) --profile monitoring stop lgtm
+	$(COMPOSE) --profile monitoring rm -f lgtm
+
+.PHONY: monitoring-logs
+monitoring-logs: ## Tail otel-lgtm logs
+	$(COMPOSE) --profile monitoring logs -f --tail=100 lgtm
+
+.PHONY: monitoring-targets
+monitoring-targets: ## Show Prometheus scrape target health (job -> up/down)
+	@curl -fsS http://localhost:$${PROMETHEUS_PORT:-9090}/api/v1/targets \
+		| tr ',' '\n' | grep -E '"(job|health)"'
+
 .PHONY: console
 console: ## Print the console URL + default credentials
 	@echo "http://localhost:7351  user=admin  password=password"

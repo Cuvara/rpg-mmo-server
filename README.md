@@ -23,7 +23,7 @@ Unity Client
 | **gateway** | `backend/gateway/` | TCP/KCP router, JWT auth, session manager, server registry, map assignment |
 | **gameserver-dotnet** | `backend/gameserver-dotnet/` | C# .NET 10 game server — tick loop, combat, input validation, AOI, persistence. Shared game logic with Unity client |
 | **nakama** | `backend/nakama/` | Nakama Go plugins — auth, economy, leaderboard, social (planned) |
-| **deploy** | `backend/deploy/` | Docker, k3s/Agones manifests, CI/CD, monitoring (planned) |
+| **deploy** | `backend/deploy/` | Docker, k3s/Agones manifests, CI/CD, dev observability (`grafana/otel-lgtm` — see `backend/deploy/docs/MONITORING.md`) |
 
 ### Connection Flow
 
