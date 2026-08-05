@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
+using GameServer.Observability;
 
 namespace GameServer.Events;
 
@@ -42,11 +43,13 @@ public sealed class EventPublisher
 {
     private readonly IEventStream _stream;
     private readonly ILogger _logger;
+    private readonly GameMetrics? _metrics;
 
-    public EventPublisher(IEventStream stream, ILogger logger)
+    public EventPublisher(IEventStream stream, ILogger logger, GameMetrics? metrics = null)
     {
         _stream = stream;
         _logger = logger;
+        _metrics = metrics;
     }
 
     /// <summary>Publish a death event to the event stream (fire-and-forget).</summary>
@@ -56,7 +59,9 @@ public sealed class EventPublisher
         {
             byte[] data = JsonSerializer.SerializeToUtf8Bytes(payload, EventJsonContext.Default.DeathPayload);
             var evt = new GameEvent(eventType, data);
-            return _stream.PublishAsync("game_events", evt, CancellationToken.None);
+            var task = _stream.PublishAsync("game_events", evt, CancellationToken.None);
+            _metrics?.RecordEventPublished(eventType);
+            return task;
         }
         catch (Exception ex)
         {

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using Shared.GameLogic.Components;
+using GameServer.Observability;
 using GameServer.World;
 
 namespace GameServer.Persistence;
@@ -44,14 +45,22 @@ public sealed class AsyncSaver
     private readonly string _mapId;
     private readonly TimeSpan _interval;
     private readonly ILogger _logger;
+    private readonly GameMetrics? _metrics;
 
-    public AsyncSaver(IPlayerStore store, GameWorld world, string mapId, TimeSpan interval, ILogger logger)
+    public AsyncSaver(
+        IPlayerStore store,
+        GameWorld world,
+        string mapId,
+        TimeSpan interval,
+        ILogger logger,
+        GameMetrics? metrics = null)
     {
         _store = store;
         _world = world;
         _mapId = mapId;
         _interval = interval;
         _logger = logger;
+        _metrics = metrics;
     }
 
     /// <summary>Run the periodic save loop until cancellation.</summary>
@@ -89,9 +98,11 @@ public sealed class AsyncSaver
                 var state = new PlayerState(p.Id, p.Position.X, p.Position.Y, p.Hp, p.MaxHp, _mapId);
                 await _store.SavePlayerAsync(state, CancellationToken.None);
                 saved++;
+                _metrics?.RecordPlayerSaveOk();
             }
             catch (Exception ex)
             {
+                _metrics?.RecordPlayerSaveError();
                 _logger.LogWarning(ex, "Failed to save player {UserId}", p.Id);
             }
         }

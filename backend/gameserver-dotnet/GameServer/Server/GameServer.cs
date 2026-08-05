@@ -7,6 +7,7 @@ using GameServer.Agones;
 using GameServer.Events;
 using GameServer.Input;
 using GameServer.Net;
+using GameServer.Observability;
 using GameServer.Persistence;
 using GameServer.Snapshot;
 using GameServer.World;
@@ -29,6 +30,9 @@ public class ServerOptions
     public IAgonesSdk? AgonesSdk { get; set; }
     public IEventStream? EventStream { get; set; }
     public ILoggerFactory? LoggerFactory { get; set; }
+
+    /// <summary>Optional metric instrument set. When null the server runs uninstrumented.</summary>
+    public GameMetrics? Metrics { get; set; }
 }
 
 /// <summary>
@@ -48,6 +52,7 @@ public sealed class GameServerHost : IAsyncDisposable
     private readonly IPlayerStore _playerStore;
     private readonly IAgonesSdk _agonesSdk;
     private readonly EventPublisher? _publisher;
+    private readonly GameMetrics? _metrics;
     private readonly ILogger _logger;
     private readonly ILoggerFactory _loggerFactory;
 
@@ -64,13 +69,15 @@ public sealed class GameServerHost : IAsyncDisposable
             b.AddConsole().SetMinimumLevel(LogLevel.Information));
         _logger = _loggerFactory.CreateLogger<GameServerHost>();
 
+        _metrics = options.Metrics;
         _world = new GameWorld();
+        _metrics?.SetEntityCountProvider(() => _world.EntityCount);
         _connections = new ConnectionManager();
         _playerStore = options.PlayerStore ?? new MemoryPlayerStore();
         _agonesSdk = options.AgonesSdk ?? new NoopAgonesSdk();
 
         var eventStream = options.EventStream ?? new NoopEventStream();
-        _publisher = new EventPublisher(eventStream, _loggerFactory.CreateLogger<EventPublisher>());
+        _publisher = new EventPublisher(eventStream, _loggerFactory.CreateLogger<EventPublisher>(), _metrics);
 
         _inputHandler = new InputHandler(
             _world,
@@ -83,14 +90,16 @@ public sealed class GameServerHost : IAsyncDisposable
             _connections,
             options.TickRate,
             GameConstants.DefaultAoiRadius,
-            _loggerFactory.CreateLogger<TickLoop>());
+            _loggerFactory.CreateLogger<TickLoop>(),
+            _metrics);
 
         _saver = new AsyncSaver(
             _playerStore,
             _world,
             options.MapId,
             options.SaveInterval,
-            _loggerFactory.CreateLogger<AsyncSaver>());
+            _loggerFactory.CreateLogger<AsyncSaver>(),
+            _metrics);
     }
 
     /// <summary>Start the server and listen for connections.</summary>
@@ -267,6 +276,7 @@ public sealed class GameServerHost : IAsyncDisposable
                 new JoinTokenResponse { Ok = true, UserId = userId });
             await conn.WriteOneAsync(resp);
 
+            _metrics?.PlayerJoined();
             _logger.LogInformation("Player {UserId} joined (total: {Count})", userId, _connections.Count);
 
             // Step 6: Start read/write loops
@@ -316,6 +326,7 @@ public sealed class GameServerHost : IAsyncDisposable
     private void OnPlayerDisconnected(string userId)
     {
         _connections.Remove(userId);
+        _metrics?.PlayerLeft();
 
         var holdTtl = _options.Mode == "dungeon"
             ? TimeSpan.FromSeconds(60)

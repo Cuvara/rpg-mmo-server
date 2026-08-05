@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- OpenTelemetry metrics (Meter `rpg.gameserver`) with a Prometheus scrape
+  endpoint + `/healthz` on `--metrics-addr` / `METRICS_ADDR` (default `:9101`,
+  empty disables). Instruments: tick duration histogram (66 ms budget buckets),
+  processed inputs, players online, entities, snapshots sent, player saves by
+  status, events published by type. Windows dev falls back to a localhost
+  prefix when the wildcard bind needs an URL ACL. See docs/METRICS.md.
+
 ### Fixed
 - JWT claim field names (`user_id`/`server_id` → `sub`/`sid`) to match Go
   gateway wire format — cross-language token validation now works correctly

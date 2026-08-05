@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Shared.GameLogic.Components;
 using GameServer.Input;
 using GameServer.Net;
+using GameServer.Observability;
 using GameServer.Snapshot;
 using GameServer.World;
 
@@ -21,7 +22,9 @@ public sealed class TickLoop
     private readonly int _tickRate;
     private readonly float _aoiRadius;
     private readonly ILogger _logger;
+    private readonly GameMetrics? _metrics;
     private ulong _currentTick;
+    private int _snapshotsThisTick;
 
     /// <summary>Current simulation tick.</summary>
     public ulong CurrentTick => _currentTick;
@@ -32,7 +35,8 @@ public sealed class TickLoop
         ConnectionManager connections,
         int tickRate,
         float aoiRadius,
-        ILogger logger)
+        ILogger logger,
+        GameMetrics? metrics = null)
     {
         _world = world;
         _handler = handler;
@@ -40,6 +44,7 @@ public sealed class TickLoop
         _tickRate = tickRate;
         _aoiRadius = aoiRadius;
         _logger = logger;
+        _metrics = metrics;
     }
 
     /// <summary>Run the tick loop until cancellation.</summary>
@@ -78,7 +83,10 @@ public sealed class TickLoop
     /// <summary>Execute a single tick. Exposed for testing.</summary>
     public void TickOnce()
     {
+        long startTimestamp = Stopwatch.GetTimestamp();
+
         _currentTick++;
+        _snapshotsThisTick = 0;
 
         // Drain and process all pending inputs under one world Update
         var inputs = _world.DrainInputs();
@@ -113,11 +121,20 @@ public sealed class TickLoop
                 var snapshot = SnapshotEncoder.Encode(_currentTick, nearby);
                 var env = WireProtocol.NewEnvelope(MsgType.Snapshot, snapshot);
                 conn.Send(env);
+                _snapshotsThisTick++;
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Failed to send snapshot to {UserId}", conn.UserId);
             }
         });
+
+        // Metrics: recorded once per tick, no per-entity allocation.
+        if (_metrics != null)
+        {
+            _metrics.RecordProcessedInputs(inputs.Count);
+            _metrics.RecordSnapshotsSent(_snapshotsThisTick);
+            _metrics.RecordTickDuration(startTimestamp, Stopwatch.GetTimestamp());
+        }
     }
 }
