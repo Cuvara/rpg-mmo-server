@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/duycuong/rpg-mmo/gateway/events"
+	"github.com/duycuong/rpg-mmo/gateway/metrics"
 	"github.com/duycuong/rpg-mmo/gateway/registry"
 	"github.com/duycuong/rpg-mmo/gateway/server"
 	"github.com/duycuong/rpg-mmo/gateway/session"
@@ -41,6 +42,7 @@ func main() {
 	allocFleetMap := flag.String("allocator-fleet-map", "", "Agones Fleet for map servers (overrides ALLOCATOR_FLEET_MAP)")
 	allocFleetDungeon := flag.String("allocator-fleet-dungeon", "", "Agones Fleet for dungeon servers (overrides ALLOCATOR_FLEET_DUNGEON)")
 	allocTransport := flag.String("allocator-transport", "", "Realtime transport the allocated fleet's game servers listen with: tcp or kcp (overrides ALLOCATOR_TRANSPORT; defaults to --transport)")
+	metricsAddr := flag.String("metrics-addr", "", "Prometheus metrics listen address, e.g. :9102 (overrides METRICS_ADDR; \"off\" or an empty METRICS_ADDR disables it)")
 	allocKubeconfig := flag.String("allocator-kubeconfig", "", "Kubeconfig path for the allocator (default: in-cluster config, then $KUBECONFIG, then ~/.kube/config)")
 	flag.Parse()
 
@@ -58,6 +60,15 @@ func main() {
 	}
 	if err := transport.Validate(listenTransport); err != nil {
 		log.Error("invalid transport", "err", err)
+		os.Exit(1)
+	}
+
+	// Metrics listener: separate port from the realtime listener, started before
+	// anything else so a crash-looping gateway is still scrapeable/probeable.
+	met, promReg := metrics.NewDefault()
+	metricsSrv, err := metrics.Serve(resolveMetricsAddr(*metricsAddr), promReg, log)
+	if err != nil {
+		log.Error("metrics listener failed", "err", err)
 		os.Exit(1)
 	}
 
@@ -104,7 +115,7 @@ func main() {
 	// Allocator: with --allocator=agones the registry asks the Agones allocation
 	// API for a GameServer whenever no live server can serve a map. Without it
 	// an unserved map is simply an error (the pre-Agones behaviour).
-	reg := registry.NewRegistryService(serverRegistry)
+	reg := registry.NewRegistryService(serverRegistry, registry.WithMetrics(met))
 	allocMode, err := resolveAllocator(*allocatorMode)
 	if err != nil {
 		log.Error("invalid allocator", "err", err)
@@ -131,7 +142,7 @@ func main() {
 			log.Error("agones allocator init failed", "err", aerr)
 			os.Exit(1)
 		}
-		reg = registry.NewRegistryServiceWithAllocator(serverRegistry, alloc)
+		reg = registry.NewRegistryServiceWithAllocator(serverRegistry, alloc, registry.WithMetrics(met))
 		log.Info("agones allocator enabled",
 			"namespace", agonesCfg.Namespace,
 			"fleet_map", agonesCfg.FleetMap,
@@ -148,7 +159,8 @@ func main() {
 	relay := events.NewRelay(eventStream, events.DefaultStream,
 		events.SinkFunc(func(ev storage.Event) { gw.OnEvent(ev) }), log)
 	gw = server.New(sessions, reg, cfg.JWTSecret, log,
-		server.WithEventRelay(relay), server.WithTransport(listenTransport))
+		server.WithEventRelay(relay), server.WithTransport(listenTransport),
+		server.WithMetrics(met))
 
 	// Graceful shutdown on SIGINT/SIGTERM.
 	sigCh := make(chan os.Signal, 1)
@@ -158,6 +170,9 @@ func main() {
 		<-sigCh
 		log.Info("shutting down gateway")
 		gw.Shutdown()
+		if serr := metricsSrv.Shutdown(); serr != nil {
+			log.Warn("stop metrics listener", "err", serr)
+		}
 		for _, c := range closers {
 			if err := c(); err != nil {
 				log.Warn("close resource", "err", err)
@@ -173,6 +188,26 @@ func main() {
 		log.Error("gateway exited with error", "err", err)
 		os.Exit(1)
 	}
+}
+
+// resolveMetricsAddr picks the metrics listen address from the --metrics-addr
+// flag, the METRICS_ADDR env var, or DefaultAddr. "off"/"none"/"disabled" (and
+// an explicitly exported empty METRICS_ADDR) turn the listener off; the empty
+// string returned here means "disabled".
+func resolveMetricsAddr(flagValue string) string {
+	addr := flagValue
+	if addr == "" {
+		env, ok := os.LookupEnv("METRICS_ADDR")
+		if !ok {
+			return metrics.DefaultAddr
+		}
+		addr = env
+	}
+	switch addr {
+	case "", "off", "none", "disabled":
+		return ""
+	}
+	return addr
 }
 
 // resolveBackend picks the store backend from the --backend flag, the
