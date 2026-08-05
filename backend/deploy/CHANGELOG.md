@@ -5,6 +5,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- backup.sh verification flaked on WSL drvfs (/mnt/*) — a dump read
+  immediately after write could appear truncated. Verification now syncs and
+  retries up to 3 times before declaring the archive unreadable.
+
 ### Added
 - **`docs/VPS-SETUP.md`** — the canonical, zero-prior-context runbook for
   bringing a new machine online as a deploy target: prerequisites and where to
