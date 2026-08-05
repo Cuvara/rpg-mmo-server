@@ -59,6 +59,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Removed the dead `gameserver` compose service, which still referenced the
   deleted Go module's `rpg-mmo/gameserver:dev` image.
 
+- CD deployed monitoring config changes without applying them: Prometheus and
+  Grafana read their bind-mounted files only at container start, and
+  `docker compose up -d` does not recreate a container just because a mounted
+  file changed. The deploy job now hashes `deploy/monitoring/` before and after
+  the sync and restarts `lgtm` when it differs.
 - Game server metrics were reaching Prometheus under **dotted** OpenTelemetry
   names (`gameserver.players.online`), because Prometheus 3 negotiates UTF-8
   metric names and the C# exporter then serves the raw instrument names. Every

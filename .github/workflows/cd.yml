@@ -402,11 +402,25 @@ jobs:
           install -m 0644 dist/deploy/.env.example       "$RPG_DEPLOY_DIR/deploy/.env.example"
           # Compose bind-mount sources. Replaced wholesale so a file deleted in
           # git also disappears on the host; docker re-reads them on `up`.
+          # Prometheus and Grafana read these files ONCE, at container start, so
+          # a changed config is invisible until lgtm is recreated — a silent
+          # "deployed but not applied". Hash before/after to drive the restart
+          # in the compose step below.
+          hash_dir() { [ -d "$1" ] && find "$1" -type f -exec sha256sum {} + | sort -k2 | sha256sum | cut -d' ' -f1 || echo none; }
+          mon_before="$(hash_dir "$RPG_DEPLOY_DIR/deploy/monitoring")"
           for d in monitoring db; do
             rm -rf "$RPG_DEPLOY_DIR/deploy/$d"
             cp -r "dist/deploy/$d" "$RPG_DEPLOY_DIR/deploy/$d"
             chmod -R a+rX "$RPG_DEPLOY_DIR/deploy/$d"
           done
+          mon_after="$(hash_dir "$RPG_DEPLOY_DIR/deploy/monitoring")"
+          if [ "$mon_before" = "$mon_after" ]; then
+            echo "MONITORING_CONFIG_CHANGED=0" >> "$GITHUB_ENV"
+            echo "monitoring config unchanged"
+          else
+            echo "MONITORING_CONFIG_CHANGED=1" >> "$GITHUB_ENV"
+            echo "monitoring config CHANGED — lgtm will be restarted"
+          fi
           cp dist/COMMIT "$RPG_DEPLOY_DIR/COMMIT"
 
       # Secrets come from the GitHub Environment (dev / staging / production).
@@ -596,6 +610,14 @@ jobs:
           # images are already in the daemon's store.
           docker compose "${profile_args[@]}" pull --quiet || true
           docker compose "${profile_args[@]}" up -d --remove-orphans
+          # `up -d` does NOT recreate a container whose bind-mounted files
+          # changed — only its image/config/env are compared. Without this, a
+          # new prometheus.yaml or dashboard sits on disk unread until someone
+          # happens to restart lgtm.
+          if [ "${MONITORING_ENABLED}" != "false" ] && [ "${MONITORING_CONFIG_CHANGED:-0}" = "1" ]; then
+            echo "restarting lgtm to pick up the new monitoring config"
+            docker compose "${profile_args[@]}" restart lgtm
+          fi
           docker compose "${profile_args[@]}" ps
           # The gameserver opens GAME_DB_URL at boot and exits(1) if postgres-game
           # is not accepting connections yet, so wait for its healthcheck before
