@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Shared.GameLogic.Components;
 using GameServer.Agones;
 using GameServer.Events;
 using GameServer.Observability;
@@ -13,6 +14,12 @@ string mapId = GetArg(args, "--map-id") ?? Env("GAMESERVER_MAP_ID") ?? "map_01";
 string serverId = GetArg(args, "--server-id") ?? Env("GAMESERVER_ID") ?? Env("POD_NAME") ?? $"gs-{Guid.NewGuid():N}"[..12];
 int capacity = int.TryParse(GetArg(args, "--capacity") ?? Env("GAMESERVER_CAPACITY"), out var cap) ? cap : 100;
 int tickRate = int.TryParse(GetArg(args, "--tick-rate") ?? Env("GAMESERVER_TICK_RATE"), out var tr) ? tr : 15;
+float mapWidth = float.TryParse(GetArg(args, "--map-width") ?? Env("GAMESERVER_MAP_WIDTH"),
+    System.Globalization.CultureInfo.InvariantCulture, out var mw) && mw > 0f
+    ? mw : GameConstants.DefaultMapWidth;
+float mapHeight = float.TryParse(GetArg(args, "--map-height") ?? Env("GAMESERVER_MAP_HEIGHT"),
+    System.Globalization.CultureInfo.InvariantCulture, out var mh) && mh > 0f
+    ? mh : GameConstants.DefaultMapHeight;
 bool useAgones = HasFlag(args, "--agones") || Env("AGONES_ENABLED") == "true";
 string jwtSecret = GetArg(args, "--jwt-secret") ?? Env("JWT_SECRET") ?? "";
 // Metrics listen address. Unset -> ":9101"; explicitly empty -> metrics disabled.
@@ -38,6 +45,7 @@ logger.LogInformation("  MapId:     {MapId}", mapId);
 logger.LogInformation("  ServerId:  {ServerId}", serverId);
 logger.LogInformation("  Capacity:  {Capacity}", capacity);
 logger.LogInformation("  TickRate:  {TickRate}Hz", tickRate);
+logger.LogInformation("  MapSize:   {Width}x{Height} world units (centered on origin)", mapWidth, mapHeight);
 logger.LogInformation("  Agones:    {Agones}", useAgones);
 logger.LogInformation("  Metrics:   {Metrics}", string.IsNullOrWhiteSpace(metricsAddr) ? "disabled" : metricsAddr);
 logger.LogInformation("  GameDB:    {GameDb}",
@@ -93,6 +101,7 @@ var options = new ServerOptions
     MapId = mapId,
     Mode = mode,
     TickRate = tickRate,
+    MapBounds = MapBounds.FromSize(mapWidth, mapHeight),
     Capacity = capacity,
     JwtSecret = jwtSecret,
     HoldTtl = mode == "dungeon" ? TimeSpan.FromSeconds(60) : TimeSpan.FromSeconds(30),

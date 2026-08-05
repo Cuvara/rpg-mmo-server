@@ -79,12 +79,117 @@ The C# server produces byte-identical wire output to the Go server:
 - **Binary compatible**: The Go gateway performs no server-type detection. It
   forwards bytes opaquely. An Agones fleet can mix Go and C# game servers.
 
+## Movement Model (2026-08-05)
+
+### What it replaced
+
+The first C# port carried the Go MVP's model verbatim: `move_x`/`move_y` were a
+**displacement**, applied as `position += (move_x, move_y)` once per received input
+message, with a per-message cap of `MaxMovePerTick (5.0) * Speed`. Three problems:
+
+1. **Speed scaled with packet rate.** Every input message moved the entity, and the
+   tick loop applied *all* buffered inputs in one tick. Sending 10 inputs per tick
+   moved 10x further — a speed hack that required no malformed packet at all.
+2. **Diagonals were faster.** `(1,1)` moved `sqrt(2)` ≈ 1.414 units against `(1,0)`'s
+   1.0, so holding two keys was strictly better than one.
+3. **Not simulatable client-side.** With displacement-per-message there is no
+   timestep, so the Unity client had nothing to integrate and could not predict.
+
+### What it is now
+
+`Shared.GameLogic.Systems.MovementSystem` implements a fixed-timestep model:
+
+```
+direction = clamp(input, |v| <= 1)          // normalize when |v| > 1
+position += direction * speed * dt          // dt = 1 / tickRate
+position  = mapBounds.Clamp(position)
+```
+
+- **`move_x`/`move_y` are a direction, not a displacement.** The wire format is
+  unchanged (same fields, same types, same framing) — only the semantics changed.
+  Magnitudes below 1 are preserved so analog sticks give proportional speed.
+- **Diagonal == cardinal.** Any vector with magnitude > 1 is normalized, so raw
+  keyboard `(1,1)` becomes `(0.707, 0.707)` and travels exactly as far as `(1,0)`.
+- **`EntityState.Speed` is world units per second** (previously a per-tick
+  displacement multiplier). Default player speed moved from `1.0` to `5.0` u/s,
+  which reproduces the old effective cap of 5 units of travel per second while
+  making the number mean something physical.
+- **Map bounds.** `MapBounds` is an axis-aligned rectangle, default 1000x1000
+  centered on the origin (players spawn at `(0,0)`), configurable per server with
+  `--map-width` / `--map-height`. Clamping is per-axis, so a player pressed against
+  a wall keeps sliding along it instead of stopping dead. Positions loaded from the
+  player store are clamped on join, so a map resize cannot leave an entity outside.
+- **Tick-rate independence.** Because `dt = 1/tickRate`, a server at 10Hz and one at
+  15Hz move a player the same distance per wall-clock second. Tick rate is now a
+  smoothness knob, not a balance knob.
+
+### Input buffering: latest-wins, not accumulate
+
+The old loop applied **every** buffered input each tick. The new loop coalesces:
+per player, only the newest input (highest client tick) performs the movement
+integration; superseded inputs are still processed for their attack payload, which
+has its own cooldown gate.
+
+Rationale — accumulating N inputs into one tick would multiply displacement by N and
+resurrect exactly the exploit this rework removes. Latest-wins makes travel a pure
+function of wall-clock time and speed, and it matches what the client predicts (a
+client also integrates one input per fixed step). The cost is that inputs produced
+faster than the tick rate are dropped for movement purposes; that is intended —
+input rate above the simulation rate carries no additional authority.
+
+`LastInputTick` still tracks the newest processed input and is echoed for
+reconciliation, so a client can identify which input the authoritative position
+corresponds to.
+
+### Validation (enum, never exceptions)
+
+`MoveResult` is returned by value — a hostile packet must not allocate an exception
+inside the tick loop:
+
+| Result     | Condition                                            | Server action        |
+|------------|------------------------------------------------------|----------------------|
+| `None`     | vector inside the deadzone                            | no-op                |
+| `Accepted` | `\|v\| <= 1`                                          | integrate as-is      |
+| `Clamped`  | `1 < \|v\| <= MaxInputMagnitude (1.5)`                | normalize, integrate |
+| `Rejected` | NaN / infinity / `\|v\| > 1.5`                        | log at Debug, drop   |
+| `Blocked`  | entity dead, `speed <= 0`, or `dt <= 0`               | no-op                |
+
+`MaxInputMagnitude = 1.5` is chosen so an honest client sending raw diagonal input
+(magnitude 1.414) is clamped rather than punished, while anything wilder is dropped.
+`dt` is additionally capped at `MaxDeltaTime = 0.5s` so a stalled process cannot
+produce a teleport on resume. `MovementSystem.IsDisplacementLegal` provides the
+displacement audit (`distance <= speed * dt * 1.05`) for validating client-reported
+positions during reconciliation.
+
+### Unity client prediction reuse
+
+`MovementSystem` is pure: static methods over structs, no randomness, no
+`DateTime`, no allocations, no collections — `dt` is always a parameter. The Unity
+DOTS client links the same `Shared.GameLogic` assembly and calls the identical
+`ResolveDirection` / `Integrate` for local prediction, so a predicted position and
+the server's authoritative position agree given the same input, speed and `dt`.
+The planned client loop:
+
+1. On each fixed step, sample input, call `ResolveDirection` + `Integrate`, render
+   the predicted position immediately, and push `(tick, direction)` to a local ring
+   buffer alongside the input sent to the server.
+2. On each snapshot, look up the entry for `LastInputTick`. If the predicted
+   position matches the authoritative one within epsilon, discard the acked history.
+3. Otherwise snap to the authoritative position and replay the unacked inputs
+   through `Integrate` — the rewind/replay step, cheap because it is the same
+   deterministic function.
+
+The prerequisite for step 2/3 is that snapshots carry the acked input tick per
+entity; that is the next piece of work on the wire format.
+
 ## Anti-Cheat
 
 All validation is server-authoritative:
 
-- **Speed hack**: Server compares displacement between ticks against maximum
-  allowed speed. Excessive movement is clamped or rejected.
+- **Speed hack**: The server integrates movement itself from a normalized
+  direction (`direction * speed * dt`, one integration per player per tick), so a
+  client cannot travel further by sending larger vectors or more packets. See
+  *Movement Model* above.
 - **Range check**: Attack and skill targets must be within range according to
   the shared logic's distance calculation.
 - **Cooldown enforcement**: Skill cooldowns are tracked server-side. Early

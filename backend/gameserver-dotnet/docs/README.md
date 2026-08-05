@@ -55,6 +55,8 @@ dotnet run --project GameServer -- \
   --addr=:9000 \
   --map-id=map_01 \
   --tick-rate=15 \
+  --map-width=1000 \
+  --map-height=1000 \
   --jwt-secret=dev-secret-change-me \
   --agones \
   --redis=localhost:6379
@@ -126,24 +128,31 @@ Add `Shared.GameLogic` to the Unity project as a local package or source folder:
 3. Reference the assembly from your DOTS systems:
 
 ```csharp
-using Shared.GameLogic;
+using Shared.GameLogic.Components;
+using Shared.GameLogic.Systems;
 
 public partial struct PlayerMovementSystem : ISystem
 {
     public void OnUpdate(ref SystemState state)
     {
+        // Same fixed timestep the server uses: dt = 1 / tickRate.
+        float dt = MovementSystem.DeltaTimeForTickRate(GameConstants.DefaultTickRate);
+        MapBounds bounds = MapBounds.Default;
+
         foreach (var (transform, input) in
             SystemAPI.Query<RefRW<LocalTransform>, RefRO<PlayerInput>>())
         {
-            var newPos = MovementLogic.ApplyInput(
-                transform.ValueRO.Position,
-                input.ValueRO.Direction,
-                input.ValueRO.DeltaTime);
+            // Identical call the server makes -> prediction matches authority.
+            var result = MovementSystem.ResolveDirection(
+                input.ValueRO.MoveX, input.ValueRO.MoveY, out Vec2 direction);
 
-            if (MovementLogic.ValidateSpeed(
-                    transform.ValueRO.Position, newPos, input.ValueRO.DeltaTime))
+            if (result is MoveResult.Accepted or MoveResult.Clamped)
             {
-                transform.ValueRW.Position = newPos;
+                var predicted = MovementSystem.Integrate(
+                    ToVec2(transform.ValueRO.Position), direction,
+                    input.ValueRO.Speed, dt, bounds);
+
+                transform.ValueRW.Position = ToFloat3(predicted);
             }
         }
     }
@@ -279,8 +288,30 @@ identical to the Go game server:
 ### Example: Input
 
 ```json
-{"type": 3, "data": {"tick": 1042, "dx": 1.0, "dy": 0.0, "seq": 523}}
+{"type": 3, "data": {"tick": 1042, "move_x": 1.0, "move_y": 0.0, "attack_target_id": null}}
 ```
+
+**`move_x` / `move_y` are a movement DIRECTION, not a displacement.** The server
+integrates `direction * speed * dt` once per tick (`dt = 1 / tickRate`), then clamps
+the result to the map bounds:
+
+| Client sends           | Server does                                              |
+|------------------------|----------------------------------------------------------|
+| `(1, 0)`               | move right at full speed                                  |
+| `(0.5, 0)`             | move right at half speed (analog stick)                   |
+| `(1, 1)`               | normalized to `(0.707, 0.707)` — diagonals are not faster |
+| `(1.2, 0)`             | normalized to `(1, 0)`                                    |
+| `(5, 0)` / `NaN` / `∞` | rejected, logged at Debug, entity does not move           |
+| `(0, 0)`               | no movement                                               |
+
+Only the newest input per player is integrated each tick, so sending inputs faster
+than the tick rate does not move the player further. Distance travelled depends only
+on wall-clock time and the entity's `speed` stat (world units per second, default
+5.0). `tick` is echoed back as the entity's `LastInputTick` for client reconciliation.
+
+Map bounds default to 1000x1000 world units centered on the origin and are
+configurable per server via `--map-width` / `--map-height`
+(`GAMESERVER_MAP_WIDTH` / `GAMESERVER_MAP_HEIGHT`).
 
 ### Example: Snapshot
 

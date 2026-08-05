@@ -17,32 +17,63 @@ public sealed class InputHandler
     private readonly GameWorld _world;
     private readonly ILogger _logger;
     private readonly DeathHandler? _onDeath;
+    private readonly float _deltaTime;
+    private readonly MapBounds _bounds;
 
-    public InputHandler(GameWorld world, ILogger logger, DeathHandler? onDeath = null)
+    /// <summary>Fixed simulation timestep in seconds used for movement integration.</summary>
+    public float DeltaTime => _deltaTime;
+
+    /// <summary>Play area movement is clamped into.</summary>
+    public MapBounds Bounds => _bounds;
+
+    /// <param name="world">World the handler mutates.</param>
+    /// <param name="logger">Logger for dropped/invalid input.</param>
+    /// <param name="onDeath">Optional death callback.</param>
+    /// <param name="tickRate">
+    /// Simulation tick rate in Hz; the movement timestep is <c>1 / tickRate</c>.
+    /// Non-positive values fall back to <see cref="GameConstants.DefaultTickRate"/>.
+    /// </param>
+    /// <param name="bounds">Play area; defaults to <see cref="MapBounds.Default"/>.</param>
+    public InputHandler(
+        GameWorld world,
+        ILogger logger,
+        DeathHandler? onDeath = null,
+        int tickRate = GameConstants.DefaultTickRate,
+        MapBounds? bounds = null)
     {
         _world = world;
         _logger = logger;
         _onDeath = onDeath;
+        _deltaTime = MovementSystem.DeltaTimeForTickRate(
+            tickRate > 0 ? tickRate : GameConstants.DefaultTickRate);
+        _bounds = bounds ?? MapBounds.Default;
     }
 
     /// <summary>Process input for a user, taking the world write lock.</summary>
-    public void ProcessInput(string userId, InputData input)
+    public void ProcessInput(string userId, InputData input, bool applyMovement = true)
     {
-        _world.Update((get, set) => ProcessInputLocked(get, set, userId, input));
+        _world.Update((get, set) => ProcessInputLocked(get, set, userId, input, applyMovement));
     }
 
     /// <summary>
     /// Process input inside an existing write lock.
     /// 1. Get entity, skip if null or dead.
-    /// 2. Track LastInputTick (monotonic).
-    /// 3. Movement: validate via MovementLogic, apply delta.
+    /// 2. Track LastInputTick (monotonic) — this is the value the client reconciles against.
+    /// 3. Movement: integrate direction * speed * dt via <see cref="MovementSystem"/>,
+    ///    clamped to the map bounds. Skipped when <paramref name="applyMovement"/> is false.
     /// 4. Attack: get target, validate via CombatLogic, apply damage, handle death.
     /// </summary>
+    /// <param name="applyMovement">
+    /// False for superseded inputs when several arrived in the same tick: only the newest
+    /// input moves the entity, so movement speed cannot be inflated by packet spam.
+    /// Attacks are still processed (they have their own cooldown gate).
+    /// </param>
     public void ProcessInputLocked(
         Func<string, EntityState?> get,
         Action<string, EntityState> set,
         string userId,
-        InputData input)
+        InputData input,
+        bool applyMovement = true)
     {
         var entity = get(userId);
         if (entity == null) return;
@@ -56,16 +87,23 @@ public sealed class InputHandler
         e.LastInputTick = input.Tick;
 
         // --- Movement ---
-        if (input.MoveX != 0 || input.MoveY != 0)
+        // move_x/move_y are a DIRECTION, not a displacement: the server integrates
+        // direction * speed * dt itself, so a client cannot travel further by sending
+        // more packets or larger vectors.
+        if (applyMovement)
         {
-            string? moveErr = MovementLogic.ValidateMove(in e, input.MoveX, input.MoveY);
-            if (moveErr == null)
+            MoveResult moveResult = MovementSystem.TryMove(
+                in e, input.MoveX, input.MoveY, _deltaTime, in _bounds, out Vec2 newPosition);
+
+            if (moveResult is MoveResult.Accepted or MoveResult.Clamped)
             {
-                e.Position = MovementLogic.ApplyMove(in e.Position, input.MoveX, input.MoveY);
+                e.Position = newPosition;
             }
-            else
+            else if (moveResult == MoveResult.Rejected)
             {
-                _logger.LogDebug("Invalid move from {UserId}: {Error}", userId, moveErr);
+                // Grossly invalid vector (NaN/inf/oversized): log and drop, never throw.
+                _logger.LogDebug("Dropped invalid move from {UserId}: ({MoveX}, {MoveY})",
+                    userId, input.MoveX, input.MoveY);
             }
         }
 

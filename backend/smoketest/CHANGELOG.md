@@ -6,6 +6,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- `gameserver_join` position assertion follows the new server-authoritative
+  movement model: `move_x`/`move_y` are a direction integrated as
+  `direction * speed * dt` per tick, so N inputs no longer put the player at
+  X≈N. The step now requires `0 < final_x < inputs` — the upper bound is a
+  regression guard against `move_x` being treated as a raw displacement again.
+  Snapshot draining stops once the buffered snapshots are consumed so `final_x`
+  reports the newest authoritative position (expected ≈ `inputs * speed /
+  tickRate`, i.e. ≈3.33 with the default 10 inputs, 5 u/s, 15Hz).
 - Game server migrated from Go to C# .NET 10 (`backend/gameserver-dotnet/`).
   Smoke test unchanged — the `gameserver_join` step connects to whatever address
   the `EnterWorldResponse` returns, same wire protocol.
