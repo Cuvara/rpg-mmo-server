@@ -26,7 +26,7 @@ PASS  nakama_health               9ms  http://localhost:7350/healthcheck
 PASS  device_auth                11ms  device_id=smoketest-4f2edf0c963d2262
 PASS  gateway_token_rpc           2ms  user_id=a64ac680-…
 PASS  gateway_auth                3ms  map=map_01 server=[::]:9200
-PASS  gameserver_join          1.009s  snapshots=10 final_x=10.00
+PASS  gameserver_join          1.009s  snapshots=10 final_x=3.33
 SMOKE=PASS
 ```
 

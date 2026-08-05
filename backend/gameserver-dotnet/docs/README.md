@@ -55,10 +55,54 @@ dotnet run --project GameServer -- \
   --addr=:9000 \
   --map-id=map_01 \
   --tick-rate=15 \
+  --map-width=1000 \
+  --map-height=1000 \
   --jwt-secret=dev-secret-change-me \
   --agones \
   --redis=localhost:6379
 ```
+
+### Configuration
+
+Every flag has an environment-variable equivalent; the flag wins when both are
+set. Flags are **space-separated** (`--addr :9000`).
+
+| Flag | Environment variable | Default | Description |
+|------|----------------------|---------|-------------|
+| `--mode` | `GAMESERVER_MODE` | `map` | `map` or `dungeon` (dungeon uses a 60s reconnect hold) |
+| `--addr` | `GAMESERVER_ADDR` | `:9000` | Game traffic listen address |
+| `--map-id` | `GAMESERVER_MAP_ID` | `map_01` | Map identifier, also the `map_id` metric label |
+| `--server-id` | `GAMESERVER_ID` / `POD_NAME` | random | Server identity checked against the join token |
+| `--capacity` | `GAMESERVER_CAPACITY` | `100` | Maximum concurrent players |
+| `--tick-rate` | `GAMESERVER_TICK_RATE` | `15` | Simulation ticks per second |
+| `--map-width` | `GAMESERVER_MAP_WIDTH` | `1000` | Map width in world units |
+| `--map-height` | `GAMESERVER_MAP_HEIGHT` | `1000` | Map height in world units |
+| `--jwt-secret` | `JWT_SECRET` | *(empty)* | HS256 secret shared with the gateway |
+| `--metrics-addr` | `METRICS_ADDR` | `:9101` | Prometheus `/metrics` + `/healthz`; empty disables |
+| `--game-db-url` | `GAME_DB_URL` | *(unset)* | Game-state PostgreSQL DSN — see below |
+| `--agones` | `AGONES_ENABLED=true` | off | Enable the Agones SDK integration |
+
+#### Player state persistence (`GAME_DB_URL`)
+
+When set, player state is persisted to the game-state PostgreSQL database and
+survives a server restart. When unset the server falls back to an in-memory
+store and **all player state is lost on restart** — the startup log says which
+store is active.
+
+```bash
+dotnet run --project GameServer -- \
+  --addr :9000 \
+  --game-db-url 'postgres://game:localdev@localhost:5433/gamestate?sslmode=disable'
+```
+
+Accepted formats are a libpq URL (above) or a native Npgsql keyword string
+(`Host=...;Database=...;Username=...;Password=...`). The password is masked in
+every log line.
+
+The schema is created on boot if missing (idempotent), so pointing at an empty
+database is enough. If the database is configured but unreachable the server
+logs a critical error and **exits with status 1** rather than silently
+degrading to the memory store and losing writes.
 
 ### Run Tests
 
@@ -126,24 +170,31 @@ Add `Shared.GameLogic` to the Unity project as a local package or source folder:
 3. Reference the assembly from your DOTS systems:
 
 ```csharp
-using Shared.GameLogic;
+using Shared.GameLogic.Components;
+using Shared.GameLogic.Systems;
 
 public partial struct PlayerMovementSystem : ISystem
 {
     public void OnUpdate(ref SystemState state)
     {
+        // Same fixed timestep the server uses: dt = 1 / tickRate.
+        float dt = MovementSystem.DeltaTimeForTickRate(GameConstants.DefaultTickRate);
+        MapBounds bounds = MapBounds.Default;
+
         foreach (var (transform, input) in
             SystemAPI.Query<RefRW<LocalTransform>, RefRO<PlayerInput>>())
         {
-            var newPos = MovementLogic.ApplyInput(
-                transform.ValueRO.Position,
-                input.ValueRO.Direction,
-                input.ValueRO.DeltaTime);
+            // Identical call the server makes -> prediction matches authority.
+            var result = MovementSystem.ResolveDirection(
+                input.ValueRO.MoveX, input.ValueRO.MoveY, out Vec2 direction);
 
-            if (MovementLogic.ValidateSpeed(
-                    transform.ValueRO.Position, newPos, input.ValueRO.DeltaTime))
+            if (result is MoveResult.Accepted or MoveResult.Clamped)
             {
-                transform.ValueRW.Position = newPos;
+                var predicted = MovementSystem.Integrate(
+                    ToVec2(transform.ValueRO.Position), direction,
+                    input.ValueRO.Speed, dt, bounds);
+
+                transform.ValueRW.Position = ToFloat3(predicted);
             }
         }
     }
@@ -279,8 +330,30 @@ identical to the Go game server:
 ### Example: Input
 
 ```json
-{"type": 3, "data": {"tick": 1042, "dx": 1.0, "dy": 0.0, "seq": 523}}
+{"type": 3, "data": {"tick": 1042, "move_x": 1.0, "move_y": 0.0, "attack_target_id": null}}
 ```
+
+**`move_x` / `move_y` are a movement DIRECTION, not a displacement.** The server
+integrates `direction * speed * dt` once per tick (`dt = 1 / tickRate`), then clamps
+the result to the map bounds:
+
+| Client sends           | Server does                                              |
+|------------------------|----------------------------------------------------------|
+| `(1, 0)`               | move right at full speed                                  |
+| `(0.5, 0)`             | move right at half speed (analog stick)                   |
+| `(1, 1)`               | normalized to `(0.707, 0.707)` — diagonals are not faster |
+| `(1.2, 0)`             | normalized to `(1, 0)`                                    |
+| `(5, 0)` / `NaN` / `∞` | rejected, logged at Debug, entity does not move           |
+| `(0, 0)`               | no movement                                               |
+
+Only the newest input per player is integrated each tick, so sending inputs faster
+than the tick rate does not move the player further. Distance travelled depends only
+on wall-clock time and the entity's `speed` stat (world units per second, default
+5.0). `tick` is echoed back as the entity's `LastInputTick` for client reconciliation.
+
+Map bounds default to 1000x1000 world units centered on the origin and are
+configurable per server via `--map-width` / `--map-height`
+(`GAMESERVER_MAP_WIDTH` / `GAMESERVER_MAP_HEIGHT`).
 
 ### Example: Snapshot
 

@@ -269,8 +269,11 @@ func (r *Runner) stepGameServerFlow() (string, error) {
 		}
 	}()
 
-	// Send inputs: fresh players spawn at (0,0); MoveX=1 per input is a delta,
-	// so after N accepted inputs the entity sits at X≈N.
+	// Send inputs: fresh players spawn at (0,0). MoveX=1 is a unit DIRECTION, not a
+	// displacement — the game server integrates direction*speed*dt once per tick, so
+	// after N accepted inputs the entity sits at X ≈ N*speed/tickRate (with the default
+	// 5 u/s at 15Hz: N/3). The exact value depends on server config, so the assertion
+	// below only checks "moved forward, and not by a per-message teleport".
 	for i := 0; i < r.cfg.Inputs; i++ {
 		env, err := messages.NewEnvelope(messages.MsgInput, messages.InputMessage{
 			Tick:  uint64(i + 1),
@@ -304,7 +307,9 @@ drain:
 					seen = true
 				}
 			}
-			if seen && snapshots >= r.cfg.MinSnapshots && lastX >= float32(r.cfg.Inputs) {
+			// Stop once every buffered snapshot is consumed, so lastX is the newest
+			// authoritative position rather than an early one from the send phase.
+			if seen && snapshots >= r.cfg.MinSnapshots && lastX > 0 && len(snapCh) == 0 {
 				break drain
 			}
 		case <-deadline:
@@ -320,10 +325,14 @@ drain:
 	if !seen {
 		return "", fmt.Errorf("player %s never appeared in a snapshot", r.userID)
 	}
-	// All inputs should have been applied; allow half to be in flight/dropped.
-	minX := float32(r.cfg.Inputs) / 2
-	if lastX < minX {
-		return "", fmt.Errorf("position did not move as expected: X=%.2f, want >= %.2f", lastX, minX)
+	// Movement is server-integrated: the player must have advanced along +X, but by
+	// far less than one world unit per input. An X >= Inputs would mean the server is
+	// back to treating move_x as a raw displacement (per-message teleport regression).
+	if lastX <= 0 {
+		return "", fmt.Errorf("position did not move as expected: X=%.2f, want > 0", lastX)
+	}
+	if maxX := float32(r.cfg.Inputs); lastX >= maxX {
+		return "", fmt.Errorf("position moved too far: X=%.2f, want < %.2f (move_x must be a direction, not a displacement)", lastX, maxX)
 	}
 
 	// Clean disconnect: polite MsgDisconnect, then close (deferred). This

@@ -26,6 +26,12 @@ public sealed class TickLoop
     private ulong _currentTick;
     private int _snapshotsThisTick;
 
+    /// <summary>
+    /// Scratch map (user ID -> index of the newest input in this tick's drained batch).
+    /// Reused across ticks so input coalescing allocates nothing in the hot path.
+    /// </summary>
+    private readonly Dictionary<string, int> _newestInputIndex = new();
+
     /// <summary>Current simulation tick.</summary>
     public ulong CurrentTick => _currentTick;
 
@@ -93,11 +99,28 @@ public sealed class TickLoop
 
         if (inputs.Count > 0)
         {
+            // Coalesce movement: at most one integration step per player per tick, using
+            // the newest input (highest client tick, arrival order as tiebreak). Without
+            // this, a client that sends N input packets per tick would move N times as
+            // far — the movement model is per-tick, not per-message.
+            _newestInputIndex.Clear();
+            for (int i = 0; i < inputs.Count; i++)
+            {
+                string userId = inputs[i].UserId;
+                if (!_newestInputIndex.TryGetValue(userId, out int best) ||
+                    inputs[i].Input.Tick >= inputs[best].Input.Tick)
+                {
+                    _newestInputIndex[userId] = i;
+                }
+            }
+
             _world.Update((get, set) =>
             {
-                foreach (var pi in inputs)
+                for (int i = 0; i < inputs.Count; i++)
                 {
-                    _handler.ProcessInputLocked(get, set, pi.UserId, pi.Input);
+                    var pi = inputs[i];
+                    bool applyMovement = _newestInputIndex[pi.UserId] == i;
+                    _handler.ProcessInputLocked(get, set, pi.UserId, pi.Input, applyMovement);
                 }
             });
         }
