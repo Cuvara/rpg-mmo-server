@@ -6,6 +6,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- `storage/pgstore/schema.sql` — header comment only, no SQL change. The game-state
+  schema is now owned by numbered migrations in `backend/deploy/db/migrations/gamestate/`
+  applied by the C# gameserver; this package has been orphaned since that migration.
+  The file is kept byte-identical to `deploy/db/init-gamestate.sql` because
+  `TestSchemaMatchesDeployInitScript` compares them exactly.
 - `Envelope.Payload` type changed from `[]byte` to `json.RawMessage` for C#
   interop — `System.Text.Json` on the gameserver-dotnet side expects a raw JSON
   object, not a base64-encoded byte array.

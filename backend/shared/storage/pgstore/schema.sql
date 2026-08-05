@@ -1,13 +1,22 @@
 -- Game state schema (PostgreSQL "Game State" instance — NOT the Nakama meta DB).
 --
--- SINGLE SOURCE OF TRUTH FOR THE SCHEMA IS THIS FILE.
--- It is embedded into the binary (see migrate.go, go:embed) and applied on
--- startup by PostgresPlayerStore.Migrate. A byte-identical copy lives at
--- backend/deploy/db/init-gamestate.sql so a fresh docker-compose volume is
--- initialised even before any gameserver connects. Keep the two in sync —
--- pgstore_test.go asserts they match.
+-- FIRST-BOOT SEED ONLY. Mounted into the postgres-game container's
+-- /docker-entrypoint-initdb.d/, so it runs once on an empty data volume.
 --
--- Every statement MUST be idempotent: Migrate runs on every boot.
+-- The authoritative schema history lives in numbered migrations:
+--   backend/deploy/db/migrations/gamestate/NNN_*.sql          (ops copies, psql-friendly)
+--   backend/gameserver-dotnet/GameServer/Persistence/Migrations/  (embedded, applied by the server)
+--
+-- This file must describe exactly what 001_init.sql describes, or a fresh volume
+-- and a migrated volume would disagree. Two tests enforce that:
+--   MigratorTests.InitGamestateSql_MatchesFirstMigration (C#, compares statements)
+--   TestSchemaMatchesDeployInitScript (Go, byte-compares this file against the
+--     orphaned shared/storage/pgstore/schema.sql — keep those two byte-identical)
+--
+-- DO NOT add tables here. Add a new numbered migration instead; the workflow is
+-- documented in backend/deploy/docs/DATABASE.md.
+--
+-- Every statement MUST be idempotent.
 
 CREATE TABLE IF NOT EXISTS player_states (
     user_id    text        PRIMARY KEY,

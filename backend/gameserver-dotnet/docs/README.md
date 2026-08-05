@@ -80,6 +80,7 @@ set. Flags are **space-separated** (`--addr :9000`).
 | `--jwt-secret` | `JWT_SECRET` | *(empty)* | HS256 secret shared with the gateway |
 | `--metrics-addr` | `METRICS_ADDR` | `:9101` | Prometheus `/metrics` + `/healthz`; empty disables |
 | `--game-db-url` | `GAME_DB_URL` | *(unset)* | Game-state PostgreSQL DSN — see below |
+| `--migrate-only` | `GAMESERVER_MIGRATE_ONLY=true` | off | Apply pending migrations, then exit — see below |
 | `--agones` | `AGONES_ENABLED=true` | off | Enable the Agones SDK integration |
 
 #### Player state persistence (`GAME_DB_URL`)
@@ -103,6 +104,25 @@ The schema is created on boot if missing (idempotent), so pointing at an empty
 database is enough. If the database is configured but unreachable the server
 logs a critical error and **exits with status 1** rather than silently
 degrading to the memory store and losing writes.
+
+#### Schema migrations (`--migrate-only`)
+
+Schema history lives in numbered migrations under
+`GameServer/Persistence/Migrations/`, embedded into the binary. They are applied
+transactionally, in order, exactly once, and the checksums of already-applied
+migrations are verified on every run — an edited migration fails loudly instead
+of letting environments drift apart.
+
+The server applies pending migrations at boot. `--migrate-only` does just that
+and exits, which is how CD migrates before restarting anything:
+
+```bash
+gameserver-dotnet --migrate-only --game-db-url "$GAME_DB_URL"
+# exit 0 = applied or already current, 1 = failure, 2 = no DSN given
+```
+
+Adding a migration and the backward-compatibility rules are documented in
+`backend/deploy/docs/DATABASE.md`.
 
 ### Run Tests
 
