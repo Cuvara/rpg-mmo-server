@@ -1,0 +1,209 @@
+using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
+
+namespace GameServer.Tests.Persistence;
+
+/// <summary>
+/// A throwaway PostgreSQL container used by the persistence tests.
+///
+/// Tests run against a REAL postgres — no fakes, no in-memory shims — because the
+/// store's behaviour (upsert semantics, real/int type mapping, DDL idempotency)
+/// only means something against the actual engine.
+///
+/// The container binds a random free loopback port so it never collides with the
+/// developer's live game-state database on :5433. When docker is unavailable the
+/// factory returns null and the tests skip cleanly.
+/// </summary>
+internal sealed class EphemeralPostgres : IAsyncDisposable
+{
+    private const string Image = "postgres:16.4-alpine";
+    private const string User = "gstest";
+    private const string Password = "gstest";
+    private const string Database = "gamestate_test";
+
+    private readonly string _docker;
+
+    /// <summary>Container name (also usable with <c>docker exec</c>).</summary>
+    public string ContainerName { get; }
+
+    /// <summary>Host port the container's 5432 is published on.</summary>
+    public int Port { get; }
+
+    /// <summary>libpq URL DSN pointing at the container.</summary>
+    public string Dsn => $"postgres://{User}:{Password}@127.0.0.1:{Port}/{Database}?sslmode=disable";
+
+    private EphemeralPostgres(string docker, string name, int port)
+    {
+        _docker = docker;
+        ContainerName = name;
+        Port = port;
+    }
+
+    /// <summary>
+    /// Start a container and wait until it accepts connections.
+    /// Returns null when docker is not usable on this machine (test should skip).
+    /// </summary>
+    public static async Task<EphemeralPostgres?> TryStartAsync(CancellationToken ct = default)
+    {
+        string? docker = FindDocker();
+        if (docker is null) return null;
+
+        int port = FreeTcpPort();
+        string name = $"rpg-gs-test-pg-{Guid.NewGuid():N}"[..30];
+
+        var run = Exec(docker,
+            $"run -d --name {name} " +
+            $"-e POSTGRES_USER={User} -e POSTGRES_PASSWORD={Password} -e POSTGRES_DB={Database} " +
+            $"-p 127.0.0.1:{port}:5432 {Image}",
+            TimeSpan.FromMinutes(5));
+
+        if (run.ExitCode != 0)
+        {
+            Console.WriteLine($"[EphemeralPostgres] docker run failed: {run.StdErr.Trim()}");
+            return null;
+        }
+
+        var pg = new EphemeralPostgres(docker, name, port);
+        if (!await pg.WaitReadyAsync(TimeSpan.FromSeconds(90), ct))
+        {
+            Console.WriteLine("[EphemeralPostgres] container never became ready");
+            await pg.DisposeAsync();
+            return null;
+        }
+        return pg;
+    }
+
+    /// <summary>Force-remove the container. Never throws.</summary>
+    public void Kill() => Exec(_docker, $"rm -f {ContainerName}", TimeSpan.FromSeconds(60));
+
+    private async Task<bool> WaitReadyAsync(TimeSpan timeout, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var probe = Exec(_docker, $"exec {ContainerName} pg_isready -U {User} -d {Database}",
+                TimeSpan.FromSeconds(15));
+            if (probe.ExitCode == 0 && await CanConnectAsync(ct)) return true;
+
+            await Task.Delay(500, ct);
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// pg_isready only proves the server is up inside the container; the published
+    /// port mapping can lag behind, so confirm an actual TCP connect from the host.
+    /// </summary>
+    private async Task<bool> CanConnectAsync(CancellationToken ct)
+    {
+        try
+        {
+            using var client = new TcpClient();
+            await client.ConnectAsync(IPAddress.Loopback, Port, ct);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string? FindDocker()
+    {
+        foreach (var candidate in new[] { "docker", "docker.exe" })
+        {
+            try
+            {
+                if (Exec(candidate, "version --format {{.Server.Version}}", TimeSpan.FromSeconds(30)).ExitCode == 0)
+                    return candidate;
+            }
+            catch
+            {
+                // Binary not on PATH — try the next candidate.
+            }
+        }
+        return null;
+    }
+
+    private static int FreeTcpPort()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        return port;
+    }
+
+    private static (int ExitCode, string StdOut, string StdErr) Exec(string file, string args, TimeSpan timeout)
+    {
+        using var proc = new Process
+        {
+            StartInfo = new ProcessStartInfo(file, args)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            }
+        };
+        proc.Start();
+        string stdout = proc.StandardOutput.ReadToEnd();
+        string stderr = proc.StandardError.ReadToEnd();
+        if (!proc.WaitForExit((int)timeout.TotalMilliseconds))
+        {
+            try { proc.Kill(true); } catch { /* ignore */ }
+            return (-1, stdout, "timed out");
+        }
+        return (proc.ExitCode, stdout, stderr);
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        Kill();
+        return ValueTask.CompletedTask;
+    }
+}
+
+/// <summary>
+/// Shared container for the whole persistence test collection — starting one
+/// postgres per test would dominate the suite runtime.
+/// </summary>
+public sealed class PostgresFixture : IAsyncLifetime
+{
+    internal EphemeralPostgres? Container { get; private set; }
+
+    /// <summary>True when a real postgres is available for the tests to use.</summary>
+    public bool Available => Container is not null;
+
+    /// <summary>DSN of the shared container (empty when unavailable).</summary>
+    public string Dsn => Container?.Dsn ?? "";
+
+    public async Task InitializeAsync() => Container = await EphemeralPostgres.TryStartAsync();
+
+    public async Task DisposeAsync()
+    {
+        if (Container is not null) await Container.DisposeAsync();
+    }
+
+    /// <summary>
+    /// Emit a visible marker and return false when docker is missing so a test can
+    /// bail out without failing. CI (ubuntu-latest) always has docker, so a skip
+    /// there would be a real signal, not a silent pass.
+    /// </summary>
+    public bool SkipIfUnavailable(string testName)
+    {
+        if (Available) return false;
+        Console.WriteLine($"[SKIP] {testName}: docker unavailable, no postgres to test against");
+        return true;
+    }
+}
+
+/// <summary>Collection definition binding the shared postgres container.</summary>
+[CollectionDefinition(Name)]
+public sealed class PostgresCollection : ICollectionFixture<PostgresFixture>
+{
+    public const string Name = "postgres";
+}
