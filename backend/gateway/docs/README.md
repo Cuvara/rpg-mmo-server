@@ -102,6 +102,31 @@ All three Redis stores share one client/pool.
 
 See `shared/config` for the full list.
 
+## Metrics
+
+A second listener (separate from the realtime port) serves Prometheus metrics
+and a liveness endpoint:
+
+```bash
+go run ./cmd/gateway/ --addr=:8000 --metrics-addr=:9102   # default is :9102
+curl localhost:9102/metrics
+curl localhost:9102/healthz     # 200 "ok" while the process is alive
+```
+
+`METRICS_ADDR` is the env equivalent; `off`, `none` or an explicitly empty
+`METRICS_ADDR` disables the listener.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `gateway_connections_active` | gauge | — |
+| `gateway_auth_total` | counter | `result=ok\|fail` |
+| `gateway_enter_world_total` | counter | `result=ok\|fail` |
+| `gateway_allocations_total` | counter | `result=ok\|fail` |
+| `gateway_relay_events_total` | counter | — |
+
+Scraped by the dev stack in `backend/deploy` (`make monitoring-up`) — see
+`backend/deploy/docs/MONITORING.md`.
+
 ## Test
 
 ```bash

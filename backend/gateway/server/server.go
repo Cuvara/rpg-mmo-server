@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/duycuong/rpg-mmo/gateway/events"
+	"github.com/duycuong/rpg-mmo/gateway/metrics"
 	"github.com/duycuong/rpg-mmo/gateway/registry"
 	"github.com/duycuong/rpg-mmo/gateway/session"
 	"github.com/duycuong/rpg-mmo/gateway/transfer"
@@ -28,6 +29,10 @@ type Gateway struct {
 	relay      events.EventRelay
 	eventCount atomic.Int64
 
+	// metrics is nil when the gateway runs without instrumentation; every
+	// recording helper is nil-safe.
+	metrics *metrics.Metrics
+
 	// transportKind is the realtime transport the gateway listens with
 	// ("tcp" or "kcp"); it is immutable after New, so Run reads it lock-free.
 	transportKind string
@@ -46,6 +51,12 @@ type Option func(*Gateway)
 // default (TCP).
 func WithTransport(kind string) Option {
 	return func(g *Gateway) { g.transportKind = kind }
+}
+
+// WithMetrics attaches the Prometheus metric set. Without it the gateway is
+// uninstrumented (all recording calls are no-ops).
+func WithMetrics(m *metrics.Metrics) Option {
+	return func(g *Gateway) { g.metrics = m }
 }
 
 // WithEventRelay attaches a cross-server event relay. The gateway starts it in
@@ -86,6 +97,7 @@ func New(
 // (iterate g.conns, cc.Send). See gateway/docs/DESIGN.md.
 func (g *Gateway) OnEvent(ev storage.Event) {
 	g.eventCount.Add(1)
+	g.metrics.RelayEvent()
 	g.logger.Info("relayed event",
 		"type", ev.Type,
 		"bytes", len(ev.Payload),
@@ -175,8 +187,12 @@ func (g *Gateway) trackConn(cc *ClientConn, add bool) {
 	defer g.mu.Unlock()
 	if add {
 		g.conns[cc] = struct{}{}
-	} else {
+		g.metrics.ConnOpened()
+		return
+	}
+	if _, tracked := g.conns[cc]; tracked {
 		delete(g.conns, cc)
+		g.metrics.ConnClosed()
 	}
 }
 
@@ -230,6 +246,7 @@ func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
 func (g *Gateway) checkSession(cc *ClientConn, msgType messages.MsgType) bool {
 	if cc.State == StateConnected || cc.UserID == "" {
 		if msgType == messages.MsgEnterWorld {
+			g.metrics.EnterWorldResult(false)
 			g.sendEnterWorldError(cc, "not authenticated")
 		} else {
 			g.sendAuthError(cc, "not authenticated")
@@ -245,6 +262,7 @@ func (g *Gateway) checkSession(cc *ClientConn, msgType messages.MsgType) bool {
 		cc.State = StateConnected
 		cc.UserID = ""
 		if msgType == messages.MsgEnterWorld {
+			g.metrics.EnterWorldResult(false)
 			g.sendEnterWorldError(cc, "session expired")
 		} else {
 			g.sendAuthError(cc, "session expired")
@@ -262,12 +280,14 @@ func (g *Gateway) checkSession(cc *ClientConn, msgType messages.MsgType) bool {
 func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 	var req messages.AuthRequest
 	if err := messages.UnmarshalPayload(env.Payload, &req); err != nil {
+		g.metrics.AuthResult(false)
 		g.sendAuthError(cc, "invalid auth request")
 		return
 	}
 
 	userID, err := session.VerifyClientJWT(req.Token, g.jwtSecret)
 	if err != nil {
+		g.metrics.AuthResult(false)
 		g.sendAuthError(cc, "invalid token")
 		return
 	}
@@ -275,9 +295,11 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 	ctx := context.Background()
 	_, err = g.sessions.CreateSession(ctx, userID)
 	if err != nil {
+		g.metrics.AuthResult(false)
 		g.sendAuthError(cc, "session creation failed")
 		return
 	}
+	g.metrics.AuthResult(true)
 
 	cc.UserID = userID
 	cc.State = StateAuthenticated
@@ -306,12 +328,14 @@ func (g *Gateway) sendAuthError(cc *ClientConn, msg string) {
 
 func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 	if cc.State != StateAuthenticated && cc.State != StateInWorld {
+		g.metrics.EnterWorldResult(false)
 		g.sendEnterWorldError(cc, "not authenticated")
 		return
 	}
 
 	var req messages.EnterWorldRequest
 	if err := messages.UnmarshalPayload(env.Payload, &req); err != nil {
+		g.metrics.EnterWorldResult(false)
 		g.sendEnterWorldError(cc, "invalid enter world request")
 		return
 	}
@@ -319,9 +343,11 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 	ctx := context.Background()
 	result, err := transfer.AssignMap(ctx, cc.UserID, req.MapID, g.registry, g.jwtSecret)
 	if err != nil {
+		g.metrics.EnterWorldResult(false)
 		g.sendEnterWorldError(cc, err.Error())
 		return
 	}
+	g.metrics.EnterWorldResult(true)
 
 	cc.State = StateInWorld
 

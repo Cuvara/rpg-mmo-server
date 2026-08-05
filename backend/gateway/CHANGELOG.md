@@ -5,6 +5,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Prometheus instrumentation (`metrics/`): `gateway_connections_active` (gauge),
+  `gateway_auth_total`, `gateway_enter_world_total`, `gateway_allocations_total`
+  (counters labelled `result=ok|fail`) and `gateway_relay_events_total`, plus the
+  standard `go_*`/`process_*` collectors.
+- Separate metrics listener serving `/metrics` (promhttp) and `/healthz` (200
+  liveness): `--metrics-addr` / `METRICS_ADDR`, default `:9102`;
+  `off`/`none`/empty disables it. Never shares the realtime port.
+- `server.WithMetrics` and `registry.WithMetrics` options; both are optional and
+  every recorder is nil-safe, so an uninstrumented gateway behaves as before.
+
 ### Changed
 - Game servers migrated from Go to C# .NET 10 (`backend/gameserver-dotnet/`).
   Gateway wire protocol unchanged (4-byte BE length prefix + JSON, `snake_case`

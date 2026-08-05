@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/duycuong/rpg-mmo/gateway/metrics"
 	"github.com/duycuong/rpg-mmo/shared/storage"
 )
 
@@ -15,17 +16,36 @@ import (
 type RegistryService struct {
 	reg       storage.ServerRegistry
 	allocator Allocator
+
+	// metrics is nil unless WithMetrics was passed; recording is nil-safe.
+	metrics *metrics.Metrics
+}
+
+// Option customises a RegistryService at construction time.
+type Option func(*RegistryService)
+
+// WithMetrics attaches the Prometheus metric set so allocator requests are
+// counted (gateway_allocations_total).
+func WithMetrics(m *metrics.Metrics) Option {
+	return func(s *RegistryService) { s.metrics = m }
 }
 
 // NewRegistryService creates a RegistryService backed by the given registry.
-func NewRegistryService(reg storage.ServerRegistry) *RegistryService {
-	return &RegistryService{reg: reg}
+func NewRegistryService(reg storage.ServerRegistry, opts ...Option) *RegistryService {
+	return newRegistryService(&RegistryService{reg: reg}, opts)
 }
 
 // NewRegistryServiceWithAllocator creates a RegistryService that asks the
 // allocator (e.g. Agones) for a new instance when no live server has capacity.
-func NewRegistryServiceWithAllocator(reg storage.ServerRegistry, alloc Allocator) *RegistryService {
-	return &RegistryService{reg: reg, allocator: alloc}
+func NewRegistryServiceWithAllocator(reg storage.ServerRegistry, alloc Allocator, opts ...Option) *RegistryService {
+	return newRegistryService(&RegistryService{reg: reg, allocator: alloc}, opts)
+}
+
+func newRegistryService(s *RegistryService, opts []Option) *RegistryService {
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // FindServer locates the least-loaded live server for mapID that still has
@@ -57,11 +77,16 @@ func (s *RegistryService) FindServer(ctx context.Context, mapID string) (storage
 	if s.allocator != nil {
 		allocated, aerr := s.allocator.AllocateServer(ctx, mapID)
 		if aerr != nil {
+			s.metrics.AllocationResult(false)
 			return storage.ServerInfo{}, fmt.Errorf("no available server for map %s: %w", mapID, aerr)
 		}
+		// The allocation itself succeeded; a failed registry write still leaves
+		// a pod running, so it is counted as a failure of the whole request.
 		if rerr := s.reg.Register(ctx, allocated); rerr != nil {
+			s.metrics.AllocationResult(false)
 			return storage.ServerInfo{}, fmt.Errorf("register allocated server %s: %w", allocated.ServerID, rerr)
 		}
+		s.metrics.AllocationResult(true)
 		return allocated, nil
 	}
 

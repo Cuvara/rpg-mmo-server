@@ -5,6 +5,30 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `monitoring` compose profile: one `grafana/otel-lgtm` container (Grafana +
+  Prometheus + Loki + Tempo + Pyroscope + OTel Collector) on `${GRAFANA_PORT:-3000}`,
+  `${PROMETHEUS_PORT:-9090}`, OTLP `${OTLP_GRPC_PORT:-4317}` / `${OTLP_HTTP_PORT:-4318}`,
+  persisted in the `lgtm-data` volume. Replaces the hand-rolled Prometheus+Grafana
+  pair — fewer moving parts and OTLP ingest is ready for traces/logs.
+- `monitoring/prometheus.yaml` mounted over the image's own (its documented
+  override point) with scrape jobs for nakama (`nakama:9100`), host-run gateway
+  (`host.docker.internal:9102`) and C# gameserver (`host.docker.internal:9101`),
+  plus the containerised `realtime` variants.
+- Provisioned "RPG Gameplay" Grafana dashboard (`monitoring/dashboards/`): tick
+  p99, players online, gateway connections, auth/enter-world failure ratio, save
+  and allocation errors, scrape-target health.
+- `make monitoring-up|monitoring-down|monitoring-logs|monitoring-targets`;
+  `.env.example` gained `OTEL_LGTM_VERSION`, `GRAFANA_PORT`, `GRAFANA_USER`,
+  `GRAFANA_PASSWORD`, `PROMETHEUS_PORT`, `OTLP_*_PORT`, `GATEWAY_METRICS_PORT`.
+- `docs/MONITORING.md` — rationale, usage, dashboard guide, import-by-ID infra
+  dashboards (1860 / 763 / 9628), Grafana Cloud (Alloy) and k3s
+  (kube-prometheus-stack) graduation paths.
+
+### Changed
+- Containerised gateway (`--profile realtime`) exports metrics on `:9102`
+  (`METRICS_ADDR`), published as `${GATEWAY_METRICS_PORT:-9102}`.
+
 ### Changed
 - Removed `docker/Dockerfile.gameserver` (Go). Added
   `docker/Dockerfile.gameserver-dotnet` (C# .NET 10 NativeAOT multi-stage build:

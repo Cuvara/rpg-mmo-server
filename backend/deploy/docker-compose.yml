@@ -171,8 +171,12 @@ services:
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      # Prometheus endpoint (/metrics, /healthz). Scraped in-network by the
+      # `monitoring` profile as gateway:9102; set to "off" to disable.
+      METRICS_ADDR: ":9102"
     ports:
       - "${GATEWAY_CONTAINER_PORT:-8100}:8000"
+      - "${GATEWAY_METRICS_PORT:-9102}:9102"
 
   gameserver:
     profiles: ["realtime"]
@@ -223,7 +227,50 @@ services:
     ports:
       - "${GAMESERVER_DOTNET_CONTAINER_PORT:-9400}:9000"
 
+  # ----------------------------------------------------------- monitoring
+  # Profile-gated dev observability: `docker compose --profile monitoring up -d`.
+  #
+  # ONE container (grafana/otel-lgtm) bundles Grafana + Prometheus + Loki +
+  # Tempo + Pyroscope + an OTel Collector. It replaces a hand-rolled
+  # Prometheus+Grafana pair: fewer moving parts, and OTLP (4317/4318) is already
+  # there for when we add traces/logs. See docs/MONITORING.md.
+  #
+  # Scraping: the image reads /otel-lgtm/prometheus.yaml, so ours is mounted
+  # over it (monitoring/prometheus.yaml). Host-run gateway/gameserver are
+  # scraped via host.docker.internal (extra_hosts makes that work on Linux too).
+  lgtm:
+    profiles: ["monitoring"]
+    image: grafana/otel-lgtm:${OTEL_LGTM_VERSION:-0.11.15}
+    container_name: rpg-lgtm
+    restart: unless-stopped
+    environment:
+      # Grafana admin login for http://localhost:3000.
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"        # Grafana UI
+      - "${OTLP_GRPC_PORT:-4317}:4317"      # OTLP gRPC (traces/metrics/logs)
+      - "${OTLP_HTTP_PORT:-4318}:4318"      # OTLP HTTP
+      - "${PROMETHEUS_PORT:-9090}:9090"     # bundled Prometheus (targets/query)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./monitoring/prometheus.yaml:/otel-lgtm/prometheus.yaml:ro
+      - ./monitoring/grafana-dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/rpg-dashboards.yaml:ro
+      - ./monitoring/dashboards:/otel-lgtm/dashboards-rpg:ro
+      # All bundled components write under /data — one volume keeps dashboards,
+      # TSDB and Loki chunks across restarts.
+      - lgtm-data:/data
+    healthcheck:
+      # The image ships curl but no wget.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/api/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
 volumes:
   postgres-data:
   postgres-game-data:
   redis-data:
+  lgtm-data:

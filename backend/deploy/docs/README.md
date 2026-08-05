@@ -15,12 +15,14 @@ All open-source, $0 license: Docker, k3s, Agones, PostgreSQL, Redis, Grafana, Pr
 | k3s / Agones dev bootstrap | `k3s/setup-dev.sh`, `k3s/teardown-dev.sh`, `k3s/lib.sh`, `k3s/namespaces.yaml`, `k3s/validate-manifests.py` | ✅ Authored + manifests schema-validated (needs a live cluster) |
 | k8s base/overlays (Nakama, Gateway, Redis, Postgres) | — | Planned |
 | DB init + backup scripts, prod Redis config (Sentinel, eviction) | — | Planned |
-| Monitoring (Prometheus/Grafana) | — | Planned |
+| Dev observability (Grafana + Prometheus + Loki + Tempo) | `docker-compose.yml` profile `monitoring`, `monitoring/` | ✅ Usable (`make monitoring-up`) |
 
 Docs:
 - `RUNBOOK-local-dev.md` — start/stop/debug/reset the local stack, verification steps, REDIS_ADDR wiring.
 - `CICD.md` — `build-all.sh` / `deploy-local.sh` usage, `cd.yml` job matrix, self-hosted
   runner registration + labels, Environment secrets, branch strategy, rollback.
+- `MONITORING.md` — `make monitoring-up` (one `grafana/otel-lgtm` container), scrape
+  targets, the "RPG Gameplay" dashboard, metric contracts, Grafana Cloud / k3s paths.
 - `K3S.md` — dev cluster bootstrap (`k3s/setup-dev.sh`), Agones install + fleets,
   cluster options on WSL2, offline manifest validation, graduation to a real k3s VPS.
 

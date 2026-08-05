@@ -1,0 +1,13 @@
+# Extra Grafana dashboard provider, mounted into the otel-lgtm image's
+# provisioning directory (/otel-lgtm/grafana/conf/provisioning/dashboards/).
+# The image's own providers (RED metrics, JVM) live in grafana-dashboards.yaml
+# there; this file is added alongside them under a different name, so nothing
+# built into the image is overwritten.
+apiVersion: 1
+
+providers:
+  - name: "RPG Gameplay"
+    type: file
+    options:
+      path: /otel-lgtm/dashboards-rpg/rpg-gameplay.json
+      foldersFromFilesStructure: false
