@@ -398,6 +398,7 @@ jobs:
           MONITORING_ENABLED: ${{ vars.MONITORING_ENABLED || 'true' }}
           GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
           GRAFANA_USER: ${{ vars.GRAFANA_USER || 'admin' }}
+          GRAFANA_ANONYMOUS: ${{ vars.GRAFANA_ANONYMOUS || 'false' }}
           GRAFANA_PORT: ${{ vars.GRAFANA_PORT || '3000' }}
           GRAFANA_BIND: ${{ vars.GRAFANA_BIND || '0.0.0.0' }}
           PROMETHEUS_PORT: ${{ vars.PROMETHEUS_PORT || '9090' }}
@@ -446,6 +447,7 @@ jobs:
             echo "OTEL_LGTM_VERSION=${OTEL_LGTM_VERSION}"
             echo "GRAFANA_USER=${GRAFANA_USER}"
             echo "GRAFANA_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}"
+            echo "GRAFANA_ANONYMOUS=${GRAFANA_ANONYMOUS}"
             echo "GRAFANA_PORT=${GRAFANA_PORT}"
             echo "GRAFANA_BIND=${GRAFANA_BIND}"
             echo "PROMETHEUS_PORT=${PROMETHEUS_PORT}"

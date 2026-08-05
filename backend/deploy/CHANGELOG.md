@@ -31,7 +31,22 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   table, how staging/production get monitoring (set one secret), and firewall
   guidance — SSH tunnel, Caddy reverse proxy + TLS, ufw allowlist, plus the
   `DOCKER-USER` chain caveat (Docker's iptables rules bypass ufw `INPUT`).
-  Guidance only; no proxy is implemented.
+  Guidance only; no proxy is implemented. Also documents the two Grafana gotchas
+  found while verifying the deploy: the anonymous-admin default (above) and the
+  fact that `GF_SECURITY_ADMIN_PASSWORD` is applied **only when Grafana creates
+  the admin user** — rotating the secret against an existing `lgtm-data` volume
+  silently keeps the old password, so the doc gives the drop-the-DB procedure
+  (`grafana cli admin reset-admin-password` reports success but produces a hash
+  that does not authenticate against this image).
+
+### Fixed
+- **Grafana was reachable as an anonymous org Admin.** `grafana/otel-lgtm`'s
+  `run-grafana.sh` exports `GF_AUTH_ANONYMOUS_ENABLED=true` +
+  `GF_AUTH_ANONYMOUS_ORG_ROLE=Admin` whenever the variable is *unset*, so the
+  login page was decoration — verified live: `GET /api/org` returned 200 with no
+  credentials. The `lgtm` service now always sets
+  `GF_AUTH_ANONYMOUS_ENABLED: ${GRAFANA_ANONYMOUS:-false}`. Would have shipped
+  an open admin console the moment Grafana was published on a VPS.
 
 ### Changed
 - `lgtm` service port bindings are parameterised for VPS exposure control:

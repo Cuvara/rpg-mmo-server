@@ -184,6 +184,7 @@ environment secret** — no new workflow, no manual `make monitoring-up`.
 | **secret** | `GRAFANA_ADMIN_PASSWORD` | *(none — required)* | `GF_SECURITY_ADMIN_PASSWORD`. The deploy **fails** with `::error` if unset while monitoring is enabled. |
 | var | `MONITORING_ENABLED` | `true` | Set to exactly `false` to deploy the plain meta stack; `--remove-orphans` then tears the running lgtm container down. |
 | var | `GRAFANA_USER` | `admin` | |
+| var | `GRAFANA_ANONYMOUS` | `false` | See "Anonymous access" below — leave off unless the stack is unreachable from outside the host. |
 | var | `GRAFANA_PORT` | `3000` | dev uses `3001` — `3000` is a popular port. |
 | var | `GRAFANA_BIND` | `0.0.0.0` | Host interface for the published Grafana port. See firewall guidance below. |
 | var | `PROMETHEUS_PORT` / `PROMETHEUS_BIND` | `9090` / `127.0.0.1` | Loopback-only: the bundled Prometheus has no auth at all. |
@@ -194,6 +195,54 @@ The healthcheck in `scripts/deploy-local.sh` curls Grafana's `/api/health` and
 is **warn-only by design**: observability is not on the gameplay critical path,
 so a dead Grafana must never fail a deploy that otherwise put a healthy game
 stack on the box. Gateway/gameserver stay hard failures.
+
+### Two Grafana gotchas this stack pins down
+
+Both were found by actually deploying the stack and probing it — neither is
+obvious from the compose file.
+
+**1. The image ships anonymous *Admin* access.** `otel-lgtm`'s
+`run-grafana.sh` does:
+
+```sh
+if [ -z "${GF_AUTH_ANONYMOUS_ENABLED:-}" ]; then
+    export GF_AUTH_ANONYMOUS_ENABLED=true
+    export GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+fi
+```
+
+So an unset variable means *anyone who can reach the port is an org admin* —
+the login page is decoration. Convenient on a laptop, an open admin console on a
+VPS. `docker-compose.yml` therefore always sets
+`GF_AUTH_ANONYMOUS_ENABLED: ${GRAFANA_ANONYMOUS:-false}`. Verify after any image
+bump:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:${GRAFANA_PORT}/api/org   # want 401
+```
+
+**2. `GF_SECURITY_ADMIN_PASSWORD` only applies on first boot.** Grafana reads it
+when it *creates* the admin user in an empty `grafana.db`. The `lgtm-data`
+volume persists that DB, so **changing the secret and redeploying does not
+change the password** — the old one keeps working and the deploy looks fine.
+
+To rotate on an existing environment, change it *in Grafana* (Profile →
+Change password) and update the `GRAFANA_ADMIN_PASSWORD` secret to match, or —
+if the current password is lost — drop the Grafana DB and let the next deploy
+recreate it from the secret:
+
+```bash
+cd "$RPG_DEPLOY_DIR/deploy"
+docker compose --profile monitoring stop lgtm
+docker compose --profile monitoring run --rm --entrypoint sh lgtm -c 'rm -f /data/grafana/data/grafana.db'
+docker compose --profile monitoring up -d lgtm
+```
+
+Only Grafana's own state (users, ad-hoc dashboards, preferences) is lost — the
+provisioned "RPG Gameplay" dashboard and datasources come back from files, and
+the Prometheus/Loki/Tempo data under `/data` is untouched. `grafana cli admin
+reset-admin-password` is **not** a working alternative here: it reports success
+against this image's DB but the resulting hash does not authenticate.
 
 ### Firewall / exposure
 
