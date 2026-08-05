@@ -142,9 +142,22 @@ dump_db() {
 
 	# A dump that pg_restore cannot list is not a backup. Catch corruption now,
 	# not during an incident.
-	if ! "$DOCKER" exec -i "$container" pg_restore --list >/dev/null 2>&1 <"$out.partial"; then
+	#
+	# Retry with a sync in between: on WSL drvfs mounts (/mnt/*) a file read
+	# immediately after the redirect closes can briefly appear truncated, which
+	# made this check flake in CI while the dump itself was fine.
+	local verify_ok=0 attempt
+	for attempt in 1 2 3; do
+		sync "$out.partial" 2>/dev/null || sync
+		if "$DOCKER" exec -i "$container" pg_restore --list >/dev/null 2>&1 <"$out.partial"; then
+			verify_ok=1
+			break
+		fi
+		sleep "$attempt"
+	done
+	if [ "$verify_ok" -ne 1 ]; then
 		rm -f "$out.partial"
-		die "verification failed: '$label' dump is not a readable pg_restore archive"
+		die "verification failed: '$label' dump is not a readable pg_restore archive (3 attempts)"
 	fi
 
 	mv "$out.partial" "$out"
