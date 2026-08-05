@@ -23,6 +23,11 @@ name: CD — Build & Deploy
 #                                        deploy ─► post-deploy-smoke ─► summary
 #   (*) build-images runs only for production / build_images=true and is not
 #       on the deploy path.
+#
+# The `deploy` job has two modes, chosen per environment by vars.DEPLOY_MODE:
+#   host       (default) — bundle binaries supervised by scripts/deploy-local.sh
+#   containers           — images built on the runner, brought up by the compose
+#                          `realtime` profile. See backend/deploy/docs/CICD.md.
 
 on:
   push:
@@ -306,8 +311,12 @@ jobs:
           cp -r backend/deploy/monitoring dist/deploy/monitoring
           cp -r backend/deploy/db         dist/deploy/db
           cp scripts/deploy-local.sh dist/scripts/
+          # Writes the Redis registry entry the gateway looks up. Needed by BOTH
+          # deploy modes — the C# game server has no Redis client of its own.
+          cp scripts/register-gameserver.sh dist/scripts/
           echo "${GITHUB_SHA}" > dist/COMMIT
           for f in bin/gateway bin/smoketest bin/gameserver-dotnet deploy/nakama.so \
+                   scripts/deploy-local.sh scripts/register-gameserver.sh \
                    deploy/monitoring/prometheus.yaml \
                    deploy/monitoring/grafana-dashboards.yaml \
                    deploy/monitoring/dashboards/rpg-gameplay.json \
@@ -334,12 +343,36 @@ jobs:
     environment: ${{ needs.resolve.outputs.environment }}
     outputs:
       deploy_dir: ${{ steps.paths.outputs.deploy_dir }}
+      deploy_mode: ${{ steps.paths.outputs.deploy_mode }}
     steps:
-      - name: Resolve deploy dir
+      # DEPLOY_MODE picks how the realtime services run on this box:
+      #   host       (default) — prebuilt binaries from the bundle, supervised by
+      #                          scripts/deploy-local.sh (systemd or nohup).
+      #   containers          — gateway + gameserver images are built on this
+      #                          runner and brought up by the compose `realtime`
+      #                          profile, sharing the meta stack's network.
+      # Everything else (secrets, ports, monitoring) is identical, so moving an
+      # environment between the two is a single variable flip.
+      - name: Resolve deploy dir + mode
         id: paths
         env:
           RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
-        run: echo "deploy_dir=${RPG_DEPLOY_DIR}" >> "$GITHUB_OUTPUT"
+          DEPLOY_MODE: ${{ vars.DEPLOY_MODE || 'host' }}
+        run: |
+          set -euo pipefail
+          case "${DEPLOY_MODE}" in
+            host|containers) ;;
+            *) echo "::error::vars.DEPLOY_MODE must be 'host' or 'containers' (got '${DEPLOY_MODE}')"; exit 1 ;;
+          esac
+          echo "deploy_dir=${RPG_DEPLOY_DIR}" >> "$GITHUB_OUTPUT"
+          echo "deploy_mode=${DEPLOY_MODE}"   >> "$GITHUB_OUTPUT"
+          echo "deploy mode: ${DEPLOY_MODE}"
+
+      # Needed only by containers mode (the image build needs the Dockerfiles
+      # and sources), but checking out unconditionally keeps the job simple and
+      # costs a few seconds.
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Download deployment bundle
         uses: actions/download-artifact@v4
@@ -360,7 +393,8 @@ jobs:
           install -m 0755 dist/bin/gateway            "$RPG_DEPLOY_DIR/bin/gateway"
           install -m 0755 dist/bin/gameserver-dotnet   "$RPG_DEPLOY_DIR/bin/gameserver-dotnet"
           install -m 0755 dist/bin/smoketest           "$RPG_DEPLOY_DIR/bin/smoketest"
-          install -m 0755 dist/scripts/deploy-local.sh "$RPG_DEPLOY_DIR/scripts/deploy-local.sh"
+          install -m 0755 dist/scripts/deploy-local.sh        "$RPG_DEPLOY_DIR/scripts/deploy-local.sh"
+          install -m 0755 dist/scripts/register-gameserver.sh "$RPG_DEPLOY_DIR/scripts/register-gameserver.sh"
           mkdir -p "$RPG_DEPLOY_DIR/deploy/modules"
           install -m 0644 dist/deploy/nakama.so          "$RPG_DEPLOY_DIR/deploy/modules/nakama.so"
           install -m 0644 dist/deploy/docker-compose.yml "$RPG_DEPLOY_DIR/deploy/docker-compose.yml"
@@ -368,11 +402,25 @@ jobs:
           install -m 0644 dist/deploy/.env.example       "$RPG_DEPLOY_DIR/deploy/.env.example"
           # Compose bind-mount sources. Replaced wholesale so a file deleted in
           # git also disappears on the host; docker re-reads them on `up`.
+          # Prometheus and Grafana read these files ONCE, at container start, so
+          # a changed config is invisible until lgtm is recreated — a silent
+          # "deployed but not applied". Hash before/after to drive the restart
+          # in the compose step below.
+          hash_dir() { [ -d "$1" ] && find "$1" -type f -exec sha256sum {} + | sort -k2 | sha256sum | cut -d' ' -f1 || echo none; }
+          mon_before="$(hash_dir "$RPG_DEPLOY_DIR/deploy/monitoring")"
           for d in monitoring db; do
             rm -rf "$RPG_DEPLOY_DIR/deploy/$d"
             cp -r "dist/deploy/$d" "$RPG_DEPLOY_DIR/deploy/$d"
             chmod -R a+rX "$RPG_DEPLOY_DIR/deploy/$d"
           done
+          mon_after="$(hash_dir "$RPG_DEPLOY_DIR/deploy/monitoring")"
+          if [ "$mon_before" = "$mon_after" ]; then
+            echo "MONITORING_CONFIG_CHANGED=0" >> "$GITHUB_ENV"
+            echo "monitoring config unchanged"
+          else
+            echo "MONITORING_CONFIG_CHANGED=1" >> "$GITHUB_ENV"
+            echo "monitoring config CHANGED — lgtm will be restarted"
+          fi
           cp dist/COMMIT "$RPG_DEPLOY_DIR/COMMIT"
 
       # Secrets come from the GitHub Environment (dev / staging / production).
@@ -394,6 +442,23 @@ jobs:
           GAMESERVER_MAP_ID: ${{ vars.GAMESERVER_MAP_ID || 'map_01' }}
           REDIS_ADDR: ${{ vars.REDIS_ADDR || 'localhost:6379' }}
           GAME_DB_URL: ${{ vars.GAME_DB_URL || '' }}
+          # --- containers mode (compose `realtime` profile) --------------------
+          DEPLOY_MODE: ${{ steps.paths.outputs.deploy_mode }}
+          # Published host ports for the realtime containers. Empty = derive them
+          # from GATEWAY_ADDR / GAMESERVER_ADDR below, so the containers take
+          # over exactly the ports every other component already expects.
+          GATEWAY_CONTAINER_PORT: ${{ vars.GATEWAY_CONTAINER_PORT || '' }}
+          GAMESERVER_CONTAINER_PORT: ${{ vars.GAMESERVER_CONTAINER_PORT || '' }}
+          GATEWAY_METRICS_PORT: ${{ vars.GATEWAY_METRICS_PORT || '9102' }}
+          GAMESERVER_METRICS_PORT: ${{ vars.GAMESERVER_METRICS_PORT || '9101' }}
+          # Listen address of the C# metrics endpoint INSIDE its container. Must
+          # stay a resolvable name, not a wildcard — see docker-compose.yml.
+          GAMESERVER_METRICS_ADDR: ${{ vars.GAMESERVER_METRICS_ADDR || 'gameserver-dotnet:9101' }}
+          # The address handed to CLIENTS in MsgEnterWorldResp.ServerAddr. Empty
+          # = ":<gameserver container port>", which clients normalize to
+          # loopback — correct on a dev box, WRONG on a VPS. Set it to
+          # <public-host>:<port> there.
+          GAMESERVER_PUBLIC_ADDR: ${{ vars.GAMESERVER_PUBLIC_ADDR || '' }}
           # --- monitoring (compose `monitoring` profile / grafana-otel-lgtm) ---
           MONITORING_ENABLED: ${{ vars.MONITORING_ENABLED || 'true' }}
           GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
@@ -423,6 +488,11 @@ jobs:
             echo "::error::environment secret GRAFANA_ADMIN_PASSWORD is not set (required while vars.MONITORING_ENABLED != 'false')"
             exit 1
           fi
+          # Container ports default to the ports the listen addresses already
+          # name, so ":8000"/":9200" stay true whichever mode is active.
+          : "${GATEWAY_CONTAINER_PORT:=${GATEWAY_ADDR##*:}}"
+          : "${GAMESERVER_CONTAINER_PORT:=${GAMESERVER_ADDR##*:}}"
+          : "${GAMESERVER_PUBLIC_ADDR:=:${GAMESERVER_CONTAINER_PORT}}"
           umask 077
           envfile="$RPG_DEPLOY_DIR/deploy/.env"
           {
@@ -443,6 +513,15 @@ jobs:
             echo "GAMESERVER_RUNTIME=dotnet"
             echo "GAMESERVER_ID=gs-dotnet-${GAMESERVER_MAP_ID}"
             echo "GAME_DB_URL=${GAME_DB_URL}"
+            echo "DEPLOY_MODE=${DEPLOY_MODE}"
+            echo "GATEWAY_CONTAINER_PORT=${GATEWAY_CONTAINER_PORT}"
+            echo "GAMESERVER_CONTAINER_PORT=${GAMESERVER_CONTAINER_PORT}"
+            echo "GATEWAY_METRICS_PORT=${GATEWAY_METRICS_PORT}"
+            echo "GAMESERVER_METRICS_PORT=${GAMESERVER_METRICS_PORT}"
+            echo "GAMESERVER_METRICS_ADDR=${GAMESERVER_METRICS_ADDR}"
+            echo "GAMESERVER_PUBLIC_ADDR=${GAMESERVER_PUBLIC_ADDR}"
+            echo "GATEWAY_IMAGE=rpg-mmo/gateway:${GITHUB_SHA}"
+            echo "GAMESERVER_IMAGE=rpg-mmo/gameserver-dotnet:${GITHUB_SHA}"
             echo "MONITORING_ENABLED=${MONITORING_ENABLED}"
             echo "OTEL_LGTM_VERSION=${OTEL_LGTM_VERSION}"
             echo "GRAFANA_USER=${GRAFANA_USER}"
@@ -459,13 +538,49 @@ jobs:
           chmod 600 "$envfile"
           echo "wrote $envfile ($(wc -l < "$envfile") vars, values redacted)"
 
-      # postgres + redis + nakama (+ the `monitoring` profile: grafana/otel-lgtm).
+      # ---------------------------------------------------- containers mode only
+      # Host-mode processes own the same ports the containers are about to
+      # publish, so they have to go first. Safe when nothing is running:
+      # deploy-local.sh stop just reports "not running" for a missing pidfile.
+      - name: Stop host-mode realtime services
+        if: steps.paths.outputs.deploy_mode == 'containers'
+        env:
+          RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
+        run: |
+          set -euo pipefail
+          chmod +x "$RPG_DEPLOY_DIR/scripts/deploy-local.sh"
+          "$RPG_DEPLOY_DIR/scripts/deploy-local.sh" stop
+
+      # Built HERE, on the deploy target, rather than pulled from a registry:
+      # dev/staging have no registry credentials and the images never leave this
+      # box. `build-images` (GHCR) stays the production/k8s path.
+      #
+      # Contexts are NOT the same: the gateway needs backend/ (its go.mod has
+      # `replace ... => ../shared`), and the C# Dockerfile also copies from
+      # backend/gameserver-dotnet/, so backend/ covers both. Paths are kept
+      # cwd-relative — under WSL `docker` is a shim for docker.exe, which cannot
+      # resolve absolute /mnt/* paths.
+      - name: Build realtime images on the runner
+        if: steps.paths.outputs.deploy_mode == 'containers'
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          docker build -f deploy/docker/Dockerfile.gateway \
+            -t "rpg-mmo/gateway:${GITHUB_SHA}" -t rpg-mmo/gateway:dev .
+          docker build -f deploy/docker/Dockerfile.gameserver-dotnet \
+            -t "rpg-mmo/gameserver-dotnet:${GITHUB_SHA}" -t rpg-mmo/gameserver-dotnet:dev .
+          docker image ls --filter reference='rpg-mmo/*' \
+            --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}'
+
+      # postgres + redis + nakama (+ the `monitoring` profile: grafana/otel-lgtm,
+      # + the `realtime` profile in containers mode: gateway + gameserver).
       # The plugin .so is mounted from ./modules, monitoring configs from
       # ./monitoring — both installed by the sync step above.
-      - name: Start / update the meta stack (docker compose)
+      - name: Start / update the stack (docker compose)
         env:
           RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
           MONITORING_ENABLED: ${{ vars.MONITORING_ENABLED || 'true' }}
+          DEPLOY_MODE: ${{ steps.paths.outputs.deploy_mode }}
         working-directory: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
         run: |
           set -euo pipefail
@@ -481,8 +596,28 @@ jobs:
           else
             echo "monitoring profile: disabled (vars.MONITORING_ENABLED=false)"
           fi
+          # In containers mode the realtime profile joins in, so the gateway and
+          # game server come up on the compose network next to redis/postgres.
+          # In host mode it stays off and --remove-orphans removes any leftover
+          # realtime containers, making the switch reversible in one variable.
+          if [ "${DEPLOY_MODE}" = "containers" ]; then
+            profile_args+=(--profile realtime)
+            echo "realtime profile: ENABLED (DEPLOY_MODE=containers)"
+          else
+            echo "realtime profile: disabled (DEPLOY_MODE=host)"
+          fi
+          # `pull` cannot fetch the locally built rpg-mmo/* tags — tolerated, the
+          # images are already in the daemon's store.
           docker compose "${profile_args[@]}" pull --quiet || true
           docker compose "${profile_args[@]}" up -d --remove-orphans
+          # `up -d` does NOT recreate a container whose bind-mounted files
+          # changed — only its image/config/env are compared. Without this, a
+          # new prometheus.yaml or dashboard sits on disk unread until someone
+          # happens to restart lgtm.
+          if [ "${MONITORING_ENABLED}" != "false" ] && [ "${MONITORING_CONFIG_CHANGED:-0}" = "1" ]; then
+            echo "restarting lgtm to pick up the new monitoring config"
+            docker compose "${profile_args[@]}" restart lgtm
+          fi
           docker compose "${profile_args[@]}" ps
           # The gameserver opens GAME_DB_URL at boot and exits(1) if postgres-game
           # is not accepting connections yet, so wait for its healthcheck before
@@ -494,7 +629,12 @@ jobs:
             sleep 2
           done
 
+      # ------------------------------------------------------- host mode only
+      # deploy-local.sh both (re)starts the binaries AND writes the game
+      # server's Redis registry entry; in containers mode compose owns the
+      # processes and the registration is a separate step below.
       - name: Restart realtime services (systemd, else nohup)
+        if: steps.paths.outputs.deploy_mode == 'host'
         env:
           RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
         run: |
@@ -502,13 +642,91 @@ jobs:
           chmod +x "$RPG_DEPLOY_DIR/scripts/deploy-local.sh"
           "$RPG_DEPLOY_DIR/scripts/deploy-local.sh" restart
 
-      - name: Post-deploy healthcheck
+      - name: Post-deploy healthcheck (host mode)
+        if: steps.paths.outputs.deploy_mode == 'host'
         env:
           RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
         run: |
           set -euo pipefail
           "$RPG_DEPLOY_DIR/scripts/deploy-local.sh" health
           "$RPG_DEPLOY_DIR/scripts/deploy-local.sh" status
+
+      # -------------------------------------------------- containers mode only
+      # The C# game server has no Redis client, so nothing would ever appear in
+      # the registry the gateway reads and MsgEnterWorld would fail with "no
+      # available server". GAMESERVER_PUBLIC_ADDR (from deploy/.env) is what
+      # clients are handed — on a VPS it must be the public host:port.
+      - name: Register the game server in Redis
+        if: steps.paths.outputs.deploy_mode == 'containers'
+        env:
+          RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
+        run: |
+          set -euo pipefail
+          set -a
+          # shellcheck disable=SC1091
+          . "$RPG_DEPLOY_DIR/deploy/.env"
+          set +a
+          chmod +x "$RPG_DEPLOY_DIR/scripts/register-gameserver.sh"
+          "$RPG_DEPLOY_DIR/scripts/register-gameserver.sh" register
+
+      # Both runtime images expose /healthz on their metrics port — the gateway
+      # from backend/gateway/metrics, the C# server from
+      # GameServer/Observability/MetricsEndpoint.cs. That is a real liveness
+      # signal (the process is serving), unlike a bare TCP connect, and it works
+      # from the host even though the gateway image is distroless.
+      - name: Post-deploy healthcheck (containers mode)
+        if: steps.paths.outputs.deploy_mode == 'containers'
+        env:
+          RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
+        run: |
+          set -euo pipefail
+          set -a
+          # shellcheck disable=SC1091
+          . "$RPG_DEPLOY_DIR/deploy/.env"
+          set +a
+
+          probe() { # name url [host-header]
+            local i hdr=()
+            [ -n "${3:-}" ] && hdr=(-H "Host: $3")
+            for i in $(seq 1 45); do
+              if curl -fsS --max-time 3 "${hdr[@]}" "$2" >/dev/null 2>&1; then
+                echo "    $1 healthy (${i}s): $2"
+                return 0
+              fi
+              sleep 1
+            done
+            echo "::error::$1 not healthy after 45s: $2"
+            return 1
+          }
+          tcp() { # name port
+            local i
+            for i in $(seq 1 45); do
+              if timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$2" >/dev/null 2>&1; then
+                echo "    $1 accepting connections on tcp/$2 (${i}s)"
+                return 0
+              fi
+              sleep 1
+            done
+            echo "::error::$1 not accepting connections on tcp/$2"
+            return 1
+          }
+
+          rc=0
+          probe gateway    "http://127.0.0.1:${GATEWAY_METRICS_PORT:-9102}/healthz" || rc=1
+          # The C# metrics listener is bound to a named prefix, not a wildcard
+          # (see the METRICS_ADDR comment in docker-compose.yml), so a request
+          # from the host must carry the matching Host header or HttpListener
+          # answers 404.
+          probe gameserver "http://127.0.0.1:${GAMESERVER_METRICS_PORT:-9101}/healthz" \
+                           "${GAMESERVER_METRICS_ADDR:-gameserver-dotnet:9101}" || rc=1
+          tcp   gateway    "${GATEWAY_CONTAINER_PORT:-8000}"                           || rc=1
+          tcp   gameserver "${GAMESERVER_CONTAINER_PORT:-9200}"                        || rc=1
+          docker ps --filter name=rpg- --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+          if [ "$rc" != 0 ]; then
+            echo "--- gateway logs ---";    docker logs --tail 50 rpg-gateway    2>&1 || true
+            echo "--- gameserver logs ---"; docker logs --tail 50 rpg-gameserver 2>&1 || true
+          fi
+          exit "$rc"
 
   # ------------------------------------------------------- post-deploy smoke
   # Full-flow smoke test against the freshly deployed stack: Nakama health,
@@ -551,6 +769,7 @@ jobs:
             echo "| commit | \`${{ github.sha }}\` |"
             echo "| runner | \`${{ join(fromJSON(needs.resolve.outputs.runner_labels), ', ') }}\` |"
             echo "| deploy dir | \`${{ needs.deploy.outputs.deploy_dir }}\` |"
+            echo "| deploy mode | \`${{ needs.deploy.outputs.deploy_mode }}\` |"
             echo "| deploy | ${{ needs.deploy.result }} |"
             echo "| smoke test | ${{ needs['post-deploy-smoke'].result }} |"
           } >> "$GITHUB_STEP_SUMMARY"

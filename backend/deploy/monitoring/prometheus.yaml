@@ -60,7 +60,15 @@ scrape_configs:
   # 9101 = C# game server, 9102 = Go gateway (`--metrics-addr`).
   # A target stays DOWN until that process is running; that is expected in a
   # partial dev stack.
+  # The C# exporter serves OpenTelemetry instrument names, which contain DOTS
+  # (`gameserver.tick.duration`). Prometheus 3 negotiates UTF-8 by default, so
+  # it would store them verbatim — and every dashboard query, which uses the
+  # underscore form, silently returns "No data" against a target that reads UP.
+  # Forcing the escaping scheme makes the exporter hand over
+  # `gameserver_tick_duration_seconds_bucket` instead. Applies to both the
+  # host-run and containerised game server.
   - job_name: gameserver
+    metric_name_escaping_scheme: underscores
     static_configs:
       - targets: ["host.docker.internal:9101"]
         labels:
@@ -72,9 +80,18 @@ scrape_configs:
         labels:
           service: gateway
 
-  # Containerised variants (docker compose --profile realtime / realtime-dotnet).
-  # Down when those profiles are not up — harmless.
+  # Containerised variants (docker compose --profile realtime, i.e. CD's
+  # DEPLOY_MODE=containers). Down when that profile is not up — harmless.
+  #
+  # In containers mode the two host-facing jobs above behave differently from
+  # each other, because the containers publish the same ports on the host:
+  #   * `gateway` scrapes the gateway container through host.docker.internal and
+  #     reads UP — a duplicate of `gateway-container`, same series.
+  #   * `gameserver` stays DOWN: the C# listener is bound to a named prefix, so
+  #     a request with `Host: host.docker.internal:9101` gets a 404.
+  # Neither is a fault; the *-container jobs are the authoritative ones.
   - job_name: gameserver-container
+    metric_name_escaping_scheme: underscores
     static_configs:
       - targets: ["gameserver-dotnet:9101"]
         labels:

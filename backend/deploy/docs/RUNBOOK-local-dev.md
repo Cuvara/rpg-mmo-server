@@ -289,6 +289,42 @@ Redis persistence is AOF (`appendfsync everysec`) plus an RDB snapshot rule, on
 the `redis-data` volume — sessions and registry entries survive a restart.
 `make reset` wipes it along with the DB.
 
+## 8. Running the realtime services as containers
+
+Everything above runs gateway and game server on the host. The `realtime`
+compose profile runs them as containers instead — the same thing CD does when an
+environment sets `DEPLOY_MODE=containers` (see `docs/CICD.md` §3b).
+
+```bash
+cd backend/deploy
+# build first — contexts differ from this directory:
+docker build -f docker/Dockerfile.gateway           -t rpg-mmo/gateway:dev ..
+docker build -f docker/Dockerfile.gameserver-dotnet -t rpg-mmo/gameserver-dotnet:dev ..
+
+docker compose --profile realtime --profile monitoring up -d
+```
+
+Points that bite:
+
+- **Stop the host processes first.** With the CD defaults the containers publish
+  the same `:8000` / `:9200`; two owners of one port means the second bind
+  fails. `scripts/deploy-local.sh stop` clears the host side.
+- **The game server must be registered by hand.** It has no Redis client, so
+  nothing appears in the registry and `MsgEnterWorld` fails with *no available
+  server for map …*. Run `scripts/register-gameserver.sh register` after
+  `compose up` (that is exactly what the CD job does).
+  `GAMESERVER_PUBLIC_ADDR` in `.env` is the address clients are handed.
+- **Health probes come from the host**, because the gateway image is distroless
+  (no shell, no curl): `curl http://127.0.0.1:9102/healthz` for the gateway, and
+  for the game server `curl -H 'Host: gameserver-dotnet:9101'
+  http://127.0.0.1:9101/healthz` (see `docs/MONITORING.md` for why the header is
+  needed).
+- **Container-to-container addressing** is by service name: `redis:6379`,
+  `postgres-game:5432`, `nakama:7350` — never `localhost`.
+
+`docker compose --profile realtime down` (or simply dropping the profile and
+running `up -d --remove-orphans`) puts you back on the host path.
+
 ## Security note
 
 Every credential in `.env.example` (`localdev`, `admin/password`, `defaultkey`,
