@@ -6,6 +6,61 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Monitoring now deploys through CD (VPS-ready)** — `cd.yml` brings the
+  `monitoring` profile up on every environment; no hand-run `make monitoring-up`.
+  - `bundle` stages `backend/deploy/monitoring/` **and** `backend/deploy/db/`
+    into the artifact and asserts each mounted file exists. Previously only
+    `docker-compose.yml` + `Makefile` + `.env.example` shipped, so a fresh host
+    got empty *directories* where `prometheus.yaml` / `init-gamestate.sql` were
+    expected — silently wrong config instead of a hard failure.
+  - `deploy` installs those trees into `$RPG_DEPLOY_DIR/deploy/`, replacing the
+    previous copies wholesale so deletions in git propagate.
+  - Compose step runs `docker compose --profile monitoring up -d
+    --remove-orphans`, gated on `vars.MONITORING_ENABLED != 'false'` (default
+    ON). Disabling it removes the running `rpg-lgtm` rather than orphaning it.
+  - Env-file step writes `MONITORING_ENABLED`, `OTEL_LGTM_VERSION`,
+    `GRAFANA_USER/ADMIN_PASSWORD/PORT/BIND`, `PROMETHEUS_PORT/BIND`,
+    `OTLP_GRPC_PORT/HTTP_PORT/BIND`. New **required** environment secret
+    `GRAFANA_ADMIN_PASSWORD` (fails the deploy with `::error` when monitoring is
+    enabled and it is unset).
+- `scripts/deploy-local.sh health` curls Grafana `/api/health` on
+  `GRAFANA_PORT`. Warn-only by design and skipped when `MONITORING_ENABLED=false`
+  — observability is off the gameplay critical path, so a dead Grafana must not
+  fail a deploy that put a healthy game stack on the box.
+- `docs/MONITORING.md` §"Deploying to a VPS": per-environment secret/variable
+  table, how staging/production get monitoring (set one secret), and firewall
+  guidance — SSH tunnel, Caddy reverse proxy + TLS, ufw allowlist, plus the
+  `DOCKER-USER` chain caveat (Docker's iptables rules bypass ufw `INPUT`).
+  Guidance only; no proxy is implemented. Also documents the two Grafana gotchas
+  found while verifying the deploy: the anonymous-admin default (above) and the
+  fact that `GF_SECURITY_ADMIN_PASSWORD` is applied **only when Grafana creates
+  the admin user** — rotating the secret against an existing `lgtm-data` volume
+  silently keeps the old password, so the doc gives the drop-the-DB procedure
+  (`grafana cli admin reset-admin-password` reports success but produces a hash
+  that does not authenticate against this image).
+
+### Fixed
+- **Grafana was reachable as an anonymous org Admin.** `grafana/otel-lgtm`'s
+  `run-grafana.sh` exports `GF_AUTH_ANONYMOUS_ENABLED=true` +
+  `GF_AUTH_ANONYMOUS_ORG_ROLE=Admin` whenever the variable is *unset*, so the
+  login page was decoration — verified live: `GET /api/org` returned 200 with no
+  credentials. The `lgtm` service now always sets
+  `GF_AUTH_ANONYMOUS_ENABLED: ${GRAFANA_ANONYMOUS:-false}`. Would have shipped
+  an open admin console the moment Grafana was published on a VPS.
+
+### Changed
+- `lgtm` service port bindings are parameterised for VPS exposure control:
+  Grafana `${GRAFANA_BIND:-0.0.0.0}`, while OTLP and the bundled Prometheus now
+  default to `127.0.0.1` — both are completely unauthenticated and nothing
+  off-box talks to them yet.
+- Grafana admin password env renamed `GRAFANA_PASSWORD` → `GRAFANA_ADMIN_PASSWORD`
+  (matches the CD secret name), default `admin` → `localdev` (matches the other
+  dev defaults in `.env.example`). Updated in `docker-compose.yml`,
+  `.env.example`, `Makefile` (`monitoring-up` banner) and `docs/MONITORING.md`.
+  **Action:** update the key in any existing local `backend/deploy/.env`.
+- `docs/CICD.md`: `GRAFANA_ADMIN_PASSWORD` added to the required-secrets table,
+  new monitoring-variables table, deploy-dir layout lists `deploy/monitoring/`
+  and `deploy/db/`.
 - `monitoring` compose profile: one `grafana/otel-lgtm` container (Grafana +
   Prometheus + Loki + Tempo + Pyroscope + OTel Collector) on `${GRAFANA_PORT:-3000}`,
   `${PROMETHEUS_PORT:-9090}`, OTLP `${OTLP_GRPC_PORT:-4317}` / `${OTLP_HTTP_PORT:-4318}`,
