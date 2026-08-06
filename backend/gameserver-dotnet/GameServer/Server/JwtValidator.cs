@@ -42,11 +42,37 @@ public static partial class JwtValidator
     private partial class JwtJsonContext : JsonSerializerContext;
 
     /// <summary>
+    /// Why a verification failed. The distinction matters for
+    /// <see cref="JwtKeyring"/>: a signature that matched a key but whose
+    /// <c>exp</c> has passed is a definitive answer, so the keyring must stop
+    /// instead of retrying the remaining keys. Mirrors the short-circuit in the
+    /// Go <c>shared/jwt</c> Keyring.Verify.
+    /// </summary>
+    public enum VerifyStatus
+    {
+        /// <summary>Token verified.</summary>
+        Ok,
+        /// <summary>Empty token/secret, wrong segment count, bad base64, bad JSON, wrong alg, or missing sub.</summary>
+        Invalid,
+        /// <summary>Well-formed token, but the HMAC did not match this secret.</summary>
+        BadSignature,
+        /// <summary>Signature matched this secret, but the token has expired.</summary>
+        Expired
+    }
+
+    /// <summary>
     /// Verify an HS256 JWT token and extract claims.
     /// Returns null if the token is invalid, expired, or uses a different algorithm.
     /// </summary>
-    public static JwtClaims? Verify(string token, string secret)
+    public static JwtClaims? Verify(string token, string secret) => Verify(token, secret, out _);
+
+    /// <summary>
+    /// Verify an HS256 JWT token and extract claims, reporting why it failed.
+    /// </summary>
+    public static JwtClaims? Verify(string token, string secret, out VerifyStatus status)
     {
+        status = VerifyStatus.Invalid;
+
         if (string.IsNullOrEmpty(token) || string.IsNullOrEmpty(secret))
             return null;
 
@@ -72,7 +98,10 @@ public static partial class JwtValidator
 
             byte[] actualSig = Base64UrlDecode(parts[2]);
             if (!CryptographicOperations.FixedTimeEquals(expectedSig, actualSig))
+            {
+                status = VerifyStatus.BadSignature;
                 return null;
+            }
 
             // Decode claims
             var claimsBytes = Base64UrlDecode(parts[1]);
@@ -83,8 +112,12 @@ public static partial class JwtValidator
             // Check expiration
             long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             if (claims.Exp > 0 && now > claims.Exp)
+            {
+                status = VerifyStatus.Expired;
                 return null;
+            }
 
+            status = VerifyStatus.Ok;
             return new JwtClaims(claims.UserId, claims.ServerId ?? "", claims.Exp);
         }
         catch

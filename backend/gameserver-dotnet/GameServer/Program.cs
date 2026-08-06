@@ -28,6 +28,11 @@ float mapHeight = float.TryParse(GetArg(args, "--map-height") ?? Env("GAMESERVER
     ? mh : GameConstants.DefaultMapHeight;
 bool useAgones = HasFlag(args, "--agones") || Env("AGONES_ENABLED") == "true";
 string jwtSecret = GetArg(args, "--jwt-secret") ?? Env("JWT_SECRET") ?? "";
+// Secret the GATEWAY signs join tokens with. Deliberately NOT JWT_SECRET: this value
+// is distributed to every game-server pod, so a compromised pod must not be able to
+// mint Nakama-style auth tokens. Empty = reuse JWT_SECRET (pre-split behaviour, warned
+// about below). Comma-separated ("current,previous") to rotate without dropping joins.
+string joinTokenSecret = GetArg(args, "--join-token-secret") ?? Env("JOIN_TOKEN_SECRET") ?? "";
 // Metrics listen address. Unset -> ":9101"; explicitly empty -> metrics disabled.
 string metricsAddr = GetArg(args, "--metrics-addr")
     ?? Environment.GetEnvironmentVariable("METRICS_ADDR")
@@ -126,6 +131,27 @@ if (string.IsNullOrEmpty(jwtSecret))
     logger.LogWarning("JWT_SECRET not set -- token validation will reject all tokens in production");
 }
 
+// Mirror of the gateway's start-up check (backend/gateway/cmd/gateway/main.go): both
+// halves must take the same fallback or the gateway signs join tokens with a key this
+// server does not hold, and every join fails.
+var (joinSecretSpec, joinSharedWithAuth) = ServerOptions.EffectiveJoinTokenSecret(joinTokenSecret, jwtSecret);
+var joinKeyring = JwtKeyring.Parse(joinSecretSpec);
+if (joinSharedWithAuth)
+{
+    logger.LogWarning("JOIN_TOKEN_SECRET is unset -- join tokens are verified with JWT_SECRET; " +
+                      "a leak of either secret compromises both the Nakama auth hop and the game-server hop. " +
+                      "Set JOIN_TOKEN_SECRET (and the matching value on the gateway) before launch.");
+}
+if (!joinKeyring.IsValid)
+{
+    logger.LogWarning("No join-token secret at all (JOIN_TOKEN_SECRET and JWT_SECRET both empty) -- " +
+                      "every join will be rejected");
+}
+logger.LogInformation("  JoinToken: {Source}, {Count} key(s){Rotating}",
+    joinSharedWithAuth ? "JWT_SECRET (fallback)" : "JOIN_TOKEN_SECRET",
+    joinKeyring.Count,
+    joinKeyring.Count > 1 ? " -- rotation in progress, previous key(s) still accepted" : "");
+
 // ── Metrics (OpenTelemetry -> Prometheus) ──
 
 using var metrics = new GameMetrics(mapId);
@@ -209,6 +235,7 @@ var options = new ServerOptions
     MapBounds = MapBounds.FromSize(mapWidth, mapHeight),
     Capacity = capacity,
     JwtSecret = jwtSecret,
+    JoinTokenSecret = joinTokenSecret,
     HoldTtl = mode == "dungeon" ? TimeSpan.FromSeconds(60) : TimeSpan.FromSeconds(30),
     SaveInterval = TimeSpan.FromSeconds(30),
     PlayerStore = playerStore,

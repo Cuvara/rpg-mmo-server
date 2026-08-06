@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- **Join tokens are verified with `JOIN_TOKEN_SECRET`, not `JWT_SECRET`.** The join
+  secret is distributed to every game-server pod; the Nakama auth secret is not.
+  Sharing them meant one compromised pod could mint auth tokens for any user. This
+  is the C# half of the split already merged on the Go side — until now, enabling
+  `JOIN_TOKEN_SECRET` on the gateway alone would have broken **every** join, because
+  this server only knew `JWT_SECRET`.
+  - New config: `--join-token-secret` / `JOIN_TOKEN_SECRET`. Unset falls back to
+    `JWT_SECRET` (pre-split behaviour) and logs the same start-up warning the
+    gateway logs, so the two halves cannot silently drift. The fallback lives in
+    `ServerOptions.EffectiveJoinTokenSecret`, mirroring Go's
+    `config.Config.EffectiveJoinTokenSecret`.
+  - `JwtKeyring` (`GameServer/Server/JwtKeyring.cs`) — secret rotation. Both
+    secrets accept a comma-separated `"current,previous"` list: the gateway signs
+    with the first entry, every entry verifies here, so a rotation drains the old
+    population over the join-token TTL instead of logging everyone out. Port of
+    Go's `shared/jwt.Keyring`, including whitespace trimming, dropping empty
+    entries, failing **closed** on an empty keyring, and short-circuiting on an
+    expired token instead of retrying the remaining keys.
+  - `JwtValidator.Verify` gained a `VerifyStatus` overload (Ok / Invalid /
+    BadSignature / Expired) so the keyring can tell "wrong key, try the next" from
+    "right key, dead token" — the distinction the Go short-circuit depends on. The
+    existing two-argument overload is unchanged.
+  - Verified against the real Go gateway on high ports: matching secrets → join
+    accepted; deliberately mismatched secrets → join rejected; gateway signing with
+    the rotated key against a `"previous,current"` keyring → join accepted.
+
 ### Added
 - **Server self-registration and heartbeat (`GameServer/Registry/`).** The server now
   publishes its own entry into the Redis registry the Go gateway reads, refreshes it

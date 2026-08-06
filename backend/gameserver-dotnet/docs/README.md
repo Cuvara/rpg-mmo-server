@@ -78,11 +78,45 @@ set. Flags are **space-separated** (`--addr :9000`).
 | `--keyframe-interval` | `GAMESERVER_KEYFRAME_INTERVAL` | `30` | Delta snapshots between full keyframes; `0` disables delta encoding (see `docs/API.md`) |
 | `--map-width` | `GAMESERVER_MAP_WIDTH` | `1000` | Map width in world units |
 | `--map-height` | `GAMESERVER_MAP_HEIGHT` | `1000` | Map height in world units |
-| `--jwt-secret` | `JWT_SECRET` | *(empty)* | HS256 secret shared with the gateway |
+| `--jwt-secret` | `JWT_SECRET` | *(empty)* | HS256 secret for the Nakama→client auth token. Only used here as the `JOIN_TOKEN_SECRET` fallback |
+| `--join-token-secret` | `JOIN_TOKEN_SECRET` | *(empty → `JWT_SECRET`)* | HS256 secret the **gateway** signs join tokens with. Comma-separated (`current,previous`) to rotate — see below |
 | `--metrics-addr` | `METRICS_ADDR` | `:9101` | Prometheus `/metrics` + `/healthz`; empty disables |
 | `--game-db-url` | `GAME_DB_URL` | *(unset)* | Game-state PostgreSQL DSN — see below |
 | `--migrate-only` | `GAMESERVER_MIGRATE_ONLY=true` | off | Apply pending migrations, then exit — see below |
 | `--agones` | `AGONES_ENABLED=true` | off | Enable the Agones SDK integration |
+
+#### Join-token secret (`JOIN_TOKEN_SECRET`)
+
+The join token the client presents to this server is signed by the gateway with
+`JOIN_TOKEN_SECRET`, **not** with `JWT_SECRET`. The two must hold the same value
+on both halves — the gateway signs, this server verifies:
+
+```bash
+export JOIN_TOKEN_SECRET="$(openssl rand -hex 32)"   # same value on gateway + every game server
+```
+
+`JWT_SECRET` (the Nakama→client auth secret) is never distributed to game-server
+pods, which is the whole point: a compromised pod holds only the join secret and
+therefore cannot mint auth tokens for arbitrary users.
+
+**Fallback.** When `JOIN_TOKEN_SECRET` is unset the server verifies join tokens
+with `JWT_SECRET` and logs a start-up warning. The gateway does exactly the same,
+so an unconfigured deployment still works — but the split is not active. Setting
+it on **one** side only breaks every join.
+
+**Rotation.** Both secrets accept a comma-separated list, `"current,previous"`.
+The gateway signs with the first entry; every entry verifies here, so old tokens
+drain instead of being rejected at the deploy. Procedure:
+
+1. Deploy `JOIN_TOKEN_SECRET="new,old"` to the gateway and every game server.
+2. Wait out the join-token TTL (`constants.JoinTokenTTL`), so no token signed
+   with `old` is still in a client's hands.
+3. Deploy `JOIN_TOKEN_SECRET="new"`.
+
+Whitespace around entries is trimmed and empty entries are dropped, so
+`"new, old"` and a trailing comma are fine. A spec with no usable secret at all
+(and no `JWT_SECRET` either) fails **closed** — every join is rejected and the
+start-up log says so.
 
 #### Player state persistence (`GAME_DB_URL`)
 
