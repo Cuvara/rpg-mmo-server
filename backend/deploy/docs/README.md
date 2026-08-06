@@ -25,6 +25,11 @@ Docs:
 - `DATABASE.md` — numbered game-state migrations (how to add one, the
   backward-compatibility rule), `db/backup.sh` / `db/restore.sh`, and the disaster
   recovery runbook.
+- `DISASTER-RECOVERY.md` — what breaks when each dependency dies (Redis, both
+  PostgreSQL instances, Nakama, gateway, game server, lgtm), what players
+  experience, recovery commands, RTO/RPO, `db/redis-backup.sh` / `db/redis-restore.sh`,
+  the open code gaps that make Redis data loss an unbounded outage, and the
+  Sentinel upgrade path.
 - `MONITORING.md` — `make monitoring-up` (one `grafana/otel-lgtm` container), scrape
   targets, the "RPG Gameplay" dashboard, metric contracts, Grafana Cloud / k3s paths.
 - `K3S.md` — dev cluster bootstrap (`k3s/setup-dev.sh`), Agones install + fleets,

@@ -137,6 +137,16 @@ that *looks* like a usable backup. Retention prunes only after a successful dump
 
 CD also takes one before every migration, so deploys are already checkpointed.
 
+### Redis
+
+Redis is a system of record too — it holds the server registry and the event
+stream (ADR-4), not a cache — so it gets the same treatment via
+`db/redis-backup.sh` (BGSAVE + timestamped RDB + retention) and
+`db/redis-restore.sh` (scratch-container rehearsal by default). CD runs the
+Redis backup in the same `db-migrate` step. Full procedure, the AOF-vs-RDB trap
+that makes a naive restore silently do nothing, and the mandatory
+`register-gameserver.sh` follow-up: **`DISASTER-RECOVERY.md`**.
+
 ---
 
 ## 3. Restore
