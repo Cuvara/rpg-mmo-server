@@ -126,6 +126,13 @@ come from `date -u +%H:%M:%S.%3N` taken immediately around each action.
 | Redis | 7.4.10, `run_id af6e15c0f39c4debdc1679bc34aab22295970a93`, uptime 1617s at baseline |
 | Client used | `backend/smoketest` — real `MsgAuth` → `MsgEnterWorld` → `MsgJoinToken` → `MsgInput`/`MsgSnapshot` flow, not a synthetic Redis client |
 
+> **`develop` has moved since these numbers were taken.** They were measured
+> against `4c4c58a`; `develop` is now `184a779`, which added gateway rate
+> limiting, split secrets and client→gateway KCP encryption (#22). None of that
+> touches the Redis client or the persistence path, so §0–§4 stand — but **G11
+> (no `MsgAuth` response while Redis is down) sits in the auth path that #22
+> changed**, so re-confirm G11 against `184a779` before anyone acts on it.
+
 > **This is a pre-G1 baseline, deliberately.** The drill measures the world as it
 > is *before* game-server self-registration and heartbeating land. Everything
 > below about "the registry never comes back on its own" is a measurement of the
