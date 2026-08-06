@@ -5,6 +5,42 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`db/redis-backup.sh` / `db/redis-restore.sh`** — Redis now has the same
+  backup story PostgreSQL has. Redis is a system of record here (server
+  registry + event stream, ADR-4), so losing it is not a cache miss.
+  `redis-backup.sh` issues `BGSAVE`, waits for `LASTSAVE` to advance, asserts
+  `rdb_last_bgsave_status=ok`, streams `/data/dump.rdb` out through
+  `docker exec cat` (no `docker cp`: docker.exe rejects absolute `/mnt/*`
+  paths), verifies the `REDIS` magic with the same sync+retry the PG backup
+  needs on WSL drvfs, then prunes to `--keep`. `redis-restore.sh` defaults to
+  a **scratch container** rehearsal on a disposable volume and only touches the
+  live instance with `--mode live --yes`. Both modes delete
+  `appendonlydir`/`appendonly.aof` before injecting the RDB — with
+  `--appendonly yes` Redis prefers the AOF at startup, so the obvious
+  "drop dump.rdb in place" restore silently restores nothing.
+- **`docs/DISASTER-RECOVERY.md`** — per-dependency blast radius (Redis, meta PG,
+  game PG, Nakama, gateway, game server, lgtm): what in-progress players
+  experience vs what new logins experience, recovery commands, RTO/RPO, the
+  Redis durability config with the commands to verify it is actually in effect,
+  a repeatable Redis failure-drill procedure, ten filed code gaps with
+  `file:line` evidence, and the replica → Sentinel upgrade path per tier.
+  Headline finding: **nothing in the running code ever registers a game
+  server** — `scripts/register-gameserver.sh` writes the entry once at deploy
+  time with a 3600s TTL and nothing heartbeats it, so any Redis data loss makes
+  every map permanently unjoinable until a human re-runs that script.
+  The failure drill itself is **not yet measured** (Docker Desktop was paused
+  for the whole window); the expectations table is marked estimated-from-code
+  and the doc reserves a section for the measured numbers.
+
+### Changed
+- `cd.yml`: the `db-migrate` job now also takes a Redis checkpoint
+  (`redis-backup.sh --skip-missing`) alongside the two `pg_dump`s, and the
+  bundle ships `deploy/db/redis-backup.sh` + `deploy/db/redis-restore.sh` so
+  the scripts exist on the deploy target.
+- `docs/DATABASE.md`, `docs/README.md`: cross-reference the new Redis
+  backup/restore pair and the disaster-recovery runbook.
+
 ### Fixed
 - backup.sh verification flaked on WSL drvfs (/mnt/*) — a dump read
   immediately after write could appear truncated. Verification now syncs and
