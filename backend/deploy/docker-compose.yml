@@ -235,12 +235,19 @@ services:
       # Revert this to ":9101" once GameServer/Observability/MetricsEndpoint.cs
       # can bind a wildcard (owner: agent-gameserver-dotnet).
       METRICS_ADDR: ${GAMESERVER_METRICS_ADDR:-gameserver-dotnet:9101}
-      # Not read by the C# server yet (it has no Redis/Npgsql client — the
-      # registry entry is written externally by scripts/register-gameserver.sh,
-      # and persistence is the in-memory store). Set here so the day the C#
-      # module gains those clients, no deploy config has to change.
+      # The C# server now registers ITSELF here and heartbeats every 5s (TTL 15s),
+      # so there is no external registration step any more. Unset REDIS_ADDR and the
+      # server runs unregistered — the gateway then answers MsgEnterWorld with
+      # "no available server for map <id>".
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      # ADVERTISED TO CLIENTS, and it is NOT the listen address. The container
+      # listens on :9000 but is published on GAMESERVER_CONTAINER_PORT, and the
+      # gateway hands this value back verbatim in MsgEnterWorldResp.ServerAddr —
+      # so it must be what a CLIENT can dial. A bare ":9200" is normalized by the
+      # client to 127.0.0.1:9200, which is right for a local stack; on a VPS set
+      # GAMESERVER_PUBLIC_ADDR=<public-host>:<published-port>.
+      GAMESERVER_PUBLIC_ADDR: ${GAMESERVER_PUBLIC_ADDR:-:${GAMESERVER_CONTAINER_PORT:-9200}}
       GAME_DB_URL: postgres://${POSTGRES_GAME_USER:-game}:${POSTGRES_GAME_PASSWORD:-localdev}@postgres-game:5432/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable
     ports:
       - "${GAMESERVER_CONTAINER_PORT:-9200}:9000"

@@ -17,6 +17,11 @@
     <!-- Npgsql 10.x is trim/NativeAOT-annotated; PostgresPlayerStore uses raw
          commands + typed parameters only (no ORM, no reflection mapping). -->
     <PackageReference Include="Npgsql" Version="10.0.3" />
+    <!-- Server self-registration into the Redis registry the Go gateway reads.
+         3.x ships a net10.0 target and is trim/NativeAOT-clean for the surface we
+         use (raw commands + a Lua script, no reflection-based object mapping,
+         no profiling/tie-breaker features). The `publish` CI job is the gate. -->
+    <PackageReference Include="StackExchange.Redis" Version="3.1.11" />
     <PackageReference Include="OpenTelemetry" Version="1.17.0" />
     <PackageReference Include="OpenTelemetry.Exporter.Prometheus.HttpListener" Version="1.17.0-beta.1" />
   </ItemGroup>

@@ -25,10 +25,10 @@ public class PostgresPlayerStoreTests
         return store;
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task SaveThenLoad_RoundTripsAllColumns()
     {
-        if (_pg.SkipIfUnavailable(nameof(SaveThenLoad_RoundTripsAllColumns))) return;
+        _pg.SkipUnlessAvailable(nameof(SaveThenLoad_RoundTripsAllColumns));
 
         await using var store = await MigratedStoreAsync();
         string userId = $"user-{Guid.NewGuid():N}";
@@ -46,10 +46,10 @@ public class PostgresPlayerStoreTests
         Assert.Equal("map_07", loaded.MapId);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task Save_Twice_UpsertsInPlaceAndBumpsUpdatedAt()
     {
-        if (_pg.SkipIfUnavailable(nameof(Save_Twice_UpsertsInPlaceAndBumpsUpdatedAt))) return;
+        _pg.SkipUnlessAvailable(nameof(Save_Twice_UpsertsInPlaceAndBumpsUpdatedAt));
 
         await using var store = await MigratedStoreAsync();
         string userId = $"user-{Guid.NewGuid():N}";
@@ -74,10 +74,10 @@ public class PostgresPlayerStoreTests
         Assert.True(await QueryUpdatedAtAsync(userId) > firstUpdatedAt, "updated_at should advance on upsert");
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task LoadPlayer_Missing_ReturnsNull()
     {
-        if (_pg.SkipIfUnavailable(nameof(LoadPlayer_Missing_ReturnsNull))) return;
+        _pg.SkipUnlessAvailable(nameof(LoadPlayer_Missing_ReturnsNull));
 
         await using var store = await MigratedStoreAsync();
 
@@ -86,10 +86,10 @@ public class PostgresPlayerStoreTests
         Assert.Null(await store.LoadPlayerAsync("", default));
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task DeletePlayer_RemovesRow_AndMissingDeleteIsNoOp()
     {
-        if (_pg.SkipIfUnavailable(nameof(DeletePlayer_RemovesRow_AndMissingDeleteIsNoOp))) return;
+        _pg.SkipUnlessAvailable(nameof(DeletePlayer_RemovesRow_AndMissingDeleteIsNoOp));
 
         await using var store = await MigratedStoreAsync();
         string userId = $"user-{Guid.NewGuid():N}";
@@ -101,10 +101,10 @@ public class PostgresPlayerStoreTests
         await store.DeletePlayerAsync(userId); // no-op, must not throw
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task Migrate_RunTwice_IsIdempotentAndPreservesData()
     {
-        if (_pg.SkipIfUnavailable(nameof(Migrate_RunTwice_IsIdempotentAndPreservesData))) return;
+        _pg.SkipUnlessAvailable(nameof(Migrate_RunTwice_IsIdempotentAndPreservesData));
 
         await using var store = await MigratedStoreAsync();
         string userId = $"user-{Guid.NewGuid():N}";
@@ -133,10 +133,10 @@ public class PostgresPlayerStoreTests
         Assert.DoesNotContain("secret", ex.Message); // password never leaks into logs
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task Save_AfterDatabaseGoesAway_SurfacesErrorAndIncrementsMetric()
     {
-        if (_pg.SkipIfUnavailable(nameof(Save_AfterDatabaseGoesAway_SurfacesErrorAndIncrementsMetric))) return;
+        _pg.SkipUnlessAvailable(nameof(Save_AfterDatabaseGoesAway_SurfacesErrorAndIncrementsMetric));
 
         // Dedicated container — this test destroys the server mid-flight.
         await using var victim = await EphemeralPostgres.TryStartAsync();

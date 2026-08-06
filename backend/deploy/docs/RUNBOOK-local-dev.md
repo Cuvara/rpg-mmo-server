@@ -21,6 +21,17 @@ integration is off, the Windows binary is still reachable as `docker.exe` — bu
 `docker.exe compose -f <abs-WSL-path>` breaks on path translation, so always run
 compose from `backend/deploy/` and let it pick up the local `docker-compose.yml`.
 
+> **On this project's dev machine WSL integration is OFF and `docker` is a shim
+> to `docker.exe`.** That is deliberate and documented, with the reasoning and
+> the (unflipped) switch-over plan, in
+> [`CICD.md` §4a–4b](CICD.md#4a-the-dev-runner-is-wsl-and-docker-there-is-a-shim).
+> The one rule you must follow when writing new commands: a bind-mount source
+> must be a **literal relative path** — `-v ".:/x"` works, `-v "$PWD:/x"`
+> silently mounts an **empty** directory and exits 0. `$PWD` is absolute, so it
+> gets translated to a nonexistent `E:\mnt\…` path that Docker Desktop then
+> helpfully creates. Prefer named volumes or `docker exec` stdio, which the
+> `db/` scripts already do and which are immune to this.
+
 Status: the whole path below (plugin build → stack up → `gateway_token` RPC →
 gateway `MsgAuth`) has been executed end-to-end against nakama 3.40.0.
 
@@ -309,11 +320,12 @@ Points that bite:
 - **Stop the host processes first.** With the CD defaults the containers publish
   the same `:8000` / `:9200`; two owners of one port means the second bind
   fails. `scripts/deploy-local.sh stop` clears the host side.
-- **The game server must be registered by hand.** It has no Redis client, so
-  nothing appears in the registry and `MsgEnterWorld` fails with *no available
-  server for map …*. Run `scripts/register-gameserver.sh register` after
-  `compose up` (that is exactly what the CD job does).
-  `GAMESERVER_PUBLIC_ADDR` in `.env` is the address clients are handed.
+- **The game server registers itself.** There is no manual step: it publishes its
+  registry entry on startup and heartbeats it every 5s, so `MsgEnterWorld` works
+  as soon as the container is listening. What still matters is
+  `GAMESERVER_PUBLIC_ADDR` in `.env` — the address clients are handed verbatim,
+  which in containers mode is the PUBLISHED port (`:9200`), not the listen port
+  (`:9000`). Get it wrong and joins fail even though the registry looks healthy.
 - **Health probes come from the host**, because the gateway image is distroless
   (no shell, no curl): `curl http://127.0.0.1:9102/healthz` for the gateway, and
   for the game server `curl -H 'Host: gameserver-dotnet:9101'

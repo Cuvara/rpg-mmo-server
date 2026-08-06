@@ -5,7 +5,82 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+- **`scripts/register-gameserver.sh` — deleted.** Its own header said "Delete this
+  script the day the C# server registers itself"; that day is here. The C# game
+  server now writes, refreshes and removes its own registry entry
+  (`gameserver-dotnet/GameServer/Registry/`). The script wrote the entry **once** at
+  deploy time with `REGISTRY_TTL=3600` and nothing refreshed it, which is why a Redis
+  wipe left every map unjoinable until a human re-ran it (G1), and why a crashed
+  server kept black-holing joins for up to an hour (G2). Both gaps are closed.
+  - `scripts/deploy-local.sh` no longer calls it, and now exports `REDIS_ADDR`,
+    `REDIS_PASSWORD` and `GAMESERVER_PUBLIC_ADDR` so the server it starts can
+    self-register.
+  - `.github/workflows/cd.yml` no longer bundles, installs or invokes it; the
+    "Register the game server in Redis" step is gone from containers mode.
+
+### Changed
+- `docker-compose.yml`: `REDIS_ADDR` for the gameserver is no longer a
+  set-for-the-future no-op — the server reads it and self-registers. Added
+  **`GAMESERVER_PUBLIC_ADDR`**, defaulting to `:${GAMESERVER_CONTAINER_PORT:-9200}`:
+  the container listens on `:9000` but is published on 9200, and the gateway hands
+  this value to clients verbatim, so it must be the PUBLISHED address. On a VPS set
+  it to `<public-host>:<port>`.
+- Docs updated to match: `DISASTER-RECOVERY.md` (G1 and G2 marked FIXED, the
+  "step people forget" after a Redis restore is gone, replica advice reframed),
+  `CICD.md` §2b, `RUNBOOK-local-dev.md`, `DATABASE.md`, `VPS-SETUP.md`,
+  `docs/README.md`, plus `backend/docs/ARCHITECTURE-DECISIONS.md` (registry no
+  longer has a shell-script writer) and `backend/docs/CORE_FLOW.md`.
+
+### Added
+- **`docs/CICD.md` §4a — the `dev` runner's `docker` shim is now documented.**
+  It was undocumented tribal knowledge that would baffle anyone debugging a
+  failed dev deploy, because it is invisible from every workflow file. Docker
+  Desktop's WSL integration is disabled for this distro, so `/usr/bin/docker`
+  points at a dead `/var/run/docker.sock` (`curl --unix-socket` → `curl: (56)`),
+  and `/usr/local/bin/docker` is a two-line `exec docker.exe "$@"` shim that
+  wins because the runner's frozen `~/actions-runner/.path` lists
+  `/usr/local/bin` before `/usr/bin`. A CD deploy failed on exactly this after
+  a reboot, before the shim existed.
+  Documented with it: the path-translation rule the shim forces, which turns out
+  to be **narrower and more dangerous than "keep paths cwd-relative"**.
+  `docker.exe` does not reject Linux absolute paths, it resolves them against
+  the current drive — loudly for `-f`
+  (`open E:\mnt\e\…: The system cannot find the path specified`) but **silently
+  for bind mounts**: `-v /mnt/e/…:/x` exits 0 with `/x` mounted **empty**,
+  because Docker Desktop creates the nonexistent `E:\mnt\e\…` and mounts that.
+  **`$PWD` is absolute and therefore affected** — `-v "$PWD:/x"` silently mounts
+  nothing while `-v ".:/x"` works. Audited: nothing in the repo trips this
+  today (compose bind mounts are relative, the four `db/` scripts use named
+  volumes and `docker exec` stdio, `build-all.sh` and the `db/` scripts carry a
+  `detect_docker()` fallback). Verified live rather than by reading — the
+  prometheus/dashboard/`nakama.so` mounts are all non-empty inside the running
+  containers.
+- **`docs/CICD.md` §4b — recommendation on enabling WSL integration: not now**,
+  with the evidence and a rollback. The only real benefit is removing the silent
+  empty-mount landmine, which is latent, not live. Speed is not an argument
+  (`docker.exe` measured at ~85 ms/invocation vs ~25 ms native — seconds per CD
+  run), and bind-mount throughput is unchanged because the repo and
+  `$RPG_DEPLOY_DIR` both sit on `/mnt/e`. Most importantly the toggle **alone
+  changes nothing**: `/usr/local/bin` precedes `/usr/bin` in the runner's frozen
+  `.path`, so the shim keeps shadowing the native CLI — switching is a two-step
+  change (flip the toggle *and* remove the shim), and doing only the first looks
+  like the toggle "did not work". Documented switch procedure verifies the
+  socket *before* the shim is retired, since removing it with the toggle off
+  leaves the runner with no working `docker` at all. The shim stays as the
+  rollback.
+- `docs/RUNBOOK-local-dev.md`: cross-reference to §4a and the `.` vs `$PWD`
+  bind-mount rule.
+
 ### Fixed
+- **`docs/DISASTER-RECOVERY.md` provenance note was wrong.** The drill writeup
+  claimed there is no `$RPG_DEPLOY_DIR/COMMIT` on this host. There is — at
+  `/mnt/e/rpg-mmo-deploy/COMMIT`, because `vars.RPG_DEPLOY_DIR` is
+  `/mnt/e/rpg-mmo-deploy` and only the `/opt/rpg-mmo` default was checked. Both
+  sources agree on `4c4c58a` for the drill window (`COMMIT` was rewritten to
+  `184a779` at 10:19 UTC, after the drill ended at 10:11), so **no measured
+  value changes** — only the note. Corrected in place, with the correction
+  called out rather than quietly rewritten.
 - **PRs into `develop` ran no CI at all.** `ci.yml` listed only
   `[main, master]` under `pull_request`, but every feature branch PRs into
   `develop`, so `gh pr checks <n>` answered "no checks reported" — which reads
@@ -23,6 +98,57 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   on a Go-side wire change proves only that C# still builds — real wire-compat
   coverage needs the `backend/integration_test` E2E suite, which runs today
   only in `cd.yml` on push, i.e. after merge.
+- **`db/redis-restore.sh --mode live` restored nothing and exited 0** — found by
+  running the Redis failure drill, which is the first time either Redis script
+  had been executed against a live stack. Feeding it a freshly-taken, freshly-
+  rehearsed 5-key RDB wiped `rpg-redis` and brought it back with `DBSIZE 0`,
+  printing `restored dataset: 0 keys` followed by `done`.
+  Root cause: deleting `appendonlydir` before injecting the RDB is necessary but
+  **not sufficient**. With `--appendonly yes` and no AOF manifest on disk, Redis
+  7 does not fall back to `dump.rdb` — it initialises an empty dataset and
+  writes a fresh AOF base from it (`Server initialized` → `Creating AOF base
+  file`, with no `Done loading RDB` line). Not a permissions or path problem;
+  Redis simply never opens the RDB. Same reason the Redis manual says to enable
+  AOF via a runtime `CONFIG SET`, not by restarting into it.
+  The scratch-mode rehearsal could never have caught this: it starts its
+  throwaway container with `--appendonly no`, so it exercised a different Redis
+  startup path than production. A green rehearsal was evidence about the file,
+  never about the restore.
+  Fix: `--mode live` now runs a short-lived **seed** container over the live
+  volume with `--appendonly no` (which does load the RDB), issues `CONFIG SET
+  appendonly yes` so Redis rewrites `appendonlydir` from the loaded dataset,
+  waits for `aof_rewrite_in_progress:0` + `aof_last_bgrewrite_status:ok`, shuts
+  it down, and only then starts the real container. A hard verification gate
+  compares the live key count against the seed's and fails the script on
+  mismatch — the old failure was silent, and the silence is what made it
+  dangerous. Verified by using the fixed script to recover the stack from a
+  deliberately emptied registry: 5 keys back, `SMOKE=PASS`, 8.5s.
+
+### Changed
+- **`docs/DISASTER-RECOVERY.md` — the Redis failure drill was executed** (2026-08-06,
+  10:03–10:11 UTC, deployed commit `4c4c58a`, recorded from the image tag shared
+  by `rpg-gateway` and `rpg-gameserver` since this is a compose host with no
+  `$RPG_DEPLOY_DIR/COMMIT`). "Measured results" replaces the placeholder with
+  timings, pasted evidence, and an explicit split between what was observed from
+  a **natural** event (a container stop; a registration TTL expiring on its own)
+  and what required a **forced `DEL`**. The estimate table is left unedited so
+  the estimate-vs-reality delta stays visible.
+  Headline numbers, all measured: clean Redis restart → verified joinable in
+  **2.3s**, RPO 0 (AOF replayed, TTLs preserved absolutely, consumer groups
+  intact, no `NOGROUP` loop). In-progress gameplay is untouched — a client held
+  **286 snapshots across a 58s Redis outage**. Registry deleted → world
+  unjoinable, polled for 70s with no self-recovery: **G1 is now measured, not
+  inferred**. Deliberately a pre-G1 baseline; the doc says so and says which row
+  should change when self-registration lands.
+  Two new gaps filed from the drill: **G11** — with Redis down the gateway sends
+  *no* `MsgAuth` response at all (the estimate said it would reject with
+  `MsgAuthResp{OK:false}`); clients hang to their own timeout and the gateway
+  logs nothing but go-redis pool chatter. **G12** — `servers:map:*` index sets
+  carry no TTL while `servers:id:*` hashes do, leaving orphan members; bounded,
+  since the gateway `SREM`s them on lookup, but it leaks for maps nobody queries.
+  Drill cadence updated: a monthly scratch rehearsal is explicitly *not*
+  sufficient, because that is exactly how a completely broken `--mode live`
+  survived review.
 
 ### Added
 - **`db/redis-backup.sh` / `db/redis-restore.sh`** — Redis now has the same
@@ -51,6 +177,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   The failure drill itself is **not yet measured** (Docker Desktop was paused
   for the whole window); the expectations table is marked estimated-from-code
   and the doc reserves a section for the measured numbers.
+  *(Superseded within this same Unreleased block: the drill was executed on
+  2026-08-06 — see "Changed" above. Two of the estimated rows turned out wrong.)*
 
 ### Changed
 - `cd.yml`: the `db-migrate` job now also takes a Redis checkpoint

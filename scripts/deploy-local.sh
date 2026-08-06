@@ -66,9 +66,13 @@ load_env
 GATEWAY_ADDR="${GATEWAY_ADDR:-:8000}"
 GAMESERVER_ADDR="${GAMESERVER_ADDR:-:9000}"
 GAMESERVER_MAP_ID="${GAMESERVER_MAP_ID:-map_01}"
-# Exported so register-gameserver.sh (a separate process) sees the same values
-# whether they came from deploy/.env or from these defaults.
+# Exported so the gameserver process inherits the same values whether they came
+# from deploy/.env or from these defaults. REDIS_* and GAMESERVER_PUBLIC_ADDR go
+# with them: the server self-registers, so it needs the registry address and the
+# address to advertise. In host mode there is no port mapping, so falling back to
+# GAMESERVER_ADDR is correct.
 export GAMESERVER_ADDR GAMESERVER_MAP_ID
+export REDIS_ADDR REDIS_PASSWORD GAMESERVER_PUBLIC_ADDR
 
 # The Go gameserver has been removed. C# .NET 10 NativeAOT binary is the default.
 # Set GAMESERVER_RUNTIME=go only if you have a legacy Go binary to test against.
@@ -260,18 +264,13 @@ do_start() {
 		start_one "$name" "$bin" "$args"
 	done
 
-	# The C# gameserver does not (yet) register itself in Redis, so publish its
-	# registry entry here or the gateway answers MsgEnterWorld with "no available
-	# server for map <id>". Shared with DEPLOY_MODE=containers, which calls the
-	# same script from the CD deploy job — see its header for the address
-	# semantics (GAMESERVER_PUBLIC_ADDR is what clients are told to dial).
-	if [ -n "${REDIS_ADDR:-}" ]; then
-		local reg="$SCRIPT_DIR/register-gameserver.sh"
-		if [ -x "$reg" ]; then
-			"$reg" register || info "WARN: gameserver registration failed"
-		else
-			info "WARN: $reg not found or not executable — gateway may not find gameserver"
-		fi
+	# No registration step: the C# gameserver registers ITSELF in Redis on startup
+	# and heartbeats every 5s (TTL 15s), so the entry is created, refreshed and
+	# removed by the process that owns it. It reads REDIS_ADDR / REDIS_PASSWORD and
+	# advertises GAMESERVER_PUBLIC_ADDR (falling back to GAMESERVER_ADDR, which is
+	# correct in host mode where there is no port mapping).
+	if [ -z "${REDIS_ADDR:-}" ]; then
+		info "WARN: REDIS_ADDR is unset — the gameserver will not self-register and the gateway will not find it"
 	fi
 }
 
