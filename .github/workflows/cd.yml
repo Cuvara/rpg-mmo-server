@@ -538,9 +538,10 @@ jobs:
           GAMESERVER_CONTAINER_PORT: ${{ vars.GAMESERVER_CONTAINER_PORT || '' }}
           GATEWAY_METRICS_PORT: ${{ vars.GATEWAY_METRICS_PORT || '9102' }}
           GAMESERVER_METRICS_PORT: ${{ vars.GAMESERVER_METRICS_PORT || '9101' }}
-          # Listen address of the C# metrics endpoint INSIDE its container. Must
-          # stay a resolvable name, not a wildcard — see docker-compose.yml.
-          GAMESERVER_METRICS_ADDR: ${{ vars.GAMESERVER_METRICS_ADDR || 'gameserver-dotnet:9101' }}
+          # Listen address of the C# metrics endpoint INSIDE its container.
+          # A wildcard is correct and works; it used to have to be a resolvable
+          # name because the C# listener could not bind one.
+          GAMESERVER_METRICS_ADDR: ${{ vars.GAMESERVER_METRICS_ADDR || ':9101' }}
           # The address handed to CLIENTS in MsgEnterWorldResp.ServerAddr. Empty
           # = ":<gameserver container port>", which clients normalize to
           # loopback — correct on a dev box, WRONG on a VPS. Set it to
@@ -787,12 +788,10 @@ jobs:
 
           rc=0
           probe gateway    "http://127.0.0.1:${GATEWAY_METRICS_PORT:-9102}/healthz" || rc=1
-          # The C# metrics listener is bound to a named prefix, not a wildcard
-          # (see the METRICS_ADDR comment in docker-compose.yml), so a request
-          # from the host must carry the matching Host header or HttpListener
-          # answers 404.
-          probe gameserver "http://127.0.0.1:${GAMESERVER_METRICS_PORT:-9101}/healthz" \
-                           "${GAMESERVER_METRICS_ADDR:-gameserver-dotnet:9101}" || rc=1
+          # No Host header: the C# metrics listener binds the wildcard, so a
+          # plain request from the host matches. If this ever 404s again, the
+          # wildcard bind has regressed — do NOT paper over it with a header.
+          probe gameserver "http://127.0.0.1:${GAMESERVER_METRICS_PORT:-9101}/healthz" || rc=1
           tcp   gateway    "${GATEWAY_CONTAINER_PORT:-8000}"                           || rc=1
           tcp   gameserver "${GAMESERVER_CONTAINER_PORT:-9200}"                        || rc=1
           docker ps --filter name=rpg- --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'

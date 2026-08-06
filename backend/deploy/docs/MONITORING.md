@@ -82,7 +82,7 @@ Targets:
 | `gateway` | `host.docker.internal:9102` | host-run `go run ./cmd/gateway/` |
 | `gameserver` | `host.docker.internal:9101` | host-run C# `dotnet run` |
 | `gateway-container` | `gateway:9102` | up with `--profile realtime` (i.e. `DEPLOY_MODE=containers`) |
-| `gameserver-container` | `gameserver-dotnet:9101` | same profile — see the wildcard caveat below |
+| `gameserver-container` | `gameserver-dotnet:9101` | same profile |
 
 `host.docker.internal` resolves inside the container because the service
 declares `extra_hosts: host.docker.internal:host-gateway` (needed on a plain
@@ -111,38 +111,30 @@ Plus the standard `go_*` and `process_*` collectors. Both `result` label values
 are pre-created at startup so `rate()` has a zero baseline instead of a series
 that pops into existence on the first failure.
 
-### The C# metrics endpoint cannot bind a wildcard
+### The C# metrics endpoint binds a wildcard (fixed 2026-08-06)
 
-`METRICS_ADDR=:9101` (or `0.0.0.0:9101`, or `*:9101`) **does not work**. The
-server maps an empty host to the HttpListener wildcard `http://+:9101/`, and
-OpenTelemetry's `PrometheusHttpListener` then runs that string through
-`UriBuilder`, which rejects `+`:
-
-```
-fail: Program[0]
-      Failed to start metrics endpoint on http://+:9101/
-      System.InvalidOperationException: PrometheusExporter HttpListener could not be started.
-       ---> System.UriFormatException: Invalid URI: The hostname could not be parsed.
-```
-
-The process keeps running and serving the game — only observability is lost —
-which is why this went unnoticed: **the host-mode `gameserver` scrape target has
-simply been DOWN**, indistinguishable from "the process is not running".
-
-A *resolvable* host binds fine, so containers mode sets
-`METRICS_ADDR=gameserver-dotnet:9101` (the compose service name). Docker's DNS
-resolves it to the container, and Prometheus scrapes it under exactly that name,
-so the request's `Host` header matches the registered prefix. The consequence:
-probing the published port from the host needs the header too, or HttpListener
-answers 404:
+`METRICS_ADDR=:9101` (also `0.0.0.0:9101` / `*:9101`) binds `http://+:9101/` and
+answers on **any** `Host`, so the in-network scrape (`gameserver-dotnet:9101`),
+the host-mode scrape (`host.docker.internal:9101`) and a plain host probe
+(`127.0.0.1:9101`) all work:
 
 ```bash
-curl -H 'Host: gameserver-dotnet:9101' http://127.0.0.1:9101/healthz   # ok
-curl http://127.0.0.1:9101/healthz                                     # 404
+curl http://127.0.0.1:9101/healthz   # ok — no Host header needed
+curl http://127.0.0.1:9101/metrics   # gameserver_* series
 ```
 
-The real fix belongs in `GameServer/Observability/MetricsEndpoint.cs` (owner:
-`agent-gameserver-dotnet`) — until then, keep `GAMESERVER_METRICS_ADDR` a name.
+Historical note, kept because the workaround outlived the bug by weeks: OTel's
+`PrometheusHttpListener` used to build its prefix with
+`new UriBuilder("http", Host, Port)`, and `UriBuilder` rejects the HttpListener
+wildcards `+` / `*` (`UriFormatException: Invalid URI: The hostname could not be
+parsed`), so the endpoint never started. The process kept serving the game — only
+observability was lost — so the symptom was just a scrape target stuck **DOWN**,
+indistinguishable from "the process is not running". Compose worked around it by
+setting `GAMESERVER_METRICS_ADDR` to the compose service name, which made probing
+from the host require `curl -H 'Host: gameserver-dotnet:9101'`.
+`MetricsEndpoint.cs` now rewrites the listener prefix in `ConfigureHttpListener`
+(which runs before `Start`), so the workaround is gone. If a wildcard bind ever
+regresses, fix it there — do **not** re-pin `GAMESERVER_METRICS_ADDR` to a name.
 
 ### C# metric names arrive with dots unless the scrape says otherwise
 

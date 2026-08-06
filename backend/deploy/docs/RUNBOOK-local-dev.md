@@ -327,10 +327,9 @@ Points that bite:
   which in containers mode is the PUBLISHED port (`:9200`), not the listen port
   (`:9000`). Get it wrong and joins fail even though the registry looks healthy.
 - **Health probes come from the host**, because the gateway image is distroless
-  (no shell, no curl): `curl http://127.0.0.1:9102/healthz` for the gateway, and
-  for the game server `curl -H 'Host: gameserver-dotnet:9101'
-  http://127.0.0.1:9101/healthz` (see `docs/MONITORING.md` for why the header is
-  needed).
+  (no shell, no curl): `curl http://127.0.0.1:9102/healthz` for the gateway and
+  `curl http://127.0.0.1:9101/healthz` for the game server. No `Host:` header is
+  needed — both bind wildcards.
 - **Container-to-container addressing** is by service name: `redis:6379`,
   `postgres-game:5432`, `nakama:7350` — never `localhost`.
 

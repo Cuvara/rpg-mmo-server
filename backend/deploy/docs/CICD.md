@@ -632,10 +632,6 @@ client normalizes to its own loopback. Set it to `<public-host-or-ip>:<port>`.
 - Host mode still healthchecks with a TCP connect. Both binaries do serve
   `/healthz` on their metrics port now (containers mode uses it) — host mode
   could be upgraded the same way.
-- The C# game server cannot bind a wildcard metrics address; containers mode
-  works around it with a named prefix (`GAMESERVER_METRICS_ADDR`). In host mode
-  the metrics endpoint fails to start entirely, so the `gameserver` scrape
-  target is DOWN there. Fix belongs in `GameServer/Observability/MetricsEndpoint.cs`.
 - Containers mode is verified on the dev runner. On a real VPS,
   `bootstrap-vps.sh` itself has only been exercised via `--dry-run` plus
   `bash -n` — the apt/runner/ufw paths need one real box to confirm.
