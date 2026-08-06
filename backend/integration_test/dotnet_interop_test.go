@@ -9,7 +9,9 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -70,73 +72,118 @@ func mergeSnapshots(t *testing.T, c *MockClient, want int) *messages.SnapshotSta
 	return state
 }
 
+// gameServerBinary builds the C# game server once per test binary and returns the
+// path to the produced native apphost.
+//
+// The build is deliberately separated from the run, and the run launches the built
+// assembly as `dotnet GameServer.dll` rather than `dotnet run`. `dotnet run` spawns
+// the game server as a *grandchild* and hands it its own stdout/stderr: killing
+// `dotnet run` leaves the real server alive holding the pipe, so `go test` hangs at
+// exit with `Test I/O incomplete 30s after exiting` even though every test passed.
+// `dotnet <dll>` makes the server the direct child that Kill actually kills.
+//
+// The native apphost next to the dll is deliberately NOT used: it resolves the
+// runtime through DOTNET_ROOT / a registered install location and dies with
+// "You must install .NET to run this application" whenever the SDK lives somewhere
+// non-default. The muxer already knows where its own runtime is.
+var (
+	gameServerBuildOnce sync.Once
+	gameServerDotnet    string
+	gameServerDll       string
+	gameServerBuildErr  error
+	gameServerSkip      string
+)
+
+func buildDotnetGameServer() {
+	dotnetPath, err := exec.LookPath("dotnet")
+	if err != nil {
+		home, _ := os.UserHomeDir()
+		dotnetPath = filepath.Join(home, ".dotnet", "dotnet")
+		if _, statErr := os.Stat(dotnetPath); statErr != nil {
+			gameServerSkip = "dotnet not found, skipping .NET interop tests"
+			return
+		}
+	}
+
+	projectDir := filepath.Join("..", "gameserver-dotnet", "GameServer")
+
+	build := exec.Command(dotnetPath, "build", projectDir, "-c", "Release", "-v", "q")
+	build.Env = append(os.Environ(), "DOTNET_CLI_TELEMETRY_OPTOUT=1")
+	if out, err := build.CombinedOutput(); err != nil {
+		gameServerBuildErr = fmt.Errorf("dotnet build failed: %w\n%s", err, string(out))
+		return
+	}
+
+	dll := filepath.Join(projectDir, "bin", "Release", "net10.0", "GameServer.dll")
+	if _, err := os.Stat(dll); err != nil {
+		gameServerBuildErr = fmt.Errorf("game server assembly not found at %s after build: %w", dll, err)
+		return
+	}
+	gameServerDotnet = dotnetPath
+	gameServerDll = dll
+}
+
 // startDotnetGameServer launches the C# gameserver as a subprocess and returns
 // the actual listening address parsed from stdout. The caller must call the
 // returned cleanup function to kill the process.
 func startDotnetGameServer(t *testing.T) (addr string, cleanup func()) {
 	t.Helper()
 
-	dotnetPath, err := exec.LookPath("dotnet")
-	if err != nil {
-		// Try $HOME/.dotnet/dotnet explicitly
-		home, _ := os.UserHomeDir()
-		dotnetPath = home + "/.dotnet/dotnet"
-		if _, err := os.Stat(dotnetPath); err != nil {
-			t.Skip("dotnet not found, skipping .NET interop tests")
-		}
+	gameServerBuildOnce.Do(buildDotnetGameServer)
+	if gameServerSkip != "" {
+		t.Skip(gameServerSkip)
+	}
+	if gameServerBuildErr != nil {
+		t.Fatal(gameServerBuildErr)
 	}
 
-	projectDir := "../gameserver-dotnet/GameServer"
-
-	// Pre-build so "dotnet run --no-build" starts instantly (avoids 60s+ JIT cold start)
-	build := exec.Command(dotnetPath, "build", projectDir, "-c", "Release", "-v", "q")
-	build.Env = append(os.Environ(), "DOTNET_CLI_TELEMETRY_OPTOUT=1")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("dotnet build failed: %v\n%s", err, string(out))
-	}
-
-	cmd := exec.Command(dotnetPath, "run",
-		"--project", projectDir,
-		"-c", "Release",
-		"--no-build",
-		"--",
+	cmd := exec.Command(gameServerDotnet, gameServerDll,
 		"--addr", "127.0.0.1:0",
 		"--map-id", dotnetMapID,
 		"--server-id", dotnetServerID,
 		"--jwt-secret", dotnetJWTSecret,
+		// Metrics off: the tests only exercise the game wire, and a fixed port
+		// (default :9101) would collide with any locally running server and with
+		// the next test's server in this same suite.
+		"--metrics-addr", "",
 	)
-
-	// Ensure dotnet is on PATH for child processes
 	cmd.Env = append(os.Environ(), "DOTNET_CLI_TELEMETRY_OPTOUT=1")
 
+	// Merge stderr into the same pipe so nothing is written to the test process's
+	// own stderr after the test finishes.
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatalf("stdout pipe: %v", err)
 	}
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = cmd.Stdout
 
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start dotnet gameserver: %v", err)
 	}
 
-	cleanupFn := func() {
-		if cmd.Process != nil {
-			cmd.Process.Kill()
-			cmd.Wait()
-		}
-	}
-
-	// Parse actual listen address from stdout.
-	// The .NET console logger uses multi-line format:
+	// Parse the actual listen address from stdout.
+	// The .NET console logger uses a multi-line format:
 	//   info: GameServer.Server.GameServerHost[0]
 	//         Game server listening on 127.0.0.1:XXXXX (mode=map, ...)
-	scanner := bufio.NewScanner(stdout)
-	addrCh := make(chan string, 1)
-	sent := false
+	var (
+		addrCh   = make(chan string, 1)
+		scanDone = make(chan struct{})
+		logMu    sync.Mutex
+		logging  = true
+	)
 	go func() {
+		defer close(scanDone)
+		scanner := bufio.NewScanner(stdout)
+		sent := false
 		for scanner.Scan() {
 			line := scanner.Text()
-			t.Logf("[dotnet] %s", line)
+			// t.Logf after the test returns panics, so stop logging once cleanup starts.
+			logMu.Lock()
+			if logging {
+				t.Logf("[dotnet] %s", line)
+			}
+			logMu.Unlock()
+
 			if !sent {
 				if idx := strings.Index(line, "Game server listening on "); idx >= 0 {
 					rest := line[idx+len("Game server listening on "):]
@@ -152,10 +199,31 @@ func startDotnetGameServer(t *testing.T) (addr string, cleanup func()) {
 		}
 	}()
 
+	cleanupFn := func() {
+		logMu.Lock()
+		logging = false
+		logMu.Unlock()
+
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait() // reaps the process and closes the stdout pipe
+		}
+		// Wait for the scanner to drain, so no goroutine outlives the test.
+		select {
+		case <-scanDone:
+		case <-time.After(5 * time.Second):
+		}
+	}
+
 	select {
 	case addr = <-addrCh:
 		t.Logf("dotnet gameserver listening on %s", addr)
-	case <-time.After(30 * time.Second):
+	case <-scanDone:
+		// stdout closed before the listen line: the server died on startup.
+		// Fail now with whatever it logged instead of stalling for the timeout.
+		cleanupFn()
+		t.Fatal("dotnet gameserver exited during startup (see [dotnet] log lines above)")
+	case <-time.After(60 * time.Second):
 		cleanupFn()
 		t.Fatal("timed out waiting for dotnet gameserver to start")
 	}
