@@ -12,6 +12,20 @@ Meter `rpg.gameserver` + `OpenTelemetry.Exporter.Prometheus.HttpListener`).
 - Windows dev note: binding the `+` wildcard needs an admin URL ACL, so the
   endpoint automatically falls back to `http://localhost:<port>/`. Linux (the
   production target) binds all interfaces directly.
+- Wildcard binding (`:9101`, `0.0.0.0:9101`, `*:9101`) resolves to the HttpListener
+  prefix `http://+:<port>/`, which answers **any** `Host` header — scraping by IP
+  works. A named address (`gameserver-dotnet:9101`) registers a prefix for that name
+  only and answers nothing else, so Prometheus must then scrape it under exactly
+  that name.
+  <br>
+  Wildcards were broken until 2026-08-06: OpenTelemetry builds its listener prefix
+  through `UriBuilder`, which rejects `+`/`*` with
+  `UriFormatException: Invalid URI: The hostname could not be parsed` — thrown in the
+  `PrometheusHttpListener` constructor, so the whole endpoint failed to start on
+  Linux with the default `METRICS_ADDR=:9101` (Windows hid it by falling back to
+  `localhost`). The exporter is now handed a `UriBuilder`-safe placeholder host and
+  the real wildcard prefix is set on the listener via `ConfigureHttpListener`, which
+  runs before `Start()`. Covered by `MetricsEndpointTests`.
 
 ## Metric reference (scraped names)
 

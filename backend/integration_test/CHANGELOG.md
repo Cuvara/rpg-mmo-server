@@ -5,7 +5,35 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **This suite had never actually run.** Every test sits behind `//go:build integration`,
+  but `ci.yml` and `cd.yml` invoked it without `-tags integration`, so the package
+  compiled to zero tests and both pipelines printed a green
+  `?   github.com/duycuong/rpg-mmo/integration_test  [no test files]`. Both workflows
+  now pass `-tags integration` (and `vet_flags: -tags integration`, plus a
+  `needs_dotnet` setup-dotnet step, since the suite builds and runs the C# server).
+- `go.mod` / `go.sum` were stale: `go vet -tags integration ./...` failed with
+  `go: updates to go.mod needed; to update it: go mod tidy`. The tagged sources pull in
+  the gateway's Prometheus dependencies, which were never recorded because nothing ever
+  built them. Tidied. `go vet` in the reusable workflow previously ran without the tag,
+  which is precisely why this stayed invisible.
+- **The suite failed as a package even with every test passing.**
+  `startDotnetGameServer` launched the server with `dotnet run`, which spawns it as a
+  *grandchild* holding the inherited stdout/stderr. `cmd.Process.Kill()` killed only
+  the `dotnet run` wrapper, so the real server survived with the pipe open and `go test`
+  ended in `*** Test I/O incomplete 30s after exiting` / `FAIL`. The server is now
+  launched as `dotnet GameServer.dll` — a direct child that Kill actually reaps. (The
+  native apphost is deliberately not used: it needs `DOTNET_ROOT` and dies with
+  "You must install .NET to run this application" wherever the SDK is non-default.)
+
 ### Changed
+- The C# server is built **once** per test binary (`sync.Once`) instead of once per
+  test, and the log-scanner goroutine is now joined during cleanup so nothing can
+  `t.Logf` after its test returned. Suite wall-clock: 69s (FAIL) → 7.6s (ok).
+- Test servers start with `--metrics-addr ""`. The default `:9101` is a fixed global
+  port: it collided with any locally running server and between consecutive tests.
+- Startup failures fail fast with the server's own log instead of stalling for the
+  full timeout, and the startup deadline is 60s (cold runners build slowly).
 - Snapshot assertions now merge the delta stream via the new `mergeSnapshots` helper
   (`messages.SnapshotState`) instead of inspecting a single snapshot: with delta
   encoding, one snapshot is not the world. The full-flow and wire-compat tests

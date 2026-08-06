@@ -140,7 +140,14 @@ jobs:
     with:
       module_dir: backend/integration_test
       run_tests: ${{ github.event.inputs.skip_tests != 'true' }}
-      test_flags: '-v -race -timeout 120s'
+      # `-tags integration` is MANDATORY: every test in this module sits behind
+      # `//go:build integration`. Without it the package compiles to zero tests and
+      # the job reports a green `[no test files]` — which it did, silently, for the
+      # entire life of this suite.
+      # The suite builds and runs the C# game server, hence needs_dotnet.
+      needs_dotnet: true
+      vet_flags: '-tags integration'
+      test_flags: '-tags integration -v -race -timeout 300s'
 
   # --------------------------------------------------------- build binaries
   # One job per binary; each starts as soon as its own module tests pass.
