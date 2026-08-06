@@ -389,6 +389,58 @@ feature/*  ──PR──►  main      (ci.yml validates; no deploy)
 - `release-X.Y` is cut from `main` for a production push; hotfixes land on the
   release branch and are cherry-picked back.
 
+### 6b. Which workflow gates which PR
+
+In practice feature branches PR into **`develop`**, not `main` — the diagram
+above describes the intended trunk flow, not what the team does day to day. That
+mismatch is what hid the following bug until 2026-08-06:
+
+> `ci.yml` listed only `[main, master]` under `pull_request`, so **every PR into
+> `develop` reported no checks at all**. `gh pr checks <n>` answered "no checks
+> reported on the ... branch", which is visually easy to mistake for "nothing
+> failing". Go changes merged into `develop` with zero CI for the life of the
+> project.
+
+Current, after the fix:
+
+| Workflow | Runs on PR into | Path filter on PR | What it proves |
+|---|---|---|---|
+| `ci.yml` (Go) | `main`, `master`, `develop`, `staging` | **none** — every PR runs it | shared/gateway/nakama/smoketest/integration compile + unit tests pass; gateway and smoketest binaries build |
+| `ci-dotnet.yml` (C#) | `main`, `master`, `develop`, `staging` | **none** — every PR runs it | `gameserver-dotnet` restores, builds, and its xUnit suite passes |
+| `cd.yml` | never — `push` only, to `develop` / `staging` / `release-*` | n/a | deployment; **not** a PR gate |
+
+Two deliberate choices:
+
+- **No `paths:` filter on `pull_request`.** A path-filtered workflow that does
+  not match never runs, and GitHub then reports the PR as having no checks —
+  indistinguishable at a glance from a passing PR, and a permanent block if a
+  required status check is ever added to branch protection. Every PR into a
+  protected branch therefore runs the full suite, including docs-only PRs. A few
+  minutes of hosted-runner time is cheaper than one silently ungated merge. The
+  `push` triggers keep their filters.
+- **`cd.yml` is not a PR gate and cannot become one.** It runs on the
+  self-hosted runner and needs Docker on that machine; a paused daemon makes it
+  fail with `[backup] ERROR: docker not available (tried docker, docker.exe)`.
+  That is correct fail-fast behaviour for a deploy, but it must never be what
+  stands between a PR and a merge. PR gating is GitHub-hosted only.
+
+#### Known gap: wire-compat coverage
+
+The Go gateway and the C# game server share a wire protocol
+(`backend/shared/messages/` ⇄ `Shared.GameLogic`). Dropping the `paths:` filter
+means a Go-side wire change now also runs the C# suite — but **a green
+`ci-dotnet.yml` does not prove wire compatibility.** Those tests exercise C# in
+isolation and never observe the Go encoder, so a mismatched field name or tag
+passes both suites independently.
+
+The only check that catches a real wire break is the cross-language E2E suite in
+`backend/integration_test`, which needs both binaries running together. Today it
+executes only inside `cd.yml` on push, so **a wire break is caught after merge,
+at deploy time, not on the PR.** Closing this properly means running the
+integration suite on GitHub-hosted runners as a PR gate, which needs the C#
+gameserver published in-workflow. Not attempted here — it is a separate change
+with its own failure modes.
+
 ## 7. Rollback
 
 1. **Preferred — re-run the last good deploy.** Actions → CD → pick the previous
