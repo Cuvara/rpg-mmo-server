@@ -37,7 +37,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `cd.yml`: the `db-migrate` job now also takes a Redis checkpoint
   (`redis-backup.sh --skip-missing`) alongside the two `pg_dump`s, and the
   bundle ships `deploy/db/redis-backup.sh` + `deploy/db/redis-restore.sh` so
-  the scripts exist on the deploy target.
+  the scripts exist on the deploy target. The Redis step is **non-fatal**
+  (`|| echo "::warning::…"`) while the PostgreSQL dumps stay fatal: the PG dump
+  gates a schema migration and deploying past a failed one risks unrecoverable
+  data, whereas Redis holds only transient or reconstructible state (ADR-4), so
+  a missing Redis checkpoint must never block a deploy.
 - `docs/DATABASE.md`, `docs/README.md`: cross-reference the new Redis
   backup/restore pair and the disaster-recovery runbook.
 

@@ -167,7 +167,22 @@ db/redis-restore.sh --file <rdb> --mode live --yes                     # real re
 
 CD runs `redis-backup.sh --skip-missing` in the `db-migrate` job alongside the
 PostgreSQL dumps, so every deploy leaves a Redis checkpoint under
-`$BACKUP_DIR/redis/`. Cron it on the VPS the same way as the DB backups:
+`$BACKUP_DIR/redis/`.
+
+**The Redis step is deliberately non-fatal; the PostgreSQL step is not.** The PG
+dump gates a schema migration — deploying past a failed dump risks
+unrecoverable data — so a failure there aborts the deploy. Redis holds only
+transient or reconstructible state per ADR-4: sessions expire and clients
+re-auth, and the registry and event streams are rebuilt by running servers. A
+missing Redis checkpoint is worth a `::warning::`, never a blocked deploy.
+
+(Caveat worth stating plainly, because it is the one thing that makes "Redis is
+reconstructible" less true than it sounds: the registry is only rebuilt by
+running servers *once G1 is fixed*. Today nothing re-registers, so a lost
+registry needs a manual `register-gameserver.sh`. That is an argument for
+fixing G1, not for blocking deploys on a Redis dump.)
+
+Cron it on the VPS the same way as the DB backups:
 
 ```cron
 17 3 * * * cd /opt/rpg-mmo/deploy && db/redis-backup.sh --skip-missing >> /var/log/rpg-backup.log 2>&1
