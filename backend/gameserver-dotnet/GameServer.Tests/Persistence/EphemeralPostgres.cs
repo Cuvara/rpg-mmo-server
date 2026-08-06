@@ -252,15 +252,18 @@ public sealed class PostgresFixture : IAsyncLifetime
     }
 
     /// <summary>
-    /// Emit a visible marker and return false when docker is missing so a test can
-    /// bail out without failing. CI (ubuntu-latest) always has docker, so a skip
-    /// there would be a real signal, not a silent pass.
+    /// Skip the calling test — as a REAL xUnit skip — when docker is missing.
+    ///
+    /// This used to be a soft skip: the test returned early and xUnit recorded it as
+    /// PASSED, so a docker-less run reported exactly the same totals as a full run
+    /// and absence of coverage was indistinguishable from coverage. The only honest
+    /// signal was per-test duration. Now the runner reports Skipped, so the summary
+    /// cannot lie. CI (ubuntu-latest) always has docker, so a skip there is a real
+    /// signal rather than a silent pass.
     /// </summary>
-    public bool SkipIfUnavailable(string testName)
+    public void SkipUnlessAvailable(string testName)
     {
-        if (Available) return false;
-        Console.WriteLine($"[SKIP] {testName}: docker unavailable, no postgres to test against");
-        return true;
+        Skip.IfNot(Available, $"{testName}: docker unavailable, no postgres to test against");
     }
 }
 

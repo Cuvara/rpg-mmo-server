@@ -20,10 +20,10 @@ public class PostgresPersistenceIntegrationTests
 
     public PostgresPersistenceIntegrationTests(PostgresFixture pg) => _pg = pg;
 
-    [Fact]
+    [SkippableFact]
     public async Task PlayerPosition_SurvivesServerRestart()
     {
-        if (_pg.SkipIfUnavailable(nameof(PlayerPosition_SurvivesServerRestart))) return;
+        _pg.SkipUnlessAvailable(nameof(PlayerPosition_SurvivesServerRestart));
 
         string userId = $"itest-{Guid.NewGuid():N}"[..20];
         string serverId = "gs-itest";

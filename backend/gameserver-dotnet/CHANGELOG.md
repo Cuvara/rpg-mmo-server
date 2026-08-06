@@ -7,6 +7,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Server self-registration and heartbeat (`GameServer/Registry/`).** The server now
+  publishes its own entry into the Redis registry the Go gateway reads, refreshes it
+  every 5s against a 15s TTL, updates `player_count` on join/leave, and deregisters on
+  graceful shutdown. Wire-compatible with `shared/storage/redisstore/registry.go` —
+  same keys (`servers:id:{id}` hash + `servers:map:{map}` set index), same field
+  names, same `constants.ServerHeartbeatTTL`. **No gateway change was needed**;
+  verified end to end with the real smoke test.
+  - `RedisServerRegistry` — StackExchange.Redis implementation. `UpdatePlayerCount`
+    uses the same Lua `EXISTS`-guard as the Go side, so a late writer cannot
+    resurrect an expired entry as a TTL-less immortal one.
+  - `RegistrationService` — **every heartbeat is also a repair.** When the entry is
+    missing (Redis wiped, failover onto an empty replica, TTL lapsed during an
+    outage) the next heartbeat re-registers it rather than just logging. That is what
+    makes a Redis outage self-heal in one heartbeat interval instead of requiring a
+    human to run a script. Registry failures never touch gameplay: every call is
+    wrapped and retried, and the connection uses `AbortOnConnectFail=false` so the
+    server boots and keeps serving even with Redis down.
+  - New config: `--redis`/`REDIS_ADDR`, `--redis-password`/`REDIS_PASSWORD`,
+    `--transport`/`GAMESERVER_TRANSPORT`, and `--public-addr`/`GAMESERVER_PUBLIC_ADDR`
+    — the address advertised to CLIENTS, which is **not** the listen address when a
+    container maps ports (listens `:9000`, published `:9200`). Falls back to the
+    listen address, which is correct in host mode.
+  - Replaces `scripts/register-gameserver.sh` (deleted), which wrote the entry once at
+    deploy time with a 3600s TTL and nothing to refresh it. Closes G1 and G2 in
+    `backend/deploy/docs/DISASTER-RECOVERY.md`.
+  - `StackExchange.Redis` 3.1.11 added. NativeAOT publish verified clean (zero IL trim
+    warnings) and the published binary exercised against a real Redis.
+- Registry test suite against a **real Redis** in a throwaway container
+  (`GameServer.Tests/Registry/`): exact hash/index shape the gateway reads, TTL
+  re-arming, real expiry, deregistration, the player-count resurrection guard, and
+  two self-healing tests — a wiped key repaired by the next heartbeat, and a full
+  container stop/start proving the service survives an outage and re-registers.
+- `GameServer.Tests/Infrastructure/TestDocker.cs` — docker plumbing shared by the
+  postgres and redis fixtures instead of duplicated.
 - `GameServer.Tests/Observability/MetricsEndpointTests.cs` — starts the real endpoint
   and scrapes it over HTTP: wildcard (`:port`, `0.0.0.0:port`, `*:port`) and named
   (`localhost:port`) binds both serve `/healthz` and `/metrics`, empty address
@@ -42,6 +76,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reconciliation procedure.
 
 ### Changed
+- **Docker-dependent tests now report a REAL xUnit skip instead of passing silently.**
+  `PostgresFixture.SkipIfUnavailable` returned early and xUnit recorded the test as
+  PASSED, so a machine without docker reported exactly the same totals as a full run —
+  absence of coverage was indistinguishable from coverage, and per-test duration was
+  the only honest signal. `SkipUnlessAvailable` now uses `Skip.IfNot`
+  (`Xunit.SkippableFact`), and the affected tests are `[SkippableFact]`/
+  `[SkippableTheory]`. With docker: `250 passed, 0 skipped`. Without:
+  `224 passed, 26 skipped`. The summary can no longer lie.
 - **Combat cooldowns are now tick-based, not wall-clock.** `EntityState.CooldownUntilTicks`
   (a `DateTime.Ticks` value) became `CooldownUntilTick` (a `ulong` simulation tick);
   `CombatLogic.ValidateAttack` and `ValidationLogic.ValidateInput` take the current
@@ -56,6 +98,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `SnapshotData` (Unity-facing mirror) gained `ack_tick`, `full` and `removed`.
 
 ### Fixed
+- **SIGTERM never shut the server down gracefully.** Termination was wired through
+  `AppDomain.CurrentDomain.ProcessExit`, which cancels the token but does **not** wait
+  for `Main` to unwind — the runtime terminates the process while shutdown is still in
+  flight. So on SIGTERM the final save never ran (losing up to `SaveInterval` = 30s of
+  player position/HP) and connections were never drained. Only SIGINT (Ctrl-C, via
+  `Console.CancelKeyPress`) shut down properly — the one signal production never
+  sends, since Docker, Kubernetes and an Agones drain all send SIGTERM. Both signals
+  now go through `PosixSignalRegistration` with `Cancel = true`, which suppresses the
+  runtime's terminate-now behaviour so shutdown actually completes. Found while
+  verifying registry deregistration, which was silently not happening for the same
+  reason.
 - **The metrics/health endpoint never started on Linux with a wildcard address.**
   `METRICS_ADDR=:9101` (the default, and the deployed value) becomes the HttpListener
   prefix `http://+:9101/`. OpenTelemetry builds its own prefix as

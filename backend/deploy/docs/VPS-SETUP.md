@@ -327,7 +327,7 @@ $RPG_DEPLOY_DIR/                       # default /opt/rpg-mmo
     monitoring/                        # prometheus.yaml + Grafana dashboards
     db/                                # init SQL, migrations/, backup.sh, restore.sh
   scripts/
-    deploy-local.sh  register-gameserver.sh
+    deploy-local.sh
   backups/{meta,gamestate}/            # pg_dump output, BACKUP_KEEP retained
   run/*.pid  logs/*.log                # host mode only
 ```
@@ -455,7 +455,7 @@ machines. Separate machines are the boring, working answer.
 | **Services die seconds after a green deploy** | The Actions runner's post-job cleanup kills every process it can trace to the job via `RUNNER_TRACKING_ID` | Host mode already handles this: `deploy-local.sh` starts binaries with `RUNNER_TRACKING_ID= setsid nohup …`. Any process you add to a deploy step needs the same treatment. Containers are immune — they are children of the Docker daemon. |
 | Run cancelled with *"Canceling since a higher priority waiting request exists"* | `concurrency: cd-<environment>` with `cancel-in-progress` — a newer push/dispatch for the same environment superseded this one | Expected. Dispatch **after** pushing, and watch that exact run id. A `develop` push will cancel your in-flight `dev` dispatch. |
 | `deploy` fails: `environment secret X is not set` | Secret missing or empty on that Environment (not the repo!) | `gh secret list --env <env>`. Repo-level secrets do **not** satisfy an environment-scoped read. |
-| Smoke fails at `enter world`: *no available server for map map_01* | Nothing in the Redis registry — the C# server does not register itself | `docker exec rpg-redis redis-cli HGETALL servers:id:gs-dotnet-map_01`; re-run `scripts/register-gameserver.sh register`. TTL is 3600s and nothing heartbeats it yet. |
+| Smoke fails at `enter world`: *no available server for map map_01* | Nothing in the Redis registry. The server self-registers, so this means it could not reach Redis (`REDIS_ADDR` wrong/unset) or it is not running | `docker exec rpg-redis redis-cli HGETALL servers:id:gs-dotnet-map_01` — expect a hash with `TTL` between 1 and 15. Empty? Check the server log for `Registered <id> in Redis` or a registry warning. Do NOT write the key by hand: it will be overwritten or expire. |
 | Smoke passes on the VPS, real clients cannot join | `GAMESERVER_PUBLIC_ADDR` is listen-style (`:9200`), which every client resolves to its own loopback | Set it to `<public-host>:<port>` and redeploy. |
 | `bind: address already in use` | Host-mode processes still hold the ports the containers want (or another service does) | Containers mode stops host services first; if it persists: `ss -tlnp \| grep -E '8000\|9200'`. |
 | Container images pull 404 from `ghcr.io` | GHCR packages are **private by default**, even in a public repo | Make the package public (package → Settings → Change visibility), or add a pull secret. Dev/staging avoid this entirely by building images on the runner. |

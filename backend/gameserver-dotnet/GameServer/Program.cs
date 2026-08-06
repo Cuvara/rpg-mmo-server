@@ -1,9 +1,11 @@
+using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging;
 using Shared.GameLogic.Components;
 using GameServer.Agones;
 using GameServer.Events;
 using GameServer.Observability;
 using GameServer.Persistence;
+using GameServer.Registry;
 using GameServer.Server;
 
 // ── Parse command-line args and environment variables ──
@@ -35,6 +37,16 @@ string? gameDbUrl = GetArg(args, "--game-db-url") ?? Env("GAME_DB_URL");
 // Migrate-only mode: apply pending schema migrations, then exit without listening.
 // CD runs this before the deploy step so migrations happen at a deterministic point.
 bool migrateOnly = HasFlag(args, "--migrate-only") || Env("GAMESERVER_MIGRATE_ONLY") == "true";
+// Redis holding the server registry the gateway reads. Unset -> no self-registration
+// (single-process / test default), and the gateway will not find this server.
+string? redisAddr = GetArg(args, "--redis") ?? Env("REDIS_ADDR");
+string? redisPassword = GetArg(args, "--redis-password") ?? Env("REDIS_PASSWORD");
+string transport = GetArg(args, "--transport") ?? Env("GAMESERVER_TRANSPORT") ?? "tcp";
+// Address ADVERTISED TO CLIENTS. The gateway returns it verbatim in
+// MsgEnterWorldResp.ServerAddr, so it must be dialable BY THE CLIENT — which is not
+// the listen address whenever a container maps ports (listen :9000, clients reach
+// <host>:9200). Falls back to the listen address, which is correct for host mode.
+string publicAddr = GetArg(args, "--public-addr") ?? Env("GAMESERVER_PUBLIC_ADDR") ?? addr;
 
 // ── Logging ──
 
@@ -66,6 +78,17 @@ if (useAgones)
 logger.LogInformation("  Metrics:   {Metrics}", string.IsNullOrWhiteSpace(metricsAddr) ? "disabled" : metricsAddr);
 logger.LogInformation("  GameDB:    {GameDb}",
     string.IsNullOrWhiteSpace(gameDbUrl) ? "memory" : PostgresPlayerStore.MaskDsn(gameDbUrl));
+logger.LogInformation("  Registry:  {Registry}",
+    string.IsNullOrWhiteSpace(redisAddr)
+        ? "disabled (REDIS_ADDR unset -- the gateway will NOT find this server)"
+        : $"redis {redisAddr}, advertising '{publicAddr}' ({transport})");
+if (!string.IsNullOrWhiteSpace(redisAddr) && publicAddr == addr && addr.StartsWith(':'))
+{
+    logger.LogInformation(
+        "  GAMESERVER_PUBLIC_ADDR is unset, so clients will be handed the listen address '{Addr}'. " +
+        "That is correct for host deployments; in containers with a published port, set it to " +
+        "<host>:<published-port> or clients will fail to connect.", addr);
+}
 
 // ── Migrate-only mode (CD schema step) ──
 //
@@ -137,6 +160,42 @@ else
     logger.LogInformation("using in-memory player store (GAME_DB_URL unset -- state is lost on restart)");
 }
 
+// ── Server registry (self-registration + heartbeat) ──
+//
+// Connecting never blocks startup and never fails it: the multiplexer is built with
+// AbortOnConnectFail=false, so a server booting while Redis is down still comes up
+// and registers itself as soon as Redis is reachable.
+
+RedisServerRegistry? serverRegistry = null;
+RegistrationOptions? registrationOptions = null;
+if (!string.IsNullOrWhiteSpace(redisAddr))
+{
+    try
+    {
+        serverRegistry = await RedisServerRegistry.ConnectAsync(
+            redisAddr, redisPassword, RegistryDefaults.HeartbeatTtl,
+            loggerFactory.CreateLogger<RedisServerRegistry>());
+        registrationOptions = new RegistrationOptions
+        {
+            ServerId = serverId,
+            MapId = mapId,
+            PublicAddr = publicAddr,
+            Transport = transport,
+            Capacity = capacity,
+            Ttl = RegistryDefaults.HeartbeatTtl
+        };
+    }
+    catch (Exception ex)
+    {
+        // Deliberately non-fatal: a registry outage must not take the map offline for
+        // players already connected, and the heartbeat loop cannot retry a connection
+        // that was never created — so log loudly and run unregistered.
+        logger.LogError(ex,
+            "Could not connect to Redis at {Addr}; running WITHOUT self-registration, " +
+            "so the gateway will not hand any client to this server", redisAddr);
+    }
+}
+
 // ── Build server options ──
 
 var options = new ServerOptions
@@ -162,24 +221,35 @@ var options = new ServerOptions
     // generated (entity_killed) and then discarded. See ADR-5.
     EventStream = new NoopEventStream(),
     LoggerFactory = loggerFactory,
-    Metrics = metrics
+    Metrics = metrics,
+    ServerRegistry = serverRegistry,
+    Registration = registrationOptions
 };
 
 // ── Graceful shutdown on SIGINT / SIGTERM ──
 
 using var cts = new CancellationTokenSource();
-Console.CancelKeyPress += (_, e) =>
-{
-    e.Cancel = true;
-    logger.LogInformation("Received SIGINT, shutting down...");
-    cts.Cancel();
-};
 
-AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+// SIGTERM is the signal that actually matters: it is what Docker, Kubernetes and
+// an Agones drain send. It used to be handled through AppDomain.ProcessExit, which
+// cancels the token but does NOT wait for Main to unwind — the runtime terminates
+// the process while shutdown is still in flight, so on SIGTERM the final save never
+// ran and (now) the registry entry was never removed. Only SIGINT (Ctrl-C, via
+// Console.CancelKeyPress) shut down properly, which is the one signal production
+// never sends.
+//
+// PosixSignalRegistration handles both, and setting Cancel = true suppresses the
+// runtime's default terminate-now behaviour so Main really does get to finish:
+// drain connections, deregister, final save, then exit. It is NativeAOT-safe.
+void RequestShutdown(PosixSignalContext ctx)
 {
-    logger.LogInformation("Received SIGTERM, shutting down...");
+    ctx.Cancel = true; // we own the shutdown; do not let the runtime kill us mid-drain
+    logger.LogInformation("Received {Signal}, shutting down...", ctx.Signal);
     cts.Cancel();
-};
+}
+
+using var sigInt = PosixSignalRegistration.Create(PosixSignal.SIGINT, RequestShutdown);
+using var sigTerm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, RequestShutdown);
 
 // ── Run ──
 

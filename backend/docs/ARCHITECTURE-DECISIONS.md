@@ -33,18 +33,20 @@ Four stores are in play. Interfaces live in `backend/shared/storage/interfaces.g
 | Accounts, wallet, social, leaderboard | Nakama's own PostgreSQL (`postgres` service) | Nakama, via its runtime storage API | `backend/nakama/auth/profile.go:36-37,47,72` (`nk.StorageRead`/`StorageWrite`) |
 | `player_states` (position, HP, map) | Game-state PostgreSQL (`postgres-game` service) | **gameserver-dotnet only** | `GameServer/Persistence/AsyncSaver.cs:88-111` → `PostgresPlayerStore.cs:145-168`; schema `pgstore/schema.sql:12-23` |
 | `session:{user_id}` | Redis (TTL 1h) | **gateway only** | `gateway/session/manager.go:34-40,55-60,62-68` |
-| `servers:id:{id}`, `servers:map:{map}` | Redis (TTL) | **two writers — see below** | `gateway/registry/registry.go:85,106,111-112` and `scripts/register-gameserver.sh:83-91` |
+| `servers:id:{id}`, `servers:map:{map}` | Redis (TTL 15s) | **gameserver-dotnet** (self-registration + heartbeat); the gateway also registers Agones-allocated servers | `GameServer/Registry/RedisServerRegistry.cs`, `GameServer/Registry/RegistrationService.cs`; `gateway/registry/registry.go:85,106,111-112` |
 | `events:game` | Redis Streams | nothing live (see ADR-5) | `gateway/events/relay.go:16` subscribes; no live publisher |
 | Live world (entities, mobs, pending input) | C# process memory | gameserver-dotnet | `GameServer/World/GameWorld.cs:22-27` |
 
 Three findings the criticism is right about:
 
-1. **The server registry genuinely has two writers.** The gateway writes through the
-   typed interface (`registry.go:85` registers Agones-allocated servers), while
-   `scripts/register-gameserver.sh:83-91` writes the same keys with raw
-   `redis-cli HSET`/`SADD`/`EXPIRE`. The script exists because the C# server has no
-   Redis client and cannot self-register; its own header says "Delete this script
-   the day the C# server registers itself" (`scripts/register-gameserver.sh:6-14`).
+1. **The server registry no longer has a shell-script writer.** It used to: the
+   gateway wrote through the typed interface (`registry.go:85`, for Agones-allocated
+   servers) while `scripts/register-gameserver.sh` wrote the same keys with raw
+   `redis-cli HSET`/`SADD`/`EXPIRE`, because the C# server had no Redis client. That
+   script's own header said "Delete this script the day the C# server registers
+   itself" — which has now happened, and it is deleted. The C# server owns its own
+   entry through `GameServer/Registry/`, using the same key layout and the same
+   `ServerHeartbeatTTL` the Go code assumes.
 2. **Nakama never touches the game-state DB.** Every hook takes `db *sql.DB`
    (`backend/nakama/main.go:23`, `auth/token.go:49`) and never dereferences it.
    The two PostgreSQL instances are genuinely separate.
@@ -92,9 +94,11 @@ backed up. Live world state is not recoverable (ADR-6).
 - **S** — Delete `constants.PlayerLocationKey` or implement the location index.
 - **S** — Delete the orphaned Go `shared/storage/pgstore/` package, or add a build-time
   assertion tying its schema to the C# one instead of relying on a test.
-- **M** — Give the C# server a Redis client so it self-registers and heartbeats,
-  then delete `scripts/register-gameserver.sh`. This collapses the registry to one
-  writer and fixes the dead heartbeat in ADR-2.
+- ~~**M** — Give the C# server a Redis client so it self-registers and heartbeats,
+  then delete `scripts/register-gameserver.sh`.~~ **Done.** `GameServer/Registry/`
+  registers on startup, heartbeats every 5s against a 15s TTL and deregisters on
+  shutdown; the script is deleted. This collapsed the registry to one writer per
+  server and fixed the dead heartbeat in ADR-2.
 
 ---
 
@@ -127,10 +131,12 @@ instances of one map are two disconnected copies of the world. Players on
 different instances cannot see or fight each other, and there is no handoff
 between them. Nothing warns about it.
 
-Compounding this, the registry TTL is never refreshed: `ServerRegistry.Heartbeat`
-exists (`redisstore/registry.go:90-99`) but has **zero callers** in the gateway.
-The dev entry is written once with a 1-hour TTL by
-`scripts/register-gameserver.sh:42,55` and never re-armed.
+This used to be compounded by a dead heartbeat: `ServerRegistry.Heartbeat`
+(`redisstore/registry.go:90-99`) had **zero callers**, and the dev entry was
+written once with a 1-hour TTL by a deploy script and never re-armed. That is
+fixed — the C# server now re-arms its own 15s TTL every 5s
+(`GameServer/Registry/RegistrationService.cs`), so a stale entry disappears in
+seconds. The multi-instance hazard above is unchanged.
 
 ### Decision
 
