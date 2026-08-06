@@ -5,7 +5,55 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`docs/CICD.md` §4a — the `dev` runner's `docker` shim is now documented.**
+  It was undocumented tribal knowledge that would baffle anyone debugging a
+  failed dev deploy, because it is invisible from every workflow file. Docker
+  Desktop's WSL integration is disabled for this distro, so `/usr/bin/docker`
+  points at a dead `/var/run/docker.sock` (`curl --unix-socket` → `curl: (56)`),
+  and `/usr/local/bin/docker` is a two-line `exec docker.exe "$@"` shim that
+  wins because the runner's frozen `~/actions-runner/.path` lists
+  `/usr/local/bin` before `/usr/bin`. A CD deploy failed on exactly this after
+  a reboot, before the shim existed.
+  Documented with it: the path-translation rule the shim forces, which turns out
+  to be **narrower and more dangerous than "keep paths cwd-relative"**.
+  `docker.exe` does not reject Linux absolute paths, it resolves them against
+  the current drive — loudly for `-f`
+  (`open E:\mnt\e\…: The system cannot find the path specified`) but **silently
+  for bind mounts**: `-v /mnt/e/…:/x` exits 0 with `/x` mounted **empty**,
+  because Docker Desktop creates the nonexistent `E:\mnt\e\…` and mounts that.
+  **`$PWD` is absolute and therefore affected** — `-v "$PWD:/x"` silently mounts
+  nothing while `-v ".:/x"` works. Audited: nothing in the repo trips this
+  today (compose bind mounts are relative, the four `db/` scripts use named
+  volumes and `docker exec` stdio, `build-all.sh` and the `db/` scripts carry a
+  `detect_docker()` fallback). Verified live rather than by reading — the
+  prometheus/dashboard/`nakama.so` mounts are all non-empty inside the running
+  containers.
+- **`docs/CICD.md` §4b — recommendation on enabling WSL integration: not now**,
+  with the evidence and a rollback. The only real benefit is removing the silent
+  empty-mount landmine, which is latent, not live. Speed is not an argument
+  (`docker.exe` measured at ~85 ms/invocation vs ~25 ms native — seconds per CD
+  run), and bind-mount throughput is unchanged because the repo and
+  `$RPG_DEPLOY_DIR` both sit on `/mnt/e`. Most importantly the toggle **alone
+  changes nothing**: `/usr/local/bin` precedes `/usr/bin` in the runner's frozen
+  `.path`, so the shim keeps shadowing the native CLI — switching is a two-step
+  change (flip the toggle *and* remove the shim), and doing only the first looks
+  like the toggle "did not work". Documented switch procedure verifies the
+  socket *before* the shim is retired, since removing it with the toggle off
+  leaves the runner with no working `docker` at all. The shim stays as the
+  rollback.
+- `docs/RUNBOOK-local-dev.md`: cross-reference to §4a and the `.` vs `$PWD`
+  bind-mount rule.
+
 ### Fixed
+- **`docs/DISASTER-RECOVERY.md` provenance note was wrong.** The drill writeup
+  claimed there is no `$RPG_DEPLOY_DIR/COMMIT` on this host. There is — at
+  `/mnt/e/rpg-mmo-deploy/COMMIT`, because `vars.RPG_DEPLOY_DIR` is
+  `/mnt/e/rpg-mmo-deploy` and only the `/opt/rpg-mmo` default was checked. Both
+  sources agree on `4c4c58a` for the drill window (`COMMIT` was rewritten to
+  `184a779` at 10:19 UTC, after the drill ended at 10:11), so **no measured
+  value changes** — only the note. Corrected in place, with the correction
+  called out rather than quietly rewritten.
 - **PRs into `develop` ran no CI at all.** `ci.yml` listed only
   `[main, master]` under `pull_request`, but every feature branch PRs into
   `develop`, so `gh pr checks <n>` answered "no checks reported" — which reads

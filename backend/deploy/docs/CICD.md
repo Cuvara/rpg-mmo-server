@@ -299,6 +299,157 @@ What this pipeline relies on the runner providing:
 
 Go and the .NET SDK are **not** needed — only prebuilt binaries land there.
 
+### 4a. The `dev` runner is WSL, and `docker` there is a shim
+
+**Read this before debugging a failed `dev` deploy.** It is the least obvious
+thing about this pipeline and it is not visible from any workflow file.
+
+The `dev` runner is a WSL2 Ubuntu distro on a Windows box with Docker Desktop.
+**Docker Desktop's WSL integration is DISABLED for this distro**, so the
+Linux-native Docker CLI cannot reach a daemon:
+
+```
+$ ls -l /usr/bin/docker
+/usr/bin/docker -> /mnt/wsl/docker-desktop/cli-tools/usr/bin/docker
+
+$ /usr/bin/docker version
+Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?
+
+$ curl --unix-socket /var/run/docker.sock http://localhost/_ping
+curl: (56) Recv failure          # the socket file exists but nothing is listening
+```
+
+The fix in place is a two-line shim that forwards to the Windows CLI:
+
+```sh
+# /usr/local/bin/docker   (mode 0755)
+#!/bin/sh
+exec docker.exe "$@"
+```
+
+It works because the runner's `PATH` (`~/actions-runner/.path`, captured at
+`svc.sh install` time) lists `/usr/local/bin` **before** `/usr/bin`:
+
+```
+… :/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin: …
+$ PATH="$(cat ~/actions-runner/.path)" command -v docker
+/usr/local/bin/docker
+```
+
+Notes that will save you time:
+
+- The `.path` file is a **snapshot**. Changing your interactive shell's `PATH`
+  does not change the runner's. There is a second, identical shim at
+  `~/cuongnd/bin/docker` for interactive use; `~/bin` is **not** on the runner's
+  `PATH`, which is exactly why the `/usr/local/bin` one had to be added.
+- Because `/usr/local/bin` wins, **the shim shadows `/usr/bin/docker`
+  unconditionally.** Enabling WSL integration later would change nothing on its
+  own — see [§4b](#4b-why-we-have-not-enabled-wsl-integration).
+- A CD deploy failed on exactly this after a reboot, before the shim existed.
+
+#### The path-translation rule this forces on every script
+
+`docker.exe` is a Windows binary. It does not understand Linux absolute paths,
+and — critically — **it does not reject them.** It resolves them against the
+current drive:
+
+```
+$ docker.exe compose -f /mnt/e/SecretProject/rpg-mmo-server/backend/deploy/docker-compose.yml ps
+open E:\mnt\e\SecretProject\rpg-mmo-server\backend\deploy\docker-compose.yml: The system cannot find the path specified.
+```
+
+For `-f` that is a loud error. **For a bind mount it is silent:**
+
+```
+$ docker.exe run --rm -v /mnt/e/SecretProject/rpg-mmo-server/backend/deploy:/x alpine ls /x
+$ echo $?
+0                        # exit 0, and /x is an EMPTY directory
+```
+
+Docker Desktop creates the nonexistent `E:\mnt\e\…` on the Windows side and
+mounts *that*. The container sees an empty directory and the command succeeds.
+This is the same failure shape as the Redis restore bug in
+[`DISASTER-RECOVERY.md`](DISASTER-RECOVERY.md#4-the-bug-the-drill-found---mode-live-restored-nothing-and-said-done):
+a wrong result reported as success.
+
+**`$PWD` is an absolute path, so it is affected too** — this is the trap most
+likely to bite someone:
+
+```
+$ cd backend/deploy
+$ docker.exe run --rm -v "$PWD:/x" alpine sh -c 'ls /x | wc -l'
+0                        # silently empty
+$ docker.exe run --rm -v ".:/x"   alpine sh -c 'ls /x | wc -l'
+12                       # correct
+```
+
+So the rule is narrower than "keep paths cwd-relative": **the mount source must
+be a literal relative path (`.`, `./monitoring`), never `$PWD` or `$(pwd)`.**
+
+Current state — verified 2026-08-06, nothing in the repo violates this:
+
+| Consumer | Why it is safe |
+|---|---|
+| `docker-compose.yml` | Every bind mount is relative (`./db/…`, `./modules`, `./monitoring/…`); `cd.yml` `cd`s into `$RPG_DEPLOY_DIR/deploy` first |
+| `db/backup.sh`, `db/restore.sh`, `db/redis-backup.sh`, `db/redis-restore.sh` | Move bytes through `docker exec` / `docker run -i` **stdio**, never a host bind mount. Where they do use `-v`, the source is a **named volume**, which is immune to path translation |
+| `scripts/build-all.sh`, all four `db/` scripts | Ship a `detect_docker()` that tries `docker` then `docker.exe`, so they work on the VPS and under WSL without the shim |
+| `cd.yml` image builds | `working-directory: backend` + relative `-f deploy/docker/…` |
+
+Bind mounts were confirmed live, not just read: `prometheus.yaml` (3917 B),
+`rpg-dashboards.yaml` (518 B), the dashboards dir and `nakama.so` (18 MB) are
+all present *inside* the running containers, so nothing silently mounted empty.
+
+None of this applies to a real Linux VPS, where `docker` is `docker` and
+absolute paths are absolute paths. The constraint is WSL-dev-only and costs
+nothing to keep.
+
+### 4b. Why we have not enabled WSL integration
+
+Docker Desktop can expose a working `/var/run/docker.sock` inside this distro
+(Settings → Resources → WSL integration → toggle `Ubuntu`). That would retire
+the shim and the path-translation rule. **Recommendation: not now.** Evidence:
+
+| | |
+|---|---|
+| **What it would fix** | The silent-empty-mount landmine above, permanently. That is the whole benefit, and it is a latent risk, not a live bug — no current code trips it |
+| **Speed** | Not an argument. `docker.exe` costs **~85 ms per invocation** (measured, 10× `docker version`) vs ~25 ms native. Across a CD run that is a few seconds |
+| **Bind-mount throughput** | Unchanged. The repo and `$RPG_DEPLOY_DIR` both live on `/mnt/e`, a Windows NTFS drive. Container I/O against it crosses the same 9p/drvfs boundary either way |
+| **The toggle alone does nothing** | `/usr/local/bin` precedes `/usr/bin` in the runner's frozen `.path`, so `docker` keeps resolving to the shim. Switching is a **two-step** change: flip the toggle **and** remove the shim. Flipping only the toggle produces no observable difference, which is a great way to conclude it "did not work" |
+| **Blast radius** | Every deploy path changes daemon endpoint at once: image builds, `compose up`, the health probes, the four `db/` scripts, and the Agones/k8s containers currently running on Docker Desktop's Kubernetes. All of it is re-validated only by running a real deploy |
+| **Timing** | G1 (self-registration) is mid-flight and the security change has just landed. Swapping the container runtime plumbing underneath that, for a latent-risk fix worth a few seconds per deploy, is a bad trade |
+
+**Revisit when** someone actually needs an absolute host bind mount, or when the
+`dev` runner moves off WSL. Until then the cost of staying is one documented
+shim and one rule (`.` not `$PWD`), both now written down here instead of living
+in one person's head.
+
+If we do switch, the procedure and its rollback:
+
+```bash
+# 1. Docker Desktop → Settings → Resources → WSL integration → enable "Ubuntu" → Apply & restart
+#    (GUI, user action — cannot be scripted from here)
+
+# 2. Verify the socket is actually live BEFORE touching the shim
+curl --unix-socket /var/run/docker.sock http://localhost/_ping   # want: OK
+/usr/bin/docker version --format '{{.Server.Version}}'           # want: a version, not an error
+
+# 3. Only then retire the shim (keep a copy — this is the rollback)
+sudo mv /usr/local/bin/docker /usr/local/bin/docker.shim.bak
+PATH="$(cat ~/actions-runner/.path)" command -v docker           # want: /usr/bin/docker
+
+# 4. Re-run a full dev deploy and re-verify the bind mounts landed non-empty:
+docker exec rpg-lgtm ls -l /otel-lgtm/prometheus.yaml
+docker exec rpg-nakama ls -l /nakama/data/modules/nakama.so
+
+# ROLLBACK (any step fails):
+sudo mv /usr/local/bin/docker.shim.bak /usr/local/bin/docker
+#   The shim is self-contained and needs no daemon-side state, so restoring it
+#   is instant and does not depend on the toggle being flipped back.
+```
+
+Do **not** delete the shim before step 2 passes: with the toggle off and the
+shim gone, the runner has no working `docker` at all and every deploy fails.
+
 ### Optional: systemd units for host mode
 
 Recommended for staging/production when `DEPLOY_MODE=host`. `deploy-local.sh`
