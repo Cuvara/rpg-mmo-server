@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/duycuong/rpg-mmo/shared/constants"
@@ -33,6 +35,12 @@ type EventStream struct {
 	consumer string
 	block    time.Duration
 	owned    bool
+	logger   *slog.Logger
+
+	// groupLosses counts NOGROUP recoveries. Exported through GroupLosses so
+	// the gateway can surface it as a metric and tests can assert the recovery
+	// actually happened rather than inferring it from timing.
+	groupLosses atomic.Int64
 
 	mu     sync.Mutex
 	closed bool
@@ -41,11 +49,36 @@ type EventStream struct {
 	wg     sync.WaitGroup
 }
 
+// SetLogger attaches a logger used for consumer-group recovery events. Must be
+// called before Subscribe.
+func (s *EventStream) SetLogger(l *slog.Logger) { s.logger = l }
+
+// GroupLosses returns how many times the consumer group was found missing and
+// re-created since this stream was built.
+func (s *EventStream) GroupLosses() int64 { return s.groupLosses.Load() }
+
+func (s *EventStream) recordGroupLoss() { s.groupLosses.Add(1) }
+
+func (s *EventStream) logf(format string, args ...any) {
+	if s.logger != nil {
+		s.logger.Warn(fmt.Sprintf(format, args...))
+	}
+}
+
 // NewRedisEventStream connects to Redis at addr. group is the consumer group
 // name (one logical subscriber, e.g. "gateway"); consumer identifies this
 // process within the group (e.g. the pod name).
+// The client gets a read timeout comfortably above defaultStreamBlock: a
+// blocking XREADGROUP legitimately holds the socket for the whole block
+// duration, so a read timeout at or below it would turn every idle poll into a
+// spurious i/o timeout and mask real errors.
 func NewEventStream(addr, password, group, consumer string) *EventStream {
-	s := newEventStream(NewRedisClient(addr, password), group, consumer)
+	client := NewRedisClientWithOptions(ClientOptions{
+		Addr:        addr,
+		Password:    password,
+		ReadTimeout: defaultStreamBlock + DefaultReadTimeout,
+	})
+	s := newEventStream(client, group, consumer)
 	s.owned = true
 	return s
 }
@@ -114,9 +147,7 @@ func (s *EventStream) Subscribe(ctx context.Context, stream string, handler func
 	s.mu.Unlock()
 
 	key := streamKey(stream)
-	// MkStream so subscribing before the first publish works.
-	if err := s.client.XGroupCreateMkStream(ctx, key, s.group, "0").Err(); err != nil &&
-		!strings.Contains(err.Error(), "BUSYGROUP") {
+	if err := s.ensureGroup(ctx, key); err != nil {
 		return fmt.Errorf("redis xgroup create %s/%s: %w", stream, s.group, err)
 	}
 
@@ -125,6 +156,25 @@ func (s *EventStream) Subscribe(ctx context.Context, stream string, handler func
 		defer s.wg.Done()
 		s.consume(key, handler)
 	}()
+	return nil
+}
+
+// isNoGroup reports whether err is Redis' NOGROUP error — the consumer group
+// (or the stream itself) no longer exists. This is what a FLUSHALL, a restore
+// from a backup taken before the group was created, or an eviction leaves
+// behind, and it is NOT transient: retrying XREADGROUP against a missing group
+// fails identically forever, so the relay must re-create the group instead.
+func isNoGroup(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "NOGROUP")
+}
+
+// ensureGroup creates the consumer group, tolerating BUSYGROUP (already there).
+// MkStream so subscribing before the first publish works.
+func (s *EventStream) ensureGroup(ctx context.Context, key string) error {
+	err := s.client.XGroupCreateMkStream(ctx, key, s.group, "0").Err()
+	if err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
+		return err
+	}
 	return nil
 }
 
@@ -146,6 +196,26 @@ func (s *EventStream) consume(key string, handler func(storage.Event)) {
 			// Nil == block timeout with no entries; anything else during
 			// shutdown is expected too.
 			if errors.Is(err, redis.Nil) || s.ctx.Err() != nil {
+				continue
+			}
+			// NOGROUP: the group vanished under us (Redis wiped/restored). Left
+			// alone this loop would spin at 1/block forever while the process
+			// still looked healthy and the relay was permanently dead. Re-create
+			// the group and carry on; entries published while the group was
+			// missing are unrecoverable (they were never delivered to anyone),
+			// which is why this is logged loudly rather than silently healed.
+			if isNoGroup(err) {
+				s.recordGroupLoss()
+				if cerr := s.ensureGroup(s.ctx, key); cerr != nil {
+					s.logf("event stream: consumer group %q lost on %q, re-create failed: %v", s.group, key, cerr)
+				} else {
+					s.logf("event stream: consumer group %q was missing on %q, re-created", s.group, key)
+				}
+				select {
+				case <-s.ctx.Done():
+					return
+				case <-time.After(s.block):
+				}
 				continue
 			}
 			// Transient error (e.g. Redis restart): back off briefly and retry.

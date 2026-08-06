@@ -6,6 +6,54 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `/readyz` readiness endpoint and `metrics.Readiness`, a concurrency-safe set
+  of named dependency checks. `/healthz` stays liveness-only and returns 200
+  even when Redis is down; `/readyz` returns 503 with the failing check names
+  (names only — never the error text, which carries internal addresses).
+  **The split is deliberate:** Kubernetes restarts a container that fails
+  liveness but only removes it from service on a readiness failure. Wiring Redis
+  into `/healthz` would restart every gateway pod at once during a Redis outage,
+  killing player connections that do not depend on Redis (ADR-3) and hitting a
+  recovering Redis with a reconnect storm. A restart cannot heal a sick
+  dependency (DR audit **G9**)
+- Metrics: `gateway_redis_up`, `gateway_relay_up` (gauges),
+  `gateway_session_checks_total{result="ok"|"expired"|"store_error"}` and
+  `gateway_stream_group_loss_total`. All zero-primed. The session-check split is
+  what makes a Redis blip visible — previously it was indistinguishable from
+  normal expiry on a dashboard
+- `registry.ErrNoServerAvailable` — a matchable sentinel for the "map is full or
+  absent" capacity condition, wrapped by `FindServer`
+
+### Fixed
+- **A Redis blip de-authenticated every online player.** `checkSession` treated
+  any `ValidateSession` error as an expired session, so a store outage dropped
+  live connections to `StateConnected` and told correctly-authenticated players
+  "session expired" — a forced re-login for the whole population, caused by a
+  dependency gameplay does not use. Infrastructure errors are now distinguished
+  from `storage.ErrNotFound` and **fail open**: the connection stays
+  authenticated (it already proved possession of a valid JWT at `MsgAuth`) and
+  the error is logged and counted. A session the store affirmatively reports as
+  gone is still rejected (DR audit **G6**)
+- **The gateway crash-looped when Redis was down at boot.** `relay.Start`
+  failing propagated out of `Gateway.Run`, `main` exited 1 and the pod
+  crash-looped, so a Redis outage took auth and map assignment down with it. The
+  relay is now started in the background with exponential backoff (1s → 30s):
+  the gateway serves traffic immediately and the relay attaches when Redis
+  returns, no restart required. `Gateway.RelayUp()` and `gateway_relay_up`
+  expose the degraded state (DR audit **G3**)
+- **Internal errors were sent to clients verbatim.** `handleEnterWorld` passed
+  `err.Error()` straight into the `EnterWorldResponse`, leaking internal
+  hostnames, private IPs and ports (e.g.
+  `dial tcp 10.0.1.7:6379: connect: connection refused`) to any unauthenticated
+  peer that could reach the port. Errors are now mapped to a fixed set of
+  client-safe messages and the detail is logged server-side. Anything not
+  explicitly classified collapses to `internal error`, so a new error type
+  cannot start leaking by default (DR audit **G7**)
+- `events.Relay.Start` latched `started = true` before `Subscribe` succeeded, so
+  a failed start was permanent — the retry above would have hit the
+  already-started guard forever. It now latches only on success
+
+### Added
 - Rate limiting. `server.WithConnRateLimit` bounds accepts per source IP
   (default 10/min, burst 10) and `server.WithMsgRateLimit` bounds inbound frames
   per connection (default 60/s, burst 120). The per-IP check runs immediately

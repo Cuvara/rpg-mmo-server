@@ -301,3 +301,71 @@ break every join. The start-up warning is the reminder.
 
 Keyrings are parsed once in `New` and stored, not parsed per request —
 `AssignMapKeyring` exists precisely so `EnterWorld` does no string splitting.
+
+## Surviving Redis (2026-08-06)
+
+Four gaps from the disaster-recovery audit turned a Redis blip into a
+player-visible outage. The common thread: the gateway treated a degradable
+dependency as a required one.
+
+### The gateway does not need Redis to serve
+
+Redis backs sessions, the server registry and the event stream. None of that is
+in the gameplay data path — the gateway hands out `{ServerAddr, JoinToken}` and
+the client talks to the game server directly (ADR-3). A player already in a map
+is unaffected by Redis being down. So the design rule is: **a Redis failure
+degrades the gateway, it never kills it.**
+
+Concretely:
+
+- **Boot (G3).** `relay.Start` failing used to propagate out of `Run`, so `main`
+  exited 1 and the pod crash-looped. The relay now starts in the background and
+  retries with backoff (1s → 30s). The listener binds regardless.
+- **Runtime (G6).** `checkSession` conflated "store returned an error" with
+  "session is gone", so an outage de-authenticated the entire online
+  population — the single worst outcome available, since the sessions were
+  actually fine. Store failures now fail *open*.
+- **After a wipe (G4).** `NOGROUP` was retried as if transient. It is not: the
+  group is gone and every subsequent read fails identically. The relay
+  re-creates it.
+- **Visibility (G9).** None of the above was observable. `gateway_redis_up`,
+  `gateway_relay_up`, `gateway_stream_group_loss_total` and the
+  `store_error` split on `gateway_session_checks_total` make each degraded mode
+  a series you can alert on.
+
+### Why failing open on session checks is the right trade
+
+Failing closed sounds safer and is not. The client presented a valid,
+signature-checked JWT at `MsgAuth`; the session record is a *revocation and
+presence* mechanism layered on top, not the authentication itself. When the
+store is unreachable the gateway cannot answer "was this revoked?", and the two
+options are:
+
+- **Fail closed** — disconnect every online player, force a full re-login storm
+  against an already-sick dependency, for a threat (a session revoked in the
+  last few seconds) that is rare and low-impact.
+- **Fail open** — honour the JWT for the duration of the outage. A session
+  explicitly destroyed just before the outage keeps working until Redis returns.
+
+The blast radius of the first is the entire player base; of the second, a
+handful of already-authenticated users. `TestExpiredSessionStillRejected` pins
+that this does not weaken the normal path: an affirmative "not found" is still
+a rejection.
+
+### Liveness must not depend on Redis
+
+`/healthz` stays 200 during a Redis outage; `/readyz` does not. k8s restarts on
+liveness failure and only deschedules on readiness failure, so tying Redis to
+liveness converts a dependency outage into a fleet-wide simultaneous restart —
+maximum damage, zero benefit, since restarting cannot fix Redis. See
+`docs/README.md` for the probe wiring.
+
+### Client-facing errors are a closed set (G7)
+
+`handleEnterWorld` forwarded the raw wrapped error, which meant an
+unauthenticated peer could read `dial tcp 10.0.1.7:6379: connect: connection
+refused` — free internal topology. Classification is now explicit and the
+default is generic, so a newly introduced error type cannot start leaking; it
+just reports `internal error` until someone deliberately classifies it. The
+`registry.ErrNoServerAvailable` sentinel exists so the one genuinely useful
+condition survives that collapse without string matching.

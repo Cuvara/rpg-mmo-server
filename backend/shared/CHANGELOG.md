@@ -6,6 +6,43 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `redisstore.ClientOptions` + `NewRedisClientWithOptions` — explicit timeout,
+  retry and pool configuration for every Redis client this package builds
+  (`Default*` constants; the zero value of each field falls back to the default,
+  and a negative value is preserved because go-redis reads it as "disabled").
+  The client was previously built with only `Addr`/`Password`, so every call
+  inherited go-redis defaults and an unreachable Redis could occupy a caller for
+  tens of seconds. Verified against a stopped Redis container: a `Get` now fails
+  in ~1.4s instead of hanging (DR audit **G5**)
+- `redisstore.Ping` — liveness probe with a bounded timeout independent of the
+  caller's context, for readiness handlers
+- `redisstore.EventStream.SetLogger` / `GroupLosses` — observability for
+  consumer-group recovery
+
+### Fixed
+- **Event relay could die silently after a Redis wipe.** `XREADGROUP` against a
+  missing consumer group returns `NOGROUP`, which the consume loop treated as a
+  generic transient error: it retried at 2Hz forever, logged nothing, and never
+  re-created the group, so the process looked healthy while the relay was
+  permanently dead. `NOGROUP` is now detected specifically, the group is
+  re-created, and the event is counted (`GroupLosses`) and logged. Proven
+  against a real Redis with `FLUSHALL` mid-subscription: recovery is automatic
+  and delivery resumes (DR audit **G4**)
+- **Memory and Redis session stores disagreed on the "missing key" contract.**
+  `redisstore` returned `storage.ErrNotFound` while `storage/memory.go` returned
+  a bare `fmt.Errorf(... not found)`, so no `errors.Is` check could tell a
+  missing key from an infrastructure failure on the memory backend. Every
+  memory-store "not found" now wraps `storage.ErrNotFound`. This is what makes
+  the gateway's Redis-blip fix work on both backends (DR audit **G6**)
+- `errors.Is(err, code)` in `shared/errors` used a bare type assertion, so it
+  returned false for any wrapped `GameError` — and the repo-wide convention is
+  to wrap with `%w`. It now uses `errors.As`, so classification survives
+  wrapping instead of silently falling through to the default branch
+- `NewEventStream` gives its client a read timeout above the `XREADGROUP` block
+  duration; with the new bounded defaults an equal-or-smaller read timeout would
+  turn every idle poll into a spurious i/o timeout
+
+### Added
 - `ratelimit` package — shared token-bucket limiter. `Bucket` (lock-free, zero
   allocation, 10.8 ns/op — embed per connection) and `Limiter` (keyed per
   IP/user, mutex-guarded, TTL eviction with `StartCleanup`/`Stop`). A nil

@@ -76,12 +76,24 @@ func (r *Relay) Start(ctx context.Context) error {
 		r.mu.Unlock()
 		return fmt.Errorf("event relay: already started")
 	}
-	r.started = true
+	if r.stopped {
+		r.mu.Unlock()
+		return fmt.Errorf("event relay: already stopped")
+	}
 	r.mu.Unlock()
 
+	// `started` is only latched once Subscribe actually succeeds. Setting it
+	// before the attempt would make a failed Start permanent: the caller's
+	// retry (the gateway retries a relay that could not reach Redis at boot)
+	// would hit the already-started guard forever and the relay would never
+	// recover, while still reporting itself as started.
 	if err := r.stream.Subscribe(ctx, r.name, r.dispatch); err != nil {
 		return fmt.Errorf("event relay subscribe %s: %w", r.name, err)
 	}
+
+	r.mu.Lock()
+	r.started = true
+	r.mu.Unlock()
 	if r.logger != nil {
 		r.logger.Info("event relay started", "stream", r.name)
 	}

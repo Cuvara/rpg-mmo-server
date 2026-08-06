@@ -154,7 +154,16 @@ It lives in its own package so modules that still run in-memory never pull in
 `go-redis` (their `go.sum` stays untouched until they import it).
 
 ```go
+// Client construction. NewRedisClient applies the package defaults for
+// timeouts, retries and pooling; NewRedisClientWithOptions overrides any of
+// them. In ClientOptions a zero field means "use the default" and a NEGATIVE
+// field is preserved (go-redis reads it as "disabled").
 func NewRedisClient(addr, password string) *redis.Client
+func NewRedisClientWithOptions(opts ClientOptions) *redis.Client
+
+// Ping is a liveness probe with a timeout independent of ctx's deadline —
+// for readiness handlers, which must not block longer than the probe interval.
+func Ping(ctx context.Context, client redis.UniversalClient, timeout time.Duration) error
 
 // SessionStore — keys used verbatim (build them with constants.SessionKeyPrefix + userID)
 func NewSessionStore(addr, password string) *SessionStore
@@ -180,6 +189,8 @@ func (r *ServerRegistry) Close() error
 func NewEventStream(addr, password, group, consumer string) *EventStream
 func NewEventStreamWithClient(client redis.UniversalClient, group, consumer string) *EventStream
 func (s *EventStream) SetBlockTimeout(d time.Duration)   // call before Subscribe; default 500ms
+func (s *EventStream) SetLogger(l *slog.Logger)          // call before Subscribe; logs group recovery
+func (s *EventStream) GroupLosses() int64                // consumer groups found missing and re-created
 func (s *EventStream) Publish(ctx context.Context, stream string, event storage.Event) error
 func (s *EventStream) Subscribe(ctx context.Context, stream string, handler func(storage.Event)) error
 func (s *EventStream) Close() error

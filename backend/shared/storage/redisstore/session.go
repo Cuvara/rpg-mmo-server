@@ -17,14 +17,7 @@ var (
 	_ storage.EventStream    = (*EventStream)(nil)
 )
 
-// NewRedisClient builds a go-redis client from the shared config fields
-// (config.Config.RedisAddr / RedisPassword).
-func NewRedisClient(addr, password string) *redis.Client {
-	return redis.NewClient(&redis.Options{
-		Addr:     addr,
-		Password: password,
-	})
-}
+// NewRedisClient and the client tuning defaults live in client.go.
 
 // --- RedisSessionStore ---
 
