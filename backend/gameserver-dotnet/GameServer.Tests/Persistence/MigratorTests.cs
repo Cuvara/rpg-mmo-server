@@ -48,10 +48,10 @@ public class MigratorTests
         return Convert.ToInt64(await cmd.ExecuteScalarAsync());
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task FreshDatabase_AppliesAllMigrationsInOrder()
     {
-        if (_pg.SkipIfUnavailable(nameof(FreshDatabase_AppliesAllMigrationsInOrder))) return;
+        _pg.SkipUnlessAvailable(nameof(FreshDatabase_AppliesAllMigrationsInOrder));
 
         var (ds, _) = await FreshDatabaseAsync();
         await using var _ds = ds;
@@ -85,10 +85,10 @@ public class MigratorTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task SecondRun_IsNoOp()
     {
-        if (_pg.SkipIfUnavailable(nameof(SecondRun_IsNoOp))) return;
+        _pg.SkipUnlessAvailable(nameof(SecondRun_IsNoOp));
 
         var (ds, _) = await FreshDatabaseAsync();
         await using var _ds = ds;
@@ -105,10 +105,10 @@ public class MigratorTests
         Assert.Equal(Migrator.Embedded.Count, await ScalarAsync(ds, "SELECT count(*) FROM schema_migrations"));
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task AppliesOnlyPendingMigrations_WhenBinaryGainsANewOne()
     {
-        if (_pg.SkipIfUnavailable(nameof(AppliesOnlyPendingMigrations_WhenBinaryGainsANewOne))) return;
+        _pg.SkipUnlessAvailable(nameof(AppliesOnlyPendingMigrations_WhenBinaryGainsANewOne));
 
         var (ds, _) = await FreshDatabaseAsync();
         await using var _ds = ds;
@@ -125,10 +125,10 @@ public class MigratorTests
         Assert.Equal(1, await ScalarAsync(ds, "SELECT count(*) FROM information_schema.tables WHERE table_name='t2'"));
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task EditedMigration_FailsWithDriftError()
     {
-        if (_pg.SkipIfUnavailable(nameof(EditedMigration_FailsWithDriftError))) return;
+        _pg.SkipUnlessAvailable(nameof(EditedMigration_FailsWithDriftError));
 
         var (ds, _) = await FreshDatabaseAsync();
         await using var _ds = ds;
@@ -147,10 +147,10 @@ public class MigratorTests
         Assert.Contains(tampered.Checksum, ex.Message);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task CommentOnlyEdit_DoesNotTripDrift()
     {
-        if (_pg.SkipIfUnavailable(nameof(CommentOnlyEdit_DoesNotTripDrift))) return;
+        _pg.SkipUnlessAvailable(nameof(CommentOnlyEdit_DoesNotTripDrift));
 
         var (ds, _) = await FreshDatabaseAsync();
         await using var _ds = ds;
@@ -166,10 +166,10 @@ public class MigratorTests
         Assert.True(second.NoOp);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task FailingMigration_RollsBackEntirelyAndRecordsNothing()
     {
-        if (_pg.SkipIfUnavailable(nameof(FailingMigration_RollsBackEntirelyAndRecordsNothing))) return;
+        _pg.SkipUnlessAvailable(nameof(FailingMigration_RollsBackEntirelyAndRecordsNothing));
 
         var (ds, _) = await FreshDatabaseAsync();
         await using var _ds = ds;
@@ -196,10 +196,10 @@ public class MigratorTests
         Assert.Equal([2], retry.Applied);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task ConcurrentMigrators_ApplyEachMigrationExactlyOnce()
     {
-        if (_pg.SkipIfUnavailable(nameof(ConcurrentMigrators_ApplyEachMigrationExactlyOnce))) return;
+        _pg.SkipUnlessAvailable(nameof(ConcurrentMigrators_ApplyEachMigrationExactlyOnce));
 
         var (ds, _) = await FreshDatabaseAsync();
         await using var _ds = ds;
@@ -212,10 +212,10 @@ public class MigratorTests
         Assert.Equal(Migrator.Embedded.Count, await ScalarAsync(ds, "SELECT count(*) FROM schema_migrations"));
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task DatabaseAheadOfBinary_IsAllowed()
     {
-        if (_pg.SkipIfUnavailable(nameof(DatabaseAheadOfBinary_IsAllowed))) return;
+        _pg.SkipUnlessAvailable(nameof(DatabaseAheadOfBinary_IsAllowed));
 
         var (ds, _) = await FreshDatabaseAsync();
         await using var _ds = ds;

@@ -111,7 +111,6 @@ Layout (override with `RPG_DEPLOY_DIR`, default `/opt/rpg-mmo`):
   deploy/db/migrations/gamestate/   numbered migrations (ops copies; see docs/DATABASE.md)
   deploy/db/{backup,restore}.sh     pg_dump / pg_restore helpers
   scripts/deploy-local.sh
-  scripts/register-gameserver.sh
   run/*.pid   logs/*.log   COMMIT
 ```
 
@@ -119,33 +118,24 @@ Layout (override with `RPG_DEPLOY_DIR`, default `/opt/rpg-mmo`):
 
 ---
 
-## 2b. `scripts/register-gameserver.sh` — publish the registry entry
-
-```bash
-scripts/register-gameserver.sh [register|deregister]
-```
+## 2b. Server registration — nothing to run
 
 The gateway answers `MsgEnterWorld` by looking the map up in the Redis server
 registry (`servers:map:{map_id}` → `servers:id:{server_id}`,
-`shared/storage/redisstore/registry.go`). **The C# game server never writes that
-entry** — it has no Redis client at all (no `StackExchange.Redis` in
-`GameServer.csproj`, no register/heartbeat call in `Program.cs`), so without
-this script every `MsgEnterWorld` fails with *no available server for map …*.
+`shared/storage/redisstore/registry.go`).
 
-Both deploy modes call it: `deploy-local.sh start` in host mode, the CD deploy
-job right after `compose up` in containers mode. It is configured entirely from
-`deploy/.env`; the field that matters is:
+**The C# game server writes that entry itself.** On startup it registers, then
+heartbeats every 5s to re-arm the 15s TTL, and deregisters on graceful shutdown.
+A missing entry is re-created by the next heartbeat, so a wiped Redis heals in
+about 5s with no human step. This replaced `scripts/register-gameserver.sh`,
+which wrote the entry once at deploy time with a 3600s TTL and no refresh.
+
+Two environment variables drive it, both supplied from `deploy/.env`:
 
 | Variable | Meaning |
 |----------|---------|
-| `GAMESERVER_PUBLIC_ADDR` | The address written to the registry, i.e. **the address clients are told to dial** (`MsgEnterWorldResp.ServerAddr`). It must be dialable *by the client*, not by the server. Defaults to `:<gameserver port>`, which clients normalize to loopback — right on a dev box, wrong on a VPS, where it must be `<public-host-or-ip>:<port>`. |
-| `GAMESERVER_ID` / `GAMESERVER_MAP_ID` | Registry key + map index. |
-| `REDIS_ADDR` / `REDIS_PASSWORD` | Where to write. Falls back to `docker exec <redis container> redis-cli` when no native `redis-cli` exists. |
-| `REGISTRY_TTL` | Seconds, default 3600 — deliberately long because nothing heartbeats this entry yet. |
-
-Delete the script the day the C# server registers itself.
-
----
+| `REDIS_ADDR` | Registry to publish into. Unset = no self-registration, and the gateway will not find this server. |
+| `GAMESERVER_PUBLIC_ADDR` | The address handed to CLIENTS, verbatim, in `MsgEnterWorldResp.ServerAddr`. It is **not** the listen address whenever containers map ports (listen `:9000`, published `:9200`). Falls back to `GAMESERVER_ADDR`, which is right in host mode. On a VPS set it to `<public-host>:<published-port>`. |
 
 ## 2c. `scripts/bootstrap-vps.sh` — prepare a fresh VPS
 
@@ -230,7 +220,7 @@ other, and the switch is reversible.
 | Compose profiles | `monitoring` | `monitoring` + `realtime` |
 | Redis / game DB | over the published host ports (`localhost:6379`, `localhost:5433`) | in-network service names (`redis:6379`, `postgres-game:5432`) |
 | Healthcheck | TCP connect to both ports (`deploy-local.sh health`) | HTTP `/healthz` on each metrics port **and** TCP on each game port |
-| Registration | `deploy-local.sh start` → `register-gameserver.sh` | dedicated step → `register-gameserver.sh` |
+| Registration | the game server self-registers (`REDIS_ADDR`) | the game server self-registers (`REDIS_ADDR`) |
 | Ports | the process binds `GATEWAY_ADDR` / `GAMESERVER_ADDR` directly | the container publishes `GATEWAY_CONTAINER_PORT` / `GAMESERVER_CONTAINER_PORT`, which **default to the ports those same addresses name** — so `:8000` / `:9200` stay true either way |
 
 Order of operations in containers mode: **stop host-mode services first**

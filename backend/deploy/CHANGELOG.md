@@ -5,6 +5,33 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+- **`scripts/register-gameserver.sh` — deleted.** Its own header said "Delete this
+  script the day the C# server registers itself"; that day is here. The C# game
+  server now writes, refreshes and removes its own registry entry
+  (`gameserver-dotnet/GameServer/Registry/`). The script wrote the entry **once** at
+  deploy time with `REGISTRY_TTL=3600` and nothing refreshed it, which is why a Redis
+  wipe left every map unjoinable until a human re-ran it (G1), and why a crashed
+  server kept black-holing joins for up to an hour (G2). Both gaps are closed.
+  - `scripts/deploy-local.sh` no longer calls it, and now exports `REDIS_ADDR`,
+    `REDIS_PASSWORD` and `GAMESERVER_PUBLIC_ADDR` so the server it starts can
+    self-register.
+  - `.github/workflows/cd.yml` no longer bundles, installs or invokes it; the
+    "Register the game server in Redis" step is gone from containers mode.
+
+### Changed
+- `docker-compose.yml`: `REDIS_ADDR` for the gameserver is no longer a
+  set-for-the-future no-op — the server reads it and self-registers. Added
+  **`GAMESERVER_PUBLIC_ADDR`**, defaulting to `:${GAMESERVER_CONTAINER_PORT:-9200}`:
+  the container listens on `:9000` but is published on 9200, and the gateway hands
+  this value to clients verbatim, so it must be the PUBLISHED address. On a VPS set
+  it to `<public-host>:<port>`.
+- Docs updated to match: `DISASTER-RECOVERY.md` (G1 and G2 marked FIXED, the
+  "step people forget" after a Redis restore is gone, replica advice reframed),
+  `CICD.md` §2b, `RUNBOOK-local-dev.md`, `DATABASE.md`, `VPS-SETUP.md`,
+  `docs/README.md`, plus `backend/docs/ARCHITECTURE-DECISIONS.md` (registry no
+  longer has a shell-script writer) and `backend/docs/CORE_FLOW.md`.
+
 ### Added
 - **`docs/CICD.md` §4a — the `dev` runner's `docker` shim is now documented.**
   It was undocumented tribal knowledge that would baffle anyone debugging a

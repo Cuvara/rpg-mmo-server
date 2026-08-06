@@ -10,7 +10,7 @@ All open-source, $0 license: Docker, k3s, Agones, PostgreSQL, Redis, Grafana, Pr
 | Local dev backing stack | `docker-compose.yml`, `nakama-plugin.Dockerfile`, `Makefile`, `.env.example` | ✅ Usable |
 | Agones game server fleets | `agones/fleet-map.yaml`, `agones/fleet-dungeon.yaml`, `agones/autoscaler.yaml`, `agones/allocation.yaml` | ✅ Manifests authored |
 | Build automation | `scripts/build-all.sh` (repo root) | ✅ Usable |
-| CD pipeline | `.github/workflows/cd.yml`, `scripts/deploy-local.sh`, `scripts/register-gameserver.sh` | ✅ Two modes: host binaries or full-docker (`vars.DEPLOY_MODE`) |
+| CD pipeline | `.github/workflows/cd.yml`, `scripts/deploy-local.sh` | ✅ Two modes: host binaries or full-docker (`vars.DEPLOY_MODE`) |
 | VPS bootstrap | `scripts/bootstrap-vps.sh` | ✅ Docker + deploy user + Actions runner + ufw, idempotent, `--dry-run` |
 | Gateway / gameserver images | `docker/Dockerfile.gateway`, `docker/Dockerfile.gameserver-dotnet` | ✅ Built + smoke-tested |
 | k3s / Agones dev bootstrap | `k3s/setup-dev.sh`, `k3s/teardown-dev.sh`, `k3s/lib.sh`, `k3s/namespaces.yaml`, `k3s/validate-manifests.py` | ✅ Authored + manifests schema-validated (needs a live cluster) |

@@ -8,21 +8,25 @@ Scope: the compose stack in `backend/deploy/docker-compose.yml` — the same
 topology CD deploys (`docs/CICD.md`). k3s/Agones changes the recovery commands
 but not the blast radii.
 
-> **Read this first.** The single most important finding in this document is not
-> about Redis persistence. It is that **no game server ever registers itself**.
-> The registry entry is written once, by hand, by `scripts/register-gameserver.sh`
-> at deploy time. Nothing heartbeats it and nothing rewrites it. So any event
-> that empties Redis — a crash without a usable AOF, a `FLUSHALL`, a volume
-> loss, a fresh container — makes **every game server invisible forever** and
-> every login fails with "no available server for map …" until a human re-runs
-> that script. Redis restarting cleanly is survivable; Redis losing its data is
-> an unbounded outage, not a blip. See [Code gaps](#code-gaps-open) G1.
+> **Read this first — G1 is FIXED.** This document used to open by warning that
+> **no game server ever registered itself**: the entry was written once by
+> `scripts/register-gameserver.sh` at deploy time with a 3600s TTL, nothing
+> heartbeated it, and any event that emptied Redis made every game server
+> invisible *forever* until a human re-ran that script.
 >
-> **This is no longer a code reading — it was measured on 2026-08-06.** A clean
-> Redis restart put the world back in **2.3 seconds** with no human involved. A
-> deleted registry left a perfectly healthy game server invisible for as long as
-> anyone cared to watch. Same containers, same processes; the only difference is
+> **That was measured, not theorised, on 2026-08-06.** A clean Redis restart put
+> the world back in **2.3 seconds** with no human involved, but a *deleted
+> registry* left a perfectly healthy game server invisible for as long as anyone
+> cared to watch. Same containers, same processes; the only difference was
 > whether Redis kept its keys. [Measured results](#measured-results).
+>
+> **That second case no longer exists.** The C# game server registers itself on
+> startup, heartbeats every 5s (TTL 15s, `constants.ServerHeartbeatTTL`), and
+> deregisters on graceful shutdown. A wiped Redis now self-heals within one
+> heartbeat interval — **measured at ~4s from Redis returning to a repaired
+> registry, followed by a passing smoke run** — with no human intervention, and a
+> crashed server stops attracting joins after 15s instead of an hour. The
+> registration script is deleted. See [Code gaps](#code-gaps-open) G1.
 
 ---
 
@@ -42,12 +46,12 @@ standing rule from `backend/docs/ARCHITECTURE-DECISIONS.md` ADR-7.
 
 | Dependency | In-progress gameplay | New logins / map join | Data at risk | RTO | RPO |
 |---|---|---|---|---|---|
-| **Redis** (`rpg-redis`) | ✅ unaffected — the C# game server holds no Redis client at all (`GameServer/Program.cs:153-155`) | ❌ dead: auth and `MsgEnterWorld` both fail | Sessions (expendable), server registry (**not** rebuildable automatically), event stream backlog | **2.3s measured** if the volume is intact; **unbounded** if the dataset is lost (nothing re-registers — G1) | 0 on a clean restart (measured); ≤1s on a host crash (`appendfsync everysec`) |
+| **Redis** (`rpg-redis`) | ✅ unaffected — registry errors are caught and retried off the tick loop (`GameServer/Registry/RegistrationService.cs`) | ❌ dead while Redis is down: auth and `MsgEnterWorld` both fail | Sessions (expendable), server registry (**rebuilt automatically** by each server's heartbeat since G1), event stream backlog | **2.3s measured** if the volume is intact; **~4s measured** even if the dataset is lost, since servers re-register themselves | 0 on a clean restart (measured); ≤1s on a host crash (`appendfsync everysec`) |
 | **Game PostgreSQL** (`rpg-postgres-game`) | ✅ continues — the tick loop never blocks on the DB; the 30s save sweep just fails | ⚠️ new players cannot load their saved state | ≤30s of position/HP (ADR-6) | minutes (restore.sh) | last backup, or ≤30s if the instance survives |
 | **Meta PostgreSQL** (`rpg-postgres`) | ✅ continues (combat/movement are not meta) | ❌ Nakama cannot authenticate → no JWT → no gateway auth | Accounts, currency, inventory, leaderboards — **the valuable data** | minutes (restore.sh) | last backup (daily cron / per-deploy) |
 | **Nakama** (`rpg-nakama`) | ✅ continues | ❌ no new JWTs issued; existing valid JWTs still work until expiry | none (state is in meta PG) | ~30s (container restart) | 0 |
 | **Gateway** (`rpg-gateway`) | ✅ continues — the gateway is a redirector, not a proxy (ADR-3) | ❌ no auth, no map assignment | none (state is in Redis) | ~10s (container restart) | 0 |
-| **Game server** (`rpg-gameserver`) | ❌ **everyone on that map drops** | ⚠️ that map is unjoinable; registry entry goes stale but is not removed | ≤30s of unsaved state (ADR-6) | ~30s restart **+ manual re-register** | ≤30s |
+| **Game server** (`rpg-gameserver`) | ❌ **everyone on that map drops** | ⚠️ that map is unjoinable; the registry entry is removed on a graceful stop, or expires within 15s on a crash | ≤30s of unsaved state on a crash; a graceful SIGTERM now saves before exiting (ADR-6) | ~30s restart, self-registers on boot | ≤30s |
 | **lgtm** (`rpg-lgtm`) | ✅ | ✅ | observability only — you fly blind | ~1min | metrics gap for the outage |
 
 Two things the table makes obvious:
@@ -105,10 +109,10 @@ date -u +%H:%M:%S; docker.exe start rpg-redis
 | Existing authenticated connections | **De-authenticated on their next frame** — a Redis error is indistinguishable from an expired session, so the gateway resets `State`/`UserID` and replies `"session expired"` | `gateway/server/server.go:246-278` |
 | `MsgEnterWorld` | Fails; the client receives the **raw internal error string**, e.g. `assign map: find servers: … dial tcp …: connection refused` | `gateway/server/server.go:347` (`sendEnterWorldError(cc, err.Error())`) |
 | Gateway crashes? | **No if Redis dies after boot** (degrades). **Yes — crash loop — if Redis is down at boot**: `Run()` → `relay.Start` → `XGROUP CREATE` fails → `os.Exit(1)` | `gateway/cmd/gateway/main.go:187-190`, `gateway/server/server.go:120-124` |
-| Game server crashes? | No. It never talks to Redis | `GameServer/GameServer.csproj:14-21` (no Redis package) |
+| Game server crashes? | No. Registry failures are caught and retried on the next heartbeat; the tick loop and connected players are untouched | `GameServer/Registry/RegistrationService.cs` (every call wrapped, `AbortOnConnectFail=false`) |
 | Automatic reconnect when Redis returns | **Yes** for the connection itself — go-redis reconnects transparently on the next command; no process restart needed | `shared/storage/redisstore/session.go:22-27` |
 | Time to healthy after `docker start` | Redis boot + AOF load (sub-second on this dataset) + next client attempt. **Estimated <5s** *if the data survived* | `docker-compose.yml:134-153` healthcheck `interval: 5s` |
-| Registry entry back? | **Yes if the AOF survived** (it is just a key). **NO, permanently, if the data was lost** — nothing re-registers | `scripts/register-gameserver.sh:83-91`, called once from `scripts/deploy-local.sh:269` |
+| Registry entry back? | **Yes, always, within one heartbeat interval (~5s)** — whether or not the AOF survived. Every heartbeat is also a repair: if the entry is missing the server re-registers it, rebuilding the hash and the map index | `GameServer/Registry/RegistrationService.cs` (re-register when `HeartbeatAsync` returns false) |
 | Event-stream consumer group survives? | Survives a clean restart (it is in the AOF). **After data loss the group is gone and `XREADGROUP` fails `NOGROUP` in a silent 2 Hz retry loop forever** — the relay is dead but the process looks healthy | `shared/storage/redisstore/stream.go:118-121` (created once), `:132-168` (loop never re-creates, never logs) |
 | Does `/healthz` reflect any of this? | **No.** Liveness only, on both services | `gateway/metrics/metrics.go:194-205`, `GameServer/Observability/MetricsEndpoint.cs:151-172` |
 
@@ -267,6 +271,36 @@ t+10s servers keys: []   t+20s []   t+30s []   t+40s []   t+50s []   t+60s []   
 unjoinable until a human restored it. This is the difference between a 2.3s
 outage (§2, data survived) and an unbounded one (here, data lost) — same
 process, same containers, same everything except whether Redis kept its keys.
+
+##### Re-run after G1 shipped — this result inverted
+
+As the pre-G1 note above asked for, the drill was re-run against a game server
+built from `GameServer/Registry/` (the NativeAOT binary, not `dotnet run`). Same
+disaster shape, harsher than a forced `DEL`: Redis was **stopped for 25s and
+restarted**, so the entry expired on its own and nobody touched anything.
+
+```
+10:27:41  registry before  exists=1 ttl=14
+10:27:41  docker stop rpg-redis
+10:27:42  REDIS DOWN — no human will touch anything from here on
+10:28:09  25s down. gameserver process alive=YES
+10:28:09  docker start rpg-redis
+10:28:10  REDIS UP
+10:28:14  REGISTRY SELF-HEALED  ttl=15 mapidx=gs-drill
+10:28:14  re-running smoke...
+PASS  gateway_auth                5ms  transport=tcp map=map_drill server=127.0.0.1:19346 (tcp)
+PASS  gameserver_join          1.107s  snapshots=15 (keyframes=1 deltas=14) final_x=3.33 ack_tick=10
+SMOKE=PASS
+```
+
+**~4 seconds from Redis returning to a repaired registry — hash and map index
+both — followed by a passing smoke run, with no human step.** The unbounded
+outage is gone; what remains is bounded by how long Redis itself is down, which
+is now G8's problem (the gateway still reads Redis on every `MsgEnterWorld`).
+
+Run on a scratch `map_drill` against the live gateway so `map_01` was never
+disturbed, which also proves wire compatibility: the gateway found an entry the
+**C# server wrote**, with no gateway change.
 
 #### 3. Backup and restore scripts — first real runtime exercise
 
@@ -451,11 +485,9 @@ transient or reconstructible state per ADR-4: sessions expire and clients
 re-auth, and the registry and event streams are rebuilt by running servers. A
 missing Redis checkpoint is worth a `::warning::`, never a blocked deploy.
 
-(Caveat worth stating plainly, because it is the one thing that makes "Redis is
-reconstructible" less true than it sounds: the registry is only rebuilt by
-running servers *once G1 is fixed*. Today nothing re-registers, so a lost
-registry needs a manual `register-gameserver.sh`. That is an argument for
-fixing G1, not for blocking deploys on a Redis dump.)
+(This is now literally true rather than aspirational: with G1 fixed, the registry
+*is* rebuilt by running servers, within one heartbeat interval of Redis coming
+back. No manual step, and no reason to block a deploy on a Redis dump.)
 
 Cron it on the VPS the same way as the DB backups:
 
@@ -498,15 +530,18 @@ bytes through `docker exec`/`docker run -i` stdio instead.)
 
 ### After any Redis restore — the step people forget
 
-Restoring the dataset does **not** make the world joinable. Sessions in the
-snapshot are stale (clients re-auth anyway, which is fine), but the **server
-registry is only correct if the snapshot happened to contain a still-valid
-entry.** Always finish with:
+There is no longer a step people forget: sessions in the snapshot are stale
+(clients re-auth, which is fine) and the **server registry repairs itself**. Any
+entry the snapshot restored is either refreshed by its owner or expires within
+15s, and every live server re-registers within one heartbeat interval. Verify
+rather than repair:
 
 ```bash
 docker.exe exec rpg-redis redis-cli --scan --pattern 'servers:*'
-# empty, or pointing at a dead address? re-register by hand:
-scripts/register-gameserver.sh register
+# Expect one servers:id:<server_id> per live server within ~5s, each with a TTL
+# between 1 and 15. A key with TTL -1 (no expiry) would be a bug — nothing
+# writes a TTL-less registry entry any more.
+docker.exe exec rpg-redis redis-cli TTL servers:id:gs-dotnet-map_01
 ```
 
 ---
@@ -521,7 +556,7 @@ All commands assume `cd backend/deploy` (compose needs a cwd-relative context;
 | Symptom | Action |
 |---|---|
 | Container down, volume intact | `docker.exe start rpg-redis` → AOF replays → verify `redis-cli DBSIZE` and `--scan --pattern 'servers:*'` |
-| Container up, dataset empty | `db/redis-restore.sh --file <latest rdb> --mode live --yes`, **then** `scripts/register-gameserver.sh register` |
+| Container up, dataset empty | `db/redis-restore.sh --file <latest rdb> --mode live --yes`. No registration step — live servers re-register themselves within ~5s |
 | Volume lost entirely | `docker.exe compose up -d redis` → restore as above → re-register → restart `rpg-gateway` (its event-stream consumer group is gone and the loop will not re-create it — G4) |
 | Gateway crash-looping at boot | Redis is unreachable. Fix Redis first; the gateway cannot start without it (G3) |
 
@@ -564,12 +599,11 @@ map drops and loses ≤30s of position/HP.
 
 ```bash
 docker.exe compose --profile realtime up -d gameserver-dotnet
-scripts/register-gameserver.sh register     # REQUIRED — it does not self-register
 ```
 
-Until that second command runs, the map is unjoinable even though the server is
-healthy. This is the same manual step the Redis recovery needs, for the same
-reason (G1).
+That is the whole procedure. The server registers itself as soon as it is
+listening, so the map is joinable within a second or two of the container being
+healthy — no second command, and nothing to forget (G1, fixed).
 
 ### lgtm (Grafana/Prometheus/Loki/Tempo)
 
@@ -586,8 +620,8 @@ DevOps scope. Filed here with evidence so they can be assigned.
 
 | # | Gap | Evidence | Impact |
 |---|---|---|---|
-| **G1** | **No game server registration or heartbeat in any running code.** Registration is a one-shot shell script at deploy time with `REGISTRY_TTL=3600`; nothing refreshes it | `scripts/register-gameserver.sh:83-91,55`; called once at `scripts/deploy-local.sh:269`. No production caller of `RegistryService.RegisterServer` (`gateway/registry/registry.go:148-150`) | **Highest severity.** Any Redis data loss = permanently unjoinable world until a human intervenes. Also means a crashed game server keeps a stale registry entry for up to an hour, black-holing joins |
-| **G2** | TTL mismatch: code assumes a 15s liveness window, deployment writes 3600s | `shared/constants/ttl.go:9` (`ServerHeartbeatTTL = 15s`) used at `registry.go:50,59` vs `register-gameserver.sh:55` | Stale entries survive ~240× longer than designed |
+| ~~**G1**~~ **FIXED** | The C# game server self-registers on startup, heartbeats every 5s (TTL 15s) and deregisters on graceful shutdown. Every heartbeat is also a repair, so a missing entry is re-created without intervention | `GameServer/Registry/RedisServerRegistry.cs`, `GameServer/Registry/RegistrationService.cs`; wired in `GameServer/Server/GameServer.cs`. `scripts/register-gameserver.sh` deleted | Redis data loss is now a ~5s blip, not an unbounded outage, and a crashed server stops attracting joins after 15s instead of an hour |
+| ~~**G2**~~ **FIXED** | The 3600s TTL came from the deploy script, which is deleted. The C# server now arms the same `ServerHeartbeatTTL` the Go code assumes | `GameServer/Registry/RegistrationService.cs` (`RegistryDefaults.HeartbeatTtl = 15s`, mirroring `shared/constants/ttl.go:9`) | Entries no longer outlive their design window by 240× |
 | **G3** | Gateway **crash-loops** if Redis is unavailable at boot | `gateway/server/server.go:120-124` → `gateway/cmd/gateway/main.go:187-190` (`os.Exit(1)`) | Redis blip during a deploy takes the gateway with it; no degraded start |
 | **G4** | Event-stream consumer group created **once**; after a Redis wipe the loop retries `NOGROUP` at 2 Hz **forever, silently** — no logging, no re-create, no backoff growth | `shared/storage/redisstore/stream.go:118-121` (create), `:132-168` (loop), `:164` (`_ = XAck`) | Cross-server events silently stop while every health signal stays green |
 | **G5** | Redis client has **zero** tuning: no dial/read/write timeouts, no retry policy, no pool config | `shared/storage/redisstore/session.go:22-27` — `redis.NewClient(&redis.Options{Addr, Password})` | All-defaults behaviour (5s dial, 3s read); a slow Redis stalls the gateway accept path with no backpressure |
@@ -599,21 +633,23 @@ DevOps scope. Filed here with evidence so they can be assigned.
 | **G11** | With Redis down the gateway **does not answer `MsgAuth` at all** — no `MsgAuthResp{OK:false}`, no error frame, nothing. The client hangs until its own deadline | **Measured** in the [drill §1](#1-redis-killed-natural-non-destructive-outage): 10s client-side `i/o timeout`, and the gateway logged nothing but go-redis pool chatter | A real client cannot distinguish "backend down" from "network dead", cannot show the player an error, and cannot fail over. Also invisible to operators — zero application-level logs for the whole 58s outage |
 | **G12** | `servers:map:*` index sets carry **no TTL** while `servers:id:*` hashes do, so an expired registration leaves an orphan member behind | **Measured**: `servers:map:map_kcp` held `gs-kcp-final` after its hash expired naturally | Bounded — the gateway `SREM`s dead members on lookup and drops the emptied set — but an index for a map nobody queries leaks forever. Low severity; fold into the G1 fix |
 
-Suggested order: **G1 → G3 → G4 → G6 → G8 → G5 → G9 → G2/G7/G10.** G1 alone
-converts the worst-case Redis outage from "unbounded, needs a human" into "one
-heartbeat interval, self-healing", and it is a small change: a periodic
-`Register`/`Heartbeat` call from the C# server (which would need a Redis client
-it does not currently have — see ADR-5) or, cheaper as an interim, a sidecar
-loop re-running the existing shell script on the `ServerHeartbeatTTL` cadence.
+Suggested order: **~~G1~~ → G3 → G4 → G6 → G8 → G5 → G9 → ~~G2~~/G7/G10.** G1 is
+done: it converted the worst-case Redis outage from "unbounded, needs a human"
+into "one heartbeat interval, self-healing". The remaining top item is G3.
+
+Note that G8 (no registry caching) is now the binding constraint on join
+availability during a Redis outage: the entry repairs itself, but the gateway
+still reads Redis on every `MsgEnterWorld`, so joins fail for as long as Redis is
+actually down.
 
 ---
 
 ## Production upgrade path
 
 Today: **one Redis, no replica, no Sentinel, no failover.** That is defensible
-for Dev/Alpha and Beta given that Redis is not in the gameplay path — but only
-once G1 is fixed, because until then a Redis restart is not a degraded-join
-event, it is a manual-recovery event.
+for Dev/Alpha and Beta given that Redis is not in the gameplay path. With G1
+fixed, a Redis restart is a degraded-join event that ends when Redis returns —
+not a manual-recovery event.
 
 | Tier | CCU | Redis posture | Trigger to adopt |
 |---|---|---|---|
@@ -653,9 +689,11 @@ the gateway points at a fixed `REDIS_ADDR` (`shared/config/config.go:54`). Real
 failover needs Sentinel plus a `redis.NewFailoverClient` in
 `redisstore.NewRedisClient`, which is code work (extends G5).
 
-**Do not add a replica before G1.** A replica protects against data loss; it
-does not help at all with the failure that actually hurts today, which is that
-nothing rewrites the registry.
+A replica protects against data loss, which used to be beside the point while
+nothing rewrote the registry. Now that servers rebuild their own entries, the
+remaining reason to want one is availability during the outage itself — so weigh
+it against G8 (gateway-side registry caching), which addresses the same window
+more cheaply.
 
 ---
 

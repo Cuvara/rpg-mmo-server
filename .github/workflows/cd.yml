@@ -321,12 +321,9 @@ jobs:
           cp -r backend/deploy/monitoring dist/deploy/monitoring
           cp -r backend/deploy/db         dist/deploy/db
           cp scripts/deploy-local.sh dist/scripts/
-          # Writes the Redis registry entry the gateway looks up. Needed by BOTH
-          # deploy modes — the C# game server has no Redis client of its own.
-          cp scripts/register-gameserver.sh dist/scripts/
           echo "${GITHUB_SHA}" > dist/COMMIT
           for f in bin/gateway bin/smoketest bin/gameserver-dotnet deploy/nakama.so \
-                   scripts/deploy-local.sh scripts/register-gameserver.sh \
+                   scripts/deploy-local.sh \
                    deploy/monitoring/prometheus.yaml \
                    deploy/monitoring/grafana-dashboards.yaml \
                    deploy/monitoring/dashboards/rpg-gameplay.json \
@@ -484,8 +481,7 @@ jobs:
           install -m 0755 dist/bin/gateway            "$RPG_DEPLOY_DIR/bin/gateway"
           install -m 0755 dist/bin/gameserver-dotnet   "$RPG_DEPLOY_DIR/bin/gameserver-dotnet"
           install -m 0755 dist/bin/smoketest           "$RPG_DEPLOY_DIR/bin/smoketest"
-          install -m 0755 dist/scripts/deploy-local.sh        "$RPG_DEPLOY_DIR/scripts/deploy-local.sh"
-          install -m 0755 dist/scripts/register-gameserver.sh "$RPG_DEPLOY_DIR/scripts/register-gameserver.sh"
+          install -m 0755 dist/scripts/deploy-local.sh "$RPG_DEPLOY_DIR/scripts/deploy-local.sh"
           mkdir -p "$RPG_DEPLOY_DIR/deploy/modules"
           install -m 0644 dist/deploy/nakama.so          "$RPG_DEPLOY_DIR/deploy/modules/nakama.so"
           install -m 0644 dist/deploy/docker-compose.yml "$RPG_DEPLOY_DIR/deploy/docker-compose.yml"
@@ -742,23 +738,10 @@ jobs:
           "$RPG_DEPLOY_DIR/scripts/deploy-local.sh" health
           "$RPG_DEPLOY_DIR/scripts/deploy-local.sh" status
 
-      # -------------------------------------------------- containers mode only
-      # The C# game server has no Redis client, so nothing would ever appear in
-      # the registry the gateway reads and MsgEnterWorld would fail with "no
-      # available server". GAMESERVER_PUBLIC_ADDR (from deploy/.env) is what
-      # clients are handed — on a VPS it must be the public host:port.
-      - name: Register the game server in Redis
-        if: steps.paths.outputs.deploy_mode == 'containers'
-        env:
-          RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
-        run: |
-          set -euo pipefail
-          set -a
-          # shellcheck disable=SC1091
-          . "$RPG_DEPLOY_DIR/deploy/.env"
-          set +a
-          chmod +x "$RPG_DEPLOY_DIR/scripts/register-gameserver.sh"
-          "$RPG_DEPLOY_DIR/scripts/register-gameserver.sh" register
+      # No registration step: the C# game server registers itself in Redis on
+      # startup and heartbeats every 5s (TTL 15s). It reads REDIS_ADDR and
+      # advertises GAMESERVER_PUBLIC_ADDR, both supplied by deploy/.env through
+      # docker-compose.yml — on a VPS that must be the public host:port.
 
       # Both runtime images expose /healthz on their metrics port — the gateway
       # from backend/gateway/metrics, the C# server from

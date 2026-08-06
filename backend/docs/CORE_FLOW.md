@@ -253,8 +253,9 @@ were resolved after this list was written** — re-verified 2026-08-05 against
    a proxy; it isn't one.
 2. ✅ **FIXED — Registry is per-process in-memory.** A Redis registry now exists
    (`shared/storage/redisstore/registry.go`) and the gateway selects it with
-   `--backend=redis`. Note the C# server still cannot register itself (no Redis
-   client); `scripts/register-gameserver.sh` does it. See ADR-1/ADR-2.
+   `--backend=redis`. The C# server registers itself into the same keys on startup
+   and heartbeats them (`gameserver-dotnet/GameServer/Registry/`); the old
+   `scripts/register-gameserver.sh` is gone. See ADR-1/ADR-2.
 3. ✅ **FIXED — Join token `sid` claim is not enforced.** The C# server compares
    `claims.ServerId` against its own id
    (`gameserver-dotnet/GameServer/Server/GameServer.cs:225-233`). Caveat: the check

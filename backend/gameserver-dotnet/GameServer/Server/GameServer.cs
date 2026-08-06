@@ -9,6 +9,7 @@ using GameServer.Input;
 using GameServer.Net;
 using GameServer.Observability;
 using GameServer.Persistence;
+using GameServer.Registry;
 using GameServer.Snapshot;
 using GameServer.World;
 
@@ -42,6 +43,19 @@ public class ServerOptions
 
     /// <summary>Optional metric instrument set. When null the server runs uninstrumented.</summary>
     public GameMetrics? Metrics { get; set; }
+
+    /// <summary>
+    /// Registry this server publishes itself into. When null the server does not
+    /// self-register — the in-memory / single-process default, and what every test
+    /// that does not care about the registry gets.
+    /// </summary>
+    public IServerRegistry? ServerRegistry { get; set; }
+
+    /// <summary>
+    /// How this server describes itself in the registry. Required when
+    /// <see cref="ServerRegistry"/> is set; ignored otherwise.
+    /// </summary>
+    public RegistrationOptions? Registration { get; set; }
 }
 
 /// <summary>
@@ -64,6 +78,8 @@ public sealed class GameServerHost : IAsyncDisposable
     private readonly GameMetrics? _metrics;
     private readonly ILogger _logger;
     private readonly ILoggerFactory _loggerFactory;
+
+    private readonly RegistrationService? _registration;
 
     private TcpListener? _listener;
     private CancellationTokenSource? _cts;
@@ -119,6 +135,21 @@ public sealed class GameServerHost : IAsyncDisposable
             options.SaveInterval,
             _loggerFactory.CreateLogger<AsyncSaver>(),
             _metrics);
+
+        if (options.ServerRegistry != null)
+        {
+            if (options.Registration == null)
+            {
+                throw new ArgumentException(
+                    $"{nameof(ServerOptions.Registration)} is required when {nameof(ServerOptions.ServerRegistry)} is set",
+                    nameof(options));
+            }
+            _registration = new RegistrationService(
+                options.ServerRegistry,
+                options.Registration,
+                () => _connections.Count,
+                _loggerFactory.CreateLogger<RegistrationService>());
+        }
     }
 
     /// <summary>Start the server and listen for connections.</summary>
@@ -140,6 +171,15 @@ public sealed class GameServerHost : IAsyncDisposable
 
         // Mark ready with Agones
         await _agonesSdk.ReadyAsync();
+
+        // Publish ourselves into the server registry the gateway reads, and keep the
+        // entry alive. Done after the listener is up so we never advertise an address
+        // that is not accepting yet — and after the bind, so a port=0 ephemeral listen
+        // advertises the port it actually got.
+        if (_registration != null)
+        {
+            await _registration.StartAsync(_cts.Token);
+        }
 
         // Start background tasks
         var tickTask = _tickLoop.RunAsync(_cts.Token);
@@ -199,6 +239,14 @@ public sealed class GameServerHost : IAsyncDisposable
             }
 
             _connections.CloseAll();
+
+            // Leave the registry before the final save: the point is to stop the
+            // gateway handing new clients to a server that is going away, rather than
+            // making them wait out the heartbeat TTL on a black hole.
+            if (_registration != null)
+            {
+                await _registration.DeregisterAsync();
+            }
 
             // Final save
             await _saver.SaveAllAsync();
@@ -331,6 +379,9 @@ public sealed class GameServerHost : IAsyncDisposable
             await conn.WriteOneAsync(resp);
 
             _metrics?.PlayerJoined();
+            // Fire-and-forget: the gateway's capacity view should be fresh, but a slow
+            // or down Redis must never delay a player entering the world.
+            _registration?.NotifyPlayerCountChanged();
             _logger.LogInformation("Player {UserId} joined (total: {Count})", userId, _connections.Count);
 
             // Step 6: Start read/write loops
@@ -387,6 +438,7 @@ public sealed class GameServerHost : IAsyncDisposable
     {
         _connections.Remove(userId);
         _metrics?.PlayerLeft();
+        _registration?.NotifyPlayerCountChanged();
 
         var holdTtl = _options.Mode == "dungeon"
             ? TimeSpan.FromSeconds(60)
@@ -456,6 +508,10 @@ public sealed class GameServerHost : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await ShutdownAsync();
+        if (_registration != null)
+        {
+            await _registration.DisposeAsync();
+        }
         // Disposed only here, once the run loop is guaranteed done with it — disposing
         // it inside ShutdownAsync would hand RunAsync's background tasks a dead token
         // source while they are still unwinding.
