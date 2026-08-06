@@ -6,6 +6,28 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Removed
+- **The `GAMESERVER_METRICS_ADDR=gameserver-dotnet:9101` workaround — deleted.**
+  The C# metrics endpoint was pinned to the compose service name because
+  `METRICS_ADDR=:9101` produced `http://+:9101/`, which OpenTelemetry's
+  `PrometheusHttpListener` pushed through `UriBuilder` — and `UriBuilder` rejects
+  the HttpListener wildcards `+`/`*`, so the endpoint never started on any
+  platform. `MetricsEndpoint.cs` now rewrites the listener prefix in
+  `ConfigureHttpListener` (runs before `Start`), so the wildcard binds for real
+  and the deploy-side workaround is dead weight. Reverted to `:9101` in
+  `docker-compose.yml`, `.env.example`, `cd.yml` and `scripts/setup-github-env.sh`.
+  - Visible effect: the host-mode `gameserver` scrape target
+    (`host.docker.internal:9101`) has been **DOWN with a 404 since it was added**
+    — it is now **UP**. Both game server targets read UP together for the first
+    time.
+  - `curl http://127.0.0.1:9101/metrics` from the host now returns `gameserver_*`
+    series with **no `Host:` header**. The header requirement was the symptom;
+    its disappearance is the proof.
+  - CD's post-deploy `probe gameserver` no longer passes a Host header. If that
+    probe ever 404s again the wildcard bind has regressed — fix
+    `MetricsEndpoint.cs`, do **not** re-pin `GAMESERVER_METRICS_ADDR` to a name.
+  - Docs de-workarounded: `MONITORING.md` (section rewritten, bug kept as a
+    historical note), `CICD.md` (stale limitation dropped), `VPS-SETUP.md`,
+    `RUNBOOK-local-dev.md`, `monitoring/prometheus.yaml`.
 - **`scripts/register-gameserver.sh` — deleted.** Its own header said "Delete this
   script the day the C# server registers itself"; that day is here. The C# game
   server now writes, refreshes and removes its own registry entry

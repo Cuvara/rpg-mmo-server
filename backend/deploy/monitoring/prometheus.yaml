@@ -83,13 +83,16 @@ scrape_configs:
   # Containerised variants (docker compose --profile realtime, i.e. CD's
   # DEPLOY_MODE=containers). Down when that profile is not up — harmless.
   #
-  # In containers mode the two host-facing jobs above behave differently from
-  # each other, because the containers publish the same ports on the host:
-  #   * `gateway` scrapes the gateway container through host.docker.internal and
-  #     reads UP — a duplicate of `gateway-container`, same series.
-  #   * `gameserver` stays DOWN: the C# listener is bound to a named prefix, so
-  #     a request with `Host: host.docker.internal:9101` gets a 404.
-  # Neither is a fault; the *-container jobs are the authoritative ones.
+  # In containers mode both host-facing jobs above scrape the containers through
+  # the published ports and read UP, duplicating the *-container jobs with the
+  # same series. That is expected; the *-container jobs are the authoritative
+  # ones. `honor_labels` below keeps the duplicate from relabelling anything.
+  #
+  # (Until 2026-08-06 `gameserver` stayed DOWN with a 404 here, because the C#
+  # metrics listener could not bind a wildcard and compose worked around it by
+  # binding the service name — so only a request carrying
+  # `Host: gameserver-dotnet:9101` matched. Both the bug and the workaround are
+  # gone; see MONITORING.md.)
   - job_name: gameserver-container
     metric_name_escaping_scheme: underscores
     static_configs:

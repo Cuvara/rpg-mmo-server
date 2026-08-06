@@ -233,7 +233,7 @@ grep -oE 'vars\.[A-Z_]+' .github/workflows/cd.yml | sort -u
 | `OTLP_GRPC_PORT` / `OTLP_HTTP_PORT` / `OTLP_BIND` | `4317` / `4318` / `127.0.0.1` | Unauthenticated — keep on loopback. |
 | `OTEL_LGTM_VERSION` | `0.11.15` | `grafana/otel-lgtm` image tag. |
 | `GATEWAY_METRICS_PORT` / `GAMESERVER_METRICS_PORT` | `9102` / `9101` | Published `/metrics` + `/healthz` ports. |
-| `GAMESERVER_METRICS_ADDR` | `gameserver-dotnet:9101` | Listen address of the C# metrics endpoint inside its container. **Must stay a resolvable name** — that server cannot bind a wildcard. See `MONITORING.md`. |
+| `GAMESERVER_METRICS_ADDR` | `:9101` | Listen address of the C# metrics endpoint inside its container. The wildcard answers on any `Host`, so both the in-network scrape and a host-side probe work. |
 
 **Database backup** (used by the `db-migrate` job)
 
@@ -355,9 +355,7 @@ docker ps --filter name=rpg- --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}
 curl -fsS http://127.0.0.1:7350/healthcheck && echo ' nakama ok'
 curl -fsS http://127.0.0.1:9102/healthz     && echo ' gateway ok'
 
-# The C# server binds a NAMED prefix, so the Host header must match or you get
-# a 404 (see MONITORING.md).
-curl -fsS -H 'Host: gameserver-dotnet:9101' http://127.0.0.1:9101/healthz && echo ' gameserver ok'
+curl -fsS http://127.0.0.1:9101/healthz     && echo ' gameserver ok'
 ```
 
 **Metrics and Grafana:**
