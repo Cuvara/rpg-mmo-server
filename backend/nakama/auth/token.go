@@ -33,7 +33,14 @@ func IssueGatewayToken(userID, serverID string, cfg Config) (GatewayTokenRespons
 	if userID == "" {
 		return GatewayTokenResponse{}, fmt.Errorf("issue gateway token: empty user id")
 	}
-	token, err := jwt.SignWithServer(userID, serverID, cfg.JWTSecret, cfg.TokenTTL)
+	// JWT_SECRET may be a rotation list ("current,previous"); Nakama is the
+	// issuer, so it must sign with the CURRENT secret only. Verifying the whole
+	// list is the gateway's job.
+	keys, err := jwt.ParseKeyring(cfg.JWTSecret)
+	if err != nil {
+		return GatewayTokenResponse{}, fmt.Errorf("issue gateway token: %w", err)
+	}
+	token, err := keys.SignWithServer(userID, serverID, cfg.TokenTTL)
 	if err != nil {
 		return GatewayTokenResponse{}, fmt.Errorf("issue gateway token: %w", err)
 	}
@@ -50,6 +57,14 @@ func GatewayTokenRPC(ctx context.Context, logger runtime.Logger, _ *sql.DB, _ ru
 	userID, ok := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string)
 	if !ok || userID == "" {
 		return "", ErrUnauthenticated
+	}
+
+	// Rate limit before doing any work, and key on the authenticated user id
+	// rather than an IP: the caller is already authenticated here, and a shared
+	// carrier NAT would otherwise collapse thousands of players into one bucket.
+	if !allowGatewayToken(userID) {
+		logger.Warn("gateway_token rate limited: user %s", userID)
+		return "", ErrRateLimited
 	}
 
 	var req GatewayTokenRequest

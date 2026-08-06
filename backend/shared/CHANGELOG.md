@@ -5,6 +5,31 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `ratelimit` package — shared token-bucket limiter. `Bucket` (lock-free, zero
+  allocation, 10.8 ns/op — embed per connection) and `Limiter` (keyed per
+  IP/user, mutex-guarded, TTL eviction with `StartCleanup`/`Stop`). A nil
+  `*Limiter` and the zero `Bucket` both allow everything, so "disabled" needs no
+  nil checks. Per-process scope; Redis-backed is the production upgrade (ADR-8)
+- `jwt.Keyring` — secret rotation. `JWT_SECRET`/`JOIN_TOKEN_SECRET` accept a
+  comma-separated list: the first entry signs, every entry verifies, so rotating
+  a secret no longer invalidates every live token. The zero `Keyring` fails
+  closed (rejects everything, refuses to sign). Adds `Claims.IsZero()`
+- `transport.WithKey` / `WithLogger` / `Encrypted` / `DeriveKey` / `KeyEnvVar` —
+  opt-in KCP encryption using kcp-go's AES-256 `BlockCrypt`. `TRANSPORT_KEY`
+  takes 64 hex chars (used verbatim) or a passphrase (HKDF-SHA256 stretched).
+  Empty = plaintext, and a KCP listener now logs a WARN when it starts
+  unencrypted. Encryption fails closed: a peer with the wrong key never
+  establishes a session
+- `config`: `JoinTokenSecret` (`JOIN_TOKEN_SECRET`), `TransportKey`
+  (`TRANSPORT_KEY`), `GatewayConnRatePerMin`/`GatewayConnBurst`/
+  `GatewayMsgRatePerSec`/`GatewayMsgBurst`, and
+  `Config.EffectiveJoinTokenSecret()`
+
+### Changed
+- `transport.Listen`/`Dial` take a variadic `...Option` tail. **Source
+  compatible** — every existing call site compiles unchanged
+
 ### Changed
 - `storage/pgstore/schema.sql` — header comment only, no SQL change. The game-state
   schema is now owned by numbered migrations in `backend/deploy/db/migrations/gamestate/`

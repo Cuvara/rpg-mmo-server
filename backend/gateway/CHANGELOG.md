@@ -6,6 +6,47 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Rate limiting. `server.WithConnRateLimit` bounds accepts per source IP
+  (default 10/min, burst 10) and `server.WithMsgRateLimit` bounds inbound frames
+  per connection (default 60/s, burst 120). The per-IP check runs immediately
+  after `Accept`, before any goroutine or session exists; the per-frame check is
+  a struct field on `ClientConn`, not a map lookup, so the hot path stays
+  allocation-free. A connection that trips the message limit gets one
+  `rate limited` error frame and is then closed
+- `gateway_rate_limited_total{reason="connection"|"message"}` counter,
+  zero-primed at start-up
+- `server.WithJoinTokenSecret` — join tokens are signed with `JOIN_TOKEN_SECRET`
+  instead of `JWT_SECRET`, so a compromised game-server pod cannot forge client
+  auth tokens. Unset falls back to `JWT_SECRET` (unchanged behaviour) with a
+  start-up warning
+- `server.WithTransportKey` — passes `TRANSPORT_KEY` to the KCP listener for
+  AES-256 wire encryption
+- Secret rotation: `JWT_SECRET` and `JOIN_TOKEN_SECRET` accept
+  `"current,previous"`. `session.VerifyClientJWTKeyring`,
+  `transfer.GenerateJoinTokenKeyring`, `transfer.ValidateJoinTokenKeyring`,
+  `transfer.AssignMapKeyring`
+- `ClientConn.SendAndClose` / `RemoteIP`
+- Flags: `--transport-key`, `--join-token-secret`, `--conn-rate-per-min`,
+  `--msg-rate-per-sec`. Start-up warns when `JOIN_TOKEN_SECRET` is unset or
+  `JWT_SECRET` is still the built-in dev default
+
+### Changed
+- `NewClientConn` takes a `ratelimit.Bucket` (pass the zero value for no limit)
+- Keyrings are parsed once in `New`, not per request
+
+### Known gaps
+- **KCP is not reachable end to end.** `gameserver-dotnet` has no KCP
+  implementation, so `--transport=kcp` and `TRANSPORT_KEY` protect the
+  client→gateway hop only (ADR-8)
+- **`JOIN_TOKEN_SECRET` needs a C# counterpart before it can be enabled.** The
+  game server reads only `JWT_SECRET` (`GameServer/Program.cs:24`) and verifies
+  join tokens at `GameServer/Server/GameServer.cs:217`
+  (`JwtValidator.Verify(joinReq.Token, _options.JwtSecret)`). Until that reads
+  `JOIN_TOKEN_SECRET` (falling back to `JWT_SECRET`), setting the split on the
+  gateway alone breaks every join
+- Both rate limiters are per process — N replicas admit N x the limit
+
+### Added
 - `registry.WithLogger` option. `FindServer` now logs a warning when a `map_id`
   resolves to more than one live game server — the MVP invariant is one server per
   map, and two instances are two disconnected copies of the world

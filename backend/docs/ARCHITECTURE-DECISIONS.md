@@ -578,6 +578,102 @@ A tier's CCU claim is only publishable once a run at that CCU holds every thresh
 
 ---
 
+## ADR-8 — Realtime-path security: PSK encryption, split secrets, rate limits
+
+### Context
+
+Three gaps existed on every internet-reachable surface of the realtime path:
+
+1. **The wire was plaintext.** `shared/transport` created KCP sessions with a
+   `nil` `BlockCrypt`. The join token and all gameplay state travelled in the
+   clear over UDP, where anyone on the path could read a token and replay it
+   against the game server inside its 30s TTL.
+2. **One secret protected everything.** `JWT_SECRET` signed the Nakama-issued
+   client auth token *and* the gateway-issued join token. The join secret has to
+   be distributed to every game server pod, so the blast radius of one
+   compromised pod was the whole authentication system — including the ability
+   to mint auth tokens for arbitrary users.
+3. **Nothing was rate limited.** Connection accepts, gateway frames and the
+   `gateway_token` RPC were all unbounded. A single host could exhaust a gateway
+   process, and an unbounded `gateway_token` loop is a free oracle for minting
+   the credentials to do it with.
+
+### Decision
+
+**1. KCP encryption is opt-in via a pre-shared key.** `transport.WithKey`
+(`TRANSPORT_KEY`, 32-byte hex recommended, passphrases stretched with
+HKDF-SHA256) installs kcp-go's AES-256 `BlockCrypt`. Empty key = plaintext,
+which stays the dev default but makes a KCP listener log a WARN on every start.
+
+*Why a PSK and not per-session keys.* The correct end state is a per-session key
+handed out with the join token (or DTLS), because a PSK is one secret shared by
+every client binary: extract it from one APK and you can decrypt any session you
+can capture. A PSK is still a strict improvement — it defeats the passive
+observer, which is the realistic threat on mobile carrier and public Wi-Fi
+networks — and it costs no protocol change, no key-exchange state, and no
+change to the join-token flow. Per-session keying needs a new field in
+`EnterWorldResponse`, matching Unity-client work, and a key schedule on the
+game-server side; that is a deliberate follow-up, not MVP scope.
+
+**2. Join tokens get their own secret, and both secrets rotate.**
+`JOIN_TOKEN_SECRET` signs gateway→gameserver join tokens; `JWT_SECRET` keeps
+signing the Nakama→client auth token. Unset `JOIN_TOKEN_SECRET` falls back to
+`JWT_SECRET` (old behaviour, so no deployment breaks on upgrade) with a
+start-up warning. Both variables accept a comma-separated list
+(`jwt.Keyring`): the first entry signs, all entries verify, so rotating a
+secret no longer logs the whole population out.
+
+**3. Rate limits at every entry point,** using one shared token-bucket
+(`shared/ratelimit`):
+
+| Surface | Default | Key |
+|---|---|---|
+| Gateway accepts | 10/min, burst 10 | source IP |
+| Gateway inbound frames | 60/s, burst 120 | connection |
+| Nakama `gateway_token` | 0.2/s, burst 5 | user id |
+
+Rejections increment `gateway_rate_limited_total{reason}`. The per-connection
+check is a struct field, not a map lookup — 10.8 ns/op, 0 allocs — because it
+runs on every inbound frame. A connection that trips it gets one explicit
+`rate limited` error frame and is then closed: replying to every over-limit
+frame would turn the limiter into an amplifier.
+
+### Consequences
+
+- **KCP is not reachable end to end today.** `gameserver-dotnet` has no KCP
+  implementation at all (C# side is TCP only), so `--transport=kcp` currently
+  only applies to hop 1 (client→gateway). Transport encryption therefore
+  protects the auth/redirect hop, and the gameplay hop stays TCP-plaintext until
+  the C# side gains both KCP and a matching key. This is the single largest
+  remaining hole and it is **not** closed by this ADR.
+- Encryption fails closed and *silently*: a peer with the wrong key produces
+  datagrams that decrypt to noise and are dropped as malformed segments. There
+  is no error, only a connection that never establishes. Operators rolling
+  `TRANSPORT_KEY` must roll both sides together — there is no rotation window
+  for the transport key, unlike the JWT secrets.
+- The rate limiters are per process. N gateway replicas admit N x the limit per
+  IP; N Nakama instances admit N x the limit per user. Accepted for the MVP
+  (single-instance tiers); the upgrade is a Redis-backed counter on the Redis
+  the gateway already depends on.
+- Splitting the secrets means two values to manage in every deployment. The
+  fallback keeps that optional, at the cost of a warning nobody can miss.
+
+### Follow-up work
+
+- **L** — Per-session transport keys: mint a key with the join token, return it
+  in `EnterWorldResponse`, key the game server's KCP session from it. Requires
+  Unity-client work.
+- **M** — KCP + `TRANSPORT_KEY` in `gameserver-dotnet`, so hop 2 can be
+  encrypted at all. Blocking the item above.
+- **M** — `JOIN_TOKEN_SECRET` support in `gameserver-dotnet` (see the gateway
+  CHANGELOG for the exact call site); until then the split cannot be turned on
+  in production without breaking joins.
+- **S** — Redis-backed rate limiters for multi-replica correctness.
+- **S** — Fail start-up (rather than warn) on the dev-default `JWT_SECRET` when
+  a `production` profile flag is set.
+
+---
+
 ## Summary of decisions
 
 | # | Area | Decision |
@@ -589,3 +685,4 @@ A tier's CCU claim is only publishable once a run at that CCU holds every thresh
 | 5 | Events | Redis Streams with ACK only; raw pub/sub reserved and currently unused |
 | 6 | Crash recovery | ≤30s loss window accepted for gameplay state, conditional on economy going through Nakama transactionally |
 | 7 | CCU/cost | All figures are unbenchmarked estimates; benchmark plan anchored to the 66ms tick budget |
+| 8 | Realtime security | Opt-in KCP PSK encryption (per-session keys deferred); `JOIN_TOKEN_SECRET` split from `JWT_SECRET`, both rotatable; token-bucket rate limits on accepts, frames and `gateway_token`. KCP is **not** reachable end to end — the C# game server has no KCP |

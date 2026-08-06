@@ -193,3 +193,73 @@ entry. It **must match the fleet manifest's** `--transport` argument; a mismatch
 sends the first client of a freshly allocated pod to the wrong transport, until
 the pod's own registration overwrites the entry. The default (inherit the
 gateway's transport) is correct for a uniform rollout, which is the normal case.
+
+
+---
+
+## 2026-08-06 — Rate limiting and secret separation
+
+See `backend/docs/ARCHITECTURE-DECISIONS.md` ADR-8 for the threat model; this
+entry covers the gateway-specific implementation choices.
+
+### Where the limiters sit
+
+**Per-IP, immediately after `Accept`.** The check happens before
+`NewClientConn`, before `trackConn`, before the handler goroutine — a rejected
+connection costs one map lookup and a `Close()`. Putting it after any of those
+would mean a connection flood still allocates a goroutine stack and a channel
+per attempt, which is most of the damage.
+
+**Per-connection, as a struct field.** `ClientConn.msgBucket` is a value, not a
+`*Limiter` keyed by IP. Two reasons. First cost: this runs on every inbound
+frame, and a mutex + map lookup per frame is the kind of thing that only shows
+up under the load you least want it under. As a plain field it is 10.8 ns and no
+allocation, and it needs no lock because only `ReadLoop`'s goroutine touches it.
+Second correctness: keying messages by IP would let one player behind a shared
+NAT throttle everyone else on it.
+
+**Why per-IP for connections but per-user for the Nakama RPC.** At accept time
+there is no identity yet — the IP is all there is. By the time `gateway_token`
+is called the caller is authenticated, so the user id is both available and the
+better key, for the same NAT reason.
+
+### Reply-once-then-close
+
+A connection that trips the message limiter gets exactly one `rate limited`
+frame and is then closed. The alternatives were both worse:
+
+- *Reply to every over-limit frame* — the limiter becomes an amplifier: the
+  attacker sends cheap frames and the gateway answers every one of them.
+- *Close immediately with no reply* — indistinguishable from a crash or a
+  network fault, and a legitimate client (a buggy build, say) has no way to
+  learn why.
+
+Making that work needed `SendAndClose`: `Close()` tears down the socket
+immediately, which would race the write loop and usually drop the very frame
+that explains the disconnect. `SendAndClose` sets a flag that `WriteLoop` checks
+*after* a successful write, so the connection ends once the queue is drained.
+The `cc.limited` field suppresses everything after the first rejection.
+
+### Defaults
+
+10 conn/min/IP and 60 msg/s/conn. The real protocol is three frames on one
+connection, so both are ~2 orders of magnitude above legitimate use. They exist
+to bound abuse, not to shape traffic — a limit tight enough to be interesting is
+a limit that will page someone at 3am over a flapping mobile link.
+`TestMsgRateLimitAllowsNormalHandshake` is the regression guard.
+
+### Two secrets, not one
+
+`JWT_SECRET` verifies what Nakama issued; `JOIN_TOKEN_SECRET` signs what the
+gateway issues. The asymmetry that matters: the join secret must be distributed
+to every game-server pod, while the auth secret only ever lives on Nakama and
+the gateway. Sharing them meant a compromised pod could mint auth tokens for any
+user. Split, it can at most mint join tokens — which only get you into a game
+server you already are.
+
+The fallback (unset → reuse `JWT_SECRET`) exists because the C# game server
+cannot yet read `JOIN_TOKEN_SECRET`; turning the split on unilaterally would
+break every join. The start-up warning is the reminder.
+
+Keyrings are parsed once in `New` and stored, not parsed per request —
+`AssignMapKeyring` exists precisely so `EnterWorld` does no string splitting.

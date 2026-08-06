@@ -108,5 +108,23 @@ to `Player-<first 8 chars of user id>`.
 | `auth.ValidateEmailCredentials(email, password, minLen)` | Credential validation |
 | `auth.AfterAuthenticateDevice` / `AfterAuthenticateEmail` / `BeforeAuthenticateEmail` | Hook handlers |
 | `auth.LoadConfig(ctx)` / `auth.Config` | Env-driven configuration |
-| `auth.ErrUnauthenticated`, `ErrInvalidPayload`, `ErrInternal`, `ErrInvalidEmail`, `ErrWeakPassword` | Client-facing runtime errors |
+| `auth.ErrUnauthenticated`, `ErrInvalidPayload`, `ErrInternal`, `ErrInvalidEmail`, `ErrWeakPassword`, `ErrRateLimited` | Client-facing runtime errors |
 | `auth.ProfileCollection`, `ProfileKey`, `StartingLevel`, `DefaultMinPasswordLength` | Constants |
+| `auth.TokenRatePerSec`, `TokenBurst`, `TokenIdleTTL` | `gateway_token` rate-limit constants |
+
+### `gateway_token` rate limit
+
+| Limit | Value | Key |
+|-------|-------|-----|
+| Sustained | `TokenRatePerSec` = 0.2/s (one per 5s) | authenticated user id |
+| Burst | `TokenBurst` = 5 | authenticated user id |
+
+Exceeding it returns `ErrRateLimited` — message `"rate limited"`, gRPC code `8`
+(`RESOURCE_EXHAUSTED`) — before the payload is parsed. Clients should back off,
+not retry immediately.
+
+⚠️ The limiter is **per Nakama process**: N instances admit N x the limit for a
+given user. See `docs/DESIGN.md` and ADR-8.
+
+`JWT_SECRET` may be a comma-separated rotation list; Nakama, as the issuer,
+always signs with the **first** entry.

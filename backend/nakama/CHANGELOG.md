@@ -5,6 +5,21 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Rate limiting on the `gateway_token` RPC: 0.2 calls/s sustained, burst 5, per
+  authenticated user id (not per IP — callers are authenticated here, and carrier
+  NAT would otherwise collapse thousands of players into one bucket). Over-limit
+  calls return `ErrRateLimited` (gRPC `RESOURCE_EXHAUSTED`, code 8) before any
+  work is done. Built on `shared/ratelimit` with TTL eviction
+- ⚠️ **Multi-instance caveat**: the limiter is in-process. N Nakama instances
+  admit N x the limit for a given user. Accepted for the MVP (single-instance
+  deployment tiers); a Redis-backed counter is the production upgrade (ADR-8)
+
+### Changed
+- `IssueGatewayToken` signs with `jwt.Keyring`, so a rotating
+  `JWT_SECRET="new,old"` signs with `new` only. Previously the whole
+  comma-separated string would have been used as a literal secret
+
 ### Changed
 - Bump Go version to 1.26 (align with CI and gameserver)
 
