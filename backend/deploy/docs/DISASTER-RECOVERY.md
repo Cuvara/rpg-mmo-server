@@ -122,7 +122,7 @@ come from `date -u +%H:%M:%S.%3N` taken immediately around each action.
 | | |
 |---|---|
 | Deployed commit | `4c4c58ae4522f84520febbd5ee6d2252e446fc44` — the tag on **both** `rpg-gateway` and `rpg-gameserver` images, i.e. gateway and game server are provably from one build |
-| How it was determined | `docker inspect <c> --format '{{.Config.Image}}'`. There is **no `$RPG_DEPLOY_DIR/COMMIT`** on this host: `/opt/rpg-mmo` does not exist because this stack is a plain `docker compose` bring-up, not a `deploy-local.sh` install. The image tag is the equivalent artifact and is the one to record on a compose host |
+| How it was determined | `docker inspect <c> --format '{{.Config.Image}}'` — the image tag on both containers, which additionally proves single-build provenance. **Corrected 2026-08-06:** the original text here claimed `$RPG_DEPLOY_DIR/COMMIT` does not exist on this host. **That was wrong.** It does exist, at `/mnt/e/rpg-mmo-deploy/COMMIT` — `vars.RPG_DEPLOY_DIR` is `/mnt/e/rpg-mmo-deploy`, not the `/opt/rpg-mmo` default that was checked. Both sources agree on `4c4c58a` for the drill window (`COMMIT` was rewritten to `184a779` at 10:19 UTC, eight minutes after the drill ended), so **no measurement below is affected** — only the provenance note was. Prefer `$RPG_DEPLOY_DIR/COMMIT`; read `vars.RPG_DEPLOY_DIR` rather than assuming the default |
 | Redis | 7.4.10, `run_id af6e15c0f39c4debdc1679bc34aab22295970a93`, uptime 1617s at baseline |
 | Client used | `backend/smoketest` — real `MsgAuth` → `MsgEnterWorld` → `MsgJoinToken` → `MsgInput`/`MsgSnapshot` flow, not a synthetic Redis client |
 

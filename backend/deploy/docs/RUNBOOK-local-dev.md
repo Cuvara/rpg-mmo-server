@@ -21,6 +21,17 @@ integration is off, the Windows binary is still reachable as `docker.exe` — bu
 `docker.exe compose -f <abs-WSL-path>` breaks on path translation, so always run
 compose from `backend/deploy/` and let it pick up the local `docker-compose.yml`.
 
+> **On this project's dev machine WSL integration is OFF and `docker` is a shim
+> to `docker.exe`.** That is deliberate and documented, with the reasoning and
+> the (unflipped) switch-over plan, in
+> [`CICD.md` §4a–4b](CICD.md#4a-the-dev-runner-is-wsl-and-docker-there-is-a-shim).
+> The one rule you must follow when writing new commands: a bind-mount source
+> must be a **literal relative path** — `-v ".:/x"` works, `-v "$PWD:/x"`
+> silently mounts an **empty** directory and exits 0. `$PWD` is absolute, so it
+> gets translated to a nonexistent `E:\mnt\…` path that Docker Desktop then
+> helpfully creates. Prefer named volumes or `docker exec` stdio, which the
+> `db/` scripts already do and which are immune to this.
+
 Status: the whole path below (plugin build → stack up → `gateway_token` RPC →
 gateway `MsgAuth`) has been executed end-to-end against nakama 3.40.0.
 
