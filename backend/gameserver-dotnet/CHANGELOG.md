@@ -26,7 +26,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and scrapes it over HTTP: wildcard (`:port`, `0.0.0.0:port`, `*:port`) and named
   (`localhost:port`) binds both serve `/healthz` and `/metrics`, empty address
   disables, plus a `ParseAddr` normalization table. The three wildcard cases fail with
-  `Assert.NotNull() Failure: Value is null` against the unfixed code.
+  `Assert.NotNull() Failure: Value is null` against the unfixed code. The wildcard
+  cases scrape whichever authority actually got bound: on Windows the `+` prefix needs
+  an admin URL ACL, so `TryStart` falls back to `localhost` and `HttpListener` answers
+  `400` to a `127.0.0.1` Host header that matches no registered prefix. On Linux — CI
+  and the production target — the test additionally asserts the bind really is `+`, so
+  the fallback can never quietly become the normal path there.
 - `InternalsVisibleTo` for `GameServer.Tests` so tests can assert on internal helpers
   without widening the public API.
 - **Delta snapshots.** Each connection now receives a full keyframe on join, on

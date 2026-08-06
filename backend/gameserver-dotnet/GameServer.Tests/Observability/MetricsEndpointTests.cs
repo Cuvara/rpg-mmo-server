@@ -57,11 +57,28 @@ public class MetricsEndpointTests
         Assert.NotNull(endpoint); // null = it failed to bind, which is the regression
         metrics.PlayerJoined();
 
-        var (healthStatus, healthBody) = await GetAsync($"http://{requestHost}:{port}/healthz");
+        bool wildcardBound = endpoint!.UriPrefix.StartsWith("http://+:", StringComparison.Ordinal);
+
+        // On Linux — CI and the production target — a wildcard address must really bind
+        // the "+" prefix. Pin that down so the fallback below can never quietly become
+        // the normal path there.
+        if (!OperatingSystem.IsWindows() && requestHost == "127.0.0.1")
+        {
+            Assert.True(wildcardBound,
+                $"expected a wildcard bind for '{addr}', got prefix '{endpoint.UriPrefix}'");
+        }
+
+        // Windows needs an admin URL ACL for "+", so TryStart deliberately falls back to
+        // localhost for unprivileged dev runs. HttpListener answers 400 to any Host header
+        // no registered prefix matches, so scrape the authority that was actually bound
+        // rather than the one we asked for. The status/body assertions stay identical.
+        string scrapeHost = wildcardBound ? requestHost : new Uri(endpoint.UriPrefix).Host;
+
+        var (healthStatus, healthBody) = await GetAsync($"http://{scrapeHost}:{port}/healthz");
         Assert.Equal(200, healthStatus);
         Assert.Equal("ok", healthBody);
 
-        var (metricsStatus, metricsBody) = await GetAsync($"http://{requestHost}:{port}/metrics");
+        var (metricsStatus, metricsBody) = await GetAsync($"http://{scrapeHost}:{port}/metrics");
         Assert.Equal(200, metricsStatus);
         // Prometheus exposition of a known instrument, proving the exporter is live
         // and the documented name translation (dots -> underscores) is applied.
