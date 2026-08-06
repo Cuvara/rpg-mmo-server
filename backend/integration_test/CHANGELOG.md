@@ -6,6 +6,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- Snapshot assertions now merge the delta stream via the new `mergeSnapshots` helper
+  (`messages.SnapshotState`) instead of inspecting a single snapshot: with delta
+  encoding, one snapshot is not the world. The full-flow and wire-compat tests
+  additionally assert `ack_tick` matches the input tick that was sent, and every
+  merge asserts the connection opened with a keyframe.
 - Replaced Go gameserver integration tests with dotnet interop tests following
   the gameserver migration from Go to C# .NET 10.
 

@@ -326,7 +326,9 @@ jobs:
                    deploy/db/init-gamestate.sql \
                    deploy/db/migrations/gamestate/001_init.sql \
                    deploy/db/backup.sh \
-                   deploy/db/restore.sh; do
+                   deploy/db/restore.sh \
+                   deploy/db/redis-backup.sh \
+                   deploy/db/redis-restore.sh; do
             [ -f "dist/$f" ] || { echo "::error::missing dist/$f"; exit 1; }
           done
           ls -lhR dist
@@ -373,7 +375,7 @@ jobs:
           name: deploy-bundle-${{ github.sha }}
           path: dist
 
-      - name: Back up both databases
+      - name: Back up both databases + Redis
         env:
           # Default under the deploy dir, which the runner owns. /var/backups is
           # root-only on a stock host and CD does not run as root; point
@@ -387,6 +389,19 @@ jobs:
           # --skip-missing: on a first-ever deploy the postgres containers do not
           # exist yet, and "nothing to back up" must not block the first deploy.
           bash backend/deploy/db/backup.sh --skip-missing
+          # Redis is a system of record too (server registry + event stream, see
+          # ADR-4), so it gets the same pre-deploy checkpoint. Same --skip-missing
+          # rationale. Writes to $BACKUP_DIR/redis/.
+          #
+          # NON-FATAL, unlike the PostgreSQL dumps above. The PG backup gates a
+          # schema migration — deploying past a failed dump risks unrecoverable
+          # data — so it stays fatal. Redis holds only transient or
+          # reconstructible state (sessions expire and clients re-auth; the
+          # registry and event streams are rebuilt by running servers), so a
+          # missing Redis checkpoint must never block a deploy. See
+          # backend/deploy/docs/DISASTER-RECOVERY.md.
+          bash backend/deploy/db/redis-backup.sh --skip-missing \
+            || echo "::warning::redis backup failed (non-fatal, see DR doc)"
 
       - name: Apply pending migrations
         env:

@@ -26,6 +26,50 @@ const dotnetJWTSecret = "test-secret-key-for-integration"
 const dotnetServerID = "test-dotnet-gs"
 const dotnetMapID = "map_test"
 
+// mergeSnapshots reads snapshots from the client and merges them into reconstructed
+// world state, exactly as the Unity client must: the game server sends a full keyframe
+// on join and then deltas carrying only what changed, so no single snapshot is the
+// whole world.
+//
+// It stops after `want` snapshots or when the client stops producing them, and fails
+// the test if none arrived at all.
+func mergeSnapshots(t *testing.T, c *MockClient, want int) *messages.SnapshotState {
+	t.Helper()
+
+	state := messages.NewSnapshotState()
+	got := 0
+	failures := 0
+	for attempts := 0; attempts < want*3 && got < want; attempts++ {
+		env, err := c.Receive()
+		if err != nil {
+			t.Logf("receive attempt %d: %v", attempts, err)
+			// Each Receive burns a 5s deadline; bail rather than blow the test timeout.
+			if failures++; failures >= 2 {
+				break
+			}
+			continue
+		}
+		if env.Type != messages.MsgSnapshot {
+			continue
+		}
+		var snap messages.SnapshotMessage
+		if err := messages.UnmarshalPayload(env.Payload, &snap); err != nil {
+			t.Fatalf("unmarshal snapshot: %v", err)
+		}
+		state.Apply(snap)
+		got++
+	}
+	if got == 0 {
+		t.Fatal("did not receive a snapshot from C# gameserver within timeout")
+	}
+	// The first snapshot on a connection is always a keyframe; without it the client
+	// would be applying deltas onto nothing.
+	if state.Keyframes == 0 {
+		t.Error("no keyframe received: client cannot seed its world state")
+	}
+	return state
+}
+
 // startDotnetGameServer launches the C# gameserver as a subprocess and returns
 // the actual listening address parsed from stdout. The caller must call the
 // returned cleanup function to kill the process.
@@ -282,30 +326,16 @@ func TestDotnetInterop_FullFlow(t *testing.T) {
 	}
 
 	// --- Step h/i: Wait for MsgSnapshot and verify entity position ---
-	var snapshot messages.SnapshotMessage
-	received := false
-	for i := 0; i < 10; i++ {
-		snapEnv, err := gsClient.Receive()
-		if err != nil {
-			t.Logf("receive attempt %d: %v", i, err)
-			continue
-		}
-		if snapEnv.Type == messages.MsgSnapshot {
-			if err := messages.UnmarshalPayload(snapEnv.Payload, &snapshot); err != nil {
-				t.Fatalf("unmarshal snapshot: %v", err)
-			}
-			received = true
-			break
-		}
-	}
-	if !received {
-		t.Fatal("did not receive a snapshot from C# gameserver within timeout")
-	}
-	t.Logf("received snapshot tick=%d with %d entities", snapshot.Tick, len(snapshot.Entities))
+	//
+	// Snapshots are delta-encoded (keyframe on join, then only what changed), so a
+	// single snapshot is not the world — merge the stream the way a real client does.
+	state := mergeSnapshots(t, gsClient, 5)
+	t.Logf("merged %d keyframes + %d deltas: tick=%d ack_tick=%d entities=%d",
+		state.Keyframes, state.Deltas, state.Tick, state.AckTick, state.Len())
 
-	// Verify the player entity is in the snapshot
+	// Verify the player entity is in the reconstructed state
 	found := false
-	for _, e := range snapshot.Entities {
+	for _, e := range state.Entities {
 		if e.Type == "player" {
 			found = true
 			t.Logf("player entity: id=%s pos=(%.2f, %.2f) hp=%d/%d", e.ID, e.X, e.Y, e.HP, e.MaxHP)
@@ -318,6 +348,11 @@ func TestDotnetInterop_FullFlow(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("no player entity found in snapshot")
+	}
+	// The server must acknowledge the input tick it accepted, otherwise the client
+	// has nothing to reconcile its prediction against.
+	if state.AckTick != 1 {
+		t.Errorf("ack_tick = %d, want 1 (the only input sent)", state.AckTick)
 	}
 
 	t.Log("PASS: full flow Go gateway <-> C# gameserver interop")
@@ -468,39 +503,22 @@ func TestDotnetInterop_MultipleClients(t *testing.T) {
 	client1.Send(input1)
 	client2.Send(input2)
 
-	// Both should receive snapshots
-	receiveSnapshot := func(c *MockClient, name string) messages.SnapshotMessage {
-		t.Helper()
-		for i := 0; i < 10; i++ {
-			env, err := c.Receive()
-			if err != nil {
-				continue
-			}
-			if env.Type == messages.MsgSnapshot {
-				var snap messages.SnapshotMessage
-				if err := messages.UnmarshalPayload(env.Payload, &snap); err != nil {
-					t.Fatalf("unmarshal snapshot %s: %v", name, err)
-				}
-				return snap
-			}
-		}
-		t.Fatalf("no snapshot received for %s", name)
-		return messages.SnapshotMessage{}
+	// Both should receive snapshots, and each merges its own delta stream.
+	state1 := mergeSnapshots(t, client1, 5)
+	state2 := mergeSnapshots(t, client2, 5)
+
+	// Both reconstructed worlds should contain both players (they see each other)
+	if state1.Len() < 2 {
+		t.Logf("client1 state has %d entities (expected >= 2)", state1.Len())
+	}
+	if state2.Len() < 2 {
+		t.Logf("client2 state has %d entities (expected >= 2)", state2.Len())
 	}
 
-	snap1 := receiveSnapshot(client1, "client1")
-	snap2 := receiveSnapshot(client2, "client2")
-
-	// Both snapshots should contain both players (they see each other)
-	if len(snap1.Entities) < 2 {
-		t.Logf("client1 snapshot has %d entities (expected >= 2)", len(snap1.Entities))
-	}
-	if len(snap2.Entities) < 2 {
-		t.Logf("client2 snapshot has %d entities (expected >= 2)", len(snap2.Entities))
-	}
-
-	t.Logf("client1 snapshot: tick=%d entities=%d", snap1.Tick, len(snap1.Entities))
-	t.Logf("client2 snapshot: tick=%d entities=%d", snap2.Tick, len(snap2.Entities))
+	t.Logf("client1 state: tick=%d entities=%d keyframes=%d deltas=%d",
+		state1.Tick, state1.Len(), state1.Keyframes, state1.Deltas)
+	t.Logf("client2 state: tick=%d entities=%d keyframes=%d deltas=%d",
+		state2.Tick, state2.Len(), state2.Keyframes, state2.Deltas)
 	t.Log("PASS: multiple clients receive snapshots from C# gameserver")
 }
 
@@ -699,27 +717,19 @@ func TestDotnetInterop_WireProtocolCompat(t *testing.T) {
 		t.Fatalf("send input: %v", err)
 	}
 
-	// Wait for snapshot
-	for i := 0; i < 10; i++ {
-		env, err := client.Receive()
-		if err != nil {
-			continue
-		}
-		if env.Type == messages.MsgSnapshot {
-			var snap messages.SnapshotMessage
-			if err := messages.UnmarshalPayload(env.Payload, &snap); err != nil {
-				t.Fatalf("snapshot unmarshal failed (field name mismatch?): %v\npayload: %s", err, string(env.Payload))
-			}
-			t.Logf("wire compat OK: snapshot tick=%d, entities=%d", snap.Tick, len(snap.Entities))
+	// Wait for snapshots and merge them: this also exercises the delta fields
+	// (full / removed / ack_tick) across the Go<->C# boundary.
+	state := mergeSnapshots(t, client, 5)
+	t.Logf("wire compat OK: tick=%d ack_tick=%d entities=%d keyframes=%d deltas=%d",
+		state.Tick, state.AckTick, state.Len(), state.Keyframes, state.Deltas)
 
-			// Verify entity fields can be read
-			for _, e := range snap.Entities {
-				_ = fmt.Sprintf("id=%s type=%s x=%.2f y=%.2f hp=%d max_hp=%d",
-					e.ID, e.Type, e.X, e.Y, e.HP, e.MaxHP)
-			}
-			t.Log("PASS: wire protocol fully compatible between Go and C#")
-			return
-		}
+	// Verify entity fields can be read
+	for _, e := range state.Entities {
+		_ = fmt.Sprintf("id=%s type=%s x=%.2f y=%.2f hp=%d max_hp=%d",
+			e.ID, e.Type, e.X, e.Y, e.HP, e.MaxHP)
 	}
-	t.Fatal("did not receive snapshot for wire protocol test")
+	if state.AckTick != 42 {
+		t.Errorf("ack_tick = %d, want 42 (the input tick that was sent)", state.AckTick)
+	}
+	t.Log("PASS: wire protocol fully compatible between Go and C#")
 }

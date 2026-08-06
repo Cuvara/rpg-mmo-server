@@ -27,6 +27,12 @@ public class ServerOptions
     /// <summary>Play area for this map. Movement is clamped into these bounds.</summary>
     public MapBounds MapBounds { get; set; } = MapBounds.Default;
 
+    /// <summary>
+    /// Delta snapshots between full keyframes. 0 or less disables delta encoding
+    /// (every snapshot is a full keyframe).
+    /// </summary>
+    public int KeyframeInterval { get; set; } = GameConstants.DefaultKeyframeInterval;
+
     public TimeSpan HoldTtl { get; set; } = TimeSpan.FromSeconds(30);
     public TimeSpan SaveInterval { get; set; } = TimeSpan.FromSeconds(30);
     public IPlayerStore? PlayerStore { get; set; }
@@ -96,7 +102,8 @@ public sealed class GameServerHost : IAsyncDisposable
             options.TickRate,
             GameConstants.DefaultAoiRadius,
             _loggerFactory.CreateLogger<TickLoop>(),
-            _metrics);
+            _metrics,
+            options.KeyframeInterval);
 
         _saver = new AsyncSaver(
             _playerStore,
@@ -316,6 +323,12 @@ public sealed class GameServerHost : IAsyncDisposable
                     input.MoveX,
                     input.MoveY,
                     input.AttackTargetId));
+                break;
+
+            case MsgType.Resync:
+                // Client lost or distrusts its reconstructed state: promote the next
+                // snapshot for this connection to a full keyframe. Payload is ignored.
+                conn.DeltaState.RequestFull();
                 break;
 
             case MsgType.Disconnect:

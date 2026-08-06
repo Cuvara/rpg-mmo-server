@@ -25,12 +25,23 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`TRANSPORT_KEY`), `GatewayConnRatePerMin`/`GatewayConnBurst`/
   `GatewayMsgRatePerSec`/`GatewayMsgBurst`, and
   `Config.EffectiveJoinTokenSecret()`
+- `messages.SnapshotMessage` gained three `omitempty` fields for the delta snapshot
+  protocol: `ack_tick` (newest client input tick the server accepted for this player —
+  the client's reconciliation anchor), `full` (this snapshot is a keyframe carrying
+  the complete AOI set) and `removed` (entity IDs that left the AOI/world on a delta).
+  All are omitted when default, so a keyframe-only stream is byte-identical to the
+  previous wire format and pre-delta readers keep working.
+- `messages.MsgResync` (type 10) — client → gameserver request for a full keyframe.
+- `messages/snapshot_state.go` — `SnapshotState`, the Go reference implementation of
+  the client-side keyframe/delta merge (keyframe replaces, delta upserts + removes,
+  `tick`/`ack_tick` monotonic). Used by the smoke test and the integration tests so
+  the merge rule is not reimplemented per consumer. C# mirror:
+  `Shared.GameLogic.Systems.SnapshotMerger`. Wire reference:
+  `backend/gameserver-dotnet/docs/API.md`.
 
 ### Changed
 - `transport.Listen`/`Dial` take a variadic `...Option` tail. **Source
   compatible** — every existing call site compiles unchanged
-
-### Changed
 - `storage/pgstore/schema.sql` — header comment only, no SQL change. The game-state
   schema is now owned by numbered migrations in `backend/deploy/db/migrations/gamestate/`
   applied by the C# gameserver; this package has been orphaned since that migration.

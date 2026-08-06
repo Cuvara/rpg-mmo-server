@@ -6,6 +6,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- `gameserver_join` now merges the snapshot stream through `messages.SnapshotState`
+  instead of reading entities out of one snapshot. Snapshots are delta-encoded — only
+  the join keyframe and every 30th snapshot carry full state — so scanning a single
+  snapshot for the player would usually find nothing. The step result now also
+  reports `keyframes`, `deltas` and `ack_tick`; those are reported, not asserted, so
+  the smoke test stays green against a server predating the delta protocol (which
+  simply looks like an all-keyframe stream).
 - `gameserver_join` position assertion follows the new server-authoritative
   movement model: `move_x`/`move_y` are a direction integrated as
   `direction * speed * dt` per tick, so N inputs no longer put the player at

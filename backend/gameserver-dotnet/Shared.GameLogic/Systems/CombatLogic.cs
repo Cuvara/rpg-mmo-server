@@ -36,7 +36,11 @@ public static class CombatLogic
     /// Validate an attack: check target alive, range, and cooldown.
     /// Returns null if valid, or an error string describing why the attack is invalid.
     /// </summary>
-    public static string? ValidateAttack(in EntityState attacker, in EntityState target, long nowTicks)
+    /// <param name="currentTick">
+    /// Current SIMULATION tick (not wall-clock). Cooldowns are tick-based so the same
+    /// input sequence always resolves the same way on server and predicting client.
+    /// </param>
+    public static string? ValidateAttack(in EntityState attacker, in EntityState target, ulong currentTick)
     {
         if (target.Dead)
             return "target is already dead";
@@ -44,7 +48,7 @@ public static class CombatLogic
         if (!InRange(attacker.Position, target.Position, GameConstants.AttackRange))
             return $"target out of range: distance {Vec2.Distance(attacker.Position, target.Position):F2} exceeds {GameConstants.AttackRange:F2}";
 
-        if (nowTicks < attacker.CooldownUntilTicks)
+        if (currentTick < attacker.CooldownUntilTick)
             return "attack on cooldown";
 
         return null;

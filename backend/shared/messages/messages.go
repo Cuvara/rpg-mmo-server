@@ -15,6 +15,7 @@ const (
 	MsgInput                             // client -> gameserver (per tick)
 	MsgSnapshot                          // gameserver -> client (per tick)
 	MsgDisconnect                        // either direction
+	MsgResync                            // client -> gameserver (request a full keyframe)
 )
 
 // Envelope is the top-level wire message. Type selects the payload schema.
@@ -78,9 +79,28 @@ type InputMessage struct {
 }
 
 // SnapshotMessage is a world state update sent to the client.
+//
+// Snapshots are either KEYFRAMES (Full=true — Entities is the complete AOI set)
+// or DELTAS (Full=false — Entities holds only entities that changed since the
+// previous snapshot sent to this connection, and Removed lists entities that
+// left the AOI or the world). A client reconstructs full state by applying
+// deltas onto the last keyframe; see SnapshotState.
+//
+// All added fields are omitempty, so a pre-delta client that only reads Tick and
+// Entities keeps working against a server that only ever sends keyframes.
 type SnapshotMessage struct {
-	Tick     uint64           `json:"tick"`
+	Tick uint64 `json:"tick"`
+	// AckTick is the highest client input tick the server has accepted for the
+	// receiving player. It is the value the client reconciles its prediction
+	// against. Zero means "no input accepted yet".
+	AckTick uint64 `json:"ack_tick,omitempty"`
+	// Full marks this snapshot as a keyframe: Entities is the authoritative,
+	// complete AOI set and the client must discard anything not listed.
+	Full     bool             `json:"full,omitempty"`
 	Entities []EntitySnapshot `json:"entities"`
+	// Removed lists entity IDs that left the AOI (or the world) since the last
+	// snapshot. Only meaningful on deltas; always empty on keyframes.
+	Removed []string `json:"removed,omitempty"`
 }
 
 // EntitySnapshot is a single entity's visible state.
