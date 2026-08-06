@@ -234,11 +234,49 @@ frame and is then closed. The alternatives were both worse:
   network fault, and a legitimate client (a buggy build, say) has no way to
   learn why.
 
-Making that work needed `SendAndClose`: `Close()` tears down the socket
-immediately, which would race the write loop and usually drop the very frame
-that explains the disconnect. `SendAndClose` sets a flag that `WriteLoop` checks
-*after* a successful write, so the connection ends once the queue is drained.
-The `cc.limited` field suppresses everything after the first rejection.
+Making that work took two mechanisms, because there are two distinct ways the
+explanatory frame can be lost.
+
+**The queue race** — `Close()` tears down the socket immediately, which races
+the write loop and drops a frame that is still sitting in `sendCh`.
+`SendAndClose` sets a flag that `WriteLoop` checks *after* a successful write,
+so the connection only ends once the queue is drained. `cc.limited` suppresses
+everything after the first rejection.
+
+**The RST race** — flushing the frame is not enough. A hard `Close()` on a TCP
+socket whose *receive* queue still holds unread bytes makes the kernel emit RST
+instead of FIN, and an RST discards the socket's unsent send buffer. That is
+precisely the state a flooding client leaves behind: the gateway stops reading
+after the limit trips, so the rest of the flood sits unread, and the frame that
+was just written gets thrown away. The client sees a bare connection reset with
+no reason — and because it depends on whether `ReadLoop` happened to drain the
+backlog before `WriteLoop` closed, it only shows up under load. It surfaced as
+an intermittent `TestMsgRateLimit` failure in a loaded `go test ./...`.
+
+`CloseGracefully` fixes it structurally:
+
+1. `CloseWrite()` on the `*net.TCPConn` — the queued bytes leave with a FIN
+   rather than an RST. The client reads the frame, then a clean EOF.
+2. A `closeDrainTimeout` (2s) read deadline bounds the wait, so a client that
+   ignores the FIN cannot pin a socket.
+3. `ReadLoop` — the socket's **only** reader — keeps consuming the backlog until
+   EOF or the deadline, then its deferred `Close()` runs against an empty
+   receive queue, which is a clean FIN.
+
+Draining deliberately stays in `ReadLoop` rather than happening inside
+`CloseGracefully`: a second reader racing `Decode` mid-frame would corrupt the
+very teardown this exists to make orderly. Transports without half-close (KCP —
+`kcp.UDPSession` has no `CloseWrite`) fall back to a plain `Close`, which is
+safe there for the same reason it is unsafe on TCP: no kernel receive queue, no
+RST, and kcp-go flushes pending output on close.
+
+`handleDisconnect` uses the same path — a client that pipelined anything after
+`MsgDisconnect` would otherwise turn an orderly goodbye into a reset.
+
+The regression test asserts both halves: the explicit `rate limited` frame
+*and* that the stream ends with EOF rather than `ECONNRESET`. The second
+assertion is the deterministic one — it fails on every run with the old hard
+close, instead of only on unlucky timing.
 
 ### Defaults
 

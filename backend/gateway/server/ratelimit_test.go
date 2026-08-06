@@ -1,8 +1,10 @@
 package server
 
 import (
+	"errors"
 	"net"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -165,12 +167,14 @@ func TestMsgRateLimit(t *testing.T) {
 	}
 
 	// Somewhere in the replies there must be a "rate limited" error, and the
-	// stream must then end.
+	// stream must then end with an orderly EOF.
 	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 	sawLimit := false
+	var finalErr error
 	for {
 		env, derr := messages.Decode(conn)
 		if derr != nil {
+			finalErr = derr
 			break // EOF / closed — expected terminal state
 		}
 		var resp messages.AuthResponse
@@ -184,6 +188,20 @@ func TestMsgRateLimit(t *testing.T) {
 
 	if !sawLimit {
 		t.Error("client should receive an explicit \"rate limited\" error frame before the close")
+	}
+
+	// The stream must end with a clean EOF, never a reset.
+	//
+	// This is the deterministic half of the assertion above. A hard Close() on
+	// a socket whose receive queue still holds the flood makes the kernel send
+	// RST instead of FIN, and RST discards the unsent send buffer — so the
+	// "rate limited" frame is silently dropped and the client learns nothing.
+	// The `sawLimit` check catches that only when the timing happens to be
+	// unlucky (it flaked exactly this way under a loaded `go test ./...`);
+	// this check catches the underlying condition every run, on any machine.
+	if finalErr != nil && errors.Is(finalErr, syscall.ECONNRESET) {
+		t.Errorf("connection ended with RST (%v) — the gateway must half-close so the "+
+			"error frame survives; see ClientConn.CloseGracefully", finalErr)
 	}
 	if got := counterValue(t, met.RateLimitedTotal, metrics.RateLimitReasonMessage); got < 1 {
 		t.Errorf("gateway_rate_limited_total{reason=message} = %v, want >= 1", got)

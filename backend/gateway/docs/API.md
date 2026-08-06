@@ -77,7 +77,13 @@ take a pre-parsed `jwt.Keyring` so `EnterWorld` does no string splitting.
 | Surface | Default | Key | On reject |
 |---|---|---|---|
 | Connection accept | 10/min, burst 10 | source IP | socket closed immediately, no frame |
-| Inbound frame | 60/s, burst 120 | connection | one `MsgAuthResp{ok:false, error:"rate limited"}`, then close |
+| Inbound frame | 60/s, burst 120 | connection | one `MsgAuthResp{ok:false, error:"rate limited"}`, then a half-close (FIN) |
+
+The message-limit disconnect is an orderly TCP half-close (`CloseWrite`), not a
+hard close, so the error frame is guaranteed to reach the client — a hard close
+with the flood still unread would make the kernel send RST and discard it.
+Clients should therefore expect: error frame → EOF. `MsgDisconnect` is handled
+the same way.
 
 Both increment `gateway_rate_limited_total{reason="connection"|"message"}`.
 `0` on either env var disables that limiter. Limits are per gateway process.

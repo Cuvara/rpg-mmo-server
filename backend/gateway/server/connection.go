@@ -6,6 +6,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/duycuong/rpg-mmo/shared/messages"
 	"github.com/duycuong/rpg-mmo/shared/ratelimit"
@@ -46,11 +47,27 @@ type ClientConn struct {
 	// limiter into an amplifier.
 	limited bool
 
-	// closeAfterFlush tells WriteLoop to close the connection once sendCh is
-	// empty, so a final error frame actually reaches the client instead of
+	// closeAfterFlush tells WriteLoop to shut the connection down once sendCh
+	// is empty, so a final error frame actually reaches the client instead of
 	// racing an immediate Close.
 	closeAfterFlush atomic.Bool
+
+	// halfClosed is set once the write side has been shut down with
+	// CloseWrite. It guards the transition so the half-close happens exactly
+	// once even if both WriteLoop and a handler ask for it.
+	halfClosed atomic.Bool
 }
+
+// closeDrainTimeout bounds how long a half-closed connection waits for the peer
+// to notice the FIN and close its side. It only ever applies to a client that
+// has been told to go away and refuses to; a well-behaved one closes in one
+// RTT. Short enough that an abusive client cannot pin a socket, long enough to
+// cover a bad mobile RTT.
+const closeDrainTimeout = 2 * time.Second
+
+// halfCloser is the optional half-close capability of a net.Conn.
+// *net.TCPConn and *net.UnixConn implement it; kcp.UDPSession does not.
+type halfCloser interface{ CloseWrite() error }
 
 // NewClientConn creates a new client connection wrapper. The bucket is the
 // per-connection inbound message limiter; pass the zero value for no limit.
@@ -108,12 +125,70 @@ func (c *ClientConn) SendAndClose(env messages.Envelope) {
 	}
 }
 
-// Close shuts down the connection.
+// Close shuts down the connection immediately.
+//
+// On TCP this is a *hard* close. If the kernel receive queue still holds unread
+// bytes — which is exactly the situation when a client is being disconnected
+// for flooding — the kernel answers with RST instead of FIN, and an RST
+// discards the socket's unsent send buffer. Any frame written just before the
+// Close can therefore be thrown away before it reaches the client, so the
+// client observes a bare disconnect with no reason.
+//
+// Any path that writes an explanatory frame and then disconnects must call
+// CloseGracefully instead. Close remains correct for the abrupt cases
+// (shutdown, read error, encode failure) where there is nothing left to
+// deliver.
 func (c *ClientConn) Close() {
 	c.once.Do(func() {
 		close(c.done)
 		c.conn.Close()
 	})
+}
+
+// CloseGracefully shuts the write side down with CloseWrite so the pending
+// bytes leave with a FIN rather than being discarded by an RST, then leaves the
+// read side open for ReadLoop to drain.
+//
+// The sequence is:
+//
+//  1. CloseWrite — everything already written (including the final error frame)
+//     is flushed and followed by a FIN. The client reads the frame, then EOF.
+//  2. A read deadline bounds the wait so a client that ignores the FIN cannot
+//     pin the socket.
+//  3. ReadLoop — the connection's *only* reader — keeps consuming the inbound
+//     backlog until EOF or the deadline, then its deferred Close runs. By then
+//     the receive queue is empty, so that Close is a clean FIN, not an RST.
+//
+// Draining is deliberately left to ReadLoop instead of being done here: the
+// socket has exactly one reader, and adding a second one racing Decode
+// mid-frame would corrupt the very teardown this is meant to make orderly.
+//
+// Transports without half-close (KCP — kcp.UDPSession has no CloseWrite) fall
+// back to a plain Close. That is safe there for the reason it is unsafe on TCP:
+// there is no kernel receive queue and no RST, and kcp-go flushes pending
+// output on Close.
+func (c *ClientConn) CloseGracefully() {
+	if !c.halfClosed.CompareAndSwap(false, true) {
+		return // already half-closed; ReadLoop owns the rest
+	}
+	hc, ok := c.conn.(halfCloser)
+	if !ok {
+		c.Close()
+		return
+	}
+	if err := hc.CloseWrite(); err != nil {
+		// Peer already gone, or a conn that reports the capability but cannot
+		// honour it. Nothing left to deliver, so fall back.
+		c.logger.Debug("close write", "user", c.UserID, "err", err)
+		c.Close()
+		return
+	}
+	// Bound the drain. ReadLoop turns this into an error and exits, which runs
+	// the deferred Close on an empty receive queue.
+	if err := c.conn.SetReadDeadline(time.Now().Add(closeDrainTimeout)); err != nil {
+		c.logger.Debug("set drain deadline", "user", c.UserID, "err", err)
+		c.Close()
+	}
 }
 
 // Done returns a channel that is closed when the connection ends.
@@ -137,27 +212,42 @@ func (c *ClientConn) ReadLoop(handler func(conn *ClientConn, env messages.Envelo
 }
 
 // WriteLoop sends envelopes from the send channel to the TCP connection.
+//
+// It ends in one of two ways. A deferred-close request (SendAndClose) drains
+// the queue and then half-closes, so the last frame is guaranteed to reach the
+// client. Anything else — an encode failure, a dead socket, Shutdown — is an
+// abrupt end with nothing left worth delivering, so it hard-closes.
 func (c *ClientConn) WriteLoop() {
-	defer c.Close()
+	if c.writeLoop() {
+		c.CloseGracefully()
+		return
+	}
+	c.Close()
+}
+
+// writeLoop pumps the send queue and reports whether it stopped because a
+// deferred close was requested and fully flushed (true) rather than because the
+// connection failed or was torn down (false).
+func (c *ClientConn) writeLoop() bool {
 	for {
 		select {
 		case env := <-c.sendCh:
 			data, err := messages.Encode(env)
 			if err != nil {
 				c.logger.Error("encode error", "user", c.UserID, "err", err)
-				return
+				return false
 			}
 			if _, err := c.conn.Write(data); err != nil {
 				c.logger.Debug("write error", "user", c.UserID, "err", err)
-				return
+				return false
 			}
 			// Deferred close requested (rate limiter, protocol abort): leave
 			// once the queue is drained so the client sees the reason.
 			if c.closeAfterFlush.Load() && len(c.sendCh) == 0 {
-				return
+				return true
 			}
 		case <-c.done:
-			return
+			return false
 		}
 	}
 }

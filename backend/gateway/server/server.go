@@ -475,10 +475,16 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 
 // handleDisconnect processes an explicit client MsgDisconnect: destroy the
 // session, then close the socket.
+//
+// Graceful, not abrupt: a client that pipelined anything after MsgDisconnect
+// leaves bytes in the receive queue, and a hard Close on a non-empty queue
+// makes the kernel emit RST — which would discard any frame still queued
+// outbound and turn an orderly goodbye into a connection reset in the client's
+// logs.
 func (g *Gateway) handleDisconnect(cc *ClientConn) {
 	g.logger.Info("client disconnect", "user", cc.UserID)
 	g.cleanupSession(cc)
-	cc.Close()
+	cc.CloseGracefully()
 }
 
 func (g *Gateway) sendEnterWorldError(cc *ClientConn, msg string) {
