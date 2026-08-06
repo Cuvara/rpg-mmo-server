@@ -349,3 +349,34 @@ All validation is server-authoritative:
 - If the client reconnects with a valid session token within the window, it
   resumes with full state. Otherwise the entity is removed and the session is
   invalidated.
+
+## Shutdown (2026-08-06)
+
+`GameServerHost.ShutdownAsync` always has at least two callers on a real
+termination, and they overlap:
+
+1. `RunAsync` calls it at its tail, as soon as the run token is cancelled and one
+   of the tick / save / accept tasks returns.
+2. The process owner calls it directly — the SIGTERM handler, an Agones drain, or
+   a test harness that wants the final save flushed before it reads the store.
+
+So shutdown is **idempotent and concurrency-safe** by contract:
+
+- The first caller wins an `Interlocked.Exchange` on a guard flag and performs the
+  teardown. Every other caller awaits the same `TaskCompletionSource` and observes
+  the same outcome — success or the same exception. A caller that gets a normal
+  return from `ShutdownAsync` may therefore assume the final save has completed;
+  it never means "somebody else has started one".
+- The entity-hold table is drained with `TryRemove`, not iterated, so every hold
+  `CancellationTokenSource` has exactly one owner. The reconnect path in
+  `HandleConnectionAsync` competes for the same entries and takes ownership the
+  same way, so whoever wins cancels and disposes it exactly once.
+- The linked `CancellationTokenSource` created in `RunAsync` is disposed only in
+  `DisposeAsync`, after the run task has completed. Disposing it inside
+  `ShutdownAsync` would hand the still-unwinding background loops a dead token
+  source.
+
+Before this contract existed, two racing teardowns could cancel a hold CTS the
+other had already disposed, so a pod that should have drained cleanly threw
+`ObjectDisposedException` out of `RunAsync`. Regression coverage:
+`GameServer.Tests/Server/GameServerHostShutdownTests.cs`.
