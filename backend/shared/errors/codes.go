@@ -1,6 +1,9 @@
 package errors
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // ErrorCode represents a game-specific error category.
 type ErrorCode int
@@ -55,8 +58,15 @@ func Newf(code ErrorCode, format string, args ...any) *GameError {
 	return &GameError{Code: code, Message: fmt.Sprintf(format, args...)}
 }
 
-// Is checks whether an error is a GameError with a specific code.
+// Is checks whether err, or anything it wraps, is a GameError with the given
+// code.
+//
+// This unwraps: callers routinely wrap with fmt.Errorf("context: %w", err) per
+// the repo-wide error convention, and a bare type assertion would silently
+// return false for every wrapped GameError — making classification decisions
+// (such as which failures are safe to describe to a client) fall through to
+// their default branch.
 func Is(err error, code ErrorCode) bool {
-	ge, ok := err.(*GameError)
-	return ok && ge.Code == code
+	var ge *GameError
+	return errors.As(err, &ge) && ge.Code == code
 }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"github.com/duycuong/rpg-mmo/gateway/registry"
 	"github.com/duycuong/rpg-mmo/gateway/session"
 	"github.com/duycuong/rpg-mmo/gateway/transfer"
+	gameerrors "github.com/duycuong/rpg-mmo/shared/errors"
 	sharedjwt "github.com/duycuong/rpg-mmo/shared/jwt"
 	"github.com/duycuong/rpg-mmo/shared/messages"
 	"github.com/duycuong/rpg-mmo/shared/ratelimit"
@@ -46,6 +48,10 @@ type Gateway struct {
 
 	relay      events.EventRelay
 	eventCount atomic.Int64
+	// relayUp tracks whether the relay is subscribed. It starts false and is
+	// set once Start succeeds, possibly after several retries (see
+	// startRelayWithRetry), so readiness can reflect a degraded gateway.
+	relayUp atomic.Bool
 
 	// metrics is nil when the gateway runs without instrumentation; every
 	// recording helper is nil-safe.
@@ -159,6 +165,59 @@ func New(
 	return g
 }
 
+// Relay retry schedule: fast enough that a Redis restart is picked up within a
+// few seconds, capped so a long outage does not hammer a recovering Redis.
+const (
+	relayRetryMin = 1 * time.Second
+	relayRetryMax = 30 * time.Second
+)
+
+// startRelayWithRetry attempts relay.Start immediately and, if that fails,
+// keeps retrying with exponential backoff until it succeeds or the gateway
+// shuts down. The gateway serves traffic throughout: cross-server events are
+// simply not delivered while the relay is down, which is a partial degradation
+// rather than an outage.
+func (g *Gateway) startRelayWithRetry() {
+	if err := g.relay.Start(context.Background()); err == nil {
+		g.relayUp.Store(true)
+		g.metrics.SetRelayUp(true)
+		return
+	} else {
+		g.logger.Error("event relay failed to start, continuing degraded and retrying",
+			"err", err, "retry_in", relayRetryMin)
+		g.metrics.SetRelayUp(false)
+	}
+
+	go func() {
+		backoff := relayRetryMin
+		for {
+			select {
+			case <-g.done:
+				return
+			case <-time.After(backoff):
+			}
+
+			if err := g.relay.Start(context.Background()); err != nil {
+				backoff *= 2
+				if backoff > relayRetryMax {
+					backoff = relayRetryMax
+				}
+				g.logger.Warn("event relay still unavailable",
+					"err", err, "retry_in", backoff)
+				continue
+			}
+			g.relayUp.Store(true)
+			g.metrics.SetRelayUp(true)
+			g.logger.Info("event relay recovered")
+			return
+		}
+	}()
+}
+
+// RelayUp reports whether the event relay is currently subscribed. False means
+// the gateway is running degraded: cross-server events are not being delivered.
+func (g *Gateway) RelayUp() bool { return g.relayUp.Load() }
+
 // OnEvent implements events.Sink: it receives every cross-server event consumed
 // by the relay.
 //
@@ -189,10 +248,14 @@ func (g *Gateway) ConnCount() int {
 // Run starts the gateway listener on the given address, using the transport
 // selected with WithTransport (TCP by default).
 func (g *Gateway) Run(addr string) error {
+	// The event relay is a degradable dependency, not a startup requirement.
+	// Failing Run here (which is what a Redis-down boot did) makes main exit 1
+	// and the pod crash-loop, so a Redis outage took the gateway with it — even
+	// though auth and map assignment against a memory backend, and every already
+	// connected player, are unaffected by the relay being down. Start it in the
+	// background and keep retrying instead.
 	if g.relay != nil {
-		if err := g.relay.Start(context.Background()); err != nil {
-			return fmt.Errorf("start event relay: %w", err)
-		}
+		g.startRelayWithRetry()
 	}
 
 	ln, err := transport.Listen(g.transportKind, addr,
@@ -367,7 +430,26 @@ func (g *Gateway) checkSession(cc *ClientConn, msgType messages.MsgType) bool {
 	ctx := context.Background()
 	key := session.SessionKey(cc.UserID)
 	userID, err := g.sessions.ValidateSession(ctx, key)
+
+	// A store error and a missing key mean opposite things, and conflating them
+	// de-auths live players during a Redis blip: the connection is dropped back
+	// to StateConnected and the client is told "session expired", so it discards
+	// a session that is in fact still valid and forces the player through a full
+	// re-login. Only storage.ErrNotFound actually means the session is gone.
+	if err != nil && !errors.Is(err, storage.ErrNotFound) {
+		// Infrastructure failure. Fail *open*: keep the connection authenticated
+		// and let the request through. The client already proved possession of a
+		// valid JWT at MsgAuth, so the residual risk is a session that was
+		// explicitly destroyed still being honoured for the length of the
+		// outage — strictly better than disconnecting every online player
+		// because Redis restarted.
+		g.metrics.SessionCheckResult(metrics.SessionCheckStoreError)
+		g.logger.Error("session store unavailable, failing open",
+			"user", cc.UserID, "err", err)
+		return true
+	}
 	if err != nil || userID != cc.UserID {
+		g.metrics.SessionCheckResult(metrics.SessionCheckExpired)
 		g.logger.Info("session expired", "user", cc.UserID, "err", err)
 		cc.State = StateConnected
 		cc.UserID = ""
@@ -379,6 +461,7 @@ func (g *Gateway) checkSession(cc *ClientConn, msgType messages.MsgType) bool {
 		}
 		return false
 	}
+	g.metrics.SessionCheckResult(metrics.SessionCheckOK)
 
 	// Sliding TTL: any client activity keeps the session alive.
 	if err := g.sessions.RefreshSession(ctx, key); err != nil {
@@ -454,7 +537,12 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 	result, err := transfer.AssignMapKeyring(ctx, cc.UserID, req.MapID, g.registry, g.joinKeys)
 	if err != nil {
 		g.metrics.EnterWorldResult(false)
-		g.sendEnterWorldError(cc, err.Error())
+		// Never hand the raw error to the client: it is a wrapped chain that
+		// ends in things like `dial tcp 10.0.1.7:6379: connect: connection
+		// refused`, which hands an attacker internal hostnames, private IPs and
+		// port numbers for free. The detail is logged server-side instead.
+		g.logger.Error("enter world failed", "user", cc.UserID, "map", req.MapID, "err", err)
+		g.sendEnterWorldError(cc, clientSafeAssignError(err))
 		return
 	}
 	g.metrics.EnterWorldResult(true)
@@ -485,6 +573,32 @@ func (g *Gateway) handleDisconnect(cc *ClientConn) {
 	g.logger.Info("client disconnect", "user", cc.UserID)
 	g.cleanupSession(cc)
 	cc.CloseGracefully()
+}
+
+// Client-facing messages for EnterWorld failures. These are the only strings a
+// client ever sees from the assignment path; anything not explicitly classified
+// collapses to msgInternalError so a new error type cannot start leaking
+// infrastructure detail by default.
+const (
+	msgNoServerAvailable = "no server available for map"
+	msgNotImplemented    = "not implemented"
+	msgInternalError     = "internal error"
+)
+
+// clientSafeAssignError maps an assignment error to a message safe to send to
+// an untrusted client. Conditions the player can act on (a full/absent map,
+// an unimplemented mode) keep a specific message; everything else — Redis down,
+// allocator failure, token signing failure — becomes a generic internal error,
+// because those chains embed addresses and internal identifiers.
+func clientSafeAssignError(err error) string {
+	switch {
+	case errors.Is(err, registry.ErrNoServerAvailable):
+		return msgNoServerAvailable
+	case gameerrors.Is(err, gameerrors.ErrNotImplemented):
+		return msgNotImplemented
+	default:
+		return msgInternalError
+	}
 }
 
 func (g *Gateway) sendEnterWorldError(cc *ClientConn, msg string) {

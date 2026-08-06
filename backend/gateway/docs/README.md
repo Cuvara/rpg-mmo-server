@@ -156,12 +156,13 @@ See `shared/config` for the full list.
 ## Metrics
 
 A second listener (separate from the realtime port) serves Prometheus metrics
-and a liveness endpoint:
+and the health endpoints:
 
 ```bash
 go run ./cmd/gateway/ --addr=:8000 --metrics-addr=:9102   # default is :9102
 curl localhost:9102/metrics
 curl localhost:9102/healthz     # 200 "ok" while the process is alive
+curl localhost:9102/readyz      # 200 "ready", or 503 "not ready: redis"
 ```
 
 `METRICS_ADDR` is the env equivalent; `off`, `none` or an explicitly empty
@@ -175,6 +176,44 @@ curl localhost:9102/healthz     # 200 "ok" while the process is alive
 | `gateway_allocations_total` | counter | `result=ok\|fail` |
 | `gateway_relay_events_total` | counter | — |
 | `gateway_rate_limited_total` | counter | `reason=connection\|message` |
+| `gateway_redis_up` | gauge | — |
+| `gateway_relay_up` | gauge | — |
+| `gateway_session_checks_total` | counter | `result=ok\|expired\|store_error` |
+| `gateway_stream_group_loss_total` | counter | — |
+
+### Liveness vs readiness
+
+**`/healthz` is liveness and never checks a dependency. `/readyz` is readiness
+and does.** Point the k8s `livenessProbe` at `/healthz` and the
+`readinessProbe` at `/readyz`; do not swap them.
+
+Kubernetes restarts a container that fails liveness, but only takes it out of
+service on a readiness failure. If Redis gated liveness, a single Redis outage
+would fail liveness on every gateway pod simultaneously and trigger a
+fleet-wide rolling restart — dropping the connections of players whose
+gameplay never touches Redis (the gateway is not in the gameplay data path,
+ADR-3) and hitting a recovering Redis with a reconnect storm. A restart cannot
+fix a sick dependency. Readiness is the correct lever: stop routing *new*
+logins to a gateway that cannot reach Redis, leave the process and its existing
+connections alone.
+
+`/readyz` returns only the *names* of failing checks (`not ready: redis`), never
+the underlying error text, which carries internal addresses.
+
+### Degraded operation
+
+The gateway is designed to survive Redis being unavailable rather than
+crash-loop:
+
+| Redis state | Gateway behaviour |
+|-------------|-------------------|
+| Down at boot | Listener still binds and serves. The event relay retries in the background (1s → 30s backoff) and attaches when Redis returns. `gateway_relay_up` is 0 meanwhile |
+| Blips while running | Live players are **not** de-authenticated. A store error is distinguished from an expired session and fails open; `gateway_session_checks_total{result="store_error"}` increments |
+| Wiped / restored | The event-stream consumer group is re-created automatically on `NOGROUP`; `gateway_stream_group_loss_total` increments |
+
+Alerting starting points: `gateway_redis_up == 0`, `gateway_relay_up == 0` for
+more than a few minutes, any increase in `gateway_stream_group_loss_total`, and
+a rising `rate(gateway_session_checks_total{result="store_error"}[5m])`.
 
 Scraped by the dev stack in `backend/deploy` (`make monitoring-up`) — see
 `backend/deploy/docs/MONITORING.md`.

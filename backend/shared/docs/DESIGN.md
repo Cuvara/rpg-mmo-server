@@ -281,3 +281,61 @@ zero `Bucket` unlimited: `Rate: 0` reads naturally as "no rate limit".
 **Testability.** Every decision function has an `...At(now time.Time)` variant.
 The tests drive time explicitly instead of sleeping, so the whole suite is
 deterministic and runs in milliseconds.
+
+## Redis client defaults (2026-08-06)
+
+`NewRedisClient` previously set only `Addr` and `Password`, so every store
+inherited go-redis' defaults. That is not a safe base for a request path: with a
+5s dial timeout and 3 unbounded retries, one `Get` against a black-holed Redis
+can occupy a caller for tens of seconds, and a login burst then piles up stuck
+goroutines until the process is effectively wedged.
+
+`ClientOptions` makes timeouts, retries and pooling explicit
+(`redisstore/client.go`). The numbers are picked so a healthy Redis never
+approaches them and an unhealthy one is detected in about a second: 2s
+dial/read/write, 3 retries between 16ms and 256ms, pool of 32 with 4 warm idle
+connections. Measured against a stopped Redis container, a `Get` now fails in
+~1.4s.
+
+**Zero means default, negative means disabled.** go-redis reads a negative
+timeout as "no timeout", which is a meaningful choice a caller may want, so
+`withDefaults` substitutes only exact zeros. `TestClientOptionsOverrides` pins
+this — the obvious `if o.X <= 0` implementation would silently override the
+caller.
+
+**Blocking reads are the exception.** `XREADGROUP` with `Block` legitimately
+holds the socket for the block duration, so a read timeout at or below it makes
+every idle poll look like an i/o timeout and buries real errors. `NewEventStream`
+therefore widens `ReadTimeout` to `block + DefaultReadTimeout`. This is the kind
+of interaction that only appears once timeouts are set at all, which is why it
+is called out here rather than left as a comment.
+
+## NOGROUP is not a transient error (2026-08-06)
+
+The stream consumer backed off and retried on every non-`redis.Nil` error. That
+is right for a connection reset and wrong for `NOGROUP`: the consumer group no
+longer exists, so every subsequent `XREADGROUP` fails identically, forever. The
+observed failure mode after a Redis wipe or a restore from an older backup was a
+relay spinning at 2Hz, logging nothing, with the process reporting itself
+healthy — a dead subsystem that looked fine.
+
+`NOGROUP` is now classified separately, the group is re-created via the same
+`ensureGroup` path used at subscribe time, and the recovery is both logged and
+counted (`GroupLosses`). Entries published while the group was missing are
+genuinely lost — they were never delivered to any consumer — which is why this
+is a loud warning rather than a silent heal.
+
+## One "not found", two stores (2026-08-06)
+
+`redisstore` returned `storage.ErrNotFound` for a missing key; `storage/memory.go`
+returned a bare `fmt.Errorf("session %s not found", key)`. Both read fine at a
+call site doing `if err != nil`, and both were wrong the moment a caller needed
+to tell "absent" from "store broken" — on the memory backend every `errors.Is`
+check answered false, so a missing session looked like an infrastructure
+failure. Every memory-store miss now wraps the sentinel.
+
+Relatedly, `errors.Is(err, code)` in `shared/errors` used a bare type assertion
+and so returned false for any wrapped `GameError` — while `TEAM.md` mandates
+wrapping with `%w` everywhere. It now uses `errors.As`. Both bugs are the same
+shape: a classification helper that silently reports "no" instead of failing
+loudly, which makes every caller's default branch the accidental behaviour.

@@ -30,11 +30,34 @@ Every frame except `MsgAuth` goes through `checkSession`:
    `not authenticated`.
 2. `SessionStore.Get("session:{user_id}")` must return the same user id; otherwise the
    connection is demoted to `StateConnected` and the client gets `session expired`.
+   **Only `storage.ErrNotFound` counts as "gone".** A store *failure* (Redis
+   unreachable, timeout) is a different condition and fails open: the connection
+   stays authenticated and the frame is processed. See "Store failures" below.
 3. On success `SessionStore.Refresh(key, SessionTTL)` re-arms the TTL — a sliding window
    driven by client activity.
 
+### Store failures vs expiry (changed 2026-08-06)
+
+These were previously conflated, so a Redis blip told every online player
+`session expired` and forced a full re-login. They are now distinct:
+
+| Condition | Client sees | Connection state |
+|-----------|-------------|------------------|
+| Session record absent (`storage.ErrNotFound`) | `session expired` | demoted to `StateConnected` |
+| Store unreachable / timeout | *nothing* — the frame is processed normally | unchanged, stays authenticated |
+
+Failing open is deliberate: the client already proved possession of a valid JWT
+at `MsgAuth`, so the residual risk is that an explicitly destroyed session keeps
+working for the duration of the outage — strictly better than disconnecting the
+entire player base because a dependency restarted. Store failures increment
+`gateway_session_checks_total{result="store_error"}`.
+
 Error replies reuse the response type of the request: `MsgEnterWorldResp{Error}` for
 `MsgEnterWorld`, `MsgAuthResp{OK:false, Error}` otherwise.
+
+**Error strings are a closed set.** Internal error text is never forwarded to a
+client — it embeds internal hostnames, private IPs and ports. Anything not
+classified below is reported as `internal error` and logged server-side.
 
 | Error string | Meaning |
 |--------------|---------|
@@ -43,7 +66,15 @@ Error replies reuse the response type of the request: `MsgEnterWorldResp{Error}`
 | `session creation failed` | session store write failed |
 | `not authenticated` | frame sent before a successful `MsgAuth` |
 | `session expired` | session record gone (TTL, explicit disconnect, evicted elsewhere) |
-| `assign map: ...` | no live server with capacity for the map |
+| `invalid enter world request` | `MsgEnterWorld` payload did not decode |
+| `no server available for map` | no live server with capacity, and allocation did not produce one |
+| `not implemented` | the requested transfer mode is unimplemented (e.g. dungeon) |
+| `internal error` | anything else — store failure, allocator failure, token signing failure |
+| `rate limited` | connection tripped the inbound frame limiter |
+
+> Changed 2026-08-06: `MsgEnterWorld` previously replied with the raw wrapped
+> error (`assign map: find servers: dial tcp 10.0.1.7:6379: ...`). Clients that
+> string-matched on `assign map: ...` must switch to the values above.
 
 ## Session teardown
 

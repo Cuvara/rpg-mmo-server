@@ -32,7 +32,7 @@ func (s *MemoryPlayerStore) LoadPlayer(_ context.Context, userID string) (*Playe
 	defer s.mu.RUnlock()
 	p, ok := s.players[userID]
 	if !ok {
-		return nil, fmt.Errorf("player %s not found", userID)
+		return nil, fmt.Errorf("player %s: %w", userID, ErrNotFound)
 	}
 	cp := *p
 	return &cp, nil
@@ -77,7 +77,7 @@ func (s *MemorySessionStore) Get(_ context.Context, key string) ([]byte, error) 
 	defer s.mu.RUnlock()
 	entry, ok := s.sessions[key]
 	if !ok {
-		return nil, fmt.Errorf("session %s not found", key)
+		return nil, fmt.Errorf("session %s: %w", key, ErrNotFound)
 	}
 	if time.Now().After(entry.expiresAt) {
 		return nil, fmt.Errorf("session %s expired", key)
@@ -98,7 +98,7 @@ func (s *MemorySessionStore) Refresh(_ context.Context, key string, ttl time.Dur
 	defer s.mu.Unlock()
 	entry, ok := s.sessions[key]
 	if !ok {
-		return fmt.Errorf("session %s not found", key)
+		return fmt.Errorf("session %s: %w", key, ErrNotFound)
 	}
 	if time.Now().After(entry.expiresAt) {
 		delete(s.sessions, key)
@@ -159,7 +159,7 @@ func (r *MemoryServerRegistry) Heartbeat(_ context.Context, serverID string) err
 	defer r.mu.Unlock()
 	e, ok := r.servers[serverID]
 	if !ok || !r.alive(e) {
-		return fmt.Errorf("server %s not found", serverID)
+		return fmt.Errorf("server %s: %w", serverID, ErrNotFound)
 	}
 	e.lastSeen = time.Now()
 	return nil
@@ -171,7 +171,7 @@ func (r *MemoryServerRegistry) GetServer(_ context.Context, serverID string) (Se
 	defer r.mu.RUnlock()
 	e, ok := r.servers[serverID]
 	if !ok || !r.alive(e) {
-		return ServerInfo{}, fmt.Errorf("server %s not found", serverID)
+		return ServerInfo{}, fmt.Errorf("server %s: %w", serverID, ErrNotFound)
 	}
 	return e.info, nil
 }
@@ -200,7 +200,7 @@ func (r *MemoryServerRegistry) UpdatePlayerCount(_ context.Context, serverID str
 	defer r.mu.Unlock()
 	e, ok := r.servers[serverID]
 	if !ok || !r.alive(e) {
-		return fmt.Errorf("server %s not found", serverID)
+		return fmt.Errorf("server %s: %w", serverID, ErrNotFound)
 	}
 	e.info.PlayerCount = count
 	return nil

@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -64,6 +65,13 @@ func newRegistryService(s *RegistryService, opts []Option) *RegistryService {
 	return s
 }
 
+// ErrNoServerAvailable means no game server has spare capacity for the
+// requested map (and allocation, if configured, did not produce one). It is a
+// capacity condition, not a fault: the gateway maps it to a distinct
+// client-facing message, so it must be matchable with errors.Is rather than by
+// string comparison.
+var ErrNoServerAvailable = errors.New("no available server for map")
+
 // FindServer locates the least-loaded live server for mapID that still has
 // capacity (PlayerCount < Capacity). Ties break on ServerID so the choice is
 // deterministic. When no server has room and an allocator is configured, it
@@ -120,7 +128,7 @@ func (s *RegistryService) FindServer(ctx context.Context, mapID string) (storage
 		allocated, aerr := s.allocator.AllocateServer(ctx, mapID)
 		if aerr != nil {
 			s.metrics.AllocationResult(false)
-			return storage.ServerInfo{}, fmt.Errorf("no available server for map %s: %w", mapID, aerr)
+			return storage.ServerInfo{}, fmt.Errorf("%w %s: allocate: %w", ErrNoServerAvailable, mapID, aerr)
 		}
 		// The allocation itself succeeded; a failed registry write still leaves
 		// a pod running, so it is counted as a failure of the whole request.
@@ -132,7 +140,7 @@ func (s *RegistryService) FindServer(ctx context.Context, mapID string) (storage
 		return allocated, nil
 	}
 
-	return storage.ServerInfo{}, fmt.Errorf("no available server for map %s", mapID)
+	return storage.ServerInfo{}, fmt.Errorf("%w %s", ErrNoServerAvailable, mapID)
 }
 
 // GetServer returns a single live server by ID.

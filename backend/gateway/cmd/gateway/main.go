@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/duycuong/rpg-mmo/gateway/events"
 	"github.com/duycuong/rpg-mmo/gateway/metrics"
@@ -24,6 +26,11 @@ import (
 const (
 	backendMemory = "memory"
 	backendRedis  = "redis"
+
+	// streamLossSampleInterval is how often main samples the event stream's
+	// consumer-group recovery count into the Prometheus counter. Group loss is
+	// a rare, operator-visible event, so a coarse interval is plenty.
+	streamLossSampleInterval = 10 * time.Second
 )
 
 // Allocator modes: how the gateway reacts to a map no live server serves.
@@ -118,7 +125,11 @@ func main() {
 	// Metrics listener: separate port from the realtime listener, started before
 	// anything else so a crash-looping gateway is still scrapeable/probeable.
 	met, promReg := metrics.NewDefault()
-	metricsSrv, err := metrics.Serve(resolveMetricsAddr(*metricsAddr), promReg, log)
+	// Readiness checks are registered below once the backend is known — the
+	// metrics listener starts first on purpose, so probes work even if backend
+	// wiring fails.
+	ready := metrics.NewReadiness()
+	metricsSrv, err := metrics.ServeWithChecks(resolveMetricsAddr(*metricsAddr), promReg, ready, log)
 	if err != nil {
 		log.Error("metrics listener failed", "err", err)
 		os.Exit(1)
@@ -135,6 +146,10 @@ func main() {
 		serverRegistry storage.ServerRegistry
 		eventStream    storage.EventStream
 		closers        []func() error
+		// redisStream is non-nil only on the Redis backend; it exposes the
+		// consumer-group recovery counter that feeds
+		// gateway_stream_group_loss_total.
+		redisStream *redisstore.EventStream
 	)
 
 	switch mode {
@@ -151,8 +166,19 @@ func main() {
 		sess := redisstore.NewSessionStoreWithClient(client)
 		reg := redisstore.NewServerRegistryWithClient(client, 0)
 		stream := redisstore.NewEventStreamWithClient(client, "gateway", consumer)
+		stream.SetLogger(log)
 		sessionStore, serverRegistry, eventStream = sess, reg, stream
 		closers = append(closers, stream.Close, client.Close)
+
+		// Redis is a real dependency of login and map assignment, so it gates
+		// readiness (not liveness — see metrics.HandlerWithChecks). The probe
+		// doubles as the sampler for gateway_redis_up.
+		ready.Register("redis", func(ctx context.Context) error {
+			err := redisstore.Ping(ctx, client, redisstore.DefaultDialTimeout)
+			met.SetRedisUp(err == nil)
+			return err
+		})
+		redisStream = stream
 		log.Info("using redis backend", "addr", cfg.RedisAddr, "consumer", consumer)
 	default:
 		sessionStore = storage.NewMemorySessionStore()
@@ -203,6 +229,24 @@ func main() {
 		)
 	} else {
 		log.Info("allocator disabled (unserved maps return an error)")
+	}
+
+	// The stream owns the recovery count (it lives in shared/, which must not
+	// import the gateway's metrics package), so main samples it into the
+	// counter. Sampling a monotonic count and adding the delta keeps the
+	// Prometheus counter monotonic too.
+	if redisStream != nil {
+		go func() {
+			ticker := time.NewTicker(streamLossSampleInterval)
+			defer ticker.Stop()
+			var reported int64
+			for range ticker.C {
+				if cur := redisStream.GroupLosses(); cur > reported {
+					met.StreamGroupLost(cur - reported)
+					reported = cur
+				}
+			}
+		}()
 	}
 
 	// The relay's sink is the gateway and the gateway owns the relay, so the sink
