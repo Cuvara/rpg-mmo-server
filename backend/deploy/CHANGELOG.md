@@ -23,6 +23,57 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   on a Go-side wire change proves only that C# still builds — real wire-compat
   coverage needs the `backend/integration_test` E2E suite, which runs today
   only in `cd.yml` on push, i.e. after merge.
+- **`db/redis-restore.sh --mode live` restored nothing and exited 0** — found by
+  running the Redis failure drill, which is the first time either Redis script
+  had been executed against a live stack. Feeding it a freshly-taken, freshly-
+  rehearsed 5-key RDB wiped `rpg-redis` and brought it back with `DBSIZE 0`,
+  printing `restored dataset: 0 keys` followed by `done`.
+  Root cause: deleting `appendonlydir` before injecting the RDB is necessary but
+  **not sufficient**. With `--appendonly yes` and no AOF manifest on disk, Redis
+  7 does not fall back to `dump.rdb` — it initialises an empty dataset and
+  writes a fresh AOF base from it (`Server initialized` → `Creating AOF base
+  file`, with no `Done loading RDB` line). Not a permissions or path problem;
+  Redis simply never opens the RDB. Same reason the Redis manual says to enable
+  AOF via a runtime `CONFIG SET`, not by restarting into it.
+  The scratch-mode rehearsal could never have caught this: it starts its
+  throwaway container with `--appendonly no`, so it exercised a different Redis
+  startup path than production. A green rehearsal was evidence about the file,
+  never about the restore.
+  Fix: `--mode live` now runs a short-lived **seed** container over the live
+  volume with `--appendonly no` (which does load the RDB), issues `CONFIG SET
+  appendonly yes` so Redis rewrites `appendonlydir` from the loaded dataset,
+  waits for `aof_rewrite_in_progress:0` + `aof_last_bgrewrite_status:ok`, shuts
+  it down, and only then starts the real container. A hard verification gate
+  compares the live key count against the seed's and fails the script on
+  mismatch — the old failure was silent, and the silence is what made it
+  dangerous. Verified by using the fixed script to recover the stack from a
+  deliberately emptied registry: 5 keys back, `SMOKE=PASS`, 8.5s.
+
+### Changed
+- **`docs/DISASTER-RECOVERY.md` — the Redis failure drill was executed** (2026-08-06,
+  10:03–10:11 UTC, deployed commit `4c4c58a`, recorded from the image tag shared
+  by `rpg-gateway` and `rpg-gameserver` since this is a compose host with no
+  `$RPG_DEPLOY_DIR/COMMIT`). "Measured results" replaces the placeholder with
+  timings, pasted evidence, and an explicit split between what was observed from
+  a **natural** event (a container stop; a registration TTL expiring on its own)
+  and what required a **forced `DEL`**. The estimate table is left unedited so
+  the estimate-vs-reality delta stays visible.
+  Headline numbers, all measured: clean Redis restart → verified joinable in
+  **2.3s**, RPO 0 (AOF replayed, TTLs preserved absolutely, consumer groups
+  intact, no `NOGROUP` loop). In-progress gameplay is untouched — a client held
+  **286 snapshots across a 58s Redis outage**. Registry deleted → world
+  unjoinable, polled for 70s with no self-recovery: **G1 is now measured, not
+  inferred**. Deliberately a pre-G1 baseline; the doc says so and says which row
+  should change when self-registration lands.
+  Two new gaps filed from the drill: **G11** — with Redis down the gateway sends
+  *no* `MsgAuth` response at all (the estimate said it would reject with
+  `MsgAuthResp{OK:false}`); clients hang to their own timeout and the gateway
+  logs nothing but go-redis pool chatter. **G12** — `servers:map:*` index sets
+  carry no TTL while `servers:id:*` hashes do, leaving orphan members; bounded,
+  since the gateway `SREM`s them on lookup, but it leaks for maps nobody queries.
+  Drill cadence updated: a monthly scratch rehearsal is explicitly *not*
+  sufficient, because that is exactly how a completely broken `--mode live`
+  survived review.
 
 ### Added
 - **`db/redis-backup.sh` / `db/redis-restore.sh`** — Redis now has the same
@@ -51,6 +102,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   The failure drill itself is **not yet measured** (Docker Desktop was paused
   for the whole window); the expectations table is marked estimated-from-code
   and the doc reserves a section for the measured numbers.
+  *(Superseded within this same Unreleased block: the drill was executed on
+  2026-08-06 — see "Changed" above. Two of the estimated rows turned out wrong.)*
 
 ### Changed
 - `cd.yml`: the `db-migrate` job now also takes a Redis checkpoint
