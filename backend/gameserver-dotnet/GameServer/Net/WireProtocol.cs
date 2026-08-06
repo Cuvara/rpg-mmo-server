@@ -15,7 +15,9 @@ public enum MsgType : byte
     JoinTokenResp = 6,
     Input = 7,
     Snapshot = 8,
-    Disconnect = 9
+    Disconnect = 9,
+    /// <summary>Client -> gameserver: request a full keyframe on the next tick.</summary>
+    Resync = 10
 }
 
 /// <summary>Wire envelope: 4-byte big-endian length prefix + JSON body.</summary>
@@ -63,13 +65,38 @@ public sealed class InputMessage
     public string? AttackTargetId { get; set; }
 }
 
+/// <summary>
+/// World state update. Either a KEYFRAME (<see cref="Full"/> = true, <see cref="Entities"/>
+/// is the complete AOI set) or a DELTA (only entities whose visible state changed since the
+/// previous snapshot sent to this connection, plus <see cref="Removed"/> for entities that
+/// left the AOI or the world).
+/// New fields are omitted when default, so the JSON of a plain full snapshot is byte-identical
+/// to the pre-delta protocol.
+/// </summary>
 public sealed class SnapshotMessage
 {
     [JsonPropertyName("tick")]
     public ulong Tick { get; set; }
 
+    /// <summary>
+    /// Highest client input tick accepted for the receiving player. The client
+    /// reconciles its prediction against this. 0 = nothing accepted yet.
+    /// </summary>
+    [JsonPropertyName("ack_tick")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public ulong AckTick { get; set; }
+
+    /// <summary>True when this snapshot is a keyframe (complete AOI state).</summary>
+    [JsonPropertyName("full")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool Full { get; set; }
+
     [JsonPropertyName("entities")]
     public List<EntitySnapshotMsg> Entities { get; set; } = new();
+
+    /// <summary>Entity IDs that left the AOI/world. Null on keyframes.</summary>
+    [JsonPropertyName("removed")]
+    public List<string>? Removed { get; set; }
 }
 
 public sealed class EntitySnapshotMsg
@@ -101,6 +128,7 @@ public sealed class EntitySnapshotMsg
 [JsonSerializable(typeof(SnapshotMessage))]
 [JsonSerializable(typeof(EntitySnapshotMsg))]
 [JsonSerializable(typeof(List<EntitySnapshotMsg>))]
+[JsonSerializable(typeof(List<string>))]
 [JsonSourceGenerationOptions(
     PropertyNamingPolicy = JsonKnownNamingPolicy.Unspecified,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]

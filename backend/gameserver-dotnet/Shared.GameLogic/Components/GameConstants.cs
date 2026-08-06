@@ -48,6 +48,26 @@ public static class GameConstants
     /// <summary>Attack cooldown duration in milliseconds.</summary>
     public const int AttackCooldownMs = 500;
 
+    /// <summary>
+    /// Attack cooldown expressed in simulation ticks for the given tick rate.
+    /// <para>
+    /// Cooldowns are counted in ticks, not wall-clock time: the simulation must be
+    /// deterministic and replayable (client prediction rewind/replay, server-side
+    /// replay of a disputed sequence). A <c>DateTime.UtcNow</c> comparison makes the
+    /// same input sequence produce different outcomes on two runs.
+    /// </para>
+    /// <para>
+    /// Rounded UP so the tick-based cooldown is never shorter than the wall-clock one
+    /// it replaces. At the default 15Hz: ceil(500ms / 66.67ms) = 8 ticks = 533ms.
+    /// </para>
+    /// </summary>
+    public static int AttackCooldownTicks(int tickRate)
+    {
+        if (tickRate <= 0) tickRate = DefaultTickRate;
+        int ticks = (AttackCooldownMs * tickRate + 999) / 1000; // ceil
+        return ticks < 1 ? 1 : ticks;
+    }
+
     /// <summary>Minimum damage dealt per attack (floor).</summary>
     public const int MinDamage = 1;
 
@@ -58,4 +78,11 @@ public static class GameConstants
 
     /// <summary>Default simulation tick rate (Hz).</summary>
     public const int DefaultTickRate = 15;
+
+    /// <summary>
+    /// Default number of delta snapshots between full keyframes. At 15Hz a keyframe
+    /// lands every 2 seconds, bounding how long a client can stay desynced if it ever
+    /// misses a delta. Set to 0 or less to disable delta encoding entirely.
+    /// </summary>
+    public const int DefaultKeyframeInterval = 30;
 }

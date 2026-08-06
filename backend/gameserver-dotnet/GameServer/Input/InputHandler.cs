@@ -19,6 +19,7 @@ public sealed class InputHandler
     private readonly DeathHandler? _onDeath;
     private readonly float _deltaTime;
     private readonly MapBounds _bounds;
+    private readonly int _cooldownTicks;
 
     /// <summary>Fixed simulation timestep in seconds used for movement integration.</summary>
     public float DeltaTime => _deltaTime;
@@ -47,12 +48,17 @@ public sealed class InputHandler
         _deltaTime = MovementSystem.DeltaTimeForTickRate(
             tickRate > 0 ? tickRate : GameConstants.DefaultTickRate);
         _bounds = bounds ?? MapBounds.Default;
+        _cooldownTicks = GameConstants.AttackCooldownTicks(tickRate);
     }
 
+    /// <summary>Attack cooldown length in simulation ticks at this handler's tick rate.</summary>
+    public int CooldownTicks => _cooldownTicks;
+
     /// <summary>Process input for a user, taking the world write lock.</summary>
-    public void ProcessInput(string userId, InputData input, bool applyMovement = true)
+    /// <param name="currentTick">Current simulation tick (drives cooldowns).</param>
+    public void ProcessInput(string userId, InputData input, ulong currentTick = 0, bool applyMovement = true)
     {
-        _world.Update((get, set) => ProcessInputLocked(get, set, userId, input, applyMovement));
+        _world.Update((get, set) => ProcessInputLocked(get, set, userId, input, currentTick, applyMovement));
     }
 
     /// <summary>
@@ -73,6 +79,7 @@ public sealed class InputHandler
         Action<string, EntityState> set,
         string userId,
         InputData input,
+        ulong currentTick = 0,
         bool applyMovement = true)
     {
         var entity = get(userId);
@@ -114,14 +121,16 @@ public sealed class InputHandler
             if (target != null)
             {
                 var t = target.Value;
-                long nowTicks = DateTime.UtcNow.Ticks;
 
-                string? attackErr = CombatLogic.ValidateAttack(in e, in t, nowTicks);
+                // Cooldown is measured in simulation ticks, never wall-clock: the tick
+                // loop is the only clock the simulation has, so replaying the same input
+                // sequence always produces the same combat outcome.
+                string? attackErr = CombatLogic.ValidateAttack(in e, in t, currentTick);
                 if (attackErr == null)
                 {
                     int damage = CombatLogic.CalculateDamage(in e, in t);
                     t.Hp -= damage;
-                    e.CooldownUntilTicks = nowTicks + TimeSpan.FromMilliseconds(GameConstants.AttackCooldownMs).Ticks;
+                    e.CooldownUntilTick = currentTick + (ulong)_cooldownTicks;
 
                     if (CombatLogic.HandleDeath(ref t))
                     {

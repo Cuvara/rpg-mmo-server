@@ -14,6 +14,10 @@ string mapId = GetArg(args, "--map-id") ?? Env("GAMESERVER_MAP_ID") ?? "map_01";
 string serverId = GetArg(args, "--server-id") ?? Env("GAMESERVER_ID") ?? Env("POD_NAME") ?? $"gs-{Guid.NewGuid():N}"[..12];
 int capacity = int.TryParse(GetArg(args, "--capacity") ?? Env("GAMESERVER_CAPACITY"), out var cap) ? cap : 100;
 int tickRate = int.TryParse(GetArg(args, "--tick-rate") ?? Env("GAMESERVER_TICK_RATE"), out var tr) ? tr : 15;
+// Delta snapshots between full keyframes. 0 or less = send a full snapshot every tick
+// (pre-delta behaviour), the escape hatch for a client that cannot merge deltas.
+int keyframeInterval = int.TryParse(GetArg(args, "--keyframe-interval") ?? Env("GAMESERVER_KEYFRAME_INTERVAL"), out var kf)
+    ? kf : GameConstants.DefaultKeyframeInterval;
 float mapWidth = float.TryParse(GetArg(args, "--map-width") ?? Env("GAMESERVER_MAP_WIDTH"),
     System.Globalization.CultureInfo.InvariantCulture, out var mw) && mw > 0f
     ? mw : GameConstants.DefaultMapWidth;
@@ -48,6 +52,9 @@ logger.LogInformation("  MapId:     {MapId}", mapId);
 logger.LogInformation("  ServerId:  {ServerId}", serverId);
 logger.LogInformation("  Capacity:  {Capacity}", capacity);
 logger.LogInformation("  TickRate:  {TickRate}Hz", tickRate);
+logger.LogInformation("  Snapshots: {Mode}", keyframeInterval > 0
+    ? $"delta, keyframe every {keyframeInterval} snapshots"
+    : "full every tick (delta disabled)");
 logger.LogInformation("  MapSize:   {Width}x{Height} world units (centered on origin)", mapWidth, mapHeight);
 logger.LogInformation("  Agones:    {Agones}", useAgones);
 if (useAgones)
@@ -139,6 +146,7 @@ var options = new ServerOptions
     MapId = mapId,
     Mode = mode,
     TickRate = tickRate,
+    KeyframeInterval = keyframeInterval,
     MapBounds = MapBounds.FromSize(mapWidth, mapHeight),
     Capacity = capacity,
     JwtSecret = jwtSecret,
