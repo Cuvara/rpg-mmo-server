@@ -380,3 +380,78 @@ Before this contract existed, two racing teardowns could cancel a hold CTS the
 other had already disposed, so a pod that should have drained cleanly threw
 `ObjectDisposedException` out of `RunAsync`. Regression coverage:
 `GameServer.Tests/Server/GameServerHostShutdownTests.cs`.
+
+## Join-Token Secret Split and Rotation (2026-08-06)
+
+### What it replaced
+
+The game server verified the join token with `JWT_SECRET` — the same secret
+Nakama uses to sign client auth tokens. That secret has to be present on every
+game-server pod for the join hop to work, which means the blast radius of one
+compromised pod was "can mint an auth token for any user", not "can accept a
+join". The two hops have completely different trust boundaries and were sharing
+one key purely by accident of implementation.
+
+### What it is now
+
+Two independent secrets:
+
+| Secret | Signs | Distributed to |
+|--------|-------|----------------|
+| `JWT_SECRET` | Nakama → client auth token | Nakama, gateway |
+| `JOIN_TOKEN_SECRET` | gateway → game server join token | gateway, **every game-server pod** |
+
+`GameServerHost` verifies the join token against `JOIN_TOKEN_SECRET` only. The
+Go gateway signs it with the same variable (`backend/gateway/cmd/gateway/main.go`),
+so the two halves are symmetric by construction.
+
+**Fallback, and why it exists.** When `JOIN_TOKEN_SECRET` is unset both halves
+fall back to `JWT_SECRET` and both log the same start-up warning. This is the
+pre-split behaviour and keeps existing deployments working; it is also the reason
+the split has to be enabled on gateway and game servers *together*. Setting it on
+the gateway alone means the gateway signs with a key no game server holds and
+every join fails — which is exactly why the C# half had to land before the split
+could be turned on anywhere. The fallback decision lives in one place,
+`ServerOptions.EffectiveJoinTokenSecret`, mirroring Go's
+`config.Config.EffectiveJoinTokenSecret`.
+
+### Rotation contract
+
+Both variables accept a comma-separated list, `"current,previous"`, parsed by
+`JwtKeyring` — the C# counterpart of Go's `shared/jwt.Keyring`. The contract is
+deliberately identical on both sides, because any divergence surfaces only during
+a rotation, i.e. at the worst possible moment:
+
+- **The first entry signs.** Only the gateway signs; this server never does. The
+  ordering still matters because it decides which key the gateway used.
+- **Every entry verifies, in order.** A token signed with the previous secret is
+  still accepted, so the old population drains over the join-token TTL instead of
+  being logged out at the deploy.
+- **Whitespace is trimmed, empty entries dropped.** `"new, old"`, `"new,old"` and
+  `"new,old,"` are the same keyring.
+- **An empty keyring fails closed.** No secrets means every token is rejected —
+  never "accept anything" — and start-up logs it loudly.
+- **Expiry short-circuits.** When a key matches the signature but `exp` has
+  passed, verification stops there instead of trying the remaining keys: a valid
+  signature with a dead expiry cannot become valid under a different key. This
+  mirrors Go's short-circuit, where `Verify` returns non-zero claims on an
+  expiry failure and the keyring treats that as definitive.
+
+Verification cost is O(keys) HMAC-SHA256 computations in the worst case, which is
+why a keyring is meant to hold two secrets during a rotation window, not an
+archive of every secret ever used.
+
+### Known behavioural difference from the Go verifier
+
+One drift predates this change and is **not** rotation-related, but it is worth
+recording: Go's `jwt.Verify` rejects a token whose `exp` claim is absent (its
+zero value is in the past), and it additionally requires the header's `typ` to be
+`JWT`; the C# validator only enforces `exp` when it is greater than zero, and
+checks only `alg`. Both only ever *accept more* than the Go side, and the gateway
+always emits `exp` and `typ`, so no gateway-produced token is affected. Tightening
+it would change nothing for real traffic and is left alone rather than risking a
+behaviour change on the join path.
+
+Coverage: `GameServer.Tests/Server/JwtKeyringTests.cs` (keyring semantics) and
+`GameServer.Tests/Server/JoinTokenSecretTests.cs` (the real TCP handshake for
+split-active, fallback, rotation, post-rotation, fail-closed and expiry).
