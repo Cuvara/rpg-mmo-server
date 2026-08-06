@@ -38,10 +38,14 @@ public struct EntityState
     public bool Dead;
 
     /// <summary>
-    /// Tick value (DateTime.Ticks) until which attack is on cooldown.
-    /// Go: CooldownUntil time.Time — converted to long ticks.
+    /// Simulation tick at which the attack cooldown expires: an attack is allowed when
+    /// <c>currentTick &gt;= CooldownUntilTick</c>.
+    /// <para>
+    /// This is a SIMULATION tick, not <c>DateTime.Ticks</c> — cooldowns must be
+    /// deterministic and replayable, so no wall-clock is involved anywhere in combat.
+    /// </para>
     /// </summary>
-    public long CooldownUntilTicks;
+    public ulong CooldownUntilTick;
 
     /// <summary>Last processed input tick. Go: LastInputTick uint64.</summary>
     public ulong LastInputTick;

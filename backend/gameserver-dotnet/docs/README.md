@@ -75,6 +75,7 @@ set. Flags are **space-separated** (`--addr :9000`).
 | `--server-id` | `GAMESERVER_ID` / `POD_NAME` | random | Server identity checked against the join token |
 | `--capacity` | `GAMESERVER_CAPACITY` | `100` | Maximum concurrent players |
 | `--tick-rate` | `GAMESERVER_TICK_RATE` | `15` | Simulation ticks per second |
+| `--keyframe-interval` | `GAMESERVER_KEYFRAME_INTERVAL` | `30` | Delta snapshots between full keyframes; `0` disables delta encoding (see `docs/API.md`) |
 | `--map-width` | `GAMESERVER_MAP_WIDTH` | `1000` | Map width in world units |
 | `--map-height` | `GAMESERVER_MAP_HEIGHT` | `1000` | Map height in world units |
 | `--jwt-secret` | `JWT_SECRET` | *(empty)* | HS256 secret shared with the gateway |

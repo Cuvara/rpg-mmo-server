@@ -246,6 +246,84 @@ So the server logs a critical error and exits 1, which surfaces immediately as
 a crash-looping pod. DSN passwords are masked in every log line and in the
 exception message.
 
+## Delta Snapshots, Input Ack and Tick-Based Timers (2026-08-06)
+
+Wire format reference: `docs/API.md`. This section is the *why*.
+
+### What it replaced
+
+Every tick, every connected client received the **complete** AOI entity set as JSON,
+and the server never told the client which of its inputs had been applied:
+
+1. **Bandwidth grew as O(entities × tick rate) per client.** Measured on a trivial
+   scene (1 moving player + 8 stationary mobs, 15 Hz): **592 B/tick/client**, ≈ 8.9
+   KB/s down *per client* before TCP/IP overhead. Most of those bytes re-sent
+   coordinates that had not moved since the previous tick. A real map — dozens of
+   entities in AOI — puts this straight through a mobile data budget.
+2. **Reconciliation was impossible.** `EntityState.LastInputTick` existed and was
+   maintained correctly, but was never serialized. A predicting client could see the
+   authoritative position but not *which input that position included*, so it could
+   not decide which of its buffered inputs to replay. Without that, client prediction
+   is either absent (input lag) or permanently divergent.
+3. **Cooldowns were wall-clock.** `DateTime.UtcNow.Ticks` gated attacks. The same
+   input sequence replayed twice could produce different outcomes, so neither
+   client-side prediction nor server-side replay of a disputed sequence was sound.
+
+### Delta encoding
+
+Each connection owns a `SnapshotDeltaState` (created with the `Connection`, discarded
+with it) holding the visible state it last sent. Per tick, per client:
+
+- **Keyframe** (`full: true`) — the complete AOI set; the client discards anything
+  not listed. Sent on join, on `resync` request, and every `keyframeInterval`
+  snapshots (default 30 ≈ 2s at 15 Hz).
+- **Delta** — only entities whose `type/x/y/hp/max_hp` changed since the previous
+  snapshot to *this* connection, plus a `removed[]` list of entities that left AOI or
+  the world. Comparison is exact (bitwise float equality), not tolerance-based: a
+  tolerance would let slow drift accumulate on the client with nothing to correct it.
+
+Measured on the same scene, 100 ticks: **126.6 B/tick/client, a 78.6% reduction**
+(`DeltaSnapshotWireTests.DeltaEncoding_UsesLessBandwidthThanFullSnapshots`). The
+saving grows with the number of *stationary* entities in AOI, which is the normal
+case — most of a map is not moving in any given 66 ms.
+
+Correctness rests on the transport being ordered and reliable (TCP today), so the
+server may treat "last sent" as "last received". That assumption is stated, not
+hidden: the periodic keyframe bounds how long any violation can persist, `resync`
+lets the client force recovery immediately, and `--keyframe-interval 0` turns delta
+encoding off entirely if a client cannot merge. Under KCP in unreliable mode the
+keyframe interval is the knob to tighten.
+
+Allocation behaviour: the per-connection `Dictionary` of last-sent state and the
+`HashSet` scratch are reused across ticks; only the outgoing message and its lists
+are allocated, and the entity list is allocated **lazily** — a tick where nothing
+changed produces a message carrying a shared empty list. No LINQ, no enumerator
+boxing, indexed `for` loops only. Snapshots cannot use a reused buffer because they
+are handed to the per-connection send channel and serialized later on the write loop.
+
+### Input acknowledgement
+
+Every snapshot carries `ack_tick`: the newest `input.tick` accepted for **that
+client's own entity**, read under the same world lock as its position. It is
+per-connection by construction — one player's ack can never reflect another's
+inputs. `0` means "nothing accepted yet", which is why the field is `omitempty`:
+it is also the pre-delta wire shape.
+
+### Tick-based timers
+
+`EntityState.CooldownUntilTicks` (a `DateTime.Ticks` value) became
+`CooldownUntilTick` (a `ulong` simulation tick). `CombatLogic.ValidateAttack` takes
+the current tick; `InputHandler` receives it from the tick loop and sets
+`CooldownUntilTick = currentTick + AttackCooldownTicks(tickRate)`.
+
+`AttackCooldownTicks` rounds **up** — `ceil(500 ms × 15 Hz / 1000)` = 8 ticks =
+533 ms — so the tick cooldown is never *shorter* than the wall-clock one it
+replaced (never a new exploit window). Behaviour at 15 Hz is equivalent: a player
+spamming attacks lands 19 hits per 150 ticks where the wall-clock gate allowed 20
+per 10 s. The simulation now has exactly one clock, the tick counter, so the same
+input sequence always yields the same result — a property the tests assert directly
+rather than assume.
+
 ## Anti-Cheat
 
 All validation is server-authoritative:
@@ -256,7 +334,9 @@ All validation is server-authoritative:
   *Movement Model* above.
 - **Range check**: Attack and skill targets must be within range according to
   the shared logic's distance calculation.
-- **Cooldown enforcement**: Skill cooldowns are tracked server-side. Early
+- **Cooldown enforcement**: Cooldowns are tracked server-side in **simulation
+  ticks** (`EntityState.CooldownUntilTick`), never wall-clock, so an early input is
+  rejected deterministically and the client can predict the same ruling. Early
   inputs are silently dropped.
 - **Rate limiting**: Input messages are bounded per tick. Excess messages from
   a client are discarded.

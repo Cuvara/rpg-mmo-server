@@ -6,6 +6,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Delta snapshots.** Each connection now receives a full keyframe on join, on
+  `MsgResync` (type 10) request, and every `--keyframe-interval` snapshots (default
+  30 ≈ 2s at 15Hz); every other snapshot carries only entities whose visible state
+  changed plus an explicit `removed[]` despawn list. Measured on 1 moving player +
+  8 stationary mobs over 100 ticks: **592.2 → 126.6 bytes/tick/client (−78.6%)**.
+  New `SnapshotDeltaState` (per `Connection`) holds the last-sent state; its scratch
+  collections are reused across ticks and the entity list is allocated lazily, so an
+  unchanged tick allocates only the message itself. `--keyframe-interval 0` disables
+  delta encoding entirely (full snapshot every tick, the pre-delta wire shape).
+- **Input acknowledgement on the wire.** `SnapshotMessage.ack_tick` carries the
+  newest input tick accepted for the receiving player's own entity — the anchor a
+  predicting client rewinds to. `EntityState.LastInputTick` was already tracked but
+  never serialized, which made client-side reconciliation impossible.
+- `Shared.GameLogic.Systems.SnapshotMerger` — the normative client-side merge of the
+  keyframe/delta stream, shared with the Unity client (Go mirror:
+  `messages.SnapshotState`).
+- `MsgType.Resync` (10) — client asks for a full keyframe on the next tick.
+- `--keyframe-interval` / `GAMESERVER_KEYFRAME_INTERVAL`.
+- `docs/API.md` — precise wire reference for the Unity client: framing, every
+  message, the delta/keyframe semantics, the normative merge algorithm and the
+  reconciliation procedure.
+
+### Changed
+- **Combat cooldowns are now tick-based, not wall-clock.** `EntityState.CooldownUntilTicks`
+  (a `DateTime.Ticks` value) became `CooldownUntilTick` (a `ulong` simulation tick);
+  `CombatLogic.ValidateAttack` and `ValidationLogic.ValidateInput` take the current
+  tick instead of `nowTicks`. Length comes from `GameConstants.AttackCooldownTicks(tickRate)`
+  = `ceil(500ms × tickRate / 1000)` = 8 ticks (533ms) at 15Hz — rounded up so the
+  cooldown is never shorter than the wall-clock one it replaced. The simulation now
+  has a single clock, so replaying an input sequence always yields the same outcome;
+  a wall-clock gate could not guarantee that, which blocked both client prediction
+  and server-side replay of disputed sequences.
+  **Breaking for in-flight callers:** `InputHandler.ProcessInput`/`ProcessInputLocked`
+  take a `currentTick` parameter before `applyMovement`.
+- `SnapshotData` (Unity-facing mirror) gained `ack_tick`, `full` and `removed`.
+
 ### Fixed
 - Player state is now persisted when a reconnect hold expires, before the entity is
   removed from the world. Previously `OnPlayerDisconnected` removed the entity

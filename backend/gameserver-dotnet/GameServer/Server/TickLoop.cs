@@ -13,6 +13,12 @@ namespace GameServer.Server;
 /// Fixed-rate simulation tick loop. Drains inputs, processes them, then
 /// broadcasts AOI-filtered snapshots to all connected players.
 /// Port of Go server/tick.go.
+/// <para>
+/// Snapshots are delta-encoded per connection: each client gets a keyframe on join
+/// and then only the entities whose visible state changed, plus explicit despawns.
+/// Every snapshot carries <c>ack_tick</c> — that client's newest accepted input tick —
+/// so the client can reconcile its prediction.
+/// </para>
 /// </summary>
 public sealed class TickLoop
 {
@@ -21,6 +27,7 @@ public sealed class TickLoop
     private readonly ConnectionManager _connections;
     private readonly int _tickRate;
     private readonly float _aoiRadius;
+    private readonly int _keyframeInterval;
     private readonly ILogger _logger;
     private readonly GameMetrics? _metrics;
     private ulong _currentTick;
@@ -42,7 +49,8 @@ public sealed class TickLoop
         int tickRate,
         float aoiRadius,
         ILogger logger,
-        GameMetrics? metrics = null)
+        GameMetrics? metrics = null,
+        int keyframeInterval = GameConstants.DefaultKeyframeInterval)
     {
         _world = world;
         _handler = handler;
@@ -51,6 +59,7 @@ public sealed class TickLoop
         _aoiRadius = aoiRadius;
         _logger = logger;
         _metrics = metrics;
+        _keyframeInterval = keyframeInterval;
     }
 
     /// <summary>Run the tick loop until cancellation.</summary>
@@ -120,7 +129,7 @@ public sealed class TickLoop
                 {
                     var pi = inputs[i];
                     bool applyMovement = _newestInputIndex[pi.UserId] == i;
-                    _handler.ProcessInputLocked(get, set, pi.UserId, pi.Input, applyMovement);
+                    _handler.ProcessInputLocked(get, set, pi.UserId, pi.Input, _currentTick, applyMovement);
                 }
             });
         }
@@ -131,17 +140,22 @@ public sealed class TickLoop
             try
             {
                 Vec2 playerPos = default;
+                ulong ackTick = 0;
                 _world.View(get =>
                 {
                     var entity = get(conn.UserId);
                     if (entity != null)
                     {
                         playerPos = entity.Value.Position;
+                        // Per-player acknowledgement: the newest input tick this
+                        // player's own entity has accepted. Other players' entities
+                        // never contribute — reconciliation is strictly per-client.
+                        ackTick = entity.Value.LastInputTick;
                     }
                 });
 
                 var nearby = SnapshotEncoder.GetNearbyEntities(_world, playerPos, _aoiRadius);
-                var snapshot = SnapshotEncoder.Encode(_currentTick, nearby);
+                var snapshot = conn.DeltaState.Encode(_currentTick, ackTick, nearby, _keyframeInterval);
                 var env = WireProtocol.NewEnvelope(MsgType.Snapshot, snapshot);
                 conn.Send(env);
                 _snapshotsThisTick++;

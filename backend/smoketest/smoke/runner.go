@@ -290,22 +290,27 @@ func (r *Runner) stepGameServerFlow() (string, error) {
 	}
 
 	// Drain snapshots for a little longer so the final position lands.
+	//
+	// Snapshots are delta-encoded: only the first one (and every Nth after it) is a
+	// full keyframe, the rest carry just what changed. A client that reads a single
+	// snapshot in isolation would see an empty entity list, so merge the stream into
+	// reconstructed world state exactly as the Unity client must.
 	deadline := time.After(2 * time.Second)
 	var (
 		snapshots int
 		lastX     float32
 		seen      bool
+		state     = messages.NewSnapshotState()
 	)
 drain:
 	for {
 		select {
 		case s := <-snapCh:
 			snapshots++
-			for _, e := range s.msg.Entities {
-				if e.ID == r.userID {
-					lastX = e.X
-					seen = true
-				}
+			state.Apply(s.msg)
+			if e, ok := state.Get(r.userID); ok {
+				lastX = e.X
+				seen = true
 			}
 			// Stop once every buffered snapshot is consumed, so lastX is the newest
 			// authoritative position rather than an early one from the send phase.
@@ -343,7 +348,10 @@ drain:
 		_ = r.send(conn, env)
 		time.Sleep(100 * time.Millisecond)
 	}
-	return fmt.Sprintf("snapshots=%d final_x=%.2f", snapshots, lastX), nil
+	// ack_tick / keyframe counts are reported, not asserted: a server predating the
+	// delta protocol sends neither, and the smoke test must stay green against it.
+	return fmt.Sprintf("snapshots=%d (keyframes=%d deltas=%d) final_x=%.2f ack_tick=%d",
+		snapshots, state.Keyframes, state.Deltas, lastX, state.AckTick), nil
 }
 
 // ---------------------------------------------------------------- wire utils

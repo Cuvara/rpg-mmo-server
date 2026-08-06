@@ -14,12 +14,12 @@ public static class ValidationLogic
     /// <param name="entity">The entity performing the action.</param>
     /// <param name="input">The input to validate.</param>
     /// <param name="getEntity">Lookup function to resolve an entity by ID (for attack targets).</param>
-    /// <param name="nowTicks">Current time in DateTime.Ticks for cooldown checks.</param>
+    /// <param name="currentTick">Current simulation tick, used for cooldown checks.</param>
     public static string? ValidateInput(
         in EntityState entity,
         in InputData input,
         Func<string, EntityState?> getEntity,
-        long nowTicks)
+        ulong currentTick)
     {
         if (entity.Dead)
             return "entity is dead";
@@ -37,7 +37,7 @@ public static class ValidationLogic
             if (target == null)
                 return $"attack target '{input.AttackTargetId}' not found";
 
-            string? attackError = CombatLogic.ValidateAttack(entity, target.Value, nowTicks);
+            string? attackError = CombatLogic.ValidateAttack(entity, target.Value, currentTick);
             if (attackError != null)
                 return attackError;
         }

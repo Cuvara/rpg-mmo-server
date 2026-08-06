@@ -88,7 +88,7 @@ public class CombatLogicTests
         var target = TestHelpers.CreatePlayer("p2", x: 1, y: 0, hp: 0);
         target.Dead = true;
 
-        var result = CombatLogic.ValidateAttack(in attacker, in target, nowTicks: 0);
+        var result = CombatLogic.ValidateAttack(in attacker, in target, currentTick: 0);
         Assert.NotNull(result);
     }
 
@@ -98,7 +98,7 @@ public class CombatLogicTests
         var attacker = TestHelpers.CreatePlayer("p1", x: 0, y: 0);
         var target = TestHelpers.CreatePlayer("p2", x: 100, y: 100);
 
-        var result = CombatLogic.ValidateAttack(in attacker, in target, nowTicks: 0);
+        var result = CombatLogic.ValidateAttack(in attacker, in target, currentTick: 0);
         Assert.NotNull(result);
     }
 
@@ -106,10 +106,10 @@ public class CombatLogicTests
     public void ValidateAttack_OnCooldown_ReturnsError()
     {
         var attacker = TestHelpers.CreatePlayer("p1", x: 0, y: 0);
-        attacker.CooldownUntilTicks = 1000; // Cooldown until tick 1000
+        attacker.CooldownUntilTick = 1000; // Cooldown until tick 1000
         var target = TestHelpers.CreatePlayer("p2", x: 1, y: 0);
 
-        var result = CombatLogic.ValidateAttack(in attacker, in target, nowTicks: 500);
+        var result = CombatLogic.ValidateAttack(in attacker, in target, currentTick: 500);
         Assert.NotNull(result);
     }
 
@@ -117,10 +117,10 @@ public class CombatLogicTests
     public void ValidateAttack_Valid_ReturnsNull()
     {
         var attacker = TestHelpers.CreatePlayer("p1", x: 0, y: 0);
-        attacker.CooldownUntilTicks = 0;
+        attacker.CooldownUntilTick = 0;
         var target = TestHelpers.CreatePlayer("p2", x: 1, y: 0);
 
-        var result = CombatLogic.ValidateAttack(in attacker, in target, nowTicks: 100);
+        var result = CombatLogic.ValidateAttack(in attacker, in target, currentTick: 100);
         Assert.Null(result);
     }
 
@@ -128,10 +128,10 @@ public class CombatLogicTests
     public void ValidateAttack_ExactCooldownExpiry_ReturnsNull()
     {
         var attacker = TestHelpers.CreatePlayer("p1", x: 0, y: 0);
-        attacker.CooldownUntilTicks = 100;
+        attacker.CooldownUntilTick = 100;
         var target = TestHelpers.CreatePlayer("p2", x: 1, y: 0);
 
-        var result = CombatLogic.ValidateAttack(in attacker, in target, nowTicks: 100);
+        var result = CombatLogic.ValidateAttack(in attacker, in target, currentTick: 100);
         Assert.Null(result);
     }
 

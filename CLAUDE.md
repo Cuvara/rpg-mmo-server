@@ -82,8 +82,15 @@ Each module has its own `CLAUDE.md` with detailed role-specific instructions, pl
 5. Client → GameServer: MsgJoinToken { Token }
 6. GameServer → Client: MsgJoinTokenResp { OK }
 7. Client → GameServer: MsgInput { MoveX, MoveY, AttackTargetID }  (per tick)
-8. GameServer → Client: MsgSnapshot { Tick, Entities[] }           (per tick)
+8. GameServer → Client: MsgSnapshot { Tick, AckTick, Full, Entities[], Removed[] }  (per tick)
+9. Client → GameServer: MsgResync {}                               (optional: force a keyframe)
 ```
+
+Snapshots are delta-encoded: a full keyframe on join / on `MsgResync` / every N
+snapshots (default 30), deltas in between carrying only changed entities plus a
+despawn list. `AckTick` is the newest client input tick the server accepted for that
+player — the client's reconciliation anchor. Normative wire reference and client
+merge algorithm: **`backend/gameserver-dotnet/docs/API.md`**.
 
 ### Extension Seams (MVP → Production)
 

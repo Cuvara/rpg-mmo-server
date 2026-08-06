@@ -13,6 +13,12 @@ public sealed class Connection : IDisposable
     /// <summary>User ID associated with this connection (set after JWT validation).</summary>
     public string UserId { get; }
 
+    /// <summary>
+    /// Per-connection snapshot delta encoder state. Lives and dies with the connection,
+    /// so a reconnecting client always starts from a fresh keyframe.
+    /// </summary>
+    public GameServer.Snapshot.SnapshotDeltaState DeltaState { get; } = new();
+
     private readonly TcpClient _tcp;
     private readonly NetworkStream _stream;
     private readonly Channel<Envelope> _sendChannel;
