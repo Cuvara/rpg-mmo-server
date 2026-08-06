@@ -59,7 +59,34 @@ This keeps a Redis-backed store from reporting ghost-online players after a drop
 
 `transfer.GenerateJoinToken(userID, serverID, secret)` — HS256, TTL
 `constants.JoinTokenTTL` (30s), claims `{sub: userID, sid: serverID}`. The game server
-verifies it with the same shared secret as the first frame on its socket.
+verifies it as the first frame on its socket.
+
+Signed with **`JOIN_TOKEN_SECRET`**, not `JWT_SECRET` (added 2026-08-06). The
+join secret is distributed to every game-server pod; the auth secret is not, so
+sharing them made one compromised pod able to forge client auth tokens. Unset
+`JOIN_TOKEN_SECRET` falls back to `JWT_SECRET` (unchanged behaviour, start-up
+warning) — required today because `gameserver-dotnet` cannot read the new
+variable yet.
+
+Both secrets accept a comma-separated rotation list; the keyring variants
+(`GenerateJoinTokenKeyring`, `ValidateJoinTokenKeyring`, `AssignMapKeyring`)
+take a pre-parsed `jwt.Keyring` so `EnterWorld` does no string splitting.
+
+## Rate limiting (added 2026-08-06)
+
+| Surface | Default | Key | On reject |
+|---|---|---|---|
+| Connection accept | 10/min, burst 10 | source IP | socket closed immediately, no frame |
+| Inbound frame | 60/s, burst 120 | connection | one `MsgAuthResp{ok:false, error:"rate limited"}`, then a half-close (FIN) |
+
+The message-limit disconnect is an orderly TCP half-close (`CloseWrite`), not a
+hard close, so the error frame is guaranteed to reach the client — a hard close
+with the flood still unread would make the kernel send RST and discard it.
+Clients should therefore expect: error frame → EOF. `MsgDisconnect` is handled
+the same way.
+
+Both increment `gateway_rate_limited_total{reason="connection"|"message"}`.
+`0` on either env var disables that limiter. Limits are per gateway process.
 
 ## Server allocation (added 2026-08-04)
 

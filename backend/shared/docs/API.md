@@ -23,6 +23,75 @@ func (c Claims) IsExpired() bool
 a missing/odd `typ`, or a non-base64 header are rejected before any signature work.
 The API is unchanged — callers need no edits.
 
+### `Keyring` — secret rotation
+
+`JWT_SECRET` and `JOIN_TOKEN_SECRET` accept a **comma-separated list**
+(`"current,previous"`). The first entry signs; every entry verifies, in order.
+This is what makes a secret rotation non-disruptive: deploy `new,old`, wait out
+the longest token TTL, then deploy `new`.
+
+```go
+func ParseKeyring(spec string) (Keyring, error)   // "new, old" -> 2 secrets
+func NewKeyring(secrets ...string) (Keyring, error)
+
+func (k Keyring) Len() int          // >1 means a rotation is in progress
+func (k Keyring) Valid() bool
+func (k Keyring) Signing() string   // the first secret
+func (k Keyring) Sign(userID string, expiry time.Duration) (string, error)
+func (k Keyring) SignWithServer(userID, serverID string, expiry time.Duration) (string, error)
+func (k Keyring) Verify(token string) (Claims, error)
+func (c Claims) IsZero() bool
+```
+
+Notes:
+
+- **An empty spec is an error.** The zero `Keyring` rejects every token and
+  refuses to sign — a service booted with no secret fails closed rather than
+  accepting tokens signed with `""`.
+- **Expiry short-circuits.** A token whose signature matched but whose `exp`
+  passed returns immediately (with its claims populated, for logging) instead of
+  being retried against the remaining keys.
+- Verification is O(number of secrets) HMAC-SHA256 ops in the worst case, so a
+  keyring is a rotation window, not an archive. Two entries is the intended size.
+
+## `ratelimit` — token-bucket limiter
+
+Shared by the gateway (per-IP accepts, per-connection messages) and the Nakama
+plugin (per-user RPCs). Two types, split by allocation profile:
+
+```go
+// Single bucket: no lock, no map, zero allocations. Embed by value.
+type Bucket struct { Rate, Burst float64 }   // Rate <= 0 disables limiting
+func NewBucket(rate, burst float64) Bucket
+func (b *Bucket) Allow() bool
+func (b *Bucket) AllowAt(now time.Time) bool  // tests drive time through this
+func (b *Bucket) Enabled() bool
+
+// Keyed set of buckets (per IP / per user), mutex-guarded, TTL-evicted.
+func NewLimiter(rate, burst float64, idleTTL time.Duration) *Limiter
+func (l *Limiter) Allow(key string) bool
+func (l *Limiter) AllowAt(key string, now time.Time) bool
+func (l *Limiter) Cleanup(now time.Time) int
+func (l *Limiter) StartCleanup(every time.Duration)
+func (l *Limiter) Stop()
+func (l *Limiter) Len() int
+func (l *Limiter) Enabled() bool
+
+const DefaultIdleTTL = 10 * time.Minute
+```
+
+Semantics: the bucket holds up to `Burst` tokens and refills at `Rate`/second;
+`Allow` consumes one. A short burst passes in full, sustained traffic is
+throttled to `Rate`. `Bucket`'s zero value and a **nil `*Limiter`** both allow
+everything, so "disabled" needs no nil checks at the call site.
+
+`BenchmarkBucketAllow`: **10.8 ns/op, 0 allocs/op** — which is what makes it
+safe in the gateway's per-message read path.
+
+**Scope caveat:** the limiter is per process and in memory. N replicas admit
+N x `Rate` per key. Accepted for the MVP; the production upgrade is a
+Redis-backed counter keyed identically.
+
 ## `storage` — interfaces and in-memory implementations
 
 ```go
@@ -220,8 +289,13 @@ servers get.
 
 | Function | Signature | Notes |
 |----------|-----------|-------|
-| `Listen` | `Listen(kind, addr string) (net.Listener, error)` | `kind` is `"tcp"`, `"kcp"` or `""` (= tcp) |
-| `Dial` | `Dial(kind, addr string, timeout time.Duration) (net.Conn, error)` | `timeout` bounds the TCP handshake only |
+| `Listen` | `Listen(kind, addr string, opts ...Option) (net.Listener, error)` | `kind` is `"tcp"`, `"kcp"` or `""` (= tcp) |
+| `Dial` | `Dial(kind, addr string, timeout time.Duration, opts ...Option) (net.Conn, error)` | `timeout` bounds the TCP handshake only |
+| `WithKey` | `WithKey(key string) Option` | pre-shared KCP encryption key; `""` = plaintext |
+| `WithLogger` | `WithLogger(*slog.Logger) Option` | logger for the unencrypted-listener warning |
+| `Encrypted` | `Encrypted(opts ...Option) bool` | whether a given option set encrypts |
+| `DeriveKey` | `DeriveKey(key string) ([]byte, error)` | 32-byte AES-256 key; validate config at start-up |
+| `KeyEnvVar` | `= "TRANSPORT_KEY"` | env var name |
 | `Normalize` | `Normalize(kind string) string` | lowercases; `""` → `"tcp"` |
 | `Validate` | `Validate(kind string) error` | `""`/`tcp`/`kcp` are valid |
 | `Kinds` | `Kinds() []string` | `["tcp", "kcp"]` |
@@ -229,7 +303,35 @@ servers get.
 ```go
 ln, err := transport.Listen("kcp", ":9000")   // net.Listener
 conn, err := transport.Dial("kcp", addr, 2*time.Second) // net.Conn
+
+// Encrypted (both peers need the SAME key):
+ln, err := transport.Listen("kcp", ":9000", transport.WithKey(os.Getenv("TRANSPORT_KEY")))
+conn, err := transport.Dial("kcp", addr, 2*time.Second, transport.WithKey(key))
 ```
+
+`opts` is variadic, so every pre-existing call site compiles unchanged.
+
+### KCP encryption (`TRANSPORT_KEY`)
+
+`WithKey` installs kcp-go's AES-256 `BlockCrypt`, which encrypts **every UDP
+datagram** below the KCP ARQ — including the datagrams carrying the join token.
+
+Key formats accepted by `DeriveKey`:
+
+| Input | Handling |
+|-------|----------|
+| 64 hex chars (`openssl rand -hex 32`) | decoded verbatim as 32 raw bytes — **recommended** |
+| anything else | HKDF-SHA256 stretched to 32 bytes (spreads the entropy it has; it cannot create entropy a short passphrase lacks) |
+| `""` / whitespace only | plaintext; a KCP **listener logs a WARN** on every start |
+
+There is no negotiation and no downgrade path, so the failure mode is
+fail-closed and silent: a peer with the wrong key (or no key) produces
+datagrams that decrypt to noise and are dropped as malformed KCP segments —
+no session is ever established and no error is returned. Verified by
+`TestKCPEncryptionRoundtrip`, which covers matching-key success and all three
+mismatch cases (encrypted↔plaintext both ways, and two different keys).
+
+TCP ignores the key entirely; use TLS or the cluster network there.
 
 KCP is `github.com/xtaci/kcp-go/v5` with a game profile applied to every
 session (exported as constants so callers can log/inspect them):
@@ -258,6 +360,17 @@ send `MsgDisconnect` first.
 | `GameDBURL` | `GAME_DB_URL` | *(empty)* — empty means "no PostgreSQL configured"; services fall back to their in-memory store |
 | `GatewayTransport` | `GATEWAY_TRANSPORT` | `tcp` — realtime transport the gateway listens with (`tcp` or `kcp`) |
 | `GameServerTransport` | `GAMESERVER_TRANSPORT` | `tcp` — realtime transport the game server listens with (`tcp` or `kcp`) |
+| `JWTSecret` | `JWT_SECRET` | `dev-secret-change-me` — client auth token. Comma-separated list to rotate (`new,old`) |
+| `JoinTokenSecret` | `JOIN_TOKEN_SECRET` | *(empty)* — gateway→gameserver join token. Empty means "reuse `JWT_SECRET`" (with a start-up warning) |
+| `TransportKey` | `TRANSPORT_KEY` | *(empty)* — pre-shared KCP encryption key, 32-byte hex recommended. Empty = plaintext |
+| `GatewayConnRatePerMin` | `GATEWAY_CONN_RATE_PER_MIN` | `10` — accepted connections/min per source IP (`0` disables) |
+| `GatewayConnBurst` | `GATEWAY_CONN_BURST` | `10` |
+| `GatewayMsgRatePerSec` | `GATEWAY_MSG_RATE_PER_SEC` | `60` — inbound frames/s per connection (`0` disables) |
+| `GatewayMsgBurst` | `GATEWAY_MSG_BURST` | `120` |
+
+`Config.EffectiveJoinTokenSecret() (spec string, sharedWithAuth bool)` resolves
+the join-token secret and reports whether the `JWT_SECRET` fallback was taken,
+so each service emits the "secrets are not split" warning exactly once.
 
 Example: `postgres://game:localdev@localhost:5433/gamestate?sslmode=disable`
 (the `postgres-game` service in `backend/deploy/docker-compose.yml`).

@@ -44,6 +44,10 @@ func main() {
 	allocTransport := flag.String("allocator-transport", "", "Realtime transport the allocated fleet's game servers listen with: tcp or kcp (overrides ALLOCATOR_TRANSPORT; defaults to --transport)")
 	metricsAddr := flag.String("metrics-addr", "", "Prometheus metrics listen address, e.g. :9102 (overrides METRICS_ADDR; \"off\" or an empty METRICS_ADDR disables it)")
 	allocKubeconfig := flag.String("allocator-kubeconfig", "", "Kubeconfig path for the allocator (default: in-cluster config, then $KUBECONFIG, then ~/.kube/config)")
+	transportKey := flag.String("transport-key", "", "Pre-shared key encrypting the KCP listener, 32-byte hex recommended (overrides TRANSPORT_KEY; empty = plaintext)")
+	joinTokenSecret := flag.String("join-token-secret", "", "HS256 secret (comma-separated list to rotate) for gateway->gameserver join tokens (overrides JOIN_TOKEN_SECRET; empty = reuse JWT_SECRET)")
+	connRate := flag.Float64("conn-rate-per-min", -1, "Max accepted connections per minute per source IP (overrides GATEWAY_CONN_RATE_PER_MIN; 0 disables)")
+	msgRate := flag.Float64("msg-rate-per-sec", -1, "Max inbound messages per second per connection (overrides GATEWAY_MSG_RATE_PER_SEC; 0 disables)")
 	flag.Parse()
 
 	cfg := config.Load()
@@ -61,6 +65,54 @@ func main() {
 	if err := transport.Validate(listenTransport); err != nil {
 		log.Error("invalid transport", "err", err)
 		os.Exit(1)
+	}
+
+	// --- Security configuration -------------------------------------------
+	//
+	// Three independent secrets, each with an explicit "insecure default" that
+	// is legal for local dev and loudly logged so nobody ships it:
+	//   TRANSPORT_KEY      — KCP wire encryption. Empty = plaintext.
+	//   JWT_SECRET         — Nakama-issued client auth token.
+	//   JOIN_TOKEN_SECRET  — gateway-issued join token. Empty = reuse JWT_SECRET.
+	tKey := cfg.TransportKey
+	if *transportKey != "" {
+		tKey = *transportKey
+	}
+	if tKey != "" {
+		if _, kerr := transport.DeriveKey(tKey); kerr != nil {
+			log.Error("invalid transport key", "err", kerr)
+			os.Exit(1)
+		}
+	}
+
+	joinSecret, sharedWithAuth := cfg.EffectiveJoinTokenSecret()
+	if *joinTokenSecret != "" {
+		joinSecret, sharedWithAuth = *joinTokenSecret, false
+	}
+	if sharedWithAuth {
+		log.Warn("JOIN_TOKEN_SECRET is unset -- join tokens are signed with JWT_SECRET; a leak of either secret compromises both the Nakama auth hop and the game-server hop. Set JOIN_TOKEN_SECRET (and the matching value on every game server) before launch.")
+	}
+	if cfg.JWTSecret == "dev-secret-change-me" {
+		log.Warn("JWT_SECRET is the built-in development default -- anyone can forge auth tokens. Set JWT_SECRET before exposing this gateway.")
+	}
+
+	// Rate limits: flags win, then env (via config), then the built-in
+	// defaults. A negative flag means "unset"; 0 explicitly disables a limiter.
+	connRatePerMin := cfg.GatewayConnRatePerMin
+	if *connRate >= 0 {
+		connRatePerMin = *connRate
+	}
+	msgRatePerSec := cfg.GatewayMsgRatePerSec
+	if *msgRate >= 0 {
+		msgRatePerSec = *msgRate
+	}
+	connBurst := cfg.GatewayConnBurst
+	if connBurst < 1 {
+		connBurst = 1
+	}
+	msgBurst := cfg.GatewayMsgBurst
+	if msgBurst < 1 {
+		msgBurst = 1
 	}
 
 	// Metrics listener: separate port from the realtime listener, started before
@@ -160,7 +212,14 @@ func main() {
 		events.SinkFunc(func(ev storage.Event) { gw.OnEvent(ev) }), log)
 	gw = server.New(sessions, reg, cfg.JWTSecret, log,
 		server.WithEventRelay(relay), server.WithTransport(listenTransport),
-		server.WithMetrics(met))
+		server.WithMetrics(met),
+		server.WithTransportKey(tKey),
+		server.WithJoinTokenSecret(joinSecret),
+		// The per-IP limiter is configured per minute (the natural unit for a
+		// login rate) but the bucket refills per second.
+		server.WithConnRateLimit(connRatePerMin/60, connBurst),
+		server.WithMsgRateLimit(msgRatePerSec, msgBurst),
+	)
 
 	// Graceful shutdown on SIGINT/SIGTERM.
 	sigCh := make(chan os.Signal, 1)
@@ -183,7 +242,10 @@ func main() {
 	log.Info("starting gateway",
 		slog.String("addr", listenAddr),
 		slog.String("backend", mode),
-		slog.String("transport", transport.Normalize(listenTransport)))
+		slog.String("transport", transport.Normalize(listenTransport)),
+		slog.Bool("transport_encrypted", tKey != ""),
+		slog.Float64("conn_rate_per_min", connRatePerMin),
+		slog.Float64("msg_rate_per_sec", msgRatePerSec))
 	if err := gw.Run(listenAddr); err != nil {
 		log.Error("gateway exited with error", "err", err)
 		os.Exit(1)

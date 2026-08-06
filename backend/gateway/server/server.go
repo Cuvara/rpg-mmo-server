@@ -7,13 +7,16 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/duycuong/rpg-mmo/gateway/events"
 	"github.com/duycuong/rpg-mmo/gateway/metrics"
 	"github.com/duycuong/rpg-mmo/gateway/registry"
 	"github.com/duycuong/rpg-mmo/gateway/session"
 	"github.com/duycuong/rpg-mmo/gateway/transfer"
+	sharedjwt "github.com/duycuong/rpg-mmo/shared/jwt"
 	"github.com/duycuong/rpg-mmo/shared/messages"
+	"github.com/duycuong/rpg-mmo/shared/ratelimit"
 	"github.com/duycuong/rpg-mmo/shared/storage"
 	"github.com/duycuong/rpg-mmo/shared/transport"
 )
@@ -25,6 +28,21 @@ type Gateway struct {
 	registry  *registry.RegistryService
 	jwtSecret string
 	logger    *slog.Logger
+
+	// authKeys verifies client auth tokens (JWT_SECRET, possibly a rotation
+	// list). joinKeys signs join tokens (JOIN_TOKEN_SECRET, defaulting to
+	// JWT_SECRET). Both are parsed once at construction.
+	authKeys sharedjwt.Keyring
+	joinKeys sharedjwt.Keyring
+
+	// connLimiter bounds accepts per source IP; msgRate/msgBurst seed each
+	// connection's own inbound-frame bucket. Both are no-ops when unset.
+	connLimiter *ratelimit.Limiter
+	msgRate     float64
+	msgBurst    float64
+
+	// transportKey is the pre-shared KCP encryption key ("" = plaintext).
+	transportKey string
 
 	relay      events.EventRelay
 	eventCount atomic.Int64
@@ -65,7 +83,54 @@ func WithEventRelay(relay events.EventRelay) Option {
 	return func(g *Gateway) { g.relay = relay }
 }
 
+// WithJoinTokenSecret sets the secret (or comma-separated rotation list) used
+// to sign gateway -> game server join tokens. Without it the gateway falls back
+// to the auth JWT secret, which is the pre-split behaviour: one leaked secret
+// then forges both client auth tokens and join tokens.
+func WithJoinTokenSecret(spec string) Option {
+	return func(g *Gateway) {
+		if keys, err := sharedjwt.ParseKeyring(spec); err == nil {
+			g.joinKeys = keys
+		}
+	}
+}
+
+// WithTransportKey sets the pre-shared key that encrypts the KCP listener.
+// Ignored for TCP. Empty means plaintext (and Listen logs a warning).
+func WithTransportKey(key string) Option {
+	return func(g *Gateway) { g.transportKey = key }
+}
+
+// WithConnRateLimit bounds accepted connections per source IP: `burst`
+// instantly, then `ratePerSec` sustained. A non-positive rate disables it.
+//
+// The check happens right after Accept and before any goroutine or session is
+// created, so a rejected connection costs one map lookup and a Close.
+func WithConnRateLimit(ratePerSec, burst float64) Option {
+	return func(g *Gateway) {
+		if ratePerSec <= 0 {
+			g.connLimiter = nil
+			return
+		}
+		g.connLimiter = ratelimit.NewLimiter(ratePerSec, burst, ratelimit.DefaultIdleTTL)
+	}
+}
+
+// WithMsgRateLimit bounds inbound frames per connection. A non-positive rate
+// disables it.
+func WithMsgRateLimit(ratePerSec, burst float64) Option {
+	return func(g *Gateway) {
+		g.msgRate = ratePerSec
+		g.msgBurst = burst
+	}
+}
+
 // New creates a new Gateway instance.
+//
+// jwtSecret is the client-auth secret and accepts a comma-separated rotation
+// list ("current,previous"): the first entry signs anything the gateway issues,
+// every entry verifies. It also seeds the join-token keyring unless
+// WithJoinTokenSecret overrides it.
 func New(
 	sessions *session.SessionManager,
 	reg *registry.RegistryService,
@@ -73,11 +138,17 @@ func New(
 	logger *slog.Logger,
 	opts ...Option,
 ) *Gateway {
+	// ParseKeyring only fails on an empty spec. Leaving the zero Keyring in
+	// that case is deliberate and fail-closed: a gateway started with no secret
+	// rejects every token instead of accepting tokens signed with "".
+	authKeys, _ := sharedjwt.ParseKeyring(jwtSecret)
 	g := &Gateway{
 		transportKind: transport.KindTCP,
 		sessions:      sessions,
 		registry:      reg,
 		jwtSecret:     jwtSecret,
+		authKeys:      authKeys,
+		joinKeys:      authKeys,
 		logger:        logger,
 		conns:         make(map[*ClientConn]struct{}),
 		done:          make(chan struct{}),
@@ -124,16 +195,21 @@ func (g *Gateway) Run(addr string) error {
 		}
 	}
 
-	ln, err := transport.Listen(g.transportKind, addr)
+	ln, err := transport.Listen(g.transportKind, addr,
+		transport.WithKey(g.transportKey), transport.WithLogger(g.logger))
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
 	g.mu.Lock()
 	g.listener = ln
 	g.mu.Unlock()
+	g.connLimiter.StartCleanup(time.Minute)
 	g.logger.Info("gateway listening",
 		"addr", ln.Addr().String(),
-		"transport", transport.Normalize(g.transportKind))
+		"transport", transport.Normalize(g.transportKind),
+		"encrypted", g.transportKey != "",
+		"conn_limit", g.connLimiter.Enabled(),
+		"msg_limit", g.msgRate > 0)
 
 	for {
 		conn, err := ln.Accept()
@@ -146,7 +222,16 @@ func (g *Gateway) Run(addr string) error {
 				continue
 			}
 		}
-		cc := NewClientConn(conn, g.logger)
+		// Per-IP admission control happens before anything is allocated for
+		// this connection — no goroutine, no session, no tracking entry — so a
+		// connection flood costs one map lookup per attempt.
+		if ip := remoteIP(conn); !g.connLimiter.Allow(ip) {
+			g.metrics.RateLimited(metrics.RateLimitReasonConnection)
+			g.logger.Warn("connection rate limited", "ip", ip)
+			conn.Close()
+			continue
+		}
+		cc := NewClientConn(conn, g.logger, ratelimit.NewBucket(g.msgRate, g.msgBurst))
 		g.trackConn(cc, true)
 		go g.handleConn(cc)
 	}
@@ -163,6 +248,8 @@ func (g *Gateway) Shutdown() {
 		cc.Close()
 	}
 	g.mu.Unlock()
+
+	g.connLimiter.Stop()
 
 	if g.relay != nil {
 		if err := g.relay.Stop(); err != nil {
@@ -223,6 +310,29 @@ func (g *Gateway) cleanupSession(cc *ClientConn) {
 }
 
 func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
+	// Per-connection flood control. A client that blows through 60 msg/s on a
+	// three-message protocol is not a client, so the connection is told why and
+	// then dropped: replying to every over-limit frame would turn the limiter
+	// itself into an amplifier.
+	if cc.limited {
+		return // already told; drop everything else until the socket closes
+	}
+	if !cc.allowMessage() {
+		cc.limited = true
+		g.metrics.RateLimited(metrics.RateLimitReasonMessage)
+		g.logger.Warn("message rate limited", "ip", cc.RemoteIP(), "user", cc.UserID, "type", env.Type)
+		resp, err := messages.NewEnvelope(messages.MsgAuthResp, messages.AuthResponse{
+			OK:    false,
+			Error: "rate limited",
+		})
+		if err != nil {
+			cc.Close()
+			return
+		}
+		cc.SendAndClose(resp)
+		return
+	}
+
 	// MsgAuth is the only frame accepted without a live session.
 	if env.Type != messages.MsgAuth && !g.checkSession(cc, env.Type) {
 		return
@@ -285,7 +395,7 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 		return
 	}
 
-	userID, err := session.VerifyClientJWT(req.Token, g.jwtSecret)
+	userID, err := session.VerifyClientJWTKeyring(req.Token, g.authKeys)
 	if err != nil {
 		g.metrics.AuthResult(false)
 		g.sendAuthError(cc, "invalid token")
@@ -341,7 +451,7 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 	}
 
 	ctx := context.Background()
-	result, err := transfer.AssignMap(ctx, cc.UserID, req.MapID, g.registry, g.jwtSecret)
+	result, err := transfer.AssignMapKeyring(ctx, cc.UserID, req.MapID, g.registry, g.joinKeys)
 	if err != nil {
 		g.metrics.EnterWorldResult(false)
 		g.sendEnterWorldError(cc, err.Error())
@@ -365,10 +475,16 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 
 // handleDisconnect processes an explicit client MsgDisconnect: destroy the
 // session, then close the socket.
+//
+// Graceful, not abrupt: a client that pipelined anything after MsgDisconnect
+// leaves bytes in the receive queue, and a hard Close on a non-empty queue
+// makes the kernel emit RST — which would discard any frame still queued
+// outbound and turn an orderly goodbye into a connection reset in the client's
+// logs.
 func (g *Gateway) handleDisconnect(cc *ClientConn) {
 	g.logger.Info("client disconnect", "user", cc.UserID)
 	g.cleanupSession(cc)
-	cc.Close()
+	cc.CloseGracefully()
 }
 
 func (g *Gateway) sendEnterWorldError(cc *ClientConn, msg string) {

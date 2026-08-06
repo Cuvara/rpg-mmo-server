@@ -6,6 +6,65 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Rate limiting. `server.WithConnRateLimit` bounds accepts per source IP
+  (default 10/min, burst 10) and `server.WithMsgRateLimit` bounds inbound frames
+  per connection (default 60/s, burst 120). The per-IP check runs immediately
+  after `Accept`, before any goroutine or session exists; the per-frame check is
+  a struct field on `ClientConn`, not a map lookup, so the hot path stays
+  allocation-free. A connection that trips the message limit gets one
+  `rate limited` error frame and is then closed
+- `gateway_rate_limited_total{reason="connection"|"message"}` counter,
+  zero-primed at start-up
+- `server.WithJoinTokenSecret` — join tokens are signed with `JOIN_TOKEN_SECRET`
+  instead of `JWT_SECRET`, so a compromised game-server pod cannot forge client
+  auth tokens. Unset falls back to `JWT_SECRET` (unchanged behaviour) with a
+  start-up warning
+- `server.WithTransportKey` — passes `TRANSPORT_KEY` to the KCP listener for
+  AES-256 wire encryption
+- Secret rotation: `JWT_SECRET` and `JOIN_TOKEN_SECRET` accept
+  `"current,previous"`. `session.VerifyClientJWTKeyring`,
+  `transfer.GenerateJoinTokenKeyring`, `transfer.ValidateJoinTokenKeyring`,
+  `transfer.AssignMapKeyring`
+- `ClientConn.SendAndClose` / `RemoteIP`
+- Flags: `--transport-key`, `--join-token-secret`, `--conn-rate-per-min`,
+  `--msg-rate-per-sec`. Start-up warns when `JOIN_TOKEN_SECRET` is unset or
+  `JWT_SECRET` is still the built-in dev default
+
+### Fixed
+- Disconnecting a client with an explanatory frame no longer loses that frame to
+  a TCP reset. A hard `Close()` on a socket with unread inbound data (exactly
+  what a flooding client leaves behind) makes the kernel emit RST instead of
+  FIN, and RST discards the unsent send buffer — so a rate-limited player could
+  get a bare disconnect with no reason. New `ClientConn.CloseGracefully`
+  half-closes with `CloseWrite`, bounds the drain with a 2s read deadline, and
+  lets `ReadLoop` (the socket's only reader) consume the backlog so the final
+  `Close` sees an empty receive queue. Used by the rate-limit path and
+  `handleDisconnect`; KCP falls back to a plain `Close` (no half-close, and no
+  RST semantics to worry about). Surfaced as an intermittent `TestMsgRateLimit`
+  failure under a loaded `go test ./...`; the test now also asserts the stream
+  ends with EOF rather than `ECONNRESET`, which fails deterministically against
+  the old behaviour
+
+### Changed
+- `NewClientConn` takes a `ratelimit.Bucket` (pass the zero value for no limit)
+- `WriteLoop` half-closes instead of hard-closing when a deferred close was
+  requested and fully flushed; abrupt exits (encode error, dead socket,
+  Shutdown) still hard-close
+- Keyrings are parsed once in `New`, not per request
+
+### Known gaps
+- **KCP is not reachable end to end.** `gameserver-dotnet` has no KCP
+  implementation, so `--transport=kcp` and `TRANSPORT_KEY` protect the
+  client→gateway hop only (ADR-8)
+- **`JOIN_TOKEN_SECRET` needs a C# counterpart before it can be enabled.** The
+  game server reads only `JWT_SECRET` (`GameServer/Program.cs:24`) and verifies
+  join tokens at `GameServer/Server/GameServer.cs:217`
+  (`JwtValidator.Verify(joinReq.Token, _options.JwtSecret)`). Until that reads
+  `JOIN_TOKEN_SECRET` (falling back to `JWT_SECRET`), setting the split on the
+  gateway alone breaks every join
+- Both rate limiters are per process — N replicas admit N x the limit
+
+### Added
 - `registry.WithLogger` option. `FindServer` now logs a warning when a `map_id`
   resolves to more than one live game server — the MVP invariant is one server per
   map, and two instances are two disconnected copies of the world

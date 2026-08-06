@@ -52,7 +52,20 @@ type Metrics struct {
 	AllocationsTotal *prometheus.CounterVec
 	// RelayEventsTotal counts cross-server events delivered by the relay.
 	RelayEventsTotal prometheus.Counter
+	// RateLimitedTotal counts requests rejected by a rate limiter, labelled
+	// with which limiter fired (see the RateLimitReason* constants).
+	RateLimitedTotal *prometheus.CounterVec
 }
+
+// Reason label values for gateway_rate_limited_total.
+const (
+	// RateLimitReasonConnection is a TCP/KCP accept rejected by the per-IP
+	// connection limiter.
+	RateLimitReasonConnection = "connection"
+	// RateLimitReasonMessage is an inbound frame rejected by the
+	// per-connection message limiter.
+	RateLimitReasonMessage = "message"
+)
 
 // New builds the metric set and registers it with reg. Passing a fresh
 // prometheus.NewRegistry() keeps tests isolated; main uses NewDefault.
@@ -78,6 +91,10 @@ func New(reg prometheus.Registerer) *Metrics {
 			Name: "gateway_relay_events_total",
 			Help: "Cross-server events delivered by the event relay.",
 		}),
+		RateLimitedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gateway_rate_limited_total",
+			Help: "Requests rejected by a rate limiter, by reason.",
+		}, []string{"reason"}),
 	}
 	if reg != nil {
 		reg.MustRegister(
@@ -86,7 +103,12 @@ func New(reg prometheus.Registerer) *Metrics {
 			m.EnterWorldTotal,
 			m.AllocationsTotal,
 			m.RelayEventsTotal,
+			m.RateLimitedTotal,
 		)
+		// Same zero-priming rationale as the result counters below: a limiter
+		// that has never fired should export 0, not nothing.
+		m.RateLimitedTotal.WithLabelValues(RateLimitReasonConnection)
+		m.RateLimitedTotal.WithLabelValues(RateLimitReasonMessage)
 		// Pre-create both label values so a freshly started gateway exports
 		// `...{result="fail"} 0` instead of nothing — rate() over a series that
 		// only appears on the first failure produces misleading graphs.
@@ -147,6 +169,16 @@ func (m *Metrics) AllocationResult(ok bool) {
 		return
 	}
 	m.AllocationsTotal.WithLabelValues(result(ok)).Inc()
+}
+
+// RateLimited records one request rejected by a rate limiter. reason must be
+// one of the RateLimitReason* constants — it is a metric label, so it must stay
+// a small closed set and must never carry an IP or user id.
+func (m *Metrics) RateLimited(reason string) {
+	if m == nil {
+		return
+	}
+	m.RateLimitedTotal.WithLabelValues(reason).Inc()
 }
 
 // RelayEvent records one event delivered by the relay.

@@ -18,6 +18,7 @@ package transport
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"time"
@@ -54,11 +55,11 @@ const (
 //   - FEC off (0 data / 0 parity shards). FEC trades bandwidth for latency on
 //     lossy links, but it needs per-game measurement to tune; enabling it
 //     blind costs bandwidth for nothing. Revisit with real client telemetry.
-//   - No encryption for the MVP. TODO(production): the realtime path must be
-//     encrypted before public launch — kcp-go supports pluggable BlockCrypt
-//     (e.g. kcp.NewAESBlockCrypt with a per-session key handed out by the
-//     gateway in EnterWorldResponse). Until then the join token (short-TTL
-//     signed JWT) is the only thing protecting a session.
+//   - Encryption is opt-in via a pre-shared key (WithKey / TRANSPORT_KEY),
+//     applied as kcp-go's AES-256 BlockCrypt. Empty key = plaintext, which is
+//     the dev default and logs a warning on every KCP listener. See crypto.go
+//     for key derivation and shared/docs/DESIGN.md for the PSK-vs-per-session
+//     tradeoff.
 //   - StreamMode(true) makes a session behave like a byte stream, which is
 //     exactly what the length-prefixed codec expects; in message mode a write
 //     larger than the MTU would not reassemble the way Decode assumes.
@@ -106,11 +107,60 @@ func Validate(kind string) error {
 	}
 }
 
+// options is the resolved set of Option values for one Listen/Dial call.
+type options struct {
+	key    string
+	logger *slog.Logger
+}
+
+// Option customises a Listen or Dial call. Options that do not apply to the
+// chosen kind are ignored (a transport key is meaningless for TCP, which is
+// expected to be wrapped in TLS or run inside the cluster network instead).
+type Option func(*options)
+
+// WithKey sets the pre-shared key that encrypts a KCP listener or dial.
+//
+// Both peers must be given the same key: KCP block crypto has no negotiation,
+// so a mismatch (including one side unset) is a hard failure — the receiver
+// simply never assembles a valid segment. The empty string keeps the connection
+// in plaintext.
+func WithKey(key string) Option {
+	return func(o *options) { o.key = strings.TrimSpace(key) }
+}
+
+// WithLogger overrides the logger used for the unencrypted-listener warning.
+// Defaults to slog.Default().
+func WithLogger(l *slog.Logger) Option {
+	return func(o *options) { o.logger = l }
+}
+
+func resolveOptions(opts []Option) options {
+	o := options{logger: slog.Default()}
+	for _, fn := range opts {
+		if fn != nil {
+			fn(&o)
+		}
+	}
+	if o.logger == nil {
+		o.logger = slog.Default()
+	}
+	return o
+}
+
+// Encrypted reports whether a set of options turns on transport encryption.
+func Encrypted(opts ...Option) bool { return resolveOptions(opts).key != "" }
+
 // Listen starts a listener of the given kind on addr.
 //
 // Both kinds return a net.Listener whose Accept yields a reliable, ordered
 // net.Conn, so callers need no transport-specific code.
-func Listen(kind, addr string) (net.Listener, error) {
+//
+// With WithKey set and kind=kcp, every datagram is AES-256 encrypted. Without
+// it a KCP listener logs a WARN: the realtime path carries the join token and
+// gameplay state in cleartext over UDP, which is acceptable for local dev and
+// not for anything reachable from the internet.
+func Listen(kind, addr string, opts ...Option) (net.Listener, error) {
+	o := resolveOptions(opts)
 	switch Normalize(kind) {
 	case KindTCP:
 		ln, err := net.Listen("tcp", addr)
@@ -119,7 +169,15 @@ func Listen(kind, addr string) (net.Listener, error) {
 		}
 		return ln, nil
 	case KindKCP:
-		ln, err := kcp.ListenWithOptions(addr, nil, KCPDataShards, KCPParityShards)
+		bc, err := blockCrypt(o.key)
+		if err != nil {
+			return nil, fmt.Errorf("listen kcp %s: %w", addr, err)
+		}
+		if bc == nil {
+			o.logger.Warn("KCP listener is UNENCRYPTED — join tokens and gameplay traffic are in cleartext; set "+KeyEnvVar+" (32-byte hex) before exposing this port",
+				"addr", addr, "transport", KindKCP)
+		}
+		ln, err := kcp.ListenWithOptions(addr, bc, KCPDataShards, KCPParityShards)
 		if err != nil {
 			return nil, fmt.Errorf("listen kcp %s: %w", addr, err)
 		}
@@ -140,7 +198,11 @@ func Listen(kind, addr string) (net.Listener, error) {
 // succeeds and the failure surfaces as a read timeout on the first frame.
 // Callers that need liveness must rely on an application-level reply
 // (MsgAuthResp / MsgJoinTokenResp) with a read deadline.
-func Dial(kind, addr string, timeout time.Duration) (net.Conn, error) {
+//
+// A KCP dial with WithKey encrypts every datagram; the key must match the
+// listener's or nothing the dialer sends is ever assembled into a session.
+func Dial(kind, addr string, timeout time.Duration, opts ...Option) (net.Conn, error) {
+	o := resolveOptions(opts)
 	switch Normalize(kind) {
 	case KindTCP:
 		conn, err := net.DialTimeout("tcp", addr, timeout)
@@ -149,7 +211,11 @@ func Dial(kind, addr string, timeout time.Duration) (net.Conn, error) {
 		}
 		return conn, nil
 	case KindKCP:
-		sess, err := kcp.DialWithOptions(addr, nil, KCPDataShards, KCPParityShards)
+		bc, err := blockCrypt(o.key)
+		if err != nil {
+			return nil, fmt.Errorf("dial kcp %s: %w", addr, err)
+		}
+		sess, err := kcp.DialWithOptions(addr, bc, KCPDataShards, KCPParityShards)
 		if err != nil {
 			return nil, fmt.Errorf("dial kcp %s: %w", addr, err)
 		}

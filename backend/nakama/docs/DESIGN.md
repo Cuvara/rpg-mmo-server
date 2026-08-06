@@ -87,3 +87,44 @@ wholesale, `profile.go` declares a two-method `profileStore` interface
 structurally. Unit tests drive `EnsureProfile` against a small in-memory fake,
 and the hooks are tested with a struct embedding `runtime.NakamaModule` (nil)
 plus that fake — any unexpected call panics, which is the desired signal.
+
+
+---
+
+## 2026-08-06 — `gateway_token` rate limiting
+
+Nakama's Go runtime ships no rate limiter, so `auth/ratelimit.go` wires
+`shared/ratelimit` to the `gateway_token` RPC.
+
+**Keyed by user id, checked first.** The caller is already authenticated when
+the handler runs, so the user id is available and is the right key — an IP key
+would collapse everyone behind one carrier NAT into a single bucket. The check
+runs before the payload is even parsed, so a rejected call does no work.
+
+**Why limit a cheap RPC at all.** One HMAC costs nothing; CPU is not the
+concern. The token *is*. An unbounded `gateway_token` loop is a free oracle for
+minting valid realtime credentials, which is exactly the raw material for a
+connection flood against the gateway. Limiting issuance is what makes the
+gateway's own per-IP limit meaningful.
+
+**0.2/s, burst 5.** A legitimate client calls this once per realtime
+connection: at login, and again after a disconnect. Burst 5 absorbs a flapping
+mobile link reconnecting a few times in a row; one call per 5s sustained is far
+above any real client and far below a scripted loop.
+
+**Package-level singleton.** Nakama registers RPCs as plain functions with
+nowhere to hang per-plugin state, and `InitModule` runs once per process — so a
+package var has exactly the lifetime we want. `TokenIdleTTL` (10m) must exceed
+the bucket's own full-refill time (`TokenBurst/TokenRatePerSec` = 25s), or
+eviction would hand an attacker a free reset; `TestTokenIdleTTLExceedsRefill`
+pins that invariant.
+
+### ⚠️ Multi-instance caveat
+
+The buckets live in **this process's memory**. With N Nakama instances behind a
+load balancer, one user gets N x the limit, because nothing synchronises the
+instances. Accepted for the MVP — the deployment tiers in the root `CLAUDE.md`
+run a single Nakama instance up to Soft Launch. The production upgrade is a
+Redis-backed counter (`INCR` + `EXPIRE` on
+`ratelimit:gateway_token:{user_id}`), against the Redis the gateway already
+depends on. Tracked in ADR-8.

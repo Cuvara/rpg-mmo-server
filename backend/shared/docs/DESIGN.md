@@ -181,7 +181,7 @@ kcp-go names):
 | `SetWindowSize(128, 128)` | ~170 KB in flight | never the limiting factor on a bad mobile link, still bounds per-session memory (~350 KB both directions) at a few thousand CCU per pod |
 | `SetMtu(1350)` | kcp-go default | under the common 1400-1500B path MTU (PPPoE/VPN/carrier), so KCP segments are never IP-fragmented |
 | FEC `0/0` | disabled | FEC trades bandwidth for latency but needs per-game measurement; enabling it blind costs bandwidth for nothing. Revisit with client telemetry |
-| encryption | none | **MVP only.** TODO(production): the realtime path must be encrypted before public launch — kcp-go takes a pluggable `BlockCrypt` (e.g. `kcp.NewAESBlockCrypt` with a per-session key delivered in `EnterWorldResponse`). Until then the short-TTL signed join token is the only protection |
+| encryption | opt-in PSK | `TRANSPORT_KEY` → `kcp.NewAESBlockCrypt` (AES-256). Empty = plaintext (dev default) and a KCP listener logs a WARN. See the 2026-08-06 entry below |
 | `SetStreamMode(true)` | byte stream | what the length-prefixed codec expects; in message mode a write larger than the MTU would not reassemble the way `Decode` assumes |
 | `SetWriteDelay(false)` | flush now | one less update interval of added latency per frame |
 | socket buffers | 4 MiB | one UDP socket multiplexes every session on a listener, so it needs far more room than a per-connection TCP socket |
@@ -199,3 +199,85 @@ dialing a dead KCP port succeeds and only fails on the first read, and a client
 that drops its socket is invisible to the server until the reconnect hold
 expires. Both are documented on the package API; clients send `MsgDisconnect`
 before closing, and the existing hold window covers the rest.
+
+
+---
+
+## 2026-08-06 — Realtime-path security primitives
+
+Three additions, all in `shared` because both the gateway and the Nakama plugin
+need them and `shared` is the dependency root. Architectural rationale and the
+threat model are in `backend/docs/ARCHITECTURE-DECISIONS.md`, ADR-8; this entry
+covers the implementation choices.
+
+### `transport` — KCP encryption via a pre-shared key
+
+`Listen`/`Dial` gained a variadic `...Option` tail (so every existing call site
+compiles untouched) and `WithKey` installs kcp-go's AES-256 `BlockCrypt`.
+
+**Why HKDF and not PBKDF2/scrypt for passphrases.** The 64-hex-char form is the
+recommended input and is used verbatim — no derivation at all. The passphrase
+path exists only so a dev can type something memorable, and it is stretched
+with `crypto/hkdf` (stdlib as of Go 1.24, so no new dependency) under a
+domain-separated info string. HKDF is deliberately *fast*: it is a key
+derivation function, not a password hash. That is the right call here because
+the key is read once at start-up from an environment variable, never from user
+input, and slowing it down would protect nothing — an attacker brute-forcing a
+weak passphrase does so offline against captured traffic, where a 100ms KDF
+costs them nothing at scale. The honest mitigation is "use the hex form", which
+the docs say and the warning nudges toward.
+
+**Why the empty key is legal.** Making encryption mandatory would break every
+existing dev workflow and the TCP default path, and would have forced the same
+change into `gameserver-dotnet` (out of scope, and it has no KCP at all). The
+compromise is: legal, but a KCP listener says so loudly on every start.
+
+**Failure mode is silence, by design.** kcp-go has no crypto negotiation. A
+peer with the wrong key emits datagrams that decrypt to garbage and are dropped
+as malformed segments — no handshake, no error, no downgrade. That is what
+makes "encrypted listener + plaintext dialer" impossible rather than merely
+discouraged, and it is why the roundtrip test asserts on a *timeout* for the
+mismatch cases.
+
+### `jwt.Keyring` — rotation without a logout event
+
+An ordered secret list: first signs, all verify. The alternative designs were a
+`kid` header claim (proper JWKS-style key identification) and a versioned token
+prefix. Both are better at scale and both require a wire-format change plus a
+coordinated Unity-client update; the ordered list needs neither, costs one extra
+HMAC per verification during the rotation window only, and is entirely
+config-driven. For a rotation that happens a handful of times a year, that trade
+is right.
+
+Two details worth pinning:
+
+- **Expiry short-circuits.** A signature that matched but whose `exp` passed
+  returns immediately rather than being retried under the remaining keys — the
+  answer cannot change, and the retry is pure cost.
+- **The zero `Keyring` fails closed.** It rejects everything and refuses to
+  sign. A service started with no secret must not silently accept tokens signed
+  with the empty string.
+
+### `ratelimit` — one limiter, two shapes
+
+`Bucket` (bare struct, no lock, no map) and `Limiter` (keyed, mutex-guarded,
+TTL-evicted) are separate types rather than one type with a "keyed" mode
+because their cost profiles differ by an order of magnitude and they are used in
+different places: `Bucket` is embedded per connection and runs in the gateway's
+per-frame read path (10.8 ns/op, 0 allocs — benchmarked, not assumed), while
+`Limiter` runs once per accept or per RPC where a mutex and a map lookup are
+free in comparison.
+
+**Why TTL eviction is safe.** Evicting an idle bucket recreates it full on the
+next request — but an un-evicted bucket would have refilled to full anyway,
+because the TTL is required to exceed `burst/rate`. So eviction cannot be used
+as a bypass, which `TestLimiterCleanupDoesNotGrantFreeReset` pins.
+
+**Why `nil *Limiter` allows everything.** "Limiting disabled" and "no limiter
+configured" are the same thing to every call site, and making the nil case
+permissive removes a nil check from each of them. The same reasoning makes the
+zero `Bucket` unlimited: `Rate: 0` reads naturally as "no rate limit".
+
+**Testability.** Every decision function has an `...At(now time.Time)` variant.
+The tests drive time explicitly instead of sleeping, so the whole suite is
+deterministic and runs in milliseconds.

@@ -193,3 +193,111 @@ entry. It **must match the fleet manifest's** `--transport` argument; a mismatch
 sends the first client of a freshly allocated pod to the wrong transport, until
 the pod's own registration overwrites the entry. The default (inherit the
 gateway's transport) is correct for a uniform rollout, which is the normal case.
+
+
+---
+
+## 2026-08-06 — Rate limiting and secret separation
+
+See `backend/docs/ARCHITECTURE-DECISIONS.md` ADR-8 for the threat model; this
+entry covers the gateway-specific implementation choices.
+
+### Where the limiters sit
+
+**Per-IP, immediately after `Accept`.** The check happens before
+`NewClientConn`, before `trackConn`, before the handler goroutine — a rejected
+connection costs one map lookup and a `Close()`. Putting it after any of those
+would mean a connection flood still allocates a goroutine stack and a channel
+per attempt, which is most of the damage.
+
+**Per-connection, as a struct field.** `ClientConn.msgBucket` is a value, not a
+`*Limiter` keyed by IP. Two reasons. First cost: this runs on every inbound
+frame, and a mutex + map lookup per frame is the kind of thing that only shows
+up under the load you least want it under. As a plain field it is 10.8 ns and no
+allocation, and it needs no lock because only `ReadLoop`'s goroutine touches it.
+Second correctness: keying messages by IP would let one player behind a shared
+NAT throttle everyone else on it.
+
+**Why per-IP for connections but per-user for the Nakama RPC.** At accept time
+there is no identity yet — the IP is all there is. By the time `gateway_token`
+is called the caller is authenticated, so the user id is both available and the
+better key, for the same NAT reason.
+
+### Reply-once-then-close
+
+A connection that trips the message limiter gets exactly one `rate limited`
+frame and is then closed. The alternatives were both worse:
+
+- *Reply to every over-limit frame* — the limiter becomes an amplifier: the
+  attacker sends cheap frames and the gateway answers every one of them.
+- *Close immediately with no reply* — indistinguishable from a crash or a
+  network fault, and a legitimate client (a buggy build, say) has no way to
+  learn why.
+
+Making that work took two mechanisms, because there are two distinct ways the
+explanatory frame can be lost.
+
+**The queue race** — `Close()` tears down the socket immediately, which races
+the write loop and drops a frame that is still sitting in `sendCh`.
+`SendAndClose` sets a flag that `WriteLoop` checks *after* a successful write,
+so the connection only ends once the queue is drained. `cc.limited` suppresses
+everything after the first rejection.
+
+**The RST race** — flushing the frame is not enough. A hard `Close()` on a TCP
+socket whose *receive* queue still holds unread bytes makes the kernel emit RST
+instead of FIN, and an RST discards the socket's unsent send buffer. That is
+precisely the state a flooding client leaves behind: the gateway stops reading
+after the limit trips, so the rest of the flood sits unread, and the frame that
+was just written gets thrown away. The client sees a bare connection reset with
+no reason — and because it depends on whether `ReadLoop` happened to drain the
+backlog before `WriteLoop` closed, it only shows up under load. It surfaced as
+an intermittent `TestMsgRateLimit` failure in a loaded `go test ./...`.
+
+`CloseGracefully` fixes it structurally:
+
+1. `CloseWrite()` on the `*net.TCPConn` — the queued bytes leave with a FIN
+   rather than an RST. The client reads the frame, then a clean EOF.
+2. A `closeDrainTimeout` (2s) read deadline bounds the wait, so a client that
+   ignores the FIN cannot pin a socket.
+3. `ReadLoop` — the socket's **only** reader — keeps consuming the backlog until
+   EOF or the deadline, then its deferred `Close()` runs against an empty
+   receive queue, which is a clean FIN.
+
+Draining deliberately stays in `ReadLoop` rather than happening inside
+`CloseGracefully`: a second reader racing `Decode` mid-frame would corrupt the
+very teardown this exists to make orderly. Transports without half-close (KCP —
+`kcp.UDPSession` has no `CloseWrite`) fall back to a plain `Close`, which is
+safe there for the same reason it is unsafe on TCP: no kernel receive queue, no
+RST, and kcp-go flushes pending output on close.
+
+`handleDisconnect` uses the same path — a client that pipelined anything after
+`MsgDisconnect` would otherwise turn an orderly goodbye into a reset.
+
+The regression test asserts both halves: the explicit `rate limited` frame
+*and* that the stream ends with EOF rather than `ECONNRESET`. The second
+assertion is the deterministic one — it fails on every run with the old hard
+close, instead of only on unlucky timing.
+
+### Defaults
+
+10 conn/min/IP and 60 msg/s/conn. The real protocol is three frames on one
+connection, so both are ~2 orders of magnitude above legitimate use. They exist
+to bound abuse, not to shape traffic — a limit tight enough to be interesting is
+a limit that will page someone at 3am over a flapping mobile link.
+`TestMsgRateLimitAllowsNormalHandshake` is the regression guard.
+
+### Two secrets, not one
+
+`JWT_SECRET` verifies what Nakama issued; `JOIN_TOKEN_SECRET` signs what the
+gateway issues. The asymmetry that matters: the join secret must be distributed
+to every game-server pod, while the auth secret only ever lives on Nakama and
+the gateway. Sharing them meant a compromised pod could mint auth tokens for any
+user. Split, it can at most mint join tokens — which only get you into a game
+server you already are.
+
+The fallback (unset → reuse `JWT_SECRET`) exists because the C# game server
+cannot yet read `JOIN_TOKEN_SECRET`; turning the split on unilaterally would
+break every join. The start-up warning is the reminder.
+
+Keyrings are parsed once in `New` and stored, not parsed per request —
+`AssignMapKeyring` exists precisely so `EnterWorld` does no string splitting.
