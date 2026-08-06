@@ -6,21 +6,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Fixed
-- **The metrics/health endpoint never started on Linux with a wildcard address.**
-  `METRICS_ADDR=:9101` (the default, and the deployed value) becomes the HttpListener
-  prefix `http://+:9101/`. OpenTelemetry builds its own prefix as
-  `new UriBuilder("http", Host, Port).Uri`, and `UriBuilder` rejects `+`/`*` with
-  `UriFormatException: Invalid URI: The hostname could not be parsed`, thrown inside
-  the `PrometheusHttpListener` constructor — so `/metrics` **and** `/healthz` silently
-  failed to bind on every Linux deployment. Windows masked it by falling back to
-  `localhost`. The exporter is now given a `UriBuilder`-safe placeholder host, and the
-  real wildcard prefix is installed on the listener through `ConfigureHttpListener`,
-  which runs before `Start()`. `backend/deploy` can now drop its
-  `GAMESERVER_METRICS_ADDR=gameserver-dotnet:9101` workaround and go back to `:9101`
-  (owner: agent-devops).
-  Found by the E2E integration suite the first time it was actually executed.
-
 ### Added
 - `GameServer.Tests/Observability/MetricsEndpointTests.cs` — starts the real endpoint
   and scrapes it over HTTP: wildcard (`:port`, `0.0.0.0:port`, `*:port`) and named
@@ -71,6 +56,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `SnapshotData` (Unity-facing mirror) gained `ack_tick`, `full` and `removed`.
 
 ### Fixed
+- **The metrics/health endpoint never started on Linux with a wildcard address.**
+  `METRICS_ADDR=:9101` (the default, and the deployed value) becomes the HttpListener
+  prefix `http://+:9101/`. OpenTelemetry builds its own prefix as
+  `new UriBuilder("http", Host, Port).Uri`, and `UriBuilder` rejects `+`/`*` with
+  `UriFormatException: Invalid URI: The hostname could not be parsed`, thrown inside
+  the `PrometheusHttpListener` constructor — so `/metrics` **and** `/healthz` silently
+  failed to bind on every Linux deployment. Windows masked it by falling back to
+  `localhost`. The exporter is now given a `UriBuilder`-safe placeholder host, and the
+  real wildcard prefix is installed on the listener through `ConfigureHttpListener`,
+  which runs before `Start()`. `backend/deploy` can now drop its
+  `GAMESERVER_METRICS_ADDR=gameserver-dotnet:9101` workaround and go back to `:9101`
+  (owner: agent-devops).
+  Found by the E2E integration suite the first time it was actually executed.
 - **`GameServerHost.ShutdownAsync` is now idempotent and concurrency-safe.** It is
   called from two places on essentially every termination: `RunAsync` invokes it at
   its tail when the run token is cancelled, and the process owner (SIGTERM handler,
