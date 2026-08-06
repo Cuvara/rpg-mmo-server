@@ -2,15 +2,30 @@ name: CI — GameServer .NET
 
 on:
   push:
-    branches: [main, master, develop]
+    branches: [main, master, develop, staging]
     paths:
       - 'backend/gameserver-dotnet/**'
       - '.github/workflows/ci-dotnet.yml'
+
+  # No `paths:` filter here, for the same reason as ci.yml: a filtered-out PR
+  # reports no checks, which reads as "nothing to worry about" and is the exact
+  # bug this change fixes.
+  #
+  # It also closes a specific hole. The Go and C# servers share a wire protocol
+  # (`backend/shared/messages/` <-> `Shared.GameLogic`), so a PR that changes
+  # wire types on the Go side alone previously matched no C# path and skipped
+  # this workflow entirely.
+  #
+  # HONEST LIMIT — read before trusting a green check here: running this suite
+  # on a Go-side wire change proves only that the C# side still builds and its
+  # own unit tests pass. It does NOT verify wire compatibility, because these
+  # tests exercise C# in isolation and cannot observe the Go encoder. The only
+  # thing that actually catches a wire break is the cross-language E2E suite in
+  # `backend/integration_test`, and today that runs solely in cd.yml on push —
+  # never on a PR. Widening this filter is a real improvement but is not a
+  # substitute for that; see docs/CICD.md "Known gap: wire-compat coverage".
   pull_request:
-    branches: [main, master, develop]
-    paths:
-      - 'backend/gameserver-dotnet/**'
-      - '.github/workflows/ci-dotnet.yml'
+    branches: [main, master, develop, staging]
   workflow_dispatch:
 
 permissions:

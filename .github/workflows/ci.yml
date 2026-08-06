@@ -12,12 +12,35 @@ name: CI — Backend
 #               └─► test-integration ─► build-{gateway,smoketest}
 
 on:
+  # `develop` is the integration branch every feature PR targets, so it MUST be
+  # listed here or those PRs get no checks at all. It was missing until now:
+  # `gh pr checks <n>` on a develop-targeted PR reported "no checks reported",
+  # which means Go changes reached develop with zero CI for the life of the
+  # project. `staging` is listed for the same reason — cd.yml deploys from it.
   push:
-    branches: [main, master]
+    branches: [main, master, develop, staging]
     paths: ['backend/**', '.github/workflows/**']
+
+  # NOTE: deliberately NO `paths:` filter on pull_request.
+  #
+  # A path-filtered workflow that does not match simply never runs, and GitHub
+  # reports the PR as having no checks — indistinguishable at a glance from
+  # "all checks passed". That is precisely the failure this change exists to
+  # fix, and re-introducing it for a subset of PRs would re-create it in a
+  # harder-to-spot form. Worse, if a required status check is ever added to
+  # branch protection, a filtered-out PR blocks forever on a check that will
+  # never report.
+  #
+  # So: every PR into a protected branch runs the full Go suite, even a
+  # docs-only one. The cost is a few minutes of GitHub-hosted runner time; the
+  # benefit is that "no checks" becomes an unambiguous signal that something is
+  # misconfigured, never a normal state. Merge gating is worth more than CI
+  # minutes.
+  #
+  # The `push` trigger above keeps its paths filter: pushes to shared branches
+  # are frequent and already covered by the PR run that preceded them.
   pull_request:
-    branches: [main, master]
-    paths: ['backend/**', '.github/workflows/**']
+    branches: [main, master, develop, staging]
   workflow_dispatch:
 
 permissions:

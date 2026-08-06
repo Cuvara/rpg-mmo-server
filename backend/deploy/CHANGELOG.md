@@ -5,6 +5,25 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **PRs into `develop` ran no CI at all.** `ci.yml` listed only
+  `[main, master]` under `pull_request`, but every feature branch PRs into
+  `develop`, so `gh pr checks <n>` answered "no checks reported" — which reads
+  like a passing PR. Go changes have been merging into `develop` with zero
+  automated validation for the life of the project. Added `develop` and
+  `staging` to the `push` and `pull_request` branch lists of both `ci.yml` and
+  `ci-dotnet.yml`.
+- Removed the `paths:` filter from the `pull_request` trigger of both CI
+  workflows. A filtered-out workflow does not run, and GitHub then reports the
+  PR as having no checks — the same silent-pass failure mode, in a
+  harder-to-spot form, plus a permanent block if a required status check is
+  ever added to branch protection. Every PR into a protected branch now runs
+  the full suite; the `push` triggers keep their filters. Documented in
+  `docs/CICD.md` §6b along with the honest limit that a green `ci-dotnet.yml`
+  on a Go-side wire change proves only that C# still builds — real wire-compat
+  coverage needs the `backend/integration_test` E2E suite, which runs today
+  only in `cd.yml` on push, i.e. after merge.
+
 ### Added
 - **`db/redis-backup.sh` / `db/redis-restore.sh`** — Redis now has the same
   backup story PostgreSQL has. Redis is a system of record here (server
