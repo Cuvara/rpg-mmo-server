@@ -44,6 +44,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `SnapshotData` (Unity-facing mirror) gained `ack_tick`, `full` and `removed`.
 
 ### Fixed
+- **`GameServerHost.ShutdownAsync` is now idempotent and concurrency-safe.** It is
+  called from two places on essentially every termination: `RunAsync` invokes it at
+  its tail when the run token is cancelled, and the process owner (SIGTERM handler,
+  Agones drain, a test harness) invokes it directly. Both racers walked the entity
+  hold table with `foreach (var kvp in _holds)`, so one could call `Cancel()` on a
+  `CancellationTokenSource` the other had already `Dispose()`d — a pod that should
+  have drained cleanly threw `ObjectDisposedException` out of `RunAsync` instead.
+  This surfaced as an intermittent `PlayerPosition_SurvivesServerRestart` failure
+  (~2 runs in 3) but the defect was in the server, not the test. The first caller now
+  wins an `Interlocked.Exchange` and performs the teardown; every other caller awaits
+  that same teardown and observes the same outcome, so "shutdown returned" always
+  means "the final save finished". Holds are drained by `TryRemove` so each CTS has
+  exactly one owner (the reconnect path races for the same entries), and the linked
+  `CancellationTokenSource` is disposed only in `DisposeAsync`, once the run loop is
+  guaranteed done with it.
 - Player state is now persisted when a reconnect hold expires, before the entity is
   removed from the world. Previously `OnPlayerDisconnected` removed the entity
   without saving, so once it left the world the periodic `AsyncSaver` sweep could no

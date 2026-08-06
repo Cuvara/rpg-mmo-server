@@ -68,6 +68,13 @@ public sealed class GameServerHost : IAsyncDisposable
     private TcpListener? _listener;
     private CancellationTokenSource? _cts;
 
+    /// <summary>0 until the first ShutdownAsync caller wins the race, 1 afterwards.</summary>
+    private int _shutdownStarted;
+
+    /// <summary>Completed when the single real teardown finishes (or faults).</summary>
+    private readonly TaskCompletionSource _shutdownComplete =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
     /// <summary>Entity hold timers for reconnect (user ID -> hold CTS).</summary>
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _holds = new();
 
@@ -150,32 +157,65 @@ public sealed class GameServerHost : IAsyncDisposable
         await ShutdownAsync();
     }
 
-    /// <summary>Graceful shutdown: stop accepting, close connections, final save, agones shutdown.</summary>
+    /// <summary>
+    /// Graceful shutdown: stop accepting, close connections, final save, agones shutdown.
+    /// Idempotent and safe to call concurrently: the first caller performs the teardown,
+    /// every other caller awaits that same teardown and observes the same outcome.
+    /// RunAsync calls this at its tail while the owner (test harness, SIGTERM handler,
+    /// Agones drain) usually calls it too — without the guard the two racers both walk
+    /// the hold table and one cancels a CancellationTokenSource the other already
+    /// disposed, throwing ObjectDisposedException out of a pod that should have drained.
+    /// </summary>
     public async Task ShutdownAsync()
     {
-        _logger.LogInformation("Shutting down game server...");
-
-        _cts?.Cancel();
-
-        try { _listener?.Stop(); } catch { /* ignore */ }
-
-        // Cancel all entity holds
-        foreach (var kvp in _holds)
+        // Only the first caller runs the teardown; the rest await its completion so
+        // "shutdown returned" always means "final save finished", never "someone else
+        // started one".
+        if (Interlocked.Exchange(ref _shutdownStarted, 1) != 0)
         {
-            kvp.Value.Cancel();
-            kvp.Value.Dispose();
+            await _shutdownComplete.Task;
+            return;
         }
-        _holds.Clear();
 
-        _connections.CloseAll();
+        try
+        {
+            _logger.LogInformation("Shutting down game server...");
 
-        // Final save
-        await _saver.SaveAllAsync();
+            // The CTS is never disposed before the run task completes (see DisposeAsync),
+            // but a caller-supplied linked token can still be torn down underneath us.
+            try { _cts?.Cancel(); } catch (ObjectDisposedException) { /* already gone */ }
 
-        // Agones shutdown
-        await _agonesSdk.ShutdownAsync();
+            try { _listener?.Stop(); } catch { /* ignore */ }
 
-        _logger.LogInformation("Game server shutdown complete");
+            // Drain the hold table by removal so each CTS has exactly one owner. The
+            // reconnect path (HandleConnectionAsync) races us for the same entries and
+            // also takes ownership via TryRemove, so whoever wins disposes it once.
+            foreach (var userId in _holds.Keys)
+            {
+                if (!_holds.TryRemove(userId, out var holdCts))
+                    continue;
+                try { holdCts.Cancel(); } catch (ObjectDisposedException) { /* already gone */ }
+                holdCts.Dispose();
+            }
+
+            _connections.CloseAll();
+
+            // Final save
+            await _saver.SaveAllAsync();
+
+            // Agones shutdown
+            await _agonesSdk.ShutdownAsync();
+
+            _logger.LogInformation("Game server shutdown complete");
+            _shutdownComplete.TrySetResult();
+        }
+        catch (Exception ex)
+        {
+            // Propagate to concurrent callers too, so a failed drain is not silently
+            // reported as success to whoever awaited us.
+            _shutdownComplete.TrySetException(ex);
+            throw;
+        }
     }
 
     private async Task AcceptLoopAsync(CancellationToken ct)
@@ -416,6 +456,10 @@ public sealed class GameServerHost : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await ShutdownAsync();
+        // Disposed only here, once the run loop is guaranteed done with it — disposing
+        // it inside ShutdownAsync would hand RunAsync's background tasks a dead token
+        // source while they are still unwinding.
+        _cts?.Dispose();
         _world.Dispose();
     }
 }
