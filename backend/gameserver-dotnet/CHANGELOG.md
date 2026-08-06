@@ -6,7 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **The metrics/health endpoint never started on Linux with a wildcard address.**
+  `METRICS_ADDR=:9101` (the default, and the deployed value) becomes the HttpListener
+  prefix `http://+:9101/`. OpenTelemetry builds its own prefix as
+  `new UriBuilder("http", Host, Port).Uri`, and `UriBuilder` rejects `+`/`*` with
+  `UriFormatException: Invalid URI: The hostname could not be parsed`, thrown inside
+  the `PrometheusHttpListener` constructor — so `/metrics` **and** `/healthz` silently
+  failed to bind on every Linux deployment. Windows masked it by falling back to
+  `localhost`. The exporter is now given a `UriBuilder`-safe placeholder host, and the
+  real wildcard prefix is installed on the listener through `ConfigureHttpListener`,
+  which runs before `Start()`. `backend/deploy` can now drop its
+  `GAMESERVER_METRICS_ADDR=gameserver-dotnet:9101` workaround and go back to `:9101`
+  (owner: agent-devops).
+  Found by the E2E integration suite the first time it was actually executed.
+
 ### Added
+- `GameServer.Tests/Observability/MetricsEndpointTests.cs` — starts the real endpoint
+  and scrapes it over HTTP: wildcard (`:port`, `0.0.0.0:port`, `*:port`) and named
+  (`localhost:port`) binds both serve `/healthz` and `/metrics`, empty address
+  disables, plus a `ParseAddr` normalization table. The three wildcard cases fail with
+  `Assert.NotNull() Failure: Value is null` against the unfixed code.
+- `InternalsVisibleTo` for `GameServer.Tests` so tests can assert on internal helpers
+  without widening the public API.
 - **Delta snapshots.** Each connection now receives a full keyframe on join, on
   `MsgResync` (type 10) request, and every `--keyframe-interval` snapshots (default
   30 ≈ 2s at 15Hz); every other snapshot carries only entities whose visible state

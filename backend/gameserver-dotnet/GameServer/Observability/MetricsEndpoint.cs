@@ -69,7 +69,8 @@ public sealed class MetricsEndpoint : IAsyncDisposable
 
         // On Windows, binding the "+" wildcard prefix requires an URL ACL
         // (admin-only). Fall back to localhost so unprivileged dev runs still
-        // get a working endpoint; Linux (the production target) binds "+" fine.
+        // get a working endpoint; Linux (the production target) binds "+" fine
+        // (see the UriBuilder note in TryStartOn for what "fine" required).
         var hostCandidates = host == "+" && OperatingSystem.IsWindows()
             ? new[] { "+", "localhost" }
             : new[] { host };
@@ -95,6 +96,7 @@ public sealed class MetricsEndpoint : IAsyncDisposable
         bool suppressError)
     {
         string prefix = $"http://{host}:{port}/";
+        bool wildcard = host == "+";
 
         MeterProvider? provider = null;
         HttpListener? health = null;
@@ -110,7 +112,16 @@ public sealed class MetricsEndpoint : IAsyncDisposable
                     new ExplicitBucketHistogramConfiguration { Boundaries = TickDurationBuckets })
                 .AddPrometheusHttpListener(options =>
                 {
-                    options.Host = host;
+                    // OpenTelemetry builds its listener prefix as
+                    // `new UriBuilder("http", Host, Port).Uri`, and UriBuilder rejects
+                    // the HttpListener wildcards "+" and "*" with
+                    // `UriFormatException: Invalid URI: The hostname could not be parsed`
+                    // — thrown in the PrometheusHttpListener constructor, before any
+                    // option we set could take effect. So for a wildcard bind we hand
+                    // OTel a UriBuilder-safe placeholder and rewrite the prefix on the
+                    // listener itself in ConfigureHttpListener, which runs before Start.
+                    // HttpListener accepts "+" natively; only UriBuilder does not.
+                    options.Host = wildcard ? "localhost" : host;
                     options.Port = port;
                     options.ScrapeEndpointPath = "/metrics";
                     // Keep the exposition clean: no otel_scope_* labels, and the
@@ -119,6 +130,15 @@ public sealed class MetricsEndpoint : IAsyncDisposable
                     options.ScopeInfoEnabled = false;
                     options.TranslationStrategy =
                         PrometheusTranslationStrategy.UnderscoreEscapingWithSuffixes;
+
+                    if (wildcard)
+                    {
+                        options.ConfigureHttpListener = (_, listener) =>
+                        {
+                            listener.Prefixes.Clear();
+                            listener.Prefixes.Add(prefix);
+                        };
+                    }
                 })
                 .Build();
 

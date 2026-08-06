@@ -26,6 +26,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Lets the test project assert on internal helpers (e.g.
+         MetricsEndpoint.ParseAddr) without widening the public surface. -->
+    <InternalsVisibleTo Include="GameServer.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Numbered schema migrations, embedded so the binary is self-contained and
          the migrate-only mode needs no files on disk. Resource names become
          GameServer.Persistence.Migrations.<file>.sql; Migrator reads them via
