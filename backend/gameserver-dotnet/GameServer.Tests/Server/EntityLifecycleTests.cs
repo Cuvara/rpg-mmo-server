@@ -257,11 +257,10 @@ public class EntityLifecycleTests
 
     internal static async Task SendJoinAsync(Stream stream, string userId, string secret)
     {
-        var payload = JsonSerializer.SerializeToUtf8Bytes(
+        var env = WireProtocol.NewEnvelope(
+            MsgType.JoinToken,
             new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, secret) },
-            WireJsonContext.Default.JoinTokenRequest);
-        using var doc = JsonDocument.Parse(payload);
-        var env = new Envelope { Type = (byte)MsgType.JoinToken, Payload = doc.RootElement.Clone() };
+            WireEncoding.Json);
         byte[] frame = WireProtocol.Encode(env);
         await stream.WriteAsync(frame);
         await stream.FlushAsync();

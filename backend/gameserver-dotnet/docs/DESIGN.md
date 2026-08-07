@@ -710,3 +710,35 @@ Coverage: `GameServer.Tests/Server/EntityLifecycleTests.cs` (clean disconnect, a
 join, cohort join/leave, reconnect-within-hold, online-count integrity) and
 `GameServer.Tests/Snapshot/KeyframeStaggerTests.cs` (spread, determinism, single
 shortened cycle, unstaggered default).
+
+## The join handshake runs on a throwaway Connection (2026-08-07)
+
+`GameServerHost` accepts a socket, wraps it in a **temporary** `Connection` to
+read `MsgJoinToken` and verify the JWT, and only then constructs the *real*
+session `Connection` over that same socket. The temporary one is discarded.
+
+**Any per-connection state established during the handshake is therefore lost
+unless it is explicitly handed to the session connection.** This is not
+hypothetical: the Protobuf migration hit it immediately. The client's wire
+encoding is latched from the first frame decoded, which is the handshake frame
+on the temporary connection — so every reply silently fell back to legacy JSON
+until the encoding was threaded through the session constructor. The bug was
+invisible to every single-encoding test and only surfaced against a client that
+spoke Protobuf and expected Protobuf back.
+
+The shape generalises: negotiated compression, a client-declared protocol
+version, a per-connection cipher, an observed MTU — each would be dropped the
+same way, and each would fail silently rather than loudly, because the fresh
+connection's defaults are always *valid*, just wrong.
+
+If you add per-connection state, add it to the `Connection` constructor and hand
+it over at the handoff in `HandleConnectionAsync`. A default parameter is fine
+for the legacy value; what is not fine is assuming the handshake's observations
+survive on their own.
+
+Two cleaner fixes exist and were both considered too invasive for the migration:
+carry the handshake result in a small struct that the session constructor takes
+wholesale, or stop rebuilding the connection at all and make `UserId` mutable
+after verification. The second is probably right long term — the rebuild exists
+only because `UserId` is `readonly` and unknown until the JWT is checked.
+
