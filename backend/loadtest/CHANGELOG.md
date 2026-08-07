@@ -8,6 +8,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`-encoding json|proto`** — selects the wire encoding virtual players speak,
+  and the choice is recorded in the JSON result so a result file is
+  self-describing. The server answers in whatever encoding it is addressed in, so
+  one *unchanged* server binary can be measured under both: the before/after is a
+  controlled comparison instead of one spanning two builds.
+- `scripts/encoding-sweep.sh` — the three-arm capacity sweep at matched player
+  counts: `develop`'s image on JSON (the `BENCHMARK.md` baseline), this branch's
+  image on JSON (isolates the JSON-path cleanup), and this branch's image on
+  protobuf (isolates the encoding change). One loadtest binary drives all three,
+  so only the server under test varies. The middle arm exists for honesty —
+  folding the removed `JsonDocument.Parse` round-trip into "what Protobuf bought"
+  would flatter the result.
+- `results/encoding/` — the raw JSON from that sweep.
+
+### Fixed
+
+- **The snapshot read loop hardcoded `json.Unmarshal`**, so under `-encoding
+  proto` every snapshot failed to parse and was skipped by the `continue`. It
+  surfaced as `recv%=0` with zeroed snapshot/ack percentiles rather than as an
+  error. `decodeCounted` now goes through `messages.DecodeBody` and sniffs the
+  encoding like everything else.
+
+### Added
+
 - **New module `backend/loadtest`** — a load generator that drives N concurrent
   virtual players through the real wire protocol (gateway `MsgAuth` /
   `MsgEnterWorld` → game server `MsgJoinToken` → `MsgInput` at tick rate →

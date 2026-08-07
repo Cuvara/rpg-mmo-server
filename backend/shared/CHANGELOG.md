@@ -6,6 +6,33 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`shared/proto/wire.proto` — the single source of truth for the realtime wire
+  format.** The Go bindings are generated into `shared/proto/gen` (package
+  `wirepb`) by `shared/proto/generate.sh`, which also emits the C# side into the
+  game server. Generated code is committed, so no CI runner needs `protoc`
+  installed to build or test either module.
+- The `messages` package now speaks **both JSON and Protobuf**. `Envelope` gained
+  an `Enc` field — transport metadata, never serialized — and `Payload` is now
+  `[]byte`; custom `MarshalJSON`/`UnmarshalJSON` keep the JSON wire shape
+  byte-identical to what shipped before.
+- Encoding is detected from the first byte of the frame body, not negotiated: a
+  JSON body always starts with `{` (0x7B), a Protobuf `Envelope` always starts
+  with 0x08 (the tag for field 1, `type`, which proto3 never elides because
+  `type` is >= 1 for every real message). Those cannot collide, so there is no
+  handshake, no version field, and the 4-byte length framing is unchanged.
+- New API: `Encoding` (with `ParseEncoding`/`String`), `SniffEncoding`,
+  `EncodeBody`, `DecodeBody`, `NewEnvelopeAs`, and `Envelope.Reply` — the last
+  two are how a caller answers in the encoding it was addressed in.
+- JSON remains the default. On its own this changes no bytes on the wire.
+
+### Changed
+- **BREAKING (Go API only, not the wire):** `messages.UnmarshalPayload(payload,
+  v)` is gone as a free function and is now a method, `env.UnmarshalPayload(v)`.
+  The encoding travels with the bytes it describes, so a payload can no longer be
+  decoded with the wrong codec by forgetting to thread the encoding through the
+  call. Every caller in the repo is updated.
+
+### Added
 - `redisstore.ClientOptions` + `NewRedisClientWithOptions` — explicit timeout,
   retry and pool configuration for every Redis client this package builds
   (`Default*` constants; the zero value of each field falls back to the default,

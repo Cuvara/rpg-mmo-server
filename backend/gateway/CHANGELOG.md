@@ -6,6 +6,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **The gateway answers in the encoding the client spoke.** `ClientConn` latches
+  the encoding of the first frame it decodes (`shared/messages` sniffs JSON vs
+  Protobuf from the first body byte) and every response is built through the new
+  `ClientConn.Reply` instead of `messages.NewEnvelope`, so a new response type
+  cannot accidentally be pinned to JSON. The gateway never picks an encoding of
+  its own — which is what lets the gateway, the game servers and the client be
+  upgraded in any order, and lets a Protobuf-capable gateway keep serving JSON
+  clients through a rollout. The zero value is `EncodingJSON`, so anything that
+  somehow replies before reading stays on the legacy encoding.
+
+### Added
 - `/readyz` readiness endpoint and `metrics.Readiness`, a concurrency-safe set
   of named dependency checks. `/healthz` stays liveness-only and returns 200
   even when Redis is down; `/readyz` returns 503 with the failing check names

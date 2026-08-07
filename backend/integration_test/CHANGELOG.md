@@ -5,6 +5,22 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `TestDotnetInterop_MixedEncodingsOnOneServer` — a JSON client and a Protobuf
+  client joined to the **same running server**, which is the state a fleet is
+  actually in mid-rollout. It asserts the server answers each client in the
+  encoding it was addressed in, and measures the keyframe payload saving on the
+  real wire so the bandwidth claim is checked rather than trusted. This test is
+  what caught the game server dropping the handshake's encoding and falling back
+  to JSON for every reply.
+
+### Changed
+- `TestDotnetInterop_FullFlow` now runs the whole handshake **twice, once per
+  encoding**. It is the only test that can prove the two independently generated
+  implementations of `wire.proto` agree — `protoc-gen-go` on the Go side,
+  `protoc`'s C# generator on the server. Unit tests on either side can only prove
+  each is self-consistent.
+
 ### Fixed
 - **This suite had never actually run.** Every test sits behind `//go:build integration`,
   but `ci.yml` and `cd.yml` invoked it without `-tags integration`, so the package
