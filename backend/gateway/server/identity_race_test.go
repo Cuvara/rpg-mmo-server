@@ -70,60 +70,63 @@ func TestClientConnIdentityConcurrentAccess(t *testing.T) {
 }
 
 // TestGatewayConcurrentTeardownRace exercises the real two-goroutine teardown
-// end to end: a flooding client trips the message limiter, so WriteLoop drains
-// the final error frame and calls CloseGracefully (reading the identity) while
-// ReadLoop exits and its deferred cleanupSession clears that same identity.
-// That interleaving is exactly the one in the CI race report.
+// end to end: a client authenticates, trips the message limiter so the gateway
+// queues a final error frame, then vanishes. The write goroutine's Write fails
+// and logs the user (connection.go's "write error"), while the read goroutine
+// sees EOF and runs handleConn's deferred cleanupSession, which clears that same
+// user. That is the interleaving from the CI race report.
 //
-// The client authenticates first so the identity is non-empty and the teardown
-// actually has something to clear; several connections run at once to widen the
-// window.
+// Note this is a *probabilistic* reproducer — the window is real but narrow, so
+// it is a realism supplement, not the guarantee. The deterministic guard is
+// TestClientConnIdentityConcurrentAccess above. Several rounds of several
+// clients widen the window without making the test slow.
 func TestGatewayConcurrentTeardownRace(t *testing.T) {
 	// startGatewayWithOptions registers its own Shutdown cleanup.
 	gw, _ := startGatewayWithOptions(t, WithMsgRateLimit(0.01, 3))
 
-	const clients = 12
-	var wg sync.WaitGroup
-	for i := 0; i < clients; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
-			conn, err := net.DialTimeout("tcp", gw.Addr(), 2*time.Second)
-			if err != nil {
-				return // accept-side limiting or shutdown; not what we test here
-			}
-			defer conn.Close()
-
-			token, err := jwt.Sign("user1", testSecret, time.Hour)
-			if err != nil {
-				return
-			}
-			authEnv, err := messages.NewEnvelope(messages.MsgAuth, messages.AuthRequest{Token: token})
-			if err != nil {
-				return
-			}
-			data, err := messages.Encode(authEnv)
-			if err != nil {
-				return
-			}
-			// Burn the burst so the limiter trips and hands the connection to
-			// the SendAndClose -> WriteLoop -> CloseGracefully teardown path.
-			for n := 0; n < 20; n++ {
-				conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-				if _, err := conn.Write(data); err != nil {
-					break
-				}
-			}
-			// Drain until the server hangs up, so the test observes the whole
-			// teardown rather than racing it with its own Close.
-			conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-			for {
-				if _, err := messages.Decode(conn); err != nil {
-					return
-				}
-			}
-		}()
+	token, err := jwt.Sign("user1", testSecret, time.Hour)
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
 	}
-	wg.Wait()
+	authEnv, err := messages.NewEnvelope(messages.MsgAuth, messages.AuthRequest{Token: token})
+	if err != nil {
+		t.Fatalf("envelope: %v", err)
+	}
+	data, err := messages.Encode(authEnv)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	const (
+		rounds  = 8
+		clients = 8
+	)
+	for round := 0; round < rounds; round++ {
+		var wg sync.WaitGroup
+		for i := 0; i < clients; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+
+				conn, err := net.DialTimeout("tcp", gw.Addr(), 2*time.Second)
+				if err != nil {
+					return // accept-side limiting or shutdown; not what we test here
+				}
+				// Authenticate, then burn the burst so the limiter trips and
+				// hands the connection to the SendAndClose teardown path.
+				for n := 0; n < 12; n++ {
+					conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+					if _, err := conn.Write(data); err != nil {
+						break
+					}
+				}
+				// Vanish without draining. The server is mid-teardown with a
+				// live identity: its write of the error frame fails on the
+				// write goroutine while the read goroutine hits EOF and clears
+				// that identity.
+				conn.Close()
+			}()
+		}
+		wg.Wait()
+	}
 }
