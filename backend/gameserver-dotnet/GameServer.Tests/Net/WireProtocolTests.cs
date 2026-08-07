@@ -42,35 +42,80 @@ public class WireProtocolTests
     /// <summary>
     /// The whole dual-stack migration rests on these two byte values never
     /// colliding: a JSON body starts with '{', a protobuf Envelope starts with
-    /// the field-1 varint tag 0x08. If this ever fails, encoding detection is
-    /// broken and mixed-version clients will silently misparse.
+    /// the field-1 varint tag 0x08.
+    /// <para>
+    /// This sweeps EVERY type value the wire can carry (1..255), not just the
+    /// declared enum members, so adding a message type cannot silently escape the
+    /// check and neither can renumbering the existing ones. If it ever fails,
+    /// encoding detection is broken and mixed-version clients misparse silently.
+    /// </para>
     /// </summary>
     [Fact]
-    public void EncodedBodies_HaveDistinguishablePrefixes()
+    public void EncodedBodies_HaveDistinguishablePrefixes_ForEveryType()
     {
-        var payload = new JoinTokenResponse { Ok = true, UserId = "u1" };
+        for (int n = 1; n <= 255; n++)
+        {
+            var type = (MsgType)n;
 
-        byte[] json = WireProtocol.EncodeBody(WireProtocol.NewEnvelope(MsgType.JoinTokenResp, payload, WireEncoding.Json));
-        byte[] proto = WireProtocol.EncodeBody(WireProtocol.NewEnvelope(MsgType.JoinTokenResp, payload, WireEncoding.Proto));
+            byte[] json = WireProtocol.EncodeBody(WireProtocol.NewEmptyEnvelope(type, WireEncoding.Json));
+            byte[] proto = WireProtocol.EncodeBody(WireProtocol.NewEmptyEnvelope(type, WireEncoding.Proto));
 
-        Assert.Equal((byte)'{', json[0]);
-        Assert.Equal(0x08, proto[0]);
+            // No leading whitespace, ever: an encoder that pretty-printed would
+            // move the '{' off byte 0 and every frame would sniff as protobuf.
+            Assert.Equal((byte)'{', json[0]);
+            Assert.Equal(0x08, proto[0]);
+            Assert.Equal(WireEncoding.Json, WireProtocol.SniffEncoding(json));
+            Assert.Equal(WireEncoding.Proto, WireProtocol.SniffEncoding(proto));
 
-        Assert.Equal(WireEncoding.Json, WireProtocol.SniffEncoding(json));
-        Assert.Equal(WireEncoding.Proto, WireProtocol.SniffEncoding(proto));
+            Assert.Equal((byte)n, WireProtocol.DecodeBody(json).Type);
+            Assert.Equal((byte)n, WireProtocol.DecodeBody(proto).Type);
+        }
     }
 
-    /// <summary>Every message type must keep a 0x08-prefixed protobuf body.</summary>
+    /// <summary>
+    /// Guards the invariant at construction: proto3 elides a zero field 1, so a
+    /// Type 0 envelope would encode without the 0x08 prefix and be sniffed as the
+    /// wrong encoding. The enum starts at 1, but nothing forces that to stay true.
+    /// </summary>
     [Fact]
-    public void ProtoEnvelope_AlwaysStartsWithTypeTag()
+    public void MsgTypeZero_IsRejectedAtConstruction()
     {
-        foreach (MsgType t in Enum.GetValues<MsgType>())
+        foreach (var enc in new[] { WireEncoding.Json, WireEncoding.Proto })
         {
-            if (t == MsgType.Unspecified) continue;
-            byte[] body = WireProtocol.EncodeBody(WireProtocol.NewEmptyEnvelope(t, WireEncoding.Proto));
-            Assert.Equal(0x08, body[0]);
-            Assert.Equal(WireEncoding.Proto, WireProtocol.SniffEncoding(body));
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                WireProtocol.NewEmptyEnvelope(MsgType.Unspecified, enc));
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                WireProtocol.NewEnvelope(MsgType.Unspecified, new JoinTokenResponse { Ok = true }, enc));
         }
+    }
+
+    /// <summary>
+    /// Both decoders must fail closed on a body that is neither valid JSON nor a
+    /// real envelope.
+    /// <para>
+    /// The important case is <c>0x12</c>: that is field 2 (payload),
+    /// length-delimited, so it parses as a perfectly well-formed protobuf
+    /// Envelope and leaves the type at 0. Without the type-0 guard that produced
+    /// a typeless envelope and NO error — a silent half-parse routed onwards as
+    /// an unknown message rather than rejected.
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData(new byte[] { 0x12, 0x02, 0x41, 0x42 })] // valid proto, no type field
+    [InlineData(new byte[] { 0x00, 0x01 })]             // field number 0
+    [InlineData(new byte[] { 0xFF, 0xFF, 0xFF })]       // high bytes
+    [InlineData(new byte[] { 0x08 })]                   // truncated varint
+    [InlineData(new byte[] { })]                        // empty
+    public void DecodeBody_FailsClosedOnGarbage(byte[] body)
+    {
+        Assert.ThrowsAny<Exception>(() => WireProtocol.DecodeBody(body));
+    }
+
+    [Fact]
+    public void DecodeBody_FailsClosedOnJsonWithoutType()
+    {
+        Assert.ThrowsAny<Exception>(() =>
+            WireProtocol.DecodeBody(Encoding.UTF8.GetBytes("{\"nope\":1}")));
     }
 
     [Fact]

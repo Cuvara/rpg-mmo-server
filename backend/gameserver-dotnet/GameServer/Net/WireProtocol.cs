@@ -77,6 +77,22 @@ public static class WireProtocol
     /// <summary>First byte of a JSON body.</summary>
     private const byte JsonPrefix = (byte)'{';
 
+    /// <summary>
+    /// Reject a zero message type at construction.
+    /// </summary>
+    /// <remarks>
+    /// proto3 elides a zero field 1, so a Type 0 envelope would encode WITHOUT
+    /// the 0x08 prefix and be sniffed as the wrong encoding by the peer. The
+    /// declared values start at 1, but nothing forces that to stay true, so the
+    /// constraint that the whole scheme rests on is enforced rather than assumed.
+    /// </remarks>
+    private static byte RequireMsgType(MsgType type)
+    {
+        if (type == MsgType.Unspecified)
+            throw new ArgumentOutOfRangeException(nameof(type), "message type 0 is not a valid wire type");
+        return (byte)type;
+    }
+
     /// <summary>Classify a frame body by its first byte.</summary>
     public static WireEncoding SniffEncoding(ReadOnlySpan<byte> body) =>
         body.Length > 0 && body[0] == JsonPrefix ? WireEncoding.Json : WireEncoding.Proto;
@@ -126,11 +142,23 @@ public static class WireProtocol
     }
 
     /// <summary>Parse one frame body into an envelope, detecting the encoding.</summary>
+    /// <remarks>
+    /// Fails closed. Sniffing narrows a body to one of two decoders, but it
+    /// cannot tell a real Protobuf envelope from arbitrary bytes that merely
+    /// happen to be valid Protobuf: a body beginning 0x12 parses as a well-formed
+    /// Envelope carrying only field 2, leaving the type at 0. Rejecting type 0 is
+    /// what turns that from a silent half-parse into an error.
+    /// </remarks>
     public static Envelope DecodeBody(byte[] body)
     {
+        if (body.Length == 0)
+            throw new IOException("Empty envelope body");
+
         if (SniffEncoding(body) == WireEncoding.Proto)
         {
             var pb = RpgMmo.Wire.V1.Envelope.Parser.ParseFrom(body);
+            if (pb.Type == 0)
+                throw new IOException("Invalid message type 0");
             if (pb.Type > byte.MaxValue)
                 throw new IOException($"Message type out of range: {pb.Type}");
             return new Envelope
@@ -141,7 +169,10 @@ public static class WireProtocol
             };
         }
 
-        return DecodeJsonEnvelope(body);
+        var env = DecodeJsonEnvelope(body);
+        if (env.Type == 0)
+            throw new IOException("Invalid message type 0");
+        return env;
     }
 
     /// <summary>Read one length-prefixed envelope from a stream. Returns null on EOF.</summary>
@@ -177,7 +208,7 @@ public static class WireProtocol
     public static Envelope NewEnvelope(MsgType type, JoinTokenResponse payload, WireEncoding encoding) =>
         new()
         {
-            Type = (byte)type,
+            Type = RequireMsgType(type),
             Payload = encoding == WireEncoding.Proto ? payload.ToByteArray() : JsonWriter.Write(payload),
             Encoding = encoding
         };
@@ -186,7 +217,7 @@ public static class WireProtocol
     public static Envelope NewEnvelope(MsgType type, SnapshotMessage payload, WireEncoding encoding) =>
         new()
         {
-            Type = (byte)type,
+            Type = RequireMsgType(type),
             Payload = encoding == WireEncoding.Proto ? payload.ToByteArray() : JsonWriter.Write(payload),
             Encoding = encoding
         };
@@ -195,7 +226,7 @@ public static class WireProtocol
     public static Envelope NewEnvelope(MsgType type, JoinTokenRequest payload, WireEncoding encoding) =>
         new()
         {
-            Type = (byte)type,
+            Type = RequireMsgType(type),
             Payload = encoding == WireEncoding.Proto ? payload.ToByteArray() : JsonWriter.Write(payload),
             Encoding = encoding
         };
@@ -204,7 +235,7 @@ public static class WireProtocol
     public static Envelope NewEnvelope(MsgType type, InputMessage payload, WireEncoding encoding) =>
         new()
         {
-            Type = (byte)type,
+            Type = RequireMsgType(type),
             Payload = encoding == WireEncoding.Proto ? payload.ToByteArray() : JsonWriter.Write(payload),
             Encoding = encoding
         };
@@ -213,7 +244,7 @@ public static class WireProtocol
     public static Envelope NewEmptyEnvelope(MsgType type, WireEncoding encoding) =>
         new()
         {
-            Type = (byte)type,
+            Type = RequireMsgType(type),
             Payload = encoding == WireEncoding.Proto ? Array.Empty<byte>() : "{}"u8.ToArray(),
             Encoding = encoding
         };

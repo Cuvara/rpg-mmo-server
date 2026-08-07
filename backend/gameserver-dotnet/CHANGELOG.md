@@ -34,6 +34,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   not the reflection-based ones.
 
 ### Fixed
+- **`DecodeBody` half-parsed garbage as a typeless envelope.** A body beginning
+  `0x12` is valid Protobuf (field 2, length-delimited) and parsed cleanly with
+  the type left at 0, so arbitrary bytes became a well-formed envelope with no
+  error. Type 0 is now rejected on decode and at construction, and both decoders
+  fail closed. Pinned by a 1..255 sweep of the prefix invariant rather than by a
+  comment.
 - **Replies fell back to legacy JSON after the join handshake.** The handshake
   runs on a throwaway `Connection` and the session `Connection` was then
   constructed fresh over the same socket, dropping the encoding the client had

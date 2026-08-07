@@ -2,8 +2,17 @@ package messages
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
+
+// ErrInvalidMsgType marks an envelope whose type is 0.
+//
+// Zero is not a message type in either encoding, and it is the value a Protobuf
+// decode leaves behind when the bytes never carried field 1 at all — which is
+// what arbitrary non-JSON data looks like. Treating it as an error is what makes
+// decoding fail closed instead of yielding a typeless envelope.
+var ErrInvalidMsgType = errors.New("invalid message type 0")
 
 // MsgType identifies the type of message in an Envelope.
 type MsgType uint8

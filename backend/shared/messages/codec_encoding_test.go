@@ -3,6 +3,7 @@ package messages
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"math"
 	"testing"
 )
@@ -12,17 +13,22 @@ import (
 var bothEncodings = []Encoding{EncodingJSON, EncodingProto}
 
 // TestEncodingPrefixesCannotCollide pins the single assumption the whole
-// dual-stack migration rests on. If this ever fails, encoding detection is
-// broken and mixed-version peers will silently misparse each other.
+// dual-stack migration rests on.
+//
+// It sweeps EVERY type value the wire can carry (1..255), not just the currently
+// declared constants, so adding a message type cannot silently escape the check
+// and neither can renumbering the existing ones.
 func TestEncodingPrefixesCannotCollide(t *testing.T) {
-	for msgType := MsgAuth; msgType <= MsgResync; msgType++ {
+	for n := 1; n <= 255; n++ {
+		msgType := MsgType(n)
+
 		jsonEnv, err := NewEnvelopeAs(EncodingJSON, msgType, struct{}{})
 		if err != nil {
-			t.Fatalf("json envelope type %d: %v", msgType, err)
+			t.Fatalf("json envelope type %d: %v", n, err)
 		}
 		protoEnv, err := NewEnvelopeAs(EncodingProto, msgType, struct{}{})
 		if err != nil {
-			t.Fatalf("proto envelope type %d: %v", msgType, err)
+			t.Fatalf("proto envelope type %d: %v", n, err)
 		}
 
 		jsonBody, err := EncodeBody(jsonEnv)
@@ -34,17 +40,72 @@ func TestEncodingPrefixesCannotCollide(t *testing.T) {
 			t.Fatalf("encode proto body: %v", err)
 		}
 
+		// No leading whitespace, ever: an encoder that pretty-printed or indented
+		// would move the '{' off byte 0 and every frame would sniff as Protobuf.
 		if jsonBody[0] != '{' {
-			t.Errorf("type %d: json body starts with %#x, want '{'", msgType, jsonBody[0])
+			t.Fatalf("type %d: json body starts with %#x, want '{'", n, jsonBody[0])
 		}
 		if protoBody[0] != 0x08 {
-			t.Errorf("type %d: proto body starts with %#x, want 0x08 (field 1 varint tag)", msgType, protoBody[0])
+			t.Fatalf("type %d: proto body starts with %#x, want 0x08 (field 1 varint tag)", n, protoBody[0])
 		}
 		if got := SniffEncoding(jsonBody); got != EncodingJSON {
-			t.Errorf("type %d: sniffed json body as %v", msgType, got)
+			t.Fatalf("type %d: sniffed json body as %v", n, got)
 		}
 		if got := SniffEncoding(protoBody); got != EncodingProto {
-			t.Errorf("type %d: sniffed proto body as %v", msgType, got)
+			t.Fatalf("type %d: sniffed proto body as %v", n, got)
+		}
+
+		// And each must round-trip back to the type it went in as.
+		for _, body := range [][]byte{jsonBody, protoBody} {
+			got, err := DecodeBody(body)
+			if err != nil {
+				t.Fatalf("type %d: DecodeBody: %v", n, err)
+			}
+			if got.Type != msgType {
+				t.Fatalf("type %d round-tripped as %d", n, got.Type)
+			}
+		}
+	}
+}
+
+// TestMsgTypeZeroIsRejected guards the invariant at construction.
+//
+// proto3 elides a zero field 1, so a Type 0 envelope would encode WITHOUT the
+// 0x08 prefix and be sniffed as the wrong encoding by the peer. The declared
+// constants start at iota + 1, but nothing forces that to stay true, so the
+// constraint is enforced rather than assumed.
+func TestMsgTypeZeroIsRejected(t *testing.T) {
+	for _, enc := range bothEncodings {
+		if _, err := NewEnvelopeAs(enc, 0, struct{}{}); !errors.Is(err, ErrInvalidMsgType) {
+			t.Errorf("%v: NewEnvelopeAs(type 0) err = %v, want ErrInvalidMsgType", enc, err)
+		}
+	}
+	if _, err := NewEnvelope(0, struct{}{}); !errors.Is(err, ErrInvalidMsgType) {
+		t.Errorf("NewEnvelope(type 0) err = %v, want ErrInvalidMsgType", err)
+	}
+}
+
+// TestDecodeFailsClosedOnGarbage is the reason ErrInvalidMsgType exists.
+//
+// Sniffing narrows a body to one of two decoders; it cannot tell a real Protobuf
+// envelope from arbitrary bytes that happen to BE valid Protobuf. A body
+// beginning 0x12 is field 2 (payload), length-delimited — it parses cleanly and
+// leaves Type at 0. Before the Type 0 guard that produced a typeless envelope
+// and no error at all, i.e. a silent half-parse routed onwards as an unknown
+// message. Every one of these must now be an error.
+func TestDecodeFailsClosedOnGarbage(t *testing.T) {
+	garbage := map[string][]byte{
+		"payload field only (parses as valid proto!)": {0x12, 0x02, 0x41, 0x42},
+		"zero field number":                           {0x00, 0x01},
+		"ascii text":                                  []byte("not json!!"),
+		"high bytes":                                  {0xFF, 0xFF, 0xFF},
+		"truncated varint":                            {0x08},
+		"json-ish but not an envelope":                []byte(`{"nope":1}`),
+		"empty":                                       {},
+	}
+	for name, body := range garbage {
+		if _, err := DecodeBody(body); err == nil {
+			t.Errorf("DecodeBody(%s) succeeded; must fail closed", name)
 		}
 	}
 }

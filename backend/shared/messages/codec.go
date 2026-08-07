@@ -71,6 +71,12 @@ func EncodeBody(env Envelope) ([]byte, error) {
 
 // DecodeBody parses one frame body into an Envelope, detecting the encoding from
 // the bytes themselves.
+//
+// It fails closed. Sniffing narrows a body to one of two decoders, but it cannot
+// tell a Protobuf envelope from arbitrary bytes that merely happen to be valid
+// Protobuf: a body beginning 0x12 parses as a well-formed Envelope carrying only
+// field 2, leaving Type at 0. Rejecting Type 0 is what turns that from a silent
+// half-parse into an error, so it is a correctness guard and not a formality.
 func DecodeBody(data []byte) (Envelope, error) {
 	var env Envelope
 	// An envelope always carries a type >= 1, so its encoding is never zero
@@ -84,12 +90,18 @@ func DecodeBody(data []byte) (Envelope, error) {
 			return env, fmt.Errorf("unmarshal envelope: %w", err)
 		}
 		env.Enc = EncodingJSON
+		if env.Type == 0 {
+			return Envelope{}, fmt.Errorf("decode envelope: %w", ErrInvalidMsgType)
+		}
 		return env, nil
 	}
 
 	var pb wirepb.Envelope
 	if err := proto.Unmarshal(data, &pb); err != nil {
 		return env, fmt.Errorf("unmarshal proto envelope: %w", err)
+	}
+	if pb.Type == 0 {
+		return Envelope{}, fmt.Errorf("decode proto envelope: %w", ErrInvalidMsgType)
 	}
 	if pb.Type > 0xFF {
 		return env, fmt.Errorf("message type out of range: %d", pb.Type)
@@ -138,7 +150,17 @@ func NewEnvelope(msgType MsgType, payload any) (Envelope, error) {
 
 // NewEnvelopeAs creates an Envelope with its payload marshaled in the given
 // encoding.
+//
+// A zero msgType is rejected. The whole encoding-detection scheme depends on a
+// Protobuf envelope always emitting field 1 — which proto3 only does for a
+// non-zero value — so a Type 0 envelope would encode without the 0x08 prefix and
+// be sniffed as the wrong encoding by the peer. The current numbering starts at
+// iota + 1, but nothing forces it to stay that way, so it is checked here rather
+// than assumed.
 func NewEnvelopeAs(enc Encoding, msgType MsgType, payload any) (Envelope, error) {
+	if msgType == 0 {
+		return Envelope{}, ErrInvalidMsgType
+	}
 	data, err := MarshalPayload(enc, payload)
 	if err != nil {
 		return Envelope{}, err

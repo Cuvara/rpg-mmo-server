@@ -526,7 +526,13 @@ Everything in §8 still applies. Two more:
    times in an unknown and non-uniform way. The *ratios* between arms are more
    robust than the absolute numbers, and the ~55% bandwidth saving is a property
    of the encoding that host load cannot affect at all.
-2. **A single client failed to join in three of the levels** (`new-json` @ 50 and
+2. **The entity leak (§7.1) was still live when this sweep ran.** Every level
+   restarted the container and waited for `gameserver_entities` to read 0, and
+   clients stay connected for the whole window, so within-level contamination
+   should be near zero — but "should be" is not "was measured to be". The leak
+   fix changes tick cost characteristics, so **these numbers must be re-taken
+   after rebasing onto it** before any of them are quoted as current.
+3. **A single client failed to join in three of the levels** (`new-json` @ 50 and
    @ 200, `new-proto` @ 150), out of 50-250. It occurred in both encodings, so it
    is not encoding-specific; it is most likely join contention under a 20/s ramp
    on a loaded host. It is not explained, and it is recorded rather than

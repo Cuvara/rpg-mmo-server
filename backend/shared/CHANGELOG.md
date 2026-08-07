@@ -6,6 +6,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `ErrInvalidMsgType`. Message type 0 is now rejected both when an envelope is
+  constructed and when one is decoded. This is a correctness guard, not a
+  formality: sniffing narrows a body to one of two decoders but cannot tell a
+  real Protobuf envelope from arbitrary bytes that happen to be valid Protobuf —
+  a body beginning `0x12` parses cleanly as an `Envelope` carrying only field 2
+  and leaves the type at 0. That previously produced a typeless envelope and **no
+  error**, a silent half-parse. Decoding now fails closed. Rejecting type 0 at
+  construction protects the other half of the invariant: proto3 elides a zero
+  field 1, so a type-0 envelope would encode without the `0x08` prefix and be
+  sniffed as the wrong encoding by the peer.
 - **`shared/proto/wire.proto` — the single source of truth for the realtime wire
   format.** The Go bindings are generated into `shared/proto/gen` (package
   `wirepb`) by `shared/proto/generate.sh`, which also emits the C# side into the

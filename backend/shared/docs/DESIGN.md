@@ -426,4 +426,13 @@ break, not a wire break.
 for `type` (~8 bytes to ~2) and interned entity handles would both shrink the
 hottest message further, but each changes what the field *means*, whereas this
 change is a pure re-encoding whose correctness is checkable by round-tripping.
-They belong in a follow-up with their own compatibility story.
+Mixing them in would also make the before/after impossible to attribute.
+
+**This follow-up is not optional polish, and it is probably larger than this
+change was.** The measurement in [BENCHMARK.md](../../docs/BENCHMARK.md) Part II
+says Protobuf moved the mobile bandwidth ceiling from ~41 to ~93 players against
+a tick ceiling of 300 — so bandwidth is *still* the binding constraint, and the
+absolute gap actually widened. Roughly 40% of a packed `EntitySnapshot` is now
+string data (`id` and `type`), which no encoding can compress away. Interning
+those is the only remaining lever on the wire itself; after that it is a question
+of sending less (AOI radius, distance-tiered update rates), not of encoding.
