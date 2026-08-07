@@ -252,16 +252,13 @@ public class MigratorTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public void EmbeddedMigrations_MatchDeployCopies()
     {
         string? migrationsDir = PostgresPlayerStoreTests.FindRepoFile(
             Path.Combine("backend", "deploy", "db", "migrations", "gamestate", "001_init.sql"));
-        if (migrationsDir is null)
-        {
-            Console.WriteLine("[SKIP] deploy migrations not found (running outside the repo tree)");
-            return;
-        }
+        Skip.If(migrationsDir is null,
+            "deploy migrations not found (running outside the repo tree)");
 
         string deployDir = Path.GetDirectoryName(migrationsDir)!;
 
@@ -279,22 +276,18 @@ public class MigratorTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public void InitGamestateSql_MatchesFirstMigration()
     {
         string? path = PostgresPlayerStoreTests.FindRepoFile(
             Path.Combine("backend", "deploy", "db", "init-gamestate.sql"));
-        if (path is null)
-        {
-            Console.WriteLine("[SKIP] init-gamestate.sql not found (running outside the repo tree)");
-            return;
-        }
+        Skip.If(path is null, "init-gamestate.sql not found (running outside the repo tree)");
 
         // init-gamestate.sql seeds a brand-new postgres volume via docker-entrypoint,
         // before any gameserver connects. It must describe exactly what 001 describes,
         // or a fresh volume and a migrated volume would disagree.
         var first = Migrator.Embedded.Single(s => s.Version == 1);
-        Assert.Equal(Migrator.Normalize(first.Sql), Migrator.Normalize(File.ReadAllText(path)));
+        Assert.Equal(Migrator.Normalize(first.Sql), Migrator.Normalize(File.ReadAllText(path!)));
     }
 
     [Fact]
