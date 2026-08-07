@@ -39,3 +39,14 @@ Thumbs.db
 
 # Compiled gateway binary (build artifact, was committed by mistake)
 /backend/gateway/gateway
+
+# Compiled Go binaries built in-tree by the benchmark/dev scripts.
+#
+# `go build -o loadtest ./cmd/loadtest` (scripts/encoding-sweep.sh) drops a
+# ~15MB binary next to the source, and a `git add -A` will happily commit it --
+# which is exactly how it reached develop once, and how a 19MB gateway binary
+# reached it before that. Named explicitly rather than by a broad pattern,
+# because these directories also contain a package named after the binary.
+backend/loadtest/loadtest
+backend/gateway/gateway
+backend/smoketest/smoketest
