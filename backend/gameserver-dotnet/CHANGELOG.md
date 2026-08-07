@@ -32,6 +32,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     loopback. Interop tests skip when no Go toolchain is present.
 
 ### Fixed
+- **Cross-map position bleed on join.** `player_states` holds one row per player,
+  overwritten by whichever server hosts them, and the join path restored its
+  `x`/`y` unconditionally. A player who last stood at (480, 12) on `map_02` and
+  then joined `map_01` was recreated at (480, 12) *on `map_01`* — a different
+  place entirely. The row never converged either: each join wrote back the stale
+  base plus whatever they walked, so the drift compounded.
+
+  Placement now goes through `PlayerSpawn.Resolve`, which reuses saved
+  coordinates only when the row's `map_id` matches the map being joined and
+  otherwise places the player at that map's spawn point. HP and max HP carry
+  across unchanged — they belong to the character, not to the ground under it.
+  An empty `map_id` counts as a mismatch rather than a wildcard, because the
+  column defaults to `''` and such a row has unknown provenance. The row
+  converges on the next save with no extra write, since `AsyncSaver` already
+  uses the hosting server's own `MapId`.
+
+  Rationale and the full decision table: `docs/DESIGN.md` — "Position is
+  map-scoped; carried stats are not". Policy is a pure function rather than
+  inline join-handler code, so every branch is testable without a database, a
+  socket or a running server.
+
+  Covered by `PlayerSpawnTests` (policy) and `MapIdReloadIntegrationTests`
+  (real PostgreSQL + real TCP join handshake, `[SkippableFact]` per the
+  dependency-gating convention). Three of the four integration tests fail
+  against the pre-fix join path — `Expected: 0 … Actual: 137.5` — so they
+  pin the regression rather than decorating it.
+
+  Not fixed here: `player_states` has no `dead` column, so a player persisted
+  at `hp = 0` reloads with `Hp = 0` and `Dead = false`. That needs respawn rules
+  and a schema change; this change preserves the existing HP behaviour exactly.
 - The realtime transport published into the registry is now what the server
   actually listens with, so `EnterWorldResponse.Transport` tells clients the truth.
   It was previously whatever `--transport` said, regardless of the TCP listener
