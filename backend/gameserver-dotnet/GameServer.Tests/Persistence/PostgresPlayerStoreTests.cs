@@ -140,13 +140,9 @@ public class PostgresPlayerStoreTests
 
         // Dedicated container — this test destroys the server mid-flight.
         await using var victim = await EphemeralPostgres.TryStartAsync();
-        if (victim is null)
-        {
-            Console.WriteLine("[SKIP] could not start dedicated postgres container");
-            return;
-        }
+        Skip.If(victim is null, "could not start a dedicated postgres container for this test");
 
-        var store = await PostgresPlayerStore.ConnectAsync(victim.Dsn);
+        var store = await PostgresPlayerStore.ConnectAsync(victim!.Dsn);
         await store.MigrateAsync();
         await store.SavePlayerAsync(new PlayerState("u1", 1, 1, 10, 100, "map_01"), default);
 
