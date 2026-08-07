@@ -344,8 +344,9 @@ Ordered by measured impact:
 5. **Reduce what is sent, not how it is encoded** — AOI radius, distance-tiered
    update rates, interned entity IDs. Part II shows this is now the only lever
    left on the bandwidth ceiling: at 150 players Protobuf still costs 80.7 KB/s
-   per client against a 50 KB/s target, and ~40% of a packed entity is string
-   data that no encoding can compress away.
+   per client against a 50 KB/s target, and **61%** of a packed entity is string
+   data that no encoding can compress away (measured: 17.0 bytes of `id` plus 8.0
+   of `type`, against 41.2 bytes marginal cost per entity).
 6. **Spatial-grid AOI** — worth doing, but it targets the 20% term. ADR-7 ranked
    it first; the measurement demotes it below the items above.
 7. **Re-run on real VPS hardware** with the generator on a separate host before
@@ -494,8 +495,10 @@ wrong about what dominates.
 Protobuf removes field names, punctuation, and decimal float formatting. It
 cannot remove *identifiers*. A realistic entity ID (`lt-000000000042`, 15 chars)
 costs 15 bytes in both encodings, and is ~15 of the ~40 bytes a Protobuf entity
-occupies. The floor is the string data, and roughly 40% of a packed entity is
-string. This is asserted, not just described, in
+occupies. The floor is the string data, and **61% of a packed entity is string**
+— measured marginally at 50 entities: 41.2 bytes each, of which `id` is 17.0 and
+`type` is 8.0. (An earlier revision of this section said ~40%; it counted only
+`id`.) This is asserted, not just described, in
 `shared/messages` `TestProtoIsSmallerThanJSON` and measured on the real wire by
 `TestDotnetInterop_MixedEncodingsOnOneServer`.
 
