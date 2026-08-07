@@ -6,6 +6,63 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Entities leaked when a join was aborted.** `gameserver_players_online` returned to
+  0 while `gameserver_entities` stayed at its peak indefinitely — 200 entities with 0
+  players, still there minutes later, reproduced below.
+
+  The hold mechanism was not at fault and the gauge was not lying. `AddEntity` has
+  exactly one call site (the join path) and `RemoveEntity` only ever runs from the
+  reconnect-hold task, so an entity whose hold is never *scheduled* is unreachable
+  forever. `OnPlayerDisconnected` was called on the happy path only, at the end of the
+  `try`. Any throw after the entity was attached — most easily the `WriteOneAsync` that
+  sends `JoinTokenResp`, against a client that gave up during the handshake — skipped
+  it entirely.
+
+  The asymmetry in the symptom is what identified the path: `players_online` is an
+  independent counter incremented *after* that write, so an abort before it leaves the
+  player count correct and only the entity count wrong. That is exactly what was
+  observed.
+
+  Teardown now runs from a `finally` block, guarded by whether the entity was actually
+  attached. A second flag tracks whether `PlayerJoined()` was recorded, so an aborted
+  join cannot decrement a counter it never incremented and corrupt the count for
+  players who really are online.
+
+  Also in the same path, all reachable from an aborted or racing join:
+  - A superseded hold's `CancellationTokenSource` was neither cancelled nor disposed,
+    leaving a live timer for a removal the newer hold already owns.
+  - The expiry task claimed its removal non-atomically. It now uses
+    `TryRemove(KeyValuePair)`, which only succeeds while *its* hold is still registered,
+    and additionally refuses to remove an entity that has a live connection — a
+    reconnect during the pre-removal save must not have its entity deleted underneath
+    it.
+  - An unexpected exception in the expiry task was swallowed, silently leaking the
+    entity it was responsible for. It now logs and removes anyway.
+  - `holdCts` is disposed on every path.
+
+  `GameServerHost.EntityCount` / `PendingHolds` are exposed so tests assert the number
+  an operator sees rather than a parallel count that could agree while the gauge lies.
+
+- **Keyframe stampede: per-connection keyframe counters are now staggered.** Every
+  connection started its counter at zero, so clients that joined on the same tick
+  keyframed on the same tick afterwards, forever, serializing full state for the whole
+  cohort at once.
+
+  `SnapshotDeltaState` takes a phase derived from the user id (FNV-1a, not
+  `string.GetHashCode()`, which is randomized per process). Deterministic on purpose:
+  a random offset would spread load equally well but make a replay of the same session
+  produce different frames — the same reasoning that puts cooldowns on tick counts
+  rather than wall clock.
+
+  The phase is applied **once**, right after the join keyframe, shortening a single
+  cycle. A permanent offset would shorten this client's cycle forever and hand it more
+  keyframes, and more bandwidth, than everyone else. The parameterless constructor is
+  unstaggered, so existing callers are unaffected.
+
+  Note: no end-to-end latency improvement is claimed — see the PR. The dev box's
+  run-to-run variance swamps the effect; the unit tests prove the keyframes are spread.
+
 ### Added
 - **KCP transport for the gameplay hop (`--transport kcp` / `GAMESERVER_TRANSPORT`).**
   Until now this flag only selected what got *advertised*: the C# server had no KCP

@@ -24,7 +24,7 @@ public sealed class Connection : IDisposable
     /// Per-connection snapshot delta encoder state. Lives and dies with the connection,
     /// so a reconnecting client always starts from a fresh keyframe.
     /// </summary>
-    public GameServer.Snapshot.SnapshotDeltaState DeltaState { get; } = new();
+    public GameServer.Snapshot.SnapshotDeltaState DeltaState { get; }
 
     private readonly ITransportConnection _transport;
     private readonly Stream _stream;
@@ -40,6 +40,10 @@ public sealed class Connection : IDisposable
     public Connection(string userId, ITransportConnection transport, ILogger logger)
     {
         UserId = userId;
+        // Keyframe phase is derived from the user id, so it is stable across runs and
+        // across reconnects of the same player.
+        DeltaState = new GameServer.Snapshot.SnapshotDeltaState(
+            GameServer.Snapshot.SnapshotDeltaState.PhaseFor(userId));
         _transport = transport;
         _stream = transport.Stream;
         _logger = logger;

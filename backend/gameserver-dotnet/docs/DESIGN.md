@@ -645,3 +645,68 @@ Coverage: `GameServer.Tests/Net/KcpTransportTests.cs` (crypto vectors, CFB
 round-trips including the unpadded tail, ARQ loopback and fragmentation, conv
 rejection, listener binding, stream adapter chunking and EOF, transport-kind
 normalisation) and `GameServer.Tests/Net/KcpInteropTests.cs` (the Go client).
+
+## Entity Lifecycle and Keyframe Phase (2026-08-07)
+
+### Entity removal has exactly one owner, so a missed removal is permanent
+
+`GameWorld.AddEntity` has one call site — the join path — and `RemoveEntity` runs from
+one place: the reconnect-hold expiry task. There is no sweep, no GC, no reconciliation
+against the connection table. That makes the hold task the **sole owner** of every
+player entity's removal, and it means a join that attaches an entity without scheduling
+a hold leaks it for the life of the process.
+
+That is what happened. `OnPlayerDisconnected` was the last statement of the `try` block,
+so it ran only when the connection loop exited normally. An abort after the entity was
+attached — most easily the `WriteOneAsync` sending `JoinTokenResp`, against a client
+that gave up mid-handshake — skipped it. The entity then stayed in the world, still
+scanned by the AOI pass and diffed by the delta encoder on every tick, forever. It turns
+a cost bounded by *concurrent* players into one that grows with *cumulative* joins.
+
+Teardown therefore runs from `finally`, gated on an `entityAttached` flag set the moment
+the world holds an entity for that user. The rule is: **once the world owns an entity for
+a connection, every exit path must hand it to the hold scheduler.**
+
+`players_online` is a separate counter, not derived from the connection table, and it is
+incremented *after* the write that could throw. That asymmetry is why the symptom looked
+the way it did — correct player count, stuck entity count — and it is why teardown needs
+a second flag (`countedOnline`): decrementing a counter an aborted join never incremented
+would corrupt the count for the players who really are online.
+
+The expiry task claims its removal with `TryRemove(KeyValuePair)`, which succeeds only
+while *its* hold is still the registered one, and additionally declines to remove an
+entity that has a live connection. A reconnect that lands during the pre-removal save
+must not have its freshly reattached entity deleted underneath it. A narrow residual
+window remains — a reconnect can still interleave between the task's claim and its
+connection lookup — and closing it fully needs per-user serialisation of the join and
+expiry paths, which is not worth the lock today: the consequence is a reconnecting
+player being respawned from the state that was just saved, not corruption.
+
+### Keyframe phase is per-connection and derived from the user id
+
+Every connection began its keyframe counter at zero, so a cohort that joined on the same
+tick kept keyframing on the same tick. Full state for all of them serialises in one tick,
+periodically, which is a latency spike exactly while a server fills up.
+
+`SnapshotDeltaState` now takes a phase offset. Three properties matter:
+
+- **Deterministic, not random.** A random offset spreads load just as well, but the same
+  session replayed would produce different frames. Same reasoning as tick-based cooldowns
+  above: reproducibility is a property we keep on purpose.
+- **FNV-1a over the user id, not `string.GetHashCode()`.** .NET randomizes string hashing
+  per process, so the built-in hash is stable within a run and different across runs —
+  precisely the non-determinism being avoided.
+- **Applied once, after the join keyframe.** It shortens exactly one cycle. Applying it
+  on every keyframe would permanently shorten this client's period to
+  `interval - phase`, giving it more keyframes, and more bandwidth, than its peers.
+
+The parameterless constructor is unstaggered and behaves exactly as before.
+
+The keyframe period is `interval + 1` snapshots, not `interval` — the counter is compared
+before being incremented. That predates the stagger and is left alone; the tests derive
+the period rather than hard-coding it, so they describe what the code does.
+
+Coverage: `GameServer.Tests/Server/EntityLifecycleTests.cs` (clean disconnect, aborted
+join, cohort join/leave, reconnect-within-hold, online-count integrity) and
+`GameServer.Tests/Snapshot/KeyframeStaggerTests.cs` (spread, determinism, single
+shortened cycle, unstaggered default).

@@ -135,6 +135,16 @@ public sealed class GameServerHost : IAsyncDisposable
     /// <summary>Entity hold timers for reconnect (user ID -> hold CTS).</summary>
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _holds = new();
 
+    /// <summary>
+    /// Entities currently in the world — the exact value the <c>gameserver_entities</c>
+    /// gauge publishes. Exposed so lifecycle tests assert the number an operator sees
+    /// rather than a parallel count that could agree while the gauge lies.
+    /// </summary>
+    public int EntityCount => _world.EntityCount;
+
+    /// <summary>Reconnect holds currently pending. Diagnostics and tests.</summary>
+    public int PendingHolds => _holds.Count;
+
     public GameServerHost(ServerOptions options)
     {
         _options = options;
@@ -346,6 +356,15 @@ public sealed class GameServerHost : IAsyncDisposable
     private async Task HandleConnectionAsync(ITransportConnection accepted, CancellationToken ct)
     {
         Connection? conn = null;
+        // The world holds an entity for this user and the reconnect hold owes it a
+        // removal. Set once the entity is created or reattached; never cleared.
+        bool entityAttached = false;
+        // PlayerJoined() was recorded for this connection, so PlayerLeft() must balance
+        // it — and must NOT be called otherwise, or an aborted join would decrement
+        // another player's count.
+        bool countedOnline = false;
+        // userId is needed by the finally block, so it lives outside the try.
+        string userId = "";
         try
         {
             // Use a temporary logger-only connection for the handshake
@@ -390,7 +409,7 @@ public sealed class GameServerHost : IAsyncDisposable
                 return;
             }
 
-            string userId = claims.UserId;
+            userId = claims.UserId;
 
             // Cancel any pending entity hold for this user (reconnect)
             if (_holds.TryRemove(userId, out var holdCts))
@@ -434,6 +453,13 @@ public sealed class GameServerHost : IAsyncDisposable
                 _world.AddEntity(entity);
             }
 
+            // From here the world holds an entity for this user, so teardown is
+            // MANDATORY on every exit path — see the finally block. Before this flag
+            // existed, any throw between here and OnPlayerDisconnected (most easily the
+            // WriteOneAsync below, against a client that gave up during the handshake)
+            // left the entity in the world with no hold scheduled, i.e. leaked forever.
+            entityAttached = true;
+
             // Create the real connection with the verified user ID, reusing the same
             // accepted transport connection (no reconnect, no second handshake).
             conn = new Connection(userId, accepted, connLogger);
@@ -447,6 +473,9 @@ public sealed class GameServerHost : IAsyncDisposable
             await conn.WriteOneAsync(resp);
 
             _metrics?.PlayerJoined();
+            // players_online is an independent counter, not derived from _connections,
+            // so it must be balanced exactly once and only if it was incremented.
+            countedOnline = true;
             // Fire-and-forget: the gateway's capacity view should be fresh, but a slow
             // or down Redis must never delay a player entering the world.
             _registration?.NotifyPlayerCountChanged();
@@ -457,9 +486,6 @@ public sealed class GameServerHost : IAsyncDisposable
             var readTask = conn.ReadLoopAsync(OnMessageReceived);
 
             await Task.WhenAny(readTask, writeTask);
-
-            // Step 7: On disconnect, hold entity for reconnect window
-            OnPlayerDisconnected(userId);
         }
         catch (Exception ex)
         {
@@ -467,6 +493,15 @@ public sealed class GameServerHost : IAsyncDisposable
         }
         finally
         {
+            // Step 7: hold the entity for the reconnect window. This runs from the
+            // finally block, not the happy path, because an abort after the entity was
+            // attached leaks it otherwise: nothing else ever removes an entity, so a
+            // missed hold is permanent, and every leaked entity keeps being scanned by
+            // AOI and diffed on every tick for the life of the process.
+            if (entityAttached)
+            {
+                OnPlayerDisconnected(userId, countedOnline);
+            }
             conn?.Dispose();
         }
     }
@@ -502,10 +537,18 @@ public sealed class GameServerHost : IAsyncDisposable
         return Task.CompletedTask;
     }
 
-    private void OnPlayerDisconnected(string userId)
+    /// <param name="countedOnline">
+    /// Whether <see cref="GameMetrics.PlayerJoined"/> was recorded for this connection.
+    /// An aborted join never incremented it, and decrementing anyway would corrupt the
+    /// count for the players who really are online.
+    /// </param>
+    private void OnPlayerDisconnected(string userId, bool countedOnline)
     {
         _connections.Remove(userId);
-        _metrics?.PlayerLeft();
+        if (countedOnline)
+        {
+            _metrics?.PlayerLeft();
+        }
         _registration?.NotifyPlayerCountChanged();
 
         var holdTtl = _options.Mode == "dungeon"
@@ -513,6 +556,14 @@ public sealed class GameServerHost : IAsyncDisposable
             : _options.HoldTtl;
 
         var holdCts = new CancellationTokenSource();
+        // Replace rather than overwrite: a superseded hold's CTS would otherwise never
+        // be cancelled or disposed, and its timer would keep running to fire a removal
+        // this one already owns.
+        if (_holds.TryRemove(userId, out var superseded))
+        {
+            superseded.Cancel();
+            superseded.Dispose();
+        }
         _holds[userId] = holdCts;
 
         _logger.LogInformation("Player {UserId} disconnected, holding entity for {Ttl}",
@@ -531,14 +582,40 @@ public sealed class GameServerHost : IAsyncDisposable
                 // tick (up to SaveInterval, 30s) instead of at most one tick.
                 await _saver.SavePlayerAsync(userId);
 
-                // Hold expired, remove entity
-                _world.RemoveEntity(userId);
-                _holds.TryRemove(userId, out _);
-                _logger.LogInformation("Entity hold expired for {UserId}, entity removed", userId);
+                // Claim the removal atomically: TryRemove(KeyValuePair) only succeeds
+                // while THIS hold is still the registered one. A reconnect during the
+                // save above cancels and removes it first, and must not then have its
+                // freshly reattached entity deleted out from under it.
+                if (_holds.TryRemove(new KeyValuePair<string, CancellationTokenSource>(userId, holdCts))
+                    && _connections.Get(userId) == null)
+                {
+                    _world.RemoveEntity(userId);
+                    _logger.LogInformation("Entity hold expired for {UserId}, entity removed", userId);
+                }
+                else
+                {
+                    _logger.LogInformation(
+                        "Entity hold for {UserId} superseded by a reconnect; entity kept", userId);
+                }
             }
             catch (OperationCanceledException)
             {
                 // Reconnected before hold expired
+            }
+            catch (Exception ex)
+            {
+                // The removal must not be lost to an unexpected failure: nothing else
+                // ever removes an entity, so swallowing this silently would leak it.
+                _logger.LogError(ex, "Entity hold for {UserId} failed; removing anyway", userId);
+                _holds.TryRemove(new KeyValuePair<string, CancellationTokenSource>(userId, holdCts));
+                if (_connections.Get(userId) == null)
+                {
+                    _world.RemoveEntity(userId);
+                }
+            }
+            finally
+            {
+                holdCts.Dispose();
             }
         });
     }
