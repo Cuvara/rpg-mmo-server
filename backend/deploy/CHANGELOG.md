@@ -26,6 +26,32 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     a heal time** — Redis was back 18s before the first probe, so the entry was
     already present when first observed. The measured ~4s self-heal from the
     post-G1 re-run stands as the real figure; this run is not a better one.
+- **Retracted the 150-player ceiling from the deploy module's docs.**
+  `deploy/CLAUDE.md` and `docs/README.md` still stated the per-game-server
+  ceiling "IS measured: 150 players, bottleneck = snapshot JSON serialization".
+  Both halves are now false — the figure predates Protobuf, the entity-type enum
+  and id interning, which removed 81% of the wire and with it the constraint that
+  produced 150. The root `CLAUDE.md` and ADR-7 had already been corrected; this
+  module had not, and `deploy/CLAUDE.md` is loaded into agent context, so it was
+  actively re-seeding a retracted number.
+  - Both files now lead with the figure worth planning on — **45.9 KB/s per
+    client at 200 players**, inside ADR-7's mobile threshold, reproduced to 0.3%
+    — and state plainly that **the player ceiling is unknown and not measurable
+    on the current hardware**, with ADR-7 item 6 named as the ⛔ blocker.
+  - The "Game servers @ 150" column is **removed, not updated**. Every value in
+    it was tier CCU divided by the retracted figure: arithmetic on a number that
+    no longer exists, wearing the confidence of a measurement.
+  - `GAMESERVER_CAPACITY=100` is re-described as a **policy limit rather than
+    headroom against a measured ceiling** — there is no measured ceiling for it
+    to have headroom against.
+
+### Added
+- `.env.example` now sets `GAME_DB_URL` instead of only mentioning it in a comment.
+  Host-side tools read it — `bin/smoketest` (whose new `gamestate_*` persistence
+  checks SKIP without it) and `gameserver-dotnet --migrate-only`. The gameserver
+  *container* is unaffected: `docker-compose.yml:238` builds its own DSN from the
+  `POSTGRES_GAME_*` values and points at `postgres-game:5432`, and nothing in
+  compose substitutes `${GAME_DB_URL}`, so the new value cannot leak into it.
 
 ### Removed
 - **The `GAMESERVER_METRICS_ADDR=gameserver-dotnet:9101` workaround — deleted.**
