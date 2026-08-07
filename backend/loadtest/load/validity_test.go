@@ -140,6 +140,22 @@ func TestInvalidLevelIsExcludedFromTheCeiling(t *testing.T) {
 	}
 }
 
+// An INVALID level must also count as Degraded, so `-fail-on-degraded` exits
+// non-zero on it. An unmeasurable level is not a passing level, and a CI job
+// gating on that flag must not go green because the run was too broken to judge.
+func TestInvalidAlsoTripsTheFailOnDegradedExitCode(t *testing.T) {
+	r := healthyResult()
+	r.Client.PlayersFailed = 1
+
+	v := Evaluate(r)
+	if !v.Invalid {
+		t.Fatal("expected INVALID")
+	}
+	if !v.Degraded {
+		t.Error("INVALID must also set Degraded, or -fail-on-degraded would exit 0 on a run that measured nothing")
+	}
+}
+
 // healthyResult is a run with nothing wrong with it, at 150 players.
 func healthyResult() *Result {
 	r := &Result{}
