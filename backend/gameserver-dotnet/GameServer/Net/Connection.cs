@@ -59,7 +59,19 @@ public sealed class Connection : IDisposable
     private readonly Channel<Envelope> _sendChannel;
     private readonly CancellationTokenSource _cts;
     private readonly ILogger _logger;
-    private int _disposed;
+    // Close lifecycle, three states rather than a bool.
+    //
+    // A single "already closing" flag is being asked to mean two different things
+    // — close BEGUN and close COMPLETE — and Dispose() needs the second. When
+    // Close() returned early it told Dispose() "someone else is closing", never
+    // "closing has finished", so Dispose() could free the CancellationTokenSource
+    // while the other thread was still between its CAS and its Cancel(). That
+    // threw ObjectDisposedException out of GameServerHost.ShutdownAsync, which
+    // under Agones means terminate fails instead of draining.
+    private const int StateOpen = 0;
+    private const int StateClosing = 1;
+    private const int StateClosed = 2;
+    private int _closeState;
 
     /// <summary>The peer address, for logging.</summary>
     public string RemoteEndPoint => _transport.RemoteEndPoint;
@@ -178,15 +190,36 @@ public sealed class Connection : IDisposable
     /// <summary>Close the connection. Idempotent.</summary>
     public void Close()
     {
-        if (Interlocked.CompareExchange(ref _disposed, 1, 0) != 0) return;
-        _cts.Cancel();
-        _sendChannel.Writer.TryComplete();
-        try { _transport.Close(); } catch { /* ignore */ }
+        if (Interlocked.CompareExchange(ref _closeState, StateClosing, StateOpen) != StateOpen) return;
+        try
+        {
+            _cts.Cancel();
+            _sendChannel.Writer.TryComplete();
+            try { _transport.Close(); } catch { /* ignore */ }
+        }
+        finally
+        {
+            // In a finally so a throw from a cancellation callback cannot strand
+            // the state at Closing and spin Dispose() forever.
+            Volatile.Write(ref _closeState, StateClosed);
+        }
     }
 
     public void Dispose()
     {
         Close();
+
+        // Wait for an in-flight Close() on another thread to FINISH before
+        // freeing the token source it is still using. Close() returning is not
+        // enough: it returns immediately when someone else owns the close.
+        //
+        // A spin rather than a lock because CancellationTokenSource.Cancel runs
+        // registered callbacks inline, and holding a lock across arbitrary user
+        // code invites a deadlock. The wait is bounded by the length of Close(),
+        // which is a cancel, a channel completion and a socket close.
+        var spin = new SpinWait();
+        while (Volatile.Read(ref _closeState) != StateClosed) spin.SpinOnce();
+
         _cts.Dispose();
     }
 }

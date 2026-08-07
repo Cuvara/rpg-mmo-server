@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`ObjectDisposedException` out of `ShutdownAsync` when `Close()` raced
+  `Dispose()`.** Under Agones that means terminate throws instead of draining.
+
+  `Close()` guarded itself with a single flag and `Dispose()` used that guard as
+  a barrier. It is not one: the early return means "another thread STARTED
+  closing", never "another thread FINISHED closing". So `Dispose()` could free
+  the `CancellationTokenSource` while the other thread sat between its CAS and
+  its `Cancel()`.
+
+  Replaced with a three-state lifecycle (open → closing → closed); `Dispose()`
+  waits for *closed* before disposing the CTS. A spin rather than a lock because
+  `CancellationTokenSource.Cancel` runs registered callbacks inline and a lock
+  across arbitrary callback code invites a deadlock. The state transition to
+  *closed* is in a `finally`, so a throwing callback cannot strand it and spin
+  `Dispose()` forever.
+
+  **`KcpSession` had the identical shape and was also broken** — verified by
+  reproducing the same exception against the unfixed file. Fixed at the same
+  time rather than waiting for a KCP deployment to find it.
+
+  This is the third appearance of one pattern: the 2026-08-06 blocker
+  (`GameServerHost._cts?.Cancel()`, where `?.` guarded null but not disposed) was
+  fixed at the one call site that threw, and the pattern was not swept. All six
+  `CancellationTokenSource` sites in the module have now been audited — see the
+  PR for the per-site verdict.
+
+### Changed
+- `MetricsEndpoint.DisposeAsync` is now idempotent. Single-owner today, so this
+  is hardening rather than a fix, but an unguarded Cancel-then-Dispose is the
+  exact shape that has now thrown twice.
+
 ### Added
 - **`gameserver_resyncs_total`** (counter, `map_id`) — keyframes requested by a
   client via `MsgResync`. Expected value is approximately zero.
