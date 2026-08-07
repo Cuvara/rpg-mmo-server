@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +27,27 @@ type Config struct {
 	Inputs        int           // SMOKE_INPUTS    — number of MsgInput frames
 	InputInterval time.Duration // SMOKE_INPUT_INTERVAL — delay between inputs
 	MinSnapshots  int           // SMOKE_MIN_SNAPSHOTS — required MsgSnapshot count
+
+	// --- persistence checks (see docs/README.md "Database checks") ---
+
+	// DeviceID pins the Nakama device id instead of generating a random one.
+	// Reusing an id reuses the account, which is occasionally useful when
+	// debugging against a specific player. Empty = random per run (the default,
+	// and the only mode that guarantees a clean slate).
+	DeviceID string // SMOKE_DEVICE_ID
+
+	// GameDBURL is the game-state PostgreSQL DSN. When empty the game-state
+	// checks are SKIPPED rather than silently passed; --require-db turns a skip
+	// into a failure. CD already writes GAME_DB_URL into deploy/.env, which the
+	// post-deploy smoke step sources, so no extra credential is needed there.
+	GameDBURL string // GAME_DB_URL
+
+	SkipDB          bool          // SMOKE_SKIP_DB    — skip every persistence check
+	RequireDB       bool          // SMOKE_REQUIRE_DB — a skipped persistence check fails the run
+	ExpectMigration int           // SMOKE_EXPECT_MIGRATION — required schema_migrations version
+	DBPollTimeout   time.Duration // SMOKE_DB_POLL_TIMEOUT  — deadline for the player_states row
+	DBPollInterval  time.Duration // SMOKE_DB_POLL_INTERVAL — gap between polls
+	HoldTTL         time.Duration // SMOKE_HOLD_TTL — game server reconnect hold, waited out before the reload check
 }
 
 // Defaults matching the dev deployment.
@@ -42,6 +64,34 @@ const (
 	DefaultInputs        = 10
 	DefaultInputInterval = 100 * time.Millisecond
 	DefaultMinSnapshots  = 5
+
+	// DefaultExpectMigration is the highest version in
+	// backend/deploy/db/migrations/gamestate/. Bump it in the same commit that
+	// adds a migration — that is the point of the assertion.
+	DefaultExpectMigration = 1
+
+	// DefaultDBPollTimeout bounds the wait for the player_states row. The game
+	// server writes on the AsyncSaver sweep (30s) or when the reconnect hold
+	// expires and the entity is evicted (another 30s), so the worst case is
+	// ~60s; 75s leaves headroom without letting CI hang.
+	DefaultDBPollTimeout  = 75 * time.Second
+	DefaultDBPollInterval = time.Second
+
+	// DefaultHoldTTL mirrors GameServerOptions.HoldTtl for a map server
+	// (GameServer/Server/GameServer.cs). The reload check waits this out so the
+	// rejoin really goes through the player store instead of reattaching to a
+	// still-resident entity.
+	DefaultHoldTTL = 30 * time.Second
+
+	// holdGrace is added to HoldTTL before rejoining, covering clock skew and
+	// the server's eviction latency.
+	holdGrace = 3 * time.Second
+
+	// reloadTolerance is the accepted gap between the position PostgreSQL holds
+	// and the position the server respawns at. player_states.x is a float4, so
+	// a round-trip through it loses precision relative to the float32 the wire
+	// carries; the tolerance only has to absorb that, not real movement.
+	reloadTolerance = 0.01
 )
 
 // EnvOr returns getenv(key) or def when the variable is unset/empty.
@@ -66,13 +116,41 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 		Inputs:        DefaultInputs,
 		InputInterval: DefaultInputInterval,
 		MinSnapshots:  DefaultMinSnapshots,
+
+		DeviceID:        getenv("SMOKE_DEVICE_ID"),
+		GameDBURL:       getenv("GAME_DB_URL"),
+		SkipDB:          isTruthy(getenv("SMOKE_SKIP_DB")),
+		RequireDB:       isTruthy(getenv("SMOKE_REQUIRE_DB")),
+		ExpectMigration: DefaultExpectMigration,
+		DBPollTimeout:   DefaultDBPollTimeout,
+		DBPollInterval:  DefaultDBPollInterval,
+		HoldTTL:         DefaultHoldTTL,
 	}
-	if v := getenv("SMOKE_TIMEOUT"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return cfg, fmt.Errorf("SMOKE_TIMEOUT: %w", err)
+	for _, d := range []struct {
+		key string
+		dst *time.Duration
+	}{
+		{"SMOKE_TIMEOUT", &cfg.Timeout},
+		{"SMOKE_DB_POLL_TIMEOUT", &cfg.DBPollTimeout},
+		{"SMOKE_DB_POLL_INTERVAL", &cfg.DBPollInterval},
+		{"SMOKE_HOLD_TTL", &cfg.HoldTTL},
+	} {
+		v := getenv(d.key)
+		if v == "" {
+			continue
 		}
-		cfg.Timeout = d
+		parsed, err := time.ParseDuration(v)
+		if err != nil {
+			return cfg, fmt.Errorf("%s: %w", d.key, err)
+		}
+		*d.dst = parsed
+	}
+	if v := getenv("SMOKE_EXPECT_MIGRATION"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return cfg, fmt.Errorf("SMOKE_EXPECT_MIGRATION: %w", err)
+		}
+		cfg.ExpectMigration = n
 	}
 
 	fs := flag.NewFlagSet("smoketest", flag.ContinueOnError)
@@ -86,6 +164,14 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	fs.IntVar(&cfg.Inputs, "inputs", cfg.Inputs, "Number of input frames to send")
 	fs.DurationVar(&cfg.InputInterval, "input-interval", cfg.InputInterval, "Delay between input frames")
 	fs.IntVar(&cfg.MinSnapshots, "min-snapshots", cfg.MinSnapshots, "Minimum snapshots required to pass")
+	fs.StringVar(&cfg.DeviceID, "device-id", cfg.DeviceID, "Nakama device id to authenticate with (default: random per run)")
+	fs.StringVar(&cfg.GameDBURL, "game-db-url", cfg.GameDBURL, "Game-state PostgreSQL DSN; unset skips the game-state checks")
+	fs.BoolVar(&cfg.SkipDB, "skip-db", cfg.SkipDB, "Skip every persistence check (realtime flow only)")
+	fs.BoolVar(&cfg.RequireDB, "require-db", cfg.RequireDB, "Fail instead of skipping when a persistence check cannot run")
+	fs.IntVar(&cfg.ExpectMigration, "expect-migration-version", cfg.ExpectMigration, "Required schema_migrations version")
+	fs.DurationVar(&cfg.DBPollTimeout, "db-poll-timeout", cfg.DBPollTimeout, "Deadline for the player_states row to appear")
+	fs.DurationVar(&cfg.DBPollInterval, "db-poll-interval", cfg.DBPollInterval, "Gap between player_states polls")
+	fs.DurationVar(&cfg.HoldTTL, "hold-ttl", cfg.HoldTTL, "Game server reconnect hold, waited out before the reload check")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
@@ -109,7 +195,37 @@ func (c Config) Validate() error {
 	if err := transport.Validate(c.Transport); err != nil {
 		return fmt.Errorf("transport: %w", err)
 	}
+	if c.ExpectMigration <= 0 {
+		return fmt.Errorf("expect-migration-version must be > 0, got %d", c.ExpectMigration)
+	}
+	if c.DBPollTimeout <= 0 {
+		return fmt.Errorf("db-poll-timeout must be > 0, got %s", c.DBPollTimeout)
+	}
+	if c.DBPollInterval <= 0 {
+		return fmt.Errorf("db-poll-interval must be > 0, got %s", c.DBPollInterval)
+	}
+	if c.HoldTTL < 0 {
+		return fmt.Errorf("hold-ttl must be >= 0, got %s", c.HoldTTL)
+	}
+	// --require-db promises the persistence checks actually ran; a config that
+	// cannot run them must be rejected up front rather than at step time.
+	if c.RequireDB && c.SkipDB {
+		return fmt.Errorf("--require-db and --skip-db are mutually exclusive")
+	}
+	if c.RequireDB && c.GameDBURL == "" {
+		return fmt.Errorf("--require-db needs GAME_DB_URL (env or --game-db-url) for the game-state checks")
+	}
 	return nil
+}
+
+// isTruthy interprets an environment flag. Anything other than the usual
+// negatives enables the option, so SMOKE_SKIP_DB=1 and =true both work.
+func isTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "0", "false", "no", "off":
+		return false
+	}
+	return true
 }
 
 // NormalizeDialAddr rewrites listen-style addresses (":8000", "0.0.0.0:9000",
@@ -141,16 +257,24 @@ type StepResult struct {
 	Latency time.Duration
 	Err     error
 	Detail  string
+	// Skipped marks a check that could not run for want of configuration
+	// (typically GAME_DB_URL). A skip is reported as SKIP with its reason in
+	// Detail — never as PASS, because "the check did not run" and "the check
+	// passed" must never look the same. --require-db turns skips into errors.
+	Skipped bool
 }
 
-// OK reports whether the step passed.
+// OK reports whether the step passed. A skipped step is not a failure.
 func (r StepResult) OK() bool { return r.Err == nil }
 
 // FormatStep renders one human-readable result line.
 func FormatStep(r StepResult) string {
 	status := "PASS"
-	if !r.OK() {
+	switch {
+	case !r.OK():
 		status = "FAIL"
+	case r.Skipped:
+		status = "SKIP"
 	}
 	line := fmt.Sprintf("%-4s  %-22s %8s", status, r.Name, r.Latency.Round(time.Millisecond))
 	if r.Detail != "" {

@@ -5,6 +5,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `.env.example` now sets `GAME_DB_URL` instead of only mentioning it in a comment.
+  Host-side tools read it — `bin/smoketest` (whose new `gamestate_*` persistence
+  checks SKIP without it) and `gameserver-dotnet --migrate-only`. The gameserver
+  *container* is unaffected: `docker-compose.yml:238` builds its own DSN from the
+  `POSTGRES_GAME_*` values and points at `postgres-game:5432`, and nothing in
+  compose substitutes `${GAME_DB_URL}`, so the new value cannot leak into it.
+
 ### Removed
 - **The `GAMESERVER_METRICS_ADDR=gameserver-dotnet:9101` workaround — deleted.**
   The C# metrics endpoint was pinned to the compose service name because
