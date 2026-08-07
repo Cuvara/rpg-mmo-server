@@ -531,7 +531,9 @@ func (r *Runner) stepGameStateReload() (string, error) {
 		if err := env.UnmarshalPayload(&s); err != nil {
 			continue
 		}
-		state.Apply(s)
+		if err := state.Apply(s); err != nil {
+			return "", fmt.Errorf("reload: apply snapshot: %w", err)
+		}
 		if e, ok := state.Get(r.userID); ok {
 			spawn, found = e, true
 		}

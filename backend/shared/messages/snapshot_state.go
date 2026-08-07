@@ -1,5 +1,7 @@
 package messages
 
+import "fmt"
+
 // SnapshotState reconstructs authoritative world state from the keyframe/delta
 // snapshot stream produced by the game server.
 //
@@ -21,6 +23,12 @@ type SnapshotState struct {
 	// Keyframes and Deltas count the snapshots applied so far.
 	Keyframes int
 	Deltas    int
+
+	// handles maps interned entity handles to ids for the current keyframe
+	// interval. Cleared on every keyframe, because the sender resets its handle
+	// space there too — that shared reset point is what makes the mapping
+	// self-repairing rather than something both sides have to agree to forget.
+	handles map[uint32]string
 }
 
 // NewSnapshotState returns an empty state ready to accept snapshots.
@@ -35,19 +43,50 @@ func NewSnapshotState() *SnapshotState {
 // duplicated snapshots (Tick <= current Tick) are still applied — the transport
 // is ordered, and dropping them would silently diverge — but Tick itself never
 // moves backwards.
-func (s *SnapshotState) Apply(msg SnapshotMessage) {
+//
+// Returns ErrUnknownHandle when a delta references an interned handle this state
+// has no binding for. The state is left untouched in that case: a partially
+// applied snapshot is worse than an unapplied one, because it looks like valid
+// state. The caller must request a keyframe (MsgResync) and apply that instead.
+func (s *SnapshotState) Apply(msg SnapshotMessage) error {
 	if s.Entities == nil {
 		s.Entities = make(map[string]EntitySnapshot)
+	}
+	if s.handles == nil {
+		s.handles = make(map[uint32]string)
+	}
+
+	// Resolve every entity BEFORE mutating anything, so an unknown handle
+	// aborts the whole snapshot rather than leaving half of it applied.
+	resolved := make([]EntitySnapshot, len(msg.Entities))
+	for i, e := range msg.Entities {
+		if e.Handle != 0 && e.ID == "" {
+			id, ok := s.handles[e.Handle]
+			if !ok {
+				// On a keyframe this cannot legitimately happen: a keyframe
+				// re-introduces every binding. If it does, the sender is wrong
+				// rather than us, and the same recovery applies.
+				return fmt.Errorf("handle %d at tick %d: %w", e.Handle, msg.Tick, ErrUnknownHandle)
+			}
+			e.ID = id
+		}
+		resolved[i] = e
 	}
 
 	if msg.Full {
 		clear(s.Entities)
+		// The sender restarts its handle space at every keyframe, so old
+		// bindings are not merely stale, they are actively misleading.
+		clear(s.handles)
 		s.Keyframes++
 	} else {
 		s.Deltas++
 	}
 
-	for _, e := range msg.Entities {
+	for _, e := range resolved {
+		if e.Handle != 0 {
+			s.handles[e.Handle] = e.ID
+		}
 		s.Entities[e.ID] = e
 	}
 	for _, id := range msg.Removed {
@@ -60,6 +99,7 @@ func (s *SnapshotState) Apply(msg SnapshotMessage) {
 	if msg.AckTick > s.AckTick {
 		s.AckTick = msg.AckTick
 	}
+	return nil
 }
 
 // Get returns the reconstructed state of one entity.

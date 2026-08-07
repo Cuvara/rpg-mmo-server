@@ -438,3 +438,68 @@ cost per entity. (An earlier revision of this note said ~40%; that counted only
 the `id` and was wrong.) No encoding can compress that away. Interning
 those is the only remaining lever on the wire itself; after that it is a question
 of sending less (AOI radius, distance-tiered update rates), not of encoding.
+
+## Entity-id interning: handles scoped to a keyframe interval (2026-08-07)
+
+A realistic entity id (`lt-000000000042`) costs ~17 bytes on every mention, 41%
+of a packed `EntitySnapshot` and the single largest term once the type became an
+enum. Interning replaces repeat mentions with a varint handle.
+
+**This is protocol state, not a re-encoding.** Everything before it — Protobuf,
+the type enum — could be validated by round-tripping a single message, because a
+message meant the same thing in isolation. A handle does not: it means whatever
+the two ends agree it means. So the correctness risk lives entirely in them
+disagreeing, and a happy-path test proves nothing.
+
+### The lifecycle
+
+- Handles are allocated per connection, from 1, and **reset at every keyframe**.
+- An entity's id is sent **once per interval**, on the message that introduces
+  its handle. Later mentions carry the handle alone.
+- A handle is **never reused within an interval**, even after the entity
+  despawns.
+- `handle = 0` means "not interned", so a peer that does not implement this — or
+  a JSON connection, which has no handle field — is unaffected.
+
+### Why the keyframe is the reset point
+
+It is a synchronisation point both ends *already* agree on, and it was already
+self-sufficient: a keyframe replaces the entity set outright. Making it also
+reset the handle space means every binding is re-introduced there, so **any
+divergence repairs itself within one keyframe interval whether or not either
+side noticed it**. No new agreement, no new message type, no negotiated
+handshake — the recovery path is the one that already existed (`MsgResync`).
+
+It also keeps handles small. Bounded by the entities seen in one interval, they
+stay inside a one- or two-byte varint rather than growing without limit over a
+long session.
+
+### Why handles are not reused
+
+Reuse would keep them smaller still. It is rejected because of *how* it fails: a
+receiver that missed a despawn would silently attribute an update to the wrong
+entity. That is **wrong state, not absent state** — it looks entirely valid,
+renders as a real entity in the wrong place, and nothing detects it. An
+unresolvable handle, by contrast, is loud and recoverable.
+
+The same asymmetry runs through the loadtest's validity gate: prefer the failure
+a human can see.
+
+### The receiver must refuse, not guess
+
+`SnapshotState.Apply` returns `ErrUnknownHandle` when a snapshot references a
+handle it has no binding for, and **applies nothing** — resolution happens before
+any mutation, so a partially-resolvable snapshot leaves no partial state. A
+half-applied snapshot is worse than an unapplied one because it looks like valid
+state.
+
+The caller's correct response is to request a keyframe. `backend/loadtest` does
+exactly this and counts the resyncs, so a client that is quietly resyncing every
+tick shows up as a number rather than as an inexplicably small bandwidth figure.
+
+### What is deliberately not interned
+
+`SnapshotMessage.removed` still carries ids. Removals are comparatively rare, the
+client keys its reconstructed world by id, and interning them would mean the
+despawn path depends on the same table it is tearing down. Worth revisiting with
+a measurement, not before.

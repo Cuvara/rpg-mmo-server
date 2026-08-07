@@ -34,6 +34,9 @@ type PlayerStats struct {
 	BytesTx uint64
 
 	Snapshots int
+	// Resyncs counts keyframes this player had to request because a snapshot
+	// referenced an entity handle it had no binding for.
+	Resyncs   int
 	Keyframes int
 	Deltas    int
 	Inputs    int
@@ -290,6 +293,9 @@ func (p *player) readLoop(ctx context.Context, sentCh <-chan pendingInput) error
 		lastSnap time.Time
 		pending  []pendingInput
 	)
+	// Reconstructs authoritative state the way the Unity client will, which is
+	// also what makes interned handles resolvable.
+	state := messages.NewSnapshotState()
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -326,6 +332,23 @@ func (p *player) readLoop(ctx context.Context, sentCh <-chan pendingInput) error
 		// it as JSON unconditionally silently drops every snapshot under -encoding
 		// proto, which reads as "server sent nothing" rather than as an error.
 		if err := env.UnmarshalPayload(&snap); err != nil {
+			continue
+		}
+
+		// Resolve interned entity handles the way a real client must. This is not
+		// bookkeeping for its own sake: without it the generator would happily
+		// consume handle-only entities with empty ids and report a smaller
+		// bandwidth number for a stream it never actually reconstructed — the
+		// same shape as the run that reported a 97% saving because its clients
+		// had died.
+		if err := state.Apply(snap); err != nil {
+			// Desynchronised: the only correct response is to ask for a keyframe,
+			// which resets the handle space on both sides. Counted, so a run that
+			// is quietly resyncing every tick is visible rather than merely slow.
+			p.stats.Resyncs++
+			if rq, encErr := messages.NewEnvelopeAs(p.cfg.Encoding, messages.MsgResync, struct{}{}); encErr == nil {
+				_ = p.send(p.gsConn, rq)
+			}
 			continue
 		}
 

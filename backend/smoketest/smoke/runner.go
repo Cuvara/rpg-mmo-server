@@ -363,7 +363,12 @@ drain:
 		select {
 		case s := <-snapCh:
 			snapshots++
-			state.Apply(s.msg)
+			// Smoketest speaks JSON, which never interns, so a desync here would
+			// mean the server sent handles to a JSON connection — a bug worth
+			// failing on rather than skipping past.
+			if err := state.Apply(s.msg); err != nil {
+				return "", fmt.Errorf("apply snapshot: %w", err)
+			}
 			if e, ok := state.Get(r.userID); ok {
 				lastX = e.X
 				seen = true

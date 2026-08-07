@@ -649,13 +649,23 @@ func (x *InputMessage) GetAttackTargetId() string {
 // id is ~41 bytes, of which the two strings are ~25 — so string content, not
 // field encoding, is what dominates here.
 //
-// `id` is still a full string rather than an interned handle. That is the larger
-// remaining term (~17 of the ~41 bytes) and is tracked as a follow-up in
-// shared/docs/DESIGN.md; it needs per-connection mapping state, so unlike the
-// type enum it is not a change that can be validated by round-tripping alone.
+// `id` is INTERNED: it is sent once per connection per keyframe interval, to
+// introduce a `handle`, and every later mention of that entity carries only the
+// handle. A realistic id costs ~17 bytes; a handle costs 1-2.
+//
+// Unlike the type enum, this is protocol STATE rather than a re-encoding, so
+// round-tripping one message proves nothing — the risk lives entirely in the two
+// sides disagreeing about what a handle means. See shared/docs/DESIGN.md for the
+// lifecycle and the recovery path.
 type EntitySnapshot struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// Entity id. Present ONLY on the message that introduces `handle` to this
+	// connection; empty on every later mention of the same entity.
+	//
+	// A receiver that sees a handle it has no binding for MUST NOT guess. It has
+	// lost state the sender assumed it had, and the only correct response is to
+	// ask for a keyframe (MsgResync), which resets both sides.
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	// Type name as a string, used ONLY when `type` cannot express the value —
 	// i.e. the simulation produced a kind this schema does not enumerate yet.
 	//
@@ -669,7 +679,22 @@ type EntitySnapshot struct {
 	Hp       int32   `protobuf:"varint,5,opt,name=hp,proto3" json:"hp,omitempty"`
 	MaxHp    int32   `protobuf:"varint,6,opt,name=max_hp,json=maxHp,proto3" json:"max_hp,omitempty"`
 	// The entity kind. ENTITY_TYPE_UNSPECIFIED means "see type_name".
-	Type          EntityType `protobuf:"varint,7,opt,name=type,proto3,enum=rpgmmo.wire.v1.EntityType" json:"type,omitempty"`
+	Type EntityType `protobuf:"varint,7,opt,name=type,proto3,enum=rpgmmo.wire.v1.EntityType" json:"type,omitempty"`
+	// Per-connection alias for `id`, valid only until the next keyframe.
+	//
+	// Handles are allocated from 1 and RESET AT EVERY KEYFRAME, which is what
+	// keeps them small enough to be a 1-2 byte varint and, more importantly, what
+	// bounds how long a disagreement can persist: a keyframe re-introduces every
+	// binding, so any divergence is repaired within one keyframe interval whether
+	// or not anyone noticed it.
+	//
+	// Handles are never reused within an interval. Reuse would mean a receiver
+	// that missed a despawn silently attributes an update to the wrong entity —
+	// wrong state rather than absent state, which is far harder to detect.
+	//
+	// Zero means "not interned": the sender is using `id` directly. That keeps the
+	// field optional, so a peer that does not implement interning still works.
+	Handle        uint32 `protobuf:"varint,8,opt,name=handle,proto3" json:"handle,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -751,6 +776,13 @@ func (x *EntitySnapshot) GetType() EntityType {
 		return x.Type
 	}
 	return EntityType_ENTITY_TYPE_UNSPECIFIED
+}
+
+func (x *EntitySnapshot) GetHandle() uint32 {
+	if x != nil {
+		return x.Handle
+	}
+	return 0
 }
 
 // SnapshotMessage is a world state update sent to the client.
@@ -957,7 +989,7 @@ const file_wire_proto_rawDesc = "" +
 	"\x04tick\x18\x01 \x01(\x04R\x04tick\x12\x15\n" +
 	"\x06move_x\x18\x02 \x01(\x02R\x05moveX\x12\x15\n" +
 	"\x06move_y\x18\x03 \x01(\x02R\x05moveY\x12(\n" +
-	"\x10attack_target_id\x18\x04 \x01(\tR\x0eattackTargetId\"\xb0\x01\n" +
+	"\x10attack_target_id\x18\x04 \x01(\tR\x0eattackTargetId\"\xc8\x01\n" +
 	"\x0eEntitySnapshot\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\ttype_name\x18\x02 \x01(\tR\btypeName\x12\f\n" +
@@ -965,7 +997,8 @@ const file_wire_proto_rawDesc = "" +
 	"\x01y\x18\x04 \x01(\x02R\x01y\x12\x0e\n" +
 	"\x02hp\x18\x05 \x01(\x05R\x02hp\x12\x15\n" +
 	"\x06max_hp\x18\x06 \x01(\x05R\x05maxHp\x12.\n" +
-	"\x04type\x18\a \x01(\x0e2\x1a.rpgmmo.wire.v1.EntityTypeR\x04type\"\xaa\x01\n" +
+	"\x04type\x18\a \x01(\x0e2\x1a.rpgmmo.wire.v1.EntityTypeR\x04type\x12\x16\n" +
+	"\x06handle\x18\b \x01(\rR\x06handle\"\xaa\x01\n" +
 	"\x0fSnapshotMessage\x12\x12\n" +
 	"\x04tick\x18\x01 \x01(\x04R\x04tick\x12\x19\n" +
 	"\back_tick\x18\x02 \x01(\x04R\aackTick\x12\x12\n" +
