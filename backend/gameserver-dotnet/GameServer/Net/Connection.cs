@@ -38,7 +38,21 @@ public sealed class Connection : IDisposable
     /// <see cref="WireEncoding.Json"/> so a reply that somehow precedes any read
     /// stays on the legacy encoding.
     /// </remarks>
-    public WireEncoding Encoding { get; private set; }
+    /// <remarks>
+    /// <b>volatile:</b> this is written by the read loop and read by the tick
+    /// loop, which are different tasks on different threads. A byte-sized write
+    /// cannot tear, but without a memory barrier the tick loop could keep
+    /// reading a stale value indefinitely and go on serializing snapshots in
+    /// the wrong encoding for a client that has already switched.
+    /// </remarks>
+    private volatile WireEncoding _encoding;
+
+    /// <inheritdoc cref="_encoding"/>
+    public WireEncoding Encoding
+    {
+        get => _encoding;
+        private set => _encoding = value;
+    }
 
     private readonly ITransportConnection _transport;
     private readonly Stream _stream;
