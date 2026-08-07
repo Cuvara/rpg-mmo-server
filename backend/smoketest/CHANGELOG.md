@@ -5,6 +5,43 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Persistence checks.** The smoke flow proved the wire and touched no database;
+  it now asserts that both stores actually hold what the run produced. Five new
+  steps:
+  - `nakama_account` — `GET /v2/account` asserts the device login created a durable
+    account whose id matches the one `gateway_token` issued a JWT for, with our
+    device id linked to it.
+  - `nakama_profile` — `POST /v2/storage` asserts the plugin's `AfterAuthenticate`
+    hook wrote `collection=player key=profile` owned by the player, with
+    `level == StartingLevel`. Nakama answers **HTTP 200 with an empty object list**
+    when the record is absent, so the emptiness check — not the status code — is
+    what catches a Nakama running without the Go plugin loaded.
+  - `gamestate_migrations` — asserts `schema_migrations` is non-empty, gap-free,
+    checksummed and at the version the binary expects (`--expect-migration-version`,
+    default 1). Bump that default in the same commit that adds a migration.
+  - `gamestate_player_row` — polls `player_states` until the row for this run's user
+    appears, then asserts map, position, HP and freshness. Polls rather than sleeps:
+    the game server only writes on the `AsyncSaver` sweep (30s) or when the reconnect
+    hold expires (another 30s), so the arrival time spans a ~60s window.
+  - `gamestate_reload` — waits out the reconnect hold so the entity is evicted from
+    memory, rejoins, and asserts the server respawns the player at the *persisted*
+    position instead of the origin. This is the only check that proves the saved row
+    is read back; inside the hold window a reconnect reattaches to the in-memory
+    entity and would prove nothing.
+
+  The two Nakama checks use the public HTTP API (works against a remote VPS, needs
+  no credential the run did not already have) and always run — they add ~5ms. The
+  three game-state checks need direct SQL, because nothing exposes `player_states`
+  over HTTP; they are **skipped loudly** when `GAME_DB_URL` is unset and add ~35s
+  when it is set. CD needs no change: `deploy/.env` already carries `GAME_DB_URL`
+  and the post-deploy smoke step sources it.
+- `SKIP` step status, rendered distinctly from `PASS` so an unconfigured run can
+  never read as a verified one, and `--require-db` to turn skips into failures.
+- Flags/env: `--device-id`/`SMOKE_DEVICE_ID`, `--game-db-url`/`GAME_DB_URL`,
+  `--skip-db`, `--require-db`, `--expect-migration-version`, `--db-poll-timeout`,
+  `--db-poll-interval`, `--hold-ttl`.
+
 ### Changed
 - `gameserver_join` now merges the snapshot stream through `messages.SnapshotState`
   instead of reading entities out of one snapshot. Snapshots are delta-encoded — only

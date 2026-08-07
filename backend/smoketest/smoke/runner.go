@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -24,11 +25,20 @@ type Runner struct {
 	hc  *http.Client
 
 	sessionToken string // Nakama session token (step b)
+	deviceID     string // device id authenticated with (step b)
 	userID       string // Nakama user id (step c)
+	username     string // Nakama username (nakama_account)
 	gatewayJWT   string // gateway realtime token (step c)
 	serverAddr   string // game server addr from EnterWorldResponse (step e)
 	serverTrans  string // game server transport from EnterWorldResponse (step e)
 	joinToken    string // join token from EnterWorldResponse (step e)
+
+	// runStart is the wall clock at Run(); every persisted row this run asserts
+	// on must be newer than it, which is what stops a stale row from passing.
+	runStart     time.Time
+	disconnectAt time.Time // when the gameplay socket was closed (reload hold math)
+	persistedX   float32   // position read back out of player_states
+	persistedY   float32
 
 	results []StepResult
 }
@@ -38,9 +48,17 @@ func NewRunner(cfg Config, out io.Writer) *Runner {
 	return &Runner{cfg: cfg, out: out, hc: &http.Client{Timeout: cfg.Timeout}}
 }
 
+// skip is returned by a step that could not run for want of configuration. The
+// runner turns it into a SKIP line, or into a failure under --require-db.
+type skip struct{ reason string }
+
+func (s skip) Error() string { return s.reason }
+
 // Run executes every step in order, stopping at the first failure, prints the
 // summary and returns overall pass/fail.
 func (r *Runner) Run() bool {
+	r.runStart = time.Now()
+
 	steps := []struct {
 		name string
 		fn   func() (string, error)
@@ -50,18 +68,52 @@ func (r *Runner) Run() bool {
 		{"gateway_token_rpc", r.stepGatewayToken},
 		{"gateway_auth", r.stepGatewayAuthEnter},  // MsgAuth + MsgEnterWorld share one conn
 		{"gameserver_join", r.stepGameServerFlow}, // MsgJoinToken + inputs + snapshots + disconnect
+
+		// --- persistence: the flow above proves the wire, not the databases ---
+		//
+		// The two Nakama checks go over the public HTTP API with the session
+		// token already in hand, so they cost a few milliseconds and always run.
+		// The three game-state checks need GAME_DB_URL and are skipped (loudly)
+		// without it.
+		{"nakama_account", r.guardDB(r.stepNakamaAccount, false)},
+		{"nakama_profile", r.guardDB(r.stepNakamaProfile, false)},
+		{"gamestate_migrations", r.guardDB(r.stepGameStateMigrations, true)},
+		{"gamestate_player_row", r.guardDB(r.stepGameStatePlayerRow, true)},
+		{"gamestate_reload", r.guardDB(r.stepGameStateReload, true)},
 	}
 	for _, s := range steps {
 		start := time.Now()
 		detail, err := s.fn()
-		r.results = append(r.results, StepResult{
-			Name: s.name, Latency: time.Since(start), Err: err, Detail: detail,
-		})
-		if err != nil {
+		res := StepResult{Name: s.name, Latency: time.Since(start), Err: err, Detail: detail}
+		var sk skip
+		if errors.As(err, &sk) {
+			// --require-db keeps the skip as a hard failure; otherwise report
+			// SKIP and carry on with the remaining steps.
+			if !r.cfg.RequireDB {
+				res.Err, res.Skipped, res.Detail = nil, true, sk.reason
+			}
+		}
+		r.results = append(r.results, res)
+		if res.Err != nil {
 			break
 		}
 	}
 	return WriteSummary(r.out, r.results)
+}
+
+// guardDB wraps a persistence step with the reasons it may legitimately not
+// run. needsDSN marks steps that talk to the game-state database directly.
+func (r *Runner) guardDB(fn func() (string, error), needsDSN bool) func() (string, error) {
+	return func() (string, error) {
+		if r.cfg.SkipDB {
+			return "", skip{"--skip-db / SMOKE_SKIP_DB set"}
+		}
+		if needsDSN && r.cfg.GameDBURL == "" {
+			return "", skip{"GAME_DB_URL is unset — game-state persistence NOT verified " +
+				"(set it, or pass --require-db to make this a failure)"}
+		}
+		return fn()
+	}
 }
 
 // ---------------------------------------------------------------- step a
@@ -82,11 +134,15 @@ func (r *Runner) stepNakamaHealth() (string, error) {
 // ---------------------------------------------------------------- step b
 
 func (r *Runner) stepDeviceAuth() (string, error) {
-	suffix := make([]byte, 8)
-	if _, err := rand.Read(suffix); err != nil {
-		return "", fmt.Errorf("random device id: %w", err)
+	deviceID := r.cfg.DeviceID
+	if deviceID == "" {
+		suffix := make([]byte, 8)
+		if _, err := rand.Read(suffix); err != nil {
+			return "", fmt.Errorf("random device id: %w", err)
+		}
+		deviceID = "smoketest-" + hex.EncodeToString(suffix)
 	}
-	deviceID := "smoketest-" + hex.EncodeToString(suffix)
+	r.deviceID = deviceID
 
 	body, _ := json.Marshal(map[string]string{"id": deviceID})
 	url := strings.TrimRight(r.cfg.NakamaURL, "/") + "/v2/account/authenticate/device?create=true"
@@ -348,6 +404,9 @@ drain:
 		_ = r.send(conn, env)
 		time.Sleep(100 * time.Millisecond)
 	}
+	// Anchor for the reconnect-hold wait in the reload check: the entity is
+	// evicted HoldTtl after the socket goes away, not after the run started.
+	r.disconnectAt = time.Now()
 	// ack_tick / keyframe counts are reported, not asserted: a server predating the
 	// delta protocol sends neither, and the smoke test must stay green against it.
 	return fmt.Sprintf("snapshots=%d (keyframes=%d deltas=%d) final_x=%.2f ack_tick=%d",

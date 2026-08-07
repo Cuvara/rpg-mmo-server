@@ -171,7 +171,13 @@ func TestLoadConfig_Transport(t *testing.T) {
 }
 
 func TestConfigValidate(t *testing.T) {
-	valid := Config{JWTSecret: "s", Timeout: time.Second, Inputs: 1, MinSnapshots: 1}
+	valid := Config{
+		JWTSecret: "s", Timeout: time.Second, Inputs: 1, MinSnapshots: 1,
+		ExpectMigration: DefaultExpectMigration,
+		DBPollTimeout:   DefaultDBPollTimeout,
+		DBPollInterval:  DefaultDBPollInterval,
+		HoldTTL:         DefaultHoldTTL,
+	}
 
 	tests := []struct {
 		name    string
@@ -183,6 +189,21 @@ func TestConfigValidate(t *testing.T) {
 		{"zero timeout", func(c *Config) { c.Timeout = 0 }, true},
 		{"zero inputs", func(c *Config) { c.Inputs = 0 }, true},
 		{"zero min snapshots", func(c *Config) { c.MinSnapshots = 0 }, true},
+		{"zero migration version", func(c *Config) { c.ExpectMigration = 0 }, true},
+		{"zero db poll timeout", func(c *Config) { c.DBPollTimeout = 0 }, true},
+		{"zero db poll interval", func(c *Config) { c.DBPollInterval = 0 }, true},
+		{"negative hold ttl", func(c *Config) { c.HoldTTL = -time.Second }, true},
+		{"require-db without a dsn", func(c *Config) { c.RequireDB = true }, true},
+		{
+			"require-db with a dsn",
+			func(c *Config) { c.RequireDB = true; c.GameDBURL = "postgres://u:p@h/db" },
+			false,
+		},
+		{
+			"require-db with skip-db",
+			func(c *Config) { c.RequireDB = true; c.GameDBURL = "postgres://u:p@h/db"; c.SkipDB = true },
+			true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
