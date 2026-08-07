@@ -455,3 +455,140 @@ behaviour change on the join path.
 Coverage: `GameServer.Tests/Server/JwtKeyringTests.cs` (keyring semantics) and
 `GameServer.Tests/Server/JoinTokenSecretTests.cs` (the real TCP handshake for
 split-active, fallback, rotation, post-rotation, fail-closed and expiry).
+
+## KCP Transport for the Gameplay Hop (2026-08-07)
+
+Until now `--transport=kcp` only ever covered the client→gateway hop. The
+gateway advertised a transport to clients through `EnterWorldResponse.Transport`,
+and the registry carried a `transport` field, but this server had no KCP at all —
+it always bound TCP, so a KCP deployment was half a deployment. This entry covers
+closing that gap.
+
+### Requirement: interoperability, not "some KCP"
+
+The constraint that decided everything here is that the Go side already ships
+KCP (`backend/shared/transport` over `github.com/xtaci/kcp-go/v5`). A C# listener
+that speaks a *different* dialect of KCP is worse than no KCP: it type-checks, it
+passes its own tests, and it silently cannot talk to the clients and tools the
+rest of the project already has. So wire compatibility with kcp-go was treated as
+the acceptance criterion, and it was verified **before** anything was built on
+top of the transport.
+
+### Library evaluation
+
+| Option | Verdict |
+|--------|---------|
+| **kcp2k** (Mirror's C# KCP) | **Rejected — not wire-compatible.** kcp2k is mature and widely used, but it is not a transport-level port of kcp-go. It runs its own reliable-handshake layer above KCP: a channel byte prefixed to every datagram (`1` reliable / `2` unreliable), a Hello/cookie exchange that must complete before any payload moves, and a cookie value mixed into subsequent packets for address-spoof resistance. kcp-go has none of that — its listener creates a session from the first well-formed KCP header it sees. A kcp-go dialer's first datagram would be read by kcp2k as a channel byte plus garbage, and kcp2k's Hello would be read by kcp-go as a segment with a nonsense conv. Bridging would mean forking kcp2k's framing, which is strictly more work than porting the protocol *and* leaves a permanently diverged dependency. |
+| **P/Invoke binding to `ikcp.c`** | **Rejected.** Wire-correct by construction, but it puts a native artifact into a NativeAOT build that currently has none, and it needs per-platform build and packaging for linux-x64 (CI + prod) and win-x64 (dev). The protocol is ~700 lines; the build plumbing would outlive it. |
+| **Port the kcp-go protocol subset (chosen)** | The KCP protocol is small, frozen, and fully specified by `ikcp.c`, of which kcp-go's `kcp.go` is itself a port. FEC is disabled on the Go side (`KCPDataShards = 0`), so no FEC header ever appears, and the only framing above KCP is kcp-go's optional crypt header. That reduces the surface to: the 24-byte segment header, the ARQ, and a 20-byte crypt header. No new dependency, NativeAOT-clean, and every byte is auditable against the Go source it must match. |
+
+### What the port actually had to match
+
+Three things, none of which is negotiated on the wire — a mismatch in any of them
+is a silent failure rather than an error:
+
+1. **Segment framing.** Little-endian `conv(4) cmd(1) frg(1) wnd(2) ts(4) sn(4)
+   una(4) len(4)`, several segments packed per datagram up to the MTU. Commands
+   81-84 (PUSH/ACK/WASK/WINS).
+2. **The crypt header.** kcp-go's block ciphers are *not* an AEAD. Each datagram
+   is `nonce(16) | crc32-IEEE(4, little endian) | KCP bytes`, and then the whole
+   buffer — nonce included — is AES-CFB encrypted under a **fixed** IV
+   (kcp-go's `initialVector`). The random nonce is what makes the first
+   ciphertext block differ per packet; the trailing partial block is XORed
+   against the live keystream with no padding. `KcpCrypto` reproduces this with
+   `Aes.EncryptEcb` as the block primitive, because .NET's built-in CFB mode is
+   not guaranteed to be available with the same feedback size everywhere.
+3. **Key derivation.** `TRANSPORT_KEY` → 32 bytes, by the same two rules as
+   `shared/transport/crypto.go`: 64 hex characters verbatim, anything else
+   through HKDF-SHA256 with no salt and the info string
+   `rpg-mmo/transport/kcp/aes-256`. Go's `hkdf.Key(sha256.New, k, nil, info, 32)`
+   and .NET's `HKDF.DeriveKey(SHA256, k, 32, salt: null, info)` agree — and
+   `KcpInteropTests.GoDeriveKey_MatchesCSharpDeriveKey` asserts it against the
+   real Go implementation rather than trusting that reading.
+
+The tuning profile (nodelay 1, interval 10ms, resend 2, congestion control off,
+128/128 packet windows, MTU 1350, stream mode, ACK-no-delay, FEC off) is copied
+from `shared/transport`'s `KCP*` constants into `KcpTuning`. These do not change
+the wire *format*, but they do change latency and window behaviour, and an
+asymmetric profile is far harder to notice than an outright failure.
+
+### Interop evidence
+
+`interop/kcpprobe` is a small Go client that dials through
+`backend/shared/transport` — deliberately not through kcp-go directly, so the
+thing being tested is "a client configured the way this project configures its
+Go clients", including any drift in the tuning or key handling.
+
+`GameServer.Tests/Net/KcpInteropTests.cs` drives it:
+
+- the same `TRANSPORT_KEY` derives to the same 32 bytes on both sides, for a hex
+  key and for a passphrase;
+- a Go client completes an echo against the C# listener in plaintext, with a hex
+  key, and with a passphrase-derived key;
+- a Go client completes a **full game join** (join token → accepted → inputs →
+  snapshots showing the player actually moved) against a real `GameServerHost`
+  bound with `--transport kcp`, both plaintext and encrypted;
+- all three key-mismatch cases (server encrypted/client plaintext, server
+  plaintext/client encrypted, both encrypted with different keys) fail closed.
+
+These skip rather than fail when no Go toolchain is present, because the dotnet
+CI image has none.
+
+### Deviations from kcp-go, and why they are not observable
+
+- **Data structures.** Plain `List<T>` instead of kcp-go's ring buffers and
+  receive heap. Same ordering semantics, O(n) where kcp-go is O(1) on a few
+  paths; with a 128-packet window that is not a hot spot worth the machinery.
+- **No FEC, no SNMP counters, no trace logging.** FEC is off on the Go side too,
+  so a peer configured by `shared/transport` never emits an FEC header. The
+  listener explicitly drops packets carrying kcp-go's FEC/OOB type markers
+  (0xf1/0xf2/0xf3 at offset 4) with a warning, rather than misparsing them as
+  KCP headers.
+- **Flush emits after the state machine settles.** kcp-go calls its output
+  callback while walking the send buffer. Doing that in C# with a synchronous
+  callback (a loopback peer, or any transport that feeds a reply straight back
+  into `Input`) re-enters the instance and mutates the list being enumerated.
+  `Kcp.Flush` therefore collects datagrams and hands them to the output callback
+  only once every state update is complete. Wire output is byte-identical; only
+  the ordering of the callback relative to internal bookkeeping changed.
+
+### Session lifecycle
+
+KCP has no handshake and no FIN. A session is created when a datagram arrives
+from an unknown endpoint with a well-formed KCP header, adopting the conv from
+that packet — exactly kcp-go's `Listener.packetInput`. A datagram from a *known*
+endpoint carrying a different conv means the peer restarted; the old session is
+replaced, but only if the packet is a fresh session's first (`sn == 0`), so a
+stray cannot evict a live player.
+
+Because there is no FIN, two sweeps replace what TCP gets from the kernel: the
+ARQ's dead-link detection (20 failed retransmissions of one segment) and a 60s
+idle timeout on inbound datagrams. Without the latter a vanished client would
+hold its session — and its world entity — forever. Closing the listener tears
+down every session directly, since there is no per-peer socket whose close the
+kernel would propagate.
+
+### What is and is not encrypted end to end
+
+With `--transport kcp` and `TRANSPORT_KEY` set on both peers, the **gameplay
+hop** is genuinely encrypted: every UDP datagram, including the one carrying the
+join token, is AES-256 encrypted below the ARQ, with no negotiation and no
+downgrade. What that does *not* cover:
+
+- **The client↔gateway hop** is a separate connection with its own transport
+  setting. It is encrypted only if the gateway also runs KCP with the same key.
+- **TCP mode is unencrypted, full stop.** `TRANSPORT_KEY` is ignored there.
+- **A pre-shared key is not per-session key material.** Every server and every
+  client in a deployment holds the same key, so it provides confidentiality
+  against a passive network observer, not against a peer that already has the
+  key. There is no forward secrecy: a leaked key retroactively decrypts captured
+  traffic. Per-session key exchange remains the production target.
+- **Key distribution is the operator's problem.** A key left unset gets a
+  start-up WARNING and nothing more; nothing enforces that the two halves of a
+  deployment agree, and when they disagree the only symptom is that joins time
+  out.
+
+Coverage: `GameServer.Tests/Net/KcpTransportTests.cs` (crypto vectors, CFB
+round-trips including the unpadded tail, ARQ loopback and fragmentation, conv
+rejection, listener binding, stream adapter chunking and EOF, transport-kind
+normalisation) and `GameServer.Tests/Net/KcpInteropTests.cs` (the Go client).

@@ -5,6 +5,7 @@ using GameServer.Agones;
 using GameServer.Events;
 using GameServer.Observability;
 using GameServer.Persistence;
+using GameServer.Net.Transport;
 using GameServer.Registry;
 using GameServer.Server;
 
@@ -46,7 +47,14 @@ bool migrateOnly = HasFlag(args, "--migrate-only") || Env("GAMESERVER_MIGRATE_ON
 // (single-process / test default), and the gateway will not find this server.
 string? redisAddr = GetArg(args, "--redis") ?? Env("REDIS_ADDR");
 string? redisPassword = GetArg(args, "--redis-password") ?? Env("REDIS_PASSWORD");
-string transport = GetArg(args, "--transport") ?? Env("GAMESERVER_TRANSPORT") ?? "tcp";
+// Realtime transport for the gameplay hop: "tcp" (default) or "kcp". Matches Go's
+// --transport flag; the value is also what gets advertised to clients through the
+// registry, so it must describe what the listener actually speaks.
+string transport = TransportKind.Normalize(GetArg(args, "--transport") ?? Env("GAMESERVER_TRANSPORT"));
+// Pre-shared AES-256 key for KCP. The SAME variable and the same derivation as the
+// Go side (backend/shared/transport): 64 hex chars are used verbatim, anything else
+// is stretched with HKDF-SHA256. Empty = plaintext.
+string transportKey = Env(TransportKind.KeyEnvVar) ?? "";
 // Address ADVERTISED TO CLIENTS. The gateway returns it verbatim in
 // MsgEnterWorldResp.ServerAddr, so it must be dialable BY THE CLIENT — which is not
 // the listen address whenever a container maps ports (listen :9000, clients reach
@@ -65,6 +73,10 @@ var logger = loggerFactory.CreateLogger("Program");
 logger.LogInformation("GameServer .NET starting");
 logger.LogInformation("  Mode:      {Mode}", mode);
 logger.LogInformation("  Address:   {Addr}", addr);
+logger.LogInformation("  Transport: {Transport}{Encryption}", transport,
+    transport == TransportKind.Kcp
+        ? string.IsNullOrWhiteSpace(transportKey) ? " (UNENCRYPTED)" : " (AES-256)"
+        : "");
 logger.LogInformation("  MapId:     {MapId}", mapId);
 logger.LogInformation("  ServerId:  {ServerId}", serverId);
 logger.LogInformation("  Capacity:  {Capacity}", capacity);
@@ -125,6 +137,30 @@ if (migrateOnly)
 }
 
 // ── Validate ──
+
+if (!TransportKind.IsValid(transport))
+{
+    logger.LogCritical("unknown transport {Transport} (want {Tcp} or {Kcp})",
+        transport, TransportKind.Tcp, TransportKind.Kcp);
+    return 2;
+}
+
+// Mirror of the Go listener's warning (backend/shared/transport/transport.go): KCP
+// without a key puts the join token and every snapshot on the wire in cleartext UDP,
+// which is fine for local dev and not for anything reachable from the internet.
+if (transport == TransportKind.Kcp && string.IsNullOrWhiteSpace(transportKey))
+{
+    logger.LogWarning(
+        "KCP listener is UNENCRYPTED -- join tokens and gameplay traffic are in cleartext; set {KeyVar} " +
+        "(32-byte hex) before exposing this port (addr={Addr}, transport={Transport})",
+        TransportKind.KeyEnvVar, addr, TransportKind.Kcp);
+}
+if (transport == TransportKind.Tcp && !string.IsNullOrWhiteSpace(transportKey))
+{
+    logger.LogWarning(
+        "{KeyVar} is set but the transport is TCP, which has no packet encryption -- the key is IGNORED. " +
+        "Use --transport kcp, or terminate TLS in front of this listener.", TransportKind.KeyEnvVar);
+}
 
 if (string.IsNullOrEmpty(jwtSecret))
 {
@@ -227,6 +263,8 @@ if (!string.IsNullOrWhiteSpace(redisAddr))
 var options = new ServerOptions
 {
     ServerAddr = addr,
+    Transport = transport,
+    TransportKey = transportKey,
     ServerId = serverId,
     MapId = mapId,
     Mode = mode,

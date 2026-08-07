@@ -1,13 +1,20 @@
 using System.Net.Sockets;
 using System.Threading.Channels;
+using GameServer.Net.Transport;
 using Microsoft.Extensions.Logging;
 
 namespace GameServer.Net;
 
 /// <summary>
-/// Represents a single player connection. Manages read/write loops over a TCP stream
-/// using a bounded channel for the send queue (capacity 64, drops oldest on full).
+/// Represents a single player connection. Manages read/write loops over the
+/// transport's byte stream using a bounded channel for the send queue
+/// (capacity 64, drops oldest on full).
 /// </summary>
+/// <remarks>
+/// The transport is deliberately abstracted behind <see cref="ITransportConnection"/>:
+/// the length-prefixed JSON codec only needs a reliable ordered stream, which TCP
+/// and KCP both provide, so nothing in this class knows which one it is on.
+/// </remarks>
 public sealed class Connection : IDisposable
 {
     /// <summary>User ID associated with this connection (set after JWT validation).</summary>
@@ -19,18 +26,22 @@ public sealed class Connection : IDisposable
     /// </summary>
     public GameServer.Snapshot.SnapshotDeltaState DeltaState { get; } = new();
 
-    private readonly TcpClient _tcp;
-    private readonly NetworkStream _stream;
+    private readonly ITransportConnection _transport;
+    private readonly Stream _stream;
     private readonly Channel<Envelope> _sendChannel;
     private readonly CancellationTokenSource _cts;
     private readonly ILogger _logger;
     private int _disposed;
 
-    public Connection(string userId, TcpClient tcp, ILogger logger)
+    /// <summary>The peer address, for logging.</summary>
+    public string RemoteEndPoint => _transport.RemoteEndPoint;
+
+    /// <summary>Creates a connection over an already-accepted transport connection.</summary>
+    public Connection(string userId, ITransportConnection transport, ILogger logger)
     {
         UserId = userId;
-        _tcp = tcp;
-        _stream = tcp.GetStream();
+        _transport = transport;
+        _stream = transport.Stream;
         _logger = logger;
         _cts = new CancellationTokenSource();
 
@@ -40,6 +51,15 @@ public sealed class Connection : IDisposable
             SingleReader = true,
             SingleWriter = false
         });
+    }
+
+    /// <summary>
+    /// Convenience overload for TCP callers (and tests) that already hold a
+    /// <see cref="TcpClient"/>. Ownership of the client transfers to this connection.
+    /// </summary>
+    public Connection(string userId, TcpClient tcp, ILogger logger)
+        : this(userId, new TcpTransportConnection(tcp), logger)
+    {
     }
 
     /// <summary>Enqueue an envelope for sending. Non-blocking; drops oldest if full.</summary>
@@ -116,8 +136,7 @@ public sealed class Connection : IDisposable
         if (Interlocked.CompareExchange(ref _disposed, 1, 0) != 0) return;
         _cts.Cancel();
         _sendChannel.Writer.TryComplete();
-        try { _stream.Close(); } catch { /* ignore */ }
-        try { _tcp.Close(); } catch { /* ignore */ }
+        try { _transport.Close(); } catch { /* ignore */ }
     }
 
     public void Dispose()
