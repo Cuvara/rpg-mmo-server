@@ -84,6 +84,58 @@ set. Flags are **space-separated** (`--addr :9000`).
 | `--game-db-url` | `GAME_DB_URL` | *(unset)* | Game-state PostgreSQL DSN — see below |
 | `--migrate-only` | `GAMESERVER_MIGRATE_ONLY=true` | off | Apply pending migrations, then exit — see below |
 | `--agones` | `AGONES_ENABLED=true` | off | Enable the Agones SDK integration |
+| `--transport` | `GAMESERVER_TRANSPORT` | `tcp` | Realtime transport: `tcp` or `kcp` — see below |
+| *(none)* | `TRANSPORT_KEY` | *(empty)* | Pre-shared AES-256 key for KCP. Empty = cleartext (start-up WARNING). Ignored for TCP |
+| `--public-addr` | `GAMESERVER_PUBLIC_ADDR` | *(listen addr)* | Address advertised to clients through the registry |
+| `--redis` | `REDIS_ADDR` | *(unset)* | Registry Redis; unset disables self-registration |
+| `--redis-password` | `REDIS_PASSWORD` | *(unset)* | Registry Redis password |
+
+#### Realtime transport (`--transport`, `TRANSPORT_KEY`)
+
+The gameplay hop (client ↔ this server) speaks **TCP** by default and **KCP over
+UDP** with `--transport kcp`. KCP is reliable and ordered like TCP, but its ARQ
+is tuned for latency instead of throughput: a lost packet recovers in roughly one
+RTT instead of a TCP RTO backoff, which is what a 10-15Hz authoritative tick loop
+wants on a mobile network.
+
+The listener is wire-compatible with the Go side (`backend/shared/transport`,
+`github.com/xtaci/kcp-go/v5`) — a Go or Unity client dialling through that
+package reaches this server, and the tuning profile (nodelay 1, interval 10ms,
+resend 2, no congestion control, 128/128 windows, MTU 1350, FEC off, stream mode)
+is identical on both halves. `interop/kcpprobe` is a Go client that proves it;
+see `docs/DESIGN.md`.
+
+```bash
+export TRANSPORT_KEY="$(openssl rand -hex 32)"   # same value on every peer
+dotnet run --project GameServer -- --transport kcp --addr :9000
+```
+
+**Encryption.** `TRANSPORT_KEY` turns on AES-256 on every datagram, below the
+ARQ — the join token and all gameplay state included. The key is accepted in two
+forms, exactly as on the Go side:
+
+- **64 hex characters** — used verbatim as the 32-byte key. Recommended
+  (`openssl rand -hex 32`): full entropy, no derivation guesswork.
+- **anything else** — treated as a passphrase and stretched with HKDF-SHA256. A
+  short passphrase stays brute-forceable; HKDF spreads entropy, it does not
+  create it.
+
+There is **no negotiation and no downgrade path**. A peer without the right key
+produces datagrams that fail the checksum and are dropped, so the session never
+forms — "encrypted server + plaintext client" fails closed, silently, as a read
+timeout on the client. Leaving the key unset logs a start-up WARNING; that is
+fine for local dev and not for a port reachable from the internet.
+
+`TRANSPORT_KEY` is ignored with `--transport tcp` (and warned about): TCP has no
+packet encryption here, so TLS termination or the cluster network is the answer.
+
+**Advertisement.** The transport is published into the registry alongside the
+address, and the gateway hands it to clients in `EnterWorldResponse.Transport`.
+Running this server with `--transport kcp` therefore also tells clients to dial
+KCP — but only if it self-registers (`REDIS_ADDR` set). Under Agones the gateway
+announces allocated servers before their own registration lands and falls back to
+its own listen transport, so set `ALLOCATOR_TRANSPORT=kcp` on the gateway when the
+fleet speaks KCP and the gateway does not.
 
 #### Join-token secret (`JOIN_TOKEN_SECRET`)
 

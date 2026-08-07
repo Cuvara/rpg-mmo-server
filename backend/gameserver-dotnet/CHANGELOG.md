@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **KCP transport for the gameplay hop (`--transport kcp` / `GAMESERVER_TRANSPORT`).**
+  Until now this flag only selected what got *advertised*: the C# server had no KCP
+  and always bound TCP, so a "KCP deployment" was half a deployment — the Go side
+  shipped KCP for the client→gateway hop while the gameplay hop stayed TCP. The
+  server now really listens with KCP over UDP, wire-compatible with
+  `backend/shared/transport` (`github.com/xtaci/kcp-go/v5`).
+  - `GameServer/Net/Transport/` — a port of kcp-go's protocol subset: the ARQ
+    (`Kcp.cs`), kcp-go's crypt framing (`KcpCrypto.cs`), the UDP listener with
+    per-endpoint session demultiplexing (`KcpListener.cs`, `KcpSession.cs`), and a
+    `Stream` adapter (`KcpStream.cs`) so the length-prefixed JSON codec rides on
+    top unchanged. kcp2k (Mirror's C# KCP) was evaluated and rejected: its
+    handshake/cookie layer is not on the wire kcp-go speaks. Rationale and the
+    interop evidence: `docs/DESIGN.md`, 2026-08-07.
+  - Tuning matches the Go constants exactly (nodelay 1, interval 10ms, resend 2,
+    congestion control off, 128/128 windows, MTU 1350, stream mode, FEC off).
+  - `Connection` and `GameServerHost` now take an `ITransportConnection` /
+    `ITransportListener` instead of `TcpClient` / `TcpListener`. TCP remains the
+    default and its behaviour is unchanged; the `Connection(string, TcpClient,
+    ILogger)` constructor is kept.
+  - `interop/kcpprobe` — a Go client harness that dials through
+    `backend/shared/transport` and completes a real join, so interoperability is
+    asserted against the actual kcp-go implementation rather than a C#-to-C#
+    loopback. Interop tests skip when no Go toolchain is present.
+
 ### Fixed
 - **Cross-map position bleed on join.** `player_states` holds one row per player,
   overwritten by whichever server hosts them, and the join path restored its
@@ -37,6 +62,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Not fixed here: `player_states` has no `dead` column, so a player persisted
   at `hp = 0` reloads with `Hp = 0` and `Dead = false`. That needs respawn rules
   and a schema change; this change preserves the existing HP behaviour exactly.
+- The realtime transport published into the registry is now what the server
+  actually listens with, so `EnterWorldResponse.Transport` tells clients the truth.
+  It was previously whatever `--transport` said, regardless of the TCP listener
+  underneath — a client that honoured the field would have dialled KCP at a TCP
+  socket and simply hung.
 - **The last three soft skips in the test suite now report as real skips.** Tests
   gated on an external dependency used to `Console.WriteLine("[SKIP] ...")` and
   `return`, which xUnit records as **PASSED** — so a run without the dependency
@@ -57,6 +87,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   not reintroduced: dependency-gated tests must skip, never silently pass.
 
 ### Security
+- **KCP traffic can be encrypted with the same pre-shared key as the Go side
+  (`TRANSPORT_KEY`).** AES-256 is applied per datagram below the ARQ, so the join
+  token and every snapshot are covered. Key derivation matches
+  `shared/transport/crypto.go`: 64 hex characters verbatim, anything else stretched
+  with HKDF-SHA256 under the info string `rpg-mmo/transport/kcp/aes-256` — asserted
+  against the real Go implementation, because a silent derivation drift would look
+  exactly like a network fault.
+  - There is no negotiation and no downgrade: a peer without the key produces
+    datagrams that fail the checksum and are dropped, so "encrypted server +
+    plaintext client" fails closed rather than falling back to cleartext.
+  - A KCP listener with no key logs a start-up WARNING mirroring the Go wording.
+    `TRANSPORT_KEY` set with `--transport tcp` is ignored and warned about — TCP has
+    no packet encryption here.
+  - Scope, and what is still *not* covered end to end (the client↔gateway hop is a
+    separate setting; a PSK gives no forward secrecy and no protection from a peer
+    that holds the key): `docs/DESIGN.md`, 2026-08-07.
+
 - **Join tokens are verified with `JOIN_TOKEN_SECRET`, not `JWT_SECRET`.** The join
   secret is distributed to every game-server pod; the Nakama auth secret is not.
   Sharing them meant one compromised pod could mint auth tokens for any user. This

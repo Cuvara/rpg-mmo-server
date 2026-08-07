@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using GameServer.Net;
 using GameServer.Persistence;
+using GameServer.Net.Transport;
 using GameServer.Server;
 using Shared.GameLogic.Components;
 
@@ -159,6 +160,11 @@ public class MapIdReloadIntegrationTests
             ServerId = serverId,
             MapId = serverMapId,
             Mode = "map",
+            // Pinned rather than left to the default: the placement policy runs in the
+            // join handler, above the transport, so TCP is chosen here only because this
+            // harness dials with a raw TcpClient. Transport coverage lives in the KCP
+            // interop tests; a future change of the default must not silently break this.
+            Transport = TransportKind.Tcp,
             TickRate = 20,
             Capacity = 4,
             JwtSecret = JwtSecret,

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Threading.Channels;
 using System.Net;
 using System.Net.Sockets;
 using Microsoft.Extensions.Logging;
@@ -7,6 +8,7 @@ using GameServer.Agones;
 using GameServer.Events;
 using GameServer.Input;
 using GameServer.Net;
+using GameServer.Net.Transport;
 using GameServer.Observability;
 using GameServer.Persistence;
 using GameServer.Registry;
@@ -19,6 +21,17 @@ namespace GameServer.Server;
 public class ServerOptions
 {
     public string ServerAddr { get; set; } = ":9000";
+    /// <summary>
+    /// Realtime transport the listener speaks: "tcp" (default) or "kcp". The same
+    /// strings the Go side uses, because this value travels to clients through the
+    /// registry and <c>EnterWorldResponse.Transport</c>.
+    /// </summary>
+    public string Transport { get; set; } = TransportKind.Tcp;
+    /// <summary>
+    /// Pre-shared AES-256 key for KCP (<c>TRANSPORT_KEY</c>). Empty means plaintext.
+    /// Ignored for TCP, where TLS or the cluster network is the answer instead.
+    /// </summary>
+    public string TransportKey { get; set; } = "";
     public string ServerId { get; set; } = "";
     public string MapId { get; set; } = "map_01";
     public string Mode { get; set; } = "map"; // "map" or "dungeon"
@@ -109,7 +122,7 @@ public sealed class GameServerHost : IAsyncDisposable
 
     private readonly RegistrationService? _registration;
 
-    private TcpListener? _listener;
+    private ITransportListener? _listener;
     private CancellationTokenSource? _cts;
 
     /// <summary>0 until the first ShutdownAsync caller wins the race, 1 afterwards.</summary>
@@ -198,17 +211,15 @@ public sealed class GameServerHost : IAsyncDisposable
     {
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
-        // Parse address
-        var (host, port) = ParseAddr(addr);
-        _listener = new TcpListener(
-            string.IsNullOrEmpty(host) ? IPAddress.Any : IPAddress.Parse(host),
-            port);
-        _listener.Start();
+        // Bind the configured transport. TCP and KCP both yield a reliable ordered
+        // stream, so everything above the listener is transport-agnostic.
+        _listener = TransportFactory.Listen(_options.Transport, addr, _options.TransportKey, _logger);
 
         // Log the actual bound address (important when port=0 for ephemeral port allocation)
-        var actualAddr = _listener.LocalEndpoint.ToString()!;
-        _logger.LogInformation("Game server listening on {Addr} (mode={Mode}, map={MapId}, id={ServerId})",
-            actualAddr, _options.Mode, _options.MapId, _options.ServerId);
+        var actualAddr = _listener.LocalEndPoint;
+        _logger.LogInformation(
+            "Game server listening on {Addr} via {Transport} (mode={Mode}, map={MapId}, id={ServerId})",
+            actualAddr, _listener.Kind, _options.Mode, _options.MapId, _options.ServerId);
 
         // Mark ready with Agones
         await _agonesSdk.ReadyAsync();
@@ -266,7 +277,9 @@ public sealed class GameServerHost : IAsyncDisposable
             // but a caller-supplied linked token can still be torn down underneath us.
             try { _cts?.Cancel(); } catch (ObjectDisposedException) { /* already gone */ }
 
-            try { _listener?.Stop(); } catch { /* ignore */ }
+            // Closing the listener also tears down every live KCP session: unlike TCP
+            // there is no socket per peer whose close the kernel would propagate.
+            try { _listener?.Dispose(); } catch { /* ignore */ }
 
             // Drain the hold table by removal so each CTS has exactly one owner. The
             // reconnect path (HandleConnectionAsync) races us for the same entries and
@@ -311,13 +324,14 @@ public sealed class GameServerHost : IAsyncDisposable
     {
         while (!ct.IsCancellationRequested)
         {
-            TcpClient tcp;
+            ITransportConnection accepted;
             try
             {
-                tcp = await _listener!.AcceptTcpClientAsync(ct);
+                accepted = await _listener!.AcceptAsync(ct);
             }
             catch (OperationCanceledException) { break; }
             catch (ObjectDisposedException) { break; }
+            catch (ChannelClosedException) { break; }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Accept error");
@@ -325,18 +339,18 @@ public sealed class GameServerHost : IAsyncDisposable
             }
 
             // Handle connection on a background task (fire-and-forget)
-            _ = Task.Run(() => HandleConnectionAsync(tcp, ct), ct);
+            _ = Task.Run(() => HandleConnectionAsync(accepted, ct), ct);
         }
     }
 
-    private async Task HandleConnectionAsync(TcpClient tcp, CancellationToken ct)
+    private async Task HandleConnectionAsync(ITransportConnection accepted, CancellationToken ct)
     {
         Connection? conn = null;
         try
         {
             // Use a temporary logger-only connection for the handshake
             var connLogger = _loggerFactory.CreateLogger<Connection>();
-            var tempConn = new Connection("pending", tcp, connLogger);
+            var tempConn = new Connection("pending", accepted, connLogger);
 
             // Step 1: Read MsgJoinToken
             var env = await tempConn.ReadOneAsync();
@@ -420,8 +434,9 @@ public sealed class GameServerHost : IAsyncDisposable
                 _world.AddEntity(entity);
             }
 
-            // Create the real connection with the verified user ID, reusing the same TcpClient
-            conn = new Connection(userId, tcp, connLogger);
+            // Create the real connection with the verified user ID, reusing the same
+            // accepted transport connection (no reconnect, no second handshake).
+            conn = new Connection(userId, accepted, connLogger);
 
             // Register connection
             _connections.Add(conn);
