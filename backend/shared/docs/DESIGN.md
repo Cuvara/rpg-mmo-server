@@ -432,7 +432,9 @@ Mixing them in would also make the before/after impossible to attribute.
 change was.** The measurement in [BENCHMARK.md](../../docs/BENCHMARK.md) Part II
 says Protobuf moved the mobile bandwidth ceiling from ~41 to ~93 players against
 a tick ceiling of 300 — so bandwidth is *still* the binding constraint, and the
-absolute gap actually widened. Roughly 40% of a packed `EntitySnapshot` is now
-string data (`id` and `type`), which no encoding can compress away. Interning
+absolute gap actually widened. **Measured: 61%** of a packed `EntitySnapshot` is
+string data — 17.0 bytes of `id` and 8.0 of `type` against a 41.2-byte marginal
+cost per entity. (An earlier revision of this note said ~40%; that counted only
+the `id` and was wrong.) No encoding can compress that away. Interning
 those is the only remaining lever on the wire itself; after that it is a question
 of sending less (AOI radius, distance-tiered update rates), not of encoding.
