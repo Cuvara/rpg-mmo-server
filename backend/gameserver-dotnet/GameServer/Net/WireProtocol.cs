@@ -1,156 +1,147 @@
 using System.Buffers.Binary;
+using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
+using Google.Protobuf;
+using RpgMmo.Wire.V1;
 
 namespace GameServer.Net;
 
-/// <summary>Message type constants matching the Go gateway wire protocol.</summary>
-public enum MsgType : byte
+/// <summary>
+/// Which serialization a frame body uses. Both encodings share the same framing
+/// ([4-byte big-endian length][body]) and the same <see cref="MsgType"/> space,
+/// so they are interchangeable per connection and the transport never sees the
+/// difference.
+/// </summary>
+public enum WireEncoding : byte
 {
-    Auth = 1,
-    AuthResp = 2,
-    EnterWorld = 3,
-    EnterWorldResp = 4,
-    JoinToken = 5,
-    JoinTokenResp = 6,
-    Input = 7,
-    Snapshot = 8,
-    Disconnect = 9,
-    /// <summary>Client -> gameserver: request a full keyframe on the next tick.</summary>
-    Resync = 10
+    /// <summary>Legacy <c>{"type":N,"payload":{...}}</c>. Default.</summary>
+    Json = 0,
+
+    /// <summary>Protobuf, generated from <c>shared/proto/wire.proto</c>.</summary>
+    Proto = 1
 }
 
-/// <summary>Wire envelope: 4-byte big-endian length prefix + JSON body.</summary>
+/// <summary>
+/// Wire envelope: 4-byte big-endian length prefix + body.
+/// </summary>
+/// <remarks>
+/// <see cref="Payload"/> holds the already-serialized inner message in whichever
+/// encoding <see cref="Encoding"/> names. It is raw bytes rather than a
+/// <c>JsonElement</c> so that the JSON path no longer has to re-parse its own
+/// freshly written output just to nest it, and so the Protobuf path can carry
+/// binary that is not valid JSON at all.
+/// </remarks>
 public sealed class Envelope
 {
-    [JsonPropertyName("type")]
     public byte Type { get; set; }
 
-    [JsonPropertyName("payload")]
-    public JsonElement Payload { get; set; }
-}
+    public byte[] Payload { get; set; } = Array.Empty<byte>();
 
-// ── Inner message types (JSON field names match Go exactly) ──
-
-public sealed class JoinTokenRequest
-{
-    [JsonPropertyName("token")]
-    public string Token { get; set; } = string.Empty;
-}
-
-public sealed class JoinTokenResponse
-{
-    [JsonPropertyName("ok")]
-    public bool Ok { get; set; }
-
-    [JsonPropertyName("user_id")]
-    public string? UserId { get; set; }
-
-    [JsonPropertyName("error")]
-    public string? Error { get; set; }
-}
-
-public sealed class InputMessage
-{
-    [JsonPropertyName("tick")]
-    public ulong Tick { get; set; }
-
-    [JsonPropertyName("move_x")]
-    public float MoveX { get; set; }
-
-    [JsonPropertyName("move_y")]
-    public float MoveY { get; set; }
-
-    [JsonPropertyName("attack_target_id")]
-    public string? AttackTargetId { get; set; }
+    public WireEncoding Encoding { get; set; }
 }
 
 /// <summary>
-/// World state update. Either a KEYFRAME (<see cref="Full"/> = true, <see cref="Entities"/>
-/// is the complete AOI set) or a DELTA (only entities whose visible state changed since the
-/// previous snapshot sent to this connection, plus <see cref="Removed"/> for entities that
-/// left the AOI or the world).
-/// New fields are omitted when default, so the JSON of a plain full snapshot is byte-identical
-/// to the pre-delta protocol.
+/// Length-prefixed codec for the realtime wire protocol, speaking both the
+/// Protobuf and the legacy JSON encoding.
 /// </summary>
-public sealed class SnapshotMessage
-{
-    [JsonPropertyName("tick")]
-    public ulong Tick { get; set; }
-
-    /// <summary>
-    /// Highest client input tick accepted for the receiving player. The client
-    /// reconciles its prediction against this. 0 = nothing accepted yet.
-    /// </summary>
-    [JsonPropertyName("ack_tick")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public ulong AckTick { get; set; }
-
-    /// <summary>True when this snapshot is a keyframe (complete AOI state).</summary>
-    [JsonPropertyName("full")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public bool Full { get; set; }
-
-    [JsonPropertyName("entities")]
-    public List<EntitySnapshotMsg> Entities { get; set; } = new();
-
-    /// <summary>Entity IDs that left the AOI/world. Null on keyframes.</summary>
-    [JsonPropertyName("removed")]
-    public List<string>? Removed { get; set; }
-}
-
-public sealed class EntitySnapshotMsg
-{
-    [JsonPropertyName("id")]
-    public string Id { get; set; } = string.Empty;
-
-    [JsonPropertyName("type")]
-    public string Type { get; set; } = string.Empty;
-
-    [JsonPropertyName("x")]
-    public float X { get; set; }
-
-    [JsonPropertyName("y")]
-    public float Y { get; set; }
-
-    [JsonPropertyName("hp")]
-    public int Hp { get; set; }
-
-    [JsonPropertyName("max_hp")]
-    public int MaxHp { get; set; }
-}
-
-/// <summary>AOT-compatible JSON source generator context for all wire types.</summary>
-[JsonSerializable(typeof(Envelope))]
-[JsonSerializable(typeof(JoinTokenRequest))]
-[JsonSerializable(typeof(JoinTokenResponse))]
-[JsonSerializable(typeof(InputMessage))]
-[JsonSerializable(typeof(SnapshotMessage))]
-[JsonSerializable(typeof(EntitySnapshotMsg))]
-[JsonSerializable(typeof(List<EntitySnapshotMsg>))]
-[JsonSerializable(typeof(List<string>))]
-[JsonSourceGenerationOptions(
-    PropertyNamingPolicy = JsonKnownNamingPolicy.Unspecified,
-    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
-public partial class WireJsonContext : JsonSerializerContext;
-
-/// <summary>
-/// Length-prefixed JSON codec matching the Go gateway wire format.
-/// Format: [4-byte big-endian length][JSON envelope body]
-/// </summary>
+/// <remarks>
+/// <para>
+/// Message types come from <c>shared/proto/wire.proto</c> via the generated
+/// <see cref="RpgMmo.Wire.V1"/> types — there is deliberately no second,
+/// hand-maintained set of C# message classes, because two definitions of one
+/// wire format drift.
+/// </para>
+/// <para>
+/// <b>Encoding detection.</b> A JSON body always starts with '{' (0x7B); a
+/// Protobuf <c>Envelope</c> always starts with 0x08, the tag byte for field 1
+/// (<c>type</c>, varint), which proto3 always emits because the type is >= 1 for
+/// every real message. Those cannot collide, so the first body byte identifies
+/// the encoding with no negotiation and no handshake. A server therefore answers
+/// each client in the encoding that client used, and the gateway, the game server
+/// and the Unity client can be upgraded in any order.
+/// </para>
+/// <para>
+/// The JSON codec below is hand-written against <see cref="Utf8JsonWriter"/> and
+/// <see cref="Utf8JsonReader"/> rather than going through a serializer. That
+/// keeps it NativeAOT-safe with no reflection and no source-generator context,
+/// and it lets the generated Protobuf types be the only message classes: the
+/// alternative (Protobuf's own JsonFormatter) emits camelCase and drives
+/// descriptor reflection, so it would match neither the wire format nor AOT.
+/// </para>
+/// </remarks>
 public static class WireProtocol
 {
     /// <summary>Maximum message size (1 MB).</summary>
     public const int MaxMessageSize = 1 << 20;
 
-    /// <summary>Encode an envelope to bytes with a 4-byte big-endian length prefix.</summary>
+    /// <summary>First byte of a JSON body.</summary>
+    private const byte JsonPrefix = (byte)'{';
+
+    /// <summary>Classify a frame body by its first byte.</summary>
+    public static WireEncoding SniffEncoding(ReadOnlySpan<byte> body) =>
+        body.Length > 0 && body[0] == JsonPrefix ? WireEncoding.Json : WireEncoding.Proto;
+
+    // ─────────────────────────── framing ───────────────────────────
+
+    /// <summary>Encode an envelope to a length-prefixed frame.</summary>
     public static byte[] Encode(Envelope envelope)
     {
-        byte[] body = JsonSerializer.SerializeToUtf8Bytes(envelope, WireJsonContext.Default.Envelope);
+        byte[] body = EncodeBody(envelope);
         byte[] frame = new byte[4 + body.Length];
         BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(0, 4), body.Length);
         body.CopyTo(frame, 4);
         return frame;
+    }
+
+    /// <summary>Encode an envelope body without the length prefix.</summary>
+    public static byte[] EncodeBody(Envelope envelope)
+    {
+        if (envelope.Encoding == WireEncoding.Proto)
+        {
+            var pb = new RpgMmo.Wire.V1.Envelope { Type = envelope.Type };
+            if (envelope.Payload.Length > 0)
+                pb.Payload = ByteString.CopyFrom(envelope.Payload);
+            return pb.ToByteArray();
+        }
+
+        // {"type":N,"payload":<raw>}
+        // Assembled directly: the payload is already valid JSON, so running it
+        // back through a parser only to re-emit it (what this used to do via
+        // JsonDocument.Parse) is pure waste on the per-tick snapshot path.
+        ReadOnlySpan<byte> head = "{\"type\":"u8;
+        ReadOnlySpan<byte> mid = ",\"payload\":"u8;
+        Span<byte> typeDigits = stackalloc byte[3];
+        int typeLen = WriteByteDecimal(envelope.Type, typeDigits);
+
+        byte[] payload = envelope.Payload.Length > 0 ? envelope.Payload : "null"u8.ToArray();
+        byte[] body = new byte[head.Length + typeLen + mid.Length + payload.Length + 1];
+
+        int o = 0;
+        head.CopyTo(body.AsSpan(o)); o += head.Length;
+        typeDigits[..typeLen].CopyTo(body.AsSpan(o)); o += typeLen;
+        mid.CopyTo(body.AsSpan(o)); o += mid.Length;
+        payload.CopyTo(body.AsSpan(o)); o += payload.Length;
+        body[o] = (byte)'}';
+        return body;
+    }
+
+    /// <summary>Parse one frame body into an envelope, detecting the encoding.</summary>
+    public static Envelope DecodeBody(byte[] body)
+    {
+        if (SniffEncoding(body) == WireEncoding.Proto)
+        {
+            var pb = RpgMmo.Wire.V1.Envelope.Parser.ParseFrom(body);
+            if (pb.Type > byte.MaxValue)
+                throw new IOException($"Message type out of range: {pb.Type}");
+            return new Envelope
+            {
+                Type = (byte)pb.Type,
+                Payload = pb.Payload.IsEmpty ? Array.Empty<byte>() : pb.Payload.ToByteArray(),
+                Encoding = WireEncoding.Proto
+            };
+        }
+
+        return DecodeJsonEnvelope(body);
     }
 
     /// <summary>Read one length-prefixed envelope from a stream. Returns null on EOF.</summary>
@@ -169,50 +160,143 @@ public static class WireProtocol
         read = await ReadExactAsync(stream, body, ct);
         if (read < length) throw new IOException("Incomplete message body");
 
-        return JsonSerializer.Deserialize(body, WireJsonContext.Default.Envelope)
-               ?? throw new IOException("Failed to deserialize envelope");
+        return DecodeBody(body);
     }
 
-    /// <summary>Create an envelope with a serialized payload (AOT-safe).</summary>
-    public static Envelope NewEnvelope(MsgType type, JoinTokenResponse payload)
-    {
-        var payloadBytes = JsonSerializer.SerializeToUtf8Bytes(payload, WireJsonContext.Default.JoinTokenResponse);
-        return MakeEnvelope(type, payloadBytes);
-    }
+    // ─────────────────────── envelope construction ───────────────────────
 
-    /// <summary>Create an envelope with a serialized payload (AOT-safe).</summary>
-    public static Envelope NewEnvelope(MsgType type, SnapshotMessage payload)
-    {
-        var payloadBytes = JsonSerializer.SerializeToUtf8Bytes(payload, WireJsonContext.Default.SnapshotMessage);
-        return MakeEnvelope(type, payloadBytes);
-    }
+    /// <summary>
+    /// Build an envelope carrying <paramref name="payload"/>, serialized in
+    /// <paramref name="encoding"/>.
+    /// </summary>
+    /// <remarks>
+    /// Every server reply should be built with the encoding of the message it
+    /// answers (see <c>Connection.Encoding</c>), never with a hard-coded one —
+    /// that is what keeps a Protobuf server able to serve a JSON client.
+    /// </remarks>
+    public static Envelope NewEnvelope(MsgType type, JoinTokenResponse payload, WireEncoding encoding) =>
+        new()
+        {
+            Type = (byte)type,
+            Payload = encoding == WireEncoding.Proto ? payload.ToByteArray() : JsonWriter.Write(payload),
+            Encoding = encoding
+        };
 
-    /// <summary>Deserialize the payload as a JoinTokenRequest (AOT-safe).</summary>
-    public static T GetPayload<T>(Envelope envelope)
+    /// <inheritdoc cref="NewEnvelope(MsgType, JoinTokenResponse, WireEncoding)"/>
+    public static Envelope NewEnvelope(MsgType type, SnapshotMessage payload, WireEncoding encoding) =>
+        new()
+        {
+            Type = (byte)type,
+            Payload = encoding == WireEncoding.Proto ? payload.ToByteArray() : JsonWriter.Write(payload),
+            Encoding = encoding
+        };
+
+    /// <inheritdoc cref="NewEnvelope(MsgType, JoinTokenResponse, WireEncoding)"/>
+    public static Envelope NewEnvelope(MsgType type, JoinTokenRequest payload, WireEncoding encoding) =>
+        new()
+        {
+            Type = (byte)type,
+            Payload = encoding == WireEncoding.Proto ? payload.ToByteArray() : JsonWriter.Write(payload),
+            Encoding = encoding
+        };
+
+    /// <inheritdoc cref="NewEnvelope(MsgType, JoinTokenResponse, WireEncoding)"/>
+    public static Envelope NewEnvelope(MsgType type, InputMessage payload, WireEncoding encoding) =>
+        new()
+        {
+            Type = (byte)type,
+            Payload = encoding == WireEncoding.Proto ? payload.ToByteArray() : JsonWriter.Write(payload),
+            Encoding = encoding
+        };
+
+    /// <summary>Build an envelope with no payload (Disconnect, Resync).</summary>
+    public static Envelope NewEmptyEnvelope(MsgType type, WireEncoding encoding) =>
+        new()
+        {
+            Type = (byte)type,
+            Payload = encoding == WireEncoding.Proto ? Array.Empty<byte>() : "{}"u8.ToArray(),
+            Encoding = encoding
+        };
+
+    // ─────────────────────────── payload access ───────────────────────────
+
+    /// <summary>Deserialize the payload as <typeparamref name="T"/>, honouring the envelope's encoding.</summary>
+    public static T GetPayload<T>(Envelope envelope) where T : class
     {
-        var json = envelope.Payload.GetRawText();
+        bool proto = envelope.Encoding == WireEncoding.Proto;
         object? result = typeof(T) switch
         {
-            Type t when t == typeof(JoinTokenRequest) =>
-                JsonSerializer.Deserialize(json, WireJsonContext.Default.JoinTokenRequest),
-            Type t when t == typeof(JoinTokenResponse) =>
-                JsonSerializer.Deserialize(json, WireJsonContext.Default.JoinTokenResponse),
-            Type t when t == typeof(InputMessage) =>
-                JsonSerializer.Deserialize(json, WireJsonContext.Default.InputMessage),
-            Type t when t == typeof(SnapshotMessage) =>
-                JsonSerializer.Deserialize(json, WireJsonContext.Default.SnapshotMessage),
+            var t when t == typeof(JoinTokenRequest) => proto
+                ? JoinTokenRequest.Parser.ParseFrom(envelope.Payload)
+                : JsonReader.ReadJoinTokenRequest(envelope.Payload),
+            var t when t == typeof(JoinTokenResponse) => proto
+                ? JoinTokenResponse.Parser.ParseFrom(envelope.Payload)
+                : JsonReader.ReadJoinTokenResponse(envelope.Payload),
+            var t when t == typeof(InputMessage) => proto
+                ? InputMessage.Parser.ParseFrom(envelope.Payload)
+                : JsonReader.ReadInputMessage(envelope.Payload),
+            var t when t == typeof(SnapshotMessage) => proto
+                ? SnapshotMessage.Parser.ParseFrom(envelope.Payload)
+                : JsonReader.ReadSnapshotMessage(envelope.Payload),
             _ => throw new NotSupportedException($"Unsupported payload type: {typeof(T).Name}")
         };
         return (T)(result ?? throw new InvalidOperationException($"Failed to deserialize payload as {typeof(T).Name}"));
     }
 
-    private static Envelope MakeEnvelope(MsgType type, byte[] payloadBytes)
+    // ─────────────────────────── helpers ───────────────────────────
+
+    private static int WriteByteDecimal(byte value, Span<byte> dst)
     {
-        return new Envelope
+        if (value >= 100) { dst[0] = (byte)('0' + value / 100); dst[1] = (byte)('0' + value / 10 % 10); dst[2] = (byte)('0' + value % 10); return 3; }
+        if (value >= 10) { dst[0] = (byte)('0' + value / 10); dst[1] = (byte)('0' + value % 10); return 2; }
+        dst[0] = (byte)('0' + value);
+        return 1;
+    }
+
+    private static Envelope DecodeJsonEnvelope(byte[] body)
+    {
+        var reader = new Utf8JsonReader(body);
+        byte type = 0;
+        byte[] payload = Array.Empty<byte>();
+
+        if (!reader.Read() || reader.TokenType != JsonTokenType.StartObject)
+            throw new IOException("Malformed JSON envelope");
+
+        while (reader.Read() && reader.TokenType != JsonTokenType.EndObject)
         {
-            Type = (byte)type,
-            Payload = JsonDocument.Parse(payloadBytes).RootElement.Clone()
-        };
+            if (reader.TokenType != JsonTokenType.PropertyName)
+                throw new IOException("Malformed JSON envelope");
+
+            bool isType = reader.ValueTextEquals("type"u8);
+            bool isPayload = reader.ValueTextEquals("payload"u8);
+
+            if (!reader.Read()) throw new IOException("Truncated JSON envelope");
+
+            if (isType)
+            {
+                type = reader.GetByte();
+            }
+            else if (isPayload)
+            {
+                if (reader.TokenType == JsonTokenType.Null)
+                {
+                    payload = Array.Empty<byte>();
+                }
+                else
+                {
+                    long start = reader.TokenStartIndex;
+                    reader.Skip();
+                    long end = reader.BytesConsumed;
+                    payload = body.AsSpan((int)start, (int)(end - start)).ToArray();
+                }
+            }
+            else
+            {
+                reader.Skip();
+            }
+        }
+
+        return new Envelope { Type = type, Payload = payload, Encoding = WireEncoding.Json };
     }
 
     /// <summary>Read exactly buffer.Length bytes from stream. Returns bytes actually read (0 = EOF).</summary>

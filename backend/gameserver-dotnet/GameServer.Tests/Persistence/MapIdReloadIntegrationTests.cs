@@ -148,7 +148,7 @@ public class MapIdReloadIntegrationTests
     /// complete the join handshake as <paramref name="userId"/>, optionally walk east, and
     /// return the player's own entity as the server reports it.
     /// </summary>
-    private static async Task<EntitySnapshotMsg> JoinAndReadOwnEntityAsync(
+    private static async Task<EntitySnapshot> JoinAndReadOwnEntityAsync(
         PostgresPlayerStore store, string userId, string serverMapId, int moveTicks = 0)
     {
         const string serverId = "gs-mapid-itest";
@@ -220,7 +220,7 @@ public class MapIdReloadIntegrationTests
     /// Read snapshots until the player's own entity appears. Snapshots are delta-encoded,
     /// so the entity arrives in the join keyframe; later deltas may omit it entirely.
     /// </summary>
-    private static async Task<EntitySnapshotMsg> ReadOwnEntityAsync(
+    private static async Task<EntitySnapshot> ReadOwnEntityAsync(
         NetworkStream stream, string userId, CancellationToken ct)
     {
         for (int frames = 0; frames < 200; frames++)
@@ -229,8 +229,7 @@ public class MapIdReloadIntegrationTests
             if (env == null) break;
             if ((MsgType)env.Type != MsgType.Snapshot) continue;
 
-            var msg = JsonSerializer.Deserialize(
-                env.Payload.GetRawText(), WireJsonContext.Default.SnapshotMessage)!;
+            var msg = WireProtocol.GetPayload<SnapshotMessage>(env);
 
             foreach (var e in msg.Entities)
             {
@@ -243,17 +242,13 @@ public class MapIdReloadIntegrationTests
     private static string NewUserId() => $"mapid-{Guid.NewGuid():N}"[..20];
 
     private static async Task SendAsync(Stream stream, MsgType type, JoinTokenRequest payload)
-        => await WriteFrameAsync(stream, type,
-            JsonSerializer.SerializeToUtf8Bytes(payload, WireJsonContext.Default.JoinTokenRequest));
+        => await WriteFrameAsync(stream, WireProtocol.NewEnvelope(type, payload, WireEncoding.Json));
 
     private static async Task SendAsync(Stream stream, MsgType type, InputMessage payload)
-        => await WriteFrameAsync(stream, type,
-            JsonSerializer.SerializeToUtf8Bytes(payload, WireJsonContext.Default.InputMessage));
+        => await WriteFrameAsync(stream, WireProtocol.NewEnvelope(type, payload, WireEncoding.Json));
 
-    private static async Task WriteFrameAsync(Stream stream, MsgType type, byte[] payloadBytes)
+    private static async Task WriteFrameAsync(Stream stream, Envelope env)
     {
-        using var doc = JsonDocument.Parse(payloadBytes);
-        var env = new Envelope { Type = (byte)type, Payload = doc.RootElement.Clone() };
         byte[] frame = WireProtocol.Encode(env);
         await stream.WriteAsync(frame);
         await stream.FlushAsync();

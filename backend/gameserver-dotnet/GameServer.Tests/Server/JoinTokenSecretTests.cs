@@ -111,10 +111,7 @@ public class JoinTokenSecretTests
                 ? TestHelpers.CreateExpiredJwt("user-join", ServerId, tokenSecret)
                 : TestHelpers.CreateTestJwt("user-join", ServerId, tokenSecret);
 
-            byte[] payloadBytes = JsonSerializer.SerializeToUtf8Bytes(
-                new JoinTokenRequest { Token = token }, WireJsonContext.Default.JoinTokenRequest);
-            using var doc = JsonDocument.Parse(payloadBytes);
-            var env = new Envelope { Type = (byte)MsgType.JoinToken, Payload = doc.RootElement.Clone() };
+            var env = WireProtocol.NewEnvelope(MsgType.JoinToken, new JoinTokenRequest { Token = token }, WireEncoding.Json);
             await stream.WriteAsync(WireProtocol.Encode(env), cts.Token);
             await stream.FlushAsync(cts.Token);
 

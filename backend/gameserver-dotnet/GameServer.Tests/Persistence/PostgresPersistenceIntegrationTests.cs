@@ -109,17 +109,13 @@ public class PostgresPersistenceIntegrationTests
     // ── Helpers ──
 
     private static async Task SendAsync(Stream stream, MsgType type, JoinTokenRequest payload)
-        => await WriteFrameAsync(stream, type,
-            JsonSerializer.SerializeToUtf8Bytes(payload, WireJsonContext.Default.JoinTokenRequest));
+        => await WriteFrameAsync(stream, WireProtocol.NewEnvelope(type, payload, WireEncoding.Json));
 
     private static async Task SendAsync(Stream stream, MsgType type, InputMessage payload)
-        => await WriteFrameAsync(stream, type,
-            JsonSerializer.SerializeToUtf8Bytes(payload, WireJsonContext.Default.InputMessage));
+        => await WriteFrameAsync(stream, WireProtocol.NewEnvelope(type, payload, WireEncoding.Json));
 
-    private static async Task WriteFrameAsync(Stream stream, MsgType type, byte[] payloadBytes)
+    private static async Task WriteFrameAsync(Stream stream, Envelope env)
     {
-        using var doc = JsonDocument.Parse(payloadBytes);
-        var env = new Envelope { Type = (byte)type, Payload = doc.RootElement.Clone() };
         byte[] frame = WireProtocol.Encode(env);
         await stream.WriteAsync(frame);
         await stream.FlushAsync();

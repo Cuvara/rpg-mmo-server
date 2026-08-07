@@ -26,6 +26,20 @@ public sealed class Connection : IDisposable
     /// </summary>
     public GameServer.Snapshot.SnapshotDeltaState DeltaState { get; }
 
+    /// <summary>
+    /// Wire encoding this connection speaks, latched from the first frame decoded
+    /// on it and used for every reply.
+    /// </summary>
+    /// <remarks>
+    /// The server never chooses an encoding; it answers in whatever the client
+    /// used. That is what lets one server binary serve Protobuf and legacy JSON
+    /// clients at once, and lets the gateway, the game server and the Unity
+    /// client be upgraded in any order. Defaults to
+    /// <see cref="WireEncoding.Json"/> so a reply that somehow precedes any read
+    /// stays on the legacy encoding.
+    /// </remarks>
+    public WireEncoding Encoding { get; private set; } = WireEncoding.Json;
+
     private readonly ITransportConnection _transport;
     private readonly Stream _stream;
     private readonly Channel<Envelope> _sendChannel;
@@ -86,6 +100,7 @@ public sealed class Connection : IDisposable
                 var env = await WireProtocol.DecodeAsync(_stream, _cts.Token);
                 if (env == null) break; // clean EOF
 
+                Encoding = env.Encoding;
                 await handler(this, env);
             }
         }
@@ -121,9 +136,11 @@ public sealed class Connection : IDisposable
     }
 
     /// <summary>Read a single envelope from the wire (used during handshake).</summary>
-    public Task<Envelope?> ReadOneAsync()
+    public async Task<Envelope?> ReadOneAsync()
     {
-        return WireProtocol.DecodeAsync(_stream, _cts.Token);
+        var env = await WireProtocol.DecodeAsync(_stream, _cts.Token);
+        if (env != null) Encoding = env.Encoding;
+        return env;
     }
 
     /// <summary>Write a single envelope to the wire (used during handshake).</summary>

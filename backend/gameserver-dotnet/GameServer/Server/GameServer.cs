@@ -469,7 +469,7 @@ public sealed class GameServerHost : IAsyncDisposable
 
             // Step 5: Send JoinTokenResp
             var resp = WireProtocol.NewEnvelope(MsgType.JoinTokenResp,
-                new JoinTokenResponse { Ok = true, UserId = userId });
+                new JoinTokenResponse { Ok = true, UserId = userId }, conn.Encoding);
             await conn.WriteOneAsync(resp);
 
             _metrics?.PlayerJoined();
@@ -634,7 +634,7 @@ public sealed class GameServerHost : IAsyncDisposable
     private static async Task SendError(Connection conn, string error)
     {
         var resp = WireProtocol.NewEnvelope(MsgType.JoinTokenResp,
-            new JoinTokenResponse { Ok = false, Error = error });
+            new JoinTokenResponse { Ok = false, Error = error }, conn.Encoding);
         await conn.WriteOneAsync(resp);
     }
 

@@ -70,8 +70,8 @@ public class DeltaSnapshotWireTests : IDisposable
             if (env == null) break;
             if ((MsgType)env.Type != MsgType.Snapshot) continue;
 
-            string raw = env.Payload.GetRawText();
-            var msg = JsonSerializer.Deserialize(raw, WireJsonContext.Default.SnapshotMessage)!;
+            var msg = WireProtocol.GetPayload<SnapshotMessage>(env);
+            string raw = System.Text.Encoding.UTF8.GetString(env.Payload);
             result.Add((msg, System.Text.Encoding.UTF8.GetByteCount(raw)));
         }
         return result;

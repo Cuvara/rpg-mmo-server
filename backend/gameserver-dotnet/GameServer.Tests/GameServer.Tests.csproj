@@ -39,4 +39,19 @@
     <ProjectReference Include="..\GameServer\GameServer.csproj" />
   </ItemGroup>
 
+
+  <ItemGroup>
+    <!-- The generated wire.proto types ARE the game server's message types.
+         Imported as explicit aliases rather than a whole-namespace using so that
+         RpgMmo.Wire.V1.Envelope (the protobuf message) never collides with
+         GameServer.Net.Envelope (the framing envelope that carries encoding
+         metadata) - they are different things with the same name. -->
+    <Using Include="RpgMmo.Wire.V1.MsgType" Alias="MsgType" />
+    <Using Include="RpgMmo.Wire.V1.JoinTokenRequest" Alias="JoinTokenRequest" />
+    <Using Include="RpgMmo.Wire.V1.JoinTokenResponse" Alias="JoinTokenResponse" />
+    <Using Include="RpgMmo.Wire.V1.InputMessage" Alias="InputMessage" />
+    <Using Include="RpgMmo.Wire.V1.SnapshotMessage" Alias="SnapshotMessage" />
+    <Using Include="RpgMmo.Wire.V1.EntitySnapshot" Alias="EntitySnapshot" />
+  </ItemGroup>
+
 </Project>

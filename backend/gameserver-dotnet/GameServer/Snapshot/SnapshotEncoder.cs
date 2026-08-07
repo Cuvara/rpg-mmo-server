@@ -1,6 +1,7 @@
 using Shared.GameLogic.Components;
 using GameServer.Net;
 using GameServer.World;
+using RpgMmo.Wire.V1;
 
 namespace GameServer.Snapshot;
 
@@ -13,15 +14,11 @@ public static class SnapshotEncoder
     /// <summary>Encode a list of entities into a wire snapshot message.</summary>
     public static SnapshotMessage Encode(ulong tick, List<EntityState> entities)
     {
-        var msg = new SnapshotMessage
-        {
-            Tick = tick,
-            Entities = new List<EntitySnapshotMsg>(entities.Count)
-        };
+        var msg = new SnapshotMessage { Tick = tick };
 
         foreach (var e in entities)
         {
-            msg.Entities.Add(new EntitySnapshotMsg
+            msg.Entities.Add(new EntitySnapshot
             {
                 Id = e.Id,
                 Type = e.Type,
