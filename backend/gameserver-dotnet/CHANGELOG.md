@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`GameServer/Net/EntityTypes.cs`** — maps the simulation's string entity types
+  to the wire enum and back, the C# mirror of Go's `entityTypeToPB`. Unrecognised
+  names travel in `EntitySnapshot.TypeName` instead of being dropped, so a new
+  entity kind cannot silently break an older client.
+
+### Changed
+- The snapshot encoders set the entity type through `EntityTypes.SetType`, which
+  writes the enum when the name is known (2 bytes) and the string only when it is
+  not. The JSON codec still emits and parses the string form, so the legacy wire
+  is byte-identical.
+
 ### Changed
 - **The generated `wire.proto` types are now the server's only message classes.**
   The hand-written C# mirrors of the Go structs are deleted, which removes exactly

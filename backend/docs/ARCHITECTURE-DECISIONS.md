@@ -572,6 +572,22 @@ tolerable rather than a duplication exploit.
 > **Until a level has been measured this way, treat every player-count ceiling in
 > this project as approximate to ±50**, including the 150 in the table above.
 >
+> **Item 6 of the plan below (re-run on real hardware) now has a measured reason,
+> and it is not "the box is too noisy".** With the CD guard held and host load
+> recorded, six repeats of a fixed level held a 5.1% p99 spread — usable. The
+> problem is subtler: **the load generator runs on the same machine as the server
+> under test and consumes more CPU than it** (~261% of a core against ~120% at 200
+> players), and p99 tracked host load monotonically within that quiet set
+> (load 9.00 → 67.83ms, 14.01 → 67.41ms, 15.29 → 70.28ms, rising as the generator
+> warmed up).
+>
+> So the generator's own load is *inside* the measurement. That makes every tick
+> figure from this host a **lower bound — pessimistic, not optimistic**: the
+> server is competing with the thing measuring it, so its measured capacity is
+> below its true capacity. Safe to plan against, but it under-reports headroom,
+> and the size of the under-report is unknown. A number anyone sizes a fleet on
+> needs the generator on separate hardware.
+>
 > **Bandwidth is unaffected and is the better criterion.** It reproduced to within
 > **0.4%** across two sweeps on different builds, because bytes on the wire are
 > not a tail statistic and do not care what else the host is doing. It is also the

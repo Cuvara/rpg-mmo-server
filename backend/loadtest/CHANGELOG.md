@@ -7,6 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `results/entity-type-enum/` — the four-level sweep measuring the entity-type
+  enum at ~15.4% of downstream bandwidth. All four levels passed the validity
+  gate on the first attempt.
+
+### Added
 
 - **`-repeat N` and a ceiling that is a decidable output rather than a one-shot
   threshold crossing.** `ComputeCeiling` groups repeated runs of a level and
