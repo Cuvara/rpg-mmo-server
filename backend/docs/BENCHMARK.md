@@ -24,6 +24,15 @@
 > was withdrawn on re-run. **The mobile bandwidth ceiling is still only ~93
 > players, and that, not the tick ceiling, is what should size a fleet.**
 
+> **⚠️ The ~150-player figure in Part I is STALE.** It predates Protobuf, the
+> entity-type enum and id interning — three changes that removed 81% of the wire
+> and with it the constraint that produced 150. **The current tick ceiling is
+> unknown**, and cannot be measured on this host: the load generator shares the
+> machine with the server under test and uses more CPU than it. Bandwidth, by
+> contrast, is solved — 45.9 KB/s per client at 200 players, inside ADR-7's
+> threshold, measured to 0.3%. See [Part IV](#part-iv--entity-id-interning-2026-08-07)
+> and ADR-7's CURRENT STATE block.
+
 > **Headline (Part I, pre-Protobuf): one game server holds ~150 concurrent players in the worst-case
 > dense-crowd shape before the 15Hz tick budget breaks. The bottleneck is
 > per-client snapshot construction and JSON serialization, not the brute-force
@@ -363,8 +372,14 @@ Ordered by measured impact:
    of `type`, against 41.2 bytes marginal cost per entity).
 6. **Spatial-grid AOI** — worth doing, but it targets the 20% term. ADR-7 ranked
    it first; the measurement demotes it below the items above.
-7. **Re-run on real VPS hardware** with the generator on a separate host before
-   any tier CCU number is published.
+7. **⛔ BLOCKER — put the generator on a separate machine.** Not "before
+   publishing a tier table": before *any* further capacity work. Bandwidth is now
+   solved to the threshold and tick binds instead, and tick is the statistic a
+   co-located generator distorts — measured 3.3x on p99 with a dose-response
+   against host load. Optimising against it would be tuning to an instrument
+   known to be measuring the wrong thing. See
+   [Part IV](#part-iv--entity-id-interning-2026-08-07) and ADR-7's CURRENT STATE
+   block.
 
 ---
 

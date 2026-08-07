@@ -494,17 +494,56 @@ tolerable rather than a duplication exploit.
 
 ## ADR-7 — CCU and cost figures are unbenchmarked estimates
 
-> **UPDATE 2026-08-07 — partially resolved. The primary benchmark has been run.**
+> ## ⛔ CURRENT STATE (2026-08-07, final) — capacity work is BLOCKED on hardware
+>
+> Read this before quoting any number from this ADR.
+>
+> | Question | Answer |
+> |---|---|
+> | Downstream bandwidth | **SOLVED to the threshold.** 45.9 KB/s per client at 200 players, inside ADR-7's `< 50 KB/s`. Ceiling is above 200 and no longer bracketed |
+> | How reliable is that? | **0.3% spread across six runs.** Bytes on the wire do not care what else the host is doing |
+> | Players per game server (tick) | **UNKNOWN — and unknowable on this machine** |
+> | What binds now | **Tick time.** Bandwidth was the constraint at ~⅓ of the tick ceiling; three wire changes removed it, and tick now breaks first |
+> | What unblocks it | **A separate machine for the load generator. Nothing else.** |
+>
+> **The ~150-player figure below is STALE. Do not quote it as the current
+> ceiling.** It was measured before Protobuf, before the entity-type enum and
+> before id interning — three changes that removed 81% of the wire and, with it,
+> the constraint that produced 150. Everything derived from it is stale too,
+> including the "game servers implied" column in the root `CLAUDE.md` tier table,
+> which divides tier CCU by 150.
+>
+> **Why a new number cannot be produced here.** The load generator runs on the
+> same machine as the server under test and consumes *more CPU than it* (~261% of
+> a core against ~120% at 200 players). Tick p99 is highly sensitive to that: at a
+> fixed level it measured 67.4–70.8ms with the box quiet and 224.7–240.6ms with a
+> deploy sharing it — a **3.3× swing**, with a monotonic dose-response against
+> host load (9.00 → 67.83ms, 14.01 → 67.41ms, 15.29 → 70.28ms). The tick mean
+> moves 1.7× under the same disturbance.
+>
+> So the generator's own load sits *inside* the measurement. Every tick figure
+> from this host is a **lower bound — pessimistic, safe to plan against, but
+> under-reporting headroom by an unknown amount.** Optimising against it would be
+> tuning to an instrument known to be measuring the wrong thing.
+>
+> **Item 6 of the plan below is therefore promoted from a footnote to a
+> BLOCKER.** It is not "nice to have before publishing a tier table"; it is the
+> single prerequisite for any further capacity work. This is a measured
+> conclusion, not a suspicion.
+>
+> ---
+>
+> **UPDATE 2026-08-07 — the primary benchmark has been run.**
 >
 > `backend/loadtest` now exists and the game-server capacity ceiling has been
 > measured. Full write-up: **[BENCHMARK.md](BENCHMARK.md)**.
 >
 > | Measured (dev workstation, lower bound) | Result |
 > |---|---|
-> | Players per game server before tick p99 > 66.67ms | **150** (160 breaches) |
+> | Players per game server before tick p99 > 66.67ms | **150** ⚠️ **STALE — pre-Protobuf, see above** |
 > | RAM per pod | **~30 MiB idle, ~50 MiB @100, ~82 MiB @200** — resolves the 30-45 vs 50 MB dispute |
 > | Downstream bandwidth | **1.22 KB/s per in-AOI player**; 184 KB/s per client at 150 |
-> | Bandwidth vs the < 50 KB/s threshold below | breached at **~41 players** |
+> | Bandwidth vs the < 50 KB/s threshold below | breached at **~41 players** ⚠️ **SUPERSEDED — now passes above 200** |
 >
 > **The bottleneck prediction in this ADR was wrong.** This ADR named brute-force
 > AOI as "the most likely first failure". Measurement puts snapshot construction
@@ -704,8 +743,13 @@ A tier's CCU claim is only publishable once a run at that CCU holds every thresh
   players.
 - **S** — Stagger per-connection keyframe counters to stop the keyframe stampede.
 - **M** — Spatial-grid AOI. Measurement demotes this: it targets the ~20% term.
-- **M** — Re-run the matrix on VPS hardware with the generator on a separate host,
-  then replace the tier CCU numbers and drop the ⚠️ markers.
+- **⛔ BLOCKER** — Put the load generator on a **separate machine** from the
+  server under test, then re-run the matrix and replace the tier CCU numbers.
+  This is no longer one item among several: bandwidth is solved, tick now binds,
+  and tick is precisely the statistic a co-located generator distorts (measured
+  3.3x on p99, with a dose-response against host load). **No further capacity
+  work is meaningful until this is done** — see the CURRENT STATE block at the
+  top of this ADR.
 - **M** — Measure the two remaining plan items: connection churn, and gateway
   login throughput (`-auth=nakama` in `backend/loadtest` drives the real path).
 
