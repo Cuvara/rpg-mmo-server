@@ -38,6 +38,7 @@ public sealed class GameMetrics : IDisposable
     private readonly Counter<long> _playerSaves;
     private readonly Counter<long> _eventsPublished;
     private readonly Counter<long> _processedInputs;
+    private readonly Counter<long> _resyncsRequested;
 
     // Pre-built tag sets — never allocate per record call.
     private readonly TagList _mapTags;
@@ -93,6 +94,15 @@ public sealed class GameMetrics : IDisposable
             "gameserver.tick.processed_inputs",
             description: "Client inputs drained and applied by the tick loop.");
 
+        // Counts CLIENT-INITIATED resyncs only, never the periodic keyframe. The
+        // periodic one is routine (every N snapshots, by design); folding it in
+        // would bury the signal under a constant background rate, and the signal
+        // is the entire point of the counter. See docs/METRICS.md.
+        _resyncsRequested = _meter.CreateCounter<long>(
+            "gameserver.resyncs",
+            description: "Keyframes requested by a client (MsgResync), i.e. a client that " +
+                         "could not reconstruct state from the delta stream.");
+
         _meter.CreateObservableGauge(
             "gameserver.players.online",
             ObservePlayersOnline,
@@ -130,6 +140,18 @@ public sealed class GameMetrics : IDisposable
     {
         if (count > 0) _snapshotsSent.Add(count, _mapTags);
     }
+
+    /// <summary>
+    /// Record a client asking for a full keyframe (<c>MsgResync</c>).
+    /// </summary>
+    /// <remarks>
+    /// A client only sends this when it cannot reconstruct state from the delta
+    /// stream. Since entity-id interning shipped, the most likely cause is a
+    /// snapshot referencing an entity handle the client has no binding for — the
+    /// two ends disagreeing about the interning table. See docs/METRICS.md for
+    /// how to read a rising rate.
+    /// </remarks>
+    public void RecordResyncRequested() => _resyncsRequested.Add(1, _mapTags);
 
     /// <summary>Record a successful player save.</summary>
     public void RecordPlayerSaveOk() => _playerSaves.Add(1, _saveOkTags);

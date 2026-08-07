@@ -523,6 +523,12 @@ public sealed class GameServerHost : IAsyncDisposable
                 // Client lost or distrusts its reconstructed state: promote the next
                 // snapshot for this connection to a full keyframe. Payload is ignored.
                 conn.DeltaState.RequestFull();
+                // Counted because this is the only field-visible signal that the
+                // interning handle tables have diverged. A healthy fleet sits at
+                // ~0; a sustained rate means clients are repeatedly failing to
+                // resolve handles and the delta stream is doing less work than
+                // the snapshot count suggests.
+                _metrics?.RecordResyncRequested();
                 break;
 
             case MsgType.Disconnect:

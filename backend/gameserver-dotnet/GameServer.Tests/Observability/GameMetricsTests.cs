@@ -266,6 +266,39 @@ public class GameMetricsTests
         Assert.Equal(2, value);
     }
 
+    /// <summary>
+    /// The resync counter is the only field-visible signal that entity-id
+    /// interning has gone wrong, so it has to exist and be labelled like every
+    /// other server metric.
+    /// </summary>
+    [Fact]
+    public void ResyncsRequested_CounterExistsAfterRecording()
+    {
+        using var h = new Harness(nameof(ResyncsRequested_CounterExistsAfterRecording));
+
+        h.Metrics.RecordResyncRequested();
+        h.Metrics.RecordResyncRequested();
+
+        var metric = Find(h.Collect(), "gameserver.resyncs");
+        Assert.NotNull(metric);
+        Assert.Equal(2, SumLong(metric, ("map_id", "map_01")));
+    }
+
+    /// <summary>
+    /// A server nobody resynced against must report nothing rather than a zero
+    /// that looks like a reading. The counter only appears once something has
+    /// happened, which is standard counter behaviour and worth pinning: a
+    /// permanently-absent series would read the same as a healthy one.
+    /// </summary>
+    [Fact]
+    public void ResyncsRequested_AbsentUntilSomethingHappens()
+    {
+        using var h = new Harness(nameof(ResyncsRequested_AbsentUntilSomethingHappens));
+
+        h.Metrics.RecordSnapshotsSent(1); // unrelated activity
+        Assert.Null(Find(h.Collect(), "gameserver.resyncs"));
+    }
+
     [Fact]
     public void SnapshotsSent_CounterExistsAfterRecording()
     {

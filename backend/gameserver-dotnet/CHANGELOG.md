@@ -7,6 +7,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`gameserver_resyncs_total`** (counter, `map_id`) — keyframes requested by a
+  client via `MsgResync`. Expected value is approximately zero.
+
+  This is the only field-visible signal that entity-id interning has gone wrong.
+  A client sends `MsgResync` only when it cannot reconstruct state from the delta
+  stream, and the likeliest cause is a snapshot referencing an entity handle it
+  has no binding for — the two ends disagreeing about the interning table.
+  Interning is backward compatible by construction and by test, but had no way to
+  be observed failing in production; now it does.
+
+  Counts client-initiated resyncs **only**, never the periodic keyframe. Folding
+  the routine one in would bury the signal under a constant background rate.
+  `docs/METRICS.md` says what a rising rate means and what it invalidates.
+
+  No gateway-side equivalent exists, deliberately: `MsgResync` goes client to
+  game server directly (ADR-3), so a gateway counter would always read zero —
+  worse than absent, because a permanently-zero series looks healthy.
+
+### Added
 - **Entity-id interning**, gated on the connection's encoding. `SnapshotDeltaState`
   keeps a per-connection handle table reset at every keyframe, writes the id only
   on the message that introduces a handle, and never reuses a handle within an
