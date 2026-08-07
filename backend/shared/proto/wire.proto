@@ -1,0 +1,153 @@
+syntax = "proto3";
+
+// Realtime wire protocol shared by the Go gateway, the C# game server and the
+// Unity client.
+//
+// THIS FILE IS THE SINGLE SOURCE OF TRUTH. Go code under proto/gen/ and C# code
+// under gameserver-dotnet/GameServer/Net/Generated/ are both generated from it
+// (see proto/generate.sh). Do not hand-edit either one, and do not add a
+// parallel definition in another language — the drift that causes is exactly
+// what this file exists to prevent.
+//
+// Framing is NOT described here. Every message travels as
+// [4-byte big-endian length][Envelope bytes], identically to the JSON encoding
+// it replaces, so the transport layer (TCP/KCP) is unaffected.
+
+package rpgmmo.wire.v1;
+
+option go_package = "github.com/duycuong/rpg-mmo/shared/proto/gen;wirepb";
+option csharp_namespace = "RpgMmo.Wire.V1";
+
+// MsgType selects the payload schema carried by an Envelope.
+//
+// The numeric values are FROZEN — they are the same integers the JSON encoding
+// puts in its "type" field, so both encodings share one type space and a
+// dual-stack peer routes a message the same way whichever encoding it arrived
+// in. Never renumber; only append.
+enum MsgType {
+  MSG_TYPE_UNSPECIFIED = 0;
+  MSG_TYPE_AUTH = 1;             // client -> gateway
+  MSG_TYPE_AUTH_RESP = 2;        // gateway -> client
+  MSG_TYPE_ENTER_WORLD = 3;      // client -> gateway
+  MSG_TYPE_ENTER_WORLD_RESP = 4; // gateway -> client
+  MSG_TYPE_JOIN_TOKEN = 5;       // client -> gameserver
+  MSG_TYPE_JOIN_TOKEN_RESP = 6;  // gameserver -> client
+  MSG_TYPE_INPUT = 7;            // client -> gameserver (per tick)
+  MSG_TYPE_SNAPSHOT = 8;         // gameserver -> client (per tick)
+  MSG_TYPE_DISCONNECT = 9;       // either direction
+  MSG_TYPE_RESYNC = 10;          // client -> gameserver (request a keyframe)
+}
+
+// Envelope is the top-level wire message.
+//
+// `type` is field 1 and is always >= 1 for any real message, so proto3 never
+// elides it and an encoded Envelope ALWAYS begins with tag byte 0x08. A JSON
+// envelope always begins with '{' (0x7B). Those cannot collide, which is what
+// lets a peer identify the encoding from the first body byte alone — no version
+// negotiation and no extra handshake round trip. See docs/DESIGN.md.
+//
+// `payload` stays opaque bytes rather than becoming a oneof so that routing and
+// payload decoding remain separable, exactly as in the JSON encoding: a proxy or
+// relay can dispatch on `type` without linking in every payload schema.
+message Envelope {
+  uint32 type = 1;
+  bytes payload = 2;
+}
+
+// --- Gateway handshake ---
+
+// AuthRequest is sent by the client to authenticate with the gateway.
+message AuthRequest {
+  string token = 1;
+}
+
+// AuthResponse is the gateway's reply to an auth request.
+message AuthResponse {
+  bool ok = 1;
+  string user_id = 2;
+  string error = 3;
+}
+
+// EnterWorldRequest asks the gateway to assign a map server.
+message EnterWorldRequest {
+  string map_id = 1;
+}
+
+// EnterWorldResponse contains the game server address and join token.
+//
+// `transport` tells the client which realtime transport the target game server
+// speaks ("tcp" or "kcp"). Empty means "tcp".
+message EnterWorldResponse {
+  string server_addr = 1;
+  string join_token = 2;
+  string transport = 3;
+  string error = 4;
+}
+
+// --- Game server handshake ---
+
+// JoinTokenRequest is sent by the client to authenticate with a game server.
+message JoinTokenRequest {
+  string token = 1;
+}
+
+// JoinTokenResponse confirms whether the join was accepted.
+message JoinTokenResponse {
+  bool ok = 1;
+  string user_id = 2;
+  string error = 3;
+}
+
+// --- Gameplay ---
+
+// InputMessage carries player input for one tick.
+message InputMessage {
+  uint64 tick = 1;
+  float move_x = 2;
+  float move_y = 3;
+  string attack_target_id = 4;
+}
+
+// EntitySnapshot is a single entity's visible state.
+//
+// `type` is deliberately still a string rather than an enum, and `id` is still a
+// full string rather than an interned handle. Both would shrink the wire further
+// — this is the hottest message in the protocol — but both are semantic changes
+// to what the field means, whereas this schema is a pure re-encoding of the
+// existing JSON. They are tracked as follow-ups in docs/DESIGN.md.
+message EntitySnapshot {
+  string id = 1;
+  string type = 2;
+  float x = 3;
+  float y = 4;
+  int32 hp = 5;
+  int32 max_hp = 6;
+}
+
+// SnapshotMessage is a world state update sent to the client.
+//
+// Either a KEYFRAME (full = true, `entities` is the complete AOI set and the
+// client discards anything not listed) or a DELTA (full = false, `entities`
+// holds only entities whose visible state changed since the previous snapshot
+// sent to this connection and `removed` lists entities that left the AOI or the
+// world).
+message SnapshotMessage {
+  uint64 tick = 1;
+  // Highest client input tick the server has accepted for the receiving player;
+  // the client's reconciliation anchor. Zero means "no input accepted yet".
+  uint64 ack_tick = 2;
+  bool full = 3;
+  repeated EntitySnapshot entities = 4;
+  repeated string removed = 5;
+}
+
+// DisconnectMessage is sent by either side to end the session politely.
+// The JSON encoding sends an empty object here; the field is reserved for a
+// future reason string and is optional in both encodings.
+message DisconnectMessage {
+  string reason = 1;
+}
+
+// ResyncRequest asks the game server to make the next snapshot a full keyframe.
+// It carries no fields and encodes to zero bytes.
+message ResyncRequest {}
