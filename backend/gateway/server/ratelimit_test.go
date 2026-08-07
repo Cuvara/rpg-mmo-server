@@ -178,7 +178,7 @@ func TestMsgRateLimit(t *testing.T) {
 			break // EOF / closed — expected terminal state
 		}
 		var resp messages.AuthResponse
-		if uerr := messages.UnmarshalPayload(env.Payload, &resp); uerr != nil {
+		if uerr := env.UnmarshalPayload(&resp); uerr != nil {
 			continue
 		}
 		if !resp.OK && strings.Contains(resp.Error, "rate limited") {
@@ -235,7 +235,7 @@ func TestMsgRateLimitAllowsNormalHandshake(t *testing.T) {
 		t.Fatalf("decode enter world resp: %v", err)
 	}
 	var ew messages.EnterWorldResponse
-	if err := messages.UnmarshalPayload(env.Payload, &ew); err != nil {
+	if err := env.UnmarshalPayload(&ew); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if ew.Error != "" {
@@ -271,7 +271,7 @@ func readAuthResp(t *testing.T, conn net.Conn) messages.AuthResponse {
 		t.Fatalf("decode: %v", err)
 	}
 	var resp messages.AuthResponse
-	if err := messages.UnmarshalPayload(env.Payload, &resp); err != nil {
+	if err := env.UnmarshalPayload(&resp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	return resp
