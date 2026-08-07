@@ -1,5 +1,19 @@
 # Benchmark — measured game-server capacity
 
+> **Which number should you plan on? Bandwidth.** Measured across six repeats of
+> a fixed level on this host:
+>
+> | statistic | spread across 6 runs | under a deploy sharing the host |
+> |---|--:|--:|
+> | **KB/s per client** | **0.3%** | barely moved |
+> | tick p99 | 5.1% | **3.3×** |
+> | tick mean | 5.9% | 1.7× |
+>
+> Bytes on the wire do not care how busy the machine is; tick timings do, by
+> multiples. Bandwidth is also the *binding* constraint — it breaks ADR-7's
+> mobile threshold at roughly a third of the tick ceiling. **Size a fleet on the
+> bandwidth figure; treat every tick/CCU number here as a lower bound.**
+
 > **⚠️ Part I below measures the pre-Protobuf server and is kept as the
 > historical baseline. For current numbers see
 > [Part II](#part-ii--protobuf-vs-json-2026-08-07): after the Protobuf migration
