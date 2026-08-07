@@ -522,6 +522,40 @@ tolerable rather than a duplication exploit.
 > (`gameserver_entities` never returns to 0), which turns the bounded O(n²) tick
 > cost into an unbounded one on a long-lived server. BENCHMARK.md §7.
 
+> **UPDATE 2026-08-07 (b) — the acceptance criterion in this ADR is not
+> decidable as written, and must change.**
+>
+> This ADR defines the tick threshold as "p99 within the 66.67ms budget",
+> evaluated at one player count, from one run. Two full sweeps
+> ([BENCHMARK.md §16](BENCHMARK.md#16-reproduction-a-withdrawn-claim-and-a-run-that-lied-in-our-favour))
+> show that criterion cannot reproduce a ceiling to better than **±50 players**:
+> the same build measured p99 53.46ms and then 72.47ms at 200 players, straddling
+> the budget, while its tick *mean* and its p99 at 150 players barely moved. A
+> capacity figure derived this way inherits that instability, and one such figure
+> has already had to be withdrawn.
+>
+> **The criterion should be changed to one of the following, in preference order:**
+>
+> 1. **Publish a band, not a number.** The ceiling is the highest level that
+>    passes in *every* run of N ≥ 3. Levels that pass in some runs and not others
+>    are the band, quoted as "150–200" rather than as either endpoint.
+> 2. **Judge on the mean and report the tail separately.** Tick mean reproduced
+>    within 10% across runs where p99 moved 35%. "Mean within half the budget",
+>    plus a separately reported p99, is decidable and still catches the tail
+>    behaviour p99 exists to catch.
+> 3. **At minimum: never quote a ceiling from a single run.** Every ceiling
+>    figure published before this update came from one sweep.
+>
+> Until this is adopted, **treat every player-count ceiling in this project as
+> approximate to ±50**, including the 150 in the table above and the ~300 in
+> BENCHMARK.md Part II. The bandwidth figures are unaffected — they reproduced to
+> within 0.4% across builds and machines, because bytes on the wire are not a
+> tail statistic.
+>
+> **The bandwidth threshold is therefore the more reliable of the two acceptance
+> criteria in this ADR, and it is also the binding one** (~93 players after
+> Protobuf, against a tick ceiling three times higher). Fleet sizing should use it.
+
 ### Context
 
 The criticism: the CCU and cost tables are presented as fact but nothing has been
