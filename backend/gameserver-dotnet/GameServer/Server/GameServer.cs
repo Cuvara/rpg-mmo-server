@@ -390,17 +390,29 @@ public sealed class GameServerHost : IAsyncDisposable
             var existing = _world.GetEntity(userId);
             if (existing == null)
             {
-                // Load from store or create new
+                // Load from store or create new. PlayerSpawn owns the policy: saved
+                // coordinates are only reused when the row belongs to THIS map, because
+                // player_states holds one row per player and a row written by another
+                // map's server describes a position that does not exist here. HP and
+                // max HP are map-independent and carry across either way.
                 var saved = await _playerStore.LoadPlayerAsync(userId, ct);
+                var spawn = PlayerSpawn.Resolve(saved, _options.MapId, _options.MapBounds);
+
+                if (spawn.DiscardedMapId != null)
+                {
+                    _logger.LogInformation(
+                        "Player {UserId} last saved on map {SavedMapId}; spawning at {MapId} spawn point " +
+                        "instead of stale coordinates ({X:F2}, {Y:F2})",
+                        userId, spawn.DiscardedMapId, _options.MapId, saved!.X, saved.Y);
+                }
+
                 var entity = new EntityState
                 {
                     Id = userId,
                     Type = "player",
-                    // Clamp restored/spawn positions: a map may have been resized since
-                    // the state was saved, and an out-of-bounds entity must not persist.
-                    Position = _options.MapBounds.Clamp(new Vec2(saved?.X ?? 0, saved?.Y ?? 0)),
-                    Hp = saved?.Hp ?? ServerDefaults.DefaultPlayerHp,
-                    MaxHp = saved?.MaxHp ?? ServerDefaults.DefaultPlayerHp,
+                    Position = spawn.Position,
+                    Hp = spawn.Hp,
+                    MaxHp = spawn.MaxHp,
                     Speed = ServerDefaults.DefaultPlayerSpeed,
                     Attack = ServerDefaults.DefaultPlayerAttack,
                     Defense = ServerDefaults.DefaultPlayerDefense

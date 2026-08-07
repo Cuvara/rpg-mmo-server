@@ -246,6 +246,59 @@ So the server logs a critical error and exits 1, which surfaces immediately as
 a crash-looping pod. DSN passwords are masked in every log line and in the
 exception message.
 
+### Position is map-scoped; carried stats are not (2026-08-07)
+
+`player_states` holds **one row per player**, overwritten by whichever server
+currently hosts them — there is no per-map row. That is a deliberate consequence
+of ADR-1 (one writer per datum): the hosting server owns the player's state, and
+a player is only ever hosted by one server.
+
+The join path originally restored `x`/`y` from that row unconditionally. With one
+map live nobody noticed; with two, a player who last stood at (480, 12) on
+`map_02` and then joined `map_01` was recreated at (480, 12) on `map_01` — a
+different place entirely, possibly inside terrain. Worse, the row never
+converged: each join wrote back the stale base plus whatever they walked, so the
+drift compounded.
+
+**A coordinate pair only means something relative to the map it was recorded on.**
+So `PlayerSpawn.Resolve` compares the row's `map_id` against the map being joined:
+
+| Saved row | Position | HP / max HP |
+|---|---|---|
+| none | spawn point | defaults |
+| `map_id` == joining map | restored, clamped into bounds | restored |
+| `map_id` != joining map | **spawn point** | restored |
+| `map_id` empty | **spawn point** | restored |
+
+**HP crosses unchanged.** It is a property of the character, not of the ground
+under it; healing or damaging someone for walking through a door would be a
+gameplay decision nobody made. Everything else the entity needs (speed, attack,
+defense) is a server default today and is not persisted at all.
+
+**An empty `map_id` counts as a mismatch, not a wildcard.** The column defaults to
+`''`, so a row written before the id meant anything — or by a server started
+without one — has unknown provenance. Spawning such a player at the spawn point
+is recoverable; dropping them at coordinates from an unknown map is not.
+
+**Comparison is ordinal.** Map ids are opaque identifiers matched byte for byte in
+the registry keys and the join-token claim; a culture-sensitive compare here could
+disagree with them.
+
+The row converges on the next save without any extra write: `AsyncSaver` is
+constructed with the hosting server's own `MapId`, so the first sweep after the
+join rewrites `map_id` to the map the player is actually on.
+
+Policy lives in `GameServer/Persistence/PlayerSpawn.cs` as a pure function rather
+than inline in the join handler, so every branch is testable without a database, a
+socket or a running server — and so the decision has one home when zone/shard
+routing (ADR-2) eventually makes the key richer than a bare map id.
+
+**Known gap, deliberately not fixed here:** `player_states` has no `dead` column,
+so a player persisted at `hp = 0` reloads with `Hp = 0` and `Dead = false`. That is
+a pre-existing death/respawn design question — it needs respawn rules and a schema
+change, not a tweak to the placement policy — and this change preserves the
+existing HP behaviour exactly rather than quietly reviving anyone.
+
 ## Delta Snapshots, Input Ack and Tick-Based Timers (2026-08-06)
 
 Wire format reference: `docs/API.md`. This section is the *why*.
