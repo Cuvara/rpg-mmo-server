@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -323,7 +322,10 @@ func (p *player) readLoop(ctx context.Context, sentCh <-chan pendingInput) error
 			continue
 		}
 		var snap messages.SnapshotMessage
-		if err := json.Unmarshal(env.Payload, &snap); err != nil {
+		// Encoding-aware: the payload is whatever this connection speaks. Decoding
+		// it as JSON unconditionally silently drops every snapshot under -encoding
+		// proto, which reads as "server sent nothing" rather than as an error.
+		if err := env.UnmarshalPayload(&snap); err != nil {
 			continue
 		}
 
