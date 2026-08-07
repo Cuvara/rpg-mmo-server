@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/duycuong/rpg-mmo/shared/messages"
 	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
@@ -120,6 +121,12 @@ type Config struct {
 	AuthMode AuthMode
 	Movement string
 
+	// Encoding selects the wire encoding every virtual player speaks. The server
+	// answers in whatever encoding it is addressed in, so flipping this A/B-tests
+	// JSON against Protobuf against one unchanged server binary — the comparison
+	// stays controlled instead of spanning two builds.
+	Encoding messages.Encoding
+
 	// --- plumbing ---
 	Timeout      time.Duration
 	HoldGateway  bool // keep the gateway socket open for the whole run
@@ -186,6 +193,7 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 
 	authMode := string(cfg.AuthMode)
 	joinMode := string(cfg.JoinMode)
+	encoding := cfg.Encoding.String()
 	fs := flag.NewFlagSet("loadtest", flag.ContinueOnError)
 	fs.StringVar(&joinMode, "join", joinMode, "Join path: gateway (default, realistic) or direct (skip the gateway; needed above its conn-rate/capacity ceilings)")
 	fs.StringVar(&cfg.GameServerAddr, "gameserver-addr", cfg.GameServerAddr, "Game server address dialed by -join=direct")
@@ -203,6 +211,7 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	fs.IntVar(&cfg.TickRate, "tick-rate", cfg.TickRate, "Client input sends per second")
 	fs.StringVar(&authMode, "auth", authMode, "Auth path: presigned (default, benchmarks the game path) or nakama (adds real login cost)")
 	fs.StringVar(&cfg.Movement, "movement", cfg.Movement, "Input pattern: cluster, still or spread")
+	fs.StringVar(&encoding, "encoding", encoding, "Wire encoding: json (legacy) or proto")
 	fs.DurationVar(&cfg.Timeout, "timeout", cfg.Timeout, "Per-operation network timeout")
 	fs.BoolVar(&cfg.HoldGateway, "hold-gateway", cfg.HoldGateway, "Keep the gateway socket open for the whole run (as a real client does)")
 	fs.StringVar(&cfg.GSMetricsURL, "gameserver-metrics", cfg.GSMetricsURL, "Game server /metrics URL ('' to skip)")
@@ -215,6 +224,11 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	}
 	cfg.AuthMode = AuthMode(authMode)
 	cfg.JoinMode = JoinMode(joinMode)
+	enc, err := messages.ParseEncoding(encoding)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.Encoding = enc
 	// Mirror the server's own fallback: an unset JOIN_TOKEN_SECRET means join
 	// tokens are signed and verified with JWT_SECRET (Program.cs:141).
 	if cfg.JoinTokenSecret == "" {

@@ -50,6 +50,7 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 			ClientTickHz:  r.cfg.TickRate,
 			AuthMode:      string(r.cfg.AuthMode),
 			Movement:      r.cfg.Movement,
+			Encoding:      r.cfg.Encoding.String(),
 			MapID:         r.cfg.MapID,
 			Transport:     r.cfg.Transport,
 			HoldGateway:   r.cfg.HoldGateway,

@@ -116,7 +116,7 @@ func (p *player) closeAll() {
 		// Polite disconnect so the server frees the slot immediately instead of
 		// holding the entity for the reconnect window. Without it, back-to-back
 		// sweep levels would inherit the previous level's ghosts.
-		if env, err := messages.NewEnvelope(messages.MsgDisconnect, struct{}{}); err == nil {
+		if env, err := messages.NewEnvelopeAs(p.cfg.Encoding, messages.MsgDisconnect, struct{}{}); err == nil {
 			_ = p.send(p.gsConn, env)
 		}
 		_ = p.gsConn.Close()
@@ -261,7 +261,7 @@ func (p *player) loop(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			tick++
-			env, err := messages.NewEnvelope(messages.MsgInput, messages.InputMessage{
+			env, err := messages.NewEnvelopeAs(p.cfg.Encoding, messages.MsgInput, messages.InputMessage{
 				Tick: tick, MoveX: moveX, MoveY: moveY,
 			})
 			if err != nil {
@@ -445,8 +445,9 @@ func decodeCounted(r io.Reader) (messages.Envelope, int, error) {
 	if _, err := io.ReadFull(r, data); err != nil {
 		return env, 4, err
 	}
-	if err := json.Unmarshal(data, &env); err != nil {
-		return env, 4 + int(length), fmt.Errorf("unmarshal envelope: %w", err)
+	env, err := messages.DecodeBody(data)
+	if err != nil {
+		return env, 4 + int(length), err
 	}
 	return env, 4 + int(length), nil
 }
@@ -455,7 +456,7 @@ func decodeCounted(r io.Reader) (messages.Envelope, int, error) {
 // interleaved frames (an early snapshot, for instance).
 func (p *player) roundTrip(conn net.Conn, r io.Reader, reqType messages.MsgType,
 	reqPayload any, wantType messages.MsgType, out any) error {
-	env, err := messages.NewEnvelope(reqType, reqPayload)
+	env, err := messages.NewEnvelopeAs(p.cfg.Encoding, reqType, reqPayload)
 	if err != nil {
 		return fmt.Errorf("encode: %w", err)
 	}
@@ -473,7 +474,7 @@ func (p *player) roundTrip(conn net.Conn, r io.Reader, reqType messages.MsgType,
 		if resp.Type != wantType {
 			continue
 		}
-		return messages.UnmarshalPayload(resp.Payload, out)
+		return resp.UnmarshalPayload(out)
 	}
 	return fmt.Errorf("no frame of type %d received", wantType)
 }

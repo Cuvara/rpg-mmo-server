@@ -24,12 +24,16 @@ const ResultSchema = "rpg-mmo.loadtest/v1"
 
 // ResultConfig is the subset of Config that changes a measurement.
 type ResultConfig struct {
-	Players       int     `json:"players"`
-	RampRate      float64 `json:"ramp_players_per_sec"`
-	DurationSec   float64 `json:"duration_sec"`
-	ClientTickHz  int     `json:"client_tick_hz"`
-	AuthMode      string  `json:"auth_mode"`
-	Movement      string  `json:"movement"`
+	Players      int     `json:"players"`
+	RampRate     float64 `json:"ramp_players_per_sec"`
+	DurationSec  float64 `json:"duration_sec"`
+	ClientTickHz int     `json:"client_tick_hz"`
+	AuthMode     string  `json:"auth_mode"`
+	Movement     string  `json:"movement"`
+	// Encoding is the wire encoding the virtual players spoke ("json" or
+	// "proto"). Recorded so a result file is self-describing: the two encodings
+	// produce very different bandwidth numbers from identical load parameters.
+	Encoding      string  `json:"encoding"`
 	MapID         string  `json:"map_id"`
 	Transport     string  `json:"transport"`
 	HoldGateway   bool    `json:"hold_gateway"`
