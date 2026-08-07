@@ -6,6 +6,26 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`EntityType` enum on the protobuf wire.** A string entity type costs 8 bytes
+  ("player" = tag + length + 6 characters) for a value drawn from a set of two;
+  the enum costs 2. Measured at ~15% of a whole 50-entity snapshot payload and
+  ~19% of a packed entity.
+
+  `EntitySnapshot.type_name` remains as a string fallback, used ONLY when the
+  enum cannot express the value, so a simulation that grows a new entity kind
+  before the schema does degrades to the old cost rather than dropping the type.
+  Exactly one of the two fields is ever set.
+
+  JSON is unchanged — the enum is a protobuf-wire optimisation, not a
+  protocol-wide change of meaning, and a pre-enum client still parses
+  `"type":"player"` as text.
+
+  The Go mapping (`entityTypeToPB`) and the C# one (`EntityTypes`) are
+  hand-mirrored and both pin the exact name set, because a name added to one and
+  not the other would silently degrade that type to the string fallback in one
+  language only.
+
+### Added
 - `ErrInvalidMsgType`. Message type 0 is now rejected both when an envelope is
   constructed and when one is decoded. This is a correctness guard, not a
   formality: sniffing narrows a body to one of two decoders but cannot tell a

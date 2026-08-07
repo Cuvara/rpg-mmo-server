@@ -159,9 +159,13 @@ func unmarshalProtoPayload(data []byte, v any) error {
 		if len(pb.Entities) > 0 {
 			ents := make([]EntitySnapshot, len(pb.Entities))
 			for i, e := range pb.Entities {
+				typ := e.TypeName
+				if name, ok := entityTypeFromPB[e.Type]; ok {
+					typ = name
+				}
 				ents[i] = EntitySnapshot{
 					ID:    e.Id,
-					Type:  e.Type,
+					Type:  typ,
 					X:     e.X,
 					Y:     e.Y,
 					HP:    int(e.Hp),
@@ -216,6 +220,40 @@ func inputPB(t InputMessage) *wirepb.InputMessage {
 	}
 }
 
+// Entity type names as they appear in the JSON encoding and in the domain
+// structs. The enum exists only on the Protobuf wire; every other layer keeps
+// speaking strings, so this mapping is the single place the two meet.
+//
+// An unknown name is NOT an error: it round-trips through EntitySnapshot's
+// type_name fallback. A server that learns a new entity kind before the schema
+// does must degrade, not break.
+var (
+	entityTypeToPB = map[string]wirepb.EntityType{
+		"player":     wirepb.EntityType_ENTITY_TYPE_PLAYER,
+		"mob":        wirepb.EntityType_ENTITY_TYPE_MOB,
+		"npc":        wirepb.EntityType_ENTITY_TYPE_NPC,
+		"item":       wirepb.EntityType_ENTITY_TYPE_ITEM,
+		"projectile": wirepb.EntityType_ENTITY_TYPE_PROJECTILE,
+	}
+	entityTypeFromPB = func() map[wirepb.EntityType]string {
+		m := make(map[wirepb.EntityType]string, len(entityTypeToPB))
+		for name, v := range entityTypeToPB {
+			m[v] = name
+		}
+		return m
+	}()
+)
+
+// EntityTypeNames returns the type names this build can encode as an enum.
+// Exported for tests that assert the two languages agree on the mapping.
+func EntityTypeNames() []string {
+	out := make([]string, 0, len(entityTypeToPB))
+	for name := range entityTypeToPB {
+		out = append(out, name)
+	}
+	return out
+}
+
 func snapshotPB(t SnapshotMessage) *wirepb.SnapshotMessage {
 	pb := &wirepb.SnapshotMessage{
 		Tick:    t.Tick,
@@ -226,14 +264,22 @@ func snapshotPB(t SnapshotMessage) *wirepb.SnapshotMessage {
 	if len(t.Entities) > 0 {
 		pb.Entities = make([]*wirepb.EntitySnapshot, len(t.Entities))
 		for i, e := range t.Entities {
-			pb.Entities[i] = &wirepb.EntitySnapshot{
+			ent := &wirepb.EntitySnapshot{
 				Id:    e.ID,
-				Type:  e.Type,
 				X:     e.X,
 				Y:     e.Y,
 				Hp:    int32(e.HP),
 				MaxHp: int32(e.MaxHP),
 			}
+			// Enum when we can (2 bytes), name when we cannot (2 + len). Never
+			// both: the reader prefers the enum, so setting both would make the
+			// larger field pure waste.
+			if v, ok := entityTypeToPB[e.Type]; ok {
+				ent.Type = v
+			} else {
+				ent.TypeName = e.Type
+			}
+			pb.Entities[i] = ent
 		}
 	}
 	return pb

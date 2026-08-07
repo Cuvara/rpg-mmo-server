@@ -34,25 +34,29 @@ namespace RpgMmo.Wire.V1 {
             "Eg0KBXRva2VuGAEgASgJIj8KEUpvaW5Ub2tlblJlc3BvbnNlEgoKAm9rGAEg",
             "ASgIEg8KB3VzZXJfaWQYAiABKAkSDQoFZXJyb3IYAyABKAkiVgoMSW5wdXRN",
             "ZXNzYWdlEgwKBHRpY2sYASABKAQSDgoGbW92ZV94GAIgASgCEg4KBm1vdmVf",
-            "eRgDIAEoAhIYChBhdHRhY2tfdGFyZ2V0X2lkGAQgASgJIlwKDkVudGl0eVNu",
-            "YXBzaG90EgoKAmlkGAEgASgJEgwKBHR5cGUYAiABKAkSCQoBeBgDIAEoAhIJ",
-            "CgF5GAQgASgCEgoKAmhwGAUgASgFEg4KBm1heF9ocBgGIAEoBSKCAQoPU25h",
-            "cHNob3RNZXNzYWdlEgwKBHRpY2sYASABKAQSEAoIYWNrX3RpY2sYAiABKAQS",
-            "DAoEZnVsbBgDIAEoCBIwCghlbnRpdGllcxgEIAMoCzIeLnJwZ21tby53aXJl",
-            "LnYxLkVudGl0eVNuYXBzaG90Eg8KB3JlbW92ZWQYBSADKAkiIwoRRGlzY29u",
-            "bmVjdE1lc3NhZ2USDgoGcmVhc29uGAEgASgJIg8KDVJlc3luY1JlcXVlc3Qq",
-            "lwIKB01zZ1R5cGUSGAoUTVNHX1RZUEVfVU5TUEVDSUZJRUQQABIRCg1NU0df",
-            "VFlQRV9BVVRIEAESFgoSTVNHX1RZUEVfQVVUSF9SRVNQEAISGAoUTVNHX1RZ",
-            "UEVfRU5URVJfV09STEQQAxIdChlNU0dfVFlQRV9FTlRFUl9XT1JMRF9SRVNQ",
-            "EAQSFwoTTVNHX1RZUEVfSk9JTl9UT0tFThAFEhwKGE1TR19UWVBFX0pPSU5f",
-            "VE9LRU5fUkVTUBAGEhIKDk1TR19UWVBFX0lOUFVUEAcSFQoRTVNHX1RZUEVf",
-            "U05BUFNIT1QQCBIXChNNU0dfVFlQRV9ESVNDT05ORUNUEAkSEwoPTVNHX1RZ",
-            "UEVfUkVTWU5DEApCRlozZ2l0aHViLmNvbS9kdXljdW9uZy9ycGctbW1vL3No",
-            "YXJlZC9wcm90by9nZW47d2lyZXBiqgIOUnBnTW1vLldpcmUuVjFiBnByb3Rv",
-            "Mw=="));
+            "eRgDIAEoAhIYChBhdHRhY2tfdGFyZ2V0X2lkGAQgASgJIosBCg5FbnRpdHlT",
+            "bmFwc2hvdBIKCgJpZBgBIAEoCRIRCgl0eXBlX25hbWUYAiABKAkSCQoBeBgD",
+            "IAEoAhIJCgF5GAQgASgCEgoKAmhwGAUgASgFEg4KBm1heF9ocBgGIAEoBRIo",
+            "CgR0eXBlGAcgASgOMhoucnBnbW1vLndpcmUudjEuRW50aXR5VHlwZSKCAQoP",
+            "U25hcHNob3RNZXNzYWdlEgwKBHRpY2sYASABKAQSEAoIYWNrX3RpY2sYAiAB",
+            "KAQSDAoEZnVsbBgDIAEoCBIwCghlbnRpdGllcxgEIAMoCzIeLnJwZ21tby53",
+            "aXJlLnYxLkVudGl0eVNuYXBzaG90Eg8KB3JlbW92ZWQYBSADKAkiIwoRRGlz",
+            "Y29ubmVjdE1lc3NhZ2USDgoGcmVhc29uGAEgASgJIg8KDVJlc3luY1JlcXVl",
+            "c3QqlwIKB01zZ1R5cGUSGAoUTVNHX1RZUEVfVU5TUEVDSUZJRUQQABIRCg1N",
+            "U0dfVFlQRV9BVVRIEAESFgoSTVNHX1RZUEVfQVVUSF9SRVNQEAISGAoUTVNH",
+            "X1RZUEVfRU5URVJfV09STEQQAxIdChlNU0dfVFlQRV9FTlRFUl9XT1JMRF9S",
+            "RVNQEAQSFwoTTVNHX1RZUEVfSk9JTl9UT0tFThAFEhwKGE1TR19UWVBFX0pP",
+            "SU5fVE9LRU5fUkVTUBAGEhIKDk1TR19UWVBFX0lOUFVUEAcSFQoRTVNHX1RZ",
+            "UEVfU05BUFNIT1QQCBIXChNNU0dfVFlQRV9ESVNDT05ORUNUEAkSEwoPTVNH",
+            "X1RZUEVfUkVTWU5DEAoqnQEKCkVudGl0eVR5cGUSGwoXRU5USVRZX1RZUEVf",
+            "VU5TUEVDSUZJRUQQABIWChJFTlRJVFlfVFlQRV9QTEFZRVIQARITCg9FTlRJ",
+            "VFlfVFlQRV9NT0IQAhITCg9FTlRJVFlfVFlQRV9OUEMQAxIUChBFTlRJVFlf",
+            "VFlQRV9JVEVNEAQSGgoWRU5USVRZX1RZUEVfUFJPSkVDVElMRRAFQkZaM2dp",
+            "dGh1Yi5jb20vZHV5Y3VvbmcvcnBnLW1tby9zaGFyZWQvcHJvdG8vZ2VuO3dp",
+            "cmVwYqoCDlJwZ01tby5XaXJlLlYxYgZwcm90bzM="));
       descriptor = pbr::FileDescriptor.FromGeneratedCode(descriptorData,
           new pbr::FileDescriptor[] { },
-          new pbr::GeneratedClrTypeInfo(new[] {typeof(global::RpgMmo.Wire.V1.MsgType), }, null, new pbr::GeneratedClrTypeInfo[] {
+          new pbr::GeneratedClrTypeInfo(new[] {typeof(global::RpgMmo.Wire.V1.MsgType), typeof(global::RpgMmo.Wire.V1.EntityType), }, null, new pbr::GeneratedClrTypeInfo[] {
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.Envelope), global::RpgMmo.Wire.V1.Envelope.Parser, new[]{ "Type", "Payload" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.AuthRequest), global::RpgMmo.Wire.V1.AuthRequest.Parser, new[]{ "Token" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.AuthResponse), global::RpgMmo.Wire.V1.AuthResponse.Parser, new[]{ "Ok", "UserId", "Error" }, null, null, null, null),
@@ -61,7 +65,7 @@ namespace RpgMmo.Wire.V1 {
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenRequest), global::RpgMmo.Wire.V1.JoinTokenRequest.Parser, new[]{ "Token" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenResponse), global::RpgMmo.Wire.V1.JoinTokenResponse.Parser, new[]{ "Ok", "UserId", "Error" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.InputMessage), global::RpgMmo.Wire.V1.InputMessage.Parser, new[]{ "Tick", "MoveX", "MoveY", "AttackTargetId" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EntitySnapshot), global::RpgMmo.Wire.V1.EntitySnapshot.Parser, new[]{ "Id", "Type", "X", "Y", "Hp", "MaxHp" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EntitySnapshot), global::RpgMmo.Wire.V1.EntitySnapshot.Parser, new[]{ "Id", "TypeName", "X", "Y", "Hp", "MaxHp", "Type" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.SnapshotMessage), global::RpgMmo.Wire.V1.SnapshotMessage.Parser, new[]{ "Tick", "AckTick", "Full", "Entities", "Removed" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.DisconnectMessage), global::RpgMmo.Wire.V1.DisconnectMessage.Parser, new[]{ "Reason" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.ResyncRequest), global::RpgMmo.Wire.V1.ResyncRequest.Parser, null, null, null, null, null)
@@ -121,6 +125,29 @@ namespace RpgMmo.Wire.V1 {
     /// client -> gameserver (request a keyframe)
     /// </summary>
     [pbr::OriginalName("MSG_TYPE_RESYNC")] Resync = 10,
+  }
+
+  /// <summary>
+  /// EntityType enumerates the entity kinds the simulation knows about.
+  ///
+  /// Numbers are FROZEN once shipped. Append only; never renumber.
+  ///
+  /// A string entity type cost 8 bytes on the wire ("player" = tag + length + 6
+  /// characters); the enum costs 2. Measured against a 50-entity keyframe that is
+  /// ~19% of the whole payload, which is why this exists.
+  /// </summary>
+  public enum EntityType {
+    [pbr::OriginalName("ENTITY_TYPE_UNSPECIFIED")] Unspecified = 0,
+    [pbr::OriginalName("ENTITY_TYPE_PLAYER")] Player = 1,
+    [pbr::OriginalName("ENTITY_TYPE_MOB")] Mob = 2,
+    /// <summary>
+    /// Not yet produced by the simulation, but named here so that adding one is an
+    /// append rather than a renumber. A server that starts emitting these against
+    /// an older client degrades to `type_name` rather than breaking.
+    /// </summary>
+    [pbr::OriginalName("ENTITY_TYPE_NPC")] Npc = 3,
+    [pbr::OriginalName("ENTITY_TYPE_ITEM")] Item = 4,
+    [pbr::OriginalName("ENTITY_TYPE_PROJECTILE")] Projectile = 5,
   }
 
   #endregion
@@ -2157,11 +2184,15 @@ namespace RpgMmo.Wire.V1 {
   /// <summary>
   /// EntitySnapshot is a single entity's visible state.
   ///
-  /// `type` is deliberately still a string rather than an enum, and `id` is still a
-  /// full string rather than an interned handle. Both would shrink the wire further
-  /// — this is the hottest message in the protocol — but both are semantic changes
-  /// to what the field means, whereas this schema is a pure re-encoding of the
-  /// existing JSON. They are tracked as follow-ups in docs/DESIGN.md.
+  /// This is the hottest message in the protocol: a snapshot carries one per entity
+  /// in the AOI, every tick. Measured marginal cost with a realistic 15-character
+  /// id is ~41 bytes, of which the two strings are ~25 — so string content, not
+  /// field encoding, is what dominates here.
+  ///
+  /// `id` is still a full string rather than an interned handle. That is the larger
+  /// remaining term (~17 of the ~41 bytes) and is tracked as a follow-up in
+  /// shared/docs/DESIGN.md; it needs per-connection mapping state, so unlike the
+  /// type enum it is not a change that can be validated by round-tripping alone.
   /// </summary>
   [global::System.Diagnostics.DebuggerDisplayAttribute("{ToString(),nq}")]
   public sealed partial class EntitySnapshot : pb::IMessage<EntitySnapshot>
@@ -2199,11 +2230,12 @@ namespace RpgMmo.Wire.V1 {
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public EntitySnapshot(EntitySnapshot other) : this() {
       id_ = other.id_;
-      type_ = other.type_;
+      typeName_ = other.typeName_;
       x_ = other.x_;
       y_ = other.y_;
       hp_ = other.hp_;
       maxHp_ = other.maxHp_;
+      type_ = other.type_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -2225,15 +2257,24 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
-    /// <summary>Field number for the "type" field.</summary>
-    public const int TypeFieldNumber = 2;
-    private string type_ = "";
+    /// <summary>Field number for the "type_name" field.</summary>
+    public const int TypeNameFieldNumber = 2;
+    private string typeName_ = "";
+    /// <summary>
+    /// Type name as a string, used ONLY when `type` cannot express the value —
+    /// i.e. the simulation produced a kind this schema does not enumerate yet.
+    ///
+    /// This is field 2, which previously carried the type for every entity. A peer
+    /// that reads only this field still works when it is populated, and the two are
+    /// never both set, so "the type" is unambiguous: prefer `type`, fall back to
+    /// `type_name`.
+    /// </summary>
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
-    public string Type {
-      get { return type_; }
+    public string TypeName {
+      get { return typeName_; }
       set {
-        type_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+        typeName_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
       }
     }
 
@@ -2285,6 +2326,21 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "type" field.</summary>
+    public const int TypeFieldNumber = 7;
+    private global::RpgMmo.Wire.V1.EntityType type_ = global::RpgMmo.Wire.V1.EntityType.Unspecified;
+    /// <summary>
+    /// The entity kind. ENTITY_TYPE_UNSPECIFIED means "see type_name".
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public global::RpgMmo.Wire.V1.EntityType Type {
+      get { return type_; }
+      set {
+        type_ = value;
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -2301,11 +2357,12 @@ namespace RpgMmo.Wire.V1 {
         return true;
       }
       if (Id != other.Id) return false;
-      if (Type != other.Type) return false;
+      if (TypeName != other.TypeName) return false;
       if (!pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.Equals(X, other.X)) return false;
       if (!pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.Equals(Y, other.Y)) return false;
       if (Hp != other.Hp) return false;
       if (MaxHp != other.MaxHp) return false;
+      if (Type != other.Type) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -2314,11 +2371,12 @@ namespace RpgMmo.Wire.V1 {
     public override int GetHashCode() {
       int hash = 1;
       if (Id.Length != 0) hash ^= Id.GetHashCode();
-      if (Type.Length != 0) hash ^= Type.GetHashCode();
+      if (TypeName.Length != 0) hash ^= TypeName.GetHashCode();
       if (X != 0F) hash ^= pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.GetHashCode(X);
       if (Y != 0F) hash ^= pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.GetHashCode(Y);
       if (Hp != 0) hash ^= Hp.GetHashCode();
       if (MaxHp != 0) hash ^= MaxHp.GetHashCode();
+      if (Type != global::RpgMmo.Wire.V1.EntityType.Unspecified) hash ^= Type.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -2341,9 +2399,9 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(10);
         output.WriteString(Id);
       }
-      if (Type.Length != 0) {
+      if (TypeName.Length != 0) {
         output.WriteRawTag(18);
-        output.WriteString(Type);
+        output.WriteString(TypeName);
       }
       if (X != 0F) {
         output.WriteRawTag(29);
@@ -2360,6 +2418,10 @@ namespace RpgMmo.Wire.V1 {
       if (MaxHp != 0) {
         output.WriteRawTag(48);
         output.WriteInt32(MaxHp);
+      }
+      if (Type != global::RpgMmo.Wire.V1.EntityType.Unspecified) {
+        output.WriteRawTag(56);
+        output.WriteEnum((int) Type);
       }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
@@ -2375,9 +2437,9 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(10);
         output.WriteString(Id);
       }
-      if (Type.Length != 0) {
+      if (TypeName.Length != 0) {
         output.WriteRawTag(18);
-        output.WriteString(Type);
+        output.WriteString(TypeName);
       }
       if (X != 0F) {
         output.WriteRawTag(29);
@@ -2395,6 +2457,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(48);
         output.WriteInt32(MaxHp);
       }
+      if (Type != global::RpgMmo.Wire.V1.EntityType.Unspecified) {
+        output.WriteRawTag(56);
+        output.WriteEnum((int) Type);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -2408,8 +2474,8 @@ namespace RpgMmo.Wire.V1 {
       if (Id.Length != 0) {
         size += 1 + pb::CodedOutputStream.ComputeStringSize(Id);
       }
-      if (Type.Length != 0) {
-        size += 1 + pb::CodedOutputStream.ComputeStringSize(Type);
+      if (TypeName.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeStringSize(TypeName);
       }
       if (X != 0F) {
         size += 1 + 4;
@@ -2422,6 +2488,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (MaxHp != 0) {
         size += 1 + pb::CodedOutputStream.ComputeInt32Size(MaxHp);
+      }
+      if (Type != global::RpgMmo.Wire.V1.EntityType.Unspecified) {
+        size += 1 + pb::CodedOutputStream.ComputeEnumSize((int) Type);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -2438,8 +2507,8 @@ namespace RpgMmo.Wire.V1 {
       if (other.Id.Length != 0) {
         Id = other.Id;
       }
-      if (other.Type.Length != 0) {
-        Type = other.Type;
+      if (other.TypeName.Length != 0) {
+        TypeName = other.TypeName;
       }
       if (other.X != 0F) {
         X = other.X;
@@ -2452,6 +2521,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.MaxHp != 0) {
         MaxHp = other.MaxHp;
+      }
+      if (other.Type != global::RpgMmo.Wire.V1.EntityType.Unspecified) {
+        Type = other.Type;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -2477,7 +2549,7 @@ namespace RpgMmo.Wire.V1 {
             break;
           }
           case 18: {
-            Type = input.ReadString();
+            TypeName = input.ReadString();
             break;
           }
           case 29: {
@@ -2494,6 +2566,10 @@ namespace RpgMmo.Wire.V1 {
           }
           case 48: {
             MaxHp = input.ReadInt32();
+            break;
+          }
+          case 56: {
+            Type = (global::RpgMmo.Wire.V1.EntityType) input.ReadEnum();
             break;
           }
         }
@@ -2520,7 +2596,7 @@ namespace RpgMmo.Wire.V1 {
             break;
           }
           case 18: {
-            Type = input.ReadString();
+            TypeName = input.ReadString();
             break;
           }
           case 29: {
@@ -2537,6 +2613,10 @@ namespace RpgMmo.Wire.V1 {
           }
           case 48: {
             MaxHp = input.ReadInt32();
+            break;
+          }
+          case 56: {
+            Type = (global::RpgMmo.Wire.V1.EntityType) input.ReadEnum();
             break;
           }
         }

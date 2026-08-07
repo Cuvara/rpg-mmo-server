@@ -846,6 +846,11 @@ Contention is therefore handled where it can actually be observed — externally
 by refusing to sweep during a deploy, and by recording host load with every
 result — rather than inferred from metrics that cannot distinguish it.
 
+> **`host.load_avg_1`'s first use in anger was stopping its own author from
+> publishing 410ms as a capacity figure.** That is the case for record-don't-judge
+> in one sentence: a field that only ever describes the environment, and never
+> votes on the verdict, still caught the thing a verdict would have missed.
+
 **And one check that was tried and rejected.** Achieved tick rate looked like a
 clean discriminator — 14.66–14.71/s healthy, 12.87–13.48 disturbed, 3.93 when the
 host was overwhelmed — so "ticks/s well below the configured rate ⇒ INVALID"
@@ -856,3 +861,80 @@ faults and made them vanish from the results — an error in the *optimistic*
 direction. **The tool cannot distinguish host contention from real saturation
 using its own metrics**, so it records the host state and leaves the judgement to
 a human.
+
+---
+
+# Part III — Entity type as an enum (2026-08-07)
+
+> **Headline: a further ~15% off downstream, consistently across every level,
+> from replacing one string field with an enum. The mobile bandwidth ceiling
+> moves from ~92 to ~109 players.**
+
+Raw data: [`backend/loadtest/results/entity-type-enum/`](../loadtest/results/entity-type-enum/).
+
+## 17. Why the type string was worth 15% of the payload
+
+Measured marginal cost of one `EntitySnapshot` in a 50-entity protobuf snapshot
+is **41.2 bytes**, of which:
+
+| component | bytes | share |
+|---|--:|--:|
+| `id` string | 17.0 | 41% |
+| `type` string | 8.0 | 19% |
+| numeric fields + framing | 16.2 | 39% |
+
+`"player"` costs 8 bytes on the wire — a tag, a length, and six characters — for
+a value drawn from a set of two. The enum costs 2.
+
+## 18. Measured
+
+Same protocol as Part II, judged on bandwidth per
+[ADR-7's revised guidance](ARCHITECTURE-DECISIONS.md#adr-7--ccu-and-cost-figures-are-unbenchmarked-estimates):
+bandwidth is the binding constraint and reproduces to 0.3% across runs, where
+tick figures from this host are a lower bound distorted by the co-located
+generator.
+
+| Players | protobuf | + type enum | saved |
+|--:|--:|--:|--:|
+| 50 | 26.8 | 23.0 | 14.3% |
+| 100 | 54.4 | 45.6 | 16.1% |
+| 150 | 81.4 | 68.9 | 15.4% |
+| 200 | 108.8 | 91.8 | 15.6% |
+
+Consistent at ~15% across a 4× range of player counts, which is what a per-byte
+saving should look like. A unit test predicted 15.0% from the schema alone; the
+measurement came in at 15.4%, so the model of where the bytes go is now correct —
+that model was what was missing when the earlier case rested on a "~40%" figure
+that turned out to be 61%.
+
+All four levels passed the validity gate on the first attempt, with the readiness
+probe from §16 in place.
+
+## 19. Cumulative, and the ceiling that matters
+
+At 150 players in the worst-case dense-crowd shape:
+
+| encoding | KB/s per client | vs JSON |
+|---|--:|--:|
+| JSON | 181.5 | — |
+| Protobuf | 81.4 | 55% |
+| Protobuf + type enum | **68.9** | **62%** |
+
+Against ADR-7's `< 50 KB/s per client` mobile threshold:
+
+| | bandwidth ceiling |
+|---|--:|
+| JSON | ~41 players |
+| Protobuf | ~92 players |
+| Protobuf + type enum | **~109 players** |
+
+**Bandwidth is still the binding constraint.** ~109 players is better than ~41,
+but it is still well below the tick ceiling, and the gap has to close from the
+bandwidth side. The remaining lever on the wire itself is the `id` string at 17.0
+bytes per entity — 41% of a packed entity and now the single largest term. That
+is the interning follow-up, and unlike this change it is protocol *state* rather
+than a re-encoding.
+
+Tick figures were recorded and are not quoted here as acceptance evidence: per
+§16 they are a lower bound from this host, and this change is not aimed at tick
+time.

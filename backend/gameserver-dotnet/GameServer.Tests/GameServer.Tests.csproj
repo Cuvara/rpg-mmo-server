@@ -52,6 +52,7 @@
     <Using Include="RpgMmo.Wire.V1.InputMessage" Alias="InputMessage" />
     <Using Include="RpgMmo.Wire.V1.SnapshotMessage" Alias="SnapshotMessage" />
     <Using Include="RpgMmo.Wire.V1.EntitySnapshot" Alias="EntitySnapshot" />
+    <Using Include="RpgMmo.Wire.V1.EntityType" Alias="EntityType" />
   </ItemGroup>
 
 </Project>

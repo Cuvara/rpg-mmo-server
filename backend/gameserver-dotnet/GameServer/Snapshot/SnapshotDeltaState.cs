@@ -208,13 +208,18 @@ public sealed class SnapshotDeltaState
         return msg;
     }
 
-    private static EntitySnapshot ToMsg(in EntityState e) => new()
+    private static EntitySnapshot ToMsg(in EntityState e)
     {
-        Id = e.Id,
-        Type = e.Type,
-        X = e.Position.X,
-        Y = e.Position.Y,
-        Hp = e.Hp,
-        MaxHp = e.MaxHp
-    };
+        var msg = new EntitySnapshot
+        {
+            Id = e.Id,
+            X = e.Position.X,
+            Y = e.Position.Y,
+            Hp = e.Hp,
+            MaxHp = e.MaxHp
+        };
+        // Enum when the name is known (2 bytes), string fallback when it is not.
+        EntityTypes.SetType(msg, e.Type);
+        return msg;
+    }
 }
