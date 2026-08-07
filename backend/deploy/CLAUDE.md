@@ -52,18 +52,38 @@
 
 ### 8. Tier-Specific Configs (Drawio Page 10)
 
-> **⚠️ Costs and tier CCU below are still planning figures** — no VPS load test has
-> been run. The per-game-server ceiling IS measured: **150 players** before tick
-> p99 breaks the 66.67ms budget, RAM ~30-82 MiB, bottleneck = snapshot JSON
-> serialization. See `backend/docs/BENCHMARK.md` and ADR-7.
+> **⚠️ Costs and tier CCU below are planning figures.** No VPS load test has been
+> run, and **the per-game-server player ceiling is not known.**
+>
+> | | |
+> |---|---|
+> | **Bandwidth — plan on this** | **45.9 KB/s per client at 200 players**, inside ADR-7's < 50 KB/s mobile threshold. Reproduced to **0.3%** across six runs |
+> | RAM per pod | ~30 MiB idle → ~82 MiB at 200 players |
+> | **Player ceiling** | **unknown, and not measurable on the current hardware** |
+>
+> **Do not quote a player-count ceiling from this repo.** The old "150 players,
+> bottleneck = JSON serialization" figure is **retracted**: it predates Protobuf,
+> the entity-type enum and id interning, which together removed 81% of the wire
+> and with it the constraint that produced 150. The load generator also shares a
+> host with the server under test and uses more CPU than it — under a deploy
+> competing for the box, tick p99 moved **3.3×** while bytes per client moved
+> 0.3%. Tick and CCU numbers are measurement artefacts of this box; bandwidth is
+> a property of the protocol. ADR-7 item 6 (generator on separate hardware) is a
+> ⛔ **BLOCKER** on any capacity claim. See `backend/docs/BENCHMARK.md` and ADR-7.
 
-- **Dev/Alpha ($40-60)**: 1 VPS all-in-one, pg_dump daily, < 200 CCU (~2 game servers)
-- **Beta ($80-150)**: 2 VPS (app + DB), CDN, Grafana, 200-500 CCU (~2-4)
-- **Soft Launch ($200-400)**: 3 VPS, Redis dedicated, 500-2000 CCU (~4-14)
-- **Growth ($400-1000+)**: Multi-node k3s, managed DB optional, 2000-5000+ CCU (~14-34)
+- **Dev/Alpha ($40-60)**: 1 VPS all-in-one, pg_dump daily, < 200 CCU
+- **Beta ($80-150)**: 2 VPS (app + DB), CDN, Grafana, 200-500 CCU
+- **Soft Launch ($200-400)**: 3 VPS, Redis dedicated, 500-2000 CCU
+- **Growth ($400-1000+)**: Multi-node k3s, managed DB optional, 2000-5000+ CCU
 
-Sizing notes from the benchmark: `GAMESERVER_CAPACITY` defaults to 100 against a
-measured ceiling of 150 (intentional headroom). `GATEWAY_CONN_RATE_PER_MIN`
+Game-server counts per tier are deliberately absent — they were derived by
+dividing tier CCU by the retracted 150 figure, so they were arithmetic on a
+number that no longer exists. They return when a ceiling is measured on separate
+hardware.
+
+Sizing notes: `GAMESERVER_CAPACITY` defaults to **100**. That is now a configured
+policy limit, not headroom against a measured ceiling — treat it as the number to
+raise deliberately once a real ceiling exists. `GATEWAY_CONN_RATE_PER_MIN`
 defaults to 10/min per source IP — raise it if players will share a carrier NAT.
 
 ## Key Design Constraints

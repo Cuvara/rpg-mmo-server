@@ -217,29 +217,43 @@ kubectl apply -f agones/
 
 ## Tiers
 
-> **⚠️ COSTS AND TIER CCU ARE STILL ESTIMATES.** No load test has been run on VPS
-> hardware. The per-game-server ceiling below IS measured — see
-> `backend/docs/BENCHMARK.md`.
+> **⚠️ COSTS AND TIER CCU ARE ESTIMATES, AND THE PLAYER CEILING IS UNKNOWN.** No
+> load test has been run on VPS hardware, and the per-game-server ceiling cannot
+> be measured on the current box — see `backend/docs/BENCHMARK.md`.
 
-**Measured (dev workstation, lower bound):** one game server holds **150 players**
-before tick p99 breaks the 66.67ms budget; RAM **~30 MiB idle → ~82 MiB at 200
-players**; downstream **1.22 KB/s per in-AOI player**. The bottleneck is snapshot
-JSON serialization (~80% of tick cost), not the AOI scan (~20%).
+**What is measured, and worth planning on: bandwidth.** **45.9 KB/s per client at
+200 players**, inside ADR-7's < 50 KB/s mobile threshold, reproduced to **0.3%**
+across six runs. RAM **~30 MiB idle → ~82 MiB at 200 players**.
+
+**What is not measured: the player ceiling.** The former "150 players, bottleneck
+= JSON serialization" figure is **retracted**. It predates Protobuf, the
+entity-type enum and id interning — three changes that removed 81% of the wire
+and with it the constraint that produced 150. Separately, the load generator
+shares this host with the server under test and uses more CPU than it: under a
+deploy competing for the box, tick p99 moved **3.3×** while bytes per client
+moved 0.3%. Tick and CCU figures describe the measuring rig; bandwidth describes
+the protocol. ADR-7 item 6 (generator on separate hardware) is a ⛔ **BLOCKER** on
+any capacity claim.
 
 Two configured ceilings bite before any performance limit does, and both matter
 when sizing a deployment:
 
 | Setting | Default | Effect |
 |---|---|---|
-| `GAMESERVER_CAPACITY` | 100 | Join is refused with "Server is full". Conservative vs the measured 150 — deliberate headroom, leave it unless a VPS benchmark says otherwise. |
+| `GAMESERVER_CAPACITY` | 100 | Join is refused with "Server is full". A **policy limit, not headroom against a measured ceiling** — there is no measured ceiling to have headroom against. Raise it deliberately once one exists. |
 | `GATEWAY_CONN_RATE_PER_MIN` | 10 per source IP | Fine for real clients (one connect each), but it blocks load testing and any NAT with many players behind one address. Raise it if a carrier NAT is expected. |
 
-| Tier | Cost/mo ⚠️ | Setup | CCU ⚠️ | Game servers @ 150 |
-|------|---------|-------|-----|-----|
-| Dev/Alpha | $40-60 | 1 VPS all-in-one | < 200 | 2 |
-| Beta | $80-150 | 2 VPS (app + DB) | 200-500 | 2-4 |
-| Soft Launch | $200-400 | 3 VPS separated | 500-2000 | 4-14 |
-| Growth | $400-1000+ | Multi-node k3s | 2000-5000+ | 14-34 |
+| Tier | Cost/mo ⚠️ | Setup | CCU ⚠️ |
+|------|---------|-------|-----|
+| Dev/Alpha | $40-60 | 1 VPS all-in-one | < 200 |
+| Beta | $80-150 | 2 VPS (app + DB) | 200-500 |
+| Soft Launch | $200-400 | 3 VPS separated | 500-2000 |
+| Growth | $400-1000+ | Multi-node k3s | 2000-5000+ |
+
+The "game servers @ 150" column has been **removed rather than updated**. Every
+value in it was tier CCU divided by the retracted 150 figure — arithmetic on a
+number that no longer exists, presented with the confidence of a measurement. It
+returns when a ceiling is measured on separate hardware, not before.
 
 ## Quick Start (Dev Tier, k3s — planned)
 
