@@ -38,7 +38,7 @@ public sealed class Connection : IDisposable
     /// <see cref="WireEncoding.Json"/> so a reply that somehow precedes any read
     /// stays on the legacy encoding.
     /// </remarks>
-    public WireEncoding Encoding { get; private set; } = WireEncoding.Json;
+    public WireEncoding Encoding { get; private set; }
 
     private readonly ITransportConnection _transport;
     private readonly Stream _stream;
@@ -51,13 +51,22 @@ public sealed class Connection : IDisposable
     public string RemoteEndPoint => _transport.RemoteEndPoint;
 
     /// <summary>Creates a connection over an already-accepted transport connection.</summary>
-    public Connection(string userId, ITransportConnection transport, ILogger logger)
+    /// <param name="encoding">
+    /// Encoding this connection starts on. The join handshake runs on a
+    /// throwaway connection over the same socket and the real one is built
+    /// afterwards, so the encoding the client already demonstrated has to be
+    /// handed over explicitly — otherwise the very first reply would silently
+    /// fall back to legacy JSON.
+    /// </param>
+    public Connection(string userId, ITransportConnection transport, ILogger logger,
+        WireEncoding encoding = WireEncoding.Json)
     {
         UserId = userId;
         // Keyframe phase is derived from the user id, so it is stable across runs and
         // across reconnects of the same player.
         DeltaState = new GameServer.Snapshot.SnapshotDeltaState(
             GameServer.Snapshot.SnapshotDeltaState.PhaseFor(userId));
+        Encoding = encoding;
         _transport = transport;
         _stream = transport.Stream;
         _logger = logger;
@@ -75,8 +84,9 @@ public sealed class Connection : IDisposable
     /// Convenience overload for TCP callers (and tests) that already hold a
     /// <see cref="TcpClient"/>. Ownership of the client transfers to this connection.
     /// </summary>
-    public Connection(string userId, TcpClient tcp, ILogger logger)
-        : this(userId, new TcpTransportConnection(tcp), logger)
+    public Connection(string userId, TcpClient tcp, ILogger logger,
+        WireEncoding encoding = WireEncoding.Json)
+        : this(userId, new TcpTransportConnection(tcp), logger, encoding)
     {
     }
 

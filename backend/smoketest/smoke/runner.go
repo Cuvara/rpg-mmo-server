@@ -315,7 +315,7 @@ func (r *Runner) stepGameServerFlow() (string, error) {
 				continue
 			}
 			var s messages.SnapshotMessage
-			if err := messages.UnmarshalPayload(env.Payload, &s); err != nil {
+			if err := env.UnmarshalPayload(&s); err != nil {
 				continue
 			}
 			select {
@@ -465,7 +465,7 @@ func (r *Runner) roundTrip(conn net.Conn, reqType messages.MsgType, reqPayload a
 		if resp.Type != wantType {
 			continue
 		}
-		return messages.UnmarshalPayload(resp.Payload, out)
+		return resp.UnmarshalPayload(out)
 	}
 	return fmt.Errorf("no frame of type %d received", wantType)
 }

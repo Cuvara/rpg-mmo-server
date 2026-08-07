@@ -462,7 +462,7 @@ public sealed class GameServerHost : IAsyncDisposable
 
             // Create the real connection with the verified user ID, reusing the same
             // accepted transport connection (no reconnect, no second handshake).
-            conn = new Connection(userId, accepted, connLogger);
+            conn = new Connection(userId, accepted, connLogger, tempConn.Encoding);
 
             // Register connection
             _connections.Add(conn);

@@ -55,7 +55,7 @@ func mergeSnapshots(t *testing.T, c *MockClient, want int) *messages.SnapshotSta
 			continue
 		}
 		var snap messages.SnapshotMessage
-		if err := messages.UnmarshalPayload(env.Payload, &snap); err != nil {
+		if err := env.UnmarshalPayload(&snap); err != nil {
 			t.Fatalf("unmarshal snapshot: %v", err)
 		}
 		state.Apply(snap)
@@ -275,7 +275,20 @@ func startGatewayForDotnet(t *testing.T, gsAddr string) (gwAddr string, cleanup 
 }
 
 // TestDotnetInterop_FullFlow tests the complete client -> gateway -> C# gameserver flow.
+// TestDotnetInterop_FullFlow walks the whole handshake against the real C# game
+// server in BOTH wire encodings.
+//
+// This is the test that proves the two independently generated implementations
+// of wire.proto — protoc-gen-go on the Go side, protoc's C# generator on the
+// server — actually agree. Unit tests on either side can only prove each is
+// self-consistent.
 func TestDotnetInterop_FullFlow(t *testing.T) {
+	for _, enc := range []messages.Encoding{messages.EncodingJSON, messages.EncodingProto} {
+		t.Run(enc.String(), func(t *testing.T) { runDotnetFullFlow(t, enc) })
+	}
+}
+
+func runDotnetFullFlow(t *testing.T, enc messages.Encoding) {
 	if _, err := exec.LookPath("dotnet"); err != nil {
 		home, _ := os.UserHomeDir()
 		if _, err := os.Stat(home + "/.dotnet/dotnet"); err != nil {
@@ -295,13 +308,13 @@ func TestDotnetInterop_FullFlow(t *testing.T) {
 		t.Fatalf("connect to gateway: %v", err)
 	}
 
-	userID := "dotnet-player-001"
+	userID := "dotnet-player-" + enc.String()
 	token, err := jwt.Sign(userID, dotnetJWTSecret, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("jwt.Sign: %v", err)
 	}
 
-	authEnv, _ := messages.NewEnvelope(messages.MsgAuth, messages.AuthRequest{Token: token})
+	authEnv, _ := messages.NewEnvelopeAs(enc, messages.MsgAuth, messages.AuthRequest{Token: token})
 	if err := gwClient.Send(authEnv); err != nil {
 		t.Fatalf("send auth: %v", err)
 	}
@@ -314,7 +327,7 @@ func TestDotnetInterop_FullFlow(t *testing.T) {
 		t.Fatalf("expected MsgAuthResp, got type %d", authRespEnv.Type)
 	}
 	var authResp messages.AuthResponse
-	if err := messages.UnmarshalPayload(authRespEnv.Payload, &authResp); err != nil {
+	if err := authRespEnv.UnmarshalPayload(&authResp); err != nil {
 		t.Fatalf("unmarshal auth response: %v", err)
 	}
 	if !authResp.OK {
@@ -326,7 +339,7 @@ func TestDotnetInterop_FullFlow(t *testing.T) {
 	t.Log("gateway auth OK")
 
 	// --- Step c/d: Client -> Gateway: MsgEnterWorld { MapID } ---
-	enterEnv, _ := messages.NewEnvelope(messages.MsgEnterWorld, messages.EnterWorldRequest{MapID: dotnetMapID})
+	enterEnv, _ := messages.NewEnvelopeAs(enc, messages.MsgEnterWorld, messages.EnterWorldRequest{MapID: dotnetMapID})
 	if err := gwClient.Send(enterEnv); err != nil {
 		t.Fatalf("send enter world: %v", err)
 	}
@@ -339,7 +352,7 @@ func TestDotnetInterop_FullFlow(t *testing.T) {
 		t.Fatalf("expected MsgEnterWorldResp, got type %d", enterRespEnv.Type)
 	}
 	var enterResp messages.EnterWorldResponse
-	if err := messages.UnmarshalPayload(enterRespEnv.Payload, &enterResp); err != nil {
+	if err := enterRespEnv.UnmarshalPayload(&enterResp); err != nil {
 		t.Fatalf("unmarshal enter world response: %v", err)
 	}
 	if enterResp.Error != "" {
@@ -359,7 +372,7 @@ func TestDotnetInterop_FullFlow(t *testing.T) {
 	}
 	defer gsClient.Close()
 
-	joinEnv, _ := messages.NewEnvelope(messages.MsgJoinToken, messages.JoinTokenRequest{Token: enterResp.JoinToken})
+	joinEnv, _ := messages.NewEnvelopeAs(enc, messages.MsgJoinToken, messages.JoinTokenRequest{Token: enterResp.JoinToken})
 	if err := gsClient.Send(joinEnv); err != nil {
 		t.Fatalf("send join token: %v", err)
 	}
@@ -372,7 +385,7 @@ func TestDotnetInterop_FullFlow(t *testing.T) {
 		t.Fatalf("expected MsgJoinTokenResp, got type %d", joinRespEnv.Type)
 	}
 	var joinResp messages.JoinTokenResponse
-	if err := messages.UnmarshalPayload(joinRespEnv.Payload, &joinResp); err != nil {
+	if err := joinRespEnv.UnmarshalPayload(&joinResp); err != nil {
 		t.Fatalf("unmarshal join response: %v", err)
 	}
 	if !joinResp.OK {
@@ -381,10 +394,16 @@ func TestDotnetInterop_FullFlow(t *testing.T) {
 	if joinResp.UserID != userID {
 		t.Fatalf("join user mismatch: want %s, got %s", userID, joinResp.UserID)
 	}
+	// The reply must come back in the encoding the client spoke. If the server
+	// ever answered in its own preferred encoding instead, a half-migrated fleet
+	// would break here rather than in production.
+	if joinRespEnv.Enc != enc {
+		t.Fatalf("join response encoding = %v, want %v (server must answer in the client's encoding)", joinRespEnv.Enc, enc)
+	}
 	t.Log("C# gameserver join accepted OK")
 
 	// --- Step g: Client -> C# GameServer: MsgInput { Tick:1, MoveX:1, MoveY:0 } ---
-	inputEnv, _ := messages.NewEnvelope(messages.MsgInput, messages.InputMessage{
+	inputEnv, _ := messages.NewEnvelopeAs(enc, messages.MsgInput, messages.InputMessage{
 		Tick:  1,
 		MoveX: 1.0,
 		MoveY: 0.0,
@@ -423,7 +442,7 @@ func TestDotnetInterop_FullFlow(t *testing.T) {
 		t.Errorf("ack_tick = %d, want 1 (the only input sent)", state.AckTick)
 	}
 
-	t.Log("PASS: full flow Go gateway <-> C# gameserver interop")
+	t.Logf("PASS: full flow Go gateway <-> C# gameserver interop over %s", enc)
 }
 
 // TestDotnetInterop_InvalidJWT verifies that the C# gameserver rejects an invalid JWT.
@@ -460,7 +479,7 @@ func TestDotnetInterop_InvalidJWT(t *testing.T) {
 		t.Fatalf("expected MsgJoinTokenResp, got type %d", respEnv.Type)
 	}
 	var joinResp messages.JoinTokenResponse
-	if err := messages.UnmarshalPayload(respEnv.Payload, &joinResp); err != nil {
+	if err := respEnv.UnmarshalPayload(&joinResp); err != nil {
 		t.Fatalf("unmarshal join response: %v", err)
 	}
 	if joinResp.OK {
@@ -506,7 +525,7 @@ func TestDotnetInterop_WrongServerID(t *testing.T) {
 		t.Fatalf("receive response: %v", err)
 	}
 	var joinResp messages.JoinTokenResponse
-	if err := messages.UnmarshalPayload(respEnv.Payload, &joinResp); err != nil {
+	if err := respEnv.UnmarshalPayload(&joinResp); err != nil {
 		t.Fatalf("unmarshal join response: %v", err)
 	}
 	if joinResp.OK {
@@ -551,7 +570,7 @@ func TestDotnetInterop_MultipleClients(t *testing.T) {
 			t.Fatalf("receive join resp %s: %v", playerID, err)
 		}
 		var joinResp messages.JoinTokenResponse
-		if err := messages.UnmarshalPayload(respEnv.Payload, &joinResp); err != nil {
+		if err := respEnv.UnmarshalPayload(&joinResp); err != nil {
 			t.Fatalf("unmarshal join resp %s: %v", playerID, err)
 		}
 		if !joinResp.OK {
@@ -624,7 +643,7 @@ func TestDotnetInterop_ClientDisconnect(t *testing.T) {
 		t.Fatalf("receive join response: %v", err)
 	}
 	var joinResp messages.JoinTokenResponse
-	messages.UnmarshalPayload(respEnv.Payload, &joinResp)
+	respEnv.UnmarshalPayload(&joinResp)
 	if !joinResp.OK {
 		t.Fatalf("join rejected: %s", joinResp.Error)
 	}
@@ -653,7 +672,7 @@ func TestDotnetInterop_ClientDisconnect(t *testing.T) {
 		t.Fatalf("receive join response after disconnect: %v", err)
 	}
 	var joinResp2 messages.JoinTokenResponse
-	messages.UnmarshalPayload(respEnv2.Payload, &joinResp2)
+	respEnv2.UnmarshalPayload(&joinResp2)
 	if !joinResp2.OK {
 		t.Fatalf("join rejected after disconnect: %s", joinResp2.Error)
 	}
@@ -693,7 +712,7 @@ func TestDotnetInterop_GatewayInvalidJWT(t *testing.T) {
 		t.Fatalf("receive auth response: %v", err)
 	}
 	var authResp messages.AuthResponse
-	if err := messages.UnmarshalPayload(authRespEnv.Payload, &authResp); err != nil {
+	if err := authRespEnv.UnmarshalPayload(&authResp); err != nil {
 		t.Fatalf("unmarshal auth response: %v", err)
 	}
 	if authResp.OK {
@@ -717,7 +736,7 @@ func TestDotnetInterop_GatewayInvalidJWT(t *testing.T) {
 	}
 
 	var enterResp messages.EnterWorldResponse
-	messages.UnmarshalPayload(enterRespEnv.Payload, &enterResp)
+	enterRespEnv.UnmarshalPayload(&enterResp)
 	if enterResp.Error == "" {
 		t.Fatal("expected error for enter world without auth")
 	}
@@ -768,7 +787,7 @@ func TestDotnetInterop_WireProtocolCompat(t *testing.T) {
 
 	// Verify payload JSON fields
 	var joinResp messages.JoinTokenResponse
-	if err := messages.UnmarshalPayload(respEnv.Payload, &joinResp); err != nil {
+	if err := respEnv.UnmarshalPayload(&joinResp); err != nil {
 		t.Fatalf("payload unmarshal failed (field name mismatch?): %v", err)
 	}
 	if !joinResp.OK {
@@ -800,4 +819,101 @@ func TestDotnetInterop_WireProtocolCompat(t *testing.T) {
 		t.Errorf("ack_tick = %d, want 42 (the input tick that was sent)", state.AckTick)
 	}
 	t.Log("PASS: wire protocol fully compatible between Go and C#")
+}
+
+// TestDotnetInterop_MixedEncodingsOnOneServer is the migration test.
+//
+// A JSON client and a Protobuf client join the SAME running C# server at the
+// same time and both must be served correctly. This is the state a fleet is
+// actually in mid-rollout — gateway, game servers and Unity clients all deploy
+// independently — and it is what the first-byte encoding sniff exists to make
+// safe. If the server ever latched one encoding globally instead of per
+// connection, this test fails where a single-encoding test would not.
+//
+// It also measures the snapshot payload saving on the real wire, so the
+// bandwidth claim in docs/BENCHMARK.md is checked by CI rather than trusted.
+func TestDotnetInterop_MixedEncodingsOnOneServer(t *testing.T) {
+	if _, err := exec.LookPath("dotnet"); err != nil {
+		home, _ := os.UserHomeDir()
+		if _, err := os.Stat(home + "/.dotnet/dotnet"); err != nil {
+			t.Skip("dotnet not found")
+		}
+	}
+
+	gsAddr, gsCleanup := startDotnetGameServer(t)
+	defer gsCleanup()
+
+	// Payload bytes of the first keyframe each client receives. Both clients see
+	// the same world, so the two numbers are directly comparable.
+	keyframeBytes := map[messages.Encoding]int{}
+
+	for _, enc := range []messages.Encoding{messages.EncodingJSON, messages.EncodingProto} {
+		client, err := NewMockClient(gsAddr)
+		if err != nil {
+			t.Fatalf("%s: connect: %v", enc, err)
+		}
+		defer client.Close()
+
+		token, err := jwt.SignWithServer("mixed-"+enc.String(), dotnetServerID, dotnetJWTSecret, 5*time.Minute)
+		if err != nil {
+			t.Fatalf("%s: sign token: %v", enc, err)
+		}
+
+		joinEnv, _ := messages.NewEnvelopeAs(enc, messages.MsgJoinToken, messages.JoinTokenRequest{Token: token})
+		if err := client.Send(joinEnv); err != nil {
+			t.Fatalf("%s: send join: %v", enc, err)
+		}
+
+		respEnv, err := client.Receive()
+		if err != nil {
+			t.Fatalf("%s: receive join response: %v", enc, err)
+		}
+		if respEnv.Enc != enc {
+			t.Fatalf("%s: server replied in %v — it must answer in the client's encoding", enc, respEnv.Enc)
+		}
+		var joinResp messages.JoinTokenResponse
+		if err := respEnv.UnmarshalPayload(&joinResp); err != nil {
+			t.Fatalf("%s: unmarshal join response: %v", enc, err)
+		}
+		if !joinResp.OK {
+			t.Fatalf("%s: join rejected: %s", enc, joinResp.Error)
+		}
+
+		inputEnv, _ := messages.NewEnvelopeAs(enc, messages.MsgInput, messages.InputMessage{Tick: 7, MoveX: 1})
+		if err := client.Send(inputEnv); err != nil {
+			t.Fatalf("%s: send input: %v", enc, err)
+		}
+
+		// First keyframe carrying at least one entity.
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			env, err := client.Receive()
+			if err != nil {
+				t.Fatalf("%s: receive snapshot: %v", enc, err)
+			}
+			if env.Type != messages.MsgSnapshot || env.Enc != enc {
+				continue
+			}
+			var snap messages.SnapshotMessage
+			if err := env.UnmarshalPayload(&snap); err != nil {
+				t.Fatalf("%s: unmarshal snapshot: %v", enc, err)
+			}
+			if !snap.Full || len(snap.Entities) == 0 {
+				continue
+			}
+			keyframeBytes[enc] = len(env.Payload)
+			break
+		}
+		if keyframeBytes[enc] == 0 {
+			t.Fatalf("%s: no keyframe with entities arrived", enc)
+		}
+	}
+
+	jsonBytes, protoBytes := keyframeBytes[messages.EncodingJSON], keyframeBytes[messages.EncodingProto]
+	saving := 100 * float64(jsonBytes-protoBytes) / float64(jsonBytes)
+	t.Logf("keyframe payload: json=%dB proto=%dB saving=%.1f%%", jsonBytes, protoBytes, saving)
+
+	if protoBytes >= jsonBytes {
+		t.Errorf("protobuf keyframe (%dB) is not smaller than JSON (%dB)", protoBytes, jsonBytes)
+	}
 }
