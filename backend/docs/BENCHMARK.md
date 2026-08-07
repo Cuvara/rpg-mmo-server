@@ -685,6 +685,20 @@ document that lost exactly one client lost it this way, and the previous
 write-up's guess — "join contention under a 20/s ramp on a loaded host" — was
 wrong.
 
+**This project already knew that, somewhere else.** The CD post-deploy healthcheck
+in [`.github/workflows/cd.yml`](../../.github/workflows/cd.yml) probes
+`/healthz` on the metrics port **and** does a raw TCP connect on the gateway and
+game-server ports, with a comment explaining that the HTTP probe is a liveness
+signal "unlike a bare TCP connect" — i.e. its author understood the two answer
+different questions and did both.
+
+So the failure was not missing knowledge; it was knowledge that did not travel
+from the deploy pipeline to the benchmark tooling. **If you are writing a
+readiness wait, copy the `probe`/`tcp` pair from `cd.yml` rather than inventing
+one.** Rediscovering this cost roughly one client in four cold starts and a
+paragraph of confidently wrong speculation in an earlier revision of this
+document.
+
 This also interacts with the new gate: those levels are now `INVALID` rather than
 merely reporting `fail=1`, so the sweep script reruns them instead of recording a
 level that ran at 149 players under a "150" label.
@@ -694,3 +708,27 @@ any client failure, a snapshots-received ratio more than 5% off 1.0, or
 server-side entity/player counts above what was requested is marked `INVALID` and
 excluded from every aggregate — it is not a worse result, it is not a result. See
 `Verdict.Invalid` and `validityFailure` in `load/runner.go`.
+
+### Why a ratio of 1.40 walked past an existing check on that exact ratio
+
+`snapshots_received_ratio` was already being checked when the 97% run happened.
+It still got through, and the reason is worth keeping:
+
+| Check | Asks | Fires when |
+|---|---|---|
+| `NoFrameLoss` (pre-existing) | did clients receive **less** than the server sent? | ratio &lt; 0.95 |
+| `validityFailure` (new) | did clients receive **more** than the server sent? | ratio &gt; 1.05 |
+
+Two different questions on one number, in opposite directions. The first is a
+performance question — the server's bounded 64-deep send channel uses
+`DropOldest`, so a client the writer cannot keep up with loses frames silently,
+and that is a real result about capacity. The second is a validity question: a
+client cannot receive more than was sent, so a ratio above 1 means the two
+measurement windows describe different populations and *nothing* on either side
+can be trusted.
+
+A check that only looks one way down a two-sided number leaves the other half
+unguarded, and the unguarded half here was the one that produced a flattering
+result. When adding a bound to a ratio, ask whether the opposite bound is also
+meaningful — and if it is, whether it means something so different that it needs
+its own verdict rather than a wider band on the existing one.

@@ -82,6 +82,15 @@ A level is INVALID when:
 - the server reports more entities or players online than were requested, which
   means it was not empty when the level started.
 
+**When writing a readiness wait, copy `cd.yml`.** The post-deploy healthcheck in
+`.github/workflows/cd.yml` probes `/healthz` on the metrics port *and* does a raw
+TCP connect on the service port, because the two answer different questions. This
+tooling originally waited only on `/metrics`, and since the game server starts its
+metrics endpoint well before its listener, levels could begin against a port that
+was not accepting — losing a client to `connection reset by peer` on roughly one
+cold start in four. The pattern already existed in this repo; it just had not
+travelled here.
+
 **Why this is a property of the tool and not of a benchmark script:** a broken
 run does not announce itself in the headline numbers, and it can look *better*
 than a healthy one. A sweep level whose clients all died mid-run reported a
