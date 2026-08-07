@@ -121,7 +121,26 @@ rather than closing the socket, so the client can re-`MsgAuth` on the same conne
 **3. Session teardown on both paths.**
 `MsgDisconnect` and the `handleConn` defer both call `cleanupSession`. Relying on TTL alone
 would leave a Redis-backed deployment reporting ghost-online players for up to an hour.
-`cleanupSession` clears `UserID`/`State` so a double call is a no-op.
+`cleanupSession` takes the identity via `cc.ClearIdentity()`, which returns the user it
+cleared under the connection's lock, so a double call is a no-op and the two paths cannot
+both destroy the same session.
+
+**3a. Connection identity is mutex-guarded, and not by accident.**
+`ClientConn` is touched by two goroutines per connection: the read loop (`ReadLoop` →
+`handleMessage` → auth / session checks / teardown) and the write loop (`WriteLoop` →
+`writeLoop` / `CloseGracefully`). The identity fields cross that boundary — the read side
+writes them, the write side reads them for every log line it emits — so they are unexported
+and reached only through `UserID()` / `State()` / `Identity()` / `SetAuthenticated()` /
+`SetInWorld()` / `ClearIdentity()`, all guarded by an `RWMutex`. They were plain exported
+fields until a `-race` CI build caught `cleanupSession` writing them while
+`CloseGracefully` read them.
+
+The rest of the struct is deliberately *not* locked, and each for a stated reason:
+`msgBucket` and `limited` are only ever touched from the read loop (`allowMessage` is
+called from `handleMessage` and nowhere else), `closeAfterFlush` and `halfClosed` are
+`atomic.Bool`, and `conn` / `sendCh` / `done` / `once` / `logger` are immutable after
+construction or internally synchronised. Adding a field that crosses the read/write
+boundary means putting it behind `mu`.
 
 **4. The relay is real; only its sink is stubbed.**
 `events.Relay` subscribes to any `storage.EventStream` and dispatches to a `Sink`. The

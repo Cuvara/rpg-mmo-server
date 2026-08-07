@@ -362,14 +362,17 @@ func (g *Gateway) handleConn(cc *ClientConn) {
 
 // cleanupSession destroys the session bound to a connection, if any.
 func (g *Gateway) cleanupSession(cc *ClientConn) {
-	if cc.State == StateConnected || cc.UserID == "" {
+	// Claim the identity first: ClearIdentity hands back the user under the
+	// connection's lock, so an explicit MsgDisconnect and handleConn's deferred
+	// cleanup cannot both destroy the same session, and a concurrent WriteLoop
+	// log line cannot read a half-cleared identity.
+	userID := cc.ClearIdentity()
+	if userID == "" {
 		return
 	}
-	if err := g.sessions.DestroySession(context.Background(), session.SessionKey(cc.UserID)); err != nil {
-		g.logger.Warn("destroy session", "user", cc.UserID, "err", err)
+	if err := g.sessions.DestroySession(context.Background(), session.SessionKey(userID)); err != nil {
+		g.logger.Warn("destroy session", "user", userID, "err", err)
 	}
-	cc.State = StateConnected
-	cc.UserID = ""
 }
 
 func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
@@ -383,7 +386,7 @@ func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
 	if !cc.allowMessage() {
 		cc.limited = true
 		g.metrics.RateLimited(metrics.RateLimitReasonMessage)
-		g.logger.Warn("message rate limited", "ip", cc.RemoteIP(), "user", cc.UserID, "type", env.Type)
+		g.logger.Warn("message rate limited", "ip", cc.RemoteIP(), "user", cc.UserID(), "type", env.Type)
 		resp, err := messages.NewEnvelope(messages.MsgAuthResp, messages.AuthResponse{
 			OK:    false,
 			Error: "rate limited",
@@ -409,7 +412,7 @@ func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
 	case messages.MsgDisconnect:
 		g.handleDisconnect(cc)
 	default:
-		g.logger.Warn("unexpected message type", "type", env.Type, "state", cc.State)
+		g.logger.Warn("unexpected message type", "type", env.Type, "state", cc.State())
 	}
 }
 
@@ -417,7 +420,8 @@ func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
 // store and refreshes its TTL (activity heartbeat). Returns false — after
 // replying with the appropriate error — when the session is gone.
 func (g *Gateway) checkSession(cc *ClientConn, msgType messages.MsgType) bool {
-	if cc.State == StateConnected || cc.UserID == "" {
+	connUser, connState := cc.Identity()
+	if connState == StateConnected || connUser == "" {
 		if msgType == messages.MsgEnterWorld {
 			g.metrics.EnterWorldResult(false)
 			g.sendEnterWorldError(cc, "not authenticated")
@@ -428,7 +432,7 @@ func (g *Gateway) checkSession(cc *ClientConn, msgType messages.MsgType) bool {
 	}
 
 	ctx := context.Background()
-	key := session.SessionKey(cc.UserID)
+	key := session.SessionKey(connUser)
 	userID, err := g.sessions.ValidateSession(ctx, key)
 
 	// A store error and a missing key mean opposite things, and conflating them
@@ -445,14 +449,13 @@ func (g *Gateway) checkSession(cc *ClientConn, msgType messages.MsgType) bool {
 		// because Redis restarted.
 		g.metrics.SessionCheckResult(metrics.SessionCheckStoreError)
 		g.logger.Error("session store unavailable, failing open",
-			"user", cc.UserID, "err", err)
+			"user", connUser, "err", err)
 		return true
 	}
-	if err != nil || userID != cc.UserID {
+	if err != nil || userID != connUser {
 		g.metrics.SessionCheckResult(metrics.SessionCheckExpired)
-		g.logger.Info("session expired", "user", cc.UserID, "err", err)
-		cc.State = StateConnected
-		cc.UserID = ""
+		g.logger.Info("session expired", "user", connUser, "err", err)
+		cc.ClearIdentity()
 		if msgType == messages.MsgEnterWorld {
 			g.metrics.EnterWorldResult(false)
 			g.sendEnterWorldError(cc, "session expired")
@@ -465,7 +468,7 @@ func (g *Gateway) checkSession(cc *ClientConn, msgType messages.MsgType) bool {
 
 	// Sliding TTL: any client activity keeps the session alive.
 	if err := g.sessions.RefreshSession(ctx, key); err != nil {
-		g.logger.Warn("refresh session", "user", cc.UserID, "err", err)
+		g.logger.Warn("refresh session", "user", connUser, "err", err)
 	}
 	return true
 }
@@ -494,8 +497,7 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 	}
 	g.metrics.AuthResult(true)
 
-	cc.UserID = userID
-	cc.State = StateAuthenticated
+	cc.SetAuthenticated(userID)
 
 	resp, err := messages.NewEnvelope(messages.MsgAuthResp, messages.AuthResponse{
 		OK:     true,
@@ -520,7 +522,8 @@ func (g *Gateway) sendAuthError(cc *ClientConn, msg string) {
 }
 
 func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
-	if cc.State != StateAuthenticated && cc.State != StateInWorld {
+	userID, state := cc.Identity()
+	if state != StateAuthenticated && state != StateInWorld {
 		g.metrics.EnterWorldResult(false)
 		g.sendEnterWorldError(cc, "not authenticated")
 		return
@@ -534,20 +537,20 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 	}
 
 	ctx := context.Background()
-	result, err := transfer.AssignMapKeyring(ctx, cc.UserID, req.MapID, g.registry, g.joinKeys)
+	result, err := transfer.AssignMapKeyring(ctx, userID, req.MapID, g.registry, g.joinKeys)
 	if err != nil {
 		g.metrics.EnterWorldResult(false)
 		// Never hand the raw error to the client: it is a wrapped chain that
 		// ends in things like `dial tcp 10.0.1.7:6379: connect: connection
 		// refused`, which hands an attacker internal hostnames, private IPs and
 		// port numbers for free. The detail is logged server-side instead.
-		g.logger.Error("enter world failed", "user", cc.UserID, "map", req.MapID, "err", err)
+		g.logger.Error("enter world failed", "user", userID, "map", req.MapID, "err", err)
 		g.sendEnterWorldError(cc, clientSafeAssignError(err))
 		return
 	}
 	g.metrics.EnterWorldResult(true)
 
-	cc.State = StateInWorld
+	cc.SetInWorld()
 
 	resp, err := messages.NewEnvelope(messages.MsgEnterWorldResp, messages.EnterWorldResponse{
 		ServerAddr: result.ServerAddr,
@@ -570,7 +573,7 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 // outbound and turn an orderly goodbye into a connection reset in the client's
 // logs.
 func (g *Gateway) handleDisconnect(cc *ClientConn) {
-	g.logger.Info("client disconnect", "user", cc.UserID)
+	g.logger.Info("client disconnect", "user", cc.UserID())
 	g.cleanupSession(cc)
 	cc.CloseGracefully()
 }

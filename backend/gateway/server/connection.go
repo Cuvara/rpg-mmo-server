@@ -23,9 +23,18 @@ const (
 
 // ClientConn wraps a TCP connection with state tracking for a gateway client.
 type ClientConn struct {
-	conn   net.Conn
-	UserID string
-	State  ConnState
+	conn net.Conn
+
+	// mu guards the connection's identity (userID/state). Unlike msgBucket
+	// below, identity genuinely crosses goroutines: the read side writes it
+	// (auth, session expiry, teardown in handleConn's defer) while the write
+	// side reads it for every log line it emits. Exported accessors are the
+	// only way in — the fields used to be exported and plain, which is exactly
+	// how a write in cleanupSession raced a read in CloseGracefully.
+	mu     sync.RWMutex
+	userID string
+	state  ConnState
+
 	sendCh chan messages.Envelope
 	done   chan struct{}
 	once   sync.Once
@@ -36,8 +45,9 @@ type ClientConn struct {
 	// It is a struct field, not a map lookup, on purpose: this is the only
 	// per-message check in the gateway's read path, so it must cost a few
 	// float ops and zero allocations. It is only ever touched from ReadLoop's
-	// goroutine, so it needs no lock. A zero-Rate bucket (the default) allows
-	// everything.
+	// goroutine — allowMessage is called from handleMessage and nowhere else —
+	// so it needs no lock. A zero-Rate bucket (the default) allows everything.
+	// Audited: unlike userID/state above, nothing on the write side reads it.
 	msgBucket ratelimit.Bucket
 
 	// limited is set once this connection tripped the message limiter and is
@@ -74,12 +84,72 @@ type halfCloser interface{ CloseWrite() error }
 func NewClientConn(conn net.Conn, logger *slog.Logger, bucket ratelimit.Bucket) *ClientConn {
 	return &ClientConn{
 		conn:      conn,
-		State:     StateConnected,
+		state:     StateConnected,
 		sendCh:    make(chan messages.Envelope, 64),
 		done:      make(chan struct{}),
 		logger:    logger,
 		msgBucket: bucket,
 	}
+}
+
+// UserID returns the authenticated user bound to this connection, or "" when
+// it has no identity. Safe from any goroutine.
+func (c *ClientConn) UserID() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.userID
+}
+
+// State returns the connection's lifecycle state. Safe from any goroutine.
+func (c *ClientConn) State() ConnState {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.state
+}
+
+// Identity returns userID and state together. Callers that branch on both must
+// use this rather than two calls, so they cannot observe a half-applied
+// transition (a userID from before a clear paired with a state from after it).
+func (c *ClientConn) Identity() (string, ConnState) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.userID, c.state
+}
+
+// SetAuthenticated binds a verified user to the connection.
+func (c *ClientConn) SetAuthenticated(userID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.userID = userID
+	c.state = StateAuthenticated
+}
+
+// SetInWorld marks the connection as assigned to a game server. It is a no-op
+// if the connection lost its identity in the meantime, so a late assignment
+// cannot resurrect a torn-down connection into StateInWorld with no user.
+func (c *ClientConn) SetInWorld() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.userID == "" {
+		return
+	}
+	c.state = StateInWorld
+}
+
+// ClearIdentity drops the connection back to an unauthenticated state and
+// returns the user it was bound to, or "" if it had none.
+//
+// Returning the cleared value is what makes session teardown safe to call from
+// more than one path: the check ("was there a session?") and the act ("take
+// it") happen under one lock, so an explicit MsgDisconnect and the deferred
+// cleanup in handleConn cannot both decide they own the same session.
+func (c *ClientConn) ClearIdentity() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	userID := c.userID
+	c.userID = ""
+	c.state = StateConnected
+	return userID
 }
 
 // RemoteIP returns the peer's IP without the port, for use as a rate-limit key.
@@ -179,14 +249,14 @@ func (c *ClientConn) CloseGracefully() {
 	if err := hc.CloseWrite(); err != nil {
 		// Peer already gone, or a conn that reports the capability but cannot
 		// honour it. Nothing left to deliver, so fall back.
-		c.logger.Debug("close write", "user", c.UserID, "err", err)
+		c.logger.Debug("close write", "user", c.UserID(), "err", err)
 		c.Close()
 		return
 	}
 	// Bound the drain. ReadLoop turns this into an error and exits, which runs
 	// the deferred Close on an empty receive queue.
 	if err := c.conn.SetReadDeadline(time.Now().Add(closeDrainTimeout)); err != nil {
-		c.logger.Debug("set drain deadline", "user", c.UserID, "err", err)
+		c.logger.Debug("set drain deadline", "user", c.UserID(), "err", err)
 		c.Close()
 	}
 }
@@ -203,7 +273,7 @@ func (c *ClientConn) ReadLoop(handler func(conn *ClientConn, env messages.Envelo
 		env, err := messages.Decode(c.conn)
 		if err != nil {
 			if err != io.EOF {
-				c.logger.Debug("read error", "user", c.UserID, "err", err)
+				c.logger.Debug("read error", "user", c.UserID(), "err", err)
 			}
 			return
 		}
@@ -234,11 +304,11 @@ func (c *ClientConn) writeLoop() bool {
 		case env := <-c.sendCh:
 			data, err := messages.Encode(env)
 			if err != nil {
-				c.logger.Error("encode error", "user", c.UserID, "err", err)
+				c.logger.Error("encode error", "user", c.UserID(), "err", err)
 				return false
 			}
 			if _, err := c.conn.Write(data); err != nil {
-				c.logger.Debug("write error", "user", c.UserID, "err", err)
+				c.logger.Debug("write error", "user", c.UserID(), "err", err)
 				return false
 			}
 			// Deferred close requested (rate limiter, protocol abort): leave
