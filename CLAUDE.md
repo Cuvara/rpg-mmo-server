@@ -97,7 +97,7 @@ merge algorithm: **`backend/gameserver-dotnet/docs/API.md`**.
 | Layer | MVP (current) | Production |
 |-------|---------------|------------|
 | Transport | TCP (default) — KCP/UDP available opt-in via `shared/transport` + `--transport=kcp` | KCP everywhere, with per-session encryption |
-| Encoding | **Protobuf implemented** (`shared/proto/wire.proto`, one schema -> Go + C#); legacy JSON still accepted and distinguished by the first body byte - ADR-9 | Protobuf only, once no pre-Protobuf client remains |
+| Encoding | **Protobuf + entity-type enum + entity-id interning** (`shared/proto/wire.proto`, one schema -> Go + C#), **81% smaller than the original JSON**; legacy JSON still accepted and distinguished by the first body byte - ADR-9 | Protobuf only, once no pre-Protobuf client remains |
 | Player store | In-memory default; **PostgreSQL implemented** (C# `PostgresPlayerStore`, set `GAME_DB_URL`) | PostgreSQL everywhere |
 | Session/Registry stores | In-memory default; **Redis implemented** (gateway `--backend=redis`) | Redis everywhere |
 | Event stream | Go channels default; **Redis Streams implemented** (consumer group + ACK). C# side still publishes into a noop — ADR-5 | Redis Streams end to end |
@@ -139,35 +139,50 @@ merge algorithm: **`backend/gameserver-dotnet/docs/API.md`**.
 
 > **⚠️ COST AND TIER CCU FIGURES ARE STILL ESTIMATES.** Costs below are planning
 > figures and no VPS-hardware load test has been run. Do not size a launch on the
-> tier rows. What *has* been measured is the per-game-server ceiling, below.
+> tier rows. What *has* been measured is **bandwidth per client**, below; the
+> per-server player ceiling is currently **unknown** and blocked on hardware.
 
 **Measured per-game-server capacity** (`backend/docs/BENCHMARK.md`, 2026-08-07,
-develop @ `a19bfed`):
+develop @ `cb31656`):
 
 | Metric | Measured | Notes |
 |--------|----------|-------|
-| Players per game server | **150** | tick p99 crosses the 66.67ms budget at 160 |
-| Bottleneck | **snapshot JSON serialization** (~80% of tick), AOI scan ~20% | not AOI, as previously assumed |
-| Downstream bandwidth | **1.22 KB/s per in-AOI player** | 184 KB/s/client at 150 players |
-| Mobile-viable density | **~41 players** | where ADR-7's < 50 KB/s/client threshold breaks |
+| Downstream bandwidth | **45.9 KB/s per client at 200 players** | inside ADR-7's `< 50 KB/s` mobile threshold; ceiling is above 200 and not yet bracketed |
+| Reproducibility of that | **0.3% across six runs** | bytes on the wire do not care what else the host is doing |
+| Wire encoding | Protobuf + entity-type enum + id interning | **81% smaller than the original JSON** |
 | RAM per game server | **~30 MiB idle → ~82 MiB at 200 players** | well inside the 128Mi pod limit |
+| **Players per game server (tick)** | **UNKNOWN** | ⛔ see below — not measurable on the current hardware |
 
-> ⚠️ Measured on a WSL2 dev workstation that was also running the load generator
-> (which used more CPU than the server under test), Docker Desktop and Kubernetes.
-> Treat 150 as a **lower bound**. The bottleneck ratio is far more robust than the
-> absolute number.
+> ### ⛔ The per-server player ceiling is currently unknown
+>
+> An earlier revision of this table said **150**. That figure is **stale**: it was
+> measured before Protobuf, the entity-type enum and id interning — three changes
+> that removed 81% of the wire and with it the constraint that produced it. **Do
+> not quote 150 as the current ceiling.**
+>
+> A replacement cannot be measured here. The load generator runs on the same
+> machine as the server under test and uses *more CPU than it*, and tick p99 is
+> highly sensitive to that: at a fixed level it read 67.4–70.8ms with the box
+> quiet and 224.7–240.6ms with a deploy sharing it, a **3.3× swing**. So every
+> tick figure from this host is a lower bound of unknown tightness.
+>
+> **The unblock is a separate machine for the load generator, and nothing else.**
+> Tracked as a blocker in [ADR-7](backend/docs/ARCHITECTURE-DECISIONS.md).
+>
+> **What did change**: bandwidth was the binding constraint at roughly a third of
+> the tick ceiling, and is not any more — tick binds now. That is why the missing
+> number is a blocker rather than a curiosity.
 
-| Tier | Cost/mo ⚠️ | Setup | CCU ⚠️ | Game servers implied |
-|------|---------|-------|-----|------|
-| Dev/Alpha | $40-60 | 1 VPS all-in-one, pg_dump daily | <200 | 2 @ 150 |
-| Beta | $80-150 | 2 VPS (app+DB), CDN, Grafana | 200-500 | 2-4 @ 150 |
-| Soft Launch | $200-400 | 3 VPS (Nakama+GW, game servers, DB), Redis dedicated | 500-2000 | 4-14 @ 150 |
-| Growth | $400-1000+ | Multi-node k3s, managed DB optional, Redis Sentinel | 2000-5000+ | 14-34 @ 150 |
+| Tier | Cost/mo ⚠️ | Setup | CCU ⚠️ |
+|------|---------|-------|-----|
+| Dev/Alpha | $40-60 | 1 VPS all-in-one, pg_dump daily | <200 |
+| Beta | $80-150 | 2 VPS (app+DB), CDN, Grafana | 200-500 |
+| Soft Launch | $200-400 | 3 VPS (Nakama+GW, game servers, DB), Redis dedicated | 500-2000 |
+| Growth | $400-1000+ | Multi-node k3s, managed DB optional, Redis Sentinel | 2000-5000+ |
 
-The "game servers implied" column is the only column derived from a measurement:
-tier CCU ÷ 150. It assumes dense crowds; sparser maps hold more. Bandwidth, not
-tick time, is the binding constraint for mobile clients until the snapshot
-encoding moves off JSON.
+The **"game servers implied" column has been removed.** It divided tier CCU by
+150, so it propagated a stale ceiling into the one place someone sizing a fleet
+would actually read. It can come back when there is a ceiling worth dividing by.
 
 ## Tech Stack Reference
 
