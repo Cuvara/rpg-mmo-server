@@ -65,6 +65,56 @@ public sealed class SnapshotDeltaState
     private int _sinceKeyframe;
     private int _forceFull = 1; // first snapshot on a connection is always a keyframe
 
+    /// <summary>
+    /// Per-connection keyframe phase, applied once after the join keyframe so that
+    /// clients which joined on the same tick do not then keyframe in lockstep forever.
+    /// See <see cref="PhaseFor"/>.
+    /// </summary>
+    private readonly int _phaseSeed;
+    private bool _phaseApplied;
+
+    /// <summary>Unstaggered state — every keyframe cycle is exactly the full interval.</summary>
+    public SnapshotDeltaState() : this(0) { }
+
+    /// <summary>
+    /// State whose keyframe cycle is offset by <paramref name="phaseSeed"/> snapshots
+    /// once, immediately after the join keyframe. Use <see cref="PhaseFor"/> to derive
+    /// the seed from the connection's identity.
+    /// </summary>
+    public SnapshotDeltaState(int phaseSeed)
+    {
+        _phaseSeed = phaseSeed < 0 ? 0 : phaseSeed;
+    }
+
+    /// <summary>
+    /// Deterministic keyframe phase for a connection, derived from its user id.
+    ///
+    /// <para>Deterministic on purpose. A random offset would spread the load equally
+    /// well but make a replay of the same session produce different frames, which is
+    /// the same reasoning that puts cooldowns on tick counts rather than wall clock
+    /// (<c>docs/DESIGN.md</c>). Two runs with the same players produce the same
+    /// keyframe schedule.</para>
+    ///
+    /// <para>FNV-1a rather than <see cref="string.GetHashCode()"/>: string hashing in
+    /// .NET is randomized per process, so it would be stable within a run and different
+    /// across runs — exactly the non-determinism this avoids.</para>
+    /// </summary>
+    public static int PhaseFor(string userId)
+    {
+        const uint offsetBasis = 2166136261;
+        const uint prime = 16777619;
+
+        uint hash = offsetBasis;
+        foreach (char c in userId)
+        {
+            hash = (hash ^ (byte)c) * prime;
+            hash = (hash ^ (byte)(c >> 8)) * prime;
+        }
+        // Mask the sign bit rather than casting: a negative seed would be clamped to 0
+        // and silently unstagger a whole class of user ids.
+        return (int)(hash & 0x7FFFFFFF);
+    }
+
     /// <summary>Number of snapshots sent since the last keyframe. Diagnostics/tests.</summary>
     public int SinceKeyframe => _sinceKeyframe;
 
@@ -89,7 +139,23 @@ public sealed class SnapshotDeltaState
 
         if (full)
         {
-            _sinceKeyframe = 0;
+            // Stagger exactly once, after the join keyframe. A cohort that joins on the
+            // same tick would otherwise share a counter phase and serialize full state
+            // for every member on the same tick, every interval, for the life of the
+            // server — a self-inflicted latency spike precisely while filling up.
+            //
+            // Applied once, not on every keyframe: a permanent offset would shorten this
+            // client's cycle to (interval - phase) and hand it more keyframes than
+            // everyone else. One shortened first cycle is enough to desynchronize.
+            if (!_phaseApplied && keyframeInterval > 1)
+            {
+                _phaseApplied = true;
+                _sinceKeyframe = _phaseSeed % keyframeInterval;
+            }
+            else
+            {
+                _sinceKeyframe = 0;
+            }
             return EncodeFull(tick, ackTick, nearby);
         }
 
