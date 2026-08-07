@@ -52,13 +52,19 @@
 
 ### 8. Tier-Specific Configs (Drawio Page 10)
 
-> **⚠️ ESTIMATES — UNBENCHMARKED.** Costs and CCU below are planning figures; no
-> load test has been run. See `backend/docs/ARCHITECTURE-DECISIONS.md` ADR-7.
+> **⚠️ Costs and tier CCU below are still planning figures** — no VPS load test has
+> been run. The per-game-server ceiling IS measured: **150 players** before tick
+> p99 breaks the 66.67ms budget, RAM ~30-82 MiB, bottleneck = snapshot JSON
+> serialization. See `backend/docs/BENCHMARK.md` and ADR-7.
 
-- **Dev/Alpha ($40-60)**: 1 VPS all-in-one, pg_dump daily, < 200 CCU
-- **Beta ($80-150)**: 2 VPS (app + DB), CDN, Grafana, 200-500 CCU
-- **Soft Launch ($200-400)**: 3 VPS, Redis dedicated, 500-2000 CCU
-- **Growth ($400-1000+)**: Multi-node k3s, managed DB optional, 2000-5000+ CCU
+- **Dev/Alpha ($40-60)**: 1 VPS all-in-one, pg_dump daily, < 200 CCU (~2 game servers)
+- **Beta ($80-150)**: 2 VPS (app + DB), CDN, Grafana, 200-500 CCU (~2-4)
+- **Soft Launch ($200-400)**: 3 VPS, Redis dedicated, 500-2000 CCU (~4-14)
+- **Growth ($400-1000+)**: Multi-node k3s, managed DB optional, 2000-5000+ CCU (~14-34)
+
+Sizing notes from the benchmark: `GAMESERVER_CAPACITY` defaults to 100 against a
+measured ceiling of 150 (intentional headroom). `GATEWAY_CONN_RATE_PER_MIN`
+defaults to 10/min per source IP — raise it if players will share a carrier NAT.
 
 ## Key Design Constraints
 - All infrastructure = open-source, $0 license

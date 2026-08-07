@@ -8,8 +8,9 @@ name: CI — Backend
 #   test-shared
 #     ├─► test-gateway ────┐
 #     ├─► test-nakama ─────┤
-#     └─► test-smoketest ──┘
-#               └─► test-integration ─► build-{gateway,smoketest}
+#     ├─► test-smoketest ──┘
+#     │         └─► test-integration ─► build-{gateway,smoketest}
+#     └─► test-loadtest
 
 on:
   # `develop` is the integration branch every feature PR targets, so it MUST be
@@ -89,6 +90,18 @@ jobs:
       cache_dependency_path: backend/smoketest/go.mod
       test_flags: '-v -race -timeout 60s'
       run_build: go build ./cmd/smoketest/
+
+  test-loadtest:
+    name: Test loadtest
+    needs: test-shared
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/loadtest
+      # Unit tests only: every test here is pure (percentiles, Prometheus
+      # parsing, counter differencing, verdict logic). The network path needs a
+      # live stack and is exercised by running the tool, not by CI.
+      test_flags: '-v -race -timeout 60s'
+      run_build: go build ./cmd/loadtest/
 
   test-integration:
     name: Integration tests

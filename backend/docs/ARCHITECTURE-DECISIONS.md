@@ -494,6 +494,34 @@ tolerable rather than a duplication exploit.
 
 ## ADR-7 — CCU and cost figures are unbenchmarked estimates
 
+> **UPDATE 2026-08-07 — partially resolved. The primary benchmark has been run.**
+>
+> `backend/loadtest` now exists and the game-server capacity ceiling has been
+> measured. Full write-up: **[BENCHMARK.md](BENCHMARK.md)**.
+>
+> | Measured (dev workstation, lower bound) | Result |
+> |---|---|
+> | Players per game server before tick p99 > 66.67ms | **150** (160 breaches) |
+> | RAM per pod | **~30 MiB idle, ~50 MiB @100, ~82 MiB @200** — resolves the 30-45 vs 50 MB dispute |
+> | Downstream bandwidth | **1.22 KB/s per in-AOI player**; 184 KB/s per client at 150 |
+> | Bandwidth vs the < 50 KB/s threshold below | breached at **~41 players** |
+>
+> **The bottleneck prediction in this ADR was wrong.** This ADR named brute-force
+> AOI as "the most likely first failure". Measurement puts snapshot construction
+> plus JSON serialization at ~80% of tick cost and the AOI scan at ~20% — a 5:1
+> ratio, confirmed two independent ways (see BENCHMARK.md §5). Protobuf, not a
+> spatial grid, is the highest-impact fix; the spatial grid drops to fourth.
+>
+> **Still unmeasured** (items 4 and 5 of the plan below): connection churn, and
+> gateway login throughput. Also unmeasured on real hardware — every figure above
+> came from a WSL2 dev box that was simultaneously running the load generator,
+> Docker Desktop, Kubernetes and an AI agent. The ⚠️ markers on the tier tables
+> stay until a VPS run replaces them.
+>
+> **A new blocker was found**: entities leak on disconnect
+> (`gameserver_entities` never returns to 0), which turns the bounded O(n²) tick
+> cost into an unbounded one on a long-lived server. BENCHMARK.md §7.
+
 ### Context
 
 The criticism: the CCU and cost tables are presented as fact but nothing has been
@@ -535,9 +563,13 @@ customer-facing or planning material without a benchmark reference.
 1. **Tick p99 vs entity count** — the primary ceiling. Step entity count until p99
    crosses the budget. This is the number that determines per-map capacity, and it
    is expected to bend early because AOI is a brute-force O(n²) scan per tick.
+   *(Measured: breaks at 160 players. The expectation about AOI was wrong —
+   serialization dominates 5:1. BENCHMARK.md §5.)*
 2. **Snapshot bandwidth per client** — bytes/sec/client vs nearby-entity count.
-   Snapshots are full-state JSON with no delta encoding, so this is expected to be
-   the first thing that hurts on mobile networks.
+   Snapshots are delta-encoded JSON with a keyframe every 30 snapshots, so this is
+   expected to be the first thing that hurts on mobile networks. *(Measured: yes —
+   1.22 KB/s per in-AOI player, breaching the 50 KB/s threshold below at ~41
+   players, well before the tick budget breaks.)*
 3. **RAM per 100 players** — resident set at 0 / 100 / 500 players, to replace the
    contested 30-45MB vs 50MB claim with a measured curve.
 4. **Connection churn** — join/leave rate the accept path sustains, including the
@@ -575,12 +607,32 @@ A tier's CCU claim is only publishable once a run at that CCU holds every thresh
 
 ### Follow-up work
 
-- **M** — Build `backend/loadtest` per the spec above.
+- ~~**M** — Build `backend/loadtest` per the spec above.~~ **Done** — see
+  `backend/loadtest/`.
+- ~~**M** — Run the benchmark matrix~~ **Partially done** — tick-vs-entity-count,
+  snapshot bandwidth and RAM are measured (BENCHMARK.md). Connection churn and
+  gateway login throughput are still open.
 - **S** — Add explicit histogram buckets around the 66ms budget instead of the OTel
-  defaults, so p99 is readable near the threshold.
-- **M** — Run the benchmark matrix and replace the estimate tables with measured
-  numbers plus the commit they were measured at.
-- **M** — Spatial-grid AOI, if and only if measurement confirms it is the ceiling.
+  defaults, so p99 is readable near the threshold. **Still worth doing**: the
+  nearest edges are 0.05s and 0.075s, which straddle the 0.0667s budget, so an
+  interpolated p99 near the threshold is imprecise. `backend/loadtest` works
+  around this by also reporting the exact fraction of ticks above the 0.05 edge.
+- **L** — **Protobuf/FlatBuffers on the snapshot path. Now the top-priority
+  performance item**, ahead of AOI work: measurement attributes ~80% of tick cost
+  and effectively all of the bandwidth problem to JSON encoding.
+- **S** — Move serialization off the tick loop. `WireProtocol.NewEnvelope`
+  serializes inline while `Connection.Send` merely enqueues; doing it in the
+  writer task removes the dominant term from the critical path without changing
+  the encoding.
+- **S** — Fix the entity leak on disconnect (BENCHMARK.md §7). Highest priority of
+  all — it makes the O(n²) cost grow with cumulative joins rather than concurrent
+  players.
+- **S** — Stagger per-connection keyframe counters to stop the keyframe stampede.
+- **M** — Spatial-grid AOI. Measurement demotes this: it targets the ~20% term.
+- **M** — Re-run the matrix on VPS hardware with the generator on a separate host,
+  then replace the tier CCU numbers and drop the ⚠️ markers.
+- **M** — Measure the two remaining plan items: connection churn, and gateway
+  login throughput (`-auth=nakama` in `backend/loadtest` drives the real path).
 
 ---
 

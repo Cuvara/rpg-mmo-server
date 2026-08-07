@@ -217,16 +217,29 @@ kubectl apply -f agones/
 
 ## Tiers
 
-> **⚠️ ESTIMATES — UNBENCHMARKED.** No load test has been run against this stack.
-> See `backend/docs/ARCHITECTURE-DECISIONS.md` ADR-7 for the benchmark plan and
-> acceptance thresholds.
+> **⚠️ COSTS AND TIER CCU ARE STILL ESTIMATES.** No load test has been run on VPS
+> hardware. The per-game-server ceiling below IS measured — see
+> `backend/docs/BENCHMARK.md`.
 
-| Tier | Cost/mo | Setup | CCU |
-|------|---------|-------|-----|
-| Dev/Alpha | $40-60 | 1 VPS all-in-one | < 200 |
-| Beta | $80-150 | 2 VPS (app + DB) | 200-500 |
-| Soft Launch | $200-400 | 3 VPS separated | 500-2000 |
-| Growth | $400-1000+ | Multi-node k3s | 2000-5000+ |
+**Measured (dev workstation, lower bound):** one game server holds **150 players**
+before tick p99 breaks the 66.67ms budget; RAM **~30 MiB idle → ~82 MiB at 200
+players**; downstream **1.22 KB/s per in-AOI player**. The bottleneck is snapshot
+JSON serialization (~80% of tick cost), not the AOI scan (~20%).
+
+Two configured ceilings bite before any performance limit does, and both matter
+when sizing a deployment:
+
+| Setting | Default | Effect |
+|---|---|---|
+| `GAMESERVER_CAPACITY` | 100 | Join is refused with "Server is full". Conservative vs the measured 150 — deliberate headroom, leave it unless a VPS benchmark says otherwise. |
+| `GATEWAY_CONN_RATE_PER_MIN` | 10 per source IP | Fine for real clients (one connect each), but it blocks load testing and any NAT with many players behind one address. Raise it if a carrier NAT is expected. |
+
+| Tier | Cost/mo ⚠️ | Setup | CCU ⚠️ | Game servers @ 150 |
+|------|---------|-------|-----|-----|
+| Dev/Alpha | $40-60 | 1 VPS all-in-one | < 200 | 2 |
+| Beta | $80-150 | 2 VPS (app + DB) | 200-500 | 2-4 |
+| Soft Launch | $200-400 | 3 VPS separated | 500-2000 | 4-14 |
+| Growth | $400-1000+ | Multi-node k3s | 2000-5000+ | 14-34 |
 
 ## Quick Start (Dev Tier, k3s — planned)
 
