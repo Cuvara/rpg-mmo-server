@@ -42,7 +42,10 @@ var tableCols = []struct {
 	{"recv%", func(r *Result) string { return pct(r.Client.SnapshotsReceivedRatio) }},
 	{"fail", func(r *Result) string { return fmt.Sprint(r.Client.PlayersFailed) }},
 	{"verdict", func(r *Result) string {
-		if r.Verdict.Degraded {
+		switch {
+		case r.Verdict.Invalid:
+			return "INVALID"
+		case r.Verdict.Degraded:
 			return "DEGRADED"
 		}
 		return "ok"
@@ -99,20 +102,31 @@ func WriteSummary(w io.Writer, results []*Result) {
 	WriteTable(w, results)
 
 	fmt.Fprintln(w)
-	best := 0
+	best, invalid := 0, 0
 	for _, r := range results {
-		if r.Verdict.Degraded {
+		switch {
+		case r.Verdict.Invalid:
+			// Excluded from the aggregate entirely, not counted as a failing
+			// level: an invalid level says nothing about capacity in either
+			// direction, so letting it cap `best` would understate the ceiling
+			// exactly as letting it pass would overstate it.
+			invalid++
+			fmt.Fprintf(w, "  players=%-5d %s\n", r.Config.Players, r.Verdict.Reason)
+		case r.Verdict.Degraded:
 			fmt.Fprintf(w, "  players=%-5d DEGRADED: %s\n", r.Config.Players, r.Verdict.Reason)
-			continue
-		}
-		if r.Config.Players > best {
-			best = r.Config.Players
+		default:
+			if r.Config.Players > best {
+				best = r.Config.Players
+			}
 		}
 	}
 	if best > 0 {
 		fmt.Fprintf(w, "\nHIGHEST PASSING LEVEL: %d players on one game server\n", best)
 	} else {
 		fmt.Fprintln(w, "\nHIGHEST PASSING LEVEL: none — every level degraded")
+	}
+	if invalid > 0 {
+		fmt.Fprintf(w, "%d level(s) were INVALID and excluded — the sweep above is incomplete, rerun them.\n", invalid)
 	}
 }
 

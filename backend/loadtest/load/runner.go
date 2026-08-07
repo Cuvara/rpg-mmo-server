@@ -295,11 +295,22 @@ func Evaluate(res *Result) Verdict {
 		v.NoFrameLoss = false
 	}
 
+	// --- Validity: did this level measure what it claims to have measured? ---
+	//
+	// Distinct from the criteria above, which describe a server that kept up or
+	// did not. These describe a run that is not a measurement at all, so its
+	// numbers must be excluded rather than reported as a worse result.
+	invalidReason := validityFailure(res)
+
 	switch {
+	case invalidReason != "":
+		v.Invalid = true
+		v.Reason = "INVALID: " + invalidReason + " — rerun this level"
 	case res.Server.RestartedMidRun:
-		// Checked FIRST: a restart makes every other signal meaningless. The
-		// clients all saw "server closed the connection" and the counter deltas
-		// span two process lifetimes.
+		// A restart makes every other signal meaningless. The clients all saw
+		// "server closed the connection" and the counter deltas span two process
+		// lifetimes.
+		v.Invalid = true
 		v.Reason = "INVALID: the game server restarted mid-run (counter reset) — rerun this level"
 	case !v.TickBudgetOK:
 		v.Reason = fmt.Sprintf("tick p99 %.1fms over the %.1fms budget (%.2f%% of ticks above %.0fms)",
@@ -317,6 +328,52 @@ func Evaluate(res *Result) Verdict {
 	}
 	v.Degraded = v.Reason != ""
 	return v
+}
+
+// validityFailure reports why a level failed to measure what it claims, or "".
+//
+// Every check here answers "is this a measurement?", never "is this a good
+// result?". They exist because a broken run does not announce itself in the
+// headline numbers, and can look BETTER than a healthy one — a level whose
+// clients all died early reported a 97% bandwidth saving, because the bytes they
+// never received were indistinguishable from bytes the server never sent.
+func validityFailure(res *Result) string {
+	c, s := &res.Client, &res.Server
+
+	// 1. Any client failure means the level did not run at the size on its label.
+	//    Even one is enough: a "150-player" level where one client never joined
+	//    measured 149, and reporting it as 150 misstates the x-axis of every
+	//    curve drawn from it.
+	if c.PlayersFailed > 0 || c.PlayersJoined < c.PlayersRequested {
+		return fmt.Sprintf("%d/%d players failed, so this level did not run at %d players",
+			c.PlayersFailed, c.PlayersRequested, c.PlayersRequested)
+	}
+
+	// 2. A received ratio far ABOVE 1 is as broken as one far below, and used to
+	//    go unchecked: NoFrameLoss only looks downward, because it is asking a
+	//    different question (did the send queue drop frames?). A ratio of 1.40
+	//    means the client and server windows describe different populations —
+	//    reconnects, a dirty server, or overlapping runs — and nothing derived
+	//    from either side can be trusted.
+	if c.SnapshotsReceivedRatio > 1.05 {
+		return fmt.Sprintf("clients recorded %.2fx the snapshots the server sent; the two measurement windows disagree",
+			c.SnapshotsReceivedRatio)
+	}
+
+	// 3. The server cannot hold more players or entities than were asked of it.
+	//    When it reports more, the process was not clean at the start of the
+	//    level and is carrying load from somewhere else.
+	if s.Scraped {
+		if s.PlayersOnline > float64(c.PlayersRequested) {
+			return fmt.Sprintf("server reported %.0f players online for a %d-player level; it was not empty when the level started",
+				s.PlayersOnline, c.PlayersRequested)
+		}
+		if s.Entities > float64(c.PlayersRequested) {
+			return fmt.Sprintf("server reported %.0f entities for a %d-player level; it was not empty when the level started",
+				s.Entities, c.PlayersRequested)
+		}
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------- helpers

@@ -52,11 +52,32 @@ start_server() {
     -e GAMESERVER_CAPACITY=2000 -e METRICS_ADDR=:9101 \
     "$image" >/dev/null
 
-  # Wait for the server to be live AND for entity count to read 0.
-  for _ in $(seq 1 60); do
-    if curl -sf "http://localhost:${METRICS_PORT}/metrics" 2>/dev/null \
-        | grep -qE '^gameserver_entities({})? 0(\.0)?$'; then
-      return 0
+  # Wait for the server to be live AND genuinely empty.
+  #
+  # BOTH gauges, not just entities: checking entities alone let a container that
+  # was still carrying players through as "clean", and the level measured against
+  # it reported a 97% bandwidth saving that was pure artefact. See
+  # docs/BENCHMARK.md. The loadtest itself now also rejects such a level, but
+  # this precondition is cheaper than discovering it 43 seconds later.
+  for _ in $(seq 1 90); do
+    m=$(curl -sf "http://localhost:${METRICS_PORT}/metrics" 2>/dev/null) || { sleep 1; continue; }
+    e=$(echo "$m" | grep -E '^gameserver_entities' | awk '{print $2}')
+    o=$(echo "$m" | grep -E '^gameserver_players_online' | awk '{print $2}')
+    if [ "$e" = "0" ] && [ "$o" = "0" ]; then
+      # /metrics being up proves nothing about the GAME port: Program.cs starts
+      # the metrics endpoint (line ~193) well before the listener, so a level
+      # that starts on the strength of a metrics scrape can race the listener
+      # and lose a client to "connection reset by peer" during join. Measured at
+      # roughly 1 cold start in 4. Probe the port that matters, then settle.
+      for _ in $(seq 1 30); do
+        if (exec 3<>/dev/tcp/127.0.0.1/${PORT}) 2>/dev/null; then
+          sleep 1
+          return 0
+        fi
+        sleep 1
+      done
+      echo "  game port ${PORT} never accepted" >&2
+      return 1
     fi
     sleep 1
   done
@@ -68,15 +89,29 @@ start_server() {
 run_arm() {
   local arm="$1" image="$2" encoding="$3"
   for players in "${LEVELS[@]}"; do
-    echo "=== ${arm} @ ${players} players ==="
-    start_server "$image"
-    ./loadtest \
-      -join direct -gameserver-addr "127.0.0.1:${PORT}" -server-id gs-bench \
-      -gameserver-metrics "http://localhost:${METRICS_PORT}/metrics" -gateway-metrics "" \
-      -players "$players" -duration "$DURATION" -warmup "$WARMUP" \
-      -movement cluster -encoding "$encoding" \
-      -label "${arm}" \
-      -json "${OUT}/${arm}-${players}.json" || echo "LEVEL FAILED: ${arm}@${players}" >&2
+    # Retry a level the tool itself reports INVALID. That verdict means the level
+    # did not measure what it claims (see load/runner.go validityFailure), so
+    # recording it would put a non-measurement into the results; rerunning is the
+    # only correct response. A DEGRADED level is a real result and is kept.
+    for attempt in 1 2 3; do
+      echo "=== ${arm} @ ${players} players (attempt ${attempt}) ==="
+      start_server "$image" || continue
+      ./loadtest \
+        -join direct -gameserver-addr "127.0.0.1:${PORT}" -server-id gs-bench \
+        -gameserver-metrics "http://localhost:${METRICS_PORT}/metrics" -gateway-metrics "" \
+        -players "$players" -duration "$DURATION" -warmup "$WARMUP" \
+        -movement cluster -encoding "$encoding" \
+        -label "${arm}" \
+        -json "${OUT}/${arm}-${players}.json" || echo "LEVEL FAILED: ${arm}@${players}" >&2
+
+      if [ -f "${OUT}/${arm}-${players}.json" ] && \
+         ! grep -q '"invalid":true' "${OUT}/${arm}-${players}.json"; then
+        break
+      fi
+      echo "  level INVALID, rerunning" >&2
+      rm -f "${OUT}/${arm}-${players}.json"
+      sleep 3
+    done
   done
 }
 
