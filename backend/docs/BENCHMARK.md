@@ -742,17 +742,31 @@ its own verdict rather than a wider band on the existing one.
 ceilings should therefore be quoted loosely. **The direction of that reasoning was
 wrong, and the corrected version is more useful.**
 
-Repeated at a fixed 200-player level on a *quiet* machine, p99 is tight:
+Repeated at a fixed 200-player level, six runs on a quiet machine against two
+disturbed by a CD deploy sharing the host:
 
-| | tick p99 | tick mean |
-|---|---|---|
-| 4 runs, quiet box | 72.9 – 74.6ms (**2.3% spread**) | 39.4 – 42.0ms |
-| 2 runs, CD deploy sharing the host | 224.7, 240.6ms | 60.6, 65.6ms |
+| statistic | 6 runs, quiet | spread | disturbed runs |
+|---|---|--:|---|
+| tick p99 | 67.41 – 70.84ms (median 69.48) | **5.1%** | 224.7, 240.6ms — **3.3×** |
+| tick mean | 36.51 – 38.68ms (median 37.81) | **5.9%** | 60.6, 65.6ms — **1.7×** |
+| **KB/s per client** | 243.7 – 244.3 | **0.3%** | 205.6, 210.7 |
 
-p99 is not intrinsically noisy — it is **contention-sensitive**, and it amplifies
-a disturbance far more than the mean does: **3.3× versus 1.7×** under the same
-interference. The load generator shares this machine with the self-hosted deploy
-runner, so "noise" here was mostly one identifiable process.
+Three things follow, and the second corrects an earlier claim in this document.
+
+**p99 is not intrinsically noisy — it is contention-sensitive.** Quiet, it holds
+a 5.1% spread; disturbed, it moves 3.3×. The load generator shares this machine
+with the self-hosted deploy runner, so "noise" here was mostly one identifiable
+process.
+
+**But p99 is not meaningfully stabler *or* less stable than the mean when the box
+is quiet** — 5.1% against 5.9% is a wash. An earlier revision of this section
+claimed p99 was *tighter* than the mean (0.6% vs 2.2%); that was computed from
+**two** runs and did not survive six. The mean's real advantage is narrower than
+stated: it shows up only under contention (1.7× versus 3.3×), not in general.
+
+**Bandwidth is an order of magnitude more reproducible than either**, at 0.3%
+across the same six runs — and it barely moved even in the disturbed runs. This
+is the empirical case for judging bandwidth-motivated work on bandwidth.
 
 Two consequences:
 
