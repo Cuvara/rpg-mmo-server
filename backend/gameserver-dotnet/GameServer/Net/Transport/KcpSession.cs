@@ -21,7 +21,13 @@ public sealed class KcpSession : IDisposable
         Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions { SingleReader = true });
     private readonly byte[] _recvScratch = new byte[KcpTuning.MaxMessageSize];
     private readonly CancellationTokenSource _cts = new();
-    private int _closed;
+    // Three-state close lifecycle; see Connection.cs for why a single flag is not
+    // enough (it conflates "close begun" with "close complete", and Dispose()
+    // needs the latter before it can free the CancellationTokenSource).
+    private const int StateOpen = 0;
+    private const int StateClosing = 1;
+    private const int StateClosed = 2;
+    private int _closeState;
     private long _lastActivityTicks = Environment.TickCount64;
 
     /// <summary>The peer this session talks to.</summary>
@@ -100,7 +106,7 @@ public sealed class KcpSession : IDisposable
     /// </summary>
     public void Write(ReadOnlySpan<byte> data)
     {
-        if (Volatile.Read(ref _closed) != 0) throw new IOException("KCP session closed");
+        if (Volatile.Read(ref _closeState) != StateOpen) throw new IOException("KCP session closed");
         lock (_lock)
         {
             _kcp.Send(data);
@@ -123,15 +129,34 @@ public sealed class KcpSession : IDisposable
     /// <summary>Closes the session. Idempotent.</summary>
     public void Close()
     {
-        if (Interlocked.Exchange(ref _closed, 1) != 0) return;
-        _received.Writer.TryComplete();
-        _cts.Cancel();
-        Closed?.Invoke(this);
+        if (Interlocked.CompareExchange(ref _closeState, StateClosing, StateOpen) != StateOpen) return;
+        try
+        {
+            _received.Writer.TryComplete();
+            _cts.Cancel();
+            Closed?.Invoke(this);
+        }
+        finally
+        {
+            // In a finally: Closed?.Invoke runs subscriber code, and a throw from
+            // it must not strand the state at Closing and spin Dispose() forever.
+            Volatile.Write(ref _closeState, StateClosed);
+        }
     }
 
     public void Dispose()
     {
         Close();
+
+        // Same reasoning as Connection.Dispose: Close() returning early means
+        // "another thread owns the close", not "the close has finished", so the
+        // token source must not be freed until that thread is actually done with
+        // it. This is the identical shape to the bug that threw out of
+        // ShutdownAsync; it was fixed here at the same time rather than waiting
+        // for a KCP deployment to find it.
+        var spin = new SpinWait();
+        while (Volatile.Read(ref _closeState) != StateClosed) spin.SpinOnce();
+
         _cts.Dispose();
     }
 }

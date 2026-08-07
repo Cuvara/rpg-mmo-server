@@ -227,8 +227,16 @@ public sealed class MetricsEndpoint : IAsyncDisposable
         return (host, int.Parse(port));
     }
 
+    private int _disposed;
+
     public async ValueTask DisposeAsync()
     {
+        // Idempotence guard. This is single-owner today (one `await using` in
+        // Program.cs), so it is hardening rather than a fix — but an unguarded
+        // Cancel-then-Dispose on a CancellationTokenSource is exactly the shape
+        // that threw out of ShutdownAsync twice, and the guard costs nothing.
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+
         _cts.Cancel();
         try { _healthListener.Close(); } catch { /* ignore */ }
 
