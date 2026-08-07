@@ -5,13 +5,27 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Added
-- `.env.example` now sets `GAME_DB_URL` instead of only mentioning it in a comment.
-  Host-side tools read it — `bin/smoketest` (whose new `gamestate_*` persistence
-  checks SKIP without it) and `gameserver-dotnet --migrate-only`. The gameserver
-  *container* is unaffected: `docker-compose.yml:238` builds its own DSN from the
-  `POSTGRES_GAME_*` values and points at `postgres-game:5432`, and nothing in
-  compose substitutes `${GAME_DB_URL}`, so the new value cannot leak into it.
+### Changed
+- **G11 re-confirmed against `e3909d3`** — the one drill result that could not be
+  trusted after #22 rewrote the auth path (rate limiting, split
+  `JOIN_TOKEN_SECRET`, KCP encryption). Re-measured on the deployed stack:
+  behaviour is unchanged. With Redis down the gateway still answers `MsgAuth`
+  with **nothing at all** — the client burns its full 10.009s deadline, and the
+  gateway emits **zero application-level log lines** for the entire outage.
+  `DISASTER-RECOVERY.md` gains a dated re-confirmation section.
+  - The gateway was verified to be on `--backend=redis` **before** the drill
+    rather than after. G10 means an unset `REDIS_ADDR` silently selects the
+    in-memory backend, which would have made the whole drill measure nothing
+    while reporting cleanly.
+  - New observation: the go-redis failure changes shape mid-outage, from
+    `connect: connection refused` to `lookup redis: i/o timeout` — stopping the
+    container removes its Docker DNS record. **G5 is worse than it reads**: the
+    unbounded stall budget includes resolver timeouts, not just the 5s dial
+    default.
+  - The recovery timing from this run is recorded as an **upper bound of 18s, not
+    a heal time** — Redis was back 18s before the first probe, so the entry was
+    already present when first observed. The measured ~4s self-heal from the
+    post-G1 re-run stands as the real figure; this run is not a better one.
 
 ### Removed
 - **The `GAMESERVER_METRICS_ADDR=gameserver-dotnet:9101` workaround — deleted.**
