@@ -108,20 +108,55 @@ message InputMessage {
   string attack_target_id = 4;
 }
 
+// EntityType enumerates the entity kinds the simulation knows about.
+//
+// Numbers are FROZEN once shipped. Append only; never renumber.
+//
+// A string entity type cost 8 bytes on the wire ("player" = tag + length + 6
+// characters); the enum costs 2. Measured against a 50-entity keyframe that is
+// ~19% of the whole payload, which is why this exists.
+enum EntityType {
+  ENTITY_TYPE_UNSPECIFIED = 0;
+  ENTITY_TYPE_PLAYER = 1;
+  ENTITY_TYPE_MOB = 2;
+  // Not yet produced by the simulation, but named here so that adding one is an
+  // append rather than a renumber. A server that starts emitting these against
+  // an older client degrades to `type_name` rather than breaking.
+  ENTITY_TYPE_NPC = 3;
+  ENTITY_TYPE_ITEM = 4;
+  ENTITY_TYPE_PROJECTILE = 5;
+}
+
 // EntitySnapshot is a single entity's visible state.
 //
-// `type` is deliberately still a string rather than an enum, and `id` is still a
-// full string rather than an interned handle. Both would shrink the wire further
-// — this is the hottest message in the protocol — but both are semantic changes
-// to what the field means, whereas this schema is a pure re-encoding of the
-// existing JSON. They are tracked as follow-ups in docs/DESIGN.md.
+// This is the hottest message in the protocol: a snapshot carries one per entity
+// in the AOI, every tick. Measured marginal cost with a realistic 15-character
+// id is ~41 bytes, of which the two strings are ~25 — so string content, not
+// field encoding, is what dominates here.
+//
+// `id` is still a full string rather than an interned handle. That is the larger
+// remaining term (~17 of the ~41 bytes) and is tracked as a follow-up in
+// shared/docs/DESIGN.md; it needs per-connection mapping state, so unlike the
+// type enum it is not a change that can be validated by round-tripping alone.
 message EntitySnapshot {
   string id = 1;
-  string type = 2;
+
+  // Type name as a string, used ONLY when `type` cannot express the value —
+  // i.e. the simulation produced a kind this schema does not enumerate yet.
+  //
+  // This is field 2, which previously carried the type for every entity. A peer
+  // that reads only this field still works when it is populated, and the two are
+  // never both set, so "the type" is unambiguous: prefer `type`, fall back to
+  // `type_name`.
+  string type_name = 2;
+
   float x = 3;
   float y = 4;
   int32 hp = 5;
   int32 max_hp = 6;
+
+  // The entity kind. ENTITY_TYPE_UNSPECIFIED means "see type_name".
+  EntityType type = 7;
 }
 
 // SnapshotMessage is a world state update sent to the client.

@@ -278,7 +278,7 @@ public class SnapshotDeltaStateTests
         for (int i = 0; i < msg.Entities.Count; i++)
         {
             var e = msg.Entities[i];
-            entities[i] = new EntitySnapshotData(e.Id, e.Type, e.X, e.Y, e.Hp, e.MaxHp);
+            entities[i] = new EntitySnapshotData(e.Id, EntityTypes.NameOf(e), e.X, e.Y, e.Hp, e.MaxHp);
         }
         return new SnapshotData(msg.Tick, msg.AckTick, msg.Full, entities, msg.Removed?.ToArray());
     }

@@ -1,0 +1,86 @@
+{
+  "schema": "rpg-mmo.loadtest/v1",
+  "label": "enum",
+  "run_id": "97e4281f",
+  "started": "2026-08-07T14:12:08.47319575+07:00",
+  "config": {
+    "players": 200,
+    "ramp_players_per_sec": 20,
+    "duration_sec": 35,
+    "client_tick_hz": 15,
+    "auth_mode": "presigned",
+    "movement": "cluster",
+    "encoding": "proto",
+    "map_id": "map_01",
+    "transport": "tcp",
+    "hold_gateway": true,
+    "tick_budget_sec": 0.066666666
+  },
+  "client": {
+    "players_requested": 200,
+    "players_joined": 200,
+    "players_failed": 0,
+    "snapshot_interval": {
+      "count": 102790,
+      "mean_ms": 68.09,
+      "p50_ms": 68,
+      "p95_ms": 74.87,
+      "p99_ms": 78.67,
+      "max_ms": 89.86
+    },
+    "ack_latency": {
+      "count": 104824,
+      "mean_ms": 44.32,
+      "p50_ms": 44.24,
+      "p95_ms": 76.84,
+      "p99_ms": 83.84,
+      "max_ms": 108.08
+    },
+    "join_latency": {
+      "count": 200,
+      "mean_ms": 1.49,
+      "p50_ms": 1.13,
+      "p95_ms": 3.52,
+      "p99_ms": 5.73,
+      "max_ms": 9.34
+    },
+    "snapshots_total": 102790,
+    "keyframes_total": 3318,
+    "deltas_total": 99472,
+    "inputs_total": 105019,
+    "rx_bytes_per_sec_per_player": 93975.87,
+    "tx_bytes_per_sec_per_player": 240,
+    "rx_bytes_per_sec_total": 18795173.15,
+    "tx_bytes_per_sec_total": 47999.36,
+    "snapshots_received_ratio": 0.9999
+  },
+  "server": {
+    "scraped": true,
+    "tick_p50_sec": 0.017634,
+    "tick_p95_sec": 0.024504,
+    "tick_p99_sec": 0.035722,
+    "tick_mean_sec": 0.017365,
+    "tick_count": 514,
+    "tick_over_budget_ratio": 0,
+    "tick_over_budget_edge_sec": 0.05,
+    "ticks_per_sec": 14.68,
+    "players_online": 200,
+    "entities": 200,
+    "snapshots_sent_window": 102800,
+    "processed_inputs_window": 105024,
+    "gateway_connections_active": 0,
+    "gateway_auth_ok_window": 0,
+    "gateway_auth_fail_window": 0,
+    "gateway_enter_world_ok_window": 0,
+    "gateway_enter_world_fail_window": 0,
+    "gateway_rate_limited_window": 0
+  },
+  "verdict": {
+    "tick_budget_ok": true,
+    "snapshot_cadence_ok": true,
+    "no_errors": true,
+    "no_frame_loss": true,
+    "invalid": false,
+    "degraded": false
+  }
+}

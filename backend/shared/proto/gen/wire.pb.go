@@ -113,6 +113,74 @@ func (MsgType) EnumDescriptor() ([]byte, []int) {
 	return file_wire_proto_rawDescGZIP(), []int{0}
 }
 
+// EntityType enumerates the entity kinds the simulation knows about.
+//
+// Numbers are FROZEN once shipped. Append only; never renumber.
+//
+// A string entity type cost 8 bytes on the wire ("player" = tag + length + 6
+// characters); the enum costs 2. Measured against a 50-entity keyframe that is
+// ~19% of the whole payload, which is why this exists.
+type EntityType int32
+
+const (
+	EntityType_ENTITY_TYPE_UNSPECIFIED EntityType = 0
+	EntityType_ENTITY_TYPE_PLAYER      EntityType = 1
+	EntityType_ENTITY_TYPE_MOB         EntityType = 2
+	// Not yet produced by the simulation, but named here so that adding one is an
+	// append rather than a renumber. A server that starts emitting these against
+	// an older client degrades to `type_name` rather than breaking.
+	EntityType_ENTITY_TYPE_NPC        EntityType = 3
+	EntityType_ENTITY_TYPE_ITEM       EntityType = 4
+	EntityType_ENTITY_TYPE_PROJECTILE EntityType = 5
+)
+
+// Enum value maps for EntityType.
+var (
+	EntityType_name = map[int32]string{
+		0: "ENTITY_TYPE_UNSPECIFIED",
+		1: "ENTITY_TYPE_PLAYER",
+		2: "ENTITY_TYPE_MOB",
+		3: "ENTITY_TYPE_NPC",
+		4: "ENTITY_TYPE_ITEM",
+		5: "ENTITY_TYPE_PROJECTILE",
+	}
+	EntityType_value = map[string]int32{
+		"ENTITY_TYPE_UNSPECIFIED": 0,
+		"ENTITY_TYPE_PLAYER":      1,
+		"ENTITY_TYPE_MOB":         2,
+		"ENTITY_TYPE_NPC":         3,
+		"ENTITY_TYPE_ITEM":        4,
+		"ENTITY_TYPE_PROJECTILE":  5,
+	}
+)
+
+func (x EntityType) Enum() *EntityType {
+	p := new(EntityType)
+	*p = x
+	return p
+}
+
+func (x EntityType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (EntityType) Descriptor() protoreflect.EnumDescriptor {
+	return file_wire_proto_enumTypes[1].Descriptor()
+}
+
+func (EntityType) Type() protoreflect.EnumType {
+	return &file_wire_proto_enumTypes[1]
+}
+
+func (x EntityType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use EntityType.Descriptor instead.
+func (EntityType) EnumDescriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{1}
+}
+
 // Envelope is the top-level wire message.
 //
 // `type` is field 1 and is always >= 1 for any real message, so proto3 never
@@ -576,19 +644,32 @@ func (x *InputMessage) GetAttackTargetId() string {
 
 // EntitySnapshot is a single entity's visible state.
 //
-// `type` is deliberately still a string rather than an enum, and `id` is still a
-// full string rather than an interned handle. Both would shrink the wire further
-// — this is the hottest message in the protocol — but both are semantic changes
-// to what the field means, whereas this schema is a pure re-encoding of the
-// existing JSON. They are tracked as follow-ups in docs/DESIGN.md.
+// This is the hottest message in the protocol: a snapshot carries one per entity
+// in the AOI, every tick. Measured marginal cost with a realistic 15-character
+// id is ~41 bytes, of which the two strings are ~25 — so string content, not
+// field encoding, is what dominates here.
+//
+// `id` is still a full string rather than an interned handle. That is the larger
+// remaining term (~17 of the ~41 bytes) and is tracked as a follow-up in
+// shared/docs/DESIGN.md; it needs per-connection mapping state, so unlike the
+// type enum it is not a change that can be validated by round-tripping alone.
 type EntitySnapshot struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Type          string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
-	X             float32                `protobuf:"fixed32,3,opt,name=x,proto3" json:"x,omitempty"`
-	Y             float32                `protobuf:"fixed32,4,opt,name=y,proto3" json:"y,omitempty"`
-	Hp            int32                  `protobuf:"varint,5,opt,name=hp,proto3" json:"hp,omitempty"`
-	MaxHp         int32                  `protobuf:"varint,6,opt,name=max_hp,json=maxHp,proto3" json:"max_hp,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// Type name as a string, used ONLY when `type` cannot express the value —
+	// i.e. the simulation produced a kind this schema does not enumerate yet.
+	//
+	// This is field 2, which previously carried the type for every entity. A peer
+	// that reads only this field still works when it is populated, and the two are
+	// never both set, so "the type" is unambiguous: prefer `type`, fall back to
+	// `type_name`.
+	TypeName string  `protobuf:"bytes,2,opt,name=type_name,json=typeName,proto3" json:"type_name,omitempty"`
+	X        float32 `protobuf:"fixed32,3,opt,name=x,proto3" json:"x,omitempty"`
+	Y        float32 `protobuf:"fixed32,4,opt,name=y,proto3" json:"y,omitempty"`
+	Hp       int32   `protobuf:"varint,5,opt,name=hp,proto3" json:"hp,omitempty"`
+	MaxHp    int32   `protobuf:"varint,6,opt,name=max_hp,json=maxHp,proto3" json:"max_hp,omitempty"`
+	// The entity kind. ENTITY_TYPE_UNSPECIFIED means "see type_name".
+	Type          EntityType `protobuf:"varint,7,opt,name=type,proto3,enum=rpgmmo.wire.v1.EntityType" json:"type,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -630,9 +711,9 @@ func (x *EntitySnapshot) GetId() string {
 	return ""
 }
 
-func (x *EntitySnapshot) GetType() string {
+func (x *EntitySnapshot) GetTypeName() string {
 	if x != nil {
-		return x.Type
+		return x.TypeName
 	}
 	return ""
 }
@@ -663,6 +744,13 @@ func (x *EntitySnapshot) GetMaxHp() int32 {
 		return x.MaxHp
 	}
 	return 0
+}
+
+func (x *EntitySnapshot) GetType() EntityType {
+	if x != nil {
+		return x.Type
+	}
+	return EntityType_ENTITY_TYPE_UNSPECIFIED
 }
 
 // SnapshotMessage is a world state update sent to the client.
@@ -869,14 +957,15 @@ const file_wire_proto_rawDesc = "" +
 	"\x04tick\x18\x01 \x01(\x04R\x04tick\x12\x15\n" +
 	"\x06move_x\x18\x02 \x01(\x02R\x05moveX\x12\x15\n" +
 	"\x06move_y\x18\x03 \x01(\x02R\x05moveY\x12(\n" +
-	"\x10attack_target_id\x18\x04 \x01(\tR\x0eattackTargetId\"w\n" +
+	"\x10attack_target_id\x18\x04 \x01(\tR\x0eattackTargetId\"\xb0\x01\n" +
 	"\x0eEntitySnapshot\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
-	"\x04type\x18\x02 \x01(\tR\x04type\x12\f\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
+	"\ttype_name\x18\x02 \x01(\tR\btypeName\x12\f\n" +
 	"\x01x\x18\x03 \x01(\x02R\x01x\x12\f\n" +
 	"\x01y\x18\x04 \x01(\x02R\x01y\x12\x0e\n" +
 	"\x02hp\x18\x05 \x01(\x05R\x02hp\x12\x15\n" +
-	"\x06max_hp\x18\x06 \x01(\x05R\x05maxHp\"\xaa\x01\n" +
+	"\x06max_hp\x18\x06 \x01(\x05R\x05maxHp\x12.\n" +
+	"\x04type\x18\a \x01(\x0e2\x1a.rpgmmo.wire.v1.EntityTypeR\x04type\"\xaa\x01\n" +
 	"\x0fSnapshotMessage\x12\x12\n" +
 	"\x04tick\x18\x01 \x01(\x04R\x04tick\x12\x19\n" +
 	"\back_tick\x18\x02 \x01(\x04R\aackTick\x12\x12\n" +
@@ -898,7 +987,15 @@ const file_wire_proto_rawDesc = "" +
 	"\x11MSG_TYPE_SNAPSHOT\x10\b\x12\x17\n" +
 	"\x13MSG_TYPE_DISCONNECT\x10\t\x12\x13\n" +
 	"\x0fMSG_TYPE_RESYNC\x10\n" +
-	"BFZ3github.com/duycuong/rpg-mmo/shared/proto/gen;wirepb\xaa\x02\x0eRpgMmo.Wire.V1b\x06proto3"
+	"*\x9d\x01\n" +
+	"\n" +
+	"EntityType\x12\x1b\n" +
+	"\x17ENTITY_TYPE_UNSPECIFIED\x10\x00\x12\x16\n" +
+	"\x12ENTITY_TYPE_PLAYER\x10\x01\x12\x13\n" +
+	"\x0fENTITY_TYPE_MOB\x10\x02\x12\x13\n" +
+	"\x0fENTITY_TYPE_NPC\x10\x03\x12\x14\n" +
+	"\x10ENTITY_TYPE_ITEM\x10\x04\x12\x1a\n" +
+	"\x16ENTITY_TYPE_PROJECTILE\x10\x05BFZ3github.com/duycuong/rpg-mmo/shared/proto/gen;wirepb\xaa\x02\x0eRpgMmo.Wire.V1b\x06proto3"
 
 var (
 	file_wire_proto_rawDescOnce sync.Once
@@ -912,30 +1009,32 @@ func file_wire_proto_rawDescGZIP() []byte {
 	return file_wire_proto_rawDescData
 }
 
-var file_wire_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_wire_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
 var file_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_wire_proto_goTypes = []any{
 	(MsgType)(0),               // 0: rpgmmo.wire.v1.MsgType
-	(*Envelope)(nil),           // 1: rpgmmo.wire.v1.Envelope
-	(*AuthRequest)(nil),        // 2: rpgmmo.wire.v1.AuthRequest
-	(*AuthResponse)(nil),       // 3: rpgmmo.wire.v1.AuthResponse
-	(*EnterWorldRequest)(nil),  // 4: rpgmmo.wire.v1.EnterWorldRequest
-	(*EnterWorldResponse)(nil), // 5: rpgmmo.wire.v1.EnterWorldResponse
-	(*JoinTokenRequest)(nil),   // 6: rpgmmo.wire.v1.JoinTokenRequest
-	(*JoinTokenResponse)(nil),  // 7: rpgmmo.wire.v1.JoinTokenResponse
-	(*InputMessage)(nil),       // 8: rpgmmo.wire.v1.InputMessage
-	(*EntitySnapshot)(nil),     // 9: rpgmmo.wire.v1.EntitySnapshot
-	(*SnapshotMessage)(nil),    // 10: rpgmmo.wire.v1.SnapshotMessage
-	(*DisconnectMessage)(nil),  // 11: rpgmmo.wire.v1.DisconnectMessage
-	(*ResyncRequest)(nil),      // 12: rpgmmo.wire.v1.ResyncRequest
+	(EntityType)(0),            // 1: rpgmmo.wire.v1.EntityType
+	(*Envelope)(nil),           // 2: rpgmmo.wire.v1.Envelope
+	(*AuthRequest)(nil),        // 3: rpgmmo.wire.v1.AuthRequest
+	(*AuthResponse)(nil),       // 4: rpgmmo.wire.v1.AuthResponse
+	(*EnterWorldRequest)(nil),  // 5: rpgmmo.wire.v1.EnterWorldRequest
+	(*EnterWorldResponse)(nil), // 6: rpgmmo.wire.v1.EnterWorldResponse
+	(*JoinTokenRequest)(nil),   // 7: rpgmmo.wire.v1.JoinTokenRequest
+	(*JoinTokenResponse)(nil),  // 8: rpgmmo.wire.v1.JoinTokenResponse
+	(*InputMessage)(nil),       // 9: rpgmmo.wire.v1.InputMessage
+	(*EntitySnapshot)(nil),     // 10: rpgmmo.wire.v1.EntitySnapshot
+	(*SnapshotMessage)(nil),    // 11: rpgmmo.wire.v1.SnapshotMessage
+	(*DisconnectMessage)(nil),  // 12: rpgmmo.wire.v1.DisconnectMessage
+	(*ResyncRequest)(nil),      // 13: rpgmmo.wire.v1.ResyncRequest
 }
 var file_wire_proto_depIdxs = []int32{
-	9, // 0: rpgmmo.wire.v1.SnapshotMessage.entities:type_name -> rpgmmo.wire.v1.EntitySnapshot
-	1, // [1:1] is the sub-list for method output_type
-	1, // [1:1] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	1,  // 0: rpgmmo.wire.v1.EntitySnapshot.type:type_name -> rpgmmo.wire.v1.EntityType
+	10, // 1: rpgmmo.wire.v1.SnapshotMessage.entities:type_name -> rpgmmo.wire.v1.EntitySnapshot
+	2,  // [2:2] is the sub-list for method output_type
+	2,  // [2:2] is the sub-list for method input_type
+	2,  // [2:2] is the sub-list for extension type_name
+	2,  // [2:2] is the sub-list for extension extendee
+	0,  // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_wire_proto_init() }
@@ -948,7 +1047,7 @@ func file_wire_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_wire_proto_rawDesc), len(file_wire_proto_rawDesc)),
-			NumEnums:      1,
+			NumEnums:      2,
 			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   0,

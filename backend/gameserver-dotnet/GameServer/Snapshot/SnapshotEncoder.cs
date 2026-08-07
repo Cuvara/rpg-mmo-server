@@ -18,15 +18,16 @@ public static class SnapshotEncoder
 
         foreach (var e in entities)
         {
-            msg.Entities.Add(new EntitySnapshot
+            var ent = new EntitySnapshot
             {
                 Id = e.Id,
-                Type = e.Type,
                 X = e.Position.X,
                 Y = e.Position.Y,
                 Hp = e.Hp,
                 MaxHp = e.MaxHp
-            });
+            };
+            EntityTypes.SetType(ent, e.Type);
+            msg.Entities.Add(ent);
         }
 
         return msg;

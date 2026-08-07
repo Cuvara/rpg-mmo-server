@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"bytes"
 	"bufio"
 	"context"
 	"fmt"
@@ -846,6 +847,7 @@ func TestDotnetInterop_MixedEncodingsOnOneServer(t *testing.T) {
 	// Payload bytes of the first keyframe each client receives. Both clients see
 	// the same world, so the two numbers are directly comparable.
 	keyframeBytes := map[messages.Encoding]int{}
+	var protoKeyframe []byte
 
 	for _, enc := range []messages.Encoding{messages.EncodingJSON, messages.EncodingProto} {
 		client, err := NewMockClient(gsAddr)
@@ -902,11 +904,26 @@ func TestDotnetInterop_MixedEncodingsOnOneServer(t *testing.T) {
 				continue
 			}
 			keyframeBytes[enc] = len(env.Payload)
+			if enc == messages.EncodingProto {
+				protoKeyframe = append([]byte(nil), env.Payload...)
+			}
 			break
 		}
 		if keyframeBytes[enc] == 0 {
 			t.Fatalf("%s: no keyframe with entities arrived", enc)
 		}
+	}
+
+	// The C# server must actually be using the entity-type enum, not just
+	// agreeing with Go about what the string means. A protobuf keyframe carrying
+	// only known entity types should contain no literal type string at all, so
+	// this checks the bytes rather than the decoded value — decoding would look
+	// identical either way, which is exactly how a silently-unused optimisation
+	// survives.
+	if bytes.Contains(protoKeyframe, []byte("player")) {
+		t.Errorf("protobuf keyframe still contains the literal type string %q; "+
+			"the C# server is falling back to type_name instead of the enum:\n%q",
+			"player", protoKeyframe)
 	}
 
 	jsonBytes, protoBytes := keyframeBytes[messages.EncodingJSON], keyframeBytes[messages.EncodingProto]

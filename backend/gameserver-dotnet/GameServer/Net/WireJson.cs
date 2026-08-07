@@ -61,7 +61,10 @@ internal static class JsonWriter
                 var e = m.Entities[i];
                 w.WriteStartObject();
                 w.WriteString("id"u8, e.Id);
-                w.WriteString("type"u8, e.Type);
+                // JSON keeps the string form: it is the legacy encoding and a
+                // pre-enum client parses "type" as text. The enum is a Protobuf
+                // wire optimisation, not a protocol-wide change of meaning.
+                w.WriteString("type"u8, EntityTypes.NameOf(e));
                 w.WriteNumber("x"u8, e.X);
                 w.WriteNumber("y"u8, e.Y);
                 w.WriteNumber("hp"u8, e.Hp);
@@ -215,7 +218,7 @@ internal static class JsonReader
                 bool maxHp = r.ValueTextEquals("max_hp"u8);
                 if (!r.Read()) break;
                 if (id) e.Id = r.GetString() ?? "";
-                else if (type) e.Type = r.GetString() ?? "";
+                else if (type) EntityTypes.SetType(e, r.GetString());
                 else if (x) e.X = r.GetSingle();
                 else if (y) e.Y = r.GetSingle();
                 else if (hp) e.Hp = r.GetInt32();

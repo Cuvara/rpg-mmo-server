@@ -201,7 +201,7 @@ public class WireProtocolTests
         var snapshot = new SnapshotMessage { Tick = 42, AckTick = 41, Full = true };
         snapshot.Entities.Add(new EntitySnapshot
         {
-            Id = "player1", Type = "player", X = 10.5f, Y = 20.25f, Hp = 90, MaxHp = 100
+            Id = "player1", Type = EntityType.Player, X = 10.5f, Y = 20.25f, Hp = 90, MaxHp = 100
         });
         snapshot.Removed.Add("gone1");
 
@@ -236,8 +236,8 @@ public class WireProtocolTests
     public void BothEncodings_RoundTripIdenticalSnapshot()
     {
         var snapshot = new SnapshotMessage { Tick = 900, AckTick = 899, Full = false };
-        snapshot.Entities.Add(new EntitySnapshot { Id = "e1", Type = "player", X = -1.5f, Y = 2.25f, Hp = 5, MaxHp = 200 });
-        snapshot.Entities.Add(new EntitySnapshot { Id = "e2", Type = "mob", X = 0f, Y = 0f, Hp = 0, MaxHp = 1 });
+        snapshot.Entities.Add(new EntitySnapshot { Id = "e1", Type = EntityType.Player, X = -1.5f, Y = 2.25f, Hp = 5, MaxHp = 200 });
+        snapshot.Entities.Add(new EntitySnapshot { Id = "e2", Type = EntityType.Mob, X = 0f, Y = 0f, Hp = 0, MaxHp = 1 });
         snapshot.Removed.Add("e3");
 
         var viaJson = WireProtocol.GetPayload<SnapshotMessage>(
@@ -259,7 +259,7 @@ public class WireProtocolTests
         {
             snapshot.Entities.Add(new EntitySnapshot
             {
-                Id = $"lt-{i:D12}", Type = "player", X = 100.5f + i, Y = 200.25f + i, Hp = 100, MaxHp = 100
+                Id = $"lt-{i:D12}", Type = EntityType.Player, X = 100.5f + i, Y = 200.25f + i, Hp = 100, MaxHp = 100
             });
         }
 
