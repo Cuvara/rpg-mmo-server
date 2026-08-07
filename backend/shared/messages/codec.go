@@ -73,6 +73,12 @@ func EncodeBody(env Envelope) ([]byte, error) {
 // the bytes themselves.
 func DecodeBody(data []byte) (Envelope, error) {
 	var env Envelope
+	// An envelope always carries a type >= 1, so its encoding is never zero
+	// bytes long in either scheme. Rejecting this explicitly keeps a truncated
+	// frame an error rather than a silently well-formed Type 0 message.
+	if len(data) == 0 {
+		return env, fmt.Errorf("empty envelope body")
+	}
 	if SniffEncoding(data) == EncodingJSON {
 		if err := json.Unmarshal(data, &env); err != nil {
 			return env, fmt.Errorf("unmarshal envelope: %w", err)
