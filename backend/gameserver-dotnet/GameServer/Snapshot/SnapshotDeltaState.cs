@@ -1,5 +1,6 @@
 using GameServer.Net;
 using Shared.GameLogic.Components;
+using RpgMmo.Wire.V1;
 
 namespace GameServer.Snapshot;
 
@@ -56,9 +57,6 @@ public sealed class SnapshotDeltaState
         public override bool Equals(object? obj) => obj is SentView v && Equals(v);
         public override int GetHashCode() => HashCode.Combine(Type, X, Y, Hp, MaxHp);
     }
-
-    /// <summary>Shared empty entity list for deltas where nothing changed (never mutated).</summary>
-    private static readonly List<EntitySnapshotMsg> EmptyEntities = new(0);
 
     private readonly Dictionary<string, SentView> _lastSent = new();
     private readonly HashSet<string> _seen = new(StringComparer.Ordinal);
@@ -165,31 +163,24 @@ public sealed class SnapshotDeltaState
 
     private SnapshotMessage EncodeFull(ulong tick, ulong ackTick, List<EntityState> nearby)
     {
-        var entities = new List<EntitySnapshotMsg>(nearby.Count);
+        var msg = new SnapshotMessage { Tick = tick, AckTick = ackTick, Full = true };
         _lastSent.Clear();
 
         // Indexed for-loop, no LINQ, no enumerator boxing: this runs once per client per tick.
         for (int i = 0; i < nearby.Count; i++)
         {
             var e = nearby[i];
-            entities.Add(ToMsg(in e));
+            msg.Entities.Add(ToMsg(in e));
             _lastSent[e.Id] = new SentView(in e);
         }
 
-        return new SnapshotMessage
-        {
-            Tick = tick,
-            AckTick = ackTick,
-            Full = true,
-            Entities = entities,
-            Removed = null
-        };
+        return msg;
     }
 
     private SnapshotMessage EncodeDelta(ulong tick, ulong ackTick, List<EntityState> nearby)
     {
         _seen.Clear();
-        List<EntitySnapshotMsg>? changed = null;
+        var msg = new SnapshotMessage { Tick = tick, AckTick = ackTick, Full = false };
 
         for (int i = 0; i < nearby.Count; i++)
         {
@@ -200,40 +191,24 @@ public sealed class SnapshotDeltaState
             if (_lastSent.TryGetValue(e.Id, out var prev) && prev.Equals(view))
                 continue; // unchanged since last send -> omit
 
-            changed ??= new List<EntitySnapshotMsg>(4);
-            changed.Add(ToMsg(in e));
+            msg.Entities.Add(ToMsg(in e));
             _lastSent[e.Id] = view;
         }
 
         // Anything previously sent but no longer in AOI is an explicit despawn.
-        List<string>? removed = null;
         if (_lastSent.Count != _seen.Count)
         {
             foreach (var id in _lastSent.Keys)
             {
-                if (!_seen.Contains(id))
-                {
-                    removed ??= new List<string>(2);
-                    removed.Add(id);
-                }
+                if (!_seen.Contains(id)) msg.Removed.Add(id);
             }
-            if (removed != null)
-            {
-                for (int i = 0; i < removed.Count; i++) _lastSent.Remove(removed[i]);
-            }
+            for (int i = 0; i < msg.Removed.Count; i++) _lastSent.Remove(msg.Removed[i]);
         }
 
-        return new SnapshotMessage
-        {
-            Tick = tick,
-            AckTick = ackTick,
-            Full = false,
-            Entities = changed ?? EmptyEntities,
-            Removed = removed
-        };
+        return msg;
     }
 
-    private static EntitySnapshotMsg ToMsg(in EntityState e) => new()
+    private static EntitySnapshot ToMsg(in EntityState e) => new()
     {
         Id = e.Id,
         Type = e.Type,

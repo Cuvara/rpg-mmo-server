@@ -391,3 +391,88 @@ Example: `postgres://game:localdev@localhost:5433/gamestate?sslmode=disable`
 `ServerHeartbeatTTL` (15s) is now wired: it is the default liveness window of
 `redisstore.ServerRegistry`. `EventStreamPrefix` (`events:`) is now wired as the
 Redis Streams key prefix.
+
+## `messages` — wire protocol
+
+Length-prefixed envelopes over any ordered stream. Two encodings, one framing.
+
+```
+[4-byte big-endian length][body]
+```
+
+The body is either legacy JSON (`{"type":N,"payload":{…}}`) or the Protobuf
+`Envelope` generated from [`shared/proto/wire.proto`](../proto/wire.proto).
+**Which one is detected from the first body byte** — JSON starts with `{`
+(`0x7B`), Protobuf starts with `0x08` — so no negotiation or version field is
+needed. See [DESIGN.md](DESIGN.md#protobuf-on-the-wire-with-json-detected-by-its-first-byte-2026-08-07).
+
+### Types
+
+```go
+type Encoding uint8
+const (
+    EncodingJSON  Encoding = iota // legacy, still the default
+    EncodingProto
+)
+
+type Envelope struct {
+    Type    MsgType
+    Payload []byte   // already-serialized inner message, encoded per Enc
+    Enc     Encoding // transport metadata; never itself serialized
+}
+```
+
+### Encoding
+
+```go
+env, err := messages.NewEnvelopeAs(messages.EncodingProto, messages.MsgInput,
+    messages.InputMessage{Tick: 1, MoveX: 1})
+frame, err := messages.Encode(env)          // adds the 4-byte length prefix
+body,  err := messages.EncodeBody(env)      // without the prefix
+```
+
+`NewEnvelope(msgType, payload)` is retained and always produces JSON, so
+pre-existing callers keep their exact behaviour.
+
+### Decoding
+
+```go
+env, err := messages.Decode(conn)      // reads one frame, detects the encoding
+env, err := messages.DecodeBody(body)  // when the body is already in hand
+
+var snap messages.SnapshotMessage
+err = env.UnmarshalPayload(&snap)      // decodes using env.Enc
+```
+
+`UnmarshalPayload` is a **method on Envelope**, not a free function: the encoding
+travels with the bytes, so a payload cannot be decoded with the wrong one.
+
+### Replying in the peer's encoding
+
+A server must never choose an encoding — it answers in whatever it was addressed
+in, which is what allows independent deploys and mixed-version fleets:
+
+```go
+resp, err := env.Reply(messages.MsgAuthResp, messages.AuthResponse{OK: true})
+```
+
+The gateway wraps this as `ClientConn.Reply`, latching the encoding of the first
+frame decoded on the connection; the C# game server does the same via
+`Connection.Encoding`.
+
+### Helpers
+
+| Function | Purpose |
+|---|---|
+| `SniffEncoding(body) Encoding` | Classify a body without decoding it |
+| `ParseEncoding(s) (Encoding, error)` | `"json"` / `"proto"` for flags and env |
+| `Encoding.String()` | `"json"` / `"proto"` |
+
+### Regenerating
+
+```bash
+cd backend/shared/proto && ./generate.sh   # needs protoc + protoc-gen-go
+```
+
+Generated code for **both** languages is committed, so neither CI nor a fresh
+clone needs `protoc`. Run this only when `wire.proto` changes.

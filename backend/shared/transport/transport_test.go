@@ -147,7 +147,7 @@ func TestRoundTrip(t *testing.T) {
 				t.Errorf("type = %d, want %d", got.Type, messages.MsgAuth)
 			}
 			var req messages.AuthRequest
-			if err := messages.UnmarshalPayload(got.Payload, &req); err != nil {
+			if err := got.UnmarshalPayload(&req); err != nil {
 				t.Fatalf("UnmarshalPayload: %v", err)
 			}
 			if req.Token != "hello-"+kind {
@@ -181,7 +181,7 @@ func TestSequentialFrames(t *testing.T) {
 					t.Fatalf("frame %d: %v", i, err)
 				}
 				var req messages.AuthRequest
-				if err := messages.UnmarshalPayload(got.Payload, &req); err != nil {
+				if err := got.UnmarshalPayload(&req); err != nil {
 					t.Fatalf("frame %d unmarshal: %v", i, err)
 				}
 				if req.Token != want {
@@ -225,7 +225,7 @@ func TestConcurrentConnections(t *testing.T) {
 						return
 					}
 					var req messages.AuthRequest
-					if err := messages.UnmarshalPayload(got.Payload, &req); err != nil {
+					if err := got.UnmarshalPayload(&req); err != nil {
 						errCh <- err
 						return
 					}
@@ -265,7 +265,7 @@ func TestLargePayload(t *testing.T) {
 				t.Fatalf("roundTrip: %v", err)
 			}
 			var req messages.AuthRequest
-			if err := messages.UnmarshalPayload(got.Payload, &req); err != nil {
+			if err := got.UnmarshalPayload(&req); err != nil {
 				t.Fatalf("UnmarshalPayload: %v", err)
 			}
 			if len(req.Token) != len(payload) {

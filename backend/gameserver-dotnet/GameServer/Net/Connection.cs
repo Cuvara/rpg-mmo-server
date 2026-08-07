@@ -26,6 +26,34 @@ public sealed class Connection : IDisposable
     /// </summary>
     public GameServer.Snapshot.SnapshotDeltaState DeltaState { get; }
 
+    /// <summary>
+    /// Wire encoding this connection speaks, latched from the first frame decoded
+    /// on it and used for every reply.
+    /// </summary>
+    /// <remarks>
+    /// The server never chooses an encoding; it answers in whatever the client
+    /// used. That is what lets one server binary serve Protobuf and legacy JSON
+    /// clients at once, and lets the gateway, the game server and the Unity
+    /// client be upgraded in any order. Defaults to
+    /// <see cref="WireEncoding.Json"/> so a reply that somehow precedes any read
+    /// stays on the legacy encoding.
+    /// </remarks>
+    /// <remarks>
+    /// <b>volatile:</b> this is written by the read loop and read by the tick
+    /// loop, which are different tasks on different threads. A byte-sized write
+    /// cannot tear, but without a memory barrier the tick loop could keep
+    /// reading a stale value indefinitely and go on serializing snapshots in
+    /// the wrong encoding for a client that has already switched.
+    /// </remarks>
+    private volatile WireEncoding _encoding;
+
+    /// <inheritdoc cref="_encoding"/>
+    public WireEncoding Encoding
+    {
+        get => _encoding;
+        private set => _encoding = value;
+    }
+
     private readonly ITransportConnection _transport;
     private readonly Stream _stream;
     private readonly Channel<Envelope> _sendChannel;
@@ -37,13 +65,22 @@ public sealed class Connection : IDisposable
     public string RemoteEndPoint => _transport.RemoteEndPoint;
 
     /// <summary>Creates a connection over an already-accepted transport connection.</summary>
-    public Connection(string userId, ITransportConnection transport, ILogger logger)
+    /// <param name="encoding">
+    /// Encoding this connection starts on. The join handshake runs on a
+    /// throwaway connection over the same socket and the real one is built
+    /// afterwards, so the encoding the client already demonstrated has to be
+    /// handed over explicitly — otherwise the very first reply would silently
+    /// fall back to legacy JSON.
+    /// </param>
+    public Connection(string userId, ITransportConnection transport, ILogger logger,
+        WireEncoding encoding = WireEncoding.Json)
     {
         UserId = userId;
         // Keyframe phase is derived from the user id, so it is stable across runs and
         // across reconnects of the same player.
         DeltaState = new GameServer.Snapshot.SnapshotDeltaState(
             GameServer.Snapshot.SnapshotDeltaState.PhaseFor(userId));
+        Encoding = encoding;
         _transport = transport;
         _stream = transport.Stream;
         _logger = logger;
@@ -61,8 +98,9 @@ public sealed class Connection : IDisposable
     /// Convenience overload for TCP callers (and tests) that already hold a
     /// <see cref="TcpClient"/>. Ownership of the client transfers to this connection.
     /// </summary>
-    public Connection(string userId, TcpClient tcp, ILogger logger)
-        : this(userId, new TcpTransportConnection(tcp), logger)
+    public Connection(string userId, TcpClient tcp, ILogger logger,
+        WireEncoding encoding = WireEncoding.Json)
+        : this(userId, new TcpTransportConnection(tcp), logger, encoding)
     {
     }
 
@@ -86,6 +124,7 @@ public sealed class Connection : IDisposable
                 var env = await WireProtocol.DecodeAsync(_stream, _cts.Token);
                 if (env == null) break; // clean EOF
 
+                Encoding = env.Encoding;
                 await handler(this, env);
             }
         }
@@ -121,9 +160,11 @@ public sealed class Connection : IDisposable
     }
 
     /// <summary>Read a single envelope from the wire (used during handshake).</summary>
-    public Task<Envelope?> ReadOneAsync()
+    public async Task<Envelope?> ReadOneAsync()
     {
-        return WireProtocol.DecodeAsync(_stream, _cts.Token);
+        var env = await WireProtocol.DecodeAsync(_stream, _cts.Token);
+        if (env != null) Encoding = env.Encoding;
+        return env;
     }
 
     /// <summary>Write a single envelope to the wire (used during handshake).</summary>

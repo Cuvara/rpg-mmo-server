@@ -100,7 +100,14 @@ public class EntityLifecycleTests
         await using var h = await Harness.StartAsync(metrics);
 
         using var stayer = await h.JoinAsync("user-stayer");
-        Assert.Equal(1, metrics.PlayersOnline);
+        // Wait, do not assert immediately: the server records PlayerJoined() AFTER
+        // writing JoinTokenResp (deliberately, so an aborted write cannot increment a
+        // counter the finally block would then have to unwind). So a client that has
+        // read the response is racing the increment, with no happens-before between
+        // them. Asserting straight away passed only because the write used to be
+        // slower than the test; it failed on a fast CI runner once the JSON path
+        // stopped round-tripping its own payload through JsonDocument.Parse.
+        await h.WaitForAsync(() => metrics.PlayersOnline == 1);
 
         for (int i = 0; i < 5; i++)
         {
@@ -257,11 +264,10 @@ public class EntityLifecycleTests
 
     internal static async Task SendJoinAsync(Stream stream, string userId, string secret)
     {
-        var payload = JsonSerializer.SerializeToUtf8Bytes(
+        var env = WireProtocol.NewEnvelope(
+            MsgType.JoinToken,
             new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, secret) },
-            WireJsonContext.Default.JoinTokenRequest);
-        using var doc = JsonDocument.Parse(payload);
-        var env = new Envelope { Type = (byte)MsgType.JoinToken, Payload = doc.RootElement.Clone() };
+            WireEncoding.Json);
         byte[] frame = WireProtocol.Encode(env);
         await stream.WriteAsync(frame);
         await stream.FlushAsync();

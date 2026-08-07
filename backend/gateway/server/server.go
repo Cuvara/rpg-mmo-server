@@ -387,7 +387,7 @@ func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
 		cc.limited = true
 		g.metrics.RateLimited(metrics.RateLimitReasonMessage)
 		g.logger.Warn("message rate limited", "ip", cc.RemoteIP(), "user", cc.UserID(), "type", env.Type)
-		resp, err := messages.NewEnvelope(messages.MsgAuthResp, messages.AuthResponse{
+		resp, err := cc.Reply(messages.MsgAuthResp, messages.AuthResponse{
 			OK:    false,
 			Error: "rate limited",
 		})
@@ -475,7 +475,7 @@ func (g *Gateway) checkSession(cc *ClientConn, msgType messages.MsgType) bool {
 
 func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 	var req messages.AuthRequest
-	if err := messages.UnmarshalPayload(env.Payload, &req); err != nil {
+	if err := env.UnmarshalPayload(&req); err != nil {
 		g.metrics.AuthResult(false)
 		g.sendAuthError(cc, "invalid auth request")
 		return
@@ -499,7 +499,7 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 
 	cc.SetAuthenticated(userID)
 
-	resp, err := messages.NewEnvelope(messages.MsgAuthResp, messages.AuthResponse{
+	resp, err := cc.Reply(messages.MsgAuthResp, messages.AuthResponse{
 		OK:     true,
 		UserID: userID,
 	})
@@ -511,7 +511,7 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 }
 
 func (g *Gateway) sendAuthError(cc *ClientConn, msg string) {
-	resp, err := messages.NewEnvelope(messages.MsgAuthResp, messages.AuthResponse{
+	resp, err := cc.Reply(messages.MsgAuthResp, messages.AuthResponse{
 		OK:    false,
 		Error: msg,
 	})
@@ -530,7 +530,7 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 	}
 
 	var req messages.EnterWorldRequest
-	if err := messages.UnmarshalPayload(env.Payload, &req); err != nil {
+	if err := env.UnmarshalPayload(&req); err != nil {
 		g.metrics.EnterWorldResult(false)
 		g.sendEnterWorldError(cc, "invalid enter world request")
 		return
@@ -552,7 +552,7 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 
 	cc.SetInWorld()
 
-	resp, err := messages.NewEnvelope(messages.MsgEnterWorldResp, messages.EnterWorldResponse{
+	resp, err := cc.Reply(messages.MsgEnterWorldResp, messages.EnterWorldResponse{
 		ServerAddr: result.ServerAddr,
 		JoinToken:  result.JoinToken,
 		Transport:  result.Transport,
@@ -605,7 +605,7 @@ func clientSafeAssignError(err error) string {
 }
 
 func (g *Gateway) sendEnterWorldError(cc *ClientConn, msg string) {
-	resp, err := messages.NewEnvelope(messages.MsgEnterWorldResp, messages.EnterWorldResponse{
+	resp, err := cc.Reply(messages.MsgEnterWorldResp, messages.EnterWorldResponse{
 		Error: msg,
 	})
 	if err != nil {

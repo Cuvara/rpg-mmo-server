@@ -83,7 +83,7 @@ func TestJoinTokenUsesSeparateSecret(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	var ew messages.EnterWorldResponse
-	if err := messages.UnmarshalPayload(env.Payload, &ew); err != nil {
+	if err := env.UnmarshalPayload(&ew); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if ew.Error != "" {
@@ -138,7 +138,7 @@ func TestJoinTokenDefaultsToAuthSecret(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	var ew messages.EnterWorldResponse
-	if err := messages.UnmarshalPayload(env.Payload, &ew); err != nil {
+	if err := env.UnmarshalPayload(&ew); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if _, _, err := transfer.ValidateJoinToken(ew.JoinToken, authSecret); err != nil {

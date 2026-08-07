@@ -107,7 +107,7 @@ func TestGateway_AuthSuccess(t *testing.T) {
 	}
 
 	var authResp messages.AuthResponse
-	if err := messages.UnmarshalPayload(resp.Payload, &authResp); err != nil {
+	if err := resp.UnmarshalPayload(&authResp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if !authResp.OK {
@@ -130,7 +130,7 @@ func TestGateway_AuthFailure(t *testing.T) {
 
 	resp := readEnvelope(t, conn)
 	var authResp messages.AuthResponse
-	messages.UnmarshalPayload(resp.Payload, &authResp)
+	resp.UnmarshalPayload(&authResp)
 	if authResp.OK {
 		t.Error("auth should have failed")
 	}
@@ -162,7 +162,7 @@ func TestGateway_EnterWorld(t *testing.T) {
 	}
 
 	var ewResp messages.EnterWorldResponse
-	if err := messages.UnmarshalPayload(resp.Payload, &ewResp); err != nil {
+	if err := resp.UnmarshalPayload(&ewResp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if ewResp.Error != "" {
@@ -189,7 +189,7 @@ func TestGateway_EnterWorldBeforeAuth(t *testing.T) {
 
 	resp := readEnvelope(t, conn)
 	var ewResp messages.EnterWorldResponse
-	messages.UnmarshalPayload(resp.Payload, &ewResp)
+	resp.UnmarshalPayload(&ewResp)
 	if ewResp.Error == "" {
 		t.Error("should fail when not authenticated")
 	}

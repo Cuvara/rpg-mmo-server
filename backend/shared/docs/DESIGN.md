@@ -339,3 +339,100 @@ and so returned false for any wrapped `GameError` — while `TEAM.md` mandates
 wrapping with `%w` everywhere. It now uses `errors.As`. Both bugs are the same
 shape: a classification helper that silently reports "no" instead of failing
 loudly, which makes every caller's default branch the accidental behaviour.
+
+## Protobuf on the wire, with JSON detected by its first byte (2026-08-07)
+
+`shared/proto/wire.proto` is now the single source of truth for the realtime
+wire format. Go bindings are generated into `shared/proto/gen`, C# bindings into
+`gameserver-dotnet/GameServer/Net/Generated`, both by `shared/proto/generate.sh`,
+and both are committed so no CI runner needs `protoc`.
+
+### Why now
+
+Not speculative. [`docs/BENCHMARK.md`](../../docs/BENCHMARK.md) measured that
+snapshot construction plus `JsonSerializer` was ~80% of tick cost against ~20%
+for the brute-force AOI scan, and that ADR-7's own `< 50 KB/s per client`
+threshold broke at ~41 players — less than a third of the tick-budget ceiling of
+150. Bandwidth was the binding constraint and JSON was the whole of it.
+
+### The migration decision: sniffing, not negotiation
+
+The alternatives were a hard cutover, a version field in the envelope, or a
+negotiated handshake. All three were rejected in favour of **detecting the
+encoding from the first byte of the frame body**:
+
+| Encoding | First body byte |
+|---|---|
+| JSON `{"type":…}` | `0x7B` (`{`) |
+| Protobuf `Envelope` | `0x08` — tag for field 1 (`type`, varint) |
+
+`type` is `>= 1` for every real message, so proto3 never elides field 1 and a
+protobuf `Envelope` *always* begins with `0x08`. The two values cannot collide,
+so one byte classifies a frame with no negotiation, no version field, and no
+extra round trip.
+
+That buys three things a version handshake would not:
+
+1. **Independent deploys.** The gateway, the game servers and the Unity client
+   ship on different cadences and, in Agones, are literally different pods
+   rolling at different times. A server that accepts both and *replies in
+   whatever it was addressed in* has no ordering requirement at all. There is no
+   flag day and no window where a mismatched pair is broken.
+2. **Sticky per connection, not per process.** Encoding is latched per
+   connection (`ClientConn.enc` in the gateway, `Connection.Encoding` in the game
+   server), so one binary serves a legacy JSON client and a Protobuf client
+   simultaneously — the actual mid-rollout state, and what
+   `TestDotnetInterop_MixedEncodingsOnOneServer` pins.
+3. **A controlled benchmark.** Because the server answers in the client's
+   encoding, `loadtest -encoding json|proto` A/B-tests one unchanged server
+   binary. The before/after is a single-variable comparison instead of one
+   spanning two builds.
+
+Framing is untouched — still `[4-byte big-endian length][body]` — so
+`shared/transport` and the KCP/TCP layer required no changes and cannot observe
+the difference.
+
+The cost of sniffing is that a corrupt frame whose first byte is not `{` is
+reported as a protobuf parse failure rather than as "unknown encoding". That is
+acceptable: both are fatal for the frame and both close the connection.
+
+### Why the Go domain structs did not become the generated types
+
+`messages.SnapshotMessage` and friends stay plain Go structs; `proto.go`
+converts them to and from the generated types and is the only place the two
+representations meet. Generated types carry state that makes them awkward as
+domain values (they are not cheap to copy or compare, and `SnapshotState` keeps a
+map of them), and every existing caller across gateway, smoketest, loadtest and
+integration_test already speaks the plain structs. The conversion is confined to
+one file, so a schema change surfaces there as a compile error rather than as a
+silently unset field.
+
+The C# side made the **opposite** choice — there the generated types *are* the
+only message classes — because the game server is where the per-tick cost lives
+and an extra domain-to-generated conversion per entity per client per tick is
+exactly what this change exists to remove.
+
+### `UnmarshalPayload` became a method
+
+`messages.UnmarshalPayload(payload, v)` was a free function taking raw bytes,
+which made it possible to decode a Protobuf payload as JSON by forgetting to
+thread the encoding through. It is now `env.UnmarshalPayload(v)`: the encoding
+travels with the bytes and the mistake is unrepresentable. This is a Go API
+break, not a wire break.
+
+### Deliberately left on the table
+
+`EntitySnapshot.type` is still a string and `id` is still a full string. An enum
+for `type` (~8 bytes to ~2) and interned entity handles would both shrink the
+hottest message further, but each changes what the field *means*, whereas this
+change is a pure re-encoding whose correctness is checkable by round-tripping.
+Mixing them in would also make the before/after impossible to attribute.
+
+**This follow-up is not optional polish, and it is probably larger than this
+change was.** The measurement in [BENCHMARK.md](../../docs/BENCHMARK.md) Part II
+says Protobuf moved the mobile bandwidth ceiling from ~41 to ~93 players against
+a tick ceiling of 300 — so bandwidth is *still* the binding constraint, and the
+absolute gap actually widened. Roughly 40% of a packed `EntitySnapshot` is now
+string data (`id` and `type`), which no encoding can compress away. Interning
+those is the only remaining lever on the wire itself; after that it is a question
+of sending less (AOI radius, distance-tiered update rates), not of encoding.

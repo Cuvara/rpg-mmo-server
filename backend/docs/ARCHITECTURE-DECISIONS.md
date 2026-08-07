@@ -732,6 +732,77 @@ frame would turn the limiter into an amplifier.
 
 ---
 
+## ADR-9 — Wire encoding: Protobuf, migrated by content sniffing
+
+**Status:** accepted, implemented 2026-08-07.
+
+**Context.** [BENCHMARK.md](BENCHMARK.md) measured that snapshot construction
+plus `JsonSerializer` accounted for ~80% of tick cost against ~20% for the
+brute-force AOI scan, and that ADR-7's own acceptance threshold of
+`< 50 KB/s per client` broke at **~41 players** — less than a third of the
+150-player tick-budget ceiling. Bandwidth, not tick time, was the binding
+constraint, and JSON was the entirety of it. Protobuf was already the stated
+production encoding in the extension-seam table; the measurement moved it from
+"later polish" to the first thing to do, ahead of spatial-grid AOI.
+
+**Decision.**
+
+1. **One schema, two generators.** `backend/shared/proto/wire.proto` is the
+   single source of truth. Go and C# bindings are generated from it by
+   `shared/proto/generate.sh` and **committed**, so no CI runner and no fresh
+   clone needs `protoc`. A `proto-generated` CI job regenerates and fails on any
+   diff, which is what stops the committed output from drifting from the schema.
+
+2. **No parallel hand-written definitions.** The C# game server's hand-written
+   mirrors of the Go structs were deleted; the generated types are now its only
+   message classes. Legacy JSON is produced by a hand-written
+   `Utf8JsonWriter`/`Utf8JsonReader` codec over those same generated types, so
+   there is still exactly one definition of every message.
+
+3. **Migration is by content sniffing, not negotiation.** A JSON body always
+   starts with `{` (0x7B); a Protobuf `Envelope` always starts with `0x08`, the
+   tag for field 1 (`type`), which proto3 never elides because `type >= 1` for
+   every real message. One byte therefore identifies the encoding. Encoding is
+   latched **per connection**, and a server always replies in the encoding it was
+   addressed in.
+
+**Why sniffing rather than a version field or a handshake.** The gateway, the
+game servers and the Unity client deploy independently — under Agones they are
+literally separate pods rolling at different times. A negotiated handshake would
+add a round trip to every connection and still need a fallback path; a version
+field in the envelope would have to be understood by both sides *before* it could
+be read, which is the same bootstrapping problem one layer down. Sniffing gives a
+rollout with no flag day, no ordering requirement between components, and no
+window in which a mismatched pair is broken. It also makes the benchmark
+single-variable: because the server answers in the client's encoding,
+`loadtest -encoding json|proto` A/B-tests one unchanged binary.
+
+The cost is that a corrupt frame not starting with `{` is reported as a Protobuf
+parse failure rather than as "unrecognised encoding". Both are fatal for the
+frame and both close the connection, so nothing is lost.
+
+**Consequences.**
+
+- Framing (`[4-byte big-endian length][body]`) is unchanged, so
+  `shared/transport` and the TCP/KCP layer needed no changes and cannot observe
+  the difference.
+- `messages.UnmarshalPayload` became a method on `Envelope` so the encoding
+  travels with the bytes it describes. Go API break, not a wire break.
+- JSON remains supported and is still the default for existing callers. It is
+  the legacy path and should be retired once no pre-Protobuf client remains; that
+  retirement is a separate decision with its own deprecation window.
+- `EntitySnapshot.type` is still a string and `id` is still a full string.
+  Interning either would shrink the hottest message further but changes what the
+  field *means*, so both are deliberately out of scope here — see
+  `shared/docs/DESIGN.md`.
+
+**Revisit if** a client appears that cannot be upgraded, or if measured
+bandwidth still fails the ADR-7 threshold at the player counts a tier is sized
+for — in which case the next lever is field-level (entity-type enum, interned
+IDs), not another encoding swap.
+
+---
+
 ## Summary of decisions
 
 | # | Area | Decision |
@@ -744,3 +815,4 @@ frame would turn the limiter into an amplifier.
 | 6 | Crash recovery | ≤30s loss window accepted for gameplay state, conditional on economy going through Nakama transactionally |
 | 7 | CCU/cost | All figures are unbenchmarked estimates; benchmark plan anchored to the 66ms tick budget |
 | 8 | Realtime security | Opt-in KCP PSK encryption (per-session keys deferred); `JOIN_TOKEN_SECRET` split from `JWT_SECRET`, both rotatable; token-bucket rate limits on accepts, frames and `gateway_token`. KCP is **not** reachable end to end — the C# game server has no KCP |
+| 9 | Wire encoding | Protobuf from one committed schema; JSON kept during migration and distinguished by the first body byte, so components upgrade in any order |

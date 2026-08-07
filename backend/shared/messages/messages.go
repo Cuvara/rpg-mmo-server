@@ -1,6 +1,18 @@
 package messages
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+)
+
+// ErrInvalidMsgType marks an envelope whose type is 0.
+//
+// Zero is not a message type in either encoding, and it is the value a Protobuf
+// decode leaves behind when the bytes never carried field 1 at all — which is
+// what arbitrary non-JSON data looks like. Treating it as an error is what makes
+// decoding fail closed instead of yielding a typeless envelope.
+var ErrInvalidMsgType = errors.New("invalid message type 0")
 
 // MsgType identifies the type of message in an Envelope.
 type MsgType uint8
@@ -18,16 +30,111 @@ const (
 	MsgResync                            // client -> gameserver (request a full keyframe)
 )
 
+// Encoding selects how an Envelope and its payload are serialized.
+//
+// Both encodings share the same framing ([4-byte big-endian length][body]) and
+// the same MsgType space, so they are interchangeable on a per-connection basis
+// and the transport layer never has to know which is in use.
+type Encoding uint8
+
+const (
+	// EncodingJSON is the legacy encoding: {"type":N,"payload":{...}}.
+	EncodingJSON Encoding = iota
+	// EncodingProto is the Protobuf encoding generated from shared/proto/wire.proto.
+	EncodingProto
+)
+
+// String implements fmt.Stringer.
+func (e Encoding) String() string {
+	switch e {
+	case EncodingJSON:
+		return "json"
+	case EncodingProto:
+		return "proto"
+	default:
+		return fmt.Sprintf("Encoding(%d)", uint8(e))
+	}
+}
+
+// ParseEncoding maps a flag/env string onto an Encoding.
+func ParseEncoding(s string) (Encoding, error) {
+	switch s {
+	case "json", "":
+		return EncodingJSON, nil
+	case "proto", "protobuf":
+		return EncodingProto, nil
+	default:
+		return 0, fmt.Errorf("unknown wire encoding %q (want \"json\" or \"proto\")", s)
+	}
+}
+
 // Envelope is the top-level wire message. Type selects the payload schema.
 //
-// Payload is json.RawMessage so it serializes as inline JSON (not base64),
-// ensuring wire compatibility with non-Go implementations (e.g. C#/.NET).
+// Payload holds the already-serialized inner message, encoded according to Enc.
+// For EncodingJSON that is raw JSON (so it marshals inline, not base64, keeping
+// wire compatibility with non-Go implementations); for EncodingProto it is the
+// Protobuf binary encoding of the corresponding wire.proto message.
+//
+// Enc is transport metadata, not a wire field: it is set by Decode from the
+// bytes actually observed and consumed by Encode to decide how to write. It is
+// never itself serialized in either encoding.
 type Envelope struct {
+	Type    MsgType
+	Payload []byte
+	Enc     Encoding
+}
+
+// envelopeJSON is the on-the-wire JSON shape of an Envelope. It exists so that
+// Envelope can carry the Enc field without that field leaking into the JSON.
+type envelopeJSON struct {
 	Type    MsgType         `json:"type"`
 	Payload json.RawMessage `json:"payload"`
 }
 
+// MarshalJSON emits the legacy {"type":N,"payload":{...}} shape.
+func (e Envelope) MarshalJSON() ([]byte, error) {
+	payload := json.RawMessage(e.Payload)
+	if len(payload) == 0 {
+		payload = json.RawMessage("null")
+	}
+	return json.Marshal(envelopeJSON{Type: e.Type, Payload: payload})
+}
+
+// UnmarshalJSON parses the legacy {"type":N,"payload":{...}} shape.
+func (e *Envelope) UnmarshalJSON(data []byte) error {
+	var raw envelopeJSON
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	e.Type = raw.Type
+	e.Payload = raw.Payload
+	e.Enc = EncodingJSON
+	return nil
+}
+
+// UnmarshalPayload decodes this envelope's payload into a concrete message type,
+// using whichever encoding the envelope arrived in.
+//
+// This is a method rather than a free function precisely so that a caller cannot
+// decode a Protobuf payload as JSON by forgetting to thread the encoding
+// through: the encoding travels with the bytes.
+func (e Envelope) UnmarshalPayload(v any) error {
+	switch e.Enc {
+	case EncodingProto:
+		return unmarshalProtoPayload(e.Payload, v)
+	default:
+		return json.Unmarshal(e.Payload, v)
+	}
+}
+
 // --- Inner message types ---
+//
+// These stay plain Go structs rather than becoming aliases for the generated
+// Protobuf types. They are the domain representation every caller already uses,
+// they carry no generated-code baggage (no mutex, no reflection state, cheap to
+// copy and compare), and keeping them lets a single codebase speak both
+// encodings. shared/messages/proto.go converts them to and from the generated
+// types; that conversion is the only place the two representations meet.
 
 // AuthRequest is sent by the client to authenticate with the gateway.
 type AuthRequest struct {
@@ -112,3 +219,13 @@ type EntitySnapshot struct {
 	HP    int     `json:"hp"`
 	MaxHP int     `json:"max_hp"`
 }
+
+// DisconnectMessage ends a session politely. Both encodings accept an empty
+// payload here, which is what every current sender emits.
+type DisconnectMessage struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+// ResyncRequest asks the game server to make the next snapshot a full keyframe.
+// It carries no fields.
+type ResyncRequest struct{}

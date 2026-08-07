@@ -52,6 +52,57 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ------------------------------------------------------- generated code drift
+  # wire.proto is the single source of truth for the realtime wire format, and
+  # the Go and C# bindings generated from it are COMMITTED so that no runner and
+  # no fresh clone needs protoc. That trade has one failure mode: someone edits
+  # generated code by hand, or changes wire.proto and forgets to regenerate, and
+  # the two languages silently drift apart again — the exact problem the schema
+  # exists to prevent.
+  #
+  # So this job regenerates both languages and fails if anything moved. The tool
+  # versions are pinned exactly: protoc and protoc-gen-go both stamp their
+  # version into the generated headers, so an unpinned bump would fail the diff
+  # for no real reason.
+  proto-generated:
+    name: Proto bindings up to date
+    runs-on: ubuntu-latest
+    env:
+      PROTOC_VERSION: '29.3'
+      PROTOC_GEN_GO_VERSION: 'v1.36.6'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/shared/go.mod
+          cache-dependency-path: backend/shared/go.sum
+
+      - name: Install protoc
+        run: |
+          curl -sSLo /tmp/protoc.zip \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          unzip -q /tmp/protoc.zip -d /tmp/protoc
+          sudo install -m 0755 /tmp/protoc/bin/protoc /usr/local/bin/protoc
+          protoc --version
+
+      - name: Install protoc-gen-go
+        run: |
+          go install "google.golang.org/protobuf/cmd/protoc-gen-go@${PROTOC_GEN_GO_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Regenerate
+        run: ./backend/shared/proto/generate.sh
+
+      - name: Fail if the committed bindings are stale
+        run: |
+          if ! git diff --exit-code -- \
+              backend/shared/proto/gen \
+              backend/gameserver-dotnet/GameServer/Net/Generated; then
+            echo "::error::Generated protobuf bindings are out of date. Run backend/shared/proto/generate.sh and commit the result."
+            exit 1
+          fi
+
   # ------------------------------------------------------------- module tests
   test-shared:
     name: Test shared

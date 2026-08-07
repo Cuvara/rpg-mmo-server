@@ -1,6 +1,12 @@
 # Benchmark — measured game-server capacity
 
-> **Headline: one game server holds ~150 concurrent players in the worst-case
+> **⚠️ Part I below measures the pre-Protobuf server and is kept as the
+> historical baseline. For current numbers see
+> [Part II](#part-ii--protobuf-vs-json-2026-08-07): after the Protobuf migration
+> the tick ceiling is 300 players (was 150) and downstream is ~55% smaller, but
+> the mobile bandwidth ceiling is still only ~93 players.**
+
+> **Headline (Part I, pre-Protobuf): one game server holds ~150 concurrent players in the worst-case
 > dense-crowd shape before the 15Hz tick budget breaks. The bottleneck is
 > per-client snapshot construction and JSON serialization, not the brute-force
 > AOI scan.** At 160 players tick p99 crosses 66.67ms; at 150 it sits at 49.8ms.
@@ -312,24 +318,33 @@ independent ways.
 
 ---
 
+---
+
 ## 9. What to do about it
 
 Ordered by measured impact:
 
 1. **Fix the entity leak** (`gameserver-dotnet`). Unbounded O(n²) growth beats
    every optimisation below.
-2. **Replace JSON with Protobuf/FlatBuffers on the snapshot path.** This is the
-   80% term in the tick and the whole of the bandwidth problem. Already the
-   planned production encoding — the measurement says it is the *first* thing to
-   do, not a later polish.
+2. ~~**Replace JSON with Protobuf/FlatBuffers on the snapshot path.**~~ ✅ **Done**
+   — see [Part II](#part-ii--protobuf-vs-json-2026-08-07). Delivered ~55% less
+   downstream and a 150 → 300 tick ceiling, but *less* than this entry assumed:
+   the saving is ~55% not ~70%, because entity ID strings cost the same in both
+   encodings, and bandwidth remains the binding constraint at ~93 players.
 3. **Move serialization off the tick.** `WireProtocol.NewEnvelope` serializes
    inside the tick loop while `Connection.Send` only enqueues. Serializing in the
    writer task instead would take the dominant term off the critical path without
-   changing the encoding.
+   changing the encoding. **Still outstanding** — Protobuf made this term
+   cheaper, it did not move it off the tick.
 4. **Stagger keyframe counters per connection** to kill the stampede.
-5. **Spatial-grid AOI** — worth doing, but it targets the 20% term. ADR-7 ranked
-   it first; the measurement demotes it to fourth.
-6. **Re-run on real VPS hardware** with the generator on a separate host before
+5. **Reduce what is sent, not how it is encoded** — AOI radius, distance-tiered
+   update rates, interned entity IDs. Part II shows this is now the only lever
+   left on the bandwidth ceiling: at 150 players Protobuf still costs 80.7 KB/s
+   per client against a 50 KB/s target, and ~40% of a packed entity is string
+   data that no encoding can compress away.
+6. **Spatial-grid AOI** — worth doing, but it targets the 20% term. ADR-7 ranked
+   it first; the measurement demotes it below the items above.
+7. **Re-run on real VPS hardware** with the generator on a separate host before
    any tier CCU number is published.
 
 ---
@@ -360,3 +375,165 @@ JWT_SECRET=dev-secret-change-me ./loadtest \
 
 Restart the container and wait for `gameserver_entities` to read 0 between
 levels, or the leak in §7 will contaminate the results.
+
+### Part II — the encoding comparison
+
+```bash
+cd backend/loadtest
+JWT_SECRET=dev-secret-change-me ./scripts/encoding-sweep.sh 50 100 150 200
+python3 scripts/encoding-report.py results/encoding
+```
+
+The script builds nothing: it expects the baseline image
+(`rpg-mmo/gameserver-dotnet:<develop-sha>`, override with `BASELINE_IMAGE`) and
+the branch image (`rpg-mmo/gameserver-dotnet:proto`, override with `NEW_IMAGE`)
+to exist already. It restarts the container and waits for `gameserver_entities`
+to read 0 before every level, for the same reason as Part I.
+
+---
+
+# Part II — Protobuf vs JSON (2026-08-07)
+
+> **Headline: Protobuf cuts downstream bandwidth by ~55% and doubles the
+> tick-budget ceiling from 150 to 300 players. But the win is smaller than the
+> naive estimate in §5 predicted, roughly half the tick improvement is not
+> actually the encoding, and bandwidth remains the binding constraint.**
+
+Measured on the same machine, same protocol and same 35s/8s windows as Part I,
+against `develop` @ `f4d5561` (baseline) and `feat/shared/protobuf-wire`.
+Raw results: [`backend/loadtest/results/encoding/`](../loadtest/results/encoding/).
+Reproduce with [`backend/loadtest/scripts/encoding-sweep.sh`](../loadtest/scripts/encoding-sweep.sh).
+
+## 11. Method — three arms, one load generator
+
+| Arm | Server image | Encoding | Isolates |
+|---|---|---|---|
+| `baseline-json` | `develop` @ `f4d5561` | JSON | The Part I baseline |
+| `new-json` | this branch | JSON | The JSON-path cleanup **only** |
+| `new-proto` | this branch | Protobuf | The encoding change |
+
+The **same** `loadtest` binary drove all three: `-encoding json` emits
+byte-identical legacy frames, and the server answers in whatever encoding it is
+addressed in, so `new-json` and `new-proto` are the *same running binary* under
+one flag. Only the server changes between arms, and between the last two, nothing
+changes at all except what the client asked for.
+
+**The middle arm exists for honesty.** This branch also removed a
+`JsonDocument.Parse` round-trip from the JSON path (the envelope used to re-parse
+its own freshly serialized payload just to nest it). That is a real improvement
+but it is *not* Protobuf, and folding it into the headline would overstate the
+encoding's contribution. It turns out to be about half the tick win.
+
+**Baseline reproduction.** `baseline-json` reproduced Part I closely enough to
+trust the comparison: 61.1 vs 61 KB/s at 50 players, 183.8 vs 184 at 150, and
+tick p99 at 150 of 49.77ms against Part I's 49.77ms.
+
+## 12. Results
+
+### Bandwidth — the thing this was for
+
+| Players | KB/s/client JSON | KB/s/client Protobuf | saved |
+|--:|--:|--:|--:|
+| 50 | 60.3 | 27.4 | **54.6%** |
+| 100 | 121.6 | 53.8 | **55.7%** |
+| 150 | 183.4 | 80.7 | **56.0%** |
+| 200 | 243.1 | 109.2 | **55.1%** |
+| 250 | 281.3 | 131.3 | **53.3%** |
+
+Flat at ~55% across the whole range, which is what a pure re-encoding should look
+like — the saving is per byte, not per player.
+
+### Tick time
+
+| Players | tick mean baseline | tick mean new-json | tick mean proto | tick p99 baseline | tick p99 new-json | tick p99 proto |
+|--:|--:|--:|--:|--:|--:|--:|
+| 50 | 4.46ms | 3.19ms | 1.66ms | 14.05ms | 9.90ms | 7.93ms |
+| 100 | 14.33ms | 10.47ms | 4.44ms | 25.00ms | 24.73ms | 17.38ms |
+| 150 | 29.27ms | 20.63ms | 10.58ms | 49.77ms | 47.51ms | 24.81ms |
+| 200 | 50.79ms | 34.40ms | 17.26ms | 85.32ms | 53.46ms | 40.80ms |
+| 250 | — | 60.34ms | 25.80ms | — | 98.99ms | 49.58ms |
+| 300 | — | 95.42ms | 34.29ms | — | 245.64ms | 49.99ms |
+| 400 | — | — | 72.27ms | — | — | 239.73ms |
+
+### The new ceilings
+
+| Arm | Highest passing (tick p99 < 66.67ms) | First breach |
+|---|--:|--:|
+| `baseline-json` | **150** | 200 (p99 85.32ms) |
+| `new-json` | **200** | 250 (p99 98.99ms) |
+| `new-proto` | **300** | 400 (p99 239.73ms) |
+
+**150 → 300 players, a 2× ceiling.** But attributed honestly:
+
+- `baseline` → `new-json`: **150 → 200 (+33%)** from removing the
+  `JsonDocument.Parse` round-trip. Not the encoding.
+- `new-json` → `new-proto`: **200 → 300 (+50%)** from Protobuf itself.
+
+At 300 players the JSON arm is fully broken (100% of ticks over budget, p99
+245.64ms) while the proto arm is still comfortably inside budget at p99 49.99ms
+on the *same binary* — the single clearest side-by-side in this document.
+
+At 400 players the proto arm collapses (p99 239.73ms, 84.7% of ticks over
+budget), and its measured bandwidth *drops* from 147.2 to 140.0 KB/s — the server
+is no longer keeping up, so it emits fewer snapshots. A falling bandwidth number
+at a rising player count is a degradation signature, not an improvement.
+
+## 13. Where the win is smaller than predicted — read this
+
+**§5 estimated an `EntitySnapshot` at ~95 bytes of JSON versus "~30 bytes
+packed", implying a ~70% saving. The measured saving is ~55%.** The estimate was
+wrong about what dominates.
+
+Protobuf removes field names, punctuation, and decimal float formatting. It
+cannot remove *identifiers*. A realistic entity ID (`lt-000000000042`, 15 chars)
+costs 15 bytes in both encodings, and is ~15 of the ~40 bytes a Protobuf entity
+occupies. The floor is the string data, and roughly 40% of a packed entity is
+string. This is asserted, not just described, in
+`shared/messages` `TestProtoIsSmallerThanJSON` and measured on the real wire by
+`TestDotnetInterop_MixedEncodingsOnOneServer`.
+
+The lever that would move it further is interning entity IDs (and making
+`entity.type` an enum). Both change what the field *means* rather than how it is
+encoded, so both were deliberately left out of this change — see ADR-9.
+
+## 14. ADR-7 thresholds, re-checked
+
+| Threshold | Before | After | Verdict |
+|---|--:|--:|:--|
+| Tick p99 < 66.67ms @ 15Hz | 150 players | **300 players** | improved 2× |
+| Downstream < 50 KB/s per client | ~41 players | **~93 players** | improved 2.3×, **still fails** |
+
+**Bandwidth is still the binding constraint, and by a wider margin than before.**
+The tick ceiling moved to 300 while the mobile-viable bandwidth ceiling moved
+only to ~93 — the gap between "the server can simulate it" and "a phone can
+receive it" widened from 3.7× to 3.2× in ratio but grew from 109 to 207 players
+in absolute terms. Protobuf did not solve the bandwidth problem; it bought
+roughly a 2.3× and moved the next bottleneck nowhere.
+
+**A dense-crowd capacity plan should still use ~93, not 300**, on the mobile
+assumption. If crowds of 150+ in one AOI are a real design requirement, the next
+work is not another encoding — it is reducing *what* is sent (AOI radius, update
+rate tiering by distance, ID interning), because at 150 players Protobuf still
+costs 80.7 KB/s per client.
+
+## 15. Additional confounds for Part II
+
+Everything in §8 still applies. Two more:
+
+1. **Another agent was running its own load tests against a different game
+   server container on this same host during parts of this sweep.** Host load was
+   therefore higher and less stable than in Part I. This inflates absolute tick
+   times in an unknown and non-uniform way. The *ratios* between arms are more
+   robust than the absolute numbers, and the ~55% bandwidth saving is a property
+   of the encoding that host load cannot affect at all.
+2. **The entity leak (§7.1) was still live when this sweep ran.** Every level
+   restarted the container and waited for `gameserver_entities` to read 0, and
+   clients stay connected for the whole window, so within-level contamination
+   should be near zero — but "should be" is not "was measured to be". The leak
+   fix changes tick cost characteristics, so **these numbers must be re-taken
+   after rebasing onto it** before any of them are quoted as current.
+3. **A single client failed to join in three of the levels** (`new-json` @ 50 and
+   @ 200, `new-proto` @ 150), out of 50-250. It occurred in both encodings, so it
+   is not encoding-specific; it is most likely join contention under a 20/s ramp
+   on a loaded host. It is not explained, and it is recorded rather than
+   dismissed.

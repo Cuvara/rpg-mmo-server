@@ -26,7 +26,9 @@ public class SnapshotDeltaStateTests
 
         Assert.True(snap.Full);
         Assert.Equal(2, snap.Entities.Count);
-        Assert.Null(snap.Removed);
+        // RepeatedField is never null; "no removals" is Count == 0. The wire is
+        // unchanged either way: the JSON codec still omits "removed" when empty.
+        Assert.Empty(snap.Removed);
     }
 
     [Fact]
@@ -100,7 +102,9 @@ public class SnapshotDeltaStateTests
         var snap = state.Encode(2, 0, world, Keyframe);
 
         Assert.Empty(snap.Entities);
-        Assert.Null(snap.Removed);
+        // RepeatedField is never null; "no removals" is Count == 0. The wire is
+        // unchanged either way: the JSON codec still omits "removed" when empty.
+        Assert.Empty(snap.Removed);
     }
 
     [Fact]
@@ -139,7 +143,9 @@ public class SnapshotDeltaStateTests
 
         var e = Assert.Single(snap.Entities);
         Assert.Equal("p3", e.Id);
-        Assert.Null(snap.Removed);
+        // RepeatedField is never null; "no removals" is Count == 0. The wire is
+        // unchanged either way: the JSON codec still omits "removed" when empty.
+        Assert.Empty(snap.Removed);
     }
 
     [Fact]
@@ -164,7 +170,9 @@ public class SnapshotDeltaStateTests
 
         var snap = state.Encode(3, 0, World(Player("p1")), Keyframe);
 
-        Assert.Null(snap.Removed);
+        // RepeatedField is never null; "no removals" is Count == 0. The wire is
+        // unchanged either way: the JSON codec still omits "removed" when empty.
+        Assert.Empty(snap.Removed);
         Assert.Empty(snap.Entities);
     }
 
@@ -193,7 +201,9 @@ public class SnapshotDeltaStateTests
         var snap = state.Encode(2, 0, World(Player("p1")), Keyframe);
 
         Assert.True(snap.Full);
-        Assert.Null(snap.Removed);
+        // RepeatedField is never null; "no removals" is Count == 0. The wire is
+        // unchanged either way: the JSON codec still omits "removed" when empty.
+        Assert.Empty(snap.Removed);
         Assert.Single(snap.Entities);
     }
 
@@ -262,7 +272,7 @@ public class SnapshotDeltaStateTests
     }
 
     /// <summary>Convert a server-side wire message into the client-side mirror type.</summary>
-    internal static SnapshotData ToData(GameServer.Net.SnapshotMessage msg)
+    internal static SnapshotData ToData(SnapshotMessage msg)
     {
         var entities = new EntitySnapshotData[msg.Entities.Count];
         for (int i = 0; i < msg.Entities.Count; i++)

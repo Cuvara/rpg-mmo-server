@@ -16,7 +16,7 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 	}
 
 	var decoded InputMessage
-	if err := UnmarshalPayload(env.Payload, &decoded); err != nil {
+	if err := env.UnmarshalPayload(&decoded); err != nil {
 		t.Fatalf("UnmarshalPayload() error: %v", err)
 	}
 	if decoded.Tick != 42 || decoded.MoveX != 1.5 || decoded.MoveY != -0.5 {
@@ -46,7 +46,7 @@ func TestCodecRoundTrip(t *testing.T) {
 	}
 
 	var decodedAuth AuthRequest
-	if err := UnmarshalPayload(decoded.Payload, &decodedAuth); err != nil {
+	if err := decoded.UnmarshalPayload(&decodedAuth); err != nil {
 		t.Fatalf("UnmarshalPayload() error: %v", err)
 	}
 	if decodedAuth.Token != "abc123" {
@@ -82,7 +82,7 @@ func TestSnapshotMessage(t *testing.T) {
 	}
 
 	var decoded SnapshotMessage
-	if err := UnmarshalPayload(env.Payload, &decoded); err != nil {
+	if err := env.UnmarshalPayload(&decoded); err != nil {
 		t.Fatalf("UnmarshalPayload() error: %v", err)
 	}
 

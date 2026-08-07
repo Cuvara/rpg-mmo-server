@@ -6,7 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **The generated `wire.proto` types are now the server's only message classes.**
+  The hand-written C# mirrors of the Go structs are deleted, which removes exactly
+  the two-definitions drift `wire.proto` exists to prevent. They are imported as
+  explicit global `Using` aliases so `RpgMmo.Wire.V1.Envelope` (the protobuf
+  message) never collides with `GameServer.Net.Envelope` (the framing envelope
+  that carries the encoding metadata).
+- `Connection` latches the encoding of the client's first frame and every reply
+  uses it, so a single binary serves JSON and Protobuf clients side by side and
+  the server never chooses an encoding of its own.
+- The JSON path no longer round-trips its own freshly serialized payload through
+  `JsonDocument.Parse` just to nest it inside the envelope — pure waste that sat
+  on the per-tick snapshot path.
+- `SnapshotMessage.Removed` is a protobuf `RepeatedField`, so it is now empty
+  rather than `null` when there are no removals. The JSON on the wire is
+  unchanged: the field is still omitted when empty.
+
+### Added
+- Legacy JSON stays fully supported through a hand-written
+  `Utf8JsonWriter`/`Utf8JsonReader` codec (`GameServer/Net/WireJson.cs`) that
+  reproduces Go's `omitempty` rules byte for byte. Protobuf's own `JsonFormatter`
+  was evaluated and rejected: it emits camelCase and drives descriptor
+  reflection, so it matches neither this wire format nor NativeAOT.
+- `Google.Protobuf` 3.29.3. `dotnet publish -c Release` with `PublishAot`
+  succeeds with **zero trim/AOT warnings** — the generated serializers are used,
+  not the reflection-based ones.
+
 ### Fixed
+- **`DecodeBody` half-parsed garbage as a typeless envelope.** A body beginning
+  `0x12` is valid Protobuf (field 2, length-delimited) and parsed cleanly with
+  the type left at 0, so arbitrary bytes became a well-formed envelope with no
+  error. Type 0 is now rejected on decode and at construction, and both decoders
+  fail closed. Pinned by a 1..255 sweep of the prefix invariant rather than by a
+  comment.
+- **Replies fell back to legacy JSON after the join handshake.** The handshake
+  runs on a throwaway `Connection` and the session `Connection` was then
+  constructed fresh over the same socket, dropping the encoding the client had
+  already demonstrated. The handshake now hands its latched encoding to the
+  session connection. Caught by the new mixed-encoding integration test.
 - **Entities leaked when a join was aborted.** `gameserver_players_online` returned to
   0 while `gameserver_entities` stayed at its peak indefinitely — 200 entities with 0
   players, still there minutes later, reproduced below.

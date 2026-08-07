@@ -98,7 +98,7 @@ func authenticate(t *testing.T, conn net.Conn, userID string) messages.AuthRespo
 
 	resp := readEnvelope(t, conn)
 	var authResp messages.AuthResponse
-	if err := messages.UnmarshalPayload(resp.Payload, &authResp); err != nil {
+	if err := resp.UnmarshalPayload(&authResp); err != nil {
 		t.Fatalf("unmarshal auth resp: %v", err)
 	}
 	return authResp
@@ -111,7 +111,7 @@ func enterWorld(t *testing.T, conn net.Conn, mapID string) messages.EnterWorldRe
 
 	resp := readEnvelope(t, conn)
 	var ewResp messages.EnterWorldResponse
-	if err := messages.UnmarshalPayload(resp.Payload, &ewResp); err != nil {
+	if err := resp.UnmarshalPayload(&ewResp); err != nil {
 		t.Fatalf("unmarshal enter world resp: %v", err)
 	}
 	return ewResp

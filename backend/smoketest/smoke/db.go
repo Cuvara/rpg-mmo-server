@@ -528,7 +528,7 @@ func (r *Runner) stepGameStateReload() (string, error) {
 			continue
 		}
 		var s messages.SnapshotMessage
-		if err := messages.UnmarshalPayload(env.Payload, &s); err != nil {
+		if err := env.UnmarshalPayload(&s); err != nil {
 			continue
 		}
 		state.Apply(s)

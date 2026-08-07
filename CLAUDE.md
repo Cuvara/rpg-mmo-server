@@ -53,7 +53,7 @@ CI: C# — `.github/workflows/ci-dotnet.yml`: build + test gameserver-dotnet. Tr
 
 ## Repo Structure & Current State
 
-The MVP is intentionally interface-driven: the default wiring is TCP + JSON + in-memory stores, but the production implementations (KCP, PostgreSQL, Redis, Agones allocation) are already written and selected by flag/env — Protobuf is the one swap still outstanding. Architecture rationale and known limitations: **`backend/docs/ARCHITECTURE-DECISIONS.md`** (read this before trusting any older diagram; `backend/docs/CORE_FLOW.md` predates the C# migration and is partly stale).
+The MVP is intentionally interface-driven: the default wiring is TCP + JSON + in-memory stores, but the production implementations (KCP, PostgreSQL, Redis, Agones allocation, Protobuf) are already written and selected by flag/env. Architecture rationale and known limitations: **`backend/docs/ARCHITECTURE-DECISIONS.md`** (read this before trusting any older diagram; `backend/docs/CORE_FLOW.md` predates the C# migration and is partly stale).
 
 | Module | Path | Status | Contents |
 |--------|------|--------|----------|
@@ -97,7 +97,7 @@ merge algorithm: **`backend/gameserver-dotnet/docs/API.md`**.
 | Layer | MVP (current) | Production |
 |-------|---------------|------------|
 | Transport | TCP (default) — KCP/UDP available opt-in via `shared/transport` + `--transport=kcp` | KCP everywhere, with per-session encryption |
-| Encoding | JSON structs | Protobuf |
+| Encoding | **Protobuf implemented** (`shared/proto/wire.proto`, one schema -> Go + C#); legacy JSON still accepted and distinguished by the first body byte - ADR-9 | Protobuf only, once no pre-Protobuf client remains |
 | Player store | In-memory default; **PostgreSQL implemented** (C# `PostgresPlayerStore`, set `GAME_DB_URL`) | PostgreSQL everywhere |
 | Session/Registry stores | In-memory default; **Redis implemented** (gateway `--backend=redis`) | Redis everywhere |
 | Event stream | Go channels default; **Redis Streams implemented** (consumer group + ACK). C# side still publishes into a noop — ADR-5 | Redis Streams end to end |

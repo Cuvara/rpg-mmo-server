@@ -7,6 +7,7 @@ require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/xtaci/kcp-go/v5 v5.6.72
+	google.golang.org/protobuf v1.36.6
 )
 
 require (

@@ -462,14 +462,14 @@ public sealed class GameServerHost : IAsyncDisposable
 
             // Create the real connection with the verified user ID, reusing the same
             // accepted transport connection (no reconnect, no second handshake).
-            conn = new Connection(userId, accepted, connLogger);
+            conn = new Connection(userId, accepted, connLogger, tempConn.Encoding);
 
             // Register connection
             _connections.Add(conn);
 
             // Step 5: Send JoinTokenResp
             var resp = WireProtocol.NewEnvelope(MsgType.JoinTokenResp,
-                new JoinTokenResponse { Ok = true, UserId = userId });
+                new JoinTokenResponse { Ok = true, UserId = userId }, conn.Encoding);
             await conn.WriteOneAsync(resp);
 
             _metrics?.PlayerJoined();
@@ -634,7 +634,7 @@ public sealed class GameServerHost : IAsyncDisposable
     private static async Task SendError(Connection conn, string error)
     {
         var resp = WireProtocol.NewEnvelope(MsgType.JoinTokenResp,
-            new JoinTokenResponse { Ok = false, Error = error });
+            new JoinTokenResponse { Ok = false, Error = error }, conn.Encoding);
         await conn.WriteOneAsync(resp);
     }
 

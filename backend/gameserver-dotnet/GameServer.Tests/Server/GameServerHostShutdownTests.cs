@@ -160,11 +160,7 @@ public class GameServerHostShutdownTests
 
     private static async Task JoinAsync(NetworkStream stream, string userId, CancellationToken ct)
     {
-        byte[] payloadBytes = JsonSerializer.SerializeToUtf8Bytes(
-            new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret) },
-            WireJsonContext.Default.JoinTokenRequest);
-        using var doc = JsonDocument.Parse(payloadBytes);
-        var env = new Envelope { Type = (byte)MsgType.JoinToken, Payload = doc.RootElement.Clone() };
+        var env = WireProtocol.NewEnvelope(MsgType.JoinToken, new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret) }, WireEncoding.Json);
         await stream.WriteAsync(WireProtocol.Encode(env), ct);
         await stream.FlushAsync(ct);
 

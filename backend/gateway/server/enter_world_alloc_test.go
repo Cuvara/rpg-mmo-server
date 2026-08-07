@@ -117,7 +117,7 @@ func TestGateway_EnterWorldAllocatesUnservedMap(t *testing.T) {
 			sendEnvelope(t, conn, enterEnv)
 
 			var resp messages.EnterWorldResponse
-			if err := messages.UnmarshalPayload(readEnvelope(t, conn).Payload, &resp); err != nil {
+			if err := readEnvelope(t, conn).UnmarshalPayload(&resp); err != nil {
 				t.Fatalf("unmarshal: %v", err)
 			}
 

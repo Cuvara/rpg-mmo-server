@@ -57,6 +57,20 @@ type ClientConn struct {
 	// limiter into an amplifier.
 	limited bool
 
+	// enc is the wire encoding this connection speaks, latched from the first
+	// frame decoded on it and used for every reply.
+	//
+	// The gateway never chooses an encoding: it answers in whatever the client
+	// used. That is what lets a Protobuf gateway keep serving a JSON client, and
+	// lets the gateway and the game servers be upgraded in either order — see
+	// shared/docs/DESIGN.md. Zero value is EncodingJSON, so a connection that
+	// somehow replies before reading anything stays on the legacy encoding.
+	//
+	// Read-loop goroutine only, like msgBucket above: every reply is built from
+	// handleMessage's call stack, and nothing on the write side reads it, so it
+	// needs no lock.
+	enc messages.Encoding
+
 	// closeAfterFlush tells WriteLoop to shut the connection down once sendCh
 	// is empty, so a final error frame actually reaches the client instead of
 	// racing an immediate Close.
@@ -277,8 +291,18 @@ func (c *ClientConn) ReadLoop(handler func(conn *ClientConn, env messages.Envelo
 			}
 			return
 		}
+		c.enc = env.Enc
 		handler(c, env)
 	}
+}
+
+// Reply builds an envelope in the encoding this connection speaks.
+//
+// Every gateway response goes through here rather than through
+// messages.NewEnvelope, so that adding a new response type cannot accidentally
+// pin it to JSON.
+func (c *ClientConn) Reply(msgType messages.MsgType, payload any) (messages.Envelope, error) {
+	return messages.NewEnvelopeAs(c.enc, msgType, payload)
 }
 
 // WriteLoop sends envelopes from the send channel to the TCP connection.
