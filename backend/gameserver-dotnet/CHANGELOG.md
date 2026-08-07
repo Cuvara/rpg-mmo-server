@@ -7,6 +7,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Entity-id interning**, gated on the connection's encoding. `SnapshotDeltaState`
+  keeps a per-connection handle table reset at every keyframe, writes the id only
+  on the message that introduces a handle, and never reuses a handle within an
+  interval — reuse would let a client that missed a despawn attribute an update
+  to the wrong entity, which is wrong state rather than absent state.
+
+  `Encode` takes `intern:`; `TickLoop` passes `conn.Encoding == WireEncoding.Proto`.
+  JSON has no handle field, so interning there would emit entities with an empty
+  id and silently break every pre-interning client.
+
+### Added
 - **`GameServer/Net/EntityTypes.cs`** — maps the simulation's string entity types
   to the wire enum and back, the C# mirror of Go's `entityTypeToPB`. Unrecognised
   names travel in `EntitySnapshot.TypeName` instead of being dropped, so a new
