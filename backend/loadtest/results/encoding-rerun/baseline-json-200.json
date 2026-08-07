@@ -1,0 +1,92 @@
+{
+  "schema": "rpg-mmo.loadtest/v1",
+  "label": "baseline-json",
+  "run_id": "1aee2367",
+  "started": "2026-08-07T13:11:15.85015037+07:00",
+  "config": {
+    "players": 200,
+    "ramp_players_per_sec": 20,
+    "duration_sec": 35,
+    "client_tick_hz": 15,
+    "auth_mode": "presigned",
+    "movement": "cluster",
+    "encoding": "json",
+    "map_id": "map_01",
+    "transport": "tcp",
+    "hold_gateway": true,
+    "tick_budget_sec": 0.066666666
+  },
+  "client": {
+    "players_requested": 200,
+    "players_joined": 199,
+    "players_failed": 1,
+    "failures_by_phase": {
+      "join": 1
+    },
+    "sample_errors": [
+      "join: join: recv: read tcp 127.0.0.1:46538-\u003e127.0.0.1:9300: read: connection reset by peer"
+    ],
+    "snapshot_interval": {
+      "count": 101315,
+      "mean_ms": 68.8,
+      "p50_ms": 68.16,
+      "p95_ms": 83.25,
+      "p99_ms": 98.97,
+      "max_ms": 204.29
+    },
+    "ack_latency": {
+      "count": 104368,
+      "mean_ms": 65.73,
+      "p50_ms": 65.18,
+      "p95_ms": 111.45,
+      "p99_ms": 131.95,
+      "max_ms": 249.43
+    },
+    "join_latency": {
+      "count": 199,
+      "mean_ms": 1.62,
+      "p50_ms": 1.13,
+      "p95_ms": 4.64,
+      "p99_ms": 8.3,
+      "max_ms": 11.49
+    },
+    "snapshots_total": 101315,
+    "keyframes_total": 3276,
+    "deltas_total": 98039,
+    "inputs_total": 104529,
+    "rx_bytes_per_sec_per_player": 244656.62,
+    "tx_bytes_per_sec_per_player": 885.02,
+    "rx_bytes_per_sec_total": 48686667.24,
+    "tx_bytes_per_sec_total": 176119.92,
+    "snapshots_received_ratio": 1.0022
+  },
+  "server": {
+    "scraped": true,
+    "tick_p50_sec": 0.056447,
+    "tick_p95_sec": 0.074418,
+    "tick_p99_sec": 0.094,
+    "tick_mean_sec": 0.055528,
+    "tick_count": 508,
+    "tick_over_budget_ratio": 0.661417,
+    "tick_over_budget_edge_sec": 0.05,
+    "ticks_per_sec": 14.51,
+    "players_online": 199,
+    "entities": 199,
+    "snapshots_sent_window": 101092,
+    "processed_inputs_window": 104328,
+    "gateway_connections_active": 0,
+    "gateway_auth_ok_window": 0,
+    "gateway_auth_fail_window": 0,
+    "gateway_enter_world_ok_window": 0,
+    "gateway_enter_world_fail_window": 0,
+    "gateway_rate_limited_window": 0
+  },
+  "verdict": {
+    "tick_budget_ok": false,
+    "snapshot_cadence_ok": true,
+    "no_errors": false,
+    "no_frame_loss": true,
+    "degraded": true,
+    "reason": "tick p99 94.0ms over the 66.7ms budget (66.14% of ticks above 50ms)"
+  }
+}

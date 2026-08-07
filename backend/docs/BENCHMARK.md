@@ -3,8 +3,12 @@
 > **⚠️ Part I below measures the pre-Protobuf server and is kept as the
 > historical baseline. For current numbers see
 > [Part II](#part-ii--protobuf-vs-json-2026-08-07): after the Protobuf migration
-> the tick ceiling is 300 players (was 150) and downstream is ~55% smaller, but
-> the mobile bandwidth ceiling is still only ~93 players.**
+> downstream is **~55% smaller** — reproduced to within 0.4% across two sweeps on
+> different builds ([§16](#16-reproduction-a-withdrawn-claim-and-a-run-that-lied-in-our-favour)) —
+> and the tick ceiling roughly doubles. Treat the ceiling figures as approximate:
+> §16 shows they are single threshold crossings of a noisy p99 and one of them
+> was withdrawn on re-run. **The mobile bandwidth ceiling is still only ~93
+> players, and that, not the tick ceiling, is what should size a fleet.**
 
 > **Headline (Part I, pre-Protobuf): one game server holds ~150 concurrent players in the worst-case
 > dense-crowd shape before the 15Hz tick budget breaks. The bottleneck is
@@ -463,7 +467,10 @@ like — the saving is per byte, not per player.
 | `new-json` | **200** | 250 (p99 98.99ms) |
 | `new-proto` | **300** | 400 (p99 239.73ms) |
 
-**150 → 300 players, a 2× ceiling.** But attributed honestly:
+**150 → 300 players, a 2× ceiling.** Attributed honestly below — but see
+[§16](#16-reproduction-a-withdrawn-claim-and-a-run-that-lied-in-our-favour),
+which **withdraws the middle step** (it did not reproduce) and shows that ceiling
+figures generally are threshold readings on a statistic too noisy to carry them:
 
 - `baseline` → `new-json`: **150 → 200 (+33%)** from removing the
   `JsonDocument.Parse` round-trip. Not the encoding.
@@ -532,8 +539,158 @@ Everything in §8 still applies. Two more:
    should be near zero — but "should be" is not "was measured to be". The leak
    fix changes tick cost characteristics, so **these numbers must be re-taken
    after rebasing onto it** before any of them are quoted as current.
-3. **A single client failed to join in three of the levels** (`new-json` @ 50 and
-   @ 200, `new-proto` @ 150), out of 50-250. It occurred in both encodings, so it
-   is not encoding-specific; it is most likely join contention under a 20/s ramp
-   on a loaded host. It is not explained, and it is recorded rather than
-   dismissed.
+3. ~~**A single client failed to join in three of the levels.**~~ **Explained and
+   fixed** — see §16. It was not load: the sweep waited for `/metrics` before
+   starting a level, but `Program.cs` starts the metrics endpoint well before the
+   game listener, so a level could begin while the game port was still not
+   accepting and lose a client to `connection reset by peer` during join.
+   Reproduced at roughly **1 cold start in 4**, and eliminated (0 in 5) by probing
+   the game port itself before the level. The readiness check was waiting on the
+   wrong port.
+
+---
+
+## 16. Reproduction, a withdrawn claim, and a run that lied in our favour
+
+Part II was re-run in full after the entity-leak fix, with the baseline image
+rebuilt from `7c4108b` so the leak fix sits on **both** sides of the comparison.
+Raw data: [`backend/loadtest/results/encoding-rerun/`](../loadtest/results/encoding-rerun/),
+kept beside the first run rather than overwriting it so both are quotable.
+That matters: after rebasing, the Protobuf branch carried the leak fix while the
+original baseline image did not, so comparing against the old image would have
+credited someone else's fix to Protobuf — the same error the middle arm exists to
+prevent, one level up.
+
+### What reproduced: the bandwidth saving
+
+| Players | baseline | new-json | new-proto | saved |
+|--:|--:|--:|--:|--:|
+| 50 | 60.9 | 60.1 | 26.8 | **55.4%** |
+| 100 | 121.7 | 120.1 | 54.4 | **54.8%** |
+| 150 | 183.1 | 181.5 | 81.4 | **55.1%** |
+| 200 | 238.9 | 242.1 | 108.8 | **55.1%** |
+
+Within 0.4% of the first sweep at every level, on a different build. **This is
+the number to quote.** It is a property of the encoding, it reproduced across two
+sweeps, and host load cannot affect it — a byte is a byte on any machine.
+
+The baseline arm is unchanged by the leak fix, as expected: the loadtest's
+clients close gracefully and never trigger the RST path the leak needed.
+
+Tick *means* also reproduced directionally — roughly 30% off from the JSON-path
+cleanup, roughly another 50% from the encoding:
+
+| Players | baseline | new-json | new-proto |
+|--:|--:|--:|--:|
+| 50 | 4.93ms | 3.20ms | 1.74ms |
+| 100 | 14.71ms | 9.54ms | 5.42ms |
+| 150 | 30.21ms | 22.34ms | 11.13ms |
+| 200 | 55.53ms | 39.28ms | 17.61ms |
+
+### ⚠️ Withdrawn: "the JSON cleanup alone moved the ceiling 150 → 200"
+
+[§12](#12-results) reported per-arm ceilings of 150 / 200 / 300. **The middle
+number did not reproduce.** On the second sweep `new-json` breaches at 200
+(p99 72.47ms) and its ceiling is 150 — the same as baseline.
+
+| Arm | ceiling, run 1 | ceiling, run 2 |
+|---|--:|--:|
+| `baseline-json` | 150 | 150 |
+| `new-json` | 200 | **150** |
+| `new-proto` | 300 | ≥ 200 (not swept higher) |
+
+The cause is not a measurement mistake; it is the criterion. At 150 players
+`new-json` measured p99 47.51ms then 49.74ms — nearly identical. At 200 it
+measured 53.46ms then 72.47ms, straddling the 66.67ms budget. **The underlying
+distribution barely moved; the reported ceiling moved by 50 players**, because a
+ceiling is a single threshold crossing of a noisy tail statistic.
+
+Protobuf's advantage over JSON does not depend on this: it is large and
+consistent at every level in both runs (11.13ms vs 22.34ms mean at 150, 17.61ms
+vs 39.28ms at 200). It is the *attribution between baseline and new-json* that
+cannot be resolved at ceiling granularity.
+
+### The tick-ceiling criterion is not decidable as ADR-7 states it
+
+ADR-7's acceptance threshold is "tick p99 within the 66.67ms budget", evaluated
+at one level, from one run. The measurement above shows that criterion cannot
+reproduce a ceiling to better than ±50 players, so every capacity number derived
+from it inherits that instability.
+
+**Recommendation, in preference order:**
+
+1. **Report a band, not a number.** A ceiling is the highest level that passes in
+   *every* run of N ≥ 3; levels that pass in some runs and not others are the
+   band, and should be published as "150–200", not as either endpoint.
+2. **Judge on the mean, report the tail separately.** Tick *mean* reproduced
+   within 10% across runs where p99 moved 35%. A criterion of "mean within half
+   the budget" plus a separately reported p99 would be decidable and would still
+   catch the failure mode p99 is there to catch.
+3. **At minimum, never quote a ceiling from a single run.** Every ceiling in this
+   document before §16 came from one sweep and should be read as approximate.
+
+ADR-7 has been amended to record this; see
+[ADR-7](ARCHITECTURE-DECISIONS.md#adr-7--ccu-and-cost-figures-are-unbenchmarked-estimates).
+
+### A run that reported a 97% bandwidth saving, and did not measure anything
+
+The first attempt at re-running levels 150 and 200 produced savings of **84.7%**
+and **97.0%**. Both were discarded. The tells were all present in the result
+files:
+
+```
+150p  joined=150  failed=150  recv_ratio=1.40  entities=200  online=200
+200p  joined=200  failed=200  recv_ratio=0.20  entities=199  online=199
+```
+
+Every client had failed mid-run, so they received almost nothing — and
+**bytes-not-received are indistinguishable from bytes-not-sent**. The instrument
+reported exactly what it measured; it simply was not measuring what the label
+claimed. The 150-player level also ran against a container that was not empty
+(200 entities for 150 players), which the clean-container precondition missed
+because it checked `gameserver_entities` alone and not `gameserver_players_online`.
+
+This is recorded here, prominently, because of the direction it points:
+
+> **A run where every client failed can look like a 97% bandwidth win.**
+
+It was caught only because the number was implausibly *good*. Every other
+instrument failure in this project was caught by someone noticing something
+broken; this one had to be caught by someone distrusting something that
+confirmed what they wanted to believe. A 97% saving would have passed review.
+
+Two instrument bugs were found while producing this document, and they point
+opposite ways. The first — `json.Unmarshal` hardcoded in the loadtest's snapshot
+loop — silently discarded every Protobuf snapshot and *hid* the win. The second
+*invented* one. **The invented one is far more dangerous, because nobody
+re-checks a flattering number.**
+
+### The join failures in §15 were the readiness check, not load
+
+While validating the gate above, the intermittent single-client join failures
+recorded as "not explained" in [§15](#15-additional-confounds-for-part-ii) were
+reproduced and root-caused.
+
+The sweep waited for `gameserver_entities == 0` on `/metrics` and treated that as
+"server ready". But `GameServer/Program.cs` starts the metrics endpoint (~line
+193) well before the TCP listener, so **a level could start while the game port
+was not yet accepting**. The first client then hit `connection reset by peer`
+during join. Measured at roughly **1 cold start in 4**; with a TCP probe of the
+game port added before each level, **0 in 5**.
+
+Worth stating as a general lesson, because the readiness check looked correct and
+was checking a real signal from the right process: *a health signal on one port
+says nothing about a different port in the same process.* Every level in this
+document that lost exactly one client lost it this way, and the previous
+write-up's guess — "join contention under a 20/s ramp on a loaded host" — was
+wrong.
+
+This also interacts with the new gate: those levels are now `INVALID` rather than
+merely reporting `fail=1`, so the sweep script reruns them instead of recording a
+level that ran at 149 players under a "150" label.
+
+`backend/loadtest` now rejects such a run rather than reporting it: a level with
+any client failure, a snapshots-received ratio more than 5% off 1.0, or
+server-side entity/player counts above what was requested is marked `INVALID` and
+excluded from every aggregate — it is not a worse result, it is not a result. See
+`Verdict.Invalid` and `validityFailure` in `load/runner.go`.

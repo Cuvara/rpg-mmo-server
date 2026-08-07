@@ -126,7 +126,20 @@ type Verdict struct {
 	// NoErrors: every requested player joined and none dropped mid-run.
 	NoErrors bool `json:"no_errors"`
 	// NoFrameLoss: the server did not silently drop queued snapshots.
-	NoFrameLoss bool   `json:"no_frame_loss"`
-	Degraded    bool   `json:"degraded"`
-	Reason      string `json:"reason,omitempty"`
+	NoFrameLoss bool `json:"no_frame_loss"`
+
+	// Invalid marks a level that did not actually measure what it claims, as
+	// opposed to one that measured a server failing to keep up. An INVALID level
+	// must be excluded from every aggregate and rerun — its numbers are not a
+	// worse result, they are not a result.
+	//
+	// This exists because the distinction is not visible in the headline figures
+	// and the failure can point in the flattering direction. A sweep level where
+	// every client died mid-run reported a 97% bandwidth saving: the clients
+	// received almost nothing, and bytes-not-received read as bytes-not-sent.
+	// See backend/docs/BENCHMARK.md.
+	Invalid bool `json:"invalid"`
+
+	Degraded bool   `json:"degraded"`
+	Reason   string `json:"reason,omitempty"`
 }

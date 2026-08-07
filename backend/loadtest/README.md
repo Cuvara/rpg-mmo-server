@@ -61,9 +61,35 @@ A level is **DEGRADED** if any of these fails:
   (`Connection.cs` uses a 64-deep bounded channel with `DropOldest`, so a client
   the writer cannot keep up with loses frames silently).
 
-A mid-run server restart is detected via counter reset and reported as
-`INVALID`, outranking every other verdict — on a shared dev box a concurrent
-redeploy otherwise looks exactly like a load-induced failure.
+A level is **INVALID** — a stronger statement than DEGRADED — when it did not
+measure what its label claims. DEGRADED means "the server could not keep up",
+which is a result. INVALID means "this is not a result", and such a level is
+**excluded from every aggregate** rather than counted as a failing one: it is not
+evidence in either direction, so capping the reported ceiling with it understates
+capacity exactly as accepting it would overstate it.
+
+A level is INVALID when:
+
+- the game server restarted mid-run (detected via counter reset) — on a shared
+  dev box a concurrent redeploy otherwise looks exactly like a load-induced
+  failure;
+- **any** client failed, so the level did not run at the size on its label (a
+  "150-player" level that ran 149 puts the wrong x on every curve drawn from it);
+- the snapshots-received ratio is **above** 1.05 — the client and server windows
+  describe different populations, and nothing from either side is trustworthy.
+  Note this looks *upward*; the 95% check above looks downward and is asking a
+  different question;
+- the server reports more entities or players online than were requested, which
+  means it was not empty when the level started.
+
+**Why this is a property of the tool and not of a benchmark script:** a broken
+run does not announce itself in the headline numbers, and it can look *better*
+than a healthy one. A sweep level whose clients all died mid-run reported a
+**97% bandwidth saving**, because bytes-not-received are indistinguishable from
+bytes-not-sent. The instrument reported exactly what it measured; it simply was
+not measuring what the label claimed. That number was caught only because it was
+implausibly good — the direction nobody checks. See
+[BENCHMARK.md §16](../docs/BENCHMARK.md).
 
 ## Key flags
 

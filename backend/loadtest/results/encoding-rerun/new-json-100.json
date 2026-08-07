@@ -1,0 +1,92 @@
+{
+  "schema": "rpg-mmo.loadtest/v1",
+  "label": "new-json",
+  "run_id": "e4298946",
+  "started": "2026-08-07T13:13:13.058696101+07:00",
+  "config": {
+    "players": 100,
+    "ramp_players_per_sec": 20,
+    "duration_sec": 35,
+    "client_tick_hz": 15,
+    "auth_mode": "presigned",
+    "movement": "cluster",
+    "encoding": "json",
+    "map_id": "map_01",
+    "transport": "tcp",
+    "hold_gateway": true,
+    "tick_budget_sec": 0.066666666
+  },
+  "client": {
+    "players_requested": 100,
+    "players_joined": 99,
+    "players_failed": 1,
+    "failures_by_phase": {
+      "join": 1
+    },
+    "sample_errors": [
+      "join: join: recv: read tcp 127.0.0.1:46514-\u003e127.0.0.1:9300: read: connection reset by peer"
+    ],
+    "snapshot_interval": {
+      "count": 50571,
+      "mean_ms": 68.53,
+      "p50_ms": 68.36,
+      "p95_ms": 75.41,
+      "p99_ms": 80.24,
+      "max_ms": 93.62
+    },
+    "ack_latency": {
+      "count": 51896,
+      "mean_ms": 41.57,
+      "p50_ms": 41.59,
+      "p95_ms": 73.08,
+      "p99_ms": 79.27,
+      "max_ms": 93.2
+    },
+    "join_latency": {
+      "count": 99,
+      "mean_ms": 1.43,
+      "p50_ms": 1.1,
+      "p95_ms": 3.62,
+      "p99_ms": 5.44,
+      "max_ms": 5.44
+    },
+    "snapshots_total": 50571,
+    "keyframes_total": 1629,
+    "deltas_total": 48942,
+    "inputs_total": 51990,
+    "rx_bytes_per_sec_per_player": 123030.32,
+    "tx_bytes_per_sec_per_player": 885.02,
+    "rx_bytes_per_sec_total": 12180001.85,
+    "tx_bytes_per_sec_total": 87616.85,
+    "snapshots_received_ratio": 1.0016
+  },
+  "server": {
+    "scraped": true,
+    "tick_p50_sec": 0.008512,
+    "tick_p95_sec": 0.022398,
+    "tick_p99_sec": 0.02448,
+    "tick_mean_sec": 0.009538,
+    "tick_count": 510,
+    "tick_over_budget_ratio": 0,
+    "tick_over_budget_edge_sec": 0.05,
+    "ticks_per_sec": 14.57,
+    "players_online": 99,
+    "entities": 99,
+    "snapshots_sent_window": 50490,
+    "processed_inputs_window": 51899,
+    "gateway_connections_active": 0,
+    "gateway_auth_ok_window": 0,
+    "gateway_auth_fail_window": 0,
+    "gateway_enter_world_ok_window": 0,
+    "gateway_enter_world_fail_window": 0,
+    "gateway_rate_limited_window": 0
+  },
+  "verdict": {
+    "tick_budget_ok": true,
+    "snapshot_cadence_ok": true,
+    "no_errors": false,
+    "no_frame_loss": true,
+    "degraded": true,
+    "reason": "1/100 players failed"
+  }
+}

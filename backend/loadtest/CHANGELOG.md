@@ -8,6 +8,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`INVALID` verdicts: a level that did not measure what it claims is now
+  excluded from aggregates rather than reported as a worse result.** `Verdict`
+  gained a machine-readable `Invalid` field (previously INVALID existed only as a
+  string prefix on `Reason`, for mid-run server restarts). A level is INVALID when
+  any client failed, when the snapshots-received ratio is more than 5% off 1.0, or
+  when the server reports more entities or players online than were requested.
+
+  This is a property of the tool, not of a benchmark script, because a broken run
+  does not announce itself in the headline numbers and can look *better* than a
+  healthy one: a sweep level whose clients all died mid-run reported a **97%
+  bandwidth saving**, since bytes-not-received are indistinguishable from
+  bytes-not-sent. It was caught only because the number was implausibly good.
+  See `docs/BENCHMARK.md` §16.
+
+  Note the received-ratio check looks **upward** (> 1.05). The pre-existing
+  `NoFrameLoss` check looks downward (< 0.95) and answers a different question —
+  did the server's bounded send channel drop frames — which is why a ratio of
+  1.40 previously passed unremarked.
+
+### Changed
+
+- `scripts/encoding-sweep.sh` waits for `gameserver_players_online == 0` as well
+  as `gameserver_entities == 0` before each level. Checking entities alone let a
+  container that was still carrying players through as "clean".
+
+### Added
+
 - **`-encoding json|proto`** — selects the wire encoding virtual players speak,
   and the choice is recorded in the JSON result so a result file is
   self-describing. The server answers in whatever encoding it is addressed in, so
