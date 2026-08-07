@@ -735,3 +735,72 @@ unguarded, and the unguarded half here was the one that produced a flattering
 result. When adding a bound to a ratio, ask whether the opposite bound is also
 meaningful — and if it is, whether it means something so different that it needs
 its own verdict rather than a wider band on the existing one.
+
+### The ceiling criterion was the problem, and p99 was not the culprit I named
+
+§16 above concluded that tick p99 is "noisier run-to-run than the mean" and that
+ceilings should therefore be quoted loosely. **The direction of that reasoning was
+wrong, and the corrected version is more useful.**
+
+Repeated at a fixed 200-player level on a *quiet* machine, p99 is tight:
+
+| | tick p99 | tick mean |
+|---|---|---|
+| 4 runs, quiet box | 72.9 – 74.6ms (**2.3% spread**) | 39.4 – 42.0ms |
+| 2 runs, CD deploy sharing the host | 224.7, 240.6ms | 60.6, 65.6ms |
+
+p99 is not intrinsically noisy — it is **contention-sensitive**, and it amplifies
+a disturbance far more than the mean does: **3.3× versus 1.7×** under the same
+interference. The load generator shares this machine with the self-hosted deploy
+runner, so "noise" here was mostly one identifiable process.
+
+Two consequences:
+
+1. **It flips which reading was the anomaly.** 53.46ms was the outlier and
+   72.47ms the reproducible value, so `new-json` at 200 players genuinely fails
+   the budget. The withdrawal in §16 stands; the reasoning underneath it did not.
+2. **More repeats is the wrong fix.** Under "passes only if it passed every one of
+   N runs", with 2 runs in 6 disturbed, the chance all N are clean is (4/6)^N —
+   **0.44 at N=2, 0.30 at N=3, 0.20 at N=4**. Unanimity at N=3 would call a
+   genuinely-passing level marginal ~70% of the time, and raising N makes it
+   worse. N is no defence against an outlier process.
+
+**What was adopted** (`backend/loadtest`, and ADR-7 amended to match): don't sweep
+during a deploy (the sweep script refuses); decide a level on the **median** p99
+across its runs; report the min..max bracket and name any level that straddles
+the budget; record host load per run as evidence.
+
+### A quiet box was not obtainable, and that is itself the finding
+
+The intent was to pair the contended measurements above with a clean set. It was
+not achievable on this host. With 200 virtual players the **load generator alone
+consumes ~261% of a core** against the game server's ~120%, and the machine also
+carries the dev stack, a k3s/Agones control plane and other agents; 1-minute load
+average sat at 13.9–19.5 on 12 cores throughout, and p99 at the same level read
+266–410ms rather than the 72.9–74.6ms measured earlier the same day.
+
+`host.load_avg_1` is what made that visible. Its first use in anger was to stop
+its own author from publishing 410ms as a capacity figure — which is the argument
+for recording environment state alongside every measurement rather than trusting
+that the box was quiet.
+
+The practical consequence: **absolute tick figures from this host are not
+trustworthy at any N**, because the disturbance is not a rare outlier but the
+ambient condition. The criterion changes above are still correct and still
+necessary; they bound the damage rather than remove it. A capacity number anyone
+plans around needs the generator on separate hardware from the server under test
+— already ADR-7 item 6, and now with a measured reason rather than a suspicion.
+
+This does not touch the bandwidth results. Those reproduced to 0.4% across sweeps
+and builds precisely because bytes on the wire do not care how busy the host is.
+
+**And one check that was tried and rejected.** Achieved tick rate looked like a
+clean discriminator — 14.66–14.71/s healthy, 12.87–13.48 disturbed, 3.93 when the
+host was overwhelmed — so "ticks/s well below the configured rate ⇒ INVALID"
+seemed principled. It is wrong: a genuinely saturated server loses ticks the same
+way, measured at **10.46 ticks/s at 300 players** and **12.51 at 400**, both real
+capacity limits. That rule would have classified genuine ceilings as environment
+faults and made them vanish from the results — an error in the *optimistic*
+direction. **The tool cannot distinguish host contention from real saturation
+using its own metrics**, so it records the host state and leaves the judgement to
+a human.

@@ -146,6 +146,9 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 	res.Server = aggregateServer(beforeGS, afterGS, beforeGW, afterGW, serverWindowSec,
 		firstErr(errGS, errGS2), firstErr(errGW, errGW2))
 	reconcile(&res.Client, &res.Server)
+	// Sampled after the window so it describes the run rather than whatever
+	// preceded it.
+	res.Host = ReadHostStats()
 	res.Verdict = Evaluate(res)
 	return res, nil
 }

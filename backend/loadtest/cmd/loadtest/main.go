@@ -45,7 +45,7 @@ func run() error {
 	// Sweep orchestration lives here rather than in load.Config: a sweep is a
 	// list of runs, and each run must stay independently reproducible from its
 	// own recorded config.
-	args, sweep, cooldown, failOnDegraded, err := extractSweepFlags(os.Args[1:])
+	args, sweep, cooldown, failOnDegraded, repeat, err := extractSweepFlags(os.Args[1:])
 	if err != nil {
 		return err
 	}
@@ -61,32 +61,38 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	results := make([]*load.Result, 0, len(sweep))
-	for i, n := range sweep {
-		if ctx.Err() != nil {
-			break
-		}
-		if i > 0 && cooldown > 0 {
-			// Let the previous level's entities age out of the world before the
-			// next one starts, so levels do not inherit each other's load.
-			fmt.Printf("[loadtest] cooldown %s before the next level\n", cooldown)
-			select {
-			case <-ctx.Done():
-			case <-time.After(cooldown):
-			}
-		}
-		lvl := cfg
-		lvl.Players = n
-		res, err := load.NewRunner(lvl, os.Stdout).Run(ctx)
-		if err != nil {
+	results := make([]*load.Result, 0, len(sweep)*repeat)
+	// Levels are repeated in the OUTER loop, so run k of every level happens
+	// before run k+1 of any of them. Repeating a level back to back would
+	// correlate its runs with whatever the host was doing for that minute, which
+	// is precisely the variance the repeat exists to measure.
+	for pass := 0; pass < repeat; pass++ {
+		for i, n := range sweep {
 			if ctx.Err() != nil {
 				break
 			}
-			return fmt.Errorf("run with %d players: %w", n, err)
-		}
-		results = append(results, res)
-		if res.Verdict.Degraded {
-			fmt.Printf("[loadtest] players=%d DEGRADED: %s\n", n, res.Verdict.Reason)
+			if (i > 0 || pass > 0) && cooldown > 0 {
+				// Let the previous level's entities age out of the world before the
+				// next one starts, so levels do not inherit each other's load.
+				fmt.Printf("[loadtest] cooldown %s before the next level\n", cooldown)
+				select {
+				case <-ctx.Done():
+				case <-time.After(cooldown):
+				}
+			}
+			lvl := cfg
+			lvl.Players = n
+			res, err := load.NewRunner(lvl, os.Stdout).Run(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					break
+				}
+				return fmt.Errorf("run with %d players: %w", n, err)
+			}
+			results = append(results, res)
+			if res.Verdict.Degraded {
+				fmt.Printf("[loadtest] players=%d DEGRADED: %s\n", n, res.Verdict.Reason)
+			}
 		}
 	}
 
@@ -94,6 +100,7 @@ func run() error {
 		return fmt.Errorf("no run completed")
 	}
 	load.WriteSummary(os.Stdout, results)
+	load.WriteCeiling(os.Stdout, load.ComputeCeiling(results))
 
 	if cfg.JSONOut != "" {
 		if cfg.JSONOut == "-" {
@@ -125,8 +132,9 @@ func run() error {
 
 // extractSweepFlags pulls the orchestration-only flags out of the argument list
 // before load.LoadConfig sees it, so the two flag sets never collide.
-func extractSweepFlags(args []string) (rest []string, sweep []int, cooldown time.Duration, failOnDegraded bool, err error) {
+func extractSweepFlags(args []string) (rest []string, sweep []int, cooldown time.Duration, failOnDegraded bool, repeat int, err error) {
 	cooldown = 20 * time.Second
+	repeat = 1
 	rest = make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -145,20 +153,29 @@ func extractSweepFlags(args []string) (rest []string, sweep []int, cooldown time
 		case "sweep":
 			v, ok := takeValue()
 			if !ok {
-				return nil, nil, 0, false, fmt.Errorf("-sweep needs a value, e.g. -sweep 1,10,50,100")
+				return nil, nil, 0, false, 0, fmt.Errorf("-sweep needs a value, e.g. -sweep 1,10,50,100")
 			}
 			sweep, err = parseSweep(v)
 			if err != nil {
-				return nil, nil, 0, false, err
+				return nil, nil, 0, false, 0, err
 			}
 		case "cooldown":
 			v, ok := takeValue()
 			if !ok {
-				return nil, nil, 0, false, fmt.Errorf("-cooldown needs a value")
+				return nil, nil, 0, false, 0, fmt.Errorf("-cooldown needs a value")
 			}
 			cooldown, err = time.ParseDuration(v)
 			if err != nil {
-				return nil, nil, 0, false, fmt.Errorf("-cooldown: %w", err)
+				return nil, nil, 0, false, 0, fmt.Errorf("-cooldown: %w", err)
+			}
+		case "repeat":
+			v, ok := takeValue()
+			if !ok {
+				return nil, nil, 0, false, 0, fmt.Errorf("-repeat needs a value, e.g. -repeat 3")
+			}
+			repeat, err = strconv.Atoi(v)
+			if err != nil || repeat < 1 {
+				return nil, nil, 0, false, 0, fmt.Errorf("-repeat must be a positive integer, got %q", v)
 			}
 		case "fail-on-degraded":
 			if hasValue {
@@ -170,7 +187,7 @@ func extractSweepFlags(args []string) (rest []string, sweep []int, cooldown time
 			rest = append(rest, a)
 		}
 	}
-	return rest, sweep, cooldown, failOnDegraded, nil
+	return rest, sweep, cooldown, failOnDegraded, repeat, nil
 }
 
 func parseSweep(s string) ([]int, error) {

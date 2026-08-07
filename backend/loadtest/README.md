@@ -100,6 +100,35 @@ not measuring what the label claimed. That number was caught only because it was
 implausibly good — the direction nobody checks. See
 [BENCHMARK.md §16](../docs/BENCHMARK.md).
 
+### Ceiling: a band, not a number
+
+A capacity ceiling is a threshold crossing of tick p99, and p99 is noisy run to
+run. Measured across two sweeps, the same build produced p99 **53.46ms then
+72.47ms** at 200 players — straddling the 66.67ms budget — while its tick *mean*
+and its p99 at other levels barely moved. One noisy number moved a reported
+ceiling by 50 players, and a claim derived from it had to be withdrawn
+([BENCHMARK.md](../docs/BENCHMARK.md) §16).
+
+So `-repeat N` runs every level N times and the summary reports:
+
+- **`CEILING: 150`** — the highest level that passed *every* run, and the number
+  capacity planning should use;
+- **`CEILING: 150–200`** — when levels in between have a split verdict, i.e. the
+  criterion cannot decide them. The split levels are named. **Quote the band, not
+  an endpoint.**
+
+Levels are repeated in the outer loop (run k of every level before run k+1 of
+any), so a level's repeats are not correlated with whatever the host happened to
+be doing for that one minute — which is the variance the repeat exists to
+measure.
+
+A single run per level still works and is still the default, but the output says
+in as many words that the result is **not reproducible**.
+
+`INVALID` runs are excluded from the tally rather than counted as failures: a
+level that measured nothing is not evidence that capacity is lower, any more than
+it is evidence that capacity is higher.
+
 ## Key flags
 
 | Flag | Default | Why it matters |
