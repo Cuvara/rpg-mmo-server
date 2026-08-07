@@ -794,6 +794,30 @@ plans around needs the generator on separate hardware from the server under test
 This does not touch the bandwidth results. Those reproduced to 0.4% across sweeps
 and builds precisely because bytes on the wire do not care how busy the host is.
 
+### The validity gate errs pessimistic, and that is the decision
+
+The gate catches runs where the *instrument* broke. It does **not** catch runs
+where the *host* was stolen: a sweep interrupted by a deploy returns
+`players_failed=0`, a received ratio of 1.005 and sane entity counts, and is
+recorded as merely `degraded` — as though the server could not keep up, when the
+machine was busy elsewhere. That **understates** capacity.
+
+This gap is accepted, not overlooked, and the reasoning is the point:
+
+| | fails toward | how it fails |
+|---|---|---|
+| Gate as built | pessimistic — a level looks worse than it is | **visibly**: the level is reported, and a human can question a number that looks wrong |
+| Tick-rate rule (rejected) | optimistic — real ceilings look like environment faults | **invisibly**: the level is `INVALID` and therefore *absent*, which reads as a sweep that did not go that high |
+
+An absent level is the same failure shape as an integration suite that compiled
+zero tests, or a restore script reporting success: the output is not false, it is
+*missing*, and nobody reads missing as an error. A pessimistic number a human can
+argue with is strictly preferable to an optimistic one nobody can see.
+
+Contention is therefore handled where it can actually be observed — externally,
+by refusing to sweep during a deploy, and by recording host load with every
+result — rather than inferred from metrics that cannot distinguish it.
+
 **And one check that was tried and rejected.** Achieved tick rate looked like a
 clean discriminator — 14.66–14.71/s healthy, 12.87–13.48 disturbed, 3.93 when the
 host was overwhelmed — so "ticks/s well below the configured rate ⇒ INVALID"
