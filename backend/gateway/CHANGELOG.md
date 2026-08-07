@@ -24,7 +24,29 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `registry.ErrNoServerAvailable` — a matchable sentinel for the "map is full or
   absent" capacity condition, wrapped by `FindServer`
 
+### Changed
+- `ClientConn.UserID` / `ClientConn.State` are no longer exported plain fields.
+  Identity now lives behind a `sync.RWMutex` with accessors — `UserID()`,
+  `State()`, `Identity()`, `SetAuthenticated()`, `SetInWorld()` and
+  `ClearIdentity()`. `Identity()` returns both halves under one lock so a caller
+  branching on user *and* state cannot observe a half-applied transition;
+  `ClearIdentity()` returns the user it took, so the check ("is there a
+  session?") and the act ("destroy it") happen atomically and two teardown paths
+  cannot both claim the same session
+
 ### Fixed
+- **Data race on `ClientConn` identity.** `cleanupSession` wrote `UserID`/`State`
+  from the read-loop goroutine (`handleConn`'s defer) while `CloseGracefully`
+  and `writeLoop` read `UserID` from the write-loop goroutine for their log
+  lines — an unsynchronised read/write on the same words, reported by the
+  `-race` build in CI. The struct comment explaining that `msgBucket` needs no
+  lock *because* it is ReadLoop-only was correct for `msgBucket` and was being
+  quietly assumed for the identity fields, which genuinely cross goroutines.
+  Race detection is probabilistic, so this had already reached `develop` green.
+  Audit of every other `ClientConn` field found no second instance: `msgBucket`
+  and `limited` really are ReadLoop-only, `closeAfterFlush`/`halfClosed` are
+  already `atomic.Bool`, and `conn`/`sendCh`/`done`/`once`/`logger` are
+  immutable after construction or internally synchronised
 - **A Redis blip de-authenticated every online player.** `checkSession` treated
   any `ValidateSession` error as an expired session, so a store outage dropped
   live connections to `StateConnected` and told correctly-authenticated players
