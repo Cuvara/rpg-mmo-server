@@ -14,6 +14,20 @@ import (
 // decoding fail closed instead of yielding a typeless envelope.
 var ErrInvalidMsgType = errors.New("invalid message type 0")
 
+// ErrUnknownHandle is returned when a snapshot references an interned entity
+// handle the receiver has no binding for.
+//
+// This is not a decode failure — the bytes were well formed. It means the two
+// sides disagree about what a handle means, i.e. the receiver has lost state the
+// sender assumed it had. Guessing is the one thing a receiver must not do: it
+// would attribute an update to the wrong entity, producing wrong state rather
+// than absent state, which is far harder to notice.
+//
+// The correct response is to request a keyframe (MsgResync). A keyframe
+// re-introduces every binding and resets the handle space on both sides, so it
+// repairs the disagreement whatever caused it.
+var ErrUnknownHandle = errors.New("snapshot references an unknown entity handle")
+
 // MsgType identifies the type of message in an Envelope.
 type MsgType uint8
 
@@ -211,13 +225,21 @@ type SnapshotMessage struct {
 }
 
 // EntitySnapshot is a single entity's visible state.
+//
+// Handle is a per-connection alias for ID on the Protobuf wire, valid until the
+// next keyframe. On a message that introduces a handle both fields are set; on
+// later mentions only Handle is. Zero means "not interned".
+//
+// The JSON encoding never interns — Handle is omitted there and ID is always
+// present — so a pre-interning client is unaffected.
 type EntitySnapshot struct {
-	ID    string  `json:"id"`
-	Type  string  `json:"type"`
-	X     float32 `json:"x"`
-	Y     float32 `json:"y"`
-	HP    int     `json:"hp"`
-	MaxHP int     `json:"max_hp"`
+	ID     string  `json:"id"`
+	Type   string  `json:"type"`
+	X      float32 `json:"x"`
+	Y      float32 `json:"y"`
+	HP     int     `json:"hp"`
+	MaxHP  int     `json:"max_hp"`
+	Handle uint32  `json:"-"`
 }
 
 // DisconnectMessage ends a session politely. Both encodings accept an empty

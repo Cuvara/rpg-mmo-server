@@ -58,6 +58,11 @@ type ClientStats struct {
 	AckLatency       Dist `json:"ack_latency"`
 	JoinLatency      Dist `json:"join_latency"`
 
+	// Resyncs counts keyframes requested because a snapshot referenced an entity
+	// handle the client had no binding for. Non-zero means client and server
+	// disagreed about interning state; a run that resyncs constantly is
+	// reconstructing far less than its snapshot count suggests.
+	Resyncs        int `json:"resyncs,omitempty"`
 	SnapshotsTotal int `json:"snapshots_total"`
 	KeyframesTotal int `json:"keyframes_total"`
 	DeltasTotal    int `json:"deltas_total"`

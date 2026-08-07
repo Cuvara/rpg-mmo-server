@@ -848,6 +848,8 @@ func TestDotnetInterop_MixedEncodingsOnOneServer(t *testing.T) {
 	// the same world, so the two numbers are directly comparable.
 	keyframeBytes := map[messages.Encoding]int{}
 	var protoKeyframe []byte
+	var protoDeltaWithEntities []byte
+	var userIDForInterning string
 
 	for _, enc := range []messages.Encoding{messages.EncodingJSON, messages.EncodingProto} {
 		client, err := NewMockClient(gsAddr)
@@ -856,7 +858,11 @@ func TestDotnetInterop_MixedEncodingsOnOneServer(t *testing.T) {
 		}
 		defer client.Close()
 
-		token, err := jwt.SignWithServer("mixed-"+enc.String(), dotnetServerID, dotnetJWTSecret, 5*time.Minute)
+		userID := "mixed-" + enc.String()
+		if enc == messages.EncodingProto {
+			userIDForInterning = userID
+		}
+		token, err := jwt.SignWithServer(userID, dotnetServerID, dotnetJWTSecret, 5*time.Minute)
 		if err != nil {
 			t.Fatalf("%s: sign token: %v", enc, err)
 		}
@@ -906,6 +912,9 @@ func TestDotnetInterop_MixedEncodingsOnOneServer(t *testing.T) {
 			keyframeBytes[enc] = len(env.Payload)
 			if enc == messages.EncodingProto {
 				protoKeyframe = append([]byte(nil), env.Payload...)
+				// Keep reading past the keyframe for a delta that actually carries
+				// entities — that is where interning shows up.
+				protoDeltaWithEntities = firstDeltaWithEntities(t, client, enc)
 			}
 			break
 		}
@@ -920,6 +929,17 @@ func TestDotnetInterop_MixedEncodingsOnOneServer(t *testing.T) {
 	// this checks the bytes rather than the decoded value — decoding would look
 	// identical either way, which is exactly how a silently-unused optimisation
 	// survives.
+	// Interning: after the keyframe introduces the bindings, later protobuf
+	// deltas must stop carrying entity ids. Asserted on the BYTES rather than the
+	// decoded value, because a decoded snapshot looks identical whether or not
+	// the ids were actually elided — which is how an optimisation silently stops
+	// working. mergeSnapshots already applied the stream, so a desync would have
+	// surfaced as an error there.
+	if protoDeltaWithEntities != nil && bytes.Contains(protoDeltaWithEntities, []byte(userIDForInterning)) {
+		t.Errorf("protobuf delta still carries the entity id %q; interning is not in effect:\n%q",
+			userIDForInterning, protoDeltaWithEntities)
+	}
+
 	if bytes.Contains(protoKeyframe, []byte("player")) {
 		t.Errorf("protobuf keyframe still contains the literal type string %q; "+
 			"the C# server is falling back to type_name instead of the enum:\n%q",
@@ -933,4 +953,30 @@ func TestDotnetInterop_MixedEncodingsOnOneServer(t *testing.T) {
 	if protoBytes >= jsonBytes {
 		t.Errorf("protobuf keyframe (%dB) is not smaller than JSON (%dB)", protoBytes, jsonBytes)
 	}
+}
+
+// firstDeltaWithEntities reads on until a non-keyframe snapshot carrying at
+// least one entity arrives, and returns its raw payload. Returns nil if none
+// appears — the caller treats that as "nothing to assert" rather than a failure,
+// because a perfectly still world legitimately produces empty deltas.
+func firstDeltaWithEntities(t *testing.T, client *MockClient, enc messages.Encoding) []byte {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		env, err := client.Receive()
+		if err != nil {
+			return nil
+		}
+		if env.Type != messages.MsgSnapshot || env.Enc != enc {
+			continue
+		}
+		var snap messages.SnapshotMessage
+		if err := env.UnmarshalPayload(&snap); err != nil {
+			return nil
+		}
+		if !snap.Full && len(snap.Entities) > 0 {
+			return append([]byte(nil), env.Payload...)
+		}
+	}
+	return nil
 }

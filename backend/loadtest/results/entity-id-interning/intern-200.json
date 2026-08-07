@@ -1,0 +1,92 @@
+{
+  "schema": "rpg-mmo.loadtest/v1",
+  "label": "intern",
+  "run_id": "a8499a64",
+  "started": "2026-08-07T15:31:26.459379318+07:00",
+  "config": {
+    "players": 200,
+    "ramp_players_per_sec": 20,
+    "duration_sec": 35,
+    "client_tick_hz": 15,
+    "auth_mode": "presigned",
+    "movement": "cluster",
+    "encoding": "proto",
+    "map_id": "map_01",
+    "transport": "tcp",
+    "hold_gateway": true,
+    "tick_budget_sec": 0.066666666
+  },
+  "client": {
+    "players_requested": 200,
+    "players_joined": 200,
+    "players_failed": 0,
+    "snapshot_interval": {
+      "count": 102800,
+      "mean_ms": 68.03,
+      "p50_ms": 67.96,
+      "p95_ms": 75.11,
+      "p99_ms": 79.64,
+      "max_ms": 88.01
+    },
+    "ack_latency": {
+      "count": 104810,
+      "mean_ms": 43.97,
+      "p50_ms": 43.88,
+      "p95_ms": 76.42,
+      "p99_ms": 83.78,
+      "max_ms": 103.88
+    },
+    "join_latency": {
+      "count": 200,
+      "mean_ms": 1.45,
+      "p50_ms": 1.1,
+      "p95_ms": 3.95,
+      "p99_ms": 6.4,
+      "max_ms": 6.67
+    },
+    "snapshots_total": 102800,
+    "keyframes_total": 3323,
+    "deltas_total": 99477,
+    "inputs_total": 105011,
+    "rx_bytes_per_sec_per_player": 47014.49,
+    "tx_bytes_per_sec_per_player": 240,
+    "rx_bytes_per_sec_total": 9402897.44,
+    "tx_bytes_per_sec_total": 47999.04,
+    "snapshots_received_ratio": 1
+  },
+  "server": {
+    "scraped": true,
+    "tick_p50_sec": 0.017664,
+    "tick_p95_sec": 0.024562,
+    "tick_p99_sec": 0.038318,
+    "tick_mean_sec": 0.017052,
+    "tick_count": 514,
+    "tick_over_budget_ratio": 0,
+    "tick_over_budget_edge_sec": 0.05,
+    "ticks_per_sec": 14.68,
+    "players_online": 200,
+    "entities": 200,
+    "snapshots_sent_window": 102800,
+    "processed_inputs_window": 104907,
+    "gateway_connections_active": 0,
+    "gateway_auth_ok_window": 0,
+    "gateway_auth_fail_window": 0,
+    "gateway_enter_world_ok_window": 0,
+    "gateway_enter_world_fail_window": 0,
+    "gateway_rate_limited_window": 0
+  },
+  "host": {
+    "load_avg_1": 4.79,
+    "load_avg_5": 5.46,
+    "load_avg_15": 5.47,
+    "cpus": 12
+  },
+  "verdict": {
+    "tick_budget_ok": true,
+    "snapshot_cadence_ok": true,
+    "no_errors": true,
+    "no_frame_loss": true,
+    "invalid": false,
+    "degraded": false
+  }
+}

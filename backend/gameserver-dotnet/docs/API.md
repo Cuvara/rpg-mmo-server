@@ -111,6 +111,39 @@ both encodings; the JSON column shows the legacy field names, which match the
 a change in any of them puts the entity in the next delta; a change in a field the
 client cannot see (e.g. cooldown) does not.
 
+### Entity-id interning (Protobuf only) — normative
+
+On a Protobuf connection the server replaces repeated entity ids with a per
+connection `handle`, to avoid spending ~17 bytes on the same string every tick.
+**A client MUST implement this to read Protobuf snapshots correctly.**
+
+Rules:
+
+1. Each `EntitySnapshot` carries `handle` (a `uint32`). **`handle = 0` means "not
+   interned"** — use `id` directly. The JSON encoding never interns.
+2. When `handle != 0` **and `id` is non-empty**, this message is *introducing* the
+   binding. Record `handle -> id` and use the id.
+3. When `handle != 0` **and `id` is empty**, resolve the id from your table.
+4. **On a keyframe (`full = true`), clear the whole handle table before applying**
+   — the server resets its handle space at every keyframe, so old bindings do not
+   merely go stale, they become actively wrong.
+5. **If a handle does not resolve, do not guess.** Apply nothing from that
+   snapshot and send `MsgResync` (10). The keyframe re-introduces every binding
+   and repairs the disagreement.
+
+Rule 5 is the one that matters. Guessing — or falling back to the last entity
+seen, or skipping the entity — produces *wrong* state rather than *absent* state,
+which renders as a real entity in the wrong place and nothing detects it. A
+handle that fails to resolve is loud and recoverable; a handle resolved to the
+wrong entity is neither.
+
+Handles are never reused within a keyframe interval, so a handle you hold is
+either correct or unresolvable — never silently reassigned mid-interval.
+
+The Go reference implementation is `SnapshotState.Apply` in
+`backend/shared/messages/snapshot_state.go`; its desynchronise-and-recover tests
+are in `interning_test.go` alongside it.
+
 ### Client merge algorithm (normative)
 
 ```

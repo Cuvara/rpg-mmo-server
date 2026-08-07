@@ -938,3 +938,74 @@ than a re-encoding.
 Tick figures were recorded and are not quoted here as acceptance evidence: per
 §16 they are a lower bound from this host, and this change is not aimed at tick
 time.
+
+---
+
+# Part IV — Entity-id interning (2026-08-07)
+
+> **Headline: a further ~51% off downstream, and ADR-7's mobile bandwidth
+> threshold now PASSES at 200 players — the first time any configuration has met
+> it above ~41.**
+
+Raw data: [`backend/loadtest/results/entity-id-interning/`](../loadtest/results/entity-id-interning/).
+
+## 20. Measured
+
+Same protocol, judged on bandwidth.
+
+| Players | JSON | Protobuf | + type enum | **+ id interning** | vs enum | vs JSON |
+|--:|--:|--:|--:|--:|--:|--:|
+| 50 | 60.1 | 26.8 | 23.0 | **11.3** | 50.7% | **81.1%** |
+| 100 | 120.1 | 54.4 | 45.6 | **22.4** | 50.9% | **81.3%** |
+| 150 | 181.5 | 81.4 | 68.9 | **33.9** | 50.8% | **81.3%** |
+| 200 | 242.1 | 108.8 | 91.8 | **45.9** | 50.0% | **81.0%** |
+
+Flat at ~51% across a 4× player range, and **81% cumulative against the JSON
+baseline** this work started from.
+
+**`resyncs = 0` and `players_failed = 0` at every level.** The recovery path
+exists and is tested, but nothing triggered it in ~40 minutes of load — the
+handle tables stayed in agreement, which is what the keyframe reset is for. A
+non-zero resync count here would have meant the two ends were disagreeing
+routinely and the bandwidth figure was measuring a stream the client never
+reconstructed.
+
+## 21. The threshold, finally
+
+ADR-7's acceptance criterion is `< 50 KB/s per client` on the mobile assumption.
+
+| encoding | bandwidth ceiling |
+|---|--:|
+| JSON | ~41 players |
+| Protobuf | ~92 |
+| + type enum | ~109 |
+| **+ id interning** | **> 200** (highest level swept is still under) |
+
+At 200 players the measurement is 45.9 KB/s, inside the threshold. The ceiling is
+no longer bracketed by this sweep — it is somewhere above 200 and would need
+higher levels to find.
+
+**This changes which constraint binds.** Bandwidth has been the limiting factor
+throughout this work, at roughly a third of the tick ceiling. It is now the
+looser of the two: the tick budget breaks before the bandwidth budget does. Any
+further capacity work should target tick time, and the ranked list in §9 —
+serialization off the tick, keyframe staggering, spatial-grid AOI — is where to
+start.
+
+**Caveat, unchanged and now more important:** tick figures from this host are a
+lower bound because the load generator shares the machine with the server under
+test. Now that tick is the binding constraint, the co-located-generator problem
+(ADR-7 item 6) is on the critical path rather than a footnote.
+
+## 22. Why the saving is ~51% rather than the ~41% the byte budget implied
+
+The `id` string is 17.0 of a 41.2-byte packed entity — 41%. The measured saving
+is higher because interning removes the id from *every* mention after the first,
+while the byte budget counted a single entity in isolation. In a delta stream
+most mentions are repeats, so the amortised saving exceeds the per-message share.
+
+The remaining terms are the numeric fields and framing, which are already close
+to minimal: position as two floats, hp/max_hp as varints, and a handle. Further
+wire savings would need to change *what* is sent — delta-encoding positions
+against the previous tick, dropping `max_hp` from every update when it rarely
+changes, or tiering update rate by distance — not how it is encoded.

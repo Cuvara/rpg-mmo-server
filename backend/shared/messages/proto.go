@@ -164,12 +164,13 @@ func unmarshalProtoPayload(data []byte, v any) error {
 					typ = name
 				}
 				ents[i] = EntitySnapshot{
-					ID:    e.Id,
-					Type:  typ,
-					X:     e.X,
-					Y:     e.Y,
-					HP:    int(e.Hp),
-					MaxHP: int(e.MaxHp),
+					ID:     e.Id,
+					Type:   typ,
+					X:      e.X,
+					Y:      e.Y,
+					HP:     int(e.Hp),
+					MaxHP:  int(e.MaxHp),
+					Handle: e.Handle,
 				}
 			}
 			t.Entities = ents
@@ -265,11 +266,12 @@ func snapshotPB(t SnapshotMessage) *wirepb.SnapshotMessage {
 		pb.Entities = make([]*wirepb.EntitySnapshot, len(t.Entities))
 		for i, e := range t.Entities {
 			ent := &wirepb.EntitySnapshot{
-				Id:    e.ID,
-				X:     e.X,
-				Y:     e.Y,
-				Hp:    int32(e.HP),
-				MaxHp: int32(e.MaxHP),
+				Id:     e.ID,
+				X:      e.X,
+				Y:      e.Y,
+				Hp:     int32(e.HP),
+				MaxHp:  int32(e.MaxHP),
+				Handle: e.Handle,
 			}
 			// Enum when we can (2 bytes), name when we cannot (2 + len). Never
 			// both: the reader prefers the enum, so setting both would make the

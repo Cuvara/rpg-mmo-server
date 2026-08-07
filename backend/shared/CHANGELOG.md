@@ -6,6 +6,26 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Entity-id interning on the protobuf wire.** A realistic entity id costs ~17
+  bytes on every mention; repeat mentions now carry a varint `handle` instead.
+  Measured at ~51% of downstream bandwidth.
+
+  Handles are per connection, allocated from 1, **reset at every keyframe**, and
+  **never reused within an interval**. The id is sent once per interval, on the
+  message that introduces the handle. `handle = 0` means "not interned", so JSON
+  connections and any peer that does not implement this are unaffected.
+
+- `ErrUnknownHandle`. `SnapshotState.Apply` now returns an error and **applies
+  nothing** when a snapshot references a handle it has no binding for.
+  Resolution happens before any mutation, because a half-applied snapshot is
+  worse than an unapplied one — it looks like valid state. The caller's correct
+  response is to request a keyframe, which re-introduces every binding.
+
+### Changed
+- **BREAKING (Go API):** `SnapshotState.Apply` returns `error`. Ignoring it means
+  silently accepting a desynchronised stream.
+
+### Added
 - **`EntityType` enum on the protobuf wire.** A string entity type costs 8 bytes
   ("player" = tag + length + 6 characters) for a value drawn from a set of two;
   the enum costs 2. Measured at ~15% of a whole 50-entity snapshot payload and

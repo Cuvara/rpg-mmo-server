@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- The generator now reconstructs authoritative state with `SnapshotState`, so it
+  resolves interned entity handles the way a real client must. Without this it
+  would consume handle-only entities with empty ids and report a smaller
+  bandwidth figure for a stream it never actually reconstructed.
+- `resyncs` in the JSON result: keyframes requested because a snapshot referenced
+  an unknown handle. Non-zero means the two ends disagreed about interning state.
+- `results/entity-id-interning/` — the four-level sweep, ~51% saved at every
+  level with zero resyncs.
+
+### Added
 - `results/entity-type-enum/` — the four-level sweep measuring the entity-type
   enum at ~15.4% of downstream bandwidth. All four levels passed the validity
   gate on the first attempt.

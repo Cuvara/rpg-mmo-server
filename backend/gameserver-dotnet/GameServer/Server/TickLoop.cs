@@ -155,7 +155,8 @@ public sealed class TickLoop
                 });
 
                 var nearby = SnapshotEncoder.GetNearbyEntities(_world, playerPos, _aoiRadius);
-                var snapshot = conn.DeltaState.Encode(_currentTick, ackTick, nearby, _keyframeInterval);
+                var snapshot = conn.DeltaState.Encode(_currentTick, ackTick, nearby, _keyframeInterval,
+                    intern: conn.Encoding == WireEncoding.Proto);
                 var env = WireProtocol.NewEnvelope(MsgType.Snapshot, snapshot, conn.Encoding);
                 conn.Send(env);
                 _snapshotsThisTick++;

@@ -58,6 +58,28 @@ public sealed class SnapshotDeltaState
         public override int GetHashCode() => HashCode.Combine(Type, X, Y, Hp, MaxHp);
     }
 
+    /// <summary>
+    /// Entity id to the per-connection handle currently standing in for it.
+    /// </summary>
+    /// <remarks>
+    /// Reset at every keyframe, in lockstep with <see cref="_lastSent"/> — the
+    /// two describe the same thing (what this client has been told) and must not
+    /// be allowed to drift apart. Resetting at the keyframe is also what bounds
+    /// a disagreement: whatever the client believes, a keyframe re-introduces
+    /// every binding and repairs it within one interval.
+    /// </remarks>
+    private readonly Dictionary<string, uint> _handles = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Next handle to hand out. Starts at 1 because 0 means "not interned" on
+    /// the wire; reset at each keyframe, which keeps handles small enough to be
+    /// a one- or two-byte varint.
+    /// </summary>
+    private uint _nextHandle = 1;
+
+    /// <summary>Whether this connection's encoding supports handles. See Encode.</summary>
+    private bool _intern;
+
     private readonly Dictionary<string, SentView> _lastSent = new();
     private readonly HashSet<string> _seen = new(StringComparer.Ordinal);
     private int _sinceKeyframe;
@@ -129,8 +151,17 @@ public sealed class SnapshotDeltaState
     /// Snapshots between keyframes. &lt;= 0 disables delta encoding entirely (every
     /// snapshot is a keyframe) — the escape hatch if a client cannot merge deltas.
     /// </param>
-    public SnapshotMessage Encode(ulong tick, ulong ackTick, List<EntityState> nearby, int keyframeInterval)
+    /// <param name="intern">
+    /// Whether to replace repeated entity ids with per-connection handles. TRUE
+    /// only for Protobuf connections: the JSON encoding has no handle field, so
+    /// interning there would emit entities with an empty id and silently break
+    /// every pre-interning client. The encoding is a property of the connection,
+    /// so the caller passes it rather than this class guessing.
+    /// </param>
+    public SnapshotMessage Encode(ulong tick, ulong ackTick, List<EntityState> nearby, int keyframeInterval,
+        bool intern = false)
     {
+        _intern = intern;
         bool full = Interlocked.Exchange(ref _forceFull, 0) != 0
                     || keyframeInterval <= 0
                     || _sinceKeyframe >= keyframeInterval;
@@ -165,6 +196,10 @@ public sealed class SnapshotDeltaState
     {
         var msg = new SnapshotMessage { Tick = tick, AckTick = ackTick, Full = true };
         _lastSent.Clear();
+        // A keyframe is the synchronisation point for the handle space: both
+        // sides drop every binding and start again from 1.
+        _handles.Clear();
+        _nextHandle = 1;
 
         // Indexed for-loop, no LINQ, no enumerator boxing: this runs once per client per tick.
         for (int i = 0; i < nearby.Count; i++)
@@ -202,24 +237,61 @@ public sealed class SnapshotDeltaState
             {
                 if (!_seen.Contains(id)) msg.Removed.Add(id);
             }
-            for (int i = 0; i < msg.Removed.Count; i++) _lastSent.Remove(msg.Removed[i]);
+            for (int i = 0; i < msg.Removed.Count; i++)
+            {
+                _lastSent.Remove(msg.Removed[i]);
+                // The handle is NOT returned to the pool: _nextHandle only ever
+                // advances within an interval. Freeing it would allow reuse, and
+                // reuse is the failure this design exists to avoid.
+                _handles.Remove(msg.Removed[i]);
+            }
         }
 
         return msg;
     }
 
-    private static EntitySnapshot ToMsg(in EntityState e)
+    /// <summary>
+    /// Build the wire entity, interning its id against this connection's handle
+    /// table.
+    /// </summary>
+    /// <remarks>
+    /// The id string is written ONLY on the message that introduces the handle.
+    /// Every later mention costs a varint instead of ~17 bytes. A handle is never
+    /// reused within a keyframe interval: reuse would let a client that missed a
+    /// despawn attribute an update to the wrong entity, which is wrong state
+    /// rather than absent state and far harder to detect.
+    /// </remarks>
+    private EntitySnapshot ToMsg(in EntityState e)
     {
         var msg = new EntitySnapshot
         {
-            Id = e.Id,
             X = e.Position.X,
             Y = e.Position.Y,
             Hp = e.Hp,
             MaxHp = e.MaxHp
         };
-        // Enum when the name is known (2 bytes), string fallback when it is not.
         EntityTypes.SetType(msg, e.Type);
+
+        if (!_intern)
+        {
+            // JSON: never intern. The id is the only identifier that encoding has.
+            msg.Id = e.Id;
+            return msg;
+        }
+
+        if (_handles.TryGetValue(e.Id, out uint handle))
+        {
+            // Already introduced this interval: handle alone.
+            msg.Handle = handle;
+        }
+        else
+        {
+            // First mention: carry both, so the receiver learns the binding.
+            handle = _nextHandle++;
+            _handles[e.Id] = handle;
+            msg.Handle = handle;
+            msg.Id = e.Id;
+        }
         return msg;
     }
 }
