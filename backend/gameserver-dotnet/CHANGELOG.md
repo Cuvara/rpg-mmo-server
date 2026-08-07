@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **The last three soft skips in the test suite now report as real skips.** Tests
+  gated on an external dependency used to `Console.WriteLine("[SKIP] ...")` and
+  `return`, which xUnit records as **PASSED** — so a run without the dependency
+  reported the same totals as a full run and absence of coverage was
+  indistinguishable from coverage. The postgres/redis fixtures were converted to
+  `Skip.IfNot` earlier; these three were missed:
+  - `MigratorTests.EmbeddedMigrations_MatchDeployCopies` and
+    `MigratorTests.InitGamestateSql_MatchesFirstMigration` — gated on the deploy
+    SQL being reachable in the repo tree; now `[SkippableFact]` + `Skip.If`.
+  - `PostgresPlayerStoreTests.Save_AfterDatabaseGoesAway_SurfacesErrorAndIncrementsMetric`
+    — its *dedicated* throwaway container (the one it kills mid-test) could fail to
+    start after the shared-fixture gate had already passed, silently voiding the
+    test; now `Skip.If`.
+  No assertion was weakened and nothing skips unconditionally. Verified both
+  directions: docker up → `Passed: 287, Skipped: 0`; docker off `PATH` →
+  `Passed: 261, Skipped: 26`.
+- Test convention documented in `CLAUDE.md` (§ Testing) so the soft-skip pattern is
+  not reintroduced: dependency-gated tests must skip, never silently pass.
+
 ### Security
 - **Join tokens are verified with `JOIN_TOKEN_SECRET`, not `JWT_SECRET`.** The join
   secret is distributed to every game-server pod; the Nakama auth secret is not.

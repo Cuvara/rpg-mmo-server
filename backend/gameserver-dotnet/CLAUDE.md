@@ -55,6 +55,43 @@ docker build -f deploy/docker/Dockerfile.gameserver-dotnet -t rpg-mmo/gameserver
 - Integration tests for full tick loop + client simulation
 - All tests must pass before merge (CI enforces this)
 
+### Dependency-gated tests MUST skip, never silently pass
+
+A test that cannot run because an external dependency is missing (docker, postgres,
+redis, a file outside the repo tree) **must report as SKIPPED**. Never write:
+
+```csharp
+[Fact]
+public void Thing()
+{
+    if (!_fixture.Available) { Console.WriteLine("[SKIP] ..."); return; }  // ❌ recorded as PASSED
+```
+
+An early `return` is a *soft skip*: xUnit records the test as **passed**, so a run
+with docker down reports the same `Passed: 287, Skipped: 0` as a full run. Absence
+of coverage becomes indistinguishable from full coverage — the same failure mode
+that once let an empty integration suite report green for weeks.
+
+Use `Xunit.SkippableFact` instead — `[SkippableFact]` / `[SkippableTheory]` plus
+`Skip.If(...)` / `Skip.IfNot(...)`, or the fixture helpers
+`PostgresFixture.SkipUnlessAvailable()` / `RedisFixture.SkipUnlessAvailable()`:
+
+```csharp
+[SkippableFact]
+public void Thing()
+{
+    _pg.SkipUnlessAvailable(nameof(Thing));   // ✅ real skip, shows in the summary
+```
+
+The inverse is equally wrong: never skip unconditionally, and never soften an
+assertion to make a test "pass" without its dependency. A test that skips when it
+could have run is the same lie in the other direction.
+
+Verify both directions when touching this: with docker up the suite reports
+`Skipped: 0`; with docker off `PATH` it reports a non-zero `Skipped:` and a
+correspondingly lower `Passed:`. CI (ubuntu-latest) always has docker, so any skip
+there is a real signal, not background noise.
+
 ## Dependencies
 
 - `System.Text.Json` — JSON serialization (AOT-compatible with source generators)
