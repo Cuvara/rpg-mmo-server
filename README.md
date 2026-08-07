@@ -144,15 +144,20 @@ subtests each).
 
 ## Deployment Tiers
 
-> **⚠️ ESTIMATES — UNBENCHMARKED.** No load test has been run against this stack.
-> See [ADR-7](backend/docs/ARCHITECTURE-DECISIONS.md) for the benchmark plan.
+**Measured:** one game server holds **150 concurrent players** before the 15Hz
+tick budget breaks; the bottleneck is snapshot JSON serialization, not the AOI
+scan. Full report: [BENCHMARK.md](backend/docs/BENCHMARK.md).
 
-| Tier | Cost/mo | CCU |
-|------|---------|-----|
-| Dev/Alpha | $40-60 | < 200 |
-| Beta | $80-150 | 200-500 |
-| Soft Launch | $200-400 | 500-2000 |
-| Growth | $400-1000+ | 2000-5000+ |
+> **⚠️ Costs and tier CCU below are still estimates** — the measurement above came
+> from a dev workstation, and no VPS load test has been run. See
+> [ADR-7](backend/docs/ARCHITECTURE-DECISIONS.md).
+
+| Tier | Cost/mo ⚠️ | CCU ⚠️ | Game servers @ 150 |
+|------|---------|-----|-----|
+| Dev/Alpha | $40-60 | < 200 | 2 |
+| Beta | $80-150 | 200-500 | 2-4 |
+| Soft Launch | $200-400 | 500-2000 | 4-14 |
+| Growth | $400-1000+ | 2000-5000+ | 14-34 |
 
 All open-source stack: Nakama, k3s, Agones, PostgreSQL, Redis — $0 license.
 

@@ -137,17 +137,37 @@ merge algorithm: **`backend/gameserver-dotnet/docs/API.md`**.
 
 ## Deployment Tiers (VPS + k3s, all open-source $0 license)
 
-> **⚠️ ESTIMATES — UNBENCHMARKED.** Every CCU and cost figure below is a planning
-> estimate. No load test has ever been run against this stack. Do not size a launch
-> on these numbers. See `backend/docs/ARCHITECTURE-DECISIONS.md` ADR-7 for the
-> benchmark plan and acceptance thresholds.
+> **⚠️ COST AND TIER CCU FIGURES ARE STILL ESTIMATES.** Costs below are planning
+> figures and no VPS-hardware load test has been run. Do not size a launch on the
+> tier rows. What *has* been measured is the per-game-server ceiling, below.
 
-| Tier | Cost/mo | Setup | CCU |
-|------|---------|-------|-----|
-| Dev/Alpha | $40-60 | 1 VPS all-in-one, pg_dump daily | <200 |
-| Beta | $80-150 | 2 VPS (app+DB), CDN, Grafana | 200-500 |
-| Soft Launch | $200-400 | 3 VPS (Nakama+GW, game servers, DB), Redis dedicated | 500-2000 |
-| Growth | $400-1000+ | Multi-node k3s, managed DB optional, Redis Sentinel | 2000-5000+ |
+**Measured per-game-server capacity** (`backend/docs/BENCHMARK.md`, 2026-08-07,
+develop @ `a19bfed`):
+
+| Metric | Measured | Notes |
+|--------|----------|-------|
+| Players per game server | **150** | tick p99 crosses the 66.67ms budget at 160 |
+| Bottleneck | **snapshot JSON serialization** (~80% of tick), AOI scan ~20% | not AOI, as previously assumed |
+| Downstream bandwidth | **1.22 KB/s per in-AOI player** | 184 KB/s/client at 150 players |
+| Mobile-viable density | **~41 players** | where ADR-7's < 50 KB/s/client threshold breaks |
+| RAM per game server | **~30 MiB idle → ~82 MiB at 200 players** | well inside the 128Mi pod limit |
+
+> ⚠️ Measured on a WSL2 dev workstation that was also running the load generator
+> (which used more CPU than the server under test), Docker Desktop and Kubernetes.
+> Treat 150 as a **lower bound**. The bottleneck ratio is far more robust than the
+> absolute number.
+
+| Tier | Cost/mo ⚠️ | Setup | CCU ⚠️ | Game servers implied |
+|------|---------|-------|-----|------|
+| Dev/Alpha | $40-60 | 1 VPS all-in-one, pg_dump daily | <200 | 2 @ 150 |
+| Beta | $80-150 | 2 VPS (app+DB), CDN, Grafana | 200-500 | 2-4 @ 150 |
+| Soft Launch | $200-400 | 3 VPS (Nakama+GW, game servers, DB), Redis dedicated | 500-2000 | 4-14 @ 150 |
+| Growth | $400-1000+ | Multi-node k3s, managed DB optional, Redis Sentinel | 2000-5000+ | 14-34 @ 150 |
+
+The "game servers implied" column is the only column derived from a measurement:
+tier CCU ÷ 150. It assumes dense crowds; sparser maps hold more. Bandwidth, not
+tick time, is the binding constraint for mobile clients until the snapshot
+encoding moves off JSON.
 
 ## Tech Stack Reference
 

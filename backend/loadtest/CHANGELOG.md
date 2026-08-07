@@ -1,0 +1,86 @@
+# Changelog
+
+All notable changes to the loadtest module are documented here.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [Unreleased]
+
+### Added
+
+- **New module `backend/loadtest`** — a load generator that drives N concurrent
+  virtual players through the real wire protocol (gateway `MsgAuth` /
+  `MsgEnterWorld` → game server `MsgJoinToken` → `MsgInput` at tick rate →
+  delta-merged `MsgSnapshot`), using the same `shared/messages` codec as
+  `smoketest` and the Unity client. Closes the tooling half of ADR-7.
+- Client-observed measurements: snapshot-interval and input→ack latency
+  percentiles (exact, over raw samples), join latency, per-client bytes/sec in
+  both directions, and connection failures bucketed by lifecycle phase.
+- Server-side measurements scraped from `/metrics` and **differenced across the
+  measurement window**: `gameserver_tick_duration_seconds` p50/p95/p99 plus the
+  exact fraction of ticks over budget, achieved tick rate, `players_online`,
+  `entities`, `snapshots_sent_total`, and the gateway's `connections_active`,
+  auth/enter-world ok+fail and rate-limit counters.
+- Cross-check between the two sides: snapshots received ÷ snapshots the server
+  enqueued, which detects the silent frame loss the game server's bounded
+  64-deep `DropOldest` send channel would otherwise hide.
+- Acceptance verdict per run against ADR-7's thresholds (tick p99 vs the 66.67ms
+  15Hz budget, snapshot cadence vs 2× the tick period, zero connection errors,
+  no frame loss), with `-fail-on-degraded` for CI.
+- Mid-run server-restart detection via counter reset, reported as `INVALID` and
+  outranking every other verdict — on a shared box a concurrent redeploy is
+  otherwise indistinguishable from a load-induced failure.
+- `-sweep 1,10,50,100` to run several player counts in one invocation, with
+  `-cooldown` between levels, a comparison table and a single JSON document
+  (schema `rpg-mmo.loadtest/v1`).
+- `-auth presigned|nakama`. Pre-signed is the default so a run measures the game
+  path rather than Nakama's login throughput; `-auth=nakama` drives the real
+  device-auth + `gateway_token` RPC path when login throughput is the question.
+- `-join gateway|direct`. `direct` mints the same `sid`-bound join token the
+  gateway would and dials the game server directly, which is both correct per
+  ADR-3 (the gateway is not in the gameplay data path) and necessary above ~10
+  players, since `GATEWAY_CONN_RATE_PER_MIN` defaults to 10/min per source IP.
+- `-movement cluster|still|spread` as the bottleneck experiment control: `still`
+  keeps the AOI scan and delta diff at full cost while collapsing the
+  serialization term, so the difference between modes at equal player count
+  measures serialization directly.
+- `scripts/bench.sh` — runs one level while sampling `docker stats` for the
+  server containers and the load generator's own CPU/RSS.
+- `results/` — the raw JSON from the 2026-08-07 benchmark run.
+
+### Documented
+
+- `README.md` — usage, what each flag measures, and why the non-obvious defaults
+  (pre-signed auth, direct join, movement modes) are what they are.
+- `backend/docs/BENCHMARK.md` (new) — methodology, machine, measured tables,
+  break point and bottleneck analysis, plus an explicit confounds section.
+
+### Findings
+
+Recorded here because they are properties of other modules, discovered by this
+one. Full detail in `backend/docs/BENCHMARK.md`.
+
+- **One game server holds ~150 concurrent players** in the worst-case dense-crowd
+  shape before `gameserver_tick_duration_seconds` p99 crosses the 66.67ms budget
+  (160 breaches at 67.6ms; 150 sits at 49.8ms). Measured on a WSL2 dev
+  workstation — a lower bound, not a production figure.
+- **The bottleneck is snapshot construction + JSON serialization (~80% of tick
+  cost), not the brute-force AOI scan (~20%)**, contradicting ADR-7's prediction.
+  Confirmed two independent ways: cluster-vs-still at equal player count (4-6×),
+  and the p50/p99 gap inside a single still-mode run (keyframe ticks vs delta
+  ticks).
+- **Downstream bandwidth is 1.22 KB/s per in-AOI player** and near-perfectly
+  linear, so ADR-7's own < 50 KB/s per client threshold breaks at ~41 players —
+  well before the tick budget does.
+- **Entities leak on disconnect** in `gameserver-dotnet`: `players_online`
+  returns to 0 but `gameserver_entities` stays at its peak indefinitely, turning
+  a bounded O(n²) tick cost into an unbounded one on a long-lived server.
+- **Keyframe stampede**: per-connection keyframe counters are not staggered, so a
+  cohort that joins together triggers full-state serialization for every client
+  on the same tick every 30 snapshots.
+- **The tick loop runs at ~14.7Hz, not 15Hz**, even at zero load — timer
+  granularity, so the effective budget is ~68ms.
+- **Client-side snapshot cadence cannot detect a blown tick budget.** At 200
+  players the tick was 51ms mean against a 66.67ms budget while clients still saw
+  an 87ms p99 snapshot interval, because the loop runs ticks late rather than
+  skipping them. Only `gameserver_tick_duration_seconds` catches this.
