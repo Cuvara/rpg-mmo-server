@@ -532,7 +532,8 @@ tolerable rather than a duplication exploit.
 >
 > **The cause was not what it first looked like.** The obvious reading is "p99 is
 > a noisy statistic". It is not: repeated at a fixed level on a quiet machine, p99
-> lands inside a **2.3% spread**. What p99 is, is *contention-sensitive*. Measured
+> lands inside a **5.1% spread** over six runs. What p99 is, is
+> *contention-sensitive*. Measured
 > at one level with a CD deploy sharing the host, four runs sat in 72.9–74.6ms
 > and two came back at 224.7 and 240.6ms — **p99 moved 3.3x while the tick mean
 > moved 1.7x** under the identical disturbance. The disturbance is bimodal, not a
@@ -573,7 +574,8 @@ tolerable rather than a duplication exploit.
 > this project as approximate to ±50**, including the 150 in the table above.
 >
 > **Bandwidth is unaffected and is the better criterion.** It reproduced to within
-> **0.4%** across two sweeps on different builds, because bytes on the wire are
+> **0.3%** across six runs at a fixed level and **0.4%** across two sweeps on
+> different builds, because bytes on the wire are
 > not a tail statistic and do not care what else the host is doing. It is also the
 > *binding* constraint — roughly a third of the tick ceiling. **Fleet sizing should
 > use the bandwidth threshold**, and a change whose purpose is sending fewer bytes

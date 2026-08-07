@@ -19,6 +19,18 @@ import (
 // 50 players, and a claim derived from it had to be withdrawn. See
 // backend/docs/BENCHMARK.md.
 //
+// Measured at a fixed 200-player level, six runs on a quiet box against two
+// disturbed by a deploy sharing the host:
+//
+//	tick p99   67.41..70.84ms  (5.1% spread)   vs  224.7, 240.6ms  — 3.3x
+//	tick mean  36.51..38.68ms  (5.9% spread)   vs  60.6,  65.6ms   — 1.7x
+//	KB/s       243.7..244.3    (0.3% spread)   vs  205.6, 210.7
+//
+// Note p99 and the mean are equally stable when the box is quiet; the mean's
+// advantage is only under contention. Bandwidth is an order of magnitude more
+// reproducible than either, which is why bandwidth-motivated work is judged on
+// bandwidth.
+//
 // # Why the rule is a median and not unanimity
 //
 // The obvious fix is "a level counts as passing only if it passed every run".
