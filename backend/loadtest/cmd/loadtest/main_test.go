@@ -75,7 +75,7 @@ func TestExtractSweepFlags(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rest, sweep, cooldown, failOn, err := extractSweepFlags(tt.args)
+			rest, sweep, cooldown, failOn, _, err := extractSweepFlags(tt.args)
 			if err != nil {
 				t.Fatalf("extractSweepFlags: %v", err)
 			}
@@ -107,7 +107,7 @@ func TestExtractSweepFlagsErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, _, _, _, err := extractSweepFlags(tt.args); err == nil {
+			if _, _, _, _, _, err := extractSweepFlags(tt.args); err == nil {
 				t.Errorf("extractSweepFlags(%v) = nil error, want an error", tt.args)
 			}
 		})

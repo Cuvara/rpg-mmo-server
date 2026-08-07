@@ -8,6 +8,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`-repeat N` and a ceiling that is a decidable output rather than a one-shot
+  threshold crossing.** `ComputeCeiling` groups repeated runs of a level and
+  decides it on the **median** tick p99, reporting the min..max bracket alongside
+  and naming any level whose runs straddle the budget.
+
+  Unanimity was rejected with arithmetic, not taste: the disturbance on this host
+  is bimodal (a CD deploy sharing the machine), and with 2 runs in 6 disturbed the
+  chance that all N are clean is (4/6)^N — 0.44 at N=2, **0.30 at N=3**, 0.20 at
+  N=4. A unanimity rule marks a genuinely-passing level marginal ~70% of the time
+  at N=3 and gets worse as N grows. A median cannot be moved by a minority.
+
+  Levels are repeated in the **outer** loop, so run k of every level happens
+  before run k+1 of any: repeating a level back to back would correlate its runs
+  with whatever the host was doing for that one minute, which is the variance the
+  repeat exists to measure.
+
+- **`HostStats`** — load average and core count recorded per run, sampled after
+  the measurement window. Evidence for a human comparing two sweeps, explicitly
+  **never** an input to the verdict.
+
+  A tempting rule was tried and rejected: "achieved tick rate below the configured
+  rate means the process was starved, so the run is INVALID". A genuinely
+  saturated server loses ticks the same way — measured 10.46 ticks/s at 300
+  players and 12.51 at 400, both real capacity limits, against 12.87–13.48 for a
+  quiet box disturbed by a deploy. That rule would have classified real ceilings
+  as environment faults and removed them from the results, an error in the
+  optimistic direction. The tool cannot tell the two apart from its own metrics
+  and no longer pretends it can.
+
+### Changed
+
+- `scripts/encoding-sweep.sh` refuses to start while a `cd.yml` run is in progress
+  or queued. The load generator and the self-hosted deploy runner share a host, so
+  an overlapping deploy contaminates the sweep *and* the sweep can make the
+  deploy's smoke test flaky — which under the merge gate reads as a broken deploy
+  rather than a busy box. `SKIP_CD_CHECK=1` overrides, and says to record the
+  overlap. Only `cd.yml` is checked, deliberately: its deploy jobs are the only
+  self-hosted ones, while ci.yml/_go-module.yml/ci-dotnet.yml are all
+  `ubuntu-latest`.
+
+### Added
+
 - **`INVALID` verdicts: a level that did not measure what it claims is now
   excluded from aggregates rather than reported as a worse result.** `Verdict`
   gained a machine-readable `Invalid` field (previously INVALID existed only as a

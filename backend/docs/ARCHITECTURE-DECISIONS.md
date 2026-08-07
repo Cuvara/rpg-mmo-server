@@ -523,38 +523,61 @@ tolerable rather than a duplication exploit.
 > cost into an unbounded one on a long-lived server. BENCHMARK.md §7.
 
 > **UPDATE 2026-08-07 (b) — the acceptance criterion in this ADR is not
-> decidable as written, and must change.**
+> decidable as written, and has been changed.**
 >
-> This ADR defines the tick threshold as "p99 within the 66.67ms budget",
-> evaluated at one player count, from one run. Two full sweeps
-> ([BENCHMARK.md §16](BENCHMARK.md#16-reproduction-a-withdrawn-claim-and-a-run-that-lied-in-our-favour))
-> show that criterion cannot reproduce a ceiling to better than **±50 players**:
-> the same build measured p99 53.46ms and then 72.47ms at 200 players, straddling
-> the budget, while its tick *mean* and its p99 at 150 players barely moved. A
-> capacity figure derived this way inherits that instability, and one such figure
-> has already had to be withdrawn.
+> This ADR defined the tick threshold as "p99 within the 66.67ms budget",
+> evaluated at one player count from one run. The same build measured p99
+> 53.46ms and then 72.47ms at 200 players, straddling the budget, which moved a
+> reported ceiling by 50 players and forced a published claim to be withdrawn.
 >
-> **The criterion should be changed to one of the following, in preference order:**
+> **The cause was not what it first looked like.** The obvious reading is "p99 is
+> a noisy statistic". It is not: repeated at a fixed level on a quiet machine, p99
+> lands inside a **2.3% spread**. What p99 is, is *contention-sensitive*. Measured
+> at one level with a CD deploy sharing the host, four runs sat in 72.9–74.6ms
+> and two came back at 224.7 and 240.6ms — **p99 moved 3.3x while the tick mean
+> moved 1.7x** under the identical disturbance. The disturbance is bimodal, not a
+> smear, and this repo's load generator shares a machine with its self-hosted
+> deploy runner.
 >
-> 1. **Publish a band, not a number.** The ceiling is the highest level that
->    passes in *every* run of N ≥ 3. Levels that pass in some runs and not others
->    are the band, quoted as "150–200" rather than as either endpoint.
-> 2. **Judge on the mean and report the tail separately.** Tick mean reproduced
->    within 10% across runs where p99 moved 35%. "Mean within half the budget",
->    plus a separately reported p99, is decidable and still catches the tail
->    behaviour p99 exists to catch.
-> 3. **At minimum: never quote a ceiling from a single run.** Every ceiling
->    figure published before this update came from one sweep.
+> That correction matters for the withdrawn claim too: it means **53.46ms was the
+> anomalous reading and 72.47ms the reproducible one**, so json@200 genuinely
+> fails the budget.
 >
-> Until this is adopted, **treat every player-count ceiling in this project as
-> approximate to ±50**, including the 150 in the table above and the ~300 in
-> BENCHMARK.md Part II. The bandwidth figures are unaffected — they reproduced to
-> within 0.4% across builds and machines, because bytes on the wire are not a
-> tail statistic.
+> **More runs is the wrong fix, and the arithmetic says so.** A rule of "the level
+> passes only if it passed every one of N runs" gets *worse* as N grows: with 2
+> runs in 6 disturbed, the chance all N are clean is (4/6)^N — **0.44 at N=2, 0.30
+> at N=3, 0.20 at N=4**. Unanimity at N=3 would mark a genuinely-passing level
+> marginal roughly 70% of the time. N is not a defence against an outlier process.
 >
-> **The bandwidth threshold is therefore the more reliable of the two acceptance
-> criteria in this ADR, and it is also the binding one** (~93 players after
-> Protobuf, against a tick ceiling three times higher). Fleet sizing should use it.
+> **Adopted instead**, in `backend/loadtest`:
+>
+> 1. **Don't measure during a deploy.** `scripts/encoding-sweep.sh` refuses to
+>    start while a `cd.yml` run is in progress or queued. This is the actual fix;
+>    everything below is containment for when it is bypassed.
+> 2. **Decide a level on the MEDIAN p99 across its runs**, not on unanimity. A
+>    minority of disturbed runs cannot move a median.
+> 3. **Report the min..max bracket and flag straddles.** A level whose runs
+>    straddle the budget is still named, because that is the evidence a reader
+>    needs — it is just no longer allowed to silently decide the ceiling.
+> 4. **Record host load per run** (`host.load_avg_1`), as evidence, never as a
+>    verdict input. A tempting rule — "achieved tick rate below the configured
+>    rate means the process was starved, so the run is invalid" — was tried and
+>    **rejected**: a genuinely saturated server loses ticks the same way (measured
+>    10.46 ticks/s at 300 players and 12.51 at 400, both real capacity limits,
+>    against 12.87–13.48 for a quiet box disturbed by a deploy). Such a rule would
+>    classify real saturation as an environment fault and hide the ceiling — an
+>    error in the optimistic direction. The tool cannot tell the two apart from
+>    its own metrics and does not pretend to.
+>
+> **Until a level has been measured this way, treat every player-count ceiling in
+> this project as approximate to ±50**, including the 150 in the table above.
+>
+> **Bandwidth is unaffected and is the better criterion.** It reproduced to within
+> **0.4%** across two sweeps on different builds, because bytes on the wire are
+> not a tail statistic and do not care what else the host is doing. It is also the
+> *binding* constraint — roughly a third of the tick ceiling. **Fleet sizing should
+> use the bandwidth threshold**, and a change whose purpose is sending fewer bytes
+> should be judged on it rather than on a contention-sensitive CPU threshold.
 
 ### Context
 

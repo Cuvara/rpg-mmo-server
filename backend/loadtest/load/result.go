@@ -14,6 +14,10 @@ type Result struct {
 	Config ResultConfig `json:"config"`
 	Client ClientStats  `json:"client"`
 	Server ServerStats  `json:"server"`
+	// Host records what else the machine was doing. Evidence for a human, never
+	// an input to the verdict — see HostStats for why that distinction is load
+	// bearing.
+	Host HostStats `json:"host"`
 
 	// Verdict summarises the acceptance checks; see Evaluate.
 	Verdict Verdict `json:"verdict"`

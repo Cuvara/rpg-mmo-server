@@ -42,6 +42,34 @@ WARMUP="${WARMUP:-8s}"
 mkdir -p "$OUT"
 go build -o loadtest ./cmd/loadtest
 
+# Refuse to start while a CD deploy is running on this host.
+#
+# The load generator and the self-hosted runner share this machine, so an
+# overlapping deploy contaminates the sweep AND the sweep can make the deploy's
+# post-deploy smoke flaky — which under the merge gate reads as a broken deploy
+# rather than a busy box. Measured: p99 at a fixed level swung 72.9ms to 240.6ms
+# depending on whether a CD build phase was in flight, a 3.3x range, while the
+# tick mean moved only 1.7x.
+#
+# Only cd.yml is checked, and that is deliberate rather than an oversight: its
+# deploy jobs are the ONLY ones on this host (cd.yml uses
+# `runs-on: ${{ fromJSON(needs.resolve.outputs.runner_labels) }}` for them).
+# ci.yml, _go-module.yml and ci-dotnet.yml are all `ubuntu-latest`, i.e.
+# GitHub-hosted, so ordinary CI never contends with a sweep. Do not "fix" this by
+# widening it to all workflows — CI runs on nearly every push, and gating on
+# those would make sweeps effectively unrunnable.
+#
+# Set SKIP_CD_CHECK=1 to override (e.g. no gh, or a deliberately concurrent run).
+if [ "${SKIP_CD_CHECK:-0}" != "1" ] && command -v gh >/dev/null 2>&1; then
+  cd_status=$(gh run list --workflow=cd.yml -L 1 --json status --jq '.[0].status' 2>/dev/null || echo "")
+  if [ "$cd_status" = "in_progress" ] || [ "$cd_status" = "queued" ]; then
+    echo "error: a CD run is $cd_status on this host." >&2
+    echo "  A sweep now would be contaminated by it, and could make its smoke test flaky." >&2
+    echo "  Wait for it, or re-run with SKIP_CD_CHECK=1 and RECORD THE OVERLAP in the results." >&2
+    exit 1
+  fi
+fi
+
 start_server() {
   local image="$1"
   $DOCKER rm -f "$NAME" >/dev/null 2>&1 || true

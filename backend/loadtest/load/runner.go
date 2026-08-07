@@ -146,6 +146,9 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 	res.Server = aggregateServer(beforeGS, afterGS, beforeGW, afterGW, serverWindowSec,
 		firstErr(errGS, errGS2), firstErr(errGW, errGW2))
 	reconcile(&res.Client, &res.Server)
+	// Sampled after the window so it describes the run rather than whatever
+	// preceded it.
+	res.Host = ReadHostStats()
 	res.Verdict = Evaluate(res)
 	return res, nil
 }
@@ -337,6 +340,30 @@ func Evaluate(res *Result) Verdict {
 // headline numbers, and can look BETTER than a healthy one — a level whose
 // clients all died early reported a 97% bandwidth saving, because the bytes they
 // never received were indistinguishable from bytes the server never sent.
+//
+// # A deliberate asymmetry: this gate errs pessimistic, not optimistic
+//
+// It catches runs where the INSTRUMENT broke — clients failed, ratios impossible,
+// the server carrying load it was never given. It does NOT catch runs where the
+// HOST was stolen: a sweep interrupted by a deploy comes back with
+// players_failed=0, a received ratio of 1.005 and sane entity counts, and is
+// recorded as "degraded" — i.e. as though the server could not keep up, when in
+// truth the machine was busy elsewhere. That understates capacity.
+//
+// That gap is known and accepted rather than overlooked. The alternative was a
+// rule keyed on achieved tick rate, which was implemented, tested against
+// saturated runs already in the repo, and rejected: a genuinely overloaded server
+// loses ticks exactly like a starved one (10.46 ticks/s at 300 players, 12.51 at
+// 400, both real limits). Such a rule fails in the other direction, and in the
+// worse way — it would mark real capacity ceilings INVALID, so those levels would
+// not be reported wrongly, they would be ABSENT, and an absent level reads as a
+// sweep that simply did not go that high.
+//
+// So the trade is: a pessimistic level a human can see and question, over an
+// optimistic one that silently deletes evidence. Contention is handled where it
+// can actually be observed — externally, by refusing to sweep during a deploy
+// (scripts/encoding-sweep.sh) and by recording host load with every result
+// (HostStats).
 func validityFailure(res *Result) string {
 	c, s := &res.Client, &res.Server
 
