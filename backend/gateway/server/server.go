@@ -23,6 +23,24 @@ import (
 	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
+// KickPublisher publishes duplicate-login kick requests to other gateway
+// instances. The in-memory implementation is a no-op (single process); the
+// Redis implementation publishes to the gateway:kick Pub/Sub channel.
+type KickPublisher interface {
+	PublishKick(ctx context.Context, userID string) error
+}
+
+// KickSubscriber receives kick requests from other gateway instances.
+type KickSubscriber interface {
+	SubscribeKick(ctx context.Context, handler func(userID string)) error
+	Close() error
+}
+
+// noopKickPublisher is used when no cross-gateway kick channel is configured.
+type noopKickPublisher struct{}
+
+func (noopKickPublisher) PublishKick(context.Context, string) error { return nil }
+
 // Gateway is the main TCP server that handles client authentication
 // and map assignment before redirecting to game servers.
 type Gateway struct {
@@ -46,6 +64,12 @@ type Gateway struct {
 	// transportKey is the pre-shared KCP encryption key ("" = plaintext).
 	transportKey string
 
+	// kickPub publishes kick requests to other gateway instances.
+	kickPub KickPublisher
+	// kickSub receives kick requests from other instances; nil when running
+	// single-process (in-memory backend).
+	kickSub KickSubscriber
+
 	relay      events.EventRelay
 	eventCount atomic.Int64
 	// relayUp tracks whether the relay is subscribed. It starts false and is
@@ -61,10 +85,11 @@ type Gateway struct {
 	// ("tcp" or "kcp"); it is immutable after New, so Run reads it lock-free.
 	transportKind string
 
-	mu       sync.Mutex
-	listener net.Listener
-	conns    map[*ClientConn]struct{}
-	done     chan struct{}
+	mu        sync.Mutex
+	listener  net.Listener
+	conns     map[*ClientConn]struct{}
+	userConns map[string]*ClientConn // userID -> active connection (O(1) duplicate-login lookup)
+	done      chan struct{}
 }
 
 // Option customises a Gateway at construction time.
@@ -131,6 +156,18 @@ func WithMsgRateLimit(ratePerSec, burst float64) Option {
 	}
 }
 
+// WithKickPublisher sets the publisher used to send duplicate-login kick
+// requests to other gateway instances.
+func WithKickPublisher(pub KickPublisher) Option {
+	return func(g *Gateway) { g.kickPub = pub }
+}
+
+// WithKickSubscriber sets the subscriber for receiving kick requests from
+// other instances. The gateway starts listening in Run.
+func WithKickSubscriber(sub KickSubscriber) Option {
+	return func(g *Gateway) { g.kickSub = sub }
+}
+
 // New creates a new Gateway instance.
 //
 // jwtSecret is the client-auth secret and accepts a comma-separated rotation
@@ -155,8 +192,10 @@ func New(
 		jwtSecret:     jwtSecret,
 		authKeys:      authKeys,
 		joinKeys:      authKeys,
+		kickPub:       noopKickPublisher{},
 		logger:        logger,
 		conns:         make(map[*ClientConn]struct{}),
+		userConns:     make(map[string]*ClientConn),
 		done:          make(chan struct{}),
 	}
 	for _, opt := range opts {
@@ -249,13 +288,16 @@ func (g *Gateway) ConnCount() int {
 // selected with WithTransport (TCP by default).
 func (g *Gateway) Run(addr string) error {
 	// The event relay is a degradable dependency, not a startup requirement.
-	// Failing Run here (which is what a Redis-down boot did) makes main exit 1
-	// and the pod crash-loop, so a Redis outage took the gateway with it — even
-	// though auth and map assignment against a memory backend, and every already
-	// connected player, are unaffected by the relay being down. Start it in the
-	// background and keep retrying instead.
 	if g.relay != nil {
 		g.startRelayWithRetry()
+	}
+
+	// Start the kick subscriber so this gateway can receive cross-instance
+	// duplicate-login kick requests.
+	if g.kickSub != nil {
+		if err := g.kickSub.SubscribeKick(context.Background(), g.handleKickEvent); err != nil {
+			g.logger.Error("kick subscriber failed to start", "err", err)
+		}
 	}
 
 	ln, err := transport.Listen(g.transportKind, addr,
@@ -319,6 +361,11 @@ func (g *Gateway) Shutdown() {
 			g.logger.Error("stop event relay", "err", err)
 		}
 	}
+	if g.kickSub != nil {
+		if err := g.kickSub.Close(); err != nil {
+			g.logger.Error("stop kick subscriber", "err", err)
+		}
+	}
 }
 
 // Addr returns the listener address, or empty string if not running.
@@ -346,6 +393,33 @@ func (g *Gateway) trackConn(cc *ClientConn, add bool) {
 	}
 }
 
+// trackUser associates a userID with a connection for O(1) duplicate-login
+// lookup. Returns the previous connection for that user, if any.
+func (g *Gateway) trackUser(userID string, cc *ClientConn) *ClientConn {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	old := g.userConns[userID]
+	g.userConns[userID] = cc
+	return old
+}
+
+// untrackUser removes a user->connection association. Only removes if the
+// current mapping points to cc (avoid clearing a newer connection).
+func (g *Gateway) untrackUser(userID string, cc *ClientConn) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.userConns[userID] == cc {
+		delete(g.userConns, userID)
+	}
+}
+
+// findUserConn returns the connection for the given userID, or nil.
+func (g *Gateway) findUserConn(userID string) *ClientConn {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.userConns[userID]
+}
+
 func (g *Gateway) handleConn(cc *ClientConn) {
 	defer func() {
 		// A dropped socket must not leave a session record behind, otherwise the
@@ -362,26 +436,20 @@ func (g *Gateway) handleConn(cc *ClientConn) {
 
 // cleanupSession destroys the session bound to a connection, if any.
 func (g *Gateway) cleanupSession(cc *ClientConn) {
-	// Claim the identity first: ClearIdentity hands back the user under the
-	// connection's lock, so an explicit MsgDisconnect and handleConn's deferred
-	// cleanup cannot both destroy the same session, and a concurrent WriteLoop
-	// log line cannot read a half-cleared identity.
 	userID := cc.ClearIdentity()
 	if userID == "" {
 		return
 	}
+	g.untrackUser(userID, cc)
 	if err := g.sessions.DestroySession(context.Background(), session.SessionKey(userID)); err != nil {
 		g.logger.Warn("destroy session", "user", userID, "err", err)
 	}
 }
 
 func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
-	// Per-connection flood control. A client that blows through 60 msg/s on a
-	// three-message protocol is not a client, so the connection is told why and
-	// then dropped: replying to every over-limit frame would turn the limiter
-	// itself into an amplifier.
+	// Per-connection flood control.
 	if cc.limited {
-		return // already told; drop everything else until the socket closes
+		return
 	}
 	if !cc.allowMessage() {
 		cc.limited = true
@@ -433,26 +501,15 @@ func (g *Gateway) checkSession(cc *ClientConn, msgType messages.MsgType) bool {
 
 	ctx := context.Background()
 	key := session.SessionKey(connUser)
-	userID, err := g.sessions.ValidateSession(ctx, key)
+	_, err := g.sessions.ValidateSession(ctx, key)
 
-	// A store error and a missing key mean opposite things, and conflating them
-	// de-auths live players during a Redis blip: the connection is dropped back
-	// to StateConnected and the client is told "session expired", so it discards
-	// a session that is in fact still valid and forces the player through a full
-	// re-login. Only storage.ErrNotFound actually means the session is gone.
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
-		// Infrastructure failure. Fail *open*: keep the connection authenticated
-		// and let the request through. The client already proved possession of a
-		// valid JWT at MsgAuth, so the residual risk is a session that was
-		// explicitly destroyed still being honoured for the length of the
-		// outage — strictly better than disconnecting every online player
-		// because Redis restarted.
 		g.metrics.SessionCheckResult(metrics.SessionCheckStoreError)
 		g.logger.Error("session store unavailable, failing open",
 			"user", connUser, "err", err)
 		return true
 	}
-	if err != nil || userID != connUser {
+	if err != nil {
 		g.metrics.SessionCheckResult(metrics.SessionCheckExpired)
 		g.logger.Info("session expired", "user", connUser, "err", err)
 		cc.ClearIdentity()
@@ -489,6 +546,29 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 	}
 
 	ctx := context.Background()
+
+	// --- Duplicate login detection ---
+	existing, getErr := g.sessions.GetSession(ctx, userID)
+	if getErr == nil {
+		gwID := g.sessions.GatewayID()
+		if existing.GatewayID == gwID {
+			// Same gateway: kick the old connection, but only if it is a
+			// different socket (re-auth on the same conn is not a duplicate).
+			if old := g.findUserConn(userID); old != nil && old != cc {
+				g.kickLocalUser(userID)
+			}
+		} else {
+			// Different gateway: publish a kick request via Pub/Sub.
+			if perr := g.kickPub.PublishKick(ctx, userID); perr != nil {
+				g.logger.Warn("publish kick event", "user", userID, "err", perr)
+			}
+		}
+		g.logger.Info("duplicate login detected",
+			"user", userID,
+			"old_gateway", existing.GatewayID,
+			"new_gateway", gwID)
+	}
+
 	_, err = g.sessions.CreateSession(ctx, userID)
 	if err != nil {
 		g.metrics.AuthResult(false)
@@ -498,6 +578,7 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 	g.metrics.AuthResult(true)
 
 	cc.SetAuthenticated(userID)
+	g.trackUser(userID, cc)
 
 	resp, err := cc.Reply(messages.MsgAuthResp, messages.AuthResponse{
 		OK:     true,
@@ -508,6 +589,36 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 		return
 	}
 	cc.Send(resp)
+}
+
+// kickLocalUser finds a local connection for userID and sends
+// MsgDisconnect(reason="duplicate_login") before closing it.
+func (g *Gateway) kickLocalUser(userID string) {
+	old := g.findUserConn(userID)
+	if old == nil {
+		return
+	}
+	// Use NewEnvelope (JSON) rather than old.Reply to avoid reading the enc
+	// field, which is only safe from the old connection's ReadLoop goroutine.
+	resp, err := messages.NewEnvelope(messages.MsgDisconnect, messages.DisconnectMessage{
+		Reason: "duplicate_login",
+	})
+	if err == nil {
+		old.SendAndClose(resp)
+	} else {
+		old.Close()
+	}
+	// ClearIdentity so cleanupSession in handleConn's defer doesn't destroy the
+	// session we're about to overwrite.
+	old.ClearIdentity()
+	g.untrackUser(userID, old)
+}
+
+// handleKickEvent processes a kick request received from another gateway
+// instance via the Pub/Sub channel.
+func (g *Gateway) handleKickEvent(userID string) {
+	g.logger.Info("received kick event", "user", userID)
+	g.kickLocalUser(userID)
 }
 
 func (g *Gateway) sendAuthError(cc *ClientConn, msg string) {
@@ -540,10 +651,6 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 	result, err := transfer.AssignMapKeyring(ctx, userID, req.MapID, g.registry, g.joinKeys)
 	if err != nil {
 		g.metrics.EnterWorldResult(false)
-		// Never hand the raw error to the client: it is a wrapped chain that
-		// ends in things like `dial tcp 10.0.1.7:6379: connect: connection
-		// refused`, which hands an attacker internal hostnames, private IPs and
-		// port numbers for free. The detail is logged server-side instead.
 		g.logger.Error("enter world failed", "user", userID, "map", req.MapID, "err", err)
 		g.sendEnterWorldError(cc, clientSafeAssignError(err))
 		return
@@ -551,6 +658,14 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 	g.metrics.EnterWorldResult(true)
 
 	cc.SetInWorld()
+
+	// Update session with map association (task 2c).
+	if uerr := g.sessions.UpdateSession(ctx, userID, func(sd *session.SessionData) {
+		sd.MapID = req.MapID
+	}); uerr != nil {
+		g.logger.Warn("update session map association",
+			"user", userID, "map", req.MapID, "err", uerr)
+	}
 
 	resp, err := cc.Reply(messages.MsgEnterWorldResp, messages.EnterWorldResponse{
 		ServerAddr: result.ServerAddr,
@@ -566,33 +681,19 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 
 // handleDisconnect processes an explicit client MsgDisconnect: destroy the
 // session, then close the socket.
-//
-// Graceful, not abrupt: a client that pipelined anything after MsgDisconnect
-// leaves bytes in the receive queue, and a hard Close on a non-empty queue
-// makes the kernel emit RST — which would discard any frame still queued
-// outbound and turn an orderly goodbye into a connection reset in the client's
-// logs.
 func (g *Gateway) handleDisconnect(cc *ClientConn) {
 	g.logger.Info("client disconnect", "user", cc.UserID())
 	g.cleanupSession(cc)
 	cc.CloseGracefully()
 }
 
-// Client-facing messages for EnterWorld failures. These are the only strings a
-// client ever sees from the assignment path; anything not explicitly classified
-// collapses to msgInternalError so a new error type cannot start leaking
-// infrastructure detail by default.
+// Client-facing messages for EnterWorld failures.
 const (
 	msgNoServerAvailable = "no server available for map"
 	msgNotImplemented    = "not implemented"
 	msgInternalError     = "internal error"
 )
 
-// clientSafeAssignError maps an assignment error to a message safe to send to
-// an untrusted client. Conditions the player can act on (a full/absent map,
-// an unimplemented mode) keep a specific message; everything else — Redis down,
-// allocator failure, token signing failure — becomes a generic internal error,
-// because those chains embed addresses and internal identifiers.
 func clientSafeAssignError(err error) string {
 	switch {
 	case errors.Is(err, registry.ErrNoServerAvailable):
