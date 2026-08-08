@@ -6,6 +6,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `GatewayKickChannel` constant (`"gateway:kick"`) in `constants/keys.go` for
+  cross-gateway duplicate-login Pub/Sub coordination
+
 - **Entity-id interning on the protobuf wire.** A realistic entity id costs ~17
   bytes on every mention; repeat mentions now carry a varint `handle` instead.
   Measured at ~51% of downstream bandwidth.

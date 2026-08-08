@@ -14,6 +14,7 @@ import (
 // from its registry entry. Empty means TCP (backward compatible with entries
 // written before the transport field existed).
 type AssignResult struct {
+	ServerID   string
 	ServerAddr string
 	JoinToken  string
 	Transport  string
@@ -44,6 +45,7 @@ func AssignMapKeyring(ctx context.Context, userID, mapID string, reg *registry.R
 	}
 
 	return AssignResult{
+		ServerID:   srv.ServerID,
 		ServerAddr: srv.Addr,
 		JoinToken:  token,
 		Transport:  srv.Transport,

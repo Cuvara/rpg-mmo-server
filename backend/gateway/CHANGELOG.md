@@ -34,9 +34,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `KickSubscriber` interfaces with `WithKickPublisher` / `WithKickSubscriber`
   options; `handleKickEvent` processes incoming kick requests
 - **Session-server association tracking.** After a successful `MsgEnterWorld`
-  (join token minted), the session in the store is updated with `map_id` so
-  the gateway knows where each player is currently playing. Uses the new
-  `UpdateSession` method
+  (join token minted), the session in the store is updated with `server_id` and
+  `map_id` so the gateway knows where each player is currently playing. Uses
+  the new `UpdateSession` method. `AssignResult` gained a `ServerID` field
 - **User-to-connection lookup.** `userConns` map on `Gateway` enables O(1)
   connection lookup by `user_id` for local duplicate-login kicks.
   `trackUser`, `untrackUser`, `findUserConn` methods manage the mapping

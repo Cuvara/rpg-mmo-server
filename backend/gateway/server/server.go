@@ -659,12 +659,13 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 
 	cc.SetInWorld()
 
-	// Update session with map association (task 2c).
+	// Update session with server and map association (task 2c).
 	if uerr := g.sessions.UpdateSession(ctx, userID, func(sd *session.SessionData) {
+		sd.ServerID = result.ServerID
 		sd.MapID = req.MapID
 	}); uerr != nil {
-		g.logger.Warn("update session map association",
-			"user", userID, "map", req.MapID, "err", uerr)
+		g.logger.Warn("update session server association",
+			"user", userID, "server", result.ServerID, "map", req.MapID, "err", uerr)
 	}
 
 	resp, err := cc.Reply(messages.MsgEnterWorldResp, messages.EnterWorldResponse{
