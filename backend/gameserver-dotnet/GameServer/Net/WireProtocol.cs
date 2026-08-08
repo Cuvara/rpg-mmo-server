@@ -240,6 +240,15 @@ public static class WireProtocol
             Encoding = encoding
         };
 
+    /// <inheritdoc cref="NewEnvelope(MsgType, JoinTokenResponse, WireEncoding)"/>
+    public static Envelope NewEnvelope(MsgType type, DisconnectMessage payload, WireEncoding encoding) =>
+        new()
+        {
+            Type = RequireMsgType(type),
+            Payload = encoding == WireEncoding.Proto ? payload.ToByteArray() : JsonWriter.Write(payload),
+            Encoding = encoding
+        };
+
     /// <summary>Build an envelope with no payload (Disconnect, Resync).</summary>
     public static Envelope NewEmptyEnvelope(MsgType type, WireEncoding encoding) =>
         new()
