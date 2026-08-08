@@ -49,6 +49,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `cmd/gateway` now passes `--instance-id` / hostname as `gatewayID` to
   `NewSessionManager`, so every session record is tagged with the owning
   gateway instance
+- **30-second unauthenticated connection timeout.** Connections that do not send
+  `MsgAuth` within 30 seconds are closed automatically, preventing connection-slot
+  exhaustion from idle or malicious clients.
+
+### Changed
+- **`JOIN_TOKEN_SECRET` is now mandatory (fatal if unset).** The gateway exits
+  with a fatal error when the env var is empty or unset. The fallback to
+  `JWT_SECRET` has been removed.
+- **`GenerateJoinTokenKeyring` rejects empty `serverID`.** An empty server ID in
+  the join token would bypass the game server's `sid` check.
 
 ### Added
 - **The gateway answers in the encoding the client spoke.** `ClientConn` latches

@@ -13,6 +13,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   clients receive the notification and can reconnect to another server instead
   of timing out. Adds `WireProtocol.NewEnvelope` for `DisconnectMessage` (with
   reason) and the corresponding JSON serializer in `WireJson`
+- **JTI replay protection.** `JtiTracker` rejects consumed join-token JTIs for
+  60 seconds (2x the 30s token TTL). A replayed token returns "Token already used".
+- **5-second clock skew tolerance.** `JwtValidator` now accepts tokens up to 5
+  seconds past their `exp`. Constant: `JwtValidator.ClockSkewSeconds`.
+
+### Changed
+- **`JOIN_TOKEN_SECRET` is now mandatory (fatal if unset).** `Program.cs` exits
+  with code 2 when the env var is empty. `EffectiveJoinTokenSecret` (fallback to
+  `JWT_SECRET`) has been removed from `ServerOptions`.
+- **Mandatory server ID check.** The game server now rejects join tokens with an
+  empty `sid` claim or a `sid` that does not match `ServerId`. The previous
+  double-empty bypass has been removed.
 
 ### Fixed
 - **`ObjectDisposedException` out of `ShutdownAsync` when `Close()` raced

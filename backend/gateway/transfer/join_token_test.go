@@ -35,8 +35,8 @@ func TestJoinToken_InvalidToken(t *testing.T) {
 
 func TestJoinToken_Expired(t *testing.T) {
 	secret := "test-secret"
-	// Create a token that is already expired by signing directly with negative TTL.
-	token, err := jwt.SignWithServer("user1", "srv1", secret, -1*time.Second)
+	// Create a token expired beyond the 5s clock skew tolerance.
+	token, err := jwt.SignWithServer("user1", "srv1", secret, -10*time.Second)
 	if err != nil {
 		t.Fatalf("SignWithServer() error: %v", err)
 	}
@@ -44,6 +44,14 @@ func TestJoinToken_Expired(t *testing.T) {
 	_, _, err = ValidateJoinToken(token, secret)
 	if err == nil {
 		t.Error("ValidateJoinToken() should fail on expired token")
+	}
+}
+
+func TestGenerateJoinTokenKeyring_EmptyServerID(t *testing.T) {
+	keys, _ := jwt.NewKeyring("test-secret")
+	_, err := GenerateJoinTokenKeyring("user1", "", keys)
+	if err == nil {
+		t.Error("GenerateJoinTokenKeyring() should fail with empty serverID")
 	}
 }
 

@@ -9,6 +9,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `GatewayKickChannel` constant (`"gateway:kick"`) in `constants/keys.go` for
   cross-gateway duplicate-login Pub/Sub coordination
 
+- **JTI claim in join tokens.** `SignWithServer` now generates a UUID v4 `jti`
+  claim when `serverID` is non-empty. Enables per-server replay protection.
+- **5-second clock skew tolerance.** `Claims.IsExpired()` now accepts tokens up
+  to 5 seconds past their `exp`, so small clock differences between gateway and
+  game server do not cause spurious rejections. Constant: `jwt.ClockSkew`.
+
+### Changed
+- **BREAKING (Go API):** `Config.EffectiveJoinTokenSecret` removed. `JOIN_TOKEN_SECRET`
+  is now mandatory; there is no fallback to `JWT_SECRET`.
+
+### Added
 - **Entity-id interning on the protobuf wire.** A realistic entity id costs ~17
   bytes on every mention; repeat mentions now carry a varint `handle` instead.
   Measured at ~51% of downstream bandwidth.

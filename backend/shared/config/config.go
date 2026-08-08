@@ -23,9 +23,8 @@ type Config struct {
 	// The FIRST entry signs, every entry verifies.
 	JWTSecret string
 	// JoinTokenSecret is the HS256 secret (or rotation list) for the
-	// gateway -> game server join token. Empty means "reuse JWTSecret", which
-	// is the pre-split behaviour and is what every service warns about at
-	// start-up: one leaked secret then compromises both hops.
+	// gateway -> game server join token. REQUIRED: both gateway and game
+	// server refuse to start when it is empty.
 	JoinTokenSecret string
 	// TransportKey is the pre-shared key that encrypts KCP datagrams
 	// (32-byte hex recommended). Empty means plaintext. See shared/transport.
@@ -60,17 +59,6 @@ type Config struct {
 
 	// Logging
 	LogLevel string
-}
-
-// EffectiveJoinTokenSecret returns the secret spec used for gateway -> game
-// server join tokens, falling back to JWTSecret when JOIN_TOKEN_SECRET is
-// unset. The second return value reports whether the fallback was taken, so
-// callers can emit the start-up warning exactly once.
-func (c Config) EffectiveJoinTokenSecret() (spec string, sharedWithAuth bool) {
-	if c.JoinTokenSecret != "" {
-		return c.JoinTokenSecret, false
-	}
-	return c.JWTSecret, true
 }
 
 // Load reads configuration from environment variables with sensible defaults.
