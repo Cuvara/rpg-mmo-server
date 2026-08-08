@@ -18,6 +18,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 - **BREAKING (Go API):** `Config.EffectiveJoinTokenSecret` removed. `JOIN_TOKEN_SECRET`
   is now mandatory; there is no fallback to `JWT_SECRET`.
+- **MsgTransferMap / MsgTransferMapResp (types 13/14).** Wire messages for
+  client-driven map transfer. `TransferMapRequest` carries a `map_id`;
+  `TransferMapResponse` carries `ok` and `error`. Protobuf + JSON codec support
+  added in `messages/` and `proto/wire.proto`.
 
 ### Added
 - **Entity-id interning on the protobuf wire.** A realistic entity id costs ~17
