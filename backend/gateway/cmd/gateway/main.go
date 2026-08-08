@@ -188,7 +188,16 @@ func main() {
 		log.Info("using in-memory backend (single process)")
 	}
 
-	sessions := session.NewSessionManager(sessionStore)
+	// The gateway_id labels every session this instance creates, enabling
+	// cross-gateway duplicate-login coordination.
+	gatewayID := *instanceID
+	if gatewayID == "" {
+		gatewayID, _ = os.Hostname()
+	}
+	if gatewayID == "" {
+		gatewayID = "gateway"
+	}
+	sessions := session.NewSessionManager(sessionStore, gatewayID)
 
 	// Allocator: with --allocator=agones the registry asks the Agones allocation
 	// API for a GameServer whenever no live server can serve a map. Without it
