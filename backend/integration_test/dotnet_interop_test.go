@@ -514,7 +514,7 @@ func TestDotnetInterop_WrongServerID(t *testing.T) {
 	defer client.Close()
 
 	// Sign a join token for a DIFFERENT server ID
-	wrongToken, err := jwt.SignWithServer("player-wrong", "wrong-server-id", dotnetJWTSecret, 5*time.Minute)
+	wrongToken, err := jwt.SignWithServer("player-wrong", "wrong-server-id", dotnetJoinTokenSecret, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("jwt.SignWithServer: %v", err)
 	}
@@ -561,7 +561,7 @@ func TestDotnetInterop_MultipleClients(t *testing.T) {
 			t.Fatalf("connect client %s: %v", playerID, err)
 		}
 
-		token, err := jwt.SignWithServer(playerID, dotnetServerID, dotnetJWTSecret, 5*time.Minute)
+		token, err := jwt.SignWithServer(playerID, dotnetServerID, dotnetJoinTokenSecret, 5*time.Minute)
 		if err != nil {
 			t.Fatalf("sign token for %s: %v", playerID, err)
 		}
@@ -634,7 +634,7 @@ func TestDotnetInterop_ClientDisconnect(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 
-	token, err := jwt.SignWithServer("disconnect-player", dotnetServerID, dotnetJWTSecret, 5*time.Minute)
+	token, err := jwt.SignWithServer("disconnect-player", dotnetServerID, dotnetJoinTokenSecret, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("sign token: %v", err)
 	}
@@ -667,7 +667,7 @@ func TestDotnetInterop_ClientDisconnect(t *testing.T) {
 	defer client2.Close()
 
 	// New client can still join
-	token2, _ := jwt.SignWithServer("disconnect-player-2", dotnetServerID, dotnetJWTSecret, 5*time.Minute)
+	token2, _ := jwt.SignWithServer("disconnect-player-2", dotnetServerID, dotnetJoinTokenSecret, 5*time.Minute)
 	joinEnv2, _ := messages.NewEnvelope(messages.MsgJoinToken, messages.JoinTokenRequest{Token: token2})
 	if err := client2.Send(joinEnv2); err != nil {
 		t.Fatalf("send join after disconnect: %v", err)
@@ -770,7 +770,7 @@ func TestDotnetInterop_WireProtocolCompat(t *testing.T) {
 	defer client.Close()
 
 	// Sign a valid join token
-	token, err := jwt.SignWithServer("wire-test-player", dotnetServerID, dotnetJWTSecret, 5*time.Minute)
+	token, err := jwt.SignWithServer("wire-test-player", dotnetServerID, dotnetJoinTokenSecret, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("sign token: %v", err)
 	}
@@ -867,7 +867,7 @@ func TestDotnetInterop_MixedEncodingsOnOneServer(t *testing.T) {
 		if enc == messages.EncodingProto {
 			userIDForInterning = userID
 		}
-		token, err := jwt.SignWithServer(userID, dotnetServerID, dotnetJWTSecret, 5*time.Minute)
+		token, err := jwt.SignWithServer(userID, dotnetServerID, dotnetJoinTokenSecret, 5*time.Minute)
 		if err != nil {
 			t.Fatalf("%s: sign token: %v", enc, err)
 		}
