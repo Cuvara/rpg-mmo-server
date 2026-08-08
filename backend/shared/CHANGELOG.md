@@ -8,6 +8,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 - `GatewayKickChannel` constant (`"gateway:kick"`) in `constants/keys.go` for
   cross-gateway duplicate-login Pub/Sub coordination
+- **MsgPing/MsgPong (type 11/12) heartbeat messages.** `PingMessage{timestamp}`
+  carries the sender's monotonic clock; `PongMessage{timestamp, server_time}`
+  echoes it back with the responder's wall clock. Both JSON and Protobuf
+  encode/decode are implemented. Wire type numbers are frozen.
+
+- **MsgKick (type 15) server→client forced disconnect.** `KickMessage{reason}`
+  carries a machine-readable reason string. Defined reasons: `duplicate_login`,
+  `server_shutdown`, `session_expired`, `rate_limited`.
 
 - **JTI claim in join tokens.** `SignWithServer` now generates a UUID v4 `jti`
   claim when `serverID` is non-empty. Enables per-server replay protection.

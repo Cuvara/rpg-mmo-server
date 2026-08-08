@@ -443,6 +443,7 @@ func (g *Gateway) handleConn(cc *ClientConn) {
 	}
 
 	go cc.WriteLoop()
+	go cc.HeartbeatLoop()
 	cc.ReadLoop(g.handleMessage)
 }
 
@@ -476,6 +477,18 @@ func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
 			return
 		}
 		cc.SendAndClose(resp)
+		return
+	}
+
+	// Heartbeat messages are handled before session checks: a MsgPong that
+	// refreshes the timeout must not be rejected because a Redis blip made the
+	// session lookup fail, and pings carry no session semantics at all.
+	switch env.Type {
+	case messages.MsgPing:
+		g.handlePing(cc, env)
+		return
+	case messages.MsgPong:
+		cc.RecordPong()
 		return
 	}
 
@@ -722,6 +735,21 @@ func clientSafeAssignError(err error) string {
 	default:
 		return msgInternalError
 	}
+}
+
+func (g *Gateway) handlePing(cc *ClientConn, env messages.Envelope) {
+	var req messages.PingMessage
+	if err := env.UnmarshalPayload(&req); err != nil {
+		return
+	}
+	resp, err := cc.Reply(messages.MsgPong, messages.PongMessage{
+		Timestamp:  req.Timestamp,
+		ServerTime: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		return
+	}
+	cc.Send(resp)
 }
 
 func (g *Gateway) sendEnterWorldError(cc *ClientConn, msg string) {

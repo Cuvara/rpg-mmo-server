@@ -93,3 +93,99 @@ func TestSnapshotMessage(t *testing.T) {
 		t.Errorf("Entity[0].ID = %q, want %q", decoded.Entities[0].ID, "p1")
 	}
 }
+
+func TestPingPongRoundTrip(t *testing.T) {
+	for _, enc := range []Encoding{EncodingJSON, EncodingProto} {
+		t.Run(enc.String(), func(t *testing.T) {
+			ping := PingMessage{Timestamp: 1234567890}
+			env, err := NewEnvelopeAs(enc, MsgPing, ping)
+			if err != nil {
+				t.Fatalf("NewEnvelopeAs(Ping): %v", err)
+			}
+			if env.Type != MsgPing {
+				t.Errorf("Type = %d, want %d", env.Type, MsgPing)
+			}
+
+			frame, err := Encode(env)
+			if err != nil {
+				t.Fatalf("Encode: %v", err)
+			}
+			decoded, err := Decode(bytes.NewReader(frame))
+			if err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+
+			var got PingMessage
+			if err := decoded.UnmarshalPayload(&got); err != nil {
+				t.Fatalf("UnmarshalPayload(Ping): %v", err)
+			}
+			if got.Timestamp != 1234567890 {
+				t.Errorf("Timestamp = %d, want 1234567890", got.Timestamp)
+			}
+
+			// Pong
+			pong := PongMessage{Timestamp: 1234567890, ServerTime: 9999999999}
+			env2, err := NewEnvelopeAs(enc, MsgPong, pong)
+			if err != nil {
+				t.Fatalf("NewEnvelopeAs(Pong): %v", err)
+			}
+			frame2, err := Encode(env2)
+			if err != nil {
+				t.Fatalf("Encode(Pong): %v", err)
+			}
+			decoded2, err := Decode(bytes.NewReader(frame2))
+			if err != nil {
+				t.Fatalf("Decode(Pong): %v", err)
+			}
+			var gotPong PongMessage
+			if err := decoded2.UnmarshalPayload(&gotPong); err != nil {
+				t.Fatalf("UnmarshalPayload(Pong): %v", err)
+			}
+			if gotPong.Timestamp != 1234567890 || gotPong.ServerTime != 9999999999 {
+				t.Errorf("Pong = %+v, want timestamp=1234567890, server_time=9999999999", gotPong)
+			}
+		})
+	}
+}
+
+func TestKickRoundTrip(t *testing.T) {
+	for _, enc := range []Encoding{EncodingJSON, EncodingProto} {
+		t.Run(enc.String(), func(t *testing.T) {
+			kick := KickMessage{Reason: "duplicate_login"}
+			env, err := NewEnvelopeAs(enc, MsgKick, kick)
+			if err != nil {
+				t.Fatalf("NewEnvelopeAs(Kick): %v", err)
+			}
+
+			frame, err := Encode(env)
+			if err != nil {
+				t.Fatalf("Encode: %v", err)
+			}
+			decoded, err := Decode(bytes.NewReader(frame))
+			if err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+
+			var got KickMessage
+			if err := decoded.UnmarshalPayload(&got); err != nil {
+				t.Fatalf("UnmarshalPayload(Kick): %v", err)
+			}
+			if got.Reason != "duplicate_login" {
+				t.Errorf("Reason = %q, want %q", got.Reason, "duplicate_login")
+			}
+		})
+	}
+}
+
+func TestMsgTypeConstants(t *testing.T) {
+	// Verify the explicit constants have the expected values.
+	if MsgPing != 11 {
+		t.Errorf("MsgPing = %d, want 11", MsgPing)
+	}
+	if MsgPong != 12 {
+		t.Errorf("MsgPong = %d, want 12", MsgPong)
+	}
+	if MsgKick != 15 {
+		t.Errorf("MsgKick = %d, want 15", MsgKick)
+	}
+}
