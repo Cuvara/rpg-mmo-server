@@ -136,6 +136,7 @@ public class TransferMapTests
                 TickRate = 20,
                 Capacity = 100,
                 JwtSecret = JwtSecret,
+                JoinTokenSecret = JwtSecret,
                 HoldTtl = TimeSpan.FromMilliseconds(300),
                 SaveInterval = TimeSpan.FromHours(1),
                 Metrics = metrics,
