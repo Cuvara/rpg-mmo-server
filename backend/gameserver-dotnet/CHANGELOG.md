@@ -35,6 +35,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - xUnit tests: `TransferMapTests` (3 cases: success, same-map rejection,
   empty-map rejection) and `WireProtocolTests` round-trip tests for transfer
   messages.
+- **Heartbeat loop (MsgPing/MsgPong) on player connections.** Each accepted
+  connection sends MsgPing every 10 s after join. If no MsgPong is received
+  within 30 s the connection is closed. Incoming MsgPing from a client is
+  answered with a MsgPong echoing the sender's timestamp plus the server's
+  wall clock. Heartbeat runs as a third task alongside read/write loops.
+
+- **MsgKick support.** `WireProtocol.NewEnvelope` overload for `KickMessage`;
+  `JsonWriter.Write(KickMessage)` and `JsonReader.ReadKickMessage` for JSON
+  encoding; Protobuf encoding via generated `Wire.cs`.
 
 ### Fixed
 - **`ObjectDisposedException` out of `ShutdownAsync` when `Close()` raced

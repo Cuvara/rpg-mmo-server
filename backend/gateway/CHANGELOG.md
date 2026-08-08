@@ -65,6 +65,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   re-entry to a new map server.
 
 ### Added
+- **Heartbeat loop (MsgPing/MsgPong).** Each client connection sends MsgPing
+  every 10 s after TCP accept. If no MsgPong is received within 30 s the
+  connection is closed. Incoming MsgPing from a client is answered with a
+  MsgPong echoing the sender's timestamp plus the server's wall clock.
+  Heartbeat messages bypass session validation — a pong must refresh the
+  timer even during a transient Redis outage.
+
 - **The gateway answers in the encoding the client spoke.** `ClientConn` latches
   the encoding of the first frame it decodes (`shared/messages` sniffs JSON vs
   Protobuf from the first body byte) and every response is built through the new

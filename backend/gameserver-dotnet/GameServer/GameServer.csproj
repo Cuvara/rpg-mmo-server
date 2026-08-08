@@ -63,6 +63,10 @@
     <Using Include="RpgMmo.Wire.V1.EntityType" Alias="EntityType" />
     <Using Include="RpgMmo.Wire.V1.TransferMapRequest" Alias="TransferMapRequest" />
     <Using Include="RpgMmo.Wire.V1.TransferMapResponse" Alias="TransferMapResponse" />
+    <Using Include="RpgMmo.Wire.V1.PingMessage" Alias="PingMessage" />
+    <Using Include="RpgMmo.Wire.V1.PongMessage" Alias="PongMessage" />
+    <Using Include="RpgMmo.Wire.V1.KickMessage" Alias="KickMessage" />
+    <Using Include="RpgMmo.Wire.V1.DisconnectMessage" Alias="DisconnectMessage" />
   </ItemGroup>
 
 </Project>

@@ -480,11 +480,12 @@ public sealed class GameServerHost : IAsyncDisposable
             _registration?.NotifyPlayerCountChanged();
             _logger.LogInformation("Player {UserId} joined (total: {Count})", userId, _connections.Count);
 
-            // Step 6: Start read/write loops
+            // Step 6: Start read/write loops + heartbeat
             var writeTask = conn.WriteLoopAsync();
             var readTask = conn.ReadLoopAsync(OnMessageReceived);
+            var heartbeatTask = conn.HeartbeatLoopAsync();
 
-            await Task.WhenAny(readTask, writeTask);
+            await Task.WhenAny(readTask, writeTask, heartbeatTask);
         }
         catch (Exception ex)
         {
@@ -522,11 +523,6 @@ public sealed class GameServerHost : IAsyncDisposable
                 // Client lost or distrusts its reconstructed state: promote the next
                 // snapshot for this connection to a full keyframe. Payload is ignored.
                 conn.DeltaState.RequestFull();
-                // Counted because this is the only field-visible signal that the
-                // interning handle tables have diverged. A healthy fleet sits at
-                // ~0; a sustained rate means clients are repeatedly failing to
-                // resolve handles and the delta stream is doing less work than
-                // the snapshot count suggests.
                 _metrics?.RecordResyncRequested();
                 break;
 
@@ -534,6 +530,12 @@ public sealed class GameServerHost : IAsyncDisposable
                 // Fire-and-forget: the transfer handler is async (save + respond),
                 // but the read loop must not block on it.
                 _ = HandleTransferMapAsync(conn, env);
+            case MsgType.Ping:
+                conn.HandlePing(WireProtocol.GetPayload<PingMessage>(env));
+                break;
+
+            case MsgType.Pong:
+                conn.RecordPong();
                 break;
 
             case MsgType.Disconnect:
