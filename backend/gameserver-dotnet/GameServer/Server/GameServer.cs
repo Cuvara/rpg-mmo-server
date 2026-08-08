@@ -302,6 +302,12 @@ public sealed class GameServerHost : IAsyncDisposable
                 holdCts.Dispose();
             }
 
+            // Notify connected clients before closing: send MsgDisconnect with
+            // reason "server_shutdown" so clients can reconnect to another server
+            // rather than waiting for a timeout. The 2s grace period lets TCP drain
+            // the send buffer; clients that have already disconnected will ignore it.
+            await DrainClientsAsync();
+
             _connections.CloseAll();
 
             // Leave the registry before the final save: the point is to stop the
@@ -624,6 +630,38 @@ public sealed class GameServerHost : IAsyncDisposable
                 holdCts.Dispose();
             }
         });
+    }
+
+    /// <summary>
+    /// Send MsgDisconnect(reason="server_shutdown") to every connected client and
+    /// wait briefly for the message to reach the wire before connections are torn
+    /// down. Best effort: a client that already hung up silently fails the write.
+    /// </summary>
+    private async Task DrainClientsAsync()
+    {
+        var disconnectMsg = new RpgMmo.Wire.V1.DisconnectMessage { Reason = "server_shutdown" };
+
+        _connections.ForEach(conn =>
+        {
+            try
+            {
+                var env = WireProtocol.NewEnvelope(MsgType.Disconnect, disconnectMsg, conn.Encoding);
+                // Fire-and-forget per connection: WriteOneAsync may throw if the
+                // peer is already gone, but that is fine — we are shutting down.
+                _ = conn.WriteOneAsync(env);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Failed to send shutdown disconnect to {UserId}", conn.UserId);
+            }
+        });
+
+        _logger.LogInformation(
+            "Sent shutdown notification to {Count} client(s), waiting 2s for drain",
+            _connections.Count);
+
+        // Give TCP time to flush the send buffers before CloseAll tears them down.
+        await Task.Delay(TimeSpan.FromSeconds(2));
     }
 
     private void OnEntityDeath(EntityState victim, EntityState killer)

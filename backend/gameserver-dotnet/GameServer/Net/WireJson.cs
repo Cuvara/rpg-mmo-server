@@ -111,6 +111,18 @@ internal static class JsonWriter
         }
         return buffer.WrittenSpan.ToArray();
     }
+
+    internal static byte[] Write(DisconnectMessage m)
+    {
+        var buffer = new ArrayBufferWriter<byte>(64);
+        using (var w = new Utf8JsonWriter(buffer))
+        {
+            w.WriteStartObject();
+            if (m.Reason.Length > 0) w.WriteString("reason"u8, m.Reason);
+            w.WriteEndObject();
+        }
+        return buffer.WrittenSpan.ToArray();
+    }
 }
 
 /// <summary>
