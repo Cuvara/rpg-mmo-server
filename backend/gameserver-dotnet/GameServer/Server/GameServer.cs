@@ -530,6 +530,12 @@ public sealed class GameServerHost : IAsyncDisposable
                 _metrics?.RecordResyncRequested();
                 break;
 
+            case MsgType.TransferMap:
+                // Fire-and-forget: the transfer handler is async (save + respond),
+                // but the read loop must not block on it.
+                _ = HandleTransferMapAsync(conn, env);
+                break;
+
             case MsgType.Disconnect:
                 conn.Close();
                 break;
@@ -540,6 +546,80 @@ public sealed class GameServerHost : IAsyncDisposable
                 break;
         }
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Handle a client request to transfer to a different map.
+    /// </summary>
+    /// <remarks>
+    /// The flow is client-driven:
+    /// <list type="number">
+    ///   <item>Client sends MsgTransferMap(map_id) to the current game server.</item>
+    ///   <item>Game server validates, saves state, responds, removes entity, closes connection.</item>
+    ///   <item>Client sends MsgEnterWorld(new_map_id) to the gateway (existing flow).</item>
+    ///   <item>Gateway assigns the new map server and mints a join token.</item>
+    ///   <item>Client connects to the new server with the join token.</item>
+    /// </list>
+    /// The entity is removed immediately (not held) because this is an intentional
+    /// transfer, not a disconnect: there is nothing to reconnect to.
+    /// </remarks>
+    private async Task HandleTransferMapAsync(Connection conn, Envelope env)
+    {
+        try
+        {
+            var req = WireProtocol.GetPayload<TransferMapRequest>(env);
+
+            // Validate: the target map must differ from the current one.
+            if (string.IsNullOrEmpty(req.MapId))
+            {
+                await SendTransferError(conn, "map_id is required");
+                return;
+            }
+            if (req.MapId == _options.MapId)
+            {
+                await SendTransferError(conn, "already on this map");
+                return;
+            }
+
+            // Force an immediate save so the destination server sees fresh state.
+            await _saver.SavePlayerAsync(conn.UserId);
+
+            // Tell the client the transfer is accepted.
+            var resp = WireProtocol.NewEnvelope(MsgType.TransferMapResp,
+                new TransferMapResponse { Ok = true }, conn.Encoding);
+            await conn.WriteOneAsync(resp);
+
+            _logger.LogInformation(
+                "Player {UserId} transferring from {FromMap} to {ToMap}",
+                conn.UserId, _options.MapId, req.MapId);
+
+            // Clean removal: cancel any existing hold, remove the entity from the
+            // world, and close the connection. No hold is scheduled because the
+            // player is intentionally leaving, not disconnecting.
+            if (_holds.TryRemove(conn.UserId, out var holdCts))
+            {
+                holdCts.Cancel();
+                holdCts.Dispose();
+            }
+            _connections.Remove(conn.UserId);
+            _world.RemoveEntity(conn.UserId);
+            _metrics?.PlayerLeft();
+            _registration?.NotifyPlayerCountChanged();
+            conn.Close();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Transfer map failed for {UserId}", conn.UserId);
+            try { await SendTransferError(conn, "internal error"); }
+            catch { /* connection may already be dead */ }
+        }
+    }
+
+    private async Task SendTransferError(Connection conn, string error)
+    {
+        var resp = WireProtocol.NewEnvelope(MsgType.TransferMapResp,
+            new TransferMapResponse { Ok = false, Error = error }, conn.Encoding);
+        await conn.WriteOneAsync(resp);
     }
 
     /// <param name="countedOnline">

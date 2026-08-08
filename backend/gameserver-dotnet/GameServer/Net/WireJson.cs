@@ -113,12 +113,27 @@ internal static class JsonWriter
     }
 
     internal static byte[] Write(DisconnectMessage m)
+    internal static byte[] Write(TransferMapRequest m)
     {
         var buffer = new ArrayBufferWriter<byte>(64);
         using (var w = new Utf8JsonWriter(buffer))
         {
             w.WriteStartObject();
             if (m.Reason.Length > 0) w.WriteString("reason"u8, m.Reason);
+            w.WriteString("map_id"u8, m.MapId);
+            w.WriteEndObject();
+        }
+        return buffer.WrittenSpan.ToArray();
+    }
+
+    internal static byte[] Write(TransferMapResponse m)
+    {
+        var buffer = new ArrayBufferWriter<byte>(64);
+        using (var w = new Utf8JsonWriter(buffer))
+        {
+            w.WriteStartObject();
+            w.WriteBoolean("ok"u8, m.Ok);
+            if (m.Error.Length > 0) w.WriteString("error"u8, m.Error);
             w.WriteEndObject();
         }
         return buffer.WrittenSpan.ToArray();
@@ -248,6 +263,38 @@ internal static class JsonReader
         {
             if (r.TokenType == JsonTokenType.String) m.Removed.Add(r.GetString() ?? "");
         }
+    }
+
+    internal static TransferMapRequest ReadTransferMapRequest(byte[] json)
+    {
+        var m = new TransferMapRequest();
+        var r = new Utf8JsonReader(json);
+        Expect(ref r, JsonTokenType.StartObject);
+        while (r.Read() && r.TokenType != JsonTokenType.EndObject)
+        {
+            bool mapId = r.ValueTextEquals("map_id"u8);
+            if (!r.Read()) break;
+            if (mapId) m.MapId = r.GetString() ?? "";
+            else r.Skip();
+        }
+        return m;
+    }
+
+    internal static TransferMapResponse ReadTransferMapResponse(byte[] json)
+    {
+        var m = new TransferMapResponse();
+        var r = new Utf8JsonReader(json);
+        Expect(ref r, JsonTokenType.StartObject);
+        while (r.Read() && r.TokenType != JsonTokenType.EndObject)
+        {
+            bool ok = r.ValueTextEquals("ok"u8);
+            bool error = r.ValueTextEquals("error"u8);
+            if (!r.Read()) break;
+            if (ok) m.Ok = r.TokenType == JsonTokenType.True;
+            else if (error) m.Error = r.GetString() ?? "";
+            else r.Skip();
+        }
+        return m;
     }
 
     private static void Expect(ref Utf8JsonReader r, JsonTokenType type)

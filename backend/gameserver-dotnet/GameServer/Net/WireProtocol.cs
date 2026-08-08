@@ -258,6 +258,24 @@ public static class WireProtocol
             Encoding = encoding
         };
 
+    /// <inheritdoc cref="NewEnvelope(MsgType, JoinTokenResponse, WireEncoding)"/>
+    public static Envelope NewEnvelope(MsgType type, TransferMapRequest payload, WireEncoding encoding) =>
+        new()
+        {
+            Type = RequireMsgType(type),
+            Payload = encoding == WireEncoding.Proto ? payload.ToByteArray() : JsonWriter.Write(payload),
+            Encoding = encoding
+        };
+
+    /// <inheritdoc cref="NewEnvelope(MsgType, JoinTokenResponse, WireEncoding)"/>
+    public static Envelope NewEnvelope(MsgType type, TransferMapResponse payload, WireEncoding encoding) =>
+        new()
+        {
+            Type = RequireMsgType(type),
+            Payload = encoding == WireEncoding.Proto ? payload.ToByteArray() : JsonWriter.Write(payload),
+            Encoding = encoding
+        };
+
     // ─────────────────────────── payload access ───────────────────────────
 
     /// <summary>Deserialize the payload as <typeparamref name="T"/>, honouring the envelope's encoding.</summary>
@@ -278,6 +296,12 @@ public static class WireProtocol
             var t when t == typeof(SnapshotMessage) => proto
                 ? SnapshotMessage.Parser.ParseFrom(envelope.Payload)
                 : JsonReader.ReadSnapshotMessage(envelope.Payload),
+            var t when t == typeof(TransferMapRequest) => proto
+                ? TransferMapRequest.Parser.ParseFrom(envelope.Payload)
+                : JsonReader.ReadTransferMapRequest(envelope.Payload),
+            var t when t == typeof(TransferMapResponse) => proto
+                ? TransferMapResponse.Parser.ParseFrom(envelope.Payload)
+                : JsonReader.ReadTransferMapResponse(envelope.Payload),
             _ => throw new NotSupportedException($"Unsupported payload type: {typeof(T).Name}")
         };
         return (T)(result ?? throw new InvalidOperationException($"Failed to deserialize payload as {typeof(T).Name}"));
