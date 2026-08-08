@@ -42,6 +42,10 @@ const (
 	MsgSnapshot                          // gameserver -> client (per tick)
 	MsgDisconnect                        // either direction
 	MsgResync                            // client -> gameserver (request a full keyframe)
+	_                                    // 11: reserved
+	_                                    // 12: reserved
+	MsgTransferMap                       // client -> gameserver (request map transfer)
+	MsgTransferMapResp                   // gameserver -> client (transfer result)
 )
 
 // Encoding selects how an Envelope and its payload are serialized.
@@ -251,3 +255,17 @@ type DisconnectMessage struct {
 // ResyncRequest asks the game server to make the next snapshot a full keyframe.
 // It carries no fields.
 type ResyncRequest struct{}
+
+// TransferMapRequest is sent by the client to request a map transfer.
+// The game server validates, saves state, and disconnects the client so it can
+// reconnect through the gateway to the new map's server via the existing
+// MsgEnterWorld flow.
+type TransferMapRequest struct {
+	MapID string `json:"map_id"`
+}
+
+// TransferMapResponse is the game server's reply to a transfer request.
+type TransferMapResponse struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}

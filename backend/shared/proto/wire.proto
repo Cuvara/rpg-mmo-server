@@ -36,6 +36,9 @@ enum MsgType {
   MSG_TYPE_SNAPSHOT = 8;         // gameserver -> client (per tick)
   MSG_TYPE_DISCONNECT = 9;       // either direction
   MSG_TYPE_RESYNC = 10;          // client -> gameserver (request a keyframe)
+  // 11, 12: reserved
+  MSG_TYPE_TRANSFER_MAP = 13;    // client -> gameserver (request map transfer)
+  MSG_TYPE_TRANSFER_MAP_RESP = 14; // gameserver -> client (transfer result)
 }
 
 // Envelope is the top-level wire message.
@@ -212,3 +215,19 @@ message DisconnectMessage {
 // ResyncRequest asks the game server to make the next snapshot a full keyframe.
 // It carries no fields and encodes to zero bytes.
 message ResyncRequest {}
+
+// --- Map transfer ---
+
+// TransferMapRequest is sent by the client to request a map transfer.
+// The game server saves state and disconnects; the client then reconnects
+// through the gateway to the new map's server via the existing MsgEnterWorld
+// flow.
+message TransferMapRequest {
+  string map_id = 1;
+}
+
+// TransferMapResponse is the game server's reply to a transfer request.
+message TransferMapResponse {
+  bool ok = 1;
+  string error = 2;
+}
