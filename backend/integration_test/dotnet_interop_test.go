@@ -26,6 +26,7 @@ import (
 )
 
 const dotnetJWTSecret = "test-secret-key-for-integration"
+const dotnetJoinTokenSecret = "test-join-secret-32chars-minimum"
 const dotnetServerID = "test-dotnet-gs"
 const dotnetMapID = "map_test"
 
@@ -148,7 +149,10 @@ func startDotnetGameServer(t *testing.T) (addr string, cleanup func()) {
 		// the next test's server in this same suite.
 		"--metrics-addr", "",
 	)
-	cmd.Env = append(os.Environ(), "DOTNET_CLI_TELEMETRY_OPTOUT=1")
+	cmd.Env = append(os.Environ(),
+		"DOTNET_CLI_TELEMETRY_OPTOUT=1",
+		"JOIN_TOKEN_SECRET="+dotnetJoinTokenSecret,
+	)
 
 	// Merge stderr into the same pipe so nothing is written to the test process's
 	// own stderr after the test finishes.
@@ -254,7 +258,8 @@ func startGatewayForDotnet(t *testing.T, gsAddr string) (gwAddr string, cleanup 
 
 	sessionMgr := gwsession.NewSessionManager(sessionStore)
 	registrySvc := gwregistry.NewRegistryService(reg)
-	gw := gwserver.New(sessionMgr, registrySvc, dotnetJWTSecret, logger)
+	gw := gwserver.New(sessionMgr, registrySvc, dotnetJWTSecret, logger,
+		gwserver.WithJoinTokenSecret(dotnetJoinTokenSecret))
 
 	go gw.Run(":0")
 
