@@ -102,8 +102,10 @@ public sealed class GameServerHost : IAsyncDisposable
     private readonly EventPublisher? _publisher;
     private readonly GameMetrics? _metrics;
     private readonly ILogger _logger;
-    /// <summary>Keyring join tokens are verified against (JOIN_TOKEN_SECRET, or JWT_SECRET as fallback).</summary>
+    /// <summary>Keyring join tokens are verified against (JOIN_TOKEN_SECRET).</summary>
     private readonly JwtKeyring _joinKeys;
+    /// <summary>Tracks consumed JTI values to prevent join token replay.</summary>
+    private readonly JtiTracker _jtiTracker = new();
     private readonly ILoggerFactory _loggerFactory;
 
     private readonly RegistrationService? _registration;
@@ -382,16 +384,22 @@ public sealed class GameServerHost : IAsyncDisposable
                 return;
             }
 
-            // Step 3: Check server ID claim
-            if (!string.IsNullOrEmpty(_options.ServerId) &&
-                !string.IsNullOrEmpty(claims.ServerId) &&
-                claims.ServerId != _options.ServerId)
+            // Step 3: Check server ID claim — mandatory, no empty bypass
+            if (string.IsNullOrEmpty(claims.ServerId) || claims.ServerId != _options.ServerId)
             {
                 await SendError(tempConn, "Token is for a different server");
                 tempConn.Close();
                 return;
             }
 
+
+            // Step 3b: JTI replay protection
+            if (string.IsNullOrEmpty(claims.Jti) || !_jtiTracker.TryConsume(claims.Jti))
+            {
+                await SendError(tempConn, "Token already used");
+                tempConn.Close();
+                return;
+            }
             // Step 4: Check capacity
             if (_connections.Count >= _options.Capacity)
             {
