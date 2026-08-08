@@ -59,6 +59,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `JWT_SECRET` has been removed.
 - **`GenerateJoinTokenKeyring` rejects empty `serverID`.** An empty server ID in
   the join token would bypass the game server's `sid` check.
+- **Map transfer documentation in `transfer/dungeon.go`.** Documents the
+  client-driven map transfer flow (MsgTransferMap types 13/14) and confirms
+  no gateway code change is required — the existing MsgEnterWorld flow handles
+  re-entry to a new map server.
 
 ### Added
 - **The gateway answers in the encoding the client spoke.** `ClientConn` latches

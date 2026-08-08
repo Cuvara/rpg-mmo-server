@@ -25,6 +25,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Mandatory server ID check.** The game server now rejects join tokens with an
   empty `sid` claim or a `sid` that does not match `ServerId`. The previous
   double-empty bypass has been removed.
+- **Map transfer handler (MsgTransferMap).** A connected player can request
+  transfer to a different map. The server validates the target map, saves state
+  via `AsyncSaver.SavePlayerAsync`, responds with `TransferMapResponse`, removes
+  the entity (no reconnect hold), and closes the connection. The client then
+  follows the existing `MsgEnterWorld` flow with the gateway.
+- JSON codec for `TransferMapRequest` / `TransferMapResponse` (write + read),
+  `NewEnvelope` overloads, and `GetPayload` cases for both types.
+- xUnit tests: `TransferMapTests` (3 cases: success, same-map rejection,
+  empty-map rejection) and `WireProtocolTests` round-trip tests for transfer
+  messages.
 
 ### Fixed
 - **`ObjectDisposedException` out of `ShutdownAsync` when `Close()` raced
