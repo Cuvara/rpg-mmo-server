@@ -166,6 +166,12 @@ func (c *ClientConn) ClearIdentity() string {
 	return userID
 }
 
+// SetReadDeadline sets the read deadline on the underlying connection.
+func (c *ClientConn) SetReadDeadline(t time.Time) error { return c.conn.SetReadDeadline(t) }
+
+// ClearReadDeadline removes any read deadline on the underlying connection.
+func (c *ClientConn) ClearReadDeadline() error { return c.conn.SetReadDeadline(time.Time{}) }
+
 // RemoteIP returns the peer's IP without the port, for use as a rate-limit key.
 // It falls back to the raw address string when the address has no port (which
 // no real net.Conn produces, but a test fake might).

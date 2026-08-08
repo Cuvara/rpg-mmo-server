@@ -420,6 +420,11 @@ func (g *Gateway) findUserConn(userID string) *ClientConn {
 	return g.userConns[userID]
 }
 
+// authTimeout is how long an unauthenticated connection may idle before the
+// gateway closes it. Prevents connection-slot exhaustion from clients that
+// connect but never send MsgAuth.
+const authTimeout = 30 * time.Second
+
 func (g *Gateway) handleConn(cc *ClientConn) {
 	defer func() {
 		// A dropped socket must not leave a session record behind, otherwise the
@@ -429,6 +434,13 @@ func (g *Gateway) handleConn(cc *ClientConn) {
 		cc.Close()
 		g.trackConn(cc, false)
 	}()
+
+	// Unauthenticated connections get a hard read deadline: if no MsgAuth
+	// arrives within authTimeout the read returns an error and ReadLoop exits,
+	// which triggers the deferred cleanup above.
+	if err := cc.SetReadDeadline(time.Now().Add(authTimeout)); err != nil {
+		g.logger.Debug("set auth deadline", "ip", cc.RemoteIP(), "err", err)
+	}
 
 	go cc.WriteLoop()
 	cc.ReadLoop(g.handleMessage)
@@ -579,6 +591,12 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 
 	cc.SetAuthenticated(userID)
 	g.trackUser(userID, cc)
+
+	// Auth succeeded: remove the unauthenticated read deadline so the
+	// connection is no longer time-limited.
+	if derr := cc.ClearReadDeadline(); derr != nil {
+		g.logger.Debug("clear auth deadline", "user", userID, "err", derr)
+	}
 
 	resp, err := cc.Reply(messages.MsgAuthResp, messages.AuthResponse{
 		OK:     true,
