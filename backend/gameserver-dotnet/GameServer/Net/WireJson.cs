@@ -113,13 +113,23 @@ internal static class JsonWriter
     }
 
     internal static byte[] Write(DisconnectMessage m)
-    internal static byte[] Write(TransferMapRequest m)
     {
         var buffer = new ArrayBufferWriter<byte>(64);
         using (var w = new Utf8JsonWriter(buffer))
         {
             w.WriteStartObject();
             if (m.Reason.Length > 0) w.WriteString("reason"u8, m.Reason);
+            w.WriteEndObject();
+        }
+        return buffer.WrittenSpan.ToArray();
+    }
+
+    internal static byte[] Write(TransferMapRequest m)
+    {
+        var buffer = new ArrayBufferWriter<byte>(64);
+        using (var w = new Utf8JsonWriter(buffer))
+        {
+            w.WriteStartObject();
             w.WriteString("map_id"u8, m.MapId);
             w.WriteEndObject();
         }
