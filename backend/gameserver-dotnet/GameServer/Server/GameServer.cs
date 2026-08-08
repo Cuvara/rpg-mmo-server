@@ -530,6 +530,8 @@ public sealed class GameServerHost : IAsyncDisposable
                 // Fire-and-forget: the transfer handler is async (save + respond),
                 // but the read loop must not block on it.
                 _ = HandleTransferMapAsync(conn, env);
+                break;
+
             case MsgType.Ping:
                 conn.HandlePing(WireProtocol.GetPayload<PingMessage>(env));
                 break;
