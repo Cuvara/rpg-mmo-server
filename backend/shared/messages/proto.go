@@ -85,6 +85,20 @@ func marshalProtoPayload(v any) ([]byte, error) {
 		m = transferMapRespPB(t)
 	case *TransferMapResponse:
 		m = transferMapRespPB(*t)
+	case PingMessage:
+		m = &wirepb.PingMessage{Timestamp: t.Timestamp}
+	case *PingMessage:
+		m = &wirepb.PingMessage{Timestamp: t.Timestamp}
+
+	case PongMessage:
+		m = &wirepb.PongMessage{Timestamp: t.Timestamp, ServerTime: t.ServerTime}
+	case *PongMessage:
+		m = &wirepb.PongMessage{Timestamp: t.Timestamp, ServerTime: t.ServerTime}
+
+	case KickMessage:
+		m = &wirepb.KickMessage{Reason: t.Reason}
+	case *KickMessage:
+		m = &wirepb.KickMessage{Reason: t.Reason}
 
 	default:
 		return nil, fmt.Errorf("marshal proto payload: unsupported message type %T", v)
@@ -208,6 +222,26 @@ func unmarshalProtoPayload(data []byte, v any) error {
 			return wrapUnmarshal(v, err)
 		}
 		t.OK, t.Error = pb.Ok, pb.Error
+	case *PingMessage:
+		var pb wirepb.PingMessage
+		if err := proto.Unmarshal(data, &pb); err != nil {
+			return wrapUnmarshal(v, err)
+		}
+		t.Timestamp = pb.Timestamp
+
+	case *PongMessage:
+		var pb wirepb.PongMessage
+		if err := proto.Unmarshal(data, &pb); err != nil {
+			return wrapUnmarshal(v, err)
+		}
+		t.Timestamp, t.ServerTime = pb.Timestamp, pb.ServerTime
+
+	case *KickMessage:
+		var pb wirepb.KickMessage
+		if err := proto.Unmarshal(data, &pb); err != nil {
+			return wrapUnmarshal(v, err)
+		}
+		t.Reason = pb.Reason
 
 	default:
 		return fmt.Errorf("unmarshal proto payload: unsupported message type %T", v)

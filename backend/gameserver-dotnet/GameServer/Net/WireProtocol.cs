@@ -249,6 +249,33 @@ public static class WireProtocol
             Encoding = encoding
         };
 
+    /// <inheritdoc cref="NewEnvelope(MsgType, JoinTokenResponse, WireEncoding)"/>
+    public static Envelope NewEnvelope(MsgType type, PingMessage payload, WireEncoding encoding) =>
+        new()
+        {
+            Type = RequireMsgType(type),
+            Payload = encoding == WireEncoding.Proto ? payload.ToByteArray() : JsonWriter.Write(payload),
+            Encoding = encoding
+        };
+
+    /// <inheritdoc cref="NewEnvelope(MsgType, JoinTokenResponse, WireEncoding)"/>
+    public static Envelope NewEnvelope(MsgType type, PongMessage payload, WireEncoding encoding) =>
+        new()
+        {
+            Type = RequireMsgType(type),
+            Payload = encoding == WireEncoding.Proto ? payload.ToByteArray() : JsonWriter.Write(payload),
+            Encoding = encoding
+        };
+
+    /// <inheritdoc cref="NewEnvelope(MsgType, JoinTokenResponse, WireEncoding)"/>
+    public static Envelope NewEnvelope(MsgType type, KickMessage payload, WireEncoding encoding) =>
+        new()
+        {
+            Type = RequireMsgType(type),
+            Payload = encoding == WireEncoding.Proto ? payload.ToByteArray() : JsonWriter.Write(payload),
+            Encoding = encoding
+        };
+
     /// <summary>Build an envelope with no payload (Disconnect, Resync).</summary>
     public static Envelope NewEmptyEnvelope(MsgType type, WireEncoding encoding) =>
         new()
@@ -302,6 +329,15 @@ public static class WireProtocol
             var t when t == typeof(TransferMapResponse) => proto
                 ? TransferMapResponse.Parser.ParseFrom(envelope.Payload)
                 : JsonReader.ReadTransferMapResponse(envelope.Payload),
+            var t when t == typeof(PingMessage) => proto
+                ? PingMessage.Parser.ParseFrom(envelope.Payload)
+                : JsonReader.ReadPingMessage(envelope.Payload),
+            var t when t == typeof(PongMessage) => proto
+                ? PongMessage.Parser.ParseFrom(envelope.Payload)
+                : JsonReader.ReadPongMessage(envelope.Payload),
+            var t when t == typeof(KickMessage) => proto
+                ? KickMessage.Parser.ParseFrom(envelope.Payload)
+                : JsonReader.ReadKickMessage(envelope.Payload),
             _ => throw new NotSupportedException($"Unsupported payload type: {typeof(T).Name}")
         };
         return (T)(result ?? throw new InvalidOperationException($"Failed to deserialize payload as {typeof(T).Name}"));

@@ -46,6 +46,10 @@ const (
 	_                                    // 12: reserved
 	MsgTransferMap                       // client -> gameserver (request map transfer)
 	MsgTransferMapResp                   // gameserver -> client (transfer result)
+	MsgPing       MsgType = 11           // either direction (heartbeat)
+	MsgPong       MsgType = 12           // either direction (heartbeat reply)
+	// 13 and 14 are reserved for MsgTransferMap/Resp.
+	MsgKick MsgType = 15 // server -> client (forced disconnect with reason)
 )
 
 // Encoding selects how an Envelope and its payload are serialized.
@@ -268,4 +272,25 @@ type TransferMapRequest struct {
 type TransferMapResponse struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+}
+
+// PingMessage is a heartbeat probe. The sender fills Timestamp with its own
+// monotonic time in milliseconds; the receiver echoes it back in a PongMessage
+// so the sender can measure RTT.
+type PingMessage struct {
+	Timestamp int64 `json:"timestamp"`
+}
+
+// PongMessage is the reply to a PingMessage. Timestamp echoes the sender's
+// value unchanged; ServerTime is the responder's wall clock in milliseconds
+// since the Unix epoch.
+type PongMessage struct {
+	Timestamp  int64 `json:"timestamp"`
+	ServerTime int64 `json:"server_time"`
+}
+
+// KickMessage is sent server -> client to force a disconnect with a reason.
+// Reasons are machine-readable strings, not user-facing text.
+type KickMessage struct {
+	Reason string `json:"reason"`
 }
