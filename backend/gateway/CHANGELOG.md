@@ -6,6 +6,18 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Exponential backoff retry for registry lookups.** `FindServer` and `GetServer`
+  now retry transient Redis errors (connection refused, timeout) with backoff
+  (1s, 2s, 4s, max 3 retries, 10s total timeout). Business-logic errors
+  (`ErrNoServerAvailable`, `ErrNotFound`) are not retried. Context cancellation
+  aborts between retries so a disconnected client does not waste attempts
+- **Server-down watcher with Pub/Sub notification.** `RegistryWatcher` periodically
+  polls known servers (every 5s) and publishes a `ServerDownEvent` to the
+  `gateway:server_down` channel when a server's heartbeat expires. Other gateway
+  instances can subscribe via `SubscribeServerDown` to clear cached state. Includes
+  in-memory `MemoryPubSub` for testing
+
+### Added
 - **The gateway answers in the encoding the client spoke.** `ClientConn` latches
   the encoding of the first frame it decodes (`shared/messages` sniffs JSON vs
   Protobuf from the first body byte) and every response is built through the new

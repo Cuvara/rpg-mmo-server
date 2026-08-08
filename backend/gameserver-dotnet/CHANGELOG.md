@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Graceful drain notification on shutdown.** On SIGTERM, the server now sends
+  `MsgDisconnect(reason="server_shutdown")` to all connected clients before
+  closing connections. A 2s grace period lets TCP drain the send buffer so
+  clients receive the notification and can reconnect to another server instead
+  of timing out. Adds `WireProtocol.NewEnvelope` for `DisconnectMessage` (with
+  reason) and the corresponding JSON serializer in `WireJson`
+
 ### Fixed
 - **`ObjectDisposedException` out of `ShutdownAsync` when `Close()` raced
   `Dispose()`.** Under Agones that means terminate throws instead of draining.
