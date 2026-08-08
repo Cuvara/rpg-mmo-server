@@ -131,6 +131,11 @@ internal static class JsonWriter
         {
             w.WriteStartObject();
             w.WriteString("map_id"u8, m.MapId);
+            w.WriteEndObject();
+        }
+        return buffer.WrittenSpan.ToArray();
+    }
+
     internal static byte[] Write(PingMessage m)
     {
         var buffer = new ArrayBufferWriter<byte>(32);
@@ -151,6 +156,11 @@ internal static class JsonWriter
             w.WriteStartObject();
             w.WriteBoolean("ok"u8, m.Ok);
             if (m.Error.Length > 0) w.WriteString("error"u8, m.Error);
+            w.WriteEndObject();
+        }
+        return buffer.WrittenSpan.ToArray();
+    }
+
     internal static byte[] Write(PongMessage m)
     {
         var buffer = new ArrayBufferWriter<byte>(48);
@@ -305,9 +315,6 @@ internal static class JsonReader
     internal static TransferMapRequest ReadTransferMapRequest(byte[] json)
     {
         var m = new TransferMapRequest();
-    internal static PingMessage ReadPingMessage(byte[] json)
-    {
-        var m = new PingMessage();
         var r = new Utf8JsonReader(json);
         Expect(ref r, JsonTokenType.StartObject);
         while (r.Read() && r.TokenType != JsonTokenType.EndObject)
@@ -315,6 +322,18 @@ internal static class JsonReader
             bool mapId = r.ValueTextEquals("map_id"u8);
             if (!r.Read()) break;
             if (mapId) m.MapId = r.GetString() ?? "";
+            else r.Skip();
+        }
+        return m;
+    }
+
+    internal static PingMessage ReadPingMessage(byte[] json)
+    {
+        var m = new PingMessage();
+        var r = new Utf8JsonReader(json);
+        Expect(ref r, JsonTokenType.StartObject);
+        while (r.Read() && r.TokenType != JsonTokenType.EndObject)
+        {
             bool timestamp = r.ValueTextEquals("timestamp"u8);
             if (!r.Read()) break;
             if (timestamp) m.Timestamp = r.GetInt64();
@@ -326,9 +345,6 @@ internal static class JsonReader
     internal static TransferMapResponse ReadTransferMapResponse(byte[] json)
     {
         var m = new TransferMapResponse();
-    internal static PongMessage ReadPongMessage(byte[] json)
-    {
-        var m = new PongMessage();
         var r = new Utf8JsonReader(json);
         Expect(ref r, JsonTokenType.StartObject);
         while (r.Read() && r.TokenType != JsonTokenType.EndObject)
@@ -338,6 +354,18 @@ internal static class JsonReader
             if (!r.Read()) break;
             if (ok) m.Ok = r.TokenType == JsonTokenType.True;
             else if (error) m.Error = r.GetString() ?? "";
+            else r.Skip();
+        }
+        return m;
+    }
+
+    internal static PongMessage ReadPongMessage(byte[] json)
+    {
+        var m = new PongMessage();
+        var r = new Utf8JsonReader(json);
+        Expect(ref r, JsonTokenType.StartObject);
+        while (r.Read() && r.TokenType != JsonTokenType.EndObject)
+        {
             bool timestamp = r.ValueTextEquals("timestamp"u8);
             bool serverTime = r.ValueTextEquals("server_time"u8);
             if (!r.Read()) break;
