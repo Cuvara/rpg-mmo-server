@@ -61,17 +61,6 @@ type Config struct {
 	LogLevel string
 }
 
-// EffectiveJoinTokenSecret returns the secret spec used for gateway -> game
-// server join tokens, falling back to JWTSecret when JOIN_TOKEN_SECRET is
-// unset. The second return value reports whether the fallback was taken, so
-// callers can emit the start-up warning exactly once.
-func (c Config) EffectiveJoinTokenSecret() (spec string, sharedWithAuth bool) {
-	if c.JoinTokenSecret != "" {
-		return c.JoinTokenSecret, false
-	}
-	return c.JWTSecret, true
-}
-
 // Load reads configuration from environment variables with sensible defaults.
 func Load() Config {
 	return Config{
