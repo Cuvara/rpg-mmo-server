@@ -16,6 +16,39 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `gateway:server_down` channel when a server's heartbeat expires. Other gateway
   instances can subscribe via `SubscribeServerDown` to clear cached state. Includes
   in-memory `MemoryPubSub` for testing
+- **Enriched session model.** Session store value changed from a plain
+  `user_id` string to a JSON object:
+  `{"gateway_id":"gw-0","server_id":"","map_id":"","created_at":N,"last_activity":N}`.
+  `SessionData` struct with `GetSession` and `UpdateSession` methods on
+  `SessionManager`. `NewSessionManager` accepts an optional `gatewayID`
+  (variadic, backward-compatible); `ValidateSession` handles both the new JSON
+  format and the legacy plain-string format for rolling upgrades.
+  `GatewayKickChannel` constant added to `shared/constants` for cross-gateway
+  coordination
+- **Duplicate login detection and kick.** On `MsgAuth`, the gateway checks
+  whether a session already exists for the user. If it belongs to this gateway,
+  the old connection receives `MsgDisconnect(reason="duplicate_login")` and is
+  closed before the new session is created. If it belongs to a different
+  gateway, a kick request is published via `KickPublisher` (noop for in-memory
+  backend, Redis Pub/Sub for multi-instance). `KickPublisher` /
+  `KickSubscriber` interfaces with `WithKickPublisher` / `WithKickSubscriber`
+  options; `handleKickEvent` processes incoming kick requests
+- **Session-server association tracking.** After a successful `MsgEnterWorld`
+  (join token minted), the session in the store is updated with `server_id` and
+  `map_id` so the gateway knows where each player is currently playing. Uses
+  the new `UpdateSession` method. `AssignResult` gained a `ServerID` field
+- **User-to-connection lookup.** `userConns` map on `Gateway` enables O(1)
+  connection lookup by `user_id` for local duplicate-login kicks.
+  `trackUser`, `untrackUser`, `findUserConn` methods manage the mapping
+
+### Fixed
+- **Data race in `kickLocalUser`.** The method called `old.Reply` from the new
+  connection's ReadLoop goroutine, which reads the `enc` field that the old
+  connection's ReadLoop may still be writing. Switched to
+  `messages.NewEnvelope` (JSON, always safe from any goroutine)
+- `cmd/gateway` now passes `--instance-id` / hostname as `gatewayID` to
+  `NewSessionManager`, so every session record is tagged with the owning
+  gateway instance
 
 ### Added
 - **The gateway answers in the encoding the client spoke.** `ClientConn` latches
