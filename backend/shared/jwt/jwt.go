@@ -2,6 +2,7 @@ package jwt
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -15,17 +16,24 @@ type header struct {
 	Typ string `json:"typ"`
 }
 
+// ClockSkew is the tolerance applied when checking token expiration. A token
+// whose exp is up to this many seconds in the past is still accepted, so small
+// clock differences between the gateway and game server do not cause spurious
+// rejections.
+const ClockSkew = 5 * time.Second
+
 // Claims holds the JWT payload.
 type Claims struct {
 	UserID   string `json:"sub"`
 	ServerID string `json:"sid,omitempty"`
+	Jti      string `json:"jti,omitempty"`
 	IssuedAt int64  `json:"iat"`
 	ExpireAt int64  `json:"exp"`
 }
 
-// IsExpired returns true if the token has expired.
+// IsExpired returns true if the token has expired, accounting for ClockSkew.
 func (c Claims) IsExpired() bool {
-	return time.Now().Unix() > c.ExpireAt
+	return time.Now().Add(-ClockSkew).Unix() > c.ExpireAt
 }
 
 var defaultHeader = header{Alg: "HS256", Typ: "JWT"}
@@ -36,6 +44,8 @@ func Sign(userID, secret string, expiry time.Duration) (string, error) {
 }
 
 // SignWithServer creates a HS256 JWT with an optional server ID claim.
+// When serverID is non-empty (join tokens), a unique JTI claim is added
+// for replay protection.
 func SignWithServer(userID, serverID, secret string, expiry time.Duration) (string, error) {
 	now := time.Now()
 	claims := Claims{
@@ -43,6 +53,13 @@ func SignWithServer(userID, serverID, secret string, expiry time.Duration) (stri
 		ServerID: serverID,
 		IssuedAt: now.Unix(),
 		ExpireAt: now.Add(expiry).Unix(),
+	}
+	if serverID != "" {
+		jti, err := generateJTI()
+		if err != nil {
+			return "", fmt.Errorf("generate jti: %w", err)
+		}
+		claims.Jti = jti
 	}
 
 	hdrJSON, _ := json.Marshal(defaultHeader)
@@ -120,4 +137,17 @@ func Verify(token, secret string) (Claims, error) {
 	}
 
 	return claims, nil
+}
+
+// generateJTI returns a UUID v4 string for use as a unique token identifier.
+func generateJTI() (string, error) {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	// Set version 4 and variant bits per RFC 4122.
+	buf[6] = (buf[6] & 0x0f) | 0x40
+	buf[8] = (buf[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		buf[0:4], buf[4:6], buf[6:8], buf[8:10], buf[10:16]), nil
 }
