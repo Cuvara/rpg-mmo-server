@@ -132,6 +132,7 @@ public class GameServerHostShutdownTests
         TickRate = 20,
         Capacity = 8,
         JwtSecret = JwtSecret,
+        JoinTokenSecret = JwtSecret,
         // Long enough that the periodic sweep never fires: the saves under test are the
         // shutdown ones, so a background sweep would muddy the timing assertion.
         SaveInterval = TimeSpan.FromSeconds(30),

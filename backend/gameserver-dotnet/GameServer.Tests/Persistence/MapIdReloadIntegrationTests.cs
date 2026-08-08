@@ -168,6 +168,7 @@ public class MapIdReloadIntegrationTests
             TickRate = 20,
             Capacity = 4,
             JwtSecret = JwtSecret,
+            JoinTokenSecret = JwtSecret,
             SaveInterval = TimeSpan.FromMilliseconds(300),
             PlayerStore = store,
             LoggerFactory = NullLoggerFactory.Instance

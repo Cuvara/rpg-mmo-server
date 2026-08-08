@@ -46,24 +46,10 @@ public class ServerOptions
 
     /// <summary>
     /// HS256 secret (or comma-separated rotation list, "current,previous") that the
-    /// gateway signs join tokens with — <c>JOIN_TOKEN_SECRET</c>. Empty means
-    /// "reuse <see cref="JwtSecret"/>", the pre-split behaviour: see
-    /// <see cref="EffectiveJoinTokenSecret"/>.
+    /// gateway signs join tokens with — <c>JOIN_TOKEN_SECRET</c>. REQUIRED: the
+    /// server refuses to start when this is empty.
     /// </summary>
     public string JoinTokenSecret { get; set; } = "";
-
-    /// <summary>
-    /// The secret spec actually used to verify join tokens, plus whether the
-    /// JWT_SECRET fallback was taken (which callers warn about at start-up).
-    /// Mirrors Go's <c>config.Config.EffectiveJoinTokenSecret</c> — the two halves
-    /// must agree or the gateway signs with a key this server does not hold.
-    /// </summary>
-    public static (string Spec, bool SharedWithAuth) EffectiveJoinTokenSecret(string? joinTokenSecret, string? jwtSecret)
-        => string.IsNullOrEmpty(joinTokenSecret) ? (jwtSecret ?? "", true) : (joinTokenSecret, false);
-
-    /// <summary>Instance form of <see cref="EffectiveJoinTokenSecret(string?, string?)"/>.</summary>
-    public (string Spec, bool SharedWithAuth) EffectiveJoinTokenSecret()
-        => EffectiveJoinTokenSecret(JoinTokenSecret, JwtSecret);
     /// <summary>Play area for this map. Movement is clamped into these bounds.</summary>
     public MapBounds MapBounds { get; set; } = MapBounds.Default;
 
@@ -152,16 +138,15 @@ public sealed class GameServerHost : IAsyncDisposable
             b.AddConsole().SetMinimumLevel(LogLevel.Information));
         _logger = _loggerFactory.CreateLogger<GameServerHost>();
 
-        // Join tokens are verified against JOIN_TOKEN_SECRET, falling back to
-        // JWT_SECRET when it is unset (pre-split behaviour). Both may be a
-        // "current,previous" rotation list; every entry verifies.
-        var (joinSpec, _) = options.EffectiveJoinTokenSecret();
-        _joinKeys = JwtKeyring.Parse(joinSpec);
+        // Join tokens are verified against JOIN_TOKEN_SECRET (required, enforced
+        // by Program.cs at startup). Both may be a "current,previous" rotation
+        // list; every entry verifies.
+        _joinKeys = JwtKeyring.Parse(options.JoinTokenSecret);
         if (!_joinKeys.IsValid)
         {
             // Fail closed, loudly: no key means no join can ever succeed.
             _logger.LogWarning(
-                "No join-token secret configured (JOIN_TOKEN_SECRET and JWT_SECRET are both empty) -- " +
+                "No join-token secret configured (JOIN_TOKEN_SECRET is empty) -- " +
                 "every join will be rejected");
         }
 

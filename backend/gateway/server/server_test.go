@@ -35,7 +35,8 @@ func startTestGateway(t *testing.T) *Gateway {
 	reg := registry.NewRegistryService(serverRegistry)
 	log := logger.New("error") // quiet during tests
 
-	gw := New(sessions, reg, testSecret, log)
+	gw := New(sessions, reg, testSecret, log,
+		WithJoinTokenSecret(testSecret))
 
 	go func() {
 		if err := gw.Run("127.0.0.1:0"); err != nil {

@@ -23,9 +23,8 @@ type Config struct {
 	// The FIRST entry signs, every entry verifies.
 	JWTSecret string
 	// JoinTokenSecret is the HS256 secret (or rotation list) for the
-	// gateway -> game server join token. Empty means "reuse JWTSecret", which
-	// is the pre-split behaviour and is what every service warns about at
-	// start-up: one leaked secret then compromises both hops.
+	// gateway -> game server join token. REQUIRED: both gateway and game
+	// server refuse to start when it is empty.
 	JoinTokenSecret string
 	// TransportKey is the pre-shared key that encrypts KCP datagrams
 	// (32-byte hex recommended). Empty means plaintext. See shared/transport.
