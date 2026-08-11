@@ -965,6 +965,23 @@ container they are iterated out of.
    divergence fails CI on whichever side moved. Without this, "shared logic" is
    a shared file, not shared behaviour.
 
+   The format is constrained by both readers, so it is fixed here rather than
+   left to whoever writes first:
+
+   - **Floats are stored as their IEEE-754 bit pattern** (`"x": "0x40551EB8"`),
+     compared with `BitConverter.SingleToInt32Bits`. Decimal text does not
+     round-trip identically through two different serializers, and a fixture
+     compared with a tolerance would not be testing the property this ADR exists
+     to protect. Storing bits also makes the assertion self-documenting.
+   - **The top level is an object, not an array** (`{"cases": [...]}`), and the
+     schema stays flat with public fields only — no dictionaries, no properties.
+     That is the subset Unity's built-in `JsonUtility` can read, so the client
+     needs no JSON package at all.
+   - Fixtures are read by **EditMode** tests from the package path. A PlayMode or
+     IL2CPP build cannot read arbitrary paths and would need `Resources/` or
+     `StreamingAssets/`; that is deferred until something actually requires it,
+     since these are a CI conformance gate rather than a runtime asset.
+
 5. **The determinism budget is explicit.** `Shared.GameLogic` may use only
    IEEE-754-exact float operations: `+ - * /`, comparison, and
    `MathF.Min/Max/Abs/Sqrt`. Transcendentals (`Sin`, `Cos`, `Atan2`, `Pow`,
@@ -997,15 +1014,60 @@ follow-ups:
 
 | | Current | Required | Why it blocks |
 |---|---|---|---|
-| Target framework | `net10.0` only | `netstandard2.1;net10.0` | Unity 6 cannot reference a `net10.0` assembly. This alone is why the client references nothing today |
+| Target framework | `net10.0` only | `netstandard2.1;net10.0` | Needed for the server-side and tooling builds; see the note below on why it is not sufficient |
 | `EntityState.Id` | `string` | integer handle | A managed reference inside an ECS component puts a pointer in every chunk and is prohibited outright under Burst |
 | `EntityState.Type` | `string` | enum | Same, plus it duplicates `EntityType` which the wire already carries as an enum |
 | `AoiLogic.GetNearbyEntities` | returns `new List<EntityState>()` | fills a caller-provided `Span<T>` | Allocates per call, per tick, per entity — the cost Arch exists to remove |
 
-The `string` → handle/enum pair is not new ground: ADR-9's follow-on work
-already made exactly this change *on the wire* (entity-type enum, interned ids),
-where it removed 81% of the payload. The shared logic is simply behind its own
-protocol.
+**Multi-targeting alone does not make the library Unity-consumable, and the
+constraint that matters is not `netstandard2.1`.** Because decision 3 has the
+client compile *source*, Unity never loads the netstandard assembly — Unity's own
+compiler is what has to accept these files, and it is **C# 9** (Unity 6 does not
+support C# 10 or later). Three properties of the current source fail there:
+
+- **File-scoped namespaces** (`namespace X;`) are C# 10 and appear in all 11
+  files. Mechanical to fix, but it is every file, so it is decided once.
+- **`ImplicitUsings=enable`**, which the sources rely on — e.g. `MapBounds.cs`
+  uses `MathF` with no `using System;`. Unity has no implicit usings, so every
+  file needs its usings written out.
+- **`System.Text.Json.Serialization` attributes** on `InputData` and
+  `SnapshotData`. Unity does not ship System.Text.Json.
+
+The third looks like it forces a choice between moving those DTOs out of the
+library and taking an STJ dependency through IL2CPP. It does not: **nothing
+serializes these types.** ADR-9 deleted the hand-written message mirrors and made
+the generated Protobuf types the server's only message classes, with legacy JSON
+produced by a hand-written `Utf8JsonWriter` codec over *those*. `InputData` and
+`SnapshotData` are only ever constructed and read directly. The attributes are
+dead metadata from before ADR-9 and are simply deleted — no relocation, no
+dependency, no behaviour change.
+
+`netstandard2.1` itself needs no polyfill: `MathF.Min/Max/Abs/Sqrt` is available
+there, and that set is exactly the determinism budget in rule 5.
+
+**There are three identity spaces, and conflating any two of them is the main
+hazard in this work.** An earlier draft of this ADR cited the wire's interned ids
+as "prior art" for the simulation handle. That was wrong and is corrected here:
+the wire handle is deliberately the *opposite* kind of identity.
+
+| Identity | Lifetime | Scope | Lives in |
+|---|---|---|---|
+| `user_id` (string) | durable, across sessions and servers | global | `player_states`, join-token `sub`, reconnect/hold table |
+| simulation handle (integer, new) | the entity's lifetime | one server process | `EntityState.Id`, ECS components |
+| wire handle (`EntitySnapshot.handle`) | **one keyframe interval** | one connection | snapshot encoding only |
+
+The wire handle is reset at every keyframe and allocated from 1 per connection —
+that is precisely what bounds a client/server disagreement to a single keyframe
+interval (ADR-9 follow-on, `wire.proto`). A simulation handle must be stable for
+the entity's lifetime. Reusing one as the other yields an identifier whose meaning
+silently changes every keyframe.
+
+The mapping between `user_id` and simulation handle must therefore be an explicit,
+named structure, not an implicit equality. Today `EntityState.Id` *is* the user id
+(`GameServer.cs:443`, `Id = userId`), so this migration is not "narrow a field" —
+it is "split one identity into two", and every existing use has to be classified
+as one or the other. The reconnect/hold table stays keyed by `user_id`: a hold
+exists precisely when the entity does not, so it cannot be keyed by a handle.
 
 **Consequences and accepted costs.**
 
