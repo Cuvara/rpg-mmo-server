@@ -542,7 +542,24 @@ func (r *Runner) stepGameStateReload() (string, error) {
 		return "", fmt.Errorf("reload: player %s never appeared in a snapshot after rejoin", r.userID)
 	}
 
-	if err := CheckReloadedPosition(spawn.X, spawn.Y, r.persistedX, r.persistedY, reloadTolerance); err != nil {
+	// Re-read the row NOW rather than trusting the snapshot the previous step
+	// took. That earlier read only had to prove the write path works, so it
+	// accepts any 0 < x < maxX and can legitimately catch a periodic 30s save
+	// taken mid-walk. The eviction save that follows the hold expiry then
+	// overwrites it with the final position -- so by the time we rejoin, the
+	// value the server correctly reloads is newer than the one we recorded, and
+	// comparing against the recording fails a deploy that did everything right.
+	//
+	// (Seen on 2026-08-11: step recorded x=3.0000, the server reloaded x=3.3333,
+	// and postgres held x=3.3333 by the time anyone looked.)
+	wantX, wantY := r.persistedX, r.persistedY
+	if row, ok, err := r.reloadPlayerRow(); err != nil {
+		return "", fmt.Errorf("reload: re-reading player_states: %w", err)
+	} else if ok {
+		wantX, wantY = row.X, row.Y
+	}
+
+	if err := CheckReloadedPosition(spawn.X, spawn.Y, wantX, wantY, reloadTolerance); err != nil {
 		return "", err
 	}
 
@@ -551,7 +568,21 @@ func (r *Runner) stepGameStateReload() (string, error) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return fmt.Sprintf("respawned at x=%.4f y=%.4f from persisted x=%.4f y=%.4f (waited %s for hold)",
-		spawn.X, spawn.Y, r.persistedX, r.persistedY, waited.Round(time.Second)), nil
+		spawn.X, spawn.Y, wantX, wantY, waited.Round(time.Second)), nil
+}
+
+// reloadPlayerRow re-reads this run's player_states row on its own short-lived
+// connection. Used by the reload check to compare against what the database
+// holds at comparison time rather than what it held a step earlier.
+func (r *Runner) reloadPlayerRow() (PlayerRow, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.Timeout)
+	defer cancel()
+	conn, err := r.connectDB(ctx)
+	if err != nil {
+		return PlayerRow{}, false, err
+	}
+	defer conn.Close(context.Background())
+	return r.loadPlayerRow(ctx, conn, r.userID)
 }
 
 // CheckReloadedPosition asserts a rejoining player was restored to the position
