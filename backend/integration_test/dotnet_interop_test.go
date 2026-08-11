@@ -153,6 +153,15 @@ func buildDotnetGameServer() {
 // returned cleanup function to kill the process.
 func startDotnetGameServer(t *testing.T) (addr string, cleanup func()) {
 	t.Helper()
+	return startDotnetGameServerWith(t, nil, nil)
+}
+
+// startDotnetGameServerWith is startDotnetGameServer with extra CLI args and
+// extra environment appended. The self-registration flow test uses it to point
+// the server at a Redis instance and give it an address to advertise; every
+// other caller wants the plain defaults.
+func startDotnetGameServerWith(t *testing.T, extraArgs, extraEnv []string) (addr string, cleanup func()) {
+	t.Helper()
 
 	gameServerBuildOnce.Do(buildDotnetGameServer)
 	if gameServerSkip != "" {
@@ -162,7 +171,11 @@ func startDotnetGameServer(t *testing.T) (addr string, cleanup func()) {
 		t.Fatal(gameServerBuildErr)
 	}
 
-	serverArgs := []string{
+	// extraArgs go FIRST: GameServer/Program.cs GetArg returns the first match,
+	// so a later --addr would be silently ignored. Prepending is what makes
+	// these overrides rather than additions.
+	serverArgs := append([]string{}, extraArgs...)
+	serverArgs = append(serverArgs,
 		"--addr", "127.0.0.1:0",
 		"--map-id", dotnetMapID,
 		"--server-id", dotnetServerID,
@@ -171,7 +184,7 @@ func startDotnetGameServer(t *testing.T) (addr string, cleanup func()) {
 		// (default :9101) would collide with any locally running server and with
 		// the next test's server in this same suite.
 		"--metrics-addr", "",
-	}
+	)
 
 	var cmd *exec.Cmd
 	if gameServerNativeBin != "" {
@@ -183,6 +196,7 @@ func startDotnetGameServer(t *testing.T) (addr string, cleanup func()) {
 		"DOTNET_CLI_TELEMETRY_OPTOUT=1",
 		"JOIN_TOKEN_SECRET="+dotnetJoinTokenSecret,
 	)
+	cmd.Env = append(cmd.Env, extraEnv...)
 
 	// Merge stderr into the same pipe so nothing is written to the test process's
 	// own stderr after the test finishes.

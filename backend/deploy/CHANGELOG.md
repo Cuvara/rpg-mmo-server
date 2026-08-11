@@ -5,7 +5,61 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`stack.sh` — one command that brings the whole backend up locally.**
+  Everything needed to bring up a stack a client can actually connect to
+  existed, but it was six manual steps spread across two docs (copy `.env`,
+  build the Nakama plugin, build two images, `up`, `up --profile realtime`, find
+  the secrets), and nothing told you whether the game server had registered
+  itself — the one condition that decides whether `MsgEnterWorld` can be
+  answered at all.
+
+  ```bash
+  cd backend/deploy
+  ./stack.sh up      # build every image + start everything + wait for the registry
+  ./stack.sh check   # drive the full client flow through it (smoketest)
+  ./stack.sh down    # stop (--wipe to drop the data volumes too)
+  ```
+
+  Also `health` (probes every health endpoint **and** reads
+  `servers:map:<map_id>` out of Redis, so "the game server is invisible to the
+  gateway" is a distinct, named failure rather than a mystery), `ps` and `logs`.
+  `--no-build` skips the image builds.
+
+  It is a shell script, not a Makefile target, because **`make` is not installed
+  on this project's dev box**; the `flow-*` Make targets are thin wrappers so
+  both spellings work, and nothing in the documented path requires `make`.
+
+- **`stack.sh up --scratch`** — a second, fully isolated stack (own compose
+  project, own container names `rpgs-*`, own volumes, every published port
+  offset). Without it there is no way to test a compose change on a machine that
+  already has a stack up, and the failure mode of trying is bad: compose
+  **adopts and recreates** the running containers with your `.env`, printing a
+  normal successful recreate while silently replacing someone else's
+  environment. That happened once while building this, to the live dev stack;
+  it was restored by re-running CD's compose file, and the isolation flag exists
+  so it cannot happen again.
+
+### Changed
+- `docker-compose.yml`: `container_name` is now `${COMPOSE_NAME_PREFIX:-rpg}-*`
+  and Nakama's four published ports are env-driven
+  (`NAKAMA_{GRPC,HTTP,CONSOLE,METRICS}_PORT`). Defaults are unchanged, so every
+  existing command, script and CD path behaves exactly as before; this only
+  makes an isolated second stack expressible.
+
 ### Fixed
+- **Scratch/second-stack configuration passed through exported environment
+  variables was silently ignored.** On this project's dev box `docker` is a
+  shell shim to the Windows `docker.exe` (`docs/CICD.md` §4a), and WSL only
+  forwards an environment variable to a Windows process when it is listed in
+  `$WSLENV`. So `export COMPOSE_PROJECT_NAME=… ; docker compose up` reaches
+  compose with the variable **unset** and operates on the default project —
+  with no warning, and with output that looks like success. Compounding it, the
+  compose file's top-level `name:` beats `COMPOSE_PROJECT_NAME` anyway.
+  `stack.sh` therefore passes configuration with `--env-file` and `-p`, never
+  through the environment. Documented in the runbook alongside the existing
+  `$PWD` bind-mount trap, since it is the same class of WSL-interop bug.
+
 - **`JOIN_TOKEN_SECRET` was never wired into any deployment path**, so both
   realtime containers crash-looped on startup: `rpg-gateway` and `rpg-gameserver`
   each logged `JOIN_TOKEN_SECRET is required but not set -- refusing to start`.

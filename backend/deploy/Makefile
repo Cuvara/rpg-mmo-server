@@ -1,8 +1,15 @@
-# Local dev backing stack (PostgreSQL + Redis + Nakama with our Go plugin).
-# Run from backend/deploy/.
+# Local dev stack. Run from backend/deploy/.
 #
+# WHOLE BACKEND, ONE COMMAND:
+#   make flow-up     # build every image + start postgres, redis, nakama,
+#                    # gateway and the C# game server, correctly wired
+#   make flow-check  # prove the full client flow through it (smoketest)
+#   make flow-down   # stop everything (keeps data volumes)
+#
+# Backing services only (gateway/gameserver run on the host with go run /
+# dotnet run — the interactive-dev path):
 #   make plugin   # compile nakama.so into ./modules
-#   make up       # start stack
+#   make up       # start postgres + postgres-game + redis + nakama
 #   make logs     # tail logs
 #   make down     # stop stack (keeps data volumes)
 #   make reset    # stop + delete data volumes + delete plugin
@@ -41,6 +48,49 @@ image: ## Build a nakama image with the plugin baked in (for k3s/CI)
 		--target runtime \
 		-t $(IMAGE) \
 		$(CONTEXT)
+
+# ------------------------------------------------------------- whole stack
+# The whole-stack targets are thin wrappers around ./stack.sh, which is the
+# real entry point: `make` is not installed on every dev box here (it is absent
+# from the WSL distro this project is developed on), so the one-command path
+# must not depend on it. Anything these targets do, `./stack.sh <cmd>` does.
+#
+# SCRATCH=1 runs an ISOLATED second stack (own compose project, own container
+# names, offset published ports) so it can coexist with one already running.
+STACK := ./stack.sh
+ifeq ($(SCRATCH),1)
+STACK_FLAGS := --scratch
+else
+STACK_FLAGS :=
+endif
+
+.PHONY: flow-up
+flow-up: ## ONE COMMAND: build everything and run the whole backend
+	$(STACK) up $(STACK_FLAGS)
+
+.PHONY: flow-down
+flow-down: ## Stop the whole stack (keeps data volumes)
+	$(STACK) down $(STACK_FLAGS)
+
+.PHONY: flow-reset
+flow-reset: ## Stop the whole stack and wipe its data volumes
+	$(STACK) down --wipe $(STACK_FLAGS)
+
+.PHONY: flow-ps
+flow-ps: ## Show whole-stack service status
+	$(STACK) ps $(STACK_FLAGS)
+
+.PHONY: flow-logs
+flow-logs: ## Tail gateway + gameserver logs
+	$(STACK) logs $(STACK_FLAGS)
+
+.PHONY: flow-check
+flow-check: ## Prove the full client flow end to end (nakama -> gateway -> gameserver)
+	$(STACK) check $(STACK_FLAGS)
+
+.PHONY: flow-health
+flow-health: ## Probe every published health endpoint + the server registry
+	$(STACK) health $(STACK_FLAGS)
 
 .PHONY: up
 up: ## Start postgres + redis + nakama in the background
