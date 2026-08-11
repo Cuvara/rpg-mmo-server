@@ -5,6 +5,28 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`ci-dotnet.yml` could hang for six hours and say nothing.** Since 2026-08-08
+  three runs (two on `develop`, one on a PR) have had their `Test` step stop
+  emitting output partway through and run until the 6-hour default job timeout
+  cancelled them. The suite normally finishes in ~3 minutes.
+  - Both jobs now carry `timeout-minutes` (20 test, 25 publish), so a hang costs
+    minutes of runner time instead of hours.
+  - `dotnet test` runs under `--blame-hang --blame-hang-timeout 8m`, which turns
+    a hang into a **failure that names the hung test** and writes a
+    `Sequence_*.xml` beside the results. Today a hang produces no `.trx` at all,
+    so the artifact step reports "no files found" and the run tells you nothing
+    about which test never returned.
+  - The artifact upload now collects `Sequence_*.xml` too, and declares
+    `if-no-files-found: warn` rather than relying on the default.
+  - **This diagnoses; it does not cure.** The hang is not yet root-caused. It
+    survives to a test that ran fine at `cb5d139` and hangs at `817c6ac` with the
+    C# tree byte-identical between the two, so it is environmental or a race, not
+    a code change. Candidates are the four tests that never reported in the last
+    run: `GameServerHostShutdownTests.ShutdownAsync_SecondCaller_AwaitsTheFirstTeardown`,
+    two `JoinTokenSecretTests` cases, and `JwtKeyringTests.EffectiveJoinTokenSecret_MatchesGoFallback`.
+    The next red run should name it.
+
 ### Changed
 - **G11 re-confirmed against `e3909d3`** — the one drill result that could not be
   trusted after #22 rewrote the auth path (rate limiting, split
