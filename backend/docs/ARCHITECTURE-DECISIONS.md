@@ -35,7 +35,7 @@ Four stores are in play. Interfaces live in `backend/shared/storage/interfaces.g
 | `session:{user_id}` | Redis (TTL 1h) | **gateway only** | `gateway/session/manager.go:34-40,55-60,62-68` |
 | `servers:id:{id}`, `servers:map:{map}` | Redis (TTL 15s) | **gameserver-dotnet** (self-registration + heartbeat); the gateway also registers Agones-allocated servers | `GameServer/Registry/RedisServerRegistry.cs`, `GameServer/Registry/RegistrationService.cs`; `gateway/registry/registry.go:85,106,111-112` |
 | `events:game` | Redis Streams | nothing live (see ADR-5) | `gateway/events/relay.go:16` subscribes; no live publisher |
-| Live world (entities, mobs, pending input) | C# process memory | gameserver-dotnet | `GameServer/World/GameWorld.cs:22-27` |
+| Live world (entities, mobs, pending input) | C# process memory | gameserver-dotnet | `GameServer/World/EcsWorld.cs` (Arch ECS, ADR-10) |
 
 Three findings the criticism is right about:
 

@@ -146,7 +146,8 @@ times — the right tradeoff for a tick-loop server.
 
 - `ReaderWriterLockSlim` protects the world state (same pattern as Go's
   `sync.RWMutex`). The tick loop takes a write lock; snapshot reads and
-  connection handlers take read locks.
+  connection handlers take read locks. Arch's `World` is not thread-safe, so this
+  lock is load-bearing rather than incidental — see "Entity storage: Arch ECS".
 - `Channel<T>` (bounded) for per-connection send queues. Back-pressure drops
   messages for slow clients rather than letting buffers grow unbounded.
 - The tick loop itself is synchronous and never awaits I/O. Persistence is
@@ -741,7 +742,7 @@ normalisation) and `GameServer.Tests/Net/KcpInteropTests.cs` (the Go client).
 
 ### Entity removal has exactly one owner, so a missed removal is permanent
 
-`GameWorld.AddEntity` has one call site — the join path — and `RemoveEntity` runs from
+`EcsWorld.AddEntity` has one call site — the join path — and `RemoveEntity` runs from
 one place: the reconnect-hold expiry task. There is no sweep, no GC, no reconciliation
 against the connection table. That makes the hold task the **sole owner** of every
 player entity's removal, and it means a join that attaches an entity without scheduling
@@ -833,3 +834,143 @@ wholesale, or stop rebuilding the connection at all and make `UserId` mutable
 after verification. The second is probably right long term — the rebuild exists
 only because `UserId` is `readonly` and unknown until the JWT is checked.
 
+## Entity storage: Arch ECS (2026-08-11)
+
+### What replaced `GameWorld`
+
+`GameServer/World/GameWorld.cs` — a `Dictionary<string, EntityState>` behind a
+`ReaderWriterLockSlim` — is deleted. `GameServer/World/EcsWorld.cs` replaces it and
+stores every entity in an [Arch](https://github.com/genaray/Arch) world (ADR-10).
+Arch owns entity identity, component storage, queries and iteration order; there is
+no second store and no fallback path.
+
+`EntityState` is decomposed into seven components plus one tag
+(`GameServer/World/Components.cs`):
+
+| Component | Fields | Notes |
+|---|---|---|
+| `EntityIdRef` | `string Value` | Still a string, still equal to the user id — see below |
+| `EntityKind` | `string Value` | `"player"` / `"npc"` / `"mob"` / `"boss"` |
+| `Position` | `Vec2 Value` | |
+| `Health` | `Hp`, `MaxHp`, `Dead` | |
+| `Combat` | `Attack`, `Defense`, `CooldownUntilTick` | Cooldown is a simulation tick |
+| `Locomotion` | `Speed` | |
+| `InputCursor` | `LastInputTick` | The client's `ack_tick` |
+| `PlayerTag` | — | Archetype tag mirroring `EntityKind == "player"` |
+
+Two archetypes exist: player (all eight) and non-player (the first seven). The
+persistence sweep (`AsyncSaver.SaveAllAsync`) is now an archetype query on
+`PlayerTag` rather than a full scan with a string comparison per entity.
+
+### What `EcsWorld` owns on top of Arch, and why
+
+Three things, none of which Arch provides:
+
+1. **A `string -> Entity` index.** `EntityState.Id` is still a `string` and is still
+   the user id. ADR-10 calls for an integer simulation handle; that migration reaches
+   persistence, the snapshot encoder and the reconnect/hold bookkeeping (~21 call
+   sites) and is deliberately **not** part of this change. Until it lands,
+   `EntityIdRef` puts a managed reference in every chunk — the exact cost ADR-10 says
+   the handle exists to remove.
+2. **The reader/writer lock.** Arch's `World` is not thread-safe, and network threads
+   spawn/despawn entities and push input while the tick loop reads. The lock discipline
+   is unchanged from `GameWorld`; it is now protecting something that genuinely
+   requires it.
+3. **A deferred structural-change phase**, below.
+
+Everything else — lookup, mutation, range scan, player enumeration — goes through Arch
+queries and chunk spans. `GetEntitiesInRange` iterates chunks and materialises an
+`EntityState` only for entities that pass the distance test, instead of copying every
+entity as the dictionary scan did.
+
+### Chunk iteration, not the delegate `Query` overloads
+
+Arch's ergonomic `world.Query(in desc, (ref A a) => ...)` allocates a closure whenever
+the lambda captures anything, which a tick loop's lambdas invariably do. `EcsWorld`
+uses `GetChunkIterator()` + `chunk.GetSpan<T>()` throughout — the allocation-free shape,
+and the one the AOT spike exercised.
+
+### No `CommandBuffer`; structural changes are an explicit phase
+
+ADR-11 measured that `Arch.Buffer.CommandBuffer` throws `NullReferenceException` inside
+`Arch.Core.World.Has<T>` under NativeAOT even with array hints in place. It is not used
+here at all.
+
+Instead, spawns and despawns raised while a query is being iterated are queued and
+applied by `EcsWorld.ApplyStructuralChanges()`, which `TickLoop.TickOnce` calls once per
+tick before anything iterates.
+
+**Be honest about what this currently does:** the queue is normally empty. The
+reader/writer lock already prevents a writer from overlapping a reader, and nothing in
+the present call graph mutates the world during iteration, so structural ops take the
+immediate path. The deferral is a backstop that keeps "nothing mutates during
+iteration" from being an unstated assumption that a future system quietly breaks. The
+re-entrancy counter that drives it is `[ThreadStatic]`, because same-thread re-entrancy
+is the only case the lock does not already exclude.
+
+### The `Shared.GameLogic` boundary is unchanged
+
+No `Arch.Core` type appears anywhere in `Shared.GameLogic` — not `World`, not `Entity`,
+not `QueryDescription`, not a component attribute. `EcsWorld` composes an `EntityState`
+out of components on the way out and writes components back on the way in; the shared
+static functions (`MovementSystem.TryMove`, `CombatLogic.*`, `Vec2.DistanceSq`) are
+called with plain structs and never see the ECS.
+
+The cost is a struct copy per entity per read. At the current tick rate and player count
+this is not measurable, and it is the price of keeping the client's prediction code
+free of a pre-1.0 server dependency (ADR-10, "Why not share the ECS").
+
+### AOT hints: what breaks, and the guard that stops it (ADR-11)
+
+`Arch.Core.Chunk` allocates one backing array per component type through
+`System.Array.CreateInstance(Type, int)`. Under NativeAOT the array type `T[]` for a
+user-defined struct exists only if ILC saw it constructed statically somewhere.
+`GameServer/World/ArchAotHints.cs` constructs one array per component type in a
+`[ModuleInitializer]`.
+
+**This was re-measured on this branch, not taken on trust.** Commenting out the single
+`new Locomotion[1],` line and publishing produced:
+
+- `dotnet build`: clean.
+- `dotnet test`: 500 passed, 0 failed. The suite runs on CoreCLR with a JIT and
+  structurally cannot see this.
+- `dotnet publish -c Release`: clean. **No warning naming `Locomotion`.**
+- The native binary: started, logged `Game server listening on 127.0.0.1:...`,
+  accepted the TCP connection — and then threw on the first player join:
+
+  ```
+  System.NotSupportedException: 'GameServer.World.Components.Locomotion[]' is
+  missing native code or metadata.
+  ```
+
+Note where it threw. The first archetype creation is the **first player spawn**, not
+startup. A smoke check that starts the binary and confirms it listens would report
+green on a binary that cannot accept a single player. The CI smoke step therefore runs
+the real cross-language handshake (`GAMESERVER_NATIVE_BIN` in
+`.github/workflows/ci-dotnet.yml`), not a liveness probe.
+
+**The guard.** `GameServer.Tests/World/ArchAotHintTests.cs` reflects over the GameServer
+assembly, collects every struct that is either declared in `GameServer.World.Components`
+or carries `[EcsComponent]`, and fails when one is absent from
+`ArchAotHints.HintedComponentTypes`. That property is derived from the constructed
+arrays themselves via `GetElementType()`, so there is no second list to drift out of
+sync — the guard checks the hints, not a description of them. A companion test rejects
+stale entries in the other direction.
+
+**The guard has been observed to fire.** Adding an unhinted `GuardProbe` component made
+`EveryComponentType_IsHintedForNativeAot` fail naming `GuardProbe` and telling the
+author which line to add. It was then removed.
+
+### Known follow-ups
+
+- **ADR-7's benchmark numbers are void.** 45.9 KB/s per client and ~82 MiB at 200
+  players were measured against `GameWorld`. Storage changed underneath the tick loop;
+  re-run `backend/docs/BENCHMARK.md` before quoting either again.
+- **`EntityState.Id` is still a `string`.** See above. Arch's ergonomics make the split
+  more attractive than before — the index lookup is now the only hash on the read path,
+  and it would disappear — but it is a separate piece of work.
+- **Arch pulls in `Collections.Pooled` 2.0.0-preview.27, which produces AOT and trim
+  analysis warnings** (`IL3053`, `IL2104`) on publish. Every other dependency in
+  `GameServer.csproj` is warning-free, so this is a new exception to that file's
+  standard. The binary works — the E2E suite passes against it — but the warnings are
+  unexamined, and they are the noise a future real warning would hide in.
