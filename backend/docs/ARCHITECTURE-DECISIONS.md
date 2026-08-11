@@ -35,7 +35,7 @@ Four stores are in play. Interfaces live in `backend/shared/storage/interfaces.g
 | `session:{user_id}` | Redis (TTL 1h) | **gateway only** | `gateway/session/manager.go:34-40,55-60,62-68` |
 | `servers:id:{id}`, `servers:map:{map}` | Redis (TTL 15s) | **gameserver-dotnet** (self-registration + heartbeat); the gateway also registers Agones-allocated servers | `GameServer/Registry/RedisServerRegistry.cs`, `GameServer/Registry/RegistrationService.cs`; `gateway/registry/registry.go:85,106,111-112` |
 | `events:game` | Redis Streams | nothing live (see ADR-5) | `gateway/events/relay.go:16` subscribes; no live publisher |
-| Live world (entities, mobs, pending input) | C# process memory | gameserver-dotnet | `GameServer/World/EcsWorld.cs` (Arch ECS, ADR-10) |
+| Live world (entities, mobs, pending input) | C# process memory | gameserver-dotnet | `GameServer/World/GameWorld.cs:22-27` |
 
 Three findings the criticism is right about:
 
@@ -952,12 +952,41 @@ container they are iterated out of.
    now in play, for the same reason.
 
 3. **The client consumes it as source, not as a DLL.** `Shared.GameLogic`
-   multi-targets `netstandard2.1;net10.0` and gains a `package.json` +
+   multi-targets `netstandard2.1;net10.0` and carries a `package.json` +
    `.asmdef`, consumed by Unity through a UPM git dependency with a `?path=`
-   subfolder reference pinned to a tag. Compiling from source is what keeps
-   IL2CPP from having to swallow a `netstandard2.1` assembly, keeps the code
-   steppable in the Editor, and removes any possibility of binary drift between
-   what the server ran and what the client shipped.
+   subfolder reference **pinned to a tag**. The normative form, in the client's
+   `Packages/manifest.json`:
+
+   ```json
+   "com.rpgmmo.shared-gamelogic": "https://github.com/dyCuong03/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.0"
+   ```
+
+   Compiling from source is what keeps IL2CPP from having to swallow a
+   `netstandard2.1` assembly, keeps the code steppable in the Editor, and removes
+   any possibility of binary drift between what the server ran and what the client
+   shipped. "Release" here therefore means **stamping a commit with a tag**, not
+   building an artifact. A `.tgz` on GitHub Releases would be strictly worse — UPM
+   consumes local paths, git URLs and registries, but not tarball URLs.
+
+   This mechanism is not novel in this project: the Unity client already resolves
+   `com.company.build-pipeline` through the identical `git?path=#ref` form, and
+   `rpg-mmo-server` is public, so no credential or deploy key is involved on a
+   developer machine or in CI.
+
+   **Pin a tag, never a branch.** A branch reference means the rules the client
+   predicts with change whenever someone pushes, silently, with no commit in the
+   client repo to attribute the change to. A tag makes adopting new rules a
+   deliberate, reviewable act, and `packages-lock.json` records the resolved
+   commit so a build stays reproducible even if a tag is moved. Tags are
+   `sgl-vX.Y.Z` with no `/`, since a slash is a valid git ref but its handling
+   inside a UPM `#fragment` is unverified.
+
+   Two mechanical guards make the boundary self-enforcing rather than
+   review-dependent: `<LangVersion>9.0</LangVersion>` on the csproj makes the
+   *server* build reject C# 10+ syntax the client could not compile, and
+   `"noEngineReferences": true` in the asmdef makes the *client* build reject a
+   `UnityEngine` reference. Each side fails on the rule the other side would
+   otherwise not notice being broken.
 
 4. **Conformance is mechanical, not editorial.** A committed set of golden
    vectors — `(state, input, dt) → expected state` — is executed by the server's
@@ -1099,6 +1128,95 @@ rule 4 back in question.
 
 ---
 
+## ADR-11 — Arch under NativeAOT: hints are generated, CommandBuffer is not used
+
+**Status:** accepted 2026-08-11, measured. Constrains ADR-10 decision 1.
+
+**Context.** ADR-10 chose Arch as the server's entity storage before anyone had
+established that Arch works in a NativeAOT binary. The server ships NativeAOT
+(`GameServer.csproj`, `<PublishAot>true</PublishAot>`), and every other dependency
+in that file carries a comment justifying why it is trim/AOT-clean. Arch's
+documentation says nothing about AOT at all.
+
+A throwaway spike (`_spike/ArchAotSpike`, branch `spike/gameserver/arch-nativeaot`)
+published Arch `2.1.0-beta` under the real project's AOT settings across nine
+configurations and ran each native binary against a plain dictionary baseline.
+
+**What was measured.**
+
+`dotnet publish` succeeds **cleanly in every configuration**. The binary then
+throws on the first archetype creation:
+
+```
+NotSupportedException: 'Identity[]' is missing native code or metadata.
+```
+
+All three usage modes fail — direct query, chunk iteration, command buffer. The
+publish emits no warning that predicts it. This is precisely the failure mode that
+survives `dotnet test`, because tests run on CoreCLR with a JIT.
+
+The cause is that `Arch.Core.Chunk`'s constructor allocates one backing array per
+component type through `System.Array.CreateInstance(Type, int)` — runtime,
+`Type`-driven array creation. Under NativeAOT the array type `T[]` for a
+user-defined struct exists only if ILC saw it constructed statically somewhere.
+
+Statically constructing one array per component type in a `[ModuleInitializer]`
+fixes it. With that in place:
+
+| Mode | Result |
+|---|---|
+| direct query | works; state checksum identical to the baseline |
+| chunk iteration | works; identical |
+| source generator (`Arch.System`) | works; identical |
+| **`CommandBuffer`** | **still throws** `NullReferenceException` inside `Arch.Core.World.Has<T>` |
+
+Two residual hazards, both confirmed by experiment rather than reasoning:
+
+1. **A missing hint is invisible.** Omitting one component type from the list
+   produces no build error and no startup error — the binary crashes on the first
+   tick that creates an archetype containing it. The spike demonstrates this by
+   deliberately omitting `Stunned`. A rare archetype means a production crash.
+2. **`CommandBuffer` is unusable**, and it is the idiomatic way to make structural
+   changes (spawn, despawn, add/remove component) while iterating.
+
+**Decision.**
+
+1. **Arch stays** (ADR-10 decision 1 is unchanged). Where it runs, it is
+   behaviourally identical to the baseline — the checksums match exactly, so this
+   is a packaging problem, not a correctness one.
+2. **The AOT hint list is generated or guarded, never hand-maintained.** Either a
+   source generator emits one static array construction per component type, or a
+   test enumerates every component type and fails when one is unhinted. A
+   hand-written list whose omissions surface only in production is not an
+   acceptable steady state. This is the load-bearing part of this ADR: without it,
+   adding a component is a silent production hazard forever.
+3. **`CommandBuffer` is not used.** Structural changes are deferred to an explicit
+   phase outside iteration. At a 10–15 Hz tick this costs nothing that matters, and
+   it removes a dependency on a code path that is broken in the shipping
+   configuration.
+4. **The `publish` CI job must run the binary, not merely build it.** A clean
+   publish demonstrably does not imply a working binary here. A smoke run of the
+   published artifact is what would have caught this, and is what will catch the
+   next instance.
+
+**Consequences.**
+
+- Adding a component type is no longer a purely local act; it must reach whatever
+  mechanism decision 2 settles on. That mechanism should fail loudly at build or
+  test time, so the cost is paid once rather than per component.
+- Arch remains at `2.1.0-beta`. This spike found one library bug that survives the
+  documented workaround; treat further AOT-related breakage as likely rather than
+  surprising, and re-run the spike on any Arch upgrade.
+- The spike is throwaway and is not merged into the solution. It is retained on its
+  branch as the reproduction for anyone revisiting this.
+
+**Revisit if** Arch publishes an AOT statement or fixes `CommandBuffer`, or if the
+hint mechanism turns out to be unable to see component types defined outside the
+server assembly — which would be a stronger argument against Arch than anything
+found here.
+
+---
+
 ## Summary of decisions
 
 | # | Area | Decision |
@@ -1113,3 +1231,4 @@ rule 4 back in question.
 | 8 | Realtime security | Opt-in KCP PSK encryption (per-session keys deferred); `JOIN_TOKEN_SECRET` split from `JWT_SECRET`, both rotatable; token-bucket rate limits on accepts, frames and `gateway_token`. KCP is **not** reachable end to end — the C# game server has no KCP |
 | 9 | Wire encoding | Protobuf from one committed schema; JSON kept during migration and distinguished by the first body byte, so components upgrade in any order |
 | 10 | Shared simulation | Arch replaces `GameWorld` on the server; `Shared.GameLogic` stays ECS-free and ships to Unity as multi-targeted **source**; golden vectors run on both sides in CI; only IEEE-exact float ops permitted in shared code |
+| 11 | Arch under NativeAOT | Arch publishes clean and then throws at runtime without per-component AOT hints; hints are **generated or guarded, never hand-written**; `CommandBuffer` is broken under AOT and is not used; the `publish` CI job must **run** the binary, not just build it |
