@@ -193,7 +193,7 @@ would actually read. It can come back when there is a ceiling worth dividing by.
 | Gateway | Custom Go binary |
 | Orchestration | k3s + Agones |
 | Database / Cache | PostgreSQL / Redis |
-| Client | Unity 2022 LTS+ with DOTS |
+| Client | Unity 6 (6000.3.9f1) with DOTS |
 | Realtime Transport | KCP/UDP (custom Gateway) |
 | Serialization | Protobuf / FlatBuffers (target) |
 | Monitoring | Grafana Cloud free + Prometheus |

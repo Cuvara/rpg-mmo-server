@@ -622,27 +622,63 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 	cc.Send(resp)
 }
 
-// kickLocalUser finds a local connection for userID and sends
-// MsgDisconnect(reason="duplicate_login") before closing it.
+// Machine-readable kick reasons. They travel in both MsgKick and the paired
+// MsgDisconnect, so the two frames never disagree about why a client was
+// evicted.
+const (
+	KickReasonDuplicateLogin = "duplicate_login"
+)
+
+// kickLocalUser finds a local connection for userID and evicts it with
+// MsgKick(reason) followed by MsgDisconnect(reason), then closes it.
 func (g *Gateway) kickLocalUser(userID string) {
 	old := g.findUserConn(userID)
 	if old == nil {
 		return
 	}
-	// Use NewEnvelope (JSON) rather than old.Reply to avoid reading the enc
-	// field, which is only safe from the old connection's ReadLoop goroutine.
-	resp, err := messages.NewEnvelope(messages.MsgDisconnect, messages.DisconnectMessage{
-		Reason: "duplicate_login",
-	})
-	if err == nil {
-		old.SendAndClose(resp)
-	} else {
-		old.Close()
-	}
+	g.sendKickAndClose(old, KickReasonDuplicateLogin)
 	// ClearIdentity so cleanupSession in handleConn's defer doesn't destroy the
 	// session we're about to overwrite.
 	old.ClearIdentity()
 	g.untrackUser(userID, old)
+}
+
+// sendKickAndClose evicts a connection with two frames — MsgKick then
+// MsgDisconnect, both carrying the same reason — and closes once they flush.
+//
+// Both are sent because they address different clients, not because the
+// information differs. MsgKick is the typed eviction signal; MsgDisconnect is
+// what every client built before MsgKick existed already acts on, and an old
+// client silently ignores an unknown type 15. Sending only MsgKick would strand
+// those clients on a socket that simply stops answering.
+//
+// Order matters and is part of the contract: a client that understands MsgKick
+// reads the reason from it and MUST treat the MsgDisconnect that follows as the
+// same eviction rather than a second event. Reversing the order would make a new
+// client act on the weaker frame first. See gateway/docs/API.md.
+//
+// Both frames use NewEnvelope (JSON) rather than cc.Reply: this runs on the
+// *evicting* connection's goroutine, and cc.enc may only be read from the
+// evicted connection's own ReadLoop.
+func (g *Gateway) sendKickAndClose(cc *ClientConn, reason string) {
+	kick, kickErr := messages.NewEnvelope(messages.MsgKick, messages.KickMessage{
+		Reason: reason,
+	})
+	disc, discErr := messages.NewEnvelope(messages.MsgDisconnect, messages.DisconnectMessage{
+		Reason: reason,
+	})
+	if kickErr != nil || discErr != nil {
+		// Encoding a two-field struct cannot realistically fail, but a close
+		// with no explanation still beats leaving the socket open.
+		g.logger.Error("encode kick frames", "user", cc.UserID(), "reason", reason,
+			"kick_err", kickErr, "disconnect_err", discErr)
+		cc.Close()
+		return
+	}
+	cc.Send(kick)
+	// SendAndClose on the *last* frame only: WriteLoop half-closes once the
+	// queue drains, so both frames are on the wire before the FIN.
+	cc.SendAndClose(disc)
 }
 
 // handleKickEvent processes a kick request received from another gateway

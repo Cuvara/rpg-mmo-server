@@ -314,7 +314,7 @@ that convert between `System.Numerics` and `Unity.Mathematics`.
 
 ### Detailed Unity Integration Guide
 
-There are three ways to add `Shared.GameLogic` to a Unity 2022+ project:
+There are three ways to add `Shared.GameLogic` to a Unity 6 project:
 
 #### Option A: Git Submodule (recommended for team workflows)
 

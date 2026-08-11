@@ -3,15 +3,47 @@
 All frames are `shared/messages.Envelope` (`{type, payload}`) with a 4-byte big-endian
 length prefix, 1 MB max frame. Message ids are defined in `shared/messages/messages.go`.
 
+### Encoding: Protobuf or JSON, detected per frame
+
+The envelope body is **either** Protobuf (default) **or** legacy JSON, and the
+receiver tells them apart from the **first body byte** — no negotiation, no
+version field, no extra round trip:
+
+| First byte | Encoding | Why it cannot collide |
+|---|---|---|
+| `0x08` | Protobuf | proto3 always emits field 1 (`type`), which is ≥ 1 for every real message |
+| `0x7B` (`{`) | JSON | a JSON object always opens with `{` |
+
+The gateway **never chooses** an encoding. `ClientConn.enc` is latched from the
+first frame decoded on the connection and every reply goes back in that same
+encoding (`cc.Reply`, never `messages.NewEnvelope`). That is what lets a Protobuf
+gateway keep serving a JSON client, and lets gateway, game server and Unity
+client be upgraded in any order. See `shared/docs/DESIGN.md`.
+
+Decoding fails closed: `type == 0` is rejected in both branches. Without that
+guard a body starting `0x12` parses as a well-formed Envelope carrying only
+field 2 — a silent half-parse rather than an error.
+
+> One deliberate exception: the duplicate-login kick built in `kickLocalUser`
+> uses `messages.NewEnvelope` (JSON) because it is constructed off the victim
+> connection's read-loop goroutine, and `enc` may only be read from that
+> goroutine.
+
 ## Handshake
 
 ```
 1. Client → Gateway  MsgAuth          AuthRequest{Token}          (JWT from Nakama)
 2. Gateway → Client  MsgAuthResp      AuthResponse{OK, UserID}
 3. Client → Gateway  MsgEnterWorld    EnterWorldRequest{MapID}
-4. Gateway → Client  MsgEnterWorldResp EnterWorldResponse{ServerAddr, JoinToken}
+4. Gateway → Client  MsgEnterWorldResp EnterWorldResponse{ServerAddr, JoinToken, Transport}
 5. Client → Gateway  MsgDisconnect    (no payload)                (optional, graceful)
 ```
+
+`Transport` names the realtime transport the **target game server** speaks —
+`"tcp"` or `"kcp"` — copied from that server's registry entry. **Empty means
+`"tcp"`**, which is what entries written before the field existed carry. The
+client must dial the game server with this transport, not with whatever it used
+to reach the gateway: the two are configured independently.
 
 ## Messages handled by the gateway
 
@@ -19,8 +51,62 @@ length prefix, 1 MB max frame. Message ids are defined in `shared/messages/messa
 |----|---------|--------------|----------|
 | 1 | `MsgAuth` | none — the only frame accepted without a session | Verify JWT locally (`session.VerifyClientJWT`, shared secret, no Nakama call) → `SessionStore.Set("session:{user_id}", TTL=1h)` → reply `MsgAuthResp{OK}`. Invalid token/payload → `MsgAuthResp{OK:false, Error}` |
 | 3 | `MsgEnterWorld` | live session | Least-loaded live server for `MapID` with `PlayerCount < Capacity` → 30s join token (`sid` claim = server id) → `MsgEnterWorldResp` |
-| 9 | `MsgDisconnect` | live session | Destroy the session record, close the socket |
+| 9 | `MsgDisconnect` | live session | Destroy the session record, half-close the socket |
+| 11 | `MsgPing` | **none — handled before the session check** | Reply `MsgPong{Timestamp echoed, ServerTime}` |
+| 12 | `MsgPong` | **none — handled before the session check** | Refresh the connection's liveness timer |
 | other | — | live session | Logged and ignored |
+
+**Heartbeat frames bypass session enforcement on purpose.** They are dispatched
+in `handleMessage` *before* `checkSession`: a `MsgPong` that keeps the connection
+alive must not be rejected because a Redis blip made the session lookup fail, and
+a ping carries no session semantics at all. They are still subject to the inbound
+frame limiter, which runs first.
+
+The gateway pings on its own initiative every **10 s** (`pingInterval`) and closes
+any connection that has not produced a `MsgPong` within **30 s** (`pongTimeout`).
+The game server uses the same two values, so a client can run one heartbeat
+implementation against both hops.
+
+### Eviction: `MsgKick` + `MsgDisconnect`, in that order
+
+When the gateway evicts a connection it sends **two** frames carrying the **same**
+reason string, then half-closes:
+
+```
+Gateway → Client  MsgKick(15)        KickMessage{reason}        typed eviction signal
+Gateway → Client  MsgDisconnect(9)   DisconnectMessage{reason}  legacy frame, same reason
+                  <FIN>
+```
+
+Both are sent because they address different clients, not because they carry
+different information. `MsgKick` is the typed signal; `MsgDisconnect` is what
+every client written before `MsgKick` was wired up already acts on, and such a
+client silently ignores an unknown type 15. Sending only `MsgKick` would strand
+them on a socket that simply stops answering.
+
+**Client contract**: a client that understands `MsgKick` takes the reason from it
+and MUST treat the `MsgDisconnect` that follows as *the same eviction*, not a
+second event — otherwise it reports the disconnect twice. A client that does not
+understand `MsgKick` ignores it and behaves exactly as before. The order is
+therefore part of the contract, not an implementation detail.
+
+| Reason | Emitted when |
+|---|---|
+| `duplicate_login` | the same user authenticated on another connection (same gateway, or another gateway via the kick Pub/Sub channel) |
+
+`wire.proto` names further reasons (`server_shutdown`, `session_expired`,
+`rate_limited`) as an intended vocabulary. **The gateway does not emit them
+today**: shutdown closes sockets without a frame, an expired session replies
+`MsgAuthResp{error:"session expired"}` on the *next* frame rather than pushing
+anything, and the frame limiter replies `MsgAuthResp{error:"rate limited"}`.
+Treat the table above as the complete current set; a client should handle an
+unrecognised reason by disconnecting and surfacing a generic message.
+
+Both frames are JSON regardless of the connection's latched encoding — eviction
+runs on the *evicting* connection's goroutine, and `ClientConn.enc` may only be
+read from the evicted connection's own `ReadLoop`. A Protobuf client must
+therefore accept a JSON eviction frame, which the first-byte sniff already
+handles transparently.
 
 ## Session enforcement (added 2026-08-04)
 
@@ -89,15 +175,40 @@ This keeps a Redis-backed store from reporting ghost-online players after a drop
 ## Join token
 
 `transfer.GenerateJoinToken(userID, serverID, secret)` — HS256, TTL
-`constants.JoinTokenTTL` (30s), claims `{sub: userID, sid: serverID}`. The game server
-verifies it as the first frame on its socket.
+`constants.JoinTokenTTL` (30s), claims `{sub: userID, sid: serverID, jti}`. The
+game server verifies it as the first frame on its socket.
 
 Signed with **`JOIN_TOKEN_SECRET`**, not `JWT_SECRET` (added 2026-08-06). The
 join secret is distributed to every game-server pod; the auth secret is not, so
-sharing them made one compromised pod able to forge client auth tokens. Unset
-`JOIN_TOKEN_SECRET` falls back to `JWT_SECRET` (unchanged behaviour, start-up
-warning) — required today because `gameserver-dotnet` cannot read the new
-variable yet.
+sharing them made one compromised pod able to forge client auth tokens.
+
+> **`JOIN_TOKEN_SECRET` is mandatory on both sides — there is no fallback.**
+> The gateway refuses to start without it (`cmd/gateway/main.go`), and so does
+> the C# game server (`Program.cs`, exit code 2). Both log a warning when it is
+> set to the *same value* as `JWT_SECRET`, which defeats the split.
+>
+> Corrected 2026-08-11: this section previously said an unset `JOIN_TOKEN_SECRET`
+> falls back to `JWT_SECRET` "because `gameserver-dotnet` cannot read the new
+> variable yet". Both claims are obsolete — the game server reads it
+> (`GameServerHost` parses it into `_joinKeys`) and requires it. Following the old
+> text now yields a gateway that will not boot, or, if only the gateway is given
+> a distinct secret, a fleet where **every join fails signature verification**.
+
+### Replay protection (`jti`)
+
+`SignWithServer` attaches a unique `jti` claim **whenever `serverID` is non-empty**
+— i.e. to every join token, and to no client auth token. The game server consumes
+it exactly once through `JtiTracker.TryConsume` and rejects a token whose `jti` is
+missing or already seen (`"Token already used"`).
+
+So a join token is **single-use, single-server, 30-second**: `sid` must equal the
+receiving server's own id (empty `sid` is rejected outright, no bypass), the `jti`
+must be fresh, and the expiry bounds the window.
+
+The tracker is **in-memory and per game-server process**, holding consumed ids for
+60 s. Two consequences worth designing around: a restarted pod forgets the set
+(harmless — the 30 s TTL is shorter than the gap), and the guard does not span
+pods, which is why `sid` pinning carries the cross-pod half of the protection.
 
 Both secrets accept a comma-separated rotation list; the keyring variants
 (`GenerateJoinTokenKeyring`, `ValidateJoinTokenKeyring`, `AssignMapKeyring`)
