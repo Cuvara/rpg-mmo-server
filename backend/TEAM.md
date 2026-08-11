@@ -43,11 +43,39 @@ deploy (depends on all above — build artifacts)
 - Config structs and env loading
 
 ### Shared Game Logic (owned by agent-gameserver-dotnet, C#)
-`gameserver-dotnet/Shared.GameLogic/` is a pure C# .NET 10 class library with zero Unity dependencies. It contains all deterministic game logic (movement, combat, validation, AOI, constants) and is designed to be used by both:
+`gameserver-dotnet/Shared.GameLogic/` is a pure C# class library with zero engine dependencies. It contains all deterministic game logic (movement, combat, validation, AOI, constants) and is used by both:
 - **GameServer (.NET 10)**: referenced via `<ProjectReference>`
-- **Unity DOTS client**: imported as a local package / Git submodule with an Assembly Definition (`.asmdef`)
+- **Unity 6 client**: consumed as **source** via a UPM git dependency with a `?path=` subfolder reference, pinned to a tag
 
-Constraints: no Unity refs, no server-specific code (networking/persistence/logging), no allocations in hot paths, NativeAOT compatible (no reflection).
+Constraints: no Unity refs, **no ECS refs (`Arch.Core` included)**, no server-specific code (networking/persistence/logging), no allocations in hot paths, NativeAOT compatible (no reflection).
+
+> **This is a two-repo contract — ADR-10.** The client repo compiles this exact
+> source. Changing a signature here changes the client's build; changing a
+> *behaviour* here changes what the client predicts. Neither is a local edit.
+
+**Rules that are not negotiable at review time** (see ADR-10 for the reasoning):
+
+| Rule | Consequence of breaking it |
+|---|---|
+| Target `netstandard2.1;net10.0` — never `net10.0` alone | Unity cannot reference the assembly at all |
+| No ECS type in any signature | Couples the client to a server storage choice, and to a pre-1.0 dependency |
+| Float ops limited to `+ - * /`, comparison, `MathF.Min/Max/Abs/Sqrt` | Transcendentals are implementation-defined; server (NativeAOT x64) and client (IL2CPP ARM64) stop agreeing |
+| Entity identity is an integer handle, not a `string` | A managed reference in an ECS component is a pointer per chunk, and is prohibited under Burst |
+| No allocation on a per-tick path — fill caller-provided `Span<T>` | The cost the ECS migration exists to remove |
+
+**Golden vectors are the conformance mechanism.** Fixtures of
+`(state, input, dt) → expected state` are committed alongside the logic and run
+by the server's xUnit suite *and* the client's Unity Test Runner. A behavioural
+change is expected to update the vectors in the same commit; an *unintended* one
+fails CI on whichever side moved. Shared code without these is a shared file,
+not shared behaviour.
+
+### Server ECS (owned by agent-gameserver-dotnet, C#)
+The game server's entity storage is [Arch](https://github.com/genaray/Arch),
+replacing the hand-rolled `GameWorld` (ADR-10). Arch owns entity identity,
+component storage, queries and iteration; it does **not** own the rules. Arch
+systems iterate and call into `Shared.GameLogic`. Arch stays server-side and
+never reaches the client.
 
 ## Mandatory: Documentation & Changelog
 

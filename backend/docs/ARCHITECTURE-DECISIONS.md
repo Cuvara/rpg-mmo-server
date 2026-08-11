@@ -922,6 +922,121 @@ IDs), not another encoding swap.
 
 ---
 
+## ADR-10 — Shared simulation: pure logic boundary, ECS on the server only
+
+**Status:** accepted 2026-08-11, not yet implemented.
+
+**Context.** The game server is to move its entity storage to
+[Arch](https://github.com/genaray/Arch), an archetype/chunk ECS for C#. At the
+same time, the long-stated goal that the Unity client and the server run *the
+same simulation code* (`Shared.GameLogic`) is still unrealised: the client
+references nothing today. Doing both at once forces a decision that is easy to
+get wrong by default — whether "share the simulation" means sharing the ECS.
+
+It does not. An ECS is a storage and scheduling choice. The game's rules are
+what must agree between the two sides, and those are separable from the
+container they are iterated out of.
+
+**Decision.**
+
+1. **Arch replaces `GameWorld` as the server's entity storage.** Not additive,
+   not alongside — two sources of truth inside one tick is a synchronisation bug
+   generator. Arch owns entity identity, component storage, queries and
+   iteration order.
+
+2. **`Shared.GameLogic` stays ECS-free.** No `Arch.Core` type may appear in its
+   public or internal surface: no `World`, no `Entity`, no `QueryDescription`, no
+   `[Component]`. It remains static functions over plain structs. Arch systems on
+   the server iterate and *call into* it; they do not absorb it. The same rule
+   already bars `UnityEngine` — this extends the constraint to the second engine
+   now in play, for the same reason.
+
+3. **The client consumes it as source, not as a DLL.** `Shared.GameLogic`
+   multi-targets `netstandard2.1;net10.0` and gains a `package.json` +
+   `.asmdef`, consumed by Unity through a UPM git dependency with a `?path=`
+   subfolder reference pinned to a tag. Compiling from source is what keeps
+   IL2CPP from having to swallow a `netstandard2.1` assembly, keeps the code
+   steppable in the Editor, and removes any possibility of binary drift between
+   what the server ran and what the client shipped.
+
+4. **Conformance is mechanical, not editorial.** A committed set of golden
+   vectors — `(state, input, dt) → expected state` — is executed by the server's
+   xUnit suite *and* by the Unity Test Runner, from the same fixture files. A
+   divergence fails CI on whichever side moved. Without this, "shared logic" is
+   a shared file, not shared behaviour.
+
+5. **The determinism budget is explicit.** `Shared.GameLogic` may use only
+   IEEE-754-exact float operations: `+ - * /`, comparison, and
+   `MathF.Min/Max/Abs/Sqrt`. Transcendentals (`Sin`, `Cos`, `Atan2`, `Pow`,
+   `Exp`) are **not** permitted, because their results are implementation-defined
+   and the two sides run different compilers on different architectures
+   (NativeAOT x64 server, IL2CPP ARM64 client). Adding one is an amendment to
+   this ADR, not a code review comment.
+
+**Why not share the ECS.** Four reasons, in descending weight:
+
+- Arch's Unity story is thin. The integration guide is one paragraph — "build
+  Arch as a DLL and add it to the Unity project" — with no statement about
+  IL2CPP, AOT, code stripping or source generators, and it concedes there is no
+  example project. That is enough to build on; it is not enough to place the
+  determinism contract on top of.
+- The client already ships Unity DOTS (Entities 1.4.8, Burst, Collections).
+  Two ECS frameworks in one IL2CPP build means two sets of AOT generic
+  instantiations and two stripping surfaces, for no gameplay benefit.
+- Arch is not Burst-compatible. If client-side prediction ever moves into a
+  Burst job, the logic must already be static functions over blittable structs —
+  which is exactly what constraint 2 preserves and what an Arch-typed API would
+  foreclose.
+- Arch is at `2.1.0-beta`. Coupling the shared contract to it makes every
+  upgrade of a pre-1.0-stability dependency a client rebuild with prediction
+  divergence as the failure mode.
+
+**What must change first.** Four properties of the current
+`Shared.GameLogic` block both halves of this, and are prerequisites rather than
+follow-ups:
+
+| | Current | Required | Why it blocks |
+|---|---|---|---|
+| Target framework | `net10.0` only | `netstandard2.1;net10.0` | Unity 6 cannot reference a `net10.0` assembly. This alone is why the client references nothing today |
+| `EntityState.Id` | `string` | integer handle | A managed reference inside an ECS component puts a pointer in every chunk and is prohibited outright under Burst |
+| `EntityState.Type` | `string` | enum | Same, plus it duplicates `EntityType` which the wire already carries as an enum |
+| `AoiLogic.GetNearbyEntities` | returns `new List<EntityState>()` | fills a caller-provided `Span<T>` | Allocates per call, per tick, per entity — the cost Arch exists to remove |
+
+The `string` → handle/enum pair is not new ground: ADR-9's follow-on work
+already made exactly this change *on the wire* (entity-type enum, interned ids),
+where it removed 81% of the payload. The shared logic is simply behind its own
+protocol.
+
+**Consequences and accepted costs.**
+
+- **ADR-7's measurements do not carry over.** The 45.9 KB/s per client and
+  ~82 MiB at 200 players figures were taken against `GameWorld`. Storage is
+  being replaced underneath the tick loop; the benchmark must be re-run before
+  any of those numbers is quoted again. The per-server player ceiling remains
+  unknown for the reason ADR-7 gives, and this does not change that.
+- **The id migration reaches beyond the simulation.** `EntityState.Id` is a
+  `string` today in persistence (`player_states`), in the snapshot encoder and
+  in the reconnect/hold bookkeeping keyed by user id. The handle is an
+  *in-simulation* identity; the mapping to the durable string user id has to
+  live somewhere explicit, not be assumed to be the same value.
+- **Bit-exactness is currently achievable and is worth keeping.** The existing
+  logic already uses only the permitted operations — no transcendental appears
+  anywhere in `Shared.GameLogic`. Prediction plus reconciliation does not
+  strictly require bit-exactness, since the server is authoritative and a
+  divergence is corrected on the next snapshot; what it buys is that
+  reconciliation fires on packet loss rather than continuously. Rule 5 exists to
+  keep an asset that already exists.
+- Arch's own multithreading is out of scope here. The tick loop's threading
+  model is unchanged by this decision and is a separate one.
+
+**Revisit if** Arch gains a supported, exercised Unity path with an AOT
+statement, in which case sharing systems (not just functions) becomes worth
+re-costing — or if the golden vectors prove impossible to run under the Unity
+Test Runner in CI, which would remove the mechanism this ADR relies on and put
+rule 4 back in question.
+
+---
+
 ## Summary of decisions
 
 | # | Area | Decision |
@@ -935,3 +1050,4 @@ IDs), not another encoding swap.
 | 7 | CCU/cost | All figures are unbenchmarked estimates; benchmark plan anchored to the 66ms tick budget |
 | 8 | Realtime security | Opt-in KCP PSK encryption (per-session keys deferred); `JOIN_TOKEN_SECRET` split from `JWT_SECRET`, both rotatable; token-bucket rate limits on accepts, frames and `gateway_token`. KCP is **not** reachable end to end — the C# game server has no KCP |
 | 9 | Wire encoding | Protobuf from one committed schema; JSON kept during migration and distinguished by the first body byte, so components upgrade in any order |
+| 10 | Shared simulation | Arch replaces `GameWorld` on the server; `Shared.GameLogic` stays ECS-free and ships to Unity as multi-targeted **source**; golden vectors run on both sides in CI; only IEEE-exact float ops permitted in shared code |
