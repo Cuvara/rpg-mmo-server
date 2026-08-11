@@ -6,6 +6,41 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`TestFullFlow_SelfRegistration`** (`selfreg_flow_test.go`) — the whole client
+  flow over the **deployed topology**, with nothing pre-registered.
+
+  `TestDotnetInterop_FullFlow` already walks the same nine messages, but it
+  pre-registers the game server into an in-memory registry *itself*. The
+  registry entry is therefore constructed by the test, which means the test
+  cannot fail the way a real bring-up fails — and every bring-up failure this
+  project has actually hit lives in exactly that gap:
+  - the game server never self-registers (`REDIS_ADDR` unset or unreachable) and
+    the gateway answers `MsgEnterWorld` with "no available server for map …";
+  - it registers its *listen* address rather than one a client can dial, so
+    `MsgEnterWorldResp.ServerAddr` comes back undialable;
+  - it registers under an id that differs from its own `--server-id`, so the
+    gateway mints a join token whose `sid` claim the server then rejects.
+
+  The new test starts the real C# server with `REDIS_ADDR` and
+  `GAMESERVER_PUBLIC_ADDR` set, waits for it to publish itself, asserts the
+  registered id and address, then points a **Redis-backed gateway** (the same
+  `redisstore` types the `--backend=redis` production wiring uses) at that same
+  Redis and walks auth → enter world → dial whatever address came back → join →
+  input → snapshot → clean disconnect. After the disconnect it re-asserts that
+  the server still accepts joins and is still in the registry, i.e. that the
+  heartbeat loop survived a client leaving.
+
+  Redis is **miniredis, in-process** — already a dependency of `shared` and
+  `gateway`, a real TCP RESP server the C# side connects to unmodified. So this
+  runs in the existing `-tags integration` CI job with no docker service added.
+
+### Changed
+- `startDotnetGameServer` is now a wrapper over `startDotnetGameServerWith`,
+  which takes extra CLI args and extra environment. The extra args are
+  **prepended**, not appended: `GameServer/Program.cs GetArg` returns the first
+  match, so an appended `--addr` is silently ignored and the server binds the
+  default instead — which is how the first draft of the new test failed.
+
 - **`GAMESERVER_NATIVE_BIN`** — set it to a published NativeAOT binary and the whole
   `TestDotnetInterop_*` suite runs against that binary instead of `dotnet <dll>`.
   This is not a convenience knob. ADR-11 measured that Arch publishes cleanly under

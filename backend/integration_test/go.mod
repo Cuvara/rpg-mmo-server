@@ -3,8 +3,10 @@ module github.com/duycuong/rpg-mmo/integration_test
 go 1.26.5
 
 require (
+	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/duycuong/rpg-mmo/gateway v0.0.0
 	github.com/duycuong/rpg-mmo/shared v0.0.0
+	github.com/redis/go-redis/v9 v9.22.0
 )
 
 require (
@@ -28,6 +30,8 @@ require (
 	github.com/tjfoc/gmsm v1.4.1 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/xtaci/kcp-go/v5 v5.6.72 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
+	go.uber.org/atomic v1.11.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
