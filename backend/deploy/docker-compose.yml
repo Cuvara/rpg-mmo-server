@@ -182,6 +182,10 @@ services:
     command: ["--addr=:8000", "--backend=redis"]
     environment:
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      # Signs the gateway→gameserver join token. Deliberately NOT JWT_SECRET —
+      # a compromised game server must not be able to forge client auth tokens.
+      # The gameserver-dotnet service below must carry the identical value.
+      JOIN_TOKEN_SECRET: ${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
       # Prometheus endpoint (/metrics, /healthz). Scraped in-network by the
@@ -214,6 +218,9 @@ services:
     # therefore done through the environment below, which works either way.
     environment:
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      # Verifies join tokens signed by the gateway. Same value as the gateway
+      # service above, and NOT JWT_SECRET (see the comment there).
+      JOIN_TOKEN_SECRET: ${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}
       GAMESERVER_ADDR: ":9000"
       GAMESERVER_MODE: map
       GAMESERVER_MAP_ID: ${GAMESERVER_MAP_ID:-map_01}

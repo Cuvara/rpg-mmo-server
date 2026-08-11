@@ -273,6 +273,7 @@ publishes Redis on the host, so the defaults work as-is.
 
 ```bash
 export JWT_SECRET=dev-secret-change-me      # must equal .env JWT_SECRET
+export JOIN_TOKEN_SECRET=dev-join-secret-change-me   # must equal .env; NOT JWT_SECRET
 export REDIS_ADDR=localhost:6379            # match REDIS_PORT if you changed it
 export REDIS_PASSWORD=                      # must equal .env REDIS_PASSWORD
 export META_DB_URL='postgres://nakama:localdev@localhost:5432/nakama?sslmode=disable'
