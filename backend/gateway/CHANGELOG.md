@@ -6,6 +6,68 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`MsgKick` is now emitted on eviction, alongside `MsgDisconnect`.** Type 15
+  had been defined in `wire.proto` with working codecs on both the Go and C#
+  sides since it was introduced, but nothing ever sent it. `kickLocalUser` now
+  goes through `sendKickAndClose`, which sends `MsgKick{reason}` followed by
+  `MsgDisconnect{reason}` — same reason string in both — and half-closes once
+  they flush.
+
+  Both frames are sent rather than one because they address different clients.
+  `MsgKick` is the typed signal; `MsgDisconnect` is what any client written
+  before this change already acts on, and such a client ignores an unknown type
+  15. Emitting only `MsgKick` would have stranded them on a socket that stops
+  answering. The order is contractual: a client that understands `MsgKick` reads
+  the reason there and must treat the following `MsgDisconnect` as the same
+  eviction, not a second one.
+
+  `KickReasonDuplicateLogin` is exported so the reason string has one definition
+  rather than a literal per call site. `duplicate_login` is the only reason the
+  gateway emits today; `wire.proto` names others (`server_shutdown`,
+  `session_expired`, `rate_limited`) that remain unwired — shutdown still closes
+  without a frame, and the session/rate-limit paths still answer on the next
+  frame via `MsgAuthResp`.
+
+  Both frames are JSON regardless of the connection's latched encoding, for the
+  reason the previous single frame was: eviction runs on the *evicting*
+  connection's goroutine and `ClientConn.enc` may only be read from the evicted
+  connection's `ReadLoop`.
+
+### Fixed
+- **`docs/API.md` documented a `JOIN_TOKEN_SECRET` fallback that no longer
+  exists, and recommended it.** The join-token section said an unset
+  `JOIN_TOKEN_SECRET` falls back to `JWT_SECRET` "because `gameserver-dotnet`
+  cannot read the new variable yet". Both halves are obsolete: the C# game server
+  reads it (`GameServerHost` parses it into `_joinKeys`) and *requires* it
+  (`Program.cs` exits 2 without it), and this gateway refuses to start without it
+  too (`cmd/gateway/main.go`). An operator following the old text got a gateway
+  that will not boot — or, giving only the gateway a distinct secret, a fleet
+  where every join fails signature verification. No code changed; the doc was
+  describing a state the code left behind.
+
+### Added
+- `docs/API.md`: the wire encoding is now documented — Protobuf or legacy JSON,
+  identified from the first body byte (`0x08` vs `{`), latched per connection so
+  every reply answers in the encoding the client used. The one deliberate
+  exception (duplicate-login kick builds JSON off the victim's read-loop
+  goroutine) is called out.
+- `docs/API.md`: join tokens are single-use — `SignWithServer` attaches a `jti`
+  whenever `serverID` is set, and the game server consumes it once through
+  `JtiTracker`. Documented together with the tracker's real scope (in-memory,
+  per-process, 60 s), since that is what makes `sid` pinning load-bearing rather
+  than redundant.
+- `docs/API.md`: `MsgPing` (11) and `MsgPong` (12) added to the handled-message
+  table, with the reason they are dispatched *before* `checkSession` — a pong
+  must not be rejected because a Redis blip failed the session lookup. The table
+  previously implied they fell into "logged and ignored".
+- `docs/API.md`: `EnterWorldResponse.Transport` documented in the handshake
+  sequence — the client must dial the game server with that transport, and empty
+  means `"tcp"` (pre-field registry entries).
+- `docs/API.md`: noted that `MsgKick` (15) is defined and has codecs on both
+  sides but is emitted by nothing; duplicate-login eviction sends
+  `MsgDisconnect{reason:"duplicate_login"}`, which is what a client should watch.
+
+### Added
 - **Exponential backoff retry for registry lookups.** `FindServer` and `GetServer`
   now retry transient Redis errors (connection refused, timeout) with backoff
   (1s, 2s, 4s, max 3 retries, 10s total timeout). Business-logic errors
