@@ -7,6 +7,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`Shared.GameLogic/` is now a valid UPM package root** — `package.json`
+  (`com.rpgmmo.shared-gamelogic`, `0.1.0`, `unity: 6000.3`, **no dependencies**)
+  and `Shared.GameLogic.asmdef`. Without these the client cannot consume the
+  library at all: the folder does not resolve as a package, and the sources would
+  land in Unity's default assembly where the "no Unity references" rule is
+  unenforceable.
+  - The asmdef sets **`"noEngineReferences": true`** and an empty `references`
+    list, which turns ADR-10's zero-engine-dependency rule from a review
+    convention into a client-side compile error. `allowUnsafeCode` is false, and
+    the csproj's `AllowUnsafeBlocks` was flipped from true to false to match —
+    the two build systems compiling different subsets of C# is precisely the
+    class of defect this arrangement has to avoid.
+  - The same folder now feeds two build systems. Verified that MSBuild's
+    `Compile` items are still exactly the 11 `.cs` files, with `package.json` and
+    the asmdef landing in `None`, so no exclusion is needed. In the other
+    direction, Unity compiles every `.cs` under the package root — which is safe
+    only because `bin/` and `obj/` are gitignored and a UPM git fetch therefore
+    never sees the generated `AssemblyInfo.cs`. **Consume this package via the
+    git URL, never as a local path reference into a built working tree**, or
+    Unity will compile the server build's generated sources and fail on duplicate
+    assembly attributes.
+  - **Version discipline**: `package.json`'s `version` must be bumped in the same
+    commit that gets tagged. Tags are `sgl-vX.Y.Z` (no `/`, since a slash inside
+    a UPM `#fragment` is unverified). A tag pointing at a commit whose
+    `package.json` still carries the previous version yields a package that
+    misreports its own version, and UPM does not warn about that — the client
+    silently believes it has a release it does not have.
 - **Golden vectors: `Shared.GameLogic/GoldenVectors/`, 77 committed cases.**
   ADR-10 makes conformance mechanical rather than editorial: without executable
   fixtures, "shared logic" means a shared *file*, not shared *behaviour* — the

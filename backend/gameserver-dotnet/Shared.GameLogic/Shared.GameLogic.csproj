@@ -10,7 +10,10 @@
     <!-- Unity has no implicit usings. Disabling it here makes the SERVER build
          fail on a missing using, instead of the client discovering it later. -->
     <ImplicitUsings>disable</ImplicitUsings>
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- False to match "allowUnsafeCode": false in Shared.GameLogic.asmdef. The two
+         build systems must agree on what compiles: unsafe code that builds here and
+         is rejected by Unity is a defect discovered on the wrong side. -->
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
     <!-- Unity 6's compiler is C# 9. Pinning the language version makes the
          server build reject C# 10+ syntax (file-scoped namespaces, etc.) that
          the client could not compile. Do not raise this without ADR-10. -->

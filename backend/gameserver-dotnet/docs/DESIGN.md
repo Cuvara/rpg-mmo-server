@@ -62,6 +62,35 @@ bearing:
 are the server's only message types, and the legacy JSON path is a hand-written
 `Utf8JsonWriter` codec over *those*. Nothing serializes these two.
 
+### Packaging for Unity
+
+`Shared.GameLogic/` doubles as a UPM package root: `package.json`
+(`com.rpgmmo.shared-gamelogic`, no dependencies) plus
+`Shared.GameLogic.asmdef`. The client consumes it as a git dependency with a
+`?path=` subfolder reference pinned to a tag — the same mechanism the Unity
+project already uses for `com.company.build-pipeline`:
+
+```
+https://github.com/<org>/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.0
+```
+
+Tags are `sgl-vX.Y.Z`, and `package.json`'s `version` must be bumped in the
+commit that is tagged — a tag whose `package.json` still says the old version
+gives the client a package that misreports itself, silently.
+
+The asmdef declares `"noEngineReferences": true` and an empty `references` list,
+which makes ADR-10's zero-engine-dependency rule a compile error on the client
+rather than a review convention. It also bounds what Unity compiles: without an
+asmdef the sources would join the default assembly and lose all dependency
+control.
+
+Two build systems now read this folder. MSBuild's `Compile` glob takes the 11
+`.cs` files and treats `package.json`/`.asmdef` as `None`; Unity compiles every
+`.cs` under the package root, which is safe only because `bin/` and `obj/` are
+gitignored and a git fetch never delivers them. Consuming the package by local
+path into a *built* working tree would feed Unity the generated
+`AssemblyInfo.cs` and fail on duplicate assembly attributes — use the git URL.
+
 ### Golden vectors
 
 `Shared.GameLogic/GoldenVectors/` holds committed
