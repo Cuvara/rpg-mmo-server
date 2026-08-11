@@ -52,6 +52,7 @@ gameserver-dotnet), sharing `JWT_SECRET` and `REDIS_ADDR` with the stack:
 
 ```bash
 export JWT_SECRET=dev-secret-change-me
+export JOIN_TOKEN_SECRET=dev-join-secret-change-me   # must match .env; NOT JWT_SECRET
 export REDIS_ADDR=localhost:6379   # container-to-container it would be redis:6379
 export REDIS_PASSWORD=             # must match .env
 ```

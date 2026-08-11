@@ -6,6 +6,23 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`JOIN_TOKEN_SECRET` was never wired into any deployment path**, so both
+  realtime containers crash-looped on startup: `rpg-gateway` and `rpg-gameserver`
+  each logged `JOIN_TOKEN_SECRET is required but not set -- refusing to start`.
+  The split secret landed in the binaries (#22) but no deploy config supplied it.
+  Now plumbed through every path that already carried `JWT_SECRET`:
+  - `docker-compose.yml` — added to the `gateway` and `gameserver-dotnet`
+    services, both reading the same `${JOIN_TOKEN_SECRET}`.
+  - `.env` / `.env.example` — new `JOIN_TOKEN_SECRET` entry with a dev default.
+  - `k3s/setup-dev.sh` — new `join-token-secret` key in `rpg-realtime-secrets`.
+  - `agones/fleet-{map,dungeon}.yaml` — `secretKeyRef` to that key, **not**
+    `optional`, so a missing secret fails container creation instead of
+    crash-looping. `fleet-map-dev.yaml`, `fleet-map-dotnet-dev.yaml` and
+    `fleet-dungeon-dev.yaml` get the literal dev value.
+  - `scripts/deploy-local.sh` — exported for host mode (the C# arg parser only
+    matches space-separated flags, so `--jwt-secret=X` was always inert there).
+  - `.github/workflows/cd.yml` and `scripts/setup-github-env.sh` — new required
+    secret, rejected when it equals `JWT_SECRET`.
 - **`ci-dotnet.yml` could hang for six hours and say nothing.** Since 2026-08-08
   three runs (two on `develop`, one on a PR) have had their `Test` step stop
   emitting output partway through and run until the 6-hour default job timeout
@@ -19,13 +36,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     about which test never returned.
   - The artifact upload now collects `Sequence_*.xml` too, and declares
     `if-no-files-found: warn` rather than relying on the default.
-  - **This diagnoses; it does not cure.** The hang is not yet root-caused. It
-    survives to a test that ran fine at `cb5d139` and hangs at `817c6ac` with the
-    C# tree byte-identical between the two, so it is environmental or a race, not
-    a code change. Candidates are the four tests that never reported in the last
-    run: `GameServerHostShutdownTests.ShutdownAsync_SecondCaller_AwaitsTheFirstTeardown`,
-    two `JoinTokenSecretTests` cases, and `JwtKeyringTests.EffectiveJoinTokenSecret_MatchesGoFallback`.
-    The next red run should name it.
+  - **It worked**: the next run failed in 9 minutes with a hang dump attached
+    instead of going silent for six hours, and the dump named a live-locked
+    `Connection.Dispose()` spinning on a `Connection.Close()` on its own stack.
+    Root cause and fix are in the gameserver module's changelog. The test
+    `--blame-hang` named was a bystander, as its own warning says it may be.
 
 ### Changed
 - **G11 re-confirmed against `e3909d3`** — the one drill result that could not be
