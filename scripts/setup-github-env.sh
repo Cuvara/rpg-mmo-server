@@ -19,8 +19,9 @@
 # `gh secret set` sees them, on stdin.
 #
 # Flags — secrets:
-#   --jwt-secret V            --postgres-password V     --nakama-console-password V
-#   --grafana-admin-password V --nakama-server-key V    --redis-password V
+#   --jwt-secret V            --join-token-secret V     --postgres-password V
+#   --nakama-console-password V --grafana-admin-password V --nakama-server-key V
+#   --redis-password V
 #   --generate                invent strong values for any secret not supplied
 #
 # Flags — variables (each maps 1:1 to a vars.* read by cd.yml):
@@ -61,6 +62,7 @@ GENERATE=0
 STRICT=0
 
 JWT_SECRET="${JWT_SECRET:-}"
+JOIN_TOKEN_SECRET="${JOIN_TOKEN_SECRET:-}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-}"
 NAKAMA_CONSOLE_PASSWORD="${NAKAMA_CONSOLE_PASSWORD:-}"
 GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-}"
@@ -144,7 +146,10 @@ set_secret() {
 			"$name" "$ENV_NAME" "$REPO" "${#value}"
 		return 0
 	fi
-	printf '%s' "$value" | gh secret set "$name" --env "$ENV_NAME" --repo "$REPO" --body-file -
+	# Value goes in on stdin, never in argv (argv is world-readable in /proc).
+	# `--body-file -` would say the same thing but only exists in gh >= 2.51;
+	# with neither --body nor --body-file, every gh version reads stdin.
+	printf '%s' "$value" | gh secret set "$name" --env "$ENV_NAME" --repo "$REPO"
 	info "secret $name set (${#value} chars)"
 }
 
@@ -171,6 +176,7 @@ parse_args() {
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--jwt-secret) need_arg "$1" "${2:-}" && JWT_SECRET="$2" && shift 2 ;;
+		--join-token-secret) need_arg "$1" "${2:-}" && JOIN_TOKEN_SECRET="$2" && shift 2 ;;
 		--postgres-password) need_arg "$1" "${2:-}" && POSTGRES_PASSWORD="$2" && shift 2 ;;
 		--nakama-console-password) need_arg "$1" "${2:-}" && NAKAMA_CONSOLE_PASSWORD="$2" && shift 2 ;;
 		--grafana-admin-password) need_arg "$1" "${2:-}" && GRAFANA_ADMIN_PASSWORD="$2" && shift 2 ;;
@@ -276,6 +282,9 @@ collect_secrets() {
 	# deploy job fails the same way (a Grafana published with a default password
 	# is an open door).
 	prompt_secret JWT_SECRET "HS256 secret shared by Nakama, gateway and game server" "dev-secret-change-me"
+	# Separate from JWT_SECRET on purpose: the game server needs to verify join
+	# tokens, and must not thereby be able to mint client auth tokens.
+	prompt_secret JOIN_TOKEN_SECRET "HS256 secret for gateway->gameserver join tokens (must NOT equal JWT_SECRET)" "dev-join-secret-change-me"
 	prompt_secret POSTGRES_PASSWORD "Nakama meta DB password" "localdev"
 	prompt_secret NAKAMA_CONSOLE_PASSWORD "Nakama admin console password" "password"
 	if [ "$MONITORING_ENABLED" = "true" ]; then
@@ -285,6 +294,9 @@ collect_secrets() {
 	prompt_secret REDIS_PASSWORD "Redis password (optional; blank = no auth)" ""
 
 	validate_secret JWT_SECRET "$JWT_SECRET" yes
+	validate_secret JOIN_TOKEN_SECRET "$JOIN_TOKEN_SECRET" yes
+	[ "$JOIN_TOKEN_SECRET" = "$JWT_SECRET" ] &&
+		fail "JOIN_TOKEN_SECRET must not equal JWT_SECRET — use --generate or openssl rand -hex 32"
 	validate_secret POSTGRES_PASSWORD "$POSTGRES_PASSWORD" yes
 	validate_secret NAKAMA_CONSOLE_PASSWORD "$NAKAMA_CONSOLE_PASSWORD" yes
 	if [ "$MONITORING_ENABLED" = "true" ]; then
@@ -306,6 +318,7 @@ create_environment() {
 apply_secrets() {
 	step "Applying secrets"
 	set_secret JWT_SECRET "$JWT_SECRET"
+	set_secret JOIN_TOKEN_SECRET "$JOIN_TOKEN_SECRET"
 	set_secret POSTGRES_PASSWORD "$POSTGRES_PASSWORD"
 	set_secret NAKAMA_CONSOLE_PASSWORD "$NAKAMA_CONSOLE_PASSWORD"
 	set_secret GRAFANA_ADMIN_PASSWORD "$GRAFANA_ADMIN_PASSWORD"

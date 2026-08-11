@@ -6,6 +6,32 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `GatewayKickChannel` constant (`"gateway:kick"`) in `constants/keys.go` for
+  cross-gateway duplicate-login Pub/Sub coordination
+- **MsgPing/MsgPong (type 11/12) heartbeat messages.** `PingMessage{timestamp}`
+  carries the sender's monotonic clock; `PongMessage{timestamp, server_time}`
+  echoes it back with the responder's wall clock. Both JSON and Protobuf
+  encode/decode are implemented. Wire type numbers are frozen.
+
+- **MsgKick (type 15) server→client forced disconnect.** `KickMessage{reason}`
+  carries a machine-readable reason string. Defined reasons: `duplicate_login`,
+  `server_shutdown`, `session_expired`, `rate_limited`.
+
+- **JTI claim in join tokens.** `SignWithServer` now generates a UUID v4 `jti`
+  claim when `serverID` is non-empty. Enables per-server replay protection.
+- **5-second clock skew tolerance.** `Claims.IsExpired()` now accepts tokens up
+  to 5 seconds past their `exp`, so small clock differences between gateway and
+  game server do not cause spurious rejections. Constant: `jwt.ClockSkew`.
+
+### Changed
+- **BREAKING (Go API):** `Config.EffectiveJoinTokenSecret` removed. `JOIN_TOKEN_SECRET`
+  is now mandatory; there is no fallback to `JWT_SECRET`.
+- **MsgTransferMap / MsgTransferMapResp (types 13/14).** Wire messages for
+  client-driven map transfer. `TransferMapRequest` carries a `map_id`;
+  `TransferMapResponse` carries `ok` and `error`. Protobuf + JSON codec support
+  added in `messages/` and `proto/wire.proto`.
+
+### Added
 - **Entity-id interning on the protobuf wire.** A realistic entity id costs ~17
   bytes on every mention; repeat mentions now carry a varint `handle` instead.
   Measured at ~51% of downstream bandwidth.

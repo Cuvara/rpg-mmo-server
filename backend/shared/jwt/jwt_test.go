@@ -133,3 +133,70 @@ func TestVerify_ValidHeaderStillPasses(t *testing.T) {
 		t.Errorf("Verify() rejected a valid HS256/JWT header: %v", err)
 	}
 }
+
+func TestSignWithServer_JTI(t *testing.T) {
+	secret := "test-secret"
+	token, err := SignWithServer("user1", "srv1", secret, time.Hour)
+	if err != nil {
+		t.Fatalf("SignWithServer() error: %v", err)
+	}
+
+	claims, err := Verify(token, secret)
+	if err != nil {
+		t.Fatalf("Verify() error: %v", err)
+	}
+	if claims.Jti == "" {
+		t.Error("join token should have a non-empty JTI")
+	}
+
+	// Two tokens must have different JTIs.
+	token2, _ := SignWithServer("user1", "srv1", secret, time.Hour)
+	claims2, _ := Verify(token2, secret)
+	if claims.Jti == claims2.Jti {
+		t.Error("two join tokens should have different JTIs")
+	}
+}
+
+func TestSign_NoJTI(t *testing.T) {
+	secret := "test-secret"
+	token, err := Sign("user1", secret, time.Hour)
+	if err != nil {
+		t.Fatalf("Sign() error: %v", err)
+	}
+
+	claims, err := Verify(token, secret)
+	if err != nil {
+		t.Fatalf("Verify() error: %v", err)
+	}
+	if claims.Jti != "" {
+		t.Errorf("auth token should NOT have a JTI, got %q", claims.Jti)
+	}
+}
+
+func TestClockSkew_TokenExpiredWithinTolerance(t *testing.T) {
+	secret := "test-secret"
+	// Token expired 3 seconds ago — within the 5s clock skew tolerance.
+	token, err := SignWithServer("user1", "srv1", secret, -3*time.Second)
+	if err != nil {
+		t.Fatalf("SignWithServer() error: %v", err)
+	}
+
+	_, err = Verify(token, secret)
+	if err != nil {
+		t.Errorf("token expired within clock skew tolerance should be accepted, got: %v", err)
+	}
+}
+
+func TestClockSkew_TokenExpiredBeyondTolerance(t *testing.T) {
+	secret := "test-secret"
+	// Token expired 10 seconds ago — beyond the 5s clock skew tolerance.
+	token, err := SignWithServer("user1", "srv1", secret, -10*time.Second)
+	if err != nil {
+		t.Fatalf("SignWithServer() error: %v", err)
+	}
+
+	_, err = Verify(token, secret)
+	if err == nil {
+		t.Error("token expired beyond clock skew tolerance should be rejected")
+	}
+}

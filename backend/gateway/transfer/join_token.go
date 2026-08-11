@@ -23,8 +23,12 @@ func GenerateJoinToken(userID, serverID, secret string) (string, error) {
 }
 
 // GenerateJoinTokenKeyring signs a join token with the keyring's current
-// (first) secret.
+// (first) secret. serverID is mandatory: a join token without a target server
+// could be replayed against any game-server pod.
 func GenerateJoinTokenKeyring(userID, serverID string, keys jwt.Keyring) (string, error) {
+	if serverID == "" {
+		return "", fmt.Errorf("generate join token: serverID is required")
+	}
 	token, err := keys.SignWithServer(userID, serverID, constants.JoinTokenTTL)
 	if err != nil {
 		return "", fmt.Errorf("generate join token: %w", err)

@@ -46,24 +46,10 @@ public class ServerOptions
 
     /// <summary>
     /// HS256 secret (or comma-separated rotation list, "current,previous") that the
-    /// gateway signs join tokens with — <c>JOIN_TOKEN_SECRET</c>. Empty means
-    /// "reuse <see cref="JwtSecret"/>", the pre-split behaviour: see
-    /// <see cref="EffectiveJoinTokenSecret"/>.
+    /// gateway signs join tokens with — <c>JOIN_TOKEN_SECRET</c>. REQUIRED: the
+    /// server refuses to start when this is empty.
     /// </summary>
     public string JoinTokenSecret { get; set; } = "";
-
-    /// <summary>
-    /// The secret spec actually used to verify join tokens, plus whether the
-    /// JWT_SECRET fallback was taken (which callers warn about at start-up).
-    /// Mirrors Go's <c>config.Config.EffectiveJoinTokenSecret</c> — the two halves
-    /// must agree or the gateway signs with a key this server does not hold.
-    /// </summary>
-    public static (string Spec, bool SharedWithAuth) EffectiveJoinTokenSecret(string? joinTokenSecret, string? jwtSecret)
-        => string.IsNullOrEmpty(joinTokenSecret) ? (jwtSecret ?? "", true) : (joinTokenSecret, false);
-
-    /// <summary>Instance form of <see cref="EffectiveJoinTokenSecret(string?, string?)"/>.</summary>
-    public (string Spec, bool SharedWithAuth) EffectiveJoinTokenSecret()
-        => EffectiveJoinTokenSecret(JoinTokenSecret, JwtSecret);
     /// <summary>Play area for this map. Movement is clamped into these bounds.</summary>
     public MapBounds MapBounds { get; set; } = MapBounds.Default;
 
@@ -106,7 +92,7 @@ public class ServerOptions
 public sealed class GameServerHost : IAsyncDisposable
 {
     private readonly ServerOptions _options;
-    private readonly GameWorld _world;
+    private readonly EcsWorld _world;
     private readonly ConnectionManager _connections;
     private readonly TickLoop _tickLoop;
     private readonly AsyncSaver _saver;
@@ -116,8 +102,10 @@ public sealed class GameServerHost : IAsyncDisposable
     private readonly EventPublisher? _publisher;
     private readonly GameMetrics? _metrics;
     private readonly ILogger _logger;
-    /// <summary>Keyring join tokens are verified against (JOIN_TOKEN_SECRET, or JWT_SECRET as fallback).</summary>
+    /// <summary>Keyring join tokens are verified against (JOIN_TOKEN_SECRET).</summary>
     private readonly JwtKeyring _joinKeys;
+    /// <summary>Tracks consumed JTI values to prevent join token replay.</summary>
+    private readonly JtiTracker _jtiTracker = new();
     private readonly ILoggerFactory _loggerFactory;
 
     private readonly RegistrationService? _registration;
@@ -152,21 +140,20 @@ public sealed class GameServerHost : IAsyncDisposable
             b.AddConsole().SetMinimumLevel(LogLevel.Information));
         _logger = _loggerFactory.CreateLogger<GameServerHost>();
 
-        // Join tokens are verified against JOIN_TOKEN_SECRET, falling back to
-        // JWT_SECRET when it is unset (pre-split behaviour). Both may be a
-        // "current,previous" rotation list; every entry verifies.
-        var (joinSpec, _) = options.EffectiveJoinTokenSecret();
-        _joinKeys = JwtKeyring.Parse(joinSpec);
+        // Join tokens are verified against JOIN_TOKEN_SECRET (required, enforced
+        // by Program.cs at startup). Both may be a "current,previous" rotation
+        // list; every entry verifies.
+        _joinKeys = JwtKeyring.Parse(options.JoinTokenSecret);
         if (!_joinKeys.IsValid)
         {
             // Fail closed, loudly: no key means no join can ever succeed.
             _logger.LogWarning(
-                "No join-token secret configured (JOIN_TOKEN_SECRET and JWT_SECRET are both empty) -- " +
+                "No join-token secret configured (JOIN_TOKEN_SECRET is empty) -- " +
                 "every join will be rejected");
         }
 
         _metrics = options.Metrics;
-        _world = new GameWorld();
+        _world = new EcsWorld();
         _metrics?.SetEntityCountProvider(() => _world.EntityCount);
         _connections = new ConnectionManager();
         _playerStore = options.PlayerStore ?? new MemoryPlayerStore();
@@ -302,6 +289,12 @@ public sealed class GameServerHost : IAsyncDisposable
                 holdCts.Dispose();
             }
 
+            // Notify connected clients before closing: send MsgDisconnect with
+            // reason "server_shutdown" so clients can reconnect to another server
+            // rather than waiting for a timeout. The 2s grace period lets TCP drain
+            // the send buffer; clients that have already disconnected will ignore it.
+            await DrainClientsAsync();
+
             _connections.CloseAll();
 
             // Leave the registry before the final save: the point is to stop the
@@ -391,16 +384,22 @@ public sealed class GameServerHost : IAsyncDisposable
                 return;
             }
 
-            // Step 3: Check server ID claim
-            if (!string.IsNullOrEmpty(_options.ServerId) &&
-                !string.IsNullOrEmpty(claims.ServerId) &&
-                claims.ServerId != _options.ServerId)
+            // Step 3: Check server ID claim — mandatory, no empty bypass
+            if (string.IsNullOrEmpty(claims.ServerId) || claims.ServerId != _options.ServerId)
             {
                 await SendError(tempConn, "Token is for a different server");
                 tempConn.Close();
                 return;
             }
 
+
+            // Step 3b: JTI replay protection
+            if (string.IsNullOrEmpty(claims.Jti) || !_jtiTracker.TryConsume(claims.Jti))
+            {
+                await SendError(tempConn, "Token already used");
+                tempConn.Close();
+                return;
+            }
             // Step 4: Check capacity
             if (_connections.Count >= _options.Capacity)
             {
@@ -481,11 +480,12 @@ public sealed class GameServerHost : IAsyncDisposable
             _registration?.NotifyPlayerCountChanged();
             _logger.LogInformation("Player {UserId} joined (total: {Count})", userId, _connections.Count);
 
-            // Step 6: Start read/write loops
+            // Step 6: Start read/write loops + heartbeat
             var writeTask = conn.WriteLoopAsync();
             var readTask = conn.ReadLoopAsync(OnMessageReceived);
+            var heartbeatTask = conn.HeartbeatLoopAsync();
 
-            await Task.WhenAny(readTask, writeTask);
+            await Task.WhenAny(readTask, writeTask, heartbeatTask);
         }
         catch (Exception ex)
         {
@@ -523,12 +523,21 @@ public sealed class GameServerHost : IAsyncDisposable
                 // Client lost or distrusts its reconstructed state: promote the next
                 // snapshot for this connection to a full keyframe. Payload is ignored.
                 conn.DeltaState.RequestFull();
-                // Counted because this is the only field-visible signal that the
-                // interning handle tables have diverged. A healthy fleet sits at
-                // ~0; a sustained rate means clients are repeatedly failing to
-                // resolve handles and the delta stream is doing less work than
-                // the snapshot count suggests.
                 _metrics?.RecordResyncRequested();
+                break;
+
+            case MsgType.TransferMap:
+                // Fire-and-forget: the transfer handler is async (save + respond),
+                // but the read loop must not block on it.
+                _ = HandleTransferMapAsync(conn, env);
+                break;
+
+            case MsgType.Ping:
+                conn.HandlePing(WireProtocol.GetPayload<PingMessage>(env));
+                break;
+
+            case MsgType.Pong:
+                conn.RecordPong();
                 break;
 
             case MsgType.Disconnect:
@@ -541,6 +550,80 @@ public sealed class GameServerHost : IAsyncDisposable
                 break;
         }
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Handle a client request to transfer to a different map.
+    /// </summary>
+    /// <remarks>
+    /// The flow is client-driven:
+    /// <list type="number">
+    ///   <item>Client sends MsgTransferMap(map_id) to the current game server.</item>
+    ///   <item>Game server validates, saves state, responds, removes entity, closes connection.</item>
+    ///   <item>Client sends MsgEnterWorld(new_map_id) to the gateway (existing flow).</item>
+    ///   <item>Gateway assigns the new map server and mints a join token.</item>
+    ///   <item>Client connects to the new server with the join token.</item>
+    /// </list>
+    /// The entity is removed immediately (not held) because this is an intentional
+    /// transfer, not a disconnect: there is nothing to reconnect to.
+    /// </remarks>
+    private async Task HandleTransferMapAsync(Connection conn, Envelope env)
+    {
+        try
+        {
+            var req = WireProtocol.GetPayload<TransferMapRequest>(env);
+
+            // Validate: the target map must differ from the current one.
+            if (string.IsNullOrEmpty(req.MapId))
+            {
+                await SendTransferError(conn, "map_id is required");
+                return;
+            }
+            if (req.MapId == _options.MapId)
+            {
+                await SendTransferError(conn, "already on this map");
+                return;
+            }
+
+            // Force an immediate save so the destination server sees fresh state.
+            await _saver.SavePlayerAsync(conn.UserId);
+
+            // Tell the client the transfer is accepted.
+            var resp = WireProtocol.NewEnvelope(MsgType.TransferMapResp,
+                new TransferMapResponse { Ok = true }, conn.Encoding);
+            await conn.WriteOneAsync(resp);
+
+            _logger.LogInformation(
+                "Player {UserId} transferring from {FromMap} to {ToMap}",
+                conn.UserId, _options.MapId, req.MapId);
+
+            // Clean removal: cancel any existing hold, remove the entity from the
+            // world, and close the connection. No hold is scheduled because the
+            // player is intentionally leaving, not disconnecting.
+            if (_holds.TryRemove(conn.UserId, out var holdCts))
+            {
+                holdCts.Cancel();
+                holdCts.Dispose();
+            }
+            _connections.Remove(conn.UserId);
+            _world.RemoveEntity(conn.UserId);
+            _metrics?.PlayerLeft();
+            _registration?.NotifyPlayerCountChanged();
+            conn.Close();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Transfer map failed for {UserId}", conn.UserId);
+            try { await SendTransferError(conn, "internal error"); }
+            catch { /* connection may already be dead */ }
+        }
+    }
+
+    private async Task SendTransferError(Connection conn, string error)
+    {
+        var resp = WireProtocol.NewEnvelope(MsgType.TransferMapResp,
+            new TransferMapResponse { Ok = false, Error = error }, conn.Encoding);
+        await conn.WriteOneAsync(resp);
     }
 
     /// <param name="countedOnline">
@@ -624,6 +707,38 @@ public sealed class GameServerHost : IAsyncDisposable
                 holdCts.Dispose();
             }
         });
+    }
+
+    /// <summary>
+    /// Send MsgDisconnect(reason="server_shutdown") to every connected client and
+    /// wait briefly for the message to reach the wire before connections are torn
+    /// down. Best effort: a client that already hung up silently fails the write.
+    /// </summary>
+    private async Task DrainClientsAsync()
+    {
+        var disconnectMsg = new RpgMmo.Wire.V1.DisconnectMessage { Reason = "server_shutdown" };
+
+        _connections.ForEach(conn =>
+        {
+            try
+            {
+                var env = WireProtocol.NewEnvelope(MsgType.Disconnect, disconnectMsg, conn.Encoding);
+                // Fire-and-forget per connection: WriteOneAsync may throw if the
+                // peer is already gone, but that is fine — we are shutting down.
+                _ = conn.WriteOneAsync(env);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Failed to send shutdown disconnect to {UserId}", conn.UserId);
+            }
+        });
+
+        _logger.LogInformation(
+            "Sent shutdown notification to {Count} client(s), waiting 2s for drain",
+            _connections.Count);
+
+        // Give TCP time to flush the send buffers before CloseAll tears them down.
+        await Task.Delay(TimeSpan.FromSeconds(2));
     }
 
     private void OnEntityDeath(EntityState victim, EntityState killer)

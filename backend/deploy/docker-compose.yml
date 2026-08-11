@@ -7,8 +7,17 @@
 # interactive dev instead run them on the host (see docs/RUNBOOK-local-dev.md).
 #
 # Usage:
+#   make flow-up      # ONE COMMAND: build everything + run the whole backend
+#   make flow-check   # prove the full client flow against it (smoketest)
+#   make flow-down    # tear it down
+#
+# Or piecemeal:
 #   make plugin && make up
 #   docker compose --profile realtime up -d   # + containerized gateway/gameserver
+#
+# Running a SECOND, isolated stack beside a live one: set COMPOSE_PROJECT_NAME
+# (own network + volumes), COMPOSE_NAME_PREFIX (own container names) and offset
+# every published port. `make flow-up SCRATCH=1` does exactly that.
 #
 # All image tags are pinned. Bump NAKAMA_VERSION in .env and in
 # nakama-plugin.Dockerfile together — the plugin ABI must match the server.
@@ -18,7 +27,7 @@ name: rpg-mmo-meta
 services:
   postgres:
     image: postgres:16.4-alpine
-    container_name: rpg-postgres
+    container_name: ${COMPOSE_NAME_PREFIX:-rpg}-postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-nakama}
@@ -44,7 +53,7 @@ services:
   #   GAME_DB_URL=postgres://game:localdev@localhost:5433/gamestate?sslmode=disable
   postgres-game:
     image: postgres:16.4-alpine
-    container_name: rpg-postgres-game
+    container_name: ${COMPOSE_NAME_PREFIX:-rpg}-postgres-game
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_GAME_DB:-gamestate}
@@ -69,7 +78,7 @@ services:
 
   nakama:
     image: heroiclabs/nakama:${NAKAMA_VERSION:-3.40.0}
-    container_name: rpg-nakama
+    container_name: ${COMPOSE_NAME_PREFIX:-rpg}-nakama
     restart: unless-stopped
     depends_on:
       postgres:
@@ -99,10 +108,10 @@ services:
           --socket.server_key "${NAKAMA_SERVER_KEY:-defaultkey}" \
           --metrics.prometheus_port 9100
     ports:
-      - "7349:7349"   # gRPC API
-      - "7350:7350"   # HTTP API / client
-      - "7351:7351"   # Console (web UI)
-      - "9100:9100"   # Prometheus metrics
+      - "${NAKAMA_GRPC_PORT:-7349}:7349"      # gRPC API
+      - "${NAKAMA_HTTP_PORT:-7350}:7350"      # HTTP API / client
+      - "${NAKAMA_CONSOLE_PORT:-7351}:7351"   # Console (web UI)
+      - "${NAKAMA_METRICS_PORT:-9100}:9100"   # Prometheus metrics
     volumes:
       # Compiled Go plugin (nakama.so) is dropped here by `make plugin`.
       - ./modules:/nakama/data/modules
@@ -115,7 +124,7 @@ services:
 
   redis:
     image: redis:7.4-alpine
-    container_name: rpg-redis
+    container_name: ${COMPOSE_NAME_PREFIX:-rpg}-redis
     restart: unless-stopped
     environment:
       # Empty = no auth, matching backend/shared/config default (REDIS_PASSWORD="").
@@ -174,7 +183,7 @@ services:
   gateway:
     profiles: ["realtime"]
     image: ${GATEWAY_IMAGE:-rpg-mmo/gateway:dev}
-    container_name: rpg-gateway
+    container_name: ${COMPOSE_NAME_PREFIX:-rpg}-gateway
     restart: unless-stopped
     depends_on:
       redis:
@@ -182,6 +191,10 @@ services:
     command: ["--addr=:8000", "--backend=redis"]
     environment:
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      # Signs the gateway→gameserver join token. Deliberately NOT JWT_SECRET —
+      # a compromised game server must not be able to forge client auth tokens.
+      # The gameserver-dotnet service below must carry the identical value.
+      JOIN_TOKEN_SECRET: ${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
       # Prometheus endpoint (/metrics, /healthz). Scraped in-network by the
@@ -202,7 +215,7 @@ services:
   gameserver-dotnet:
     profiles: ["realtime"]
     image: ${GAMESERVER_IMAGE:-rpg-mmo/gameserver-dotnet:dev}
-    container_name: rpg-gameserver
+    container_name: ${COMPOSE_NAME_PREFIX:-rpg}-gameserver
     restart: unless-stopped
     depends_on:
       redis:
@@ -214,6 +227,9 @@ services:
     # therefore done through the environment below, which works either way.
     environment:
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      # Verifies join tokens signed by the gateway. Same value as the gateway
+      # service above, and NOT JWT_SECRET (see the comment there).
+      JOIN_TOKEN_SECRET: ${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}
       GAMESERVER_ADDR: ":9000"
       GAMESERVER_MODE: map
       GAMESERVER_MAP_ID: ${GAMESERVER_MAP_ID:-map_01}
@@ -254,7 +270,7 @@ services:
   lgtm:
     profiles: ["monitoring"]
     image: grafana/otel-lgtm:${OTEL_LGTM_VERSION:-0.11.15}
-    container_name: rpg-lgtm
+    container_name: ${COMPOSE_NAME_PREFIX:-rpg}-lgtm
     restart: unless-stopped
     environment:
       # Grafana admin login. The otel-lgtm image runs a stock Grafana, so the

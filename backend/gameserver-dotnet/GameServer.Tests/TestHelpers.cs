@@ -42,7 +42,7 @@ internal static class TestHelpers
     }
 
     /// <summary>
-    /// Create a valid HS256 JWT for testing.
+    /// Create a valid HS256 JWT for testing, including a unique JTI claim.
     /// </summary>
     public static string CreateTestJwt(string userId, string serverId, string secret, long? exp = null)
     {
@@ -51,6 +51,7 @@ internal static class TestHelpers
         {
             ["sub"] = userId,
             ["sid"] = serverId,
+            ["jti"] = Guid.NewGuid().ToString("N"),
             ["iat"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
         };
 

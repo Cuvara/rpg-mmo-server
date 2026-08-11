@@ -295,6 +295,50 @@ public class WireProtocolTests
         }
     }
 
+    [Theory]
+    [MemberData(nameof(BothEncodings))]
+    public void TransferMapRequest_RoundTrips(WireEncoding enc)
+    {
+        var req = new TransferMapRequest { MapId = "map_02" };
+        var env = WireProtocol.NewEnvelope(MsgType.TransferMap, req, enc);
+
+        Assert.Equal(req, WireProtocol.GetPayload<TransferMapRequest>(env));
+    }
+
+    [Theory]
+    [MemberData(nameof(BothEncodings))]
+    public void TransferMapResponse_RoundTrips(WireEncoding enc)
+    {
+        var ok = new TransferMapResponse { Ok = true };
+        var envOk = WireProtocol.NewEnvelope(MsgType.TransferMapResp, ok, enc);
+        var gotOk = WireProtocol.GetPayload<TransferMapResponse>(envOk);
+        Assert.True(gotOk.Ok);
+        Assert.Equal("", gotOk.Error);
+
+        var err = new TransferMapResponse { Ok = false, Error = "already on this map" };
+        var envErr = WireProtocol.NewEnvelope(MsgType.TransferMapResp, err, enc);
+        var gotErr = WireProtocol.GetPayload<TransferMapResponse>(envErr);
+        Assert.False(gotErr.Ok);
+        Assert.Equal("already on this map", gotErr.Error);
+    }
+
+    /// <summary>Pins the JSON format for TransferMapRequest and TransferMapResponse.</summary>
+    [Fact]
+    public void TransferMap_JsonMatchesGoFormat()
+    {
+        var req = WireProtocol.NewEnvelope(MsgType.TransferMap,
+            new TransferMapRequest { MapId = "dungeon_01" }, WireEncoding.Json);
+        Assert.Equal("{\"map_id\":\"dungeon_01\"}", Encoding.UTF8.GetString(req.Payload));
+
+        var respOk = WireProtocol.NewEnvelope(MsgType.TransferMapResp,
+            new TransferMapResponse { Ok = true }, WireEncoding.Json);
+        Assert.Equal("{\"ok\":true}", Encoding.UTF8.GetString(respOk.Payload));
+
+        var respErr = WireProtocol.NewEnvelope(MsgType.TransferMapResp,
+            new TransferMapResponse { Ok = false, Error = "nope" }, WireEncoding.Json);
+        Assert.Equal("{\"ok\":false,\"error\":\"nope\"}", Encoding.UTF8.GetString(respErr.Payload));
+    }
+
     [Fact]
     public async Task Decode_EmptyStream_ReturnsNullOrThrows()
     {

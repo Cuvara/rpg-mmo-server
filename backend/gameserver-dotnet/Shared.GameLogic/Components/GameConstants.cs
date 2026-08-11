@@ -1,88 +1,89 @@
-namespace Shared.GameLogic.Components;
-
-/// <summary>
-/// Shared game constants. Used by both server validation and client prediction —
-/// the Unity client must compile against the exact same values or prediction
-/// diverges from the authoritative simulation.
-/// </summary>
-public static class GameConstants
+namespace Shared.GameLogic.Components
 {
-    // ── Movement ──
-
     /// <summary>
-    /// Maximum accepted magnitude of a raw client input vector before it is treated
-    /// as garbage and dropped. Anything in (1, this] is normalized to unit length —
-    /// a raw diagonal key input of (1,1) has magnitude ~1.414 and is clamped, not dropped.
+    /// Shared game constants. Used by both server validation and client prediction —
+    /// the Unity client must compile against the exact same values or prediction
+    /// diverges from the authoritative simulation.
     /// </summary>
-    public const float MaxInputMagnitude = 1.5f;
-
-    /// <summary>
-    /// Squared magnitude below which an input vector counts as "no movement".
-    /// </summary>
-    public const float InputDeadzoneSq = 1e-8f;
-
-    /// <summary>
-    /// Upper bound for a single integration step in seconds. Guards against a
-    /// pathological dt (paused process, debugger break) teleporting an entity.
-    /// </summary>
-    public const float MaxDeltaTime = 0.5f;
-
-    /// <summary>
-    /// Tolerance factor applied when auditing an observed displacement against the
-    /// theoretical maximum (<c>speed * dt</c>). Absorbs float rounding and one frame
-    /// of jitter without opening a speed-hack window.
-    /// </summary>
-    public const float DisplacementTolerance = 1.05f;
-
-    /// <summary>Default map width in world units.</summary>
-    public const float DefaultMapWidth = 1000f;
-
-    /// <summary>Default map height in world units.</summary>
-    public const float DefaultMapHeight = 1000f;
-
-    // ── Combat ──
-
-    /// <summary>Maximum attack range in world units.</summary>
-    public const float AttackRange = 3.0f;
-
-    /// <summary>Attack cooldown duration in milliseconds.</summary>
-    public const int AttackCooldownMs = 500;
-
-    /// <summary>
-    /// Attack cooldown expressed in simulation ticks for the given tick rate.
-    /// <para>
-    /// Cooldowns are counted in ticks, not wall-clock time: the simulation must be
-    /// deterministic and replayable (client prediction rewind/replay, server-side
-    /// replay of a disputed sequence). A <c>DateTime.UtcNow</c> comparison makes the
-    /// same input sequence produce different outcomes on two runs.
-    /// </para>
-    /// <para>
-    /// Rounded UP so the tick-based cooldown is never shorter than the wall-clock one
-    /// it replaces. At the default 15Hz: ceil(500ms / 66.67ms) = 8 ticks = 533ms.
-    /// </para>
-    /// </summary>
-    public static int AttackCooldownTicks(int tickRate)
+    public static class GameConstants
     {
-        if (tickRate <= 0) tickRate = DefaultTickRate;
-        int ticks = (AttackCooldownMs * tickRate + 999) / 1000; // ceil
-        return ticks < 1 ? 1 : ticks;
+        // ── Movement ──
+
+        /// <summary>
+        /// Maximum accepted magnitude of a raw client input vector before it is treated
+        /// as garbage and dropped. Anything in (1, this] is normalized to unit length —
+        /// a raw diagonal key input of (1,1) has magnitude ~1.414 and is clamped, not dropped.
+        /// </summary>
+        public const float MaxInputMagnitude = 1.5f;
+
+        /// <summary>
+        /// Squared magnitude below which an input vector counts as "no movement".
+        /// </summary>
+        public const float InputDeadzoneSq = 1e-8f;
+
+        /// <summary>
+        /// Upper bound for a single integration step in seconds. Guards against a
+        /// pathological dt (paused process, debugger break) teleporting an entity.
+        /// </summary>
+        public const float MaxDeltaTime = 0.5f;
+
+        /// <summary>
+        /// Tolerance factor applied when auditing an observed displacement against the
+        /// theoretical maximum (<c>speed * dt</c>). Absorbs float rounding and one frame
+        /// of jitter without opening a speed-hack window.
+        /// </summary>
+        public const float DisplacementTolerance = 1.05f;
+
+        /// <summary>Default map width in world units.</summary>
+        public const float DefaultMapWidth = 1000f;
+
+        /// <summary>Default map height in world units.</summary>
+        public const float DefaultMapHeight = 1000f;
+
+        // ── Combat ──
+
+        /// <summary>Maximum attack range in world units.</summary>
+        public const float AttackRange = 3.0f;
+
+        /// <summary>Attack cooldown duration in milliseconds.</summary>
+        public const int AttackCooldownMs = 500;
+
+        /// <summary>
+        /// Attack cooldown expressed in simulation ticks for the given tick rate.
+        /// <para>
+        /// Cooldowns are counted in ticks, not wall-clock time: the simulation must be
+        /// deterministic and replayable (client prediction rewind/replay, server-side
+        /// replay of a disputed sequence). A <c>DateTime.UtcNow</c> comparison makes the
+        /// same input sequence produce different outcomes on two runs.
+        /// </para>
+        /// <para>
+        /// Rounded UP so the tick-based cooldown is never shorter than the wall-clock one
+        /// it replaces. At the default 15Hz: ceil(500ms / 66.67ms) = 8 ticks = 533ms.
+        /// </para>
+        /// </summary>
+        public static int AttackCooldownTicks(int tickRate)
+        {
+            if (tickRate <= 0) tickRate = DefaultTickRate;
+            int ticks = (AttackCooldownMs * tickRate + 999) / 1000; // ceil
+            return ticks < 1 ? 1 : ticks;
+        }
+
+        /// <summary>Minimum damage dealt per attack (floor).</summary>
+        public const int MinDamage = 1;
+
+        // ── Simulation ──
+
+        /// <summary>Default Area of Interest radius for snapshot filtering.</summary>
+        public const float DefaultAoiRadius = 50.0f;
+
+        /// <summary>Default simulation tick rate (Hz).</summary>
+        public const int DefaultTickRate = 15;
+
+        /// <summary>
+        /// Default number of delta snapshots between full keyframes. At 15Hz a keyframe
+        /// lands every 2 seconds, bounding how long a client can stay desynced if it ever
+        /// misses a delta. Set to 0 or less to disable delta encoding entirely.
+        /// </summary>
+        public const int DefaultKeyframeInterval = 30;
     }
-
-    /// <summary>Minimum damage dealt per attack (floor).</summary>
-    public const int MinDamage = 1;
-
-    // ── Simulation ──
-
-    /// <summary>Default Area of Interest radius for snapshot filtering.</summary>
-    public const float DefaultAoiRadius = 50.0f;
-
-    /// <summary>Default simulation tick rate (Hz).</summary>
-    public const int DefaultTickRate = 15;
-
-    /// <summary>
-    /// Default number of delta snapshots between full keyframes. At 15Hz a keyframe
-    /// lands every 2 seconds, bounding how long a client can stay desynced if it ever
-    /// misses a delta. Set to 0 or less to disable delta encoding entirely.
-    /// </summary>
-    public const int DefaultKeyframeInterval = 30;
 }

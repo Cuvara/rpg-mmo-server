@@ -3,8 +3,8 @@
 package integration
 
 import (
-	"bytes"
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -26,6 +26,7 @@ import (
 )
 
 const dotnetJWTSecret = "test-secret-key-for-integration"
+const dotnetJoinTokenSecret = "test-join-secret-32chars-minimum"
 const dotnetServerID = "test-dotnet-gs"
 const dotnetMapID = "map_test"
 
@@ -93,9 +94,32 @@ var (
 	gameServerDll       string
 	gameServerBuildErr  error
 	gameServerSkip      string
+
+	// Set GAMESERVER_NATIVE_BIN to a published NativeAOT binary to run this whole
+	// suite against it instead of against the JIT'd dll.
+	//
+	// This is not a convenience: ADR-11 measured that Arch publishes cleanly under
+	// NativeAOT and then throws at runtime, a failure `dotnet test` structurally
+	// cannot see because tests run on CoreCLR with a JIT. Running the real binary
+	// through the real handshake is the only check that covers it.
+	gameServerNativeBin string
 )
 
 func buildDotnetGameServer() {
+	if bin := os.Getenv("GAMESERVER_NATIVE_BIN"); bin != "" {
+		abs, err := filepath.Abs(bin)
+		if err != nil {
+			gameServerBuildErr = fmt.Errorf("GAMESERVER_NATIVE_BIN %q: %w", bin, err)
+			return
+		}
+		if _, err := os.Stat(abs); err != nil {
+			gameServerBuildErr = fmt.Errorf("GAMESERVER_NATIVE_BIN %q not found: %w", abs, err)
+			return
+		}
+		gameServerNativeBin = abs
+		return
+	}
+
 	dotnetPath, err := exec.LookPath("dotnet")
 	if err != nil {
 		home, _ := os.UserHomeDir()
@@ -129,6 +153,15 @@ func buildDotnetGameServer() {
 // returned cleanup function to kill the process.
 func startDotnetGameServer(t *testing.T) (addr string, cleanup func()) {
 	t.Helper()
+	return startDotnetGameServerWith(t, nil, nil)
+}
+
+// startDotnetGameServerWith is startDotnetGameServer with extra CLI args and
+// extra environment appended. The self-registration flow test uses it to point
+// the server at a Redis instance and give it an address to advertise; every
+// other caller wants the plain defaults.
+func startDotnetGameServerWith(t *testing.T, extraArgs, extraEnv []string) (addr string, cleanup func()) {
+	t.Helper()
 
 	gameServerBuildOnce.Do(buildDotnetGameServer)
 	if gameServerSkip != "" {
@@ -138,7 +171,11 @@ func startDotnetGameServer(t *testing.T) (addr string, cleanup func()) {
 		t.Fatal(gameServerBuildErr)
 	}
 
-	cmd := exec.Command(gameServerDotnet, gameServerDll,
+	// extraArgs go FIRST: GameServer/Program.cs GetArg returns the first match,
+	// so a later --addr would be silently ignored. Prepending is what makes
+	// these overrides rather than additions.
+	serverArgs := append([]string{}, extraArgs...)
+	serverArgs = append(serverArgs,
 		"--addr", "127.0.0.1:0",
 		"--map-id", dotnetMapID,
 		"--server-id", dotnetServerID,
@@ -148,7 +185,18 @@ func startDotnetGameServer(t *testing.T) (addr string, cleanup func()) {
 		// the next test's server in this same suite.
 		"--metrics-addr", "",
 	)
-	cmd.Env = append(os.Environ(), "DOTNET_CLI_TELEMETRY_OPTOUT=1")
+
+	var cmd *exec.Cmd
+	if gameServerNativeBin != "" {
+		cmd = exec.Command(gameServerNativeBin, serverArgs...)
+	} else {
+		cmd = exec.Command(gameServerDotnet, append([]string{gameServerDll}, serverArgs...)...)
+	}
+	cmd.Env = append(os.Environ(),
+		"DOTNET_CLI_TELEMETRY_OPTOUT=1",
+		"JOIN_TOKEN_SECRET="+dotnetJoinTokenSecret,
+	)
+	cmd.Env = append(cmd.Env, extraEnv...)
 
 	// Merge stderr into the same pipe so nothing is written to the test process's
 	// own stderr after the test finishes.
@@ -254,7 +302,8 @@ func startGatewayForDotnet(t *testing.T, gsAddr string) (gwAddr string, cleanup 
 
 	sessionMgr := gwsession.NewSessionManager(sessionStore)
 	registrySvc := gwregistry.NewRegistryService(reg)
-	gw := gwserver.New(sessionMgr, registrySvc, dotnetJWTSecret, logger)
+	gw := gwserver.New(sessionMgr, registrySvc, dotnetJWTSecret, logger,
+		gwserver.WithJoinTokenSecret(dotnetJoinTokenSecret))
 
 	go gw.Run(":0")
 
@@ -509,7 +558,7 @@ func TestDotnetInterop_WrongServerID(t *testing.T) {
 	defer client.Close()
 
 	// Sign a join token for a DIFFERENT server ID
-	wrongToken, err := jwt.SignWithServer("player-wrong", "wrong-server-id", dotnetJWTSecret, 5*time.Minute)
+	wrongToken, err := jwt.SignWithServer("player-wrong", "wrong-server-id", dotnetJoinTokenSecret, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("jwt.SignWithServer: %v", err)
 	}
@@ -556,7 +605,7 @@ func TestDotnetInterop_MultipleClients(t *testing.T) {
 			t.Fatalf("connect client %s: %v", playerID, err)
 		}
 
-		token, err := jwt.SignWithServer(playerID, dotnetServerID, dotnetJWTSecret, 5*time.Minute)
+		token, err := jwt.SignWithServer(playerID, dotnetServerID, dotnetJoinTokenSecret, 5*time.Minute)
 		if err != nil {
 			t.Fatalf("sign token for %s: %v", playerID, err)
 		}
@@ -629,7 +678,7 @@ func TestDotnetInterop_ClientDisconnect(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 
-	token, err := jwt.SignWithServer("disconnect-player", dotnetServerID, dotnetJWTSecret, 5*time.Minute)
+	token, err := jwt.SignWithServer("disconnect-player", dotnetServerID, dotnetJoinTokenSecret, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("sign token: %v", err)
 	}
@@ -662,7 +711,7 @@ func TestDotnetInterop_ClientDisconnect(t *testing.T) {
 	defer client2.Close()
 
 	// New client can still join
-	token2, _ := jwt.SignWithServer("disconnect-player-2", dotnetServerID, dotnetJWTSecret, 5*time.Minute)
+	token2, _ := jwt.SignWithServer("disconnect-player-2", dotnetServerID, dotnetJoinTokenSecret, 5*time.Minute)
 	joinEnv2, _ := messages.NewEnvelope(messages.MsgJoinToken, messages.JoinTokenRequest{Token: token2})
 	if err := client2.Send(joinEnv2); err != nil {
 		t.Fatalf("send join after disconnect: %v", err)
@@ -765,7 +814,7 @@ func TestDotnetInterop_WireProtocolCompat(t *testing.T) {
 	defer client.Close()
 
 	// Sign a valid join token
-	token, err := jwt.SignWithServer("wire-test-player", dotnetServerID, dotnetJWTSecret, 5*time.Minute)
+	token, err := jwt.SignWithServer("wire-test-player", dotnetServerID, dotnetJoinTokenSecret, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("sign token: %v", err)
 	}
@@ -862,7 +911,7 @@ func TestDotnetInterop_MixedEncodingsOnOneServer(t *testing.T) {
 		if enc == messages.EncodingProto {
 			userIDForInterning = userID
 		}
-		token, err := jwt.SignWithServer(userID, dotnetServerID, dotnetJWTSecret, 5*time.Minute)
+		token, err := jwt.SignWithServer(userID, dotnetServerID, dotnetJoinTokenSecret, 5*time.Minute)
 		if err != nil {
 			t.Fatalf("%s: sign token: %v", enc, err)
 		}

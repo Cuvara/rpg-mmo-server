@@ -111,6 +111,80 @@ internal static class JsonWriter
         }
         return buffer.WrittenSpan.ToArray();
     }
+
+    internal static byte[] Write(DisconnectMessage m)
+    {
+        var buffer = new ArrayBufferWriter<byte>(64);
+        using (var w = new Utf8JsonWriter(buffer))
+        {
+            w.WriteStartObject();
+            if (m.Reason.Length > 0) w.WriteString("reason"u8, m.Reason);
+            w.WriteEndObject();
+        }
+        return buffer.WrittenSpan.ToArray();
+    }
+
+    internal static byte[] Write(TransferMapRequest m)
+    {
+        var buffer = new ArrayBufferWriter<byte>(64);
+        using (var w = new Utf8JsonWriter(buffer))
+        {
+            w.WriteStartObject();
+            w.WriteString("map_id"u8, m.MapId);
+            w.WriteEndObject();
+        }
+        return buffer.WrittenSpan.ToArray();
+    }
+
+    internal static byte[] Write(PingMessage m)
+    {
+        var buffer = new ArrayBufferWriter<byte>(32);
+        using (var w = new Utf8JsonWriter(buffer))
+        {
+            w.WriteStartObject();
+            w.WriteNumber("timestamp"u8, m.Timestamp);
+            w.WriteEndObject();
+        }
+        return buffer.WrittenSpan.ToArray();
+    }
+
+    internal static byte[] Write(TransferMapResponse m)
+    {
+        var buffer = new ArrayBufferWriter<byte>(64);
+        using (var w = new Utf8JsonWriter(buffer))
+        {
+            w.WriteStartObject();
+            w.WriteBoolean("ok"u8, m.Ok);
+            if (m.Error.Length > 0) w.WriteString("error"u8, m.Error);
+            w.WriteEndObject();
+        }
+        return buffer.WrittenSpan.ToArray();
+    }
+
+    internal static byte[] Write(PongMessage m)
+    {
+        var buffer = new ArrayBufferWriter<byte>(48);
+        using (var w = new Utf8JsonWriter(buffer))
+        {
+            w.WriteStartObject();
+            w.WriteNumber("timestamp"u8, m.Timestamp);
+            w.WriteNumber("server_time"u8, m.ServerTime);
+            w.WriteEndObject();
+        }
+        return buffer.WrittenSpan.ToArray();
+    }
+
+    internal static byte[] Write(KickMessage m)
+    {
+        var buffer = new ArrayBufferWriter<byte>(48);
+        using (var w = new Utf8JsonWriter(buffer))
+        {
+            w.WriteStartObject();
+            w.WriteString("reason"u8, m.Reason);
+            w.WriteEndObject();
+        }
+        return buffer.WrittenSpan.ToArray();
+    }
 }
 
 /// <summary>
@@ -236,6 +310,85 @@ internal static class JsonReader
         {
             if (r.TokenType == JsonTokenType.String) m.Removed.Add(r.GetString() ?? "");
         }
+    }
+
+    internal static TransferMapRequest ReadTransferMapRequest(byte[] json)
+    {
+        var m = new TransferMapRequest();
+        var r = new Utf8JsonReader(json);
+        Expect(ref r, JsonTokenType.StartObject);
+        while (r.Read() && r.TokenType != JsonTokenType.EndObject)
+        {
+            bool mapId = r.ValueTextEquals("map_id"u8);
+            if (!r.Read()) break;
+            if (mapId) m.MapId = r.GetString() ?? "";
+            else r.Skip();
+        }
+        return m;
+    }
+
+    internal static PingMessage ReadPingMessage(byte[] json)
+    {
+        var m = new PingMessage();
+        var r = new Utf8JsonReader(json);
+        Expect(ref r, JsonTokenType.StartObject);
+        while (r.Read() && r.TokenType != JsonTokenType.EndObject)
+        {
+            bool timestamp = r.ValueTextEquals("timestamp"u8);
+            if (!r.Read()) break;
+            if (timestamp) m.Timestamp = r.GetInt64();
+            else r.Skip();
+        }
+        return m;
+    }
+
+    internal static TransferMapResponse ReadTransferMapResponse(byte[] json)
+    {
+        var m = new TransferMapResponse();
+        var r = new Utf8JsonReader(json);
+        Expect(ref r, JsonTokenType.StartObject);
+        while (r.Read() && r.TokenType != JsonTokenType.EndObject)
+        {
+            bool ok = r.ValueTextEquals("ok"u8);
+            bool error = r.ValueTextEquals("error"u8);
+            if (!r.Read()) break;
+            if (ok) m.Ok = r.TokenType == JsonTokenType.True;
+            else if (error) m.Error = r.GetString() ?? "";
+            else r.Skip();
+        }
+        return m;
+    }
+
+    internal static PongMessage ReadPongMessage(byte[] json)
+    {
+        var m = new PongMessage();
+        var r = new Utf8JsonReader(json);
+        Expect(ref r, JsonTokenType.StartObject);
+        while (r.Read() && r.TokenType != JsonTokenType.EndObject)
+        {
+            bool timestamp = r.ValueTextEquals("timestamp"u8);
+            bool serverTime = r.ValueTextEquals("server_time"u8);
+            if (!r.Read()) break;
+            if (timestamp) m.Timestamp = r.GetInt64();
+            else if (serverTime) m.ServerTime = r.GetInt64();
+            else r.Skip();
+        }
+        return m;
+    }
+
+    internal static KickMessage ReadKickMessage(byte[] json)
+    {
+        var m = new KickMessage();
+        var r = new Utf8JsonReader(json);
+        Expect(ref r, JsonTokenType.StartObject);
+        while (r.Read() && r.TokenType != JsonTokenType.EndObject)
+        {
+            bool reason = r.ValueTextEquals("reason"u8);
+            if (!r.Read()) break;
+            if (reason) m.Reason = r.GetString() ?? "";
+            else r.Skip();
+        }
+        return m;
     }
 
     private static void Expect(ref Utf8JsonReader r, JsonTokenType type)

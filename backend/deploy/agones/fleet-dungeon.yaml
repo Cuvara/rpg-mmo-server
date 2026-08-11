@@ -53,6 +53,17 @@ spec:
                       name: rpg-realtime-secrets
                       key: jwt-secret
                       optional: true
+                # Verifies the gateway->gameserver join token. Must hold the same
+                # value as the gateway's JOIN_TOKEN_SECRET, and must NOT be
+                # JWT_SECRET: a compromised game-server pod must not be able to
+                # forge client auth tokens. Not optional -- the binary refuses to
+                # start without it, so a missing key should fail at container
+                # creation rather than crashloop.
+                - name: JOIN_TOKEN_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: rpg-realtime-secrets
+                      key: join-token-secret
                 - name: REDIS_ADDR
                   valueFrom:
                     configMapKeyRef:

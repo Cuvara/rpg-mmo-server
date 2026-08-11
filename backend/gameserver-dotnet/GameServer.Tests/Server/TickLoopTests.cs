@@ -10,11 +10,11 @@ namespace GameServer.Tests.Server;
 
 public class TickLoopTests
 {
-    private static (TickLoop loop, GameWorld world, ConnectionManager connMgr) CreateTickLoop(
+    private static (TickLoop loop, EcsWorld world, ConnectionManager connMgr) CreateTickLoop(
         int tickRate = GameConstants.DefaultTickRate,
         MapBounds? bounds = null)
     {
-        var world = new GameWorld();
+        var world = new EcsWorld();
         var connMgr = new ConnectionManager();
         var logger = NullLogger.Instance;
         var handler = new InputHandler(world, logger, null, tickRate, bounds);

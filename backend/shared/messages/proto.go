@@ -76,6 +76,30 @@ func marshalProtoPayload(v any) ([]byte, error) {
 	case *DisconnectMessage:
 		m = &wirepb.DisconnectMessage{Reason: t.Reason}
 
+	case TransferMapRequest:
+		m = &wirepb.TransferMapRequest{MapId: t.MapID}
+	case *TransferMapRequest:
+		m = &wirepb.TransferMapRequest{MapId: t.MapID}
+
+	case TransferMapResponse:
+		m = transferMapRespPB(t)
+	case *TransferMapResponse:
+		m = transferMapRespPB(*t)
+	case PingMessage:
+		m = &wirepb.PingMessage{Timestamp: t.Timestamp}
+	case *PingMessage:
+		m = &wirepb.PingMessage{Timestamp: t.Timestamp}
+
+	case PongMessage:
+		m = &wirepb.PongMessage{Timestamp: t.Timestamp, ServerTime: t.ServerTime}
+	case *PongMessage:
+		m = &wirepb.PongMessage{Timestamp: t.Timestamp, ServerTime: t.ServerTime}
+
+	case KickMessage:
+		m = &wirepb.KickMessage{Reason: t.Reason}
+	case *KickMessage:
+		m = &wirepb.KickMessage{Reason: t.Reason}
+
 	default:
 		return nil, fmt.Errorf("marshal proto payload: unsupported message type %T", v)
 	}
@@ -185,6 +209,40 @@ func unmarshalProtoPayload(data []byte, v any) error {
 		}
 		t.Reason = pb.Reason
 
+	case *TransferMapRequest:
+		var pb wirepb.TransferMapRequest
+		if err := proto.Unmarshal(data, &pb); err != nil {
+			return wrapUnmarshal(v, err)
+		}
+		t.MapID = pb.MapId
+
+	case *TransferMapResponse:
+		var pb wirepb.TransferMapResponse
+		if err := proto.Unmarshal(data, &pb); err != nil {
+			return wrapUnmarshal(v, err)
+		}
+		t.OK, t.Error = pb.Ok, pb.Error
+	case *PingMessage:
+		var pb wirepb.PingMessage
+		if err := proto.Unmarshal(data, &pb); err != nil {
+			return wrapUnmarshal(v, err)
+		}
+		t.Timestamp = pb.Timestamp
+
+	case *PongMessage:
+		var pb wirepb.PongMessage
+		if err := proto.Unmarshal(data, &pb); err != nil {
+			return wrapUnmarshal(v, err)
+		}
+		t.Timestamp, t.ServerTime = pb.Timestamp, pb.ServerTime
+
+	case *KickMessage:
+		var pb wirepb.KickMessage
+		if err := proto.Unmarshal(data, &pb); err != nil {
+			return wrapUnmarshal(v, err)
+		}
+		t.Reason = pb.Reason
+
 	default:
 		return fmt.Errorf("unmarshal proto payload: unsupported message type %T", v)
 	}
@@ -210,6 +268,10 @@ func enterWorldRespPB(t EnterWorldResponse) *wirepb.EnterWorldResponse {
 
 func joinTokenRespPB(t JoinTokenResponse) *wirepb.JoinTokenResponse {
 	return &wirepb.JoinTokenResponse{Ok: t.OK, UserId: t.UserID, Error: t.Error}
+}
+
+func transferMapRespPB(t TransferMapResponse) *wirepb.TransferMapResponse {
+	return &wirepb.TransferMapResponse{Ok: t.OK, Error: t.Error}
 }
 
 func inputPB(t InputMessage) *wirepb.InputMessage {

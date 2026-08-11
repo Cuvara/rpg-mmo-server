@@ -34,7 +34,7 @@ public static class SnapshotEncoder
     }
 
     /// <summary>Get entities within AOI radius of a center point.</summary>
-    public static List<EntityState> GetNearbyEntities(GameWorld world, Vec2 center, float radius)
+    public static List<EntityState> GetNearbyEntities(EcsWorld world, Vec2 center, float radius)
     {
         return world.GetEntitiesInRange(center, radius);
     }

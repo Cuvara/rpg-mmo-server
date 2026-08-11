@@ -40,12 +40,13 @@ public class JoinTokenSecretTests
             tokenSecret: AuthSecret, expectOk: false);
 
     /// <summary>
-    /// Pre-split deployments (JOIN_TOKEN_SECRET unset on both halves) keep working:
-    /// the gateway still signs with JWT_SECRET and this server still accepts it.
+    /// JOIN_TOKEN_SECRET is now mandatory. When set to the same value as the
+    /// auth secret, tokens signed with that value are accepted (but an operator
+    /// warning is logged about using distinct secrets).
     /// </summary>
     [Fact]
-    public async Task Join_JoinSecretUnset_FallsBackToJwtSecret()
-        => await AssertJoinAsync(jwtSecret: AuthSecret, joinTokenSecret: "",
+    public async Task Join_JoinSecretSameAsAuth_Accepted()
+        => await AssertJoinAsync(jwtSecret: AuthSecret, joinTokenSecret: AuthSecret,
             tokenSecret: AuthSecret, expectOk: true);
 
     /// <summary>Rotation window: the previous join secret still verifies.</summary>
@@ -63,9 +64,13 @@ public class JoinTokenSecretTests
         => await AssertJoinAsync(jwtSecret: AuthSecret, joinTokenSecret: JoinSecret,
             tokenSecret: OldJoinSecret, expectOk: false);
 
-    /// <summary>No secret anywhere must fail closed, never open.</summary>
+    /// <summary>
+    /// No usable secret in the keyring still fails closed: tokens signed with
+    /// any key are rejected. (In production, Program.cs prevents this at startup,
+    /// but GameServerHost must be independently safe.)
+    /// </summary>
     [Fact]
-    public async Task Join_NoSecretsConfigured_RejectsEveryToken()
+    public async Task Join_WhitespaceOnlySecret_RejectsEveryToken()
         => await AssertJoinAsync(jwtSecret: "", joinTokenSecret: "   ",
             tokenSecret: JoinSecret, expectOk: false);
 

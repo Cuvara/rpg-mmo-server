@@ -31,8 +31,8 @@ bool useAgones = HasFlag(args, "--agones") || Env("AGONES_ENABLED") == "true";
 string jwtSecret = GetArg(args, "--jwt-secret") ?? Env("JWT_SECRET") ?? "";
 // Secret the GATEWAY signs join tokens with. Deliberately NOT JWT_SECRET: this value
 // is distributed to every game-server pod, so a compromised pod must not be able to
-// mint Nakama-style auth tokens. Empty = reuse JWT_SECRET (pre-split behaviour, warned
-// about below). Comma-separated ("current,previous") to rotate without dropping joins.
+// mint Nakama-style auth tokens. REQUIRED (fatal if unset).
+// Comma-separated ("current,previous") to rotate without dropping joins.
 string joinTokenSecret = GetArg(args, "--join-token-secret") ?? Env("JOIN_TOKEN_SECRET") ?? "";
 // Metrics listen address. Unset -> ":9101"; explicitly empty -> metrics disabled.
 string metricsAddr = GetArg(args, "--metrics-addr")
@@ -167,24 +167,27 @@ if (string.IsNullOrEmpty(jwtSecret))
     logger.LogWarning("JWT_SECRET not set -- token validation will reject all tokens in production");
 }
 
-// Mirror of the gateway's start-up check (backend/gateway/cmd/gateway/main.go): both
-// halves must take the same fallback or the gateway signs join tokens with a key this
-// server does not hold, and every join fails.
-var (joinSecretSpec, joinSharedWithAuth) = ServerOptions.EffectiveJoinTokenSecret(joinTokenSecret, jwtSecret);
-var joinKeyring = JwtKeyring.Parse(joinSecretSpec);
-if (joinSharedWithAuth)
+// JOIN_TOKEN_SECRET is mandatory: a game server that cannot verify join tokens
+// must not start, otherwise every client that tries to join gets a cryptic rejection.
+if (string.IsNullOrEmpty(joinTokenSecret))
 {
-    logger.LogWarning("JOIN_TOKEN_SECRET is unset -- join tokens are verified with JWT_SECRET; " +
-                      "a leak of either secret compromises both the Nakama auth hop and the game-server hop. " +
-                      "Set JOIN_TOKEN_SECRET (and the matching value on the gateway) before launch.");
+    logger.LogCritical("JOIN_TOKEN_SECRET is required but not set -- refusing to start. " +
+                       "Set JOIN_TOKEN_SECRET to a dedicated secret (and the matching value on the gateway). " +
+                       "Do NOT reuse JWT_SECRET: a compromised game-server pod must not be able to forge auth tokens.");
+    return 2;
 }
+var joinKeyring = JwtKeyring.Parse(joinTokenSecret);
 if (!joinKeyring.IsValid)
 {
-    logger.LogWarning("No join-token secret at all (JOIN_TOKEN_SECRET and JWT_SECRET both empty) -- " +
-                      "every join will be rejected");
+    logger.LogCritical("JOIN_TOKEN_SECRET contains no usable secrets -- refusing to start");
+    return 2;
 }
-logger.LogInformation("  JoinToken: {Source}, {Count} key(s){Rotating}",
-    joinSharedWithAuth ? "JWT_SECRET (fallback)" : "JOIN_TOKEN_SECRET",
+if (joinTokenSecret == jwtSecret)
+{
+    logger.LogWarning("JOIN_TOKEN_SECRET and JWT_SECRET are the same value -- a leak of either " +
+                      "secret compromises both the Nakama auth hop and the game-server hop. Use distinct secrets before launch.");
+}
+logger.LogInformation("  JoinToken: JOIN_TOKEN_SECRET, {Count} key(s){Rotating}",
     joinKeyring.Count,
     joinKeyring.Count > 1 ? " -- rotation in progress, previous key(s) still accepted" : "");
 

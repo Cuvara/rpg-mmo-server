@@ -4,11 +4,13 @@
 # no external dependencies) — k3s/setup-dev.sh applies that one.
 #
 # Config comes from objects that live in the same namespace:
-#   Secret    rpg-realtime-secrets  key jwt-secret   -> JWT_SECRET
+#   Secret    rpg-realtime-secrets  key jwt-secret        -> JWT_SECRET
+#   Secret    rpg-realtime-secrets  key join-token-secret -> JOIN_TOKEN_SECRET
 #   ConfigMap gameserver-config     keys redis-addr, game-db-url
-# Both refs are `optional: true`, so the fleet still starts (with the binary's
-# own defaults) before those objects exist. Drop `optional` once the real
-# secret/configmap are managed by the deploy pipeline.
+# The jwt-secret and configmap refs are `optional: true`, so the fleet still
+# starts (with the binary's own defaults) before those objects exist. Drop
+# `optional` once the real secret/configmap are managed by the deploy pipeline.
+# join-token-secret is NOT optional: the binary refuses to start without it.
 apiVersion: agones.dev/v1
 kind: Fleet
 metadata:
@@ -68,6 +70,17 @@ spec:
                       name: rpg-realtime-secrets
                       key: jwt-secret
                       optional: true
+                # Verifies the gateway->gameserver join token. Must hold the same
+                # value as the gateway's JOIN_TOKEN_SECRET, and must NOT be
+                # JWT_SECRET: a compromised game-server pod must not be able to
+                # forge client auth tokens. Not optional -- the binary refuses to
+                # start without it, so a missing key should fail at container
+                # creation rather than crashloop.
+                - name: JOIN_TOKEN_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: rpg-realtime-secrets
+                      key: join-token-secret
                 - name: REDIS_ADDR
                   valueFrom:
                     configMapKeyRef:

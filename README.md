@@ -50,9 +50,36 @@ that server. Gameplay traffic never passes through the gateway.
 
 ## Quick Start
 
+### Run the whole backend — one command
+
+```bash
+cd backend/deploy
+./stack.sh up        # build every image and start the whole stack
+./stack.sh check     # prove the full client flow end to end
+./stack.sh down      # stop it
+```
+
+This brings up Nakama, both PostgreSQL instances, Redis, the Go gateway and the
+C# game server, wired with matching secrets, and waits until the game server has
+registered itself so `MsgEnterWorld` can be answered. `check` runs
+`backend/smoketest`, which walks the same path a Unity client walks — device
+auth → `gateway_token` → `MsgAuth` → `MsgEnterWorld` → game-server join →
+input/snapshot → clean disconnect — and prints a PASS line per step.
+
+Only Docker is required. **A client connects to the gateway on `localhost:8100`
+and to Nakama on `http://localhost:7350`**; it learns the game-server address at
+runtime from `MsgEnterWorldResp` and dials it directly (ADR-3). Ports, secrets,
+pointing a Unity client at it, running a second isolated stack, and
+troubleshooting: **[`backend/deploy/docs/RUNBOOK-local-dev.md`
+§0](backend/deploy/docs/RUNBOOK-local-dev.md#0-run-the-whole-thing-locally)**.
+
+The sections below are for working *on* a single service, where you want host
+processes and a debugger rather than containers.
+
 ### Prerequisites
 
-- Go 1.26+
+- Docker + `docker compose` v2 (for the stack above)
+- Go 1.26+ and .NET 10 SDK (to run services on the host, and for the tests)
 
 ### Run Tests
 
@@ -61,7 +88,7 @@ that server. Gameplay traffic never passes through the gateway.
 cd backend/shared && go test ./... -race
 cd backend/gateway && go test ./... -race
 cd backend/nakama && go test ./... -race
-cd backend/integration_test && go test -v -race -timeout 120s
+cd backend/integration_test && go test -tags integration -v -race -timeout 300s
 
 # C# game server (.NET 10)
 cd backend/gameserver-dotnet && dotnet test
@@ -77,7 +104,7 @@ In-memory mode (single process each, no external dependencies):
 ```bash
 # Terminal 1 — Game Server (C# .NET 10)
 cd backend/gameserver-dotnet
-dotnet run --project src/GameServer/ -- --addr=:9000 --map-id=map_01
+dotnet run --project GameServer/ -- --addr=:9000 --map-id=map_01
 
 # Terminal 2 — Gateway (Go)
 cd backend/gateway
@@ -93,7 +120,7 @@ redis-server --port 6379
 
 # Terminal 1 — Game Server (C# .NET 10)
 cd backend/gameserver-dotnet
-dotnet run --project src/GameServer/ -- --addr=:9000 --map-id=map_01 --redis --redis-addr=localhost:6379
+dotnet run --project GameServer/ -- --addr=:9000 --map-id=map_01 --redis --redis-addr=localhost:6379
 
 # Terminal 2 — Gateway (an exported REDIS_ADDR selects the redis backend;
 # --backend=redis forces it explicitly)

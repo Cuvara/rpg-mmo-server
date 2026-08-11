@@ -516,6 +516,10 @@ jobs:
         env:
           RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          # Signs/verifies the gateway->gameserver join token on both binaries.
+          # Deliberately separate from JWT_SECRET: a compromised game server must
+          # not be able to forge client auth tokens. Both refuse to start unset.
+          JOIN_TOKEN_SECRET: ${{ secrets.JOIN_TOKEN_SECRET }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           NAKAMA_CONSOLE_PASSWORD: ${{ secrets.NAKAMA_CONSOLE_PASSWORD }}
           REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
@@ -562,12 +566,19 @@ jobs:
           OTEL_LGTM_VERSION: ${{ vars.OTEL_LGTM_VERSION || '0.11.15' }}
         run: |
           set -euo pipefail
-          for required in JWT_SECRET POSTGRES_PASSWORD NAKAMA_CONSOLE_PASSWORD; do
+          for required in JWT_SECRET JOIN_TOKEN_SECRET POSTGRES_PASSWORD NAKAMA_CONSOLE_PASSWORD; do
             if [ -z "${!required}" ]; then
               echo "::error::environment secret ${required} is not set"
               exit 1
             fi
           done
+          # The whole point of the split is that a compromised game server can
+          # verify join tokens without being able to mint client auth tokens.
+          # Reusing one value for both gives that away silently.
+          if [ "${JOIN_TOKEN_SECRET}" = "${JWT_SECRET}" ]; then
+            echo "::error::JOIN_TOKEN_SECRET must not equal JWT_SECRET — generate a separate value (openssl rand -hex 32)"
+            exit 1
+          fi
           # Monitoring is on unless vars.MONITORING_ENABLED is exactly 'false'.
           # When it is on, the Grafana admin password is as mandatory as the
           # other secrets: a Grafana published on 0.0.0.0 with a default
@@ -592,6 +603,7 @@ jobs:
             echo "REDIS_PASSWORD=${REDIS_PASSWORD}"
             echo "REDIS_ADDR=${REDIS_ADDR}"
             echo "JWT_SECRET=${JWT_SECRET}"
+            echo "JOIN_TOKEN_SECRET=${JOIN_TOKEN_SECRET}"
             echo "NAKAMA_CONSOLE_USER=${NAKAMA_CONSOLE_USER}"
             echo "NAKAMA_CONSOLE_PASSWORD=${NAKAMA_CONSOLE_PASSWORD}"
             echo "NAKAMA_SERVER_KEY=${NAKAMA_SERVER_KEY:-defaultkey}"

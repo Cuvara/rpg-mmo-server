@@ -5,9 +5,23 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/duycuong/rpg-mmo/gateway/metrics"
 	"github.com/duycuong/rpg-mmo/shared/storage"
+)
+
+const (
+	// retryMaxAttempts is the maximum number of retries for transient registry
+	// errors (e.g. Redis connection blip). The initial attempt is not counted.
+	retryMaxAttempts = 3
+
+	// retryInitialDelay is the backoff seed: 1s -> 2s -> 4s.
+	retryInitialDelay = 1 * time.Second
+
+	// retryTotalTimeout caps the total time spent retrying so a slow Redis does
+	// not hold a client connection open indefinitely.
+	retryTotalTimeout = 10 * time.Second
 )
 
 // logger is the minimal logging surface RegistryService needs. It matches
@@ -72,6 +86,105 @@ func newRegistryService(s *RegistryService, opts []Option) *RegistryService {
 // string comparison.
 var ErrNoServerAvailable = errors.New("no available server for map")
 
+// isRetriable returns true for errors that are likely transient (Redis blip,
+// network timeout) as opposed to logical conditions (no server for map, not
+// found) that will not succeed on retry.
+func isRetriable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrNoServerAvailable) || errors.Is(err, storage.ErrNotFound) {
+		return false
+	}
+	return true
+}
+
+// findByMapIDWithRetry wraps FindByMapID with exponential backoff. Only
+// transient errors are retried; capacity / not-found errors return immediately.
+func (s *RegistryService) findByMapIDWithRetry(ctx context.Context, mapID string) ([]storage.ServerInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, retryTotalTimeout)
+	defer cancel()
+
+	var lastErr error
+	delay := retryInitialDelay
+
+	for attempt := 0; attempt <= retryMaxAttempts; attempt++ {
+		servers, err := s.reg.FindByMapID(ctx, mapID)
+		if err == nil {
+			return servers, nil
+		}
+
+		if !isRetriable(err) {
+			return nil, err
+		}
+		lastErr = err
+
+		if attempt == retryMaxAttempts {
+			break
+		}
+
+		if s.log != nil {
+			s.log.Warn("registry lookup failed, retrying",
+				"map_id", mapID,
+				"attempt", attempt+1,
+				"delay", delay,
+				"error", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("retry aborted: %w (last: %w)", ctx.Err(), lastErr)
+		case <-time.After(delay):
+		}
+		delay *= 2
+	}
+
+	return nil, fmt.Errorf("all %d retries exhausted: %w", retryMaxAttempts, lastErr)
+}
+
+// getServerWithRetry wraps GetServer with exponential backoff for transient
+// errors.
+func (s *RegistryService) getServerWithRetry(ctx context.Context, serverID string) (storage.ServerInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, retryTotalTimeout)
+	defer cancel()
+
+	var lastErr error
+	delay := retryInitialDelay
+
+	for attempt := 0; attempt <= retryMaxAttempts; attempt++ {
+		info, err := s.reg.GetServer(ctx, serverID)
+		if err == nil {
+			return info, nil
+		}
+
+		if !isRetriable(err) {
+			return storage.ServerInfo{}, err
+		}
+		lastErr = err
+
+		if attempt == retryMaxAttempts {
+			break
+		}
+
+		if s.log != nil {
+			s.log.Warn("registry get server failed, retrying",
+				"server_id", serverID,
+				"attempt", attempt+1,
+				"delay", delay,
+				"error", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return storage.ServerInfo{}, fmt.Errorf("retry aborted: %w (last: %w)", ctx.Err(), lastErr)
+		case <-time.After(delay):
+		}
+		delay *= 2
+	}
+
+	return storage.ServerInfo{}, fmt.Errorf("all %d retries exhausted: %w", retryMaxAttempts, lastErr)
+}
+
 // FindServer locates the least-loaded live server for mapID that still has
 // capacity (PlayerCount < Capacity). Ties break on ServerID so the choice is
 // deterministic. When no server has room and an allocator is configured, it
@@ -87,7 +200,7 @@ var ErrNoServerAvailable = errors.New("no available server for map")
 // deliberate MVP limitation (see backend/docs/ARCHITECTURE-DECISIONS.md, ADR-2),
 // so the condition is surfaced loudly here rather than failing the request.
 func (s *RegistryService) FindServer(ctx context.Context, mapID string) (storage.ServerInfo, error) {
-	servers, err := s.reg.FindByMapID(ctx, mapID)
+	servers, err := s.findByMapIDWithRetry(ctx, mapID)
 	if err != nil {
 		return storage.ServerInfo{}, fmt.Errorf("find servers: %w", err)
 	}
@@ -110,9 +223,6 @@ func (s *RegistryService) FindServer(ctx context.Context, mapID string) (storage
 		if srv.PlayerCount >= srv.Capacity {
 			continue
 		}
-		// Registry order is non-deterministic (Go map iteration for the memory
-		// store, SMEMBERS order for Redis), so an explicit ServerID tiebreak is
-		// what keeps two equally-loaded servers from splitting a party.
 		switch {
 		case !found,
 			srv.PlayerCount < best.PlayerCount,
@@ -130,8 +240,6 @@ func (s *RegistryService) FindServer(ctx context.Context, mapID string) (storage
 			s.metrics.AllocationResult(false)
 			return storage.ServerInfo{}, fmt.Errorf("%w %s: allocate: %w", ErrNoServerAvailable, mapID, aerr)
 		}
-		// The allocation itself succeeded; a failed registry write still leaves
-		// a pod running, so it is counted as a failure of the whole request.
 		if rerr := s.reg.Register(ctx, allocated); rerr != nil {
 			s.metrics.AllocationResult(false)
 			return storage.ServerInfo{}, fmt.Errorf("register allocated server %s: %w", allocated.ServerID, rerr)
@@ -143,9 +251,10 @@ func (s *RegistryService) FindServer(ctx context.Context, mapID string) (storage
 	return storage.ServerInfo{}, fmt.Errorf("%w %s", ErrNoServerAvailable, mapID)
 }
 
-// GetServer returns a single live server by ID.
+// GetServer returns a single live server by ID, retrying transient errors
+// with exponential backoff.
 func (s *RegistryService) GetServer(ctx context.Context, serverID string) (storage.ServerInfo, error) {
-	info, err := s.reg.GetServer(ctx, serverID)
+	info, err := s.getServerWithRetry(ctx, serverID)
 	if err != nil {
 		return storage.ServerInfo{}, fmt.Errorf("get server %s: %w", serverID, err)
 	}

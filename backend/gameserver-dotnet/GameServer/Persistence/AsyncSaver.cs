@@ -41,7 +41,7 @@ public sealed class MemoryPlayerStore : IPlayerStore
 public sealed class AsyncSaver
 {
     private readonly IPlayerStore _store;
-    private readonly GameWorld _world;
+    private readonly EcsWorld _world;
     private readonly string _mapId;
     private readonly TimeSpan _interval;
     private readonly ILogger _logger;
@@ -49,7 +49,7 @@ public sealed class AsyncSaver
 
     public AsyncSaver(
         IPlayerStore store,
-        GameWorld world,
+        EcsWorld world,
         string mapId,
         TimeSpan interval,
         ILogger logger,

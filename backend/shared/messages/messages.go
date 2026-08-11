@@ -42,6 +42,14 @@ const (
 	MsgSnapshot                          // gameserver -> client (per tick)
 	MsgDisconnect                        // either direction
 	MsgResync                            // client -> gameserver (request a full keyframe)
+	_                                    // 11: reserved
+	_                                    // 12: reserved
+	MsgTransferMap                       // client -> gameserver (request map transfer)
+	MsgTransferMapResp                   // gameserver -> client (transfer result)
+	MsgPing       MsgType = 11           // either direction (heartbeat)
+	MsgPong       MsgType = 12           // either direction (heartbeat reply)
+	// 13 and 14 are reserved for MsgTransferMap/Resp.
+	MsgKick MsgType = 15 // server -> client (forced disconnect with reason)
 )
 
 // Encoding selects how an Envelope and its payload are serialized.
@@ -251,3 +259,38 @@ type DisconnectMessage struct {
 // ResyncRequest asks the game server to make the next snapshot a full keyframe.
 // It carries no fields.
 type ResyncRequest struct{}
+
+// TransferMapRequest is sent by the client to request a map transfer.
+// The game server validates, saves state, and disconnects the client so it can
+// reconnect through the gateway to the new map's server via the existing
+// MsgEnterWorld flow.
+type TransferMapRequest struct {
+	MapID string `json:"map_id"`
+}
+
+// TransferMapResponse is the game server's reply to a transfer request.
+type TransferMapResponse struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// PingMessage is a heartbeat probe. The sender fills Timestamp with its own
+// monotonic time in milliseconds; the receiver echoes it back in a PongMessage
+// so the sender can measure RTT.
+type PingMessage struct {
+	Timestamp int64 `json:"timestamp"`
+}
+
+// PongMessage is the reply to a PingMessage. Timestamp echoes the sender's
+// value unchanged; ServerTime is the responder's wall clock in milliseconds
+// since the Unix epoch.
+type PongMessage struct {
+	Timestamp  int64 `json:"timestamp"`
+	ServerTime int64 `json:"server_time"`
+}
+
+// KickMessage is sent server -> client to force a disconnect with a reason.
+// Reasons are machine-readable strings, not user-facing text.
+type KickMessage struct {
+	Reason string `json:"reason"`
+}
