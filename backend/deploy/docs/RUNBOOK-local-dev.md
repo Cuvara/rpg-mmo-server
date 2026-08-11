@@ -1,12 +1,157 @@
-# Runbook — Local Dev Meta Stack
+# Runbook — Local Dev Stack
 
-Operational guide for the local Nakama + PostgreSQL + Redis stack defined in
+Operational guide for the local stack defined in
 `backend/deploy/docker-compose.yml`. Everything below runs from
 `backend/deploy/` unless stated otherwise.
 
-Scope: **backing services** — Nakama (auth/economy/social), PostgreSQL (meta DB),
-Redis (sessions, server registry, event streams). Realtime services (gateway,
-gameserver) still run on the host with `go run` — see the root `CLAUDE.md`.
+Two ways to run it:
+
+- **[§0 Run the whole thing](#0-run-the-whole-thing-locally)** — one command,
+  everything in containers including the gateway and the C# game server. This is
+  what you want to connect a client to something, and what a newcomer should
+  read first.
+- **§1–§7** — backing services only (Nakama, PostgreSQL, Redis) with the
+  realtime services run on the host via `go run` / `dotnet run`. This is the
+  interactive-development path: instant rebuilds and a debugger.
+
+---
+
+## 0. Run the whole thing locally
+
+```bash
+cd backend/deploy
+./stack.sh up        # build every image, start everything, wait for readiness
+./stack.sh check     # prove the full client flow end to end
+```
+
+`up` is idempotent — re-run it any time. On a cold cache the first run takes a
+while: it compiles the Nakama Go plugin and does a NativeAOT publish of the C#
+game server. Afterwards Docker layer caching makes it fast.
+
+That brings up six processes, wired with matching secrets:
+
+| Service | Host port | Role |
+|---|---|---|
+| gateway | `8100` (`GATEWAY_CONTAINER_PORT`) | auth + map assignment. **The client connects here first.** |
+| game server (C#) | `9200` (`GAMESERVER_CONTAINER_PORT`) | the gameplay connection, dialed *after* `MsgEnterWorldResp` |
+| Nakama | `7350` HTTP, `7351` console | device auth, `gateway_token` RPC, profile/economy |
+| PostgreSQL (meta) | `5432` | Nakama's database |
+| PostgreSQL (game state) | `5433` | `player_states`, written only by the game server |
+| Redis | `6379` | sessions, **server registry**, event streams |
+
+Other subcommands (all take the same flags):
+
+```bash
+./stack.sh health    # probe every health endpoint AND the server registry
+./stack.sh ps        # service status
+./stack.sh logs      # tail gateway + game server
+./stack.sh down      # stop, keep data volumes
+./stack.sh down --wipe   # stop and delete the data volumes
+./stack.sh up --no-build # skip image builds, use what is already built
+```
+
+`make flow-up` / `flow-check` / `flow-down` / `flow-health` are wrappers around
+the same script. They are a convenience only — **`make` is not installed on
+every dev box here**, so nothing in the documented path requires it.
+
+### What `check` proves
+
+`./stack.sh check` runs `backend/smoketest`, which walks exactly the path a
+Unity client walks and prints a PASS/FAIL line per step (this transcript is a
+real `--scratch` run, hence the offset ports):
+
+```
+--- smoke test summary ---
+PASS  nakama_health               3ms  http://localhost:8350/healthcheck
+PASS  device_auth                18ms  device_id=smoketest-38dddaf2d1c30537
+PASS  gateway_token_rpc           7ms  user_id=b167f0b2-d0a1-4fe3-836a-3fcf972e9889
+PASS  gateway_auth                5ms  transport=tcp map=map_01 server=:9300 (tcp)
+PASS  gameserver_join          1.112s  snapshots=15 (keyframes=2 deltas=13) final_x=3.33 ack_tick=10
+PASS  nakama_account             10ms  user=… username=VetOPcvJMk devices=1
+PASS  nakama_profile              5ms  player/profile level=1 display_name=VetOPcvJMk
+PASS  gamestate_migrations        8ms  version=1 (001_init) applied=…
+PASS  gamestate_player_row    20.035s  map=map_01 x=3.3333 y=0.0000 hp=100/100 (21 polls)
+PASS  gamestate_reload        13.095s  respawned at x=3.3333 from persisted x=3.3333
+SMOKE=PASS
+```
+
+The last three steps wait out real timers (the 30s persistence sweep and the
+reconnect hold), so a full `check` takes about a minute. `SMOKE_FLAGS=-skip-db
+./stack.sh check` skips them and returns in seconds.
+
+To push traffic through the same path instead of a single client:
+
+```bash
+cd backend/loadtest
+set -a; . ../deploy/.env; set +a
+go run ./cmd/loadtest -join=gateway -gateway-addr=:8100 -players=5 -duration=15s
+```
+
+### Pointing a Unity client at it
+
+The client needs **one address and one secret**, and nothing else:
+
+- **Gateway address** — `localhost:8100` (the `GATEWAY_CONTAINER_PORT` row
+  above). This is the only address the client configures. The game server
+  address arrives at runtime in `MsgEnterWorldResp.ServerAddr`; the client must
+  dial it directly and must never assume it (ADR-3 — the gateway is a
+  redirector, not a proxy, so the client holds two connections).
+- **Nakama** — `http://localhost:7350`, server key `defaultkey`. The client
+  authenticates here (device auth) and calls the `gateway_token` RPC to get the
+  JWT it then sends in `MsgAuth`.
+- **Secrets** — read them out of `backend/deploy/.env`. `JWT_SECRET` is shared
+  by Nakama, the gateway and the game server; `JOIN_TOKEN_SECRET` is shared by
+  the gateway and the game server only. A client never sees either: it receives
+  a signed JWT from Nakama and an opaque join token from the gateway.
+
+A bare `:9200` in `GAMESERVER_PUBLIC_ADDR` is normalized to `127.0.0.1:9200` by
+the client, which is right for a local stack and **wrong for anything else**. If
+the client runs on a phone or another machine, set
+`GAMESERVER_PUBLIC_ADDR=<this-host-ip>:9200` in `.env` and restart, or the
+client will dial its own loopback.
+
+### Two stacks side by side
+
+`./stack.sh up --scratch` runs a second, fully isolated stack: its own compose
+project, its own container names (`rpgs-*`), its own volumes, and every
+published port offset — gateway `9000`, game server `9300`, Nakama `8350`,
+console `8351`, Redis `7379`, Postgres `6432`/`6433`. Use it to test a change
+without touching a stack someone else is using. Pass `--scratch` to every
+subcommand of that stack, including `down`.
+
+> **Trap this protects you from.** Without `--scratch`, running `up` in a
+> directory while another checkout has the same compose project up does not
+> fail — compose **adopts and recreates** the running containers, with your
+> `.env` values. It prints a normal, successful-looking recreate while silently
+> replacing someone else's environment.
+
+### Troubleshooting
+
+**`MsgEnterWorld` returns "no available server for map map_01"** — the game
+server did not register itself. Registration is the game server's own job: it
+writes `servers:id:<server_id>` / `servers:map:<map_id>` into Redis on boot and
+heartbeats every 5s (TTL 15s). Check with `./stack.sh health`, whose `registry`
+line reads the set directly. The usual cause is `REDIS_ADDR` unset on the game
+server, which makes it start happily and stay invisible.
+
+**The join token is rejected by the game server** — the token's `sid` claim
+comes from the registry entry the game server wrote, and the game server checks
+it against its own `--server-id`/`GAMESERVER_ID`. If those disagree the
+handshake fails at the last hop. Both come from `GAMESERVER_ID` in `.env`, so
+they only diverge if something overrides one of them.
+
+**Either binary exits immediately with a non-zero status** — `JOIN_TOKEN_SECRET`
+is mandatory on both the gateway and the game server, they must match, and both
+refuse to start without it. `.env.example` sets a dev default.
+
+**Exported environment variables seem to be ignored by compose** — on this
+project's dev box `docker` is a shell shim to the Windows `docker.exe`
+(`CICD.md` §4a). WSL only forwards an environment variable to a Windows process
+if it is listed in `$WSLENV`, so `export COMPOSE_PROJECT_NAME=… ; docker compose
+up` reaches compose with the variable **unset** and operates on the default
+project. This is silent. That is why `stack.sh` passes configuration with
+`--env-file` and `-p` rather than through the environment; do the same in any
+new script here.
 
 ## Prerequisites
 
@@ -273,6 +418,7 @@ publishes Redis on the host, so the defaults work as-is.
 
 ```bash
 export JWT_SECRET=dev-secret-change-me      # must equal .env JWT_SECRET
+export JOIN_TOKEN_SECRET=dev-join-secret-change-me   # must equal .env; NOT JWT_SECRET
 export REDIS_ADDR=localhost:6379            # match REDIS_PORT if you changed it
 export REDIS_PASSWORD=                      # must equal .env REDIS_PASSWORD
 export META_DB_URL='postgres://nakama:localdev@localhost:5432/nakama?sslmode=disable'
@@ -305,6 +451,12 @@ the `redis-data` volume — sessions and registry entries survive a restart.
 Everything above runs gateway and game server on the host. The `realtime`
 compose profile runs them as containers instead — the same thing CD does when an
 environment sets `DEPLOY_MODE=containers` (see `docs/CICD.md` §3b).
+
+> This section is the manual form of what [§0](#0-run-the-whole-thing-locally)
+> automates. Prefer `./stack.sh up` unless you specifically need to drive the
+> steps yourself; the script additionally waits for the game server to appear in
+> the registry, which is the difference between a usable stack and a confusing
+> one.
 
 ```bash
 cd backend/deploy

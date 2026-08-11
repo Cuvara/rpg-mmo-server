@@ -43,8 +43,8 @@ func TestVerifyClientJWT_WrongSecret(t *testing.T) {
 }
 
 func TestVerifyClientJWT_Expired(t *testing.T) {
-	// Sign with a negative expiry to create an already-expired token.
-	token, err := jwt.Sign("user123", "secret", -1*time.Second)
+	// Sign with a negative expiry beyond the 5s clock skew tolerance.
+	token, err := jwt.Sign("user123", "secret", -10*time.Second)
 	if err != nil {
 		t.Fatalf("Sign() error: %v", err)
 	}

@@ -77,7 +77,7 @@ public class GameMetricsTests
     public void TickOnce_RecordsTickDurationHistogramPoint()
     {
         using var h = new Harness(nameof(TickOnce_RecordsTickDurationHistogramPoint));
-        using var world = new GameWorld();
+        using var world = new EcsWorld();
         var loop = new TickLoop(
             world,
             new InputHandler(world, NullLogger.Instance),
@@ -116,7 +116,7 @@ public class GameMetricsTests
     public void TickOnce_RecordsProcessedInputs()
     {
         using var h = new Harness(nameof(TickOnce_RecordsProcessedInputs));
-        using var world = new GameWorld();
+        using var world = new EcsWorld();
         var loop = new TickLoop(
             world,
             new InputHandler(world, NullLogger.Instance),
@@ -143,7 +143,7 @@ public class GameMetricsTests
     public async Task SaveAll_Success_RecordsStatusOk()
     {
         using var h = new Harness(nameof(SaveAll_Success_RecordsStatusOk));
-        using var world = new GameWorld();
+        using var world = new EcsWorld();
         world.AddEntity(TestHelpers.CreatePlayer("p1"));
 
         var saver = new AsyncSaver(
@@ -162,7 +162,7 @@ public class GameMetricsTests
     public async Task SaveAll_Failure_RecordsStatusError()
     {
         using var h = new Harness(nameof(SaveAll_Failure_RecordsStatusError));
-        using var world = new GameWorld();
+        using var world = new EcsWorld();
         world.AddEntity(TestHelpers.CreatePlayer("p1"));
         world.AddEntity(TestHelpers.CreatePlayer("p2"));
 
@@ -248,7 +248,7 @@ public class GameMetricsTests
     public void EntitiesGauge_ReadsWorldEntityCount()
     {
         using var h = new Harness(nameof(EntitiesGauge_ReadsWorldEntityCount));
-        using var world = new GameWorld();
+        using var world = new EcsWorld();
         h.Metrics.SetEntityCountProvider(() => world.EntityCount);
 
         world.AddEntity(TestHelpers.CreatePlayer("p1"));

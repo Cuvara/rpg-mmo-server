@@ -203,6 +203,7 @@ public class EntityLifecycleTests
                 TickRate = 20,
                 Capacity = capacity,
                 JwtSecret = JwtSecret,
+                JoinTokenSecret = JwtSecret,
                 HoldTtl = hold ?? ShortHold,
                 SaveInterval = TimeSpan.FromHours(1), // the periodic sweep is not under test
                 Metrics = metrics,

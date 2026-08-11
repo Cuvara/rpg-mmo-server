@@ -6,6 +6,379 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Golden vector `multiply_add_intermediate_rounding`** — the split-multiply in
+  `MovementSystem.Integrate` is now covered by a test rather than by reasoning.
+
+  Written as one expression, `position + direction * step` may be evaluated
+  strictly in float32, with a wider (double) intermediate, or contracted into a
+  single FMA that rounds once instead of twice. Splitting the multiply denies all
+  three. Every other movement case rounds identically under all three, so the fix
+  passed and failed nothing either way. These inputs separate the strict result
+  (`0x401B4740`, what the fixed code produces) from the alternatives
+  (`0x401B473F`).
+
+  **The fix is load-bearing, not precautionary.** Running the unfixed expression
+  shape directly under Unity's Editor Mono JIT — operands read from static fields
+  so Roslyn could not constant-fold — produced `0x401B473F`, a different position
+  from the server's.
+
+  **What the case does not prove.** It cannot distinguish FMA contraction from
+  double widening: both predict `0x401B473F`, so a pass rules out neither
+  individually. The mechanism actually measured under Editor Mono is *widening* —
+  on `sqrt_negative_components` an FMA would give the strict answer
+  (`0x4203EB84`) while Unity produced the wide one (`0x4203EB85`). FMA
+  contraction remains unobserved there, and unmeasured under IL2CPP, which is
+  what ships. The case was originally named `fma_multiply_add_discriminator`,
+  which overstated it; renamed before anyone could read a green suite as proof
+  that no runtime fuses.
+
+  Inputs were derived by hand from the algorithm on the client side; the
+  committed expectation comes from running the real code through the generator.
+  The two agree exactly, which is what makes the case evidence rather than
+  circular.
+
+### Fixed
+- **`package.json` and the `.csproj` now ship `.meta` files too.** `sgl-v0.1.1`
+  covered the folders, sources, fixtures and the asmdef, on the reasoning that
+  Unity imports neither of those two. That reasoning was wrong: Unity logs a
+  console error for *every* asset without a `.meta` inside an immutable package,
+  including files it does not otherwise care about, so the client console was
+  permanently red with two errors on every import. Both now carry a
+  `DefaultImporter` meta with the same deterministic path-derived GUID scheme.
+
+### Fixed
+- **Float intermediates now rounded explicitly — the client and server disagreed
+  by one ULP.** The golden vectors, on their first run inside Unity, failed 3 of
+  96 cases. All three traced to one shape: `x * x + y * y`, in
+  `Vec2.SqrMagnitude` and in `MovementSystem.ResolveDirection`.
+
+  C# permits a float expression to be evaluated at higher precision than `float`
+  (ECMA-334 §11.3.7). .NET 10's RyuJIT evaluates strictly in float32; Unity's
+  Editor Mono JIT keeps double-precision intermediates and rounds once at the
+  end. Both are conforming. The results differ by one ULP — and since that value
+  feeds the deadzone and magnitude-clamp comparisons, the two runtimes could take
+  **different branches**, not merely report slightly different numbers.
+
+  Every arithmetic intermediate in `Vec2` and `MovementSystem` is now cast to
+  `float` per operation. `MovementSystem.Integrate` gets an extra split: `a + b *
+  c` can be contracted into a single FMA instruction that rounds once instead of
+  twice, so the multiply is now its own `float` local to deny the contraction.
+
+  **The server's own results are unchanged** — RyuJIT already evaluated in
+  float32, so the casts are a no-op there and every existing golden vector still
+  passes. The fix moves Unity onto the server's answer rather than the reverse.
+
+  ADR-10 rule 5 has been amended: choosing IEEE-exact *operations* was necessary
+  but not sufficient. Worth noting how this was found — the operations were
+  already legal, the whole server suite passed, and nothing warned. Only
+  replaying the vectors under the other runtime exposed it.
+
+### Fixed
+- **`Shared.GameLogic` produced no assembly in Unity — it now ships its `.meta`
+  files.** `sgl-v0.1.0` imported cleanly as a UPM package and then did nothing:
+  Unity treats a git-sourced package as **immutable** and will not generate
+  `.meta` files for it, so an asset without one is silently ignored. The package
+  cache contained zero `.meta` files, `Shared.GameLogic.asmdef` was therefore
+  never registered, and no `Shared.GameLogic.dll` appeared in
+  `Library/ScriptAssemblies`. No error, no warning — the package simply had no
+  effect.
+
+  19 `.meta` files are now committed: one per folder, per `.cs`, per golden-vector
+  `.json`, and one for the asmdef. GUIDs are derived deterministically from the
+  asset path (md5), so they are stable across regeneration and identical for every
+  consumer. `package.json` and the `.csproj` get none, because Unity imports
+  neither.
+
+  This was only findable by opening the Editor, which is exactly why `sgl-v0.1.0`
+  was tagged with "UPM resolution unverified" recorded in the tag message rather
+  than assumed.
+
+### Added
+- **`GameServer.Tests/Aot/JsonReflectionGuardTests.cs`** — scans the compiled GameServer
+  assembly's metadata for `JsonSerializer` member references and fails on any overload that
+  does not take a source-generated `JsonTypeInfo`/`JsonSerializerContext`. This enforces the
+  precondition that makes the `Collections.Pooled` AOT warnings unreachable; without it the
+  justification in `GameServer.csproj` would silently expire the first time someone added a
+  reflection-based JSON call. Verified to fire.
+- **Audit of the `Collections.Pooled` IL2026/IL3050 warnings** (`docs/DESIGN.md`,
+  "Collections.Pooled AOT warnings") plus the justifying comment in `GameServer.csproj`,
+  matching the convention every other dependency there follows. The 37 individual
+  diagnostics are all in `PooledEnumerableJsonConverter`, rooted by a `[JsonConverter]`
+  attribute rather than by any call site, and unreachable: this assembly never uses the
+  reflection-based System.Text.Json resolver, `Arch` has zero System.Text.Json references,
+  and `Collections.Pooled` registers nothing globally. **Not suppressed** — no `NoWarn` was
+  added, deliberately.
+- **Arch ECS is the server's entity storage (ADR-10).** `GameServer/World/EcsWorld.cs`
+  stores every entity in an [Arch](https://github.com/genaray/Arch) `2.1.0-beta` world:
+  entity identity, component storage, queries and iteration all belong to Arch, with no
+  second store. `EntityState` is decomposed into `EntityIdRef`, `EntityKind`, `Position`,
+  `Health`, `Combat`, `Locomotion`, `InputCursor` and a `PlayerTag` archetype tag
+  (`GameServer/World/Components.cs`). Iteration is chunk spans, not the closure-allocating
+  delegate `Query` overloads.
+- **`GameServer/World/ArchAotHints.cs`** — a `[ModuleInitializer]` that statically
+  constructs one `T[]` per component type. Without it the NativeAOT binary publishes
+  cleanly and then throws `NotSupportedException: 'T[]' is missing native code or
+  metadata` on the first archetype creation (ADR-11).
+- **`GameServer.Tests/World/ArchAotHintTests.cs`** — the guard ADR-11 requires. It
+  enumerates every component type in the assembly (by namespace or `[EcsComponent]`) and
+  fails when one is unhinted, plus a companion test rejecting stale hints. The hinted set
+  is derived from the constructed arrays themselves, so it cannot drift from what it
+  checks. Verified to fire by adding an unhinted component.
+- **`GAMESERVER_NATIVE_BIN`** in `backend/integration_test/dotnet_interop_test.go` — points
+  the cross-language E2E suite at a published NativeAOT binary instead of the JIT'd dll.
+- **CI smoke-runs the published binary** (`.github/workflows/ci-dotnet.yml`, `publish` job),
+  through the real gateway handshake. ADR-11 decision 4: a clean publish does not imply a
+  working binary, and the throw happens on the first player spawn rather than at startup,
+  so a liveness probe would not catch it.
+- **`Shared.GameLogic/` is now a valid UPM package root** — `package.json`
+  (`com.rpgmmo.shared-gamelogic`, `0.1.0`, `unity: 6000.3`, **no dependencies**)
+  and `Shared.GameLogic.asmdef`. Without these the client cannot consume the
+  library at all: the folder does not resolve as a package, and the sources would
+  land in Unity's default assembly where the "no Unity references" rule is
+  unenforceable.
+  - The asmdef sets **`"noEngineReferences": true`** and an empty `references`
+    list, which turns ADR-10's zero-engine-dependency rule from a review
+    convention into a client-side compile error. `allowUnsafeCode` is false, and
+    the csproj's `AllowUnsafeBlocks` was flipped from true to false to match —
+    the two build systems compiling different subsets of C# is precisely the
+    class of defect this arrangement has to avoid.
+  - The same folder now feeds two build systems. Verified that MSBuild's
+    `Compile` items are still exactly the 11 `.cs` files, with `package.json` and
+    the asmdef landing in `None`, so no exclusion is needed. In the other
+    direction, Unity compiles every `.cs` under the package root — which is safe
+    only because `bin/` and `obj/` are gitignored and a UPM git fetch therefore
+    never sees the generated `AssemblyInfo.cs`. **Consume this package via the
+    git URL, never as a local path reference into a built working tree**, or
+    Unity will compile the server build's generated sources and fail on duplicate
+    assembly attributes.
+  - **Version discipline**: `package.json`'s `version` must be bumped in the same
+    commit that gets tagged. Tags are `sgl-vX.Y.Z` (no `/`, since a slash inside
+    a UPM `#fragment` is unverified). A tag pointing at a commit whose
+    `package.json` still carries the previous version yields a package that
+    misreports its own version, and UPM does not warn about that — the client
+    silently believes it has a release it does not have.
+- **Golden vectors: `Shared.GameLogic/GoldenVectors/`, 77 committed cases.**
+  ADR-10 makes conformance mechanical rather than editorial: without executable
+  fixtures, "shared logic" means a shared *file*, not shared *behaviour* — the
+  client can drift from the server and nothing fails until a player reports
+  rubber-banding. `vec2.json` (15 cases aimed at the three `MathF.Sqrt` sites),
+  `movement.json` (33 cases, every `MoveResult` branch: deadzone, accepted,
+  clamped, rejected, blocked, plus the magnitude-1 branch boundary, bounds
+  clamping, edge sliding and `dt` capping), `combat.json` (17: damage floor,
+  death transitions, attack range/cooldown boundaries) and `validation.json` (12). The expected
+  values are **generated by running the implementation**
+  (`GOLDEN_REGEN=1 dotnet test --filter Regenerate`), not hand computed — they
+  lock in today's behaviour rather than asserting an opinion about it.
+  `GameServer.Tests/Golden/` replays them; the Unity Test Runner will read the
+  same files from the package path.
+  - Floats are stored as IEEE-754 bit patterns (`"0x40551EB8"`) and compared
+    with `BitConverter.SingleToInt32Bits`, because decimal text does not
+    round-trip identically through two serializers and a tolerance comparison
+    would not test the property the vectors exist to protect.
+  - The schema is a flat `{"cases": [...]}` of public fields — the subset Unity's
+    built-in `JsonUtility` reads, so the client needs no JSON package. A test
+    enforces the shape so it cannot quietly grow a dictionary or a nested object.
+  - The `Sqrt` sites get their own file because a NativeAOT-x64 / IL2CPP-ARM64
+    divergence surfaces at a `Sqrt` before it surfaces anywhere else — and two of
+    the three were unreachable from a behaviour vector: `Vec2.Magnitude` and
+    `Vec2.Normalized` have no caller inside the library, and `Vec2.Distance` is
+    used only to format the out-of-range error message, whose float the combat
+    vectors deliberately truncate away. `vec2.json` pins them directly.
+  - `CommittedFixturesAreUpToDate` fails the build when the fixtures drift from
+    what the current code produces, so a behavioural change surfaces as a fixture
+    diff in the same PR — the review signal that client prediction changed.
+
+### Changed
+- **`GameWorld` is deleted, not wrapped.** `GameServer/World/GameWorld.cs` (a
+  `Dictionary<string, EntityState>` behind a `ReaderWriterLockSlim`) is gone. `EcsWorld`
+  keeps its API surface — `AddEntity`, `RemoveEntity`, `GetEntity`, `GetEntitiesInRange`,
+  `Update`, `View`, `PushInput`, `DrainInputs`, `PlayerStates`, `EntityCount` — with
+  identical semantics, so the tick loop, input processing, snapshot construction, AOI
+  scan, reconnect/hold bookkeeping and persistence save/load are unchanged behaviourally.
+  `GameWorldTests` became `EcsWorldTests` with every assertion intact.
+- `AsyncSaver.SaveAllAsync`'s player sweep is now an archetype query on `PlayerTag`
+  instead of a full scan with a per-entity string comparison.
+- `TickLoop.TickOnce` opens with an explicit `_world.ApplyStructuralChanges()` phase.
+  `Arch.Buffer.CommandBuffer` is **not** used anywhere — it throws under NativeAOT even
+  with the array hints (ADR-11), so structural changes raised during iteration are queued
+  and applied outside it.
+- `GameServer.csproj` takes a `PackageReference` on `Arch`. This transitively pulls in
+  `Collections.Pooled 2.0.0-preview.27`, which emits `IL3053`/`IL2104` AOT and trim
+  analysis warnings on publish — the first dependency in this project that is not
+  warning-clean. The binary is verified working; the warnings are unexamined.
+- **`Shared.GameLogic` now multi-targets `netstandard2.1;net10.0`.** Unity cannot
+  consume a `net10.0`-only library; the netstandard target is what proves nothing
+  in the library reaches past Unity's runtime profile. Nothing needed a polyfill:
+  `MathF.Min/Max/Abs/Sqrt`, `HashCode.Combine`, `float.IsFinite` and `Span<T>`
+  are all present in netstandard2.1.
+- **All 11 files converted to block-scoped namespaces, `LangVersion` pinned to
+  `9.0`.** ADR-10 has the client compile these files as *source*, so Unity 6's
+  compiler — which is C# 9 — is the real constraint, not the target framework.
+  File-scoped `namespace X;` is C# 10 and would have failed at package-import
+  time on the client. Pinning the language version moves that failure into the
+  server build, where the person making the change sees it.
+- **`ImplicitUsings` disabled in `Shared.GameLogic`; every file writes its own
+  usings.** The sources relied on implicit usings (`MapBounds.cs` used `MathF`
+  with no `using System;`). Unity has no implicit usings, so the same reasoning
+  applies: disabling it here makes a missing using a server build error instead
+  of a client discovery.
+- **`AoiLogic.GetNearbyEntities` fills a caller-provided `Span<EntityState>` and
+  returns the count**, instead of returning a fresh `List<EntityState>`. It runs
+  once per entity per tick, so the old signature allocated exactly the garbage
+  the Arch migration exists to remove. Overflow contract: **count, do not
+  saturate** — when the buffer is too small the prefix that fits is written and
+  the return value is the total number of matches, i.e. the size the buffer
+  needed to be, so one resize-and-retry always succeeds. A saturating variant
+  would make "exactly full" indistinguishable from "truncated", which is silent
+  AOI loss: entities missing from a keyframe with no error anywhere. Two source
+  overloads (`ReadOnlySpan<EntityState>` and `IReadOnlyList<EntityState>`) cover
+  contiguous and non-contiguous storage.
+
+### Removed
+- **`System.Text.Json.Serialization` attributes on `InputData` and
+  `SnapshotData`.** Unity does not ship System.Text.Json, so these blocked the
+  client build — and they were dead metadata: ADR-9 made the generated Protobuf
+  types the server's only message classes, with legacy JSON produced by a
+  hand-written `Utf8JsonWriter` codec over *those*. Verified before deleting: no
+  `[JsonSerializable]` names either type, and every use in the tree
+  (`InputHandler`, `GameWorld.PushInput`, the tests) constructs and reads them
+  directly. No relocation, no dependency, no behaviour change. The XML docs that
+  claimed "JSON tags match the wire protocol" were false since ADR-9 and now say
+  these are simulation types.
+### Changed
+- **Docs: Unity version pinned to Unity 6.** `docs/DESIGN.md` and `docs/README.md`
+  described the `Shared.GameLogic` consumer as "a Unity 2022+ project". The client
+  repo is Unity 6 (6000.3.9f1), so the open-ended floor invited integration advice
+  aimed at an editor nobody runs. Both now say Unity 6. No code or constraint
+  changed — `Shared.GameLogic` still targets standard .NET 10 with zero Unity
+  dependencies.
+
+### Fixed
+- **`METRICS_ADDR=off` killed the server at startup.** The value the Go gateway
+  documents as its off-switch reached `int.Parse` and took the process down with
+
+  ```
+  Unhandled exception. System.FormatException: The input string 'off' was not in a correct format.
+     at GameServer.Observability.MetricsEndpoint.ParseAddr(String)
+  ```
+
+  A config value that reads like "turn this off" must not be a way to stop a game
+  server from booting.
+  - `off`, `none` and `disabled` (any case, surrounding whitespace ignored) now
+    disable the endpoint, matching the gateway's `resolveMetricsAddr` vocabulary
+    so one `METRICS_ADDR` means the same thing to both binaries.
+  - An address that parses as none of those disables the endpoint and logs an
+    **error**, rather than throwing. That matches how a failed *bind* is already
+    handled a few lines further down: a mistyped metrics address costs metrics,
+    not the game server. Logged loudly so the typo stays visible.
+  - Found while building a probe container for the Kerberos fix below, not by a
+    report — nothing in the deployed configs sets `off` today.
+- **Every boot logged a Kerberos library error it could never use.** The server
+  printed, outside the logger and immediately before `using postgres player store`:
+
+  ```
+  Cannot load library libgssapi_krb5.so.2
+  Error: Error loading shared library libgssapi_krb5.so.2: No such file or directory
+  ```
+
+  Npgsql 10 defaults `GSS Encryption Mode` to `Prefer`, so every connect opens by
+  attempting a Kerberos handshake. The runtime image is `runtime-deps:10.0-alpine`
+  with no krb5 library, and the game DB authenticates with a password, so the
+  attempt could only ever fail and fall back — after writing a genuine `[error]`
+  line into the log summary of an otherwise healthy server.
+  - `PostgresPlayerStore.BuildConnectionString` now sets `GSS Encryption Mode` to
+    `Disable`, rather than shipping a Kerberos stack to satisfy a probe for a
+    feature nobody uses.
+  - **Only `Prefer` is rewritten.** `Require` and `Disable` are deliberate operator
+    choices and pass through untouched — a `Require` on a deployment that does have
+    Kerberos must still fail loudly instead of being quietly downgraded.
+  - The "did the caller set this?" check is a value comparison, not
+    `builder.ContainsKey`: Npgsql's connection-string builder answers `true` for
+    every keyword it knows, set or not, which makes `ContainsKey` useless here.
+  - Verified A/B on the real image against the deployed Postgres: the previously
+    deployed image emits the two lines, an image built from this commit emits none,
+    with both reaching `using postgres player store` and a live listener.
+- **Shutdown could live-lock a thread and hold the process open forever.**
+  `Connection.Close()` cancels the connection's `CancellationTokenSource`, and
+  cancellation resumes everything parked on that token **inline, on the cancelling
+  thread**. Since the heartbeat loop landed (`817c6ac`) that produced this stack:
+
+  ```
+  ShutdownAsync -> ConnectionManager.CloseAll -> Connection.Close -> _cts.Cancel()
+    -> HeartbeatLoopAsync resumes inline
+      -> HandleConnectionAsync runs its finally
+        -> Connection.Dispose() -> spin until _closeState == StateClosed
+  ```
+
+  The `Close()` that writes `StateClosed` is a frame *further down that same
+  stack*, so `Dispose()`'s spin blocked the very call it was waiting for. A
+  thread burning a core forever, and a process that never exits.
+  - `Close()` now records the managed thread id performing the teardown.
+    `Dispose()` recognises a re-entry on that thread, defers the token-source
+    disposal back to the in-flight `Close()` and returns instead of spinning.
+    `Close()` frees it in its `finally`, once every use of `_cts` has returned.
+  - Cross-thread behaviour is unchanged: a `Dispose()` on a *different* thread
+    still spins until the close completes, which is what stops it freeing the
+    token source out from under a concurrent `Close()`.
+  - **How it showed up**: not as a failing test. Every test passed — the .NET
+    test host then refused to exit, and CI ran to its 6-hour job timeout three
+    runs in a row. `--blame-hang` named the last test to run, which was a
+    bystander. The hang dump named the real thing.
+  - Verified by the suite now exiting: two consecutive full runs finish in ~45s
+    (409 passed, 9 skipped) where the same suite previously hung indefinitely
+    after the last test completed.
+
+### Changed
+- **Test process helpers now honour the timeouts they declare.** `TestDocker`,
+  `EphemeralPostgres` and `KcpInteropTests` each ran a child process with
+  `StandardOutput.ReadToEnd()` *before* `WaitForExit(timeout)`. That read only
+  returns when the child closes the pipe, so the timeout below it was unreachable
+  — a child that never exits parked the caller forever, and a child that filled
+  the 64 KiB stderr buffer deadlocked against a caller blocked on stdout. Both
+  pipes are now read concurrently and the declared timeout is actually enforced.
+  (Side effect worth knowing: the Postgres fixture works on more machines now, so
+  local runs report ~9 skipped instead of ~28.)
+
+### Added
+- **Graceful drain notification on shutdown.** On SIGTERM, the server now sends
+  `MsgDisconnect(reason="server_shutdown")` to all connected clients before
+  closing connections. A 2s grace period lets TCP drain the send buffer so
+  clients receive the notification and can reconnect to another server instead
+  of timing out. Adds `WireProtocol.NewEnvelope` for `DisconnectMessage` (with
+  reason) and the corresponding JSON serializer in `WireJson`
+- **JTI replay protection.** `JtiTracker` rejects consumed join-token JTIs for
+  60 seconds (2x the 30s token TTL). A replayed token returns "Token already used".
+- **5-second clock skew tolerance.** `JwtValidator` now accepts tokens up to 5
+  seconds past their `exp`. Constant: `JwtValidator.ClockSkewSeconds`.
+
+### Changed
+- **`JOIN_TOKEN_SECRET` is now mandatory (fatal if unset).** `Program.cs` exits
+  with code 2 when the env var is empty. `EffectiveJoinTokenSecret` (fallback to
+  `JWT_SECRET`) has been removed from `ServerOptions`.
+- **Mandatory server ID check.** The game server now rejects join tokens with an
+  empty `sid` claim or a `sid` that does not match `ServerId`. The previous
+  double-empty bypass has been removed.
+- **Map transfer handler (MsgTransferMap).** A connected player can request
+  transfer to a different map. The server validates the target map, saves state
+  via `AsyncSaver.SavePlayerAsync`, responds with `TransferMapResponse`, removes
+  the entity (no reconnect hold), and closes the connection. The client then
+  follows the existing `MsgEnterWorld` flow with the gateway.
+- JSON codec for `TransferMapRequest` / `TransferMapResponse` (write + read),
+  `NewEnvelope` overloads, and `GetPayload` cases for both types.
+- xUnit tests: `TransferMapTests` (3 cases: success, same-map rejection,
+  empty-map rejection) and `WireProtocolTests` round-trip tests for transfer
+  messages.
+- **Heartbeat loop (MsgPing/MsgPong) on player connections.** Each accepted
+  connection sends MsgPing every 10 s after join. If no MsgPong is received
+  within 30 s the connection is closed. Incoming MsgPing from a client is
+  answered with a MsgPong echoing the sender's timestamp plus the server's
+  wall clock. Heartbeat runs as a third task alongside read/write loops.
+
+- **MsgKick support.** `WireProtocol.NewEnvelope` overload for `KickMessage`;
+  `JsonWriter.Write(KickMessage)` and `JsonReader.ReadKickMessage` for JSON
+  encoding; Protobuf encoding via generated `Wire.cs`.
+
 ### Fixed
 - **`ObjectDisposedException` out of `ShutdownAsync` when `Close()` raced
   `Dispose()`.** Under Agones that means terminate throws instead of draining.

@@ -52,7 +52,7 @@ func main() {
 	metricsAddr := flag.String("metrics-addr", "", "Prometheus metrics listen address, e.g. :9102 (overrides METRICS_ADDR; \"off\" or an empty METRICS_ADDR disables it)")
 	allocKubeconfig := flag.String("allocator-kubeconfig", "", "Kubeconfig path for the allocator (default: in-cluster config, then $KUBECONFIG, then ~/.kube/config)")
 	transportKey := flag.String("transport-key", "", "Pre-shared key encrypting the KCP listener, 32-byte hex recommended (overrides TRANSPORT_KEY; empty = plaintext)")
-	joinTokenSecret := flag.String("join-token-secret", "", "HS256 secret (comma-separated list to rotate) for gateway->gameserver join tokens (overrides JOIN_TOKEN_SECRET; empty = reuse JWT_SECRET)")
+	joinTokenSecret := flag.String("join-token-secret", "", "HS256 secret (comma-separated list to rotate) for gateway->gameserver join tokens (overrides JOIN_TOKEN_SECRET; REQUIRED)")
 	connRate := flag.Float64("conn-rate-per-min", -1, "Max accepted connections per minute per source IP (overrides GATEWAY_CONN_RATE_PER_MIN; 0 disables)")
 	msgRate := flag.Float64("msg-rate-per-sec", -1, "Max inbound messages per second per connection (overrides GATEWAY_MSG_RATE_PER_SEC; 0 disables)")
 	flag.Parse()
@@ -80,7 +80,7 @@ func main() {
 	// is legal for local dev and loudly logged so nobody ships it:
 	//   TRANSPORT_KEY      — KCP wire encryption. Empty = plaintext.
 	//   JWT_SECRET         — Nakama-issued client auth token.
-	//   JOIN_TOKEN_SECRET  — gateway-issued join token. Empty = reuse JWT_SECRET.
+	//   JOIN_TOKEN_SECRET  — gateway-issued join token. REQUIRED (fatal if unset).
 	tKey := cfg.TransportKey
 	if *transportKey != "" {
 		tKey = *transportKey
@@ -92,12 +92,18 @@ func main() {
 		}
 	}
 
-	joinSecret, sharedWithAuth := cfg.EffectiveJoinTokenSecret()
+	joinSecret := cfg.JoinTokenSecret
 	if *joinTokenSecret != "" {
-		joinSecret, sharedWithAuth = *joinTokenSecret, false
+		joinSecret = *joinTokenSecret
 	}
-	if sharedWithAuth {
-		log.Warn("JOIN_TOKEN_SECRET is unset -- join tokens are signed with JWT_SECRET; a leak of either secret compromises both the Nakama auth hop and the game-server hop. Set JOIN_TOKEN_SECRET (and the matching value on every game server) before launch.")
+	if joinSecret == "" {
+		log.Error("JOIN_TOKEN_SECRET is required but not set -- refusing to start. " +
+			"Set JOIN_TOKEN_SECRET to a dedicated secret (and the matching value on every game server). " +
+			"Do NOT reuse JWT_SECRET: a compromised game-server pod must not be able to forge auth tokens.")
+		os.Exit(1)
+	}
+	if joinSecret == cfg.JWTSecret {
+		log.Warn("JOIN_TOKEN_SECRET and JWT_SECRET are the same value -- a leak of either secret compromises both the Nakama auth hop and the game-server hop. Use distinct secrets before launch.")
 	}
 	if cfg.JWTSecret == "dev-secret-change-me" {
 		log.Warn("JWT_SECRET is the built-in development default -- anyone can forge auth tokens. Set JWT_SECRET before exposing this gateway.")
@@ -188,7 +194,16 @@ func main() {
 		log.Info("using in-memory backend (single process)")
 	}
 
-	sessions := session.NewSessionManager(sessionStore)
+	// The gateway_id labels every session this instance creates, enabling
+	// cross-gateway duplicate-login coordination.
+	gatewayID := *instanceID
+	if gatewayID == "" {
+		gatewayID, _ = os.Hostname()
+	}
+	if gatewayID == "" {
+		gatewayID = "gateway"
+	}
+	sessions := session.NewSessionManager(sessionStore, gatewayID)
 
 	// Allocator: with --allocator=agones the registry asks the Agones allocation
 	// API for a GameServer whenever no live server can serve a map. Without it

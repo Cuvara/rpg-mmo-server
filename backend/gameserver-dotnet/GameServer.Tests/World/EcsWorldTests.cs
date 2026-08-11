@@ -3,12 +3,12 @@ using GameServer.World;
 
 namespace GameServer.Tests.World;
 
-public class GameWorldTests
+public class EcsWorldTests
 {
     [Fact]
     public void AddEntity_CanRetrieve()
     {
-        var world = new GameWorld();
+        var world = new EcsWorld();
         var player = TestHelpers.CreatePlayer("p1", x: 10, y: 20);
 
         world.AddEntity(player);
@@ -23,7 +23,7 @@ public class GameWorldTests
     [Fact]
     public void RemoveEntity_NoLongerFound()
     {
-        var world = new GameWorld();
+        var world = new EcsWorld();
         var player = TestHelpers.CreatePlayer("p1");
 
         world.AddEntity(player);
@@ -36,7 +36,7 @@ public class GameWorldTests
     [Fact]
     public void RemoveEntity_NonExistent_DoesNotThrow()
     {
-        var world = new GameWorld();
+        var world = new EcsWorld();
         var ex = Record.Exception(() => world.RemoveEntity("nonexistent"));
         Assert.Null(ex);
     }
@@ -44,7 +44,7 @@ public class GameWorldTests
     [Fact]
     public void GetEntity_NonExistent_ReturnsNull()
     {
-        var world = new GameWorld();
+        var world = new EcsWorld();
         var result = world.GetEntity("nonexistent");
         Assert.Null(result);
     }
@@ -52,7 +52,7 @@ public class GameWorldTests
     [Fact]
     public void GetEntitiesInRange_ReturnsCorrectEntities()
     {
-        var world = new GameWorld();
+        var world = new EcsWorld();
         world.AddEntity(TestHelpers.CreatePlayer("p1", x: 0, y: 0));
         world.AddEntity(TestHelpers.CreatePlayer("p2", x: 10, y: 10));
         world.AddEntity(TestHelpers.CreatePlayer("p3", x: 200, y: 200));
@@ -69,7 +69,7 @@ public class GameWorldTests
     [Fact]
     public void PushInput_DrainInputs_ReturnsAll()
     {
-        var world = new GameWorld();
+        var world = new EcsWorld();
         var input1 = new InputData(tick: 1, moveX: 1f, moveY: 0f, attackTargetId: null);
         var input2 = new InputData(tick: 2, moveX: 0f, moveY: 1f, attackTargetId: null);
 
@@ -83,7 +83,7 @@ public class GameWorldTests
     [Fact]
     public void DrainInputs_ClearsQueue()
     {
-        var world = new GameWorld();
+        var world = new EcsWorld();
         var input = new InputData(tick: 1, moveX: 1f, moveY: 0f, attackTargetId: null);
 
         world.PushInput("p1", input);
@@ -97,7 +97,7 @@ public class GameWorldTests
     [Fact]
     public void Update_MutatesEntity()
     {
-        var world = new GameWorld();
+        var world = new EcsWorld();
         var player = TestHelpers.CreatePlayer("p1", x: 0, y: 0, hp: 100);
         world.AddEntity(player);
 
@@ -122,7 +122,7 @@ public class GameWorldTests
     [Fact]
     public void PlayerStates_ReturnsOnlyPlayers()
     {
-        var world = new GameWorld();
+        var world = new EcsWorld();
         world.AddEntity(TestHelpers.CreatePlayer("p1"));
         world.AddEntity(TestHelpers.CreatePlayer("p2"));
         world.AddEntity(TestHelpers.CreateMob("m1", x: 10, y: 10));
@@ -135,7 +135,7 @@ public class GameWorldTests
     [Fact]
     public void EntityCount_ReturnsCorrectCount()
     {
-        var world = new GameWorld();
+        var world = new EcsWorld();
         Assert.Equal(0, world.EntityCount);
 
         world.AddEntity(TestHelpers.CreatePlayer("p1"));
@@ -151,7 +151,7 @@ public class GameWorldTests
     [Fact]
     public void ConcurrentAccess_NoDeadlock()
     {
-        var world = new GameWorld();
+        var world = new EcsWorld();
         for (int i = 0; i < 100; i++)
         {
             world.AddEntity(TestHelpers.CreatePlayer($"p{i}", x: i, y: i));
@@ -210,7 +210,7 @@ public class GameWorldTests
     [Fact]
     public void AddEntity_Duplicate_OverwritesOrThrows()
     {
-        var world = new GameWorld();
+        var world = new EcsWorld();
         var player1 = TestHelpers.CreatePlayer("p1", x: 0, y: 0);
         var player2 = TestHelpers.CreatePlayer("p1", x: 99, y: 99);
 
@@ -234,7 +234,7 @@ public class GameWorldTests
     [Fact]
     public void PushInput_MultipleEntities_AllDrained()
     {
-        var world = new GameWorld();
+        var world = new EcsWorld();
         world.PushInput("p1", new InputData(tick: 1, moveX: 1, moveY: 0, attackTargetId: null));
         world.PushInput("p2", new InputData(tick: 1, moveX: 0, moveY: 1, attackTargetId: null));
         world.PushInput("p3", new InputData(tick: 1, moveX: -1, moveY: 0, attackTargetId: null));

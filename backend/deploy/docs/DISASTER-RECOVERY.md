@@ -136,6 +136,10 @@ come from `date -u +%H:%M:%S.%3N` taken immediately around each action.
 > touches the Redis client or the persistence path, so §0–§4 stand — but **G11
 > (no `MsgAuth` response while Redis is down) sits in the auth path that #22
 > changed**, so re-confirm G11 against `184a779` before anyone acts on it.
+>
+> **Done — G11 re-confirmed 2026-08-07 against `e3909d3`**, four releases past
+> `184a779` and well past #22. Behaviour is unchanged; see
+> [G11 re-confirmation](#g11-re-confirmation-2026-08-07-against-e3909d3).
 
 > **This is a pre-G1 baseline, deliberately.** The drill measures the world as it
 > is *before* game-server self-registration and heartbeating land. Everything
@@ -423,6 +427,61 @@ SMOKE=PASS
 
 ---
 
+### G11 re-confirmation, 2026-08-07, against `e3909d3`
+
+The original G11 measurement was taken on `4c4c58a`, before #22 changed the auth
+path (gateway rate limiting, split `JOIN_TOKEN_SECRET`, client→gateway KCP
+encryption). That made G11 the one drill result that could not be trusted to have
+survived, so it was re-measured.
+
+**It did survive. G11 is unchanged.**
+
+| | |
+|---|---|
+| Deployed commit | `e3909d34b32b92b96204a813cda84dcc92690778` — `$RPG_DEPLOY_DIR/COMMIT` and the image tag on **both** `rpg-gateway` and `rpg-gameserver` agree |
+| Gateway backend | `--backend=redis` **explicit** in `.Config.Cmd`, `REDIS_ADDR=redis:6379` — checked rather than assumed, because G10 means an unset `REDIS_ADDR` would have silently selected the in-memory backend and the whole drill would have measured nothing while passing |
+| Client | `backend/smoketest`, real `MsgAuth` flow |
+
+```
+10:53:43.812  baseline           SMOKE=PASS   gateway_auth 5ms
+10:53:57.055  REDIS DOWN
+              FAIL gateway_auth  10.009s  i/o timeout          <- no response frame
+10:54:07.135  smoketest returned (elapsed 10.07s)
+10:54:08.436  redis restarted
+10:54:26.347  registry present, ttl=11
+10:54:27.541  SMOKE=PASS         gateway_auth 5ms
+```
+
+**No `MsgAuthResp`, no error frame, nothing** — the client burns its full 10s
+deadline exactly as in the first drill. Gateway application logs for the whole
+outage: **zero lines.** The only output was go-redis pool chatter, which is
+library-level and says nothing about the request that was dropped.
+
+**One detail the first drill did not capture.** The pool error changed partway
+through the outage:
+
+```
+10:53:56  dial tcp 172.19.0.3:6379: connect: connection refused
+10:54:06  dial tcp: lookup redis: i/o timeout          <- DNS, not TCP
+```
+
+Stopping the container removes its Docker DNS record, so after a few seconds the
+failure stops being a fast refused-connection and becomes a **DNS resolution
+timeout**. That makes G5 (no dial/read/write timeouts configured at all) worse
+than it reads: the stall budget is not just the 5s dial default, it also includes
+resolver timeouts nobody has bounded. A Redis outage on a real host — where the
+DNS name may resolve but the host blackholes packets — can therefore hang longer
+than the 10s seen here, not less.
+
+**On the recovery number, deliberately not quoted as a heal time.** Redis was back
+at 10:54:08 and the first registry probe ran at 10:54:26, so the entry was already
+present when it was first looked at. That is an **upper bound of 18s, not a
+measurement**. The properly-measured self-heal figure remains the ~4s from the
+[post-G1 re-run](#re-run-after-g1-shipped--this-result-inverted); this run only
+confirms recovery happens and is not a new, better number.
+
+---
+
 ## Data durability: Redis
 
 Config in effect (`docker-compose.yml:134-143`):
@@ -630,7 +689,7 @@ DevOps scope. Filed here with evidence so they can be assigned.
 | **G8** | No registry caching — every `MsgEnterWorld` hits Redis; no last-known-good fallback | `gateway/registry/registry.go:82`, `shared/storage/redisstore/registry.go:135-163` | Redis down = 100% join failure, where a 15s cache would absorb most blips |
 | **G9** | `/healthz` is liveness-only on both services and never reflects dependency health; no `redis_up` gauge | `gateway/metrics/metrics.go:194-205`; `GameServer/Observability/MetricsEndpoint.cs:151-172`; metric registrations at `metrics.go:83,105` | Alerting cannot distinguish "up" from "up and useless" |
 | **G10** | With `REDIS_ADDR` unset the gateway **silently** selects the in-memory backend | `gateway/cmd/gateway/main.go:215-233` | A misconfigured deploy comes up "healthy" but stateless and single-process |
-| **G11** | With Redis down the gateway **does not answer `MsgAuth` at all** — no `MsgAuthResp{OK:false}`, no error frame, nothing. The client hangs until its own deadline | **Measured** in the [drill §1](#1-redis-killed-natural-non-destructive-outage): 10s client-side `i/o timeout`, and the gateway logged nothing but go-redis pool chatter | A real client cannot distinguish "backend down" from "network dead", cannot show the player an error, and cannot fail over. Also invisible to operators — zero application-level logs for the whole 58s outage |
+| **G11** | With Redis down the gateway **does not answer `MsgAuth` at all** — no `MsgAuthResp{OK:false}`, no error frame, nothing. The client hangs until its own deadline | **Measured twice** — [drill §1](#1-redis-killed-natural-non-destructive-outage) on `4c4c58a`, and [re-confirmed on `e3909d3`](#g11-re-confirmation-2026-08-07-against-e3909d3) after #22 rewrote the auth path: 10.009s client-side `i/o timeout`, zero application-level gateway logs, only go-redis pool chatter | A real client cannot distinguish "backend down" from "network dead", cannot show the player an error, and cannot fail over. Also invisible to operators — zero application-level logs for the whole 58s outage |
 | **G12** | `servers:map:*` index sets carry **no TTL** while `servers:id:*` hashes do, so an expired registration leaves an orphan member behind | **Measured**: `servers:map:map_kcp` held `gs-kcp-final` after its hash expired naturally | Bounded — the gateway `SREM`s dead members on lookup and drops the emptied set — but an index for a map nobody queries leaks forever. Low severity; fold into the G1 fix |
 
 Suggested order: **~~G1~~ → G3 → G4 → G6 → G8 → G5 → G9 → ~~G2~~/G7/G10.** G1 is

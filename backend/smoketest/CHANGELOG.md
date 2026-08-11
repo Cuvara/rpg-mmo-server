@@ -5,6 +5,24 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`gamestate_reload` could fail a deploy that did everything right.** It compared
+  the reloaded spawn against the row snapshot `gamestate_player_row` took a step
+  earlier. That earlier read only has to prove the write path works, so it accepts
+  any `0 < x < maxX` — including a periodic 30s save caught mid-walk. The eviction
+  save that follows the hold expiry then overwrites it with the final position, so
+  the value the server correctly reloads is *newer* than the recorded one.
+  - Seen on the 2026-08-11 dev deploy: the step recorded `x=3.0000`, the server
+    reloaded `x=3.3333`, the check called it a mismatch, and PostgreSQL held
+    `x=3.3333` with `updated_at` **33 s after** the recorded read. Nothing was
+    broken except the comparison.
+  - The reload check now re-reads `player_states` at comparison time and asserts
+    against that, which is what it always claimed to verify — "the persisted row is
+    actually READ BACK". It falls back to the recorded value if the re-read finds
+    no row, so a genuinely missing row still fails.
+  - This could also have passed for the wrong reason: a stale recording that happens
+    to match an unrelated spawn proves nothing about the reload path.
+
 ### Added
 - **Persistence checks.** The smoke flow proved the wire and touched no database;
   it now asserts that both stores actually hold what the run produced. Five new

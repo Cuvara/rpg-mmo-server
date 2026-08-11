@@ -36,6 +36,13 @@ enum MsgType {
   MSG_TYPE_SNAPSHOT = 8;         // gameserver -> client (per tick)
   MSG_TYPE_DISCONNECT = 9;       // either direction
   MSG_TYPE_RESYNC = 10;          // client -> gameserver (request a keyframe)
+  // 11, 12: reserved
+  MSG_TYPE_TRANSFER_MAP = 13;    // client -> gameserver (request map transfer)
+  MSG_TYPE_TRANSFER_MAP_RESP = 14; // gameserver -> client (transfer result)
+  MSG_TYPE_PING = 11;            // either direction (heartbeat)
+  MSG_TYPE_PONG = 12;            // either direction (heartbeat reply)
+  // 13 and 14 are reserved for MsgTransferMap/Resp.
+  MSG_TYPE_KICK = 15;            // server -> client (forced disconnect with reason)
 }
 
 // Envelope is the top-level wire message.
@@ -212,3 +219,45 @@ message DisconnectMessage {
 // ResyncRequest asks the game server to make the next snapshot a full keyframe.
 // It carries no fields and encodes to zero bytes.
 message ResyncRequest {}
+
+// --- Map transfer ---
+
+// TransferMapRequest is sent by the client to request a map transfer.
+// The game server saves state and disconnects; the client then reconnects
+// through the gateway to the new map's server via the existing MsgEnterWorld
+// flow.
+message TransferMapRequest {
+  string map_id = 1;
+}
+
+// TransferMapResponse is the game server's reply to a transfer request.
+message TransferMapResponse {
+  bool ok = 1;
+  string error = 2;
+}
+
+// --- Heartbeat ---
+
+// PingMessage is a heartbeat probe. The sender fills `timestamp` with its own
+// monotonic time in milliseconds; the receiver echoes it back in a PongMessage
+// so the sender can measure RTT.
+message PingMessage {
+  int64 timestamp = 1;
+}
+
+// PongMessage is the reply to a PingMessage. `timestamp` echoes the sender's
+// value unchanged; `server_time` is the responder's wall clock in milliseconds
+// since the Unix epoch.
+message PongMessage {
+  int64 timestamp = 1;
+  int64 server_time = 2;
+}
+
+// --- Server control ---
+
+// KickMessage is sent server -> client to force a disconnect with a reason.
+// Reasons are machine-readable strings (e.g. "duplicate_login",
+// "server_shutdown", "session_expired", "rate_limited").
+message KickMessage {
+  string reason = 1;
+}

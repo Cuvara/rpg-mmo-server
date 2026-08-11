@@ -12,7 +12,10 @@ namespace GameServer.Server;
 public static partial class JwtValidator
 {
     /// <summary>Decoded JWT claims relevant to the game server.</summary>
-    public record JwtClaims(string UserId, string ServerId, long Exp);
+    public record JwtClaims(string UserId, string ServerId, long Exp, string Jti = "");
+
+    /// <summary>Clock skew tolerance for expiration checks (seconds).</summary>
+    public const int ClockSkewSeconds = 5;
 
     /// <summary>Internal JSON model for the JWT claims payload.</summary>
     private sealed class JwtClaimsJson
@@ -22,6 +25,9 @@ public static partial class JwtValidator
 
         [JsonPropertyName("sid")]
         public string? ServerId { get; set; }
+
+        [JsonPropertyName("jti")]
+        public string? Jti { get; set; }
 
         [JsonPropertyName("exp")]
         public long Exp { get; set; }
@@ -109,16 +115,16 @@ public static partial class JwtValidator
             if (claims == null || string.IsNullOrEmpty(claims.UserId))
                 return null;
 
-            // Check expiration
+            // Check expiration with clock skew tolerance
             long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            if (claims.Exp > 0 && now > claims.Exp)
+            if (claims.Exp > 0 && now - ClockSkewSeconds > claims.Exp)
             {
                 status = VerifyStatus.Expired;
                 return null;
             }
 
             status = VerifyStatus.Ok;
-            return new JwtClaims(claims.UserId, claims.ServerId ?? "", claims.Exp);
+            return new JwtClaims(claims.UserId, claims.ServerId ?? "", claims.Exp, claims.Jti ?? "");
         }
         catch
         {

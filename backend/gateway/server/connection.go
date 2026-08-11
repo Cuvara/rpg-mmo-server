@@ -71,6 +71,13 @@ type ClientConn struct {
 	// needs no lock.
 	enc messages.Encoding
 
+	// lastPong is the time the last MsgPong was received (or the connection
+	// was created). The heartbeat loop compares this against pongTimeout to
+	// declare the peer dead. Written by ReadLoop (handlePong), read by the
+	// heartbeat goroutine — both through atomic load/store on the int64, so
+	// no lock is needed.
+	lastPong atomic.Int64
+
 	// closeAfterFlush tells WriteLoop to shut the connection down once sendCh
 	// is empty, so a final error frame actually reaches the client instead of
 	// racing an immediate Close.
@@ -89,6 +96,13 @@ type ClientConn struct {
 // cover a bad mobile RTT.
 const closeDrainTimeout = 2 * time.Second
 
+// Heartbeat protocol constants. Both sides send MsgPing every pingInterval;
+// if no MsgPong arrives within pongTimeout the connection is considered dead.
+const (
+	pingInterval = 10 * time.Second
+	pongTimeout  = 30 * time.Second
+)
+
 // halfCloser is the optional half-close capability of a net.Conn.
 // *net.TCPConn and *net.UnixConn implement it; kcp.UDPSession does not.
 type halfCloser interface{ CloseWrite() error }
@@ -96,7 +110,7 @@ type halfCloser interface{ CloseWrite() error }
 // NewClientConn creates a new client connection wrapper. The bucket is the
 // per-connection inbound message limiter; pass the zero value for no limit.
 func NewClientConn(conn net.Conn, logger *slog.Logger, bucket ratelimit.Bucket) *ClientConn {
-	return &ClientConn{
+	cc := &ClientConn{
 		conn:      conn,
 		state:     StateConnected,
 		sendCh:    make(chan messages.Envelope, 64),
@@ -104,6 +118,8 @@ func NewClientConn(conn net.Conn, logger *slog.Logger, bucket ratelimit.Bucket) 
 		logger:    logger,
 		msgBucket: bucket,
 	}
+	cc.lastPong.Store(time.Now().UnixMilli())
+	return cc
 }
 
 // UserID returns the authenticated user bound to this connection, or "" when
@@ -165,6 +181,12 @@ func (c *ClientConn) ClearIdentity() string {
 	c.state = StateConnected
 	return userID
 }
+
+// SetReadDeadline sets the read deadline on the underlying connection.
+func (c *ClientConn) SetReadDeadline(t time.Time) error { return c.conn.SetReadDeadline(t) }
+
+// ClearReadDeadline removes any read deadline on the underlying connection.
+func (c *ClientConn) ClearReadDeadline() error { return c.conn.SetReadDeadline(time.Time{}) }
 
 // RemoteIP returns the peer's IP without the port, for use as a rate-limit key.
 // It falls back to the raw address string when the address has no port (which
@@ -278,6 +300,41 @@ func (c *ClientConn) CloseGracefully() {
 // Done returns a channel that is closed when the connection ends.
 func (c *ClientConn) Done() <-chan struct{} {
 	return c.done
+}
+
+// RecordPong updates the last-pong timestamp. Called from the message handler
+// when a MsgPong arrives.
+func (c *ClientConn) RecordPong() { c.lastPong.Store(time.Now().UnixMilli()) }
+
+// HeartbeatLoop sends MsgPing every pingInterval and closes the connection if
+// no MsgPong has been received within pongTimeout. It is intended to run in
+// its own goroutine and returns when the connection closes.
+func (c *ClientConn) HeartbeatLoop() {
+	ticker := time.NewTicker(pingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			// Check for pong timeout.
+			last := c.lastPong.Load()
+			if time.Since(time.UnixMilli(last)) > pongTimeout {
+				c.logger.Info("heartbeat timeout", "user", c.UserID())
+				c.Close()
+				return
+			}
+			// Send ping.
+			env, err := c.Reply(messages.MsgPing, messages.PingMessage{
+				Timestamp: time.Now().UnixMilli(),
+			})
+			if err != nil {
+				c.logger.Debug("heartbeat encode error", "err", err)
+				continue
+			}
+			c.Send(env)
+		case <-c.done:
+			return
+		}
+	}
 }
 
 // ReadLoop reads envelopes from the TCP connection and calls handler for each.

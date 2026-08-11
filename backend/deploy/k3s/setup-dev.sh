@@ -103,6 +103,7 @@ log "applying dev Secret/ConfigMap in $NAMESPACE"
 kube create secret generic rpg-realtime-secrets \
   --namespace "$NAMESPACE" \
   --from-literal=jwt-secret="${JWT_SECRET:-dev-secret-change-me}" \
+  --from-literal=join-token-secret="${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}" \
   --dry-run=client -o yaml | kube apply -f -
 
 kube create configmap gameserver-config \

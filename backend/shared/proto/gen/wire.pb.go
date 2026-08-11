@@ -54,6 +54,13 @@ const (
 	MsgType_MSG_TYPE_SNAPSHOT         MsgType = 8  // gameserver -> client (per tick)
 	MsgType_MSG_TYPE_DISCONNECT       MsgType = 9  // either direction
 	MsgType_MSG_TYPE_RESYNC           MsgType = 10 // client -> gameserver (request a keyframe)
+	// 11, 12: reserved
+	MsgType_MSG_TYPE_TRANSFER_MAP      MsgType = 13 // client -> gameserver (request map transfer)
+	MsgType_MSG_TYPE_TRANSFER_MAP_RESP MsgType = 14 // gameserver -> client (transfer result)
+	MsgType_MSG_TYPE_PING              MsgType = 11 // either direction (heartbeat)
+	MsgType_MSG_TYPE_PONG              MsgType = 12 // either direction (heartbeat reply)
+	// 13 and 14 are reserved for MsgTransferMap/Resp.
+	MsgType_MSG_TYPE_KICK MsgType = 15 // server -> client (forced disconnect with reason)
 )
 
 // Enum value maps for MsgType.
@@ -70,19 +77,29 @@ var (
 		8:  "MSG_TYPE_SNAPSHOT",
 		9:  "MSG_TYPE_DISCONNECT",
 		10: "MSG_TYPE_RESYNC",
+		13: "MSG_TYPE_TRANSFER_MAP",
+		14: "MSG_TYPE_TRANSFER_MAP_RESP",
+		11: "MSG_TYPE_PING",
+		12: "MSG_TYPE_PONG",
+		15: "MSG_TYPE_KICK",
 	}
 	MsgType_value = map[string]int32{
-		"MSG_TYPE_UNSPECIFIED":      0,
-		"MSG_TYPE_AUTH":             1,
-		"MSG_TYPE_AUTH_RESP":        2,
-		"MSG_TYPE_ENTER_WORLD":      3,
-		"MSG_TYPE_ENTER_WORLD_RESP": 4,
-		"MSG_TYPE_JOIN_TOKEN":       5,
-		"MSG_TYPE_JOIN_TOKEN_RESP":  6,
-		"MSG_TYPE_INPUT":            7,
-		"MSG_TYPE_SNAPSHOT":         8,
-		"MSG_TYPE_DISCONNECT":       9,
-		"MSG_TYPE_RESYNC":           10,
+		"MSG_TYPE_UNSPECIFIED":       0,
+		"MSG_TYPE_AUTH":              1,
+		"MSG_TYPE_AUTH_RESP":         2,
+		"MSG_TYPE_ENTER_WORLD":       3,
+		"MSG_TYPE_ENTER_WORLD_RESP":  4,
+		"MSG_TYPE_JOIN_TOKEN":        5,
+		"MSG_TYPE_JOIN_TOKEN_RESP":   6,
+		"MSG_TYPE_INPUT":             7,
+		"MSG_TYPE_SNAPSHOT":          8,
+		"MSG_TYPE_DISCONNECT":        9,
+		"MSG_TYPE_RESYNC":            10,
+		"MSG_TYPE_TRANSFER_MAP":      13,
+		"MSG_TYPE_TRANSFER_MAP_RESP": 14,
+		"MSG_TYPE_PING":              11,
+		"MSG_TYPE_PONG":              12,
+		"MSG_TYPE_KICK":              15,
 	}
 )
 
@@ -955,6 +972,256 @@ func (*ResyncRequest) Descriptor() ([]byte, []int) {
 	return file_wire_proto_rawDescGZIP(), []int{11}
 }
 
+// TransferMapRequest is sent by the client to request a map transfer.
+// The game server saves state and disconnects; the client then reconnects
+// through the gateway to the new map's server via the existing MsgEnterWorld
+// flow.
+type TransferMapRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	MapId         string                 `protobuf:"bytes,1,opt,name=map_id,json=mapId,proto3" json:"map_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TransferMapRequest) Reset() {
+	*x = TransferMapRequest{}
+	mi := &file_wire_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TransferMapRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TransferMapRequest) ProtoMessage() {}
+
+func (x *TransferMapRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TransferMapRequest.ProtoReflect.Descriptor instead.
+func (*TransferMapRequest) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *TransferMapRequest) GetMapId() string {
+	if x != nil {
+		return x.MapId
+	}
+	return ""
+}
+
+// TransferMapResponse is the game server's reply to a transfer request.
+type TransferMapResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ok            bool                   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TransferMapResponse) Reset() {
+	*x = TransferMapResponse{}
+	mi := &file_wire_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TransferMapResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TransferMapResponse) ProtoMessage() {}
+
+func (x *TransferMapResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TransferMapResponse.ProtoReflect.Descriptor instead.
+func (*TransferMapResponse) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *TransferMapResponse) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *TransferMapResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+// PingMessage is a heartbeat probe. The sender fills `timestamp` with its own
+// monotonic time in milliseconds; the receiver echoes it back in a PongMessage
+// so the sender can measure RTT.
+type PingMessage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Timestamp     int64                  `protobuf:"varint,1,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PingMessage) Reset() {
+	*x = PingMessage{}
+	mi := &file_wire_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PingMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PingMessage) ProtoMessage() {}
+
+func (x *PingMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PingMessage.ProtoReflect.Descriptor instead.
+func (*PingMessage) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *PingMessage) GetTimestamp() int64 {
+	if x != nil {
+		return x.Timestamp
+	}
+	return 0
+}
+
+// PongMessage is the reply to a PingMessage. `timestamp` echoes the sender's
+// value unchanged; `server_time` is the responder's wall clock in milliseconds
+// since the Unix epoch.
+type PongMessage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Timestamp     int64                  `protobuf:"varint,1,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	ServerTime    int64                  `protobuf:"varint,2,opt,name=server_time,json=serverTime,proto3" json:"server_time,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PongMessage) Reset() {
+	*x = PongMessage{}
+	mi := &file_wire_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PongMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PongMessage) ProtoMessage() {}
+
+func (x *PongMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PongMessage.ProtoReflect.Descriptor instead.
+func (*PongMessage) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *PongMessage) GetTimestamp() int64 {
+	if x != nil {
+		return x.Timestamp
+	}
+	return 0
+}
+
+func (x *PongMessage) GetServerTime() int64 {
+	if x != nil {
+		return x.ServerTime
+	}
+	return 0
+}
+
+// KickMessage is sent server -> client to force a disconnect with a reason.
+// Reasons are machine-readable strings (e.g. "duplicate_login",
+// "server_shutdown", "session_expired", "rate_limited").
+type KickMessage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Reason        string                 `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *KickMessage) Reset() {
+	*x = KickMessage{}
+	mi := &file_wire_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *KickMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*KickMessage) ProtoMessage() {}
+
+func (x *KickMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use KickMessage.ProtoReflect.Descriptor instead.
+func (*KickMessage) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *KickMessage) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
 var File_wire_proto protoreflect.FileDescriptor
 
 const file_wire_proto_rawDesc = "" +
@@ -1007,7 +1274,20 @@ const file_wire_proto_rawDesc = "" +
 	"\aremoved\x18\x05 \x03(\tR\aremoved\"+\n" +
 	"\x11DisconnectMessage\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\"\x0f\n" +
-	"\rResyncRequest*\x97\x02\n" +
+	"\rResyncRequest\"+\n" +
+	"\x12TransferMapRequest\x12\x15\n" +
+	"\x06map_id\x18\x01 \x01(\tR\x05mapId\";\n" +
+	"\x13TransferMapResponse\x12\x0e\n" +
+	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\"+\n" +
+	"\vPingMessage\x12\x1c\n" +
+	"\ttimestamp\x18\x01 \x01(\x03R\ttimestamp\"L\n" +
+	"\vPongMessage\x12\x1c\n" +
+	"\ttimestamp\x18\x01 \x01(\x03R\ttimestamp\x12\x1f\n" +
+	"\vserver_time\x18\x02 \x01(\x03R\n" +
+	"serverTime\"%\n" +
+	"\vKickMessage\x12\x16\n" +
+	"\x06reason\x18\x01 \x01(\tR\x06reason*\x8b\x03\n" +
 	"\aMsgType\x12\x18\n" +
 	"\x14MSG_TYPE_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rMSG_TYPE_AUTH\x10\x01\x12\x16\n" +
@@ -1020,7 +1300,12 @@ const file_wire_proto_rawDesc = "" +
 	"\x11MSG_TYPE_SNAPSHOT\x10\b\x12\x17\n" +
 	"\x13MSG_TYPE_DISCONNECT\x10\t\x12\x13\n" +
 	"\x0fMSG_TYPE_RESYNC\x10\n" +
-	"*\x9d\x01\n" +
+	"\x12\x19\n" +
+	"\x15MSG_TYPE_TRANSFER_MAP\x10\r\x12\x1e\n" +
+	"\x1aMSG_TYPE_TRANSFER_MAP_RESP\x10\x0e\x12\x11\n" +
+	"\rMSG_TYPE_PING\x10\v\x12\x11\n" +
+	"\rMSG_TYPE_PONG\x10\f\x12\x11\n" +
+	"\rMSG_TYPE_KICK\x10\x0f*\x9d\x01\n" +
 	"\n" +
 	"EntityType\x12\x1b\n" +
 	"\x17ENTITY_TYPE_UNSPECIFIED\x10\x00\x12\x16\n" +
@@ -1043,22 +1328,27 @@ func file_wire_proto_rawDescGZIP() []byte {
 }
 
 var file_wire_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_wire_proto_goTypes = []any{
-	(MsgType)(0),               // 0: rpgmmo.wire.v1.MsgType
-	(EntityType)(0),            // 1: rpgmmo.wire.v1.EntityType
-	(*Envelope)(nil),           // 2: rpgmmo.wire.v1.Envelope
-	(*AuthRequest)(nil),        // 3: rpgmmo.wire.v1.AuthRequest
-	(*AuthResponse)(nil),       // 4: rpgmmo.wire.v1.AuthResponse
-	(*EnterWorldRequest)(nil),  // 5: rpgmmo.wire.v1.EnterWorldRequest
-	(*EnterWorldResponse)(nil), // 6: rpgmmo.wire.v1.EnterWorldResponse
-	(*JoinTokenRequest)(nil),   // 7: rpgmmo.wire.v1.JoinTokenRequest
-	(*JoinTokenResponse)(nil),  // 8: rpgmmo.wire.v1.JoinTokenResponse
-	(*InputMessage)(nil),       // 9: rpgmmo.wire.v1.InputMessage
-	(*EntitySnapshot)(nil),     // 10: rpgmmo.wire.v1.EntitySnapshot
-	(*SnapshotMessage)(nil),    // 11: rpgmmo.wire.v1.SnapshotMessage
-	(*DisconnectMessage)(nil),  // 12: rpgmmo.wire.v1.DisconnectMessage
-	(*ResyncRequest)(nil),      // 13: rpgmmo.wire.v1.ResyncRequest
+	(MsgType)(0),                // 0: rpgmmo.wire.v1.MsgType
+	(EntityType)(0),             // 1: rpgmmo.wire.v1.EntityType
+	(*Envelope)(nil),            // 2: rpgmmo.wire.v1.Envelope
+	(*AuthRequest)(nil),         // 3: rpgmmo.wire.v1.AuthRequest
+	(*AuthResponse)(nil),        // 4: rpgmmo.wire.v1.AuthResponse
+	(*EnterWorldRequest)(nil),   // 5: rpgmmo.wire.v1.EnterWorldRequest
+	(*EnterWorldResponse)(nil),  // 6: rpgmmo.wire.v1.EnterWorldResponse
+	(*JoinTokenRequest)(nil),    // 7: rpgmmo.wire.v1.JoinTokenRequest
+	(*JoinTokenResponse)(nil),   // 8: rpgmmo.wire.v1.JoinTokenResponse
+	(*InputMessage)(nil),        // 9: rpgmmo.wire.v1.InputMessage
+	(*EntitySnapshot)(nil),      // 10: rpgmmo.wire.v1.EntitySnapshot
+	(*SnapshotMessage)(nil),     // 11: rpgmmo.wire.v1.SnapshotMessage
+	(*DisconnectMessage)(nil),   // 12: rpgmmo.wire.v1.DisconnectMessage
+	(*ResyncRequest)(nil),       // 13: rpgmmo.wire.v1.ResyncRequest
+	(*TransferMapRequest)(nil),  // 14: rpgmmo.wire.v1.TransferMapRequest
+	(*TransferMapResponse)(nil), // 15: rpgmmo.wire.v1.TransferMapResponse
+	(*PingMessage)(nil),         // 16: rpgmmo.wire.v1.PingMessage
+	(*PongMessage)(nil),         // 17: rpgmmo.wire.v1.PongMessage
+	(*KickMessage)(nil),         // 18: rpgmmo.wire.v1.KickMessage
 }
 var file_wire_proto_depIdxs = []int32{
 	1,  // 0: rpgmmo.wire.v1.EntitySnapshot.type:type_name -> rpgmmo.wire.v1.EntityType
@@ -1081,7 +1371,7 @@ func file_wire_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_wire_proto_rawDesc), len(file_wire_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   12,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

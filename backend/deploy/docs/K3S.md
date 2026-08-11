@@ -88,7 +88,8 @@ Idempotent — every step is an `apply`, so re-running is a no-op plus waits.
    commands (address\:port, allocation, logs, teardown).
 
 Flags: `--with-dungeon`, `--with-autoscaler`, `--prod-fleets`, `--skip-agones`.
-Env: `AGONES_VERSION`, `KUBECTL_BIN`, `JWT_SECRET`, `REDIS_ADDR`, `GAME_DB_URL`.
+Env: `AGONES_VERSION`, `KUBECTL_BIN`, `JWT_SECRET`, `JOIN_TOKEN_SECRET`,
+`REDIS_ADDR`, `GAME_DB_URL`.
 
 `teardown-dev.sh` reverses it: autoscalers first (a live one recreates replicas
 under a dying fleet), then fleets, stray GameServers, config objects, namespaces,

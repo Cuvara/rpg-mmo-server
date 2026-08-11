@@ -6,6 +6,134 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`MsgKick` is now emitted on eviction, alongside `MsgDisconnect`.** Type 15
+  had been defined in `wire.proto` with working codecs on both the Go and C#
+  sides since it was introduced, but nothing ever sent it. `kickLocalUser` now
+  goes through `sendKickAndClose`, which sends `MsgKick{reason}` followed by
+  `MsgDisconnect{reason}` — same reason string in both — and half-closes once
+  they flush.
+
+  Both frames are sent rather than one because they address different clients.
+  `MsgKick` is the typed signal; `MsgDisconnect` is what any client written
+  before this change already acts on, and such a client ignores an unknown type
+  15. Emitting only `MsgKick` would have stranded them on a socket that stops
+  answering. The order is contractual: a client that understands `MsgKick` reads
+  the reason there and must treat the following `MsgDisconnect` as the same
+  eviction, not a second one.
+
+  `KickReasonDuplicateLogin` is exported so the reason string has one definition
+  rather than a literal per call site. `duplicate_login` is the only reason the
+  gateway emits today; `wire.proto` names others (`server_shutdown`,
+  `session_expired`, `rate_limited`) that remain unwired — shutdown still closes
+  without a frame, and the session/rate-limit paths still answer on the next
+  frame via `MsgAuthResp`.
+
+  Both frames are JSON regardless of the connection's latched encoding, for the
+  reason the previous single frame was: eviction runs on the *evicting*
+  connection's goroutine and `ClientConn.enc` may only be read from the evicted
+  connection's `ReadLoop`.
+
+### Fixed
+- **`docs/API.md` documented a `JOIN_TOKEN_SECRET` fallback that no longer
+  exists, and recommended it.** The join-token section said an unset
+  `JOIN_TOKEN_SECRET` falls back to `JWT_SECRET` "because `gameserver-dotnet`
+  cannot read the new variable yet". Both halves are obsolete: the C# game server
+  reads it (`GameServerHost` parses it into `_joinKeys`) and *requires* it
+  (`Program.cs` exits 2 without it), and this gateway refuses to start without it
+  too (`cmd/gateway/main.go`). An operator following the old text got a gateway
+  that will not boot — or, giving only the gateway a distinct secret, a fleet
+  where every join fails signature verification. No code changed; the doc was
+  describing a state the code left behind.
+
+### Added
+- `docs/API.md`: the wire encoding is now documented — Protobuf or legacy JSON,
+  identified from the first body byte (`0x08` vs `{`), latched per connection so
+  every reply answers in the encoding the client used. The one deliberate
+  exception (duplicate-login kick builds JSON off the victim's read-loop
+  goroutine) is called out.
+- `docs/API.md`: join tokens are single-use — `SignWithServer` attaches a `jti`
+  whenever `serverID` is set, and the game server consumes it once through
+  `JtiTracker`. Documented together with the tracker's real scope (in-memory,
+  per-process, 60 s), since that is what makes `sid` pinning load-bearing rather
+  than redundant.
+- `docs/API.md`: `MsgPing` (11) and `MsgPong` (12) added to the handled-message
+  table, with the reason they are dispatched *before* `checkSession` — a pong
+  must not be rejected because a Redis blip failed the session lookup. The table
+  previously implied they fell into "logged and ignored".
+- `docs/API.md`: `EnterWorldResponse.Transport` documented in the handshake
+  sequence — the client must dial the game server with that transport, and empty
+  means `"tcp"` (pre-field registry entries).
+- `docs/API.md`: noted that `MsgKick` (15) is defined and has codecs on both
+  sides but is emitted by nothing; duplicate-login eviction sends
+  `MsgDisconnect{reason:"duplicate_login"}`, which is what a client should watch.
+
+### Added
+- **Exponential backoff retry for registry lookups.** `FindServer` and `GetServer`
+  now retry transient Redis errors (connection refused, timeout) with backoff
+  (1s, 2s, 4s, max 3 retries, 10s total timeout). Business-logic errors
+  (`ErrNoServerAvailable`, `ErrNotFound`) are not retried. Context cancellation
+  aborts between retries so a disconnected client does not waste attempts
+- **Server-down watcher with Pub/Sub notification.** `RegistryWatcher` periodically
+  polls known servers (every 5s) and publishes a `ServerDownEvent` to the
+  `gateway:server_down` channel when a server's heartbeat expires. Other gateway
+  instances can subscribe via `SubscribeServerDown` to clear cached state. Includes
+  in-memory `MemoryPubSub` for testing
+- **Enriched session model.** Session store value changed from a plain
+  `user_id` string to a JSON object:
+  `{"gateway_id":"gw-0","server_id":"","map_id":"","created_at":N,"last_activity":N}`.
+  `SessionData` struct with `GetSession` and `UpdateSession` methods on
+  `SessionManager`. `NewSessionManager` accepts an optional `gatewayID`
+  (variadic, backward-compatible); `ValidateSession` handles both the new JSON
+  format and the legacy plain-string format for rolling upgrades.
+  `GatewayKickChannel` constant added to `shared/constants` for cross-gateway
+  coordination
+- **Duplicate login detection and kick.** On `MsgAuth`, the gateway checks
+  whether a session already exists for the user. If it belongs to this gateway,
+  the old connection receives `MsgDisconnect(reason="duplicate_login")` and is
+  closed before the new session is created. If it belongs to a different
+  gateway, a kick request is published via `KickPublisher` (noop for in-memory
+  backend, Redis Pub/Sub for multi-instance). `KickPublisher` /
+  `KickSubscriber` interfaces with `WithKickPublisher` / `WithKickSubscriber`
+  options; `handleKickEvent` processes incoming kick requests
+- **Session-server association tracking.** After a successful `MsgEnterWorld`
+  (join token minted), the session in the store is updated with `server_id` and
+  `map_id` so the gateway knows where each player is currently playing. Uses
+  the new `UpdateSession` method. `AssignResult` gained a `ServerID` field
+- **User-to-connection lookup.** `userConns` map on `Gateway` enables O(1)
+  connection lookup by `user_id` for local duplicate-login kicks.
+  `trackUser`, `untrackUser`, `findUserConn` methods manage the mapping
+
+### Fixed
+- **Data race in `kickLocalUser`.** The method called `old.Reply` from the new
+  connection's ReadLoop goroutine, which reads the `enc` field that the old
+  connection's ReadLoop may still be writing. Switched to
+  `messages.NewEnvelope` (JSON, always safe from any goroutine)
+- `cmd/gateway` now passes `--instance-id` / hostname as `gatewayID` to
+  `NewSessionManager`, so every session record is tagged with the owning
+  gateway instance
+- **30-second unauthenticated connection timeout.** Connections that do not send
+  `MsgAuth` within 30 seconds are closed automatically, preventing connection-slot
+  exhaustion from idle or malicious clients.
+
+### Changed
+- **`JOIN_TOKEN_SECRET` is now mandatory (fatal if unset).** The gateway exits
+  with a fatal error when the env var is empty or unset. The fallback to
+  `JWT_SECRET` has been removed.
+- **`GenerateJoinTokenKeyring` rejects empty `serverID`.** An empty server ID in
+  the join token would bypass the game server's `sid` check.
+- **Map transfer documentation in `transfer/dungeon.go`.** Documents the
+  client-driven map transfer flow (MsgTransferMap types 13/14) and confirms
+  no gateway code change is required — the existing MsgEnterWorld flow handles
+  re-entry to a new map server.
+
+### Added
+- **Heartbeat loop (MsgPing/MsgPong).** Each client connection sends MsgPing
+  every 10 s after TCP accept. If no MsgPong is received within 30 s the
+  connection is closed. Incoming MsgPing from a client is answered with a
+  MsgPong echoing the sender's timestamp plus the server's wall clock.
+  Heartbeat messages bypass session validation — a pong must refresh the
+  timer even during a transient Redis outage.
+
 - **The gateway answers in the encoding the client spoke.** `ClientConn` latches
   the encoding of the first frame it decodes (`shared/messages` sniffs JSON vs
   Protobuf from the first body byte) and every response is built through the new

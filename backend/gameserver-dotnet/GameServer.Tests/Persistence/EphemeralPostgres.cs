@@ -193,14 +193,24 @@ internal sealed class EphemeralPostgres : IAsyncDisposable
             }
         };
         proc.Start();
-        string stdout = proc.StandardOutput.ReadToEnd();
-        string stderr = proc.StandardError.ReadToEnd();
+
+        // Reads are started but never blocked on — see TestDocker.ExecOnce for why a
+        // synchronous ReadToEnd() here makes the timeout below unreachable.
+        var stdout = proc.StandardOutput.ReadToEndAsync();
+        var stderr = proc.StandardError.ReadToEndAsync();
+
         if (!proc.WaitForExit((int)timeout.TotalMilliseconds))
         {
-            try { proc.Kill(true); } catch { /* ignore */ }
-            return (-1, stdout, "timed out");
+            try { proc.Kill(entireProcessTree: true); } catch { /* ignore */ }
+            return (-1, Drain(stdout), "timed out");
         }
-        return (proc.ExitCode, stdout, stderr);
+        return (proc.ExitCode, Drain(stdout), Drain(stderr));
+    }
+
+    private static string Drain(Task<string> read)
+    {
+        try { return read.Wait(TimeSpan.FromSeconds(10)) ? read.Result : ""; }
+        catch { return ""; }
     }
 
     public ValueTask DisposeAsync()

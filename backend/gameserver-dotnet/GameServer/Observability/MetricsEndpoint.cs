@@ -65,7 +65,36 @@ public sealed class MetricsEndpoint : IAsyncDisposable
             return null;
         }
 
-        var (host, port) = ParseAddr(addr);
+        // Same off-switch vocabulary as the Go gateway's resolveMetricsAddr, so one
+        // METRICS_ADDR value means the same thing to both binaries. Without this,
+        // METRICS_ADDR=off reached int.Parse below and killed the server on startup
+        // with a bare FormatException — for a value that reads like "turn it off".
+        if (addr.Trim() is var trimmed &&
+            (trimmed.Equals("off", StringComparison.OrdinalIgnoreCase)
+             || trimmed.Equals("none", StringComparison.OrdinalIgnoreCase)
+             || trimmed.Equals("disabled", StringComparison.OrdinalIgnoreCase)))
+        {
+            logger.LogInformation("Metrics endpoint disabled (METRICS_ADDR={Addr})", trimmed);
+            return null;
+        }
+
+        (string host, int port) parsed;
+        try
+        {
+            parsed = ParseAddr(addr);
+        }
+        catch (Exception ex) when (ex is FormatException or OverflowException or ArgumentException)
+        {
+            // Non-fatal, matching how a failed bind is treated a few lines down: a
+            // mistyped metrics address costs metrics, not the game server. Logged as
+            // an error rather than swallowed, so the mistake is visible.
+            logger.LogError(
+                "Metrics endpoint disabled: METRICS_ADDR={Addr} is not a host:port, a port, " +
+                "or one of off/none/disabled", addr);
+            return null;
+        }
+
+        var (host, port) = parsed;
 
         // On Windows, binding the "+" wildcard prefix requires an URL ACL
         // (admin-only). Fall back to localhost so unprivileged dev runs still

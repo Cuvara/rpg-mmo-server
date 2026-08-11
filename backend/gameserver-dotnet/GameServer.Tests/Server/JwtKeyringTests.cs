@@ -138,21 +138,4 @@ public class JwtKeyringTests
         Assert.Null(ring.Verify(token));
     }
 
-    // ── EffectiveJoinTokenSecret (mirrors Go config.EffectiveJoinTokenSecret) ──
-
-    [Theory]
-    // joinTokenSecret, jwtSecret, expected spec, expected sharedWithAuth
-    [InlineData("join", "auth", "join", false)]
-    [InlineData("", "auth", "auth", true)]
-    [InlineData(null, "auth", "auth", true)]
-    [InlineData("join,old-join", "auth", "join,old-join", false)]
-    [InlineData("", "", "", true)]
-    public void EffectiveJoinTokenSecret_MatchesGoFallback(
-        string? joinTokenSecret, string? jwtSecret, string expectedSpec, bool expectedShared)
-    {
-        var (spec, shared) = ServerOptions.EffectiveJoinTokenSecret(joinTokenSecret, jwtSecret);
-
-        Assert.Equal(expectedSpec, spec);
-        Assert.Equal(expectedShared, shared);
-    }
 }

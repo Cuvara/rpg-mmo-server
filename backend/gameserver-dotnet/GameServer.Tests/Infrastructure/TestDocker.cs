@@ -73,14 +73,33 @@ internal static class TestDocker
             }
         };
         proc.Start();
-        string stdout = proc.StandardOutput.ReadToEnd();
-        string stderr = proc.StandardError.ReadToEnd();
+
+        // Start both reads WITHOUT blocking on them. A synchronous ReadToEnd() here
+        // makes the timeout below unreachable: the read returns only when the child
+        // closes the pipe, so a child that never exits parks this thread forever and
+        // WaitForExit is never called. Reading stdout to completion before touching
+        // stderr deadlocks for a second reason — a child that fills the 64 KiB stderr
+        // buffer blocks on the write while we wait on the other pipe.
+        var stdout = proc.StandardOutput.ReadToEndAsync();
+        var stderr = proc.StandardError.ReadToEndAsync();
+
         if (!proc.WaitForExit((int)timeout.TotalMilliseconds))
         {
-            try { proc.Kill(true); } catch { /* ignore */ }
-            return (-1, stdout, "timed out");
+            try { proc.Kill(entireProcessTree: true); } catch { /* ignore */ }
+            return (-1, Drain(stdout), "timed out");
         }
-        return (proc.ExitCode, stdout, stderr);
+        return (proc.ExitCode, Drain(stdout), Drain(stderr));
+    }
+
+    /// <summary>
+    /// Collect a pipe read that has already been started. The process is gone by the
+    /// time this runs, so the task is finished or about to be; the bound is there so a
+    /// stuck pipe degrades into an empty string instead of reintroducing the hang.
+    /// </summary>
+    private static string Drain(Task<string> read)
+    {
+        try { return read.Wait(TimeSpan.FromSeconds(10)) ? read.Result : ""; }
+        catch { return ""; }
     }
 
     /// <summary>A free loopback port, so containers never collide with live services.</summary>

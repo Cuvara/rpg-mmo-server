@@ -2,6 +2,7 @@ using System.Net.Sockets;
 using System.Threading.Channels;
 using GameServer.Net.Transport;
 using Microsoft.Extensions.Logging;
+using RpgMmo.Wire.V1;
 
 namespace GameServer.Net;
 
@@ -73,6 +74,38 @@ public sealed class Connection : IDisposable
     private const int StateClosed = 2;
     private int _closeState;
 
+    /// <summary>
+    /// Managed thread id of the Close() currently in flight, 0 when none is.
+    ///
+    /// Close() cancels the token source, and cancellation callbacks — including the
+    /// resumption of every loop parked on that token — run INLINE on the cancelling
+    /// thread. So a cancelled heartbeat or read loop can complete its connection
+    /// handler, and that handler can call Dispose(), all on the same stack, below
+    /// the Close() that started it. Dispose() has to recognise that stack: spinning
+    /// there waits on a frame it is itself blocking.
+    /// </summary>
+    private int _closingThreadId;
+
+    /// <summary>
+    /// Set when a Dispose() re-entered on the closing thread and had to leave the
+    /// token source alone. Close() frees it on that Dispose()'s behalf once the
+    /// teardown it was in the middle of is actually finished.
+    /// </summary>
+    private int _disposeDeferred;
+
+    /// <summary>Heartbeat interval — both sides send MsgPing at this cadence.</summary>
+    private static readonly TimeSpan PingInterval = TimeSpan.FromSeconds(10);
+
+    /// <summary>If no MsgPong arrives within this window the connection is declared dead.</summary>
+    private static readonly TimeSpan PongTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Monotonic timestamp (ms since epoch) of the last received MsgPong, or
+    /// connection creation time. Written by the read loop, read by the heartbeat
+    /// task — both through <see cref="Volatile"/> so no lock is needed.
+    /// </summary>
+    private long _lastPongMs;
+
     /// <summary>The peer address, for logging.</summary>
     public string RemoteEndPoint => _transport.RemoteEndPoint;
 
@@ -97,6 +130,8 @@ public sealed class Connection : IDisposable
         _stream = transport.Stream;
         _logger = logger;
         _cts = new CancellationTokenSource();
+
+        _lastPongMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         _sendChannel = Channel.CreateBounded<Envelope>(new BoundedChannelOptions(64)
         {
@@ -187,10 +222,62 @@ public sealed class Connection : IDisposable
         await _stream.FlushAsync(_cts.Token);
     }
 
+    /// <summary>Record that a MsgPong was received, resetting the heartbeat timer.</summary>
+    public void RecordPong() =>
+        Volatile.Write(ref _lastPongMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+
+    /// <summary>
+    /// Reply to an incoming MsgPing with a MsgPong carrying the original
+    /// timestamp and the server's current wall clock.
+    /// </summary>
+    public void HandlePing(PingMessage ping)
+    {
+        var pong = new PongMessage
+        {
+            Timestamp = ping.Timestamp,
+            ServerTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        };
+        var env = WireProtocol.NewEnvelope(MsgType.Pong, pong, Encoding);
+        Send(env);
+    }
+
+    /// <summary>
+    /// Heartbeat loop: sends MsgPing every 10 s and closes the connection if
+    /// no MsgPong has been received within 30 s. Intended to run as a
+    /// fire-and-forget task alongside the read/write loops.
+    /// </summary>
+    public async Task HeartbeatLoopAsync()
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(PingInterval);
+            while (await timer.WaitForNextTickAsync(_cts.Token))
+            {
+                var last = Volatile.Read(ref _lastPongMs);
+                var elapsed = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - last;
+                if (elapsed > (long)PongTimeout.TotalMilliseconds)
+                {
+                    _logger.LogInformation("Heartbeat timeout for {UserId}", UserId);
+                    Close();
+                    return;
+                }
+
+                var ping = new PingMessage
+                {
+                    Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                };
+                var env = WireProtocol.NewEnvelope(MsgType.Ping, ping, Encoding);
+                Send(env);
+            }
+        }
+        catch (OperationCanceledException) { /* connection closed */ }
+    }
+
     /// <summary>Close the connection. Idempotent.</summary>
     public void Close()
     {
         if (Interlocked.CompareExchange(ref _closeState, StateClosing, StateOpen) != StateOpen) return;
+        Volatile.Write(ref _closingThreadId, Environment.CurrentManagedThreadId);
         try
         {
             _cts.Cancel();
@@ -201,13 +288,31 @@ public sealed class Connection : IDisposable
         {
             // In a finally so a throw from a cancellation callback cannot strand
             // the state at Closing and spin Dispose() forever.
+            Volatile.Write(ref _closingThreadId, 0);
             Volatile.Write(ref _closeState, StateClosed);
+
+            // A Dispose() that re-entered on this very stack could not free the
+            // token source while we were still using it, so it left the job here.
+            // Safe now: every use of _cts above has returned.
+            if (Interlocked.Exchange(ref _disposeDeferred, 0) != 0) _cts.Dispose();
         }
     }
 
     public void Dispose()
     {
         Close();
+
+        // Re-entered on the thread that is still inside Close()? Then the Close()
+        // we are waiting on is a frame further down this same stack — cancellation
+        // resumed a loop inline, that loop finished its handler, and the handler
+        // called us. Spinning would block the very frame that has to finish first,
+        // which is a hang, not a wait. Hand the disposal back to that Close() and
+        // return: it frees the token source once it is genuinely done with it.
+        if (Volatile.Read(ref _closingThreadId) == Environment.CurrentManagedThreadId)
+        {
+            Volatile.Write(ref _disposeDeferred, 1);
+            return;
+        }
 
         // Wait for an in-flight Close() on another thread to FINISH before
         // freeing the token source it is still using. Close() returning is not

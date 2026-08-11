@@ -76,6 +76,10 @@ spec:
                       fieldPath: metadata.name
                 - name: JWT_SECRET
                   value: "dev-secret-change-me"
+                # Signs/verifies the gateway->gameserver join token. Must match the
+                # gateway's JOIN_TOKEN_SECRET, and is deliberately NOT JWT_SECRET.
+                - name: JOIN_TOKEN_SECRET
+                  value: "dev-join-secret-change-me"
                 # Host compose stack (docker-compose.yml) as seen from a pod on
                 # Docker Desktop Kubernetes. On k3d use host.k3d.internal.
                 - name: REDIS_ADDR

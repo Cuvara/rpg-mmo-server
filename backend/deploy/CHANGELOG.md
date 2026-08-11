@@ -6,6 +6,137 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`stack.sh` — one command that brings the whole backend up locally.**
+  Everything needed to bring up a stack a client can actually connect to
+  existed, but it was six manual steps spread across two docs (copy `.env`,
+  build the Nakama plugin, build two images, `up`, `up --profile realtime`, find
+  the secrets), and nothing told you whether the game server had registered
+  itself — the one condition that decides whether `MsgEnterWorld` can be
+  answered at all.
+
+  ```bash
+  cd backend/deploy
+  ./stack.sh up      # build every image + start everything + wait for the registry
+  ./stack.sh check   # drive the full client flow through it (smoketest)
+  ./stack.sh down    # stop (--wipe to drop the data volumes too)
+  ```
+
+  Also `health` (probes every health endpoint **and** reads
+  `servers:map:<map_id>` out of Redis, so "the game server is invisible to the
+  gateway" is a distinct, named failure rather than a mystery), `ps` and `logs`.
+  `--no-build` skips the image builds.
+
+  It is a shell script, not a Makefile target, because **`make` is not installed
+  on this project's dev box**; the `flow-*` Make targets are thin wrappers so
+  both spellings work, and nothing in the documented path requires `make`.
+
+- **`stack.sh up --scratch`** — a second, fully isolated stack (own compose
+  project, own container names `rpgs-*`, own volumes, every published port
+  offset). Without it there is no way to test a compose change on a machine that
+  already has a stack up, and the failure mode of trying is bad: compose
+  **adopts and recreates** the running containers with your `.env`, printing a
+  normal successful recreate while silently replacing someone else's
+  environment. That happened once while building this, to the live dev stack;
+  it was restored by re-running CD's compose file, and the isolation flag exists
+  so it cannot happen again.
+
+### Changed
+- `docker-compose.yml`: `container_name` is now `${COMPOSE_NAME_PREFIX:-rpg}-*`
+  and Nakama's four published ports are env-driven
+  (`NAKAMA_{GRPC,HTTP,CONSOLE,METRICS}_PORT`). Defaults are unchanged, so every
+  existing command, script and CD path behaves exactly as before; this only
+  makes an isolated second stack expressible.
+
+### Fixed
+- **Scratch/second-stack configuration passed through exported environment
+  variables was silently ignored.** On this project's dev box `docker` is a
+  shell shim to the Windows `docker.exe` (`docs/CICD.md` §4a), and WSL only
+  forwards an environment variable to a Windows process when it is listed in
+  `$WSLENV`. So `export COMPOSE_PROJECT_NAME=… ; docker compose up` reaches
+  compose with the variable **unset** and operates on the default project —
+  with no warning, and with output that looks like success. Compounding it, the
+  compose file's top-level `name:` beats `COMPOSE_PROJECT_NAME` anyway.
+  `stack.sh` therefore passes configuration with `--env-file` and `-p`, never
+  through the environment. Documented in the runbook alongside the existing
+  `$PWD` bind-mount trap, since it is the same class of WSL-interop bug.
+
+- **`JOIN_TOKEN_SECRET` was never wired into any deployment path**, so both
+  realtime containers crash-looped on startup: `rpg-gateway` and `rpg-gameserver`
+  each logged `JOIN_TOKEN_SECRET is required but not set -- refusing to start`.
+  The split secret landed in the binaries (#22) but no deploy config supplied it.
+  Now plumbed through every path that already carried `JWT_SECRET`:
+  - `docker-compose.yml` — added to the `gateway` and `gameserver-dotnet`
+    services, both reading the same `${JOIN_TOKEN_SECRET}`.
+  - `.env` / `.env.example` — new `JOIN_TOKEN_SECRET` entry with a dev default.
+  - `k3s/setup-dev.sh` — new `join-token-secret` key in `rpg-realtime-secrets`.
+  - `agones/fleet-{map,dungeon}.yaml` — `secretKeyRef` to that key, **not**
+    `optional`, so a missing secret fails container creation instead of
+    crash-looping. `fleet-map-dev.yaml`, `fleet-map-dotnet-dev.yaml` and
+    `fleet-dungeon-dev.yaml` get the literal dev value.
+  - `scripts/deploy-local.sh` — exported for host mode (the C# arg parser only
+    matches space-separated flags, so `--jwt-secret=X` was always inert there).
+  - `.github/workflows/cd.yml` and `scripts/setup-github-env.sh` — new required
+    secret, rejected when it equals `JWT_SECRET`.
+- **`ci-dotnet.yml` could hang for six hours and say nothing.** Since 2026-08-08
+  three runs (two on `develop`, one on a PR) have had their `Test` step stop
+  emitting output partway through and run until the 6-hour default job timeout
+  cancelled them. The suite normally finishes in ~3 minutes.
+  - Both jobs now carry `timeout-minutes` (20 test, 25 publish), so a hang costs
+    minutes of runner time instead of hours.
+  - `dotnet test` runs under `--blame-hang --blame-hang-timeout 8m`, which turns
+    a hang into a **failure that names the hung test** and writes a
+    `Sequence_*.xml` beside the results. Today a hang produces no `.trx` at all,
+    so the artifact step reports "no files found" and the run tells you nothing
+    about which test never returned.
+  - The artifact upload now collects `Sequence_*.xml` too, and declares
+    `if-no-files-found: warn` rather than relying on the default.
+  - **It worked**: the next run failed in 9 minutes with a hang dump attached
+    instead of going silent for six hours, and the dump named a live-locked
+    `Connection.Dispose()` spinning on a `Connection.Close()` on its own stack.
+    Root cause and fix are in the gameserver module's changelog. The test
+    `--blame-hang` named was a bystander, as its own warning says it may be.
+
+### Changed
+- **G11 re-confirmed against `e3909d3`** — the one drill result that could not be
+  trusted after #22 rewrote the auth path (rate limiting, split
+  `JOIN_TOKEN_SECRET`, KCP encryption). Re-measured on the deployed stack:
+  behaviour is unchanged. With Redis down the gateway still answers `MsgAuth`
+  with **nothing at all** — the client burns its full 10.009s deadline, and the
+  gateway emits **zero application-level log lines** for the entire outage.
+  `DISASTER-RECOVERY.md` gains a dated re-confirmation section.
+  - The gateway was verified to be on `--backend=redis` **before** the drill
+    rather than after. G10 means an unset `REDIS_ADDR` silently selects the
+    in-memory backend, which would have made the whole drill measure nothing
+    while reporting cleanly.
+  - New observation: the go-redis failure changes shape mid-outage, from
+    `connect: connection refused` to `lookup redis: i/o timeout` — stopping the
+    container removes its Docker DNS record. **G5 is worse than it reads**: the
+    unbounded stall budget includes resolver timeouts, not just the 5s dial
+    default.
+  - The recovery timing from this run is recorded as an **upper bound of 18s, not
+    a heal time** — Redis was back 18s before the first probe, so the entry was
+    already present when first observed. The measured ~4s self-heal from the
+    post-G1 re-run stands as the real figure; this run is not a better one.
+- **Retracted the 150-player ceiling from the deploy module's docs.**
+  `deploy/CLAUDE.md` and `docs/README.md` still stated the per-game-server
+  ceiling "IS measured: 150 players, bottleneck = snapshot JSON serialization".
+  Both halves are now false — the figure predates Protobuf, the entity-type enum
+  and id interning, which removed 81% of the wire and with it the constraint that
+  produced 150. The root `CLAUDE.md` and ADR-7 had already been corrected; this
+  module had not, and `deploy/CLAUDE.md` is loaded into agent context, so it was
+  actively re-seeding a retracted number.
+  - Both files now lead with the figure worth planning on — **45.9 KB/s per
+    client at 200 players**, inside ADR-7's mobile threshold, reproduced to 0.3%
+    — and state plainly that **the player ceiling is unknown and not measurable
+    on the current hardware**, with ADR-7 item 6 named as the ⛔ blocker.
+  - The "Game servers @ 150" column is **removed, not updated**. Every value in
+    it was tier CCU divided by the retracted figure: arithmetic on a number that
+    no longer exists, wearing the confidence of a measurement.
+  - `GAMESERVER_CAPACITY=100` is re-described as a **policy limit rather than
+    headroom against a measured ceiling** — there is no measured ceiling for it
+    to have headroom against.
+
+### Added
 - `.env.example` now sets `GAME_DB_URL` instead of only mentioning it in a comment.
   Host-side tools read it — `bin/smoketest` (whose new `gamestate_*` persistence
   checks SKIP without it) and `gameserver-dotnet --migrate-only`. The gameserver

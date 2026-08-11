@@ -73,6 +73,13 @@ GAMESERVER_MAP_ID="${GAMESERVER_MAP_ID:-map_01}"
 # GAMESERVER_ADDR is correct.
 export GAMESERVER_ADDR GAMESERVER_MAP_ID
 export REDIS_ADDR REDIS_PASSWORD GAMESERVER_PUBLIC_ADDR
+# Both binaries refuse to start without JOIN_TOKEN_SECRET, and it must hold the
+# same value on the gateway and every game server. It is deliberately separate
+# from JWT_SECRET: a compromised game server must not be able to forge client
+# auth tokens. Exported (not passed as a flag) because the C# arg parser only
+# matches space-separated flags — `--jwt-secret=X` is silently ignored.
+JOIN_TOKEN_SECRET="${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}"
+export JWT_SECRET JOIN_TOKEN_SECRET
 
 # The Go gameserver has been removed. C# .NET 10 NativeAOT binary is the default.
 # Set GAMESERVER_RUNTIME=go only if you have a legacy Go binary to test against.

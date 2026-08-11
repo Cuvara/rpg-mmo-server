@@ -492,9 +492,12 @@ Put protection rules (required reviewers, branch restriction to `release-*`) on
 **production**.
 
 **Hard requirements.** The deploy job fails loudly if any of these is empty:
-`JWT_SECRET`, `POSTGRES_PASSWORD`, `NAKAMA_CONSOLE_PASSWORD` — plus
+`JWT_SECRET`, `JOIN_TOKEN_SECRET`, `POSTGRES_PASSWORD`, `NAKAMA_CONSOLE_PASSWORD` — plus
 `GRAFANA_ADMIN_PASSWORD` whenever `vars.MONITORING_ENABLED` is not exactly
 `false`, because a Grafana published with a default password is an open door.
+It also fails when `JOIN_TOKEN_SECRET` equals `JWT_SECRET`: the split exists so a
+compromised game server cannot mint client auth tokens, and one shared value
+silently gives that up.
 
 **Handling.** Secrets are passed to the step as environment variables, checked
 for emptiness *by name only*, and written to `$RPG_DEPLOY_DIR/deploy/.env` under
