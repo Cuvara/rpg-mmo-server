@@ -214,6 +214,22 @@ do_check() {
 	#
 	# Extra smoketest flags go in SMOKE_FLAGS, e.g.
 	#   SMOKE_FLAGS='-skip-db' ./stack.sh check
+	# `go` is frequently not on PATH in a non-login shell even when it is
+	# installed — a plain "go: command not found" here reads as "Go is missing"
+	# and sends people installing a toolchain they already have. Look in the
+	# usual places first, and if it really is absent say so with the fix.
+	if ! command -v go >/dev/null 2>&1; then
+		for candidate in "$HOME/go/bin/go" /usr/local/go/bin/go /usr/lib/go/bin/go; do
+			[ -x "$candidate" ] && PATH="$(dirname "$candidate"):$PATH" && export PATH && break
+		done
+	fi
+	if ! command -v go >/dev/null 2>&1; then
+		echo "error: 'go' is not on PATH and was not found in the usual locations." >&2
+		echo "       The stack itself is running — only this check needs Go." >&2
+		echo "       Fix: export PATH=\$PATH:/path/to/go/bin, then re-run ./stack.sh check" >&2
+		return 1
+	fi
+
 	(
 		cd ../smoketest
 		# shellcheck disable=SC2086
