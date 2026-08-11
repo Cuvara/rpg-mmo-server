@@ -466,11 +466,13 @@ public sealed class GameServerHost : IAsyncDisposable
             // Register connection
             _connections.Add(conn);
 
-            // Step 5: Send JoinTokenResp
-            var resp = WireProtocol.NewEnvelope(MsgType.JoinTokenResp,
-                new JoinTokenResponse { Ok = true, UserId = userId }, conn.Encoding);
-            await conn.WriteOneAsync(resp);
-
+            // Record the join BEFORE sending the response: the TCP stack may
+            // deliver the frame to the client before our FlushAsync Task
+            // completes, so any observer that acts on the response (tests,
+            // monitoring) must see the counters already updated.  If the
+            // subsequent WriteOneAsync throws, the finally block calls
+            // OnPlayerDisconnected which calls PlayerLeft — the counter stays
+            // balanced.
             _metrics?.PlayerJoined();
             // players_online is an independent counter, not derived from _connections,
             // so it must be balanced exactly once and only if it was incremented.
@@ -479,6 +481,11 @@ public sealed class GameServerHost : IAsyncDisposable
             // or down Redis must never delay a player entering the world.
             _registration?.NotifyPlayerCountChanged();
             _logger.LogInformation("Player {UserId} joined (total: {Count})", userId, _connections.Count);
+
+            // Step 5: Send JoinTokenResp
+            var resp = WireProtocol.NewEnvelope(MsgType.JoinTokenResp,
+                new JoinTokenResponse { Ok = true, UserId = userId }, conn.Encoding);
+            await conn.WriteOneAsync(resp);
 
             // Step 6: Start read/write loops + heartbeat
             var writeTask = conn.WriteLoopAsync();
