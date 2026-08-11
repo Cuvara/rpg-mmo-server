@@ -198,6 +198,31 @@ public class PostgresPlayerStoreTests
         Assert.Equal(10, b.Timeout); // bounded connect timeout -> fail fast at boot
     }
 
+    /// <summary>
+    /// Npgsql defaults GSS Encryption Mode to Prefer, so every connect opens with a
+    /// Kerberos handshake attempt. The Alpine runtime image carries no krb5 library
+    /// and we authenticate with a password, so that attempt could only fail and fall
+    /// back — after printing "Cannot load library libgssapi_krb5.so.2" to stdout,
+    /// outside the logger, on every single boot.
+    /// </summary>
+    [Fact]
+    public void BuildConnectionString_DisablesGssEncryption_UnlessAskedFor()
+    {
+        var fromUrl = new NpgsqlConnectionStringBuilder(PostgresPlayerStore.BuildConnectionString(
+            "postgres://game:localdev@localhost:5433/gamestate?sslmode=disable"));
+        Assert.Equal(GssEncryptionMode.Disable, fromUrl.GssEncryptionMode);
+
+        var fromKeywords = new NpgsqlConnectionStringBuilder(PostgresPlayerStore.BuildConnectionString(
+            "Host=db;Database=gamestate;Username=game;Password=pw"));
+        Assert.Equal(GssEncryptionMode.Disable, fromKeywords.GssEncryptionMode);
+
+        // An operator on a deployment that really does have Kerberos keeps their
+        // choice: Require must fail loudly, not be quietly downgraded to Disable.
+        var explicitRequire = new NpgsqlConnectionStringBuilder(PostgresPlayerStore.BuildConnectionString(
+            "Host=db;Database=gamestate;Username=game;Password=pw;GSS Encryption Mode=Require"));
+        Assert.Equal(GssEncryptionMode.Require, explicitRequire.GssEncryptionMode);
+    }
+
     [Fact]
     public void BuildConnectionString_PassesThroughKeywordForm_AndRejectsMissingDatabase()
     {

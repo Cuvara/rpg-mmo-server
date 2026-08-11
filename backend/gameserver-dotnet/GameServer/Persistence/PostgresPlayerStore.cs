@@ -223,6 +223,25 @@ public sealed class PostgresPlayerStore : IPlayerStore, IAsyncDisposable
         // Keep the connect timeout bounded so boot fails fast on an unreachable DB.
         if (!connectTimeoutSet) builder.Timeout = 10;
 
+        // Npgsql defaults GSS Encryption Mode to Prefer, so every connect attempts a
+        // Kerberos handshake first. The runtime image has no krb5 library — it is an
+        // Alpine runtime-deps image and we authenticate with a password — so the
+        // attempt could only ever fail and fall back, after printing
+        //
+        //   Cannot load library libgssapi_krb5.so.2
+        //
+        // to stdout, outside the logger, on every boot. That is a real error line in
+        // the log for a feature nobody asked for. Turn the attempt off rather than
+        // shipping a Kerberos stack to silence it.
+        //
+        // Only Prefer is rewritten. Require and Disable are deliberate operator
+        // choices and are left exactly as given — Require on a deployment that does
+        // have Kerberos must still fail loudly rather than be quietly downgraded.
+        // (The test for "did the caller set this?" cannot be ContainsKey: Npgsql's
+        // builder answers true for every keyword it knows, set or not.)
+        if (builder.GssEncryptionMode == GssEncryptionMode.Prefer)
+            builder.GssEncryptionMode = GssEncryptionMode.Disable;
+
         return builder.ConnectionString;
     }
 

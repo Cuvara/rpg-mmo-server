@@ -7,6 +7,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **Every boot logged a Kerberos library error it could never use.** The server
+  printed, outside the logger and immediately before `using postgres player store`:
+
+  ```
+  Cannot load library libgssapi_krb5.so.2
+  Error: Error loading shared library libgssapi_krb5.so.2: No such file or directory
+  ```
+
+  Npgsql 10 defaults `GSS Encryption Mode` to `Prefer`, so every connect opens by
+  attempting a Kerberos handshake. The runtime image is `runtime-deps:10.0-alpine`
+  with no krb5 library, and the game DB authenticates with a password, so the
+  attempt could only ever fail and fall back — after writing a genuine `[error]`
+  line into the log summary of an otherwise healthy server.
+  - `PostgresPlayerStore.BuildConnectionString` now sets `GSS Encryption Mode` to
+    `Disable`, rather than shipping a Kerberos stack to satisfy a probe for a
+    feature nobody uses.
+  - **Only `Prefer` is rewritten.** `Require` and `Disable` are deliberate operator
+    choices and pass through untouched — a `Require` on a deployment that does have
+    Kerberos must still fail loudly instead of being quietly downgraded.
+  - The "did the caller set this?" check is a value comparison, not
+    `builder.ContainsKey`: Npgsql's connection-string builder answers `true` for
+    every keyword it knows, set or not, which makes `ContainsKey` useless here.
+  - Verified A/B on the real image against the deployed Postgres: the previously
+    deployed image emits the two lines, an image built from this commit emits none,
+    with both reaching `using postgres player store` and a live listener.
 - **Shutdown could live-lock a thread and hold the process open forever.**
   `Connection.Close()` cancels the connection's `CancellationTokenSource`, and
   cancellation resumes everything parked on that token **inline, on the cancelling
