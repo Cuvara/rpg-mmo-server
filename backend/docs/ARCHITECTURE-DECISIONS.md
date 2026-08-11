@@ -922,6 +922,301 @@ IDs), not another encoding swap.
 
 ---
 
+## ADR-10 — Shared simulation: pure logic boundary, ECS on the server only
+
+**Status:** accepted 2026-08-11, not yet implemented.
+
+**Context.** The game server is to move its entity storage to
+[Arch](https://github.com/genaray/Arch), an archetype/chunk ECS for C#. At the
+same time, the long-stated goal that the Unity client and the server run *the
+same simulation code* (`Shared.GameLogic`) is still unrealised: the client
+references nothing today. Doing both at once forces a decision that is easy to
+get wrong by default — whether "share the simulation" means sharing the ECS.
+
+It does not. An ECS is a storage and scheduling choice. The game's rules are
+what must agree between the two sides, and those are separable from the
+container they are iterated out of.
+
+**Decision.**
+
+1. **Arch replaces `GameWorld` as the server's entity storage.** Not additive,
+   not alongside — two sources of truth inside one tick is a synchronisation bug
+   generator. Arch owns entity identity, component storage, queries and
+   iteration order.
+
+2. **`Shared.GameLogic` stays ECS-free.** No `Arch.Core` type may appear in its
+   public or internal surface: no `World`, no `Entity`, no `QueryDescription`, no
+   `[Component]`. It remains static functions over plain structs. Arch systems on
+   the server iterate and *call into* it; they do not absorb it. The same rule
+   already bars `UnityEngine` — this extends the constraint to the second engine
+   now in play, for the same reason.
+
+3. **The client consumes it as source, not as a DLL.** `Shared.GameLogic`
+   multi-targets `netstandard2.1;net10.0` and carries a `package.json` +
+   `.asmdef`, consumed by Unity through a UPM git dependency with a `?path=`
+   subfolder reference **pinned to a tag**. The normative form, in the client's
+   `Packages/manifest.json`:
+
+   ```json
+   "com.rpgmmo.shared-gamelogic": "https://github.com/dyCuong03/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.0"
+   ```
+
+   Compiling from source is what keeps IL2CPP from having to swallow a
+   `netstandard2.1` assembly, keeps the code steppable in the Editor, and removes
+   any possibility of binary drift between what the server ran and what the client
+   shipped. "Release" here therefore means **stamping a commit with a tag**, not
+   building an artifact. A `.tgz` on GitHub Releases would be strictly worse — UPM
+   consumes local paths, git URLs and registries, but not tarball URLs.
+
+   This mechanism is not novel in this project: the Unity client already resolves
+   `com.company.build-pipeline` through the identical `git?path=#ref` form, and
+   `rpg-mmo-server` is public, so no credential or deploy key is involved on a
+   developer machine or in CI.
+
+   **Pin a tag, never a branch.** A branch reference means the rules the client
+   predicts with change whenever someone pushes, silently, with no commit in the
+   client repo to attribute the change to. A tag makes adopting new rules a
+   deliberate, reviewable act, and `packages-lock.json` records the resolved
+   commit so a build stays reproducible even if a tag is moved. Tags are
+   `sgl-vX.Y.Z` with no `/`, since a slash is a valid git ref but its handling
+   inside a UPM `#fragment` is unverified.
+
+   Two mechanical guards make the boundary self-enforcing rather than
+   review-dependent: `<LangVersion>9.0</LangVersion>` on the csproj makes the
+   *server* build reject C# 10+ syntax the client could not compile, and
+   `"noEngineReferences": true` in the asmdef makes the *client* build reject a
+   `UnityEngine` reference. Each side fails on the rule the other side would
+   otherwise not notice being broken.
+
+4. **Conformance is mechanical, not editorial.** A committed set of golden
+   vectors — `(state, input, dt) → expected state` — is executed by the server's
+   xUnit suite *and* by the Unity Test Runner, from the same fixture files. A
+   divergence fails CI on whichever side moved. Without this, "shared logic" is
+   a shared file, not shared behaviour.
+
+   The format is constrained by both readers, so it is fixed here rather than
+   left to whoever writes first:
+
+   - **Floats are stored as their IEEE-754 bit pattern** (`"x": "0x40551EB8"`),
+     compared with `BitConverter.SingleToInt32Bits`. Decimal text does not
+     round-trip identically through two different serializers, and a fixture
+     compared with a tolerance would not be testing the property this ADR exists
+     to protect. Storing bits also makes the assertion self-documenting.
+   - **The top level is an object, not an array** (`{"cases": [...]}`), and the
+     schema stays flat with public fields only — no dictionaries, no properties.
+     That is the subset Unity's built-in `JsonUtility` can read, so the client
+     needs no JSON package at all.
+   - Fixtures are read by **EditMode** tests from the package path. A PlayMode or
+     IL2CPP build cannot read arbitrary paths and would need `Resources/` or
+     `StreamingAssets/`; that is deferred until something actually requires it,
+     since these are a CI conformance gate rather than a runtime asset.
+
+5. **The determinism budget is explicit.** `Shared.GameLogic` may use only
+   IEEE-754-exact float operations: `+ - * /`, comparison, and
+   `MathF.Min/Max/Abs/Sqrt`. Transcendentals (`Sin`, `Cos`, `Atan2`, `Pow`,
+   `Exp`) are **not** permitted, because their results are implementation-defined
+   and the two sides run different compilers on different architectures
+   (NativeAOT x64 server, IL2CPP ARM64 client). Adding one is an amendment to
+   this ADR, not a code review comment.
+
+**Why not share the ECS.** Four reasons, in descending weight:
+
+- Arch's Unity story is thin. The integration guide is one paragraph — "build
+  Arch as a DLL and add it to the Unity project" — with no statement about
+  IL2CPP, AOT, code stripping or source generators, and it concedes there is no
+  example project. That is enough to build on; it is not enough to place the
+  determinism contract on top of.
+- The client already ships Unity DOTS (Entities 1.4.8, Burst, Collections).
+  Two ECS frameworks in one IL2CPP build means two sets of AOT generic
+  instantiations and two stripping surfaces, for no gameplay benefit.
+- Arch is not Burst-compatible. If client-side prediction ever moves into a
+  Burst job, the logic must already be static functions over blittable structs —
+  which is exactly what constraint 2 preserves and what an Arch-typed API would
+  foreclose.
+- Arch is at `2.1.0-beta`. Coupling the shared contract to it makes every
+  upgrade of a pre-1.0-stability dependency a client rebuild with prediction
+  divergence as the failure mode.
+
+**What must change first.** Four properties of the current
+`Shared.GameLogic` block both halves of this, and are prerequisites rather than
+follow-ups:
+
+| | Current | Required | Why it blocks |
+|---|---|---|---|
+| Target framework | `net10.0` only | `netstandard2.1;net10.0` | Needed for the server-side and tooling builds; see the note below on why it is not sufficient |
+| `EntityState.Id` | `string` | integer handle | A managed reference inside an ECS component puts a pointer in every chunk and is prohibited outright under Burst |
+| `EntityState.Type` | `string` | enum | Same, plus it duplicates `EntityType` which the wire already carries as an enum |
+| `AoiLogic.GetNearbyEntities` | returns `new List<EntityState>()` | fills a caller-provided `Span<T>` | Allocates per call, per tick, per entity — the cost Arch exists to remove |
+
+**Multi-targeting alone does not make the library Unity-consumable, and the
+constraint that matters is not `netstandard2.1`.** Because decision 3 has the
+client compile *source*, Unity never loads the netstandard assembly — Unity's own
+compiler is what has to accept these files, and it is **C# 9** (Unity 6 does not
+support C# 10 or later). Three properties of the current source fail there:
+
+- **File-scoped namespaces** (`namespace X;`) are C# 10 and appear in all 11
+  files. Mechanical to fix, but it is every file, so it is decided once.
+- **`ImplicitUsings=enable`**, which the sources rely on — e.g. `MapBounds.cs`
+  uses `MathF` with no `using System;`. Unity has no implicit usings, so every
+  file needs its usings written out.
+- **`System.Text.Json.Serialization` attributes** on `InputData` and
+  `SnapshotData`. Unity does not ship System.Text.Json.
+
+The third looks like it forces a choice between moving those DTOs out of the
+library and taking an STJ dependency through IL2CPP. It does not: **nothing
+serializes these types.** ADR-9 deleted the hand-written message mirrors and made
+the generated Protobuf types the server's only message classes, with legacy JSON
+produced by a hand-written `Utf8JsonWriter` codec over *those*. `InputData` and
+`SnapshotData` are only ever constructed and read directly. The attributes are
+dead metadata from before ADR-9 and are simply deleted — no relocation, no
+dependency, no behaviour change.
+
+`netstandard2.1` itself needs no polyfill: `MathF.Min/Max/Abs/Sqrt` is available
+there, and that set is exactly the determinism budget in rule 5.
+
+**There are three identity spaces, and conflating any two of them is the main
+hazard in this work.** An earlier draft of this ADR cited the wire's interned ids
+as "prior art" for the simulation handle. That was wrong and is corrected here:
+the wire handle is deliberately the *opposite* kind of identity.
+
+| Identity | Lifetime | Scope | Lives in |
+|---|---|---|---|
+| `user_id` (string) | durable, across sessions and servers | global | `player_states`, join-token `sub`, reconnect/hold table |
+| simulation handle (integer, new) | the entity's lifetime | one server process | `EntityState.Id`, ECS components |
+| wire handle (`EntitySnapshot.handle`) | **one keyframe interval** | one connection | snapshot encoding only |
+
+The wire handle is reset at every keyframe and allocated from 1 per connection —
+that is precisely what bounds a client/server disagreement to a single keyframe
+interval (ADR-9 follow-on, `wire.proto`). A simulation handle must be stable for
+the entity's lifetime. Reusing one as the other yields an identifier whose meaning
+silently changes every keyframe.
+
+The mapping between `user_id` and simulation handle must therefore be an explicit,
+named structure, not an implicit equality. Today `EntityState.Id` *is* the user id
+(`GameServer.cs:443`, `Id = userId`), so this migration is not "narrow a field" —
+it is "split one identity into two", and every existing use has to be classified
+as one or the other. The reconnect/hold table stays keyed by `user_id`: a hold
+exists precisely when the entity does not, so it cannot be keyed by a handle.
+
+**Consequences and accepted costs.**
+
+- **ADR-7's measurements do not carry over.** The 45.9 KB/s per client and
+  ~82 MiB at 200 players figures were taken against `GameWorld`. Storage is
+  being replaced underneath the tick loop; the benchmark must be re-run before
+  any of those numbers is quoted again. The per-server player ceiling remains
+  unknown for the reason ADR-7 gives, and this does not change that.
+- **The id migration reaches beyond the simulation.** `EntityState.Id` is a
+  `string` today in persistence (`player_states`), in the snapshot encoder and
+  in the reconnect/hold bookkeeping keyed by user id. The handle is an
+  *in-simulation* identity; the mapping to the durable string user id has to
+  live somewhere explicit, not be assumed to be the same value.
+- **Bit-exactness is currently achievable and is worth keeping.** The existing
+  logic already uses only the permitted operations — no transcendental appears
+  anywhere in `Shared.GameLogic`. Prediction plus reconciliation does not
+  strictly require bit-exactness, since the server is authoritative and a
+  divergence is corrected on the next snapshot; what it buys is that
+  reconciliation fires on packet loss rather than continuously. Rule 5 exists to
+  keep an asset that already exists.
+- Arch's own multithreading is out of scope here. The tick loop's threading
+  model is unchanged by this decision and is a separate one.
+
+**Revisit if** Arch gains a supported, exercised Unity path with an AOT
+statement, in which case sharing systems (not just functions) becomes worth
+re-costing — or if the golden vectors prove impossible to run under the Unity
+Test Runner in CI, which would remove the mechanism this ADR relies on and put
+rule 4 back in question.
+
+---
+
+## ADR-11 — Arch under NativeAOT: hints are generated, CommandBuffer is not used
+
+**Status:** accepted 2026-08-11, measured. Constrains ADR-10 decision 1.
+
+**Context.** ADR-10 chose Arch as the server's entity storage before anyone had
+established that Arch works in a NativeAOT binary. The server ships NativeAOT
+(`GameServer.csproj`, `<PublishAot>true</PublishAot>`), and every other dependency
+in that file carries a comment justifying why it is trim/AOT-clean. Arch's
+documentation says nothing about AOT at all.
+
+A throwaway spike (`_spike/ArchAotSpike`, branch `spike/gameserver/arch-nativeaot`)
+published Arch `2.1.0-beta` under the real project's AOT settings across nine
+configurations and ran each native binary against a plain dictionary baseline.
+
+**What was measured.**
+
+`dotnet publish` succeeds **cleanly in every configuration**. The binary then
+throws on the first archetype creation:
+
+```
+NotSupportedException: 'Identity[]' is missing native code or metadata.
+```
+
+All three usage modes fail — direct query, chunk iteration, command buffer. The
+publish emits no warning that predicts it. This is precisely the failure mode that
+survives `dotnet test`, because tests run on CoreCLR with a JIT.
+
+The cause is that `Arch.Core.Chunk`'s constructor allocates one backing array per
+component type through `System.Array.CreateInstance(Type, int)` — runtime,
+`Type`-driven array creation. Under NativeAOT the array type `T[]` for a
+user-defined struct exists only if ILC saw it constructed statically somewhere.
+
+Statically constructing one array per component type in a `[ModuleInitializer]`
+fixes it. With that in place:
+
+| Mode | Result |
+|---|---|
+| direct query | works; state checksum identical to the baseline |
+| chunk iteration | works; identical |
+| source generator (`Arch.System`) | works; identical |
+| **`CommandBuffer`** | **still throws** `NullReferenceException` inside `Arch.Core.World.Has<T>` |
+
+Two residual hazards, both confirmed by experiment rather than reasoning:
+
+1. **A missing hint is invisible.** Omitting one component type from the list
+   produces no build error and no startup error — the binary crashes on the first
+   tick that creates an archetype containing it. The spike demonstrates this by
+   deliberately omitting `Stunned`. A rare archetype means a production crash.
+2. **`CommandBuffer` is unusable**, and it is the idiomatic way to make structural
+   changes (spawn, despawn, add/remove component) while iterating.
+
+**Decision.**
+
+1. **Arch stays** (ADR-10 decision 1 is unchanged). Where it runs, it is
+   behaviourally identical to the baseline — the checksums match exactly, so this
+   is a packaging problem, not a correctness one.
+2. **The AOT hint list is generated or guarded, never hand-maintained.** Either a
+   source generator emits one static array construction per component type, or a
+   test enumerates every component type and fails when one is unhinted. A
+   hand-written list whose omissions surface only in production is not an
+   acceptable steady state. This is the load-bearing part of this ADR: without it,
+   adding a component is a silent production hazard forever.
+3. **`CommandBuffer` is not used.** Structural changes are deferred to an explicit
+   phase outside iteration. At a 10–15 Hz tick this costs nothing that matters, and
+   it removes a dependency on a code path that is broken in the shipping
+   configuration.
+4. **The `publish` CI job must run the binary, not merely build it.** A clean
+   publish demonstrably does not imply a working binary here. A smoke run of the
+   published artifact is what would have caught this, and is what will catch the
+   next instance.
+
+**Consequences.**
+
+- Adding a component type is no longer a purely local act; it must reach whatever
+  mechanism decision 2 settles on. That mechanism should fail loudly at build or
+  test time, so the cost is paid once rather than per component.
+- Arch remains at `2.1.0-beta`. This spike found one library bug that survives the
+  documented workaround; treat further AOT-related breakage as likely rather than
+  surprising, and re-run the spike on any Arch upgrade.
+- The spike is throwaway and is not merged into the solution. It is retained on its
+  branch as the reproduction for anyone revisiting this.
+
+**Revisit if** Arch publishes an AOT statement or fixes `CommandBuffer`, or if the
+hint mechanism turns out to be unable to see component types defined outside the
+server assembly — which would be a stronger argument against Arch than anything
+found here.
+
+---
+
 ## Summary of decisions
 
 | # | Area | Decision |
@@ -935,3 +1230,5 @@ IDs), not another encoding swap.
 | 7 | CCU/cost | All figures are unbenchmarked estimates; benchmark plan anchored to the 66ms tick budget |
 | 8 | Realtime security | Opt-in KCP PSK encryption (per-session keys deferred); `JOIN_TOKEN_SECRET` split from `JWT_SECRET`, both rotatable; token-bucket rate limits on accepts, frames and `gateway_token`. KCP is **not** reachable end to end — the C# game server has no KCP |
 | 9 | Wire encoding | Protobuf from one committed schema; JSON kept during migration and distinguished by the first body byte, so components upgrade in any order |
+| 10 | Shared simulation | Arch replaces `GameWorld` on the server; `Shared.GameLogic` stays ECS-free and ships to Unity as multi-targeted **source**; golden vectors run on both sides in CI; only IEEE-exact float ops permitted in shared code |
+| 11 | Arch under NativeAOT | Arch publishes clean and then throws at runtime without per-component AOT hints; hints are **generated or guarded, never hand-written**; `CommandBuffer` is broken under AOT and is not used; the `publish` CI job must **run** the binary, not just build it |
