@@ -59,9 +59,9 @@ public class TickCooldownTests
 
     // --- Behaviour through the input handler ---
 
-    private static (InputHandler handler, GameWorld world) Build(int tickRate = GameConstants.DefaultTickRate)
+    private static (InputHandler handler, EcsWorld world) Build(int tickRate = GameConstants.DefaultTickRate)
     {
-        var world = new GameWorld();
+        var world = new EcsWorld();
         var handler = new InputHandler(world, NullLogger.Instance, null, tickRate);
         return (handler, world);
     }
@@ -148,7 +148,7 @@ public class TickCooldownTests
         // This is exactly what a wall-clock cooldown could not guarantee.
         static int RunOnce()
         {
-            var world = new GameWorld();
+            var world = new EcsWorld();
             var handler = new InputHandler(world, NullLogger.Instance, null, GameConstants.DefaultTickRate);
             world.AddEntity(TestHelpers.CreatePlayer("a"));
             world.AddEntity(TestHelpers.CreatePlayer("b", x: 1, hp: 1000));

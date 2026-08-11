@@ -22,7 +22,7 @@ namespace GameServer.Server;
 /// </summary>
 public sealed class TickLoop
 {
-    private readonly GameWorld _world;
+    private readonly EcsWorld _world;
     private readonly InputHandler _handler;
     private readonly ConnectionManager _connections;
     private readonly int _tickRate;
@@ -43,7 +43,7 @@ public sealed class TickLoop
     public ulong CurrentTick => _currentTick;
 
     public TickLoop(
-        GameWorld world,
+        EcsWorld world,
         InputHandler handler,
         ConnectionManager connections,
         int tickRate,
@@ -102,6 +102,14 @@ public sealed class TickLoop
 
         _currentTick++;
         _snapshotsThisTick = 0;
+
+        // Structural phase, before anything iterates. ADR-11 rules out Arch's
+        // CommandBuffer (it throws under NativeAOT even with the array hints), so
+        // spawns and despawns raised while a query was being iterated are applied
+        // here instead — one explicit point in the tick, not a hidden side effect
+        // of a lock release. Normally a no-op: the network threads' spawn/despawn
+        // paths take the world write lock and so cannot overlap an iteration.
+        _world.ApplyStructuralChanges();
 
         // Drain and process all pending inputs under one world Update
         var inputs = _world.DrainInputs();

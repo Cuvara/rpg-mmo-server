@@ -6,3 +6,5 @@ publish/
 .vs/
 *.DotSettings.user
 TestResults/
+publish/
+publish-*/

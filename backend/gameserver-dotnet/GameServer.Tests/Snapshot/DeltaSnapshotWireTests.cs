@@ -48,10 +48,10 @@ public class DeltaSnapshotWireTests : IDisposable
         return (conn, client.GetStream());
     }
 
-    private static (TickLoop loop, GameWorld world, ConnectionManager connections) BuildLoop(
+    private static (TickLoop loop, EcsWorld world, ConnectionManager connections) BuildLoop(
         int keyframeInterval)
     {
-        var world = new GameWorld();
+        var world = new EcsWorld();
         var connections = new ConnectionManager();
         var handler = new InputHandler(world, NullLogger.Instance, null, GameConstants.DefaultTickRate);
         var loop = new TickLoop(world, handler, connections, GameConstants.DefaultTickRate,

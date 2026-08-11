@@ -12,6 +12,15 @@
 
   <ItemGroup>
     <PackageReference Include="System.Text.Json" Version="10.0.*" />
+    <!-- Entity storage (ADR-10). Arch is an archetype/chunk ECS and is the ONLY
+         entity store on the server; it replaced the hand-rolled GameWorld.
+         AOT note (ADR-11): Arch.Core.Chunk allocates its backing arrays with
+         System.Array.CreateInstance(Type, int), so every component type needs its
+         T[] statically constructed or the NativeAOT binary throws
+         NotSupportedException on the first archetype creation. World/ArchAotHints.cs
+         does that; ArchAotHintTests is the guard that keeps the list complete.
+         CommandBuffer is NOT used - it is broken under AOT (ADR-11). -->
+    <PackageReference Include="Arch" Version="2.1.0-beta" />
     <!-- Wire protocol. Generated (not reflection-based) serializers, so the
          NativeAOT publish stays warning-free; see shared/proto/wire.proto. -->
     <PackageReference Include="Google.Protobuf" Version="3.29.3" />

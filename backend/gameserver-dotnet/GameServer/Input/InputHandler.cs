@@ -14,7 +14,7 @@ public sealed class InputHandler
     /// <summary>Callback invoked when an entity is killed.</summary>
     public delegate void DeathHandler(EntityState victim, EntityState killer);
 
-    private readonly GameWorld _world;
+    private readonly EcsWorld _world;
     private readonly ILogger _logger;
     private readonly DeathHandler? _onDeath;
     private readonly float _deltaTime;
@@ -36,7 +36,7 @@ public sealed class InputHandler
     /// </param>
     /// <param name="bounds">Play area; defaults to <see cref="MapBounds.Default"/>.</param>
     public InputHandler(
-        GameWorld world,
+        EcsWorld world,
         ILogger logger,
         DeathHandler? onDeath = null,
         int tickRate = GameConstants.DefaultTickRate,
