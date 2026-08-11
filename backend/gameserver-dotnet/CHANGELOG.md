@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`Shared.GameLogic` produced no assembly in Unity — it now ships its `.meta`
+  files.** `sgl-v0.1.0` imported cleanly as a UPM package and then did nothing:
+  Unity treats a git-sourced package as **immutable** and will not generate
+  `.meta` files for it, so an asset without one is silently ignored. The package
+  cache contained zero `.meta` files, `Shared.GameLogic.asmdef` was therefore
+  never registered, and no `Shared.GameLogic.dll` appeared in
+  `Library/ScriptAssemblies`. No error, no warning — the package simply had no
+  effect.
+
+  19 `.meta` files are now committed: one per folder, per `.cs`, per golden-vector
+  `.json`, and one for the asmdef. GUIDs are derived deterministically from the
+  asset path (md5), so they are stable across regeneration and identical for every
+  consumer. `package.json` and the `.csproj` get none, because Unity imports
+  neither.
+
+  This was only findable by opening the Editor, which is exactly why `sgl-v0.1.0`
+  was tagged with "UPM resolution unverified" recorded in the tag message rather
+  than assumed.
+
 ### Added
 - **`GameServer.Tests/Aot/JsonReflectionGuardTests.cs`** — scans the compiled GameServer
   assembly's metadata for `JsonSerializer` member references and fails on any overload that
