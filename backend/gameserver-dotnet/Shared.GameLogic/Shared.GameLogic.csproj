@@ -1,11 +1,20 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <!-- netstandard2.1 is the Unity-compatible surface (ADR-10). The client
+         compiles these files as SOURCE, so the assembly itself is only used by
+         the server and tooling; the target is here to prove nothing in the
+         library reaches past what Unity's runtime profile offers. -->
+    <TargetFrameworks>netstandard2.1;net10.0</TargetFrameworks>
     <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Unity has no implicit usings. Disabling it here makes the SERVER build
+         fail on a missing using, instead of the client discovering it later. -->
+    <ImplicitUsings>disable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <LangVersion>latest</LangVersion>
+    <!-- Unity 6's compiler is C# 9. Pinning the language version makes the
+         server build reject C# 10+ syntax (file-scoped namespaces, etc.) that
+         the client could not compile. Do not raise this without ADR-10. -->
+    <LangVersion>9.0</LangVersion>
   </PropertyGroup>
 
 </Project>
