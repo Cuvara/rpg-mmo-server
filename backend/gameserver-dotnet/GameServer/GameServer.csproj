@@ -21,6 +21,40 @@
          does that; ArchAotHintTests is the guard that keeps the list complete.
          CommandBuffer is NOT used - it is broken under AOT (ADR-11). -->
     <PackageReference Include="Arch" Version="2.1.0-beta" />
+    <!-- Transitive via Arch, and the one dependency here that is NOT AOT-clean:
+         the publish reports 37 IL2026/IL3050 diagnostics against it. Audited
+         2026-08-11; see docs/DESIGN.md "Collections.Pooled AOT warnings".
+
+         All 37 are in ONE type, Collections.Pooled.PooledEnumerableJsonConverter,
+         a JsonConverterFactory. PooledList/Set/Queue/Stack/Collection/
+         ObservableCollection each carry [JsonConverter(typeof(...))], and that
+         attribute alone roots the converter, so ILC compiles it in (69 method
+         bodies in the map file) and analyses it. The warnings are caused by the
+         attribute, not by any call site.
+
+         Unreachable here, on four independently checked facts:
+           1. A JsonConverterFactory runs only when System.Text.Json builds a
+              JsonTypeInfo for an annotated type, which only the REFLECTION-based
+              resolver does.
+           2. This assembly never uses that resolver - all three JsonSerializer
+              call sites pass a source-generated JsonTypeInfo. Enforced by
+              GameServer.Tests/Aot/JsonReflectionGuardTests.cs, which scans this
+              assembly's metadata and fails on any reflection-based overload.
+           3. Arch has ZERO System.Text.Json member references - it uses the
+              Pooled collections as storage and never serialises them.
+           4. Collections.Pooled has no ModuleInitializer and no <Module> cctor,
+              so it never registers these converters globally.
+
+         Trigger, if it ever became reachable: code that (de)serialises a Pooled
+         collection - directly or as a member of another type - through a
+         reflection-based JsonSerializer overload. CreateConverter then calls
+         Type.MakeGenericType and the instantiation may not exist in the binary.
+         Unlike the Arch hint bug this is NOT a rare-path hazard: no such code
+         exists, and adding it would fail the guard test at (2) first.
+
+         NOT suppressed. Do not add NoWarn - the summary IL3053/IL2104 lines are
+         the standing reminder that this package is on a -preview version whose
+         newest target is netcoreapp3.0. Re-run the audit on any Arch upgrade. -->
     <!-- Wire protocol. Generated (not reflection-based) serializers, so the
          NativeAOT publish stays warning-free; see shared/proto/wire.proto. -->
     <PackageReference Include="Google.Protobuf" Version="3.29.3" />

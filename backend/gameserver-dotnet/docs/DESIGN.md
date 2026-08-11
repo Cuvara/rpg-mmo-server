@@ -974,3 +974,95 @@ author which line to add. It was then removed.
   `GameServer.csproj` is warning-free, so this is a new exception to that file's
   standard. The binary works — the E2E suite passes against it — but the warnings are
   unexamined, and they are the noise a future real warning would hide in.
+
+## Collections.Pooled AOT warnings (audited 2026-08-11)
+
+`Arch` pulls in `Collections.Pooled 2.0.0-preview.27`, and it is the only dependency in
+`GameServer.csproj` that is not AOT-clean. The publish summarises it as two lines:
+
+```
+warning IL3053: Assembly 'Collections.Pooled' produced AOT analysis warnings.
+warning IL2104: Assembly 'Collections.Pooled' produced trim warnings.
+```
+
+Published with `-p:TrimmerSingleWarn=false`, those expand to **37 individual
+diagnostics — 19 IL3050 and 18 IL2026 — all in a single type**,
+`Collections.Pooled.PooledEnumerableJsonConverter` and its six nested
+`*ConverterInner<T>` classes. They are the expected trio for a reflection-based JSON
+converter: `Type.MakeGenericType`, `JsonSerializerOptions.GetConverter`, and the
+reflection-based `JsonSerializer.Serialize`/`Deserialize` overloads.
+
+### Why the converter is in the binary at all
+
+`PooledList<T>`, `PooledSet<T>`, `PooledQueue<T>`, `PooledStack<T>`,
+`PooledCollection<T>` and `PooledObservableCollection<T>` each carry
+`[JsonConverter(typeof(PooledEnumerableJsonConverter))]` (confirmed by reading the
+assembly's metadata). That attribute is a static reference from a type Arch uses to the
+converter, so ILC roots the converter, compiles it — 69 method bodies appear in the ILC
+map file — and analyses it. **The warnings are produced by the attribute, not by any
+call site.** Nothing has to call the converter for them to appear.
+
+### Why it cannot fire
+
+A `JsonConverterFactory` is invoked only when System.Text.Json builds a `JsonTypeInfo`
+for an annotated type, and only the **reflection-based resolver** consults
+`[JsonConverter]` on an arbitrary type. Four facts, each checked separately:
+
+1. This assembly never uses that resolver. All three `JsonSerializer` call sites
+   (`EventPublisher`, and two in `JwtValidator`) pass a source-generated `JsonTypeInfo`.
+   The serialised types — `DeathPayload`, `JwtHeaderJson`, `JwtClaimsJson` — are strings
+   only; no collection of any kind.
+2. `Arch.dll` has **zero** System.Text.Json member references. It uses the Pooled
+   collections as storage and never serialises them.
+3. `Collections.Pooled` has **no `ModuleInitializer` and no `<Module>` cctor**, so it
+   never registers these converters globally into a shared `JsonSerializerOptions`.
+4. No source file in `GameServer/` or `Shared.GameLogic/` names a Pooled type.
+
+### The trigger condition, and why it is not the Arch-hint hazard
+
+For any of the 37 to become a real failure, someone would have to (de)serialise a Pooled
+collection — directly or as a member of another type — through a reflection-based
+`JsonSerializer` overload. `CreateConverter` would then call `Type.MakeGenericType`, and
+under NativeAOT that instantiation may not exist in the binary.
+
+This is worth contrasting with ADR-11's missing-hint bug, because they look similar and
+are not. **The hint bug fired on an ordinary action — a player joining.** No new code was
+needed; the hazard was latent in the normal path and only the rarity of an archetype
+decided when you noticed. **This one requires code that does not exist**, and writing it
+would be a deliberate act.
+
+### The guard
+
+That distinction is what the justification rests on, and it is a property of *our* code
+rather than of the dependency — so it is enforced rather than asserted.
+`GameServer.Tests/Aot/JsonReflectionGuardTests.cs` reads the compiled GameServer
+assembly's metadata, finds every `JsonSerializer` member reference, and fails on any
+whose signature lacks a `JsonTypeInfo` or `JsonSerializerContext` parameter. It reads
+metadata rather than source, so generated code counts and a `using` alias or helper
+wrapper cannot hide a call.
+
+**Verified to fire:** replacing `EventPublisher`'s source-generated call with the
+reflection-based `JsonSerializer.SerializeToUtf8Bytes(payload)` failed the test, naming
+`JsonSerializer.SerializeToUtf8Bytes(!!0, JsonSerializerOptions)`. Reverted.
+
+### What was rejected
+
+- **Suppressing with `NoWarn`.** The whole value of `GameServer.csproj`'s convention is
+  that every entry was actually checked; a suppression would make the next genuinely
+  dangerous dependency indistinguishable from this one. The summary IL3053/IL2104 lines
+  stay as the standing reminder that this package is on a `-preview` version.
+- **`<JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>`.**
+  Tried it; **the warning count stayed at exactly 37.** The feature switch trims the
+  reflection resolver, but the `[JsonConverter]` attribute roots the converter
+  independently, so ILC still compiles and analyses it. It would be a defensible setting
+  on its own merits — it turns "we only use source-generated JSON" into a runtime
+  guarantee — but it does not address these warnings and is not part of this change.
+
+### Standing risk
+
+`Collections.Pooled 2.0.0-preview.27`'s newest target framework is **`netcoreapp3.0`**;
+the build resolves `lib/netcoreapp3.0/` into a .NET 10 NativeAOT binary. That is a large
+version gap on a pre-release package this project did not choose directly. Re-run this
+audit on any Arch upgrade — `dotnet publish -p:TrimmerSingleWarn=false` and diff the
+diagnostic list against the 37 recorded here.
+
