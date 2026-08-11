@@ -7,6 +7,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **Float intermediates now rounded explicitly — the client and server disagreed
+  by one ULP.** The golden vectors, on their first run inside Unity, failed 3 of
+  96 cases. All three traced to one shape: `x * x + y * y`, in
+  `Vec2.SqrMagnitude` and in `MovementSystem.ResolveDirection`.
+
+  C# permits a float expression to be evaluated at higher precision than `float`
+  (ECMA-334 §11.3.7). .NET 10's RyuJIT evaluates strictly in float32; Unity's
+  Editor Mono JIT keeps double-precision intermediates and rounds once at the
+  end. Both are conforming. The results differ by one ULP — and since that value
+  feeds the deadzone and magnitude-clamp comparisons, the two runtimes could take
+  **different branches**, not merely report slightly different numbers.
+
+  Every arithmetic intermediate in `Vec2` and `MovementSystem` is now cast to
+  `float` per operation. `MovementSystem.Integrate` gets an extra split: `a + b *
+  c` can be contracted into a single FMA instruction that rounds once instead of
+  twice, so the multiply is now its own `float` local to deny the contraction.
+
+  **The server's own results are unchanged** — RyuJIT already evaluated in
+  float32, so the casts are a no-op there and every existing golden vector still
+  passes. The fix moves Unity onto the server's answer rather than the reverse.
+
+  ADR-10 rule 5 has been amended: choosing IEEE-exact *operations* was necessary
+  but not sufficient. Worth noting how this was found — the operations were
+  already legal, the whole server suite passed, and nothing warned. Only
+  replaying the vectors under the other runtime exposed it.
+
+### Fixed
 - **`Shared.GameLogic` produced no assembly in Unity — it now ships its `.meta`
   files.** `sgl-v0.1.0` imported cleanly as a UPM package and then did nothing:
   Unity treats a git-sourced package as **immutable** and will not generate

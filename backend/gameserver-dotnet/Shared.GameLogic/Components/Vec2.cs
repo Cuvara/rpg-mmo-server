@@ -28,8 +28,20 @@ namespace Shared.GameLogic.Components
 
         // --- Properties ---
 
-        /// <summary>Squared magnitude (avoids sqrt).</summary>
-        public float SqrMagnitude => X * X + Y * Y;
+        /// <summary>
+        /// Squared magnitude (avoids sqrt).
+        /// </summary>
+        /// <remarks>
+        /// Each intermediate is cast to <c>float</c> explicitly. C# permits a
+        /// float expression to be evaluated at higher precision (ECMA-334
+        /// §11.3.7), and the two runtimes this code has to agree on take
+        /// different options: .NET 10's RyuJIT evaluates strictly in float32,
+        /// while Unity's Editor Mono JIT keeps double-precision intermediates
+        /// and rounds once at the end. Written as <c>X * X + Y * Y</c> the two
+        /// disagreed by one ULP, which the golden vectors caught.
+        /// Do not "simplify" this back to a single expression.
+        /// </remarks>
+        public float SqrMagnitude => (float)((float)(X * X) + (float)(Y * Y));
 
         /// <summary>Magnitude (length) of the vector.</summary>
         public float Magnitude => MathF.Sqrt(SqrMagnitude);
@@ -49,9 +61,10 @@ namespace Shared.GameLogic.Components
         /// <summary>Squared Euclidean distance (no sqrt — use for comparisons).</summary>
         public static float DistanceSq(in Vec2 a, in Vec2 b)
         {
-            float dx = a.X - b.X;
-            float dy = a.Y - b.Y;
-            return dx * dx + dy * dy;
+            // Per-operation float casts, for the reason given on SqrMagnitude.
+            float dx = (float)(a.X - b.X);
+            float dy = (float)(a.Y - b.Y);
+            return (float)((float)(dx * dx) + (float)(dy * dy));
         }
 
         /// <summary>Euclidean distance between two points.</summary>
