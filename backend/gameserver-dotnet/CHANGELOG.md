@@ -7,6 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`package.json` and the `.csproj` now ship `.meta` files too.** `sgl-v0.1.1`
+  covered the folders, sources, fixtures and the asmdef, on the reasoning that
+  Unity imports neither of those two. That reasoning was wrong: Unity logs a
+  console error for *every* asset without a `.meta` inside an immutable package,
+  including files it does not otherwise care about, so the client console was
+  permanently red with two errors on every import. Both now carry a
+  `DefaultImporter` meta with the same deterministic path-derived GUID scheme.
+
+### Fixed
 - **Float intermediates now rounded explicitly — the client and server disagreed
   by one ULP.** The golden vectors, on their first run inside Unity, failed 3 of
   96 cases. All three traced to one shape: `x * x + y * y`, in
