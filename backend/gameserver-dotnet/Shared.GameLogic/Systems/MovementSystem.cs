@@ -80,7 +80,13 @@ namespace Shared.GameLogic.Systems
             if (!float.IsFinite(moveX) || !float.IsFinite(moveY))
                 return MoveResult.Rejected;
 
-            float magSq = moveX * moveX + moveY * moveY;
+            // Explicit per-operation casts: C# allows float arithmetic to be
+            // evaluated at higher precision (ECMA-334 §11.3.7), and .NET 10
+            // (strict float32) and Unity's Mono JIT (double intermediates)
+            // choose differently. Without these the two runtimes disagree by one
+            // ULP here, which changes which branch the magnitude comparisons
+            // below take. See Vec2.SqrMagnitude for the same fix.
+            float magSq = (float)((float)(moveX * moveX) + (float)(moveY * moveY));
 
             if (magSq <= GameConstants.InputDeadzoneSq)
                 return MoveResult.None;
@@ -110,10 +116,18 @@ namespace Shared.GameLogic.Systems
         /// <param name="bounds">Play area the resulting position is clamped into.</param>
         public static Vec2 Integrate(in Vec2 position, in Vec2 direction, float speed, float dt, in MapBounds bounds)
         {
-            float step = speed * ClampDeltaTime(dt);
+            float step = (float)(speed * ClampDeltaTime(dt));
+
+            // `a + b * c` is the shape most at risk here: besides the wider
+            // intermediates that break SqrMagnitude, a JIT is free to contract a
+            // multiply-add into a single FMA instruction, which rounds ONCE
+            // instead of twice and so gives a different float. Splitting the
+            // multiply into its own float local denies the contraction.
+            float dx = (float)(direction.X * step);
+            float dy = (float)(direction.Y * step);
             var moved = new Vec2(
-                position.X + direction.X * step,
-                position.Y + direction.Y * step);
+                (float)(position.X + dx),
+                (float)(position.Y + dy));
             return bounds.Clamp(moved);
         }
 

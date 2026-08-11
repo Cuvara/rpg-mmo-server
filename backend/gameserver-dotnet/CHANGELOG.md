@@ -7,6 +7,94 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Golden vector `multiply_add_intermediate_rounding`** — the split-multiply in
+  `MovementSystem.Integrate` is now covered by a test rather than by reasoning.
+
+  Written as one expression, `position + direction * step` may be evaluated
+  strictly in float32, with a wider (double) intermediate, or contracted into a
+  single FMA that rounds once instead of twice. Splitting the multiply denies all
+  three. Every other movement case rounds identically under all three, so the fix
+  passed and failed nothing either way. These inputs separate the strict result
+  (`0x401B4740`, what the fixed code produces) from the alternatives
+  (`0x401B473F`).
+
+  **The fix is load-bearing, not precautionary.** Running the unfixed expression
+  shape directly under Unity's Editor Mono JIT — operands read from static fields
+  so Roslyn could not constant-fold — produced `0x401B473F`, a different position
+  from the server's.
+
+  **What the case does not prove.** It cannot distinguish FMA contraction from
+  double widening: both predict `0x401B473F`, so a pass rules out neither
+  individually. The mechanism actually measured under Editor Mono is *widening* —
+  on `sqrt_negative_components` an FMA would give the strict answer
+  (`0x4203EB84`) while Unity produced the wide one (`0x4203EB85`). FMA
+  contraction remains unobserved there, and unmeasured under IL2CPP, which is
+  what ships. The case was originally named `fma_multiply_add_discriminator`,
+  which overstated it; renamed before anyone could read a green suite as proof
+  that no runtime fuses.
+
+  Inputs were derived by hand from the algorithm on the client side; the
+  committed expectation comes from running the real code through the generator.
+  The two agree exactly, which is what makes the case evidence rather than
+  circular.
+
+### Fixed
+- **`package.json` and the `.csproj` now ship `.meta` files too.** `sgl-v0.1.1`
+  covered the folders, sources, fixtures and the asmdef, on the reasoning that
+  Unity imports neither of those two. That reasoning was wrong: Unity logs a
+  console error for *every* asset without a `.meta` inside an immutable package,
+  including files it does not otherwise care about, so the client console was
+  permanently red with two errors on every import. Both now carry a
+  `DefaultImporter` meta with the same deterministic path-derived GUID scheme.
+
+### Fixed
+- **Float intermediates now rounded explicitly — the client and server disagreed
+  by one ULP.** The golden vectors, on their first run inside Unity, failed 3 of
+  96 cases. All three traced to one shape: `x * x + y * y`, in
+  `Vec2.SqrMagnitude` and in `MovementSystem.ResolveDirection`.
+
+  C# permits a float expression to be evaluated at higher precision than `float`
+  (ECMA-334 §11.3.7). .NET 10's RyuJIT evaluates strictly in float32; Unity's
+  Editor Mono JIT keeps double-precision intermediates and rounds once at the
+  end. Both are conforming. The results differ by one ULP — and since that value
+  feeds the deadzone and magnitude-clamp comparisons, the two runtimes could take
+  **different branches**, not merely report slightly different numbers.
+
+  Every arithmetic intermediate in `Vec2` and `MovementSystem` is now cast to
+  `float` per operation. `MovementSystem.Integrate` gets an extra split: `a + b *
+  c` can be contracted into a single FMA instruction that rounds once instead of
+  twice, so the multiply is now its own `float` local to deny the contraction.
+
+  **The server's own results are unchanged** — RyuJIT already evaluated in
+  float32, so the casts are a no-op there and every existing golden vector still
+  passes. The fix moves Unity onto the server's answer rather than the reverse.
+
+  ADR-10 rule 5 has been amended: choosing IEEE-exact *operations* was necessary
+  but not sufficient. Worth noting how this was found — the operations were
+  already legal, the whole server suite passed, and nothing warned. Only
+  replaying the vectors under the other runtime exposed it.
+
+### Fixed
+- **`Shared.GameLogic` produced no assembly in Unity — it now ships its `.meta`
+  files.** `sgl-v0.1.0` imported cleanly as a UPM package and then did nothing:
+  Unity treats a git-sourced package as **immutable** and will not generate
+  `.meta` files for it, so an asset without one is silently ignored. The package
+  cache contained zero `.meta` files, `Shared.GameLogic.asmdef` was therefore
+  never registered, and no `Shared.GameLogic.dll` appeared in
+  `Library/ScriptAssemblies`. No error, no warning — the package simply had no
+  effect.
+
+  19 `.meta` files are now committed: one per folder, per `.cs`, per golden-vector
+  `.json`, and one for the asmdef. GUIDs are derived deterministically from the
+  asset path (md5), so they are stable across regeneration and identical for every
+  consumer. `package.json` and the `.csproj` get none, because Unity imports
+  neither.
+
+  This was only findable by opening the Editor, which is exactly why `sgl-v0.1.0`
+  was tagged with "UPM resolution unverified" recorded in the tag message rather
+  than assumed.
+
+### Added
 - **`GameServer.Tests/Aot/JsonReflectionGuardTests.cs`** — scans the compiled GameServer
   assembly's metadata for `JsonSerializer` member references and fails on any overload that
   does not take a source-generated `JsonTypeInfo`/`JsonSerializerContext`. This enforces the

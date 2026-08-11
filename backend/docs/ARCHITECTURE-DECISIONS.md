@@ -1019,6 +1019,32 @@ container they are iterated out of.
    (NativeAOT x64 server, IL2CPP ARM64 client). Adding one is an amendment to
    this ADR, not a code review comment.
 
+   **Choosing exact operations is not sufficient — every intermediate must be
+   rounded to `float` explicitly.** Amended 2026-08-11, after the golden vectors
+   caught a real divergence on their first run in Unity. C# permits a float
+   expression to be evaluated at higher precision than `float` (ECMA-334
+   §11.3.7), and the two runtimes take different options: .NET 10's RyuJIT
+   evaluates strictly in float32, while Unity's Editor Mono JIT keeps
+   double-precision intermediates and rounds once at the end. `X * X + Y * Y`
+   therefore produced results differing by one ULP — and because that value feeds
+   magnitude comparisons, the two sides could take *different branches*, not just
+   report slightly different numbers.
+
+   Two shapes carry the hazard, and both are now written defensively in the
+   library:
+
+   - **Compound arithmetic** — write `(float)((float)(a * b) + (float)(c * d))`,
+     never `a * b + c * d`.
+   - **Multiply-add** (`a + b * c`) — additionally at risk of being contracted
+     into a single FMA instruction, which rounds **once** instead of twice and so
+     yields a different float. Split the multiply into its own `float` local to
+     deny the contraction.
+
+   Note what this cost to find: the operations were already legal under the rule
+   above, every server test passed, and nothing warned. Only replaying the golden
+   vectors under the *other* runtime exposed it — which is the entire reason
+   decision 4 exists.
+
 **Why not share the ECS.** Four reasons, in descending weight:
 
 - Arch's Unity story is thin. The integration guide is one paragraph — "build

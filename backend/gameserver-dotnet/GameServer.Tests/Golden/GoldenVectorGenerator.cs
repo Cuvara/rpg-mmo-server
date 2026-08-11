@@ -136,6 +136,42 @@ public class GoldenVectorGenerator
             // dt clamping (MaxDeltaTime)
             ("dt_above_max_is_clamped",    0f, 0f,    1f,      0f,      5f, 10f, defaults, false),
             ("dt_at_max",                  0f, 0f,    1f,      0f,      5f, GameConstants.MaxDeltaTime, defaults, false),
+
+            // Multiply-add intermediate-rounding discriminator.
+            //
+            // Integrate computes `position + direction * step`. Written as one
+            // expression a runtime may evaluate it three ways: strictly in
+            // float32, with a wider (double) intermediate, or contracted into a
+            // single FMA instruction that rounds once instead of twice. The
+            // split-multiply in Integrate denies all three by forcing a float
+            // rounding between the multiply and the add.
+            //
+            // Every other movement case rounds identically under all three, so
+            // that fix was covered by reasoning and by nothing executable. These
+            // inputs separate the strict evaluation (0x401B4740, what the fixed
+            // code produces) from the alternatives (0x401B473F), one ULP apart.
+            //
+            // WHAT THIS CASE DOES NOT PROVE. It cannot tell FMA contraction from
+            // double widening — **both** predict 0x401B473F here, so a pass rules
+            // out neither individually. Measured under Unity's Editor Mono JIT,
+            // the mechanism is *widening*, not contraction: on
+            // sqrt_negative_components an FMA would give the strict answer
+            // (0x4203EB84) while Unity produced the wide one (0x4203EB85). FMA
+            // contraction remains **unobserved** in that runtime, and entirely
+            // unmeasured under IL2CPP, which is what ships. Do not read a green
+            // suite as evidence that no runtime fuses.
+            //
+            // Deliberately isolates the multiply-add: magSq is 0x3E2833EB, which
+            // is <= 1 so ResolveDirection returns Accepted with the raw vector and
+            // no sqrt is involved, and the result lands well inside the bounds so
+            // nothing clamps.
+            //
+            // Values are built from bit patterns rather than decimal literals
+            // because a literal does not pin the bits, and the bits are the point.
+            ("multiply_add_intermediate_rounding",
+                BitConverter.Int32BitsToSingle(unchecked((int)0x4012A1D2)), 0f,
+                BitConverter.Int32BitsToSingle(unchecked((int)0x3ECF8243)), 0f,
+                5f, dt, defaults, false),
         };
 
         var cases = new List<MovementCase>();
