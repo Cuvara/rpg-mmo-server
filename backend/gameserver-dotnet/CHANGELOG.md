@@ -7,6 +7,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`GameServer.Tests/Aot/JsonReflectionGuardTests.cs`** — scans the compiled GameServer
+  assembly's metadata for `JsonSerializer` member references and fails on any overload that
+  does not take a source-generated `JsonTypeInfo`/`JsonSerializerContext`. This enforces the
+  precondition that makes the `Collections.Pooled` AOT warnings unreachable; without it the
+  justification in `GameServer.csproj` would silently expire the first time someone added a
+  reflection-based JSON call. Verified to fire.
+- **Audit of the `Collections.Pooled` IL2026/IL3050 warnings** (`docs/DESIGN.md`,
+  "Collections.Pooled AOT warnings") plus the justifying comment in `GameServer.csproj`,
+  matching the convention every other dependency there follows. The 37 individual
+  diagnostics are all in `PooledEnumerableJsonConverter`, rooted by a `[JsonConverter]`
+  attribute rather than by any call site, and unreachable: this assembly never uses the
+  reflection-based System.Text.Json resolver, `Arch` has zero System.Text.Json references,
+  and `Collections.Pooled` registers nothing globally. **Not suppressed** — no `NoWarn` was
+  added, deliberately.
 - **Arch ECS is the server's entity storage (ADR-10).** `GameServer/World/EcsWorld.cs`
   stores every entity in an [Arch](https://github.com/genaray/Arch) `2.1.0-beta` world:
   entity identity, component storage, queries and iteration all belong to Arch, with no
