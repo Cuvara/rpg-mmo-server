@@ -3,8 +3,8 @@
 package integration
 
 import (
-	"bytes"
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -94,9 +94,32 @@ var (
 	gameServerDll       string
 	gameServerBuildErr  error
 	gameServerSkip      string
+
+	// Set GAMESERVER_NATIVE_BIN to a published NativeAOT binary to run this whole
+	// suite against it instead of against the JIT'd dll.
+	//
+	// This is not a convenience: ADR-11 measured that Arch publishes cleanly under
+	// NativeAOT and then throws at runtime, a failure `dotnet test` structurally
+	// cannot see because tests run on CoreCLR with a JIT. Running the real binary
+	// through the real handshake is the only check that covers it.
+	gameServerNativeBin string
 )
 
 func buildDotnetGameServer() {
+	if bin := os.Getenv("GAMESERVER_NATIVE_BIN"); bin != "" {
+		abs, err := filepath.Abs(bin)
+		if err != nil {
+			gameServerBuildErr = fmt.Errorf("GAMESERVER_NATIVE_BIN %q: %w", bin, err)
+			return
+		}
+		if _, err := os.Stat(abs); err != nil {
+			gameServerBuildErr = fmt.Errorf("GAMESERVER_NATIVE_BIN %q not found: %w", abs, err)
+			return
+		}
+		gameServerNativeBin = abs
+		return
+	}
+
 	dotnetPath, err := exec.LookPath("dotnet")
 	if err != nil {
 		home, _ := os.UserHomeDir()
@@ -139,7 +162,7 @@ func startDotnetGameServer(t *testing.T) (addr string, cleanup func()) {
 		t.Fatal(gameServerBuildErr)
 	}
 
-	cmd := exec.Command(gameServerDotnet, gameServerDll,
+	serverArgs := []string{
 		"--addr", "127.0.0.1:0",
 		"--map-id", dotnetMapID,
 		"--server-id", dotnetServerID,
@@ -148,7 +171,14 @@ func startDotnetGameServer(t *testing.T) (addr string, cleanup func()) {
 		// (default :9101) would collide with any locally running server and with
 		// the next test's server in this same suite.
 		"--metrics-addr", "",
-	)
+	}
+
+	var cmd *exec.Cmd
+	if gameServerNativeBin != "" {
+		cmd = exec.Command(gameServerNativeBin, serverArgs...)
+	} else {
+		cmd = exec.Command(gameServerDotnet, append([]string{gameServerDll}, serverArgs...)...)
+	}
 	cmd.Env = append(os.Environ(),
 		"DOTNET_CLI_TELEMETRY_OPTOUT=1",
 		"JOIN_TOKEN_SECRET="+dotnetJoinTokenSecret,

@@ -92,7 +92,7 @@ public class ServerOptions
 public sealed class GameServerHost : IAsyncDisposable
 {
     private readonly ServerOptions _options;
-    private readonly GameWorld _world;
+    private readonly EcsWorld _world;
     private readonly ConnectionManager _connections;
     private readonly TickLoop _tickLoop;
     private readonly AsyncSaver _saver;
@@ -153,7 +153,7 @@ public sealed class GameServerHost : IAsyncDisposable
         }
 
         _metrics = options.Metrics;
-        _world = new GameWorld();
+        _world = new EcsWorld();
         _metrics?.SetEntityCountProvider(() => _world.EntityCount);
         _connections = new ConnectionManager();
         _playerStore = options.PlayerStore ?? new MemoryPlayerStore();

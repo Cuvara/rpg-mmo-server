@@ -7,6 +7,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Arch ECS is the server's entity storage (ADR-10).** `GameServer/World/EcsWorld.cs`
+  stores every entity in an [Arch](https://github.com/genaray/Arch) `2.1.0-beta` world:
+  entity identity, component storage, queries and iteration all belong to Arch, with no
+  second store. `EntityState` is decomposed into `EntityIdRef`, `EntityKind`, `Position`,
+  `Health`, `Combat`, `Locomotion`, `InputCursor` and a `PlayerTag` archetype tag
+  (`GameServer/World/Components.cs`). Iteration is chunk spans, not the closure-allocating
+  delegate `Query` overloads.
+- **`GameServer/World/ArchAotHints.cs`** — a `[ModuleInitializer]` that statically
+  constructs one `T[]` per component type. Without it the NativeAOT binary publishes
+  cleanly and then throws `NotSupportedException: 'T[]' is missing native code or
+  metadata` on the first archetype creation (ADR-11).
+- **`GameServer.Tests/World/ArchAotHintTests.cs`** — the guard ADR-11 requires. It
+  enumerates every component type in the assembly (by namespace or `[EcsComponent]`) and
+  fails when one is unhinted, plus a companion test rejecting stale hints. The hinted set
+  is derived from the constructed arrays themselves, so it cannot drift from what it
+  checks. Verified to fire by adding an unhinted component.
+- **`GAMESERVER_NATIVE_BIN`** in `backend/integration_test/dotnet_interop_test.go` — points
+  the cross-language E2E suite at a published NativeAOT binary instead of the JIT'd dll.
+- **CI smoke-runs the published binary** (`.github/workflows/ci-dotnet.yml`, `publish` job),
+  through the real gateway handshake. ADR-11 decision 4: a clean publish does not imply a
+  working binary, and the throw happens on the first player spawn rather than at startup,
+  so a liveness probe would not catch it.
 - **`Shared.GameLogic/` is now a valid UPM package root** — `package.json`
   (`com.rpgmmo.shared-gamelogic`, `0.1.0`, `unity: 6000.3`, **no dependencies**)
   and `Shared.GameLogic.asmdef`. Without these the client cannot consume the
@@ -66,6 +88,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     diff in the same PR — the review signal that client prediction changed.
 
 ### Changed
+- **`GameWorld` is deleted, not wrapped.** `GameServer/World/GameWorld.cs` (a
+  `Dictionary<string, EntityState>` behind a `ReaderWriterLockSlim`) is gone. `EcsWorld`
+  keeps its API surface — `AddEntity`, `RemoveEntity`, `GetEntity`, `GetEntitiesInRange`,
+  `Update`, `View`, `PushInput`, `DrainInputs`, `PlayerStates`, `EntityCount` — with
+  identical semantics, so the tick loop, input processing, snapshot construction, AOI
+  scan, reconnect/hold bookkeeping and persistence save/load are unchanged behaviourally.
+  `GameWorldTests` became `EcsWorldTests` with every assertion intact.
+- `AsyncSaver.SaveAllAsync`'s player sweep is now an archetype query on `PlayerTag`
+  instead of a full scan with a per-entity string comparison.
+- `TickLoop.TickOnce` opens with an explicit `_world.ApplyStructuralChanges()` phase.
+  `Arch.Buffer.CommandBuffer` is **not** used anywhere — it throws under NativeAOT even
+  with the array hints (ADR-11), so structural changes raised during iteration are queued
+  and applied outside it.
+- `GameServer.csproj` takes a `PackageReference` on `Arch`. This transitively pulls in
+  `Collections.Pooled 2.0.0-preview.27`, which emits `IL3053`/`IL2104` AOT and trim
+  analysis warnings on publish — the first dependency in this project that is not
+  warning-clean. The binary is verified working; the warnings are unexamined.
 - **`Shared.GameLogic` now multi-targets `netstandard2.1;net10.0`.** Unity cannot
   consume a `net10.0`-only library; the netstandard target is what proves nothing
   in the library reaches past Unity's runtime profile. Nothing needed a polyfill:

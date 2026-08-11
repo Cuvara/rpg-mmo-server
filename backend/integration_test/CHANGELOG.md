@@ -6,6 +6,18 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`GAMESERVER_NATIVE_BIN`** — set it to a published NativeAOT binary and the whole
+  `TestDotnetInterop_*` suite runs against that binary instead of `dotnet <dll>`.
+  This is not a convenience knob. ADR-11 measured that Arch publishes cleanly under
+  NativeAOT and then throws at runtime, a failure `dotnet test` structurally cannot
+  see because those tests run on CoreCLR with a JIT. Re-measured on
+  `feat/gameserver/arch-ecs`: an unhinted component produced a clean build, 500
+  passing unit tests, a clean publish with no warning naming it, a binary that
+  started and logged `Game server listening on ...` — and then
+  `NotSupportedException` on the **first player join**. Because the throw is on the
+  first archetype creation rather than at startup, only a run that completes a real
+  handshake catches it; `.github/workflows/ci-dotnet.yml` uses this hook for exactly
+  that.
 - `TestDotnetInterop_MixedEncodingsOnOneServer` — a JSON client and a Protobuf
   client joined to the **same running server**, which is the state a fleet is
   actually in mid-rollout. It asserts the server answers each client in the

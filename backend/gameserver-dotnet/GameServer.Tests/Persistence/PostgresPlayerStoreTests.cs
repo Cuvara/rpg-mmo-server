@@ -154,7 +154,7 @@ public class PostgresPlayerStoreTests
 
         // 2. AsyncSaver turns that failure into gameserver_player_saves_total{status="error"}.
         using var harness = new MetricHarness(nameof(Save_AfterDatabaseGoesAway_SurfacesErrorAndIncrementsMetric));
-        using var world = new GameWorld();
+        using var world = new EcsWorld();
         world.AddEntity(TestHelpers.CreatePlayer("u1", 2, 2));
 
         var saver = new AsyncSaver(store, world, "map_01", TimeSpan.FromSeconds(30),

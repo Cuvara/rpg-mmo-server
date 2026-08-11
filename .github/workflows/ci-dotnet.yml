@@ -112,6 +112,29 @@ jobs:
       - name: Publish NativeAOT
         run: dotnet publish GameServer/GameServer.csproj -c Release -o ./publish
 
+      # ADR-11 decision 4: a clean publish demonstrably does not imply a working
+      # binary. Arch allocates its chunk backing arrays through
+      # System.Array.CreateInstance(Type, int), so a component whose T[] was not
+      # statically constructed publishes with NO warning and then throws
+      # NotSupportedException at runtime. `dotnet test` cannot see this — those
+      # tests run on CoreCLR with a JIT.
+      #
+      # It also has to be a REAL JOIN, not a start-and-ping. The throw happens on
+      # the first archetype creation, which is the first player spawn: the server
+      # starts, logs "listening", accepts TCP, and only then dies. This was
+      # re-measured on this branch by deliberately unhinting one component.
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: false
+
+      - name: Smoke-run the native binary (real handshake)
+        working-directory: backend/integration_test
+        env:
+          GAMESERVER_NATIVE_BIN: ../gameserver-dotnet/publish/GameServer
+        run: go test -tags integration -run TestDotnetInterop -count=1 -timeout 15m ./...
+
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
