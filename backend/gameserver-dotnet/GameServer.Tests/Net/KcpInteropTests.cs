@@ -261,13 +261,24 @@ internal sealed class GoProbe
         }
 
         using var proc = System.Diagnostics.Process.Start(psi)!;
-        string stdout = proc.StandardOutput.ReadToEnd();
-        string stderr = proc.StandardError.ReadToEnd();
+
+        // Reads started, not awaited — see TestDocker.ExecOnce. `go build` on a cold
+        // module cache is exactly the shape that punishes the old order: minutes of
+        // work with progress on stderr while the caller blocks reading stdout.
+        var stdout = proc.StandardOutput.ReadToEndAsync();
+        var stderr = proc.StandardError.ReadToEndAsync();
+
         if (!proc.WaitForExit((int)timeout.TotalMilliseconds))
         {
-            try { proc.Kill(true); } catch { /* ignore */ }
-            return (-1, stdout, stderr + "\n[timeout]");
+            try { proc.Kill(entireProcessTree: true); } catch { /* ignore */ }
+            return (-1, Drain(stdout), Drain(stderr) + "\n[timeout]");
         }
-        return (proc.ExitCode, stdout, stderr);
+        return (proc.ExitCode, Drain(stdout), Drain(stderr));
+    }
+
+    private static string Drain(Task<string> read)
+    {
+        try { return read.Wait(TimeSpan.FromSeconds(10)) ? read.Result : ""; }
+        catch { return ""; }
     }
 }

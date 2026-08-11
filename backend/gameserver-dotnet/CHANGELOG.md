@@ -6,6 +6,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Shutdown could live-lock a thread and hold the process open forever.**
+  `Connection.Close()` cancels the connection's `CancellationTokenSource`, and
+  cancellation resumes everything parked on that token **inline, on the cancelling
+  thread**. Since the heartbeat loop landed (`817c6ac`) that produced this stack:
+
+  ```
+  ShutdownAsync -> ConnectionManager.CloseAll -> Connection.Close -> _cts.Cancel()
+    -> HeartbeatLoopAsync resumes inline
+      -> HandleConnectionAsync runs its finally
+        -> Connection.Dispose() -> spin until _closeState == StateClosed
+  ```
+
+  The `Close()` that writes `StateClosed` is a frame *further down that same
+  stack*, so `Dispose()`'s spin blocked the very call it was waiting for. A
+  thread burning a core forever, and a process that never exits.
+  - `Close()` now records the managed thread id performing the teardown.
+    `Dispose()` recognises a re-entry on that thread, defers the token-source
+    disposal back to the in-flight `Close()` and returns instead of spinning.
+    `Close()` frees it in its `finally`, once every use of `_cts` has returned.
+  - Cross-thread behaviour is unchanged: a `Dispose()` on a *different* thread
+    still spins until the close completes, which is what stops it freeing the
+    token source out from under a concurrent `Close()`.
+  - **How it showed up**: not as a failing test. Every test passed — the .NET
+    test host then refused to exit, and CI ran to its 6-hour job timeout three
+    runs in a row. `--blame-hang` named the last test to run, which was a
+    bystander. The hang dump named the real thing.
+  - Verified by the suite now exiting: two consecutive full runs finish in ~45s
+    (409 passed, 9 skipped) where the same suite previously hung indefinitely
+    after the last test completed.
+
+### Changed
+- **Test process helpers now honour the timeouts they declare.** `TestDocker`,
+  `EphemeralPostgres` and `KcpInteropTests` each ran a child process with
+  `StandardOutput.ReadToEnd()` *before* `WaitForExit(timeout)`. That read only
+  returns when the child closes the pipe, so the timeout below it was unreachable
+  — a child that never exits parked the caller forever, and a child that filled
+  the 64 KiB stderr buffer deadlocked against a caller blocked on stdout. Both
+  pipes are now read concurrently and the declared timeout is actually enforced.
+  (Side effect worth knowing: the Postgres fixture works on more machines now, so
+  local runs report ~9 skipped instead of ~28.)
+
 ### Added
 - **Graceful drain notification on shutdown.** On SIGTERM, the server now sends
   `MsgDisconnect(reason="server_shutdown")` to all connected clients before
