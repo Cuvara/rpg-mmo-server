@@ -320,7 +320,7 @@ There are three ways to add `Shared.GameLogic` to a Unity 6 project:
 
 ```bash
 # From Unity project root
-git submodule add https://github.com/dyCuong03/rpg-mmo-indie.git \
+git submodule add https://github.com/Cuvara/rpg-mmo-indie.git \
   Packages/com.rpgmmo.shared-gamelogic
 ```
 

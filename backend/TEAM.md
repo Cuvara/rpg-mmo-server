@@ -73,7 +73,7 @@ Constraints: no Unity refs, **no ECS refs (`Arch.Core` included)**, no server-sp
 **How the client consumes it — use this exact form, do not invent another:**
 
 ```json
-"com.rpgmmo.shared-gamelogic": "https://github.com/dyCuong03/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.0"
+"com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.0"
 ```
 
 - **Tag, never branch.** A branch ref changes what the client predicts whenever

@@ -958,7 +958,7 @@ container they are iterated out of.
    `Packages/manifest.json`:
 
    ```json
-   "com.rpgmmo.shared-gamelogic": "https://github.com/dyCuong03/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.0"
+   "com.rpgmmo.shared-gamelogic": "https://github.com/Cuvara/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.0"
    ```
 
    Compiling from source is what keeps IL2CPP from having to swallow a
