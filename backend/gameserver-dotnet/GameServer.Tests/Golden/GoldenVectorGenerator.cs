@@ -136,6 +136,32 @@ public class GoldenVectorGenerator
             // dt clamping (MaxDeltaTime)
             ("dt_above_max_is_clamped",    0f, 0f,    1f,      0f,      5f, 10f, defaults, false),
             ("dt_at_max",                  0f, 0f,    1f,      0f,      5f, GameConstants.MaxDeltaTime, defaults, false),
+
+            // FMA contraction discriminator.
+            //
+            // Integrate computes `position + direction * step`, a multiply-add. A
+            // JIT is free to contract that into a single FMA instruction, which
+            // rounds ONCE instead of twice and therefore yields a different float
+            // — a third possible answer beyond the two that ADR-10 rule 5's
+            // intermediate-rounding problem already produces.
+            //
+            // Every other movement case here happens to round identically fused
+            // or unfused, so the split-multiply fix in Integrate was covered by
+            // reasoning and by nothing executable. These inputs are chosen so the
+            // two evaluations differ: unfused gives 0x401B4740, a contracted FMA
+            // gives 0x401B473F, one ULP apart.
+            //
+            // Deliberately isolates the multiply-add: magSq is 0x3E2833EB, which
+            // is <= 1 so ResolveDirection returns Accepted with the raw vector and
+            // no sqrt is involved, and the result lands well inside the bounds so
+            // nothing clamps.
+            //
+            // Values are built from bit patterns rather than decimal literals
+            // because a literal does not pin the bits, and the bits are the point.
+            ("fma_multiply_add_discriminator",
+                BitConverter.Int32BitsToSingle(unchecked((int)0x4012A1D2)), 0f,
+                BitConverter.Int32BitsToSingle(unchecked((int)0x3ECF8243)), 0f,
+                5f, dt, defaults, false),
         };
 
         var cases = new List<MovementCase>();

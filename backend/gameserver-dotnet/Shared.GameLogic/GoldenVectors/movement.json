@@ -560,6 +560,23 @@
       "expectedResult": "Accepted",
       "expectedX": "0x40200000",
       "expectedY": "0x00000000"
+    },
+    {
+      "name": "fma_multiply_add_discriminator",
+      "posX": "0x4012A1D2",
+      "posY": "0x00000000",
+      "moveX": "0x3ECF8243",
+      "moveY": "0x00000000",
+      "speed": "0x40A00000",
+      "dt": "0x3D888889",
+      "minX": "0xC3FA0000",
+      "minY": "0xC3FA0000",
+      "maxX": "0x43FA0000",
+      "maxY": "0x43FA0000",
+      "dead": false,
+      "expectedResult": "Accepted",
+      "expectedX": "0x401B4740",
+      "expectedY": "0x00000000"
     }
   ]
 }

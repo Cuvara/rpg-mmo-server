@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Golden vector `fma_multiply_add_discriminator`** — the FMA fix in
+  `MovementSystem.Integrate` is now covered by a test rather than by reasoning.
+
+  `position + direction * step` is a multiply-add, and a JIT may contract it into
+  a single FMA that rounds **once** instead of twice, producing a third possible
+  answer beyond the intermediate-precision divergence ADR-10 rule 5 describes.
+  Every pre-existing movement case happened to round identically fused or
+  unfused, so the fix passed and failed nothing either way — it was protected by
+  an argument and by no executable check.
+
+  These inputs are chosen so the two evaluations differ: unfused gives
+  `0x401B4740`, a contracted FMA gives `0x401B473F`, one ULP apart. The case
+  isolates the multiply-add deliberately — `magSq` is `0x3E2833EB`, at or below 1
+  so `ResolveDirection` returns the raw vector with no sqrt involved, and the
+  result lands well inside bounds so nothing clamps. Inputs are built from bit
+  patterns rather than decimal literals, because a literal does not pin the bits
+  and the bits are the point.
+
+  The inputs were derived on the client side by hand from the algorithm; the
+  committed expectation comes from running the real code in the generator. The
+  two agree exactly, which is what makes the case trustworthy rather than
+  circular.
+
 ### Fixed
 - **`package.json` and the `.csproj` now ship `.meta` files too.** `sgl-v0.1.1`
   covered the folders, sources, fixtures and the asmdef, on the reasoning that
