@@ -562,7 +562,7 @@
       "expectedY": "0x00000000"
     },
     {
-      "name": "fma_multiply_add_discriminator",
+      "name": "multiply_add_intermediate_rounding",
       "posX": "0x4012A1D2",
       "posY": "0x00000000",
       "moveX": "0x3ECF8243",

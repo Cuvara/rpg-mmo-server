@@ -7,27 +7,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
-- **Golden vector `fma_multiply_add_discriminator`** — the FMA fix in
+- **Golden vector `multiply_add_intermediate_rounding`** — the split-multiply in
   `MovementSystem.Integrate` is now covered by a test rather than by reasoning.
 
-  `position + direction * step` is a multiply-add, and a JIT may contract it into
-  a single FMA that rounds **once** instead of twice, producing a third possible
-  answer beyond the intermediate-precision divergence ADR-10 rule 5 describes.
-  Every pre-existing movement case happened to round identically fused or
-  unfused, so the fix passed and failed nothing either way — it was protected by
-  an argument and by no executable check.
+  Written as one expression, `position + direction * step` may be evaluated
+  strictly in float32, with a wider (double) intermediate, or contracted into a
+  single FMA that rounds once instead of twice. Splitting the multiply denies all
+  three. Every other movement case rounds identically under all three, so the fix
+  passed and failed nothing either way. These inputs separate the strict result
+  (`0x401B4740`, what the fixed code produces) from the alternatives
+  (`0x401B473F`).
 
-  These inputs are chosen so the two evaluations differ: unfused gives
-  `0x401B4740`, a contracted FMA gives `0x401B473F`, one ULP apart. The case
-  isolates the multiply-add deliberately — `magSq` is `0x3E2833EB`, at or below 1
-  so `ResolveDirection` returns the raw vector with no sqrt involved, and the
-  result lands well inside bounds so nothing clamps. Inputs are built from bit
-  patterns rather than decimal literals, because a literal does not pin the bits
-  and the bits are the point.
+  **The fix is load-bearing, not precautionary.** Running the unfixed expression
+  shape directly under Unity's Editor Mono JIT — operands read from static fields
+  so Roslyn could not constant-fold — produced `0x401B473F`, a different position
+  from the server's.
 
-  The inputs were derived on the client side by hand from the algorithm; the
-  committed expectation comes from running the real code in the generator. The
-  two agree exactly, which is what makes the case trustworthy rather than
+  **What the case does not prove.** It cannot distinguish FMA contraction from
+  double widening: both predict `0x401B473F`, so a pass rules out neither
+  individually. The mechanism actually measured under Editor Mono is *widening* —
+  on `sqrt_negative_components` an FMA would give the strict answer
+  (`0x4203EB84`) while Unity produced the wide one (`0x4203EB85`). FMA
+  contraction remains unobserved there, and unmeasured under IL2CPP, which is
+  what ships. The case was originally named `fma_multiply_add_discriminator`,
+  which overstated it; renamed before anyone could read a green suite as proof
+  that no runtime fuses.
+
+  Inputs were derived by hand from the algorithm on the client side; the
+  committed expectation comes from running the real code through the generator.
+  The two agree exactly, which is what makes the case evidence rather than
   circular.
 
 ### Fixed
