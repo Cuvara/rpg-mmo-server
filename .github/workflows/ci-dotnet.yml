@@ -39,6 +39,10 @@ jobs:
   test:
     name: Test & Build
     runs-on: ubuntu-latest
+    # The suite finishes in ~3 minutes when it finishes at all. Without this the
+    # job inherits the 6-hour default, and three runs since 2026-08-08 have burned
+    # exactly that: the Test step stops emitting output and nothing kills it.
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: backend/gameserver-dotnet
@@ -56,24 +60,41 @@ jobs:
       - name: Build
         run: dotnet build --no-restore -c Release
 
+      # --blame-hang turns a hang into a failure that NAMES the test. Without it a
+      # hung test is indistinguishable from a slow one: the runner log simply stops,
+      # the .trx is never written, and the artifact upload reports "no files found"
+      # — which is exactly what the 2026-08-08 runs looked like.
+      #
+      # 8 minutes is ~2.5x the whole suite's normal runtime, so it cannot fire on a
+      # merely slow test on a 2-core runner. The hang dump is written next to the
+      # results as Sequence_*.xml, listing the test that never returned.
       - name: Test
         run: >-
           dotnet test --no-build -c Release
           --verbosity normal
           --logger "trx;LogFileName=test-results.trx"
+          --blame-hang
+          --blame-hang-timeout 8m
+          --blame-hang-dump-type none
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-results
-          path: backend/gameserver-dotnet/**/test-results.trx
+          path: |
+            backend/gameserver-dotnet/**/test-results.trx
+            backend/gameserver-dotnet/**/Sequence_*.xml
+          if-no-files-found: warn
           retention-days: 7
 
   publish:
     name: Publish AOT
     needs: test
     runs-on: ubuntu-latest
+    # NativeAOT link is the slow part here (~5 min); 25 leaves room without
+    # inheriting the 6-hour default.
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: backend/gameserver-dotnet
