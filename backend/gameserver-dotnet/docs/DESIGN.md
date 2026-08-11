@@ -20,10 +20,13 @@ server directly, so the gateway never sees gameplay traffic (see
 ## Shared.GameLogic Constraints
 
 These constraints exist so the library compiles cleanly in both a standard
-.NET 10 project and a Unity 6 project with an Assembly Definition:
+.NET 10 project and in **Unity 6**, which consumes these files as *source*
+through a UPM git dependency rather than as a compiled assembly (ADR-10):
 
 - **Zero Unity dependencies** — must compile as a standard .NET class library.
   No `UnityEngine`, `Unity.Mathematics`, or `Unity.Collections` references.
+- **Zero ECS dependencies** — no `Arch.Core` type in any signature either. Arch
+  is the server's storage choice; the rules must not be coupled to it (ADR-10).
 - **No server-specific code** — no networking, no persistence, no logging
   framework. The server wraps shared logic with its own I/O layer.
 - **All game constants centralized** — damage formulas, speed caps, cooldown
@@ -33,6 +36,93 @@ These constraints exist so the library compiles cleanly in both a standard
   Unity DOTS jobs.
 - **No allocations in hot paths** — methods called per-tick must not allocate
   heap objects. Use `Span<T>`, stackalloc, or pre-allocated buffers.
+- **Only IEEE-exact float operations** — `+ - * /`, comparison, and
+  `MathF.Min/Max/Abs/Sqrt`. Transcendentals (`Sin`, `Cos`, `Atan2`, `Pow`,
+  `Exp`), `double`, `System.Random` and wall-clock reads are barred: their
+  results are implementation-defined and the two sides run different compilers
+  on different architectures (NativeAOT x64 server, IL2CPP ARM64 client).
+  Adding one is an amendment to ADR-10, not a review comment.
+
+### What Unity's compiler forces on this code
+
+Unity 6's C# compiler is **C# 9** and has neither implicit usings nor
+System.Text.Json. Because the client compiles the source, the *server* build is
+what has to catch a violation — the alternative is the client discovering it at
+package-import time. Three project settings make that happen, and they are load
+bearing:
+
+| Setting | Value | Why |
+|---|---|---|
+| `TargetFrameworks` | `netstandard2.1;net10.0` | The netstandard build proves nothing in the library reaches past Unity's runtime profile. No polyfill is needed — `MathF.Min/Max/Abs/Sqrt`, `HashCode.Combine`, `float.IsFinite` and `Span<T>` are all in netstandard2.1 |
+| `LangVersion` | `9.0` | Rejects C# 10+ syntax the client cannot compile. This is why the namespaces here are block-scoped: file-scoped `namespace X;` is C# 10 |
+| `ImplicitUsings` | `disable` | Unity has no implicit usings, so every file writes its own. A missing `using System;` now fails the server build |
+
+`InputData` / `SnapshotData` carry no `System.Text.Json` attributes. They are
+**simulation** types, not wire types: since ADR-9 the generated Protobuf classes
+are the server's only message types, and the legacy JSON path is a hand-written
+`Utf8JsonWriter` codec over *those*. Nothing serializes these two.
+
+### Packaging for Unity
+
+`Shared.GameLogic/` doubles as a UPM package root: `package.json`
+(`com.rpgmmo.shared-gamelogic`, no dependencies) plus
+`Shared.GameLogic.asmdef`. The client consumes it as a git dependency with a
+`?path=` subfolder reference pinned to a tag — the same mechanism the Unity
+project already uses for `com.company.build-pipeline`:
+
+```
+https://github.com/<org>/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.0
+```
+
+Tags are `sgl-vX.Y.Z`, and `package.json`'s `version` must be bumped in the
+commit that is tagged — a tag whose `package.json` still says the old version
+gives the client a package that misreports itself, silently.
+
+The asmdef declares `"noEngineReferences": true` and an empty `references` list,
+which makes ADR-10's zero-engine-dependency rule a compile error on the client
+rather than a review convention. It also bounds what Unity compiles: without an
+asmdef the sources would join the default assembly and lose all dependency
+control.
+
+Two build systems now read this folder. MSBuild's `Compile` glob takes the 11
+`.cs` files and treats `package.json`/`.asmdef` as `None`; Unity compiles every
+`.cs` under the package root, which is safe only because `bin/` and `obj/` are
+gitignored and a git fetch never delivers them. Consuming the package by local
+path into a *built* working tree would feed Unity the generated
+`AssemblyInfo.cs` and fail on duplicate assembly attributes — use the git URL.
+
+### Golden vectors
+
+`Shared.GameLogic/GoldenVectors/` holds committed
+`(state, input, dt) → expected state` fixtures — 77 cases across `vec2.json`,
+`movement.json`, `combat.json` and `validation.json`. They are replayed by
+`GameServer.Tests/Golden/` and, from the same files at the same package-relative
+path, by the client's Unity Test Runner. That is the mechanism that makes
+"shared logic" mean shared *behaviour* rather than a shared file.
+
+`vec2.json` exists separately because the three `MathF.Sqrt` call sites
+(`Vec2.Magnitude`, `Vec2.Distance`, `MovementSystem.ResolveDirection`) are where
+a NativeAOT-x64 / IL2CPP-ARM64 divergence appears first, and two of them are not
+reachable from a behaviour vector: `Vec2.Magnitude`/`Normalized` have no caller
+inside the library, and `Vec2.Distance` only formats the out-of-range error
+message. The movement vectors additionally cover both sides of the magnitude-1
+branch — the test that decides whether `Sqrt` runs at all.
+
+Format constraints (fixed by ADR-10, both readers must agree):
+
+- Floats are stored as **IEEE-754 bit patterns** (`"x": "0x40551EB8"`) and
+  compared with `BitConverter.SingleToInt32Bits`. Decimal text does not
+  round-trip identically through two serializers, and a tolerance comparison
+  would not test the property the vectors exist to protect.
+- The top level is an object (`{"cases": [...]}`) and cases are flat, public
+  fields only — the subset Unity's built-in `JsonUtility` reads, so the client
+  needs no JSON package. `FixtureShapeIsUnityJsonUtilityCompatible` enforces it.
+- Expected values are **generated by running the implementation**, never hand
+  computed: `GOLDEN_REGEN=1 dotnet test --filter Regenerate`.
+  `CommittedFixturesAreUpToDate` fails the build if the committed files drift
+  from what the current code produces, so a behavioural change shows up as a
+  fixture diff in the same PR — which is exactly the review signal that the
+  client's prediction changed.
 
 ## Performance
 
@@ -167,7 +257,8 @@ positions during reconciliation.
 
 `MovementSystem` is pure: static methods over structs, no randomness, no
 `DateTime`, no allocations, no collections — `dt` is always a parameter. The Unity
-DOTS client links the same `Shared.GameLogic` assembly and calls the identical
+DOTS client compiles the same `Shared.GameLogic` sources (ADR-10: source, not a
+DLL, so IL2CPP never has to swallow a netstandard assembly) and calls the identical
 `ResolveDirection` / `Integrate` for local prediction, so a predicted position and
 the server's authoritative position agree given the same input, speed and `dt`.
 The planned client loop:
