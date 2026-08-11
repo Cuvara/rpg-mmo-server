@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **Docs: Unity version pinned to Unity 6.** `docs/DESIGN.md` and `docs/README.md`
+  described the `Shared.GameLogic` consumer as "a Unity 2022+ project". The client
+  repo is Unity 6 (6000.3.9f1), so the open-ended floor invited integration advice
+  aimed at an editor nobody runs. Both now say Unity 6. No code or constraint
+  changed — `Shared.GameLogic` still targets standard .NET 10 with zero Unity
+  dependencies.
+
 ### Fixed
 - **`METRICS_ADDR=off` killed the server at startup.** The value the Go gateway
   documents as its off-switch reached `int.Parse` and took the process down with
