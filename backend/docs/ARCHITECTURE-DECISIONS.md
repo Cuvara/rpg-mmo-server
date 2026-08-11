@@ -952,12 +952,41 @@ container they are iterated out of.
    now in play, for the same reason.
 
 3. **The client consumes it as source, not as a DLL.** `Shared.GameLogic`
-   multi-targets `netstandard2.1;net10.0` and gains a `package.json` +
+   multi-targets `netstandard2.1;net10.0` and carries a `package.json` +
    `.asmdef`, consumed by Unity through a UPM git dependency with a `?path=`
-   subfolder reference pinned to a tag. Compiling from source is what keeps
-   IL2CPP from having to swallow a `netstandard2.1` assembly, keeps the code
-   steppable in the Editor, and removes any possibility of binary drift between
-   what the server ran and what the client shipped.
+   subfolder reference **pinned to a tag**. The normative form, in the client's
+   `Packages/manifest.json`:
+
+   ```json
+   "com.rpgmmo.shared-gamelogic": "https://github.com/dyCuong03/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.0"
+   ```
+
+   Compiling from source is what keeps IL2CPP from having to swallow a
+   `netstandard2.1` assembly, keeps the code steppable in the Editor, and removes
+   any possibility of binary drift between what the server ran and what the client
+   shipped. "Release" here therefore means **stamping a commit with a tag**, not
+   building an artifact. A `.tgz` on GitHub Releases would be strictly worse — UPM
+   consumes local paths, git URLs and registries, but not tarball URLs.
+
+   This mechanism is not novel in this project: the Unity client already resolves
+   `com.company.build-pipeline` through the identical `git?path=#ref` form, and
+   `rpg-mmo-server` is public, so no credential or deploy key is involved on a
+   developer machine or in CI.
+
+   **Pin a tag, never a branch.** A branch reference means the rules the client
+   predicts with change whenever someone pushes, silently, with no commit in the
+   client repo to attribute the change to. A tag makes adopting new rules a
+   deliberate, reviewable act, and `packages-lock.json` records the resolved
+   commit so a build stays reproducible even if a tag is moved. Tags are
+   `sgl-vX.Y.Z` with no `/`, since a slash is a valid git ref but its handling
+   inside a UPM `#fragment` is unverified.
+
+   Two mechanical guards make the boundary self-enforcing rather than
+   review-dependent: `<LangVersion>9.0</LangVersion>` on the csproj makes the
+   *server* build reject C# 10+ syntax the client could not compile, and
+   `"noEngineReferences": true` in the asmdef makes the *client* build reject a
+   `UnityEngine` reference. Each side fails on the rule the other side would
+   otherwise not notice being broken.
 
 4. **Conformance is mechanical, not editorial.** A committed set of golden
    vectors — `(state, input, dt) → expected state` — is executed by the server's
