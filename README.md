@@ -146,7 +146,7 @@ nc localhost 8000
 | Layer | MVP (current) | Production |
 |-------|---------------|------------|
 | Transport | TCP default; KCP implemented (`xtaci/kcp-go`, `--transport=kcp`) | KCP everywhere |
-| Encoding | JSON structs | Protobuf (not started) |
+| Encoding | **Protobuf + entity-type enum + id interning** (`shared/proto/wire.proto`, one schema -> Go + C#), **81% smaller than the JSON it replaced**; legacy JSON still accepted, distinguished by the first body byte (ADR-9) | Protobuf only, once no pre-Protobuf client remains |
 | Player Store | In-memory default; PostgreSQL implemented (`GAME_DB_URL`) | PostgreSQL |
 | Session Store | In-memory default; Redis implemented (`--backend=redis`) | Redis |
 | Server Registry | In-memory default; Redis implemented (`--backend=redis`) | Redis hash |
@@ -171,20 +171,41 @@ subtests each).
 
 ## Deployment Tiers
 
-**Measured:** one game server holds **150 concurrent players** before the 15Hz
-tick budget breaks; the bottleneck is snapshot JSON serialization, not the AOI
-scan. Full report: [BENCHMARK.md](backend/docs/BENCHMARK.md).
+**The players-per-game-server ceiling is currently unknown.** This section used
+to state 150, measured when snapshot JSON serialisation was the bottleneck. That
+bottleneck no longer exists: Protobuf, the entity-type enum and entity-id
+interning removed **81%** of the wire (ADR-9), which is the constraint the 150
+came from. Quoting it now would be quoting a number about a system that no
+longer runs.
 
-> **⚠️ Costs and tier CCU below are still estimates** — the measurement above came
-> from a dev workstation, and no VPS load test has been run. See
-> [ADR-7](backend/docs/ARCHITECTURE-DECISIONS.md).
+What *is* measured, and reproducible to 0.3% across six runs:
 
-| Tier | Cost/mo ⚠️ | CCU ⚠️ | Game servers @ 150 |
-|------|---------|-----|-----|
-| Dev/Alpha | $40-60 | < 200 | 2 |
-| Beta | $80-150 | 200-500 | 2-4 |
-| Soft Launch | $200-400 | 500-2000 | 4-14 |
-| Growth | $400-1000+ | 2000-5000+ | 14-34 |
+| Metric | Measured |
+|--------|----------|
+| Downstream bandwidth | **45.9 KB/s per client at 200 players** — inside ADR-7's `< 50 KB/s` mobile threshold |
+| RAM per game server | **~30 MiB idle → ~82 MiB at 200 players** — inside the 128Mi pod limit |
+| Wire encoding | Protobuf + type enum + id interning, **81% smaller than the original JSON** |
+
+A replacement ceiling cannot be measured on the current hardware: the load
+generator shares a host with the server under test and uses more CPU than it, and
+tick p99 swung **3.3×** on that alone. Every tick figure from that host is a lower
+bound of unknown tightness. The unblock is a separate machine for the load
+generator and nothing else — tracked in
+[ADR-7](backend/docs/ARCHITECTURE-DECISIONS.md). Full report:
+[BENCHMARK.md](backend/docs/BENCHMARK.md).
+
+> **⚠️ Costs and tier CCU below are estimates** — no VPS load test has been run.
+
+| Tier | Cost/mo ⚠️ | CCU ⚠️ |
+|------|---------|-----|
+| Dev/Alpha | $40-60 | < 200 |
+| Beta | $80-150 | 200-500 |
+| Soft Launch | $200-400 | 500-2000 |
+| Growth | $400-1000+ | 2000-5000+ |
+
+The **"Game servers @ 150" column has been removed.** It divided tier CCU by a
+retracted figure, propagating it into the one place someone sizing a fleet would
+actually read.
 
 All open-source stack: Nakama, k3s, Agones, PostgreSQL, Redis — $0 license.
 
@@ -224,9 +245,9 @@ backend/
 │   ├── messages/        # Wire protocol (Envelope + codec)
 │   └── storage/         # Interfaces + in-memory impls
 ├── gameserver-dotnet/   # C# .NET 10 game server (NativeAOT)
-│   ├── src/GameServer/  # Entry point, tick loop, combat, AOI, persistence
-│   ├── src/Shared.GameLogic/  # Shared game logic lib (also used by Unity client)
-│   └── tests/           # Unit + integration tests
+│   ├── GameServer/      # Entry point, tick loop, Arch ECS world, AOI, persistence
+│   ├── Shared.GameLogic/  # Deterministic sim, shipped to Unity as a UPM package
+│   └── GameServer.Tests/  # xUnit suite, incl. the golden-vector conformance gate
 ├── gateway/             # Depends on shared
 │   ├── cmd/gateway/     # Entry point
 │   ├── server/          # Gateway server, connections
