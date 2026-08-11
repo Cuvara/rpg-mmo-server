@@ -43,7 +43,9 @@ func TestGateway_DuplicateLoginKicksOldConnection(t *testing.T) {
 		t.Fatalf("second auth failed: %s", authResp2.Error)
 	}
 
-	// The old connection should receive a MsgDisconnect with reason "duplicate_login".
+	// The old connection should receive MsgKick followed by MsgDisconnect, both
+	// carrying reason "duplicate_login". The order is contractual: a client that
+	// understands MsgKick must see it before the legacy frame.
 	conn1.SetReadDeadline(time.Now().Add(2 * time.Second))
 	kickEnv, err := messages.Decode(conn1)
 	if err != nil {
@@ -54,15 +56,38 @@ func TestGateway_DuplicateLoginKicksOldConnection(t *testing.T) {
 		}
 		t.Fatalf("reading kick message: %v", err)
 	}
-	if kickEnv.Type != messages.MsgDisconnect {
-		t.Fatalf("expected MsgDisconnect, got type %d", kickEnv.Type)
+	if kickEnv.Type != messages.MsgKick {
+		t.Fatalf("first eviction frame: got type %d, want MsgKick (%d)",
+			kickEnv.Type, messages.MsgKick)
+	}
+	var kick messages.KickMessage
+	if err := kickEnv.UnmarshalPayload(&kick); err != nil {
+		t.Fatalf("unmarshal kick: %v", err)
+	}
+	if kick.Reason != KickReasonDuplicateLogin {
+		t.Errorf("kick reason = %q, want %q", kick.Reason, KickReasonDuplicateLogin)
+	}
+
+	// The paired legacy frame, so a pre-MsgKick client still learns it was
+	// evicted rather than sitting on a socket that stopped answering.
+	discEnv, err := messages.Decode(conn1)
+	if err != nil {
+		t.Fatalf("reading disconnect message: %v", err)
+	}
+	if discEnv.Type != messages.MsgDisconnect {
+		t.Fatalf("second eviction frame: got type %d, want MsgDisconnect (%d)",
+			discEnv.Type, messages.MsgDisconnect)
 	}
 	var disc messages.DisconnectMessage
-	if err := kickEnv.UnmarshalPayload(&disc); err != nil {
+	if err := discEnv.UnmarshalPayload(&disc); err != nil {
 		t.Fatalf("unmarshal disconnect: %v", err)
 	}
-	if disc.Reason != "duplicate_login" {
-		t.Errorf("reason = %q, want %q", disc.Reason, "duplicate_login")
+	if disc.Reason != KickReasonDuplicateLogin {
+		t.Errorf("disconnect reason = %q, want %q", disc.Reason, KickReasonDuplicateLogin)
+	}
+	// The two frames must never disagree about why.
+	if disc.Reason != kick.Reason {
+		t.Errorf("reason mismatch: kick %q, disconnect %q", kick.Reason, disc.Reason)
 	}
 }
 

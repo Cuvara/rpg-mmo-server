@@ -14,6 +14,23 @@ All modules share: Protobuf/FlatBuffers serialization, PostgreSQL + Redis.
 | **GameServer Engineer (C#)** | `gameserver-dotnet/` | `agent-gameserver-dotnet` | C# .NET 10 game server: tick loop, combat/skill, AI/NPC, loot. `Shared.GameLogic` shared with Unity client |
 | **DevOps Engineer** | `deploy/` | `agent-devops` | k3s + Agones manifests, Docker, CI/CD, monitoring, DB migrations |
 
+## Current phase: core plumbing only — no gameplay content
+
+**Directive, 2026-08-11.** The goal right now is to get every *flow* end to end
+and testable: handshake, wire codec, tick loop, snapshot merge, prediction
+scaffolding, the shared-logic package boundary, CI gates. Gameplay is
+deliberately **not** being built yet — no skills, no items, no loot tables, no AI
+behaviours, no dungeon content, no balance work.
+
+The reason is sequencing, not disinterest: gameplay written before the flows are
+proven has to be rewritten when a flow changes, and it makes every failure
+ambiguous between "the rule is wrong" and "the plumbing is wrong". Keep the
+simulation surface as thin as it takes to exercise a flow honestly — a movement
+rule and a damage rule are enough to prove prediction and reconciliation work.
+
+If a task seems to require inventing a gameplay rule to proceed, that is a signal
+to stop and ask, not to invent one.
+
 ## Dependency Order
 
 ```
@@ -52,6 +69,22 @@ Constraints: no Unity refs, **no ECS refs (`Arch.Core` included)**, no server-sp
 > **This is a two-repo contract — ADR-10.** The client repo compiles this exact
 > source. Changing a signature here changes the client's build; changing a
 > *behaviour* here changes what the client predicts. Neither is a local edit.
+
+**How the client consumes it — use this exact form, do not invent another:**
+
+```json
+"com.rpgmmo.shared-gamelogic": "https://github.com/dyCuong03/rpg-mmo-server.git?path=/backend/gameserver-dotnet/Shared.GameLogic#sgl-v0.1.0"
+```
+
+- **Tag, never branch.** A branch ref changes what the client predicts whenever
+  someone pushes, with nothing in the client repo to attribute it to.
+- Tags are `sgl-vX.Y.Z`, no `/` in the name.
+- `package.json`'s `version` is bumped in the same commit that gets tagged.
+  Otherwise the client installs `sgl-v0.2.0` and gets a package reporting `0.1.0`,
+  which UPM will not warn about.
+- **Tagging is a release action and belongs to the lead.** Do not create one.
+- No `.tgz`, no NuGet, no registry. UPM does not consume tarball URLs, and the
+  client must compile *source* (Unity 6 is C# 9).
 
 **Rules that are not negotiable at review time** (see ADR-10 for the reasoning):
 
