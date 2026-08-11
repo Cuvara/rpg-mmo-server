@@ -7,6 +7,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`METRICS_ADDR=off` killed the server at startup.** The value the Go gateway
+  documents as its off-switch reached `int.Parse` and took the process down with
+
+  ```
+  Unhandled exception. System.FormatException: The input string 'off' was not in a correct format.
+     at GameServer.Observability.MetricsEndpoint.ParseAddr(String)
+  ```
+
+  A config value that reads like "turn this off" must not be a way to stop a game
+  server from booting.
+  - `off`, `none` and `disabled` (any case, surrounding whitespace ignored) now
+    disable the endpoint, matching the gateway's `resolveMetricsAddr` vocabulary
+    so one `METRICS_ADDR` means the same thing to both binaries.
+  - An address that parses as none of those disables the endpoint and logs an
+    **error**, rather than throwing. That matches how a failed *bind* is already
+    handled a few lines further down: a mistyped metrics address costs metrics,
+    not the game server. Logged loudly so the typo stays visible.
+  - Found while building a probe container for the Kerberos fix below, not by a
+    report — nothing in the deployed configs sets `off` today.
 - **Every boot logged a Kerberos library error it could never use.** The server
   printed, outside the logger and immediately before `using postgres player store`:
 

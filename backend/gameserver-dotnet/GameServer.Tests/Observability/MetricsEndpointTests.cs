@@ -93,6 +93,39 @@ public class MetricsEndpointTests
         Assert.Null(endpoint);
     }
 
+    /// <summary>
+    /// "off" is the Go gateway's documented off-switch for METRICS_ADDR. It used to
+    /// reach int.Parse here and kill the server at startup with a bare
+    /// FormatException — for a value that reads like "turn it off".
+    /// </summary>
+    [Theory]
+    [InlineData("off")]
+    [InlineData("OFF")]
+    [InlineData("none")]
+    [InlineData("disabled")]
+    [InlineData("  off  ")]
+    public async Task TryStart_OffSwitches_DisableEndpointWithoutThrowing(string addr)
+    {
+        using var metrics = new GameMetrics("map_01", $"rpg.gameserver.test.endpoint.{Guid.NewGuid():N}");
+        await using var endpoint = MetricsEndpoint.TryStart(addr, metrics, "gs-test", NullLogger.Instance);
+        Assert.Null(endpoint);
+    }
+
+    /// <summary>
+    /// A mistyped address costs metrics, not the game server — the same call already
+    /// treats a failed bind as non-fatal.
+    /// </summary>
+    [Theory]
+    [InlineData("nonsense")]
+    [InlineData("localhost:not-a-port")]
+    [InlineData(":99999999999")]
+    public async Task TryStart_UnparseableAddr_DisablesEndpointInsteadOfCrashing(string addr)
+    {
+        using var metrics = new GameMetrics("map_01", $"rpg.gameserver.test.endpoint.{Guid.NewGuid():N}");
+        await using var endpoint = MetricsEndpoint.TryStart(addr, metrics, "gs-test", NullLogger.Instance);
+        Assert.Null(endpoint);
+    }
+
     [Theory]
     [InlineData(":9101", "+", 9101)]
     [InlineData("0.0.0.0:9101", "+", 9101)]
