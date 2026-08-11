@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    THROWAWAY SPIKE. Not part of GameServer.sln, not shipped.
+    Mirrors the AOT-relevant settings of GameServer/GameServer.csproj so that the
+    publish behaviour observed here is representative of the real binary.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- Surface every trim/AOT diagnostic instead of letting the SDK dedupe or
+         silence them. This is the whole point of the spike. -->
+    <TrimmerSingleWarn>false</TrimmerSingleWarn>
+    <IlcTrimMetadata>true</IlcTrimMetadata>
+    <SuppressTrimAnalysisWarnings>false</SuppressTrimAnalysisWarnings>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <EnableAotAnalyzer>true</EnableAotAnalyzer>
+    <EnableSingleFileAnalyzer>true</EnableSingleFileAnalyzer>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(ArchVersion)' == ''">
+    <ArchVersion>2.1.0-beta</ArchVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Arch" Version="$(ArchVersion)" />
+  </ItemGroup>
+
+  <!-- Opt-in second configuration: Arch.System + its source generator.
+       Enable with -p:UseArchSystem=true -->
+  <ItemGroup Condition="'$(UseArchSystem)' == 'true'">
+    <PackageReference Include="Arch.System" Version="1.1.0" />
+    <PackageReference Include="Arch.System.SourceGenerator" Version="2.1.0"
+                     OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <!-- Extra defines come in through ExtraDefines rather than DefineConstants,
+       because a command-line -p:DefineConstants is a global property that would
+       silently override the append below. -->
+  <PropertyGroup>
+    <DefineConstants Condition="'$(ExtraDefines)' != ''">$(DefineConstants);$(ExtraDefines)</DefineConstants>
+    <DefineConstants Condition="'$(UseArchSystem)' == 'true'">$(DefineConstants);USE_ARCH_SYSTEM</DefineConstants>
+  </PropertyGroup>
+
+</Project>
