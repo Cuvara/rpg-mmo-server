@@ -344,12 +344,19 @@ Two things a client CAN use, neither of them a disconnect signal:
   authoritative "gone" — and per the note above it does not distinguish a
   despawn from an AOI exit either.
 
-Measured: a client observed a peer's entity frozen at `x = 0.85` for 16 s after
-that peer disconnected, and the peer's `player_states` row — written server-side
-when the hold expired — reads `x = 0.854`. The client's view and the server's
-persisted value are the same number, which is what establishes the entity is
-genuinely frozen rather than the client having quietly stopped receiving updates
-for it.
+Measured twice, the second time with three independent observers:
+
+- A client observed a peer's entity frozen at `x = 0.85` for 16 s after that peer
+  disconnected; the peer's `player_states` row — written server-side when the
+  hold expired — reads `x = 0.854`.
+- In a later run, the departing process reported *itself* at `x = 1.15` as it
+  exited; a **second, separate Unity runtime** still reported that entity at
+  `x = 1.15` twenty-nine seconds later; and the server's persisted row reads
+  `x = 1.147`. Two client runtimes and the server, agreeing to two decimals.
+
+That agreement is what establishes the entity is genuinely frozen, rather than
+one client having quietly stopped receiving updates for it — the alternative
+explanation a single observer could not rule out.
 
 Both constants are measured, not just specified — AOI confirmed at 50 units from
 two independent directions (a remote player last visible at 50.5 units apart and
