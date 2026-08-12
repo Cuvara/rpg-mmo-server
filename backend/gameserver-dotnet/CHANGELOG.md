@@ -22,6 +22,90 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   serialising the class.
 
 ### Added
+- **`docs/API.md`: map transfer (13/14) and the KCP transport are now documented
+  as client contracts.** Both were reachable only by reading server source: the
+  message-type table stopped at 15 with a note that 13/14 were "reserved", and
+  KCP had no entry at all. Written for a client implementer, with the maturity of
+  each stated up front rather than left to be discovered.
+  - **Map transfer** — shapes, the five-step client-driven sequence, and the
+    three consequences a client must be built around: the *server* closes the
+    game-server connection, a new join token can only come from the gateway
+    (there is no server-to-server handoff), and completing the hop needs an
+    authenticated gateway connection — so keeping that connection open across
+    the session avoids a re-auth round trip on every transfer.
+  - Documented that transfer is the one path where the 30 s hold does **not**
+    apply: the entity is reaped immediately because there is nothing to
+    reconnect to, so a transferring player leaves no ghost. That is the inverse
+    of the disconnect path and is diagnostic in both directions.
+  - **The unvalidated destination**, which is the sharp edge: the current server
+    checks only that `map_id` is non-empty and different from its own. It does
+    not check the target exists or has capacity, yet it destroys the entity and
+    drops the connection regardless. A client whose destination turns out to be
+    unreachable is left nowhere — off the old server, not on the new one, entity
+    already reaped. Guidance is to read `ok = true` as "you have left", not "you
+    have arrived", keep the original `map_id` to fall back to, and not tear down
+    the local world until the join on the new server succeeds.
+  - **KCP** — that framing and the whole message layer are unchanged (same 4-byte
+    prefix, no KCP-specific handshake), the exact ARQ parameters the server uses
+    with the reasoning behind each, and the crypto in reimplementable detail:
+    HKDF-SHA256 with no salt and the exact info string, the 16 B nonce + 4 B
+    CRC32 header, whole-buffer AES-CFB with kcp-go's fixed IV given byte by byte.
+  - Recorded that **encryption exists only on the KCP path** — `TcpTransportListener`
+    takes no key — so TCP is not "unencrypted for now", it has no encryption path
+    at all, and encryption arrives with KCP or not at all.
+  - Recorded that a client does **not** need to hand-roll KCP or adopt a
+    third-party library: `GameServer/Net/Transport/` already holds a complete,
+    dependency-free C# port of kcp-go, with the two caveats that it is not in
+    `Shared.GameLogic` and implements the listener side.
+
+### Fixed
+- **The KCP cross-language interop tests were silently skipping; they run again,
+  and they pass.** All nine `KcpInteropTests` cases reported as *skipped* rather
+  than failed because the Go probe they drive, `interop/kcpprobe`, no longer
+  built: its `go.sum` carried no entry for `google.golang.org/protobuf v1.36.6`,
+  which `shared` requires — only `/go.mod` hashes for 2020-era versions. It had
+  not built since `shared` took its Protobuf dependency. `go mod tidy` on that
+  module fixes it (+6 lines across go.mod/go.sum, no version changes).
+  Result: `dotnet test --filter Kcp` goes from **44 passed / 9 skipped** to
+  **53 passed / 0 skipped**. Everything that had been dark is now verified
+  against the real `kcp-go`: HKDF key-derivation agreement
+  (`GoDeriveKey_MatchesCSharpDeriveKey`), echo through the C# listener for
+  plaintext, a hex key and an HKDF-stretched passphrase, a full join over both
+  plaintext and encrypted KCP, and three mismatched-key cases proving the
+  session fails closed. **The AES-CFB crypto interop passes** — that was the
+  specific thing at risk, since a decrypt mismatch produces noise rather than an
+  error message.
+- **A build failure in that harness now FAILS instead of skipping.** The skip was
+  what made the regression invisible: `Skip.If` covered "no Go toolchain" and
+  "probe failed to build" identically, so a broken harness read as an
+  unsupported environment and CI stayed green. `GoProbe` now distinguishes them
+  — a missing toolchain still skips, since a C#-only build machine is
+  legitimate, but a toolchain that IS present and cannot build the probe fails
+  with the build's stdout/stderr attached. Verified by temporarily restoring the
+  broken `go.sum`: the case failed with "The kcpprobe Go harness FAILED TO
+  BUILD…" instead of skipping.
+
+### Known issues (observed, not fixed here)
+- ~~**The KCP cross-language interop tests have been silently skipping.**~~
+  *Fixed in this release — see the Fixed entry above. Original description
+  retained for context:* All nine
+  `KcpInteropTests` cases — Go/C# key-derivation agreement, echo through the C#
+  listener for plaintext / hex key / passphrase, wrong-key-fails-closed, and a
+  full join over plaintext and encrypted KCP — report as *skipped*, not failed.
+  Cause: the Go probe they drive, `gameserver-dotnet/interop/kcpprobe`, no longer
+  builds. Its `go.sum` carries no entry for `google.golang.org/protobuf v1.36.6`,
+  which `shared` requires — only `/go.mod` hashes for 2020-era versions — so the
+  module has not built since `shared` took its Protobuf dependency. The harness
+  catches the build failure and calls `Skip.If`, which is why nothing is red.
+  Consequence: the C# KCP implementation is verified C#-to-C# (44 tests pass) but
+  its agreement with the real `kcp-go` is currently **unverified**, including the
+  crypto interop that is most likely to fail silently. CI does not catch it —
+  `dotnet test --no-build -c Release` treats skips as success.
+  Not fixed here: this task was to document the client contract, and repairing
+  the probe's module hygiene is a separate change. Worth doing before anyone
+  implements a KCP client, so there is a working cross-language oracle.
+
+### Added
 - **`docs/API.md`: a held entity is indistinguishable from a live one standing
   still, and now says so.** When a client disconnects its entity is not removed
   — it is held for the reconnect grace period and stays in every nearby client's
