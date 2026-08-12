@@ -21,7 +21,73 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   deliberately; a fix means holding the listener until the server takes over, or
   serialising the class.
 
+### Fixed
+- **`docs/API.md`: the normative merge algorithm resolved handles on a keyframe,
+  which fails silently on a malformed one.** Raised by the client team during an
+  implementation audit, and they were right. The section resolved a bare handle
+  against the *existing* table regardless of `full`, and instructed implementers
+  not to reorder. For valid input that is harmless — a keyframe re-introduces
+  every binding, so the lookup never fires. For a keyframe that wrongly carries
+  `handle != 0` with an empty `id`, it resolves against the **previous
+  interval's** bindings and produces exactly the wrong-entity corruption the same
+  section warns about twice, with no error raised.
+  Verified against both implementations before changing anything:
+  `SnapshotDeltaState.EncodeFull` clears `_handles` and resets `_nextHandle` to 1
+  *before* encoding, so every keyframe entity takes the "first mention" branch and
+  carries both `id` and `handle` — a keyframe referencing a prior-interval handle
+  is therefore structurally impossible, and rejecting one can never refuse valid
+  input. `wire.proto` states the same contract.
+  The fix is not the reordering that was proposed (clear-then-resolve): that
+  fails closed but mutates before validating, so a malformed keyframe empties the
+  world and leaves it empty until a resync completes. Step 1 now treats a bare
+  handle on a keyframe as an error *without consulting the table*, which keeps
+  the all-or-nothing ordering **and** fails closed. Added an implementers note
+  recording that the Go reference `messages.SnapshotState.Apply` does not yet
+  carry this guard, so anyone matching it byte-for-byte knows.
+- **`docs/API.md` cited two "reference implementations" that do not implement the
+  algorithm it documents.** `Shared.GameLogic.Systems.SnapshotMerger` covers
+  steps 2–4 only: it has no handle table and cannot have one, since `EntityState`
+  has no `handle` field — interning is a wire concern and `Shared.GameLogic` is
+  the pure simulation library. The layering is correct, but a client that copied
+  the merger as-is for Protobuf would upsert every interned entity under an empty
+  `Id` and silently collapse them into one bucket. Documented that handles must
+  be resolved in the codec/transport layer *before* entities reach the merger,
+  and which steps each reference actually covers.
+
 ### Added
+- **`docs/API.md`: the heartbeat was entirely undocumented, and it disconnects
+  clients.** The message-type table stopped at 10, so `ping` (11), `pong` (12)
+  and `kick` (15) had no entry anywhere in the wire reference. The server pings
+  every 10 s and closes any connection that has not answered within 30 s
+  (`GameServer/Net/Connection.cs`, `PingInterval` / `PongTimeout`) — so a client
+  built faithfully from this document joins, moves, receives snapshots, and is
+  then dropped mid-session with no indication of why. It presents as a random
+  disconnect rather than a missing message handler, and it survives every short
+  test because nothing goes wrong for the first 30 seconds. Found the hard way:
+  two runs of a Protobuf trace probe were killed mid-capture by exactly this,
+  logging `Heartbeat timeout for <user>`. Added the three missing table rows, a
+  normative Heartbeat section (echo `timestamp` unchanged, set `server_time`),
+  the explicit warning that sending `input` does **not** substitute for a
+  `pong`, and a note that 13/14 are reserved for map transfer.
+- **`docs/API.md`: three more worked wire traces**, captured from live Protobuf
+  connections and decoded field by field, covering the cases the single existing
+  example could not show:
+  - **multi-entity** — three players introduced in one keyframe with distinct
+    handles, then all three carried by handle alone in the next delta (167 → 51
+    bytes). States that the handle space is per-connection, not per-entity-type
+    or global.
+  - **removal beside surviving interned entities** — `removed` as field 5
+    holding a 36-byte ID in the *same frame* where a surviving entity is
+    referenced by bare handle, since that contrast is what gets misread. Adds
+    that a removal does not "release" a handle, and that AOI exit and true
+    despawn are indistinguishable to the client, so `removed` means "stop
+    rendering", not "gone forever".
+  - **mid-stream resync** — the handle-space reset with two bindings observed
+    changing meaning across the keyframe (handle 1 and handle 3 rebound to
+    different entities, handle 2 unchanged, handle 4 unbound). This is the
+    concrete form of the "handle 1 after a keyframe is a different entity"
+    trap: every handle still resolves, so a stale table renders the wrong
+    entity with no error raised.
 - **`docs/API.md` now documents the Protobuf-only behaviours a client has to
   implement, not just the message shapes.** The Protobuf path is the documented
   default and is enforced cross-language on every merge

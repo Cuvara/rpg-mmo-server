@@ -76,6 +76,33 @@ both encodings; the JSON column shows the legacy field names, which match the
 | 8 | `snapshot` | gameserver → client | see below |
 | 9 | `disconnect` | either | `{}` |
 | 10 | `resync` | client → gameserver | `{}` (ignored) — request a full keyframe |
+| 11 | `ping` | either | `{ timestamp }` — heartbeat, see below |
+| 12 | `pong` | either | `{ timestamp, server_time }` — reply to `ping` |
+| 15 | `kick` | gameserver → client | `{ reason }` — forced disconnect; `reason` is a machine-readable string, not user-facing text |
+
+> Types 13 and 14 (`transfer_map` / `transfer_map_resp`) are reserved for map
+> transfer and are not required for a basic client.
+
+### Heartbeat (`ping` / `pong`) — MANDATORY
+
+**A client that does not answer `ping` is disconnected after 30 seconds.** This
+is not optional and it is not only a liveness hint:
+
+- The server sends `ping` (11) every **10 s** on every game-server connection.
+- The client MUST reply `pong` (12), echoing `timestamp` **unchanged** and
+  setting `server_time` to its own clock in ms since the Unix epoch.
+- If no `pong` arrives within **30 s**, the server logs `Heartbeat timeout for
+  <user>` and closes the connection. The entity then enters the normal 30 s
+  reconnect hold, so from the player's side it looks like an ordinary drop.
+
+Constants live in `GameServer/Net/Connection.cs` (`PingInterval`,
+`PongTimeout`). Sending `input` does **not** substitute for a `pong` — the
+timeout tracks pongs only.
+
+This is easy to miss because everything works for the first 30 seconds. A client
+that joins, moves, and receives snapshots correctly will still be dropped
+mid-session, and it presents as a random disconnect rather than as a missing
+message handler.
 
 ---
 
@@ -242,6 +269,86 @@ than expecting the field.
 `TestDotnetInterop_MixedEncodingsOnOneServer` measures the encoding saving on a
 keyframe directly: **json=127B, proto=61B — 52.0% smaller**.
 
+#### Worked example — several entities at once
+
+Three players in view. The keyframe introduces each with **both** `id` and a
+**distinct** `handle`; handles are allocated from 1 in listing order. The very
+next delta carries all three by `handle` alone.
+
+```
+KEYFRAME  payload=167 bytes  tick=37640  ack_tick=1  full=true
+0888a602 1001 1801
+  22 33  0a24 "f6556309-…-ed0aacd88945"  1d 1500a041  2864 3064 3801 40 01   handle 1, x=20.000
+  22 33  0a24 "aa96957f-…-e2e82c1d08cb"  1d efee2e40  2864 3064 3801 40 02   handle 2, x= 2.733
+  22 33  0a24 "f0dccb4a-…-062ffc5c6c07"  1d 1500a041  2864 3064 3801 40 03   handle 3, x=20.000
+```
+
+```
+DELTA     payload=51 bytes   tick=37641  ack_tick=2   full=absent (false)
+0889a602 1002
+  22 0d  1d 9e88a041  2864 3064 3801 40 01     handle 1, x=20.067   (no id field)
+  22 0d  1d 33333340  2864 3064 3801 40 02     handle 2, x= 2.800   (no id field)
+  22 0d  1d 9e88a041  2864 3064 3801 40 03     handle 3, x=20.067   (no id field)
+```
+
+167 → 51 bytes for the same three entities. Note the handle space is **per
+connection**, not per entity type and not global: these numbers are 1/2/3 because
+that is the order this connection first saw them, and another client watching the
+same three entities may bind them to different numbers.
+
+#### Worked example — a removal beside surviving interned entities
+
+`removed` carries **entity IDs, never handles** — visible here as field 5
+(tag `0x2a`) holding a full 36-byte UUID, while the surviving entity in the same
+frame is still referenced by bare `handle`. This contrast is the thing to get
+right: one frame, two different ways of naming an entity.
+
+```
+DELTA     payload=60 bytes   tick=40784  ack_tick=339  full=absent (false)
+08d0be02 10d302
+  22 0d  1d 9a99993f  2864 3064 3801 40 01        surviving entity, handle 1, x=1.200 (no id)
+  2a 24  "0ce744f5-9559-4b85-a2ec-cbb4db28b6ab"   field 5 `removed` — a 36-byte ID
+```
+
+Do not route `removed` through the handle table, and do not expect a handle to be
+"released" by a removal — the binding simply stops being mentioned until the next
+keyframe rebuilds the space.
+
+Two different causes produce a `removed` entry and **the client cannot tell them
+apart**: the entity left the world (despawn, or a disconnect whose 30 s hold
+expired) or it merely left this client's AOI (radius 50). Treat `removed` as
+"stop rendering this", not as "this entity is gone forever" — it may reappear in
+a later snapshot with a fresh binding.
+
+#### Worked example — mid-stream resync and the handle-space reset
+
+The trap made concrete. Before the resync this connection held four bindings;
+after it, three. **The same handle numbers now name different entities.**
+
+```
+handle 1: before = aa96957f… (another player)  ->  after = 14ba20e5… (C)   *** REBOUND ***
+handle 2: before = a8753636… (self)            ->  after = a8753636… (self)   unchanged
+handle 3: before = 0ce744f5… (B, since removed)->  after = 6c265217… (D)   *** REBOUND ***
+handle 4: before = 14ba20e5… (C)               ->  after = (unbound)
+```
+
+```
+KEYFRAME (after resync)  payload=168 bytes  tick=40799  ack_tick=350  full=true
+08dfbe02 10de02 1801
+  22 33  0a24 "14ba20e5-…-34af6de8c1a3"  1d 0000c033  2864 3064 3801 40 01   handle 1 -> C
+  22 33  0a24 "a8753636-…-42969da4b8b1"  1d 0000c033  2864 3064 3801 40 02   handle 2 -> self
+  22 33  0a24 "6c265217-…-06a5db35c9f9"  1d bcbbbb3f  2864 3064 3801 40 03   handle 3 -> D
+```
+
+A client that kept its old table across this keyframe would render **D's**
+movement as **B** (handle 3) and **C's** as some third player (handle 1) — with
+no error raised anywhere, because every handle still resolves. That is precisely
+why the keyframe branch clears `handles`: two of the four bindings changed
+meaning, and only re-reading the ids can tell you which.
+
+Note also that the keyframe re-sends every `id`, so clearing the table costs
+nothing — it is rebuilt from the same frame that invalidated it.
+
 ### Client merge algorithm (normative)
 
 ```
@@ -250,6 +357,9 @@ on snapshot s:
     resolved = []
     for e in s.entities:
         if e.handle != 0 and e.id is empty:
+            if s.full:                      # a keyframe MUST introduce every binding,
+                abort                       #   so this sender is malformed. Do NOT
+                                            #   consult the table — see below.
             if e.handle not in handles:     # unresolvable
                 abort                       # apply NOTHING; send resync (10)
             e.id = handles[e.handle]
@@ -278,10 +388,27 @@ Three details in that ordering are load-bearing:
 
 - **Resolve before mutating (step 1 before step 2).** An unresolvable handle must
   abort the *whole* snapshot. A partially applied snapshot is worse than an
-  unapplied one, because it looks like valid state and nothing detects it.
-- **Resolution reads the handle table before the keyframe clears it.** That is
-  safe, not a bug: a keyframe re-introduces every binding with `id` populated, so
-  on a keyframe step 1 resolves nothing. Do not "fix" it by clearing first.
+  unapplied one, because it looks like valid state and nothing detects it. This
+  is also why clearing must not be hoisted above step 1: clear-then-abort empties
+  the world and only refills it a resync round-trip later.
+- **On a keyframe, a handle with no `id` is an error — do not resolve it.** A
+  keyframe re-introduces *every* binding, so on well-formed input step 1 resolves
+  nothing when `full` is true. The sender guarantees this structurally: it clears
+  its own handle table and restarts numbering at 1 *before* encoding a keyframe,
+  so every entity in it takes the "first mention" path and carries both `id` and
+  `handle`. A keyframe that references a bare handle therefore cannot be
+  legitimate — and resolving it against the *previous* interval's table is
+  exactly how you land in the wrong-entity failure described above, silently.
+  Rejecting it costs nothing (it can never fire on valid input) and converts a
+  silent corruption into a resync.
+
+> **Implementers note.** Earlier revisions of this section resolved handles
+> against the existing table on a keyframe too, and told implementers not to
+> reorder. That was safe for valid input but failed *silently* on a malformed
+> keyframe. The rule above keeps the all-or-nothing ordering (nothing is mutated
+> before validation) *and* fails closed. The Go reference
+> `messages.SnapshotState.Apply` now implements it, so the two agree — see
+> `TestKeyframeWithBareHandleIsRefusedNotResolvedAgainstStaleTable`.
 - **`removed` carries entity IDs, never handles.** Do not route it through the
   handle table.
 
@@ -292,6 +419,20 @@ is what the `max` is for.
 Reference implementations, both covered by tests:
 `Shared.GameLogic.Systems.SnapshotMerger` (C#/Unity) and
 `messages.SnapshotState` (Go — used by the smoke test and integration tests).
+
+**Neither is a complete reference for the Protobuf path**, so do not copy either
+one and assume interning is handled:
+
+- `Shared.GameLogic.Systems.SnapshotMerger` implements **steps 2–4 only**. It has
+  no handle table and no resolution, because `EntityState` carries no `handle`
+  field at all — `Shared.GameLogic` is the pure simulation library and interning
+  is a wire concern. That layering is deliberate and fine, but it means **handles
+  must already be resolved before entities reach the merger.** Do the resolution
+  in your codec/transport layer and hand the merger entities whose `Id` is
+  populated. Feed it un-resolved Protobuf entities and it will upsert them under
+  an empty `Id`, silently collapsing every interned entity into one bucket.
+- `messages.SnapshotState` (Go) implements all four steps including handles, but
+  predates the keyframe guard in step 1 — see the implementers note above.
 
 ### Keyframe policy
 

@@ -6,6 +6,32 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`SnapshotState.Apply` now rejects a keyframe that carries a bare interned
+  handle, instead of resolving it against the outgoing interval's table.**
+  To be plain about the status: this is **latent, not a live bug**. No sender in
+  this repo can produce the triggering frame — `SnapshotDeltaState.EncodeFull`
+  clears its handle table and restarts numbering at 1 *before* encoding, so every
+  entity in a keyframe carries both `id` and `handle`, and `wire.proto` states
+  the same contract. Nothing was breaking. This is defence against a future or
+  third-party sender.
+  It is worth guarding because of *how* it fails rather than how likely it is.
+  Handles reset at every keyframe, so a bare handle on a keyframe still resolves
+  — against bindings from the interval the keyframe is ending. The lookup
+  succeeds, no error is raised, and the entity is silently rebound to whatever
+  last held that number: one entity's updates rendered as another's, undetectable
+  downstream. The guard therefore does **not** consult the table at all when
+  `Full` is set; consulting it is the failure.
+  Ordering is unchanged — the check still runs in the resolve pass, before any
+  mutation, so a rejected keyframe leaves state untouched rather than clearing
+  the world and refilling it a resync later. Returns `ErrUnknownHandle` (wrapped,
+  so existing `errors.Is` recovery paths keep working) with a message naming the
+  keyframe case.
+  Raised by the Unity client team while auditing their implementation against
+  `gameserver-dotnet/docs/API.md`; the doc was corrected in the same change and
+  now describes this behaviour normatively.
+  Covered by `TestKeyframeWithBareHandleIsRefusedNotResolvedAgainstStaleTable`,
+  which sets up a *resolvable* stale binding specifically so the test fails if
+  the guard is removed and the lookup is allowed to succeed.
 - `GatewayKickChannel` constant (`"gateway:kick"`) in `constants/keys.go` for
   cross-gateway duplicate-login Pub/Sub coordination
 - **MsgPing/MsgPong (type 11/12) heartbeat messages.** `PingMessage{timestamp}`
