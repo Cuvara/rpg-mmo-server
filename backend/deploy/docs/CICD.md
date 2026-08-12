@@ -621,8 +621,9 @@ environment, §3 first deploy, §4 verification checklist, §5 moving an
 environment between machines.
 
 The one value that is *wrong* by default off-box is
-`GAMESERVER_PUBLIC_ADDR`: it defaults to a listen-style `:9200`, which every
-client normalizes to its own loopback. Set it to `<public-host-or-ip>:<port>`.
+`GAMESERVER_PUBLIC_ADDR`: it defaults to a listen-style `:9200`, which is handed
+to clients verbatim and is not dialable by them. Set it to
+`<public-host-or-ip>:<port>`.
 
 ---
 

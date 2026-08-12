@@ -49,6 +49,40 @@ sum(gameserver_players_online)                                               # C
 rate(gameserver_resyncs_total[5m])                                           # interning health
 ```
 
+### `gameserver_entities` vs `gameserver_players_online` — disagreement is CORRECT
+
+**These two gauges are expected to differ, and a difference is not a leak.** They
+count different things: `players_online` counts live *connections*,
+`gameserver_entities` counts *entities in the world*. On disconnect the
+connection goes immediately but the entity is held for the reconnect grace
+period, so `entities` stays above `players_online` for the length of that hold
+and then converges.
+
+Measured on the live local stack, 2026-08-12, sampling both gauges every 2 s
+across two disconnects:
+
+```
+07:28:17  player_count=2  players_online=2  entities=2   both clients connected — all agree
+07:28:42  player_count=1  players_online=1  entities=2   one disconnects; its entity is held
+07:29:11  player_count=1  players_online=1  entities=1   hold expires 29 s later
+07:30:47  player_count=0  players_online=0  entities=1   second disconnects
+07:31:19  player_count=0  players_online=0  entities=0   hold expires 32 s later
+```
+
+Two things to take from it. While both clients were steadily connected the
+gauges agreed *exactly*, in every sample — so a disagreement **while everyone is
+connected** is a real signal, not this effect. And the divergence closed after
+~29 s and ~32 s, matching the 30 s map-server hold, so the lag is bounded by a
+known constant rather than open-ended.
+
+What WOULD be a defect: `entities` staying above `players_online` well past the
+hold (60 s+ on a map server) with no one connected, or the two disagreeing while
+connection count is stable. Seeing `entities > 0` with `players_online = 0` for a
+few tens of seconds after everyone leaves is the hold doing its job.
+
+The registry's `player_count` field (Redis hash `servers:id:<id>`) tracks
+`players_online`, not `entities` — it agreed with it in all 450 samples above.
+
 ### `gameserver_resyncs_total` — what a rising rate means
 
 **Expected value: approximately zero.** A healthy fleet does not resync.

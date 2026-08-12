@@ -104,11 +104,21 @@ The client needs **one address and one secret**, and nothing else:
   the gateway and the game server only. A client never sees either: it receives
   a signed JWT from Nakama and an opaque join token from the gateway.
 
-A bare `:9200` in `GAMESERVER_PUBLIC_ADDR` is normalized to `127.0.0.1:9200` by
-the client, which is right for a local stack and **wrong for anything else**. If
-the client runs on a phone or another machine, set
-`GAMESERVER_PUBLIC_ADDR=<this-host-ip>:9200` in `.env` and restart, or the
-client will dial its own loopback.
+`GAMESERVER_PUBLIC_ADDR` is handed to clients **verbatim** in
+`MsgEnterWorldResp.ServerAddr`, so it must be an address the client can dial.
+Whenever ports are published — which is the case for this compose stack — that
+means host-qualified: `GAMESERVER_PUBLIC_ADDR=127.0.0.1:9200` in `.env`. A bare
+`:9200` is **not** portable: nothing in the protocol promises normalization, and
+only some clients rewrite a hostless address to loopback themselves. The Go
+smoketest does (`backend/smoketest/smoke/helpers.go`, `NormalizeDialAddr`) which
+is why it can pass against a misconfigured stack, but a C# `TcpClient` throws on
+it outright — so a Unity client fails the second hop while the smoke test looks
+green. A bare `:port` is only correct for host-mode deploys, where the listen
+address already is what clients reach.
+
+If the client runs on a phone or another machine, use this host's LAN address:
+`GAMESERVER_PUBLIC_ADDR=<this-host-ip>:9200`, then restart the game server. The
+server logs a warning at startup when the advertised address has no host part.
 
 ### Two stacks side by side
 

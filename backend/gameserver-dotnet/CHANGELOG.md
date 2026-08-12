@@ -6,7 +6,212 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Known issues (observed, not fixed here)
+- **`TransferMapTests` is flaky under a full parallel `dotnet test` run.** Two of
+  its cases intermittently fail with
+  `System.Net.Sockets.SocketException : Address already in use` at
+  `TcpListener.Start` (via `TransportFactory.Listen` -> `GameServerHost.RunAsync`).
+  The cause is a TOCTOU race in the test's own port helper,
+  `GameServer.Tests/Server/TransferMapTests.cs` `FreeTcpPort()`: it binds port 0,
+  reads the assigned port, **closes the listener**, and only then does the server
+  bind that port — so any concurrently-running test can take it in the gap. It is
+  a defect in the test harness, not in the server: the class passes 3/3 when run
+  in isolation (`dotnet test --filter FullyQualifiedName~TransferMapTests`).
+  Observed as 2 failed / 519 passed / 10 skipped on a full run. Left unfixed
+  deliberately; a fix means holding the listener until the server takes over, or
+  serialising the class.
+
 ### Added
+- **`docs/API.md`: a held entity is indistinguishable from a live one standing
+  still, and now says so.** When a client disconnects its entity is not removed
+  — it is held for the reconnect grace period and stays in every nearby client's
+  snapshots at its last position with full HP. There is no "held" flag on the
+  wire and no `disconnected` field on `EntitySnapshot`, so for up to 30 s a
+  dropped player renders exactly like one standing still, then vanishes with no
+  warning. Nothing in the protocol distinguishes them. Documented beside the
+  removal semantics because it is the same class of trap as "`removed` does not
+  mean gone forever", along with the two weak signals a client does have (the
+  entity stops changing — a hint, not proof, since players do stand still; and
+  the eventual `removed`, which is authoritative but does not separate a despawn
+  from an AOI exit).
+  Extended with the consequence that a client **cannot observe when a peer
+  leaves**, only when the server eventually says so — so any duration a client
+  computes that ends at "my peer left" is an upper bound inflated by up to the
+  full hold, silently, because the held entity keeps arriving in snapshots.
+  Recorded with the measured instance: two clients timing the same co-presence
+  window, both clocking from peer-visible, reported 62.8 s and 74.9 s against a
+  true 63.0 s — the second overstating by 11.9 s, which equals the time it
+  outlived its peer (server-side timestamps put the two exits 11.96 s apart).
+  Neither client was faulty. The general rule is stated: a co-presence duration
+  cannot be computed by one client; it is the minimum across both, equivalently
+  second-join-to-first-exit, and needs both clients' data by nature.
+  Worth having because it is the more dangerous face of the held-entity trap —
+  the rendering symptom produces a ghost someone may notice, this silently
+  corrupts a number that looks entirely reasonable. Found and disproved by the
+  Unity client team after an earlier per-client metric shape had been reviewed
+  and wrongly endorsed, including by this module's own maintainer.
+  Recorded with its corroboration: a client observed the peer frozen at
+  `x = 0.85` for 16 s, and that peer's server-side `player_states` row reads
+  `x = 0.854`. Client view and persisted value being the same number is what
+  establishes the entity is genuinely frozen rather than the client having
+  stopped receiving updates for it. Surfaced by the Unity client team during the
+  two-process visibility test.
+- **AOI radius and the entity hold are now recorded as MEASURED constants, not
+  just specified ones.** Both were quoted throughout the docs as bare
+  specifications. Each has now been measured against the running local stack
+  from two independent directions, and the figures agree:
+  - **AOI 50 units** — server side, two players persisted 61.00 units apart in
+    `player_states` were outside each other's snapshots; client side, a remote
+    player was last visible at 50.5 units apart and absent by 62.2, from a Unity
+    client's own snapshot tracking.
+  - **Map-server entity hold ~30 s** — server side, `gameserver_entities` lagged
+    `players_online` by 29 s and 32 s across two disconnects before converging;
+    client side, a removal reached the surviving client 30.1 s after a deliberate
+    disconnect, carried by id.
+  The agreement is the point: the two paths share no code and neither
+  measurement was taken with sight of the other, so landing within ~1 unit and
+  ~1 second is evidence in a way either figure alone is not. Recorded with the
+  date and what they were measured against, because this repo already has one
+  number that outlived its evidence (the 150-players ceiling, ADR-7) and the way
+  not to repeat that is to say what a figure is *of*.
+  Landed in `docs/DESIGN.md` as a "Measured constants" table, cross-referenced
+  from `docs/API.md` where it matters to a client — a multiplayer test that
+  spawns or drives two clients more than 50 units apart fails against a
+  *correct* server, so distance is the first thing to check, not the netcode.
+  Also annotated the stale `backend/docs/CORE_FLOW.md` AOI row inline, following
+  that document's own convention for superseded entries, since it still cites
+  the radius against deleted Go paths.
+  Updated with tighter figures from a later two-process run: the hold is now
+  measured by **three independent methods** — Prometheus gauge lag (29 s / 32 s),
+  server log disconnect-to-hold-expiry end to end (30 s / 31 s), and client-side
+  timing of the `removed` entry (30.1 s). All three paths are kept listed rather
+  than collapsed to one tight number, because the agreement across methods using
+  different data is the evidence; a single figure would read as precision it has
+  not earned.
+  Added a persistence detail a reader would otherwise guess wrong: **the save
+  lands with the hold EXPIRY, not the disconnect** — a client that disconnected
+  at 08:00:52 has its row stamped 08:01:21.56. Anyone assuming save-on-disconnect
+  misjudges the crash-loss window by the full hold: if the process dies during a
+  hold, up to 30 s of movement was never written.
+  Noted alongside them that a client run shorter than 30 s cannot test the
+  heartbeat at all — it ends before the timeout could fire — so a clean short
+  run is not evidence the heartbeat is handled. The heartbeat is now confirmed
+  exercised rather than assumed: a two-process run held connections in-world for
+  75 s and 74 s, ~7 pings each, with no `Heartbeat timeout` for either. Stated as
+  a rule to keep the claims separate — short runs prove visibility, long runs
+  prove liveness, and reading the first as the second is the mistake.
+- **`docs/METRICS.md`: `gameserver_entities` disagreeing with
+  `gameserver_players_online` is CORRECT, and now says so.** The two gauges count
+  different things — entities in the world versus live connections — so during a
+  reconnect hold the first legitimately exceeds the second. This reads as a leak
+  to anyone meeting the metrics cold; it did to me. Documented with the measured
+  timeline showing the gauges agreeing *exactly* while both clients were
+  connected and diverging only after disconnect, so the benign case is
+  distinguishable from a real one: a disagreement while connection count is
+  stable, or `entities` staying high well past the hold, is a defect; a few tens
+  of seconds of `entities > 0` at `players_online = 0` is the hold working. Also
+  records that the registry's `player_count` tracks `players_online` (agreeing
+  in all 450 samples), not `entities`.
+
+### Fixed
+- **`docs/API.md`: the normative merge algorithm resolved handles on a keyframe,
+  which fails silently on a malformed one.** Raised by the client team during an
+  implementation audit, and they were right. The section resolved a bare handle
+  against the *existing* table regardless of `full`, and instructed implementers
+  not to reorder. For valid input that is harmless — a keyframe re-introduces
+  every binding, so the lookup never fires. For a keyframe that wrongly carries
+  `handle != 0` with an empty `id`, it resolves against the **previous
+  interval's** bindings and produces exactly the wrong-entity corruption the same
+  section warns about twice, with no error raised.
+  Verified against both implementations before changing anything:
+  `SnapshotDeltaState.EncodeFull` clears `_handles` and resets `_nextHandle` to 1
+  *before* encoding, so every keyframe entity takes the "first mention" branch and
+  carries both `id` and `handle` — a keyframe referencing a prior-interval handle
+  is therefore structurally impossible, and rejecting one can never refuse valid
+  input. `wire.proto` states the same contract.
+  The fix is not the reordering that was proposed (clear-then-resolve): that
+  fails closed but mutates before validating, so a malformed keyframe empties the
+  world and leaves it empty until a resync completes. Step 1 now treats a bare
+  handle on a keyframe as an error *without consulting the table*, which keeps
+  the all-or-nothing ordering **and** fails closed. Added an implementers note
+  recording that the Go reference `messages.SnapshotState.Apply` does not yet
+  carry this guard, so anyone matching it byte-for-byte knows.
+- **`docs/API.md` cited two "reference implementations" that do not implement the
+  algorithm it documents.** `Shared.GameLogic.Systems.SnapshotMerger` covers
+  steps 2–4 only: it has no handle table and cannot have one, since `EntityState`
+  has no `handle` field — interning is a wire concern and `Shared.GameLogic` is
+  the pure simulation library. The layering is correct, but a client that copied
+  the merger as-is for Protobuf would upsert every interned entity under an empty
+  `Id` and silently collapse them into one bucket. Documented that handles must
+  be resolved in the codec/transport layer *before* entities reach the merger,
+  and which steps each reference actually covers.
+
+### Added
+- **`docs/API.md`: the heartbeat was entirely undocumented, and it disconnects
+  clients.** The message-type table stopped at 10, so `ping` (11), `pong` (12)
+  and `kick` (15) had no entry anywhere in the wire reference. The server pings
+  every 10 s and closes any connection that has not answered within 30 s
+  (`GameServer/Net/Connection.cs`, `PingInterval` / `PongTimeout`) — so a client
+  built faithfully from this document joins, moves, receives snapshots, and is
+  then dropped mid-session with no indication of why. It presents as a random
+  disconnect rather than a missing message handler, and it survives every short
+  test because nothing goes wrong for the first 30 seconds. Found the hard way:
+  two runs of a Protobuf trace probe were killed mid-capture by exactly this,
+  logging `Heartbeat timeout for <user>`. Added the three missing table rows, a
+  normative Heartbeat section (echo `timestamp` unchanged, set `server_time`),
+  the explicit warning that sending `input` does **not** substitute for a
+  `pong`, and a note that 13/14 are reserved for map transfer.
+- **`docs/API.md`: three more worked wire traces**, captured from live Protobuf
+  connections and decoded field by field, covering the cases the single existing
+  example could not show:
+  - **multi-entity** — three players introduced in one keyframe with distinct
+    handles, then all three carried by handle alone in the next delta (167 → 51
+    bytes). States that the handle space is per-connection, not per-entity-type
+    or global.
+  - **removal beside surviving interned entities** — `removed` as field 5
+    holding a 36-byte ID in the *same frame* where a surviving entity is
+    referenced by bare handle, since that contrast is what gets misread. Adds
+    that a removal does not "release" a handle, and that AOI exit and true
+    despawn are indistinguishable to the client, so `removed` means "stop
+    rendering", not "gone forever".
+  - **mid-stream resync** — the handle-space reset with two bindings observed
+    changing meaning across the keyframe (handle 1 and handle 3 rebound to
+    different entities, handle 2 unchanged, handle 4 unbound). This is the
+    concrete form of the "handle 1 after a keyframe is a different entity"
+    trap: every handle still resolves, so a stale table renders the wrong
+    entity with no error raised.
+- **`docs/API.md` now documents the Protobuf-only behaviours a client has to
+  implement, not just the message shapes.** The Protobuf path is the documented
+  default and is enforced cross-language on every merge
+  (`TestDotnetInterop_FullFlow` runs the whole flow once per encoding), but a
+  client could read the whole reference, implement it faithfully against JSON,
+  swap the codec, and still be wrong — because two of the differences are
+  *behaviour*, not encoding. Four gaps closed:
+  - **The normative client merge algorithm had no handle-resolution step at
+    all.** Followed literally it breaks on every Protobuf delta, since deltas
+    carry an empty `id`. It now resolves handles first, aborts the entire
+    snapshot on an unresolvable one, and clears `handles` alongside `world` on a
+    keyframe. Called out the three load-bearing ordering details: resolve before
+    mutate, resolution reading the table *before* the keyframe clears it (safe,
+    and not to be "fixed"), and `removed` carrying IDs rather than handles. One
+    algorithm now covers both encodings instead of silently assuming JSON.
+  - **The entity-type enum/`type_name` fallback was undocumented.** Added the
+    rule (prefer `type`, read `type_name` when `UNSPECIFIED`), the five enum
+    values with their string forms, and why reading only one field fails in both
+    directions. The old prose listed `boss` as if it were an enumerated type; it
+    is not in the enum, so it degrades through `type_name` — the entry now says
+    so rather than implying an enum value that does not exist.
+  - **Two client constraints on the encoding were implicit.** The payload must be
+    Protobuf inside a Protobuf envelope (no JSON-in-proto hybrid), and `type = 0`
+    must never be sent — spelled out with the `0x08` sniffing reason, since that
+    is the non-obvious one and the fail-closed `0x12` case depends on it.
+  - **Added a worked wire trace** captured from a live Protobuf connection: the
+    same entity across a keyframe and a delta, broken down field by field. It
+    demonstrates three rules at once that prose can only assert — `id` sent
+    exactly once, `type_name` absent because the enum carried the category, and
+    `full` absent from the delta because proto3 omits `false`. Includes the
+    suite's own measured saving (json=127B, proto=61B, 52.0%).
+  Documentation only; no behaviour change.
 - **Golden vector `multiply_add_intermediate_rounding`** — the split-multiply in
   `MovementSystem.Integrate` is now covered by a test rather than by reasoning.
 
@@ -37,6 +242,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   committed expectation comes from running the real code through the generator.
   The two agree exactly, which is what makes the case evidence rather than
   circular.
+
+### Fixed
+- **The hostless-`GAMESERVER_PUBLIC_ADDR` warning no longer misses the case it
+  was written for.** `publicAddr` is advertised to clients verbatim, so it must
+  be dialable by them (`Program.cs`, contract comment on `publicAddr`). The
+  startup guard only fired when the variable was *unset* and had fallen back to
+  the listen address (`publicAddr == addr && addr.StartsWith(':')`). An operator
+  who set it explicitly but still hostless — e.g. `GAMESERVER_PUBLIC_ADDR=:9200`
+  on a container listening on `:9000` — tripped the exact failure the message
+  describes and got no warning at all, because the two values differed. The
+  guard now tests whether the advertised address has a host part, via a new
+  `IsHostlessAddr` helper treating `""`, `0.0.0.0`, `::` and `[::]` as hostless
+  (the same host list as the Go reference client's `NormalizeDialAddr` in
+  `backend/smoketest/smoke/helpers.go`, so both sides agree on what counts as
+  listen-style). The unset-and-fell-back case keeps its existing informational
+  message; the explicitly-set-but-hostless case is a real `LogWarning` and names
+  the corrective value. Still warn-only in both cases and registration is
+  unchanged: a bare listen address *is* correct for host-mode deploys, so
+  refusing to start would break a supported topology.
+- **`NoopEventStream`'s justification was stale.** The comment on the wiring in
+  `Program.cs` read "the C# server has no Redis client", which has not been true
+  since the server started self-registering: it holds a `StackExchange.Redis`
+  `IConnectionMultiplexer` (`Registry/RedisServerRegistry.cs`) and writes its own
+  registry entry with it. The Noop decision itself is unchanged and still
+  correct (ADR-5) — what is actually missing is the *producer* side, a
+  Redis-backed `IEventStream`; the gateway's relay subscribes to `events:game`
+  and nothing publishes to it. Comment now states that reason. No behaviour
+  change.
 
 ### Fixed
 - **`package.json` and the `.csproj` now ship `.meta` files too.** `sgl-v0.1.1`
