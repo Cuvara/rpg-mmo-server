@@ -495,6 +495,63 @@ All validation is server-authoritative:
   resumes with full state. Otherwise the entity is removed and the session is
   invalidated.
 
+### Measured constants (2026-08-12)
+
+Two constants below are quoted as specifications throughout these docs. They
+have now been **measured against the running local stack from two independent
+directions each**, and the figures agree. Recorded here so they are evidence
+rather than restatement — this repo has at least one figure that outlived the
+measurement behind it (the 150-players-per-server ceiling, ADR-7), and the way
+to avoid repeating that is to say what a number is *of*.
+
+| Constant | Specified | Measured — how | Result |
+|---|---|---|---|
+| AOI radius (`GameConstants.DefaultAoiRadius`) | 50.0 units | **server**: distance between two players' persisted `player_states` rows, compared against whether each appeared in the other's snapshots | **61.00 units** apart → mutually invisible |
+| | | **client**: Unity client tracking at what separation a remote player left its world set | last visible **50.5**, absent by **62.2** |
+| Map-server entity hold | 30 s | **server, gauge sampling**: lag of `gameserver_entities` behind `players_online` across two disconnects | **29 s** and **32 s**, then converged |
+| | | **server, log end-to-end**: disconnect line to "Entity hold expired" line, across three two-process runs | **30, 31, 30, 30, 30, 31 s** |
+| | | **client**: time from a deliberate disconnect to the `removed` entry arriving at the surviving client | **30.1 s** |
+
+Three independent methods for the hold — two server-side using different data
+(Prometheus gauges vs the server's own log lines) and one client-side timing the
+wire — landing on 29-32 s. Both figures for AOI land the boundary within about a
+unit. The agreement across methods is the evidence; no single one of these is
+worth much alone.
+
+**The persistence write lands with the hold EXPIRY, not the disconnect.** In the
+measured run a client disconnected at 08:00:52 and its `player_states` row is
+stamped 08:01:21.56 — the save fires as the entity is reaped, ~30 s later. Anyone
+assuming save-on-disconnect will misjudge the crash-loss window by the full hold
+duration: if the process dies during a hold, up to 30 s of movement was never
+written.
+
+The agreement is the evidence, not either row alone. The two paths share no
+code and neither measurement was taken with sight of the other: the server-side
+AOI figure comes from persisted Postgres rows, the client-side one from a Unity
+client tracking what appeared in its own snapshots; the server-side hold figure
+comes from Prometheus gauge sampling, the client-side one from timing a `removed`
+entry on the wire. Individually each is arguable — a persisted position is only
+a snapshot of when the save fired, and a client-side inference could be a merge
+bug. Landing within ~1 unit and ~1 second of each other, they are not.
+
+A third constant, the heartbeat, is specified in `Net/Connection.cs` as a 10 s
+ping interval with a 30 s pong timeout. It is confirmed exercised: a two-process
+client run held connections in-world for **75 s and 74 s** — ~7 pings each, more
+than twice the timeout — and no `Heartbeat timeout` line appeared for either
+connection.
+
+Keep the two kinds of run distinct when reading results:
+
+- **Short runs prove visibility, not liveness.** A run under 30 s ends before the
+  pong timeout could fire, so it cannot test the heartbeat at all. Several ~25 s
+  two-client runs passed cleanly while saying nothing whatsoever about ping/pong.
+- **Long runs prove liveness.** Only a run exceeding the timeout — comfortably,
+  so a late pong is not mistaken for a passing one — is evidence the client
+  answers pings.
+
+Reading the first as the second is an easy mistake and it is why this note
+exists.
+
 ## Shutdown (2026-08-06)
 
 `GameServerHost.ShutdownAsync` always has at least two callers on a real

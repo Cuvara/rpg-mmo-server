@@ -48,6 +48,22 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   makes an isolated second stack expressible.
 
 ### Fixed
+- **`GAMESERVER_PUBLIC_ADDR`'s comment documented the opposite of the actual
+  contract.** It claimed a bare `":9200"` "is normalized by the client to
+  127.0.0.1:9200, which is right for a local stack". That is not the contract:
+  `GameServer/Program.cs` states the advertised address is handed to clients
+  verbatim and so must be **dialable by the client**, and the repo's own
+  integration test configures a host-qualified value and asserts it comes back
+  unchanged (`backend/integration_test/selfreg_flow_test.go`). Only the Go
+  smoketest rewrites listen-style addresses, and it does so defensively for
+  arbitrary deploys — it is not a guarantee the protocol makes. Taking the old
+  comment at face value cost real debugging time: a C# `TcpClient` throws on a
+  hostless address where Go's `net.Dial` resolves it, so a Unity client failed
+  the second hop against a stack that looked correct. The comment now states the
+  real requirement (host-qualified whenever ports are published, bare `":port"`
+  only for host mode) and flags that the default value below it is hostless.
+
+### Fixed
 - **Scratch/second-stack configuration passed through exported environment
   variables was silently ignored.** On this project's dev box `docker` is a
   shell shim to the Windows `docker.exe` (`docs/CICD.md` §4a), and WSL only

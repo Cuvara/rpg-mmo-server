@@ -46,6 +46,17 @@ no negotiation and no extra round trip.
    per connection. It never imposes one.
 3. Be prepared to decode either, since the same rule is what lets servers and
    clients upgrade independently.
+4. **The payload must be encoded in the same encoding as its envelope.**
+   `payload` is a nested `bytes` field, so on a Protobuf connection those bytes
+   must be the *Protobuf* serialisation of the inner message. JSON inside a
+   Protobuf envelope is not a supported hybrid; the peer will fail to parse it.
+5. **Never send `type = 0`.** It is rejected by the encoder, and the reason is
+   the sniffing rule above: proto3 elides field 1 when it is zero, so a `type 0`
+   envelope would not begin with `0x08` and the peer would classify the frame as
+   the wrong encoding. Decoding fails closed for the same reason — a body
+   beginning `0x12` parses as a well-formed `Envelope` carrying only field 2 with
+   `type` left at 0, and rejecting `type 0` turns that silent half-parse into an
+   error.
 
 The payload tables below describe the *message shapes*, which are the same in
 both encodings; the JSON column shows the legacy field names, which match the
@@ -65,6 +76,33 @@ both encodings; the JSON column shows the legacy field names, which match the
 | 8 | `snapshot` | gameserver → client | see below |
 | 9 | `disconnect` | either | `{}` |
 | 10 | `resync` | client → gameserver | `{}` (ignored) — request a full keyframe |
+| 11 | `ping` | either | `{ timestamp }` — heartbeat, see below |
+| 12 | `pong` | either | `{ timestamp, server_time }` — reply to `ping` |
+| 15 | `kick` | gameserver → client | `{ reason }` — forced disconnect; `reason` is a machine-readable string, not user-facing text |
+
+> Types 13 and 14 (`transfer_map` / `transfer_map_resp`) are reserved for map
+> transfer and are not required for a basic client.
+
+### Heartbeat (`ping` / `pong`) — MANDATORY
+
+**A client that does not answer `ping` is disconnected after 30 seconds.** This
+is not optional and it is not only a liveness hint:
+
+- The server sends `ping` (11) every **10 s** on every game-server connection.
+- The client MUST reply `pong` (12), echoing `timestamp` **unchanged** and
+  setting `server_time` to its own clock in ms since the Unix epoch.
+- If no `pong` arrives within **30 s**, the server logs `Heartbeat timeout for
+  <user>` and closes the connection. The entity then enters the normal 30 s
+  reconnect hold, so from the player's side it looks like an ordinary drop.
+
+Constants live in `GameServer/Net/Connection.cs` (`PingInterval`,
+`PongTimeout`). Sending `input` does **not** substitute for a `pong` — the
+timeout tracks pongs only.
+
+This is easy to miss because everything works for the first 30 seconds. A client
+that joins, moves, and receives snapshots correctly will still be dropped
+mid-session, and it presents as a random disconnect rather than as a missing
+message handler.
 
 ---
 
@@ -106,10 +144,44 @@ both encodings; the JSON column shows the legacy field names, which match the
 | `entities` | array | always (may be `[]`) | Keyframe: everything in AOI. Delta: only entities whose visible state changed since the previous snapshot **sent to this connection**. |
 | `removed` | string[] | omitted when empty | Delta only: entity IDs that left the AOI or the world. Never present on a keyframe. |
 
-`entities[]` element: `id` (string), `type` (`player` \| `npc` \| `mob` \| `boss`),
+`entities[]` element: `id` (string), `type` (a category string — see below),
 `x`, `y` (float32), `hp`, `max_hp` (int). Visible state is exactly these fields —
 a change in any of them puts the entity in the next delta; a change in a field the
 client cannot see (e.g. cooldown) does not.
+
+### Entity type: enum with a string fallback (Protobuf only) — normative
+
+In JSON, `type` is simply a string and there is nothing to do. In Protobuf the
+category travels in **one of two fields, never both**:
+
+| Field | Proto # | Used when |
+|---|---|---|
+| `type` (`EntityType` enum) | 7 | The category is one this schema enumerates |
+| `type_name` (string) | 2 | It is not — the simulation produced a kind the schema does not know yet |
+
+**The rule: prefer `type`; when it is `ENTITY_TYPE_UNSPECIFIED` (0), read
+`type_name`.** `ENTITY_TYPE_UNSPECIFIED` literally means "see `type_name`". The
+writer never populates both, so the category is never ambiguous.
+
+| Enum value | # | String form |
+|---|---|---|
+| `ENTITY_TYPE_UNSPECIFIED` | 0 | *(see `type_name`)* |
+| `ENTITY_TYPE_PLAYER` | 1 | `player` |
+| `ENTITY_TYPE_MOB` | 2 | `mob` |
+| `ENTITY_TYPE_NPC` | 3 | `npc` |
+| `ENTITY_TYPE_ITEM` | 4 | `item` |
+| `ENTITY_TYPE_PROJECTILE` | 5 | `projectile` |
+
+A client that reads **only** the enum silently loses every future entity kind
+(they all arrive as `UNSPECIFIED`); one that reads **only** `type_name` gets an
+empty string for all five kinds above. Both halves are required.
+
+This fallback is a live path, not a hypothetical: entity categories are
+data-driven (`World/EcsWorld.cs` takes the type from the spawn kind), and the
+component docs already name a `"boss"` category that the enum does **not**
+include. Anything outside the five values above travels as `type_name`, by
+design — "a server that learns a new entity kind before the schema does must
+degrade, not break" (`shared/messages/proto.go`).
 
 ### Entity-id interning (Protobuf only) — normative
 
@@ -144,20 +216,309 @@ The Go reference implementation is `SnapshotState.Apply` in
 `backend/shared/messages/snapshot_state.go`; its desynchronise-and-recover tests
 are in `interning_test.go` alongside it.
 
+**The trap worth stating twice: handle `1` after a keyframe is a *different
+entity* than handle `1` before it.** Handles restart from 1 at every keyframe.
+Carry the table across and you will not get an error — you will attribute one
+entity's updates to another, which renders as a real entity in the wrong place.
+That is why rule 4 says clear, and why the merge algorithm below clears
+`handles` in the same step as `world`.
+
+#### Worked example — the same entity across a keyframe and a delta
+
+Captured from a live Protobuf connection. One entity, introduced then referenced:
+
+```
+KEYFRAME  payload=60 bytes   tick=15743  ack_tick=1  full=true
+08ff7a 1001 1801 2233 0a24<36-byte uuid> 1dabaaaa3e 2864 3064 3801 4001
+
+  08 ff7a      field 1  tick      = 15743
+  10 01        field 2  ack_tick  = 1
+  18 01        field 3  full      = true
+  22 33        field 4  entities, 51 bytes:
+     0a 24        field 1  id       = "b8547cf2-…-6403cf1e3f19"   <-- INTRODUCES the binding
+     1d abaaaa3e  field 3  x        = 0.3333
+     28 64        field 5  hp       = 100
+     30 64        field 6  max_hp   = 100
+     38 01        field 7  type     = 1 (ENTITY_TYPE_PLAYER)
+     40 01        field 8  handle   = 1                           <-- bind 1 -> that uuid
+                  field 2  type_name ABSENT — never set beside the enum
+```
+
+```
+DELTA     payload=20 bytes   tick=15744  ack_tick=2  full=false
+08807b 1002 220d 1dabaa2a3f 2864 3064 3801 4001
+
+  08 807b      field 1  tick      = 15744
+  10 02        field 2  ack_tick  = 2
+               field 3  full      ABSENT => false (proto3 omits zero values)
+  22 0d        field 4  entities, 13 bytes:
+               field 1  id        ABSENT                          <-- resolve via handle
+     1d abaa2a3f  field 3  x        = 0.6667
+     28 64        field 5  hp       = 100
+     30 64        field 6  max_hp   = 100
+     38 01        field 7  type     = 1 (ENTITY_TYPE_PLAYER)
+     40 01        field 8  handle   = 1                           <-- look up 1 -> uuid
+```
+
+Same entity, 60 bytes → 20 bytes. Three separate rules are visible in this one
+pair: `id` is sent exactly once (interning), `type_name` is absent in both frames
+because the enum carried the category, and `full` is absent from the delta
+because proto3 omits `false` — so a reader must treat *absent* as `false` rather
+than expecting the field.
+
+`TestDotnetInterop_MixedEncodingsOnOneServer` measures the encoding saving on a
+keyframe directly: **json=127B, proto=61B — 52.0% smaller**.
+
+#### Worked example — several entities at once
+
+Three players in view. The keyframe introduces each with **both** `id` and a
+**distinct** `handle`; handles are allocated from 1 in listing order. The very
+next delta carries all three by `handle` alone.
+
+```
+KEYFRAME  payload=167 bytes  tick=37640  ack_tick=1  full=true
+0888a602 1001 1801
+  22 33  0a24 "f6556309-…-ed0aacd88945"  1d 1500a041  2864 3064 3801 40 01   handle 1, x=20.000
+  22 33  0a24 "aa96957f-…-e2e82c1d08cb"  1d efee2e40  2864 3064 3801 40 02   handle 2, x= 2.733
+  22 33  0a24 "f0dccb4a-…-062ffc5c6c07"  1d 1500a041  2864 3064 3801 40 03   handle 3, x=20.000
+```
+
+```
+DELTA     payload=51 bytes   tick=37641  ack_tick=2   full=absent (false)
+0889a602 1002
+  22 0d  1d 9e88a041  2864 3064 3801 40 01     handle 1, x=20.067   (no id field)
+  22 0d  1d 33333340  2864 3064 3801 40 02     handle 2, x= 2.800   (no id field)
+  22 0d  1d 9e88a041  2864 3064 3801 40 03     handle 3, x=20.067   (no id field)
+```
+
+167 → 51 bytes for the same three entities. Note the handle space is **per
+connection**, not per entity type and not global: these numbers are 1/2/3 because
+that is the order this connection first saw them, and another client watching the
+same three entities may bind them to different numbers.
+
+#### Worked example — a removal beside surviving interned entities
+
+`removed` carries **entity IDs, never handles** — visible here as field 5
+(tag `0x2a`) holding a full 36-byte UUID, while the surviving entity in the same
+frame is still referenced by bare `handle`. This contrast is the thing to get
+right: one frame, two different ways of naming an entity.
+
+```
+DELTA     payload=60 bytes   tick=40784  ack_tick=339  full=absent (false)
+08d0be02 10d302
+  22 0d  1d 9a99993f  2864 3064 3801 40 01        surviving entity, handle 1, x=1.200 (no id)
+  2a 24  "0ce744f5-9559-4b85-a2ec-cbb4db28b6ab"   field 5 `removed` — a 36-byte ID
+```
+
+Do not route `removed` through the handle table, and do not expect a handle to be
+"released" by a removal — the binding simply stops being mentioned until the next
+keyframe rebuilds the space.
+
+Two different causes produce a `removed` entry and **the client cannot tell them
+apart**: the entity left the world (despawn, or a disconnect whose 30 s hold
+expired) or it merely left this client's AOI (radius 50). Treat `removed` as
+"stop rendering this", not as "this entity is gone forever" — it may reappear in
+a later snapshot with a fresh binding.
+
+#### A held entity is indistinguishable from a live one standing still
+
+The counterpart trap to the one above, and the more likely of the two to reach
+players. When a client disconnects, its entity is **not** removed — it is held
+for the reconnect grace period (30 s on a map server). During that window the
+entity is still in every nearby client's snapshots, at its last position, with
+full HP. **There is no "held" flag on the wire**, and there is deliberately no
+`disconnected` field on `EntitySnapshot`.
+
+So a remote player who has actually dropped renders, for up to 30 s, exactly like
+a remote player who is standing still. Nothing in the protocol lets a client tell
+them apart. If your game surfaces other players at all — nameplates, targeting,
+"is anyone here" logic — decide what you want that to look like, because the
+default is a ghost that looks alive and then vanishes with no warning.
+
+**A client therefore cannot observe when a peer leaves**, only when the server
+eventually says so. Any duration a client computes that ends at "my peer left" is
+an upper bound, inflated by up to the full hold — and it inflates *silently*,
+because a held entity is still arriving in snapshots and nothing marks it.
+
+Measured instance, because this is easy to dismiss as theoretical. Two clients in
+one session each timed their own co-presence window, both clocking from the
+moment the peer became visible:
+
+| Client | Reported | Actual |
+|---|---|---|
+| the one that exited first | 62.8 s | 63.0 s — correct |
+| the one that outlived it by 12 s | **74.9 s** | 63.0 s — **overstated by 11.9 s** |
+
+The overstatement equals the time it outlived its peer, to a tenth of a second.
+Server-side timestamps confirm the two exits were 11.96 s apart. Neither client
+was faulty; the second simply kept counting a co-presence that had already ended,
+because the peer's held entity was still in its world set.
+
+The consequence generalises: **a co-presence duration cannot be computed by one
+client.** The correct figure is the minimum across both — equivalently, second
+join to first exit — and it needs both clients' data by nature. A single client
+should name its metric for what it is (a local upper bound), not for what it
+looks like.
+
+This is the same trap as the rendering one above, and arguably the more dangerous
+face of it: there it produces a ghost someone may notice, here it silently
+corrupts a number that looks entirely reasonable.
+
+Two things a client CAN use, neither of them a disconnect signal:
+
+- The entity **stops changing**. A held entity's position and HP are frozen,
+  because the simulation marks it inactive (no AI targeting, no damage). Absence
+  of change is a hint, not proof — a player really can stand still.
+- The eventual `removed` entry, when the hold expires. That is the only
+  authoritative "gone" — and per the note above it does not distinguish a
+  despawn from an AOI exit either.
+
+Measured across two runs. In the second, three observers on **two different
+surfaces** agree — which is what makes it conclusive:
+
+| Observer | Surface | Value |
+|---|---|---|
+| The departing process, as it exited | its own last self-report | `x = 1.15` |
+| A **second, separate Unity runtime**, ~28 s later and still mid-hold | the live snapshot stream | `x = 1.15` |
+| The server, when the hold expired | the `player_states` row it wrote | `x = 1.147` |
+
+An earlier run gave the same result with two observers: a peer frozen at
+`x = 0.85` for 16 s, against a persisted `x = 0.854`.
+
+Read the legs separately, because they rule out different things. The two client
+observations are of the **live snapshot stream** — the server was still sending
+that entity, and sending it unchanged, so the freeze is not a client that quietly
+stopped receiving updates for it. That is the explanation a single observer could
+never eliminate, and it takes two independent runtimes to close. The persisted
+row is a **different surface**: written at hold expiry, it shows the server's own
+authoritative state never moved either, so the entity is genuinely inert rather
+than merely being reported as static.
+
+Do not treat the mid-hold client reading as evidence about persistence — at 28 s
+the hold had not expired and nothing had been written yet.
+
+Both constants are measured, not just specified — AOI confirmed at 50 units from
+two independent directions (a remote player last visible at 50.5 units apart and
+absent by 62.2), and the hold at ~30 s (a removal arriving 30.1 s after a
+deliberate disconnect). See "Measured constants" in `DESIGN.md`. They matter to a
+client for a practical reason: **two players further apart than the AOI radius
+legitimately do not appear in each other's snapshots**, so a multiplayer test
+that spawns or drives clients more than 50 units apart will fail with a correct
+server. Check the distance before suspecting the netcode.
+
+#### Worked example — mid-stream resync and the handle-space reset
+
+The trap made concrete. Before the resync this connection held four bindings;
+after it, three. **The same handle numbers now name different entities.**
+
+```
+handle 1: before = aa96957f… (another player)  ->  after = 14ba20e5… (C)   *** REBOUND ***
+handle 2: before = a8753636… (self)            ->  after = a8753636… (self)   unchanged
+handle 3: before = 0ce744f5… (B, since removed)->  after = 6c265217… (D)   *** REBOUND ***
+handle 4: before = 14ba20e5… (C)               ->  after = (unbound)
+```
+
+```
+KEYFRAME (after resync)  payload=168 bytes  tick=40799  ack_tick=350  full=true
+08dfbe02 10de02 1801
+  22 33  0a24 "14ba20e5-…-34af6de8c1a3"  1d 0000c033  2864 3064 3801 40 01   handle 1 -> C
+  22 33  0a24 "a8753636-…-42969da4b8b1"  1d 0000c033  2864 3064 3801 40 02   handle 2 -> self
+  22 33  0a24 "6c265217-…-06a5db35c9f9"  1d bcbbbb3f  2864 3064 3801 40 03   handle 3 -> D
+```
+
+A client that kept its old table across this keyframe would render **D's**
+movement as **B** (handle 3) and **C's** as some third player (handle 1) — with
+no error raised anywhere, because every handle still resolves. That is precisely
+why the keyframe branch clears `handles`: two of the four bindings changed
+meaning, and only re-reading the ids can tell you which.
+
+Note also that the keyframe re-sends every `id`, so clearing the table costs
+nothing — it is rebuilt from the same frame that invalidated it.
+
 ### Client merge algorithm (normative)
 
 ```
 on snapshot s:
-    if s.full:      world.clear()          # discard everything not re-listed
-    for e in s.entities:  world[e.id] = e  # upsert
-    for id in s.removed:  world.remove(id) # despawn
+    # STEP 1 — resolve every handle BEFORE touching any state.
+    resolved = []
+    for e in s.entities:
+        if e.handle != 0 and e.id is empty:
+            if s.full:                      # a keyframe MUST introduce every binding,
+                abort                       #   so this sender is malformed. Do NOT
+                                            #   consult the table — see below.
+            if e.handle not in handles:     # unresolvable
+                abort                       # apply NOTHING; send resync (10)
+            e.id = handles[e.handle]
+        resolved.append(e)
+
+    # STEP 2 — only now may state be mutated.
+    if s.full:
+        world.clear()                       # discard everything not re-listed
+        handles.clear()                     # handle space restarts at a keyframe
+
+    # STEP 3 — apply.
+    for e in resolved:
+        if e.handle != 0:  handles[e.handle] = e.id   # record/refresh binding
+        world[e.id] = e                               # upsert
+    for id in s.removed:   world.remove(id)           # despawn — by ID, not handle
+
+    # STEP 4 — clocks.
     tick     = max(tick, s.tick)
     ack_tick = max(ack_tick, s.ack_tick)   # monotonic; a 0 never lowers it
 ```
 
+On a JSON connection `handles` stays empty and steps 1 and 3's handle lines are
+no-ops, so this is one algorithm for both encodings — not two.
+
+Three details in that ordering are load-bearing:
+
+- **Resolve before mutating (step 1 before step 2).** An unresolvable handle must
+  abort the *whole* snapshot. A partially applied snapshot is worse than an
+  unapplied one, because it looks like valid state and nothing detects it. This
+  is also why clearing must not be hoisted above step 1: clear-then-abort empties
+  the world and only refills it a resync round-trip later.
+- **On a keyframe, a handle with no `id` is an error — do not resolve it.** A
+  keyframe re-introduces *every* binding, so on well-formed input step 1 resolves
+  nothing when `full` is true. The sender guarantees this structurally: it clears
+  its own handle table and restarts numbering at 1 *before* encoding a keyframe,
+  so every entity in it takes the "first mention" path and carries both `id` and
+  `handle`. A keyframe that references a bare handle therefore cannot be
+  legitimate — and resolving it against the *previous* interval's table is
+  exactly how you land in the wrong-entity failure described above, silently.
+  Rejecting it costs nothing (it can never fire on valid input) and converts a
+  silent corruption into a resync.
+
+> **Implementers note.** Earlier revisions of this section resolved handles
+> against the existing table on a keyframe too, and told implementers not to
+> reorder. That was safe for valid input but failed *silently* on a malformed
+> keyframe. The rule above keeps the all-or-nothing ordering (nothing is mutated
+> before validation) *and* fails closed. The Go reference
+> `messages.SnapshotState.Apply` now implements it, so the two agree — see
+> `TestKeyframeWithBareHandleIsRefusedNotResolvedAgainstStaleTable`.
+- **`removed` carries entity IDs, never handles.** Do not route it through the
+  handle table.
+
+Out-of-order or duplicated snapshots are still applied — the transport is ordered,
+so dropping them would silently diverge — but `tick` never moves backwards, which
+is what the `max` is for.
+
 Reference implementations, both covered by tests:
 `Shared.GameLogic.Systems.SnapshotMerger` (C#/Unity) and
 `messages.SnapshotState` (Go — used by the smoke test and integration tests).
+
+**Neither is a complete reference for the Protobuf path**, so do not copy either
+one and assume interning is handled:
+
+- `Shared.GameLogic.Systems.SnapshotMerger` implements **steps 2–4 only**. It has
+  no handle table and no resolution, because `EntityState` carries no `handle`
+  field at all — `Shared.GameLogic` is the pure simulation library and interning
+  is a wire concern. That layering is deliberate and fine, but it means **handles
+  must already be resolved before entities reach the merger.** Do the resolution
+  in your codec/transport layer and hand the merger entities whose `Id` is
+  populated. Feed it un-resolved Protobuf entities and it will upsert them under
+  an empty `Id`, silently collapsing every interned entity into one bucket.
+- `messages.SnapshotState` (Go) implements all four steps including handles, but
+  predates the keyframe guard in step 1 — see the implementers note above.
 
 ### Keyframe policy
 

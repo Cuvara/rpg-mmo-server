@@ -215,6 +215,67 @@ func TestInterningShrinksRepeatedMentions(t *testing.T) {
 	}
 }
 
+// A KEYFRAME carrying a bare handle must be refused even when that handle is
+// still resolvable from the interval the keyframe is ending.
+//
+// This is the dangerous shape, and it is why the check must not consult the
+// table: the lookup SUCCEEDS and returns the previous interval's entity, so
+// resolving would silently rebind this entity to whatever last held that handle
+// number. Nothing downstream can detect it — every handle resolved, no error was
+// raised, and the client renders one entity's updates as another's.
+//
+// No well-formed sender can produce this frame: a sender clears its handle table
+// and restarts numbering before encoding a keyframe (see
+// GameServer/Snapshot/SnapshotDeltaState.EncodeFull), so every entity in a
+// keyframe carries both id and handle. The guard therefore costs nothing on
+// valid input and exists to defend against a future or third-party sender.
+//
+// If this test is ever in the way, the guard is what it is protecting — do not
+// delete it without re-reading the interning rules in
+// gameserver-dotnet/docs/API.md.
+func TestKeyframeWithBareHandleIsRefusedNotResolvedAgainstStaleTable(t *testing.T) {
+	state := NewSnapshotState()
+
+	// Interval 1 binds handle 1 -> "alice".
+	mustApply(t, state, SnapshotMessage{
+		Tick: 1,
+		Full: true,
+		Entities: []EntitySnapshot{
+			{ID: "alice", Handle: 1, Type: "player", HP: 100, MaxHP: 100},
+		},
+	})
+	if got := state.Entities["alice"]; got.ID != "alice" {
+		t.Fatalf("setup failed: alice not applied")
+	}
+
+	// A malformed keyframe reuses handle 1 with no id. Handle 1 IS still bound
+	// (to alice), so a table lookup would succeed and silently mislabel this
+	// entity as alice.
+	err := state.Apply(SnapshotMessage{
+		Tick: 2,
+		Full: true,
+		Entities: []EntitySnapshot{
+			{Handle: 1, X: 42, Y: 42, HP: 10, MaxHP: 100}, // no ID
+		},
+	})
+
+	if !errors.Is(err, ErrUnknownHandle) {
+		t.Fatalf("Apply err = %v, want ErrUnknownHandle for a bare handle on a keyframe", err)
+	}
+	// All-or-nothing: the rejected keyframe must not have cleared or replaced
+	// anything either. Rejecting AFTER clearing would leave an empty world until
+	// a resync completed.
+	if state.Len() != 1 {
+		t.Errorf("state has %d entities after a rejected keyframe, want 1 (unchanged)", state.Len())
+	}
+	if got, ok := state.Entities["alice"]; !ok || got.HP != 100 {
+		t.Errorf("alice = %+v (ok=%v); a rejected keyframe must leave state untouched", got, ok)
+	}
+	if _, ok := state.Entities[""]; ok {
+		t.Error("state gained an entity under an empty id: the bare handle was applied, not rejected")
+	}
+}
+
 func mustApply(t *testing.T, s *SnapshotState, msg SnapshotMessage) {
 	t.Helper()
 	if err := s.Apply(msg); err != nil {
