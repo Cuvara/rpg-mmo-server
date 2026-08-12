@@ -344,19 +344,29 @@ Two things a client CAN use, neither of them a disconnect signal:
   authoritative "gone" — and per the note above it does not distinguish a
   despawn from an AOI exit either.
 
-Measured twice, the second time with three independent observers:
+Measured across two runs. In the second, three observers on **two different
+surfaces** agree — which is what makes it conclusive:
 
-- A client observed a peer's entity frozen at `x = 0.85` for 16 s after that peer
-  disconnected; the peer's `player_states` row — written server-side when the
-  hold expired — reads `x = 0.854`.
-- In a later run, the departing process reported *itself* at `x = 1.15` as it
-  exited; a **second, separate Unity runtime** still reported that entity at
-  `x = 1.15` twenty-nine seconds later; and the server's persisted row reads
-  `x = 1.147`. Two client runtimes and the server, agreeing to two decimals.
+| Observer | Surface | Value |
+|---|---|---|
+| The departing process, as it exited | its own last self-report | `x = 1.15` |
+| A **second, separate Unity runtime**, ~28 s later and still mid-hold | the live snapshot stream | `x = 1.15` |
+| The server, when the hold expired | the `player_states` row it wrote | `x = 1.147` |
 
-That agreement is what establishes the entity is genuinely frozen, rather than
-one client having quietly stopped receiving updates for it — the alternative
-explanation a single observer could not rule out.
+An earlier run gave the same result with two observers: a peer frozen at
+`x = 0.85` for 16 s, against a persisted `x = 0.854`.
+
+Read the legs separately, because they rule out different things. The two client
+observations are of the **live snapshot stream** — the server was still sending
+that entity, and sending it unchanged, so the freeze is not a client that quietly
+stopped receiving updates for it. That is the explanation a single observer could
+never eliminate, and it takes two independent runtimes to close. The persisted
+row is a **different surface**: written at hold expiry, it shows the server's own
+authoritative state never moved either, so the entity is genuinely inert rather
+than merely being reported as static.
+
+Do not treat the mid-hold client reading as evidence about persistence — at 28 s
+the hold had not expired and nothing had been written yet.
 
 Both constants are measured, not just specified — AOI confirmed at 50 units from
 two independent directions (a remote player last visible at 50.5 units apart and
