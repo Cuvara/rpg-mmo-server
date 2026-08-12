@@ -22,6 +22,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   serialising the class.
 
 ### Added
+- **`docs/API.md`: a held entity is indistinguishable from a live one standing
+  still, and now says so.** When a client disconnects its entity is not removed
+  — it is held for the reconnect grace period and stays in every nearby client's
+  snapshots at its last position with full HP. There is no "held" flag on the
+  wire and no `disconnected` field on `EntitySnapshot`, so for up to 30 s a
+  dropped player renders exactly like one standing still, then vanishes with no
+  warning. Nothing in the protocol distinguishes them. Documented beside the
+  removal semantics because it is the same class of trap as "`removed` does not
+  mean gone forever", along with the two weak signals a client does have (the
+  entity stops changing — a hint, not proof, since players do stand still; and
+  the eventual `removed`, which is authoritative but does not separate a despawn
+  from an AOI exit).
+  Recorded with its corroboration: a client observed the peer frozen at
+  `x = 0.85` for 16 s, and that peer's server-side `player_states` row reads
+  `x = 0.854`. Client view and persisted value being the same number is what
+  establishes the entity is genuinely frozen rather than the client having
+  stopped receiving updates for it. Surfaced by the Unity client team during the
+  two-process visibility test.
 - **AOI radius and the entity hold are now recorded as MEASURED constants, not
   just specified ones.** Both were quoted throughout the docs as bare
   specifications. Each has now been measured against the running local stack
@@ -47,9 +65,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Also annotated the stale `backend/docs/CORE_FLOW.md` AOI row inline, following
   that document's own convention for superseded entries, since it still cites
   the radius against deleted Go paths.
+  Updated with tighter figures from a later two-process run: the hold is now
+  measured by **three independent methods** — Prometheus gauge lag (29 s / 32 s),
+  server log disconnect-to-hold-expiry end to end (30 s / 31 s), and client-side
+  timing of the `removed` entry (30.1 s). All three paths are kept listed rather
+  than collapsed to one tight number, because the agreement across methods using
+  different data is the evidence; a single figure would read as precision it has
+  not earned.
+  Added a persistence detail a reader would otherwise guess wrong: **the save
+  lands with the hold EXPIRY, not the disconnect** — a client that disconnected
+  at 08:00:52 has its row stamped 08:01:21.56. Anyone assuming save-on-disconnect
+  misjudges the crash-loss window by the full hold: if the process dies during a
+  hold, up to 30 s of movement was never written.
   Noted alongside them that a client run shorter than 30 s cannot test the
   heartbeat at all — it ends before the timeout could fire — so a clean short
-  run is not evidence the heartbeat is handled.
+  run is not evidence the heartbeat is handled. The heartbeat is now confirmed
+  exercised rather than assumed: a two-process run held connections in-world for
+  75 s and 74 s, ~7 pings each, with no `Heartbeat timeout` for either. Stated as
+  a rule to keep the claims separate — short runs prove visibility, long runs
+  prove liveness, and reading the first as the second is the mistake.
 - **`docs/METRICS.md`: `gameserver_entities` disagreeing with
   `gameserver_players_online` is CORRECT, and now says so.** The two gauges count
   different things — entities in the world versus live connections — so during a

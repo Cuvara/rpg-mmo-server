@@ -320,6 +320,37 @@ expired) or it merely left this client's AOI (radius 50). Treat `removed` as
 "stop rendering this", not as "this entity is gone forever" — it may reappear in
 a later snapshot with a fresh binding.
 
+#### A held entity is indistinguishable from a live one standing still
+
+The counterpart trap to the one above, and the more likely of the two to reach
+players. When a client disconnects, its entity is **not** removed — it is held
+for the reconnect grace period (30 s on a map server). During that window the
+entity is still in every nearby client's snapshots, at its last position, with
+full HP. **There is no "held" flag on the wire**, and there is deliberately no
+`disconnected` field on `EntitySnapshot`.
+
+So a remote player who has actually dropped renders, for up to 30 s, exactly like
+a remote player who is standing still. Nothing in the protocol lets a client tell
+them apart. If your game surfaces other players at all — nameplates, targeting,
+"is anyone here" logic — decide what you want that to look like, because the
+default is a ghost that looks alive and then vanishes with no warning.
+
+Two things a client CAN use, neither of them a disconnect signal:
+
+- The entity **stops changing**. A held entity's position and HP are frozen,
+  because the simulation marks it inactive (no AI targeting, no damage). Absence
+  of change is a hint, not proof — a player really can stand still.
+- The eventual `removed` entry, when the hold expires. That is the only
+  authoritative "gone" — and per the note above it does not distinguish a
+  despawn from an AOI exit either.
+
+Measured: a client observed a peer's entity frozen at `x = 0.85` for 16 s after
+that peer disconnected, and the peer's `player_states` row — written server-side
+when the hold expired — reads `x = 0.854`. The client's view and the server's
+persisted value are the same number, which is what establishes the entity is
+genuinely frozen rather than the client having quietly stopped receiving updates
+for it.
+
 Both constants are measured, not just specified — AOI confirmed at 50 units from
 two independent directions (a remote player last visible at 50.5 units apart and
 absent by 62.2), and the hold at ~30 s (a removal arriving 30.1 s after a
