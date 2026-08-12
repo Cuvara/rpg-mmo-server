@@ -320,6 +320,15 @@ expired) or it merely left this client's AOI (radius 50). Treat `removed` as
 "stop rendering this", not as "this entity is gone forever" — it may reappear in
 a later snapshot with a fresh binding.
 
+Both constants are measured, not just specified — AOI confirmed at 50 units from
+two independent directions (a remote player last visible at 50.5 units apart and
+absent by 62.2), and the hold at ~30 s (a removal arriving 30.1 s after a
+deliberate disconnect). See "Measured constants" in `DESIGN.md`. They matter to a
+client for a practical reason: **two players further apart than the AOI radius
+legitimately do not appear in each other's snapshots**, so a multiplayer test
+that spawns or drives clients more than 50 units apart will fail with a correct
+server. Check the distance before suspecting the netcode.
+
 #### Worked example — mid-stream resync and the handle-space reset
 
 The trap made concrete. Before the resync this connection held four bindings;

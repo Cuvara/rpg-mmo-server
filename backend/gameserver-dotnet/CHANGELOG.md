@@ -21,6 +21,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   deliberately; a fix means holding the listener until the server takes over, or
   serialising the class.
 
+### Added
+- **AOI radius and the entity hold are now recorded as MEASURED constants, not
+  just specified ones.** Both were quoted throughout the docs as bare
+  specifications. Each has now been measured against the running local stack
+  from two independent directions, and the figures agree:
+  - **AOI 50 units** — server side, two players persisted 61.00 units apart in
+    `player_states` were outside each other's snapshots; client side, a remote
+    player was last visible at 50.5 units apart and absent by 62.2, from a Unity
+    client's own snapshot tracking.
+  - **Map-server entity hold ~30 s** — server side, `gameserver_entities` lagged
+    `players_online` by 29 s and 32 s across two disconnects before converging;
+    client side, a removal reached the surviving client 30.1 s after a deliberate
+    disconnect, carried by id.
+  The agreement is the point: the two paths share no code and neither
+  measurement was taken with sight of the other, so landing within ~1 unit and
+  ~1 second is evidence in a way either figure alone is not. Recorded with the
+  date and what they were measured against, because this repo already has one
+  number that outlived its evidence (the 150-players ceiling, ADR-7) and the way
+  not to repeat that is to say what a figure is *of*.
+  Landed in `docs/DESIGN.md` as a "Measured constants" table, cross-referenced
+  from `docs/API.md` where it matters to a client — a multiplayer test that
+  spawns or drives two clients more than 50 units apart fails against a
+  *correct* server, so distance is the first thing to check, not the netcode.
+  Also annotated the stale `backend/docs/CORE_FLOW.md` AOI row inline, following
+  that document's own convention for superseded entries, since it still cites
+  the radius against deleted Go paths.
+  Noted alongside them that a client run shorter than 30 s cannot test the
+  heartbeat at all — it ends before the timeout could fire — so a clean short
+  run is not evidence the heartbeat is handled.
+- **`docs/METRICS.md`: `gameserver_entities` disagreeing with
+  `gameserver_players_online` is CORRECT, and now says so.** The two gauges count
+  different things — entities in the world versus live connections — so during a
+  reconnect hold the first legitimately exceeds the second. This reads as a leak
+  to anyone meeting the metrics cold; it did to me. Documented with the measured
+  timeline showing the gauges agreeing *exactly* while both clients were
+  connected and diverging only after disconnect, so the benign case is
+  distinguishable from a real one: a disagreement while connection count is
+  stable, or `entities` staying high well past the hold, is a defect; a few tens
+  of seconds of `entities > 0` at `players_online = 0` is the hold working. Also
+  records that the registry's `player_count` tracks `players_online` (agreeing
+  in all 450 samples), not `entities`.
+
 ### Fixed
 - **`docs/API.md`: the normative merge algorithm resolved handles on a keyframe,
   which fails silently on a malformed one.** Raised by the client team during an
