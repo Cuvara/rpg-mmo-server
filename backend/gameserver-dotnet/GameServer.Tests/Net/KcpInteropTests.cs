@@ -169,17 +169,42 @@ internal sealed class GoProbe
 {
     private static readonly Lazy<GoProbe?> Instance = new(TryCreate, LazyThreadSafetyMode.ExecutionAndPublication);
 
+    /// <summary>
+    /// Set when a Go toolchain WAS found but building the probe failed. That is a
+    /// regression, not an unavailable environment, so <see cref="Require"/> fails
+    /// instead of skipping — see the remarks there.
+    /// </summary>
+    private static string? _buildFailure;
+
     private readonly string _binary;
 
     private GoProbe(string binary) => _binary = binary;
 
-    /// <summary>Returns the harness, skipping the calling test when Go is unavailable.</summary>
+    /// <summary>
+    /// Returns the harness, skipping the calling test when Go is unavailable.
+    /// </summary>
+    /// <remarks>
+    /// A missing Go toolchain is a legitimate environment (a machine that only
+    /// builds the C# side), so that skips. A toolchain that IS present and cannot
+    /// build the probe is a broken harness and FAILS loudly — these nine cases
+    /// silently skipped for months after `shared` took a Protobuf dependency the
+    /// probe's go.sum did not cover, leaving the Go/C# KCP crypto interop
+    /// unverified while `dotnet test` stayed green. Skipping on a build failure is
+    /// what made that invisible.
+    /// </remarks>
     public static GoProbe Require()
     {
         var probe = Instance.Value;
+        if (probe == null && _buildFailure != null)
+        {
+            Assert.Fail(
+                "The kcpprobe Go harness FAILED TO BUILD, so KCP interop cannot be verified against the real " +
+                "kcp-go client. This is a broken harness, not an unavailable environment — fix it rather than " +
+                "ignoring this test.\n" + _buildFailure);
+        }
         Skip.If(probe == null,
-            "No Go toolchain found (tried 'go' and ~/go/bin/go), or the kcpprobe harness failed to build. " +
-            "KCP interop is verified against the real kcp-go client, so it cannot run here.");
+            "No Go toolchain found (tried 'go' and ~/go/bin/go). KCP interop is verified against the real " +
+            "kcp-go client, so it cannot run here.");
         return probe!;
     }
 
@@ -200,7 +225,14 @@ internal sealed class GoProbe
             // every test and muddy the timeouts the mismatch tests rely on.
             string output = Path.Combine(Path.GetTempPath(), "kcpprobe-" + Environment.ProcessId);
             var build = ExecIn(dir, candidate, $"build -o \"{output}\" .", TimeSpan.FromMinutes(5));
-            if (build.ExitCode != 0) continue;
+            if (build.ExitCode != 0)
+            {
+                // Record it rather than moving on: Go exists here, so this is a
+                // real failure and must not be reported as "environment lacks Go".
+                _buildFailure = $"`{candidate} build` in {dir} exited {build.ExitCode}.\n" +
+                    $"stdout: {build.StdOut}\nstderr: {build.StdErr}";
+                continue;
+            }
             return new GoProbe(output);
         }
         return null;

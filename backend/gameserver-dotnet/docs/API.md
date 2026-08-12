@@ -78,10 +78,9 @@ both encodings; the JSON column shows the legacy field names, which match the
 | 10 | `resync` | client → gameserver | `{}` (ignored) — request a full keyframe |
 | 11 | `ping` | either | `{ timestamp }` — heartbeat, see below |
 | 12 | `pong` | either | `{ timestamp, server_time }` — reply to `ping` |
+| 13 | `transfer_map` | client → gameserver | `{ map_id }` — request a move to another map, see below |
+| 14 | `transfer_map_resp` | gameserver → client | `{ ok, error }` |
 | 15 | `kick` | gameserver → client | `{ reason }` — forced disconnect; `reason` is a machine-readable string, not user-facing text |
-
-> Types 13 and 14 (`transfer_map` / `transfer_map_resp`) are reserved for map
-> transfer and are not required for a basic client.
 
 ### Heartbeat (`ping` / `pong`) — MANDATORY
 
@@ -560,6 +559,231 @@ client that reads only `tick` and `entities` still works against such a server.
 Empty payload. Promotes this connection's next snapshot to a keyframe. Send it when
 local reconstruction is lost or suspect (scene reload, merge error). It is cheap but
 not free — it costs one full AOI snapshot; do not send it every tick.
+
+---
+
+## `transfer_map` (13) / `transfer_map_resp` (14) — changing map
+
+Used for map-to-map movement and for entering an instanced dungeon.
+
+> **Server-side maturity: implemented, thinly tested.** The handler is merged
+> into `develop` (`GameServer/Server/GameServer.cs`, `HandleTransferMapAsync`)
+> and covered by exactly **three** C# unit tests —
+> `TransferMapTests.TransferMap_DifferentMap_SucceedsAndRemovesEntity`,
+> `_SameMap_ReturnsError`, `_EmptyMapId_ReturnsError`. There is **no
+> integration-test coverage at all**: nothing in `backend/integration_test/`
+> mentions transfer, so the full client → old server → gateway → new server
+> round trip has never been exercised end to end, in any language. The
+> single-server half is tested; the hop is not. Implement against it knowing
+> that, and expect to be the first to exercise step 3 onward.
+> (Those three tests are also the flaky ones — see the Known issues entry in this
+> module's CHANGELOG about `FreeTcpPort`.)
+
+### Message shapes
+
+```protobuf
+message TransferMapRequest  { string map_id = 1; }
+message TransferMapResponse { bool ok = 1; string error = 2; }
+```
+
+Both fields of the response are always meaningful: on failure `ok = false` and
+`error` carries a short machine-readable reason. Note this response has **no
+`server_addr` and no `join_token`** — unlike `enter_world_resp`, it does not
+hand you a destination. It only tells you the current server has released you.
+
+### The sequence — transfer is client-driven, and the client does the work
+
+Documented on `HandleTransferMapAsync` and verified against the implementation:
+
+1. Client sends `transfer_map { map_id }` to its **current game server**.
+2. Server validates, force-saves the player, replies `transfer_map_resp`,
+   removes the entity, and **closes the connection**.
+3. Client sends `enter_world { map_id }` to the **gateway** — the ordinary flow.
+4. Gateway assigns a server for the new map and mints a **new join token**.
+5. Client connects to the new game server and sends `join_token`.
+
+Three consequences the client must be built around:
+
+- **The game-server connection is dropped by the server, not by you.** Step 2
+  ends with `conn.Close()`. Expect the socket to die immediately after the
+  response and do not treat that as an error.
+- **A new join token is required, and only the gateway can mint one.** The old
+  token is bound to the old server. There is no server-to-server handoff — the
+  client re-enters through the gateway every time.
+- **You need a gateway connection to complete step 3.** If you dropped it after
+  the initial `enter_world`, you must reconnect *and re-send `auth`*: connection
+  identity is per-connection, and a fresh connection starts unauthenticated, so
+  `enter_world` on it is refused with `"not authenticated"`
+  (`gateway/server/server.go`, `checkSession`). **Keeping the gateway connection
+  open for the session's lifetime avoids a re-auth round trip on every
+  transfer** and is the recommended shape. The Redis session (`session:<user>`,
+  1 h TTL, `shared/constants/ttl.go`) is refreshed by activity, so a live
+  gateway connection stays valid.
+
+### The old entity is reaped immediately — no hold
+
+This is the one place the 30 s reconnect hold does **not** apply, and it is
+deliberate. `HandleTransferMapAsync` cancels any pending hold, removes the
+entity, and decrements the player count before closing:
+
+> "The entity is removed immediately (not held) because this is an intentional
+> transfer, not a disconnect: there is nothing to reconnect to."
+
+So a transferring player leaves **no ghost** in the old map — other clients get a
+`removed` entry promptly rather than up to 30 s of a frozen entity. That is the
+opposite of the disconnect path documented above, and it is worth knowing in
+both directions: if you see a held ghost, the peer dropped; if the entity
+disappears cleanly, it transferred.
+
+Because the save is forced *before* the response (`_saver.SavePlayerAsync`), the
+destination server reads fresh state — position carries across the hop.
+
+### Failure modes and what the client should do
+
+| Condition | What you see | Action |
+|---|---|---|
+| `map_id` empty | `ok=false, error="map_id is required"` | Client bug; connection stays usable |
+| Already on that map | `ok=false, error="already on this map"` | No-op; connection stays usable |
+| Server-side exception | `ok=false, error="internal error"` | Stay put; the connection may or may not survive — treat as fatal for the transfer |
+| **Target map has no live server** | *Not* reported here. Step 2 succeeds and your connection closes; the failure surfaces at step 3 as `enter_world_resp.error` = "no available server for map …" | **This is the dangerous one — see below** |
+| Token/session expired mid-hop | `enter_world_resp.error` = `"not authenticated"` or `"session expired"` | Re-run `auth` with a fresh Nakama token, then retry `enter_world` |
+
+**The unvalidated destination is the trap.** The current server does **not**
+check that the target map exists or has capacity — it only checks that `map_id`
+is non-empty and different from its own. It then destroys your entity and drops
+you. If the destination turns out to be unreachable at step 3, **you are
+nowhere**: off the old server, not on the new one, with the old entity already
+reaped. Recovery is to `enter_world` back to the original map, which spawns you
+fresh from persisted state.
+
+A client should therefore treat `transfer_map_resp { ok = true }` as *"you have
+left"*, not *"you have arrived"*, and keep the original `map_id` so it can fall
+back. Do not tear down the local world until step 5 succeeds.
+
+---
+
+## Transport: TCP and KCP
+
+The gateway tells you which transport the destination speaks — the `transport`
+field of `enter_world_resp`, `"tcp"` or `"kcp"`, where empty means `"tcp"`. A
+server on KCP is **not** listening on TCP at all, so there is no fallback: a
+TCP-only client must fail loudly on `"kcp"` rather than attempt a connection
+that cannot succeed.
+
+> **Client status: TCP only today.** Advertising `kcp` from the server therefore
+> breaks every current client. That is a deployment-order constraint, not a bug.
+
+### What changes on KCP, and what does not
+
+**The framing and the message layer do not change at all.** The same 4-byte
+big-endian length prefix, the same envelope, the same encoding sniffing, the
+same message types. KCP replaces the *stream transport* underneath and nothing
+above it — `KcpStream` exists precisely so "the length-prefixed codec in
+`WireProtocol` runs unchanged over" it. There is no KCP-specific handshake and
+no session-establishment message in this protocol: the KCP session forms at the
+ARQ layer, then `join_token` proceeds exactly as on TCP.
+
+What does change is that you need a KCP implementation and the exact ARQ
+parameters. The server's settings (`shared/transport/transport.go`) are:
+
+| Setting | Value | Why (from the source comments) |
+|---|---|---|
+| NoDelay | 1 | nodelay ARQ on |
+| Interval | 10 ms | matches a 10-15 Hz server tick; slower adds up to a full tick of jitter |
+| Resend | 2 | fast retransmit after 2 duplicate ACKs |
+| NoCongestion | 1 | congestion control **off** — a near-constant realtime bitrate; a TCP-style window only delays state the client already needs |
+| Send/Recv window | 128 / 128 packets | ~170 KB in flight; bounded per-session memory |
+| MTU | 1350 | kcp-go default, stays under common 1400-1500 B path MTUs so segments are never IP-fragmented |
+| FEC | 0 data / 0 parity — **disabled** | |
+| UDP socket buffer | 4 MiB | one socket multiplexes every session on a listener |
+
+### Encryption exists only on the KCP path
+
+**TCP is not "unencrypted for now" — it has no encryption path at all.**
+`TcpTransportListener(bind)` takes no key; `KcpTransportListener(bind,
+transportKey, logger)` does (`shared/transport/transport.go`). Gameplay traffic
+over TCP is plaintext on the wire. Encryption is therefore not a separable task:
+**it arrives with KCP or not at all.**
+
+When a key is set, AES-256 is applied **per UDP datagram, below the KCP ARQ** —
+every packet including the one carrying the join token. There is no negotiation,
+no key id and no downgrade path, so an encrypted listener and a plaintext dialer
+simply never form a session; the datagrams decrypt to noise and are dropped as
+malformed KCP segments. Fail-closed by construction.
+
+**Key derivation** (`shared/transport/crypto.go`, `DeriveKey`), which a client
+must reproduce exactly:
+
+- **64 hex characters** → decoded verbatim as 32 raw bytes. The recommended
+  production form (`openssl rand -hex 32`).
+- **anything else** → HKDF-SHA256, **no salt**, output length 32, with the info
+  string exactly:
+  ```
+  rpg-mmo/transport/kcp/aes-256
+  ```
+  (ASCII, no trailing newline, no null terminator.)
+- A 64-character string that is not valid hex falls through to the passphrase
+  path rather than erroring.
+
+**Datagram layout** — kcp-go's AES block crypt, which the C# port documents as
+needing to stay byte-identical:
+
+```
+| nonce (16 B, random) | crc32-IEEE of the KCP bytes (4 B, little endian) | KCP bytes |
+```
+
+Then **the whole buffer, nonce included**, is encrypted with **AES-CFB** using
+kcp-go's fixed initialisation vector:
+
+```
+167, 115, 79, 156, 18, 172, 27, 1, 164, 21, 242, 193, 252, 120, 230, 107
+```
+
+The random nonce is what makes the first ciphertext block differ per packet
+despite the fixed IV; it carries no other meaning and is discarded after
+decryption. The trailing partial block is XORed against the keystream block with
+**no padding**, as in textbook CFB. Header size is 20 B (16 nonce + 4 CRC).
+
+Any deviation here is a silent decrypt failure — the session never forms and
+there is no error message telling you why.
+
+### You do not have to hand-roll KCP
+
+`GameServer/Net/Transport/` already contains a **complete, dependency-free C#
+implementation**: `Kcp.cs` (a direct port of kcp-go's `kcp.go`, itself a port of
+`ikcp.c`), plus `KcpListener`, `KcpSession`, `KcpStream` and `KcpCrypto`. It
+pulls in **no external package** — nothing KCP-related appears in
+`GameServer.csproj` — so it is plain C# that can be ported to a Unity client
+rather than reimplemented or replaced with a third-party library.
+
+Two caveats: it lives in the server project, **not** in `Shared.GameLogic`, so it
+is not currently shipped to Unity; and it implements the *listener* side, so the
+dialer path needs the client half.
+
+### What is actually tested — read this before trusting the above
+
+The pure-C# KCP layer is well covered: **44 tests pass** in `KcpTransportTests`
+and related suites.
+
+The **cross-language** verification is a different story. `KcpInteropTests`
+exercises exactly the right things against the *real* `kcp-go` client — key
+derivation agreement, echo through the C# listener for plaintext / hex key /
+passphrase, a wrong-key-must-fail-closed case, and a full join for both
+plaintext and encrypted KCP. **All nine of them currently skip.**
+
+They skip because the Go probe they drive (`gameserver-dotnet/interop/kcpprobe`)
+**no longer builds**: its `go.sum` has no entry for `google.golang.org/protobuf
+v1.36.6`, which `shared` now requires — only `/go.mod` hashes for 2020-era
+versions. The harness catches the build failure and calls `Skip.If`, so the
+tests report as skipped rather than failed, and `dotnet test` stays green. CI
+runs `dotnet test --no-build -c Release` and skips do not fail a build, so this
+is invisible there too.
+
+**So: KCP is verified in C#-to-C#, and its agreement with the Go implementation
+is currently unverified.** The tests that would prove it exist and are the right
+tests — they are simply not running, and have not been since `shared` took its
+Protobuf dependency. Anyone implementing a KCP client should expect to fix that
+probe first, so there is a working cross-language oracle to develop against.
 
 ---
 
