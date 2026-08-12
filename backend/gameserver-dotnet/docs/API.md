@@ -335,6 +335,35 @@ them apart. If your game surfaces other players at all — nameplates, targeting
 "is anyone here" logic — decide what you want that to look like, because the
 default is a ghost that looks alive and then vanishes with no warning.
 
+**A client therefore cannot observe when a peer leaves**, only when the server
+eventually says so. Any duration a client computes that ends at "my peer left" is
+an upper bound, inflated by up to the full hold — and it inflates *silently*,
+because a held entity is still arriving in snapshots and nothing marks it.
+
+Measured instance, because this is easy to dismiss as theoretical. Two clients in
+one session each timed their own co-presence window, both clocking from the
+moment the peer became visible:
+
+| Client | Reported | Actual |
+|---|---|---|
+| the one that exited first | 62.8 s | 63.0 s — correct |
+| the one that outlived it by 12 s | **74.9 s** | 63.0 s — **overstated by 11.9 s** |
+
+The overstatement equals the time it outlived its peer, to a tenth of a second.
+Server-side timestamps confirm the two exits were 11.96 s apart. Neither client
+was faulty; the second simply kept counting a co-presence that had already ended,
+because the peer's held entity was still in its world set.
+
+The consequence generalises: **a co-presence duration cannot be computed by one
+client.** The correct figure is the minimum across both — equivalently, second
+join to first exit — and it needs both clients' data by nature. A single client
+should name its metric for what it is (a local upper bound), not for what it
+looks like.
+
+This is the same trap as the rendering one above, and arguably the more dangerous
+face of it: there it produces a ghost someone may notice, here it silently
+corrupts a number that looks entirely reasonable.
+
 Two things a client CAN use, neither of them a disconnect signal:
 
 - The entity **stops changing**. A held entity's position and HP are frozen,

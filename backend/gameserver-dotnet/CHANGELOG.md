@@ -34,6 +34,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   entity stops changing — a hint, not proof, since players do stand still; and
   the eventual `removed`, which is authoritative but does not separate a despawn
   from an AOI exit).
+  Extended with the consequence that a client **cannot observe when a peer
+  leaves**, only when the server eventually says so — so any duration a client
+  computes that ends at "my peer left" is an upper bound inflated by up to the
+  full hold, silently, because the held entity keeps arriving in snapshots.
+  Recorded with the measured instance: two clients timing the same co-presence
+  window, both clocking from peer-visible, reported 62.8 s and 74.9 s against a
+  true 63.0 s — the second overstating by 11.9 s, which equals the time it
+  outlived its peer (server-side timestamps put the two exits 11.96 s apart).
+  Neither client was faulty. The general rule is stated: a co-presence duration
+  cannot be computed by one client; it is the minimum across both, equivalently
+  second-join-to-first-exit, and needs both clients' data by nature.
+  Worth having because it is the more dangerous face of the held-entity trap —
+  the rendering symptom produces a ghost someone may notice, this silently
+  corrupts a number that looks entirely reasonable. Found and disproved by the
+  Unity client team after an earlier per-client metric shape had been reviewed
+  and wrongly endorsed, including by this module's own maintainer.
   Recorded with its corroboration: a client observed the peer frozen at
   `x = 0.85` for 16 s, and that peer's server-side `player_states` row reads
   `x = 0.854`. Client view and persisted value being the same number is what
