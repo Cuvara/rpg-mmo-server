@@ -6,7 +6,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Known issues (observed, not fixed here)
+- **`TransferMapTests` is flaky under a full parallel `dotnet test` run.** Two of
+  its cases intermittently fail with
+  `System.Net.Sockets.SocketException : Address already in use` at
+  `TcpListener.Start` (via `TransportFactory.Listen` -> `GameServerHost.RunAsync`).
+  The cause is a TOCTOU race in the test's own port helper,
+  `GameServer.Tests/Server/TransferMapTests.cs` `FreeTcpPort()`: it binds port 0,
+  reads the assigned port, **closes the listener**, and only then does the server
+  bind that port — so any concurrently-running test can take it in the gap. It is
+  a defect in the test harness, not in the server: the class passes 3/3 when run
+  in isolation (`dotnet test --filter FullyQualifiedName~TransferMapTests`).
+  Observed as 2 failed / 519 passed / 10 skipped on a full run. Left unfixed
+  deliberately; a fix means holding the listener until the server takes over, or
+  serialising the class.
+
 ### Added
+- **`docs/API.md` now documents the Protobuf-only behaviours a client has to
+  implement, not just the message shapes.** The Protobuf path is the documented
+  default and is enforced cross-language on every merge
+  (`TestDotnetInterop_FullFlow` runs the whole flow once per encoding), but a
+  client could read the whole reference, implement it faithfully against JSON,
+  swap the codec, and still be wrong — because two of the differences are
+  *behaviour*, not encoding. Four gaps closed:
+  - **The normative client merge algorithm had no handle-resolution step at
+    all.** Followed literally it breaks on every Protobuf delta, since deltas
+    carry an empty `id`. It now resolves handles first, aborts the entire
+    snapshot on an unresolvable one, and clears `handles` alongside `world` on a
+    keyframe. Called out the three load-bearing ordering details: resolve before
+    mutate, resolution reading the table *before* the keyframe clears it (safe,
+    and not to be "fixed"), and `removed` carrying IDs rather than handles. One
+    algorithm now covers both encodings instead of silently assuming JSON.
+  - **The entity-type enum/`type_name` fallback was undocumented.** Added the
+    rule (prefer `type`, read `type_name` when `UNSPECIFIED`), the five enum
+    values with their string forms, and why reading only one field fails in both
+    directions. The old prose listed `boss` as if it were an enumerated type; it
+    is not in the enum, so it degrades through `type_name` — the entry now says
+    so rather than implying an enum value that does not exist.
+  - **Two client constraints on the encoding were implicit.** The payload must be
+    Protobuf inside a Protobuf envelope (no JSON-in-proto hybrid), and `type = 0`
+    must never be sent — spelled out with the `0x08` sniffing reason, since that
+    is the non-obvious one and the fail-closed `0x12` case depends on it.
+  - **Added a worked wire trace** captured from a live Protobuf connection: the
+    same entity across a keyframe and a delta, broken down field by field. It
+    demonstrates three rules at once that prose can only assert — `id` sent
+    exactly once, `type_name` absent because the enum carried the category, and
+    `full` absent from the delta because proto3 omits `false`. Includes the
+    suite's own measured saving (json=127B, proto=61B, 52.0%).
+  Documentation only; no behaviour change.
 - **Golden vector `multiply_add_intermediate_rounding`** — the split-multiply in
   `MovementSystem.Integrate` is now covered by a test rather than by reasoning.
 
@@ -37,6 +84,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   committed expectation comes from running the real code through the generator.
   The two agree exactly, which is what makes the case evidence rather than
   circular.
+
+### Fixed
+- **The hostless-`GAMESERVER_PUBLIC_ADDR` warning no longer misses the case it
+  was written for.** `publicAddr` is advertised to clients verbatim, so it must
+  be dialable by them (`Program.cs`, contract comment on `publicAddr`). The
+  startup guard only fired when the variable was *unset* and had fallen back to
+  the listen address (`publicAddr == addr && addr.StartsWith(':')`). An operator
+  who set it explicitly but still hostless — e.g. `GAMESERVER_PUBLIC_ADDR=:9200`
+  on a container listening on `:9000` — tripped the exact failure the message
+  describes and got no warning at all, because the two values differed. The
+  guard now tests whether the advertised address has a host part, via a new
+  `IsHostlessAddr` helper treating `""`, `0.0.0.0`, `::` and `[::]` as hostless
+  (the same host list as the Go reference client's `NormalizeDialAddr` in
+  `backend/smoketest/smoke/helpers.go`, so both sides agree on what counts as
+  listen-style). The unset-and-fell-back case keeps its existing informational
+  message; the explicitly-set-but-hostless case is a real `LogWarning` and names
+  the corrective value. Still warn-only in both cases and registration is
+  unchanged: a bare listen address *is* correct for host-mode deploys, so
+  refusing to start would break a supported topology.
+- **`NoopEventStream`'s justification was stale.** The comment on the wiring in
+  `Program.cs` read "the C# server has no Redis client", which has not been true
+  since the server started self-registering: it holds a `StackExchange.Redis`
+  `IConnectionMultiplexer` (`Registry/RedisServerRegistry.cs`) and writes its own
+  registry entry with it. The Noop decision itself is unchanged and still
+  correct (ADR-5) — what is actually missing is the *producer* side, a
+  Redis-backed `IEventStream`; the gateway's relay subscribes to `events:game`
+  and nothing publishes to it. Comment now states that reason. No behaviour
+  change.
 
 ### Fixed
 - **`package.json` and the `.csproj` now ship `.meta` files too.** `sgl-v0.1.1`

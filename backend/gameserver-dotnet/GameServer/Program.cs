@@ -99,12 +99,35 @@ logger.LogInformation("  Registry:  {Registry}",
     string.IsNullOrWhiteSpace(redisAddr)
         ? "disabled (REDIS_ADDR unset -- the gateway will NOT find this server)"
         : $"redis {redisAddr}, advertising '{publicAddr}' ({transport})");
-if (!string.IsNullOrWhiteSpace(redisAddr) && publicAddr == addr && addr.StartsWith(':'))
+// A HOSTLESS advertised address (empty, 0.0.0.0, :: or [::] as the host part) is
+// not dialable by a client: the gateway hands the value back verbatim, so only
+// clients that rewrite it to loopback themselves will connect (a C# TcpClient
+// throws outright). Two shapes reach here and both deserve a word, but they are
+// not equally wrong:
+//   - unset, so publicAddr fell back to the listen address. Correct for host-mode
+//     deploys, wrong in a container with a published port. Informational.
+//   - explicitly SET and still hostless. The operator meant to advertise a mapped
+//     port but omitted the host, so it is wrong in every topology. A real warning.
+// Never fatal either way: the comment on publicAddr above documents that a bare
+// listen address IS correct for host mode, so refusing to start or to register
+// would break a supported topology.
+if (!string.IsNullOrWhiteSpace(redisAddr) && IsHostlessAddr(publicAddr))
 {
-    logger.LogInformation(
-        "  GAMESERVER_PUBLIC_ADDR is unset, so clients will be handed the listen address '{Addr}'. " +
-        "That is correct for host deployments; in containers with a published port, set it to " +
-        "<host>:<published-port> or clients will fail to connect.", addr);
+    if (publicAddr == addr)
+    {
+        logger.LogInformation(
+            "  GAMESERVER_PUBLIC_ADDR is unset, so clients will be handed the listen address '{Addr}'. " +
+            "That is correct for host deployments; in containers with a published port, set it to " +
+            "<host>:<published-port> or clients will fail to connect.", publicAddr);
+    }
+    else
+    {
+        logger.LogWarning(
+            "  GAMESERVER_PUBLIC_ADDR is set to '{PublicAddr}', which has no host part. Clients are handed " +
+            "that value verbatim and cannot dial it. Set it to <host>:<published-port> -- " +
+            "'127.0.0.1:{Port}' for a local stack, '<public-host>:{Port}' on a VPS.",
+            publicAddr, AddrPort(publicAddr), AddrPort(publicAddr));
+    }
 }
 
 // ── Migrate-only mode (CD schema step) ──
@@ -285,8 +308,12 @@ var options = new ServerOptions
     // The flag is kept so deployment manifests do not have to change when the
     // real SDK lands. See backend/docs/ARCHITECTURE-DECISIONS.md, ADR-6.
     AgonesSdk = new NoopAgonesSdk(),
-    // Always Noop: the C# server has no Redis client, so cross-server events are
-    // generated (entity_killed) and then discarded. See ADR-5.
+    // Always Noop: no Redis-backed IEventStream implementation exists yet, so
+    // cross-server events are generated (entity_killed) and then discarded.
+    // NOT for want of a Redis client — this process has one and uses it to
+    // self-register (Registry/RedisServerRegistry.cs, StackExchange.Redis).
+    // What is missing is the producer side of the stream; the gateway's relay
+    // subscribes to `events:game` and no live publisher feeds it. See ADR-5.
     EventStream = new NoopEventStream(),
     LoggerFactory = loggerFactory,
     Metrics = metrics,
@@ -366,4 +393,29 @@ static string? Env(string name)
 {
     var val = Environment.GetEnvironmentVariable(name);
     return string.IsNullOrEmpty(val) ? null : val;
+}
+
+/// <summary>
+/// True when <paramref name="addr"/> carries no usable host part, i.e. it is a
+/// listen-style address rather than something a client can dial. The host list
+/// matches the Go reference client's NormalizeDialAddr
+/// (backend/smoketest/smoke/helpers.go:231-241), so both sides agree on which
+/// addresses are "listen-style".
+/// </summary>
+static bool IsHostlessAddr(string addr)
+{
+    int i = addr.LastIndexOf(':');
+    if (i < 0) return false; // no port at all -- not a listen-style address
+    var host = addr[..i].Trim('[', ']');
+    return host is "" or "0.0.0.0" or "::";
+}
+
+/// <summary>
+/// Port part of a host:port pair, or the whole string when it has no colon.
+/// Used only to build a corrective suggestion in log messages.
+/// </summary>
+static string AddrPort(string addr)
+{
+    int i = addr.LastIndexOf(':');
+    return i < 0 ? addr : addr[(i + 1)..];
 }

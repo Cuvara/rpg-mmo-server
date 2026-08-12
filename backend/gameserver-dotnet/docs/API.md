@@ -46,6 +46,17 @@ no negotiation and no extra round trip.
    per connection. It never imposes one.
 3. Be prepared to decode either, since the same rule is what lets servers and
    clients upgrade independently.
+4. **The payload must be encoded in the same encoding as its envelope.**
+   `payload` is a nested `bytes` field, so on a Protobuf connection those bytes
+   must be the *Protobuf* serialisation of the inner message. JSON inside a
+   Protobuf envelope is not a supported hybrid; the peer will fail to parse it.
+5. **Never send `type = 0`.** It is rejected by the encoder, and the reason is
+   the sniffing rule above: proto3 elides field 1 when it is zero, so a `type 0`
+   envelope would not begin with `0x08` and the peer would classify the frame as
+   the wrong encoding. Decoding fails closed for the same reason — a body
+   beginning `0x12` parses as a well-formed `Envelope` carrying only field 2 with
+   `type` left at 0, and rejecting `type 0` turns that silent half-parse into an
+   error.
 
 The payload tables below describe the *message shapes*, which are the same in
 both encodings; the JSON column shows the legacy field names, which match the
@@ -106,10 +117,44 @@ both encodings; the JSON column shows the legacy field names, which match the
 | `entities` | array | always (may be `[]`) | Keyframe: everything in AOI. Delta: only entities whose visible state changed since the previous snapshot **sent to this connection**. |
 | `removed` | string[] | omitted when empty | Delta only: entity IDs that left the AOI or the world. Never present on a keyframe. |
 
-`entities[]` element: `id` (string), `type` (`player` \| `npc` \| `mob` \| `boss`),
+`entities[]` element: `id` (string), `type` (a category string — see below),
 `x`, `y` (float32), `hp`, `max_hp` (int). Visible state is exactly these fields —
 a change in any of them puts the entity in the next delta; a change in a field the
 client cannot see (e.g. cooldown) does not.
+
+### Entity type: enum with a string fallback (Protobuf only) — normative
+
+In JSON, `type` is simply a string and there is nothing to do. In Protobuf the
+category travels in **one of two fields, never both**:
+
+| Field | Proto # | Used when |
+|---|---|---|
+| `type` (`EntityType` enum) | 7 | The category is one this schema enumerates |
+| `type_name` (string) | 2 | It is not — the simulation produced a kind the schema does not know yet |
+
+**The rule: prefer `type`; when it is `ENTITY_TYPE_UNSPECIFIED` (0), read
+`type_name`.** `ENTITY_TYPE_UNSPECIFIED` literally means "see `type_name`". The
+writer never populates both, so the category is never ambiguous.
+
+| Enum value | # | String form |
+|---|---|---|
+| `ENTITY_TYPE_UNSPECIFIED` | 0 | *(see `type_name`)* |
+| `ENTITY_TYPE_PLAYER` | 1 | `player` |
+| `ENTITY_TYPE_MOB` | 2 | `mob` |
+| `ENTITY_TYPE_NPC` | 3 | `npc` |
+| `ENTITY_TYPE_ITEM` | 4 | `item` |
+| `ENTITY_TYPE_PROJECTILE` | 5 | `projectile` |
+
+A client that reads **only** the enum silently loses every future entity kind
+(they all arrive as `UNSPECIFIED`); one that reads **only** `type_name` gets an
+empty string for all five kinds above. Both halves are required.
+
+This fallback is a live path, not a hypothetical: entity categories are
+data-driven (`World/EcsWorld.cs` takes the type from the spawn kind), and the
+component docs already name a `"boss"` category that the enum does **not**
+include. Anything outside the five values above travels as `type_name`, by
+design — "a server that learns a new entity kind before the schema does must
+degrade, not break" (`shared/messages/proto.go`).
 
 ### Entity-id interning (Protobuf only) — normative
 
@@ -144,16 +189,105 @@ The Go reference implementation is `SnapshotState.Apply` in
 `backend/shared/messages/snapshot_state.go`; its desynchronise-and-recover tests
 are in `interning_test.go` alongside it.
 
+**The trap worth stating twice: handle `1` after a keyframe is a *different
+entity* than handle `1` before it.** Handles restart from 1 at every keyframe.
+Carry the table across and you will not get an error — you will attribute one
+entity's updates to another, which renders as a real entity in the wrong place.
+That is why rule 4 says clear, and why the merge algorithm below clears
+`handles` in the same step as `world`.
+
+#### Worked example — the same entity across a keyframe and a delta
+
+Captured from a live Protobuf connection. One entity, introduced then referenced:
+
+```
+KEYFRAME  payload=60 bytes   tick=15743  ack_tick=1  full=true
+08ff7a 1001 1801 2233 0a24<36-byte uuid> 1dabaaaa3e 2864 3064 3801 4001
+
+  08 ff7a      field 1  tick      = 15743
+  10 01        field 2  ack_tick  = 1
+  18 01        field 3  full      = true
+  22 33        field 4  entities, 51 bytes:
+     0a 24        field 1  id       = "b8547cf2-…-6403cf1e3f19"   <-- INTRODUCES the binding
+     1d abaaaa3e  field 3  x        = 0.3333
+     28 64        field 5  hp       = 100
+     30 64        field 6  max_hp   = 100
+     38 01        field 7  type     = 1 (ENTITY_TYPE_PLAYER)
+     40 01        field 8  handle   = 1                           <-- bind 1 -> that uuid
+                  field 2  type_name ABSENT — never set beside the enum
+```
+
+```
+DELTA     payload=20 bytes   tick=15744  ack_tick=2  full=false
+08807b 1002 220d 1dabaa2a3f 2864 3064 3801 4001
+
+  08 807b      field 1  tick      = 15744
+  10 02        field 2  ack_tick  = 2
+               field 3  full      ABSENT => false (proto3 omits zero values)
+  22 0d        field 4  entities, 13 bytes:
+               field 1  id        ABSENT                          <-- resolve via handle
+     1d abaa2a3f  field 3  x        = 0.6667
+     28 64        field 5  hp       = 100
+     30 64        field 6  max_hp   = 100
+     38 01        field 7  type     = 1 (ENTITY_TYPE_PLAYER)
+     40 01        field 8  handle   = 1                           <-- look up 1 -> uuid
+```
+
+Same entity, 60 bytes → 20 bytes. Three separate rules are visible in this one
+pair: `id` is sent exactly once (interning), `type_name` is absent in both frames
+because the enum carried the category, and `full` is absent from the delta
+because proto3 omits `false` — so a reader must treat *absent* as `false` rather
+than expecting the field.
+
+`TestDotnetInterop_MixedEncodingsOnOneServer` measures the encoding saving on a
+keyframe directly: **json=127B, proto=61B — 52.0% smaller**.
+
 ### Client merge algorithm (normative)
 
 ```
 on snapshot s:
-    if s.full:      world.clear()          # discard everything not re-listed
-    for e in s.entities:  world[e.id] = e  # upsert
-    for id in s.removed:  world.remove(id) # despawn
+    # STEP 1 — resolve every handle BEFORE touching any state.
+    resolved = []
+    for e in s.entities:
+        if e.handle != 0 and e.id is empty:
+            if e.handle not in handles:     # unresolvable
+                abort                       # apply NOTHING; send resync (10)
+            e.id = handles[e.handle]
+        resolved.append(e)
+
+    # STEP 2 — only now may state be mutated.
+    if s.full:
+        world.clear()                       # discard everything not re-listed
+        handles.clear()                     # handle space restarts at a keyframe
+
+    # STEP 3 — apply.
+    for e in resolved:
+        if e.handle != 0:  handles[e.handle] = e.id   # record/refresh binding
+        world[e.id] = e                               # upsert
+    for id in s.removed:   world.remove(id)           # despawn — by ID, not handle
+
+    # STEP 4 — clocks.
     tick     = max(tick, s.tick)
     ack_tick = max(ack_tick, s.ack_tick)   # monotonic; a 0 never lowers it
 ```
+
+On a JSON connection `handles` stays empty and steps 1 and 3's handle lines are
+no-ops, so this is one algorithm for both encodings — not two.
+
+Three details in that ordering are load-bearing:
+
+- **Resolve before mutating (step 1 before step 2).** An unresolvable handle must
+  abort the *whole* snapshot. A partially applied snapshot is worse than an
+  unapplied one, because it looks like valid state and nothing detects it.
+- **Resolution reads the handle table before the keyframe clears it.** That is
+  safe, not a bug: a keyframe re-introduces every binding with `id` populated, so
+  on a keyframe step 1 resolves nothing. Do not "fix" it by clearing first.
+- **`removed` carries entity IDs, never handles.** Do not route it through the
+  handle table.
+
+Out-of-order or duplicated snapshots are still applied — the transport is ordered,
+so dropping them would silently diverge — but `tick` never moves backwards, which
+is what the `max` is for.
 
 Reference implementations, both covered by tests:
 `Shared.GameLogic.Systems.SnapshotMerger` (C#/Unity) and

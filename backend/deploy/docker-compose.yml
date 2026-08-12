@@ -247,9 +247,20 @@ services:
       # ADVERTISED TO CLIENTS, and it is NOT the listen address. The container
       # listens on :9000 but is published on GAMESERVER_CONTAINER_PORT, and the
       # gateway hands this value back verbatim in MsgEnterWorldResp.ServerAddr —
-      # so it must be what a CLIENT can dial. A bare ":9200" is normalized by the
-      # client to 127.0.0.1:9200, which is right for a local stack; on a VPS set
-      # GAMESERVER_PUBLIC_ADDR=<public-host>:<published-port>.
+      # so it MUST BE DIALABLE BY THE CLIENT. That is the contract stated on
+      # `publicAddr` in GameServer/Program.cs; the game server warns at startup
+      # when this value has no host part.
+      #
+      # In a container with a published port that means HOST-QUALIFIED:
+      # <host>:<published-port> — 127.0.0.1:9200 for a local stack,
+      # <public-host>:<published-port> on a VPS. A bare ":9200" is NOT correct
+      # here: clients receive it verbatim and cannot dial it (a C# TcpClient
+      # throws; only clients that rewrite it to loopback themselves connect).
+      # A bare ":port" is correct ONLY for host-mode deploys, where the listen
+      # address already is the address clients reach.
+      #
+      # NOTE: the default below is hostless, so it is only right for host mode.
+      # Set GAMESERVER_PUBLIC_ADDR explicitly whenever ports are published.
       GAMESERVER_PUBLIC_ADDR: ${GAMESERVER_PUBLIC_ADDR:-:${GAMESERVER_CONTAINER_PORT:-9200}}
       GAME_DB_URL: postgres://${POSTGRES_GAME_USER:-game}:${POSTGRES_GAME_PASSWORD:-localdev}@postgres-game:5432/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable
     ports:
