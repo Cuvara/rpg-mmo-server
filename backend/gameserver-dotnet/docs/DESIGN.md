@@ -509,7 +509,7 @@ to avoid repeating that is to say what a number is *of*.
 | AOI radius (`GameConstants.DefaultAoiRadius`) | 50.0 units | **server**: distance between two players' persisted `player_states` rows, compared against whether each appeared in the other's snapshots | **61.00 units** apart → mutually invisible |
 | | | **client**: Unity client tracking at what separation a remote player left its world set | last visible **50.5**, absent by **62.2** |
 | Map-server entity hold | 30 s | **server, gauge sampling**: lag of `gameserver_entities` behind `players_online` across two disconnects | **29 s** and **32 s**, then converged |
-| | | **server, log end-to-end**: disconnect line to "Entity hold expired" line, across two two-process runs | **30, 31, 30, 30 s** |
+| | | **server, log end-to-end**: disconnect line to "Entity hold expired" line, across three two-process runs | **30, 31, 30, 30, 30, 31 s** |
 | | | **client**: time from a deliberate disconnect to the `removed` entry arriving at the surviving client | **30.1 s** |
 
 Three independent methods for the hold — two server-side using different data
