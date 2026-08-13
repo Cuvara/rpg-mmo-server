@@ -1,0 +1,22 @@
+# Local dev override: remap realtime profile containers to canonical ports
+# so Unity client on Windows connects to 127.0.0.1:8000 (gateway) and
+# 127.0.0.1:9000 (gameserver) via WSL2 localhostForwarding.
+#
+# Default compose ports for realtime containers are offset (8100, 9200)
+# to allow host-run binaries alongside. This override puts them on the
+# canonical ports since no host-run binaries are competing.
+
+services:
+  gateway:
+    ports:
+      - "8000:8000"
+      - "9102:9102"
+
+  gameserver-dotnet:
+    ports:
+      - "9000:9000"
+      - "9101:9101"
+    environment:
+      # Client-dialable address: since the container publishes 9000:9000,
+      # clients reach it at 127.0.0.1:9000 via WSL2 localhost forwarding.
+      GAMESERVER_PUBLIC_ADDR: "127.0.0.1:9000"

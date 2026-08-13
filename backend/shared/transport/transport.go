@@ -167,7 +167,7 @@ func Listen(kind, addr string, opts ...Option) (net.Listener, error) {
 		if err != nil {
 			return nil, fmt.Errorf("listen tcp %s: %w", addr, err)
 		}
-		return ln, nil
+		return &tcpNoDelayListener{Listener: ln}, nil
 	case KindKCP:
 		bc, err := blockCrypt(o.key)
 		if err != nil {
@@ -209,6 +209,11 @@ func Dial(kind, addr string, timeout time.Duration, opts ...Option) (net.Conn, e
 		if err != nil {
 			return nil, fmt.Errorf("dial tcp %s: %w", addr, err)
 		}
+		// Explicit NoDelay — Go defaults to true, but state it for parity
+		// with the C# game server and to guard against future changes.
+		if tc, ok := conn.(*net.TCPConn); ok {
+			_ = tc.SetNoDelay(true)
+		}
 		return conn, nil
 	case KindKCP:
 		bc, err := blockCrypt(o.key)
@@ -224,6 +229,25 @@ func Dial(kind, addr string, timeout time.Duration, opts ...Option) (net.Conn, e
 	default:
 		return nil, fmt.Errorf("dial: %w", Validate(kind))
 	}
+}
+
+// tcpNoDelayListener wraps a TCP listener to set NoDelay on every accepted
+// connection. Go defaults to NoDelay=true, but stating it explicitly documents
+// the intent, matches the C# game server, and guards against future changes.
+type tcpNoDelayListener struct {
+	net.Listener
+}
+
+// Accept returns the next TCP connection with Nagle disabled.
+func (l *tcpNoDelayListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+	}
+	return conn, nil
 }
 
 // kcpListener adapts *kcp.Listener so every accepted session is tuned with the
