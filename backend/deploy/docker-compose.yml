@@ -106,6 +106,7 @@ services:
           --console.username "${NAKAMA_CONSOLE_USER:-admin}" \
           --console.password "${NAKAMA_CONSOLE_PASSWORD:-password}" \
           --socket.server_key "${NAKAMA_SERVER_KEY:-defaultkey}" \
+          --runtime.http_key "${NAKAMA_HTTP_KEY:-defaulthttpkey}" \
           --metrics.prometheus_port 9100
     ports:
       - "${NAKAMA_GRPC_PORT:-7349}:7349"      # gRPC API
@@ -262,6 +263,8 @@ services:
       # NOTE: the default below is hostless, so it is only right for host mode.
       # Set GAMESERVER_PUBLIC_ADDR explicitly whenever ports are published.
       GAMESERVER_PUBLIC_ADDR: ${GAMESERVER_PUBLIC_ADDR:-:${GAMESERVER_CONTAINER_PORT:-9200}}
+      NAKAMA_URL: http://nakama:7350
+      NAKAMA_HTTP_KEY: ${NAKAMA_HTTP_KEY:-defaulthttpkey}
       GAME_DB_URL: postgres://${POSTGRES_GAME_USER:-game}:${POSTGRES_GAME_PASSWORD:-localdev}@postgres-game:5432/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable
     ports:
       - "${GAMESERVER_CONTAINER_PORT:-9200}:9000"

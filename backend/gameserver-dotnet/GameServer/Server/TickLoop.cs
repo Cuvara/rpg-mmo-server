@@ -44,6 +44,9 @@ public sealed class TickLoop
     /// <summary>Current simulation tick.</summary>
     public ulong CurrentTick => _currentTick;
 
+    /// <summary>Number of enemies currently alive, or 0 if the spawner is disabled.</summary>
+    public int EnemiesAlive => _enemySpawner?.AliveCount ?? 0;
+
     public TickLoop(
         EcsWorld world,
         InputHandler handler,

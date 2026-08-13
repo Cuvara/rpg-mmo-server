@@ -84,6 +84,12 @@ public class ServerOptions
     /// </summary>
     public bool EnableEnemySpawner { get; set; }
 
+    /// <summary>Nakama HTTP API base URL (e.g. <c>http://rpg-nakama:7350</c>). Null disables economy integration.</summary>
+    public string? NakamaUrl { get; set; }
+
+    /// <summary>Nakama <c>runtime.http_key</c> for server-to-server RPC calls.</summary>
+    public string NakamaHttpKey { get; set; } = "";
+
     /// <summary>
     /// How this server describes itself in the registry. Required when
     /// <see cref="ServerRegistry"/> is set; ignored otherwise.
@@ -108,6 +114,7 @@ public sealed class GameServerHost : IAsyncDisposable
     private readonly IPlayerStore _playerStore;
     private readonly IAgonesSdk _agonesSdk;
     private readonly EventPublisher? _publisher;
+    private readonly Nakama.NakamaClient? _nakamaClient;
     private readonly GameMetrics? _metrics;
     private readonly ILogger _logger;
     /// <summary>Keyring join tokens are verified against (JOIN_TOKEN_SECRET).</summary>
@@ -141,6 +148,12 @@ public sealed class GameServerHost : IAsyncDisposable
     /// <summary>Reconnect holds currently pending. Diagnostics and tests.</summary>
     public int PendingHolds => _holds.Count;
 
+    /// <summary>Current simulation tick number.</summary>
+    public ulong CurrentTick => _tickLoop.CurrentTick;
+
+    /// <summary>Number of enemies currently alive.</summary>
+    public int EnemiesAlive => _tickLoop.EnemiesAlive;
+
     public GameServerHost(ServerOptions options)
     {
         _options = options;
@@ -166,6 +179,14 @@ public sealed class GameServerHost : IAsyncDisposable
         _connections = new ConnectionManager();
         _playerStore = options.PlayerStore ?? new MemoryPlayerStore();
         _agonesSdk = options.AgonesSdk ?? new NoopAgonesSdk();
+
+        if (!string.IsNullOrWhiteSpace(options.NakamaUrl))
+        {
+            _nakamaClient = new Nakama.NakamaClient(
+                options.NakamaUrl,
+                options.NakamaHttpKey,
+                _loggerFactory.CreateLogger<Nakama.NakamaClient>());
+        }
 
         var eventStream = options.EventStream ?? new NoopEventStream();
         _publisher = new EventPublisher(eventStream, _loggerFactory.CreateLogger<EventPublisher>(), _metrics);
@@ -766,13 +787,19 @@ public sealed class GameServerHost : IAsyncDisposable
 
     private void OnEntityDeath(EntityState victim, EntityState killer)
     {
-        if (_publisher == null) return;
+        if (_publisher != null)
+        {
+            var payload = new DeathPayload(
+                victim.Id, victim.Type, killer.Id, _options.MapId, _options.ServerId);
+            _ = _publisher.PublishDeathAsync("entity_killed", payload);
+        }
 
-        var payload = new DeathPayload(
-            victim.Id, victim.Type, killer.Id, _options.MapId, _options.ServerId);
-
-        // Fire-and-forget
-        _ = _publisher.PublishDeathAsync("entity_killed", payload);
+        // Award gold + leaderboard score when a player kills a mob
+        if (_nakamaClient != null && killer.Type == "player" && victim.Type == "mob")
+        {
+            _ = _nakamaClient.RewardKillAsync(killer.Id, victim.Id, _options.MapId);
+            _ = _nakamaClient.SubmitKillAsync(killer.Id);
+        }
     }
 
     private static async Task SendError(Connection conn, string error)
@@ -801,6 +828,7 @@ public sealed class GameServerHost : IAsyncDisposable
         {
             await _registration.DisposeAsync();
         }
+        _nakamaClient?.Dispose();
         // Disposed only here, once the run loop is guaranteed done with it — disposing
         // it inside ShutdownAsync would hand RunAsync's background tasks a dead token
         // source while they are still unwinding.
