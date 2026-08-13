@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Shared.GameLogic.Components;
+using GameServer.AI;
 using GameServer.Input;
 using GameServer.Net;
 using GameServer.Observability;
@@ -25,6 +26,7 @@ public sealed class TickLoop
     private readonly EcsWorld _world;
     private readonly InputHandler _handler;
     private readonly ConnectionManager _connections;
+    private readonly EnemySpawner? _enemySpawner;
     private readonly int _tickRate;
     private readonly float _aoiRadius;
     private readonly int _keyframeInterval;
@@ -50,11 +52,13 @@ public sealed class TickLoop
         float aoiRadius,
         ILogger logger,
         GameMetrics? metrics = null,
-        int keyframeInterval = GameConstants.DefaultKeyframeInterval)
+        int keyframeInterval = GameConstants.DefaultKeyframeInterval,
+        EnemySpawner? enemySpawner = null)
     {
         _world = world;
         _handler = handler;
         _connections = connections;
+        _enemySpawner = enemySpawner;
         _tickRate = tickRate;
         _aoiRadius = aoiRadius;
         _logger = logger;
@@ -140,6 +144,23 @@ public sealed class TickLoop
                     _handler.ProcessInputLocked(get, set, pi.UserId, pi.Input, _currentTick, applyMovement);
                 }
             });
+        }
+
+        // Enemy AI: spawn, move, center-zone damage, remove dead
+        if (_enemySpawner != null)
+        {
+            _world.Update((get, set) =>
+            {
+                _enemySpawner.Tick(get, set, _currentTick);
+            });
+
+            // Remove dead enemies outside the write lock (RemoveEntity takes
+            // its own lock; calling it inside Update would deadlock).
+            var removals = _enemySpawner.PendingRemovals;
+            for (int i = 0; i < removals.Count; i++)
+            {
+                _world.RemoveEntity(removals[i]);
+            }
         }
 
         // Broadcast snapshots to each connected player

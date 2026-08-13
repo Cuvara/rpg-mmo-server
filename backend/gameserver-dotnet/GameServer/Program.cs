@@ -28,6 +28,7 @@ float mapHeight = float.TryParse(GetArg(args, "--map-height") ?? Env("GAMESERVER
     System.Globalization.CultureInfo.InvariantCulture, out var mh) && mh > 0f
     ? mh : GameConstants.DefaultMapHeight;
 bool useAgones = HasFlag(args, "--agones") || Env("AGONES_ENABLED") == "true";
+bool enableEnemySpawner = Env("GAMESERVER_ENEMIES") != "false"; // on by default, opt out with GAMESERVER_ENEMIES=false
 string jwtSecret = GetArg(args, "--jwt-secret") ?? Env("JWT_SECRET") ?? "";
 // Secret the GATEWAY signs join tokens with. Deliberately NOT JWT_SECRET: this value
 // is distributed to every game-server pod, so a compromised pod must not be able to
@@ -318,7 +319,8 @@ var options = new ServerOptions
     LoggerFactory = loggerFactory,
     Metrics = metrics,
     ServerRegistry = serverRegistry,
-    Registration = registrationOptions
+    Registration = registrationOptions,
+    EnableEnemySpawner = enableEnemySpawner
 };
 
 // ── Graceful shutdown on SIGINT / SIGTERM ──

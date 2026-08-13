@@ -5,6 +5,7 @@ using System.Net.Sockets;
 using Microsoft.Extensions.Logging;
 using Shared.GameLogic.Components;
 using GameServer.Agones;
+using GameServer.AI;
 using GameServer.Events;
 using GameServer.Input;
 using GameServer.Net;
@@ -75,6 +76,13 @@ public class ServerOptions
     /// that does not care about the registry gets.
     /// </summary>
     public IServerRegistry? ServerRegistry { get; set; }
+
+    /// <summary>
+    /// Enable server-side enemy spawning. When true, the tick loop spawns "mob"
+    /// entities that move toward the center of the map. Default: false (tests
+    /// and custom scenarios opt in explicitly).
+    /// </summary>
+    public bool EnableEnemySpawner { get; set; }
 
     /// <summary>
     /// How this server describes itself in the registry. Required when
@@ -169,6 +177,13 @@ public sealed class GameServerHost : IAsyncDisposable
             options.TickRate,
             options.MapBounds);
 
+        EnemySpawner? enemySpawner = options.EnableEnemySpawner
+            ? new EnemySpawner(
+                _world,
+                options.TickRate,
+                _loggerFactory.CreateLogger<EnemySpawner>())
+            : null;
+
         _tickLoop = new TickLoop(
             _world,
             _inputHandler,
@@ -177,7 +192,8 @@ public sealed class GameServerHost : IAsyncDisposable
             GameConstants.DefaultAoiRadius,
             _loggerFactory.CreateLogger<TickLoop>(),
             _metrics,
-            options.KeyframeInterval);
+            options.KeyframeInterval,
+            enemySpawner);
 
         _saver = new AsyncSaver(
             _playerStore,
