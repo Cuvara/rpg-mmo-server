@@ -6,21 +6,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Known issues (observed, not fixed here)
-- **`TransferMapTests` is flaky under a full parallel `dotnet test` run.** Two of
-  its cases intermittently fail with
-  `System.Net.Sockets.SocketException : Address already in use` at
-  `TcpListener.Start` (via `TransportFactory.Listen` -> `GameServerHost.RunAsync`).
-  The cause is a TOCTOU race in the test's own port helper,
-  `GameServer.Tests/Server/TransferMapTests.cs` `FreeTcpPort()`: it binds port 0,
-  reads the assigned port, **closes the listener**, and only then does the server
-  bind that port — so any concurrently-running test can take it in the gap. It is
-  a defect in the test harness, not in the server: the class passes 3/3 when run
-  in isolation (`dotnet test --filter FullyQualifiedName~TransferMapTests`).
-  Observed as 2 failed / 519 passed / 10 skipped on a full run. Left unfixed
-  deliberately; a fix means holding the listener until the server takes over, or
-  serialising the class.
-
 ### Added
 - **`docs/API.md`: map transfer (13/14) and the KCP transport are now documented
   as client contracts.** Both were reachable only by reading server source: the
@@ -59,6 +44,66 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     `Shared.GameLogic` and implements the listener side.
 
 ### Fixed
+- **`TransferMapTests` is deterministic again — it had *three* independent races,
+  and only one of them was the one previously written down here.** The known-issue
+  entry described the port race alone; the failure that took CI red on `develop`
+  was a second one, and repeat-running the suite locally (10x) exposed a third
+  that no single run had shown. All three are defects in the test, not the server.
+  - **Race 1 — the port (TOCTOU, `SocketException : Address already in use`).**
+    The old `FreeTcpPort()` bound port 0, read the assigned number, **closed its
+    listener**, and handed the number to the server, which bound it some time
+    later; any concurrent test could take the port in that gap. Fixed by removing
+    the guess entirely rather than by retrying around it: the harness now starts
+    the server on `":0"` and asks it which port it got. `GameServerHost` gained
+    `ListeningAddressAsync` (`GameServer/Server/GameServer.cs`), a task completed
+    with the bound address the moment `TransportFactory.Listen` returns — the
+    transport already resolved ephemeral binds, the address just was not
+    reachable from outside. There is no window left to lose: the socket the
+    server reports is the socket the server is listening on. It is faulted if the
+    bind throws and cancelled on shutdown, so a waiter cannot hang on a server
+    that never came up. This also deletes the harness's connect-retry loop —
+    "the listener is bound" is now a fact, not something to poll for.
+  - **Race 2 — the online gauge (`Assert.Equal() Failure: Expected: 0 /
+    Actual: 1` at `TransferMapTests.cs:57`).** The test waited for
+    `EntityCount == 0` and then asserted on `metrics.PlayersOnline`, a different
+    counter updated on a later line: `HandleTransferMap` removes the entity
+    (`_world.RemoveEntity`) and only *then* decrements the gauge
+    (`_metrics.PlayerLeft()`). The waited-for condition is therefore reached
+    strictly before the asserted one, and any preemption in that window — likely
+    on a loaded CI runner, rare on an idle laptop — failed the test. Fixed by
+    waiting for the condition actually being asserted
+    (`EntityCount == 0 && PlayersOnline == 0`). **The server is not at fault and
+    was not changed for this**: nothing promises the two counters move
+    atomically, and reordering them would only move the same window elsewhere.
+    The timeout was not touched — it was already 15s, and the failure was an
+    ordering bug, not a slow machine. `WaitForAsync`'s failure message now prints
+    the gauge alongside the entity count, since `entities=0` on its own reads
+    like a passing state.
+  - **Race 3 — the reply is not the next frame (`Expected: 14 / Actual: 8`).**
+    Each test wrote a request and then decoded exactly one envelope, assuming it
+    was the reply. It is not: the tick loop broadcasts snapshots at `TickRate`
+    (20 Hz in these tests), so a snapshot emitted between the request and the
+    reply arrives first and the assert reads message type 8 (`Snapshot`) where 14
+    (`TransferMapResp`) was expected. This one never reproduced in a single run —
+    it took repeat runs of the full suite to surface, which is why the earlier
+    known-issue entry missed it. Fixed with a `ReadUntilAsync(stream, want)`
+    helper that decodes until the awaited type arrives; the join handshake reads
+    through it too. It skips only the types the server legitimately pushes
+    unsolicited (`Snapshot`, `Pong`, `Resync`) and fails hard on anything else,
+    so it cannot mask a wrong reply.
+  - **Evidence.** 10 consecutive full-suite `dotnet test` runs (531 tests each)
+    plus 5 runs of the class in isolation: **0 `TransferMapTests` failures**,
+    where the same 10-run loop before the fix failed it 3 times. A single green
+    run proves nothing here — the CI failure this started from went green on a
+    plain re-run with no source change.
+  - **Not fixed, and not caused by this change:** the same repeat-run loop shows
+    `GameServerHostShutdownTests`, `RegistrationServiceTests.Heartbeat_*`,
+    `MetricsEndpointTests.TryStart_*` and `JoinTokenSecretTests` failing
+    intermittently under load, the last of them with the same "Address already in
+    use" signature — those classes still carry their own copy of the racy
+    `FreeTcpPort()`. Verified against an unmodified tree (4 full-suite runs), so
+    they predate this work. Porting the `":0"` + `ListeningAddressAsync` pattern
+    to them is the obvious follow-up.
 - **The KCP cross-language interop tests were silently skipping; they run again,
   and they pass.** All nine `KcpInteropTests` cases reported as *skipped* rather
   than failed because the Go probe they drive, `interop/kcpprobe`, no longer
