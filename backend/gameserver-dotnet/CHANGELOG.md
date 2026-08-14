@@ -7,6 +7,68 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **The snapshot broadcast is two phases: read the world for every viewer under one
+  lock, then encode and send under none (ECS migration, stage 3 of 3).** Each
+  viewer used to take the world read lock twice — once for its AOI anchor, once
+  for its AOI scan — so a 200-player tick acquired it 400 times, and serialization
+  ran interleaved with world reads. `TickLoop.TickOnce` now calls
+  `EcsWorld.ReadAll` once, gathers every connection's anchor and AOI into buffers
+  the connection owns, leaves the scope, and only then encodes.
+  - New `WorldReader`, the read-side counterpart of `WorldWriter`: a scope object
+    with the lock already held, so `Connection.GatherSnapshotView` can read without
+    re-acquiring per call.
+  - `ConnectionManager.CopyTo(Span<Connection>)` gives the broadcast a stable list
+    it can walk twice without holding an enumerator or a delegate across the two
+    phases. Same count-don't-saturate contract as everything else here.
+  - The per-tick `ForEach(conn => ...)` delegate allocation is gone; the gather
+    callback is built once.
+  - The viewer scratch array is cleared after each broadcast, so a dropped
+    connection is not kept alive by a stale slot until some later tick overwrites
+    it.
+  - **Trade, stated rather than buried:** a join or leave arriving mid-broadcast
+    now waits for the whole gather instead of slipping between two viewers. The
+    gather is position tests over chunk spans with no serialization in it, which is
+    exactly why serialization was moved out of the locked phase rather than left
+    inside it.
+
+### Added
+- **A wire byte-identity test, generated before the change and unchanged by it.**
+  `SnapshotByteIdentityTests` drives a fully deterministic scenario — enemy spawner
+  disabled, since it draws from `Random.Shared` — through the real tick loop for
+  120 ticks and SHA-256s the exact bytes of every snapshot envelope, for Protobuf
+  and for legacy JSON separately. The expected digests are literals in the test,
+  not a file, because the one thing that would destroy this test's value is
+  regenerating it to make it pass. It covers what a spot check cannot: an ordering
+  change, a keyframe landing a tick early, a despawn arriving late. Protobuf is
+  pinned separately because entity-id interning allocates handles in AOI arrival
+  order, which is the most order-sensitive thing downstream of this stage.
+
+### Measured
+- Paired in-process A/B against `develop`, Release, whole `TickLoop.TickOnce`:
+  **21 692 → 21 628 B/tick at 50 players (−0.3%)**, and **192 956 → 192 949 B/tick
+  at 200 players** — the latter is noise. Byte-identical across paired runs.
+- **This stage buys no measurable throughput, and that was the expectation going
+  in.** The AOI inner loop was already chunk-iterating and compose-free, and its
+  per-client allocation was removed in stage 1; there was nothing left there to
+  win. The −64 B/tick is the one delegate. What did change is not measurable in
+  bytes: read-lock acquisitions per tick went from **2 per viewer to 1 in total**
+  (400 → 1 at 200 players), and the broadcast now has a boundary it did not have.
+- ADR-12 decision 7 makes that a recorded result rather than a failure. Whether the
+  extra type is worth the boundary is a judgement call, and it is recorded as one.
+
+### Notes
+- **This makes moving serialization off the tick easier, not harder** — the
+  question that decides whether a stage 4 is worth having. Serialization still runs
+  inside the tick (`WireProtocol.NewEnvelope` in `TickOnce`; `conn.Send` only
+  enqueues), and `BENCHMARK.md` section 9 still lists moving it off as outstanding.
+  It could not be lifted out before, because encoding was interleaved with locked
+  world reads per viewer — there was no point in the tick where a viewer's snapshot
+  input existed independently of the world. After phase A there is: every
+  connection holds a self-contained view with no world reference and no lock
+  dependency, so phase B can be handed to another thread without touching
+  `EcsWorld` at all. That is the whole reason to keep this stage.
+
+### Changed
 - **The enemy AI is three systems over an archetype query, not one method over a
   list of ids (ECS migration, stage 2 of 3).** `EnemySpawner.Tick(get, set, tick)`
   walked a `List<string>` of enemy ids, resolved each through the world's string

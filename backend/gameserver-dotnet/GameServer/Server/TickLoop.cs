@@ -52,6 +52,22 @@ public sealed class TickLoop
     /// </summary>
     private readonly List<PendingInput> _inputs = new();
 
+    /// <summary>
+    /// Connections to broadcast to this tick, refreshed once per tick and walked twice —
+    /// once in the gather phase, once in the encode phase. Reused, so the broadcast
+    /// allocates nothing; cleared after each broadcast so a dropped connection is not
+    /// held alive by a stale slot.
+    /// </summary>
+    private Connection[] _viewers = Array.Empty<Connection>();
+
+    private int _viewerCount;
+
+    /// <summary>
+    /// The gather callback, built once. An inline lambda captures <c>this</c> and
+    /// allocates a delegate every tick; the old broadcast did exactly that.
+    /// </summary>
+    private readonly Action<GameServer.World.WorldReader> _gatherViews;
+
     /// <summary>Current simulation tick.</summary>
     public ulong CurrentTick => _currentTick;
 
@@ -78,6 +94,19 @@ public sealed class TickLoop
         _logger = logger;
         _metrics = metrics;
         _keyframeInterval = keyframeInterval;
+        _gatherViews = GatherViews;
+    }
+
+    /// <summary>
+    /// Phase A of the broadcast: read every viewer's anchor and AOI out of the world,
+    /// into buffers the connections own. Runs inside one world read scope.
+    /// </summary>
+    private void GatherViews(GameServer.World.WorldReader reader)
+    {
+        for (int i = 0; i < _viewerCount; i++)
+        {
+            _viewers[i].GatherSnapshotView(reader, _aoiRadius);
+        }
     }
 
     /// <summary>Run the tick loop until cancellation.</summary>
@@ -183,34 +212,54 @@ public sealed class TickLoop
         // ever seeing an enemy inside the despawn zone.
         _enemySpawner?.Tick(_currentTick);
 
-        // Broadcast snapshots to each connected player
-        _connections.ForEach(conn =>
+        // ── Snapshot broadcast, in two phases ──────────────────────────────────
+        //
+        // Phase A reads the world for every viewer under ONE read lock. Phase B encodes
+        // and sends, touching no world state and holding no lock.
+        //
+        // The split is the point of this stage. Before it, each viewer took the read
+        // lock twice — once for its anchor, once for its AOI scan — so a 200-player tick
+        // acquired it 400 times, and serialization ran interleaved with world reads. Now
+        // the boundary is explicit: after phase A every connection holds a self-contained
+        // view, which is the property that would let phase B move off the tick thread
+        // entirely. That move is NOT done here (see BENCHMARK.md section 9); this only
+        // stops the tick's structure from being the thing that prevents it.
+        int viewers = _connections.CopyTo(_viewers);
+        if (viewers > _viewers.Length)
         {
-            try
-            {
-                // AOI centre plus the per-player acknowledgement: the newest input tick
-                // this player's own entity has accepted. Other players' entities never
-                // contribute — reconciliation is strictly per-client. Two components,
-                // read directly: the previous `View(get => ...)` form composed a whole
-                // EntityState for these two fields and allocated a closure per
-                // connection per tick to carry them out of the lambda.
-                _world.TryGetSnapshotAnchor(conn.UserId, out Vec2 playerPos, out ulong ackTick);
+            _viewers = new Connection[viewers];
+            viewers = _connections.CopyTo(_viewers);
+        }
+        _viewerCount = Math.Min(viewers, _viewers.Length);
 
-                // Into the connection's reusable buffer. This used to be
-                // `new List<EntityState>()` inside EcsWorld, once per connected client
-                // per tick, plus its growth reallocations.
-                ReadOnlySpan<EntityState> nearby = conn.ScanAoi(_world, playerPos, _aoiRadius);
-                var snapshot = conn.DeltaState.Encode(_currentTick, ackTick, nearby, _keyframeInterval,
-                    intern: conn.Encoding == WireEncoding.Proto);
-                var env = WireProtocol.NewEnvelope(MsgType.Snapshot, snapshot, conn.Encoding);
-                conn.Send(env);
-                _snapshotsThisTick++;
-            }
-            catch (Exception ex)
+        if (_viewerCount > 0)
+        {
+            // Phase A — gather. One read lock for the whole broadcast.
+            _world.ReadAll(_gatherViews);
+
+            // Phase B — encode and send. No lock, no world access.
+            for (int i = 0; i < _viewerCount; i++)
             {
-                _logger.LogWarning(ex, "Failed to send snapshot to {UserId}", conn.UserId);
+                Connection conn = _viewers[i];
+                try
+                {
+                    var snapshot = conn.DeltaState.Encode(
+                        _currentTick, conn.SnapshotAckTick, conn.StagedAoi, _keyframeInterval,
+                        intern: conn.Encoding == WireEncoding.Proto);
+                    var env = WireProtocol.NewEnvelope(MsgType.Snapshot, snapshot, conn.Encoding);
+                    conn.Send(env);
+                    _snapshotsThisTick++;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to send snapshot to {UserId}", conn.UserId);
+                }
             }
-        });
+
+            // Released so a disconnected connection is not kept alive by the scratch
+            // array until the next tick happens to overwrite that slot.
+            Array.Clear(_viewers, 0, _viewerCount);
+        }
 
         // Metrics: recorded once per tick, no per-entity allocation.
         if (_metrics != null)

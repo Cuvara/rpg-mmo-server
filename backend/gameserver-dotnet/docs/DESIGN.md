@@ -1073,6 +1073,38 @@ Measured: the AI phase went 367 → 172 B/tick (−53%), deterministic across pa
 context that is **0.36%** of a 50-player tick, because snapshot encoding dominates. Per
 ADR-12 that is recorded, not dressed up.
 
+### The snapshot broadcast: gather under one lock, encode under none
+
+`TickLoop.TickOnce` broadcasts in two phases. Phase A calls `EcsWorld.ReadAll` once and,
+inside that single read scope, has every `Connection` gather its AOI anchor and its
+visible entities into buffers the connection owns. Phase B leaves the scope and encodes
+and sends, touching no world state.
+
+Before this, each viewer took the read lock twice — anchor, then AOI scan — so a
+200-player tick acquired it 400 times, and `WireProtocol.NewEnvelope` ran interleaved
+between those acquisitions.
+
+**The measurable effect is nil and that is the honest summary**: −0.3% allocation at 50
+players, noise at 200. The AOI inner loop was already chunk-iterating and compose-free and
+stage 1 had already removed its per-client list, so there was nothing left there.
+
+**The structural effect is the reason it exists.** Serialization still runs inside the
+tick. It could not be moved out while encoding was interleaved with locked world reads,
+because no point in the tick had a viewer's snapshot input standing free of the world.
+After phase A every connection holds a self-contained view — no world reference, no lock —
+so phase B can move to another thread without `EcsWorld` being involved. Whether to do
+that is BENCHMARK.md §9's outstanding item, and it is the one with a measured case behind
+it.
+
+The trade: a join or leave arriving mid-broadcast waits for the whole gather rather than
+slipping between two viewers. The gather is position tests over chunk spans with no
+serialization in it, which is why serialization was moved out of the locked phase rather
+than left in it.
+
+Wire output is unchanged, and is proven so rather than asserted: `SnapshotByteIdentityTests`
+SHA-256s every snapshot envelope of a deterministic 120-tick scenario, for Protobuf and
+JSON separately, against digests generated before the change.
+
 ### The `Shared.GameLogic` boundary is unchanged
 
 No `Arch.Core` type appears anywhere in `Shared.GameLogic` — not `World`, not `Entity`,
