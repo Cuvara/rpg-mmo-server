@@ -1348,7 +1348,7 @@ or if the archetype count outgrows the hint mechanism.
 |---|---|---|---|---|
 | 1 — input path | PR #79 | none | add, remove (unchanged) | 6 762 858 → 192 984 B/tick at 200 players (35×) |
 | 2 — enemy AI | PR #81 | `EnemyAi` (hinted same commit) | add, remove (unchanged) | 367 → 172 B/tick (−53%), but only −0.36% of a 50-player tick |
-| 3 — snapshot/AOI | not started | — | — | — |
+| 3 — snapshot/AOI | PR #83 | none | add, remove (unchanged) | 21 692 → 21 628 B/tick at 50 players (−0.3%); noise at 200. **No throughput win, as predicted.** |
 
 Two things stage 2 settled that this ADR could only predict:
 
@@ -1367,6 +1367,25 @@ Stage 2 also produced the first instance of the rule in decision 7 biting: it me
 by two orders of magnitude. That is recorded rather than dressed up, and it strengthens
 rather than weakens the case that the outstanding item is moving serialization off the
 tick.
+
+**Stage 3 closed the migration, and confirmed the analysis was right about it.** The AOI
+inner loop was already chunk-iterating and compose-free, and stage 1 had already removed
+its per-client allocation, so there was nothing left to win and nothing was won: −0.3% at
+50 players, noise at 200. Decision 7 was written for exactly this and the result is
+recorded as it came out.
+
+What stage 3 did produce is the precondition for the work that actually matters.
+Serialization still runs inside the tick, and it could not be lifted out while encoding
+was interleaved with locked per-viewer world reads — there was no moment at which a
+viewer's snapshot input existed independently of the world. There is now: the broadcast
+gathers every viewer under one read lock, then encodes outside it, so the encode phase
+holds no world reference and no lock. **A stage 4 that moves serialization off the tick is
+therefore reachable, and is the only remaining item with a measured case behind it**
+(`BENCHMARK.md` §9, and the ~5:1 serialization:AOI ratio the original analysis cited).
+
+Net across all three stages: the input path was worth doing (35× less allocation per
+tick), the AI and snapshot stages were worth doing for structure and not for speed, and
+the thing the analysis said was the real 80% remains untouched and now unblocked.
 
 
 ---

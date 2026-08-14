@@ -102,9 +102,14 @@ public sealed class EcsWorld : IDisposable
     /// </summary>
     private readonly WorldWriter _writer;
 
+    /// <summary>The read scope handed to <see cref="ReadAll"/>. One per world, so
+    /// entering the snapshot broadcast allocates nothing.</summary>
+    private readonly WorldReader _reader;
+
     public EcsWorld()
     {
         _writer = new WorldWriter(this);
+        _reader = new WorldReader(this);
     }
 
     /// <summary>Queued structural changes, drained by <see cref="ApplyStructuralChanges"/>.</summary>
@@ -337,6 +342,31 @@ public sealed class EcsWorld : IDisposable
         try { action(GetEntityLocked); }
         finally { _rwLock.ExitReadLock(); }
     }
+
+    /// <summary>
+    /// Take the read lock <b>once</b> and run <paramref name="action"/> against a
+    /// consistent view of the world.
+    ///
+    /// <para>The snapshot broadcast's entry point. It replaced two lock acquisitions per
+    /// connected client per tick with one for the whole broadcast, and — more to the
+    /// point — draws a line the previous shape did not have: everything inside this
+    /// scope reads the world, and everything that serializes happens outside it.</para>
+    /// </summary>
+    public void ReadAll(Action<WorldReader> action)
+    {
+        _rwLock.EnterReadLock();
+        _iterationDepth++;
+        try { action(_reader); }
+        finally
+        {
+            _iterationDepth--;
+            _rwLock.ExitReadLock();
+        }
+    }
+
+    /// <summary>AOI scan for <see cref="WorldReader"/>; the read lock is already held.</summary>
+    internal int ScanRangeLockedForReader(Vec2 center, float radius, Span<EntityState> destination) =>
+        ScanRangeLocked(center, radius, destination, null);
 
     /// <summary>
     /// Take the write lock and run a system against component storage.
