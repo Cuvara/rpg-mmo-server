@@ -28,6 +28,10 @@ float mapHeight = float.TryParse(GetArg(args, "--map-height") ?? Env("GAMESERVER
     System.Globalization.CultureInfo.InvariantCulture, out var mh) && mh > 0f
     ? mh : GameConstants.DefaultMapHeight;
 bool useAgones = HasFlag(args, "--agones") || Env("AGONES_ENABLED") == "true";
+bool enableEnemySpawner = Env("GAMESERVER_ENEMIES") != "false"; // on by default, opt out with GAMESERVER_ENEMIES=false
+// Nakama integration: server-to-server RPC for economy + leaderboard
+string? nakamaUrl = Env("NAKAMA_URL"); // e.g. http://rpg-nakama:7350
+string nakamaHttpKey = Env("NAKAMA_HTTP_KEY") ?? "defaulthttpkey";
 string jwtSecret = GetArg(args, "--jwt-secret") ?? Env("JWT_SECRET") ?? "";
 // Secret the GATEWAY signs join tokens with. Deliberately NOT JWT_SECRET: this value
 // is distributed to every game-server pod, so a compromised pod must not be able to
@@ -92,6 +96,7 @@ if (useAgones)
                       "still uses the no-op Agones SDK (no Ready/Health/Shutdown is reported " +
                       "to the sidecar). Do not rely on Agones health checks for this server yet.");
 }
+logger.LogInformation("  Nakama:    {Nakama}", string.IsNullOrWhiteSpace(nakamaUrl) ? "disabled (NAKAMA_URL unset)" : nakamaUrl);
 logger.LogInformation("  Metrics:   {Metrics}", string.IsNullOrWhiteSpace(metricsAddr) ? "disabled" : metricsAddr);
 logger.LogInformation("  GameDB:    {GameDb}",
     string.IsNullOrWhiteSpace(gameDbUrl) ? "memory" : PostgresPlayerStore.MaskDsn(gameDbUrl));
@@ -318,7 +323,10 @@ var options = new ServerOptions
     LoggerFactory = loggerFactory,
     Metrics = metrics,
     ServerRegistry = serverRegistry,
-    Registration = registrationOptions
+    Registration = registrationOptions,
+    EnableEnemySpawner = enableEnemySpawner,
+    NakamaUrl = nakamaUrl,
+    NakamaHttpKey = nakamaHttpKey
 };
 
 // ── Graceful shutdown on SIGINT / SIGTERM ──
@@ -349,6 +357,21 @@ using var sigTerm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, RequestS
 // ── Run ──
 
 var server = new GameServerHost(options);
+var startTime = DateTime.UtcNow;
+
+// Wire up the /status JSON endpoint with live server state.
+metricsEndpoint?.SetStatusProvider(() => new ServerStatus
+{
+    Ok = true,
+    TickRate = tickRate,
+    CurrentTick = server.CurrentTick,
+    PlayersOnline = metrics.PlayersOnline,
+    Entities = server.EntityCount,
+    EnemiesAlive = server.EnemiesAlive,
+    Redis = serverRegistry != null ? "connected" : "disconnected",
+    Postgres = postgresStore != null ? "connected" : "disconnected",
+    UptimeSeconds = (long)(DateTime.UtcNow - startTime).TotalSeconds
+});
 
 try
 {

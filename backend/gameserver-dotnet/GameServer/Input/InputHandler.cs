@@ -117,6 +117,7 @@ public sealed class InputHandler
         // --- Attack ---
         if (!string.IsNullOrEmpty(input.AttackTargetId))
         {
+            _logger.LogDebug("Attack input from {UserId} targeting {TargetId}", userId, input.AttackTargetId);
             var target = get(input.AttackTargetId);
             if (target != null)
             {

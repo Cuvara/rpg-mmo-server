@@ -124,19 +124,31 @@ internal sealed class TcpTransportListener : ITransportListener
 }
 
 /// <summary>A single accepted TCP connection.</summary>
-internal sealed class TcpTransportConnection(TcpClient tcp) : ITransportConnection
+internal sealed class TcpTransportConnection : ITransportConnection
 {
-    private readonly NetworkStream _stream = tcp.GetStream();
+    private readonly TcpClient _tcp;
+    private readonly NetworkStream _stream;
     private int _closed;
 
+    public TcpTransportConnection(TcpClient tcp)
+    {
+        // Disable Nagle's algorithm: the game protocol sends many small messages
+        // (inputs, snapshots) and Nagle batches them for up to 200ms, which is
+        // perceived as lag even with 1-2 clients. Go's net.TCPConn has NoDelay on
+        // by default; C#'s TcpClient does not.
+        tcp.NoDelay = true;
+        _tcp = tcp;
+        _stream = tcp.GetStream();
+    }
+
     public Stream Stream => _stream;
-    public string RemoteEndPoint => tcp.Client.RemoteEndPoint?.ToString() ?? "unknown";
+    public string RemoteEndPoint => _tcp.Client.RemoteEndPoint?.ToString() ?? "unknown";
 
     public void Close()
     {
         if (Interlocked.Exchange(ref _closed, 1) != 0) return;
         try { _stream.Close(); } catch { /* ignore */ }
-        try { tcp.Close(); } catch { /* ignore */ }
+        try { _tcp.Close(); } catch { /* ignore */ }
     }
 
     public void Dispose() => Close();

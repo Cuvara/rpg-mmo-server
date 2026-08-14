@@ -1,0 +1,31 @@
+# Build the Nakama Go plugin (.so) inside a container that matches the
+# Nakama server's Go version and OS. The output is a shared object that
+# Nakama loads at start-up via --runtime.path.
+#
+# Usage (from backend/):
+#   docker build -f deploy/docker/Dockerfile.nakama-plugin -t rpg-mmo/nakama-plugin:build .
+#   docker run --rm -v $(pwd)/deploy/modules:/out rpg-mmo/nakama-plugin:build
+
+FROM heroiclabs/nakama-pluginbuilder:3.40.0 AS builder
+
+WORKDIR /app
+
+# Copy Go modules first for layer caching
+COPY shared/go.mod shared/go.sum ./shared/
+COPY nakama/go.mod nakama/go.sum ./nakama/
+
+WORKDIR /app/nakama
+RUN go mod download
+
+# Copy source
+WORKDIR /app
+COPY shared/ ./shared/
+COPY nakama/ ./nakama/
+
+# Build the plugin
+WORKDIR /app/nakama
+RUN go build -buildmode=plugin -trimpath -o /out/nakama.so .
+
+# Output stage: copy the built plugin to a scratch image for extraction
+FROM scratch
+COPY --from=builder /out/nakama.so /nakama.so
