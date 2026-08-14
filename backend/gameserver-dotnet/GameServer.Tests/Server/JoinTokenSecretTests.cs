@@ -4,6 +4,7 @@ using System.Text.Json;
 using GameServer.Persistence;
 using GameServer.Server;
 using Microsoft.Extensions.Logging.Abstractions;
+using GameServer.Tests.Infrastructure;
 
 namespace GameServer.Tests.Server;
 
@@ -86,10 +87,9 @@ public class JoinTokenSecretTests
     private static async Task AssertJoinAsync(
         string jwtSecret, string joinTokenSecret, string tokenSecret, bool expectOk, bool expired = false)
     {
-        int port = FreeTcpPort();
         var options = new ServerOptions
         {
-            ServerAddr = $":{port}",
+            ServerAddr = ":0",
             ServerId = ServerId,
             MapId = "map_join_secret",
             TickRate = 20,
@@ -104,7 +104,7 @@ public class JoinTokenSecretTests
 
         var server = new GameServerHost(options);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        var runTask = server.RunAsync($":{port}", cts.Token);
+        var (runTask, port) = await TestPorts.StartServerAsync(server, cts.Token);
 
         try
         {
@@ -158,12 +158,4 @@ public class JoinTokenSecretTests
         throw new TimeoutException($"game server never started listening on :{port}");
     }
 
-    private static int FreeTcpPort()
-    {
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        return port;
-    }
 }

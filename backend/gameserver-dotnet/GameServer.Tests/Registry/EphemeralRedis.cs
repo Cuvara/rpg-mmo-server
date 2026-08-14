@@ -43,8 +43,20 @@ internal sealed class EphemeralRedis : IAsyncDisposable
         string? docker = TestDocker.Find();
         if (docker is null) return null;
 
-        int port = TestDocker.FreeTcpPort();
         string name = $"rpg-gs-test-redis-{Guid.NewGuid():N}"[..30];
+
+        // A FIXED published port, unlike EphemeralPostgres, and deliberately so: this
+        // fixture exposes Stop()/Start() to simulate a Redis outage, and a container
+        // published on ":0" gets a DIFFERENT host port every time it starts. The address
+        // handed to RegistrationService is captured once and has to survive the restart —
+        // publishing ephemerally made RedisOutage_DoesNotKillTheService fail on the
+        // reconnect, every run, because the service was reconnecting to a port that had
+        // moved. So the port is leased instead: held until the instant before `docker run`
+        // binds it. That is a narrower window than the old release-immediately helper, not
+        // a closed one — see TestPorts.Lease.
+        var lease = new TestPorts.Lease();
+        int port = lease.Port;
+        lease.Dispose();
 
         var run = TestDocker.Exec(docker,
             $"run -d --name {name} -p 127.0.0.1:{port}:6379 {Image}",

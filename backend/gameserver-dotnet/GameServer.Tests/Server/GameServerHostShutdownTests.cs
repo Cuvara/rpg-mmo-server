@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
+using GameServer.Tests.Infrastructure;
 
 namespace GameServer.Tests.Server;
 
@@ -36,10 +37,9 @@ public class GameServerHostShutdownTests
     [Fact]
     public async Task ShutdownAsync_ConcurrentCallers_WithPendingHolds_DoNotThrow()
     {
-        int port = FreeTcpPort();
-        var server = new GameServerHost(NewOptions(port, new MemoryPlayerStore()));
+        var server = new GameServerHost(NewOptions(0, new MemoryPlayerStore()));
         using var runCts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-        var runTask = server.RunAsync($":{port}", runCts.Token);
+        var (runTask, port) = await TestPorts.StartServerAsync(server, runCts.Token);
 
         // Join three players and drop each connection. Each disconnect parks a live hold
         // CTS in the table — those are the objects the two shutdown racers fought over.
@@ -84,11 +84,10 @@ public class GameServerHostShutdownTests
     [Fact]
     public async Task ShutdownAsync_SecondCaller_AwaitsTheFirstTeardown()
     {
-        int port = FreeTcpPort();
         var store = new BlockingPlayerStore();
-        var server = new GameServerHost(NewOptions(port, store));
+        var server = new GameServerHost(NewOptions(0, store));
         using var runCts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-        var runTask = server.RunAsync($":{port}", runCts.Token);
+        var (runTask, port) = await TestPorts.StartServerAsync(server, runCts.Token);
 
         try
         {
@@ -123,6 +122,12 @@ public class GameServerHostShutdownTests
 
     // ── Helpers ──
 
+    /// <param name="port">
+    /// 0 — the only value the running tests pass — means "let the kernel choose"; the port
+    /// is read back from the listener via <see cref="TestPorts.StartServerAsync"/> instead
+    /// of being decided here. The parameter stays so a test that genuinely needs a fixed
+    /// port can still ask for one.
+    /// </param>
     private static ServerOptions NewOptions(int port, IPlayerStore store) => new()
     {
         ServerAddr = $":{port}",
@@ -188,12 +193,4 @@ public class GameServerHostShutdownTests
         throw new TimeoutException($"game server never started listening on :{port}");
     }
 
-    private static int FreeTcpPort()
-    {
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        return port;
-    }
 }

@@ -7,6 +7,7 @@ using GameServer.Persistence;
 using GameServer.Net.Transport;
 using GameServer.Server;
 using Shared.GameLogic.Components;
+using GameServer.Tests.Infrastructure;
 
 namespace GameServer.Tests.Persistence;
 
@@ -152,11 +153,9 @@ public class MapIdReloadIntegrationTests
         PostgresPlayerStore store, string userId, string serverMapId, int moveTicks = 0)
     {
         const string serverId = "gs-mapid-itest";
-        int port = FreeTcpPort();
-
         var options = new ServerOptions
         {
-            ServerAddr = $":{port}",
+            ServerAddr = ":0",
             ServerId = serverId,
             MapId = serverMapId,
             Mode = "map",
@@ -176,7 +175,7 @@ public class MapIdReloadIntegrationTests
 
         var server = new GameServerHost(options);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-        var runTask = server.RunAsync($":{port}", cts.Token);
+        var (runTask, port) = await TestPorts.StartServerAsync(server, cts.Token);
 
         try
         {
@@ -272,12 +271,4 @@ public class MapIdReloadIntegrationTests
         throw new TimeoutException($"game server never started listening on :{port}");
     }
 
-    private static int FreeTcpPort()
-    {
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        return port;
-    }
 }
