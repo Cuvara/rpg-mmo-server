@@ -14,7 +14,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   gameplay wired into the host: `GameServerHost` constructed `EnemySpawner` directly behind
   an `EnableEnemySpawner` flag, and `TickLoop` held a field of that concrete type.
   - `GameServer/AI/` → `GameServer/Scaffolding/`, `GameServer.Tests/AI/` →
-    `GameServer.Tests/Scaffolding/`, namespaces with them. Moves only; no logic changed.
+    `GameServer.Tests/Scaffolding/`, namespaces with them. Moves and namespace lines only,
+    except `EnemySpawner` which also gained `: ISimulationPhase` and an explicit
+    `TrackedEntityCount`. No logic changed in any of them.
   - New `ISimulationPhase` (`Tick(ulong)`, `TrackedEntityCount`) in `GameServer/Server/`.
     `TickLoop` holds one of those instead of an `EnemySpawner`, and calls it in the same
     place in the same write scope, so anything it changes still lands in the same tick's
@@ -25,9 +27,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     the core name the gameplay it is supposed to know nothing about. `Program.cs` — the
     composition root, which is allowed to know what the game is — supplies it, still gated
     on `GAMESERVER_ENEMIES`.
-  - The test of the seam is deletability: remove `GameServer/Scaffolding` and the server
-    still builds, accepts connections, ticks and streams snapshots. It simply has nothing
-    of its own to simulate.
+  - The test of the seam is deletability, and the accurate statement of it is: **the core**
+    does not name `Scaffolding`. Deleting the directory needs the composition root edited
+    with it — `Program.cs` both `using`s the namespace and constructs the phase, by design,
+    because deciding what the game is what a composition root is for. Verified: deleting
+    the directory fails with `CS0234` at `Program.cs:7`, and after removing those two
+    references the core builds clean with no other change. An earlier wording of this entry
+    claimed the server builds with the directory simply removed, which is false as written.
   - **`Health` and `Combat` deliberately stayed in `World/Components.cs`.** They read like
     gameplay, but `hp` and `max_hp` are first-class fields in `wire.proto` and in the
     `EntityState` the Unity client compiles as source at `sgl-v0.1.6`. They are protocol.
@@ -43,9 +49,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **Gameplay written against this seam must be ECS** — systems and queries over
     components, per ADR-12. `ISimulationPhase` is the host's call into that work, not a
     licence to put simulation state in a class.
-  - No behaviour change. `SnapshotByteIdentityTests`' pre-refactor SHA-256 digests pass
-    unchanged, so the wire is byte-identical; golden vectors untouched; 575 passed / 0
-    failed / 1 skipped.
+  - No behaviour change, and the evidence for each part of that separately, because the
+    digests do not cover as much as they sound like they do: `SnapshotByteIdentityTests`
+    builds its loop with `simulationPhase: null`, so its unchanged pre-refactor digests
+    prove the **phase-less** path is byte-identical and say nothing about snapshots
+    containing enemies. Enemy behaviour is covered instead by the stage-2 characterization
+    tests, which were written against the pre-split shape and are unmodified here. That the
+    phase call site kept its position relative to input application and snapshot building
+    is established by reading the diff, not by any test. Golden vectors untouched;
+    575 passed / 0 failed / 1 skipped.
+  - **Known leak, not fixed here.** `ISimulationPhase.TrackedEntityCount` exists only to
+    feed `GameServerHost.EnemiesAlive` on the status endpoint, which renames it straight
+    back to a content word — so the core carries a gameplay-shaped concept end to end while
+    claiming to attach no meaning to it. It is one int and the status JSON is unchanged, but
+    it will not compose: a second phase means one number for two owners. The shape that
+    would compose is a per-phase diagnostics contribution (name → count).
+  - **The ECS rule behind this seam is honour-system, and should not stay that way.**
+    `Tick(ulong)` passes neither world nor writer, so an implementer must capture `EcsWorld`
+    itself — which is exactly the shape that invites private simulation state beside it.
+    `EnemySpawner` behaves, but nothing in the signature requires it. Handing the phase a
+    writer would make drift hard rather than merely discouraged; that conflicts with the
+    phase opening its own scope so its structural drain lands once, before snapshots, and
+    the tension is unresolved on purpose rather than papered over.
 
 ### Changed
 - **The snapshot broadcast is two phases: read the world for every viewer under one
