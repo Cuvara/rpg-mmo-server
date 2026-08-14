@@ -282,18 +282,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   back — and leases held concurrently cannot collide, so that part is closed even
   though the final handoff is not atomic.
 
-  **Measured, 10 consecutive full-suite runs (531 tests) before and after.**
-  Fully green runs: **4/10 → 8/10**. Per class, failures across the ten runs:
-  `GameServerHostShutdownTests` 5 → **0**, `RegistrationServiceTests` 1 → **0**,
-  `JoinTokenSecretTests` (1 in an earlier ten-run sample) → **0**,
-  `TransferMapTests` 0 → **0**. The residual is `MetricsEndpointTests`, 1 → **2**
-  runs affected, one `[Theory]` case each — and that is the honest limit of the
-  `Lease`, not a fix that failed to take: the class passes **15/15 in isolation**,
-  so what beats it to the port is another class running in parallel, in the window
-  between releasing the lease and `HttpListener` binding. Closing that needs
-  `HttpListener` to grow an ephemeral bind it does not have, or the test to stop
-  asking for a specific port; both are larger changes than this one and neither is
-  hidden behind a retry or a longer timeout here.
+  **Measured, 10 consecutive full-suite runs each side, both on the same base**
+  (559 tests, same host, unmodified tree in a scratch worktree vs this change):
+
+  | | baseline | with the harness |
+  |---|---|---|
+  | fully green runs | 6/10 | **9/10** |
+  | `MetricsEndpointTests` | 4 runs | **0** |
+  | `JoinTokenSecretTests` | 1 | **0** |
+  | `GameServerHostShutdownTests` | 1 | **0** |
+  | `RegistrationServiceTests` | 0 | **0** |
+
+  The one failing run afterwards failed on `EcsWorldTests.ConcurrentAccess_NoDeadlock`
+  and `RedisServerRegistryTests.Heartbeat_ReArmsTtl` — neither a port bind, both
+  passing 6/6 in isolation, and neither touched here.
+
+  **What these numbers can and cannot show.** They are a probability, measured on
+  one host on one day. A race's rate moves with scheduling — the ECS stage-1 work
+  that cut per-tick allocation shifted it enough that three consecutive suites on
+  the same base showed none of these classes failing at all. So read the table as
+  corroboration, not proof. What is actually proven is structural and does not
+  depend on any run: the eight TOCTOU copies are gone from the source, and every
+  `GameServerHost` consumer now learns its port from the listener instead of
+  predicting it, which removes the window rather than shrinking it. The one place
+  a window remains is `MetricsEndpointTests`, and it is documented as remaining.
 
 ### Added
 - **`docs/API.md`: map transfer (13/14) and the KCP transport are now documented
