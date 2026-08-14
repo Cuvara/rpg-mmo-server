@@ -6,6 +6,146 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **The AOI walk fills a caller-owned buffer instead of allocating a list per
+  client per tick.** `EcsWorld.GetEntitiesInRange` opened with
+  `new List<EntityState>()`, and `TickLoop` called it once per connected client
+  every tick via `SnapshotEncoder.GetNearbyEntities` — at 15 Hz that is one
+  throwaway list per player every 67 ms, plus its growth reallocations, for no
+  reason other than that the caller had nowhere to put the results.
+  - New `GetEntitiesInRange(Vec2, float, Span<EntityState>)` returning the match
+    count. Its overflow contract is **deliberately identical** to the one
+    `Shared.GameLogic/Systems/AoiLogic.cs` already publishes — *count, do not
+    saturate*: on a short buffer the first `destination.Length` matches are
+    written and the scan continues, so the return value is the size the buffer
+    needed to be. A saturating variant would make "full" indistinguishable from
+    "exactly full", which is silent AOI truncation — entities missing from a
+    keyframe with no error anywhere. Two AOI functions in one server with two
+    different overflow contracts would be worse than either contract alone, so
+    `AoiSpanAndInputBindingTests.SpanScan_OverflowContract_MatchesAoiLogic`
+    cross-checks the two directly rather than restating the rule.
+  - Each `Connection` owns the buffer, because its right size is a property of
+    that client's neighbourhood and it has to survive between ticks to be worth
+    anything. `Connection.ScanAoi` implements the retry half of the contract:
+    grow to exactly the needed count and rescan once. A spawn landing between the
+    two scans falls back to the list path for that one tick rather than
+    truncating.
+  - Both the span and list forms now run one scan implementation, so the AOI
+    predicate and iteration order cannot diverge between them — order matters,
+    because the delta encoder's bookkeeping is order-sensitive and a reordering
+    would be a wire change.
+  - `SnapshotDeltaState.Encode` gained a `ReadOnlySpan<EntityState>` overload; the
+    list overload forwards to it via `CollectionsMarshal.AsSpan`, so there is one
+    implementation and existing callers are untouched.
+- **Input is bound to its entity at ingest, so the tick loop no longer touches the
+  world's string index.** `EcsWorld.PushInput` resolves the user id to an
+  `EntityHandle` on the **network** thread, under a read lock that contends with
+  nothing. The simulation thread then never hashes a user id: movement coalescing
+  is keyed by handle (an integer hash) rather than by a `Dictionary<string, int>`,
+  and the handler addresses the entity directly.
+  - `_index` remains, and is still the authority for join, reconnect and
+    persistence. It is simply no longer on the per-input path.
+  - A handle can go stale between ingest and drain — a disconnect inside the hold
+    window destroys the entity and a reconnect creates a different one.
+    `EcsWorld.RebindStale` re-resolves exactly those entries at the top of the
+    input phase, costing a lookup only for entries that are actually stale
+    (normally none). This preserves the old behaviour, which resolved at process
+    time and so always addressed the *current* entity; `PendingInput` keeps the
+    user id for that reason and for logging.
+  - Arch's `Entity` is a stable identity rather than a slot pointer, so a handle
+    survives archetype moves and chunk compaction. Destruction is the only thing
+    that invalidates it, which is why revalidation is a liveness check and not a
+    re-resolve.
+  - `DrainInputs` gained an overload that drains into a caller-owned list, so the
+    tick reuses one list instead of building a new one every tick.
+- **The per-tick input path now addresses components, not whole entities (ECS
+  migration, stage 1 of N).** Arch has been the storage engine since ADR-10, but
+  nothing above it was written as an ECS: `EcsWorld.Update(get, set)` handed
+  callers a getter that composed a whole `EntityState` out of seven components and
+  a setter that wrote all seven back. Moving a player therefore cost fourteen
+  component lookups plus two managed-reference stores — `EntityIdRef` and
+  `EntityKind` were rewritten on every input even though neither can change after
+  spawn — to update a position and an input cursor. That is Arch used as a
+  dictionary with extra steps, and it is the shape this change starts unwinding.
+  - New `EcsWorld.UpdateComponents(Action<WorldWriter>)`: the same write lock and
+    the same deferred structural phase as `Update`, but the callback receives a
+    `WorldWriter` giving `ref` access to individual components. `EntityHandle`
+    wraps Arch's `Entity`, so no `Arch.Core` type became public and
+    `Shared.GameLogic` still never sees the ECS.
+  - The string id is now resolved **once per entity per scope** rather than on
+    every read and every write. This is the first half of ADR-10's integer
+    simulation handle; the string id survives unchanged on the wire, in
+    persistence and in `EntityState.Id`, which are separate migrations.
+  - `InputHandler.ProcessInput` reads `Health`, `InputCursor`, `Position` and
+    `Locomotion` and writes `Position`, `InputCursor` and `Combat` in place.
+  - `TickLoop`'s per-connection snapshot prologue was `View(get => ...)`, which
+    composed an entire `EntityState` to read two fields and allocated a closure
+    per connection per tick to carry them out of the lambda. It is now
+    `EcsWorld.TryGetSnapshotAnchor`, reading `Position` and `InputCursor` directly
+    and allocating nothing.
+  - **Measured end to end, whole `TickLoop.TickOnce`**, same probe run on this
+    branch and on `develop` (Release, real `Connection` objects over a null
+    transport, Protobuf encoding, clustered so AOI actually matches):
+
+    | players | develop | this branch | |
+    |---|---|---|---|
+    | 50 | 436 276 B/tick | 21 692 B/tick | **20x** |
+    | 200 | 6 762 858 B/tick | 192 984 B/tick | **35x** |
+
+    Allocation is deterministic — three paired runs at 200 players spread under
+    0.05% on both sides. **Wall-clock is not reported as an improvement**: paired
+    medians moved ~3.7 ms -> ~2.0 ms per tick, but this host's run-to-run spread on
+    the same binary is +-50% (2.9-4.5 ms on `develop` alone), which is the
+    contamination ADR-7 documents. The allocation number is the claim; the timing
+    is directional at best.
+  - **No arithmetic was re-derived.** The movement step still calls
+    `MovementSystem.TryMove`; it is handed the three fields `TryMove` reads instead
+    of a fully composed entity. That field selection is the one new assumption, and
+    it is the kind that fails silently, so
+    `ComponentInputPathTests.Movement_ComponentPath_IsBitExactAgainstWholeEntityTryMove`
+    replays every position/speed/move/bounds combination in the ADR-10 movement
+    fixture through the real handler and compares the stored position bit-for-bit
+    against `TryMove` called with a fully populated `EntityState`. The golden
+    vectors themselves are untouched and still pass.
+  - **No new components and no new archetypes**, so `World/ArchAotHints.cs` is
+    unchanged and `ArchAotHintTests` still covers everything the process can
+    create. `CommandBuffer` is still unused (ADR-11). NativeAOT publish verified.
+  - The attack branch still composes whole `EntityState` values, because
+    `CombatLogic.ValidateAttack` / `CalculateDamage` / `HandleDeath` and the death
+    callback are `Shared.GameLogic` entry points shaped that way, and
+    `Shared.GameLogic` is deliberately not being changed. Its write-back is already
+    component-level. Removing that round trip needs a decision about
+    `Shared.GameLogic`'s API surface and is not stage 1's to make.
+  - `EnemySpawner` and `AsyncSaver` still use the `EntityState` API — stage 2 and
+    a later stage respectively. Left alone on purpose: this change is meant to be
+    revertible on its own.
+  - **Structural operation kinds are unchanged**: the deferred queue drained by
+    `ApplyStructuralChanges` still carries exactly *add* and *remove*. Stage 1's
+    systems need no add/remove-component op, and the machinery for one is not
+    being built before something uses it (ADR-12 decision 2).
+  - **A per-entity pending-input component was considered and rejected.** It would
+    hold at most one input per entity per tick, but the server processes *every*
+    queued input for attacks and only the newest for movement — collapsing them
+    into one component would drop attacks under multi-input ticks, which is a wire
+    change. Binding the handle to the queue entry achieves the same "resolve once,
+    at ingest" property with no behavioural cost.
+  - **No new component types**, so `ArchAotHints.cs` is unchanged and the hint list
+    is still complete (ADR-12 decision 3). No `Arch.System` source generator, so no
+    query shape the reflection guard cannot enumerate (ADR-12 decision 4).
+
+### Known issues (observed, not fixed here)
+- **A self-targeted attack applies its cooldown and fires the death callback, but
+  its damage is discarded.** This is not new and it is not a rule anyone wrote: the
+  old `get`/`set` input path ended with `set(userId, attackerCopy)`, which
+  overwrote the target write whenever attacker and target were the same entity, so
+  the HP change was silently rolled back after `HandleDeath` had already run and
+  already notified. Component writes have no such last-writer-wins accident, so the
+  new path would have *changed* the observable outcome. Since stage 1 promises no
+  wire-visible change, `InputHandler.ProcessInput` now discards that write
+  explicitly, and `ComponentInputPathTests.SelfTargetedAttack_KeepsCooldownButDiscardsDamage_MatchingPreviousBehaviour`
+  pins it — so a later change that decides to fix the oddity has to delete a test
+  that states what it is deleting, rather than change behaviour by accident.
+
 ### Added
 - **`docs/API.md`: map transfer (13/14) and the KCP transport are now documented
   as client contracts.** Both were reachable only by reading server source: the

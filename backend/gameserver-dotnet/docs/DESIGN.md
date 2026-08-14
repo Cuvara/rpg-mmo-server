@@ -965,6 +965,76 @@ iteration" from being an unstated assumption that a future system quietly breaks
 re-entrancy counter that drives it is `[ThreadStatic]`, because same-thread re-entrancy
 is the only case the lock does not already exclude.
 
+### Two ways in: `Update(get, set)` and `UpdateComponents(writer)`
+
+`EcsWorld` exposes the world at two granularities, and which one a caller uses is the
+current dividing line of the ECS migration.
+
+`Update(get, set)` is the original, whole-entity form: `get` composes an `EntityState`
+out of all seven components, `set` writes all seven back. It is convenient and it is
+expensive in a way that scales with how often it is called, not with how much actually
+changed — moving a player costs fourteen component lookups plus two managed-reference
+stores, because `EntityIdRef` and `EntityKind` are rewritten even though neither can
+change after spawn.
+
+`UpdateComponents(Action<WorldWriter>)` takes the same write lock and runs the same
+deferred structural phase, but hands the callback a `WorldWriter`: `Resolve(id)` returns
+an `EntityHandle`, and `PositionOf`/`HealthOf`/`CombatOf`/`LocomotionOf`/`InputCursorOf`
+return `ref` to the individual components. A system then reads what it reads and writes
+what it writes. The string id is paid for once per entity per scope instead of once per
+access — the first half of ADR-10's integer simulation handle, with the wire, the
+persistence layer and `EntityState.Id` all still on strings.
+
+`EntityHandle` wraps Arch's `Entity` so no `Arch.Core` type is public, and it is only
+valid inside the scope that produced it: a structural change can move an entity's slot
+and nothing revalidates a stored handle.
+
+**Who is on which side today.** The per-tick input path and `TryGetSnapshotAnchor` (the
+per-connection AOI centre + ack tick) use the component form. `EnemySpawner`,
+`AsyncSaver`, `GetEntitiesInRange` and the join/leave paths still use the whole-entity
+form. The attack branch of `InputHandler` is deliberately mixed: it composes whole
+`EntityState` values because `CombatLogic` and the death callback are `Shared.GameLogic`
+entry points shaped that way, but its write-back is component-level.
+
+**The AOI scan fills a caller-owned buffer.** `GetEntitiesInRange` used to open with
+`new List<EntityState>()` and was called once per connected client per tick. There is now
+a `Span<EntityState>` overload whose overflow contract is deliberately the same one
+`AoiLogic.GetNearbyEntities` publishes — *count, do not saturate*, so a short buffer
+returns the size it needed to be rather than a saturated length that cannot be
+distinguished from an exact fit. Each `Connection` owns its buffer and grows it once.
+Both forms share one scan implementation: the delta encoder's bookkeeping is
+order-sensitive, so a divergence in iteration order between them would be a wire change.
+
+**Input is bound to its entity at ingest.** `PushInput` resolves the user id on the
+network thread, so the simulation thread never hashes a string — movement coalescing is
+keyed by `EntityHandle`. `_index` is still the authority for join, reconnect and
+persistence; it is just off the per-input path. A handle can be invalidated by
+destruction (not by archetype moves — Arch's `Entity` is a stable identity), so
+`RebindStale` re-resolves the reconnect case at the top of the input phase.
+
+Measured end to end on `TickLoop.TickOnce`, the same probe run on this branch and on
+`develop` (Release, real `Connection` objects over a null transport, Protobuf, clustered
+so AOI matches): **436 276 → 21 692 B/tick at 50 players (20×)** and **6 762 858 →
+192 984 B/tick at 200 players (35×)**. Allocation is deterministic to under 0.05% across
+paired runs. Wall-clock is *not* claimed: this host's spread on one binary is ±50%, which
+is the contamination ADR-7 documents.
+
+**Where the risk moved.** The movement step still calls `MovementSystem.TryMove` — the
+arithmetic is not re-derived, and the golden vectors (ADR-10) are untouched. What is new
+is that it is handed only the three fields `TryMove` reads rather than a composed
+entity, and that assumption would fail *silently* if `TryMove` grew a fourth. So
+`ComponentInputPathTests.Movement_ComponentPath_IsBitExactAgainstWholeEntityTryMove`
+replays every position/speed/move/bounds combination in the movement fixture through the
+real handler and compares the stored position bit-for-bit against `TryMove` called with
+a fully populated `EntityState`.
+
+**One preserved oddity.** A self-targeted attack applies its cooldown and fires the death
+callback but discards its damage. That is the `get`/`set` path's behaviour — its final
+`set(userId, attackerCopy)` overwrote the target write when attacker and target were the
+same entity — and component writes have no such last-writer-wins accident, so the new
+path discards it explicitly to keep the wire output identical. It is pinned by a test
+named after what it is, not fixed here.
+
 ### The `Shared.GameLogic` boundary is unchanged
 
 No `Arch.Core` type appears anywhere in `Shared.GameLogic` — not `World`, not `Entity`,
@@ -973,9 +1043,11 @@ out of components on the way out and writes components back on the way in; the s
 static functions (`MovementSystem.TryMove`, `CombatLogic.*`, `Vec2.DistanceSq`) are
 called with plain structs and never see the ECS.
 
-The cost is a struct copy per entity per read. At the current tick rate and player count
-this is not measurable, and it is the price of keeping the client's prediction code
-free of a pre-1.0 server dependency (ADR-10, "Why not share the ECS").
+The cost is a struct copy per entity per read, on the paths that still compose one — the
+input path no longer does (see "Two ways in", above). It is the price of keeping the
+client's prediction code free of a pre-1.0 server dependency (ADR-10, "Why not share the
+ECS"), and it is why the remaining round trips are being removed one caller at a time
+rather than by reshaping `Shared.GameLogic`.
 
 ### AOT hints: what breaks, and the guard that stops it (ADR-11)
 
