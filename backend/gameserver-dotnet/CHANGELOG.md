@@ -7,6 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`Shared.GameLogic` released as `sgl-v0.1.7`**, carrying the `Speed` field added to
+  `SnapshotData` by the per-entity speed work. `package.json` is bumped in the tagged
+  commit itself, per `backend/TEAM.md` — a tag whose package reports an older version
+  installs cleanly and UPM never warns, so the two must move together. The change is
+  additive: the previous constructor is kept and forwards with `speed: 0`, so a client
+  still pinned to `sgl-v0.1.6` is unaffected until it moves its manifest.
+
+### Added
 - **The snapshot encoder now sends per-entity `speed`** (`wire.proto` field 9), read
   straight off `EntityState.Speed` — the value `MovementSystem.TryMove` is actually
   integrating with. Closes
