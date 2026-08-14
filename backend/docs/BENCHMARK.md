@@ -370,8 +370,10 @@ Ordered by measured impact:
    per client against a 50 KB/s target, and **61%** of a packed entity is string
    data that no encoding can compress away (measured: 17.0 bytes of `id` plus 8.0
    of `type`, against 41.2 bytes marginal cost per entity).
-6. **Spatial-grid AOI** — worth doing, but it targets the 20% term. ADR-7 ranked
-   it first; the measurement demotes it below the items above.
+6. ~~**Spatial-grid AOI**~~ ❌ **Measured and rejected** — see
+   [Part V](#part-v--the-spatial-index-that-lost-2026-08-14). It was built,
+   verified correct against the brute-force scan, and is **2.8x slower** at
+   realistic density. The AOI scan's cost is not the distance tests.
 7. **⛔ BLOCKER — put the generator on a separate machine.** Not "before
    publishing a tier table": before *any* further capacity work. Bandwidth is now
    solved to the threshold and tick binds instead, and tick is the statistic a
@@ -1065,3 +1067,95 @@ an *unchanged* binary is wide enough to swallow an effect this size — the
 withdrawal in §16 is the precedent. Allocation is the claim; latency is not.
 Less garbage should mean fewer gen-0 collections and so less tick jitter, but
 that is a hypothesis this measurement does not test.
+
+---
+
+## Part V — the spatial index that lost (2026-08-14)
+
+**Result: a uniform spatial grid was implemented, proved correct, measured, and
+not merged.** It is slower than the brute-force scan everywhere the scan is
+expensive. This entry exists so nobody builds it again on the strength of the
+Big-O argument.
+
+### What was measured
+
+Paired in-process A/B: the same process builds a world, runs every viewer's AOI
+query through the brute-force scan, then through the index, back to back. The
+ratio *within* a run is the number that matters, because this host's absolute
+timings swing by ±50% (see §8) while the paired ratio does not. Five runs:
+
+| entities | spread | avg matches/query | brute | indexed | ratio (5 runs) |
+|---|---|---|---|---|---|
+| 200 | 1000x1000 (sparse) | 2.8 | 77–136 µs | 38–84 µs | 1.42–2.92x **faster** |
+| 200 | 250x250 (realistic) | 23.0 | 483–638 µs | 1380–1514 µs | **0.32–0.45x — ~2.8x slower** |
+| 400 | 250x250 (dense) | 42.9 | 782–1335 µs | 924–1606 µs | 0.81–0.89x slower |
+
+The realistic-density ratio is 0.32–0.45 across five runs. That spread is far
+tighter than the host noise, so the loss is real and reproducible, not an
+artefact.
+
+### Why it lost — the premise was wrong
+
+The case for an index was "40 000 distance tests per tick at 200 players, O(n²)".
+The count is right. The cost is not: those tests are sequential reads over
+contiguous chunk arrays, and 40 000 of them are worth microseconds. **The scan's
+real cost is composing an `EntityState` for each match**, and that is
+proportional to *matches* — a property of the game (how many players are near
+you) rather than of the algorithm. No index reduces it, because the matches are
+the answer.
+
+The index then made composition *worse*. The scan composes from the chunk it is
+already iterating; the index has only an entity handle, so it composes through
+seven random-access component lookups per match. Add the per-query sort that
+restores brute-force ordering (below) and the index pays more per match while
+saving only the near-free part.
+
+It wins in the sparse case for the same reason: at 2.8 matches per query there is
+almost nothing to compose, so what is left *is* the distance tests. That is also
+the case where the absolute cost is negligible — 77 µs to 38 µs on a 66 ms tick
+budget, 0.06%. **The index helps only where the cost does not matter.**
+
+### The ordering constraint, which is a real cost
+
+The delta encoder interns entity ids in AOI arrival order, so a change in
+iteration order changes the bytes on the wire for an identical set. A grid
+enumerates cell-major; the scan enumerates chunk-major. The first implementation
+therefore produced the correct set in the wrong order, and the differential test
+caught it on the first run. Fixing it means carrying each entity's scan ordinal
+through the index and re-sorting each query's matches back — correct, and a cost
+the Big-O argument never accounted for. Disabling that sort as a diagnostic did
+not rescue the result (realistic density still 0.53x).
+
+### What would have to be true to revisit
+
+- Populations where AOI sets are genuinely small while entity counts are large —
+  a much bigger map, or many more entities than viewers. The sparse row is that
+  regime, and it is 1.4–2.9x faster there.
+- A composition path the index can use as cheaply as the scan does, i.e. matches
+  grouped by chunk rather than by cell. That is a different data structure, not a
+  tuned version of this one.
+- A different bottleneck. If `EntityState` composition were pooled or removed
+  (Part IV's direction), the distance tests would become the dominant term and the
+  index's argument would come back.
+
+The implementation and its differential test are on `feat/aoi-spatial-index` at
+`2e3e5db`, reverted by the following commit. It is correct and covered; it is
+simply not worth running.
+
+### What this leaves, now that §23 has landed
+
+This section originally closed by pointing at `EntityState` composition as the
+term measured dominant twice. **Half of it has since been removed**: §23's pooling
+and buffer reuse took the encode path from 1 491 733 to 6 400 B/tick at 200
+viewers, which is the per-viewer-per-tick object churn inside `Encode`.
+
+What remains is the *other* half, which pooling does not touch: **the compose per
+match inside the AOI scan itself**. Every entity that passes the distance test is
+materialised into an `EntityState` — once per viewer, per tick — and that is the
+cost this Part measured as dominant and the index failed to reduce. It is a
+narrower and better-defined target than "stop materialising a struct per visible
+entity": the encode side is done, the scan side is not.
+
+On the evidence of this Part, and of §9 item 6 before it, that target should be
+**measured before it is built**. Four changes in this sequence were commissioned
+against a term that turned out not to be the expensive one.

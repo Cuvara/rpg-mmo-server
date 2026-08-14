@@ -106,32 +106,6 @@ public sealed class EcsWorld : IDisposable
     /// entering the snapshot broadcast allocates nothing.</summary>
     private readonly WorldReader _reader;
 
-    /// <summary>
-    /// Spatial index over entity positions, rebuilt at the top of each gather scope.
-    ///
-    /// <para>Cell size is the default AOI radius: a query then covers at most a 3x3
-    /// neighbourhood, which is the smallest neighbourhood that can contain a circle of
-    /// that radius. Smaller cells would mean more cell lookups per query for fewer
-    /// candidates each; larger cells would mean fewer lookups over more candidates. At
-    /// radius-sized cells the two costs are balanced and the arithmetic is trivial.</para>
-    /// </summary>
-    private readonly SpatialGrid _grid = new(GameConstants.DefaultAoiRadius);
-
-    /// <summary>
-    /// True when <see cref="_grid"/> was rebuilt inside the current read scope and may
-    /// be queried. Outside a scope the index is not maintained, so every other caller
-    /// takes the full scan — which is also what keeps the brute-force path live and
-    /// exercised rather than dead code behind a flag.
-    /// </summary>
-    private bool _gridFresh;
-
-    /// <summary>Scan ordinals of the current query's matches, sorted to restore
-    /// brute-force order. Reused, so a query allocates nothing.</summary>
-    private long[] _aoiOrder = Array.Empty<long>();
-
-    /// <summary>Matched entities, permuted alongside <see cref="_aoiOrder"/>.</summary>
-    private Entity[] _aoiCandidates = Array.Empty<Entity>();
-
     public EcsWorld()
     {
         _writer = new WorldWriter(this);
@@ -378,114 +352,17 @@ public sealed class EcsWorld : IDisposable
     {
         _rwLock.EnterReadLock();
         _iterationDepth++;
-        try
-        {
-            RebuildSpatialIndexLocked();
-            action(_reader);
-        }
+        try { action(_reader); }
         finally
         {
-            _gridFresh = false;
             _iterationDepth--;
             _rwLock.ExitReadLock();
         }
     }
 
-    /// <summary>
-    /// Rebuild the spatial index from current component storage. One linear pass, no
-    /// distance tests, immediately before the queries that read it — so the index cannot
-    /// be stale and no position write anywhere needs to know it exists.
-    /// </summary>
-    private void RebuildSpatialIndexLocked()
-    {
-        _grid.Begin(_index.Count);
-
-        foreach (ref var chunk in _arch.Query(in AllEntities).GetChunkIterator())
-        {
-            var positions = chunk.GetSpan<Position>();
-            int count = chunk.Count;
-            for (int i = 0; i < count; i++)
-            {
-                _grid.Add(chunk.Entity(i), in positions[i].Value);
-            }
-        }
-
-        _grid.Finish();
-        _gridFresh = true;
-    }
-
-    /// <summary>
-    /// AOI query for <see cref="WorldReader"/>; the read lock is already held and the
-    /// spatial index is fresh. Falls back to the full scan if it somehow is not, so a
-    /// future caller that reaches the reader outside a gather scope gets correct results
-    /// rather than empty ones.
-    /// </summary>
-    internal int ScanRangeLockedForReader(Vec2 center, float radius, Span<EntityState> destination)
-    {
-        if (!_gridFresh) return ScanRangeLocked(center, radius, destination, null);
-
-        // Candidates land here unordered; they are restored to scan order before being
-        // composed, so the result is byte-for-byte what the full scan produced.
-        if (_aoiOrder.Length < _grid.Count)
-        {
-            _aoiOrder = new long[Math.Max(_grid.Count, _aoiOrder.Length * 2)];
-            _aoiCandidates = new Entity[_aoiOrder.Length];
-        }
-
-        var visitor = new AoiVisitor(center, radius, _aoiOrder, _aoiCandidates);
-        _grid.Visit(in center, radius, ref visitor);
-
-        int matches = visitor.Matches;
-        Span<long> keys = _aoiOrder.AsSpan(0, matches);
-        Span<Entity> entities = _aoiCandidates.AsSpan(0, matches);
-        keys.Sort(entities);
-
-        int emitted = Math.Min(matches, destination.Length);
-        for (int i = 0; i < emitted; i++)
-        {
-            destination[i] = Compose(entities[i]);
-        }
-
-        return matches;
-    }
-
-    /// <summary>
-    /// Applies the exact AOI predicate to the index's candidates and composes the matches.
-    ///
-    /// <para>The predicate is still <c>Vec2.DistanceSq</c> from <c>Shared.GameLogic</c> —
-    /// the same function the client predicts with. The index only decides which entities
-    /// are worth testing; it never decides membership, which is what keeps its result
-    /// identical to the full scan rather than merely close to it.</para>
-    /// </summary>
-    private ref struct AoiVisitor : ISpatialVisitor
-    {
-        private readonly Vec2 _center;
-        private readonly float _radiusSq;
-        private readonly Span<long> _order;
-        private readonly Span<Entity> _candidates;
-
-        public int Matches;
-
-        public AoiVisitor(Vec2 center, float radius, Span<long> order, Span<Entity> candidates)
-        {
-            _center = center;
-            _radiusSq = radius * radius;
-            _order = order;
-            _candidates = candidates;
-            Matches = 0;
-        }
-
-        public void Visit(Entity entity, in Vec2 position, int scanOrdinal)
-        {
-            if (Vec2.DistanceSq(_center, position) > _radiusSq) return;
-
-            // Cannot overflow: an entity is visited at most once per query and both
-            // buffers are sized to the index's entity count.
-            _order[Matches] = scanOrdinal;
-            _candidates[Matches] = entity;
-            Matches++;
-        }
-    }
+    /// <summary>AOI scan for <see cref="WorldReader"/>; the read lock is already held.</summary>
+    internal int ScanRangeLockedForReader(Vec2 center, float radius, Span<EntityState> destination) =>
+        ScanRangeLocked(center, radius, destination, null);
 
     /// <summary>
     /// Take the write lock and run a system against component storage.
