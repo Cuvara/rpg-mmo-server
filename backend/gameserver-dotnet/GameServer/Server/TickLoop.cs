@@ -138,13 +138,16 @@ public sealed class TickLoop
                 }
             }
 
-            _world.Update((get, set) =>
+            // One component write scope for the whole batch. The handler resolves each
+            // user id to an entity handle once and then writes components in place;
+            // nothing round-trips a whole EntityState through storage per input.
+            _world.UpdateComponents(writer =>
             {
                 for (int i = 0; i < inputs.Count; i++)
                 {
                     var pi = inputs[i];
                     bool applyMovement = _newestInputIndex[pi.UserId] == i;
-                    _handler.ProcessInputLocked(get, set, pi.UserId, pi.Input, _currentTick, applyMovement);
+                    _handler.ProcessInput(writer, pi.UserId, pi.Input, _currentTick, applyMovement);
                 }
             });
         }
@@ -171,20 +174,13 @@ public sealed class TickLoop
         {
             try
             {
-                Vec2 playerPos = default;
-                ulong ackTick = 0;
-                _world.View(get =>
-                {
-                    var entity = get(conn.UserId);
-                    if (entity != null)
-                    {
-                        playerPos = entity.Value.Position;
-                        // Per-player acknowledgement: the newest input tick this
-                        // player's own entity has accepted. Other players' entities
-                        // never contribute — reconciliation is strictly per-client.
-                        ackTick = entity.Value.LastInputTick;
-                    }
-                });
+                // AOI centre plus the per-player acknowledgement: the newest input tick
+                // this player's own entity has accepted. Other players' entities never
+                // contribute — reconciliation is strictly per-client. Two components,
+                // read directly: the previous `View(get => ...)` form composed a whole
+                // EntityState for these two fields and allocated a closure per
+                // connection per tick to carry them out of the lambda.
+                _world.TryGetSnapshotAnchor(conn.UserId, out Vec2 playerPos, out ulong ackTick);
 
                 var nearby = SnapshotEncoder.GetNearbyEntities(_world, playerPos, _aoiRadius);
                 var snapshot = conn.DeltaState.Encode(_currentTick, ackTick, nearby, _keyframeInterval,

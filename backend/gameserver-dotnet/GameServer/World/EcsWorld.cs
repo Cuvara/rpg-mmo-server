@@ -55,6 +55,18 @@ public sealed class EcsWorld : IDisposable
     private readonly ReaderWriterLockSlim _rwLock = new();
     private readonly object _inputLock = new();
 
+    /// <summary>
+    /// The component-level write scope handed to <see cref="UpdateComponents"/>.
+    /// One per world, created once: entering a scope must not allocate, because the
+    /// input phase enters one every tick.
+    /// </summary>
+    private readonly WorldWriter _writer;
+
+    public EcsWorld()
+    {
+        _writer = new WorldWriter(this);
+    }
+
     /// <summary>Queued structural changes, drained by <see cref="ApplyStructuralChanges"/>.</summary>
     private readonly List<StructuralOp> _structural = new();
 
@@ -177,6 +189,60 @@ public sealed class EcsWorld : IDisposable
         finally { _rwLock.ExitReadLock(); }
     }
 
+    /// <summary>
+    /// Take the write lock and run a system against component storage.
+    ///
+    /// <para>The component-level counterpart of <see cref="Update"/>. Same lock and same
+    /// deferred structural phase; the difference is what the callback is handed —
+    /// a <see cref="WorldWriter"/> giving <c>ref</c> access to individual components,
+    /// rather than a getter/setter pair that round-trips a whole
+    /// <see cref="EntityState"/> through seven component lookups in each direction.</para>
+    /// </summary>
+    public void UpdateComponents(Action<WorldWriter> action)
+    {
+        _rwLock.EnterWriteLock();
+        try
+        {
+            action(_writer);
+        }
+        finally
+        {
+            ApplyStructuralChangesLocked();
+            _rwLock.ExitWriteLock();
+        }
+    }
+
+    /// <summary>
+    /// Read the two fields the snapshot broadcast needs from a player's own entity:
+    /// the AOI centre and the input tick to acknowledge.
+    ///
+    /// <para>Called once per connection per tick. It exists because the previous form —
+    /// <c>View(get =&gt; ...)</c> — composed a whole <see cref="EntityState"/> (seven
+    /// component lookups, two string references) to read two fields, and the closure
+    /// capturing the two <c>out</c> values allocated a display class per connection per
+    /// tick. This reads exactly <see cref="Position"/> and <see cref="InputCursor"/> and
+    /// allocates nothing.</para>
+    /// </summary>
+    /// <returns>False when the connection's entity is gone; outputs are then defaults,
+    /// which is the same anchor the previous code used in that case.</returns>
+    public bool TryGetSnapshotAnchor(string userId, out Vec2 position, out ulong lastInputTick)
+    {
+        position = default;
+        lastInputTick = 0;
+
+        _rwLock.EnterReadLock();
+        try
+        {
+            var handle = ResolveLocked(userId);
+            if (!handle.IsValid) return false;
+
+            position = _arch.Get<Position>(handle.Value).Value;
+            lastInputTick = _arch.Get<InputCursor>(handle.Value).LastInputTick;
+            return true;
+        }
+        finally { _rwLock.ExitReadLock(); }
+    }
+
     /// <summary>Queue an input for processing in the next tick.</summary>
     public void PushInput(string userId, InputData input)
     {
@@ -250,6 +316,28 @@ public sealed class EcsWorld : IDisposable
         _rwLock.Dispose();
         ArchWorld.Destroy(_arch);
     }
+
+    // ------------------------------------------------- component-scope internals
+
+    /// <summary>Arch world, for <see cref="WorldWriter"/>'s <c>ref</c> component access.
+    /// Internal: no <c>Arch.Core</c> type is public anywhere in this assembly.</summary>
+    internal ArchWorld ArchInternal => _arch;
+
+    /// <summary>
+    /// Resolve an id to a live entity handle. The caller must already hold the read or
+    /// write lock. An unknown id, a null id, or an index entry whose entity has since
+    /// been destroyed all yield an invalid handle.
+    /// </summary>
+    internal EntityHandle ResolveLocked(string id)
+    {
+        if (id == null) return default;
+        if (!_index.TryGetValue(id, out var entity)) return default;
+        if (!_arch.IsAlive(entity)) return default;
+        return new EntityHandle(entity);
+    }
+
+    /// <summary>Compose a full <see cref="EntityState"/> for <see cref="WorldWriter"/>.</summary>
+    internal EntityState ComposeLocked(Entity entity) => Compose(entity);
 
     // ---------------------------------------------------------------- internals
 
