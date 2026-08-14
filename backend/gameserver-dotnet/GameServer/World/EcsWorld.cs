@@ -8,17 +8,42 @@ using ArchWorld = Arch.Core.World;
 
 namespace GameServer.World;
 
-/// <summary>Pending input queued for processing in the next tick.</summary>
+/// <summary>
+/// Pending input queued for processing in the next tick, already bound to the entity
+/// it addresses.
+///
+/// <para><b>Why the handle is here.</b> Input arrives keyed by a user id string, and
+/// the tick loop used to pay for that twice per input: once to coalesce movement in a
+/// <c>Dictionary&lt;string, int&gt;</c> and again inside the handler to reach the
+/// entity. Both were string hashes on the simulation thread. The id is now resolved on
+/// the <b>network</b> thread at <see cref="EcsWorld.PushInput"/>, under a read lock that
+/// contends with nothing, so the tick sees an <see cref="EntityHandle"/>.</para>
+///
+/// <para><see cref="UserId"/> is kept because the handle can go stale: a disconnect
+/// inside the hold window destroys the entity and a reconnect creates a new one, so an
+/// input queued before that addresses a dead handle. <see cref="EcsWorld.RebindStale"/>
+/// re-resolves exactly those at drain time — the string path still exists, it is just
+/// no longer the common one.</para>
+/// </summary>
 public readonly struct PendingInput
 {
+    /// <summary>User id the input arrived on. The fallback key, and the log key.</summary>
     public readonly string UserId;
+
+    /// <summary>Entity this input addresses, resolved at ingest. May be stale.</summary>
+    public readonly EntityHandle Handle;
+
     public readonly InputData Input;
 
-    public PendingInput(string userId, InputData input)
+    public PendingInput(string userId, EntityHandle handle, InputData input)
     {
         UserId = userId;
+        Handle = handle;
         Input = input;
     }
+
+    /// <summary>Same input, rebound to a freshly resolved handle.</summary>
+    public PendingInput WithHandle(EntityHandle handle) => new(UserId, handle, Input);
 }
 
 /// <summary>
@@ -117,6 +142,18 @@ public sealed class EcsWorld : IDisposable
         finally { _rwLock.ExitWriteLock(); }
     }
 
+    /// <summary>
+    /// Whether a handle still denotes a live entity. Handles held across a tick boundary
+    /// — queued input is the only case today — must be checked before use, because a
+    /// disconnect can destroy the entity in between.
+    /// </summary>
+    public bool IsAlive(in EntityHandle handle)
+    {
+        _rwLock.EnterReadLock();
+        try { return IsAliveLocked(in handle); }
+        finally { _rwLock.ExitReadLock(); }
+    }
+
     /// <summary>Get an entity by ID. Returns null if not found.</summary>
     public EntityState? GetEntity(string id)
     {
@@ -133,26 +170,12 @@ public sealed class EcsWorld : IDisposable
     public List<EntityState> GetEntitiesInRange(Vec2 center, float radius)
     {
         var result = new List<EntityState>();
-        float radiusSq = radius * radius;
 
         _rwLock.EnterReadLock();
         _iterationDepth++;
         try
         {
-            foreach (ref var chunk in _arch.Query(in AllEntities).GetChunkIterator())
-            {
-                var positions = chunk.GetSpan<Position>();
-                int count = chunk.Count;
-                for (int i = 0; i < count; i++)
-                {
-                    // Vec2.DistanceSq is Shared.GameLogic: the AOI predicate the
-                    // client predicts with, not a second copy of it here.
-                    if (Vec2.DistanceSq(center, positions[i].Value) <= radiusSq)
-                    {
-                        result.Add(ComposeFromChunk(ref chunk, i));
-                    }
-                }
-            }
+            ScanRangeLocked(center, radius, Span<EntityState>.Empty, result);
         }
         finally
         {
@@ -161,6 +184,83 @@ public sealed class EcsWorld : IDisposable
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Fill <paramref name="destination"/> with every entity within
+    /// <paramref name="radius"/> of <paramref name="center"/>, allocating nothing.
+    ///
+    /// <para>This is the form the tick loop uses. The <see cref="List{T}"/> overload
+    /// allocated a list <b>per connected client per tick</b>, plus its growth
+    /// reallocations — at 15 Hz that is one throwaway list per player every 67 ms, for
+    /// no reason other than that the caller had nowhere to put the results. The caller
+    /// now owns a buffer it reuses.</para>
+    /// </summary>
+    /// <returns>
+    /// The <b>total number of matches</b>, which may exceed
+    /// <paramref name="destination"/>'s length.
+    /// <para>
+    /// <b>Overflow contract — count, do not saturate.</b> Deliberately identical to
+    /// <c>Shared.GameLogic.Systems.AoiLogic.GetNearbyEntities</c>: when the buffer is
+    /// too small the first <c>destination.Length</c> matches are written and the scan
+    /// continues, so the return value is the size the buffer needed to be. The caller
+    /// detects truncation with <c>count &gt; destination.Length</c>, resizes, and calls
+    /// again once. A saturating variant would make "full" indistinguishable from
+    /// "exactly full", which is silent AOI truncation — entities missing from a
+    /// keyframe with no error anywhere. Two AOI functions in one server with two
+    /// different overflow contracts would be worse than either contract.
+    /// </para>
+    /// </returns>
+    public int GetEntitiesInRange(Vec2 center, float radius, Span<EntityState> destination)
+    {
+        _rwLock.EnterReadLock();
+        _iterationDepth++;
+        try
+        {
+            return ScanRangeLocked(center, radius, destination, null);
+        }
+        finally
+        {
+            _iterationDepth--;
+            _rwLock.ExitReadLock();
+        }
+    }
+
+    /// <summary>
+    /// The one AOI scan. Writes to <paramref name="destination"/> and/or
+    /// <paramref name="sink"/>; both forms share it so the predicate and the iteration
+    /// order cannot diverge between them.
+    /// </summary>
+    private int ScanRangeLocked(
+        Vec2 center, float radius, Span<EntityState> destination, List<EntityState>? sink)
+    {
+        float radiusSq = radius * radius;
+        int matches = 0;
+
+        foreach (ref var chunk in _arch.Query(in AllEntities).GetChunkIterator())
+        {
+            var positions = chunk.GetSpan<Position>();
+            int count = chunk.Count;
+            for (int i = 0; i < count; i++)
+            {
+                // Vec2.DistanceSq is Shared.GameLogic: the AOI predicate the
+                // client predicts with, not a second copy of it here.
+                if (Vec2.DistanceSq(center, positions[i].Value) > radiusSq) continue;
+
+                if (sink != null)
+                {
+                    sink.Add(ComposeFromChunk(ref chunk, i));
+                }
+                else if (matches < destination.Length)
+                {
+                    destination[matches] = ComposeFromChunk(ref chunk, i);
+                }
+
+                matches++;
+            }
+        }
+
+        return matches;
     }
 
     /// <summary>
@@ -243,24 +343,73 @@ public sealed class EcsWorld : IDisposable
         finally { _rwLock.ExitReadLock(); }
     }
 
-    /// <summary>Queue an input for processing in the next tick.</summary>
+    /// <summary>
+    /// Queue an input for processing in the next tick, resolving the user id to an
+    /// entity handle here — on the network thread — so the tick loop never has to.
+    /// </summary>
+    /// <remarks>
+    /// The read lock and the input lock are taken in sequence, never nested, so this
+    /// introduces no lock-ordering edge. The read lock is shared and the only writer is
+    /// the tick loop's own structural/update phase, so the cost is a barrier, not a
+    /// wait for the simulation.
+    /// </remarks>
     public void PushInput(string userId, InputData input)
     {
+        EntityHandle handle;
+        _rwLock.EnterReadLock();
+        try { handle = ResolveLocked(userId); }
+        finally { _rwLock.ExitReadLock(); }
+
         lock (_inputLock)
         {
-            _pendingInputs.Add(new PendingInput(userId, input));
+            _pendingInputs.Add(new PendingInput(userId, handle, input));
         }
     }
 
     /// <summary>Drain all pending inputs (returns the list and clears the queue).</summary>
     public List<PendingInput> DrainInputs()
     {
+        var destination = new List<PendingInput>();
+        DrainInputs(destination);
+        return destination;
+    }
+
+    /// <summary>
+    /// Drain all pending inputs into a caller-owned list, which is cleared first.
+    /// The tick loop reuses one list, so draining allocates nothing.
+    /// </summary>
+    public void DrainInputs(List<PendingInput> destination)
+    {
+        destination.Clear();
         lock (_inputLock)
         {
-            var copy = new List<PendingInput>(_pendingInputs);
+            destination.AddRange(_pendingInputs);
             _pendingInputs.Clear();
-            return copy;
         }
+    }
+
+    /// <summary>
+    /// Re-resolve any queued input whose handle went stale between ingest and now —
+    /// the disconnect-inside-the-hold-window case, where the entity was destroyed and
+    /// recreated after the input was queued.
+    ///
+    /// <para>Called once at the top of the input phase so that everything downstream —
+    /// movement coalescing included — can key on a handle and never on a string. Costs
+    /// a dictionary lookup only for the entries that are actually stale, which is
+    /// normally none.</para>
+    /// </summary>
+    public void RebindStale(List<PendingInput> inputs)
+    {
+        _rwLock.EnterReadLock();
+        try
+        {
+            for (int i = 0; i < inputs.Count; i++)
+            {
+                if (inputs[i].Handle.IsValid && _arch.IsAlive(inputs[i].Handle.Value)) continue;
+                inputs[i] = inputs[i].WithHandle(ResolveLocked(inputs[i].UserId));
+            }
+        }
+        finally { _rwLock.ExitReadLock(); }
     }
 
     /// <summary>
@@ -335,6 +484,10 @@ public sealed class EcsWorld : IDisposable
         if (!_arch.IsAlive(entity)) return default;
         return new EntityHandle(entity);
     }
+
+    /// <summary>Whether a handle still denotes a live entity. Caller holds a lock.</summary>
+    internal bool IsAliveLocked(in EntityHandle handle) =>
+        handle.IsValid && _arch.IsAlive(handle.Value);
 
     /// <summary>Compose a full <see cref="EntityState"/> for <see cref="WorldWriter"/>.</summary>
     internal EntityState ComposeLocked(Entity entity) => Compose(entity);

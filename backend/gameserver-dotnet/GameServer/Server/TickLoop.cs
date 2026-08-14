@@ -36,10 +36,21 @@ public sealed class TickLoop
     private int _snapshotsThisTick;
 
     /// <summary>
-    /// Scratch map (user ID -> index of the newest input in this tick's drained batch).
+    /// Scratch map (entity -> index of the newest input in this tick's drained batch).
     /// Reused across ticks so input coalescing allocates nothing in the hot path.
+    /// <para>
+    /// Keyed by <see cref="EntityHandle"/> rather than by user id: the id was already
+    /// resolved on the network thread at ingest, so grouping is an integer hash instead
+    /// of a string hash per input on the simulation thread.
+    /// </para>
     /// </summary>
-    private readonly Dictionary<string, int> _newestInputIndex = new();
+    private readonly Dictionary<EntityHandle, int> _newestInputIndex = new();
+
+    /// <summary>
+    /// Scratch list the input queue drains into. Reused so the drain allocates nothing;
+    /// it used to hand back a freshly built list every tick.
+    /// </summary>
+    private readonly List<PendingInput> _inputs = new();
 
     /// <summary>Current simulation tick.</summary>
     public ulong CurrentTick => _currentTick;
@@ -118,11 +129,19 @@ public sealed class TickLoop
         // paths take the world write lock and so cannot overlap an iteration.
         _world.ApplyStructuralChanges();
 
-        // Drain and process all pending inputs under one world Update
-        var inputs = _world.DrainInputs();
+        // Drain and process all pending inputs under one world Update. The drain reuses
+        // _inputs, and every entry already carries the entity handle resolved at ingest.
+        var inputs = _inputs;
+        _world.DrainInputs(inputs);
 
         if (inputs.Count > 0)
         {
+            // Re-resolve only the handles that went stale since ingest (disconnect
+            // inside the hold window). After this, every entry is either bound to a live
+            // entity or provably addresses nothing, so the grouping below never needs
+            // the user id.
+            _world.RebindStale(inputs);
+
             // Coalesce movement: at most one integration step per player per tick, using
             // the newest input (highest client tick, arrival order as tiebreak). Without
             // this, a client that sends N input packets per tick would move N times as
@@ -130,24 +149,28 @@ public sealed class TickLoop
             _newestInputIndex.Clear();
             for (int i = 0; i < inputs.Count; i++)
             {
-                string userId = inputs[i].UserId;
-                if (!_newestInputIndex.TryGetValue(userId, out int best) ||
+                EntityHandle handle = inputs[i].Handle;
+                if (!handle.IsValid) continue; // addresses nothing; dropped by the handler
+
+                if (!_newestInputIndex.TryGetValue(handle, out int best) ||
                     inputs[i].Input.Tick >= inputs[best].Input.Tick)
                 {
-                    _newestInputIndex[userId] = i;
+                    _newestInputIndex[handle] = i;
                 }
             }
 
-            // One component write scope for the whole batch. The handler resolves each
-            // user id to an entity handle once and then writes components in place;
-            // nothing round-trips a whole EntityState through storage per input.
+            // One component write scope for the whole batch, addressing entities by
+            // handle. Nothing round-trips a whole EntityState through storage per input,
+            // and the world's string index is not consulted at all.
             _world.UpdateComponents(writer =>
             {
                 for (int i = 0; i < inputs.Count; i++)
                 {
                     var pi = inputs[i];
-                    bool applyMovement = _newestInputIndex[pi.UserId] == i;
-                    _handler.ProcessInput(writer, pi.UserId, pi.Input, _currentTick, applyMovement);
+                    if (!pi.Handle.IsValid) continue;
+
+                    bool applyMovement = _newestInputIndex[pi.Handle] == i;
+                    _handler.ProcessInput(writer, in pi, _currentTick, applyMovement);
                 }
             });
         }
@@ -182,7 +205,10 @@ public sealed class TickLoop
                 // connection per tick to carry them out of the lambda.
                 _world.TryGetSnapshotAnchor(conn.UserId, out Vec2 playerPos, out ulong ackTick);
 
-                var nearby = SnapshotEncoder.GetNearbyEntities(_world, playerPos, _aoiRadius);
+                // Into the connection's reusable buffer. This used to be
+                // `new List<EntityState>()` inside EcsWorld, once per connected client
+                // per tick, plus its growth reallocations.
+                ReadOnlySpan<EntityState> nearby = conn.ScanAoi(_world, playerPos, _aoiRadius);
                 var snapshot = conn.DeltaState.Encode(_currentTick, ackTick, nearby, _keyframeInterval,
                     intern: conn.Encoding == WireEncoding.Proto);
                 var env = WireProtocol.NewEnvelope(MsgType.Snapshot, snapshot, conn.Encoding);

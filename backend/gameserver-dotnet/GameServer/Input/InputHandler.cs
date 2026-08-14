@@ -97,9 +97,33 @@ public sealed class InputHandler
         InputData input,
         ulong currentTick = 0,
         bool applyMovement = true)
+        => ProcessInput(writer, writer.Resolve(userId), userId, input, currentTick, applyMovement);
+
+    /// <summary>
+    /// Process a queued input that already carries its entity handle, resolved on the
+    /// network thread at ingest. This is what the tick loop calls: the simulation thread
+    /// never hashes a user id.
+    /// </summary>
+    /// <inheritdoc cref="ProcessInput(WorldWriter, string, InputData, ulong, bool)"/>
+    public void ProcessInput(
+        WorldWriter writer,
+        in PendingInput pending,
+        ulong currentTick = 0,
+        bool applyMovement = true)
+        => ProcessInput(writer, pending.Handle, pending.UserId, pending.Input, currentTick, applyMovement);
+
+    private void ProcessInput(
+        WorldWriter writer,
+        EntityHandle self,
+        string userId,
+        InputData input,
+        ulong currentTick,
+        bool applyMovement)
     {
-        EntityHandle self = writer.Resolve(userId);
-        if (!self.IsValid) return;
+        // Revalidate: a handle resolved at ingest can be stale by the time the tick runs
+        // if the entity was destroyed in between. TickLoop rebinds first, so this is the
+        // backstop, not the mechanism.
+        if (!writer.IsAlive(in self)) return;
 
         // Skip if dead
         if (writer.HealthOf(self).Dead) return;

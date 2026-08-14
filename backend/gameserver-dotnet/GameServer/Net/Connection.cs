@@ -55,6 +55,58 @@ public sealed class Connection : IDisposable
         private set => _encoding = value;
     }
 
+    /// <summary>
+    /// Reusable AOI scratch for this connection's snapshot, owned here because its
+    /// right size is a property of this client's neighbourhood and it must survive
+    /// between ticks to be worth anything.
+    ///
+    /// <para><b>Thread affinity:</b> touched only by the tick loop, inside
+    /// <c>TickLoop.TickOnce</c>. It is not synchronised and must not be read from the
+    /// connection's own read/write tasks.</para>
+    ///
+    /// <para>Starts empty rather than at a guessed capacity: the first tick sizes it
+    /// from the real match count, which is cheaper than being wrong in either
+    /// direction for the life of every connection.</para>
+    /// </summary>
+    private Shared.GameLogic.Components.EntityState[] _aoiBuffer = Array.Empty<Shared.GameLogic.Components.EntityState>();
+
+    /// <summary>
+    /// Run the AOI scan for this connection into its reusable buffer and return the
+    /// matches.
+    ///
+    /// <para>Implements the retry half of the count-don't-saturate contract: the scan
+    /// returns the total match count even when it did not fit, so an undersized buffer
+    /// is grown to exactly that and the scan repeats <b>once</b>. It cannot loop more
+    /// than twice — the second scan is under the same world read lock discipline as the
+    /// first, and a concurrent spawn between the two only means the next tick resizes
+    /// again.</para>
+    /// </summary>
+    /// <returns>The matches, as a span over the connection-owned buffer. Valid until
+    /// the next call on this connection.</returns>
+    internal ReadOnlySpan<Shared.GameLogic.Components.EntityState> ScanAoi(
+        GameServer.World.EcsWorld world, Shared.GameLogic.Components.Vec2 center, float radius)
+    {
+        int count = world.GetEntitiesInRange(center, radius, _aoiBuffer);
+
+        if (count > _aoiBuffer.Length)
+        {
+            _aoiBuffer = new Shared.GameLogic.Components.EntityState[count];
+            count = world.GetEntitiesInRange(center, radius, _aoiBuffer);
+
+            // A spawn landing between the two scans can still overflow. Truncating
+            // would be the silent AOI loss the contract exists to prevent, so take the
+            // list path for this one tick and let the next tick run on the grown buffer.
+            if (count > _aoiBuffer.Length)
+            {
+                var overflow = world.GetEntitiesInRange(center, radius);
+                _aoiBuffer = overflow.ToArray();
+                return _aoiBuffer;
+            }
+        }
+
+        return _aoiBuffer.AsSpan(0, count);
+    }
+
     private readonly ITransportConnection _transport;
     private readonly Stream _stream;
     private readonly Channel<Envelope> _sendChannel;

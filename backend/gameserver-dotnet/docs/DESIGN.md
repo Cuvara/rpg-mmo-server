@@ -996,8 +996,28 @@ form. The attack branch of `InputHandler` is deliberately mixed: it composes who
 `EntityState` values because `CombatLogic` and the death callback are `Shared.GameLogic`
 entry points shaped that way, but its write-back is component-level.
 
-Measured on the input phase plus the per-player anchor read, 200 players over 200 ticks
-(Release): 33 856 B/tick → 96 B/tick allocated, 303 µs → 167 µs.
+**The AOI scan fills a caller-owned buffer.** `GetEntitiesInRange` used to open with
+`new List<EntityState>()` and was called once per connected client per tick. There is now
+a `Span<EntityState>` overload whose overflow contract is deliberately the same one
+`AoiLogic.GetNearbyEntities` publishes — *count, do not saturate*, so a short buffer
+returns the size it needed to be rather than a saturated length that cannot be
+distinguished from an exact fit. Each `Connection` owns its buffer and grows it once.
+Both forms share one scan implementation: the delta encoder's bookkeeping is
+order-sensitive, so a divergence in iteration order between them would be a wire change.
+
+**Input is bound to its entity at ingest.** `PushInput` resolves the user id on the
+network thread, so the simulation thread never hashes a string — movement coalescing is
+keyed by `EntityHandle`. `_index` is still the authority for join, reconnect and
+persistence; it is just off the per-input path. A handle can be invalidated by
+destruction (not by archetype moves — Arch's `Entity` is a stable identity), so
+`RebindStale` re-resolves the reconnect case at the top of the input phase.
+
+Measured end to end on `TickLoop.TickOnce`, the same probe run on this branch and on
+`develop` (Release, real `Connection` objects over a null transport, Protobuf, clustered
+so AOI matches): **436 276 → 21 692 B/tick at 50 players (20×)** and **6 762 858 →
+192 984 B/tick at 200 players (35×)**. Allocation is deterministic to under 0.05% across
+paired runs. Wall-clock is *not* claimed: this host's spread on one binary is ±50%, which
+is the contamination ADR-7 documents.
 
 **Where the risk moved.** The movement step still calls `MovementSystem.TryMove` — the
 arithmetic is not re-derived, and the golden vectors (ADR-10) are untouched. What is new

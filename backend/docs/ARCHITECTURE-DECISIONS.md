@@ -924,6 +924,13 @@ IDs), not another encoding swap.
 
 ## ADR-10 — Shared simulation: pure logic boundary, ECS on the server only
 
+> **Narrowed by [ADR-12](#adr-12--the-server-goes-to-real-ecs-staged-under-the-constraints-adr-10-and-adr-11-set)
+> (2026-08-14).** Decision 1 said Arch is the server's entity storage; it is now also
+> the server's *execution* model, staged. The boundary this ADR draws is unchanged and
+> is the binding constraint on how far that can go: no `Arch.Core` type crosses into
+> `Shared.GameLogic`, its `in EntityState` / `in Vec2` signatures are frozen, and the
+> golden vectors stay bit-exact.
+
 **Status:** accepted 2026-08-11, not yet implemented.
 
 **Context.** The game server is to move its entity storage to
@@ -1241,6 +1248,101 @@ hint mechanism turns out to be unable to see component types defined outside the
 server assembly — which would be a stronger argument against Arch than anything
 found here.
 
+> **Amended by [ADR-12](#adr-12--the-server-goes-to-real-ecs-staged-under-the-constraints-adr-10-and-adr-11-set)
+> (2026-08-14).** The server is moving to real systems over components, which is
+> exactly the direction that makes this ADR's two failure modes more likely. Nothing
+> here is relaxed: `CommandBuffer` stays out, and decision 2's guard becomes a
+> per-commit obligation — a new component type gets its hint line in the same commit
+> that introduces it. ADR-12 additionally rules out query shapes the reflection guard
+> cannot enumerate, `Arch.System`'s source generator among them.
+
+---
+
+## ADR-12 — The server goes to real ECS, staged, under the constraints ADR-10 and ADR-11 set
+
+**Status:** accepted 2026-08-14. Supersedes nothing; **narrows** ADR-10 decision 1 and
+is governed by ADR-11.
+
+**Context.** ADR-10 put Arch under the server as *storage* and stopped there: the layer
+above it addressed the world as whole `EntityState` values, so `EcsWorld.Update(get, set)`
+composed seven components into a struct on every read and wrote all seven back on every
+write. No systems existed; `TickLoop.TickOnce` called a handler that addressed entities by
+`string`. That is an ECS used as a dictionary with extra steps.
+
+An analysis was commissioned on whether to finish the job. It recommended **not** to, on
+three grounds, each of which is correct and none of which has gone away:
+
+1. **NativeAOT is a landmine, not a gradient** (ADR-11). `World/ArchAotHints.cs` needs one
+   `new T[1]` per component type; a missing line compiles clean, passes CI — which runs
+   JIT'd and structurally cannot see the problem — and throws `NotSupportedException` on
+   the first tick that creates that archetype in production. Real ECS multiplies
+   archetypes, and the idiomatic tool for the structural churn systems want is
+   `CommandBuffer`, which ADR-11 measured as still throwing with hints in place.
+2. **It targets the wrong 20%.** `BENCHMARK.md` puts the serialization:AOI ratio at ~5:1
+   and still lists "move serialization off the tick" as outstanding. The AOI hot loop is
+   *already* component-native — `EcsWorld.GetEntitiesInRange` iterates
+   `GetChunkIterator()` and tests `chunk.GetSpan<Position>()[i]`. Rewriting it would be
+   rewriting the part that is already ECS.
+3. **`Shared.GameLogic` cannot follow.** ADR-10 forbids Arch types in it, and the Unity
+   client consumes it as pinned source (`sgl-v0.1.6`). Changing `in EntityState` /
+   `in Vec2` signatures forces a lockstep client release for zero server throughput, and
+   the golden vectors stay bit-exact only while those signatures hold.
+
+The decision to proceed anyway was taken by the project owner with that analysis in hand.
+This ADR records it, and records the constraints that make it survivable, so that a future
+reader does not find ADR-10 and ADR-11 arguing against the code they are reading and
+conclude the code is a mistake.
+
+**Decision.**
+
+1. **The server moves to real systems over components, in stages, one PR per stage**, each
+   independently revertible and green: (1) the input path, (2) enemy AI, (3) the
+   snapshot/AOI walk. Not one commit, and not a rewrite.
+2. **`CommandBuffer` remains banned** — ADR-11 decision 3 is unchanged and is now
+   load-bearing rather than incidental. Every structural operation a system needs goes
+   through the existing deferred queue drained by `EcsWorld.ApplyStructuralChanges()` at
+   one explicit point in `TickLoop.TickOnce`. One structural phase per tick; no hidden
+   mid-iteration mutation. The queue's operation kinds are to be enumerated in the module
+   `CHANGELOG` as they are added, because "which structural ops exist" is exactly the
+   question a reader debugging an ordering bug will ask.
+3. **Every new component type gets its AOT hint line in the same commit that introduces
+   it**, and `ArchAotHintTests` — which reflects over every component struct in the
+   assembly — must still pass. This is ADR-11 decision 2 restated as a per-commit
+   obligation because the migration is what makes it likely to be forgotten.
+4. **Generic query shapes that the reflection guard cannot see are not permitted.** In
+   particular, `Arch.System`'s source generator produces query types the existing test
+   does not enumerate; adopting it would create unhinted surface. Either the guard is
+   extended to cover the generated shapes first, or the generator is not used.
+5. **`Shared.GameLogic` stays engine-free and ECS-free.** ADR-10's boundary is unchanged.
+   Systems read components and convert at the call boundary when invoking shared
+   arithmetic; `in EntityState` / `in Vec2` signatures are frozen for the duration.
+   `MovementSystem.Integrate`'s FMA-denying local split is not to be touched. Golden
+   vectors stay bit-exact.
+6. **No stage may change the wire.** Snapshot output stays byte-identical. Where the old
+   code had an observable accident, the accident is preserved and pinned by a test named
+   after what it is, rather than quietly corrected under cover of a refactor.
+7. **Speed is not claimed without measurement.** Stage 3 in particular is structural
+   clarity, not throughput: its inner loop is already chunk-iterating and compose-free.
+
+**Consequences.**
+
+- The archetype count is now a thing to watch. Today the server has two archetypes
+  (with and without `PlayerTag`) and eight component types. If a design needs more
+  archetypes than the hint list can practically track, that is a stop-and-report
+  condition, not something to ship.
+- CI's value against this class of bug is limited by construction — it runs JIT'd. The
+  `publish`-and-run smoke job from ADR-11 decision 4 is the only automated thing that can
+  catch a missing hint, which raises its priority.
+- The analysis's second point stands and is not answered by this work: the tick's largest
+  term is still serialization, and no stage here touches it. Moving serialization off the
+  tick remains the highest-value outstanding item and is tracked separately.
+
+**Revisit if** a stage lands and measurement shows no benefit at its own level (in which
+case stop and keep what has landed — each stage is revertible precisely so that this is
+cheap), or if Arch fixes `CommandBuffer` (which would relax decision 2 but not decision 3),
+or if the archetype count outgrows the hint mechanism.
+
+
 ---
 
 ## Summary of decisions
@@ -1258,3 +1360,4 @@ found here.
 | 9 | Wire encoding | Protobuf from one committed schema; JSON kept during migration and distinguished by the first body byte, so components upgrade in any order |
 | 10 | Shared simulation | Arch replaces `GameWorld` on the server; `Shared.GameLogic` stays ECS-free and ships to Unity as multi-targeted **source**; golden vectors run on both sides in CI; only IEEE-exact float ops permitted in shared code |
 | 11 | Arch under NativeAOT | Arch publishes clean and then throws at runtime without per-component AOT hints; hints are **generated or guarded, never hand-written**; `CommandBuffer` is broken under AOT and is not used; the `publish` CI job must **run** the binary, not just build it |
+| 12 | ECS migration | Server goes to **real ECS with Arch**, staged one PR at a time, over the analysis's objection and by owner decision; `CommandBuffer` stays banned and structural ops stay deferred to one phase per tick; every new component gets its AOT hint line in the same commit; no query shape the hint guard cannot see; `Shared.GameLogic` and the wire are frozen throughout |

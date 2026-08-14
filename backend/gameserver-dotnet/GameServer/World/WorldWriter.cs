@@ -1,3 +1,4 @@
+using System;
 using Arch.Core;
 using GameServer.World.Components;
 using Shared.GameLogic.Components;
@@ -14,11 +15,16 @@ namespace GameServer.World;
 /// wire, in persistence, or in <see cref="EntityState.Id"/> — those are separate
 /// migrations.</para>
 ///
-/// <para>A handle must not be stored across scopes: a structural change (spawn,
-/// despawn, archetype move) can move the entity's slot, and nothing here revalidates
-/// it. Resolve again in the next scope.</para>
+/// <para><b>Lifetime.</b> Arch's <c>Entity</c> is a stable identity, not a slot
+/// pointer, so a handle survives archetype moves and chunk compaction. What it does
+/// not survive is <b>destruction</b> — a disconnect inside the hold window destroys the
+/// entity, and a reconnect creates a different one that a stale handle will not
+/// address. A handle held across a tick boundary must therefore be revalidated with
+/// <see cref="WorldWriter.IsAlive"/> (or re-resolved from the id) before use. Queued
+/// input is the only place this happens today; see
+/// <see cref="EcsWorld.RebindStale"/>.</para>
 /// </summary>
-public readonly struct EntityHandle
+public readonly struct EntityHandle : IEquatable<EntityHandle>
 {
     internal readonly Entity Value;
     private readonly bool _valid;
@@ -39,6 +45,25 @@ public readonly struct EntityHandle
     /// <c>get</c>/<c>set</c>.
     /// </summary>
     public bool SameAs(in EntityHandle other) => _valid && other._valid && Value == other.Value;
+
+    /// <summary>
+    /// Value equality, so a handle can key a dictionary. The tick loop's movement
+    /// coalescing uses this: it was a <c>Dictionary&lt;string, int&gt;</c> hashing a
+    /// user id per input on the simulation thread, and is now an integer hash.
+    /// Two invalid handles are equal — they all address nothing, and inputs that
+    /// address nothing are dropped before the grouping is read.
+    /// </summary>
+    public bool Equals(EntityHandle other) => _valid == other._valid && (!_valid || Value == other.Value);
+
+    /// <inheritdoc/>
+    public override bool Equals(object? obj) => obj is EntityHandle other && Equals(other);
+
+    /// <inheritdoc/>
+    public override int GetHashCode() => _valid ? Value.GetHashCode() : 0;
+
+    public static bool operator ==(EntityHandle left, EntityHandle right) => left.Equals(right);
+
+    public static bool operator !=(EntityHandle left, EntityHandle right) => !left.Equals(right);
 }
 
 /// <summary>
@@ -76,6 +101,13 @@ public sealed class WorldWriter
     /// instead of unwrapping a nullable struct.
     /// </summary>
     public EntityHandle Resolve(string id) => _world.ResolveLocked(id);
+
+    /// <summary>
+    /// True when the handle still denotes a live entity. Handles queued across a tick
+    /// boundary — pending input is the only case today — must be checked before use:
+    /// the entity may have been destroyed by a disconnect in the meantime.
+    /// </summary>
+    public bool IsAlive(in EntityHandle handle) => _world.IsAliveLocked(handle);
 
     /// <summary>World-space position of the entity.</summary>
     public ref Position PositionOf(in EntityHandle handle) => ref _world.ArchInternal.Get<Position>(handle.Value);
