@@ -6,6 +6,62 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **The snapshot encoder now sends per-entity `speed`** (`wire.proto` field 9), read
+  straight off `EntityState.Speed` — the value `MovementSystem.TryMove` is actually
+  integrating with. Closes
+  [#91](https://github.com/Cuvara/rpg-mmo-server/issues/91). No ECS plumbing was
+  needed: `Compose`/`ComposeFromChunk` already populate `Speed` from `Locomotion`.
+
+  Three coupled places, and getting any one wrong fails silently in a different way:
+
+  | Place | Omitting it |
+  |---|---|
+  | `SnapshotDeltaState.ToMsg` | never reaches the wire at all |
+  | `SnapshotDeltaState.SentView` | **a speed-only change is never resent** — see below |
+  | `SnapshotDeltaState.Rent` | a pooled `EntitySnapshot` carries the previous entity's speed |
+
+  `SentView` is the sole arbiter of whether a delta resends an entity and it compares
+  the whole struct, so an entity buffed *while standing still* changes nothing else,
+  compares equal, and gets skipped — the client keeps predicting at the old speed for
+  up to a full keyframe interval. That failure is invisible to every keyframe test,
+  because a keyframe resends everything unconditionally.
+  `Delta_ResendsAnEntityWhoseOnlyChangeIsSpeed` fails if `Speed` is removed from
+  `SentView.Equals`; that was checked by removing it, not assumed.
+
+- **`EntitySnapshotData.Speed` in `Shared.GameLogic`, added via a new constructor
+  overload.** The 6-argument constructor is kept and forwards with `speed: 0`. This
+  library is compiled **as source** by the Unity client against a pinned tag (ADR-10),
+  so changing the existing signature would break that build for every call site at
+  once the moment the tag moved. Adding an overload costs nothing; changing a
+  signature costs a coordinated release. `AoiLogic.EncodeSnapshot` passes the speed
+  through.
+
+- **Four snapshot tests**: speed-only delta resend, unchanged-speed still suppressed,
+  speed present on handle-only mentions (interned path), and speed on keyframes.
+
+### Changed
+- **`SnapshotByteIdentityTests` digests rebaselined for both encodings.** These
+  deliberately hard-to-change constants moved because the protocol gained a field, not
+  because a walk was restructured. Both previous digests are recorded in the source
+  beside the new ones so the change stays attributable, and the comment tells the next
+  reader to establish whether *their* change was supposed to alter the wire before
+  touching the constant.
+- **`WireProtocolTests.SnapshotMessage_JsonMatchesGoFormat`** now pins a non-zero
+  speed. A zero would have pinned only that the key exists.
+
+### Documentation
+- `docs/API.md` — the normative wire reference. `entities[]` field list, the JSON
+  example, and the `speed <= 0` rule. The two Protobuf hexdumps are **left as
+  captured**, with a note that they predate field 9 and what it adds: tag `0x4d`
+  (field 9, wire type 5), 5 bytes per entity, and a freshly captured 25-byte delta
+  showing the entity block header moving `22 0d` → `22 12`. Re-capturing would have
+  changed the uuid and every offset in a pair of dumps that exist to illustrate
+  interning.
+- `docs/DESIGN.md` — the delta comparison list now reads `type/x/y/hp/max_hp/speed`,
+  matching `SentView`.
+
+
 ### Notes
 - **A uniform spatial index for AOI was built, proved correct, measured, and
   rejected. No production code changed.** It is 2.8x slower than the brute-force

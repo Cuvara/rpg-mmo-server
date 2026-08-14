@@ -22,7 +22,44 @@ namespace Shared.GameLogic.Components
 
         public readonly int MaxHp;
 
+        /// <summary>
+        /// Movement speed in world units per second, as the server is currently
+        /// integrating it for this entity.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Exists for client-side prediction, which replays local input through
+        /// <see cref="Systems.MovementSystem"/> and therefore needs the same speed the
+        /// server used. Without it a client can only assume the spawn default, and any
+        /// buff, mount or slow desyncs the two with no error on either side.
+        /// </para>
+        /// <para>
+        /// <b>Zero means "not sent", not "immobile."</b> proto3 elides a zero float, so a
+        /// sender predating the wire field is indistinguishable from a stationary entity.
+        /// Consumers must treat a non-positive value as absent and fall back to a
+        /// configured default — trusting it outright means an old server pins a client's
+        /// predicted speed to zero and the local player stops moving.
+        /// </para>
+        /// </remarks>
+        public readonly float Speed;
+
+        /// <summary>
+        /// Constructs entity state without a speed, leaving <see cref="Speed"/> zero —
+        /// which consumers read as "not sent".
+        /// </summary>
+        /// <remarks>
+        /// <b>Kept for source compatibility, deliberately.</b> This library is compiled
+        /// as source by the Unity client against a pinned tag (ADR-10), so removing this
+        /// overload would break that build the moment the tag moved, for every call site
+        /// at once. Adding an overload costs nothing; changing a signature costs a
+        /// coordinated release.
+        /// </remarks>
         public EntitySnapshotData(string id, string type, float x, float y, int hp, int maxHp)
+            : this(id, type, x, y, hp, maxHp, 0f)
+        {
+        }
+
+        public EntitySnapshotData(string id, string type, float x, float y, int hp, int maxHp, float speed)
         {
             Id = id;
             Type = type;
@@ -30,6 +67,7 @@ namespace Shared.GameLogic.Components
             Y = y;
             Hp = hp;
             MaxHp = maxHp;
+            Speed = speed;
         }
     }
 

@@ -16,6 +16,88 @@ public class SnapshotDeltaStateTests
     private static EntityState Player(string id, float x = 0, float y = 0, int hp = 100)
         => TestHelpers.CreatePlayer(id, x, y, hp);
 
+    private static EntityState PlayerWithSpeed(string id, float speed)
+        => TestHelpers.CreatePlayer(id, speed: speed);
+
+    // --- Speed on the wire (rpg-mmo-server#91) ---
+
+    /// <summary>
+    /// The trap this field is most likely to fall into: an entity whose ONLY change is
+    /// its speed must still be resent by a delta.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>SentView</c> is the sole arbiter of whether a delta resends an entity, and it
+    /// compares the whole struct. Add <c>Speed</c> to the wire writer but not to
+    /// <c>SentView</c> and a buffed-while-standing-still entity compares equal, gets
+    /// skipped, and the client keeps predicting at the old speed until the next
+    /// keyframe — up to 30 ticks of divergence with no error anywhere.
+    /// </para>
+    /// <para>
+    /// It is specifically invisible to the keyframe tests, because a keyframe resends
+    /// everything unconditionally and would look perfectly correct.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void Delta_ResendsAnEntityWhoseOnlyChangeIsSpeed()
+    {
+        var state = new SnapshotDeltaState();
+        state.Encode(1, 0, World(PlayerWithSpeed("p1", 5f)), Keyframe);
+
+        // Same position, same hp, same type — only the speed moves.
+        var snap = state.Encode(2, 0, World(PlayerWithSpeed("p1", 9f)), Keyframe);
+
+        Assert.False(snap.Full);
+        Assert.Single(snap.Entities);
+        Assert.Equal(9f, snap.Entities[0].Speed);
+    }
+
+    [Fact]
+    public void Delta_StillSuppressesAnEntityWhoseSpeedIsUnchanged()
+    {
+        var state = new SnapshotDeltaState();
+        state.Encode(1, 0, World(PlayerWithSpeed("p1", 5f)), Keyframe);
+
+        var snap = state.Encode(2, 0, World(PlayerWithSpeed("p1", 5f)), Keyframe);
+
+        Assert.False(snap.Full);
+        Assert.Empty(snap.Entities);
+    }
+
+    /// <summary>
+    /// Speed rides every mention, not just the one that introduces the id/handle
+    /// binding. A client resolving a handle expects complete state for that entity.
+    /// </summary>
+    [Fact]
+    public void Speed_IsPresentOnHandleOnlyMentions()
+    {
+        var state = new SnapshotDeltaState();
+        // intern: true — interning is opt-in per call and only the Protobuf path uses
+        // it, so the handle-only mention this test is about does not otherwise occur.
+        var full = state.Encode(1, 0, World(PlayerWithSpeed("p1", 7f)), Keyframe, intern: true);
+        Assert.Equal(7f, full.Entities[0].Speed);
+
+        // Move it so the delta resends; the id is now omitted in favour of the handle.
+        var moved = TestHelpers.CreatePlayer("p1", x: 3f, speed: 7f);
+        var delta = state.Encode(2, 0, World(moved), Keyframe, intern: true);
+
+        Assert.Single(delta.Entities);
+        Assert.Equal("", delta.Entities[0].Id);
+        Assert.NotEqual(0u, delta.Entities[0].Handle);
+        Assert.Equal(7f, delta.Entities[0].Speed);
+    }
+
+    /// <summary>Keyframes carry it too — the path a resync recovers through.</summary>
+    [Fact]
+    public void Keyframe_CarriesSpeed()
+    {
+        var state = new SnapshotDeltaState();
+        var snap = state.Encode(1, 0, World(PlayerWithSpeed("p1", 4.25f)), Keyframe);
+
+        Assert.True(snap.Full);
+        Assert.Equal(4.25f, snap.Entities[0].Speed);
+    }
+
     // --- Keyframes ---
 
     [Fact]

@@ -195,6 +195,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 					HP:     int(e.Hp),
 					MaxHP:  int(e.MaxHp),
 					Handle: e.Handle,
+					Speed:  e.Speed,
 				}
 			}
 			t.Entities = ents
@@ -334,6 +335,7 @@ func snapshotPB(t SnapshotMessage) *wirepb.SnapshotMessage {
 				Hp:     int32(e.HP),
 				MaxHp:  int32(e.MaxHP),
 				Handle: e.Handle,
+				Speed:  e.Speed,
 			}
 			// Enum when we can (2 bytes), name when we cannot (2 + len). Never
 			// both: the reader prefers the enum, so setting both would make the

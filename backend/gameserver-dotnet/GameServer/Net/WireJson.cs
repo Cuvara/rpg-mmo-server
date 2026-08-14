@@ -69,6 +69,7 @@ internal static class JsonWriter
                 w.WriteNumber("y"u8, e.Y);
                 w.WriteNumber("hp"u8, e.Hp);
                 w.WriteNumber("max_hp"u8, e.MaxHp);
+                w.WriteNumber("speed"u8, e.Speed);
                 w.WriteEndObject();
             }
             w.WriteEndArray();
@@ -290,6 +291,7 @@ internal static class JsonReader
                 bool y = r.ValueTextEquals("y"u8);
                 bool hp = r.ValueTextEquals("hp"u8);
                 bool maxHp = r.ValueTextEquals("max_hp"u8);
+                bool speed = r.ValueTextEquals("speed"u8);
                 if (!r.Read()) break;
                 if (id) e.Id = r.GetString() ?? "";
                 else if (type) EntityTypes.SetType(e, r.GetString());
@@ -297,6 +299,7 @@ internal static class JsonReader
                 else if (y) e.Y = r.GetSingle();
                 else if (hp) e.Hp = r.GetInt32();
                 else if (maxHp) e.MaxHp = r.GetInt32();
+                else if (speed) e.Speed = r.GetSingle();
                 else r.Skip();
             }
             m.Entities.Add(e);
