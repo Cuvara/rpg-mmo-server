@@ -21,9 +21,18 @@ const (
 	StateInWorld                        // Assigned to a game server
 )
 
+// connSeq numbers connections for logging. It is process-local and monotonic,
+// not a durable identifier: its only job is to let every line belonging to one
+// client session be pulled out of an interleaved log with a single grep.
+var connSeq atomic.Uint64
+
 // ClientConn wraps a TCP connection with state tracking for a gateway client.
 type ClientConn struct {
 	conn net.Conn
+
+	// id is this connection's log correlation number, assigned at accept and
+	// immutable, so it can be read without a lock from any goroutine.
+	id uint64
 
 	// mu guards the connection's identity (userID/state). Unlike msgBucket
 	// below, identity genuinely crosses goroutines: the read side writes it
@@ -56,6 +65,21 @@ type ClientConn struct {
 	// client would get one error frame per over-limit frame, turning the
 	// limiter into an amplifier.
 	limited bool
+
+	// loggedAuthFail / loggedUnexpected latch the two rejection lines that a
+	// client can otherwise mint on demand: nothing stops a socket from looping
+	// MsgAuth with a bad token, or sending an unroutable message type. The
+	// message limiter bounds that but does not make it safe — its default is 60
+	// frames per second per connection, so an unlatched line would still be 60
+	// log lines a second from one socket. The first occurrence on a connection
+	// is reported at its natural level and the rest drop to debug, which keeps
+	// the diagnostic (you always see the first failure and its reason) while
+	// bounding the worst case at one line per connection.
+	//
+	// Read-loop goroutine only, like msgBucket above — every write is on
+	// handleMessage's call stack — so they need no lock.
+	loggedAuthFail   bool
+	loggedUnexpected bool
 
 	// enc is the wire encoding this connection speaks, latched from the first
 	// frame decoded on it and used for every reply.
@@ -112,6 +136,7 @@ type halfCloser interface{ CloseWrite() error }
 func NewClientConn(conn net.Conn, logger *slog.Logger, bucket ratelimit.Bucket) *ClientConn {
 	cc := &ClientConn{
 		conn:      conn,
+		id:        connSeq.Add(1),
 		state:     StateConnected,
 		sendCh:    make(chan messages.Envelope, 64),
 		done:      make(chan struct{}),
@@ -121,6 +146,9 @@ func NewClientConn(conn net.Conn, logger *slog.Logger, bucket ratelimit.Bucket) 
 	cc.lastPong.Store(time.Now().UnixMilli())
 	return cc
 }
+
+// ID returns the connection's log correlation number. Immutable, lock-free.
+func (c *ClientConn) ID() uint64 { return c.id }
 
 // UserID returns the authenticated user bound to this connection, or "" when
 // it has no identity. Safe from any goroutine.
@@ -196,6 +224,23 @@ func (c *ClientConn) RemoteIP() string { return remoteIP(c.conn) }
 // allowMessage consumes one token from the connection's message bucket.
 // Called only from ReadLoop's goroutine.
 func (c *ClientConn) allowMessage() bool { return c.msgBucket.Allow() }
+
+// firstAuthFailure reports whether this is the first auth rejection on this
+// connection, latching for subsequent calls. ReadLoop goroutine only.
+func (c *ClientConn) firstAuthFailure() bool {
+	first := !c.loggedAuthFail
+	c.loggedAuthFail = true
+	return first
+}
+
+// firstUnexpectedMessage reports whether this is the first unroutable message
+// type on this connection, latching for subsequent calls. ReadLoop goroutine
+// only.
+func (c *ClientConn) firstUnexpectedMessage() bool {
+	first := !c.loggedUnexpected
+	c.loggedUnexpected = true
+	return first
+}
 
 // remoteIP extracts the host part of a connection's remote address.
 func remoteIP(conn net.Conn) string {
@@ -285,14 +330,14 @@ func (c *ClientConn) CloseGracefully() {
 	if err := hc.CloseWrite(); err != nil {
 		// Peer already gone, or a conn that reports the capability but cannot
 		// honour it. Nothing left to deliver, so fall back.
-		c.logger.Debug("close write", "user", c.UserID(), "err", err)
+		c.logger.Debug("close write", "conn", c.id, "user", c.UserID(), "err", err)
 		c.Close()
 		return
 	}
 	// Bound the drain. ReadLoop turns this into an error and exits, which runs
 	// the deferred Close on an empty receive queue.
 	if err := c.conn.SetReadDeadline(time.Now().Add(closeDrainTimeout)); err != nil {
-		c.logger.Debug("set drain deadline", "user", c.UserID(), "err", err)
+		c.logger.Debug("set drain deadline", "conn", c.id, "user", c.UserID(), "err", err)
 		c.Close()
 	}
 }
@@ -318,7 +363,7 @@ func (c *ClientConn) HeartbeatLoop() {
 			// Check for pong timeout.
 			last := c.lastPong.Load()
 			if time.Since(time.UnixMilli(last)) > pongTimeout {
-				c.logger.Info("heartbeat timeout", "user", c.UserID())
+				c.logger.Info("heartbeat timeout", "conn", c.id, "user", c.UserID())
 				c.Close()
 				return
 			}
@@ -327,7 +372,7 @@ func (c *ClientConn) HeartbeatLoop() {
 				Timestamp: time.Now().UnixMilli(),
 			})
 			if err != nil {
-				c.logger.Debug("heartbeat encode error", "err", err)
+				c.logger.Debug("heartbeat encode error", "conn", c.id, "err", err)
 				continue
 			}
 			c.Send(env)
@@ -344,7 +389,7 @@ func (c *ClientConn) ReadLoop(handler func(conn *ClientConn, env messages.Envelo
 		env, err := messages.Decode(c.conn)
 		if err != nil {
 			if err != io.EOF {
-				c.logger.Debug("read error", "user", c.UserID(), "err", err)
+				c.logger.Debug("read error", "conn", c.id, "user", c.UserID(), "err", err)
 			}
 			return
 		}
@@ -385,11 +430,11 @@ func (c *ClientConn) writeLoop() bool {
 		case env := <-c.sendCh:
 			data, err := messages.Encode(env)
 			if err != nil {
-				c.logger.Error("encode error", "user", c.UserID(), "err", err)
+				c.logger.Error("encode error", "conn", c.id, "user", c.UserID(), "err", err)
 				return false
 			}
 			if _, err := c.conn.Write(data); err != nil {
-				c.logger.Debug("write error", "user", c.UserID(), "err", err)
+				c.logger.Debug("write error", "conn", c.id, "user", c.UserID(), "err", err)
 				return false
 			}
 			// Deferred close requested (rate limiter, protocol abort): leave
