@@ -6,6 +6,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Notes
+- **A uniform spatial index for AOI was built, proved correct, measured, and
+  rejected. No production code changed.** It is 2.8x slower than the brute-force
+  scan at realistic density. Full numbers and reasoning: `docs/BENCHMARK.md`
+  Part V; the implementation and its differential test are on
+  `feat/aoi-spatial-index` at `2e3e5db`, reverted by the commit after it.
+  - **The premise was wrong in the same way as before.** The case for the index
+    was "40 000 distance tests per tick at 200 players, O(n²)". The count is
+    right; the cost is not. Those tests are sequential reads over contiguous
+    chunk arrays and are worth microseconds. The scan's real cost is composing an
+    `EntityState` per **match**, which is proportional to how many players are
+    near you — a property of the game, not of the algorithm — and no index
+    reduces it.
+  - The index made composition worse: the scan composes from the chunk it is
+    already iterating, while the index holds only an entity handle and composes
+    through seven random-access lookups per match.
+  - It *is* 1.4–2.9x faster when AOI sets are nearly empty (2.8 matches per
+    query) — exactly where the absolute cost is negligible, 77 µs to 38 µs
+    against a 66 ms budget. A density-switched hybrid was considered and
+    rejected: two code paths and a heuristic to win 0.06% of a tick in the case
+    that was never the problem.
+  - **Preserving byte-identical wire output costs a per-query sort**, which the
+    Big-O argument never accounted for. The delta encoder interns entity ids in
+    AOI arrival order, so a grid's cell-major enumeration changes the bytes for
+    an identical set. The first implementation got the set right and the order
+    wrong; the differential test caught it on the first run. Disabling the sort
+    as a diagnostic did not rescue the measurement.
+  - Measurement method, since a timing claim on this host needs one: paired
+    in-process A/B running both implementations back to back in one process, five
+    runs, comparing the ratio *within* each run. Absolute timings swing ±50%
+    here; the realistic-density ratio came out 0.32–0.45 across all five, far
+    tighter than the noise.
+  - `docs/BENCHMARK.md` §9 item 6 is struck through, and the extension-seams
+    table in the repo-root `CLAUDE.md` no longer promises a spatial grid as the
+    production answer — it records that one was measured and lost, with the
+    conditions that would make it worth revisiting.
+
 ### Changed
 - **The snapshot path stopped throwing away its objects: entities are pooled and the
   serialization buffers are reused.** These were the two allocation sources stage 4's
