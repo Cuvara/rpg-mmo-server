@@ -6,6 +6,46 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`EntitySnapshot.Speed` — per-entity movement speed on the wire (`wire.proto`
+  field 9), for client-side prediction.** Closes
+  [#91](https://github.com/Cuvara/rpg-mmo-server/issues/91), which was the last
+  silent failure mode in the client's prediction loop: prediction replays local input
+  through the same `Shared.GameLogic` movement code the server runs, that code needs
+  a speed, and nothing on the wire carried one. The client could only assume
+  `ServerDefaults.DefaultPlayerSpeed`. The assumption holds until anything changes a
+  player's speed — a buff, a mount, a slow — and then the two sides integrate
+  different distances every tick with **no error on either side**. It presents as
+  rubber-banding, which reads as a network problem and gets debugged in the wrong
+  layer.
+
+  `float speed = 9` — fixed32, so 5 bytes per entity per message with no varint
+  shrink for common values. Written on **every** mention including handle-only ones:
+  a receiver that resolves a handle expects complete state, and sending it only
+  beside the id would leave it correct once per keyframe interval and stale between.
+  Deliberately not interned — that would buy ~5 bytes and inherit the whole
+  handle-lifecycle contract for a value with no identity.
+
+- **`speed <= 0` means "not sent", not "immobile" — a rule, not an accident.**
+  proto3 elides a zero float, so a sender predating this field is indistinguishable
+  from a stationary entity. Receivers must fall back to a configured default;
+  trusting the value outright means an old server pins a client's predicted speed to
+  zero and the local player stops moving. `TestSpeedZeroMeansNotSent` pins the wire
+  behaviour the rule rests on, across both encodings.
+
+- **`TestSpeedSurvivesBothEncodings`** — guards against one codec dropping the field
+  and not the other, which would surface only as prediction drift on whichever
+  encoding a client happened to negotiate.
+
+### Changed
+- **`TestJSONWireShapeUnchanged` rebaselined.** `speed` is written unconditionally,
+  like every other entity value field in `EntitySnapshot` — no `omitempty` — so the
+  legacy JSON shape gains a key on every entity. Additive and safe for a legacy
+  reader: both codecs skip unknown keys. The round-trip fixture now carries a
+  non-zero speed, because a zero would round-trip identically through a codec that
+  dropped the field entirely and the test would pass vacuously.
+
+
+### Added
 - **`SnapshotState.Apply` now rejects a keyframe that carries a bare interned
   handle, instead of resolving it against the outgoing interval's table.**
   To be plain about the status: this is **latent, not a live bug**. No sender in

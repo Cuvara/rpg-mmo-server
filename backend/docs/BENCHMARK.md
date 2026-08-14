@@ -228,6 +228,9 @@ assumption. Interpolating the measured curve, that is breached at **~41 players*
 This is the JSON encoding, exactly as the extension-seam table predicts. An
 `EntitySnapshot` on the wire is ~95 bytes of JSON (`{"id":"lt-…","type":"player",
 "x":…,"y":…,"hp":100,"max_hp":100}`) for what is 6 fields, ~30 bytes packed.
+(Measured before `speed` was added as field 9 in 2026-08; the entity is 7 fields now,
++5 bytes in Protobuf. The figures below are left as captured rather than rescaled —
+a benchmark is a record of a run, not a live estimate.)
 Protobuf/FlatBuffers is the fix and it attacks the tick-time bottleneck and the
 bandwidth bottleneck at once.
 
@@ -1022,7 +1025,8 @@ while the byte budget counted a single entity in isolation. In a delta stream
 most mentions are repeats, so the amortised saving exceeds the per-message share.
 
 The remaining terms are the numeric fields and framing, which are already close
-to minimal: position as two floats, hp/max_hp as varints, and a handle. Further
+to minimal: position as two floats, hp/max_hp as varints, a handle, and (since
+field 9) speed as a third float. Further
 wire savings would need to change *what* is sent — delta-encoding positions
 against the previous tick, dropping `max_hp` from every update when it rarely
 changes, or tiering update rate by distance — not how it is encoded.

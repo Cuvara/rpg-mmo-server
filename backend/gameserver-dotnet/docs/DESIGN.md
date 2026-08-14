@@ -422,7 +422,7 @@ with it) holding the visible state it last sent. Per tick, per client:
 - **Keyframe** (`full: true`) — the complete AOI set; the client discards anything
   not listed. Sent on join, on `resync` request, and every `keyframeInterval`
   snapshots (default 30 ≈ 2s at 15 Hz).
-- **Delta** — only entities whose `type/x/y/hp/max_hp` changed since the previous
+- **Delta** — only entities whose `type/x/y/hp/max_hp/speed` changed since the previous
   snapshot to *this* connection, plus a `removed[]` list of entities that left AOI or
   the world. Comparison is exact (bitwise float equality), not tolerance-based: a
   tolerance would let slow drift accumulate on the client with nothing to correct it.

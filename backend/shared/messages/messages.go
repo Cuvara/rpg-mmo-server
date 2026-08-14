@@ -248,6 +248,13 @@ type EntitySnapshot struct {
 	HP     int     `json:"hp"`
 	MaxHP  int     `json:"max_hp"`
 	Handle uint32  `json:"-"`
+
+	// Speed is movement speed in world units per second, for client-side
+	// prediction. Zero means "not sent", NOT "immobile": proto3 elides a zero
+	// float, so a pre-speed sender is indistinguishable from a stationary
+	// entity. Receivers must fall back to a configured default rather than
+	// conclude the entity cannot move.
+	Speed float32 `json:"speed"`
 }
 
 // DisconnectMessage ends a session politely. Both encodings accept an empty

@@ -35,6 +35,7 @@ public sealed class SnapshotDeltaState
         public readonly float Y;
         public readonly int Hp;
         public readonly int MaxHp;
+        public readonly float Speed;
 
         public SentView(in EntityState e)
         {
@@ -43,6 +44,7 @@ public sealed class SnapshotDeltaState
             Y = e.Position.Y;
             Hp = e.Hp;
             MaxHp = e.MaxHp;
+            Speed = e.Speed;
         }
 
         public bool Equals(SentView other) =>
@@ -53,10 +55,17 @@ public sealed class SnapshotDeltaState
             // would let slow drift accumulate silently.
             X.Equals(other.X) &&
             Y.Equals(other.Y) &&
+            // Speed belongs here for a reason worth stating: this struct is the
+            // ONLY thing deciding whether a delta resends an entity. An entity
+            // that is buffed while standing still changes nothing else, so
+            // omitting Speed would compare it equal, skip it, and leave the
+            // client predicting at the old speed until the next keyframe — up to
+            // 30 ticks of divergence that no test of the keyframe path can see.
+            Speed.Equals(other.Speed) &&
             string.Equals(Type, other.Type, StringComparison.Ordinal);
 
         public override bool Equals(object? obj) => obj is SentView v && Equals(v);
-        public override int GetHashCode() => HashCode.Combine(Type, X, Y, Hp, MaxHp);
+        public override int GetHashCode() => HashCode.Combine(Type, X, Y, Hp, MaxHp, Speed);
     }
 
     /// <summary>
@@ -278,6 +287,7 @@ public sealed class SnapshotDeltaState
         e.Y = 0f;
         e.Hp = 0;
         e.MaxHp = 0;
+        e.Speed = 0f;
         return e;
     }
 
@@ -357,6 +367,11 @@ public sealed class SnapshotDeltaState
         msg.Y = e.Position.Y;
         msg.Hp = e.Hp;
         msg.MaxHp = e.MaxHp;
+        // Written on every mention, including handle-only ones. A client that
+        // resolves a handle expects a complete state for that entity; sending
+        // speed only when the id is introduced would leave it correct once per
+        // keyframe interval and stale in between.
+        msg.Speed = e.Speed;
         EntityTypes.SetType(msg, e.Type);
 
         if (!_intern)

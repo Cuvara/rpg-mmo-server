@@ -159,7 +159,9 @@ func TestSnapshotRoundTripBothEncodings(t *testing.T) {
 func TestBothEncodingsAgree(t *testing.T) {
 	want := SnapshotMessage{
 		Tick: 42, AckTick: 41, Full: false,
-		Entities: []EntitySnapshot{{ID: "e1", Type: "player", X: 3.5, Y: -4.25, HP: 7, MaxHP: 8}},
+		// Speed non-zero: a zero would round-trip identically through a codec that
+		// dropped the field entirely, so this fixture would pass vacuously.
+		Entities: []EntitySnapshot{{ID: "e1", Type: "player", X: 3.5, Y: -4.25, HP: 7, MaxHP: 8, Speed: 6.75}},
 		Removed:  []string{"e9"},
 	}
 
@@ -185,7 +187,7 @@ func TestJSONWireShapeUnchanged(t *testing.T) {
 		Tick:     42,
 		AckTick:  41,
 		Full:     true,
-		Entities: []EntitySnapshot{{ID: "p1", Type: "player", X: 10.5, Y: 20.25, HP: 90, MaxHP: 100}},
+		Entities: []EntitySnapshot{{ID: "p1", Type: "player", X: 10.5, Y: 20.25, HP: 90, MaxHP: 100, Speed: 5.5}},
 		Removed:  []string{"gone"},
 	})
 	if err != nil {
@@ -193,7 +195,11 @@ func TestJSONWireShapeUnchanged(t *testing.T) {
 	}
 
 	const wantPayload = `{"tick":42,"ack_tick":41,"full":true,` +
-		`"entities":[{"id":"p1","type":"player","x":10.5,"y":20.25,"hp":90,"max_hp":100}],` +
+		// `speed` added 2026-08-14 (wire.proto field 9, rpg-mmo-server#91). It is
+		// written unconditionally, like every other entity value field in this
+		// struct — no `omitempty` — so the shape gains a key for every entity.
+		// Additive and safe for a legacy reader: both codecs skip unknown keys.
+		`"entities":[{"id":"p1","type":"player","x":10.5,"y":20.25,"hp":90,"max_hp":100,"speed":5.5}],` +
 		`"removed":["gone"]}`
 	if string(env.Payload) != wantPayload {
 		t.Errorf("payload JSON drifted:\n got: %s\nwant: %s", env.Payload, wantPayload)
@@ -360,6 +366,65 @@ func assertSnapshotEqual(t *testing.T, got, want SnapshotMessage) {
 	for i := range want.Removed {
 		if got.Removed[i] != want.Removed[i] {
 			t.Errorf("removed %d: got %q, want %q", i, got.Removed[i], want.Removed[i])
+		}
+	}
+}
+
+// TestSpeedZeroMeansNotSent pins the semantic that makes the `speed` field safe to
+// add to a live protocol (wire.proto field 9, rpg-mmo-server#91).
+//
+// proto3 elides a zero float, so a sender that predates the field and an entity that
+// genuinely cannot move are indistinguishable on the wire. That ambiguity is
+// deliberate and is why receivers must treat non-positive as "no value" and fall back
+// to a configured default. This test documents the wire behaviour the rule rests on:
+// zero survives a round trip as zero, carrying no information either way.
+func TestSpeedZeroMeansNotSent(t *testing.T) {
+	for _, enc := range bothEncodings {
+		want := SnapshotMessage{
+			Tick:     1,
+			Entities: []EntitySnapshot{{ID: "e1", Type: "player", Speed: 0}},
+		}
+
+		env, err := NewEnvelopeAs(enc, MsgSnapshot, want)
+		if err != nil {
+			t.Fatalf("%v: NewEnvelopeAs: %v", enc, err)
+		}
+
+		var got SnapshotMessage
+		if err := env.UnmarshalPayload(&got); err != nil {
+			t.Fatalf("%v: UnmarshalPayload: %v", enc, err)
+		}
+
+		if got.Entities[0].Speed != 0 {
+			t.Errorf("%v: speed: got %v, want 0", enc, got.Entities[0].Speed)
+		}
+	}
+}
+
+// TestSpeedSurvivesBothEncodings guards the field against being dropped by one codec
+// and not the other, which would show up only as prediction drift on whichever
+// encoding the client happened to negotiate.
+func TestSpeedSurvivesBothEncodings(t *testing.T) {
+	const speed = 7.25
+
+	for _, enc := range bothEncodings {
+		want := SnapshotMessage{
+			Tick:     1,
+			Entities: []EntitySnapshot{{ID: "e1", Type: "player", Speed: speed}},
+		}
+
+		env, err := NewEnvelopeAs(enc, MsgSnapshot, want)
+		if err != nil {
+			t.Fatalf("%v: NewEnvelopeAs: %v", enc, err)
+		}
+
+		var got SnapshotMessage
+		if err := env.UnmarshalPayload(&got); err != nil {
+			t.Fatalf("%v: UnmarshalPayload: %v", enc, err)
+		}
+
+		if got.Entities[0].Speed != speed {
+			t.Errorf("%v: speed: got %v, want %v", enc, got.Entities[0].Speed, speed)
 		}
 	}
 }

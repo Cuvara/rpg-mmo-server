@@ -711,7 +711,32 @@ type EntitySnapshot struct {
 	//
 	// Zero means "not interned": the sender is using `id` directly. That keeps the
 	// field optional, so a peer that does not implement interning still works.
-	Handle        uint32 `protobuf:"varint,8,opt,name=handle,proto3" json:"handle,omitempty"`
+	Handle uint32 `protobuf:"varint,8,opt,name=handle,proto3" json:"handle,omitempty"`
+	// Movement speed in world units per second — the value the server's
+	// MovementSystem.Integrate is actually multiplying by, for THIS entity right
+	// now, not the spawn default.
+	//
+	// Exists for client-side prediction. Prediction replays local input through
+	// the same Shared.GameLogic movement code the server runs, and that code needs
+	// speed; without this field a client can only assume the spawn default. The
+	// assumption holds until anything changes a player's speed — a buff, a mount,
+	// a slow — and then client and server integrate different distances every
+	// tick with NO error on either side. The client corrects on every snapshot, so
+	// it presents as rubber-banding, which reads as a network problem and gets
+	// debugged as one, in the wrong layer.
+	//
+	// ZERO MEANS "NOT SENT", NOT "IMMOBILE". proto3 elides a zero float, so a
+	// pre-speed server and a genuinely immobile entity are indistinguishable on
+	// the wire. A receiver MUST treat `speed <= 0` as "no value" and fall back to
+	// its configured default rather than concluding the entity cannot move —
+	// trusting it unconditionally means an old server pins every client's
+	// predicted speed to zero and the local player stops moving.
+	//
+	// Sent on every mention of an entity, never interned. Interning it would buy
+	// ~5 bytes and inherit the whole handle-lifecycle contract above; speed is a
+	// plain value with no identity, and the delta encoder already suppresses
+	// entities whose state has not changed at all.
+	Speed         float32 `protobuf:"fixed32,9,opt,name=speed,proto3" json:"speed,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -798,6 +823,13 @@ func (x *EntitySnapshot) GetType() EntityType {
 func (x *EntitySnapshot) GetHandle() uint32 {
 	if x != nil {
 		return x.Handle
+	}
+	return 0
+}
+
+func (x *EntitySnapshot) GetSpeed() float32 {
+	if x != nil {
+		return x.Speed
 	}
 	return 0
 }
@@ -1256,7 +1288,7 @@ const file_wire_proto_rawDesc = "" +
 	"\x04tick\x18\x01 \x01(\x04R\x04tick\x12\x15\n" +
 	"\x06move_x\x18\x02 \x01(\x02R\x05moveX\x12\x15\n" +
 	"\x06move_y\x18\x03 \x01(\x02R\x05moveY\x12(\n" +
-	"\x10attack_target_id\x18\x04 \x01(\tR\x0eattackTargetId\"\xc8\x01\n" +
+	"\x10attack_target_id\x18\x04 \x01(\tR\x0eattackTargetId\"\xde\x01\n" +
 	"\x0eEntitySnapshot\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\ttype_name\x18\x02 \x01(\tR\btypeName\x12\f\n" +
@@ -1265,7 +1297,8 @@ const file_wire_proto_rawDesc = "" +
 	"\x02hp\x18\x05 \x01(\x05R\x02hp\x12\x15\n" +
 	"\x06max_hp\x18\x06 \x01(\x05R\x05maxHp\x12.\n" +
 	"\x04type\x18\a \x01(\x0e2\x1a.rpgmmo.wire.v1.EntityTypeR\x04type\x12\x16\n" +
-	"\x06handle\x18\b \x01(\rR\x06handle\"\xaa\x01\n" +
+	"\x06handle\x18\b \x01(\rR\x06handle\x12\x14\n" +
+	"\x05speed\x18\t \x01(\x02R\x05speed\"\xaa\x01\n" +
 	"\x0fSnapshotMessage\x12\x12\n" +
 	"\x04tick\x18\x01 \x01(\x04R\x04tick\x12\x19\n" +
 	"\back_tick\x18\x02 \x01(\x04R\aackTick\x12\x12\n" +

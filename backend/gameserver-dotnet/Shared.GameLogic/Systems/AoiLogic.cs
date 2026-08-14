@@ -106,7 +106,8 @@ namespace Shared.GameLogic.Systems
                     x: e.Position.X,
                     y: e.Position.Y,
                     hp: e.Hp,
-                    maxHp: e.MaxHp
+                    maxHp: e.MaxHp,
+                    speed: e.Speed
                 );
             }
 
