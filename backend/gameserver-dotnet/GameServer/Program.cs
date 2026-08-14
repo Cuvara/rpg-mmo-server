@@ -4,6 +4,7 @@ using Shared.GameLogic.Components;
 using GameServer.Agones;
 using GameServer.Events;
 using GameServer.Observability;
+using GameServer.Scaffolding;
 using GameServer.Persistence;
 using GameServer.Net.Transport;
 using GameServer.Registry;
@@ -324,7 +325,17 @@ var options = new ServerOptions
     Metrics = metrics,
     ServerRegistry = serverRegistry,
     Registration = registrationOptions,
-    EnableEnemySpawner = enableEnemySpawner,
+    // The composition root decides what the game is. The core host only knows it has
+    // a phase to tick; see ISimulationPhase.
+    SimulationPhaseFactory = enableEnemySpawner
+        ? (world, loggerFactory) => new EnemySpawner(world, tickRate, loggerFactory.CreateLogger<EnemySpawner>())
+        : null,
+    // The composition root is the one place allowed to know what the game is, so it is
+    // where the status endpoint's entity count comes from. The JSON field stays
+    // `enemies_alive` — the Unity DOTS sample polls /status and reads it.
+    StatusEntityCount = enableEnemySpawner
+        ? static world => world.CountWith<GameServer.World.Components.EnemyAi>()
+        : null,
     NakamaUrl = nakamaUrl,
     NakamaHttpKey = nakamaHttpKey
 };

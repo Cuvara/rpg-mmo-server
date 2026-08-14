@@ -48,6 +48,27 @@ public sealed class ConnectionManager
         }
     }
 
+    /// <summary>
+    /// Copy the current connections into <paramref name="destination"/>.
+    ///
+    /// <para>The snapshot broadcast needs a stable list it can walk twice — once inside
+    /// the world read scope to gather, once outside it to encode and send — without
+    /// holding a delegate or an enumerator across the two. Same count-don't-saturate
+    /// contract as the AOI scan: the return value is the connection count and may exceed
+    /// the buffer, so the caller resizes and retries rather than broadcasting to a
+    /// prefix and silently starving whoever fell off the end.</para>
+    /// </summary>
+    public int CopyTo(Span<Connection> destination)
+    {
+        int i = 0;
+        foreach (var kvp in _connections)
+        {
+            if (i < destination.Length) destination[i] = kvp.Value;
+            i++;
+        }
+        return i;
+    }
+
     /// <summary>Close and remove all connections.</summary>
     public void CloseAll()
     {

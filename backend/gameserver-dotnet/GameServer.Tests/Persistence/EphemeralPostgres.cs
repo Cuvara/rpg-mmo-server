@@ -50,13 +50,14 @@ internal sealed class EphemeralPostgres : IAsyncDisposable
         string? docker = FindDocker();
         if (docker is null) return null;
 
-        int port = FreeTcpPort();
         string name = $"rpg-gs-test-pg-{Guid.NewGuid():N}"[..30];
 
+        // Publish on ":0" and ask docker what it got, rather than picking a port, releasing
+        // it, and hoping it is still free when the container binds. See TestDocker.PublishedPort.
         var run = Exec(docker,
             $"run -d --name {name} " +
             $"-e POSTGRES_USER={User} -e POSTGRES_PASSWORD={Password} -e POSTGRES_DB={Database} " +
-            $"-p 127.0.0.1:{port}:5432 {Image}",
+            $"-p 127.0.0.1:0:5432 {Image}",
             TimeSpan.FromMinutes(5));
 
         if (run.ExitCode != 0)
@@ -65,7 +66,15 @@ internal sealed class EphemeralPostgres : IAsyncDisposable
             return null;
         }
 
-        var pg = new EphemeralPostgres(docker, name, port);
+        int? published = Infrastructure.TestDocker.PublishedPort(docker, name, 5432);
+        if (published is null)
+        {
+            Console.WriteLine("[EphemeralPostgres] container published no host port for 5432");
+            Exec(docker, $"rm -f {name}", TimeSpan.FromSeconds(60));
+            return null;
+        }
+
+        var pg = new EphemeralPostgres(docker, name, published.Value);
         if (!await pg.WaitReadyAsync(TimeSpan.FromSeconds(90), ct))
         {
             Console.WriteLine("[EphemeralPostgres] container never became ready");
@@ -142,15 +151,6 @@ internal sealed class EphemeralPostgres : IAsyncDisposable
             }
         }
         return null;
-    }
-
-    private static int FreeTcpPort()
-    {
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        return port;
     }
 
     /// <summary>

@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using GameServer.Net;
 using Shared.GameLogic.Components;
 using RpgMmo.Wire.V1;
@@ -160,6 +161,17 @@ public sealed class SnapshotDeltaState
     /// </param>
     public SnapshotMessage Encode(ulong tick, ulong ackTick, List<EntityState> nearby, int keyframeInterval,
         bool intern = false)
+        => Encode(tick, ackTick, CollectionsMarshal.AsSpan(nearby), keyframeInterval, intern);
+
+    /// <inheritdoc cref="Encode(ulong, ulong, List{EntityState}, int, bool)"/>
+    /// <remarks>
+    /// The span form is what the tick loop calls: the AOI walk fills a buffer the
+    /// connection owns and reuses, so nothing here needs a list to exist. The list
+    /// overload above forwards to this one — one implementation, so the delta/keyframe
+    /// bookkeeping cannot diverge between the two entry points.
+    /// </remarks>
+    public SnapshotMessage Encode(ulong tick, ulong ackTick, ReadOnlySpan<EntityState> nearby, int keyframeInterval,
+        bool intern = false)
     {
         _intern = intern;
         bool full = Interlocked.Exchange(ref _forceFull, 0) != 0
@@ -192,7 +204,7 @@ public sealed class SnapshotDeltaState
         return EncodeDelta(tick, ackTick, nearby);
     }
 
-    private SnapshotMessage EncodeFull(ulong tick, ulong ackTick, List<EntityState> nearby)
+    private SnapshotMessage EncodeFull(ulong tick, ulong ackTick, ReadOnlySpan<EntityState> nearby)
     {
         var msg = new SnapshotMessage { Tick = tick, AckTick = ackTick, Full = true };
         _lastSent.Clear();
@@ -202,7 +214,7 @@ public sealed class SnapshotDeltaState
         _nextHandle = 1;
 
         // Indexed for-loop, no LINQ, no enumerator boxing: this runs once per client per tick.
-        for (int i = 0; i < nearby.Count; i++)
+        for (int i = 0; i < nearby.Length; i++)
         {
             var e = nearby[i];
             msg.Entities.Add(ToMsg(in e));
@@ -212,12 +224,12 @@ public sealed class SnapshotDeltaState
         return msg;
     }
 
-    private SnapshotMessage EncodeDelta(ulong tick, ulong ackTick, List<EntityState> nearby)
+    private SnapshotMessage EncodeDelta(ulong tick, ulong ackTick, ReadOnlySpan<EntityState> nearby)
     {
         _seen.Clear();
         var msg = new SnapshotMessage { Tick = tick, AckTick = ackTick, Full = false };
 
-        for (int i = 0; i < nearby.Count; i++)
+        for (int i = 0; i < nearby.Length; i++)
         {
             var e = nearby[i];
             _seen.Add(e.Id);

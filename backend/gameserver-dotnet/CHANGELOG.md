@@ -6,20 +6,647 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **The simulation is query-driven, its ordering is declared, and its state lives in
+  the world (ECS migration, stage 5).** Commissioned as architecture, not
+  performance — see *Measured*, which is a table of zeroes and says so.
+  - **The core stops naming the gameplay.** `EcsWorld.EnemyCount`,
+    `QueryEnemiesLocked` and `WorldWriter.QueryEnemies` are now `CountWith<TTag>()`
+    and `QueryWith<TTag>(Span<EntityHandle>)`. The tag comes from whoever owns the
+    content. Query descriptions are memoised per closed generic in a static generic
+    field — allocation-free and AOT-safe, since every instantiation is reached from
+    concrete code rather than constructed at runtime.
+  - **`EnemyMoveSystem` iterates chunks.** It walks `Span<Position>` and
+    `Span<Health>` through a new `SimChunk` view instead of resolving each entity
+    through a handle. The per-chunk body is a `struct` visitor passed by `ref`, so
+    the call devirtualises and nothing is allocated per chunk or per tick.
+  - **Spawn and reap deliberately keep random access, and say why.** Spawn reads one
+    piece of state and creates entities — there is no array to walk. Reap decides per
+    entity and then performs a structural change, which needs an entity identity that
+    a component span does not carry; exposing handles through the chunk view purely to
+    satisfy a shape rule would leak the one Arch type the view exists not to leak.
+  - **`SystemSchedule`**: an ordered set of systems, each declaring `Order` and a
+    `ComponentAccess` of reads/writes. Ordering is declared, not implied by call
+    order — pass the three enemy systems in any order and they still run
+    spawn → move → reap — and a duplicate `Order` is rejected at construction, because
+    an ambiguous pair would silently run in array order, which is the implicit
+    ordering the type exists to remove.
+  - **`ISimulationPhase.TrackedEntityCount` is gone.** The core defined a
+    content-agnostic contract whose single consumer immediately renamed the property
+    after the content, and it forced every future phase to summarise itself as one
+    unlabelled int, which stops composing the moment there are two. The status number
+    now comes from `ServerOptions.StatusEntityCount`, supplied by `Program.cs` — the
+    composition root is the one place allowed to know what the game is. **The status
+    JSON field name is unchanged**: the Unity DOTS sample polls `/status` and reads
+    `EnemiesAlive`.
+
+### Fixed
+- **The spawner's simulation state was living in class fields, behind the seam that
+  was built to stop exactly that.** `_nextEnemyNumber` and `_spawnAccumulator` were
+  private instance fields on `EnemySpawnSystem` from the day the seam shipped. They
+  are now an `EnemySpawnState` component on a singleton entity. The consequences were
+  not stylistic: state in a field is invisible to the world, so it could never be
+  snapshotted, persisted, or reset with everything else, and two instances of the
+  system would each have kept their own idea of when the next wave was due.
+  - The singleton carries **only** that component, so it matches none of the queries
+    that require the seven standard ones and can never appear in an AOI scan, a
+    snapshot, the player sweep or the entity count. Pinned by
+    `SpawnStateEntity_IsInvisibleToEveryGameplayQuery`, and confirmed in the published
+    NativeAOT binary, which reports `gameserver_entities{} 6` with the singleton
+    present.
+
+### Added
+- **`SimulationStateArchitectureTests` — the rule becomes a constraint.** It reflects
+  over every `ISimulationPhase` and `IEcsSystem` implementation, and their nested
+  types, and fails on any mutable instance field or settable property. **Verified to
+  fire**: reintroducing `private float _spawnAccumulator;` on the real
+  `EnemySpawnSystem` builds clean and fails the test naming
+  `EnemySpawnSystem._spawnAccumulator`. That is the third guard in this module
+  demonstrated rather than assumed, after the AOT hints and the golden vectors.
+  - The one sanctioned exception is `[SimulationScratch]`, for reusable buffers, with
+    a strict criterion: a field qualifies only if resetting it at any tick boundary
+    would change nothing but allocation. `EnemyReapSystem`'s handle buffer carries it.
+  - Nested types are included because moving state into a private nested helper is the
+    obvious way around the rule.
+- **`SystemScheduleTests`** covering declared-vs-argument ordering, duplicate-order
+  rejection, and the disjointness predicate in both directions. Also asserts that
+  **no pair in the real enemy schedule is concurrently runnable** — spawn and reap are
+  structural, and move writes the positions reap reads — so the serial order is what
+  the declarations say rather than a temporary convenience.
+
+### Measured
+- Enemy AI phase, paired in-process A/B against `develop`, Release: **108 B/tick on
+  both sides, identical.** Timing differences at these magnitudes (2.5 vs 3.8 µs at 0
+  players) are noise.
+- **Stage 5 measures nothing, which is what was expected and what was asked for.**
+  Steady-state population is 4–6 enemies, so a chunk loop over five entities cannot
+  show anything, and this stage was commissioned as an architectural requirement after
+  its performance premise had already been disproved in stage 4. The case is that the
+  shape is right for gameplay that does not exist yet — worth taking before writing
+  gameplay against the seam rather than after.
+
+### Notes
+- **What a parallel step still needs, written down before anything is parallel.**
+  `ComponentAccess.IsDisjointFrom` answers the component half of "can these two run
+  together" and is tested. Two things it deliberately does not answer, both verified in
+  the current code and both blocking:
+  1. `EcsWorld._structural` is a plain `List<StructuralOp>` with no lock of its own,
+     safe today only because exactly one thread mutates it under the write lock. Two
+     systems doing structural work concurrently would race on the queue itself rather
+     than on any component — which is why `ComponentAccess.Structural` excludes a
+     system from concurrency outright instead of reasoning about its components.
+  2. `EcsWorld`'s iteration-depth guard is `[ThreadStatic]`, so "is anything iterating"
+     would become a per-worker fact rather than a property of the world — and that flag
+     is what decides whether a spawn or despawn applies immediately or is deferred.
+  Neither is fixed here, because nothing runs on another thread here.
+- **The cost of the `Arch.System` generator ban, stated concretely.** A general
+  N-component chunk query needs either a source generator to emit an overload per
+  arity — banned, because the AOT hint guard cannot enumerate generated query shapes —
+  or a hand-written combinatorial API nobody keeps complete. `SimChunk` therefore
+  exposes the one component set the simulation walks linearly, and adding a system with
+  a different set means adding an explicit shape or justifying handle access.
+- **Content-owned components do not have to live in the core.** `EnemySpawnState` is
+  declared in `Scaffolding` and is still covered by the hint guard, which discovers
+  component types by namespace **or** by `[EcsComponent]` anywhere in the assembly.
+  `EnemyAi` stays in `World/Components.cs` only because moving it is not this change's
+  job.
+
+### Changed
+- **The server core no longer names any gameplay: what to simulate arrives through
+  `ISimulationPhase`, and the content that implements it moved to `GameServer/Scaffolding`.**
+  The enemy AI in this module exists to give the core something to simulate and the tests
+  something to assert — it is not the game. Nothing said so, so it read as production
+  gameplay wired into the host: `GameServerHost` constructed `EnemySpawner` directly behind
+  an `EnableEnemySpawner` flag, and `TickLoop` held a field of that concrete type.
+  - `GameServer/AI/` → `GameServer/Scaffolding/`, `GameServer.Tests/AI/` →
+    `GameServer.Tests/Scaffolding/`, namespaces with them. Moves and namespace lines only,
+    except `EnemySpawner` which also gained `: ISimulationPhase` and an explicit
+    `TrackedEntityCount`. No logic changed in any of them.
+  - New `ISimulationPhase` (`Tick(ulong)`, `TrackedEntityCount`) in `GameServer/Server/`.
+    `TickLoop` holds one of those instead of an `EnemySpawner`, and calls it in the same
+    place in the same write scope, so anything it changes still lands in the same tick's
+    snapshot rather than the next one.
+  - `GameServerOptions.EnableEnemySpawner` became
+    `SimulationPhaseFactory(EcsWorld, ILoggerFactory)`. A factory because the phase needs
+    the world, which the host creates; a factory rather than a flag because a flag makes
+    the core name the gameplay it is supposed to know nothing about. `Program.cs` — the
+    composition root, which is allowed to know what the game is — supplies it, still gated
+    on `GAMESERVER_ENEMIES`.
+  - The test of the seam is deletability, and the accurate statement of it is: **the core**
+    does not name `Scaffolding`. Deleting the directory needs the composition root edited
+    with it — `Program.cs` both `using`s the namespace and constructs the phase, by design,
+    because deciding what the game is what a composition root is for. Verified: deleting
+    the directory fails with `CS0234` at `Program.cs:7`, and after removing those two
+    references the core builds clean with no other change. An earlier wording of this entry
+    claimed the server builds with the directory simply removed, which is false as written.
+  - **`Health` and `Combat` deliberately stayed in `World/Components.cs`.** They read like
+    gameplay, but `hp` and `max_hp` are first-class fields in `wire.proto` and in the
+    `EntityState` the Unity client compiles as source at `sgl-v0.1.6`. They are protocol.
+    Moving them would change what the client compiles against — disqualifying under ADR-10.
+    The comment there now says so, because the next reader will try to tidy them away.
+  - Directories, not assemblies: `ArchAotHintTests` reflects over the assembly to prove
+    every component type has a `T[]` hint, and splitting the scaffolding out would put
+    components beyond that guard's reach — the same guard that caught a missing `EnemyAi`
+    hint in stage 2. The seam is worth having; it is not worth blinding the AOT check for.
+  - Scope check: the scaffolding is ~200 of ~13 000 lines in `GameServer/`, and only three
+    files referenced it. The boundary already existed in practice; this names it and stops
+    the core reaching across it.
+  - **Gameplay written against this seam must be ECS** — systems and queries over
+    components, per ADR-12. `ISimulationPhase` is the host's call into that work, not a
+    licence to put simulation state in a class.
+  - No behaviour change, and the evidence for each part of that separately, because the
+    digests do not cover as much as they sound like they do: `SnapshotByteIdentityTests`
+    builds its loop with `simulationPhase: null`, so its unchanged pre-refactor digests
+    prove the **phase-less** path is byte-identical and say nothing about snapshots
+    containing enemies. Enemy behaviour is covered instead by the stage-2 characterization
+    tests, which were written against the pre-split shape and are unmodified here. That the
+    phase call site kept its position relative to input application and snapshot building
+    is established by reading the diff, not by any test. Golden vectors untouched;
+    575 passed / 0 failed / 1 skipped.
+  - **Known leak, not fixed here.** `ISimulationPhase.TrackedEntityCount` exists only to
+    feed `GameServerHost.EnemiesAlive` on the status endpoint, which renames it straight
+    back to a content word — so the core carries a gameplay-shaped concept end to end while
+    claiming to attach no meaning to it. It is one int and the status JSON is unchanged, but
+    it will not compose: a second phase means one number for two owners. The shape that
+    would compose is a per-phase diagnostics contribution (name → count).
+  - **The ECS rule behind this seam is honour-system, and should not stay that way.**
+    `Tick(ulong)` passes neither world nor writer, so an implementer must capture `EcsWorld`
+    itself — which is exactly the shape that invites private simulation state beside it.
+    `EnemySpawner` behaves, but nothing in the signature requires it. Handing the phase a
+    writer would make drift hard rather than merely discouraged; that conflicts with the
+    phase opening its own scope so its structural drain lands once, before snapshots, and
+    the tension is unresolved on purpose rather than papered over.
+
+- **Snapshot encoding and serialization moved off the tick thread (ECS migration,
+  stage 4).** The tick used to build every viewer's `SnapshotMessage` and
+  protobuf-serialize it before handing the envelope to the connection's write
+  task. Now the tick only *gathers* — it stages each viewer's AOI view on its own
+  connection and signals — and the connection's existing write task encodes and
+  serializes immediately before the write.
+  - **Tick-thread allocation at 200 players: 192 935 → 32 B/tick.** Paired
+    in-process A/B against `develop`, three runs each side, deterministic to a
+    couple of bytes.
+  - Ordering is **structural, not disciplinary**: each connection has one write
+    task reading one channel, so tick N+1's frame cannot overtake tick N's. The
+    send queue carries a `SendItem` that is either a built envelope or a "snapshot
+    staged" marker, so both kinds share that one ordered path.
+  - The AOI buffer is **double buffered**. Two is provably enough: a buffer is only
+    handed to the encoder when a job is claimed, and an unclaimed job is overwritten
+    in place, so at most one buffer is being encoded and one being filled.
+  - **Ticks and snapshots are no longer 1:1 when the writer lags — a real, intended
+    behaviour change.** Previously the tick encoded every snapshot and queued the
+    finished envelope, so a lagging client eventually received *all* of them: a
+    backlog of stale positions, late. Now it receives fewer, fresher ones. For a
+    realtime game that is the better trade, but it is a change in observable
+    behaviour and not merely an internal one.
+    Two tests asserted the 1:1 ratio and now assert what actually holds.
+    `ClientApplyingDeltas_ReconstructsServerStateExactly` asserts that the client's
+    reconstructed state equals the server's exactly — the stronger statement, and
+    the one the delta protocol exists to guarantee.
+    `DeltaEncoding_UsesLessBandwidthThanFullSnapshots` compared raw byte totals
+    across two runs of assumed-equal length; it now compares **bytes per
+    snapshot**, because with coalescing the two runs can deliver different counts
+    and a total-versus-total comparison would measure the coalescing rather than
+    the encoding. That one only failed in CI, where the runner is slower than this
+    machine and the writer lagged once in a hundred ticks.
+  - **Back-pressure: coalesce to newest, and it loses nothing.** If the writer has
+    not claimed the staged snapshot, the next gather overwrites it. Nothing is lost
+    because encoding is lazy — a snapshot that was never encoded never advanced the
+    delta encoder's `_lastSent`, so the next one encoded carries every change since
+    the last snapshot *actually sent*.
+
+### Fixed
+- **Snapshots dropped under load no longer lose state until the next keyframe.**
+  This is a pre-existing bug the restructuring removes rather than a new feature.
+  The old order was: encode on the tick (advancing `_lastSent`), then hand the
+  envelope to a bounded channel that drops the oldest when full. A dropped frame's
+  updates were therefore recorded as sent and never retransmitted — the affected
+  entities stayed stale on that client for up to a full keyframe interval. With
+  encoding moved to the moment of writing, a frame that is never sent is also never
+  encoded, so its changes roll into the next one.
+  `SnapshotPipelineTests.StalledClient_CoalescesToNewest_AndLosesNoState` stalls a
+  client for 80 ticks, releases it, and reconstructs the client's merged view to
+  assert it matches the world exactly.
+
+### Added
+- **`SnapshotPipelineTests` — end-to-end guards on the threaded path.** Unlike
+  `SnapshotByteIdentityTests`, which reproduces bytes from public inputs, these
+  capture what the write task *actually wrote to the stream*, through a recording
+  transport that can also be stalled on demand. They cover the four things that
+  are not provable by inspection once encoding is concurrent: bytes identical to
+  the reference encoder (Protobuf and JSON), strictly increasing tick order per
+  connection, lossless coalescing under a stalled client, and a closed or disposed
+  connection mid-broadcast neither throwing into the tick nor stalling it.
+
+### Measured
+- Paired in-process A/B against `develop`, Release, three runs per side. The probe
+  runs the connections' write tasks, so the encoding really happens somewhere —
+  without that the work would be *skipped* rather than moved and the number would
+  be a fiction. It reports bytes reaching the transport as proof.
+
+  | | `develop` | this branch |
+  |---|---|---|
+  | tick-thread alloc, 200 players | 192 935 B/tick | **32 B/tick** |
+  | tick-thread alloc, 50 players | 21 628 B/tick | **160 B/tick** |
+
+- **Wall-clock is not claimed.** Tick time was lower in all three paired runs
+  (~1.9–3.1 ms → ~1.2–1.8 ms at 200 players) but this host's spread on an unchanged
+  binary is ±50%, so the honest statement is: the work demonstrably left the tick
+  thread, and how much that is worth in wall time is not measurable here.
+- **Total CPU is unchanged.** This moves work, it does not remove it. It is a win
+  where there are spare cores and roughly a wash on a single-vCPU pod. Nothing here
+  makes encoding cheaper — that would be a different change.
+
 ### Known issues (observed, not fixed here)
-- **`TransferMapTests` is flaky under a full parallel `dotnet test` run.** Two of
-  its cases intermittently fail with
-  `System.Net.Sockets.SocketException : Address already in use` at
-  `TcpListener.Start` (via `TransportFactory.Listen` -> `GameServerHost.RunAsync`).
-  The cause is a TOCTOU race in the test's own port helper,
-  `GameServer.Tests/Server/TransferMapTests.cs` `FreeTcpPort()`: it binds port 0,
-  reads the assigned port, **closes the listener**, and only then does the server
-  bind that port — so any concurrently-running test can take it in the gap. It is
-  a defect in the test harness, not in the server: the class passes 3/3 when run
-  in isolation (`dotnet test --filter FullyQualifiedName~TransferMapTests`).
-  Observed as 2 failed / 519 passed / 10 skipped on a full run. Left unfixed
-  deliberately; a fix means holding the listener until the server takes over, or
-  serialising the class.
+- **Two bugs were introduced during this stage and caught before merge**, both worth
+  recording because neither would have failed loudly. The first: gating the "snapshot
+  staged" marker on *no job already pending* looks like an obvious optimisation and is
+  a **permanent starvation bug** — the send queue is bounded and drops the oldest item
+  when full, so a dropped marker would have left the job pending forever and that
+  connection would have stopped sending snapshots for the rest of its life, silently.
+  Markers are now unconditional and surplus ones are free. The second: the gather read
+  its buffer index outside the lock while the write task flipped it, so a slow gather
+  could write into the buffer being encoded. Buffer selection now belongs to the tick
+  thread alone and only advances when the previous job was claimed.
+- **The premise the stage was commissioned on does not reproduce.** The analysis
+  cited a ~5:1 serialization:AOI ratio and called serialization "the real 80%".
+  Measured at 200 players, splitting the old phase B by hand: AOI gather ~874–1177
+  µs/tick, `SnapshotDeltaState.Encode` ~998–1272 µs/tick, and protobuf
+  `ToByteArray` **~79–144 µs/tick**. Serialization proper is **4–6% of the tick**,
+  not 80%. The two dominant terms are the brute-force AOI scan (O(viewers ×
+  entities); a spatial index is the standing "production" item) and the delta/message
+  building inside `Encode` — which allocates 134 699 B/tick at 200 players, almost
+  all of it `EntitySnapshot` objects, and is a **pooling** problem rather than a
+  threading one. Stage 4 still pays for itself because it moves *both* Encode and
+  serialize off the tick, but the next real win is one of those two terms, not more
+  threading.
+- At 200 players in the probe the write tasks could not keep up with 15 Hz and
+  coalescing engaged (wire bytes 35 030 → 30 638 B/tick). That is the designed
+  policy working, and it is lossless, but it does mean 200 players on this host is
+  already past the encoder's throughput.
+
+### Changed
+- **The snapshot broadcast is two phases: read the world for every viewer under one
+  lock, then encode and send under none (ECS migration, stage 3 of 3).** Each
+  viewer used to take the world read lock twice — once for its AOI anchor, once
+  for its AOI scan — so a 200-player tick acquired it 400 times, and serialization
+  ran interleaved with world reads. `TickLoop.TickOnce` now calls
+  `EcsWorld.ReadAll` once, gathers every connection's anchor and AOI into buffers
+  the connection owns, leaves the scope, and only then encodes.
+  - New `WorldReader`, the read-side counterpart of `WorldWriter`: a scope object
+    with the lock already held, so `Connection.GatherSnapshotView` can read without
+    re-acquiring per call.
+  - `ConnectionManager.CopyTo(Span<Connection>)` gives the broadcast a stable list
+    it can walk twice without holding an enumerator or a delegate across the two
+    phases. Same count-don't-saturate contract as everything else here.
+  - The per-tick `ForEach(conn => ...)` delegate allocation is gone; the gather
+    callback is built once.
+  - The viewer scratch array is cleared after each broadcast, so a dropped
+    connection is not kept alive by a stale slot until some later tick overwrites
+    it.
+  - **Trade, stated rather than buried:** a join or leave arriving mid-broadcast
+    now waits for the whole gather instead of slipping between two viewers. The
+    gather is position tests over chunk spans with no serialization in it, which is
+    exactly why serialization was moved out of the locked phase rather than left
+    inside it.
+
+### Added
+- **A wire byte-identity test, generated before the change and unchanged by it.**
+  `SnapshotByteIdentityTests` drives a fully deterministic scenario — enemy spawner
+  disabled, since it draws from `Random.Shared` — through the real tick loop for
+  120 ticks and SHA-256s the exact bytes of every snapshot envelope, for Protobuf
+  and for legacy JSON separately. The expected digests are literals in the test,
+  not a file, because the one thing that would destroy this test's value is
+  regenerating it to make it pass. It covers what a spot check cannot: an ordering
+  change, a keyframe landing a tick early, a despawn arriving late. Protobuf is
+  pinned separately because entity-id interning allocates handles in AOI arrival
+  order, which is the most order-sensitive thing downstream of this stage.
+
+### Measured
+- Paired in-process A/B against `develop`, Release, whole `TickLoop.TickOnce`:
+  **21 692 → 21 628 B/tick at 50 players (−0.3%)**, and **192 956 → 192 949 B/tick
+  at 200 players** — the latter is noise. Byte-identical across paired runs.
+- **This stage buys no measurable throughput, and that was the expectation going
+  in.** The AOI inner loop was already chunk-iterating and compose-free, and its
+  per-client allocation was removed in stage 1; there was nothing left there to
+  win. The −64 B/tick is the one delegate. What did change is not measurable in
+  bytes: read-lock acquisitions per tick went from **2 per viewer to 1 in total**
+  (400 → 1 at 200 players), and the broadcast now has a boundary it did not have.
+- ADR-12 decision 7 makes that a recorded result rather than a failure. Whether the
+  extra type is worth the boundary is a judgement call, and it is recorded as one.
+
+### Notes
+- **This makes moving serialization off the tick easier, not harder** — the
+  question that decides whether a stage 4 is worth having. Serialization still runs
+  inside the tick (`WireProtocol.NewEnvelope` in `TickOnce`; `conn.Send` only
+  enqueues), and `BENCHMARK.md` section 9 still lists moving it off as outstanding.
+  It could not be lifted out before, because encoding was interleaved with locked
+  world reads per viewer — there was no point in the tick where a viewer's snapshot
+  input existed independently of the world. After phase A there is: every
+  connection holds a self-contained view with no world reference and no lock
+  dependency, so phase B can be handed to another thread without touching
+  `EcsWorld` at all. That is the whole reason to keep this stage.
+
+### Changed
+- **The enemy AI is three systems over an archetype query, not one method over a
+  list of ids (ECS migration, stage 2 of 3).** `EnemySpawner.Tick(get, set, tick)`
+  walked a `List<string>` of enemy ids, resolved each through the world's string
+  index, composed a whole `EntityState`, mutated the copy and wrote all seven
+  components back — every enemy, every tick. The id list was a second source of
+  truth for "which entities are enemies", kept in step with the world by hand.
+  - Split into `EnemySpawnSystem`, `EnemyMoveSystem` and `EnemyReapSystem`, run in
+    `EnemyAiPhase` order inside one world write scope. **Order is load-bearing**:
+    spawn first so a new enemy takes its first step on the tick it appears (the
+    original got that by spawning into the list it was about to walk, and it is
+    visible in the snapshot); reap last, because "arrived at the centre" is a fact
+    the move system produces earlier in the same tick.
+  - **`[UpdateInGroup]` was not used, because there is no server-side group tree.**
+    The one in the codebase belongs to the Unity *client* package and is DOTS'
+    scheduler. The attribute-driven option server-side would be `Arch.System`'s
+    source generator, which ADR-12 decision 4 bans: `ArchAotHintTests` reflects over
+    component structs and cannot enumerate generated query shapes, so adopting it
+    would create AOT surface no test can see. Ordering is therefore explicit and
+    total, and `EnemyAiPhase` documents why each position is the only correct one.
+  - New `EnemyAi` archetype tag, queried instead of scanning for
+    `EntityKind.Value == "mob"`. **Enemy-ness is ownership, not type**: the suite
+    creates static mobs constantly and one placed by anything other than the spawner
+    must stay where it was put, so the tag is applied only at spawn and is
+    *preserved, never re-derived*, when an existing entity is written back. Deriving
+    it from the type string would have put every test mob on a march to the origin,
+    and re-deriving it on update would have stripped it from any enemy written back
+    through `AddEntity` — which the combat path does on every hit.
+  - `AliveCount` is now a count over that archetype rather than `_enemyIds.Count`,
+    so it is answered by the world and cannot disagree with it.
+  - **Structural operation kinds are still exactly *add* and *remove*.** Spawning
+    and reaping are what ADR-12 predicted would wake this, and neither needed a
+    third kind: `EnemyAi` is applied at creation, so it rides on the add as a tag
+    payload rather than as an add-component op. Arch's `CommandBuffer` remains
+    unused and unusable (ADR-11).
+  - Despawns now go through the deferred structural phase inside the write scope.
+    The old shape could not: it collected ids into `PendingRemovals` which the tick
+    loop drained *after* releasing the lock, because `RemoveEntity` inside the lock
+    would have deadlocked on it. Both orderings apply removals before the snapshot
+    broadcast, which is what stops a client from ever seeing an enemy inside the
+    despawn radius — now checked on every tick of a 400-tick run rather than
+    assumed.
+  - `ArchAotHints.cs` gained its `new EnemyAi[1],` line in the same commit. The
+    guard was verified to fire: deleting that one line builds clean, and
+    `ArchAotHintTests` fails naming `EnemyAi`.
+
+### Added
+- **Characterization tests for the enemy AI, which had none.** Written against the
+  original `Tick(get, set, tick)` and left **unmodified** across the system split —
+  the fact that all 14 pass on both shapes is the parity evidence, and editing them
+  during the refactor would have destroyed it. They pin the constants and the
+  arithmetic as they are, not as they ought to be, including the deliberate
+  non-use of `MovementSystem`.
+
+### Measured
+- Enemy AI phase, paired in-process A/B against `develop`, Release, 600 ticks after
+  a 400-tick warm-up: **367 B/tick → 172 B/tick (−53%)**, identical to the byte
+  across three paired runs on each side.
+- **In context this is small, and that is the honest result.** At 50 connected
+  players the same probe moves the whole tick from 49 949 to 49 767 B/tick — a
+  **0.36%** cut, because snapshot encoding dominates by two orders of magnitude and
+  stage 2 does not touch it. ADR-12 makes "measures little at its own level" a
+  stop-and-keep-what-landed rather than a failure; the structural result (one source
+  of truth for enemy population, real deferred structural ops, no `PendingRemovals`
+  dance) is the part worth keeping.
+- Wall-clock is not claimed, for the reason given in stage 1: this host's spread on
+  an unchanged binary is ±50%.
+- The enemy population never approaches its cap of 30. Steady state is **4–6**:
+  waves of 2 arrive every 22.5 ticks and take ~63 ticks to walk in, so the cap has
+  never been the binding constraint at the shipped tuning.
+
+### Known issues (observed, not fixed here)
+- **There is no "center-zone damage".** The old `EnemySpawner` class comment and the
+  tick loop's `// Enemy AI: spawn, move, center-zone damage, remove dead` both
+  described a phase that no code has ever implemented — enemies reaching the centre
+  are despawned and nothing is damaged. Nothing was removed in this change; the
+  comments were wrong, and the split is spawn/move/reap because that is what exists.
+  Whether enemies reaching the centre *should* cost the players something is a
+  gameplay decision, not a refactor.
+- **Enemies do not use `MovementSystem`.** The AI carries its own step: unclamped by
+  map bounds, normalised with a reciprocal square root rather than through
+  `ResolveDirection`. Unifying the two would move every enemy onto different floats,
+  so the expression was preserved character-for-character and pinned bit-exactly by
+  `OneTickOfMovement_IsBitExactAgainstTheAisOwnArithmetic`. Unification is a real
+  question with a wire consequence, and it is a decision for the user rather than
+  something to fold into a restructuring.
+- `TickLoop.TickOnce` still allocates a delegate per tick for its
+  `_connections.ForEach(conn => ...)` broadcast, which is most of the 172 B/tick the
+  AI phase now measures. That is the snapshot path — stage 3, not this one.
+
+### Changed
+- **The AOI walk fills a caller-owned buffer instead of allocating a list per
+  client per tick.** `EcsWorld.GetEntitiesInRange` opened with
+  `new List<EntityState>()`, and `TickLoop` called it once per connected client
+  every tick via `SnapshotEncoder.GetNearbyEntities` — at 15 Hz that is one
+  throwaway list per player every 67 ms, plus its growth reallocations, for no
+  reason other than that the caller had nowhere to put the results.
+  - New `GetEntitiesInRange(Vec2, float, Span<EntityState>)` returning the match
+    count. Its overflow contract is **deliberately identical** to the one
+    `Shared.GameLogic/Systems/AoiLogic.cs` already publishes — *count, do not
+    saturate*: on a short buffer the first `destination.Length` matches are
+    written and the scan continues, so the return value is the size the buffer
+    needed to be. A saturating variant would make "full" indistinguishable from
+    "exactly full", which is silent AOI truncation — entities missing from a
+    keyframe with no error anywhere. Two AOI functions in one server with two
+    different overflow contracts would be worse than either contract alone, so
+    `AoiSpanAndInputBindingTests.SpanScan_OverflowContract_MatchesAoiLogic`
+    cross-checks the two directly rather than restating the rule.
+  - Each `Connection` owns the buffer, because its right size is a property of
+    that client's neighbourhood and it has to survive between ticks to be worth
+    anything. `Connection.ScanAoi` implements the retry half of the contract:
+    grow to exactly the needed count and rescan once. A spawn landing between the
+    two scans falls back to the list path for that one tick rather than
+    truncating.
+  - Both the span and list forms now run one scan implementation, so the AOI
+    predicate and iteration order cannot diverge between them — order matters,
+    because the delta encoder's bookkeeping is order-sensitive and a reordering
+    would be a wire change.
+  - `SnapshotDeltaState.Encode` gained a `ReadOnlySpan<EntityState>` overload; the
+    list overload forwards to it via `CollectionsMarshal.AsSpan`, so there is one
+    implementation and existing callers are untouched.
+- **Input is bound to its entity at ingest, so the tick loop no longer touches the
+  world's string index.** `EcsWorld.PushInput` resolves the user id to an
+  `EntityHandle` on the **network** thread, under a read lock that contends with
+  nothing. The simulation thread then never hashes a user id: movement coalescing
+  is keyed by handle (an integer hash) rather than by a `Dictionary<string, int>`,
+  and the handler addresses the entity directly.
+  - `_index` remains, and is still the authority for join, reconnect and
+    persistence. It is simply no longer on the per-input path.
+  - A handle can go stale between ingest and drain — a disconnect inside the hold
+    window destroys the entity and a reconnect creates a different one.
+    `EcsWorld.RebindStale` re-resolves exactly those entries at the top of the
+    input phase, costing a lookup only for entries that are actually stale
+    (normally none). This preserves the old behaviour, which resolved at process
+    time and so always addressed the *current* entity; `PendingInput` keeps the
+    user id for that reason and for logging.
+  - Arch's `Entity` is a stable identity rather than a slot pointer, so a handle
+    survives archetype moves and chunk compaction. Destruction is the only thing
+    that invalidates it, which is why revalidation is a liveness check and not a
+    re-resolve.
+  - `DrainInputs` gained an overload that drains into a caller-owned list, so the
+    tick reuses one list instead of building a new one every tick.
+- **The per-tick input path now addresses components, not whole entities (ECS
+  migration, stage 1 of N).** Arch has been the storage engine since ADR-10, but
+  nothing above it was written as an ECS: `EcsWorld.Update(get, set)` handed
+  callers a getter that composed a whole `EntityState` out of seven components and
+  a setter that wrote all seven back. Moving a player therefore cost fourteen
+  component lookups plus two managed-reference stores — `EntityIdRef` and
+  `EntityKind` were rewritten on every input even though neither can change after
+  spawn — to update a position and an input cursor. That is Arch used as a
+  dictionary with extra steps, and it is the shape this change starts unwinding.
+  - New `EcsWorld.UpdateComponents(Action<WorldWriter>)`: the same write lock and
+    the same deferred structural phase as `Update`, but the callback receives a
+    `WorldWriter` giving `ref` access to individual components. `EntityHandle`
+    wraps Arch's `Entity`, so no `Arch.Core` type became public and
+    `Shared.GameLogic` still never sees the ECS.
+  - The string id is now resolved **once per entity per scope** rather than on
+    every read and every write. This is the first half of ADR-10's integer
+    simulation handle; the string id survives unchanged on the wire, in
+    persistence and in `EntityState.Id`, which are separate migrations.
+  - `InputHandler.ProcessInput` reads `Health`, `InputCursor`, `Position` and
+    `Locomotion` and writes `Position`, `InputCursor` and `Combat` in place.
+  - `TickLoop`'s per-connection snapshot prologue was `View(get => ...)`, which
+    composed an entire `EntityState` to read two fields and allocated a closure
+    per connection per tick to carry them out of the lambda. It is now
+    `EcsWorld.TryGetSnapshotAnchor`, reading `Position` and `InputCursor` directly
+    and allocating nothing.
+  - **Measured end to end, whole `TickLoop.TickOnce`**, same probe run on this
+    branch and on `develop` (Release, real `Connection` objects over a null
+    transport, Protobuf encoding, clustered so AOI actually matches):
+
+    | players | develop | this branch | |
+    |---|---|---|---|
+    | 50 | 436 276 B/tick | 21 692 B/tick | **20x** |
+    | 200 | 6 762 858 B/tick | 192 984 B/tick | **35x** |
+
+    Allocation is deterministic — three paired runs at 200 players spread under
+    0.05% on both sides. **Wall-clock is not reported as an improvement**: paired
+    medians moved ~3.7 ms -> ~2.0 ms per tick, but this host's run-to-run spread on
+    the same binary is +-50% (2.9-4.5 ms on `develop` alone), which is the
+    contamination ADR-7 documents. The allocation number is the claim; the timing
+    is directional at best.
+  - **No arithmetic was re-derived.** The movement step still calls
+    `MovementSystem.TryMove`; it is handed the three fields `TryMove` reads instead
+    of a fully composed entity. That field selection is the one new assumption, and
+    it is the kind that fails silently, so
+    `ComponentInputPathTests.Movement_ComponentPath_IsBitExactAgainstWholeEntityTryMove`
+    replays every position/speed/move/bounds combination in the ADR-10 movement
+    fixture through the real handler and compares the stored position bit-for-bit
+    against `TryMove` called with a fully populated `EntityState`. The golden
+    vectors themselves are untouched and still pass.
+  - **No new components and no new archetypes**, so `World/ArchAotHints.cs` is
+    unchanged and `ArchAotHintTests` still covers everything the process can
+    create. `CommandBuffer` is still unused (ADR-11). NativeAOT publish verified.
+  - The attack branch still composes whole `EntityState` values, because
+    `CombatLogic.ValidateAttack` / `CalculateDamage` / `HandleDeath` and the death
+    callback are `Shared.GameLogic` entry points shaped that way, and
+    `Shared.GameLogic` is deliberately not being changed. Its write-back is already
+    component-level. Removing that round trip needs a decision about
+    `Shared.GameLogic`'s API surface and is not stage 1's to make.
+  - `EnemySpawner` and `AsyncSaver` still use the `EntityState` API — stage 2 and
+    a later stage respectively. Left alone on purpose: this change is meant to be
+    revertible on its own.
+  - **Structural operation kinds are unchanged**: the deferred queue drained by
+    `ApplyStructuralChanges` still carries exactly *add* and *remove*. Stage 1's
+    systems need no add/remove-component op, and the machinery for one is not
+    being built before something uses it (ADR-12 decision 2).
+  - **A per-entity pending-input component was considered and rejected.** It would
+    hold at most one input per entity per tick, but the server processes *every*
+    queued input for attacks and only the newest for movement — collapsing them
+    into one component would drop attacks under multi-input ticks, which is a wire
+    change. Binding the handle to the queue entry achieves the same "resolve once,
+    at ingest" property with no behavioural cost.
+  - **No new component types**, so `ArchAotHints.cs` is unchanged and the hint list
+    is still complete (ADR-12 decision 3). No `Arch.System` source generator, so no
+    query shape the reflection guard cannot enumerate (ADR-12 decision 4).
+
+### Known issues (observed, not fixed here)
+- **A self-targeted attack applies its cooldown and fires the death callback, but
+  its damage is discarded.** This is not new and it is not a rule anyone wrote: the
+  old `get`/`set` input path ended with `set(userId, attackerCopy)`, which
+  overwrote the target write whenever attacker and target were the same entity, so
+  the HP change was silently rolled back after `HandleDeath` had already run and
+  already notified. Component writes have no such last-writer-wins accident, so the
+  new path would have *changed* the observable outcome. Since stage 1 promises no
+  wire-visible change, `InputHandler.ProcessInput` now discards that write
+  explicitly, and `ComponentInputPathTests.SelfTargetedAttack_KeepsCooldownButDiscardsDamage_MatchingPreviousBehaviour`
+  pins it — so a later change that decides to fix the oddity has to delete a test
+  that states what it is deleting, rather than change behaviour by accident.
+
+### Added
+- **One shared way for tests to get a bound port: `GameServer.Tests/Infrastructure/TestPorts.cs`.**
+  This is the deliverable; the classes it fixes are incidental. Seven copies of the
+  same eight-line `FreeTcpPort()` helper existed across the test project — bind
+  port 0, read the number, **close the listener**, hand the number to whoever
+  binds next — and every copy carried the same TOCTOU window, in which any
+  sibling test could take the port and produce
+  `SocketException : Address already in use`. Fixing one copy (`TransferMapTests`,
+  previous entry) taught the other six nothing, which is precisely the argument
+  for a single implementation. All seven are deleted, plus an eighth inline copy
+  in `MetricsEndpointTests`.
+  - **`TestPorts.StartServerAsync(server, ct)`** — for anything that runs a
+    `GameServerHost`: starts it on `":0"` and reads the port back out of the
+    listener via `ListeningAddressAsync`. Nothing is predicted and nothing is
+    released, so there is no window at all. It also replaces the connect-and-retry
+    probes that were standing in for "is it up yet" — the bind completing *is* the
+    answer. Used by `EntityLifecycleTests`, `GameServerHostShutdownTests`,
+    `JoinTokenSecretTests`, `MapIdReloadIntegrationTests`,
+    `PostgresPersistenceIntegrationTests`.
+  - **`TestPorts.Lease`** — for a binder that cannot report what it bound and must
+    be told a number up front. The socket is *held* until the instant before the
+    handoff. This is documented as a narrowing, not a fix: the port is still free
+    between `Dispose()` and the real bind.
+  - **Docker fixtures use a third answer.** `EphemeralPostgres` publishes
+    `-p 127.0.0.1:0:5432` and asks docker what it assigned
+    (`TestDocker.PublishedPort`, i.e. `docker port <name> 5432/tcp`). Docker's own
+    bind is the allocation, so the port is occupied from the moment it exists —
+    the strongest of the three. `TestDocker.FreeTcpPort` is gone.
+    **`EphemeralRedis` deliberately does not do this**, and the reason is worth
+    recording: that fixture exposes `Stop()`/`Start()` to simulate an outage, and a
+    container published on `":0"` is given a *different* host port each time it
+    starts. Converting it made
+    `RedisOutage_DoesNotKillTheService_AndItReRegistersOnReconnect` fail on every
+    single run — `RegistrationService` reconnects to the address it was given at
+    construction, and that address had moved. Caught by the ten-run requirement,
+    which is the second time that rule has paid for itself. It uses a `Lease`.
+
+  The one case the `":0"` pattern genuinely cannot serve is `MetricsEndpointTests`:
+  it exercises `MetricsEndpoint`, which binds an `HttpListener`, and `HttpListener`
+  prefixes require a literal port, have no ephemeral-bind mode, and report nothing
+  back. That class uses a `Lease`. Its observed failure mode is consistent with the
+  release-immediately helper handing the *same* port to more than one of the four
+  parallel `[Theory]` cases — the kernel will re-issue a port it has just taken
+  back — and leases held concurrently cannot collide, so that part is closed even
+  though the final handoff is not atomic.
+
+  **Measured, 10 consecutive full-suite runs each side, both on the same base**
+  (559 tests, same host, unmodified tree in a scratch worktree vs this change):
+
+  | | baseline | with the harness |
+  |---|---|---|
+  | fully green runs | 6/10 | **9/10** |
+  | `MetricsEndpointTests` | 4 runs | **0** |
+  | `JoinTokenSecretTests` | 1 | **0** |
+  | `GameServerHostShutdownTests` | 1 | **0** |
+  | `RegistrationServiceTests` | 0 | **0** |
+
+  The one failing run afterwards failed on `EcsWorldTests.ConcurrentAccess_NoDeadlock`
+  and `RedisServerRegistryTests.Heartbeat_ReArmsTtl` — neither a port bind, both
+  passing 6/6 in isolation, and neither touched here.
+
+  **What these numbers can and cannot show.** They are a probability, measured on
+  one host on one day. A race's rate moves with scheduling — the ECS stage-1 work
+  that cut per-tick allocation shifted it enough that three consecutive suites on
+  the same base showed none of these classes failing at all. So read the table as
+  corroboration, not proof. What is actually proven is structural and does not
+  depend on any run: the eight TOCTOU copies are gone from the source, and every
+  `GameServerHost` consumer now learns its port from the listener instead of
+  predicting it, which removes the window rather than shrinking it. The one place
+  a window remains is `MetricsEndpointTests`, and it is documented as remaining.
 
 ### Added
 - **`docs/API.md`: map transfer (13/14) and the KCP transport are now documented
@@ -59,6 +686,66 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     `Shared.GameLogic` and implements the listener side.
 
 ### Fixed
+- **`TransferMapTests` is deterministic again — it had *three* independent races,
+  and only one of them was the one previously written down here.** The known-issue
+  entry described the port race alone; the failure that took CI red on `develop`
+  was a second one, and repeat-running the suite locally (10x) exposed a third
+  that no single run had shown. All three are defects in the test, not the server.
+  - **Race 1 — the port (TOCTOU, `SocketException : Address already in use`).**
+    The old `FreeTcpPort()` bound port 0, read the assigned number, **closed its
+    listener**, and handed the number to the server, which bound it some time
+    later; any concurrent test could take the port in that gap. Fixed by removing
+    the guess entirely rather than by retrying around it: the harness now starts
+    the server on `":0"` and asks it which port it got. `GameServerHost` gained
+    `ListeningAddressAsync` (`GameServer/Server/GameServer.cs`), a task completed
+    with the bound address the moment `TransportFactory.Listen` returns — the
+    transport already resolved ephemeral binds, the address just was not
+    reachable from outside. There is no window left to lose: the socket the
+    server reports is the socket the server is listening on. It is faulted if the
+    bind throws and cancelled on shutdown, so a waiter cannot hang on a server
+    that never came up. This also deletes the harness's connect-retry loop —
+    "the listener is bound" is now a fact, not something to poll for.
+  - **Race 2 — the online gauge (`Assert.Equal() Failure: Expected: 0 /
+    Actual: 1` at `TransferMapTests.cs:57`).** The test waited for
+    `EntityCount == 0` and then asserted on `metrics.PlayersOnline`, a different
+    counter updated on a later line: `HandleTransferMap` removes the entity
+    (`_world.RemoveEntity`) and only *then* decrements the gauge
+    (`_metrics.PlayerLeft()`). The waited-for condition is therefore reached
+    strictly before the asserted one, and any preemption in that window — likely
+    on a loaded CI runner, rare on an idle laptop — failed the test. Fixed by
+    waiting for the condition actually being asserted
+    (`EntityCount == 0 && PlayersOnline == 0`). **The server is not at fault and
+    was not changed for this**: nothing promises the two counters move
+    atomically, and reordering them would only move the same window elsewhere.
+    The timeout was not touched — it was already 15s, and the failure was an
+    ordering bug, not a slow machine. `WaitForAsync`'s failure message now prints
+    the gauge alongside the entity count, since `entities=0` on its own reads
+    like a passing state.
+  - **Race 3 — the reply is not the next frame (`Expected: 14 / Actual: 8`).**
+    Each test wrote a request and then decoded exactly one envelope, assuming it
+    was the reply. It is not: the tick loop broadcasts snapshots at `TickRate`
+    (20 Hz in these tests), so a snapshot emitted between the request and the
+    reply arrives first and the assert reads message type 8 (`Snapshot`) where 14
+    (`TransferMapResp`) was expected. This one never reproduced in a single run —
+    it took repeat runs of the full suite to surface, which is why the earlier
+    known-issue entry missed it. Fixed with a `ReadUntilAsync(stream, want)`
+    helper that decodes until the awaited type arrives; the join handshake reads
+    through it too. It skips only the types the server legitimately pushes
+    unsolicited (`Snapshot`, `Pong`, `Resync`) and fails hard on anything else,
+    so it cannot mask a wrong reply.
+  - **Evidence.** 10 consecutive full-suite `dotnet test` runs (531 tests each)
+    plus 5 runs of the class in isolation: **0 `TransferMapTests` failures**,
+    where the same 10-run loop before the fix failed it 3 times. A single green
+    run proves nothing here — the CI failure this started from went green on a
+    plain re-run with no source change.
+  - **Not fixed, and not caused by this change:** the same repeat-run loop shows
+    `GameServerHostShutdownTests`, `RegistrationServiceTests.Heartbeat_*`,
+    `MetricsEndpointTests.TryStart_*` and `JoinTokenSecretTests` failing
+    intermittently under load, the last of them with the same "Address already in
+    use" signature — those classes still carry their own copy of the racy
+    `FreeTcpPort()`. Verified against an unmodified tree (4 full-suite runs), so
+    they predate this work. Porting the `":0"` + `ListeningAddressAsync` pattern
+    to them is the obvious follow-up.
 - **The KCP cross-language interop tests were silently skipping; they run again,
   and they pass.** All nine `KcpInteropTests` cases reported as *skipped* rather
   than failed because the Go probe they drive, `interop/kcpprobe`, no longer

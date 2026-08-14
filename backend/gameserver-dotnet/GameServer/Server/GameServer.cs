@@ -5,7 +5,7 @@ using System.Net.Sockets;
 using Microsoft.Extensions.Logging;
 using Shared.GameLogic.Components;
 using GameServer.Agones;
-using GameServer.AI;
+
 using GameServer.Events;
 using GameServer.Input;
 using GameServer.Net;
@@ -78,11 +78,32 @@ public class ServerOptions
     public IServerRegistry? ServerRegistry { get; set; }
 
     /// <summary>
-    /// Enable server-side enemy spawning. When true, the tick loop spawns "mob"
-    /// entities that move toward the center of the map. Default: false (tests
-    /// and custom scenarios opt in explicitly).
+    /// Builds the per-tick simulation phase this host runs, or null for a host that
+    /// simulates nothing of its own and only relays whatever entities exist.
+    ///
+    /// <para>A factory rather than an instance because the phase needs the world, which
+    /// the host owns and creates. A factory rather than a flag because the core must not
+    /// name any particular gameplay: the composition root in <c>Program.cs</c> decides
+    /// what the game is, and this type stays content-agnostic. See
+    /// <see cref="ISimulationPhase"/>.</para>
+    ///
+    /// <para>Default null. Tests and custom scenarios opt in explicitly.</para>
     /// </summary>
-    public bool EnableEnemySpawner { get; set; }
+    public Func<EcsWorld, ILoggerFactory, ISimulationPhase>? SimulationPhaseFactory { get; set; }
+
+    /// <summary>
+    /// Supplies the number published as <c>enemies_alive</c> on the status endpoint.
+    ///
+    /// <para>Set by the composition root, which knows what the game is. Null means the
+    /// server publishes 0 — a content-free build has nothing to count, which is the
+    /// correct answer rather than a missing feature.</para>
+    ///
+    /// <para>This replaced an <c>ISimulationPhase.TrackedEntityCount</c> member. That put
+    /// the number behind a content-agnostic interface whose only consumer immediately
+    /// renamed it after the content, and forced every future phase to summarise itself as
+    /// a single unlabelled int — which stops composing as soon as there are two.</para>
+    /// </summary>
+    public Func<EcsWorld, int>? StatusEntityCount { get; set; }
 
     /// <summary>Nakama HTTP API base URL (e.g. <c>http://rpg-nakama:7350</c>). Null disables economy integration.</summary>
     public string? NakamaUrl { get; set; }
@@ -128,6 +149,22 @@ public sealed class GameServerHost : IAsyncDisposable
     private ITransportListener? _listener;
     private CancellationTokenSource? _cts;
 
+    /// <summary>
+    /// Completed with the bound address once the listener is up, so a caller can learn the
+    /// port an ephemeral (":0") bind actually got. Faulted if the bind throws and cancelled
+    /// if the server shuts down before binding, so a waiter can never hang.
+    /// </summary>
+    private readonly TaskCompletionSource<string> _listening =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>
+    /// The address the listener is bound to ("127.0.0.1:54321"), available as soon as the
+    /// bind succeeds. Callers that listen on ":0" — tests, and any deployment that lets the
+    /// kernel pick — must await this instead of choosing a port up front: picking a port,
+    /// releasing it, and rebinding it later is a TOCTOU race another process can win.
+    /// </summary>
+    public Task<string> ListeningAddressAsync => _listening.Task;
+
     /// <summary>0 until the first ShutdownAsync caller wins the race, 1 afterwards.</summary>
     private int _shutdownStarted;
 
@@ -152,7 +189,16 @@ public sealed class GameServerHost : IAsyncDisposable
     public ulong CurrentTick => _tickLoop.CurrentTick;
 
     /// <summary>Number of enemies currently alive.</summary>
-    public int EnemiesAlive => _tickLoop.EnemiesAlive;
+    /// <summary>
+    /// The number the status endpoint publishes as <c>enemies_alive</c>.
+    ///
+    /// <para>The core does not compute it and does not know what it counts. The
+    /// composition root supplies <see cref="ServerOptions.StatusEntityCount"/> — it is
+    /// the one place that is allowed to know what the game is — and the property name is
+    /// kept because the Unity DOTS sample polls <c>/status</c> and reads that field. The
+    /// name is a wire contract; what fills it is not.</para>
+    /// </summary>
+    public int EnemiesAlive => _options.StatusEntityCount?.Invoke(_world) ?? 0;
 
     public GameServerHost(ServerOptions options)
     {
@@ -198,12 +244,7 @@ public sealed class GameServerHost : IAsyncDisposable
             options.TickRate,
             options.MapBounds);
 
-        EnemySpawner? enemySpawner = options.EnableEnemySpawner
-            ? new EnemySpawner(
-                _world,
-                options.TickRate,
-                _loggerFactory.CreateLogger<EnemySpawner>())
-            : null;
+        ISimulationPhase? simulationPhase = options.SimulationPhaseFactory?.Invoke(_world, _loggerFactory);
 
         _tickLoop = new TickLoop(
             _world,
@@ -214,7 +255,7 @@ public sealed class GameServerHost : IAsyncDisposable
             _loggerFactory.CreateLogger<TickLoop>(),
             _metrics,
             options.KeyframeInterval,
-            enemySpawner);
+            simulationPhase);
 
         _saver = new AsyncSaver(
             _playerStore,
@@ -247,10 +288,26 @@ public sealed class GameServerHost : IAsyncDisposable
 
         // Bind the configured transport. TCP and KCP both yield a reliable ordered
         // stream, so everything above the listener is transport-agnostic.
-        _listener = TransportFactory.Listen(_options.Transport, addr, _options.TransportKey, _logger);
+        try
+        {
+            _listener = TransportFactory.Listen(_options.Transport, addr, _options.TransportKey, _logger);
+        }
+        catch (Exception ex)
+        {
+            // Anyone awaiting ListeningAddressAsync must observe the bind failure rather
+            // than wait for an address that will never arrive.
+            _listening.TrySetException(ex);
+            throw;
+        }
 
         // Log the actual bound address (important when port=0 for ephemeral port allocation)
         var actualAddr = _listener.LocalEndPoint;
+
+        // Publish the bound address before anything else can await it. The socket is already
+        // listening at this point, so a client that connects on this signal lands in the
+        // accept backlog even if the accept loop has not started yet.
+        _listening.TrySetResult(actualAddr);
+
         _logger.LogInformation(
             "Game server listening on {Addr} via {Transport} (mode={Mode}, map={MapId}, id={ServerId})",
             actualAddr, _listener.Kind, _options.Mode, _options.MapId, _options.ServerId);
@@ -314,6 +371,10 @@ public sealed class GameServerHost : IAsyncDisposable
             // Closing the listener also tears down every live KCP session: unlike TCP
             // there is no socket per peer whose close the kernel would propagate.
             try { _listener?.Dispose(); } catch { /* ignore */ }
+
+            // If we are shutting down before the bind ever completed, release anyone waiting
+            // on the address instead of leaving them on a task that will never finish.
+            _listening.TrySetCanceled();
 
             // Drain the hold table by removal so each CTS has exactly one owner. The
             // reconnect path (HandleConnectionAsync) races us for the same entries and

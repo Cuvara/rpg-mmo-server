@@ -63,16 +63,24 @@ public class DeltaSnapshotWireTests : IDisposable
         NetworkStream stream, int count)
     {
         var result = new List<(SnapshotMessage, int)>(count);
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-        while (result.Count < count)
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        try
         {
-            var env = await WireProtocol.DecodeAsync(stream, cts.Token);
-            if (env == null) break;
-            if ((MsgType)env.Type != MsgType.Snapshot) continue;
+            while (result.Count < count)
+            {
+                var env = await WireProtocol.DecodeAsync(stream, cts.Token);
+                if (env == null) break;
+                if ((MsgType)env.Type != MsgType.Snapshot) continue;
 
-            var msg = WireProtocol.GetPayload<SnapshotMessage>(env);
-            string raw = System.Text.Encoding.UTF8.GetString(env.Payload);
-            result.Add((msg, System.Text.Encoding.UTF8.GetByteCount(raw)));
+                var msg = WireProtocol.GetPayload<SnapshotMessage>(env);
+                string raw = System.Text.Encoding.UTF8.GetString(env.Payload);
+                result.Add((msg, System.Text.Encoding.UTF8.GetByteCount(raw)));
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Fewer snapshots than ticks is legitimate: a writer that cannot keep up
+            // coalesces staged snapshots to the newest. Return what arrived.
         }
         return result;
     }
@@ -110,7 +118,15 @@ public class DeltaSnapshotWireTests : IDisposable
         }
 
         var snapshots = await reader;
-        Assert.Equal(ticks, snapshots.Count);
+
+        // Not `== ticks`. Since snapshot encoding moved to the connection's write task,
+        // a writer that lags coalesces staged snapshots to the newest, so ticks and
+        // snapshots are no longer 1:1 under load. That is the designed back-pressure and
+        // it is lossless — which is exactly what the reconstruction below proves, and is
+        // a stronger statement than counting frames. The old shape kept the count at
+        // `ticks` by queueing already-encoded envelopes, so a lagging client received a
+        // backlog of stale positions instead of fewer fresh ones.
+        Assert.InRange(snapshots.Count, 1, ticks);
 
         var merger = new SnapshotMerger();
         foreach (var (msg, _) in snapshots)
@@ -221,15 +237,23 @@ public class DeltaSnapshotWireTests : IDisposable
         var full = await RunAsync(0);   // 0 = delta disabled, full snapshot every tick
         var delta = await RunAsync(GameConstants.DefaultKeyframeInterval);
 
-        Assert.Equal(ticks, full.count);
-        Assert.Equal(ticks, delta.count);
+        // Not `== ticks`. Since encoding moved to the connection's write task, a writer
+        // that lags coalesces staged snapshots to the newest, so the two runs can deliver
+        // slightly different counts. Comparing raw totals across runs of different length
+        // would then measure the coalescing rather than the encoding, which is why the
+        // comparison below is per snapshot.
+        Assert.InRange(full.count, ticks / 2, ticks);
+        Assert.InRange(delta.count, ticks / 2, ticks);
+
+        double fullPer = full.total / (double)full.count;
+        double deltaPer = delta.total / (double)delta.count;
 
         _out.WriteLine($"1 moving player + 8 static mobs, {ticks} ticks @15Hz:");
-        _out.WriteLine($"  full  : {full.total} B total, {full.total / (double)ticks:F1} B/tick/client");
-        _out.WriteLine($"  delta : {delta.total} B total, {delta.total / (double)ticks:F1} B/tick/client");
-        _out.WriteLine($"  saving: {100.0 * (full.total - delta.total) / full.total:F1}%");
+        _out.WriteLine($"  full  : {full.total} B over {full.count} snapshots, {fullPer:F1} B/snapshot");
+        _out.WriteLine($"  delta : {delta.total} B over {delta.count} snapshots, {deltaPer:F1} B/snapshot");
+        _out.WriteLine($"  saving: {100.0 * (fullPer - deltaPer) / fullPer:F1}%");
 
-        Assert.True(delta.total < full.total / 2,
-            $"delta ({delta.total} B) should be well under half of full ({full.total} B)");
+        Assert.True(deltaPer < fullPer / 2,
+            $"delta ({deltaPer:F1} B/snapshot) should be well under half of full ({fullPer:F1} B/snapshot)");
     }
 }

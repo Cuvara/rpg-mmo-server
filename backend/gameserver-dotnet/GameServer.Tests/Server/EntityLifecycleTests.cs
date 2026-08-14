@@ -6,6 +6,7 @@ using GameServer.Net;
 using GameServer.Net.Transport;
 using GameServer.Observability;
 using GameServer.Server;
+using GameServer.Tests.Infrastructure;
 
 namespace GameServer.Tests.Server;
 
@@ -192,10 +193,9 @@ public class EntityLifecycleTests
         public static async Task<Harness> StartAsync(
             GameMetrics metrics, int capacity = 100, TimeSpan? hold = null)
         {
-            int port = FreeTcpPort();
             var options = new ServerOptions
             {
-                ServerAddr = $":{port}",
+                ServerAddr = ":0",
                 ServerId = ServerId,
                 MapId = "map_lifecycle",
                 Mode = "map",
@@ -212,13 +212,10 @@ public class EntityLifecycleTests
 
             var server = new GameServerHost(options);
             var cts = new CancellationTokenSource();
-            var runTask = server.RunAsync($":{port}", cts.Token);
 
-            // Wait for the listener before handing the harness out.
-            using (var probe = new TcpClient())
-            {
-                await ConnectWithRetryAsync(probe, port);
-            }
+            // Binds ":0" and reports the port it got — no guess to lose, and the wait for
+            // the listener is the bind itself rather than a probe-and-retry loop.
+            var (runTask, port) = await TestPorts.StartServerAsync(server, cts.Token);
 
             return new Harness { Server = server, Port = port, Cts = cts, RunTask = runTask };
         }
@@ -291,12 +288,4 @@ public class EntityLifecycleTests
         throw new TimeoutException($"server never started listening on :{port}");
     }
 
-    private static int FreeTcpPort()
-    {
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        return port;
-    }
 }

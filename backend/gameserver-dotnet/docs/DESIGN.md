@@ -965,6 +965,225 @@ iteration" from being an unstated assumption that a future system quietly breaks
 re-entrancy counter that drives it is `[ThreadStatic]`, because same-thread re-entrancy
 is the only case the lock does not already exclude.
 
+### Two ways in: `Update(get, set)` and `UpdateComponents(writer)`
+
+`EcsWorld` exposes the world at two granularities, and which one a caller uses is the
+current dividing line of the ECS migration.
+
+`Update(get, set)` is the original, whole-entity form: `get` composes an `EntityState`
+out of all seven components, `set` writes all seven back. It is convenient and it is
+expensive in a way that scales with how often it is called, not with how much actually
+changed — moving a player costs fourteen component lookups plus two managed-reference
+stores, because `EntityIdRef` and `EntityKind` are rewritten even though neither can
+change after spawn.
+
+`UpdateComponents(Action<WorldWriter>)` takes the same write lock and runs the same
+deferred structural phase, but hands the callback a `WorldWriter`: `Resolve(id)` returns
+an `EntityHandle`, and `PositionOf`/`HealthOf`/`CombatOf`/`LocomotionOf`/`InputCursorOf`
+return `ref` to the individual components. A system then reads what it reads and writes
+what it writes. The string id is paid for once per entity per scope instead of once per
+access — the first half of ADR-10's integer simulation handle, with the wire, the
+persistence layer and `EntityState.Id` all still on strings.
+
+`EntityHandle` wraps Arch's `Entity` so no `Arch.Core` type is public, and it is only
+valid inside the scope that produced it: a structural change can move an entity's slot
+and nothing revalidates a stored handle.
+
+**Who is on which side today.** The per-tick input path and `TryGetSnapshotAnchor` (the
+per-connection AOI centre + ack tick) use the component form. `EnemySpawner`,
+`AsyncSaver`, `GetEntitiesInRange` and the join/leave paths still use the whole-entity
+form. The attack branch of `InputHandler` is deliberately mixed: it composes whole
+`EntityState` values because `CombatLogic` and the death callback are `Shared.GameLogic`
+entry points shaped that way, but its write-back is component-level.
+
+**The AOI scan fills a caller-owned buffer.** `GetEntitiesInRange` used to open with
+`new List<EntityState>()` and was called once per connected client per tick. There is now
+a `Span<EntityState>` overload whose overflow contract is deliberately the same one
+`AoiLogic.GetNearbyEntities` publishes — *count, do not saturate*, so a short buffer
+returns the size it needed to be rather than a saturated length that cannot be
+distinguished from an exact fit. Each `Connection` owns its buffer and grows it once.
+Both forms share one scan implementation: the delta encoder's bookkeeping is
+order-sensitive, so a divergence in iteration order between them would be a wire change.
+
+**Input is bound to its entity at ingest.** `PushInput` resolves the user id on the
+network thread, so the simulation thread never hashes a string — movement coalescing is
+keyed by `EntityHandle`. `_index` is still the authority for join, reconnect and
+persistence; it is just off the per-input path. A handle can be invalidated by
+destruction (not by archetype moves — Arch's `Entity` is a stable identity), so
+`RebindStale` re-resolves the reconnect case at the top of the input phase.
+
+Measured end to end on `TickLoop.TickOnce`, the same probe run on this branch and on
+`develop` (Release, real `Connection` objects over a null transport, Protobuf, clustered
+so AOI matches): **436 276 → 21 692 B/tick at 50 players (20×)** and **6 762 858 →
+192 984 B/tick at 200 players (35×)**. Allocation is deterministic to under 0.05% across
+paired runs. Wall-clock is *not* claimed: this host's spread on one binary is ±50%, which
+is the contamination ADR-7 documents.
+
+**Where the risk moved.** The movement step still calls `MovementSystem.TryMove` — the
+arithmetic is not re-derived, and the golden vectors (ADR-10) are untouched. What is new
+is that it is handed only the three fields `TryMove` reads rather than a composed
+entity, and that assumption would fail *silently* if `TryMove` grew a fourth. So
+`ComponentInputPathTests.Movement_ComponentPath_IsBitExactAgainstWholeEntityTryMove`
+replays every position/speed/move/bounds combination in the movement fixture through the
+real handler and compares the stored position bit-for-bit against `TryMove` called with
+a fully populated `EntityState`.
+
+**One preserved oddity.** A self-targeted attack applies its cooldown and fires the death
+callback but discards its damage. That is the `get`/`set` path's behaviour — its final
+`set(userId, attackerCopy)` overwrote the target write when attacker and target were the
+same entity — and component writes have no such last-writer-wins accident, so the new
+path discards it explicitly to keep the wire output identical. It is pinned by a test
+named after what it is, not fixed here.
+
+### The enemy AI: three systems over an archetype query
+
+The AI is `EnemySpawnSystem` → `EnemyMoveSystem` → `EnemyReapSystem`, run in
+`EnemyAiPhase` order inside one world write scope. It replaced a single
+`Tick(get, set, tick)` that walked a `List<string>` of enemy ids and round-tripped a whole
+`EntityState` per enemy per tick.
+
+**Order is load-bearing, and explicit rather than declarative.** Spawn runs first so a new
+enemy takes its first step on the tick it appears — the original got that by spawning into
+the list it was about to walk, and it is visible in the snapshot. Reap runs last because
+"arrived at the centre" is a fact the move system produces earlier in the same tick.
+There is no `[UpdateInGroup]` because there is no server-side group tree: the one in the
+codebase is the Unity *client* package's DOTS scheduler, and the server-side equivalent
+would be `Arch.System`'s source generator, banned by ADR-12 because `ArchAotHintTests`
+cannot enumerate the query shapes it generates.
+
+**`EnemyAi` is ownership, not type.** Entities carry the tag only if the spawner created
+them, and it is preserved rather than re-derived when an existing entity is written back.
+Deriving it from `EntityKind.Value == "mob"` would put every test-placed mob on a march to
+the origin; re-deriving it on update would strip it from any enemy written back through
+`AddEntity`, which the combat path does on every hit.
+
+**This is where the deferred structural phase earns its keep.** Despawns are raised inside
+the write scope and drained by `ApplyStructuralChangesLocked` on the way out — before the
+snapshot broadcast, so a client never observes an enemy inside the despawn radius. The old
+shape could not do this: `RemoveEntity` inside the lock would deadlock, so ids were
+collected into a `PendingRemovals` list the tick loop drained after releasing it. Op kinds
+are still just *add* and *remove*; `EnemyAi` rides on the add as a tag payload.
+
+**Enemies deliberately do not use `MovementSystem`.** Their step is unclamped by map bounds
+and normalises with a reciprocal square root. It was preserved character-for-character and
+is pinned bit-exactly, because unifying the two movement models would move every enemy onto
+different floats — a gameplay decision with a wire consequence, not a refactor.
+
+Measured: the AI phase went 367 → 172 B/tick (−53%), deterministic across paired runs. In
+context that is **0.36%** of a 50-player tick, because snapshot encoding dominates. Per
+ADR-12 that is recorded, not dressed up.
+
+### The snapshot broadcast: gather under one lock, encode under none
+
+`TickLoop.TickOnce` broadcasts in two phases. Phase A calls `EcsWorld.ReadAll` once and,
+inside that single read scope, has every `Connection` gather its AOI anchor and its
+visible entities into buffers the connection owns. Phase B leaves the scope and encodes
+and sends, touching no world state.
+
+Before this, each viewer took the read lock twice — anchor, then AOI scan — so a
+200-player tick acquired it 400 times, and `WireProtocol.NewEnvelope` ran interleaved
+between those acquisitions.
+
+**The measurable effect is nil and that is the honest summary**: −0.3% allocation at 50
+players, noise at 200. The AOI inner loop was already chunk-iterating and compose-free and
+stage 1 had already removed its per-client list, so there was nothing left there.
+
+**The structural effect is the reason it exists.** Serialization still runs inside the
+tick. It could not be moved out while encoding was interleaved with locked world reads,
+because no point in the tick had a viewer's snapshot input standing free of the world.
+After phase A every connection holds a self-contained view — no world reference, no lock —
+so phase B can move to another thread without `EcsWorld` being involved. Whether to do
+that is BENCHMARK.md §9's outstanding item, and it is the one with a measured case behind
+it.
+
+The trade: a join or leave arriving mid-broadcast waits for the whole gather rather than
+slipping between two viewers. The gather is position tests over chunk spans with no
+serialization in it, which is why serialization was moved out of the locked phase rather
+than left in it.
+
+Wire output is unchanged, and is proven so rather than asserted: `SnapshotByteIdentityTests`
+SHA-256s every snapshot envelope of a deterministic 120-tick scenario, for Protobuf and
+JSON separately, against digests generated before the change.
+
+### Snapshot encoding runs on the connection, not on the tick
+
+The tick stages each viewer's AOI view on its own `Connection` and signals; the
+connection's existing write task encodes the `SnapshotMessage`, serializes it and writes
+it. Tick-thread allocation at 200 players went from 192 935 to 32 B/tick. Total CPU is
+unchanged — this moves work, it does not remove it, so it is a win where there are spare
+cores and roughly a wash on a single-vCPU pod.
+
+**Ordering is structural.** One write task per connection reads one channel, so tick
+N+1's frame cannot overtake tick N's. The queue carries a `SendItem` that is either a
+built envelope or a "snapshot staged" marker, so both share that one ordered path.
+
+**Two AOI buffers, and two is provably enough.** Buffer selection belongs to the tick
+thread and advances only when the previous job was claimed, so the buffer an encoder holds
+is never the one being written, and an unclaimed job is overwritten in place.
+
+**Back-pressure coalesces to the newest staged snapshot, losslessly.** A snapshot that is
+never claimed is never encoded, so it never advances the delta encoder's `_lastSent`, and
+the next one encoded carries every change since the last snapshot actually sent. This
+*fixed* a pre-existing bug: the old order encoded on the tick, advanced `_lastSent`, and
+only then handed the envelope to a bounded channel that drops the oldest under load — so a
+dropped frame's updates were recorded as sent and never retransmitted until the next
+keyframe.
+
+The visible consequence is that **ticks and snapshots are no longer 1:1 when the writer
+lags**. A lagging client now gets fewer, fresher snapshots instead of a backlog of stale
+ones. That is a deliberate behaviour change, not an internal detail.
+
+**Two bugs were made and caught here, both silent by nature.** Gating the marker on "no
+job already pending" is a permanent starvation bug, because the bounded queue drops the
+oldest and a lost marker would have stopped that connection's snapshots forever; markers
+are now unconditional and surplus ones cost nothing. And reading the buffer index outside
+the lock while the write task flipped it let a slow gather write into the buffer being
+encoded.
+
+**What this measured about the tick, which matters more than the change itself.** Splitting
+the old broadcast by hand at 200 players: AOI gather ~874–1177 µs/tick,
+`SnapshotDeltaState.Encode` ~998–1272 µs/tick, protobuf `ToByteArray` ~79–144 µs/tick.
+Serialization proper is 4–6% of the tick, not the 80% the original analysis assumed. The
+two real terms are the brute-force AOI scan (a spatial index is the standing production
+item) and `Encode`'s 134 699 B/tick of `EntitySnapshot` objects, which is a pooling
+problem. Neither is an ECS problem.
+
+### Systems, the schedule, and where simulation state lives
+
+The enemy phase is three `IEcsSystem`s in a `SystemSchedule`, run inside one world write
+scope. Each declares an `Order` and a `ComponentAccess` of reads and writes; ordering is
+declared, not the order three calls happen to appear in, and a duplicate `Order` is
+rejected at construction.
+
+**Systems iterate chunks when the work is per-entity-linear.** `EnemyMoveSystem` walks
+`Span<Position>` and `Span<Health>` through a `SimChunk` view, with the per-chunk body a
+`struct` visitor passed by `ref` so the call devirtualises and nothing is allocated.
+`EnemySpawnSystem` and `EnemyReapSystem` keep handle access on purpose — spawn creates and
+has no array to walk; reap decides per entity and then performs a structural change, which
+needs an identity a component span does not carry.
+
+**Simulation state lives in the world.** The spawner's wave accumulator and id counter were
+private fields on the system — invisible to the world, so unsnapshotable, unpersistable,
+and not reset when the world is. They are an `EnemySpawnState` component on a singleton
+entity that carries only that component, so it matches none of the queries requiring the
+seven standard ones and can never surface in a snapshot, an AOI scan or the entity count.
+`SimulationStateArchitectureTests` now fails the build on any mutable instance field in a
+phase or system, with `[SimulationScratch]` the one sanctioned exception for buffers that
+carry nothing between ticks. It was verified to fire by putting the original field back.
+
+**The core does not name the gameplay.** `CountWith<TTag>()` and
+`QueryWith<TTag>(Span<EntityHandle>)` replaced an `EnemyCount` property and an enemy-named
+query. The status endpoint's number comes from `ServerOptions.StatusEntityCount`, supplied
+by `Program.cs`; the `EnemiesAlive` JSON field name is a client contract and is unchanged.
+
+**Cost of the generator ban.** `SimChunk` exposes one fixed component set because a general
+N-component chunk query needs either a source generator — banned, since the AOT hint guard
+cannot enumerate generated query shapes — or a combinatorial hand-written API. A system
+with a different set means adding an explicit shape or justifying handle access.
+
+This measured nothing: 108 B/tick before and after. Steady state is 4–6 enemies. It was
+taken as a shape change, before gameplay is written against the seam.
+
 ### The `Shared.GameLogic` boundary is unchanged
 
 No `Arch.Core` type appears anywhere in `Shared.GameLogic` — not `World`, not `Entity`,
@@ -973,9 +1192,11 @@ out of components on the way out and writes components back on the way in; the s
 static functions (`MovementSystem.TryMove`, `CombatLogic.*`, `Vec2.DistanceSq`) are
 called with plain structs and never see the ECS.
 
-The cost is a struct copy per entity per read. At the current tick rate and player count
-this is not measurable, and it is the price of keeping the client's prediction code
-free of a pre-1.0 server dependency (ADR-10, "Why not share the ECS").
+The cost is a struct copy per entity per read, on the paths that still compose one — the
+input path no longer does (see "Two ways in", above). It is the price of keeping the
+client's prediction code free of a pre-1.0 server dependency (ADR-10, "Why not share the
+ECS"), and it is why the remaining round trips are being removed one caller at a time
+rather than by reshaping `Shared.GameLogic`.
 
 ### AOT hints: what breaks, and the guard that stops it (ADR-11)
 
