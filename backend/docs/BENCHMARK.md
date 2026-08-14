@@ -1024,3 +1024,44 @@ to minimal: position as two floats, hp/max_hp as varints, and a handle. Further
 wire savings would need to change *what* is sent — delta-encoding positions
 against the previous tick, dropping `max_hp` from every update when it rarely
 changes, or tiering update rate by distance — not how it is encoded.
+
+## 23. Snapshot allocation: what pooling and buffer reuse actually removed
+
+Stage 4's breakdown left two allocation sources standing in the snapshot path —
+`Encode` building a fresh `EntitySnapshot` per entity per viewer (134 699 B/tick
+at 200 players) and `ToByteArray` allocating a new array per snapshot (44 280
+B/tick). Both are now gone. This section is the measurement.
+
+**Method — paired A/B inside one process.** Three arms run in the same binary
+over identical prebuilt inputs, 60 ticks after a warm-up, counted with
+`GC.GetAllocatedBytesForCurrentThread`. One binary, one run, so build, machine
+and day cannot confound the comparison; the harness's own world-building is
+hoisted out of the measured region so it is not charged to the arm that
+allocates least. It lives in `GameServer.Tests/Snapshot/SnapshotAllocationTests.cs`
+and runs with the suite, so the numbers can be reproduced with
+`dotnet test --filter PooledPath_AllocatesFarLessPerTick`.
+
+| viewers × 40 visible | legacy shape | pooled entities only | + reused buffers |
+|--:|--:|--:|--:|
+| 50 | 372 933 B/tick | 181 733 B/tick | **1 600 B/tick** |
+| 200 | 1 491 733 B/tick | 726 933 B/tick | **6 400 B/tick** |
+
+Byte-identical across three repeat runs. The residual is exactly **32 B per
+viewer per tick**: one `ByteString` wrapper object per snapshot, which is what
+`UnsafeByteOperations.UnsafeWrap` still allocates once the payload copy is gone.
+The two changes are worth roughly half each — pooling alone leaves the
+serialization arrays, buffer reuse alone leaves the per-entity objects.
+
+**Read this before quoting the absolute numbers.** The harness is a bounded
+reproduction, not the live server: AOI is pinned at 40 visible entities per
+viewer and every viewer sends on every tick, whereas the real server's AOI varies
+with position and the coalescing policy engages under load (§ stage 4 notes: at
+200 players the write tasks already could not keep up with 15 Hz). What transfers
+is the **ratio** and the **per-viewer residual**, not "1.49 MB/tick", which is a
+property of the harness's fixed 40-entity AOI.
+
+**No wall-clock claim is made, deliberately.** This host's run-to-run spread on
+an *unchanged* binary is wide enough to swallow an effect this size — the
+withdrawal in §16 is the precedent. Allocation is the claim; latency is not.
+Less garbage should mean fewer gen-0 collections and so less tick jitter, but
+that is a hypothesis this measurement does not test.

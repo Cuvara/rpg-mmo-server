@@ -7,6 +7,67 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **The snapshot path stopped throwing away its objects: entities are pooled and the
+  serialization buffers are reused.** These were the two allocation sources stage 4's
+  breakdown left standing — `Encode` building a fresh `EntitySnapshot` per entity per
+  viewer (134 699 B/tick at 200 players, the largest remaining term by an order of
+  magnitude) and `ToByteArray` allocating a new array per snapshot (44 280 B/tick).
+  Neither was algorithmic and neither touches the wire.
+  - **`SnapshotDeltaState` owns one `SnapshotMessage` and a pool of `EntitySnapshot`
+    objects.** Rented objects are returned by resetting a high-water mark at the top of
+    each encode, never by an explicit release — so there is no path that returns one
+    twice, and none where a snapshot staged but never claimed leaks one. An encode that
+    does not happen rents nothing, which matters because encoding has been lazy since
+    stage 4. `Rent()` clears *every* field rather than the ones about to be written: a
+    stale `Id` or `Handle` surviving a tick would be wrong state on the wire, the exact
+    failure this subsystem exists to prevent, and clearing to the proto3 defaults is
+    also what keeps the bytes identical.
+  - **The ownership contract is now explicit**: the message and its entities belong to
+    the state object and are valid only until the next `Encode` on that instance. The
+    write task's claim → encode → serialize → write loop already satisfies it.
+  - **New `SnapshotFrameWriter` serializes into buffers it keeps**, replacing four
+    allocations per snapshot (payload array, `ByteString` copy, envelope body array,
+    framed array) with two grown-once buffers and an `UnsafeByteOperations.UnsafeWrap`
+    view over the payload. Both messages are still written by the **generated**
+    protobuf writers — nothing here hand-rolls a tag or a varint, which is the version
+    of this change that would have put the wire at risk.
+  - **Per-connection, not shared.** Encoding moved off the tick thread onto one write
+    task per connection in stage 4, so a shared pool would be touched by many threads
+    and need a lock on the hottest path in the server. Both the pool and the buffers sit
+    beside `SnapshotDeltaState`, which is already per-connection and single-threaded by
+    design; no synchronisation is added anywhere.
+  - **JSON keeps the allocating path.** It is not the production encoding and
+    `JsonWriter` would need its own reuse story; the branch is one `if` in the write
+    loop and is commented as such.
+
+  **Measured — paired A/B in one process, both arms in the same binary over identical
+  inputs, 60 ticks after warm-up, `GC.GetAllocatedBytesForCurrentThread`:**
+
+  | viewers × 40 visible | legacy shape | pooled entities only | + reused buffers |
+  |--:|--:|--:|--:|
+  | 50 | 372 933 B/tick | 181 733 B/tick | **1 600 B/tick** |
+  | 200 | 1 491 733 B/tick | 726 933 B/tick | **6 400 B/tick** |
+
+  Identical to the byte across three repeat runs. The residual is exactly **32 bytes per
+  viewer per tick** — one `ByteString` wrapper object per snapshot, the one allocation
+  `UnsafeWrap` still makes. Pooling and buffer reuse are worth roughly half each; either
+  alone would have left the other half in place, which is why both are here.
+
+  **What this is not.** It is not the live server at 200 players: the harness holds AOI
+  at a fixed 40 visible entities per viewer and every viewer sends every tick, where the
+  real server's AOI varies and coalescing engages under load. The transferable result is
+  the ratio and the per-viewer residual, not the absolute B/tick — quoting 1.49 MB/tick
+  as a production figure would be wrong. **No wall-clock claim is made**: this host's
+  spread on an unchanged binary is wide enough to swallow the effect, and the claim here
+  is about garbage, not latency.
+
+  **Guards.** `SnapshotByteIdentityTests`' pre-change digests pass unchanged (they are
+  literals; regenerating them would have destroyed their value). A new
+  `WriteFrame_IsByteIdenticalToTheAllocatingPath` compares the reused-buffer frame with
+  the allocating one byte-for-byte over 40 ticks, because the digest test frames through
+  `WireProtocol.Encode` itself and never reaches the new writer.
+  `PooledEntities_CarryNoStaleFieldsBetweenTicks` asserts the failure a pool introduces
+  and a fresh object cannot. 589 passed, 0 failed, 12 skipped (docker-gated).
 - **The simulation is query-driven, its ordering is declared, and its state lives in
   the world (ECS migration, stage 5).** Commissioned as architecture, not
   performance — see *Measured*, which is a table of zeroes and says so.

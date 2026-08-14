@@ -207,6 +207,13 @@ public sealed class Connection : IDisposable
         }
     }
 
+    /// <summary>
+    /// Serialization buffers for this connection's snapshots. Per-connection, like
+    /// <see cref="DeltaState"/>, and touched only by this connection's write task — so no
+    /// pool is ever shared across threads.
+    /// </summary>
+    private readonly GameServer.Snapshot.SnapshotFrameWriter _frameWriter = new();
+
     private readonly ITransportConnection _transport;
     private readonly Stream _stream;
     private readonly Channel<SendItem> _sendChannel;
@@ -362,6 +369,20 @@ public sealed class Connection : IDisposable
                     SnapshotMessage snapshot = DeltaState.Encode(
                         tick, ackTick, buffer.AsSpan(0, count), keyframeInterval,
                         intern: Encoding == WireEncoding.Proto);
+
+                    if (Encoding == WireEncoding.Proto)
+                    {
+                        // Serialize straight into this connection's reused buffers. The
+                        // frame is valid until the next WriteFrame call on this writer,
+                        // and the await below completes before we can loop back to it.
+                        // JSON keeps the allocating path: it is not the production
+                        // encoding, and JsonWriter would need its own reuse story.
+                        ReadOnlyMemory<byte> pooledFrame =
+                            _frameWriter.WriteFrame((byte)MsgType.Snapshot, snapshot);
+                        await _stream.WriteAsync(pooledFrame, _cts.Token);
+                        await _stream.FlushAsync(_cts.Token);
+                        continue;
+                    }
 
                     env = WireProtocol.NewEnvelope(MsgType.Snapshot, snapshot, Encoding);
                 }
