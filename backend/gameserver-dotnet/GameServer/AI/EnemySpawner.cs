@@ -5,195 +5,122 @@ using GameServer.World;
 namespace GameServer.AI;
 
 /// <summary>
-/// Server-authoritative enemy spawner and AI. Runs every tick inside the
-/// simulation loop so all clients see identical enemies via the existing
-/// snapshot system.
+/// Server-authoritative enemy AI: the schedule that runs
+/// <see cref="EnemySpawnSystem"/>, <see cref="EnemyMoveSystem"/> and
+/// <see cref="EnemyReapSystem"/> in <see cref="EnemyAiPhase"/> order, once per tick,
+/// inside one world write scope.
 ///
 /// <list type="bullet">
 ///   <item>Spawns waves of "mob" entities from the map edges.</item>
 ///   <item>Moves every living enemy toward the map center each tick.</item>
-///   <item>Despawns enemies that reach the center zone near (0,0).</item>
-///   <item>Removes dead/despawned enemies from the world.</item>
+///   <item>Despawns enemies that reach the center zone near (0,0), and reaps dead ones.</item>
 /// </list>
 ///
-/// Enemies are regular <see cref="EntityState"/> entries with
-/// <c>Type = "mob"</c>, so the snapshot encoder, delta encoder, and client
-/// renderer handle them with zero protocol changes.
+/// <para>Enemies are regular <see cref="EntityState"/> entries with
+/// <c>Type = "mob"</c>, so the snapshot encoder, delta encoder and client renderer
+/// handle them with zero protocol changes. They additionally carry the
+/// <c>EnemyAi</c> archetype tag, which is what the systems query on — see that type for
+/// why the tag exists rather than a <c>Type == "mob"</c> test.</para>
+///
+/// <para><b>What this replaced.</b> A single <c>Tick(get, set, tick)</c> method that
+/// walked a <c>List&lt;string&gt;</c> of enemy ids, resolved each id through the world's
+/// string index, composed a whole <see cref="EntityState"/>, mutated the copy and wrote
+/// all seven components back — every enemy, every tick. The id list was a second source
+/// of truth for "which entities are enemies" that had to be kept in step with the world
+/// by hand; the archetype query cannot drift from the world because it <i>is</i> the
+/// world.</para>
+///
+/// <para>There is no "center-zone damage" phase. The old class comment and the tick
+/// loop's comment both claimed one; no code ever implemented it. Nothing was removed
+/// here — see the CHANGELOG.</para>
 /// </summary>
 public sealed class EnemySpawner
 {
-    // ── Spawn tuning ──
-
-    /// <summary>World-unit radius enemies spawn at (from center).</summary>
-    private const float SpawnRadius = 13.0f;
-
-    /// <summary>Enemies per wave.</summary>
-    private const int EnemiesPerWave = 2;
-
-    /// <summary>Seconds between waves.</summary>
-    private const float WaveIntervalSec = 1.5f;
-
-    /// <summary>Maximum simultaneous enemies in the world.</summary>
-    private const int MaxEnemies = 30;
-
-    // ── Enemy stats ──
-
-    private const int EnemyHp = 30;
-    private const int EnemyAttack = 5;
-    private const int EnemyDefense = 2;
-
-    /// <summary>Movement speed toward center (world units per second).</summary>
-    private const float EnemySpeed = 2.5f;
-
-    // ── Center zone ──
-
-    /// <summary>Radius around (0,0) at which enemies despawn (reached the center).</summary>
-    private const float DespawnRadius = 2.5f;
-    private const float DespawnRadiusSq = DespawnRadius * DespawnRadius;
-
-    // ── State ──
-
     private readonly EcsWorld _world;
-    private readonly ILogger _logger;
-    private readonly float _dt;
+    private readonly EnemySpawnSystem _spawn;
+    private readonly EnemyMoveSystem _move;
+    private readonly EnemyReapSystem _reap;
 
-    /// <summary>Tracks all living enemy IDs so we can iterate them each tick.</summary>
-    private readonly List<string> _enemyIds = new();
+    /// <summary>
+    /// Reusable buffer of enemy handles for this tick. Owned here so the per-tick query
+    /// allocates nothing once the population has stabilised; it grows to the high-water
+    /// mark and stays, which is bounded by <see cref="EnemyAiTuning.MaxEnemies"/>.
+    /// </summary>
+    private EntityHandle[] _enemies = Array.Empty<EntityHandle>();
 
-    /// <summary>Scratch list for removals during iteration (avoids modifying _enemyIds mid-loop).</summary>
-    private readonly List<string> _removeBuffer = new();
-
-    /// <summary>Enemy IDs to remove from the world after the Update call returns.</summary>
-    private readonly List<string> _pendingRemovals = new();
-
-    private int _nextEnemyNum;
-    private float _spawnAccumulator;
-
-    /// <summary>Number of enemies currently alive.</summary>
-    public int AliveCount => _enemyIds.Count;
+    /// <summary>
+    /// The scope callback, built once. A lambda written inline at the call site captures
+    /// <c>this</c> and so allocates a delegate on every tick; hoisting it to a field is
+    /// the difference between the AI phase allocating per tick and not.
+    /// </summary>
+    private readonly Action<WorldWriter> _runPhases;
 
     public EnemySpawner(EcsWorld world, int tickRate, ILogger logger)
     {
         _world = world;
-        _logger = logger;
-        _dt = 1.0f / tickRate;
+        float dt = 1.0f / tickRate;
+
+        _spawn = new EnemySpawnSystem(dt, logger);
+        _move = new EnemyMoveSystem(dt);
+        _reap = new EnemyReapSystem(logger);
+        _runPhases = RunPhases;
     }
 
     /// <summary>
-    /// Called once per simulation tick, inside the tick loop. Spawns new
-    /// enemies if the timer fires, then moves and damages all living enemies.
-    /// Must be called under the world write lock (from <see cref="EcsWorld.Update"/>).
+    /// Number of enemies currently alive. A count over the <c>EnemyAi</c> archetype
+    /// rather than the length of a hand-maintained id list, so it is answered by the
+    /// world itself and cannot disagree with it.
+    /// </summary>
+    public int AliveCount => _world.EnemyCount;
+
+    /// <summary>
+    /// Run one tick of enemy AI. Takes the world write scope itself; the tick loop calls
+    /// this directly rather than wrapping it, because the phases have to share one scope
+    /// for the reap to land before snapshots are built.
     /// </summary>
     /// <remarks>
-    /// Dead enemies are marked <c>Dead = true</c> via <paramref name="set"/> so
-    /// they appear as dead in the next snapshot, then collected in
-    /// <see cref="PendingRemovals"/> for the caller to remove AFTER the
-    /// <see cref="EcsWorld.Update"/> call returns (calling
-    /// <see cref="EcsWorld.RemoveEntity"/> inside Update would deadlock on
-    /// the non-reentrant write lock).
+    /// Structural changes raised inside the scope — spawns from
+    /// <see cref="EnemySpawnSystem"/>, despawns from <see cref="EnemyReapSystem"/> — are
+    /// applied by the world's deferred structural phase, which
+    /// <see cref="EcsWorld.UpdateComponents"/> drains on the way out. That is the ADR-11
+    /// substitute for Arch's <c>CommandBuffer</c>, and it is why the removals are visible
+    /// to the snapshot broadcast later in the same tick without the old dance of
+    /// collecting ids and draining them after the lock was released.
     /// </remarks>
-    public void Tick(
-        Func<string, EntityState?> get,
-        Action<string, EntityState> set,
-        ulong currentTick)
+    public void Tick(ulong currentTick)
     {
-        // ── Spawn phase ──
-        _spawnAccumulator += _dt;
-        if (_spawnAccumulator >= WaveIntervalSec)
+        _world.UpdateComponents(_runPhases);
+    }
+
+    private void RunPhases(WorldWriter writer)
+    {
+        // Phase 1 — Spawn. Before anything iterates, so new enemies are steppable
+        // this tick and their creation takes the immediate path.
+        _spawn.Run(writer, AliveCountLocked(writer));
+
+        // The population for the rest of the tick, captured once. Count-don't-
+        // saturate: a short buffer reports what it needed and we retry at the right
+        // size rather than processing a prefix and stranding the remainder.
+        int count = writer.QueryEnemies(_enemies);
+        if (count > _enemies.Length)
         {
-            _spawnAccumulator -= WaveIntervalSec;
-            SpawnWave(set);
+            _enemies = new EntityHandle[count];
+            count = writer.QueryEnemies(_enemies);
         }
 
-        // ── Move + damage phase ──
-        _removeBuffer.Clear();
-        _pendingRemovals.Clear();
+        var enemies = new ReadOnlySpan<EntityHandle>(_enemies, 0, Math.Min(count, _enemies.Length));
 
-        for (int i = 0; i < _enemyIds.Count; i++)
-        {
-            var id = _enemyIds[i];
-            var state = get(id);
-            if (state == null || state.Value.Dead)
-            {
-                _removeBuffer.Add(id);
-                _pendingRemovals.Add(id);
-                continue;
-            }
+        // Phase 2 — Move.
+        _move.Run(writer, enemies);
 
-            var e = state.Value;
-
-            // Move toward (0,0)
-            float dx = -e.Position.X;
-            float dy = -e.Position.Y;
-            float distSq = dx * dx + dy * dy;
-
-            if (distSq > 0.01f) // not already at center
-            {
-                float invDist = 1.0f / MathF.Sqrt(distSq);
-                e.Position = new Vec2(
-                    e.Position.X + dx * invDist * EnemySpeed * _dt,
-                    e.Position.Y + dy * invDist * EnemySpeed * _dt);
-            }
-
-            // Despawn when enemy reaches center
-            float centerDistSq = e.Position.X * e.Position.X + e.Position.Y * e.Position.Y;
-            if (centerDistSq <= DespawnRadiusSq)
-            {
-                _removeBuffer.Add(id);
-                _pendingRemovals.Add(id);
-                _logger.LogDebug("Enemy {Id} despawned at center", id);
-                continue; // skip set — entity will be removed
-            }
-
-            set(id, e);
-        }
-
-        // Remove from tracking list (world removal deferred to caller)
-        for (int i = 0; i < _removeBuffer.Count; i++)
-        {
-            _enemyIds.Remove(_removeBuffer[i]);
-        }
+        // Phase 3 — Reap. After Move, because "arrived at the centre" is a fact Move
+        // produced this tick.
+        _reap.Run(writer, enemies);
     }
 
     /// <summary>
-    /// Enemy IDs that died or disappeared this tick. The caller must remove
-    /// them from the world AFTER releasing the write lock to avoid deadlock.
+    /// Enemy population as seen from inside the write scope. <see cref="AliveCount"/>
+    /// takes a read lock and would deadlock against the write lock we already hold.
     /// </summary>
-    public IReadOnlyList<string> PendingRemovals => _pendingRemovals;
-
-    private void SpawnWave(Action<string, EntityState> set)
-    {
-        int toSpawn = Math.Min(EnemiesPerWave, MaxEnemies - _enemyIds.Count);
-        if (toSpawn <= 0) return;
-
-        for (int i = 0; i < toSpawn; i++)
-        {
-            _nextEnemyNum++;
-            string id = $"enemy-{_nextEnemyNum}";
-
-            // Random angle on the spawn circle
-            float angle = Random.Shared.NextSingle() * MathF.Tau;
-            float x = MathF.Cos(angle) * SpawnRadius;
-            float y = MathF.Sin(angle) * SpawnRadius;
-
-            var entity = new EntityState
-            {
-                Id = id,
-                Type = "mob",
-                Position = new Vec2(x, y),
-                Hp = EnemyHp,
-                MaxHp = EnemyHp,
-                Speed = EnemySpeed,
-                Attack = EnemyAttack,
-                Defense = EnemyDefense,
-            };
-
-            // Use the set callback (SetEntityLocked) which creates the entity
-            // if it doesn't exist — safe inside the Update write lock.
-            set(id, entity);
-            _enemyIds.Add(id);
-
-            _logger.LogDebug("Spawned enemy {Id} at ({X:F1}, {Y:F1})", id, x, y);
-        }
-    }
+    private int AliveCountLocked(WorldWriter writer) => writer.QueryEnemies(Span<EntityHandle>.Empty);
 }

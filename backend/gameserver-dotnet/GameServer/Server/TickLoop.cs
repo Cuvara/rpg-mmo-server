@@ -175,22 +175,13 @@ public sealed class TickLoop
             });
         }
 
-        // Enemy AI: spawn, move, center-zone damage, remove dead
-        if (_enemySpawner != null)
-        {
-            _world.Update((get, set) =>
-            {
-                _enemySpawner.Tick(get, set, _currentTick);
-            });
-
-            // Remove dead enemies outside the write lock (RemoveEntity takes
-            // its own lock; calling it inside Update would deadlock).
-            var removals = _enemySpawner.PendingRemovals;
-            for (int i = 0; i < removals.Count; i++)
-            {
-                _world.RemoveEntity(removals[i]);
-            }
-        }
+        // Enemy AI: spawn, move, reap — three systems in EnemyAiPhase order, sharing one
+        // world write scope. Despawns now land inside that scope via the deferred
+        // structural phase, so the old dance of collecting ids into PendingRemovals and
+        // draining them after the lock was released is gone. Either way the removals are
+        // applied before the snapshot broadcast below, which is what stops a client from
+        // ever seeing an enemy inside the despawn zone.
+        _enemySpawner?.Tick(_currentTick);
 
         // Broadcast snapshots to each connected player
         _connections.ForEach(conn =>

@@ -1035,6 +1035,44 @@ same entity — and component writes have no such last-writer-wins accident, so 
 path discards it explicitly to keep the wire output identical. It is pinned by a test
 named after what it is, not fixed here.
 
+### The enemy AI: three systems over an archetype query
+
+The AI is `EnemySpawnSystem` → `EnemyMoveSystem` → `EnemyReapSystem`, run in
+`EnemyAiPhase` order inside one world write scope. It replaced a single
+`Tick(get, set, tick)` that walked a `List<string>` of enemy ids and round-tripped a whole
+`EntityState` per enemy per tick.
+
+**Order is load-bearing, and explicit rather than declarative.** Spawn runs first so a new
+enemy takes its first step on the tick it appears — the original got that by spawning into
+the list it was about to walk, and it is visible in the snapshot. Reap runs last because
+"arrived at the centre" is a fact the move system produces earlier in the same tick.
+There is no `[UpdateInGroup]` because there is no server-side group tree: the one in the
+codebase is the Unity *client* package's DOTS scheduler, and the server-side equivalent
+would be `Arch.System`'s source generator, banned by ADR-12 because `ArchAotHintTests`
+cannot enumerate the query shapes it generates.
+
+**`EnemyAi` is ownership, not type.** Entities carry the tag only if the spawner created
+them, and it is preserved rather than re-derived when an existing entity is written back.
+Deriving it from `EntityKind.Value == "mob"` would put every test-placed mob on a march to
+the origin; re-deriving it on update would strip it from any enemy written back through
+`AddEntity`, which the combat path does on every hit.
+
+**This is where the deferred structural phase earns its keep.** Despawns are raised inside
+the write scope and drained by `ApplyStructuralChangesLocked` on the way out — before the
+snapshot broadcast, so a client never observes an enemy inside the despawn radius. The old
+shape could not do this: `RemoveEntity` inside the lock would deadlock, so ids were
+collected into a `PendingRemovals` list the tick loop drained after releasing it. Op kinds
+are still just *add* and *remove*; `EnemyAi` rides on the add as a tag payload.
+
+**Enemies deliberately do not use `MovementSystem`.** Their step is unclamped by map bounds
+and normalises with a reciprocal square root. It was preserved character-for-character and
+is pinned bit-exactly, because unifying the two movement models would move every enemy onto
+different floats — a gameplay decision with a wire consequence, not a refactor.
+
+Measured: the AI phase went 367 → 172 B/tick (−53%), deterministic across paired runs. In
+context that is **0.36%** of a 50-player tick, because snapshot encoding dominates. Per
+ADR-12 that is recorded, not dressed up.
+
 ### The `Shared.GameLogic` boundary is unchanged
 
 No `Arch.Core` type appears anywhere in `Shared.GameLogic` — not `World`, not `Entity`,

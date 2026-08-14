@@ -137,3 +137,27 @@ public struct PlayerTag
     public byte Reserved;
 }
 
+
+/// <summary>
+/// Archetype tag for entities driven by the enemy AI systems
+/// (<c>GameServer.AI</c>): they walk toward the origin each tick and are reaped when
+/// they reach the centre zone or die.
+///
+/// <para><b>This is not "is a mob".</b> Enemy-ness is ownership, not type. Plenty of
+/// entities carry <c>EntityKind.Value == "mob"</c> without being AI-driven — the test
+/// suite creates them constantly, and a mob placed by anything other than the spawner
+/// must sit where it was put. Deriving the tag from the type string would silently put
+/// every such mob on a march to the origin, so the tag is applied <b>only</b> at spawn
+/// by <see cref="EcsWorld.Spawn"/> and is preserved, never re-derived, when an existing
+/// entity is updated.</para>
+///
+/// <para>Carries a byte for the same reason <see cref="PlayerTag"/> does: a zero-size
+/// component would make the chunk's element stride zero, which is not a shape worth
+/// relying on in a pre-1.0 library.</para>
+/// </summary>
+[EcsComponent]
+public struct EnemyAi
+{
+    /// <summary>Unused; present only to give the tag a non-zero size.</summary>
+    public byte Reserved;
+}

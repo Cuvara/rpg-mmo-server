@@ -1342,6 +1342,32 @@ case stop and keep what has landed — each stage is revertible precisely so tha
 cheap), or if Arch fixes `CommandBuffer` (which would relax decision 2 but not decision 3),
 or if the archetype count outgrows the hint mechanism.
 
+**Stage log.**
+
+| Stage | Landed | Component types added | Structural op kinds | Measured at its own level |
+|---|---|---|---|---|
+| 1 — input path | PR #79 | none | add, remove (unchanged) | 6 762 858 → 192 984 B/tick at 200 players (35×) |
+| 2 — enemy AI | PR #81 | `EnemyAi` (hinted same commit) | add, remove (unchanged) | 367 → 172 B/tick (−53%), but only −0.36% of a 50-player tick |
+| 3 — snapshot/AOI | not started | — | — | — |
+
+Two things stage 2 settled that this ADR could only predict:
+
+- **Spawn and despawn did not need a new structural op kind.** The prediction was that
+  entity creation and destruction inside systems would force the deferred queue to grow;
+  it did not. `EnemyAi` is applied at creation, so it rides on the existing *add* as a
+  tag payload rather than as an add-component operation. Decision 2 holds unmodified and
+  `CommandBuffer` is still not needed for anything.
+- **The hint guard fires in practice, not just in principle.** Deleting the single
+  `new EnemyAi[1],` line builds clean and fails `ArchAotHintTests` naming the type. That
+  is the second time this has been demonstrated on real code (the first was `Locomotion`
+  under ADR-11), and it is the evidence decision 3 rests on.
+
+Stage 2 also produced the first instance of the rule in decision 7 biting: it measures a
+53% cut of the phase it targets and **0.36% of the tick**, because serialization dominates
+by two orders of magnitude. That is recorded rather than dressed up, and it strengthens
+rather than weakens the case that the outstanding item is moving serialization off the
+tick.
+
 
 ---
 

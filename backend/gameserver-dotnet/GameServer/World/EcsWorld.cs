@@ -72,6 +72,21 @@ public readonly struct PendingInput
 /// components on the way out and writes the components back on the way in; the shared
 /// static functions never see the ECS.</para>
 /// </summary>
+/// <summary>
+/// Archetype tags applied at spawn. Not derived from entity data: see
+/// <see cref="EnemyAi"/> for why enemy-ness cannot be inferred from
+/// <c>EntityKind.Value == "mob"</c>.
+/// </summary>
+[Flags]
+public enum EntityTags
+{
+    /// <summary>No extra tags. The archetype is chosen from the entity type alone.</summary>
+    None = 0,
+
+    /// <summary>Driven by the enemy AI systems. Adds <see cref="EnemyAi"/>.</summary>
+    EnemyAi = 1,
+}
+
 public sealed class EcsWorld : IDisposable
 {
     private readonly ArchWorld _arch = ArchWorld.Create();
@@ -107,6 +122,9 @@ public sealed class EcsWorld : IDisposable
     private static readonly QueryDescription AllEntities = new QueryDescription()
         .WithAll<EntityIdRef, EntityKind, Position, Health, Combat, Locomotion, InputCursor>();
 
+    private static readonly QueryDescription Enemies = new QueryDescription()
+        .WithAll<EntityIdRef, EntityKind, Position, Health, Combat, Locomotion, InputCursor, EnemyAi>();
+
     private static readonly QueryDescription Players = new QueryDescription()
         .WithAll<EntityIdRef, EntityKind, Position, Health, Combat, Locomotion, InputCursor, PlayerTag>();
 
@@ -132,6 +150,37 @@ public sealed class EcsWorld : IDisposable
         _rwLock.EnterWriteLock();
         try { AddEntityLocked(entity); }
         finally { _rwLock.ExitWriteLock(); }
+    }
+
+    /// <summary>
+    /// Create an entity carrying archetype <paramref name="tags"/>.
+    ///
+    /// <para>The only way to acquire <see cref="EntityTags.EnemyAi"/>. Tags are a
+    /// spawn-time fact: <see cref="AddEntity"/> updating an existing entity preserves
+    /// whatever tags it already has rather than re-deriving them, so writing a mutated
+    /// copy back — which the combat path and the tests both do — cannot silently
+    /// un-enemy an enemy and strand it outside the reaper's query.</para>
+    /// </summary>
+    public void Spawn(EntityState entity, EntityTags tags)
+    {
+        _rwLock.EnterWriteLock();
+        try { AddEntityLocked(entity, tags); }
+        finally { _rwLock.ExitWriteLock(); }
+    }
+
+    /// <summary>
+    /// Number of live entities driven by the enemy AI. A count over the
+    /// <see cref="EnemyAi"/> archetype, so it cannot drift from the world the way a
+    /// parallel <c>List&lt;string&gt;</c> of ids could.
+    /// </summary>
+    public int EnemyCount
+    {
+        get
+        {
+            _rwLock.EnterReadLock();
+            try { return _arch.CountEntities(in Enemies); }
+            finally { _rwLock.ExitReadLock(); }
+        }
     }
 
     /// <summary>Remove an entity by ID. A missing ID is a no-op.</summary>
@@ -485,6 +534,55 @@ public sealed class EcsWorld : IDisposable
         return new EntityHandle(entity);
     }
 
+    /// <summary>
+    /// Collect handles for every live enemy into <paramref name="destination"/>.
+    /// Caller holds the write lock.
+    ///
+    /// <para>Same count-don't-saturate contract as the AOI scan: the return value is the
+    /// total match count and may exceed the buffer, so the caller resizes and retries
+    /// once rather than silently processing a prefix. Silently dropping enemies here
+    /// would leave them un-moved and un-reaped — a stuck enemy nobody can kill.</para>
+    ///
+    /// <para>Handles rather than a chunk iterator so that the systems, which live
+    /// outside <c>World/</c>, never see an <c>Arch.Core</c> type. Structural changes are
+    /// safe against the returned handles: Arch's <c>Entity</c> is a stable identity, and
+    /// the reaper revalidates liveness before touching one.</para>
+    /// </summary>
+    internal int QueryEnemiesLocked(Span<EntityHandle> destination)
+    {
+        int matches = 0;
+
+        _iterationDepth++;
+        try
+        {
+            foreach (ref var chunk in _arch.Query(in Enemies).GetChunkIterator())
+            {
+                int count = chunk.Count;
+                for (int i = 0; i < count; i++)
+                {
+                    if (matches < destination.Length)
+                    {
+                        destination[matches] = new EntityHandle(chunk.Entity(i));
+                    }
+                    matches++;
+                }
+            }
+        }
+        finally { _iterationDepth--; }
+
+        return matches;
+    }
+
+    /// <summary>Enqueue or apply a removal for a resolved entity. Caller holds the write lock.</summary>
+    internal void DespawnLocked(in EntityHandle handle)
+    {
+        if (!IsAliveLocked(in handle)) return;
+        RemoveEntityLocked(_arch.Get<EntityIdRef>(handle.Value).Value);
+    }
+
+    /// <summary>Create a tagged entity from inside a write scope. Caller holds the write lock.</summary>
+    internal void SpawnLocked(EntityState state, EntityTags tags) => AddEntityLocked(state, tags);
+
     /// <summary>Whether a handle still denotes a live entity. Caller holds a lock.</summary>
     internal bool IsAliveLocked(in EntityHandle handle) =>
         handle.IsValid && _arch.IsAlive(handle.Value);
@@ -495,21 +593,35 @@ public sealed class EcsWorld : IDisposable
     // ---------------------------------------------------------------- internals
 
     /// <summary>A deferred structural change. Only created when <see cref="_iterationDepth"/> &gt; 0.</summary>
+    /// <summary>
+    /// A deferred structural change. Only created when <see cref="_iterationDepth"/> &gt; 0.
+    ///
+    /// <para><b>Two kinds, still: add and remove.</b> Adding the enemy systems did not
+    /// need a third — <c>EnemyAi</c> is applied at creation, so it rides on the add as a
+    /// tag payload rather than as an add-component op. No add/remove-component operation
+    /// exists because nothing needs one yet (ADR-12 decision 2); the moment something
+    /// does, it belongs here and not in Arch's <c>CommandBuffer</c>, which throws under
+    /// NativeAOT.</para>
+    /// </summary>
     private readonly struct StructuralOp
     {
         public readonly bool IsRemoval;
         public readonly string Id;
         public readonly EntityState State;
+        public readonly EntityTags Tags;
 
-        private StructuralOp(bool isRemoval, string id, EntityState state)
+        private StructuralOp(bool isRemoval, string id, EntityState state, EntityTags tags)
         {
             IsRemoval = isRemoval;
             Id = id;
             State = state;
+            Tags = tags;
         }
 
-        public static StructuralOp Add(EntityState state) => new(false, state.Id, state);
-        public static StructuralOp Remove(string id) => new(true, id, default);
+        public static StructuralOp Add(EntityState state, EntityTags tags) =>
+            new(false, state.Id, state, tags);
+
+        public static StructuralOp Remove(string id) => new(true, id, default, EntityTags.None);
     }
 
     private void ApplyStructuralChangesLocked()
@@ -524,15 +636,17 @@ public sealed class EcsWorld : IDisposable
         foreach (var op in ops)
         {
             if (op.IsRemoval) RemoveEntityLocked(op.Id);
-            else AddEntityLocked(op.State);
+            else AddEntityLocked(op.State, op.Tags);
         }
     }
 
-    private void AddEntityLocked(EntityState state)
+    private void AddEntityLocked(EntityState state) => AddEntityLocked(state, EntityTags.None);
+
+    private void AddEntityLocked(EntityState state, EntityTags tags)
     {
         if (_iterationDepth > 0)
         {
-            _structural.Add(StructuralOp.Add(state));
+            _structural.Add(StructuralOp.Add(state, tags));
             return;
         }
 
@@ -541,6 +655,9 @@ public sealed class EcsWorld : IDisposable
         if (_index.TryGetValue(state.Id, out var existing) && _arch.IsAlive(existing))
         {
             // Fix the archetype only if player-ness changed; then overwrite in place.
+            // EnemyAi is deliberately NOT reconciled here: it is a spawn-time fact, and
+            // re-deriving it would strip the tag from every entity written back through
+            // the plain AddEntity path.
             bool wasPlayer = _arch.Has<PlayerTag>(existing);
             if (isPlayer && !wasPlayer) _arch.Add(existing, new PlayerTag());
             else if (!isPlayer && wasPlayer) _arch.Remove<PlayerTag>(existing);
@@ -549,7 +666,19 @@ public sealed class EcsWorld : IDisposable
             return;
         }
 
-        Entity entity = isPlayer
+        bool isEnemy = (tags & EntityTags.EnemyAi) != 0;
+
+        Entity entity = isEnemy
+            ? _arch.Create(
+                new EntityIdRef(state.Id),
+                new EntityKind(state.Type),
+                new Position(state.Position),
+                default(Health),
+                default(Combat),
+                new Locomotion(state.Speed),
+                new InputCursor(state.LastInputTick),
+                default(EnemyAi))
+            : isPlayer
             ? _arch.Create(
                 new EntityIdRef(state.Id),
                 new EntityKind(state.Type),
