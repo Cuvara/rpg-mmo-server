@@ -110,12 +110,28 @@ public sealed class WorldWriter
     public bool IsAlive(in EntityHandle handle) => _world.IsAliveLocked(handle);
 
     /// <summary>
-    /// Collect handles for every live enemy. Count-don't-saturate, matching the AOI
-    /// scan and <c>AoiLogic</c>: the return value is the total, which may exceed the
-    /// buffer, so a caller that gets more than it asked for must resize and retry rather
-    /// than process a prefix.
+    /// Collect handles for every live entity carrying <typeparamref name="TTag"/>.
+    /// Count-don't-saturate, matching the AOI scan and <c>AoiLogic</c>: the return value
+    /// is the total, which may exceed the buffer, so a caller that gets more than it
+    /// asked for must resize and retry rather than process a prefix.
+    ///
+    /// <para>Prefer <see cref="VisitChunks{TTag, TVisitor}"/> for work that is
+    /// per-entity-linear. This exists for the cases that genuinely are not — deciding
+    /// something about one entity, or performing a structural change on it.</para>
     /// </summary>
-    public int QueryEnemies(Span<EntityHandle> destination) => _world.QueryEnemiesLocked(destination);
+    public int QueryWith<TTag>(Span<EntityHandle> destination) where TTag : struct =>
+        _world.QueryWithLocked<TTag>(destination);
+
+    /// <summary>
+    /// Run <paramref name="visitor"/> over the chunks of entities carrying
+    /// <typeparamref name="TTag"/>, giving it the component arrays directly instead of
+    /// one entity at a time. This is the shape a system should be in unless it has a
+    /// stated reason not to be.
+    /// </summary>
+    public void VisitChunks<TTag, TVisitor>(ref TVisitor visitor)
+        where TTag : struct
+        where TVisitor : struct, ISimChunkVisitor =>
+        _world.VisitChunksLocked<TTag, TVisitor>(ref visitor);
 
     /// <summary>
     /// Create an entity carrying <paramref name="tags"/> from inside this scope.
@@ -131,6 +147,15 @@ public sealed class WorldWriter
     /// reaping the same entity in one tick is safe.
     /// </summary>
     public void Despawn(in EntityHandle handle) => _world.DespawnLocked(in handle);
+
+    /// <summary>
+    /// The single entity carrying <typeparamref name="T"/>, created on first use. Where a
+    /// system's own state belongs, instead of a private field on the system.
+    ///
+    /// <para>The returned <c>ref</c> is invalidated by any structural change — re-take it
+    /// after spawning or despawning.</para>
+    /// </summary>
+    public ref T Singleton<T>() where T : struct => ref _world.SingletonLocked<T>();
 
     /// <summary>World-space position of the entity.</summary>
     public ref Position PositionOf(in EntityHandle handle) => ref _world.ArchInternal.Get<Position>(handle.Value);

@@ -7,6 +7,111 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **The simulation is query-driven, its ordering is declared, and its state lives in
+  the world (ECS migration, stage 5).** Commissioned as architecture, not
+  performance — see *Measured*, which is a table of zeroes and says so.
+  - **The core stops naming the gameplay.** `EcsWorld.EnemyCount`,
+    `QueryEnemiesLocked` and `WorldWriter.QueryEnemies` are now `CountWith<TTag>()`
+    and `QueryWith<TTag>(Span<EntityHandle>)`. The tag comes from whoever owns the
+    content. Query descriptions are memoised per closed generic in a static generic
+    field — allocation-free and AOT-safe, since every instantiation is reached from
+    concrete code rather than constructed at runtime.
+  - **`EnemyMoveSystem` iterates chunks.** It walks `Span<Position>` and
+    `Span<Health>` through a new `SimChunk` view instead of resolving each entity
+    through a handle. The per-chunk body is a `struct` visitor passed by `ref`, so
+    the call devirtualises and nothing is allocated per chunk or per tick.
+  - **Spawn and reap deliberately keep random access, and say why.** Spawn reads one
+    piece of state and creates entities — there is no array to walk. Reap decides per
+    entity and then performs a structural change, which needs an entity identity that
+    a component span does not carry; exposing handles through the chunk view purely to
+    satisfy a shape rule would leak the one Arch type the view exists not to leak.
+  - **`SystemSchedule`**: an ordered set of systems, each declaring `Order` and a
+    `ComponentAccess` of reads/writes. Ordering is declared, not implied by call
+    order — pass the three enemy systems in any order and they still run
+    spawn → move → reap — and a duplicate `Order` is rejected at construction, because
+    an ambiguous pair would silently run in array order, which is the implicit
+    ordering the type exists to remove.
+  - **`ISimulationPhase.TrackedEntityCount` is gone.** The core defined a
+    content-agnostic contract whose single consumer immediately renamed the property
+    after the content, and it forced every future phase to summarise itself as one
+    unlabelled int, which stops composing the moment there are two. The status number
+    now comes from `ServerOptions.StatusEntityCount`, supplied by `Program.cs` — the
+    composition root is the one place allowed to know what the game is. **The status
+    JSON field name is unchanged**: the Unity DOTS sample polls `/status` and reads
+    `EnemiesAlive`.
+
+### Fixed
+- **The spawner's simulation state was living in class fields, behind the seam that
+  was built to stop exactly that.** `_nextEnemyNumber` and `_spawnAccumulator` were
+  private instance fields on `EnemySpawnSystem` from the day the seam shipped. They
+  are now an `EnemySpawnState` component on a singleton entity. The consequences were
+  not stylistic: state in a field is invisible to the world, so it could never be
+  snapshotted, persisted, or reset with everything else, and two instances of the
+  system would each have kept their own idea of when the next wave was due.
+  - The singleton carries **only** that component, so it matches none of the queries
+    that require the seven standard ones and can never appear in an AOI scan, a
+    snapshot, the player sweep or the entity count. Pinned by
+    `SpawnStateEntity_IsInvisibleToEveryGameplayQuery`, and confirmed in the published
+    NativeAOT binary, which reports `gameserver_entities{} 6` with the singleton
+    present.
+
+### Added
+- **`SimulationStateArchitectureTests` — the rule becomes a constraint.** It reflects
+  over every `ISimulationPhase` and `IEcsSystem` implementation, and their nested
+  types, and fails on any mutable instance field or settable property. **Verified to
+  fire**: reintroducing `private float _spawnAccumulator;` on the real
+  `EnemySpawnSystem` builds clean and fails the test naming
+  `EnemySpawnSystem._spawnAccumulator`. That is the third guard in this module
+  demonstrated rather than assumed, after the AOT hints and the golden vectors.
+  - The one sanctioned exception is `[SimulationScratch]`, for reusable buffers, with
+    a strict criterion: a field qualifies only if resetting it at any tick boundary
+    would change nothing but allocation. `EnemyReapSystem`'s handle buffer carries it.
+  - Nested types are included because moving state into a private nested helper is the
+    obvious way around the rule.
+- **`SystemScheduleTests`** covering declared-vs-argument ordering, duplicate-order
+  rejection, and the disjointness predicate in both directions. Also asserts that
+  **no pair in the real enemy schedule is concurrently runnable** — spawn and reap are
+  structural, and move writes the positions reap reads — so the serial order is what
+  the declarations say rather than a temporary convenience.
+
+### Measured
+- Enemy AI phase, paired in-process A/B against `develop`, Release: **108 B/tick on
+  both sides, identical.** Timing differences at these magnitudes (2.5 vs 3.8 µs at 0
+  players) are noise.
+- **Stage 5 measures nothing, which is what was expected and what was asked for.**
+  Steady-state population is 4–6 enemies, so a chunk loop over five entities cannot
+  show anything, and this stage was commissioned as an architectural requirement after
+  its performance premise had already been disproved in stage 4. The case is that the
+  shape is right for gameplay that does not exist yet — worth taking before writing
+  gameplay against the seam rather than after.
+
+### Notes
+- **What a parallel step still needs, written down before anything is parallel.**
+  `ComponentAccess.IsDisjointFrom` answers the component half of "can these two run
+  together" and is tested. Two things it deliberately does not answer, both verified in
+  the current code and both blocking:
+  1. `EcsWorld._structural` is a plain `List<StructuralOp>` with no lock of its own,
+     safe today only because exactly one thread mutates it under the write lock. Two
+     systems doing structural work concurrently would race on the queue itself rather
+     than on any component — which is why `ComponentAccess.Structural` excludes a
+     system from concurrency outright instead of reasoning about its components.
+  2. `EcsWorld`'s iteration-depth guard is `[ThreadStatic]`, so "is anything iterating"
+     would become a per-worker fact rather than a property of the world — and that flag
+     is what decides whether a spawn or despawn applies immediately or is deferred.
+  Neither is fixed here, because nothing runs on another thread here.
+- **The cost of the `Arch.System` generator ban, stated concretely.** A general
+  N-component chunk query needs either a source generator to emit an overload per
+  arity — banned, because the AOT hint guard cannot enumerate generated query shapes —
+  or a hand-written combinatorial API nobody keeps complete. `SimChunk` therefore
+  exposes the one component set the simulation walks linearly, and adding a system with
+  a different set means adding an explicit shape or justifying handle access.
+- **Content-owned components do not have to live in the core.** `EnemySpawnState` is
+  declared in `Scaffolding` and is still covered by the hint guard, which discovers
+  component types by namespace **or** by `[EcsComponent]` anywhere in the assembly.
+  `EnemyAi` stays in `World/Components.cs` only because moving it is not this change's
+  job.
+
+### Changed
 - **The server core no longer names any gameplay: what to simulate arrives through
   `ISimulationPhase`, and the content that implements it moved to `GameServer/Scaffolding`.**
   The enemy AI in this module exists to give the core something to simulate and the tests

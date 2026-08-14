@@ -402,6 +402,81 @@ public class EnemyAiCharacterizationTests
         for (int t = 0; t < 100; t++) loop.TickOnce();
 
         Assert.Equal(1, world.EntityCount);
-        Assert.Equal(0, loop.SimulationEntityCount);
+        // `loop.SimulationEntityCount` was removed with ISimulationPhase.TrackedEntityCount;
+        // asking the world directly is what it forwarded to anyway, and is more direct.
+        Assert.Equal(0, world.CountWith<GameServer.World.Components.EnemyAi>());
+    }
+
+    // ── Spawn state lives in the world, and must stay invisible ──────────────
+
+    /// <summary>
+    /// The spawner's accumulator and id counter moved out of private fields onto a
+    /// singleton entity. The obvious way for that to go wrong is for the entity to show
+    /// up somewhere it does not belong — an AOI scan, a snapshot, the player sweep, the
+    /// entity count — so this pins that it does not.
+    ///
+    /// <para>It cannot, by construction: every one of those queries requires the seven
+    /// standard components and the singleton carries exactly one. This asserts the
+    /// construction rather than trusting it.</para>
+    /// </summary>
+    [Fact]
+    public void SpawnStateEntity_IsInvisibleToEveryGameplayQuery()
+    {
+        var (loop, world, ai) = NewLoop();
+        using (world)
+        {
+            world.AddEntity(TestHelpers.CreatePlayer("p1", 0, 0));
+
+            // Well past the first wave, so the singleton certainly exists.
+            for (int t = 0; t < TicksToFirstWave() + 20; t++) loop.TickOnce();
+
+            Assert.True(ai.AliveCount > 0, "no enemies spawned, so the singleton may not exist yet");
+
+            // Nothing in AOI is the spawn-state entity: everything there has a real id.
+            List<EntityState> everything =
+                world.GetEntitiesInRange(new Vec2(0, 0), 10_000f);
+            Assert.All(everything, e => Assert.False(string.IsNullOrEmpty(e.Id)));
+            Assert.All(everything, e => Assert.True(e.Type is "player" or "mob"));
+
+            // The player sweep sees exactly the one player.
+            Assert.Single(world.PlayerStates());
+
+            // And the id-keyed entity count is players + enemies, with no extra.
+            Assert.Equal(1 + ai.AliveCount, world.EntityCount);
+        }
+    }
+
+    /// <summary>
+    /// The wave cadence must survive being read from the world instead of a field —
+    /// including the accumulator's remainder, which is what stops the cadence drifting at
+    /// tick rates that do not divide the interval evenly.
+    /// </summary>
+    [Fact]
+    public void SpawnCadenceIsUnchangedByHoldingTheStateInTheWorld()
+    {
+        var (loop, world, ai) = NewLoop();
+        using (world)
+        {
+            int first = TicksToFirstWave();
+            for (int t = 0; t < first; t++) loop.TickOnce();
+            Assert.Equal(EnemiesPerWave, ai.AliveCount);
+
+            // Counted by ids ever issued, not by AliveCount: past ~63 ticks enemies start
+            // reaching the centre and being reaped, so the live population stops being
+            // cumulative and would measure the reaper rather than the cadence.
+            var everIssued = new HashSet<string>();
+            void Sample()
+            {
+                foreach (EntityState e in Enemies(world)) everIssued.Add(e.Id);
+            }
+
+            Sample();
+            int ticksPerInterval = (int)MathF.Ceiling(WaveIntervalSec / Dt);
+            for (int w = 2; w <= 6; w++)
+            {
+                for (int t = 0; t < ticksPerInterval; t++) { loop.TickOnce(); Sample(); }
+                Assert.Equal(EnemiesPerWave * w, everIssued.Count);
+            }
+        }
     }
 }
