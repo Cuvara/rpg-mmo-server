@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
+using GameServer.Tests.Infrastructure;
 
 namespace GameServer.Tests.Persistence;
 
@@ -27,15 +28,13 @@ public class PostgresPersistenceIntegrationTests
 
         string userId = $"itest-{Guid.NewGuid():N}"[..20];
         string serverId = "gs-itest";
-        int port = FreeTcpPort();
-
         // ── Boot #1: postgres-backed server ──
         var store = await _pg.ConnectStoreAsync();
         await store.MigrateAsync();
 
         var options = new ServerOptions
         {
-            ServerAddr = $":{port}",
+            ServerAddr = ":0",
             ServerId = serverId,
             MapId = "map_itest",
             Mode = "map",
@@ -50,7 +49,7 @@ public class PostgresPersistenceIntegrationTests
 
         var server = new GameServerHost(options);
         using var cts = new CancellationTokenSource();
-        var runTask = server.RunAsync($":{port}", cts.Token);
+        var (runTask, port) = await TestPorts.StartServerAsync(server, cts.Token);
 
         try
         {
@@ -139,12 +138,4 @@ public class PostgresPersistenceIntegrationTests
         throw new TimeoutException($"game server never started listening on :{port}");
     }
 
-    private static int FreeTcpPort()
-    {
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        return port;
-    }
 }

@@ -102,13 +102,31 @@ internal static class TestDocker
         catch { return ""; }
     }
 
-    /// <summary>A free loopback port, so containers never collide with live services.</summary>
-    public static int FreeTcpPort()
+    /// <summary>
+    /// The loopback port docker published <paramref name="containerPort"/> on, or null if
+    /// the container is gone or publishes nothing.
+    /// <para>
+    /// Containers are started with <c>-p 127.0.0.1:0:&lt;port&gt;</c> and asked afterwards,
+    /// rather than being told a port picked in advance. Picking one first meant binding
+    /// port 0, reading it, releasing it, and hoping it survived until <c>docker run</c> got
+    /// round to binding it — a gap any concurrent fixture could take, and the source of the
+    /// "Address already in use" container launches. Docker's own bind is the allocation, so
+    /// there is nothing left to race: the port is occupied from the moment it exists.
+    /// </para>
+    /// </summary>
+    public static int? PublishedPort(string docker, string container, int containerPort)
     {
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        return port;
+        var r = Exec(docker, $"port {container} {containerPort}/tcp", TimeSpan.FromSeconds(30));
+        if (r.ExitCode != 0) return null;
+
+        // One mapping per line, "127.0.0.1:49154" (or "0.0.0.0:49154"). Take the first.
+        foreach (string line in r.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            string s = line.Trim();
+            int idx = s.LastIndexOf(':');
+            if (idx >= 0 && int.TryParse(s[(idx + 1)..], out int port) && port > 0)
+                return port;
+        }
+        return null;
     }
 }

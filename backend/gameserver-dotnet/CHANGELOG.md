@@ -147,6 +147,65 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that states what it is deleting, rather than change behaviour by accident.
 
 ### Added
+- **One shared way for tests to get a bound port: `GameServer.Tests/Infrastructure/TestPorts.cs`.**
+  This is the deliverable; the classes it fixes are incidental. Seven copies of the
+  same eight-line `FreeTcpPort()` helper existed across the test project — bind
+  port 0, read the number, **close the listener**, hand the number to whoever
+  binds next — and every copy carried the same TOCTOU window, in which any
+  sibling test could take the port and produce
+  `SocketException : Address already in use`. Fixing one copy (`TransferMapTests`,
+  previous entry) taught the other six nothing, which is precisely the argument
+  for a single implementation. All seven are deleted, plus an eighth inline copy
+  in `MetricsEndpointTests`.
+  - **`TestPorts.StartServerAsync(server, ct)`** — for anything that runs a
+    `GameServerHost`: starts it on `":0"` and reads the port back out of the
+    listener via `ListeningAddressAsync`. Nothing is predicted and nothing is
+    released, so there is no window at all. It also replaces the connect-and-retry
+    probes that were standing in for "is it up yet" — the bind completing *is* the
+    answer. Used by `EntityLifecycleTests`, `GameServerHostShutdownTests`,
+    `JoinTokenSecretTests`, `MapIdReloadIntegrationTests`,
+    `PostgresPersistenceIntegrationTests`.
+  - **`TestPorts.Lease`** — for a binder that cannot report what it bound and must
+    be told a number up front. The socket is *held* until the instant before the
+    handoff. This is documented as a narrowing, not a fix: the port is still free
+    between `Dispose()` and the real bind.
+  - **Docker fixtures use a third answer.** `EphemeralPostgres` publishes
+    `-p 127.0.0.1:0:5432` and asks docker what it assigned
+    (`TestDocker.PublishedPort`, i.e. `docker port <name> 5432/tcp`). Docker's own
+    bind is the allocation, so the port is occupied from the moment it exists —
+    the strongest of the three. `TestDocker.FreeTcpPort` is gone.
+    **`EphemeralRedis` deliberately does not do this**, and the reason is worth
+    recording: that fixture exposes `Stop()`/`Start()` to simulate an outage, and a
+    container published on `":0"` is given a *different* host port each time it
+    starts. Converting it made
+    `RedisOutage_DoesNotKillTheService_AndItReRegistersOnReconnect` fail on every
+    single run — `RegistrationService` reconnects to the address it was given at
+    construction, and that address had moved. Caught by the ten-run requirement,
+    which is the second time that rule has paid for itself. It uses a `Lease`.
+
+  The one case the `":0"` pattern genuinely cannot serve is `MetricsEndpointTests`:
+  it exercises `MetricsEndpoint`, which binds an `HttpListener`, and `HttpListener`
+  prefixes require a literal port, have no ephemeral-bind mode, and report nothing
+  back. That class uses a `Lease`. Its observed failure mode is consistent with the
+  release-immediately helper handing the *same* port to more than one of the four
+  parallel `[Theory]` cases — the kernel will re-issue a port it has just taken
+  back — and leases held concurrently cannot collide, so that part is closed even
+  though the final handoff is not atomic.
+
+  **Measured, 10 consecutive full-suite runs (531 tests) before and after.**
+  Fully green runs: **4/10 → 8/10**. Per class, failures across the ten runs:
+  `GameServerHostShutdownTests` 5 → **0**, `RegistrationServiceTests` 1 → **0**,
+  `JoinTokenSecretTests` (1 in an earlier ten-run sample) → **0**,
+  `TransferMapTests` 0 → **0**. The residual is `MetricsEndpointTests`, 1 → **2**
+  runs affected, one `[Theory]` case each — and that is the honest limit of the
+  `Lease`, not a fix that failed to take: the class passes **15/15 in isolation**,
+  so what beats it to the port is another class running in parallel, in the window
+  between releasing the lease and `HttpListener` binding. Closing that needs
+  `HttpListener` to grow an ephemeral bind it does not have, or the test to stop
+  asking for a specific port; both are larger changes than this one and neither is
+  hidden behind a retry or a longer timeout here.
+
+### Added
 - **`docs/API.md`: map transfer (13/14) and the KCP transport are now documented
   as client contracts.** Both were reachable only by reading server source: the
   message-type table stopped at 15 with a note that 13/14 were "reserved", and
