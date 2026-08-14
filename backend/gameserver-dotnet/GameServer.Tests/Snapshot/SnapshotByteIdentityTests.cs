@@ -57,11 +57,11 @@ public class SnapshotByteIdentityTests
         var connections = new ConnectionManager();
         var handler = new InputHandler(world, NullLogger.Instance, null, TickRate, MapBounds.Default);
 
-        // enemySpawner: null — see the class remarks on determinism.
+        // simulationPhase: null — see the class remarks on determinism.
         var loop = new TickLoop(
             world, handler, connections, TickRate, GameConstants.DefaultAoiRadius,
             NullLogger.Instance, metrics: null,
-            keyframeInterval: GameConstants.DefaultKeyframeInterval, enemySpawner: null);
+            keyframeInterval: GameConstants.DefaultKeyframeInterval, simulationPhase: null);
 
         var ids = new string[Players];
         var states = new SnapshotDeltaState[Players];

@@ -1,4 +1,4 @@
-using GameServer.AI;
+using GameServer.Scaffolding;
 using GameServer.Input;
 using GameServer.Net;
 using GameServer.Server;
@@ -6,7 +6,7 @@ using GameServer.World;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shared.GameLogic.Components;
 
-namespace GameServer.Tests.AI;
+namespace GameServer.Tests.Scaffolding;
 
 /// <summary>
 /// Characterization of the enemy AI, written <b>before</b> it was split into systems and
@@ -62,7 +62,7 @@ public class EnemyAiCharacterizationTests
         var loop = new TickLoop(
             world, handler, connections, TickRate, GameConstants.DefaultAoiRadius,
             NullLogger.Instance, metrics: null,
-            keyframeInterval: GameConstants.DefaultKeyframeInterval, enemySpawner: ai);
+            keyframeInterval: GameConstants.DefaultKeyframeInterval, simulationPhase: ai);
         return (loop, world, ai);
     }
 
@@ -402,6 +402,6 @@ public class EnemyAiCharacterizationTests
         for (int t = 0; t < 100; t++) loop.TickOnce();
 
         Assert.Equal(1, world.EntityCount);
-        Assert.Equal(0, loop.EnemiesAlive);
+        Assert.Equal(0, loop.SimulationEntityCount);
     }
 }

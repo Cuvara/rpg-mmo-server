@@ -3,7 +3,7 @@ using GameServer.World;
 using GameServer.World.Components;
 using Shared.GameLogic.Components;
 
-namespace GameServer.AI;
+namespace GameServer.Scaffolding;
 
 /// <summary>
 /// <see cref="EnemyAiPhase.Spawn"/> — releases a wave of enemies on a fixed interval,

@@ -1,8 +1,9 @@
 using Microsoft.Extensions.Logging;
 using Shared.GameLogic.Components;
+using GameServer.Server;
 using GameServer.World;
 
-namespace GameServer.AI;
+namespace GameServer.Scaffolding;
 
 /// <summary>
 /// Server-authoritative enemy AI: the schedule that runs
@@ -34,7 +35,7 @@ namespace GameServer.AI;
 /// loop's comment both claimed one; no code ever implemented it. Nothing was removed
 /// here — see the CHANGELOG.</para>
 /// </summary>
-public sealed class EnemySpawner
+public sealed class EnemySpawner : ISimulationPhase
 {
     private readonly EcsWorld _world;
     private readonly EnemySpawnSystem _spawn;
@@ -72,6 +73,10 @@ public sealed class EnemySpawner
     /// world itself and cannot disagree with it.
     /// </summary>
     public int AliveCount => _world.EnemyCount;
+
+    /// <inheritdoc />
+    /// <remarks>The core asks only for a count; here it is the enemy archetype's.</remarks>
+    int ISimulationPhase.TrackedEntityCount => AliveCount;
 
     /// <summary>
     /// Run one tick of enemy AI. Takes the world write scope itself; the tick loop calls
