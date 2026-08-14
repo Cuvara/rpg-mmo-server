@@ -16,6 +16,28 @@ namespace GameServer.Net;
 /// the length-prefixed JSON codec only needs a reliable ordered stream, which TCP
 /// and KCP both provide, so nothing in this class knows which one it is on.
 /// </remarks>
+/// <summary>
+/// One item in a connection's send queue: either an envelope that is already built, or a
+/// marker meaning "a snapshot is staged for you to encode".
+///
+/// <para>The marker exists so that snapshot encoding happens on the write task, at the
+/// moment the frame is about to go out, rather than on the tick thread. Both kinds share
+/// one channel with a single reader, which is what makes ordering a property of the
+/// structure rather than of discipline: tick N+1's frame physically cannot overtake tick
+/// N's, because one task writes them in the order it dequeues them.</para>
+/// </summary>
+internal readonly struct SendItem
+{
+    /// <summary>Non-null for a pre-built envelope; null for a snapshot marker.</summary>
+    public readonly Envelope? Envelope;
+
+    private SendItem(Envelope? envelope) => Envelope = envelope;
+
+    public static SendItem Snapshot => new(null);
+
+    public static SendItem For(Envelope envelope) => new(envelope);
+}
+
 public sealed class Connection : IDisposable
 {
     /// <summary>User ID associated with this connection (set after JWT validation).</summary>
@@ -56,82 +78,138 @@ public sealed class Connection : IDisposable
     }
 
     /// <summary>
-    /// Reusable AOI scratch for this connection's snapshot, owned here because its
-    /// right size is a property of this client's neighbourhood and it must survive
-    /// between ticks to be worth anything.
+    /// Reusable AOI scratch, <b>double buffered</b>. The tick's gather phase fills one
+    /// while the write task may still be encoding the other.
     ///
-    /// <para><b>Thread affinity:</b> touched only by the tick loop, inside
-    /// <c>TickLoop.TickOnce</c>. It is not synchronised and must not be read from the
-    /// connection's own read/write tasks.</para>
+    /// <para>Two is provably enough: a buffer is only handed to the encoder by
+    /// <see cref="TakePendingSnapshot"/>, and the gather phase reuses the pending slot's
+    /// buffer while the job is still unclaimed, so at most one buffer is ever being
+    /// encoded and at most one is being written.</para>
     ///
-    /// <para>Starts empty rather than at a guessed capacity: the first tick sizes it
-    /// from the real match count, which is cheaper than being wrong in either
-    /// direction for the life of every connection.</para>
+    /// <para><b>Thread affinity:</b> index <see cref="_gatherBuffer"/> is written only by
+    /// the tick thread; the index handed out to the encoder is read only by the write
+    /// task. The handover itself is the only shared state and is under
+    /// <see cref="_snapshotLock"/>.</para>
     /// </summary>
-    private Shared.GameLogic.Components.EntityState[] _aoiBuffer = Array.Empty<Shared.GameLogic.Components.EntityState>();
+    private readonly Shared.GameLogic.Components.EntityState[][] _aoiBuffers =
+    {
+        Array.Empty<Shared.GameLogic.Components.EntityState>(),
+        Array.Empty<Shared.GameLogic.Components.EntityState>(),
+    };
+
+    private readonly object _snapshotLock = new();
 
     /// <summary>
-    /// Run the AOI scan for this connection into its reusable buffer and return the
-    /// matches.
-    ///
-    /// <para>Implements the retry half of the count-don't-saturate contract: the scan
-    /// returns the total match count even when it did not fit, so an undersized buffer
-    /// is grown to exactly that and the scan repeats <b>once</b>. It cannot loop more
-    /// than twice — the second scan is under the same world read lock discipline as the
-    /// first, and a concurrent spawn between the two only means the next tick resizes
-    /// again.</para>
+    /// Buffer the tick thread gathers into. Flipped by the <b>tick thread</b> and only
+    /// when the previous job was already claimed — so the buffer an encoder is holding
+    /// is never the one being written, and an unclaimed job is overwritten in its own
+    /// buffer. Flipping it from the write task instead would race with the gather's read
+    /// of it.
     /// </summary>
-    /// <returns>The matches, as a span over the connection-owned buffer. Valid until
-    /// the next call on this connection.</returns>
-    private int _aoiCount;
+    private int _gatherBuffer;
 
-    /// <summary>AOI centre staged for this tick by the gather phase.</summary>
-    internal Shared.GameLogic.Components.Vec2 SnapshotAnchor { get; private set; }
+    /// <summary>Buffer index the staged job refers to.</summary>
+    private int _pendingBuffer;
 
-    /// <summary>Input tick to acknowledge, staged for this tick by the gather phase.</summary>
-    internal ulong SnapshotAckTick { get; private set; }
+    /// <summary>Set while a staged snapshot is waiting to be encoded.</summary>
+    private bool _snapshotPending;
 
-    /// <summary>
-    /// The entities this connection can see, as staged by the gather phase. Valid until
-    /// the next gather on this connection.
-    /// </summary>
-    internal ReadOnlySpan<Shared.GameLogic.Components.EntityState> StagedAoi =>
-        _aoiBuffer.AsSpan(0, _aoiCount);
+    private int _pendingCount;
+    private ulong _pendingTick;
+    private ulong _pendingAckTick;
+    private int _pendingKeyframeInterval;
 
     /// <summary>
     /// Read everything this connection needs for its snapshot out of the world, into
-    /// buffers this connection owns.
+    /// buffers this connection owns, and stage it for the write task to encode.
     ///
     /// <para>Called inside a single <see cref="GameServer.World.EcsWorld.ReadAll"/> scope
-    /// for the whole broadcast. After it returns, the connection holds a self-contained
-    /// view and the encode step that follows touches no world state and needs no lock —
-    /// which is the property that would let serialization move off the tick entirely.</para>
+    /// for the whole broadcast. Nothing here serializes: the tick thread's entire share
+    /// of a snapshot is now this gather plus a flag.</para>
     ///
-    /// <para>Implements the retry half of the count-don't-saturate contract: grow to the
-    /// reported size and rescan once. Inside one read scope the world cannot change
-    /// between the two scans, so unlike the previous per-connection form there is no
-    /// third case to handle.</para>
+    /// <para><b>Coalescing is the back-pressure policy, and it is lossless.</b> If a
+    /// staged snapshot has not been claimed yet, this overwrites it — newest state wins.
+    /// That loses nothing, because encoding is lazy: a snapshot that was never encoded
+    /// never advanced the delta encoder's <c>_lastSent</c>, so the next one it does
+    /// encode carries every change since the last snapshot actually <i>sent</i>. The
+    /// previous design was the opposite way round and lost data: it encoded on the tick,
+    /// advanced <c>_lastSent</c>, and only then handed the envelope to a bounded channel
+    /// that drops the oldest under load — so a dropped frame's updates were gone until
+    /// the next keyframe.</para>
     /// </summary>
     internal void GatherSnapshotView(
-        GameServer.World.WorldReader reader, float radius)
+        GameServer.World.WorldReader reader, float radius, ulong tick, int keyframeInterval)
     {
         reader.TryGetSnapshotAnchor(UserId, out var anchor, out ulong ackTick);
-        SnapshotAnchor = anchor;
-        SnapshotAckTick = ackTick;
 
-        int count = reader.GetEntitiesInRange(anchor, radius, _aoiBuffer);
-        if (count > _aoiBuffer.Length)
+        int index;
+        lock (_snapshotLock)
         {
-            _aoiBuffer = new Shared.GameLogic.Components.EntityState[count];
-            count = reader.GetEntitiesInRange(anchor, radius, _aoiBuffer);
+            // Claimed jobs release their buffer, so move to the other one. An unclaimed
+            // job is overwritten where it already is — nobody is reading it.
+            if (!_snapshotPending) _gatherBuffer ^= 1;
+            index = _gatherBuffer;
         }
 
-        _aoiCount = count;
+        int count = reader.GetEntitiesInRange(anchor, radius, _aoiBuffers[index]);
+        if (count > _aoiBuffers[index].Length)
+        {
+            _aoiBuffers[index] = new Shared.GameLogic.Components.EntityState[count];
+            count = reader.GetEntitiesInRange(anchor, radius, _aoiBuffers[index]);
+        }
+
+        lock (_snapshotLock)
+        {
+            _pendingBuffer = index;
+            _pendingCount = count;
+            _pendingTick = tick;
+            _pendingAckTick = ackTick;
+            _pendingKeyframeInterval = keyframeInterval;
+            _snapshotPending = true;
+        }
+
+        // A marker every gather, never conditionally.
+        //
+        // Gating this on "no job already pending" looks like an obvious optimisation and
+        // is a starvation bug: the send queue is bounded and drops the OLDEST item when
+        // full, so a dropped marker would leave the job pending forever, no further
+        // marker would ever be enqueued, and that connection would stop sending snapshots
+        // permanently. Surplus markers are free — the claim returns false and the write
+        // task moves on.
+        _sendChannel.Writer.TryWrite(SendItem.Snapshot);
+    }
+
+    /// <summary>
+    /// Claim the staged snapshot, if there is one. Called only by the write task.
+    /// Returns false for a surplus marker, which is normal and harmless.
+    /// </summary>
+    private bool TakePendingSnapshot(
+        out Shared.GameLogic.Components.EntityState[] buffer, out int count,
+        out ulong tick, out ulong ackTick, out int keyframeInterval)
+    {
+        lock (_snapshotLock)
+        {
+            if (!_snapshotPending)
+            {
+                buffer = Array.Empty<Shared.GameLogic.Components.EntityState>();
+                count = 0; tick = 0; ackTick = 0; keyframeInterval = 0;
+                return false;
+            }
+
+            buffer = _aoiBuffers[_pendingBuffer];
+            count = _pendingCount;
+            tick = _pendingTick;
+            ackTick = _pendingAckTick;
+            keyframeInterval = _pendingKeyframeInterval;
+
+            _snapshotPending = false;
+            return true;
+        }
     }
 
     private readonly ITransportConnection _transport;
     private readonly Stream _stream;
-    private readonly Channel<Envelope> _sendChannel;
+    private readonly Channel<SendItem> _sendChannel;
     private readonly CancellationTokenSource _cts;
     private readonly ILogger _logger;
     // Close lifecycle, three states rather than a bool.
@@ -207,7 +285,7 @@ public sealed class Connection : IDisposable
 
         _lastPongMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-        _sendChannel = Channel.CreateBounded<Envelope>(new BoundedChannelOptions(64)
+        _sendChannel = Channel.CreateBounded<SendItem>(new BoundedChannelOptions(64)
         {
             FullMode = BoundedChannelFullMode.DropOldest,
             SingleReader = true,
@@ -229,7 +307,7 @@ public sealed class Connection : IDisposable
     public void Send(Envelope env)
     {
         if (_cts.IsCancellationRequested) return;
-        _sendChannel.Writer.TryWrite(env);
+        _sendChannel.Writer.TryWrite(SendItem.For(env));
     }
 
     /// <summary>
@@ -265,8 +343,29 @@ public sealed class Connection : IDisposable
     {
         try
         {
-            await foreach (var env in _sendChannel.Reader.ReadAllAsync(_cts.Token))
+            await foreach (var item in _sendChannel.Reader.ReadAllAsync(_cts.Token))
             {
+                Envelope? env = item.Envelope;
+
+                if (env == null)
+                {
+                    // Snapshot marker: encode now, on this task, immediately before the
+                    // write. If the job was already superseded by a newer gather this
+                    // claims the newer one; if it was claimed by an earlier marker there
+                    // is nothing to do and the marker is simply dropped.
+                    if (!TakePendingSnapshot(out var buffer, out int count, out ulong tick,
+                                             out ulong ackTick, out int keyframeInterval))
+                    {
+                        continue;
+                    }
+
+                    SnapshotMessage snapshot = DeltaState.Encode(
+                        tick, ackTick, buffer.AsSpan(0, count), keyframeInterval,
+                        intern: Encoding == WireEncoding.Proto);
+
+                    env = WireProtocol.NewEnvelope(MsgType.Snapshot, snapshot, Encoding);
+                }
+
                 byte[] frame = WireProtocol.Encode(env);
                 await _stream.WriteAsync(frame, _cts.Token);
                 await _stream.FlushAsync(_cts.Token);

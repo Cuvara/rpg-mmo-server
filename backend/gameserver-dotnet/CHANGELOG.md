@@ -72,6 +72,114 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     phase opening its own scope so its structural drain lands once, before snapshots, and
     the tension is unresolved on purpose rather than papered over.
 
+- **Snapshot encoding and serialization moved off the tick thread (ECS migration,
+  stage 4).** The tick used to build every viewer's `SnapshotMessage` and
+  protobuf-serialize it before handing the envelope to the connection's write
+  task. Now the tick only *gathers* — it stages each viewer's AOI view on its own
+  connection and signals — and the connection's existing write task encodes and
+  serializes immediately before the write.
+  - **Tick-thread allocation at 200 players: 192 935 → 32 B/tick.** Paired
+    in-process A/B against `develop`, three runs each side, deterministic to a
+    couple of bytes.
+  - Ordering is **structural, not disciplinary**: each connection has one write
+    task reading one channel, so tick N+1's frame cannot overtake tick N's. The
+    send queue carries a `SendItem` that is either a built envelope or a "snapshot
+    staged" marker, so both kinds share that one ordered path.
+  - The AOI buffer is **double buffered**. Two is provably enough: a buffer is only
+    handed to the encoder when a job is claimed, and an unclaimed job is overwritten
+    in place, so at most one buffer is being encoded and one being filled.
+  - **Ticks and snapshots are no longer 1:1 when the writer lags — a real, intended
+    behaviour change.** Previously the tick encoded every snapshot and queued the
+    finished envelope, so a lagging client eventually received *all* of them: a
+    backlog of stale positions, late. Now it receives fewer, fresher ones. For a
+    realtime game that is the better trade, but it is a change in observable
+    behaviour and not merely an internal one.
+    Two tests asserted the 1:1 ratio and now assert what actually holds.
+    `ClientApplyingDeltas_ReconstructsServerStateExactly` asserts that the client's
+    reconstructed state equals the server's exactly — the stronger statement, and
+    the one the delta protocol exists to guarantee.
+    `DeltaEncoding_UsesLessBandwidthThanFullSnapshots` compared raw byte totals
+    across two runs of assumed-equal length; it now compares **bytes per
+    snapshot**, because with coalescing the two runs can deliver different counts
+    and a total-versus-total comparison would measure the coalescing rather than
+    the encoding. That one only failed in CI, where the runner is slower than this
+    machine and the writer lagged once in a hundred ticks.
+  - **Back-pressure: coalesce to newest, and it loses nothing.** If the writer has
+    not claimed the staged snapshot, the next gather overwrites it. Nothing is lost
+    because encoding is lazy — a snapshot that was never encoded never advanced the
+    delta encoder's `_lastSent`, so the next one encoded carries every change since
+    the last snapshot *actually sent*.
+
+### Fixed
+- **Snapshots dropped under load no longer lose state until the next keyframe.**
+  This is a pre-existing bug the restructuring removes rather than a new feature.
+  The old order was: encode on the tick (advancing `_lastSent`), then hand the
+  envelope to a bounded channel that drops the oldest when full. A dropped frame's
+  updates were therefore recorded as sent and never retransmitted — the affected
+  entities stayed stale on that client for up to a full keyframe interval. With
+  encoding moved to the moment of writing, a frame that is never sent is also never
+  encoded, so its changes roll into the next one.
+  `SnapshotPipelineTests.StalledClient_CoalescesToNewest_AndLosesNoState` stalls a
+  client for 80 ticks, releases it, and reconstructs the client's merged view to
+  assert it matches the world exactly.
+
+### Added
+- **`SnapshotPipelineTests` — end-to-end guards on the threaded path.** Unlike
+  `SnapshotByteIdentityTests`, which reproduces bytes from public inputs, these
+  capture what the write task *actually wrote to the stream*, through a recording
+  transport that can also be stalled on demand. They cover the four things that
+  are not provable by inspection once encoding is concurrent: bytes identical to
+  the reference encoder (Protobuf and JSON), strictly increasing tick order per
+  connection, lossless coalescing under a stalled client, and a closed or disposed
+  connection mid-broadcast neither throwing into the tick nor stalling it.
+
+### Measured
+- Paired in-process A/B against `develop`, Release, three runs per side. The probe
+  runs the connections' write tasks, so the encoding really happens somewhere —
+  without that the work would be *skipped* rather than moved and the number would
+  be a fiction. It reports bytes reaching the transport as proof.
+
+  | | `develop` | this branch |
+  |---|---|---|
+  | tick-thread alloc, 200 players | 192 935 B/tick | **32 B/tick** |
+  | tick-thread alloc, 50 players | 21 628 B/tick | **160 B/tick** |
+
+- **Wall-clock is not claimed.** Tick time was lower in all three paired runs
+  (~1.9–3.1 ms → ~1.2–1.8 ms at 200 players) but this host's spread on an unchanged
+  binary is ±50%, so the honest statement is: the work demonstrably left the tick
+  thread, and how much that is worth in wall time is not measurable here.
+- **Total CPU is unchanged.** This moves work, it does not remove it. It is a win
+  where there are spare cores and roughly a wash on a single-vCPU pod. Nothing here
+  makes encoding cheaper — that would be a different change.
+
+### Known issues (observed, not fixed here)
+- **Two bugs were introduced during this stage and caught before merge**, both worth
+  recording because neither would have failed loudly. The first: gating the "snapshot
+  staged" marker on *no job already pending* looks like an obvious optimisation and is
+  a **permanent starvation bug** — the send queue is bounded and drops the oldest item
+  when full, so a dropped marker would have left the job pending forever and that
+  connection would have stopped sending snapshots for the rest of its life, silently.
+  Markers are now unconditional and surplus ones are free. The second: the gather read
+  its buffer index outside the lock while the write task flipped it, so a slow gather
+  could write into the buffer being encoded. Buffer selection now belongs to the tick
+  thread alone and only advances when the previous job was claimed.
+- **The premise the stage was commissioned on does not reproduce.** The analysis
+  cited a ~5:1 serialization:AOI ratio and called serialization "the real 80%".
+  Measured at 200 players, splitting the old phase B by hand: AOI gather ~874–1177
+  µs/tick, `SnapshotDeltaState.Encode` ~998–1272 µs/tick, and protobuf
+  `ToByteArray` **~79–144 µs/tick**. Serialization proper is **4–6% of the tick**,
+  not 80%. The two dominant terms are the brute-force AOI scan (O(viewers ×
+  entities); a spatial index is the standing "production" item) and the delta/message
+  building inside `Encode` — which allocates 134 699 B/tick at 200 players, almost
+  all of it `EntitySnapshot` objects, and is a **pooling** problem rather than a
+  threading one. Stage 4 still pays for itself because it moves *both* Encode and
+  serialize off the tick, but the next real win is one of those two terms, not more
+  threading.
+- At 200 players in the probe the write tasks could not keep up with 15 Hz and
+  coalescing engaged (wire bytes 35 030 → 30 638 B/tick). That is the designed
+  policy working, and it is lossless, but it does mean 200 players on this host is
+  already past the encoder's throughput.
+
 ### Changed
 - **The snapshot broadcast is two phases: read the world for every viewer under one
   lock, then encode and send under none (ECS migration, stage 3 of 3).** Each

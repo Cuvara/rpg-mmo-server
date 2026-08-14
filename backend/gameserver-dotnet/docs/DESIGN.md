@@ -1105,6 +1105,49 @@ Wire output is unchanged, and is proven so rather than asserted: `SnapshotByteId
 SHA-256s every snapshot envelope of a deterministic 120-tick scenario, for Protobuf and
 JSON separately, against digests generated before the change.
 
+### Snapshot encoding runs on the connection, not on the tick
+
+The tick stages each viewer's AOI view on its own `Connection` and signals; the
+connection's existing write task encodes the `SnapshotMessage`, serializes it and writes
+it. Tick-thread allocation at 200 players went from 192 935 to 32 B/tick. Total CPU is
+unchanged — this moves work, it does not remove it, so it is a win where there are spare
+cores and roughly a wash on a single-vCPU pod.
+
+**Ordering is structural.** One write task per connection reads one channel, so tick
+N+1's frame cannot overtake tick N's. The queue carries a `SendItem` that is either a
+built envelope or a "snapshot staged" marker, so both share that one ordered path.
+
+**Two AOI buffers, and two is provably enough.** Buffer selection belongs to the tick
+thread and advances only when the previous job was claimed, so the buffer an encoder holds
+is never the one being written, and an unclaimed job is overwritten in place.
+
+**Back-pressure coalesces to the newest staged snapshot, losslessly.** A snapshot that is
+never claimed is never encoded, so it never advances the delta encoder's `_lastSent`, and
+the next one encoded carries every change since the last snapshot actually sent. This
+*fixed* a pre-existing bug: the old order encoded on the tick, advanced `_lastSent`, and
+only then handed the envelope to a bounded channel that drops the oldest under load — so a
+dropped frame's updates were recorded as sent and never retransmitted until the next
+keyframe.
+
+The visible consequence is that **ticks and snapshots are no longer 1:1 when the writer
+lags**. A lagging client now gets fewer, fresher snapshots instead of a backlog of stale
+ones. That is a deliberate behaviour change, not an internal detail.
+
+**Two bugs were made and caught here, both silent by nature.** Gating the marker on "no
+job already pending" is a permanent starvation bug, because the bounded queue drops the
+oldest and a lost marker would have stopped that connection's snapshots forever; markers
+are now unconditional and surplus ones cost nothing. And reading the buffer index outside
+the lock while the write task flipped it let a slow gather write into the buffer being
+encoded.
+
+**What this measured about the tick, which matters more than the change itself.** Splitting
+the old broadcast by hand at 200 players: AOI gather ~874–1177 µs/tick,
+`SnapshotDeltaState.Encode` ~998–1272 µs/tick, protobuf `ToByteArray` ~79–144 µs/tick.
+Serialization proper is 4–6% of the tick, not the 80% the original analysis assumed. The
+two real terms are the brute-force AOI scan (a spatial index is the standing production
+item) and `Encode`'s 134 699 B/tick of `EntitySnapshot` objects, which is a pooling
+problem. Neither is an ECS problem.
+
 ### The `Shared.GameLogic` boundary is unchanged
 
 No `Arch.Core` type appears anywhere in `Shared.GameLogic` — not `World`, not `Entity`,

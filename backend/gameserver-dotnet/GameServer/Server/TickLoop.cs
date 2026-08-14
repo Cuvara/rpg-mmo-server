@@ -104,7 +104,7 @@ public sealed class TickLoop
     {
         for (int i = 0; i < _viewerCount; i++)
         {
-            _viewers[i].GatherSnapshotView(reader, _aoiRadius);
+            _viewers[i].GatherSnapshotView(reader, _aoiRadius, _currentTick, _keyframeInterval);
         }
     }
 
@@ -236,24 +236,17 @@ public sealed class TickLoop
             // Phase A — gather. One read lock for the whole broadcast.
             _world.ReadAll(_gatherViews);
 
-            // Phase B — encode and send. No lock, no world access.
-            for (int i = 0; i < _viewerCount; i++)
-            {
-                Connection conn = _viewers[i];
-                try
-                {
-                    var snapshot = conn.DeltaState.Encode(
-                        _currentTick, conn.SnapshotAckTick, conn.StagedAoi, _keyframeInterval,
-                        intern: conn.Encoding == WireEncoding.Proto);
-                    var env = WireProtocol.NewEnvelope(MsgType.Snapshot, snapshot, conn.Encoding);
-                    conn.Send(env);
-                    _snapshotsThisTick++;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to send snapshot to {UserId}", conn.UserId);
-                }
-            }
+            // Phase B is gone from the tick. Gathering already staged each viewer's
+            // snapshot on its own connection and signalled its write task, which encodes
+            // and serializes there — see Connection.GatherSnapshotView. The tick thread's
+            // whole share of a snapshot is now the gather plus a flag.
+            //
+            // Ordering is structural, not disciplinary: each connection has one write
+            // task reading one channel, so tick N+1's frame cannot overtake tick N's.
+            // Back-pressure coalesces to the newest staged snapshot and loses nothing,
+            // because encoding is lazy and the delta is computed against the last
+            // snapshot actually sent.
+            _snapshotsThisTick = _viewerCount;
 
             // Released so a disconnected connection is not kept alive by the scratch
             // array until the next tick happens to overwrite that slot.
