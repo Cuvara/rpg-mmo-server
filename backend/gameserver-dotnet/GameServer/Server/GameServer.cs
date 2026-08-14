@@ -128,6 +128,22 @@ public sealed class GameServerHost : IAsyncDisposable
     private ITransportListener? _listener;
     private CancellationTokenSource? _cts;
 
+    /// <summary>
+    /// Completed with the bound address once the listener is up, so a caller can learn the
+    /// port an ephemeral (":0") bind actually got. Faulted if the bind throws and cancelled
+    /// if the server shuts down before binding, so a waiter can never hang.
+    /// </summary>
+    private readonly TaskCompletionSource<string> _listening =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>
+    /// The address the listener is bound to ("127.0.0.1:54321"), available as soon as the
+    /// bind succeeds. Callers that listen on ":0" — tests, and any deployment that lets the
+    /// kernel pick — must await this instead of choosing a port up front: picking a port,
+    /// releasing it, and rebinding it later is a TOCTOU race another process can win.
+    /// </summary>
+    public Task<string> ListeningAddressAsync => _listening.Task;
+
     /// <summary>0 until the first ShutdownAsync caller wins the race, 1 afterwards.</summary>
     private int _shutdownStarted;
 
@@ -247,10 +263,26 @@ public sealed class GameServerHost : IAsyncDisposable
 
         // Bind the configured transport. TCP and KCP both yield a reliable ordered
         // stream, so everything above the listener is transport-agnostic.
-        _listener = TransportFactory.Listen(_options.Transport, addr, _options.TransportKey, _logger);
+        try
+        {
+            _listener = TransportFactory.Listen(_options.Transport, addr, _options.TransportKey, _logger);
+        }
+        catch (Exception ex)
+        {
+            // Anyone awaiting ListeningAddressAsync must observe the bind failure rather
+            // than wait for an address that will never arrive.
+            _listening.TrySetException(ex);
+            throw;
+        }
 
         // Log the actual bound address (important when port=0 for ephemeral port allocation)
         var actualAddr = _listener.LocalEndPoint;
+
+        // Publish the bound address before anything else can await it. The socket is already
+        // listening at this point, so a client that connects on this signal lands in the
+        // accept backlog even if the accept loop has not started yet.
+        _listening.TrySetResult(actualAddr);
+
         _logger.LogInformation(
             "Game server listening on {Addr} via {Transport} (mode={Mode}, map={MapId}, id={ServerId})",
             actualAddr, _listener.Kind, _options.Mode, _options.MapId, _options.ServerId);
@@ -314,6 +346,10 @@ public sealed class GameServerHost : IAsyncDisposable
             // Closing the listener also tears down every live KCP session: unlike TCP
             // there is no socket per peer whose close the kernel would propagate.
             try { _listener?.Dispose(); } catch { /* ignore */ }
+
+            // If we are shutting down before the bind ever completed, release anyone waiting
+            // on the address instead of leaving them on a task that will never finish.
+            _listening.TrySetCanceled();
 
             // Drain the hold table by removal so each CTS has exactly one owner. The
             // reconnect path (HandleConnectionAsync) races us for the same entries and
