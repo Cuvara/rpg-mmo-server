@@ -91,6 +91,20 @@ public class ServerOptions
     /// </summary>
     public Func<EcsWorld, ILoggerFactory, ISimulationPhase>? SimulationPhaseFactory { get; set; }
 
+    /// <summary>
+    /// Supplies the number published as <c>enemies_alive</c> on the status endpoint.
+    ///
+    /// <para>Set by the composition root, which knows what the game is. Null means the
+    /// server publishes 0 — a content-free build has nothing to count, which is the
+    /// correct answer rather than a missing feature.</para>
+    ///
+    /// <para>This replaced an <c>ISimulationPhase.TrackedEntityCount</c> member. That put
+    /// the number behind a content-agnostic interface whose only consumer immediately
+    /// renamed it after the content, and forced every future phase to summarise itself as
+    /// a single unlabelled int — which stops composing as soon as there are two.</para>
+    /// </summary>
+    public Func<EcsWorld, int>? StatusEntityCount { get; set; }
+
     /// <summary>Nakama HTTP API base URL (e.g. <c>http://rpg-nakama:7350</c>). Null disables economy integration.</summary>
     public string? NakamaUrl { get; set; }
 
@@ -176,11 +190,15 @@ public sealed class GameServerHost : IAsyncDisposable
 
     /// <summary>Number of enemies currently alive.</summary>
     /// <summary>
-    /// Entities owned by the simulation phase, surfaced on the status endpoint. Named
-    /// for enemies because that is what the field is called in the status JSON the
-    /// clients already read; the core itself attaches no meaning to the number.
+    /// The number the status endpoint publishes as <c>enemies_alive</c>.
+    ///
+    /// <para>The core does not compute it and does not know what it counts. The
+    /// composition root supplies <see cref="ServerOptions.StatusEntityCount"/> — it is
+    /// the one place that is allowed to know what the game is — and the property name is
+    /// kept because the Unity DOTS sample polls <c>/status</c> and reads that field. The
+    /// name is a wire contract; what fills it is not.</para>
     /// </summary>
-    public int EnemiesAlive => _tickLoop.SimulationEntityCount;
+    public int EnemiesAlive => _options.StatusEntityCount?.Invoke(_world) ?? 0;
 
     public GameServerHost(ServerOptions options)
     {

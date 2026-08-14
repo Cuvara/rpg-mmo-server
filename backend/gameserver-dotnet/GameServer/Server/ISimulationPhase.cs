@@ -26,6 +26,16 @@ namespace GameServer.Server;
 /// </summary>
 public interface ISimulationPhase
 {
+    // Deliberately one member.
+    //
+    // This interface used to also carry `int TrackedEntityCount`, and it was a mistake in
+    // two directions. The core defined a content-agnostic contract and then its single
+    // consumer renamed the property after the content ("EnemiesAlive", because that is
+    // what the status JSON calls it) — so the abstraction was not paying for itself. And
+    // it forced every future phase to summarise itself as one unlabelled int, which does
+    // not compose the moment there are two phases. The status endpoint now gets the
+    // number from the composition root, which is allowed to know what the game is.
+
     /// <summary>
     /// Advances this phase by one tick, called after input has been applied and before
     /// snapshots are built, so anything it changes is visible in the same tick's snapshot
@@ -42,10 +52,4 @@ public interface ISimulationPhase
     /// is to hand phases a writer rather than to widen this contract quietly.</para>
     /// </summary>
     void Tick(ulong currentTick);
-
-    /// <summary>
-    /// How many entities this phase currently owns. Reported through the status endpoint
-    /// for operators; the core attaches no meaning to the number beyond passing it on.
-    /// </summary>
-    int TrackedEntityCount { get; }
 }

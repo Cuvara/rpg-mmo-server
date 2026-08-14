@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using Shared.GameLogic.Components;
 using GameServer.Server;
 using GameServer.World;
+using GameServer.World.Components;
 
 namespace GameServer.Scaffolding;
 
@@ -38,94 +39,52 @@ namespace GameServer.Scaffolding;
 public sealed class EnemySpawner : ISimulationPhase
 {
     private readonly EcsWorld _world;
-    private readonly EnemySpawnSystem _spawn;
-    private readonly EnemyMoveSystem _move;
-    private readonly EnemyReapSystem _reap;
-
-    /// <summary>
-    /// Reusable buffer of enemy handles for this tick. Owned here so the per-tick query
-    /// allocates nothing once the population has stabilised; it grows to the high-water
-    /// mark and stays, which is bounded by <see cref="EnemyAiTuning.MaxEnemies"/>.
-    /// </summary>
-    private EntityHandle[] _enemies = Array.Empty<EntityHandle>();
+    private readonly SystemSchedule _schedule;
 
     /// <summary>
     /// The scope callback, built once. A lambda written inline at the call site captures
-    /// <c>this</c> and so allocates a delegate on every tick; hoisting it to a field is
-    /// the difference between the AI phase allocating per tick and not.
+    /// <c>this</c> and so allocates a delegate on every tick.
     /// </summary>
-    private readonly Action<WorldWriter> _runPhases;
+    private readonly Action<ulong, WorldWriter> _runSchedule;
 
     public EnemySpawner(EcsWorld world, int tickRate, ILogger logger)
     {
         _world = world;
         float dt = 1.0f / tickRate;
 
-        _spawn = new EnemySpawnSystem(dt, logger);
-        _move = new EnemyMoveSystem(dt);
-        _reap = new EnemyReapSystem(logger);
-        _runPhases = RunPhases;
+        // Ordering is declared by each system's Order, not by the order of these
+        // arguments — pass them in any order and the schedule still runs
+        // spawn -> move -> reap. That is the difference from the previous shape, where
+        // ordering was three method calls in a private method and nothing said so.
+        _schedule = new SystemSchedule(
+            new EnemySpawnSystem(dt, logger),
+            new EnemyMoveSystem(dt),
+            new EnemyReapSystem(logger));
+
+        _runSchedule = (tick, writer) => _schedule.Run(writer, tick);
     }
 
     /// <summary>
-    /// Number of enemies currently alive. A count over the <c>EnemyAi</c> archetype
-    /// rather than the length of a hand-maintained id list, so it is answered by the
-    /// world itself and cannot disagree with it.
+    /// Number of enemies currently alive. A count over the <c>EnemyAi</c> archetype, so
+    /// it is answered by the world and cannot drift from it.
     /// </summary>
-    public int AliveCount => _world.EnemyCount;
+    public int AliveCount => _world.CountWith<EnemyAi>();
 
-    /// <inheritdoc />
-    /// <remarks>The core asks only for a count; here it is the enemy archetype's.</remarks>
-    int ISimulationPhase.TrackedEntityCount => AliveCount;
+    /// <summary>The systems this phase runs, in the order they run. Diagnostics and tests.</summary>
+    public IReadOnlyList<IEcsSystem> Systems => _schedule.Systems;
 
     /// <summary>
-    /// Run one tick of enemy AI. Takes the world write scope itself; the tick loop calls
-    /// this directly rather than wrapping it, because the phases have to share one scope
-    /// for the reap to land before snapshots are built.
+    /// Run one tick of enemy AI: the whole schedule inside one world write scope.
     /// </summary>
     /// <remarks>
-    /// Structural changes raised inside the scope — spawns from
-    /// <see cref="EnemySpawnSystem"/>, despawns from <see cref="EnemyReapSystem"/> — are
-    /// applied by the world's deferred structural phase, which
-    /// <see cref="EcsWorld.UpdateComponents"/> drains on the way out. That is the ADR-11
-    /// substitute for Arch's <c>CommandBuffer</c>, and it is why the removals are visible
-    /// to the snapshot broadcast later in the same tick without the old dance of
-    /// collecting ids and draining them after the lock was released.
+    /// One scope for all systems, not one per system, because the deferred structural
+    /// drain happens on the way out of a scope — spawns and despawns must land once, at
+    /// the end of the phase and still before snapshots are built.
     /// </remarks>
-    public void Tick(ulong currentTick)
-    {
-        _world.UpdateComponents(_runPhases);
-    }
-
-    private void RunPhases(WorldWriter writer)
-    {
-        // Phase 1 — Spawn. Before anything iterates, so new enemies are steppable
-        // this tick and their creation takes the immediate path.
-        _spawn.Run(writer, AliveCountLocked(writer));
-
-        // The population for the rest of the tick, captured once. Count-don't-
-        // saturate: a short buffer reports what it needed and we retry at the right
-        // size rather than processing a prefix and stranding the remainder.
-        int count = writer.QueryEnemies(_enemies);
-        if (count > _enemies.Length)
-        {
-            _enemies = new EntityHandle[count];
-            count = writer.QueryEnemies(_enemies);
-        }
-
-        var enemies = new ReadOnlySpan<EntityHandle>(_enemies, 0, Math.Min(count, _enemies.Length));
-
-        // Phase 2 — Move.
-        _move.Run(writer, enemies);
-
-        // Phase 3 — Reap. After Move, because "arrived at the centre" is a fact Move
-        // produced this tick.
-        _reap.Run(writer, enemies);
-    }
-
-    /// <summary>
-    /// Enemy population as seen from inside the write scope. <see cref="AliveCount"/>
-    /// takes a read lock and would deadlock against the write lock we already hold.
-    /// </summary>
-    private int AliveCountLocked(WorldWriter writer) => writer.QueryEnemies(Span<EntityHandle>.Empty);
+    /// <remarks>
+    /// The tick is passed through the scope rather than stashed in a field: a phase that
+    /// held <c>_currentTick</c> between calls would be keeping simulation state in a
+    /// class, which is the thing <c>SimulationStateArchitectureTests</c> now forbids.
+    /// </remarks>
+    public void Tick(ulong currentTick) => _world.UpdateComponents(currentTick, _runSchedule);
 }

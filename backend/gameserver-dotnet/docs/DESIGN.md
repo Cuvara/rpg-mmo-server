@@ -1148,6 +1148,42 @@ two real terms are the brute-force AOI scan (a spatial index is the standing pro
 item) and `Encode`'s 134 699 B/tick of `EntitySnapshot` objects, which is a pooling
 problem. Neither is an ECS problem.
 
+### Systems, the schedule, and where simulation state lives
+
+The enemy phase is three `IEcsSystem`s in a `SystemSchedule`, run inside one world write
+scope. Each declares an `Order` and a `ComponentAccess` of reads and writes; ordering is
+declared, not the order three calls happen to appear in, and a duplicate `Order` is
+rejected at construction.
+
+**Systems iterate chunks when the work is per-entity-linear.** `EnemyMoveSystem` walks
+`Span<Position>` and `Span<Health>` through a `SimChunk` view, with the per-chunk body a
+`struct` visitor passed by `ref` so the call devirtualises and nothing is allocated.
+`EnemySpawnSystem` and `EnemyReapSystem` keep handle access on purpose — spawn creates and
+has no array to walk; reap decides per entity and then performs a structural change, which
+needs an identity a component span does not carry.
+
+**Simulation state lives in the world.** The spawner's wave accumulator and id counter were
+private fields on the system — invisible to the world, so unsnapshotable, unpersistable,
+and not reset when the world is. They are an `EnemySpawnState` component on a singleton
+entity that carries only that component, so it matches none of the queries requiring the
+seven standard ones and can never surface in a snapshot, an AOI scan or the entity count.
+`SimulationStateArchitectureTests` now fails the build on any mutable instance field in a
+phase or system, with `[SimulationScratch]` the one sanctioned exception for buffers that
+carry nothing between ticks. It was verified to fire by putting the original field back.
+
+**The core does not name the gameplay.** `CountWith<TTag>()` and
+`QueryWith<TTag>(Span<EntityHandle>)` replaced an `EnemyCount` property and an enemy-named
+query. The status endpoint's number comes from `ServerOptions.StatusEntityCount`, supplied
+by `Program.cs`; the `EnemiesAlive` JSON field name is a client contract and is unchanged.
+
+**Cost of the generator ban.** `SimChunk` exposes one fixed component set because a general
+N-component chunk query needs either a source generator — banned, since the AOT hint guard
+cannot enumerate generated query shapes — or a combinatorial hand-written API. A system
+with a different set means adding an explicit shape or justifying handle access.
+
+This measured nothing: 108 B/tick before and after. Steady state is 4–6 enemies. It was
+taken as a shape change, before gameplay is written against the seam.
+
 ### The `Shared.GameLogic` boundary is unchanged
 
 No `Arch.Core` type appears anywhere in `Shared.GameLogic` — not `World`, not `Entity`,

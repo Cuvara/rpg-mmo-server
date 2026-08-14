@@ -46,6 +46,11 @@ public static class ArchAotHints
         new PlayerTag[1],
         new EnemyAi[1],
 
+        // Content-owned components. They live in GameServer.Scaffolding but are hinted
+        // here because the hint list is one place by design — the guard finds them by
+        // [EcsComponent] wherever they are declared.
+        new GameServer.Scaffolding.EnemySpawnState[1],
+
         // Arch stores the chunk's entity handles in an Entity[] alongside the
         // component arrays, allocated the same Type-driven way.
         new Entity[1],

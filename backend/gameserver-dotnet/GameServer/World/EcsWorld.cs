@@ -127,9 +127,6 @@ public sealed class EcsWorld : IDisposable
     private static readonly QueryDescription AllEntities = new QueryDescription()
         .WithAll<EntityIdRef, EntityKind, Position, Health, Combat, Locomotion, InputCursor>();
 
-    private static readonly QueryDescription Enemies = new QueryDescription()
-        .WithAll<EntityIdRef, EntityKind, Position, Health, Combat, Locomotion, InputCursor, EnemyAi>();
-
     private static readonly QueryDescription Players = new QueryDescription()
         .WithAll<EntityIdRef, EntityKind, Position, Health, Combat, Locomotion, InputCursor, PlayerTag>();
 
@@ -174,18 +171,17 @@ public sealed class EcsWorld : IDisposable
     }
 
     /// <summary>
-    /// Number of live entities driven by the enemy AI. A count over the
-    /// <see cref="EnemyAi"/> archetype, so it cannot drift from the world the way a
-    /// parallel <c>List&lt;string&gt;</c> of ids could.
+    /// Number of live entities carrying <typeparamref name="TTag"/>.
+    ///
+    /// <para>Generic because the core must not name the gameplay: this replaced an
+    /// <c>EnemyCount</c> property, which meant <c>World/</c> knew what an enemy was. The
+    /// tag is supplied by whoever owns the content.</para>
     /// </summary>
-    public int EnemyCount
+    public int CountWith<TTag>() where TTag : struct
     {
-        get
-        {
-            _rwLock.EnterReadLock();
-            try { return _arch.CountEntities(in Enemies); }
-            finally { _rwLock.ExitReadLock(); }
-        }
+        _rwLock.EnterReadLock();
+        try { return _arch.CountEntities(in TaggedQuery<TTag>.Description); }
+        finally { _rwLock.ExitReadLock(); }
     }
 
     /// <summary>Remove an entity by ID. A missing ID is a no-op.</summary>
@@ -377,6 +373,21 @@ public sealed class EcsWorld : IDisposable
     /// rather than a getter/setter pair that round-trips a whole
     /// <see cref="EntityState"/> through seven component lookups in each direction.</para>
     /// </summary>
+    public void UpdateComponents<TState>(TState state, Action<TState, WorldWriter> action)
+    {
+        _rwLock.EnterWriteLock();
+        try
+        {
+            action(state, _writer);
+        }
+        finally
+        {
+            ApplyStructuralChangesLocked();
+            _rwLock.ExitWriteLock();
+        }
+    }
+
+    /// <inheritdoc cref="UpdateComponents{TState}(TState, Action{TState, WorldWriter})"/>
     public void UpdateComponents(Action<WorldWriter> action)
     {
         _rwLock.EnterWriteLock();
@@ -565,8 +576,8 @@ public sealed class EcsWorld : IDisposable
     }
 
     /// <summary>
-    /// Collect handles for every live enemy into <paramref name="destination"/>.
-    /// Caller holds the write lock.
+    /// Collect handles for every live entity carrying <typeparamref name="TTag"/> into
+    /// <paramref name="destination"/>. Caller holds the write lock.
     ///
     /// <para>Same count-don't-saturate contract as the AOI scan: the return value is the
     /// total match count and may exceed the buffer, so the caller resizes and retries
@@ -578,14 +589,14 @@ public sealed class EcsWorld : IDisposable
     /// safe against the returned handles: Arch's <c>Entity</c> is a stable identity, and
     /// the reaper revalidates liveness before touching one.</para>
     /// </summary>
-    internal int QueryEnemiesLocked(Span<EntityHandle> destination)
+    internal int QueryWithLocked<TTag>(Span<EntityHandle> destination) where TTag : struct
     {
         int matches = 0;
 
         _iterationDepth++;
         try
         {
-            foreach (ref var chunk in _arch.Query(in Enemies).GetChunkIterator())
+            foreach (ref var chunk in _arch.Query(in TaggedQuery<TTag>.Description).GetChunkIterator())
             {
                 int count = chunk.Count;
                 for (int i = 0; i < count; i++)
@@ -601,6 +612,81 @@ public sealed class EcsWorld : IDisposable
         finally { _iterationDepth--; }
 
         return matches;
+    }
+
+    /// <summary>
+    /// Per-tag query description, built once per closed generic rather than per call.
+    ///
+    /// <para>A static generic field is the allocation-free way to memoise this. It is also
+    /// AOT-safe: every instantiation is reached from concrete code, so ILC sees it — no
+    /// reflection and no runtime type construction, which is what ADR-11 actually
+    /// forbids.</para>
+    /// </summary>
+    private static class TaggedQuery<TTag> where TTag : struct
+    {
+        public static readonly QueryDescription Description = new QueryDescription()
+            .WithAll<EntityIdRef, EntityKind, Position, Health, Combat, Locomotion, InputCursor, TTag>();
+    }
+
+    /// <summary>
+    /// Run <paramref name="visitor"/> over every chunk of entities carrying
+    /// <typeparamref name="TTag"/>, handing it the component arrays directly. Caller
+    /// holds the write lock.
+    ///
+    /// <para>This is the shape the core's own scans use and the shape ECS exists to give:
+    /// the visitor walks contiguous <see cref="Span{T}"/>s rather than resolving one
+    /// entity at a time. <typeparamref name="TVisitor"/> is a <c>struct</c> constrained to
+    /// the interface and passed by <c>ref</c>, so the call devirtualises and nothing is
+    /// boxed or allocated per chunk.</para>
+    /// </summary>
+    internal void VisitChunksLocked<TTag, TVisitor>(ref TVisitor visitor)
+        where TTag : struct
+        where TVisitor : struct, ISimChunkVisitor
+    {
+        _iterationDepth++;
+        try
+        {
+            foreach (ref var chunk in _arch.Query(in TaggedQuery<TTag>.Description).GetChunkIterator())
+            {
+                var view = new SimChunk(
+                    chunk.GetSpan<Position>(), chunk.GetSpan<Health>(),
+                    chunk.GetSpan<Locomotion>(), chunk.Count);
+                visitor.Visit(in view);
+            }
+        }
+        finally { _iterationDepth--; }
+    }
+
+    /// <summary>
+    /// A reference to the single entity carrying <typeparamref name="T"/>, creating it if
+    /// it does not exist. Caller holds the write lock.
+    ///
+    /// <para>This is where per-system state belongs. A system that keeps a counter in a
+    /// private field owns simulation state the world cannot see: it cannot be snapshotted,
+    /// saved, or reset with the world, and two instances of the system would silently
+    /// disagree. Putting it on an entity makes it ordinary world data.</para>
+    ///
+    /// <para>The entity carries <b>only</b> this component, so it matches none of the
+    /// queries that require the seven standard ones — it can never appear in a snapshot,
+    /// an AOI scan, or the persistence sweep.</para>
+    ///
+    /// <para>The returned <c>ref</c> points into chunk storage and is invalidated by any
+    /// structural change. Re-take it after one.</para>
+    /// </summary>
+    internal ref T SingletonLocked<T>() where T : struct
+    {
+        foreach (ref var chunk in _arch.Query(in SingletonQuery<T>.Description).GetChunkIterator())
+        {
+            if (chunk.Count > 0) return ref chunk.GetSpan<T>()[0];
+        }
+
+        Entity created = _arch.Create(default(T));
+        return ref _arch.Get<T>(created);
+    }
+
+    private static class SingletonQuery<T> where T : struct
+    {
+        public static readonly QueryDescription Description = new QueryDescription().WithAll<T>();
     }
 
     /// <summary>Enqueue or apply a removal for a resolved entity. Caller holds the write lock.</summary>

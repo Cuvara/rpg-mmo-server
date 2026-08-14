@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using GameServer.Server;
 using GameServer.World;
 using GameServer.World.Components;
 using Shared.GameLogic.Components;
@@ -6,24 +7,24 @@ using Shared.GameLogic.Components;
 namespace GameServer.Scaffolding;
 
 /// <summary>
-/// <see cref="EnemyAiPhase.Spawn"/> — releases a wave of enemies on a fixed interval,
-/// up to a population cap.
+/// <see cref="EnemyAiPhase.Spawn"/> — releases a wave of enemies on a fixed interval, up
+/// to a population cap.
 /// </summary>
 /// <remarks>
-/// Structural work: this is the server's only entity <b>creation</b> outside the join
-/// path. It goes through <see cref="WorldWriter.Spawn"/>, which applies immediately when
-/// nothing is iterating and otherwise queues for the deferred structural phase. Nothing
-/// is iterating at this point in the tick — that is the reason spawn runs first — so the
-/// entity exists in time for <see cref="EnemyMoveSystem"/> to step it in the same tick.
-/// Arch's <c>CommandBuffer</c> is not used and must not be (ADR-11).
+/// <para><b>Not per-entity-linear, and therefore not a chunk loop.</b> This system reads
+/// one piece of state and creates entities; there is no array to walk. Forcing it into a
+/// chunk iteration would be shape for its own sake.</para>
+///
+/// <para>Structural work goes through <see cref="WorldWriter.Spawn"/>, which applies
+/// immediately when nothing is iterating and otherwise queues for the deferred drain.
+/// Nothing is iterating at this point in the schedule — that is why spawn is first — so
+/// the entity exists in time for the move system to step it in the same tick. Arch's
+/// <c>CommandBuffer</c> is not used and must not be (ADR-11).</para>
 /// </remarks>
-internal sealed class EnemySpawnSystem
+internal sealed class EnemySpawnSystem : IEcsSystem
 {
     private readonly ILogger _logger;
     private readonly float _dt;
-
-    private int _nextEnemyNum;
-    private float _spawnAccumulator;
 
     public EnemySpawnSystem(float dt, ILogger logger)
     {
@@ -31,25 +32,40 @@ internal sealed class EnemySpawnSystem
         _logger = logger;
     }
 
-    public void Run(WorldWriter writer, int aliveCount)
+    public string Name => "enemy.spawn";
+
+    public int Order => (int)EnemyAiPhase.Spawn;
+
+    public ComponentAccess Access => new(
+        writes: new[] { typeof(EnemySpawnState) },
+        structural: true);
+
+    public void Run(WorldWriter writer, ulong currentTick)
     {
-        _spawnAccumulator += _dt;
-        if (_spawnAccumulator < EnemyAiTuning.WaveIntervalSec) return;
+        ref EnemySpawnState state = ref writer.Singleton<EnemySpawnState>();
+
+        state.Accumulator += _dt;
+        if (state.Accumulator < EnemyAiTuning.WaveIntervalSec) return;
 
         // Subtract rather than reset: the accumulator carries its remainder so the wave
         // cadence does not drift against wall time at tick rates that do not divide the
         // interval evenly.
-        _spawnAccumulator -= EnemyAiTuning.WaveIntervalSec;
+        state.Accumulator -= EnemyAiTuning.WaveIntervalSec;
 
-        int toSpawn = Math.Min(EnemyAiTuning.EnemiesPerWave, EnemyAiTuning.MaxEnemies - aliveCount);
+        int alive = writer.QueryWith<EnemyAi>(Span<EntityHandle>.Empty);
+        int toSpawn = Math.Min(EnemyAiTuning.EnemiesPerWave, EnemyAiTuning.MaxEnemies - alive);
         if (toSpawn <= 0) return;
 
         for (int i = 0; i < toSpawn; i++)
         {
-            _nextEnemyNum++;
-            string id = $"enemy-{_nextEnemyNum}";
+            // Re-taking the ref each iteration: Spawn is a structural change and may move
+            // the singleton's chunk, which would leave a held ref pointing at stale
+            // storage. Cheap, and the alternative is a bug that only appears once the
+            // singleton's archetype happens to compact.
+            ref EnemySpawnState s = ref writer.Singleton<EnemySpawnState>();
+            s.NextEnemyNumber++;
+            string id = $"enemy-{s.NextEnemyNumber}";
 
-            // Random angle on the spawn circle.
             float angle = Random.Shared.NextSingle() * MathF.Tau;
             float x = MathF.Cos(angle) * EnemyAiTuning.SpawnRadius;
             float y = MathF.Sin(angle) * EnemyAiTuning.SpawnRadius;
@@ -74,83 +90,130 @@ internal sealed class EnemySpawnSystem
 }
 
 /// <summary>
-/// <see cref="EnemyAiPhase.Move"/> — steps every living enemy one tick toward the
-/// origin.
+/// <see cref="EnemyAiPhase.Move"/> — steps every living enemy one tick toward the origin.
 /// </summary>
 /// <remarks>
-/// <para><b>The arithmetic is deliberately not <c>MovementSystem.Integrate</c>.</b> The
-/// AI has always carried its own step, and it differs in two ways that are visible on
-/// the wire: it is not clamped to the map bounds, and it normalises with a reciprocal
-/// square root rather than through <c>ResolveDirection</c>. Routing it through the
-/// shared movement model would move every enemy onto different floats. The expression
-/// below is character-for-character the original, and
-/// <c>EnemyAiCharacterizationTests.OneTickOfMovement_IsBitExactAgainstTheAisOwnArithmetic</c>
-/// pins it bit-exactly against a re-evaluation of it.</para>
+/// <para><b>This one is per-entity-linear, so it iterates chunks.</b> It walks
+/// <c>Span&lt;Position&gt;</c> and <c>Span&lt;Health&gt;</c> directly rather than
+/// resolving each entity through a handle, which is the shape ECS storage exists to
+/// provide and the shape the core's own scans already use.</para>
 ///
-/// <para>Unifying the two movement models is a real question, but it is a gameplay
-/// decision with a wire consequence, not a refactor — see the CHANGELOG.</para>
+/// <para><b>The arithmetic is deliberately not <c>MovementSystem.Integrate</c>.</b> The AI
+/// has always carried its own step, and it differs in two ways that are visible on the
+/// wire: it is not clamped to the map bounds, and it normalises with a reciprocal square
+/// root rather than through <c>ResolveDirection</c>. Routing it through the shared model
+/// would move every enemy onto different floats. The expression below is
+/// character-for-character the original, pinned bit-exactly by
+/// <c>EnemyAiCharacterizationTests.OneTickOfMovement_IsBitExactAgainstTheAisOwnArithmetic</c>.</para>
 /// </remarks>
-internal sealed class EnemyMoveSystem
+internal sealed class EnemyMoveSystem : IEcsSystem
 {
     private readonly float _dt;
 
     public EnemyMoveSystem(float dt) => _dt = dt;
 
-    public void Run(WorldWriter writer, ReadOnlySpan<EntityHandle> enemies)
+    public string Name => "enemy.move";
+
+    public int Order => (int)EnemyAiPhase.Move;
+
+    public ComponentAccess Access => new(
+        reads: new[] { typeof(Health) },
+        writes: new[] { typeof(Position) });
+
+    public void Run(WorldWriter writer, ulong currentTick)
     {
-        for (int i = 0; i < enemies.Length; i++)
+        var body = new Body(_dt);
+        writer.VisitChunks<EnemyAi, Body>(ref body);
+    }
+
+    /// <summary>
+    /// The per-chunk body. A <c>struct</c> so the visit devirtualises and nothing is
+    /// allocated per chunk or per tick.
+    /// </summary>
+    private struct Body : ISimChunkVisitor
+    {
+        private readonly float _dt;
+
+        public Body(float dt) => _dt = dt;
+
+        public void Visit(in SimChunk chunk)
         {
-            ref readonly EntityHandle handle = ref enemies[i];
-            if (!writer.IsAlive(in handle)) continue;
+            Span<Position> positions = chunk.Positions;
+            Span<Health> healths = chunk.Healths;
 
-            // A dead enemy does not move. It is still reaped, by the reap system.
-            if (writer.HealthOf(in handle).Dead) continue;
+            for (int i = 0; i < chunk.Count; i++)
+            {
+                // A dead enemy does not move. It is still reaped, by the reap system.
+                if (healths[i].Dead) continue;
 
-            ref Position position = ref writer.PositionOf(in handle);
+                float dx = -positions[i].Value.X;
+                float dy = -positions[i].Value.Y;
+                float distSq = dx * dx + dy * dy;
 
-            float dx = -position.Value.X;
-            float dy = -position.Value.Y;
-            float distSq = dx * dx + dy * dy;
+                if (distSq <= 0.01f) continue; // already at center
 
-            if (distSq <= 0.01f) continue; // already at center
-
-            float invDist = 1.0f / MathF.Sqrt(distSq);
-            position.Value = new Vec2(
-                position.Value.X + dx * invDist * EnemyAiTuning.EnemySpeed * _dt,
-                position.Value.Y + dy * invDist * EnemyAiTuning.EnemySpeed * _dt);
+                float invDist = 1.0f / MathF.Sqrt(distSq);
+                positions[i].Value = new Vec2(
+                    positions[i].Value.X + dx * invDist * EnemyAiTuning.EnemySpeed * _dt,
+                    positions[i].Value.Y + dy * invDist * EnemyAiTuning.EnemySpeed * _dt);
+            }
         }
     }
 }
 
 /// <summary>
-/// <see cref="EnemyAiPhase.Reap"/> — destroys enemies that are dead or that have
-/// reached the centre zone.
+/// <see cref="EnemyAiPhase.Reap"/> — destroys enemies that are dead or that have reached
+/// the centre zone.
 /// </summary>
 /// <remarks>
-/// <para>Structural work: the server's only entity <b>destruction</b> outside the
-/// disconnect path. It goes through <see cref="WorldWriter.Despawn"/>, so a removal
-/// raised while a query is iterating is queued and drained by the deferred structural
-/// phase rather than mutating storage mid-iteration. The previous shape could not do
-/// this at all — it collected ids into a <c>PendingRemovals</c> list which the tick loop
-/// drained <i>after</i> releasing the write lock, because calling <c>RemoveEntity</c>
-/// inside the lock would have deadlocked on it.</para>
+/// <para><b>Not per-entity-linear, and therefore still handle-based.</b> The decision is
+/// per entity and the action is structural: it needs an entity identity to despawn, which
+/// a component span does not carry. Exposing entity handles through the chunk view purely
+/// to satisfy a shape rule would add the one piece of Arch that the view is designed not
+/// to leak, for no gain. This is the exception the design allows and it is stated rather
+/// than hidden.</para>
 ///
-/// <para>Reaping inside the same scope, before snapshots are built, is what keeps a
-/// centre-arriving enemy from ever being observable inside the despawn radius — the
-/// property <c>EnemyReachingTheCentre_IsGoneTheSameTick_AndNeverObservedInsideTheZone</c>
-/// checks on every tick of a 400-tick run.</para>
+/// <para>Despawns go through <see cref="WorldWriter.Despawn"/>, so a removal raised while
+/// a query is iterating is queued and drained by the deferred structural phase rather than
+/// mutating storage mid-iteration. Reaping inside the same scope, before snapshots are
+/// built, is what keeps a centre-arriving enemy from ever being observable inside the
+/// despawn radius.</para>
 /// </remarks>
-internal sealed class EnemyReapSystem
+internal sealed class EnemyReapSystem : IEcsSystem
 {
     private readonly ILogger _logger;
 
+    /// <summary>
+    /// Reusable handle buffer, refilled from a query before every read. Resetting it at
+    /// any tick boundary would change nothing but allocation, which is the test
+    /// <see cref="SimulationScratchAttribute"/> demands.
+    /// </summary>
+    [SimulationScratch]
+    private EntityHandle[] _handles = Array.Empty<EntityHandle>();
+
     public EnemyReapSystem(ILogger logger) => _logger = logger;
 
-    public void Run(WorldWriter writer, ReadOnlySpan<EntityHandle> enemies)
+    public string Name => "enemy.reap";
+
+    public int Order => (int)EnemyAiPhase.Reap;
+
+    public ComponentAccess Access => new(
+        reads: new[] { typeof(Position), typeof(Health) },
+        structural: true);
+
+    public void Run(WorldWriter writer, ulong currentTick)
     {
-        for (int i = 0; i < enemies.Length; i++)
+        int count = writer.QueryWith<EnemyAi>(_handles);
+        if (count > _handles.Length)
         {
-            ref readonly EntityHandle handle = ref enemies[i];
+            _handles = new EntityHandle[count];
+            count = writer.QueryWith<EnemyAi>(_handles);
+        }
+
+        int n = Math.Min(count, _handles.Length);
+        for (int i = 0; i < n; i++)
+        {
+            ref readonly EntityHandle handle = ref _handles[i];
             if (!writer.IsAlive(in handle)) continue;
 
             if (writer.HealthOf(in handle).Dead)

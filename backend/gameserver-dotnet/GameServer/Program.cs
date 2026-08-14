@@ -330,6 +330,12 @@ var options = new ServerOptions
     SimulationPhaseFactory = enableEnemySpawner
         ? (world, loggerFactory) => new EnemySpawner(world, tickRate, loggerFactory.CreateLogger<EnemySpawner>())
         : null,
+    // The composition root is the one place allowed to know what the game is, so it is
+    // where the status endpoint's entity count comes from. The JSON field stays
+    // `enemies_alive` — the Unity DOTS sample polls /status and reads it.
+    StatusEntityCount = enableEnemySpawner
+        ? static world => world.CountWith<GameServer.World.Components.EnemyAi>()
+        : null,
     NakamaUrl = nakamaUrl,
     NakamaHttpKey = nakamaHttpKey
 };

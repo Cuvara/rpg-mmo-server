@@ -1350,6 +1350,7 @@ or if the archetype count outgrows the hint mechanism.
 | 2 — enemy AI | PR #81 | `EnemyAi` (hinted same commit) | add, remove (unchanged) | 367 → 172 B/tick (−53%), but only −0.36% of a 50-player tick |
 | 3 — snapshot/AOI | PR #83 | none | add, remove (unchanged) | 21 692 → 21 628 B/tick at 50 players (−0.3%); noise at 200. **No throughput win, as predicted.** |
 | 4 — serialization off the tick | PR #86 | none | add, remove (unchanged) | tick-thread alloc 192 935 → 32 B/tick at 200 players. Work moved, not removed; wall-clock unmeasurable here |
+| 5 — query-driven systems | PR #87 | `EnemySpawnState` (hinted same commit) | add, remove (unchanged) | **nothing: 108 B/tick both sides.** Commissioned as architecture after the performance premise was disproved |
 
 Two things stage 2 settled that this ADR could only predict:
 
@@ -1404,9 +1405,42 @@ That reframes what is left. The two dominant terms are:
    players, almost entirely `EntitySnapshot` objects. That is a **pooling** problem, not a
    threading one.
 
-Neither is an ECS problem, which is the honest place for this migration to stop. ADR-12's
-staging is complete; further work on tick cost should be argued on its own terms rather
-than as a continuation of it.
+Neither is an ECS problem, which is the honest place for this migration to stop on
+performance grounds. Further work on tick cost should be argued on its own terms rather
+than as a continuation of this ADR.
+
+**Stage 5 was then commissioned anyway, deliberately and with that measurement in hand**,
+as an architectural requirement rather than a performance one — the user's position being
+that the shape should be right before gameplay is written against it. It measures exactly
+nothing (108 B/tick on both sides; steady-state population is 4–6 enemies, so a chunk loop
+cannot show anything) and the record should say so plainly rather than dress it up. What it
+changed:
+
+- The core stopped naming the gameplay: `CountWith<TTag>` / `QueryWith<TTag>` replaced an
+  `EnemyCount` property and an enemy-named query on `EcsWorld` and `WorldWriter`.
+- Systems that are per-entity-linear iterate chunks; the two that are not — spawn, which
+  creates, and reap, which decides per entity and then performs a structural change — keep
+  handle access with the reason stated at each.
+- Ordering became declared rather than call-ordered, via a `SystemSchedule` that rejects
+  ambiguous orders at construction.
+- **The rule this ADR states was already broken behind the seam on day one**, and is now
+  enforced. `EnemySpawnSystem` kept its wave accumulator and id counter in private fields;
+  they are a component now, and `SimulationStateArchitectureTests` fails the build on any
+  mutable instance field in a phase or system. It was verified to fire by reintroducing the
+  original field. An honour-system rule in an ADR is worth very little; this is the third
+  guard in the module to be demonstrated rather than assumed.
+
+**On parallelism, which the release gate now requires.** Stage 4 already put encode and
+serialize on per-connection threads — that is real server multithreading, and the tick
+thread's share of a snapshot is now a gather plus a flag. Parallel *simulation* is a
+different question, and stage 5's `ComponentAccess` is the part that makes it expressible:
+two systems may run concurrently exactly when neither writes what the other reads or
+writes. Two preconditions are recorded and are **not** met today, both verified in the
+code: `EcsWorld._structural` is an unsynchronised `List<StructuralOp>` safe only because
+one thread mutates it under the write lock, and the iteration-depth guard that decides
+immediate-versus-deferred structural changes is `[ThreadStatic]`, so it would become a
+per-worker fact rather than a property of the world. Neither may be left to be discovered
+by the change that first spawns a worker.
 
 One correctness result is worth separating from the performance story: moving encoding to
 the moment of writing **fixed a pre-existing data-loss bug**. The old order encoded on the
