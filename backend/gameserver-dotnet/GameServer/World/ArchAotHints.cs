@@ -44,6 +44,7 @@ public static class ArchAotHints
         new Locomotion[1],
         new InputCursor[1],
         new PlayerTag[1],
+        new EnemyAi[1],
 
         // Arch stores the chunk's entity handles in an Entity[] alongside the
         // component arrays, allocated the same Type-driven way.

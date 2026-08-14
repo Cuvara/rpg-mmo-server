@@ -7,6 +7,96 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **The enemy AI is three systems over an archetype query, not one method over a
+  list of ids (ECS migration, stage 2 of 3).** `EnemySpawner.Tick(get, set, tick)`
+  walked a `List<string>` of enemy ids, resolved each through the world's string
+  index, composed a whole `EntityState`, mutated the copy and wrote all seven
+  components back — every enemy, every tick. The id list was a second source of
+  truth for "which entities are enemies", kept in step with the world by hand.
+  - Split into `EnemySpawnSystem`, `EnemyMoveSystem` and `EnemyReapSystem`, run in
+    `EnemyAiPhase` order inside one world write scope. **Order is load-bearing**:
+    spawn first so a new enemy takes its first step on the tick it appears (the
+    original got that by spawning into the list it was about to walk, and it is
+    visible in the snapshot); reap last, because "arrived at the centre" is a fact
+    the move system produces earlier in the same tick.
+  - **`[UpdateInGroup]` was not used, because there is no server-side group tree.**
+    The one in the codebase belongs to the Unity *client* package and is DOTS'
+    scheduler. The attribute-driven option server-side would be `Arch.System`'s
+    source generator, which ADR-12 decision 4 bans: `ArchAotHintTests` reflects over
+    component structs and cannot enumerate generated query shapes, so adopting it
+    would create AOT surface no test can see. Ordering is therefore explicit and
+    total, and `EnemyAiPhase` documents why each position is the only correct one.
+  - New `EnemyAi` archetype tag, queried instead of scanning for
+    `EntityKind.Value == "mob"`. **Enemy-ness is ownership, not type**: the suite
+    creates static mobs constantly and one placed by anything other than the spawner
+    must stay where it was put, so the tag is applied only at spawn and is
+    *preserved, never re-derived*, when an existing entity is written back. Deriving
+    it from the type string would have put every test mob on a march to the origin,
+    and re-deriving it on update would have stripped it from any enemy written back
+    through `AddEntity` — which the combat path does on every hit.
+  - `AliveCount` is now a count over that archetype rather than `_enemyIds.Count`,
+    so it is answered by the world and cannot disagree with it.
+  - **Structural operation kinds are still exactly *add* and *remove*.** Spawning
+    and reaping are what ADR-12 predicted would wake this, and neither needed a
+    third kind: `EnemyAi` is applied at creation, so it rides on the add as a tag
+    payload rather than as an add-component op. Arch's `CommandBuffer` remains
+    unused and unusable (ADR-11).
+  - Despawns now go through the deferred structural phase inside the write scope.
+    The old shape could not: it collected ids into `PendingRemovals` which the tick
+    loop drained *after* releasing the lock, because `RemoveEntity` inside the lock
+    would have deadlocked on it. Both orderings apply removals before the snapshot
+    broadcast, which is what stops a client from ever seeing an enemy inside the
+    despawn radius — now checked on every tick of a 400-tick run rather than
+    assumed.
+  - `ArchAotHints.cs` gained its `new EnemyAi[1],` line in the same commit. The
+    guard was verified to fire: deleting that one line builds clean, and
+    `ArchAotHintTests` fails naming `EnemyAi`.
+
+### Added
+- **Characterization tests for the enemy AI, which had none.** Written against the
+  original `Tick(get, set, tick)` and left **unmodified** across the system split —
+  the fact that all 14 pass on both shapes is the parity evidence, and editing them
+  during the refactor would have destroyed it. They pin the constants and the
+  arithmetic as they are, not as they ought to be, including the deliberate
+  non-use of `MovementSystem`.
+
+### Measured
+- Enemy AI phase, paired in-process A/B against `develop`, Release, 600 ticks after
+  a 400-tick warm-up: **367 B/tick → 172 B/tick (−53%)**, identical to the byte
+  across three paired runs on each side.
+- **In context this is small, and that is the honest result.** At 50 connected
+  players the same probe moves the whole tick from 49 949 to 49 767 B/tick — a
+  **0.36%** cut, because snapshot encoding dominates by two orders of magnitude and
+  stage 2 does not touch it. ADR-12 makes "measures little at its own level" a
+  stop-and-keep-what-landed rather than a failure; the structural result (one source
+  of truth for enemy population, real deferred structural ops, no `PendingRemovals`
+  dance) is the part worth keeping.
+- Wall-clock is not claimed, for the reason given in stage 1: this host's spread on
+  an unchanged binary is ±50%.
+- The enemy population never approaches its cap of 30. Steady state is **4–6**:
+  waves of 2 arrive every 22.5 ticks and take ~63 ticks to walk in, so the cap has
+  never been the binding constraint at the shipped tuning.
+
+### Known issues (observed, not fixed here)
+- **There is no "center-zone damage".** The old `EnemySpawner` class comment and the
+  tick loop's `// Enemy AI: spawn, move, center-zone damage, remove dead` both
+  described a phase that no code has ever implemented — enemies reaching the centre
+  are despawned and nothing is damaged. Nothing was removed in this change; the
+  comments were wrong, and the split is spawn/move/reap because that is what exists.
+  Whether enemies reaching the centre *should* cost the players something is a
+  gameplay decision, not a refactor.
+- **Enemies do not use `MovementSystem`.** The AI carries its own step: unclamped by
+  map bounds, normalised with a reciprocal square root rather than through
+  `ResolveDirection`. Unifying the two would move every enemy onto different floats,
+  so the expression was preserved character-for-character and pinned bit-exactly by
+  `OneTickOfMovement_IsBitExactAgainstTheAisOwnArithmetic`. Unification is a real
+  question with a wire consequence, and it is a decision for the user rather than
+  something to fold into a restructuring.
+- `TickLoop.TickOnce` still allocates a delegate per tick for its
+  `_connections.ForEach(conn => ...)` broadcast, which is most of the 172 B/tick the
+  AI phase now measures. That is the snapshot path — stage 3, not this one.
+
+### Changed
 - **The AOI walk fills a caller-owned buffer instead of allocating a list per
   client per tick.** `EcsWorld.GetEntitiesInRange` opened with
   `new List<EntityState>()`, and `TickLoop` called it once per connected client

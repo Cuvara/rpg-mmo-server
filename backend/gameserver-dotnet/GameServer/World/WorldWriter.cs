@@ -109,6 +109,29 @@ public sealed class WorldWriter
     /// </summary>
     public bool IsAlive(in EntityHandle handle) => _world.IsAliveLocked(handle);
 
+    /// <summary>
+    /// Collect handles for every live enemy. Count-don't-saturate, matching the AOI
+    /// scan and <c>AoiLogic</c>: the return value is the total, which may exceed the
+    /// buffer, so a caller that gets more than it asked for must resize and retry rather
+    /// than process a prefix.
+    /// </summary>
+    public int QueryEnemies(Span<EntityHandle> destination) => _world.QueryEnemiesLocked(destination);
+
+    /// <summary>
+    /// Create an entity carrying <paramref name="tags"/> from inside this scope.
+    /// Applied immediately when nothing is iterating, and otherwise queued for the
+    /// deferred structural phase — never through Arch's <c>CommandBuffer</c>, which
+    /// throws under NativeAOT (ADR-11).
+    /// </summary>
+    public void Spawn(EntityState state, EntityTags tags) => _world.SpawnLocked(state, tags);
+
+    /// <summary>
+    /// Destroy an entity from inside this scope. Follows the same deferral rule as
+    /// <see cref="Spawn"/>; a handle that is already dead is a no-op, so two systems
+    /// reaping the same entity in one tick is safe.
+    /// </summary>
+    public void Despawn(in EntityHandle handle) => _world.DespawnLocked(in handle);
+
     /// <summary>World-space position of the entity.</summary>
     public ref Position PositionOf(in EntityHandle handle) => ref _world.ArchInternal.Get<Position>(handle.Value);
 
