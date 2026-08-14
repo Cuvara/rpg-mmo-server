@@ -5,7 +5,7 @@ using System.Net.Sockets;
 using Microsoft.Extensions.Logging;
 using Shared.GameLogic.Components;
 using GameServer.Agones;
-using GameServer.AI;
+
 using GameServer.Events;
 using GameServer.Input;
 using GameServer.Net;
@@ -78,11 +78,18 @@ public class ServerOptions
     public IServerRegistry? ServerRegistry { get; set; }
 
     /// <summary>
-    /// Enable server-side enemy spawning. When true, the tick loop spawns "mob"
-    /// entities that move toward the center of the map. Default: false (tests
-    /// and custom scenarios opt in explicitly).
+    /// Builds the per-tick simulation phase this host runs, or null for a host that
+    /// simulates nothing of its own and only relays whatever entities exist.
+    ///
+    /// <para>A factory rather than an instance because the phase needs the world, which
+    /// the host owns and creates. A factory rather than a flag because the core must not
+    /// name any particular gameplay: the composition root in <c>Program.cs</c> decides
+    /// what the game is, and this type stays content-agnostic. See
+    /// <see cref="ISimulationPhase"/>.</para>
+    ///
+    /// <para>Default null. Tests and custom scenarios opt in explicitly.</para>
     /// </summary>
-    public bool EnableEnemySpawner { get; set; }
+    public Func<EcsWorld, ILoggerFactory, ISimulationPhase>? SimulationPhaseFactory { get; set; }
 
     /// <summary>Nakama HTTP API base URL (e.g. <c>http://rpg-nakama:7350</c>). Null disables economy integration.</summary>
     public string? NakamaUrl { get; set; }
@@ -168,7 +175,12 @@ public sealed class GameServerHost : IAsyncDisposable
     public ulong CurrentTick => _tickLoop.CurrentTick;
 
     /// <summary>Number of enemies currently alive.</summary>
-    public int EnemiesAlive => _tickLoop.EnemiesAlive;
+    /// <summary>
+    /// Entities owned by the simulation phase, surfaced on the status endpoint. Named
+    /// for enemies because that is what the field is called in the status JSON the
+    /// clients already read; the core itself attaches no meaning to the number.
+    /// </summary>
+    public int EnemiesAlive => _tickLoop.SimulationEntityCount;
 
     public GameServerHost(ServerOptions options)
     {
@@ -214,12 +226,7 @@ public sealed class GameServerHost : IAsyncDisposable
             options.TickRate,
             options.MapBounds);
 
-        EnemySpawner? enemySpawner = options.EnableEnemySpawner
-            ? new EnemySpawner(
-                _world,
-                options.TickRate,
-                _loggerFactory.CreateLogger<EnemySpawner>())
-            : null;
+        ISimulationPhase? simulationPhase = options.SimulationPhaseFactory?.Invoke(_world, _loggerFactory);
 
         _tickLoop = new TickLoop(
             _world,
@@ -230,7 +237,7 @@ public sealed class GameServerHost : IAsyncDisposable
             _loggerFactory.CreateLogger<TickLoop>(),
             _metrics,
             options.KeyframeInterval,
-            enemySpawner);
+            simulationPhase);
 
         _saver = new AsyncSaver(
             _playerStore,

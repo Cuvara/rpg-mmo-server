@@ -7,6 +7,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **The server core no longer names any gameplay: what to simulate arrives through
+  `ISimulationPhase`, and the content that implements it moved to `GameServer/Scaffolding`.**
+  The enemy AI in this module exists to give the core something to simulate and the tests
+  something to assert — it is not the game. Nothing said so, so it read as production
+  gameplay wired into the host: `GameServerHost` constructed `EnemySpawner` directly behind
+  an `EnableEnemySpawner` flag, and `TickLoop` held a field of that concrete type.
+  - `GameServer/AI/` → `GameServer/Scaffolding/`, `GameServer.Tests/AI/` →
+    `GameServer.Tests/Scaffolding/`, namespaces with them. Moves only; no logic changed.
+  - New `ISimulationPhase` (`Tick(ulong)`, `TrackedEntityCount`) in `GameServer/Server/`.
+    `TickLoop` holds one of those instead of an `EnemySpawner`, and calls it in the same
+    place in the same write scope, so anything it changes still lands in the same tick's
+    snapshot rather than the next one.
+  - `GameServerOptions.EnableEnemySpawner` became
+    `SimulationPhaseFactory(EcsWorld, ILoggerFactory)`. A factory because the phase needs
+    the world, which the host creates; a factory rather than a flag because a flag makes
+    the core name the gameplay it is supposed to know nothing about. `Program.cs` — the
+    composition root, which is allowed to know what the game is — supplies it, still gated
+    on `GAMESERVER_ENEMIES`.
+  - The test of the seam is deletability: remove `GameServer/Scaffolding` and the server
+    still builds, accepts connections, ticks and streams snapshots. It simply has nothing
+    of its own to simulate.
+  - **`Health` and `Combat` deliberately stayed in `World/Components.cs`.** They read like
+    gameplay, but `hp` and `max_hp` are first-class fields in `wire.proto` and in the
+    `EntityState` the Unity client compiles as source at `sgl-v0.1.6`. They are protocol.
+    Moving them would change what the client compiles against — disqualifying under ADR-10.
+    The comment there now says so, because the next reader will try to tidy them away.
+  - Directories, not assemblies: `ArchAotHintTests` reflects over the assembly to prove
+    every component type has a `T[]` hint, and splitting the scaffolding out would put
+    components beyond that guard's reach — the same guard that caught a missing `EnemyAi`
+    hint in stage 2. The seam is worth having; it is not worth blinding the AOT check for.
+  - Scope check: the scaffolding is ~200 of ~13 000 lines in `GameServer/`, and only three
+    files referenced it. The boundary already existed in practice; this names it and stops
+    the core reaching across it.
+  - **Gameplay written against this seam must be ECS** — systems and queries over
+    components, per ADR-12. `ISimulationPhase` is the host's call into that work, not a
+    licence to put simulation state in a class.
+  - No behaviour change. `SnapshotByteIdentityTests`' pre-refactor SHA-256 digests pass
+    unchanged, so the wire is byte-identical; golden vectors untouched; 575 passed / 0
+    failed / 1 skipped.
+
+### Changed
 - **The snapshot broadcast is two phases: read the world for every viewer under one
   lock, then encode and send under none (ECS migration, stage 3 of 3).** Each
   viewer used to take the world read lock twice — once for its AOI anchor, once

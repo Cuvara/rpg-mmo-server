@@ -4,6 +4,7 @@ using Shared.GameLogic.Components;
 using GameServer.Agones;
 using GameServer.Events;
 using GameServer.Observability;
+using GameServer.Scaffolding;
 using GameServer.Persistence;
 using GameServer.Net.Transport;
 using GameServer.Registry;
@@ -324,7 +325,11 @@ var options = new ServerOptions
     Metrics = metrics,
     ServerRegistry = serverRegistry,
     Registration = registrationOptions,
-    EnableEnemySpawner = enableEnemySpawner,
+    // The composition root decides what the game is. The core host only knows it has
+    // a phase to tick; see ISimulationPhase.
+    SimulationPhaseFactory = enableEnemySpawner
+        ? (world, loggerFactory) => new EnemySpawner(world, tickRate, loggerFactory.CreateLogger<EnemySpawner>())
+        : null,
     NakamaUrl = nakamaUrl,
     NakamaHttpKey = nakamaHttpKey
 };

@@ -1,4 +1,4 @@
-namespace GameServer.AI;
+namespace GameServer.Scaffolding;
 
 /// <summary>
 /// Tuning constants for the enemy AI, shared by the three systems that need them.

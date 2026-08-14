@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Shared.GameLogic.Components;
-using GameServer.AI;
 using GameServer.Input;
 using GameServer.Net;
 using GameServer.Observability;
@@ -26,7 +25,7 @@ public sealed class TickLoop
     private readonly EcsWorld _world;
     private readonly InputHandler _handler;
     private readonly ConnectionManager _connections;
-    private readonly EnemySpawner? _enemySpawner;
+    private readonly ISimulationPhase? _simulationPhase;
     private readonly int _tickRate;
     private readonly float _aoiRadius;
     private readonly int _keyframeInterval;
@@ -72,7 +71,7 @@ public sealed class TickLoop
     public ulong CurrentTick => _currentTick;
 
     /// <summary>Number of enemies currently alive, or 0 if the spawner is disabled.</summary>
-    public int EnemiesAlive => _enemySpawner?.AliveCount ?? 0;
+    public int SimulationEntityCount => _simulationPhase?.TrackedEntityCount ?? 0;
 
     public TickLoop(
         EcsWorld world,
@@ -83,12 +82,12 @@ public sealed class TickLoop
         ILogger logger,
         GameMetrics? metrics = null,
         int keyframeInterval = GameConstants.DefaultKeyframeInterval,
-        EnemySpawner? enemySpawner = null)
+        ISimulationPhase? simulationPhase = null)
     {
         _world = world;
         _handler = handler;
         _connections = connections;
-        _enemySpawner = enemySpawner;
+        _simulationPhase = simulationPhase;
         _tickRate = tickRate;
         _aoiRadius = aoiRadius;
         _logger = logger;
@@ -210,7 +209,7 @@ public sealed class TickLoop
         // draining them after the lock was released is gone. Either way the removals are
         // applied before the snapshot broadcast below, which is what stops a client from
         // ever seeing an enemy inside the despawn zone.
-        _enemySpawner?.Tick(_currentTick);
+        _simulationPhase?.Tick(_currentTick);
 
         // ── Snapshot broadcast, in two phases ──────────────────────────────────
         //

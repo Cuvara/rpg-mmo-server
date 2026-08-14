@@ -140,7 +140,7 @@ public struct PlayerTag
 
 /// <summary>
 /// Archetype tag for entities driven by the enemy AI systems
-/// (<c>GameServer.AI</c>): they walk toward the origin each tick and are reaped when
+/// (<c>GameServer.Scaffolding</c>): they walk toward the origin each tick and are reaped when
 /// they reach the centre zone or die.
 ///
 /// <para><b>This is not "is a mob".</b> Enemy-ness is ownership, not type. Plenty of
