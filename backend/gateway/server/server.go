@@ -338,6 +338,14 @@ func (g *Gateway) Run(addr string) error {
 		}
 		cc := NewClientConn(conn, g.logger, ratelimit.NewBucket(g.msgRate, g.msgBurst))
 		g.trackConn(cc, true)
+		// Debug, not info: a TCP accept is reachable by anyone who can open a
+		// socket, so it is the one event in this file an unauthenticated peer
+		// can mint at will. Everything from MsgAuth onward costs the peer a
+		// well-formed frame and is logged at info.
+		g.logger.Debug("client connected",
+			"conn", cc.ID(),
+			"ip", cc.RemoteIP(),
+			"transport", transport.Normalize(g.transportKind))
 		go g.handleConn(cc)
 	}
 }
@@ -426,20 +434,33 @@ func (g *Gateway) findUserConn(userID string) *ClientConn {
 const authTimeout = 30 * time.Second
 
 func (g *Gateway) handleConn(cc *ClientConn) {
+	start := time.Now()
+	ip := cc.RemoteIP()
 	defer func() {
 		// A dropped socket must not leave a session record behind, otherwise the
 		// store leaks entries until the TTL expires (and a Redis-backed store
 		// would keep reporting the player as online).
-		g.cleanupSession(cc)
+		userID := g.cleanupSession(cc)
 		cc.Close()
 		g.trackConn(cc, false)
+		// Only a connection that reached auth gets an info line, so the
+		// close side matches the open side: one line per *session*, while a
+		// scanner that connects and says nothing stays at debug.
+		if userID == "" {
+			g.logger.Debug("client disconnected",
+				"conn", cc.ID(), "ip", ip, "dur_ms", time.Since(start).Milliseconds())
+			return
+		}
+		g.logger.Info("client disconnected",
+			"conn", cc.ID(), "user", userID, "ip", ip,
+			"dur_ms", time.Since(start).Milliseconds())
 	}()
 
 	// Unauthenticated connections get a hard read deadline: if no MsgAuth
 	// arrives within authTimeout the read returns an error and ReadLoop exits,
 	// which triggers the deferred cleanup above.
 	if err := cc.SetReadDeadline(time.Now().Add(authTimeout)); err != nil {
-		g.logger.Debug("set auth deadline", "ip", cc.RemoteIP(), "err", err)
+		g.logger.Debug("set auth deadline", "conn", cc.ID(), "ip", cc.RemoteIP(), "err", err)
 	}
 
 	go cc.WriteLoop()
@@ -447,16 +468,21 @@ func (g *Gateway) handleConn(cc *ClientConn) {
 	cc.ReadLoop(g.handleMessage)
 }
 
-// cleanupSession destroys the session bound to a connection, if any.
-func (g *Gateway) cleanupSession(cc *ClientConn) {
+// cleanupSession destroys the session bound to a connection, if any, and
+// returns the user it belonged to ("" when the connection never authenticated
+// or was already cleaned up). Callers use the return value to decide whether
+// there was a session worth reporting — ClearIdentity is atomic, so exactly one
+// caller can ever see a non-empty result for a given session.
+func (g *Gateway) cleanupSession(cc *ClientConn) string {
 	userID := cc.ClearIdentity()
 	if userID == "" {
-		return
+		return ""
 	}
 	g.untrackUser(userID, cc)
 	if err := g.sessions.DestroySession(context.Background(), session.SessionKey(userID)); err != nil {
-		g.logger.Warn("destroy session", "user", userID, "err", err)
+		g.logger.Warn("destroy session", "conn", cc.ID(), "user", userID, "err", err)
 	}
+	return userID
 }
 
 func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
@@ -467,7 +493,8 @@ func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
 	if !cc.allowMessage() {
 		cc.limited = true
 		g.metrics.RateLimited(metrics.RateLimitReasonMessage)
-		g.logger.Warn("message rate limited", "ip", cc.RemoteIP(), "user", cc.UserID(), "type", env.Type)
+		g.logger.Warn("message rate limited",
+			"conn", cc.ID(), "ip", cc.RemoteIP(), "user", cc.UserID(), "type", env.Type)
 		resp, err := cc.Reply(messages.MsgAuthResp, messages.AuthResponse{
 			OK:    false,
 			Error: "rate limited",
@@ -505,7 +532,15 @@ func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
 	case messages.MsgDisconnect:
 		g.handleDisconnect(cc)
 	default:
-		g.logger.Warn("unexpected message type", "type", env.Type, "state", cc.State())
+		// Latched: this is reachable once per inbound frame, and the gateway
+		// accepts only three message types, so a client speaking the wrong
+		// protocol version would otherwise emit a warning per frame forever.
+		lvl := slog.LevelWarn
+		if !cc.firstUnexpectedMessage() {
+			lvl = slog.LevelDebug
+		}
+		g.logger.Log(context.Background(), lvl, "unexpected message type",
+			"conn", cc.ID(), "user", cc.UserID(), "type", env.Type, "state", cc.State())
 	}
 }
 
@@ -531,12 +566,12 @@ func (g *Gateway) checkSession(cc *ClientConn, msgType messages.MsgType) bool {
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
 		g.metrics.SessionCheckResult(metrics.SessionCheckStoreError)
 		g.logger.Error("session store unavailable, failing open",
-			"user", connUser, "err", err)
+			"conn", cc.ID(), "user", connUser, "err", err)
 		return true
 	}
 	if err != nil {
 		g.metrics.SessionCheckResult(metrics.SessionCheckExpired)
-		g.logger.Info("session expired", "user", connUser, "err", err)
+		g.logger.Info("session expired", "conn", cc.ID(), "user", connUser, "err", err)
 		cc.ClearIdentity()
 		if msgType == messages.MsgEnterWorld {
 			g.metrics.EnterWorldResult(false)
@@ -550,15 +585,24 @@ func (g *Gateway) checkSession(cc *ClientConn, msgType messages.MsgType) bool {
 
 	// Sliding TTL: any client activity keeps the session alive.
 	if err := g.sessions.RefreshSession(ctx, key); err != nil {
-		g.logger.Warn("refresh session", "user", connUser, "err", err)
+		g.logger.Warn("refresh session", "conn", cc.ID(), "user", connUser, "err", err)
 	}
 	return true
 }
 
+// handleAuth verifies a client token and opens a session.
+//
+// Logging note: req.Token and anything derived from it never appear in a log
+// line. The token is the credential — a log that contains one is a log that can
+// be replayed — so failures report a `reason` and the verifier's error (which
+// says *why* a token was rejected, e.g. expired vs bad signature, without
+// quoting it) and nothing else.
 func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
+	start := time.Now()
 	var req messages.AuthRequest
 	if err := env.UnmarshalPayload(&req); err != nil {
 		g.metrics.AuthResult(false)
+		g.logAuthFailure(cc, slog.LevelWarn, "", "malformed_request", err)
 		g.sendAuthError(cc, "invalid auth request")
 		return
 	}
@@ -566,6 +610,7 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 	userID, err := session.VerifyClientJWTKeyring(req.Token, g.authKeys)
 	if err != nil {
 		g.metrics.AuthResult(false)
+		g.logAuthFailure(cc, slog.LevelWarn, "", "invalid_token", err)
 		g.sendAuthError(cc, "invalid token")
 		return
 	}
@@ -585,10 +630,11 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 		} else {
 			// Different gateway: publish a kick request via Pub/Sub.
 			if perr := g.kickPub.PublishKick(ctx, userID); perr != nil {
-				g.logger.Warn("publish kick event", "user", userID, "err", perr)
+				g.logger.Warn("publish kick event", "conn", cc.ID(), "user", userID, "err", perr)
 			}
 		}
 		g.logger.Info("duplicate login detected",
+			"conn", cc.ID(),
 			"user", userID,
 			"old_gateway", existing.GatewayID,
 			"new_gateway", gwID)
@@ -597,6 +643,7 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 	_, err = g.sessions.CreateSession(ctx, userID)
 	if err != nil {
 		g.metrics.AuthResult(false)
+		g.logAuthFailure(cc, slog.LevelError, userID, "session_store", err)
 		g.sendAuthError(cc, "session creation failed")
 		return
 	}
@@ -604,6 +651,13 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 
 	cc.SetAuthenticated(userID)
 	g.trackUser(userID, cc)
+
+	// Once per session: MsgAuth is sent once per connection, and a client that
+	// re-authenticates on a live socket is the duplicate-login case above, which
+	// is itself rare and separately logged.
+	g.logger.Info("auth ok",
+		"conn", cc.ID(), "user", userID, "ip", cc.RemoteIP(),
+		"dur_ms", time.Since(start).Milliseconds())
 
 	// Auth succeeded: remove the unauthenticated read deadline so the
 	// connection is no longer time-limited.
@@ -620,6 +674,25 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 		return
 	}
 	cc.Send(resp)
+}
+
+// logAuthFailure reports a rejected login. The first failure on a connection is
+// logged at the given level; every later one on the same connection drops to
+// debug, because MsgAuth is client-driven and a socket looping bad tokens must
+// not be able to drive log volume — the message limiter alone still permits 60
+// frames a second. userID is "" when the token never verified,
+// which is most of the time — the whole point is that we do not know who this is.
+//
+// The token itself is never an argument here, by construction.
+func (g *Gateway) logAuthFailure(cc *ClientConn, level slog.Level, userID, reason string, err error) {
+	attrs := []any{"conn", cc.ID(), "ip", cc.RemoteIP(), "reason", reason, "err", err}
+	if userID != "" {
+		attrs = append(attrs, "user", userID)
+	}
+	if !cc.firstAuthFailure() {
+		level = slog.LevelDebug
+	}
+	g.logger.Log(context.Background(), level, "auth failed", attrs...)
 }
 
 // Machine-readable kick reasons. They travel in both MsgKick and the paired
@@ -661,6 +734,11 @@ func (g *Gateway) kickLocalUser(userID string) {
 // *evicting* connection's goroutine, and cc.enc may only be read from the
 // evicted connection's own ReadLoop.
 func (g *Gateway) sendKickAndClose(cc *ClientConn, reason string) {
+	// Every eviction funnels through here, so this one line covers both the
+	// local duplicate-login kick and one arriving from another gateway. Once
+	// per evicted session by construction.
+	g.logger.Info("client evicted", "conn", cc.ID(), "user", cc.UserID(), "reason", reason)
+
 	kick, kickErr := messages.NewEnvelope(messages.MsgKick, messages.KickMessage{
 		Reason: reason,
 	})
@@ -670,7 +748,7 @@ func (g *Gateway) sendKickAndClose(cc *ClientConn, reason string) {
 	if kickErr != nil || discErr != nil {
 		// Encoding a two-field struct cannot realistically fail, but a close
 		// with no explanation still beats leaving the socket open.
-		g.logger.Error("encode kick frames", "user", cc.UserID(), "reason", reason,
+		g.logger.Error("encode kick frames", "conn", cc.ID(), "user", cc.UserID(), "reason", reason,
 			"kick_err", kickErr, "disconnect_err", discErr)
 		cc.Close()
 		return
@@ -699,10 +777,21 @@ func (g *Gateway) sendAuthError(cc *ClientConn, msg string) {
 	cc.Send(resp)
 }
 
+// handleEnterWorld assigns a game server for the requested map and mints the
+// join token the client presents to it.
+//
+// Logging note: result.JoinToken is deliberately absent from every line here.
+// It is a bearer credential for the game server — logging one would let anyone
+// with log access join as that player. The server id and address it names are
+// logged instead, which is what an operator actually needs to follow a client
+// to the next hop.
 func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
+	start := time.Now()
 	userID, state := cc.Identity()
 	if state != StateAuthenticated && state != StateInWorld {
 		g.metrics.EnterWorldResult(false)
+		g.logger.Warn("enter world failed",
+			"conn", cc.ID(), "ip", cc.RemoteIP(), "reason", "not_authenticated")
 		g.sendEnterWorldError(cc, "not authenticated")
 		return
 	}
@@ -710,6 +799,8 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 	var req messages.EnterWorldRequest
 	if err := env.UnmarshalPayload(&req); err != nil {
 		g.metrics.EnterWorldResult(false)
+		g.logger.Warn("enter world failed",
+			"conn", cc.ID(), "user", userID, "reason", "malformed_request", "err", err)
 		g.sendEnterWorldError(cc, "invalid enter world request")
 		return
 	}
@@ -718,13 +809,26 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 	result, err := transfer.AssignMapKeyring(ctx, userID, req.MapID, g.registry, g.joinKeys)
 	if err != nil {
 		g.metrics.EnterWorldResult(false)
-		g.logger.Error("enter world failed", "user", userID, "map", req.MapID, "err", err)
+		g.logger.Error("enter world failed",
+			"conn", cc.ID(), "user", userID, "map", req.MapID,
+			"reason", "no_assignment", "err", err,
+			"dur_ms", time.Since(start).Milliseconds())
 		g.sendEnterWorldError(cc, clientSafeAssignError(err))
 		return
 	}
 	g.metrics.EnterWorldResult(true)
 
 	cc.SetInWorld()
+
+	// Once per session: this is the map-assignment handshake, not a per-tick
+	// path — gameplay frames never reach this process at all (ADR-3). It is
+	// also the only record anywhere of which server a client was sent to, so
+	// it carries the server id and address the client is about to dial.
+	g.logger.Info("enter world assigned",
+		"conn", cc.ID(), "user", userID, "map", req.MapID,
+		"server", result.ServerID, "server_addr", result.ServerAddr,
+		"transport", result.Transport,
+		"dur_ms", time.Since(start).Milliseconds())
 
 	// Update session with server and map association (task 2c).
 	if uerr := g.sessions.UpdateSession(ctx, userID, func(sd *session.SessionData) {
@@ -749,8 +853,12 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 
 // handleDisconnect processes an explicit client MsgDisconnect: destroy the
 // session, then close the socket.
+//
+// It logs the session end itself rather than leaving it to handleConn's defer:
+// cleanupSession clears the identity here, so by the time the defer runs the
+// user is already gone and it can only emit the anonymous debug line.
 func (g *Gateway) handleDisconnect(cc *ClientConn) {
-	g.logger.Info("client disconnect", "user", cc.UserID())
+	g.logger.Info("client disconnect", "conn", cc.ID(), "user", cc.UserID(), "ip", cc.RemoteIP())
 	g.cleanupSession(cc)
 	cc.CloseGracefully()
 }
