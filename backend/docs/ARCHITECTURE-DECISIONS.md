@@ -1349,6 +1349,7 @@ or if the archetype count outgrows the hint mechanism.
 | 1 — input path | PR #79 | none | add, remove (unchanged) | 6 762 858 → 192 984 B/tick at 200 players (35×) |
 | 2 — enemy AI | PR #81 | `EnemyAi` (hinted same commit) | add, remove (unchanged) | 367 → 172 B/tick (−53%), but only −0.36% of a 50-player tick |
 | 3 — snapshot/AOI | PR #83 | none | add, remove (unchanged) | 21 692 → 21 628 B/tick at 50 players (−0.3%); noise at 200. **No throughput win, as predicted.** |
+| 4 — serialization off the tick | PR #86 | none | add, remove (unchanged) | tick-thread alloc 192 935 → 32 B/tick at 200 players. Work moved, not removed; wall-clock unmeasurable here |
 
 Two things stage 2 settled that this ADR could only predict:
 
@@ -1383,9 +1384,36 @@ holds no world reference and no lock. **A stage 4 that moves serialization off t
 therefore reachable, and is the only remaining item with a measured case behind it**
 (`BENCHMARK.md` §9, and the ~5:1 serialization:AOI ratio the original analysis cited).
 
-Net across all three stages: the input path was worth doing (35× less allocation per
+Net across the first three stages: the input path was worth doing (35× less allocation per
 tick), the AI and snapshot stages were worth doing for structure and not for speed, and
-the thing the analysis said was the real 80% remains untouched and now unblocked.
+the thing the analysis said was the real 80% was left for stage 4.
+
+**Stage 4 did it, and in doing so found the premise was wrong.** Encoding and
+serialization now happen on each connection's own write task; tick-thread allocation at
+200 players fell from 192 935 to 32 B/tick. But splitting the old phase B by hand first
+showed the ratio the analysis cited does not reproduce: at 200 players the AOI gather is
+~874–1177 µs/tick, `SnapshotDeltaState.Encode` is ~998–1272 µs/tick, and protobuf
+`ToByteArray` is **~79–144 µs/tick — 4–6% of the tick, not 80%**.
+
+That reframes what is left. The two dominant terms are:
+
+1. **The brute-force AOI scan**, O(viewers × entities), which the extension-seam table has
+   always listed as "spatial grid / quadtree" for production. At 200 players it is 40 000
+   distance tests per tick.
+2. **Delta/message building inside `Encode`**, which allocates 134 699 B/tick at 200
+   players, almost entirely `EntitySnapshot` objects. That is a **pooling** problem, not a
+   threading one.
+
+Neither is an ECS problem, which is the honest place for this migration to stop. ADR-12's
+staging is complete; further work on tick cost should be argued on its own terms rather
+than as a continuation of it.
+
+One correctness result is worth separating from the performance story: moving encoding to
+the moment of writing **fixed a pre-existing data-loss bug**. The old order encoded on the
+tick — advancing the delta encoder's `_lastSent` — and only then handed the envelope to a
+bounded channel that drops the oldest under load, so a dropped frame's updates were
+recorded as sent and never retransmitted until the next keyframe. Lazy encoding makes a
+frame that is never sent also never encoded.
 
 
 ---
