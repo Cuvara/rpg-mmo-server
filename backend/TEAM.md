@@ -217,12 +217,18 @@ device, not in the thing being measured**, and both readings came from the same 
 clock. The arithmetic was consistent with two wrong models at once, and the one chosen was
 the one that flattered a change already made.
 
-So: **when a number disagrees with your prediction, the instrument is a candidate, not just
-the subject.** Before concluding that the system is wrong, ask what the number was measured
-*with*, whether that instrument shares any state with the thing under suspicion, and whether
-an independent clock or counter says the same. In the row above, one `Stopwatch` outside the
-predictor would have settled it — and the reading that eventually did settle it was taken
-after the "fix", so it could not attribute anything to it either way.
+So: **when a number disagrees with your prediction, the instrument is a suspect too.** A
+mismatch tells you that the model and the reading disagree; it does not tell you which of
+them is wrong. Before acting on a discrepancy, ask what clock or counter produced the
+reading, and whether the thing you already suspect could also be corrupting it.
+
+**This is how a single defect impersonates two.** The 2x clock above was read once as a
+wrong interval and once as a wrong send rate, and the second reading nearly bought a change
+to the send path on evidence that did not exist. One `Stopwatch` outside the predictor would
+have settled it — and note that the reading which eventually did settle it was taken *after*
+the change, so it could not attribute anything to that change either way. **A measurement
+taken after a fix is worth less than the same measurement taken before it**, which is the
+practical reason to write the expected value down first rather than the tidy one.
 
 In practice this costs one line in the test or the report:
 
