@@ -183,6 +183,50 @@ Rules:
 - No allocations in hot paths (tick loop, snapshot, input processing)
 - All public APIs: XML doc comments
 
+### State the expected value and its units before you run the measurement
+
+**Write down what the number should be, and in what units, before you look at what it is.**
+Then compare. If you cannot say what to expect, you are not yet in a position to interpret
+the result — and that is the finding, not an obstacle to it.
+
+This is not pedantry about rigour. Every measurement mistake this team has made so far had
+the same shape: **the number that came back was plausible, so nobody checked it against a
+number that had been written down first.** A wrong-looking result gets investigated. A
+plausible-looking one gets used, quoted, and built on, and it is still wrong.
+
+Four instances, all real, all from a single week:
+
+| The number | Why it looked right | What it actually was |
+|---|---|---|
+| A 0.333-unit step read as a **20x jump** | compared against the base tick step | positions came from **snapshots**, which ship at the *world* rate — one sample already contains `WorldEvery` base steps, so 0.333 was a perfectly normal frame |
+| `effective speed 5` read as **evidence snapshots had arrived** | the value was correct | it was the **configured constant being echoed back**; it would have read 5 with no snapshot ever received |
+| A burstiness figure quoted as a **baseline** | it was measured, not guessed | the metric ranges **33–45 across runs**; a baseline of one sample is not a baseline |
+| A predictor reading **0.133 s** between sends | 15 Hz sends, and 0.133 is a real interval | the predictor's clock ran at **2x** — the true gap was 0.0669 s, and 0.133 is exactly what a doubled clock produces |
+
+Note what the last three have in common with the first: none produced an implausible value.
+Two of them produced a value that was *arithmetically consistent with a wrong model*, which
+is the hardest kind to catch after the fact and the easiest to catch before, because the
+prediction and the model are written down together.
+
+In practice this costs one line in the test or the report:
+
+```csharp
+// 15 sends/s over 1.2s at speed 5 = 9 units, sampled at the WORLD rate (15Hz),
+// so a normal sample interval is speed/15 = 0.333 units.
+float normal = speed / rates.WorldHz;
+```
+
+Three habits that follow from it:
+
+- **Name the units in the variable or the comment**, not just in your head. `normal` versus
+  `normalPerBaseTick` versus `normalPerSnapshot` is the whole of the first row above.
+- **Say which rate a per-something figure is per.** This codebase now has three simulation
+  rates and a separate replication rate; "per tick" is ambiguous and has already been wrong
+  twice.
+- **One sample is not a baseline.** If a metric's spread has not been measured, measure it
+  before quoting a value from it — `BENCHMARK.md` reports run-to-run spread beside every
+  figure for exactly this reason.
+
 ### Movement-adjacent behaviour must be tested through the live path
 
 **A test that builds its own world can be true while the path a client takes is not.**
