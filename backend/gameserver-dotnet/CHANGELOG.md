@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **A coalesced stop input failed to clear held movement in single-rate mode.** When the
+  server fell behind and drained a batch containing both a stop (deadzone) and a later
+  resume input, per-tick coalescing gave the resume `applyMovement = true` and the stop
+  `applyMovement = false`. The stop's `MoveResult.None` branch — which clears
+  `HeldFromTick` — lives inside the `applyMovement` guard, so it never ran. In multi-rate
+  mode `ApplyHeldMovement` masked this by keeping `LastMoveTick` current between packets;
+  in single-rate mode (`WorldEvery = 1`) that pass is a no-op, so `StepDeltaTime` saw the
+  full pause as elapsed time and repaid it in one step — capped at `MaxBankedTicks` (4x at
+  15 Hz). The fix moves the deadzone detection outside the `applyMovement` guard: a
+  zero-vector input clears `HeldFromTick` and resets `LastMoveTick` regardless of whether
+  it is the newest input in the batch.
+
 ### Added
 - **`Shared.GameLogic` released as `sgl-v0.1.8`**, carrying `GameConstants.MaxBankedMovementTicks`
   — the cap on how much elapsed simulated time a step may bank, added by the elapsed-time
