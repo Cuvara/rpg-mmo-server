@@ -6,6 +6,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **`JoinTokenResponse.tick_rate` is now specified, not merely implemented.** The field
+  shipped with #93 described by a code comment, and a client team building against it was
+  left inferring a protocol contract from that comment — which is the same move that
+  produced the defect the field exists to close. `docs/API.md` now states it normatively:
+
+  - **What it means.** The rate at which the authoritative tick advances *and* at which
+    player movement is integrated. A client MUST build its prediction timestep as
+    `1 / tick_rate`, and MAY use it to convert `tick`/`ack_tick` into seconds. It is
+    **not** the snapshot cadence — snapshots follow the world rate, and a client sizing an
+    interpolation buffer from this field would be four times short at the default.
+  - **Why it is not defined as "the critical group's rate".** It carries `CriticalHz`
+    today because movement is critical-group work and the critical group is the base
+    timeline, but the field is specified in terms of *movement*, not of the group. If
+    movement were ever scheduled elsewhere, the server would owe the client the movement
+    rate here — or a new field — rather than letting this value follow a group name while
+    prediction followed something else.
+  - **What to do when it is absent or `0`.** A client MUST NOT assume 15. It SHOULD
+    measure instead: `(tick₂ − tick₁)` over the wall-clock gap between two snapshots *is*
+    the rate, and that also cross-checks the advertised value. A fallback to a configured
+    rate is permitted only if it is observable, because a silent fallback is behaviourally
+    the pre-#93 code. Refusing to predict is the safest option for a player-facing build.
+
+  The absent/zero rule deliberately differs from `speed` (#91), and the document says why:
+  `speed` is per-entity and its error is bounded by that entity's real speed, whereas
+  `tick_rate` scales *every* predicted displacement by a whole ratio — 4x at 15-against-60,
+  which lands under a typical snap threshold and so is corrected by smoothing on every
+  reconcile instead of announcing itself.
+
+### Changed
+- **`SimulationRates.MovementHz` gives the wire contract one definition in code.** The rate
+  published as `tick_rate` and the rate handed to the movement integrator were two
+  independent reads of `CriticalHz`; both now read `MovementHz`. Two reads are two things
+  that can drift, and this drift is silent on both sides.
+
+### Added
+- **`JoinTickRateContractTests` enforces the contract behaviourally.** It measures one
+  tick of movement and asserts the displacement is `speed / advertised_rate` — the
+  client's own arithmetic — across four rate configurations, plus that the advertised rate
+  is the base tick rate, that it is not the snapshot cadence, and that a client predicting
+  at the advertised rate agrees with the server over a full second including when it sends
+  at a quarter of the server's rate. If the coupling breaks, this fails instead of a player
+  feeling something soft.
+
+
 ### Added
 - **The join response now tells the client which rate to predict at**
   (`join_token_resp.tick_rate`). Closes

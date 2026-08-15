@@ -88,12 +88,53 @@ both encodings; the JSON column shows the legacy field names, which match the
 { "ok": true, "user_id": "u-42", "tick_rate": 60 }
 ```
 
-`tick_rate` is the **CRITICAL simulation rate in Hz**: the cadence at which the
-server reads input, integrates movement and resolves combat. That is exactly what
-a predicting client replays locally, so it is the rate the client must run its
-own prediction loop at. It is *not* the snapshot cadence — snapshots follow the
-world rate, which may be slower, and the client observes that from the snapshots
-themselves.
+**Normative definition.** `tick_rate` is **the rate, in Hz, at which the
+authoritative simulation tick advances — which is also the rate at which player
+movement is integrated.** A client building a prediction loop MUST use
+`dt = 1 / tick_rate` as its integration step, and MAY treat `tick_rate` as the
+conversion factor between the `tick` / `ack_tick` fields and wall-clock seconds.
+
+Those two things — the tick counter's rate and the movement integration rate —
+are **one number by contract, not by coincidence**, and the server is required to
+keep them equal:
+
+- Movement integrates once per simulation tick, using `1 / tick_rate` as its
+  timestep. `speed` is in world units per second, so the two must agree or the
+  same input produces a different displacement on each side.
+- `tick` and `ack_tick` are counted in these same ticks. A client reconciling
+  against `ack_tick` needs this rate to know how much simulated time an
+  acknowledged input covered.
+
+**It is not the snapshot cadence.** Snapshots follow the world rate, which is
+usually slower — at the default configuration the server simulates 60 times a
+second and sends 15 times a second. A client that mistakes this field for the
+send rate will size its interpolation buffer four times too small. The send
+cadence is observable from the snapshots themselves and is deliberately not
+advertised here.
+
+#### Why it is defined by meaning and not by the server's group name
+
+Internally the server schedules simulation in named rate groups (`Critical`,
+`World`, `Background` — ADR-13), and today `tick_rate` carries the critical
+group's frequency, because input, movement integration and combat are critical
+work and the critical group *is* the base tick timeline.
+
+**That is an implementation fact, and this field is not specified in terms of
+it.** The contract is the definition above: whatever the server's internal
+grouping, this field carries the rate at which it integrates movement and
+advances the tick counter. If movement were ever to move to a different group,
+the server would be required to keep advertising the *movement* rate here — or to
+add a new field and deprecate this one — rather than silently letting this value
+follow a group name while the client's prediction followed something else.
+
+A client is therefore correct to build its prediction `dt` from this field, and
+is not required to know that rate groups exist.
+
+The equality is enforced by test, not by convention:
+`JoinTickRateContractTests` asserts that the advertised value equals both the
+rate the movement integrator actually uses and the base tick rate, at several
+configurations. If a future change breaks the coupling, that test fails rather
+than a player feeling something soft.
 
 It rides the join response because it is **session-constant**: the server reads
 it once at startup and never changes it. Putting it on `snapshot` would re-send
@@ -103,13 +144,48 @@ string type was ~19% of a keyframe). It is not on `enter_world_resp` because tha
 comes from the gateway, which does not run the simulation (ADR-3) and would have
 to learn the rate second-hand.
 
-**`tick_rate` absent or `0` means "not supplied"** — a server predating this
-field. A client that sees `0` MUST refuse to predict rather than assume 15.
-Assuming is the defect this field closes
-([#93](https://github.com/Cuvara/rpg-mmo-server/issues/93)): a client predicting
-at 15 against a server tuned to 30 is wrong by a little on every tick, corrected
-by every snapshot, and reads to a player as rubber-banding rather than as a
-misconfiguration. Nothing on either side errors.
+#### When it is absent or zero
+
+**`tick_rate` absent or `0` means "this server does not advertise its rate"** — a
+server predating the field. The rule, in order:
+
+1. A client **MUST NOT** assume 15, or any other constant. Assuming is the entire
+   defect this field closes
+   ([#93](https://github.com/Cuvara/rpg-mmo-server/issues/93)): predicting at 15
+   against a server tuned to 30 is wrong by a little on every tick, corrected by
+   every snapshot, and reads to a player as rubber-banding rather than as a
+   misconfiguration. Nothing on either side errors, and no counter moves.
+
+2. A client **SHOULD** measure the rate instead of guessing it. The server's tick
+   counter is on the wire: for any two snapshots, `(tick₂ − tick₁)` divided by the
+   wall-clock interval between them **is** the base tick rate, and therefore the
+   movement rate. This works even though snapshots arrive at the slower world rate,
+   because the `tick` they carry is a base tick — consecutive snapshots simply
+   differ by more than one. A handful of samples is enough to identify a rate from
+   the small set of plausible values, and the same measurement is a useful
+   **cross-check on the advertised value** even when it is present.
+
+3. A client **MAY** fall back to a locally configured rate, but only if that
+   fallback is **observable** — logged once per session, or exposed as a counter or
+   a visible dev-build indicator. A silent fallback to a configured constant is
+   behaviourally identical to the pre-#93 code and reintroduces the defect for the
+   one case the field exists to cover.
+
+4. A client **MAY** refuse to predict. This is the safest option for a
+   player-facing build: no prediction is honest input lag, whereas prediction at a
+   wrong rate is continuous, sub-threshold wrongness that smooths rather than snaps
+   and therefore never announces itself.
+
+What a client must not do is (1). Between (2), (3) and (4) the choice is the
+client's, provided the fallback in (3) is not silent.
+
+> **Note on the sibling rule.** `speed` (#91) is per-entity, varies during a
+> session, and a wrong value is bounded by whatever that entity's real speed is.
+> `tick_rate` is session-constant and scales *every* predicted displacement by a
+> whole ratio — at 15-vs-60 that is 4x per input, which lands under a typical snap
+> threshold and so is corrected by smoothing on every single reconcile. The two
+> fields warrant the same "0 means not sent" encoding and **not** the same silent
+> fallback.
 
 A **rejected** join (`ok: false`) carries no `tick_rate`. There is no session to
 predict in, and the caller has not proved it is entitled to the server's tuning.
