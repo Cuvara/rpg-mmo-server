@@ -42,6 +42,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that can drift, and this drift is silent on both sides.
 
 ### Added
+- **`SlowClientMovementTests` measures movement over a real socket.** A reading of
+  `TickLoop` that stopped at the `applyMovement` line concluded the server integrates once
+  per packet, and a measurement against a running server appeared to confirm it. The unit
+  tests that assert otherwise build the world by hand and push inputs straight into the
+  queue, so they could not answer whether they exercised the live path. These join over
+  TCP, send input on a wall clock, and read the position back out of the snapshot stream —
+  the same number a client sees. A 15Hz client against a 60Hz server travels its full
+  speed; a 15Hz client against a 15Hz server is unchanged; a 60Hz client is unchanged.
+
 - **`JoinTickRateContractTests` enforces the contract behaviourally.** It measures one
   tick of movement and asserts the displacement is `speed / advertised_rate` — the
   client's own arithmetic — across four rate configurations, plus that the advertised rate
