@@ -75,8 +75,15 @@ public sealed class InputHandler
     /// <para>A first-ever move (<paramref name="lastMoveTick"/> of 0) is one tick, not the
     /// whole age of the server.</para>
     /// </summary>
-    private float StepDeltaTime(ulong baseTick, ulong lastMoveTick)
+    private float StepDeltaTime(ulong baseTick, ulong lastMoveTick, ulong heldFromTick)
     {
+        // Nothing held means the entity was STOPPED, not stalled: the last thing the client
+        // said was "I am not moving", and a deadzone input clears the hold. Standing still
+        // is not lost input, so a player who releases the stick, waits, and presses again is
+        // owed nothing for the pause — which is the most common thing a player does, and
+        // repaying it was a visible lurch on every restart.
+        if (heldFromTick == 0) return _deltaTime;
+
         if (lastMoveTick == 0 || baseTick <= lastMoveTick) return _deltaTime;
 
         ulong elapsed = baseTick - lastMoveTick;
@@ -163,7 +170,7 @@ public sealed class InputHandler
             // model, one arithmetic, whichever path stepped the entity.
             MoveResult result = MovementSystem.TryMove(
                 in probe, cursor.HeldMoveX, cursor.HeldMoveY,
-                StepDeltaTime(baseTick, cursor.LastMoveTick), in _bounds,
+                StepDeltaTime(baseTick, cursor.LastMoveTick, cursor.HeldFromTick), in _bounds,
                 out Vec2 newPosition);
 
             if (result is MoveResult.Accepted or MoveResult.Clamped)
@@ -273,7 +280,7 @@ public sealed class InputHandler
 
             MoveResult moveResult = MovementSystem.TryMove(
                 in probe, input.MoveX, input.MoveY,
-                StepDeltaTime(currentTick, cursor.LastMoveTick), in _bounds, out Vec2 newPosition);
+                StepDeltaTime(currentTick, cursor.LastMoveTick, cursor.HeldFromTick), in _bounds, out Vec2 newPosition);
 
             if (moveResult is MoveResult.Accepted or MoveResult.Clamped)
             {
@@ -293,6 +300,20 @@ public sealed class InputHandler
                 // released the stick" and "the client went quiet": the first must stop the
                 // entity now, the second is what the hold window is for.
                 cursor.HeldFromTick = 0;
+
+                // The stop is a MOVEMENT event for the purposes of owed time, even though
+                // it moves nothing: standing still is not lost input. The client told us it
+                // was not moving, so there is nothing to repay when it starts again.
+                //
+                // Without this, every deliberate stop was indistinguishable from a network
+                // stall, and the first input after it repaid the whole pause in one step —
+                // up to 250ms of travel in a single frame. Releasing and re-pressing is the
+                // most common thing a player does, which is why that read as constant
+                // jerkiness rather than as an occasional glitch.
+                //
+                // It does NOT cover a client that simply stops sending without a deadzone
+                // input; that gap is still repaid in one step, bounded by the cap. See #104.
+                cursor.LastMoveTick = currentTick;
             }
             else if (moveResult == MoveResult.Rejected)
             {
