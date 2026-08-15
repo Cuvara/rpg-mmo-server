@@ -7,6 +7,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **A deliberate stop was being repaid as movement, and it lurched.** The elapsed-time step
+  above restores the correct distance, but it said nothing about the *rate*: a pause was
+  repaid in a single step, so a player who stopped and started got up to 250ms of travel in
+  one frame. Measured against a live server that was a **1.36-unit jump where a normal step
+  is 0.083** — 16x — and it was reported by a player as jerkiness rather than as sluggishness,
+  which is the signature of a banked interval discharged at once.
+
+  The cause was that the server could not tell "I stopped" from "my packets stopped".
+  A deadzone input clears the hold, so an entity with no held direction is *stopped*, and
+  time no longer accrues to it. Stopping and starting is the most common thing a player
+  does, which is why this lurched constantly rather than occasionally.
+
+  **The residual is deliberate and bounded**: a client that goes quiet *without* sending a
+  deadzone is the genuine lost-input case and is still repaid in one step, capped at 250ms.
+  Removing that too costs something a player would also feel — either a longer coast after
+  release, or a repayment that alternates between full and quarter speed — so it is tracked
+  as #104 rather than guessed at. `SlowClientMovementTests` pins both halves: no lurch after
+  an explicit stop, and a cap-bounded one after silence.
+
 - **Bursty input arrival lost most of a player's movement (#100).** Per-tick coalescing
   turns several inputs arriving in one tick into a single movement step — correctly, since
   that is what stops a client travelling further by spamming packets — but the simulated

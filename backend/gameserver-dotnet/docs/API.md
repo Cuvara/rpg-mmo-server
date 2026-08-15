@@ -255,6 +255,18 @@ or when** — the invariant `MovementSystem` is written around.
    them. It does not weaken rule 1, because a client sending every tick always has
    `last_move_tick == now − 1` and so earns exactly one tick of movement per tick.
 
+   **Only a moving entity accrues that time.** A deadzone input clears the hold, and an
+   entity with no held direction is *stopped*, not stalled — so a player who releases the
+   stick, waits, and presses again is owed nothing for the pause. This matters more than it
+   sounds: stopping and starting is the most common thing a player does, and repaying those
+   pauses put a quarter-second of travel into a single frame every time, which reads as
+   constant jerkiness rather than as an occasional glitch.
+
+   **A client that stops sending without a deadzone is a different case** and is still
+   repaid in one step, bounded by the cap. Sending an explicit zero vector on release is
+   therefore not optional politeness — it is how a client tells the server the difference
+   between "I stopped" and "my packets stopped", and the server cannot infer it.
+
 **The cap is part of the model, not a server-side safety valve.** A client that banks
 unbounded time reconciles against a server that does not, on precisely the frames where the
 network was worst — so a predicting client must apply the same 250 ms bound.

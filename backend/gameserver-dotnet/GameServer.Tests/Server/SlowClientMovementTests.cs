@@ -154,7 +154,189 @@ public class SlowClientMovementTests
             $"movement (the cap is {capUnits:F2} units on top of {movingUnits:F2})");
     }
 
+    /// <summary>
+    /// A client whose packets stop arriving without a deadzone input is the genuine
+    /// lost-input case. The time is repaid in one step, and this pins that the step is
+    /// <b>bounded by the cap</b> rather than by how long the silence lasted.
+    ///
+    /// <para>Distance is not the only thing that has to be right. Repaying owed time in one
+    /// step restores the correct distance and is wrong by every other measure — measured
+    /// against a live server it produced a 1.36-unit jump where a normal step is 0.083, and
+    /// a player reported the build as jerky rather than sluggish. Removing the residual is
+    /// #104; both ways of doing it cost something a player would also feel, so it is a
+    /// decision rather than a patch.</para>
+    /// </summary>
+    [Fact]
+    public async Task ASilentClientsRepayment_IsBoundedByTheCap()
+    {
+        var rates = Rates(60, 15, 5);
+
+        (float largest, float speed) = await LargestSingleStepAsync(rates, pauseMs: 800);
+
+        // Positions are read from SNAPSHOTS, which ship at the world rate, so one sample
+        // interval already contains WorldEvery base steps. That, not the base step, is the
+        // baseline a normal frame is compared against.
+        float normal = speed / rates.WorldHz;
+
+        // A client that goes quiet WITHOUT saying so is the genuine lost-input case, and
+        // the time is still repaid in one step. That is bounded — by the cap, and by
+        // nothing else — and the bound is what this pins. Removing the residual entirely
+        // is #104, because both ways of doing it cost something a player would also feel.
+        float capUnits = speed * GameConstants.MaxBankedMovementMs / 1000f;
+
+        Assert.True(largest <= capUnits + normal * 1.5f,
+            $"largest sampled movement was {largest:F4}: repayment is not bounded by the " +
+            $"{capUnits:F2}-unit cap");
+    }
+
+    /// <summary>
+    /// A deliberate stop is not lost input. A player who releases the stick, stands still,
+    /// and presses again is owed nothing for the pause — the client told the server it was
+    /// not moving.
+    ///
+    /// <para>Before this, every deliberate stop looked identical to a network stall, so the
+    /// first input after it repaid the whole pause. That is the most common thing a player
+    /// does, which is why the lurch was constant rather than occasional.</para>
+    /// </summary>
+    [Fact]
+    public async Task AnExplicitStopIsNotTreatedAsLostTime()
+    {
+        var rates = Rates(60, 15, 5);
+
+        (float largest, float speed) =
+            await LargestSingleStepAsync(rates, pauseMs: 800, stopExplicitly: true);
+
+        float normal = speed / rates.WorldHz;
+
+        Assert.True(largest < normal * 2f,
+            $"largest sampled movement after an explicit stop was {largest:F4} against a " +
+            $"normal {normal:F4} ({largest / normal:F1}x): the pause was repaid as travel");
+    }
+
     // ── Harness ──
+
+    /// <summary>
+    /// Move, pause, move again — and return the largest jump between two consecutive
+    /// snapshot positions. Deliberately measures the <b>rate</b> rather than the distance:
+    /// it is the number a player perceives as smoothness.
+    /// </summary>
+    /// <param name="stopExplicitly">
+    /// When true the client sends a deadzone input before going quiet — it released the
+    /// stick, rather than its packets stopping arriving. The server can tell these apart
+    /// and must.
+    /// </param>
+    private static async Task<(float largest, float speed)> LargestSingleStepAsync(
+        SimulationRates rates, int pauseMs, bool stopExplicitly = false)
+    {
+        string userId = $"lurch-{Guid.NewGuid():N}"[..16];
+        var options = BuildOptions(rates);
+
+        var server = new GameServerHost(options);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        var (runTask, port) = await TestPorts.StartServerAsync(server, cts.Token);
+
+        try
+        {
+            using var client = new TcpClient();
+            await ConnectWithRetryAsync(client, port);
+            await using var stream = client.GetStream();
+
+            await SendAsync(stream, MsgType.JoinToken,
+                new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret) });
+            var joinEnv = await WireProtocol.DecodeAsync(stream, cts.Token);
+            Assert.NotNull(joinEnv);
+            Assert.True(WireProtocol.GetPayload<JoinTokenResponse>(joinEnv!).Ok);
+
+            EntitySnapshot spawn = await ReadOwnEntityAsync(stream, userId, cts.Token);
+            float speed = spawn.Speed;
+
+            var steps = new List<float>();
+            var samples = Task.Run(() => SampleStepsAsync(stream, userId, steps, cts.Token), cts.Token);
+
+            ulong tick = 0;
+            // Move for a while at the world rate.
+            for (int i = 0; i < 8; i++)
+            {
+                await SendAsync(stream, MsgType.Input,
+                    new InputMessage { Tick = ++tick, MoveX = 1f, MoveY = 0f });
+                await Task.Delay(66, cts.Token);
+            }
+
+            if (stopExplicitly)
+            {
+                await SendAsync(stream, MsgType.Input,
+                    new InputMessage { Tick = ++tick, MoveX = 0f, MoveY = 0f });
+            }
+
+            // Stand still, then start again. This is the restart that used to lurch.
+            await Task.Delay(pauseMs, cts.Token);
+
+            for (int i = 0; i < 8; i++)
+            {
+                await SendAsync(stream, MsgType.Input,
+                    new InputMessage { Tick = ++tick, MoveX = 1f, MoveY = 0f });
+                await Task.Delay(66, cts.Token);
+            }
+
+            await Task.Delay(200, cts.Token);
+            cts.CancelAfter(TimeSpan.FromSeconds(3));
+            await samples;
+
+            Assert.NotEmpty(steps);
+            float largest = 0f;
+            foreach (float d in steps) if (d > largest) largest = d;
+            return (largest, speed);
+        }
+        finally
+        {
+            cts.Cancel();
+            await server.ShutdownAsync();
+            try { await runTask; } catch (OperationCanceledException) { /* expected */ }
+        }
+    }
+
+    /// <summary>Record the distance between consecutive reported positions.</summary>
+    private static async Task SampleStepsAsync(
+        NetworkStream stream, string userId, List<float> steps, CancellationToken ct)
+    {
+        float previous = float.NaN;
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                var env = await WireProtocol.DecodeAsync(stream, ct);
+                if (env == null) break;
+                if ((MsgType)env.Type != MsgType.Snapshot) continue;
+
+                var msg = WireProtocol.GetPayload<SnapshotMessage>(env);
+                foreach (var e in msg.Entities)
+                {
+                    if (e.Id != userId) continue;
+                    if (!float.IsNaN(previous)) steps.Add(Math.Abs(e.X - previous));
+                    previous = e.X;
+                }
+            }
+        }
+        catch (OperationCanceledException) { /* expected */ }
+        catch (IOException) { /* expected */ }
+    }
+
+    private static ServerOptions BuildOptions(SimulationRates rates) => new()
+    {
+        ServerAddr = ":0",
+        ServerId = ServerId,
+        MapId = "map_slow_client",
+        Mode = "map",
+        Transport = TransportKind.Tcp,
+        TickRate = rates.CriticalHz,
+        SimulationRates = rates,
+        Capacity = 4,
+        JwtSecret = JwtSecret,
+        JoinTokenSecret = JwtSecret,
+        SaveInterval = TimeSpan.FromSeconds(30),
+        PlayerStore = new MemoryPlayerStore(),
+        LoggerFactory = NullLoggerFactory.Instance
+    };
 
     private static SimulationRates Rates(int critical, int world, int background)
     {
