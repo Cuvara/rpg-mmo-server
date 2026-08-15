@@ -1452,6 +1452,102 @@ frame that is never sent also never encoded.
 
 ---
 
+## ADR-13 — Simulation runs at three configurable rates on one integer tick timeline; replication does not follow it
+
+**Status:** accepted 2026-08-15. Extends ADR-12 (the ECS schedule it adds a rate dimension
+to). Depends on #93 being fixed in the same change, for the reason in *Consequences*.
+
+**Context.** The server ran one fixed 15Hz loop. Everything that needed to happen more often
+than every 66ms — input, movement, hit detection — could not, and everything that would have
+been fine at 200ms paid the 66ms rate anyway. The obvious move, raising the global tick to
+60Hz, was rejected before it was tried: it quadruples the cost of every system whether or not
+it benefits, and it quadruples snapshot bandwidth, which the measured 45.9 KB/s per client at
+200 players (BENCHMARK.md) cannot absorb inside ADR-7's `< 50 KB/s` mobile budget.
+
+**Decisions.**
+
+1. **Three groups, named for responsibility, not frequency.** `Critical`, `World`,
+   `Background`. The Hz behind each is configuration — `SIM_CRITICAL_HZ`, `SIM_WORLD_HZ`,
+   `SIM_BACKGROUND_HZ`, defaulting to 60/15/5 — so a group named `Hz60` would be a lie the
+   first time an operator tuned it. A system declares its group and nothing else about
+   timing; `GAMESERVER_TICK_RATE` still works and means "every group at that one rate".
+
+2. **One canonical base tick, derived rather than configured.** The base rate is the critical
+   rate, and every other group must divide it exactly; `RunsOn` is `(tick - 1) % every == 0`.
+   A configuration whose rates have no integer timeline — 60/25/5, whose true common base is
+   300Hz — is **rejected at startup**, not accommodated. Accommodating it would silently run
+   the server five times faster than anyone asked for.
+
+3. **Integer scheduling, not float accumulators.** Accumulating wall-clock deltas and firing
+   on a threshold drifts, makes "which tick did this run on" unanswerable, and makes a replay
+   of the same inputs produce a different schedule. The tick number has to be an identity
+   because input acknowledgement, cooldowns, reconciliation and replay are all expressed in
+   it.
+
+4. **Each group integrates with its own dt.** A system in the world group receives `1/15`,
+   not `1/60`, because it runs 15 times a second. Handing it the base timestep while running
+   it every fourth tick is the defining bug of a multi-rate scheduler and it is silent: every
+   speed and duration in that group would be wrong by the rate ratio, with nothing to
+   observe but "the game feels off".
+
+5. **Durations counted in ticks are derived from the rate that advances them.** The attack
+   cooldown is `ceil(500ms x rate)` base ticks and is compared against the base tick, so it
+   is derived from the *critical* rate. A 500ms cooldown stays 500ms at 15, 30 and 60Hz.
+
+6. **Group order is fixed Critical -> World -> Background, and is not configurable.** It
+   encodes write ownership: on a tick where several groups are due, the faster group's writes
+   land before the slower group reads them, so a slow group can never overwrite newer state
+   with a value it computed from an older read. This is the cross-rate hazard the whole
+   design has to answer, and the answer is an ordering rule rather than per-component
+   arbitration.
+
+7. **Replication is gated to the world rate, not the base rate.** Simulating at 60Hz does not
+   mean sending at 60Hz. Sending every base tick would quadruple downstream bandwidth to
+   deliver state the client interpolates across anyway, and would silently redefine the
+   keyframe interval, which counts *snapshots*: 30 snapshots is 2 seconds at 15Hz and half a
+   second at 60Hz. Simulation rate and replication rate stay separate concepts.
+
+8. **Overload drops the backlog; it never chases it.** Past 8 base ticks of lag the loop
+   resynchronises to now and counts what it discarded
+   (`gameserver_tick_backlog_dropped_total`). A catch-up loop is worse than useless here:
+   each catch-up tick costs more than the budget it reclaims, so a server that falls behind
+   falls further behind. Simulation time then runs behind wall time under sustained overload,
+   which is a bounded and measurable failure rather than a spiral.
+
+9. **The background group ships empty, deliberately.** No system in the current simulation
+   tolerates a 200ms scheduling delay without a visible behaviour change — enemy reaping
+   looks like cleanup but is what stops a dead enemy from being observable in the snapshot
+   built later in the same tick. Inventing a tenant so the group looks used would be shipping
+   a regression to satisfy a diagram. The infrastructure is built, tested and documented with
+   the rule for what may enter it.
+
+**Consequences.**
+
+- **The base tick advances four times faster in wall-clock time at the default.** The tick
+  number on the wire is unchanged in format and meaning — it is still the authoritative
+  simulation tick — but its *rate* is now a deployment-time property. That is exactly the
+  defect #93 describes, and it is why the tick rate goes on the wire in the same change: a
+  client that assumes 15 while the server runs 60 predicts wrongly, gets corrected by every
+  snapshot, and the player sees rubber-banding rather than a misconfiguration.
+- **A single-rate configuration is byte-for-byte the old server.** With one rate there is one
+  timeline, the world group runs every base tick, snapshots ship every tick, and the held-input
+  window collapses to a single tick — so movement is one step per packet, as before. The
+  snapshot byte-identity digests and the enemy characterization tests pass unchanged, which is
+  the evidence for this claim rather than the assertion of it.
+- **Movement became continuous, and that is a real behavioural change at multi-rate.** The
+  server now integrates the newest input once per critical tick and holds it for one world
+  interval, instead of once per received packet. Without it a client sending at 15Hz against a
+  60Hz server would move at quarter speed — speed would be a function of the client's send
+  rate, which `MovementSystem` already documents as forbidden. A client that goes quiet coasts
+  for at most one world interval (66ms at the default); an explicit deadzone input stops it
+  immediately.
+- **Per-server capacity is not claimed to improve.** The point of multi-rate is high frequency
+  where it is needed and low frequency where it is not, not throughput. No capacity claim is
+  made here, and the tick ceiling remains unmeasurable on the current hardware (ADR-7).
+
+
+---
+
 ## Summary of decisions
 
 | # | Area | Decision |
@@ -1468,3 +1564,4 @@ frame that is never sent also never encoded.
 | 10 | Shared simulation | Arch replaces `GameWorld` on the server; `Shared.GameLogic` stays ECS-free and ships to Unity as multi-targeted **source**; golden vectors run on both sides in CI; only IEEE-exact float ops permitted in shared code |
 | 11 | Arch under NativeAOT | Arch publishes clean and then throws at runtime without per-component AOT hints; hints are **generated or guarded, never hand-written**; `CommandBuffer` is broken under AOT and is not used; the `publish` CI job must **run** the binary, not just build it |
 | 12 | ECS migration | Server goes to **real ECS with Arch**, staged one PR at a time, over the analysis's objection and by owner decision; `CommandBuffer` stays banned and structural ops stay deferred to one phase per tick; every new component gets its AOT hint line in the same commit; no query shape the hint guard cannot see; `Shared.GameLogic` and the wire are frozen throughout |
+| 13 | Simulation rates | Three responsibility-named groups (`Critical`/`World`/`Background`) at configurable Hz (`SIM_*_HZ`, default 60/15/5) on one derived integer base-tick timeline; rates that do not divide the base are rejected at startup; each group integrates with its own dt; group order Critical->World->Background is the cross-rate write-ownership rule; **replication stays at the world rate**; overload drops the backlog and counts it; the background group ships empty because nothing currently tolerates 200ms |

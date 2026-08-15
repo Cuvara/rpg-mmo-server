@@ -1163,3 +1163,91 @@ entity": the encode side is done, the scan side is not.
 On the evidence of this Part, and of §9 item 6 before it, that target should be
 **measured before it is built**. Four changes in this sequence were commissioned
 against a term that turned out not to be the expensive one.
+
+---
+
+## Part VI — multi-rate simulation: does replication follow the simulation rate? (2026-08-15)
+
+The multi-rate scheduler (ADR-13) raises the simulation rate 4× by default, from a
+single 15Hz loop to a 60Hz base tick with world systems every 4th tick. The design
+claims replication does **not** follow it: snapshots still ship at the world rate, so
+downstream bandwidth per client should be unchanged.
+
+That claim is the one worth measuring here, and it is also the one this host can
+measure honestly. Tick timings from this box are a lower bound of unknown tightness —
+the load generator shares the CPU with the server under test (ADR-7) — but **bytes on
+the wire do not care what else the host is doing**, and Part I established that
+bandwidth reproduces here to 0.3%.
+
+### Method
+
+Two configurations, same binary, same load, two runs each. `SIM_CRITICAL_HZ` is the
+only thing that changes between them:
+
+```
+A: SIM_CRITICAL_HZ=15 SIM_WORLD_HZ=15 SIM_BACKGROUND_HZ=5   (= the pre-change server)
+B: SIM_CRITICAL_HZ=60 SIM_WORLD_HZ=15 SIM_BACKGROUND_HZ=5   (= the new default)
+
+loadtest -join direct -players 50 -duration 45s -warmup 5s -encoding proto
+GAMESERVER_ENEMIES=false   (so the measurement is the player path, not wave timing)
+```
+
+`-join direct` bypasses the gateway: the gateway is not in the gameplay data path
+(ADR-3), and including it would only add join-time noise to a steady-state measurement.
+
+### Results
+
+| | A: 15/15/5 | B: 60/15/5 | change |
+|---|---|---|---|
+| Achieved base rate (ticks/s) | 15.02, 15.02 | 60.03, 59.99 | **4×, as configured** |
+| **Downstream per client (B/s)** | **8068, 8000** | **8145, 8146** | **+1.4%** |
+| Upstream per client (B/s) | 126, 126 | 126, 126 | none |
+| Snapshot interval p50 | 66.9ms, 67.0ms | 66.9ms, 66.9ms | none |
+| Snapshot interval p99 | 73.4ms, 73.6ms | 72.5ms, 73.3ms | none |
+| Input→ack p50 | 35.6ms, 35.6ms | 33.5ms, 34.8ms | −1.5ms |
+| Input→ack p99 | 68.1ms, 69.0ms | 68.8ms, 69.2ms | none |
+| Base tick duration p99 | 0.49ms, 0.49ms | 0.49ms, 0.50ms | none |
+| Base tick duration mean | 0.06ms | 0.03ms | halved |
+| Ticks over budget | 0% | 0% | none |
+
+### What this shows
+
+1. **Replication did not follow the simulation rate.** Simulation runs 4× more often and
+   downstream bandwidth moved by **1.4%**, against a run-to-run spread of 0.85% in
+   configuration A. The snapshot interval is unchanged at 66.9ms p50 — still 15 sends a
+   second. Had the two been coupled, this row would read ~32 KB/s per client and would
+   have blown ADR-7's `< 50 KB/s` mobile budget at a fraction of 200 players.
+
+2. **The 1.4% is real and explainable, not noise.** Movement is now continuous: a player
+   holding a direction moves on every base tick instead of only on packet arrival, so
+   marginally more entities have changed state when each snapshot is built, and the delta
+   encoder sends them. It is the cost of the movement model, not of the send rate.
+
+3. **The base tick keeps its schedule.** 60.03 and 59.99 ticks/s, not 62.5 — which is what
+   the previous `1000 / rate` integer-millisecond sleep would have produced at 60Hz
+   (`1000/60 = 16ms`, a 4% fast clock). The deadline scheduling in ADR-13 decision 3 is
+   what closes that gap, and this row is the evidence it works.
+
+4. **Mean tick cost halved** (0.06ms → 0.03ms) because three base ticks in four skip the
+   world group and the entire snapshot phase. Per *second* the server does more work, as
+   it must — the point is that the extra work is only the critical group.
+
+5. **Input acknowledgement improved slightly**, p50 35.6ms → 34.2ms averaged. Directionally
+   what a 4× input rate should do, but 1.5ms is close enough to the noise floor that it is
+   reported rather than claimed.
+
+### What this does NOT show
+
+- **No capacity claim.** 50 players on a host shared with the load generator says nothing
+  about the ceiling, which remains unmeasurable here (ADR-7). Multi-rate is a scheduling
+  change, not a throughput change, and no throughput improvement is asserted.
+- **Both levels are marked INVALID by the harness**, because all 50 clients report
+  `run: read: server closed the connection` at teardown. Joins, the 45s measurement window
+  and the snapshot reconciliation (99.97–100.26% of enqueued snapshots received) are all
+  clean, so the per-run numbers above stand; but the harness's own verdict is withheld and
+  is reported as withheld rather than being talked past.
+- **The harness's verdict thresholds are not rate-aware.** It prints `tick budget 66.67ms
+  @ 15Hz` regardless of the configured rate, so at a 60Hz base it is comparing against a
+  budget four times too generous. It did not affect these runs — nothing came close to
+  either budget — but it must be fixed before the harness is used to qualify a 60Hz
+  configuration.

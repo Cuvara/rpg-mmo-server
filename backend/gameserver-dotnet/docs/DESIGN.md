@@ -1344,3 +1344,219 @@ version gap on a pre-release package this project did not choose directly. Re-ru
 audit on any Arch upgrade — `dotnet publish -p:TrimmerSingleWarn=false` and diff the
 diagnostic list against the 37 recorded here.
 
+## Multi-Rate Simulation Scheduler (2026-08-14)
+
+### What it replaced
+
+One loop, one rate. `TickLoop` woke every `1 / GAMESERVER_TICK_RATE` seconds (15 Hz by
+default), ran everything there was to run, and broadcast a snapshot. Every piece of
+simulation therefore paid the same price: enemy AI ran as often as movement integration,
+and movement integration ran no more often than enemy AI. The only way to make combat
+feel tighter was to raise the rate for *everything*, which multiplies snapshot bandwidth
+by the same factor — so the rate was pinned by the most expensive thing in the loop and
+by the wire, not by what any individual system needed.
+
+The loop is now driven by three groups at independently configured frequencies.
+
+### Groups are responsibilities, not frequencies
+
+`SimulationGroup` has three members — `Critical`, `World`, `Background` — and the names
+describe what belongs in each, never how fast it goes:
+
+- **`Critical`** — latency-sensitive, prediction-relevant work: player input, movement
+  integration, combat resolution. Runs on every base tick; this group *is* the base rate.
+- **`World`** — world simulation: AI, spawning, despawning, non-critical entity updates.
+  Also the cadence of the snapshot broadcast, which is why demoting it changes what
+  clients *see*, not only what the server computes.
+- **`Background`** — work where a delay of a whole interval is explicitly acceptable. At
+  the default 5 Hz that delay is 200 ms, which is a gameplay judgement rather than a
+  performance one.
+
+Naming them `Hz60`/`Hz15`/`Hz5` was rejected for a concrete reason: the frequencies are
+configuration (`SIM_CRITICAL_HZ`, `SIM_WORLD_HZ`, `SIM_BACKGROUND_HZ`), so a group named
+after its rate becomes a lie the first time an operator changes one, and every reference
+to it in gameplay code becomes misleading at the same instant.
+
+A system declares its group through `IEcsSystem.Group` and nothing else about frequency.
+It never counts ticks, never tests `tick % n`, never reads a configured Hz. That is the
+property that makes the rate model auditable: "what runs at what rate" is answerable by
+reading `SimulationRates` and `SimulationSchedule`, and changing a rate is a
+configuration change rather than a code change. `Group` defaults to `World` — world
+simulation is what a system did before groups existed, so an implementation that says
+nothing keeps its old cadence rather than being silently promoted to the base rate.
+
+### The base tick, and why integers rather than a float accumulator
+
+The obvious way to run several rates in one loop is an accumulator per group: add the
+wall-clock delta each frame, fire when it crosses `1/Hz`, subtract. It was rejected on
+three counts, all of which matter to this server specifically:
+
+1. **It drifts.** The residual after each fire is a float, and the error compounds.
+2. **"Which tick did this run on" stops having an answer.** Group boundaries land
+   wherever the accumulator happened to cross, so a group run is not attached to a tick
+   number.
+3. **It is not reproducible.** The same inputs replayed on another machine produce a
+   different schedule, because the schedule depends on frame timing rather than on
+   counting.
+
+Point 2 is disqualifying on its own. Tick numbers here are *identities*, not timestamps:
+`ack_tick` on the wire is the client's reconciliation anchor, cooldowns are stored as
+`Combat.CooldownUntilTick` and compared against the tick counter, and the keyframe phase
+is derived from tick arithmetic. A scheduling mechanism that makes tick identity fuzzy
+undermines all three.
+
+So there is exactly one counter. `SimulationRates.BaseHz` is **derived, not configured**:
+it is the critical rate, because the critical group runs on every base tick by
+definition. Each group reduces to an integer `Every` — base ticks between two runs —
+computed as `BaseHz / groupHz`, and `RunsOn` is
+
+```csharp
+(baseTick - 1) % every == 0
+```
+
+The counter starts at 1 (`_currentTick++` is the first statement of `TickOnce`), so the
+`-1` makes every group fire together on tick 1. That alignment is what makes the schedule
+diagrammable and testable:
+
+```
+base tick   1  2  3  4  5  6  7  8  9 10 11 12 13 ...   (60 Hz, period 16.7 ms)
+critical    x  x  x  x  x  x  x  x  x  x  x  x  x
+world       x           x           x           x       (every 4)
+background  x                                   x       (every 12)
+snapshot    x           x           x           x       (world rate)
+```
+
+### Every rate must divide the base rate exactly, or the server refuses to start
+
+`SimulationRates.TryCreate` rejects, with an operator-facing message naming the variable
+at fault and listing the divisors of the base rate:
+
+- any rate ≤ 0, or > `MaxHz` (240) — the ceiling is not a hardware claim, it turns a typo
+  like `SIM_CRITICAL_HZ=6000` into a startup failure instead of a busy loop that starves
+  the network threads on the same box;
+- `world > critical`, or `background > world` — the critical group is the base timeline
+  and must be the fastest, or the group names stop describing what runs when;
+- `critical % world != 0` or `critical % background != 0`.
+
+The divisibility rule is the load-bearing one. A configuration like 60/25/5 has no
+integer timeline at 60 Hz: its true common base is 300 Hz, so honouring it would silently
+run the whole server five times faster than anyone asked for. `Program.cs` treats a
+rejected configuration as fatal (`return 2`) rather than falling back to a default,
+because a server that quietly substitutes 60 for an unusable 25 is a server whose measured
+behaviour does not match its configuration — the failure mode that makes a
+misconfiguration unfindable.
+
+`GAMESERVER_TICK_RATE` still works and still means what it meant. When it is set and no
+`SIM_*_HZ` variable is, all three groups take that one rate (`SimulationRates.Uniform`):
+one timeline, world due on every base tick, snapshots at the simulation rate — the
+pre-multi-rate server byte for byte. That is what let the existing tick-sensitive and
+byte-identity tests stand unchanged rather than being rewritten around the new model.
+
+### The delta-time rule: each system integrates with its own group's dt
+
+`SimulationRates.DeltaTimeFor(group)` returns `1f / HzFor(group)`, and a system is handed
+that value at construction. `EnemySpawner` builds its three systems with
+`rates.DeltaTimeFor(SimulationGroup.World)`; `InputHandler` is constructed with
+`rates.CriticalHz`.
+
+**Handing a world-group system the base dt would be a bug, not an inefficiency.** A
+system that runs every 4th base tick but integrates `1/60` s of motion moves its entities
+at a quarter speed, and the error is silent: nothing crashes, `EnemySpeed` simply stops
+meaning units per second. The inverse — a critical system given the world dt — moves
+everything four times too fast. Because the dt travels with the group rather than being
+read from a global, `units per second` means the same thing in every group, and moving a
+system between groups changes when it runs without changing how far it moves.
+
+This rule has a second edge, visible in `InputHandler`. It takes the **critical** rate for
+both of its rate-derived values: the movement dt is the critical timestep, and
+`GameConstants.AttackCooldownTicks` counts base ticks, because `Combat.CooldownUntilTick`
+is compared against the base tick counter. Deriving the cooldown from the world rate
+would make a 500 ms cooldown last 2 s at 60/15. The rule is not "use your group's dt for
+everything" but "use the rate of the timeline the value is measured against".
+
+**The consequence for movement.** `move_x`/`move_y` are a *direction*, and
+`MovementSystem` requires travel distance to depend on wall-clock time and speed, "never
+on how many input packets a client sends". That held only while the simulation rate and
+the client's send rate matched. At a 60 Hz base with a client sending at 10–15 Hz,
+integrating solely on packet arrival makes speed proportional to send rate. So
+`InputHandler.ApplyHeldMovement` integrates the newest held direction once per base tick
+for players who sent nothing that tick, bounded to `WorldEvery` base ticks — one world
+interval, 66 ms at 60/15 — after which the direction expires and the player coasts no
+further. With a single rate `WorldEvery` is 1, the pass returns immediately, and the old
+packet-driven model is reproduced exactly.
+
+### Replication is gated to the world rate, not the base rate
+
+The snapshot broadcast is behind `_rates.RunsOn(SimulationGroup.World, _currentTick)` in
+`TickLoop.TickOnce`; on a base tick where the world group is not due, the loop records its
+metrics and returns before gathering viewers. Simulating at 60 Hz does not mean
+replicating at 60 Hz, and the two must not be allowed to become the same number by
+accident. Two independent consequences if they were:
+
+1. **Bandwidth.** Sending every base tick quadruples outbound bytes per client at the
+   default 60/15. The measured 45.9 KB/s per client at 200 players
+   (`backend/docs/BENCHMARK.md`) would leave the `< 50 KB/s` mobile budget ADR-7 sets —
+   to deliver intermediate state the client interpolates across anyway.
+2. **The keyframe interval silently changes meaning.** It counts *snapshots*, not
+   seconds: 30 snapshots is 2 s at 15 Hz and 0.5 s at 60 Hz. The same constant would
+   quadruple full-keyframe bandwidth on top of the delta increase, without anyone editing
+   a number.
+
+Gating at the world rate keeps both properties fixed, and keeps the client's snapshot
+buffer and interpolation window sized against a rate that did not move.
+
+### Group order is fixed: Critical → World → Background
+
+`SimulationSchedule` runs the due groups in that order and the order is not configurable.
+It encodes a **write-ownership rule**: on a tick where several groups are due, the faster
+group's writes land before the slower group reads them, so a slower group can never
+overwrite a newer value from a faster group with a staler one computed earlier in the
+same tick. Reversing it would let the 5 Hz group clobber a 60 Hz combat result — the
+precise cross-rate hazard that multi-rate scheduling introduces and that a single-rate
+loop cannot have.
+
+Within a group, ordering is each system's declared `Order`, with duplicates rejected at
+construction exactly as before. The duplicate check is now **per group**: two systems in
+different groups never run in the same pass and so cannot be ambiguous with each other,
+and forcing globally-unique `Order` values would couple unrelated groups' numbering for
+nothing.
+
+### Groups may be empty, and today two of them are
+
+`SimulationSchedule` skips a group with no systems entirely — it does not take a write
+scope, and it does not increment the group metrics. In the current build every
+`IEcsSystem` declares `World` (the three enemy-AI systems); the critical group's work
+lives in the tick-loop body rather than in declared systems, and the background group
+ships with nothing at all.
+
+That is a real state rather than a gap. Nothing in the current simulation can tolerate a
+200 ms scheduling delay without a visible behaviour change, and inventing a tenant for
+the background group so the diagram looks complete would be shipping a regression to
+satisfy a picture. The infrastructure is here, tested, and documented with the rule for
+what may go in it: a system belongs in `Background` when a whole interval of delay is
+acceptable *as gameplay*, not merely when it is cheap.
+
+### Overload policy: drop the backlog, never chase it
+
+The loop keeps a deadline in `Stopwatch` ticks and advances it by one period each
+iteration. The period is computed as `Stopwatch.Frequency / BaseHz`, not as
+`1000 / BaseHz` milliseconds: integer millisecond arithmetic truncates 16.67 to 16, a 4%
+fast clock — 2.4 extra ticks per second, with every duration expressed in ticks short by
+the same factor. The old loop could afford that truncation because `1000/15` is exact;
+the base rate cannot.
+
+When a tick runs long, `gameserver_tick_overruns_total` is incremented and the deadline is
+advanced without sleeping, so one slow tick is absorbed by the next few. Past
+`MaxLagTicks` (8) base ticks of accumulated lag the backlog is **dropped in one step**:
+the counter `gameserver_tick_backlog_dropped_total` is increased by the number of ticks
+lost, a WARNING is logged, and the deadline is resynchronised to now.
+
+The alternative — running the missed ticks back to back — is the unbounded catch-up loop.
+Each catch-up tick costs more than the budget it is trying to reclaim, so a server that
+falls behind falls *further* behind, and the mechanism meant to preserve real-time pacing
+is exactly what stops it recovering. Dropping instead means simulation time runs slower
+than wall time under sustained overload. That is a genuine cost — tick-based timers
+advance less than the elapsed clock, inputs in the dropped window are never applied, and
+whole world intervals vanish from the delta stream — but it is **visible, bounded and
+measurable**, which a spiral is not. Both counters and how to read them:
+`docs/METRICS.md`.

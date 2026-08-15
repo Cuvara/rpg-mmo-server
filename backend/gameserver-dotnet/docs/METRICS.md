@@ -31,8 +31,12 @@ Meter `rpg.gameserver` + `OpenTelemetry.Exporter.Prometheus.HttpListener`).
 
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
-| `gameserver_tick_duration_seconds` | histogram | `map_id` | Wall time of one simulation tick. Buckets sized for the 66 ms @15 Hz budget |
+| `gameserver_tick_duration_seconds` | histogram | `map_id` | Wall time of one **base** tick. Explicit buckets 0.5 ms → 1 s, so they still bracket the 16.7 ms @60 Hz base budget as well as the 66 ms @15 Hz one |
 | `gameserver_tick_processed_inputs_total` | counter | `map_id` | Inputs applied by the tick loop |
+| `gameserver_sim_group_duration_seconds` | histogram | `map_id`, `group` | Wall time of one run of a simulation group — `group=critical\|world\|background` |
+| `gameserver_sim_group_runs_total` | counter | `map_id`, `group` | Times a simulation group has run. The ratio between groups **is** the configured rate ratio |
+| `gameserver_tick_overruns_total` | counter | `map_id` | Base ticks whose work exceeded the base period — see below |
+| `gameserver_tick_backlog_dropped_total` | counter | `map_id` | Base ticks discarded because the loop fell too far behind the wall clock — see below |
 | `gameserver_players_online` | gauge | `map_id` | Connected players |
 | `gameserver_entities` | gauge | — | Entities in the world |
 | `gameserver_snapshots_sent_total` | counter | `map_id` | Snapshot messages sent |
@@ -47,7 +51,113 @@ histogram_quantile(0.99, rate(gameserver_tick_duration_seconds_bucket[5m]))  # t
 rate(gameserver_player_saves_total{status="error"}[5m])                      # save error rate
 sum(gameserver_players_online)                                               # CCU
 rate(gameserver_resyncs_total[5m])                                           # interning health
+rate(gameserver_tick_overruns_total[5m])                                     # base rate sustainable?
+rate(gameserver_tick_backlog_dropped_total[5m])                              # sim time vs real time
+sum by (group) (rate(gameserver_sim_group_runs_total[5m]))                    # observed group Hz
 ```
+
+### The multi-rate group metrics
+
+The simulation runs three groups — `critical`, `world`, `background` — at
+independently configured frequencies (`SIM_CRITICAL_HZ` / `SIM_WORLD_HZ` /
+`SIM_BACKGROUND_HZ`, defaults 60/15/5; see `docs/README.md` and the scheduler
+section of `docs/DESIGN.md`). Both group instruments carry a `group` label rather
+than being three separately-named metrics: the groups are configuration, so a name
+that encoded the group would have to change whenever a group did, and a dashboard
+cannot sum across differently-named series.
+
+**`gameserver_sim_group_runs_total` is the scheduler's self-check.** The groups run
+on one integer tick timeline, so where two groups both have systems their run counts
+are in exactly the configured rate ratio (at 60/15/5 that would be 12 : 3 : 1) over
+any window long enough to smooth the edges. Drift in that ratio is a *scheduler*
+defect, not a load symptom — load makes every group slower together, because they
+run inside the same tick.
+
+**Which series actually appear today.** The counter is incremented per group by
+`SimulationSchedule.RunDue`, which skips a group with no registered systems
+entirely. Every `IEcsSystem` in the current build declares
+`SimulationGroup.World` (the three enemy-AI systems), so **`group="world"` is the
+only series a stock server emits.** The critical group's work — input processing and
+held-direction movement — runs directly in the tick-loop body rather than as a
+declared system, so it is counted in `gameserver_tick_duration_seconds` and not
+here; the background group ships empty by design. A `group="critical"` or
+`group="background"` series appearing means systems were registered in those
+groups, not that something broke.
+
+**`gameserver_sim_group_duration_seconds` attributes tick cost.** It is what turns
+a rising `gameserver_tick_duration_seconds` into an answer. A tick that overruns
+while `group="world"` accounts for most of its duration is a world-simulation
+problem, and lowering `SIM_WORLD_HZ` is a real remedy — it spreads that cost over
+more base ticks without touching prediction latency. An overrun where the group
+durations account for very little of the tick is the opposite finding: the cost is
+in the loop body (input drain, held movement, snapshot gather), and the only lever
+there is `SIM_CRITICAL_HZ` itself, because that work runs on every base tick by
+construction.
+
+> **Bucket caveat.** Only `gameserver_tick_duration_seconds` has an explicit-bucket
+> view (`MetricsEndpoint.TickDurationBuckets`). The group histogram uses the SDK's
+> default boundaries, which are sized for *milliseconds* while these values are
+> recorded in *seconds* — so nearly every observation lands in the lowest bucket and
+> `histogram_quantile` over it is not informative. Use `_sum` / `_count` for a mean
+> per group until a view is added.
+
+### `gameserver_tick_overruns_total` — the configured critical rate is too fast
+
+Incremented once for every base tick whose work took longer than the base period
+(`1 / SIM_CRITICAL_HZ` — 16.7 ms at the default 60 Hz). It is logged as a WARNING
+only past twice the budget, so the counter sees overruns the log does not.
+
+**Expected value: approximately zero.** A non-zero sustained rate means one thing:
+**`SIM_CRITICAL_HZ` is not sustainable on this host at this load.** It is not a
+transient, and it is not something more players will fix. The responses, in order
+of directness:
+
+1. **Lower `SIM_CRITICAL_HZ`** to the next divisor that still divides
+   `SIM_WORLD_HZ` and `SIM_BACKGROUND_HZ` cleanly (30 works with 15/5; 45 does
+   not — the server refuses to start rather than round). This is the honest fix
+   when the host simply cannot do 60 Hz.
+2. **Move work off the base tick.** Compare
+   `gameserver_sim_group_duration_seconds{group="world"}` against the tick duration:
+   if the world group accounts for the overrun, it is landing on those base ticks
+   and a lower `SIM_WORLD_HZ` spreads it out without touching prediction latency.
+3. **Suspect the host, not the server.** Tick timing on a box shared with a load
+   generator or a deploy moves by more than 3× (`backend/docs/BENCHMARK.md`,
+   ADR-7). An overrun rate measured on a contended host is a fact about the host.
+
+A rising overrun rate with `gameserver_tick_backlog_dropped_total` still at zero is
+the survivable state: individual ticks are late, the loop absorbs them by not
+sleeping, and simulation time is still tracking real time.
+
+### `gameserver_tick_backlog_dropped_total` — simulation time is behind real time
+
+Incremented **by the number of base ticks dropped**, not by one, each time the loop
+finds itself `MaxLagTicks` (8) or more base ticks behind the wall clock, gives up on
+the backlog and resynchronises its deadline to now. Always accompanied by a WARNING.
+
+**This is the serious one.** It means the server stopped simulating some interval of
+time altogether. Every consequence is visible to players and none of them is
+recoverable after the fact:
+
+- **The world ran slower than the clock.** Cooldowns, spawn timers and every other
+  tick-based timer (`docs/DESIGN.md`, "Tick-based timers") advanced less than the
+  elapsed wall time. Two servers that dropped different amounts are no longer in
+  the same time base.
+- **Inputs in the dropped window were never applied.** Clients predicted them and
+  will be reconciled backwards, which reads as rubber-banding.
+- **The snapshot stream skipped.** Snapshots are gated to the world rate, so a
+  dropped backlog removes whole world intervals from the delta stream.
+
+The counter is deliberately a *drop* rather than a catch-up: running the missed
+ticks back to back costs more than the budget it reclaims, so a server that falls
+behind falls further behind and never recovers (the comment on `MaxLagTicks` in
+`TickLoop.cs` states this as the reason). The design chooses a bounded, measurable
+loss over an unbounded spiral — which is exactly why this counter must be alerted
+on. Any value above zero deserves investigation; a sustained rate means the server
+is not keeping up and needs either a lower `SIM_CRITICAL_HZ` or fewer players.
+
+**Capacity figures measured while this is non-zero are invalid**, in the same way
+and for the same reason as figures measured under a high resync rate: the server
+was not doing the work the numbers claim to describe.
 
 ### `gameserver_entities` vs `gameserver_players_online` — disagreement is CORRECT
 

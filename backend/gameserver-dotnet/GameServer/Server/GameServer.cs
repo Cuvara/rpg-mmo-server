@@ -36,7 +36,19 @@ public class ServerOptions
     public string ServerId { get; set; } = "";
     public string MapId { get; set; } = "map_01";
     public string Mode { get; set; } = "map"; // "map" or "dungeon"
+    /// <summary>
+    /// Legacy single-rate setting. When <see cref="SimulationRates"/> is null every group
+    /// runs at this rate, which is the pre-multi-rate server exactly.
+    /// </summary>
     public int TickRate { get; set; } = GameConstants.DefaultTickRate;
+
+    /// <summary>
+    /// The multi-rate configuration. Null means "derive a uniform configuration from
+    /// <see cref="TickRate"/>", which is what every existing test does and why none of them
+    /// changed behaviour.
+    /// </summary>
+    public SimulationRates? SimulationRates { get; set; }
+
     public int Capacity { get; set; } = 100;
     /// <summary>
     /// HS256 secret (or comma-separated rotation list) for the Nakama-issued
@@ -89,7 +101,8 @@ public class ServerOptions
     ///
     /// <para>Default null. Tests and custom scenarios opt in explicitly.</para>
     /// </summary>
-    public Func<EcsWorld, ILoggerFactory, ISimulationPhase>? SimulationPhaseFactory { get; set; }
+    public Func<EcsWorld, ILoggerFactory, Action<SimulationGroup, long, long>?, ISimulationPhase>?
+        SimulationPhaseFactory { get; set; }
 
     /// <summary>
     /// Supplies the number published as <c>enemies_alive</c> on the status endpoint.
@@ -143,6 +156,13 @@ public sealed class GameServerHost : IAsyncDisposable
     /// <summary>Tracks consumed JTI values to prevent join token replay.</summary>
     private readonly JtiTracker _jtiTracker = new();
     private readonly ILoggerFactory _loggerFactory;
+
+    /// <summary>
+    /// The resolved simulation rates. Held past the constructor because the join response
+    /// has to tell the client the CRITICAL rate to predict at (#93); without it the client
+    /// falls back to its own hardcoded guess and desyncs silently.
+    /// </summary>
+    private readonly SimulationRates _rates;
 
     private readonly RegistrationService? _registration;
 
@@ -237,20 +257,36 @@ public sealed class GameServerHost : IAsyncDisposable
         var eventStream = options.EventStream ?? new NoopEventStream();
         _publisher = new EventPublisher(eventStream, _loggerFactory.CreateLogger<EventPublisher>(), _metrics);
 
+        SimulationRates rates = options.SimulationRates ?? SimulationRates.Uniform(options.TickRate);
+        _rates = rates;
+
         _inputHandler = new InputHandler(
             _world,
             _loggerFactory.CreateLogger<InputHandler>(),
             OnEntityDeath,
-            options.TickRate,
+            // The CRITICAL rate, because this handler's two rate-derived values both belong
+            // to the base timeline: the movement dt is the critical timestep, and the attack
+            // cooldown is counted in base ticks (Combat.CooldownUntilTick is compared against
+            // the base tick), so AttackCooldownTicks must be derived from the same rate that
+            // advances it. Passing the world rate here would make a 500ms cooldown last 2s.
+            rates.CriticalHz,
             options.MapBounds);
 
-        ISimulationPhase? simulationPhase = options.SimulationPhaseFactory?.Invoke(_world, _loggerFactory);
+        // The observer is handed to the phase at construction rather than set afterwards:
+        // a phase must hold no mutable instance state (ADR-12), and a settable observer is
+        // precisely that.
+        GameMetrics? metrics = _metrics;
+        Action<SimulationGroup, long, long>? onGroupRan = metrics == null
+            ? null
+            : (group, start, end) => metrics.RecordGroupRun(group, start, end);
+        ISimulationPhase? simulationPhase =
+            options.SimulationPhaseFactory?.Invoke(_world, _loggerFactory, onGroupRan);
 
         _tickLoop = new TickLoop(
             _world,
             _inputHandler,
             _connections,
-            options.TickRate,
+            rates,
             GameConstants.DefaultAoiRadius,
             _loggerFactory.CreateLogger<TickLoop>(),
             _metrics,
@@ -581,8 +617,20 @@ public sealed class GameServerHost : IAsyncDisposable
             _logger.LogInformation("Player {UserId} joined (total: {Count})", userId, _connections.Count);
 
             // Step 5: Send JoinTokenResp
+            //
+            // TickRate is the CRITICAL rate, not the world rate: it is the cadence of
+            // input, movement integration and combat, which is exactly what the client
+            // predicts. The world rate governs the snapshot cadence, which the client
+            // observes from the snapshots themselves and does not have to be told.
+            //
+            // It rides only the success path. A rejected join has no session to predict
+            // in, and the caller has not proved it is entitled to anything, so answering
+            // an unauthenticated peer with the server's simulation configuration would be
+            // giving away tuning data for nothing. Absent means 0, which the schema
+            // defines as "refuse to predict" — the correct answer to a failed join.
             var resp = WireProtocol.NewEnvelope(MsgType.JoinTokenResp,
-                new JoinTokenResponse { Ok = true, UserId = userId }, conn.Encoding);
+                new JoinTokenResponse { Ok = true, UserId = userId, TickRate = (uint)_rates.CriticalHz },
+                conn.Encoding);
             await conn.WriteOneAsync(resp);
 
             // Step 6: Start read/write loops + heartbeat

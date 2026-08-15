@@ -531,6 +531,14 @@ jobs:
           GATEWAY_ADDR: ${{ vars.GATEWAY_ADDR || ':8000' }}
           GAMESERVER_ADDR: ${{ vars.GAMESERVER_ADDR || ':9000' }}
           GAMESERVER_MAP_ID: ${{ vars.GAMESERVER_MAP_ID || 'map_01' }}
+          # Multi-rate simulation. SIM_CRITICAL_HZ is the BASE tick rate; the
+          # other two must divide it exactly and must not exceed it, or the game
+          # server exits 2 at startup instead of rounding. Snapshots ship at the
+          # WORLD rate, so SIM_WORLD_HZ is the one that moves bandwidth per
+          # client. See backend/gameserver-dotnet/docs/README.md.
+          SIM_CRITICAL_HZ: ${{ vars.SIM_CRITICAL_HZ || '60' }}
+          SIM_WORLD_HZ: ${{ vars.SIM_WORLD_HZ || '15' }}
+          SIM_BACKGROUND_HZ: ${{ vars.SIM_BACKGROUND_HZ || '5' }}
           REDIS_ADDR: ${{ vars.REDIS_ADDR || 'localhost:6379' }}
           GAME_DB_URL: ${{ vars.GAME_DB_URL || '' }}
           # --- containers mode (compose `realtime` profile) --------------------
@@ -647,6 +655,9 @@ jobs:
             echo "GAMESERVER_ADDR=${GAMESERVER_ADDR}"
             echo "GAMESERVER_MAP_ID=${GAMESERVER_MAP_ID}"
             echo "GAMESERVER_RUNTIME=dotnet"
+            echo "SIM_CRITICAL_HZ=${SIM_CRITICAL_HZ}"
+            echo "SIM_WORLD_HZ=${SIM_WORLD_HZ}"
+            echo "SIM_BACKGROUND_HZ=${SIM_BACKGROUND_HZ}"
             echo "GAMESERVER_ID=gs-dotnet-${GAMESERVER_MAP_ID}"
             echo "GAME_DB_URL=${GAME_DB_URL}"
             echo "DEPLOY_MODE=${DEPLOY_MODE}"

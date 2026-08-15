@@ -48,18 +48,22 @@ and integration scenarios.
 dotnet build
 
 # Run the game server (from repo root or gameserver-dotnet/)
-dotnet run --project GameServer -- --addr=:9000 --map-id=map_01
+# NOTE: flags are SPACE-separated. `--addr=:9000` is parsed as an unknown token
+# and silently ignored — Program.cs GetArg only matches `--name value` pairs.
+dotnet run --project GameServer -- --addr :9000 --map-id map_01
 
 # Run with all flags
 dotnet run --project GameServer -- \
-  --addr=:9000 \
-  --map-id=map_01 \
-  --tick-rate=15 \
-  --map-width=1000 \
-  --map-height=1000 \
-  --jwt-secret=dev-secret-change-me \
+  --addr :9000 \
+  --map-id map_01 \
+  --sim-critical-hz 60 \
+  --sim-world-hz 15 \
+  --sim-background-hz 5 \
+  --map-width 1000 \
+  --map-height 1000 \
+  --jwt-secret dev-secret-change-me \
   --agones \
-  --redis=localhost:6379
+  --redis localhost:6379
 ```
 
 ### Configuration
@@ -74,7 +78,10 @@ set. Flags are **space-separated** (`--addr :9000`).
 | `--map-id` | `GAMESERVER_MAP_ID` | `map_01` | Map identifier, also the `map_id` metric label |
 | `--server-id` | `GAMESERVER_ID` / `POD_NAME` | random | Server identity checked against the join token |
 | `--capacity` | `GAMESERVER_CAPACITY` | `100` | Maximum concurrent players |
-| `--tick-rate` | `GAMESERVER_TICK_RATE` | `15` | Simulation ticks per second |
+| `--sim-critical-hz` | `SIM_CRITICAL_HZ` | `60` | Frequency of the **critical** group (input, movement, combat). This is also the **base tick rate** of the loop — every other group is derived from it |
+| `--sim-world-hz` | `SIM_WORLD_HZ` | `15` | Frequency of the **world** group (AI, spawning, despawning) **and of the snapshot broadcast**. Must divide `SIM_CRITICAL_HZ` exactly and must not exceed it, or the server exits with code 2 |
+| `--sim-background-hz` | `SIM_BACKGROUND_HZ` | `5` | Frequency of the **background** group (work that tolerates a whole interval of delay). Must divide `SIM_CRITICAL_HZ` exactly and must not exceed `SIM_WORLD_HZ` |
+| `--tick-rate` | `GAMESERVER_TICK_RATE` | *(unset → `60/15/5`)* | **Legacy single-rate switch.** Sets *every* group to this one rate, i.e. base = world = background, snapshots every tick — the pre-multi-rate server exactly. Only applies when no `SIM_*_HZ` environment variable is set; any of them present wins and the tick rate is ignored |
 | `--keyframe-interval` | `GAMESERVER_KEYFRAME_INTERVAL` | `30` | Delta snapshots between full keyframes; `0` disables delta encoding (see `docs/API.md`) |
 | `--map-width` | `GAMESERVER_MAP_WIDTH` | `1000` | Map width in world units |
 | `--map-height` | `GAMESERVER_MAP_HEIGHT` | `1000` | Map height in world units |

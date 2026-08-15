@@ -40,6 +40,12 @@ services:
       GAMESERVER_MODE: map
       GAMESERVER_MAP_ID: map_02
       GAMESERVER_ID: gs-dotnet-map_02
+      # Same rates as the map_01 service in docker-compose.yml — two map servers
+      # on different simulation rates would replicate at different cadences, so a
+      # client would see the world change speed when it transferred between them.
+      SIM_CRITICAL_HZ: ${SIM_CRITICAL_HZ:-60}
+      SIM_WORLD_HZ: ${SIM_WORLD_HZ:-15}
+      SIM_BACKGROUND_HZ: ${SIM_BACKGROUND_HZ:-5}
       METRICS_ADDR: ":9101"
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
