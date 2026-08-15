@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`Shared.GameLogic` released as `sgl-v0.1.8`**, carrying `GameConstants.MaxBankedMovementTicks`
+  — the cap on how much elapsed simulated time a step may bank, added by the elapsed-time
+  movement fix (#100). It lives in the shared library rather than on the server because a
+  client that banks unbounded time reconciles against a server that does not, on exactly the
+  frames where the network was worst. `package.json` is bumped in the tagged commit itself,
+  per `backend/TEAM.md`: a tag whose package reports an older version installs cleanly and
+  UPM never warns.
+
 ### Fixed
 - **Bursty input arrival lost most of a player's movement (#100).** Per-tick coalescing
   turns several inputs arriving in one tick into a single movement step — correctly, since
