@@ -100,6 +100,27 @@ public sealed class SimulationRates
     /// <summary>Base ticks between two runs of the critical group. Always 1.</summary>
     public int CriticalEvery { get; }
 
+    /// <summary>
+    /// The rate at which player movement is integrated and the authoritative tick counter
+    /// advances — and therefore <b>the value published as
+    /// <c>JoinTokenResponse.tick_rate</c></b>.
+    ///
+    /// <para>This property exists to give that wire contract a single definition in code.
+    /// The rate reached the client and the rate the movement integrator used to be two
+    /// independent references to <see cref="CriticalHz"/>, and two references are two
+    /// things that can drift: a change that moved one would leave the other advertising a
+    /// rate the server no longer simulates at, which is silent on both sides and reads to
+    /// a player as softness rather than as a fault. Both now read this.</para>
+    ///
+    /// <para>It equals <see cref="CriticalHz"/> today because movement is critical-group
+    /// work and the critical group is the base timeline (<see cref="CriticalEvery"/> is
+    /// always 1). <b>The wire field is specified in terms of movement, not in terms of the
+    /// group</b> — see <c>docs/API.md</c>. If movement were ever scheduled somewhere else,
+    /// this property is the one place that changes, and the contract test would fail until
+    /// it did.</para>
+    /// </summary>
+    public int MovementHz => CriticalHz;
+
     /// <summary>Base ticks between two runs of the world group.</summary>
     public int WorldEvery { get; }
 

@@ -264,12 +264,16 @@ public sealed class GameServerHost : IAsyncDisposable
             _world,
             _loggerFactory.CreateLogger<InputHandler>(),
             OnEntityDeath,
-            // The CRITICAL rate, because this handler's two rate-derived values both belong
-            // to the base timeline: the movement dt is the critical timestep, and the attack
-            // cooldown is counted in base ticks (Combat.CooldownUntilTick is compared against
-            // the base tick), so AttackCooldownTicks must be derived from the same rate that
-            // advances it. Passing the world rate here would make a 500ms cooldown last 2s.
-            rates.CriticalHz,
+            // MovementHz, which is also the value published as JoinTokenResponse.tick_rate:
+            // the rate a client predicts at has to be the rate this handler integrates at,
+            // and reading the same property in both places is what keeps them from drifting
+            // (docs/API.md, "tick_rate is the client's prediction rate").
+            //
+            // It is the base-timeline rate for a second reason too: the attack cooldown is
+            // counted in base ticks (Combat.CooldownUntilTick is compared against the base
+            // tick), so AttackCooldownTicks must be derived from the rate that advances it.
+            // Passing the world rate here would make a 500ms cooldown last 2s.
+            rates.MovementHz,
             options.MapBounds);
 
         // The observer is handed to the phase at construction rather than set afterwards:
@@ -629,7 +633,7 @@ public sealed class GameServerHost : IAsyncDisposable
             // giving away tuning data for nothing. Absent means 0, which the schema
             // defines as "refuse to predict" — the correct answer to a failed join.
             var resp = WireProtocol.NewEnvelope(MsgType.JoinTokenResp,
-                new JoinTokenResponse { Ok = true, UserId = userId, TickRate = (uint)_rates.CriticalHz },
+                new JoinTokenResponse { Ok = true, UserId = userId, TickRate = (uint)_rates.MovementHz },
                 conn.Encoding);
             await conn.WriteOneAsync(resp);
 
