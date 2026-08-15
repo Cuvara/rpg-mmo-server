@@ -183,6 +183,72 @@ Rules:
 - No allocations in hot paths (tick loop, snapshot, input processing)
 - All public APIs: XML doc comments
 
+### State the expected value and its units before you run the measurement
+
+**Write down what the number should be, and in what units, before you look at what it is.**
+Then compare. If you cannot say what to expect, you are not yet in a position to interpret
+the result — and that is the finding, not an obstacle to it.
+
+This is not pedantry about rigour. Every measurement mistake this team has made so far had
+the same shape: **the number that came back was plausible, so nobody checked it against a
+number that had been written down first.** A wrong-looking result gets investigated. A
+plausible-looking one gets used, quoted, and built on, and it is still wrong.
+
+Four instances, all real, all from a single week:
+
+| The number | Why it looked right | What it actually was |
+|---|---|---|
+| A 0.333-unit step read as a **20x jump** | compared against the base tick step | positions came from **snapshots**, which ship at the *world* rate — one sample already contains `WorldEvery` base steps, so 0.333 was a perfectly normal frame |
+| `effective speed 5` read as **evidence snapshots had arrived** | the value was correct | it was the **configured constant being echoed back**; it would have read 5 with no snapshot ever received |
+| A burstiness figure quoted as a **baseline** | it was measured, not guessed | the metric ranges **33–45 across runs**; a baseline of one sample is not a baseline |
+| A predictor reading **0.133 s** between sends | 15 Hz sends, and 0.133 is a real interval | the predictor's clock ran at **2x** — the true gap was 0.0669 s, and 0.133 is exactly what a doubled clock produces |
+| A send rate of **7.5 Hz** against a configured 15 | it *disagreed* with the prediction, which is what this rule tells you to look for — so it was investigated and treated as a second, independent defect | **the same 2x clock**, read through an instrument measured in the predictor's own elapsed time. 0.138 s on a doubled clock is ~0.069 s real: the sender had been delivering ~15 Hz all along, and there was no second defect |
+
+Note what these have in common: none produced an implausible value. Three produced values
+that were *arithmetically consistent with a wrong model*, which is the hardest kind to catch
+after the fact and the easiest to catch before, because the prediction and the model are
+written down together.
+
+**The last row is the failure mode that survives this rule, so read it twice.** There the
+rule was followed: the expected value was written down (15 Hz), the measurement disagreed,
+and the mismatch was investigated. It still produced a wrong conclusion — a second
+independent defect that did not exist — because **the discrepancy was in the measuring
+device, not in the thing being measured**, and both readings came from the same broken
+clock. The arithmetic was consistent with two wrong models at once, and the one chosen was
+the one that flattered a change already made.
+
+So: **when a number disagrees with your prediction, the instrument is a suspect too.** A
+mismatch tells you that the model and the reading disagree; it does not tell you which of
+them is wrong. Before acting on a discrepancy, ask what clock or counter produced the
+reading, and whether the thing you already suspect could also be corrupting it.
+
+**This is how a single defect impersonates two.** The 2x clock above was read once as a
+wrong interval and once as a wrong send rate, and the second reading nearly bought a change
+to the send path on evidence that did not exist. One `Stopwatch` outside the predictor would
+have settled it — and note that the reading which eventually did settle it was taken *after*
+the change, so it could not attribute anything to that change either way. **A measurement
+taken after a fix is worth less than the same measurement taken before it**, which is the
+practical reason to write the expected value down first rather than the tidy one.
+
+In practice this costs one line in the test or the report:
+
+```csharp
+// 15 sends/s over 1.2s at speed 5 = 9 units, sampled at the WORLD rate (15Hz),
+// so a normal sample interval is speed/15 = 0.333 units.
+float normal = speed / rates.WorldHz;
+```
+
+Three habits that follow from it:
+
+- **Name the units in the variable or the comment**, not just in your head. `normal` versus
+  `normalPerBaseTick` versus `normalPerSnapshot` is the whole of the first row above.
+- **Say which rate a per-something figure is per.** This codebase now has three simulation
+  rates and a separate replication rate; "per tick" is ambiguous and has already been wrong
+  twice.
+- **One sample is not a baseline.** If a metric's spread has not been measured, measure it
+  before quoting a value from it — `BENCHMARK.md` reports run-to-run spread beside every
+  figure for exactly this reason.
+
 ### Movement-adjacent behaviour must be tested through the live path
 
 **A test that builds its own world can be true while the path a client takes is not.**
