@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **The server's tick-rate default was a hardcoded `15` instead of
+  `GameConstants.DefaultTickRate`**, while its three immediate neighbours in
+  `Program.cs` — keyframe interval, map width, map height — all fall back to the shared
+  constant. That inconsistency made the obvious way to change the tick rate silently
+  wrong in the *opposite* direction to the one anyone would guard against: bumping
+  `GameConstants.DefaultTickRate` and tagging a new `sgl` moves the **client**, which
+  derives its integration step from that constant, and leaves the **server** on the
+  literal. The client then integrates at a different `dt` than the server, is corrected
+  by every snapshot, and the player sees rubber-banding. Nothing logs an error on either
+  side, because neither side is wrong about anything it can observe.
+
+  This does not close the wider gap: `--tick-rate` and `GAMESERVER_TICK_RATE` can still
+  move the server alone, because the tick rate is not on the wire and the client cannot
+  observe it. That is #93. This makes the *default* path coherent, which is the path a
+  tick-rate change would actually be attempted through.
+
 ### Added
 - **`Shared.GameLogic` released as `sgl-v0.1.7`**, carrying the `Speed` field added to
   `SnapshotData` by the per-entity speed work. `package.json` is bumped in the tagged
