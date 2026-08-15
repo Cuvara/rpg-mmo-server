@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [v1.4.1] — 2026-08-15
+
 ### Fixed
 - **A coalesced stop input failed to clear held movement in single-rate mode.** When the
   server fell behind and drained a batch containing both a stop (deadzone) and a later
