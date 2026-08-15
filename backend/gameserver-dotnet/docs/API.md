@@ -71,7 +71,7 @@ both encodings; the JSON column shows the legacy field names, which match the
 | 3 | `enter_world` | client → gateway | `{ map_id }` |
 | 4 | `enter_world_resp` | gateway → client | `{ server_addr?, join_token?, transport?, error? }` |
 | 5 | `join_token` | client → gameserver | `{ token }` |
-| 6 | `join_token_resp` | gameserver → client | `{ ok, user_id?, error? }` |
+| 6 | `join_token_resp` | gameserver → client | `{ ok, user_id?, error?, tick_rate? }` — see below |
 | 7 | `input` | client → gameserver | `{ tick, move_x, move_y, attack_target_id? }` |
 | 8 | `snapshot` | gameserver → client | see below |
 | 9 | `disconnect` | either | `{}` |
@@ -81,6 +81,38 @@ both encodings; the JSON column shows the legacy field names, which match the
 | 13 | `transfer_map` | client → gameserver | `{ map_id }` — request a move to another map, see below |
 | 14 | `transfer_map_resp` | gameserver → client | `{ ok, error }` |
 | 15 | `kick` | gameserver → client | `{ reason }` — forced disconnect; `reason` is a machine-readable string, not user-facing text |
+
+### `join_token_resp` (6) — `tick_rate` is the client's prediction rate
+
+```json
+{ "ok": true, "user_id": "u-42", "tick_rate": 60 }
+```
+
+`tick_rate` is the **CRITICAL simulation rate in Hz**: the cadence at which the
+server reads input, integrates movement and resolves combat. That is exactly what
+a predicting client replays locally, so it is the rate the client must run its
+own prediction loop at. It is *not* the snapshot cadence — snapshots follow the
+world rate, which may be slower, and the client observes that from the snapshots
+themselves.
+
+It rides the join response because it is **session-constant**: the server reads
+it once at startup and never changes it. Putting it on `snapshot` would re-send
+an unchanging number to every player on every tick forever, a trade this protocol
+rejects elsewhere for the same reason (the entity-type enum exists because a
+string type was ~19% of a keyframe). It is not on `enter_world_resp` because that
+comes from the gateway, which does not run the simulation (ADR-3) and would have
+to learn the rate second-hand.
+
+**`tick_rate` absent or `0` means "not supplied"** — a server predating this
+field. A client that sees `0` MUST refuse to predict rather than assume 15.
+Assuming is the defect this field closes
+([#93](https://github.com/Cuvara/rpg-mmo-server/issues/93)): a client predicting
+at 15 against a server tuned to 30 is wrong by a little on every tick, corrected
+by every snapshot, and reads to a player as rubber-banding rather than as a
+misconfiguration. Nothing on either side errors.
+
+A **rejected** join (`ok: false`) carries no `tick_rate`. There is no session to
+predict in, and the caller has not proved it is entitled to the server's tuning.
 
 ### Heartbeat (`ping` / `pong`) — MANDATORY
 

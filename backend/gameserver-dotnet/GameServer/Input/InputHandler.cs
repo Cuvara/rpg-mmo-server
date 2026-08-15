@@ -55,6 +55,91 @@ public sealed class InputHandler
     /// <summary>Attack cooldown length in simulation ticks at this handler's tick rate.</summary>
     public int CooldownTicks => _cooldownTicks;
 
+    /// <summary>
+    /// Reusable handle buffer for the held-movement pass. Scratch, not simulation state:
+    /// it is refilled from a query before every read, so its contents never survive a tick
+    /// in any meaningful sense.
+    /// </summary>
+    [GameServer.Server.SimulationScratch]
+    private EntityHandle[] _playerHandles = Array.Empty<EntityHandle>();
+
+    /// <summary>
+    /// Advance every player that has a held direction but received no input on this base
+    /// tick — the continuous half of the movement model.
+    ///
+    /// <para><b>Why this exists.</b> <c>move_x</c>/<c>move_y</c> are a direction, and
+    /// <see cref="MovementSystem"/> documents that travel distance must depend only on
+    /// wall-clock time and the entity's speed, "never on how many input packets a client
+    /// sends". That was only true while the simulation rate and the client's send rate
+    /// happened to match. Once the critical group runs at 60Hz and a client sends at 10 or
+    /// 15, integrating solely on packet arrival makes speed proportional to send rate. This
+    /// pass closes that gap: the newest direction is integrated once per critical tick.</para>
+    ///
+    /// <para><b>Why it is bounded.</b> A held direction expires
+    /// <paramref name="holdTicks"/> base ticks after it was accepted — one world interval.
+    /// A client that stops sending therefore coasts for at most that long (66ms at the
+    /// default 60/15) rather than drifting forever, and a client that sends an explicit
+    /// deadzone input stops immediately, because that clears the hold rather than
+    /// refreshing it.</para>
+    ///
+    /// <para><b>Why it is a no-op on a single-rate server.</b> With one rate,
+    /// <paramref name="holdTicks"/> is 1, and a held direction is by definition at least one
+    /// tick old on any tick where it would be applied here — so the condition can never be
+    /// true and behaviour is exactly the pre-multi-rate model, packet for packet. That is
+    /// what lets the byte-identity and characterization tests stand unchanged.</para>
+    /// </summary>
+    /// <param name="writer">Open world write scope.</param>
+    /// <param name="baseTick">The canonical base tick.</param>
+    /// <param name="holdTicks">
+    /// How many base ticks a direction stays valid for. One world interval; 1 disables the
+    /// pass entirely.
+    /// </param>
+    public void ApplyHeldMovement(WorldWriter writer, ulong baseTick, int holdTicks)
+    {
+        if (holdTicks <= 1) return;
+
+        int count = writer.QueryWith<PlayerTag>(_playerHandles);
+        if (count > _playerHandles.Length)
+        {
+            _playerHandles = new EntityHandle[count];
+            count = writer.QueryWith<PlayerTag>(_playerHandles);
+        }
+
+        int n = Math.Min(count, _playerHandles.Length);
+        for (int i = 0; i < n; i++)
+        {
+            ref readonly EntityHandle handle = ref _playerHandles[i];
+            if (!writer.IsAlive(in handle)) continue;
+
+            ref InputCursor cursor = ref writer.InputCursorOf(in handle);
+            if (cursor.HeldFromTick == 0) continue;          // nothing held
+            if (cursor.HeldFromTick == baseTick) continue;   // already stepped this tick
+            if (baseTick - cursor.HeldFromTick >= (ulong)holdTicks) continue; // expired
+
+            if (writer.HealthOf(in handle).Dead) continue;
+
+            float speed = writer.LocomotionOf(in handle).Speed;
+            ref Position position = ref writer.PositionOf(in handle);
+            var probe = new EntityState
+            {
+                Position = position.Value,
+                Speed = speed,
+                Dead = false,
+            };
+
+            // The same TryMove the packet path calls, with the same dt — one movement
+            // model, one arithmetic, whichever path stepped the entity.
+            MoveResult result = MovementSystem.TryMove(
+                in probe, cursor.HeldMoveX, cursor.HeldMoveY, _deltaTime, in _bounds,
+                out Vec2 newPosition);
+
+            if (result is MoveResult.Accepted or MoveResult.Clamped)
+            {
+                position.Value = newPosition;
+            }
+        }
+    }
+
     /// <summary>Process input for a user, taking the world write lock.</summary>
     /// <param name="currentTick">Current simulation tick (drives cooldowns).</param>
     public void ProcessInput(string userId, InputData input, ulong currentTick = 0, bool applyMovement = true)
@@ -158,6 +243,20 @@ public sealed class InputHandler
             if (moveResult is MoveResult.Accepted or MoveResult.Clamped)
             {
                 position.Value = newPosition;
+
+                // Hold the direction so the critical group can keep integrating between
+                // packets (ApplyHeldMovement). Recorded after a successful step, so a
+                // rejected or deadzone input never becomes a held one.
+                cursor.HeldMoveX = input.MoveX;
+                cursor.HeldMoveY = input.MoveY;
+                cursor.HeldFromTick = currentTick;
+            }
+            else if (moveResult == MoveResult.None)
+            {
+                // An explicit stop. Clearing the hold is the difference between "the client
+                // released the stick" and "the client went quiet": the first must stop the
+                // entity now, the second is what the hold window is for.
+                cursor.HeldFromTick = 0;
             }
             else if (moveResult == MoveResult.Rejected)
             {

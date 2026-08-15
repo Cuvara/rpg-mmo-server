@@ -531,10 +531,18 @@ func (x *JoinTokenRequest) GetToken() string {
 
 // JoinTokenResponse confirms whether the join was accepted.
 type JoinTokenResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Ok            bool                   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	UserId        string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
-	Error         string                 `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Ok     bool                   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	UserId string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Error  string                 `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
+	// The CRITICAL simulation rate in Hz — the rate the client must predict at.
+	// Session-constant: the server reads it once at startup and never changes it,
+	// which is why it rides the join response and not every snapshot.
+	//
+	// 0 means "not supplied" (a pre-0.x server that predates this field). A client
+	// that sees 0 must REFUSE to predict rather than assume 15: assuming is exactly
+	// the silent desync this field closes (#93).
+	TickRate      uint32 `protobuf:"varint,4,opt,name=tick_rate,json=tickRate,proto3" json:"tick_rate,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -588,6 +596,13 @@ func (x *JoinTokenResponse) GetError() string {
 		return x.Error
 	}
 	return ""
+}
+
+func (x *JoinTokenResponse) GetTickRate() uint32 {
+	if x != nil {
+		return x.TickRate
+	}
+	return 0
 }
 
 // InputMessage carries player input for one tick.
@@ -1279,11 +1294,12 @@ const file_wire_proto_rawDesc = "" +
 	"\ttransport\x18\x03 \x01(\tR\ttransport\x12\x14\n" +
 	"\x05error\x18\x04 \x01(\tR\x05error\"(\n" +
 	"\x10JoinTokenRequest\x12\x14\n" +
-	"\x05token\x18\x01 \x01(\tR\x05token\"R\n" +
+	"\x05token\x18\x01 \x01(\tR\x05token\"o\n" +
 	"\x11JoinTokenResponse\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x14\n" +
-	"\x05error\x18\x03 \x01(\tR\x05error\"z\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error\x12\x1b\n" +
+	"\ttick_rate\x18\x04 \x01(\rR\btickRate\"z\n" +
 	"\fInputMessage\x12\x12\n" +
 	"\x04tick\x18\x01 \x01(\x04R\x04tick\x12\x15\n" +
 	"\x06move_x\x18\x02 \x01(\x02R\x05moveX\x12\x15\n" +

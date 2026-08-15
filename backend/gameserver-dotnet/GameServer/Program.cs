@@ -21,10 +21,37 @@ int capacity = int.TryParse(GetArg(args, "--capacity") ?? Env("GAMESERVER_CAPACI
 // integration step from the same constant, and it is compiled into both sides, so a
 // literal here means bumping GameConstants.DefaultTickRate moves the client and leaves
 // the server behind — a desync with no error on either side, which reads to a player as
-// rubber-banding rather than as a misconfiguration. Note the flag and the env var can
-// still move the server alone; that is the wire-contract gap in #93.
+// rubber-banding rather than as a misconfiguration. The flag and the env var can still
+// move the server alone, but that is no longer silent: the critical rate now rides the
+// join response (`JoinTokenResponse.tick_rate`), so a client is told what to predict at
+// instead of assuming — #93.
 int tickRate = int.TryParse(GetArg(args, "--tick-rate") ?? Env("GAMESERVER_TICK_RATE"), out var tr)
     ? tr : GameConstants.DefaultTickRate;
+// Multi-rate simulation. The three groups are named for what they do, not for how fast
+// they run, because how fast they run is configuration: SIM_CRITICAL_HZ / SIM_WORLD_HZ /
+// SIM_BACKGROUND_HZ, injected by the deployment (GitHub Environment -> .env -> compose, or
+// the Agones fleet env block). Changing a rate must never require touching a gameplay
+// system, which is why no system reads these.
+//
+// GAMESERVER_TICK_RATE still works and still means what it meant: when it is set and the
+// SIM_* variables are not, every group runs at that one rate and the server behaves exactly
+// as it did before this existed.
+// Checks flags as well as environment variables: `--tick-rate 30 --sim-world-hz 15`
+// must mean the same thing as the equivalent env vars, or the two configuration channels
+// would disagree about which one wins.
+bool anySimVar = GetArg(args, "--sim-critical-hz") != null || Env("SIM_CRITICAL_HZ") != null
+              || GetArg(args, "--sim-world-hz") != null || Env("SIM_WORLD_HZ") != null
+              || GetArg(args, "--sim-background-hz") != null || Env("SIM_BACKGROUND_HZ") != null;
+bool tickRateSet = (GetArg(args, "--tick-rate") ?? Env("GAMESERVER_TICK_RATE")) != null;
+int criticalHz = int.TryParse(GetArg(args, "--sim-critical-hz") ?? Env("SIM_CRITICAL_HZ"), out var chz)
+    ? chz
+    : (tickRateSet && !anySimVar ? tickRate : SimulationRates.DefaultCriticalHz);
+int worldHz = int.TryParse(GetArg(args, "--sim-world-hz") ?? Env("SIM_WORLD_HZ"), out var whz)
+    ? whz
+    : (tickRateSet && !anySimVar ? tickRate : SimulationRates.DefaultWorldHz);
+int backgroundHz = int.TryParse(GetArg(args, "--sim-background-hz") ?? Env("SIM_BACKGROUND_HZ"), out var bhz)
+    ? bhz
+    : (tickRateSet && !anySimVar ? tickRate : SimulationRates.DefaultBackgroundHz);
 // Delta snapshots between full keyframes. 0 or less = send a full snapshot every tick
 // (pre-delta behaviour), the escape hatch for a client that cannot merge deltas.
 int keyframeInterval = int.TryParse(GetArg(args, "--keyframe-interval") ?? Env("GAMESERVER_KEYFRAME_INTERVAL"), out var kf)
@@ -92,7 +119,7 @@ logger.LogInformation("  Transport: {Transport}{Encryption}", transport,
 logger.LogInformation("  MapId:     {MapId}", mapId);
 logger.LogInformation("  ServerId:  {ServerId}", serverId);
 logger.LogInformation("  Capacity:  {Capacity}", capacity);
-logger.LogInformation("  TickRate:  {TickRate}Hz", tickRate);
+logger.LogInformation("  SimRates:  {Rates}", $"critical={criticalHz}Hz world={worldHz}Hz background={backgroundHz}Hz");
 logger.LogInformation("  Snapshots: {Mode}", keyframeInterval > 0
     ? $"delta, keyframe every {keyframeInterval} snapshots"
     : "full every tick (delta disabled)");
@@ -173,6 +200,20 @@ if (migrateOnly)
 }
 
 // ── Validate ──
+
+if (!SimulationRates.TryCreate(criticalHz, worldHz, backgroundHz, out SimulationRates? simRates, out string? simError))
+{
+    // Fail fast, do not fall back. A server that silently substitutes a default for an
+    // unusable rate is a server whose behaviour does not match its configuration, and the
+    // operator has no way to find out — the same class of silent divergence as the tick
+    // rate never reaching the client (#93).
+    logger.LogCritical("invalid simulation rate configuration: {Error}", simError);
+    return 2;
+}
+
+// TryCreate guarantees this on success; the local makes that guarantee visible to the
+// compiler instead of asserting it at each use site.
+SimulationRates simulationRates = simRates!;
 
 if (!TransportKind.IsValid(transport))
 {
@@ -308,6 +349,7 @@ var options = new ServerOptions
     MapId = mapId,
     Mode = mode,
     TickRate = tickRate,
+    SimulationRates = simulationRates,
     KeyframeInterval = keyframeInterval,
     MapBounds = MapBounds.FromSize(mapWidth, mapHeight),
     Capacity = capacity,
@@ -335,7 +377,7 @@ var options = new ServerOptions
     // The composition root decides what the game is. The core host only knows it has
     // a phase to tick; see ISimulationPhase.
     SimulationPhaseFactory = enableEnemySpawner
-        ? (world, loggerFactory) => new EnemySpawner(world, tickRate, loggerFactory.CreateLogger<EnemySpawner>())
+        ? (world, loggerFactory, onGroupRan) => new EnemySpawner(world, simulationRates, loggerFactory.CreateLogger<EnemySpawner>(), onGroupRan)
         : null,
     // The composition root is the one place allowed to know what the game is, so it is
     // where the status endpoint's entity count comes from. The JSON field stays
@@ -416,11 +458,31 @@ return Environment.ExitCode;
 
 // ── Helpers ──
 
+/// <summary>
+/// Read <c>--name value</c> or <c>--name=value</c> from the command line.
+///
+/// <para>The <c>=</c> form used to be dropped silently: the loop only compared
+/// <c>args[i] == name</c> and took the next element, so <c>--map-id=map_02</c> matched
+/// nothing and the server started on the default map with no warning. That is not
+/// hypothetical — <c>deploy/agones/fleet-map-dotnet-dev.yaml</c> passes
+/// <c>--mode=map --map-id=map_01 --addr=:9000</c>, all three of which have been ignored
+/// for as long as the manifest has existed. It went unnoticed only because those values
+/// happen to equal the defaults; the first fleet with a non-default map would have
+/// silently served the wrong one.</para>
+/// </summary>
 static string? GetArg(string[] args, string name)
 {
-    for (int i = 0; i < args.Length - 1; i++)
+    for (int i = 0; i < args.Length; i++)
     {
-        if (args[i] == name) return args[i + 1];
+        if (args[i] == name)
+        {
+            return i + 1 < args.Length ? args[i + 1] : null;
+        }
+
+        if (args[i].StartsWith(name + "=", StringComparison.Ordinal))
+        {
+            return args[i][(name.Length + 1)..];
+        }
     }
     return null;
 }

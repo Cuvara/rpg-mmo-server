@@ -78,6 +78,21 @@ public interface IEcsSystem
     string Name { get; }
 
     /// <summary>
+    /// The rate group this system belongs to.
+    ///
+    /// <para>A system declares its group and nothing else about frequency: it never counts
+    /// ticks, never tests <c>tick % n</c>, and never reads the configured Hz. The scheduler
+    /// decides when it runs and hands it the dt of its group. That is the difference
+    /// between a rate model you can audit in one place and one that is smeared across
+    /// gameplay code — see <see cref="SimulationRates"/>.</para>
+    ///
+    /// <para>Defaulted to <see cref="SimulationGroup.World"/>: world simulation is what a
+    /// system did before groups existed, so an implementation that says nothing keeps its
+    /// old cadence rather than being silently promoted to the base rate.</para>
+    /// </summary>
+    SimulationGroup Group => SimulationGroup.World;
+
+    /// <summary>
     /// Position in the schedule. Ordering is <b>declared here</b>, not implied by the
     /// order someone happened to write the calls in — which is what it was before.
     /// </summary>

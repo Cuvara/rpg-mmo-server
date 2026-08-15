@@ -6,6 +6,120 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **The join response now tells the client which rate to predict at**
+  (`join_token_resp.tick_rate`). Closes
+  [#93](https://github.com/Cuvara/rpg-mmo-server/issues/93). This is the companion to
+  the multi-rate change below and the reason it is safe to ship: making
+  `SIM_CRITICAL_HZ` configurable armed a latent silent desync. The client's prediction
+  rate was a hardcoded 15 in a different repository, matching the server only by
+  coincidence, and an operator tuning the rate for performance would have gotten a
+  server that starts cleanly, a client that logs nothing, and a player reporting
+  rubber-banding — no error anywhere in the chain.
+
+  The value sent is `SimulationRates.CriticalHz`, not the world rate: the critical
+  group is input, movement integration and combat, which is precisely the work a
+  predicting client replays. The world rate drives snapshot cadence, which the client
+  can observe directly. When `ServerOptions.SimulationRates` is null the rate is the
+  uniform configuration derived from `TickRate`, so a legacy single-rate server
+  reports its own tick rate and not a constant.
+
+  Sent on the **success path only**. A rejected join has no session to predict in and
+  the caller has not proved it is entitled to anything, so answering an
+  unauthenticated peer with the server's tuning would be giving that away for free.
+  Absent decodes as `0`, which the schema defines as "refuse to predict" — the
+  correct answer to a failed join.
+
+  Both encodings carry it: protobuf via the regenerated bindings, and the legacy JSON
+  codec (`GameServer/Net/WireJson.cs`) as `tick_rate`, omitted when zero so the two
+  agree on "absent means not supplied". A field present in one encoding and missing
+  from the other would leave clients on the legacy path silently back to guessing,
+  which is why `JoinTickRateTests` drives every case through both.
+
+- **Multi-rate simulation: three configurable ECS groups on one integer base-tick
+  timeline** (ADR-13). The server ran one fixed 15Hz loop, so nothing could run more often
+  than every 66ms and everything that would have been fine at 200ms paid 66ms anyway.
+  Raising the global tick to 60Hz was rejected rather than tried: it quadruples the cost of
+  every system whether or not it benefits, and quadruples snapshot bandwidth, which the
+  measured 45.9 KB/s per client at 200 players cannot absorb inside ADR-7's 50 KB/s mobile
+  budget.
+
+  Systems now declare a group — `Critical`, `World`, `Background` — and nothing else about
+  timing. The frequencies are configuration (`SIM_CRITICAL_HZ` / `SIM_WORLD_HZ` /
+  `SIM_BACKGROUND_HZ`, defaults 60/15/5, also `--sim-critical-hz` etc), which is why the
+  groups are named for responsibility: a group called `Hz60` would be a lie the first time
+  an operator tuned it. `GAMESERVER_TICK_RATE` still works and still means "every group at
+  that one rate".
+
+  - **The base rate is derived, not configured**: it is the critical rate, and every other
+    group must divide it exactly. `60/25/5` has no integer timeline at 60Hz — its true
+    common base is 300Hz — so it is **rejected at startup** with an error naming the
+    variable and listing the usable divisors, rather than silently running the server five
+    times faster than anyone asked for.
+  - **Each group integrates with its own dt.** A world system receives `1/15`, not `1/60`.
+    Handing it the base timestep while running it every fourth tick is the defining bug of
+    a multi-rate scheduler, and it is silent — every speed and duration in the group would
+    be wrong by the rate ratio with nothing to observe but "the game feels off".
+  - **Durations counted in ticks follow the rate that advances them.** The attack cooldown
+    is derived from the critical rate because `CooldownUntilTick` is compared against the
+    base tick, so 500ms stays 500ms at 15, 30 and 60Hz.
+  - **Group order is fixed Critical -> World -> Background** and encodes write ownership:
+    the faster group's writes land before the slower group reads them, so a slow group can
+    never overwrite newer state with a value computed from an older read.
+  - **Scheduling is centralised.** No gameplay system counts ticks, tests `tick % 4`, or
+    reads a configured frequency; all of it lives in `SimulationRates` and
+    `SimulationSchedule`.
+
+- **Per-group telemetry**: `gameserver_sim_group_duration_seconds` and
+  `gameserver_sim_group_runs_total` (both labelled by `group`),
+  `gameserver_tick_overruns_total`, and `gameserver_tick_backlog_dropped_total`. The last
+  two are the ones that answer "is the configured critical rate sustainable on this host",
+  which was previously only visible as a log line at a 2x overrun.
+
+### Changed
+- **Replication is gated to the world rate, not the base rate.** Simulation rate and
+  replication rate stay separate concepts: snapshots still ship ~15 times a second at the
+  default. Sending every base tick would quadruple downstream bandwidth to deliver state the
+  client interpolates across anyway, and would silently redefine the keyframe interval,
+  which counts *snapshots* — 30 snapshots is 2 seconds at 15Hz and half a second at 60Hz.
+
+- **Movement is continuous rather than packet-driven.** The server integrates the newest
+  input once per critical tick and holds it for one world interval, instead of once per
+  received packet. Without this a client sending at 15Hz against a 60Hz server would move at
+  quarter speed — travel distance would become a function of the client's send rate, which
+  `MovementSystem`'s own documentation forbids. The hold is bounded: a client that goes quiet
+  coasts for at most one world interval (66ms at the default), and an explicit deadzone input
+  clears the hold immediately rather than refreshing it, so releasing the stick still stops
+  the player at once.
+
+  **On a single-rate configuration this is a no-op.** The hold window collapses to one tick,
+  so movement is exactly one step per packet as before. That is what let the snapshot
+  byte-identity digests and the enemy characterization suite pass unchanged — no golden data
+  was regenerated and no digest was rebaselined.
+
+- **The tick loop schedules against a deadline instead of sleeping a rounded interval.**
+  `1000 / 60` truncates to 16ms, a 4% fast clock — 2.4 extra ticks a second, and every
+  duration expressed in ticks short by the same factor. The old integer arithmetic was exact
+  at 15Hz and is not at 60.
+
+- **Overload behaviour is bounded and observable.** Past 8 base ticks of lag the loop drops
+  the backlog, resynchronises, logs it and counts the discarded ticks. It never runs catch-up
+  ticks: each one costs more than the budget it reclaims, so a server that fell behind would
+  fall further behind. Simulation time runs behind wall time under sustained overload, which
+  is a bounded failure rather than a spiral.
+
+### Notes
+- **The background group ships with no systems, deliberately.** Nothing in the current
+  simulation tolerates a 200ms scheduling delay without a visible behaviour change — enemy
+  reaping reads like cleanup but is what stops a dead or centre-arrived enemy from being
+  observable in the snapshot built later in the same tick. Inventing a tenant so the group
+  looked used would be shipping a regression to satisfy a diagram. The infrastructure is
+  built, tested, and documented with the rule for what may enter it.
+- **No performance claim is made.** The point of multi-rate is high frequency where it is
+  needed and low frequency where it is not, not throughput, and the per-server tick ceiling
+  remains unmeasurable on the current hardware (ADR-7).
+
+
 ### Fixed
 - **The server's tick-rate default was a hardcoded `15` instead of
   `GameConstants.DefaultTickRate`**, while its three immediate neighbours in

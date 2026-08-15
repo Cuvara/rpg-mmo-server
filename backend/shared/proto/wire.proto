@@ -103,6 +103,14 @@ message JoinTokenResponse {
   bool ok = 1;
   string user_id = 2;
   string error = 3;
+  // The CRITICAL simulation rate in Hz — the rate the client must predict at.
+  // Session-constant: the server reads it once at startup and never changes it,
+  // which is why it rides the join response and not every snapshot.
+  //
+  // 0 means "not supplied" (a pre-0.x server that predates this field). A client
+  // that sees 0 must REFUSE to predict rather than assume 15: assuming is exactly
+  // the silent desync this field closes (#93).
+  uint32 tick_rate = 4;
 }
 
 // --- Gameplay ---
