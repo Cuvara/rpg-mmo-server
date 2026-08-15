@@ -8,6 +8,7 @@ on:
     branches: [main]
     paths:
       - 'backend/gameserver-dotnet/Shared.GameLogic/**'
+  workflow_dispatch:
 
 permissions:
   contents: write
