@@ -263,6 +263,30 @@ public sealed class InputHandler
         // move_x/move_y are a DIRECTION, not a displacement: the server integrates
         // direction * speed * dt itself, so a client cannot travel further by sending
         // more packets or larger vectors.
+
+        // An explicit stop must clear the held state even when this input is not the
+        // newest in the batch (applyMovement == false). Per-tick coalescing keeps only
+        // the highest client tick for movement, so a stop that is followed by a resume
+        // in the same drain batch loses its applyMovement flag. Without this, the stop
+        // never reaches the MoveResult.None branch below, HeldFromTick stays non-zero,
+        // and StepDeltaTime repays the entire pause as a lurch on the first step.
+        //
+        // In multi-rate mode the lurch is masked: ApplyHeldMovement integrates between
+        // packets and keeps LastMoveTick current, so the elapsed gap the resume sees is
+        // at most one tick. In single-rate mode ApplyHeldMovement is a no-op
+        // (holdTicks <= 1), so the full pause is visible and capped at MaxBankedTicks.
+        //
+        // The deadzone check mirrors MovementSystem.ResolveDirection: same constant,
+        // same squared-magnitude test, so the two cannot disagree on what counts as a
+        // stop.
+        float moveMagSq = (float)((float)(input.MoveX * input.MoveX)
+            + (float)(input.MoveY * input.MoveY));
+        if (moveMagSq <= GameConstants.InputDeadzoneSq)
+        {
+            cursor.HeldFromTick = 0;
+            cursor.LastMoveTick = currentTick;
+        }
+
         if (applyMovement)
         {
             // TryMove is called with the three fields it reads, not re-implemented from
@@ -296,23 +320,11 @@ public sealed class InputHandler
             }
             else if (moveResult == MoveResult.None)
             {
-                // An explicit stop. Clearing the hold is the difference between "the client
-                // released the stick" and "the client went quiet": the first must stop the
-                // entity now, the second is what the hold window is for.
+                // An explicit stop. The held state was already cleared above (outside
+                // the applyMovement guard), so this branch is a no-op for the fields it
+                // used to set. It remains as the semantic label: if the deadzone check
+                // above and ResolveDirection ever diverge, this is the backstop.
                 cursor.HeldFromTick = 0;
-
-                // The stop is a MOVEMENT event for the purposes of owed time, even though
-                // it moves nothing: standing still is not lost input. The client told us it
-                // was not moving, so there is nothing to repay when it starts again.
-                //
-                // Without this, every deliberate stop was indistinguishable from a network
-                // stall, and the first input after it repaid the whole pause in one step —
-                // up to 250ms of travel in a single frame. Releasing and re-pressing is the
-                // most common thing a player does, which is why that read as constant
-                // jerkiness rather than as an occasional glitch.
-                //
-                // It does NOT cover a client that simply stops sending without a deadzone
-                // input; that gap is still repaid in one step, bounded by the cap. See #104.
                 cursor.LastMoveTick = currentTick;
             }
             else if (moveResult == MoveResult.Rejected)
