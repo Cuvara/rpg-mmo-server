@@ -17,7 +17,14 @@ string addr = GetArg(args, "--addr") ?? Env("GAMESERVER_ADDR") ?? ":9000";
 string mapId = GetArg(args, "--map-id") ?? Env("GAMESERVER_MAP_ID") ?? "map_01";
 string serverId = GetArg(args, "--server-id") ?? Env("GAMESERVER_ID") ?? Env("POD_NAME") ?? $"gs-{Guid.NewGuid():N}"[..12];
 int capacity = int.TryParse(GetArg(args, "--capacity") ?? Env("GAMESERVER_CAPACITY"), out var cap) ? cap : 100;
-int tickRate = int.TryParse(GetArg(args, "--tick-rate") ?? Env("GAMESERVER_TICK_RATE"), out var tr) ? tr : 15;
+// Falls back to the shared constant, not to a literal. The client derives its own
+// integration step from the same constant, and it is compiled into both sides, so a
+// literal here means bumping GameConstants.DefaultTickRate moves the client and leaves
+// the server behind — a desync with no error on either side, which reads to a player as
+// rubber-banding rather than as a misconfiguration. Note the flag and the env var can
+// still move the server alone; that is the wire-contract gap in #93.
+int tickRate = int.TryParse(GetArg(args, "--tick-rate") ?? Env("GAMESERVER_TICK_RATE"), out var tr)
+    ? tr : GameConstants.DefaultTickRate;
 // Delta snapshots between full keyframes. 0 or less = send a full snapshot every tick
 // (pre-delta behaviour), the escape hatch for a client that cannot merge deltas.
 int keyframeInterval = int.TryParse(GetArg(args, "--keyframe-interval") ?? Env("GAMESERVER_KEYFRAME_INTERVAL"), out var kf)

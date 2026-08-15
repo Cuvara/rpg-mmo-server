@@ -129,7 +129,7 @@ message handler.
   "ack_tick": 41,
   "full": true,
   "entities": [
-    { "id": "u1", "type": "player", "x": 12.5, "y": -3.0, "hp": 90, "max_hp": 100 }
+    { "id": "u1", "type": "player", "x": 12.5, "y": -3.0, "hp": 90, "max_hp": 100, "speed": 5.0 }
   ],
   "removed": ["mob_7"]
 }
@@ -144,9 +144,27 @@ message handler.
 | `removed` | string[] | omitted when empty | Delta only: entity IDs that left the AOI or the world. Never present on a keyframe. |
 
 `entities[]` element: `id` (string), `type` (a category string — see below),
-`x`, `y` (float32), `hp`, `max_hp` (int). Visible state is exactly these fields —
-a change in any of them puts the entity in the next delta; a change in a field the
-client cannot see (e.g. cooldown) does not.
+`x`, `y` (float32), `hp`, `max_hp` (int), `speed` (float32). Visible state is exactly
+these fields — a change in any of them puts the entity in the next delta; a change in a
+field the client cannot see (e.g. cooldown) does not.
+
+**`speed`** is movement speed in world units per second, as the server is integrating it
+for that entity *right now* — not the spawn default. It exists so a client can predict
+local movement through the same `Shared.GameLogic` code the server runs; without it a
+client can only assume the default, and any buff, mount or slow desyncs the two with no
+error on either side (it presents as rubber-banding, which reads as a network fault).
+
+> **`speed <= 0` means "not sent", not "immobile".** proto3 elides a zero float, so a
+> server predating this field is indistinguishable from a stationary entity. A receiver
+> MUST fall back to its configured default rather than conclude the entity cannot move —
+> trusting the value unconditionally means an old server pins a client's predicted speed
+> to zero and the local player stops moving. JSON does not elide, so `"speed":0` is
+> explicit there; the rule is the same for both encodings.
+
+`speed` is sent on **every** mention of an entity, including handle-only ones. It is
+never interned: a client that resolves a handle expects complete state, and sending it
+only alongside the id would leave it correct once per keyframe interval and stale in
+between.
 
 ### Entity type: enum with a string fallback (Protobuf only) — normative
 
@@ -259,7 +277,28 @@ DELTA     payload=20 bytes   tick=15744  ack_tick=2  full=false
      40 01        field 8  handle   = 1                           <-- look up 1 -> uuid
 ```
 
-Same entity, 60 bytes → 20 bytes. Three separate rules are visible in this one
+> **Both captures above predate `speed` (field 9)** and are kept as they were, because
+> what they exist to show is the interning mechanism and re-capturing would change the
+> uuid and every offset for no gain. What field 9 adds is one more line on **every**
+> entity, keyframe and delta alike:
+>
+> ```
+>      4d 0000a040  field 9  speed    = 5.0
+> ```
+>
+> Tag `0x4d` = field 9, wire type 5 (fixed32), so it is **5 bytes per entity per
+> message** and does not shrink for common values the way a varint would. Measured on a
+> real encode, the delta below goes 20 → 25 bytes and its entity block header moves from
+> `22 0d` to `22 12`:
+>
+> ```
+> 08807b 1002 2212 1ddaac2a3f 2864 3064 3801 4001 4d0000a040
+> ```
+>
+> proto3 still elides it when it is exactly zero, which is the same thing as it being
+> absent — see the `speed <= 0` rule above.
+
+Same entity, 60 bytes → 20 bytes (65 → 25 with field 9). Three separate rules are visible in this one
 pair: `id` is sent exactly once (interning), `type_name` is absent in both frames
 because the enum carried the category, and `full` is absent from the delta
 because proto3 omits `false` — so a reader must treat *absent* as `false` rather

@@ -35,6 +35,7 @@ public sealed class SnapshotDeltaState
         public readonly float Y;
         public readonly int Hp;
         public readonly int MaxHp;
+        public readonly float Speed;
 
         public SentView(in EntityState e)
         {
@@ -43,6 +44,7 @@ public sealed class SnapshotDeltaState
             Y = e.Position.Y;
             Hp = e.Hp;
             MaxHp = e.MaxHp;
+            Speed = e.Speed;
         }
 
         public bool Equals(SentView other) =>
@@ -53,10 +55,17 @@ public sealed class SnapshotDeltaState
             // would let slow drift accumulate silently.
             X.Equals(other.X) &&
             Y.Equals(other.Y) &&
+            // Speed belongs here for a reason worth stating: this struct is the
+            // ONLY thing deciding whether a delta resends an entity. An entity
+            // that is buffed while standing still changes nothing else, so
+            // omitting Speed would compare it equal, skip it, and leave the
+            // client predicting at the old speed until the next keyframe — up to
+            // 30 ticks of divergence that no test of the keyframe path can see.
+            Speed.Equals(other.Speed) &&
             string.Equals(Type, other.Type, StringComparison.Ordinal);
 
         public override bool Equals(object? obj) => obj is SentView v && Equals(v);
-        public override int GetHashCode() => HashCode.Combine(Type, X, Y, Hp, MaxHp);
+        public override int GetHashCode() => HashCode.Combine(Type, X, Y, Hp, MaxHp, Speed);
     }
 
     /// <summary>
@@ -80,6 +89,34 @@ public sealed class SnapshotDeltaState
 
     /// <summary>Whether this connection's encoding supports handles. See Encode.</summary>
     private bool _intern;
+
+    /// <summary>
+    /// The single <see cref="SnapshotMessage"/> this connection reuses, and the pool of
+    /// <see cref="EntitySnapshot"/> objects filling it.
+    /// <para>
+    /// <b>Ownership contract, and it is the whole safety argument:</b> the message and
+    /// its entities belong to this state object, not to the caller. They stay valid only
+    /// until the next <see cref="Encode"/> call on the same instance. Callers must
+    /// serialize (or otherwise finish with) the returned message before encoding again —
+    /// which is what the write task does: claim, encode, serialize, write, loop.
+    /// </para>
+    /// <para>
+    /// Safe without a lock because the instance is per-connection and single-threaded by
+    /// design: the tick thread staged the AOI view, and everything here runs on that one
+    /// connection's write task. Nothing is shared between connections, so a pool touched
+    /// by two threads never arises — which is why this is a per-connection pool and not a
+    /// shared one.
+    /// </para>
+    /// <para>
+    /// Rented objects are returned by <i>resetting the high-water mark</i> at the start of
+    /// each encode, never by an explicit release call. There is therefore no path on which
+    /// an object is returned twice, and none on which a staged-but-never-encoded snapshot
+    /// leaks one: an encode that does not happen rents nothing.
+    /// </para>
+    /// </summary>
+    private readonly SnapshotMessage _message = new();
+    private readonly List<EntitySnapshot> _pool = new();
+    private int _poolUsed;
 
     private readonly Dictionary<string, SentView> _lastSent = new();
     private readonly HashSet<string> _seen = new(StringComparer.Ordinal);
@@ -204,9 +241,59 @@ public sealed class SnapshotDeltaState
         return EncodeDelta(tick, ackTick, nearby);
     }
 
+    /// <summary>
+    /// Reset the reused message and hand back every pooled entity in one step. Called at
+    /// the top of each encode, which is what makes "return" a no-op rather than a call
+    /// anyone can forget or repeat.
+    /// </summary>
+    private SnapshotMessage BeginMessage(ulong tick, ulong ackTick, bool full)
+    {
+        _message.Entities.Clear();
+        _message.Removed.Clear();
+        _message.Tick = tick;
+        _message.AckTick = ackTick;
+        _message.Full = full;
+        _poolUsed = 0;
+        return _message;
+    }
+
+    /// <summary>
+    /// A cleared <see cref="EntitySnapshot"/> from the pool, growing it on first use at
+    /// this depth. Every field is reset, not just the ones the caller is about to set: a
+    /// stale <c>Id</c> or <c>Handle</c> carried over from a previous tick would be wrong
+    /// state on the wire, which is the failure mode this whole subsystem exists to avoid.
+    /// Clearing to the proto3 defaults also keeps the bytes identical, since default
+    /// values are not emitted.
+    /// </summary>
+    private EntitySnapshot Rent()
+    {
+        EntitySnapshot e;
+        if (_poolUsed < _pool.Count)
+        {
+            e = _pool[_poolUsed];
+        }
+        else
+        {
+            e = new EntitySnapshot();
+            _pool.Add(e);
+        }
+        _poolUsed++;
+
+        e.Id = "";
+        e.TypeName = "";
+        e.Type = EntityType.Unspecified;
+        e.Handle = 0;
+        e.X = 0f;
+        e.Y = 0f;
+        e.Hp = 0;
+        e.MaxHp = 0;
+        e.Speed = 0f;
+        return e;
+    }
+
     private SnapshotMessage EncodeFull(ulong tick, ulong ackTick, ReadOnlySpan<EntityState> nearby)
     {
-        var msg = new SnapshotMessage { Tick = tick, AckTick = ackTick, Full = true };
+        var msg = BeginMessage(tick, ackTick, full: true);
         _lastSent.Clear();
         // A keyframe is the synchronisation point for the handle space: both
         // sides drop every binding and start again from 1.
@@ -227,7 +314,7 @@ public sealed class SnapshotDeltaState
     private SnapshotMessage EncodeDelta(ulong tick, ulong ackTick, ReadOnlySpan<EntityState> nearby)
     {
         _seen.Clear();
-        var msg = new SnapshotMessage { Tick = tick, AckTick = ackTick, Full = false };
+        var msg = BeginMessage(tick, ackTick, full: false);
 
         for (int i = 0; i < nearby.Length; i++)
         {
@@ -275,13 +362,16 @@ public sealed class SnapshotDeltaState
     /// </remarks>
     private EntitySnapshot ToMsg(in EntityState e)
     {
-        var msg = new EntitySnapshot
-        {
-            X = e.Position.X,
-            Y = e.Position.Y,
-            Hp = e.Hp,
-            MaxHp = e.MaxHp
-        };
+        var msg = Rent();
+        msg.X = e.Position.X;
+        msg.Y = e.Position.Y;
+        msg.Hp = e.Hp;
+        msg.MaxHp = e.MaxHp;
+        // Written on every mention, including handle-only ones. A client that
+        // resolves a handle expects a complete state for that entity; sending
+        // speed only when the id is introduced would leave it correct once per
+        // keyframe interval and stale in between.
+        msg.Speed = e.Speed;
         EntityTypes.SetType(msg, e.Type);
 
         if (!_intern)

@@ -24,7 +24,8 @@ public static class SnapshotEncoder
                 X = e.Position.X,
                 Y = e.Position.Y,
                 Hp = e.Hp,
-                MaxHp = e.MaxHp
+                MaxHp = e.MaxHp,
+                Speed = e.Speed
             };
             EntityTypes.SetType(ent, e.Type);
             msg.Entities.Add(ent);

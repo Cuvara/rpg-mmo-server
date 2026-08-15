@@ -6,7 +6,186 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **The server's tick-rate default was a hardcoded `15` instead of
+  `GameConstants.DefaultTickRate`**, while its three immediate neighbours in
+  `Program.cs` — keyframe interval, map width, map height — all fall back to the shared
+  constant. That inconsistency made the obvious way to change the tick rate silently
+  wrong in the *opposite* direction to the one anyone would guard against: bumping
+  `GameConstants.DefaultTickRate` and tagging a new `sgl` moves the **client**, which
+  derives its integration step from that constant, and leaves the **server** on the
+  literal. The client then integrates at a different `dt` than the server, is corrected
+  by every snapshot, and the player sees rubber-banding. Nothing logs an error on either
+  side, because neither side is wrong about anything it can observe.
+
+  This does not close the wider gap: `--tick-rate` and `GAMESERVER_TICK_RATE` can still
+  move the server alone, because the tick rate is not on the wire and the client cannot
+  observe it. That is #93. This makes the *default* path coherent, which is the path a
+  tick-rate change would actually be attempted through.
+
+### Added
+- **`Shared.GameLogic` released as `sgl-v0.1.7`**, carrying the `Speed` field added to
+  `SnapshotData` by the per-entity speed work. `package.json` is bumped in the tagged
+  commit itself, per `backend/TEAM.md` — a tag whose package reports an older version
+  installs cleanly and UPM never warns, so the two must move together. The change is
+  additive: the previous constructor is kept and forwards with `speed: 0`, so a client
+  still pinned to `sgl-v0.1.6` is unaffected until it moves its manifest.
+
+### Added
+- **The snapshot encoder now sends per-entity `speed`** (`wire.proto` field 9), read
+  straight off `EntityState.Speed` — the value `MovementSystem.TryMove` is actually
+  integrating with. Closes
+  [#91](https://github.com/Cuvara/rpg-mmo-server/issues/91). No ECS plumbing was
+  needed: `Compose`/`ComposeFromChunk` already populate `Speed` from `Locomotion`.
+
+  Three coupled places, and getting any one wrong fails silently in a different way:
+
+  | Place | Omitting it |
+  |---|---|
+  | `SnapshotDeltaState.ToMsg` | never reaches the wire at all |
+  | `SnapshotDeltaState.SentView` | **a speed-only change is never resent** — see below |
+  | `SnapshotDeltaState.Rent` | a pooled `EntitySnapshot` carries the previous entity's speed |
+
+  `SentView` is the sole arbiter of whether a delta resends an entity and it compares
+  the whole struct, so an entity buffed *while standing still* changes nothing else,
+  compares equal, and gets skipped — the client keeps predicting at the old speed for
+  up to a full keyframe interval. That failure is invisible to every keyframe test,
+  because a keyframe resends everything unconditionally.
+  `Delta_ResendsAnEntityWhoseOnlyChangeIsSpeed` fails if `Speed` is removed from
+  `SentView.Equals`; that was checked by removing it, not assumed.
+
+- **`EntitySnapshotData.Speed` in `Shared.GameLogic`, added via a new constructor
+  overload.** The 6-argument constructor is kept and forwards with `speed: 0`. This
+  library is compiled **as source** by the Unity client against a pinned tag (ADR-10),
+  so changing the existing signature would break that build for every call site at
+  once the moment the tag moved. Adding an overload costs nothing; changing a
+  signature costs a coordinated release. `AoiLogic.EncodeSnapshot` passes the speed
+  through.
+
+- **Four snapshot tests**: speed-only delta resend, unchanged-speed still suppressed,
+  speed present on handle-only mentions (interned path), and speed on keyframes.
+
 ### Changed
+- **`SnapshotByteIdentityTests` digests rebaselined for both encodings.** These
+  deliberately hard-to-change constants moved because the protocol gained a field, not
+  because a walk was restructured. Both previous digests are recorded in the source
+  beside the new ones so the change stays attributable, and the comment tells the next
+  reader to establish whether *their* change was supposed to alter the wire before
+  touching the constant.
+- **`WireProtocolTests.SnapshotMessage_JsonMatchesGoFormat`** now pins a non-zero
+  speed. A zero would have pinned only that the key exists.
+
+### Documentation
+- `docs/API.md` — the normative wire reference. `entities[]` field list, the JSON
+  example, and the `speed <= 0` rule. The two Protobuf hexdumps are **left as
+  captured**, with a note that they predate field 9 and what it adds: tag `0x4d`
+  (field 9, wire type 5), 5 bytes per entity, and a freshly captured 25-byte delta
+  showing the entity block header moving `22 0d` → `22 12`. Re-capturing would have
+  changed the uuid and every offset in a pair of dumps that exist to illustrate
+  interning.
+- `docs/DESIGN.md` — the delta comparison list now reads `type/x/y/hp/max_hp/speed`,
+  matching `SentView`.
+
+
+### Notes
+- **A uniform spatial index for AOI was built, proved correct, measured, and
+  rejected. No production code changed.** It is 2.8x slower than the brute-force
+  scan at realistic density. Full numbers and reasoning: `docs/BENCHMARK.md`
+  Part V; the implementation and its differential test are on
+  `feat/aoi-spatial-index` at `2e3e5db`, reverted by the commit after it.
+  - **The premise was wrong in the same way as before.** The case for the index
+    was "40 000 distance tests per tick at 200 players, O(n²)". The count is
+    right; the cost is not. Those tests are sequential reads over contiguous
+    chunk arrays and are worth microseconds. The scan's real cost is composing an
+    `EntityState` per **match**, which is proportional to how many players are
+    near you — a property of the game, not of the algorithm — and no index
+    reduces it.
+  - The index made composition worse: the scan composes from the chunk it is
+    already iterating, while the index holds only an entity handle and composes
+    through seven random-access lookups per match.
+  - It *is* 1.4–2.9x faster when AOI sets are nearly empty (2.8 matches per
+    query) — exactly where the absolute cost is negligible, 77 µs to 38 µs
+    against a 66 ms budget. A density-switched hybrid was considered and
+    rejected: two code paths and a heuristic to win 0.06% of a tick in the case
+    that was never the problem.
+  - **Preserving byte-identical wire output costs a per-query sort**, which the
+    Big-O argument never accounted for. The delta encoder interns entity ids in
+    AOI arrival order, so a grid's cell-major enumeration changes the bytes for
+    an identical set. The first implementation got the set right and the order
+    wrong; the differential test caught it on the first run. Disabling the sort
+    as a diagnostic did not rescue the measurement.
+  - Measurement method, since a timing claim on this host needs one: paired
+    in-process A/B running both implementations back to back in one process, five
+    runs, comparing the ratio *within* each run. Absolute timings swing ±50%
+    here; the realistic-density ratio came out 0.32–0.45 across all five, far
+    tighter than the noise.
+  - `docs/BENCHMARK.md` §9 item 6 is struck through, and the extension-seams
+    table in the repo-root `CLAUDE.md` no longer promises a spatial grid as the
+    production answer — it records that one was measured and lost, with the
+    conditions that would make it worth revisiting.
+
+### Changed
+- **The snapshot path stopped throwing away its objects: entities are pooled and the
+  serialization buffers are reused.** These were the two allocation sources stage 4's
+  breakdown left standing — `Encode` building a fresh `EntitySnapshot` per entity per
+  viewer (134 699 B/tick at 200 players, the largest remaining term by an order of
+  magnitude) and `ToByteArray` allocating a new array per snapshot (44 280 B/tick).
+  Neither was algorithmic and neither touches the wire.
+  - **`SnapshotDeltaState` owns one `SnapshotMessage` and a pool of `EntitySnapshot`
+    objects.** Rented objects are returned by resetting a high-water mark at the top of
+    each encode, never by an explicit release — so there is no path that returns one
+    twice, and none where a snapshot staged but never claimed leaks one. An encode that
+    does not happen rents nothing, which matters because encoding has been lazy since
+    stage 4. `Rent()` clears *every* field rather than the ones about to be written: a
+    stale `Id` or `Handle` surviving a tick would be wrong state on the wire, the exact
+    failure this subsystem exists to prevent, and clearing to the proto3 defaults is
+    also what keeps the bytes identical.
+  - **The ownership contract is now explicit**: the message and its entities belong to
+    the state object and are valid only until the next `Encode` on that instance. The
+    write task's claim → encode → serialize → write loop already satisfies it.
+  - **New `SnapshotFrameWriter` serializes into buffers it keeps**, replacing four
+    allocations per snapshot (payload array, `ByteString` copy, envelope body array,
+    framed array) with two grown-once buffers and an `UnsafeByteOperations.UnsafeWrap`
+    view over the payload. Both messages are still written by the **generated**
+    protobuf writers — nothing here hand-rolls a tag or a varint, which is the version
+    of this change that would have put the wire at risk.
+  - **Per-connection, not shared.** Encoding moved off the tick thread onto one write
+    task per connection in stage 4, so a shared pool would be touched by many threads
+    and need a lock on the hottest path in the server. Both the pool and the buffers sit
+    beside `SnapshotDeltaState`, which is already per-connection and single-threaded by
+    design; no synchronisation is added anywhere.
+  - **JSON keeps the allocating path.** It is not the production encoding and
+    `JsonWriter` would need its own reuse story; the branch is one `if` in the write
+    loop and is commented as such.
+
+  **Measured — paired A/B in one process, both arms in the same binary over identical
+  inputs, 60 ticks after warm-up, `GC.GetAllocatedBytesForCurrentThread`:**
+
+  | viewers × 40 visible | legacy shape | pooled entities only | + reused buffers |
+  |--:|--:|--:|--:|
+  | 50 | 372 933 B/tick | 181 733 B/tick | **1 600 B/tick** |
+  | 200 | 1 491 733 B/tick | 726 933 B/tick | **6 400 B/tick** |
+
+  Identical to the byte across three repeat runs. The residual is exactly **32 bytes per
+  viewer per tick** — one `ByteString` wrapper object per snapshot, the one allocation
+  `UnsafeWrap` still makes. Pooling and buffer reuse are worth roughly half each; either
+  alone would have left the other half in place, which is why both are here.
+
+  **What this is not.** It is not the live server at 200 players: the harness holds AOI
+  at a fixed 40 visible entities per viewer and every viewer sends every tick, where the
+  real server's AOI varies and coalescing engages under load. The transferable result is
+  the ratio and the per-viewer residual, not the absolute B/tick — quoting 1.49 MB/tick
+  as a production figure would be wrong. **No wall-clock claim is made**: this host's
+  spread on an unchanged binary is wide enough to swallow the effect, and the claim here
+  is about garbage, not latency.
+
+  **Guards.** `SnapshotByteIdentityTests`' pre-change digests pass unchanged (they are
+  literals; regenerating them would have destroyed their value). A new
+  `WriteFrame_IsByteIdenticalToTheAllocatingPath` compares the reused-buffer frame with
+  the allocating one byte-for-byte over 40 ticks, because the digest test frames through
+  `WireProtocol.Encode` itself and never reaches the new writer.
+  `PooledEntities_CarryNoStaleFieldsBetweenTicks` asserts the failure a pool introduces
+  and a fresh object cannot. 589 passed, 0 failed, 12 skipped (docker-gated).
 - **The simulation is query-driven, its ordering is declared, and its state lives in
   the world (ECS migration, stage 5).** Commissioned as architecture, not
   performance — see *Measured*, which is a table of zeroes and says so.
