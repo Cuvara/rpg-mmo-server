@@ -183,6 +183,41 @@ Rules:
 - No allocations in hot paths (tick loop, snapshot, input processing)
 - All public APIs: XML doc comments
 
+### Movement-adjacent behaviour must be tested through the live path
+
+**A test that builds its own world can be true while the path a client takes is not.**
+Anything that changes how far, how fast or how often an entity moves needs at least one
+test that goes through the socket: join over the transport, send input as a client does,
+and read the position back **out of the snapshot stream**. That last part is the point —
+it is the number a client actually sees, rather than a number read out of the world by a
+test that also put it there.
+
+The pattern to copy is `GameServer.Tests/Server/SlowClientMovementTests.cs`.
+
+This rule was bought, not theorised. A run of defects in movement and tick-rate handling
+shared one shape: a description and an implementation disagreed, and **every existing test
+could pass while the live behaviour was wrong**, because the unit tests pushed inputs
+straight into the queue and so skipped the join handshake, the network thread, the entity's
+real creation path, per-tick input coalescing and the encoder. The defect that finally
+surfaced this — bursty input arrival losing most of a player's travel (#100) — was invisible
+to a full green suite and had been live in every configuration, including the one running on
+staging, for as long as coalescing had existed.
+
+Specifically, a unit test cannot see:
+
+- **per-tick input coalescing** — several packets arriving together become one step, which
+  a test that pushes one input per tick never produces;
+- **arrival pattern** — TCP batching, a client GC pause or a mobile radio waking up clump
+  packets that a `Task.Delay` loop spaces evenly;
+- **the entity's real archetype** — a hand-added entity may carry different components from
+  one created by the join handler, and a query that filters on a tag will silently match
+  neither;
+- **what the client is actually told** — the snapshot is delta-encoded, so a value being
+  correct in the world does not mean it reached anyone.
+
+Keep the unit tests: they are faster, they localise a failure, and they express intent. Add
+the live-path one so that when the two disagree, there is something that can settle it.
+
 ### Naming Conventions
 - Package names: lowercase, single word when possible
 - Proto files: `snake_case.proto`

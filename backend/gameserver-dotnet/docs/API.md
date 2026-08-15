@@ -224,10 +224,45 @@ message handler.
   greater than the last one it accepted for that player, and echoes the newest
   accepted value back as `ack_tick`.
 - `move_x` / `move_y` — a **direction**, not a displacement. The server integrates
-  `direction * speed * dt` once per server tick. Vectors with magnitude > 1 are
+  `direction * speed * dt`, at most once per server tick. Vectors with magnitude > 1 are
   normalized; magnitude > 1.5 is dropped. Sending more packets does not move further.
 - `attack_target_id` — optional entity ID to attack this tick. Gated by range and by
   a tick-based cooldown (see below).
+
+### The movement model a predicting client must reproduce
+
+Three rules, and a client that implements the first two but not the third will diverge
+from the server exactly when the network is worst. They exist so that **travel distance
+depends on wall-clock time and the entity's speed, and never on how many packets arrived
+or when** — the invariant `MovementSystem` is written around.
+
+1. **At most one step per player per server tick.** Several inputs landing in the same
+   tick are coalesced to the newest; the rest do not each produce movement. This is what
+   stops a client travelling further by spamming.
+
+2. **A held direction keeps integrating between packets.** The newest accepted direction is
+   re-integrated on every simulation tick until a new input arrives or it expires one world
+   interval later (66 ms at the default 60/15 configuration). Without it, a client sending
+   at 15 Hz to a 60 Hz server would move at a quarter speed, because speed would become a
+   function of send rate. An input inside the deadzone — the stick released — clears the
+   hold immediately rather than refreshing it, so an explicit stop is instant.
+
+3. **A step covers the time since that entity last moved, not one fixed tick.** `dt` is
+   `min(now − last_move_tick, cap) / tick_rate`, where the cap is
+   `GameConstants.MaxBankedMovementMs` (**250 ms**). This is what makes rule 1 safe: when
+   four packets clump into one tick — TCP batching, a client GC pause, a mobile radio
+   waking — the three that coalescing discards no longer take their simulated time with
+   them. It does not weaken rule 1, because a client sending every tick always has
+   `last_move_tick == now − 1` and so earns exactly one tick of movement per tick.
+
+**The cap is part of the model, not a server-side safety valve.** A client that banks
+unbounded time reconciles against a server that does not, on precisely the frames where the
+network was worst — so a predicting client must apply the same 250 ms bound.
+
+Together these mean a client sending at *any* rate, evenly or in bursts, covers the same
+ground per second. Verified over a real socket in
+`GameServer.Tests/Server/SlowClientMovementTests.cs` rather than only in unit tests, for
+the reason recorded in `backend/TEAM.md`.
 
 ## `snapshot` (8) — gameserver → client, once per server tick per client
 

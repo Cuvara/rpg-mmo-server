@@ -34,6 +34,51 @@ namespace Shared.GameLogic.Components
         /// </summary>
         public const float DisplacementTolerance = 1.05f;
 
+        /// <summary>
+        /// Longest span of simulated time a single movement step may cover, in
+        /// milliseconds — the cap on how much elapsed time an input can "bank".
+        ///
+        /// <para>A movement step advances the entity by the time since it last moved, not
+        /// by one fixed tick, so that a burst of inputs arriving in one tick is not silently
+        /// reduced to a single tick's travel (#100). This constant bounds that: a client
+        /// that goes quiet and then sends can never claim more than this much movement in
+        /// one step, however long it was silent.</para>
+        ///
+        /// <para><b>Why 250ms.</b> It has to be at least one send interval of the slowest
+        /// client we support, or that client can never be made whole: a client sending at
+        /// the world rate (15Hz, so 66ms apart) whose packets clump into fours leaves a
+        /// 266ms gap between bursts, and a cap below that leaves part of every gap
+        /// permanently unpaid. Measured directly — at a 200ms cap a bursting 15Hz client
+        /// against a 15Hz server recovers to 72% of its intended distance rather than to
+        /// 100%.</para>
+        ///
+        /// <para>It is deliberately close to, and slightly above, the ~200ms dead-reckoning
+        /// limit the netcode model sets for bad mobile networks: both answer "how long may
+        /// the server move on information it no longer has". Banking is the safer of the
+        /// two, because the client demonstrably <i>did</i> send input covering the period —
+        /// the packets arrived, coalescing is what discarded them — whereas dead reckoning
+        /// extrapolates input that was never sent. That is the whole of the justification
+        /// for the gap between the two numbers, and it is why this one is not larger
+        /// still.</para>
+        ///
+        /// <para><b>A predicting client must apply the same cap</b>, because it is part of
+        /// the movement model rather than a server-side safety valve: a client that banks
+        /// unbounded time reconciles against a server that does not, on exactly the frames
+        /// where the network was worst.</para>
+        /// </summary>
+        public const int MaxBankedMovementMs = 250;
+
+        /// <summary>
+        /// <see cref="MaxBankedMovementMs"/> expressed in ticks at the given simulation
+        /// rate, rounded up and never below 1.
+        /// </summary>
+        public static int MaxBankedMovementTicks(int tickRate)
+        {
+            if (tickRate <= 0) tickRate = DefaultTickRate;
+            int ticks = (MaxBankedMovementMs * tickRate + 999) / 1000; // ceil
+            return ticks < 1 ? 1 : ticks;
+        }
+
         /// <summary>Default map width in world units.</summary>
         public const float DefaultMapWidth = 1000f;
 

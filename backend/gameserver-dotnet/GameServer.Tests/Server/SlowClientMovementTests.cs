@@ -7,6 +7,7 @@ using GameServer.Server;
 using Microsoft.Extensions.Logging.Abstractions;
 using GameServer.Tests.Infrastructure;
 using RpgMmo.Wire.V1;
+using Shared.GameLogic.Components;
 
 namespace GameServer.Tests.Server;
 
@@ -90,6 +91,69 @@ public class SlowClientMovementTests
         Assert.InRange(travelled, expected * 0.80f, expected * 1.10f);
     }
 
+    /// <summary>
+    /// The same 15 packets a second, delivered in bursts of four rather than evenly — what
+    /// TCP batching, a stalled render thread, a client GC pause or a mobile radio waking up
+    /// all produce.
+    ///
+    /// <para>This is the invariant's harder half and it is what #100 was. Per-tick
+    /// coalescing turns a burst of four inputs into <b>one</b> movement step, so before the
+    /// elapsed-time step the other three took their simulated time with them and a client
+    /// whose packets clumped lost most of its travel at an unchanged average send rate:
+    /// 2.75 units against 6.00 expected.</para>
+    /// </summary>
+    [Fact]
+    public async Task AClientWhosePacketsArriveInBursts_TravelsTheSameDistance()
+    {
+        (float travelled, float speed) = await MeasureAsync(Rates(60, 15, 5), sendHz: 15, burst: 4);
+
+        float expected = speed * (float)RunSeconds;
+
+        Assert.True(travelled > expected * 0.85f,
+            $"bursty client travelled {travelled:F2} against {expected:F2} expected: " +
+            "distance is depending on the arrival pattern, not on elapsed time (#100)");
+    }
+
+    /// <summary>
+    /// The same burst pattern against the single-rate configuration <c>staging</c> runs.
+    ///
+    /// <para>Worth its own case because this is where the defect was <b>worst</b> — 28% of
+    /// the intended distance, against 46% under multi-rate, because the held-input model
+    /// happened to cover part of the gap. What closes it is the elapsed-time step, not the
+    /// rate configuration.</para>
+    /// </summary>
+    [Fact]
+    public async Task AClientWhosePacketsArriveInBursts_AgainstASingleRateServer_TravelsTheSameDistance()
+    {
+        (float travelled, float speed) = await MeasureAsync(Rates(15, 15, 5), sendHz: 15, burst: 4);
+
+        float expected = speed * (float)RunSeconds;
+
+        Assert.True(travelled > expected * 0.85f,
+            $"single-rate server: bursty client travelled {travelled:F2} against " +
+            $"{expected:F2} expected (#100)");
+    }
+
+    /// <summary>
+    /// The cap, from the other side: a client that goes quiet and comes back must not be
+    /// able to bank the whole silence as travel. One step may claim at most
+    /// <see cref="GameConstants.MaxBankedMovementMs"/>.
+    /// </summary>
+    [Fact]
+    public async Task AClientThatGoesQuietAndReturns_BanksAtMostTheCap()
+    {
+        var rates = Rates(60, 15, 5);
+        (float travelled, float speed) =
+            await MeasureAsync(rates, sendHz: 15, burst: 1, silentGapMs: 1500);
+
+        float capUnits = speed * global::Shared.GameLogic.Components.GameConstants.MaxBankedMovementMs / 1000f;
+        float movingUnits = speed * (float)RunSeconds;
+
+        Assert.True(travelled <= movingUnits + capUnits * 1.5f,
+            $"travelled {travelled:F2}: 1.5s of silence appears to have been banked as " +
+            $"movement (the cap is {capUnits:F2} units on top of {movingUnits:F2})");
+    }
+
     // ── Harness ──
 
     private static SimulationRates Rates(int critical, int world, int background)
@@ -103,7 +167,7 @@ public class SlowClientMovementTests
     /// return how far the server says the player moved along +X, plus its speed.
     /// </summary>
     private static async Task<(float travelled, float speed)> MeasureAsync(
-        SimulationRates rates, int sendHz, int burst = 1)
+        SimulationRates rates, int sendHz, int burst = 1, int silentGapMs = 0)
     {
         string userId = $"slow-{Guid.NewGuid():N}"[..16];
 
@@ -168,6 +232,15 @@ public class SlowClientMovementTests
                 int due = p * interval;
                 int wait = due - (int)sw.ElapsedMilliseconds;
                 if (wait > 0) await Task.Delay(wait, cts.Token);
+            }
+
+            if (silentGapMs > 0)
+            {
+                // Go quiet, then send one more input. Whatever that single step adds is the
+                // banking the cap has to bound.
+                await Task.Delay(silentGapMs, cts.Token);
+                await SendAsync(stream, MsgType.Input,
+                    new InputMessage { Tick = (ulong)(packets + 1), MoveX = 1f, MoveY = 0f });
             }
 
             // One world interval past the last packet, so the final held step lands and is
