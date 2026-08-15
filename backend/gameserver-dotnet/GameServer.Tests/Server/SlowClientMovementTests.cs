@@ -166,10 +166,18 @@ public class SlowClientMovementTests
     /// #104; both ways of doing it cost something a player would also feel, so it is a
     /// decision rather than a patch.</para>
     /// </summary>
-    [Fact]
-    public async Task ASilentClientsRepayment_IsBoundedByTheCap()
+    /// <remarks>
+    /// Parameterised over both configurations for the same reason as the explicit-stop
+    /// case, and paired with it deliberately: at each rate one of the two must repay and
+    /// the other must not. Passing both is what shows the server is distinguishing the two
+    /// silences rather than the test being satisfied by either extreme.
+    /// </remarks>
+    [Theory]
+    [InlineData(60, 15, 5)]
+    [InlineData(15, 15, 5)]
+    public async Task ASilentClientsRepayment_IsBoundedByTheCap(int critical, int world, int background)
     {
-        var rates = Rates(60, 15, 5);
+        var rates = Rates(critical, world, background);
 
         (float largest, float speed) = await LargestSingleStepAsync(rates, pauseMs: 800);
 
@@ -187,6 +195,15 @@ public class SlowClientMovementTests
         Assert.True(largest <= capUnits + normal * 1.5f,
             $"largest sampled movement was {largest:F4}: repayment is not bounded by the " +
             $"{capUnits:F2}-unit cap");
+
+        // The complement, and the reason it is asserted rather than assumed: silence the
+        // server never heard about MUST still be repaid. Without this, the invariant above
+        // could be satisfied by deleting the elapsed-time step altogether — which would
+        // silently reinstate #100, and every summed-distance test would still pass because
+        // summed travel is not what the defect changes.
+        Assert.True(largest > normal * 1.5f,
+            $"largest sampled movement was {largest:F4}, no larger than a normal " +
+            $"{normal:F4}: unheard silence is no longer being repaid at all (#100)");
     }
 
     /// <summary>
@@ -198,10 +215,19 @@ public class SlowClientMovementTests
     /// first input after it repaid the whole pause. That is the most common thing a player
     /// does, which is why the lurch was constant rather than occasional.</para>
     /// </summary>
-    [Fact]
-    public async Task AnExplicitStopIsNotTreatedAsLostTime()
+    /// <remarks>
+    /// Parameterised over both rate configurations deliberately. The held-movement pass is
+    /// gated differently when every group runs at one rate — <c>staging</c>'s configuration
+    /// — so a fix that lives on that path passes at 60/15/5 and fails at 15/15/5, which is
+    /// fixed on develop and broken in production. Anything touching the movement paths must
+    /// be checked at both.
+    /// </remarks>
+    [Theory]
+    [InlineData(60, 15, 5)]
+    [InlineData(15, 15, 5)]
+    public async Task AnExplicitStopIsNotTreatedAsLostTime(int critical, int world, int background)
     {
-        var rates = Rates(60, 15, 5);
+        var rates = Rates(critical, world, background);
 
         (float largest, float speed) =
             await LargestSingleStepAsync(rates, pauseMs: 800, stopExplicitly: true);
