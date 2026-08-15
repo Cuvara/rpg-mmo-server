@@ -6,6 +6,39 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`JoinTokenResponse.TickRate` — the simulation tick rate on the wire
+  (`wire.proto` field 4).** Closes
+  [#93](https://github.com/Cuvara/rpg-mmo-server/issues/93), the same defect as #91
+  one field over. The tick rate was never sent: server and client agreed on 15Hz
+  only because two hardcoded literals, in two repositories, happened to match — and
+  the server could be moved off that value by configuration the client had no way to
+  observe. Set `SIM_CRITICAL_HZ=30` and you get a server that starts cleanly, a
+  client that joins and renders and logs nothing unusual, and a player who reports
+  rubber-banding. **Nothing in that chain fails**, and no test could catch it,
+  because the client was not wrong about anything it could see — it was never told.
+
+  `uint32 tick_rate = 4` on `JoinTokenResponse`, purely additive: no existing field
+  number or order moved, so old and new peers interoperate in both directions. The
+  value is the **CRITICAL** rate — the cadence of input, movement and combat, which
+  is what a client replays when it predicts — not the world rate that governs
+  snapshot cadence.
+
+  It rides the join response rather than the snapshot because the rate is
+  session-constant: the server reads it once at startup and never changes it, so
+  putting it on `SnapshotMessage` would pay bytes per player per tick forever to
+  re-send a number that cannot move. It is not on `EnterWorldResponse` because that
+  comes from the gateway, which does not run the simulation (ADR-3) and would become
+  a second source of truth for a value the game server owns.
+
+- **`tick_rate` absent or `0` means "not supplied", and a client must refuse to
+  predict.** proto3 elides a zero, so a pre-0.x server is indistinguishable from one
+  reporting 0Hz — which is not a rate. Receivers must **not** fall back to 15:
+  silently defaulting is exactly the assumption this field removes, and would
+  reintroduce the bug while looking like it had been fixed. The Go
+  `messages.JoinTokenResponse` mirror carries the field as
+  `TickRate uint32 \`json:"tick_rate,omitempty"\`` — the Go side only ever decodes
+  this message, since the game server, not the gateway, produces it.
+
 - **`EntitySnapshot.Speed` — per-entity movement speed on the wire (`wire.proto`
   field 9), for client-side prediction.** Closes
   [#91](https://github.com/Cuvara/rpg-mmo-server/issues/91), which was the last

@@ -161,6 +161,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 			return wrapUnmarshal(v, err)
 		}
 		t.OK, t.UserID, t.Error = pb.Ok, pb.UserId, pb.Error
+		t.TickRate = pb.TickRate
 
 	case *InputMessage:
 		var pb wirepb.InputMessage
@@ -268,7 +269,7 @@ func enterWorldRespPB(t EnterWorldResponse) *wirepb.EnterWorldResponse {
 }
 
 func joinTokenRespPB(t JoinTokenResponse) *wirepb.JoinTokenResponse {
-	return &wirepb.JoinTokenResponse{Ok: t.OK, UserId: t.UserID, Error: t.Error}
+	return &wirepb.JoinTokenResponse{Ok: t.OK, UserId: t.UserID, Error: t.Error, TickRate: t.TickRate}
 }
 
 func transferMapRespPB(t TransferMapResponse) *wirepb.TransferMapResponse {

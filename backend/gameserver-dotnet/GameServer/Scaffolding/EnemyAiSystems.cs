@@ -36,6 +36,13 @@ internal sealed class EnemySpawnSystem : IEcsSystem
 
     public int Order => (int)EnemyAiPhase.Spawn;
 
+    /// <summary>
+    /// World. Wave cadence is a world-simulation concern measured in seconds, and its
+    /// accumulator is stepped by the world dt, so the wall-clock interval is unchanged by
+    /// the base rate.
+    /// </summary>
+    public SimulationGroup Group => SimulationGroup.World;
+
     public ComponentAccess Access => new(
         writes: new[] { typeof(EnemySpawnState) },
         structural: true);
@@ -115,6 +122,14 @@ internal sealed class EnemyMoveSystem : IEcsSystem
     public string Name => "enemy.move";
 
     public int Order => (int)EnemyAiPhase.Move;
+
+    /// <summary>
+    /// World. Enemies are not prediction-relevant — no client predicts them — so stepping
+    /// them four times more often would buy nothing a client can observe while costing a
+    /// full chunk walk per base tick. It is also what keeps this system's arithmetic on the
+    /// same floats: <c>EnemyAiCharacterizationTests</c> pins one 15Hz step bit-exactly.
+    /// </summary>
+    public SimulationGroup Group => SimulationGroup.World;
 
     public ComponentAccess Access => new(
         reads: new[] { typeof(Health) },
@@ -196,6 +211,15 @@ internal sealed class EnemyReapSystem : IEcsSystem
     public string Name => "enemy.reap";
 
     public int Order => (int)EnemyAiPhase.Reap;
+
+    /// <summary>
+    /// World, and deliberately <b>not</b> Background despite looking like cleanup. Reaping
+    /// is what stops a dead or centre-arrived enemy from being observable — it must run in
+    /// the same pass that moved it and before the snapshot is built. At 5Hz an enemy would
+    /// stay visible inside the despawn radius for up to 200ms, which is a gameplay
+    /// regression wearing the costume of a performance win.
+    /// </summary>
+    public SimulationGroup Group => SimulationGroup.World;
 
     public ComponentAccess Access => new(
         reads: new[] { typeof(Position), typeof(Health) },

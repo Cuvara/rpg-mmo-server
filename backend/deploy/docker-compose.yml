@@ -235,6 +235,15 @@ services:
       GAMESERVER_MODE: map
       GAMESERVER_MAP_ID: ${GAMESERVER_MAP_ID:-map_01}
       GAMESERVER_ID: ${GAMESERVER_ID:-gs-dotnet-${GAMESERVER_MAP_ID:-map_01}}
+      # Multi-rate simulation. SIM_CRITICAL_HZ is the BASE tick rate; the other
+      # two must divide it exactly and must not exceed it, or the server exits
+      # with code 2 at startup rather than rounding. Snapshots are broadcast at
+      # the WORLD rate, not the base rate — raising SIM_WORLD_HZ raises outbound
+      # bandwidth per client proportionally. See
+      # backend/gameserver-dotnet/docs/README.md and docs/DESIGN.md.
+      SIM_CRITICAL_HZ: ${SIM_CRITICAL_HZ:-60}
+      SIM_WORLD_HZ: ${SIM_WORLD_HZ:-15}
+      SIM_BACKGROUND_HZ: ${SIM_BACKGROUND_HZ:-5}
       # /metrics + /healthz. Binds the wildcard, so it answers on any Host —
       # scraped in-network as gameserver-dotnet:9101 and from the host as
       # 127.0.0.1:9101, with no `Host:` header trickery on either path.

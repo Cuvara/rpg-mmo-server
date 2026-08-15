@@ -118,6 +118,28 @@ public struct InputCursor
     /// <summary>Last processed input tick (monotonic).</summary>
     public ulong LastInputTick;
 
+    /// <summary>X of the most recently accepted movement direction.</summary>
+    /// <remarks>
+    /// Held so the critical group can keep integrating between input packets. A client
+    /// sends at its own rate — the smoke client sends 10 per second — and without this the
+    /// server would step that player only 10 times a second while simulating 60, which
+    /// makes movement speed a function of the client's send rate. The wire field is a
+    /// direction with no expiry of its own, so the expiry is the server's:
+    /// <see cref="HeldFromTick"/> plus one world interval. See
+    /// <c>InputHandler.ApplyHeldMovement</c>.
+    /// <para>Server-side only. It is not part of <c>EntityState</c> and never reaches the
+    /// wire.</para>
+    /// </remarks>
+    public float HeldMoveX;
+
+    /// <summary>Y of the most recently accepted movement direction.</summary>
+    public float HeldMoveY;
+
+    /// <summary>
+    /// Base tick on which the held direction was accepted. Zero means "nothing held".
+    /// </summary>
+    public ulong HeldFromTick;
+
     public InputCursor(ulong lastInputTick) => LastInputTick = lastInputTick;
 }
 

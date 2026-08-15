@@ -32,8 +32,20 @@ public sealed class GameMetrics : IDisposable
     /// <summary>Instrument name of the tick duration histogram (used for SDK views).</summary>
     public const string TickDurationInstrument = "gameserver.tick.duration";
 
+    /// <summary>
+    /// Instrument name for the per-group duration histogram. Public because
+    /// <see cref="MetricsEndpoint"/> registers an explicit bucket view for it, and a view
+    /// keyed off a string literal that drifted from the instrument would silently stop
+    /// applying.
+    /// </summary>
+    public const string GroupDurationInstrument = "gameserver.sim.group.duration";
+
     private readonly Meter _meter;
     private readonly Histogram<double> _tickDuration;
+    private readonly Histogram<double> _groupDuration;
+    private readonly Counter<long> _groupRuns;
+    private readonly Counter<long> _tickOverruns;
+    private readonly Counter<long> _backlogDropped;
     private readonly Counter<long> _snapshotsSent;
     private readonly Counter<long> _playerSaves;
     private readonly Counter<long> _eventsPublished;
@@ -43,6 +55,9 @@ public sealed class GameMetrics : IDisposable
     // Pre-built tag sets — never allocate per record call.
     private readonly TagList _mapTags;
     private readonly TagList _saveOkTags;
+    private readonly TagList _criticalTags;
+    private readonly TagList _worldTags;
+    private readonly TagList _backgroundTags;
     private readonly TagList _saveErrorTags;
     private readonly KeyValuePair<string, object?>[] _mapTagArray;
 
@@ -72,6 +87,10 @@ public sealed class GameMetrics : IDisposable
         _mapTags = new TagList { { "map_id", mapId } };
         _saveOkTags = new TagList { { "status", "ok" } };
         _saveErrorTags = new TagList { { "status", "error" } };
+
+        _criticalTags = new TagList { { "map_id", mapId }, { "group", "critical" } };
+        _worldTags = new TagList { { "map_id", mapId }, { "group", "world" } };
+        _backgroundTags = new TagList { { "map_id", mapId }, { "group", "background" } };
 
         _tickDuration = _meter.CreateHistogram<double>(
             TickDurationInstrument,
@@ -103,6 +122,33 @@ public sealed class GameMetrics : IDisposable
             description: "Keyframes requested by a client (MsgResync), i.e. a client that " +
                          "could not reconstruct state from the delta stream.");
 
+        // Per-group instruments. One instrument with a `group` label rather than three
+        // named instruments: the groups are configuration (SIM_*_HZ), so a metric name that
+        // encoded the group would have to change if a group were ever renamed, and a
+        // dashboard cannot sum across differently-named series. The TagLists are pre-built
+        // per group for the same reason every other TagList here is — no allocation on the
+        // tick thread.
+        _groupDuration = _meter.CreateHistogram<double>(
+            GroupDurationInstrument,
+            unit: "s",
+            description: "Wall-clock duration of one run of a simulation group, labelled by group.");
+
+        _groupRuns = _meter.CreateCounter<long>(
+            "gameserver.sim.group.runs",
+            description: "Times a simulation group has run, labelled by group. The ratio " +
+                         "between groups is the configured rate ratio, so a drift here is a " +
+                         "scheduler bug rather than a load symptom.");
+
+        _tickOverruns = _meter.CreateCounter<long>(
+            "gameserver.tick.overruns",
+            description: "Base ticks whose work exceeded the base period. A non-zero rate " +
+                         "means the configured SIM_CRITICAL_HZ is not sustainable on this host.");
+
+        _backlogDropped = _meter.CreateCounter<long>(
+            "gameserver.tick.backlog_dropped",
+            description: "Base ticks discarded because the loop fell too far behind wall " +
+                         "clock to recover. Simulation time is behind real time by this much.");
+
         _meter.CreateObservableGauge(
             "gameserver.players.online",
             ObservePlayersOnline,
@@ -128,6 +174,35 @@ public sealed class GameMetrics : IDisposable
     /// </summary>
     public void RecordTickDuration(long startTimestamp, long endTimestamp)
         => RecordTickDuration((endTimestamp - startTimestamp) / (double)Stopwatch.Frequency);
+
+    /// <summary>
+    /// Record one run of a simulation group, from a <see cref="Stopwatch.GetTimestamp"/>
+    /// pair. Increments the group's run counter as well, so the ratio between groups is
+    /// observable without deriving it from the histogram count.
+    /// </summary>
+    public void RecordGroupRun(GameServer.Server.SimulationGroup group, long startTimestamp, long endTimestamp)
+    {
+        double seconds = (endTimestamp - startTimestamp) / (double)Stopwatch.Frequency;
+        TagList tags = TagsFor(group);
+        _groupDuration.Record(seconds, tags);
+        _groupRuns.Add(1, tags);
+    }
+
+    /// <summary>Record a base tick whose work exceeded the base period.</summary>
+    public void RecordTickOverrun() => _tickOverruns.Add(1, _mapTags);
+
+    /// <summary>Record base ticks dropped because the loop could not catch up.</summary>
+    public void RecordTickBacklogDropped(long ticks)
+    {
+        if (ticks > 0) _backlogDropped.Add(ticks, _mapTags);
+    }
+
+    private TagList TagsFor(GameServer.Server.SimulationGroup group) => group switch
+    {
+        GameServer.Server.SimulationGroup.Critical => _criticalTags,
+        GameServer.Server.SimulationGroup.World => _worldTags,
+        _ => _backgroundTags,
+    };
 
     /// <summary>Record how many queued inputs a tick applied.</summary>
     public void RecordProcessedInputs(int count)

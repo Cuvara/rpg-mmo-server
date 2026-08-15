@@ -150,6 +150,15 @@ public sealed class MetricsEndpoint : IAsyncDisposable
                 .AddView(
                     GameMetrics.TickDurationInstrument,
                     new ExplicitBucketHistogramConfiguration { Boundaries = TickDurationBuckets })
+                // The group histogram needs its own view for the same reason the tick one
+                // does: the SDK's default boundaries start at 0 and step in units sized for
+                // milliseconds, while these values are recorded in seconds, so without this
+                // every observation lands in the lowest bucket and histogram_quantile over
+                // it returns nothing useful. Same boundaries as the tick, because a group's
+                // duration is bounded by the tick's and the two are read together.
+                .AddView(
+                    GameMetrics.GroupDurationInstrument,
+                    new ExplicitBucketHistogramConfiguration { Boundaries = TickDurationBuckets })
                 .AddPrometheusHttpListener(options =>
                 {
                     // OpenTelemetry builds its listener prefix as

@@ -62,6 +62,19 @@ spec:
                 # gateway's JOIN_TOKEN_SECRET, and is deliberately NOT JWT_SECRET.
                 - name: JOIN_TOKEN_SECRET
                   value: "dev-join-secret-change-me"
+                # Multi-rate simulation. SIM_CRITICAL_HZ is the BASE tick rate;
+                # the other two must divide it exactly and must not exceed it, or
+                # the container exits 2 at startup instead of rounding — which
+                # Agones sees as a crash-looping GameServer, not as a silently
+                # wrong rate. Snapshots are broadcast at the WORLD rate, so
+                # SIM_WORLD_HZ is what moves bandwidth per client.
+                # See backend/gameserver-dotnet/docs/README.md.
+                - name: SIM_CRITICAL_HZ
+                  value: "60"
+                - name: SIM_WORLD_HZ
+                  value: "15"
+                - name: SIM_BACKGROUND_HZ
+                  value: "5"
                 - name: REDIS_ADDR
                   value: "host.docker.internal:6379"
                 # Leave GAME_DB_URL unset => in-memory player store. To persist:

@@ -26,7 +26,7 @@ public sealed class TickLoop
     private readonly InputHandler _handler;
     private readonly ConnectionManager _connections;
     private readonly ISimulationPhase? _simulationPhase;
-    private readonly int _tickRate;
+    private readonly SimulationRates _rates;
     private readonly float _aoiRadius;
     private readonly int _keyframeInterval;
     private readonly ILogger _logger;
@@ -71,6 +71,11 @@ public sealed class TickLoop
     public ulong CurrentTick => _currentTick;
 
 
+    /// <summary>
+    /// Single-rate construction: every group runs at <paramref name="tickRate"/>. This is
+    /// the pre-multi-rate loop exactly — one timeline, snapshots every tick — and is what
+    /// the existing tick-sensitive tests build.
+    /// </summary>
     public TickLoop(
         EcsWorld world,
         InputHandler handler,
@@ -81,18 +86,42 @@ public sealed class TickLoop
         GameMetrics? metrics = null,
         int keyframeInterval = GameConstants.DefaultKeyframeInterval,
         ISimulationPhase? simulationPhase = null)
+        : this(world, handler, connections, SimulationRates.Uniform(tickRate), aoiRadius,
+               logger, metrics, keyframeInterval, simulationPhase)
+    {
+    }
+
+    public TickLoop(
+        EcsWorld world,
+        InputHandler handler,
+        ConnectionManager connections,
+        SimulationRates rates,
+        float aoiRadius,
+        ILogger logger,
+        GameMetrics? metrics = null,
+        int keyframeInterval = GameConstants.DefaultKeyframeInterval,
+        ISimulationPhase? simulationPhase = null)
     {
         _world = world;
         _handler = handler;
         _connections = connections;
         _simulationPhase = simulationPhase;
-        _tickRate = tickRate;
+        _rates = rates;
         _aoiRadius = aoiRadius;
         _logger = logger;
         _metrics = metrics;
         _keyframeInterval = keyframeInterval;
         _gatherViews = GatherViews;
     }
+
+    /// <summary>The rate configuration this loop runs.</summary>
+    public SimulationRates Rates => _rates;
+
+    /// <summary>
+    /// Whether the world group — and therefore the snapshot broadcast — is due on the
+    /// current base tick. Diagnostics and tests.
+    /// </summary>
+    public bool WorldDueNow => _rates.RunsOn(SimulationGroup.World, _currentTick);
 
     /// <summary>
     /// Phase A of the broadcast: read every viewer's anchor and AOI out of the world,
@@ -106,37 +135,88 @@ public sealed class TickLoop
         }
     }
 
+    /// <summary>
+    /// How far behind schedule the loop may fall before it gives up on the backlog,
+    /// resynchronises to now, and counts the ticks it dropped.
+    ///
+    /// <para>The alternative — running the missed ticks back to back — is the unbounded
+    /// catch-up loop: each catch-up tick costs more than the budget it is trying to
+    /// reclaim, so a server that falls behind falls further behind, and the mechanism meant
+    /// to preserve real-time pacing is what stops it recovering. This loop drops the lost
+    /// time instead. Simulation time then runs slower than wall time under sustained
+    /// overload, which is a visible, bounded, measurable failure rather than a spiral.</para>
+    /// </summary>
+    private const int MaxLagTicks = 8;
+
     /// <summary>Run the tick loop until cancellation.</summary>
     public async Task RunAsync(CancellationToken ct)
     {
-        int tickMs = 1000 / _tickRate;
-        _logger.LogInformation("Tick loop starting: {TickRate}Hz ({TickMs}ms budget)", _tickRate, tickMs);
+        // Period in Stopwatch ticks, not integer milliseconds. 1000/60 truncates to 16ms,
+        // which is a 4% fast clock — 2.4 extra ticks a second, and every duration expressed
+        // in ticks silently short by the same factor. The old loop could afford the
+        // truncation at 15Hz (1000/15 is exact); the base rate cannot.
+        long periodTicks = Stopwatch.Frequency / _rates.BaseHz;
+        double periodMs = 1000.0 / _rates.BaseHz;
 
-        var sw = new Stopwatch();
+        _logger.LogInformation(
+            "Tick loop starting: base {BaseHz}Hz ({PeriodMs:F2}ms budget), {Rates}",
+            _rates.BaseHz, periodMs, _rates);
+
+        long nextDeadline = Stopwatch.GetTimestamp() + periodTicks;
 
         while (!ct.IsCancellationRequested)
         {
-            sw.Restart();
+            long tickStart = Stopwatch.GetTimestamp();
 
             TickOnce();
 
-            sw.Stop();
-            int elapsed = (int)sw.ElapsedMilliseconds;
-            int remaining = tickMs - elapsed;
+            long now = Stopwatch.GetTimestamp();
+            double elapsedMs = (now - tickStart) * 1000.0 / Stopwatch.Frequency;
 
+            if (elapsedMs > periodMs)
+            {
+                _metrics?.RecordTickOverrun();
+                if (elapsedMs > periodMs * 2)
+                {
+                    _logger.LogWarning(
+                        "Tick {Tick} overran the base budget: {Elapsed:F1}ms > {Budget:F2}ms",
+                        _currentTick, elapsedMs, periodMs);
+                }
+            }
+
+            long remaining = nextDeadline - now;
             if (remaining > 0)
             {
-                try { await Task.Delay(remaining, ct); }
-                catch (OperationCanceledException) { break; }
+                int delayMs = (int)(remaining * 1000 / Stopwatch.Frequency);
+                if (delayMs > 0)
+                {
+                    try { await Task.Delay(delayMs, ct); }
+                    catch (OperationCanceledException) { break; }
+                }
+                nextDeadline += periodTicks;
+                continue;
             }
-            else if (elapsed > tickMs * 2)
+
+            // Behind schedule. Advance the deadline without sleeping, so a single slow tick
+            // is absorbed by the next few. Past MaxLagTicks the backlog is unrecoverable
+            // and is dropped in one step rather than chased.
+            long lagTicks = (-remaining) / periodTicks;
+            if (lagTicks >= MaxLagTicks)
             {
-                _logger.LogWarning("Tick {Tick} overran budget: {Elapsed}ms > {Budget}ms",
-                    _currentTick, elapsed, tickMs);
+                _metrics?.RecordTickBacklogDropped(lagTicks);
+                _logger.LogWarning(
+                    "Simulation is {Lag} base ticks behind wall clock; dropping the backlog " +
+                    "and resynchronising. Simulation time is now behind real time.",
+                    lagTicks);
+                nextDeadline = now + periodTicks;
+            }
+            else
+            {
+                nextDeadline += periodTicks;
             }
         }
 
-        _logger.LogInformation("Tick loop stopped at tick {Tick}", _currentTick);
+        _logger.LogInformation("Tick loop stopped at base tick {Tick}", _currentTick);
     }
 
     /// <summary>Execute a single tick. Exposed for testing.</summary>
@@ -154,6 +234,16 @@ public sealed class TickLoop
         // of a lock release. Normally a no-op: the network threads' spawn/despawn
         // paths take the world write lock and so cannot overlap an iteration.
         _world.ApplyStructuralChanges();
+
+        // ── Critical group ────────────────────────────────────────────────────────
+        //
+        // Input, movement and combat, every base tick. It is timed here rather than
+        // through the schedule's per-group observer because this work is not yet a
+        // declared IEcsSystem — it runs in the loop body. Recording it under the same
+        // `group="critical"` label as a declared system would is what keeps the metric
+        // honest: the group's cost is reported whether or not its work has been
+        // system-ified yet, so the dashboard does not silently lose the busiest group.
+        long criticalStart = Stopwatch.GetTimestamp();
 
         // Drain and process all pending inputs under one world Update. The drain reuses
         // _inputs, and every entry already carries the entity handle resolved at ingest.
@@ -198,7 +288,19 @@ public sealed class TickLoop
                     bool applyMovement = _newestInputIndex[pi.Handle] == i;
                     _handler.ProcessInput(writer, in pi, _currentTick, applyMovement);
                 }
+
+                // Same scope: players who sent nothing this tick still advance on their
+                // held direction. Inside the input scope rather than in one of its own so
+                // the whole critical group is one write lock per base tick.
+                _handler.ApplyHeldMovement(writer, _currentTick, _rates.WorldEvery);
             });
+        }
+        else if (_rates.WorldEvery > 1)
+        {
+            // No packets arrived at all this tick — common at 60Hz base with clients
+            // sending at 10-15Hz — but held directions still have to be integrated.
+            _world.UpdateComponents(writer =>
+                _handler.ApplyHeldMovement(writer, _currentTick, _rates.WorldEvery));
         }
 
         // Enemy AI: spawn, move, reap — three systems in EnemyAiPhase order, sharing one
@@ -207,6 +309,11 @@ public sealed class TickLoop
         // draining them after the lock was released is gone. Either way the removals are
         // applied before the snapshot broadcast below, which is what stops a client from
         // ever seeing an enemy inside the despawn zone.
+        _metrics?.RecordGroupRun(SimulationGroup.Critical, criticalStart, Stopwatch.GetTimestamp());
+
+        // The phase runs the declared systems of whichever groups are due on this base
+        // tick, in Critical -> World -> Background order. It no-ops on a tick where none
+        // are due, so at 60/15/5 three ticks in four never take the world write lock here.
         _simulationPhase?.Tick(_currentTick);
 
         // ── Snapshot broadcast, in two phases ──────────────────────────────────
@@ -221,6 +328,28 @@ public sealed class TickLoop
         // view, which is the property that would let phase B move off the tick thread
         // entirely. That move is NOT done here (see BENCHMARK.md section 9); this only
         // stops the tick's structure from being the thing that prevents it.
+        // ── Replication cadence is the WORLD rate, not the base rate ───────────────
+        //
+        // Simulating at 60Hz does not mean replicating at 60Hz, and the two must not be
+        // allowed to become the same number by accident. Sending every base tick would
+        // quadruple outbound bandwidth per client — the measured 45.9 KB/s at 200 players
+        // (BENCHMARK.md) would leave the < 50 KB/s mobile budget ADR-7 sets — to deliver
+        // state the client interpolates across anyway. It would also silently redefine the
+        // keyframe interval, which counts snapshots: 30 snapshots is 2 seconds at 15Hz and
+        // 0.5s at 60Hz, so the same constant would quadruple full-keyframe bandwidth on top.
+        //
+        // Gating here keeps both properties: snapshots ship at the world rate, and the
+        // keyframe interval keeps meaning what its comment says.
+        if (!_rates.RunsOn(SimulationGroup.World, _currentTick))
+        {
+            if (_metrics != null)
+            {
+                _metrics.RecordProcessedInputs(inputs.Count);
+                _metrics.RecordTickDuration(startTimestamp, Stopwatch.GetTimestamp());
+            }
+            return;
+        }
+
         int viewers = _connections.CopyTo(_viewers);
         if (viewers > _viewers.Length)
         {
