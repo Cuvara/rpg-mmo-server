@@ -128,8 +128,10 @@ public sealed class InputHandler
     /// </param>
     public void ApplyHeldMovement(WorldWriter writer, ulong baseTick, int holdTicks)
     {
-        if (holdTicks <= 1) return;
-
+        // Note the loop below still runs when holdTicks <= 1. There is no held movement to
+        // apply at a uniform rate, but the stopped-player pass still has to advance
+        // LastMoveTick, or a deliberate pause banks time in exactly the configuration
+        // staging runs.
         int count = writer.QueryWith<PlayerTag>(_playerHandles);
         if (count > _playerHandles.Length)
         {
@@ -144,7 +146,25 @@ public sealed class InputHandler
             if (!writer.IsAlive(in handle)) continue;
 
             ref InputCursor cursor = ref writer.InputCursorOf(in handle);
-            if (cursor.HeldFromTick == 0) continue;          // nothing held
+
+            // Nothing held. HeldFromTick is zeroed only by an explicit stop -- an expired
+            // hold leaves it set -- so this branch is exactly "the player told us they
+            // stopped, and we heard them". Keep LastMoveTick current so no banked time
+            // accrues while they stand still.
+            //
+            // Without this, StepDeltaTime pays back the whole pause on the next input:
+            // the elapsed-time rule (#100) exists to refund time lost to the NETWORK, and
+            // a deliberate pause lost nothing. Measured at 1.36 world units in one step
+            // against an ordinary 0.083, which a player reads as a lurch on every restart.
+            // Advancing it here rather than at the moment of the stop is the difference
+            // that matters: the pause itself is what accumulates, not its first tick.
+            if (cursor.HeldFromTick == 0)
+            {
+                cursor.LastMoveTick = baseTick;
+                continue;
+            }
+
+            if (holdTicks <= 1) continue;                    // no held movement to apply
             if (cursor.HeldFromTick == baseTick) continue;   // already stepped this tick
             if (baseTick - cursor.HeldFromTick >= (ulong)holdTicks) continue; // expired
 
@@ -293,6 +313,16 @@ public sealed class InputHandler
                 // released the stick" and "the client went quiet": the first must stop the
                 // entity now, the second is what the hold window is for.
                 cursor.HeldFromTick = 0;
+
+                // The same distinction applies to banked time, and for the same reason.
+                // StepDeltaTime pays back (baseTick - LastMoveTick) so that packets lost or
+                // coalesced away do not cost the player distance. A player standing still
+                // lost nothing: they told us to stop, and we heard them. Leaving LastMoveTick
+                // behind treats every deliberate pause as a network stall, so the next input
+                // discharges the whole capped window in a single step -- measured at 1.36
+                // world units against a normal 0.083, which reads to a player as a lurch on
+                // every restart rather than as anything to do with the network.
+                cursor.LastMoveTick = currentTick;
             }
             else if (moveResult == MoveResult.Rejected)
             {

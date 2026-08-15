@@ -295,10 +295,15 @@ public sealed class TickLoop
                 _handler.ApplyHeldMovement(writer, _currentTick, _rates.WorldEvery);
             });
         }
-        else if (_rates.WorldEvery > 1)
+        else
         {
             // No packets arrived at all this tick — common at 60Hz base with clients
             // sending at 10-15Hz — but held directions still have to be integrated.
+            //
+            // Called unconditionally rather than only when WorldEvery > 1: with a uniform
+            // rate there is no held movement to apply, but the pass also keeps
+            // LastMoveTick current for players who explicitly stopped, and without that a
+            // deliberate pause banks time in exactly the configuration staging runs.
             _world.UpdateComponents(writer =>
                 _handler.ApplyHeldMovement(writer, _currentTick, _rates.WorldEvery));
         }

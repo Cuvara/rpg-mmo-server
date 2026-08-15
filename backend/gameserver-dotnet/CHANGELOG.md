@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **A deliberate stop banked movement as if it were packet loss, so every restart
+  lurched.** The elapsed-time step (#100) refunds `baseTick - LastMoveTick` so that
+  packets lost or coalesced away do not cost a player distance. A player who releases
+  the key lost nothing — the server receives the deadzone input and knows it — but
+  `LastMoveTick` was left behind, so standing still accrued banked time and the next
+  input discharged the whole capped window in one step: **1.36 world units against an
+  ordinary 0.083, measured on a live build**. Total distance was correct throughout,
+  which is why nothing caught it; what was wrong was the rate of delivery, and no test
+  asked how many frames a distance arrived over.
+
+  `ApplyHeldMovement` now keeps `LastMoveTick` current for players whose
+  `HeldFromTick` is zero. That field is zeroed **only** by an explicit stop — an expired
+  hold leaves it set — so the distinction is exact: silence the server was told about
+  banks nothing, silence it was not told about still banks, and #100 stays closed.
+  Advancing it there rather than at the moment of the stop is what matters: the pause
+  itself accumulates, not its first tick.
+
+  `TickLoop` now calls `ApplyHeldMovement` on packet-less ticks unconditionally rather
+  than only when `WorldEvery > 1`. With a uniform rate there is no held movement to
+  apply, but the stopped-player pass still has to run — without it the defect survived
+  in exactly the configuration `staging` runs.
+
+
 ### Added
 - **`Shared.GameLogic` released as `sgl-v0.1.8`**, carrying `GameConstants.MaxBankedMovementTicks`
   — the cap on how much elapsed simulated time a step may bank, added by the elapsed-time
