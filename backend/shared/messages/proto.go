@@ -161,6 +161,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 			return wrapUnmarshal(v, err)
 		}
 		t.OK, t.UserID, t.Error = pb.Ok, pb.UserId, pb.Error
+		t.TickRate = pb.TickRate
 
 	case *InputMessage:
 		var pb wirepb.InputMessage
@@ -195,6 +196,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 					HP:     int(e.Hp),
 					MaxHP:  int(e.MaxHp),
 					Handle: e.Handle,
+					Speed:  e.Speed,
 				}
 			}
 			t.Entities = ents
@@ -267,7 +269,7 @@ func enterWorldRespPB(t EnterWorldResponse) *wirepb.EnterWorldResponse {
 }
 
 func joinTokenRespPB(t JoinTokenResponse) *wirepb.JoinTokenResponse {
-	return &wirepb.JoinTokenResponse{Ok: t.OK, UserId: t.UserID, Error: t.Error}
+	return &wirepb.JoinTokenResponse{Ok: t.OK, UserId: t.UserID, Error: t.Error, TickRate: t.TickRate}
 }
 
 func transferMapRespPB(t TransferMapResponse) *wirepb.TransferMapResponse {
@@ -334,6 +336,7 @@ func snapshotPB(t SnapshotMessage) *wirepb.SnapshotMessage {
 				Hp:     int32(e.HP),
 				MaxHp:  int32(e.MaxHP),
 				Handle: e.Handle,
+				Speed:  e.Speed,
 			}
 			// Enum when we can (2 bytes), name when we cannot (2 + len). Never
 			// both: the reader prefers the enum, so setting both would make the

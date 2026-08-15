@@ -38,6 +38,10 @@ internal static class JsonWriter
             w.WriteBoolean("ok"u8, m.Ok);
             if (m.UserId.Length > 0) w.WriteString("user_id"u8, m.UserId);
             if (m.Error.Length > 0) w.WriteString("error"u8, m.Error);
+            // Omitted when 0, matching protobuf's default-is-absent behaviour so the two
+            // encodings carry the same information: absent means "not supplied", and a
+            // client must refuse to predict rather than assume a rate (#93).
+            if (m.TickRate > 0) w.WriteNumber("tick_rate"u8, m.TickRate);
             w.WriteEndObject();
         }
         return buffer.WrittenSpan.ToArray();
@@ -69,6 +73,7 @@ internal static class JsonWriter
                 w.WriteNumber("y"u8, e.Y);
                 w.WriteNumber("hp"u8, e.Hp);
                 w.WriteNumber("max_hp"u8, e.MaxHp);
+                w.WriteNumber("speed"u8, e.Speed);
                 w.WriteEndObject();
             }
             w.WriteEndArray();
@@ -222,10 +227,12 @@ internal static class JsonReader
             bool ok = r.ValueTextEquals("ok"u8);
             bool userId = r.ValueTextEquals("user_id"u8);
             bool error = r.ValueTextEquals("error"u8);
+            bool tickRate = r.ValueTextEquals("tick_rate"u8);
             if (!r.Read()) break;
             if (ok) m.Ok = r.TokenType == JsonTokenType.True;
             else if (userId) m.UserId = r.GetString() ?? "";
             else if (error) m.Error = r.GetString() ?? "";
+            else if (tickRate) m.TickRate = r.GetUInt32();
             else r.Skip();
         }
         return m;
@@ -290,6 +297,7 @@ internal static class JsonReader
                 bool y = r.ValueTextEquals("y"u8);
                 bool hp = r.ValueTextEquals("hp"u8);
                 bool maxHp = r.ValueTextEquals("max_hp"u8);
+                bool speed = r.ValueTextEquals("speed"u8);
                 if (!r.Read()) break;
                 if (id) e.Id = r.GetString() ?? "";
                 else if (type) EntityTypes.SetType(e, r.GetString());
@@ -297,6 +305,7 @@ internal static class JsonReader
                 else if (y) e.Y = r.GetSingle();
                 else if (hp) e.Hp = r.GetInt32();
                 else if (maxHp) e.MaxHp = r.GetInt32();
+                else if (speed) e.Speed = r.GetSingle();
                 else r.Skip();
             }
             m.Entities.Add(e);

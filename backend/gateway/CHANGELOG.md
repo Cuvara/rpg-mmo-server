@@ -6,6 +6,42 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Per-request logging for the client handshake — the gateway was invisible.**
+  A live run of the netcode sample completed a full handshake (Nakama device
+  auth → `gateway_token` → map assignment → direct join → snapshots streaming)
+  and the gateway's entire log for it was **zero lines**; its whole log was 9
+  lines since startup. The hop could only be evidenced *indirectly*, from the
+  client reporting the address it had been handed. A gateway that misbehaved
+  could not be diagnosed from the gateway.
+
+  A session now logs three info lines — `auth ok`, `enter world assigned`,
+  `client disconnected` — plus a `conn` correlation number on every line
+  (including the debug ones), so `grep '"conn":N'` reconstructs one session.
+  `enter world assigned` carries the map, server id, server address and
+  transport: the only record anywhere of where a client was sent. Failures that
+  were previously silent — a malformed auth frame, a rejected token, a session
+  store that would not write, an unassignable map — now say which one they were
+  via a `reason` field. Verified end to end against the live stack, not by
+  reading the code: a passing smoketest produced exactly the three lines, and a
+  gateway started with a mismatched `JWT_SECRET` produced
+  `auth failed reason=invalid_token`, which is the diagnosis the log previously
+  could not give.
+
+  **No credential is logged**: not the client JWT, not the issued join token,
+  not a signing secret. Both tokens are bearer credentials, so a log holding one
+  is a log that can be replayed into a session; failures report the verifier's
+  error (expired vs bad signature) rather than the token. `TestLogNeverContains
+  Credentials` scans a full handshake's log for all three and fails on a
+  substring match. User ids *are* logged, matching the game server, which prints
+  them on join.
+
+  **The level assignment is a volume decision.** At 200 concurrent clients a
+  line on a per-message path is a denial of service against the gateway's own
+  disk, so: auth and enter-world are once per session and are info; heartbeats
+  are the only frame a connected client repeats (20 frames/s at 200 clients) and
+  are not logged at all; a TCP accept is the one event an unauthenticated peer
+  can mint at will and stays at debug. Full table in `docs/README.md`.
+
 - **`MsgKick` is now emitted on eviction, alongside `MsgDisconnect`.** Type 15
   had been defined in `wire.proto` with working codecs on both the Go and C#
   sides since it was introduced, but nothing ever sent it. `kickLocalUser` now
@@ -34,6 +70,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   connection's `ReadLoop`.
 
 ### Fixed
+- **`unexpected message type` was a per-message warning.** It predates the
+  logging work above and fires once per inbound frame, so a client speaking the
+  wrong protocol — sending gameplay frames to the gateway, which is exactly the
+  ADR-3 mistake — would warn once per frame indefinitely. It, and the new
+  `auth failed` line (which a socket can drive by looping bad tokens), are now
+  latched: the first occurrence on a connection logs at its natural level and
+  the rest drop to debug. The per-connection message limiter bounds these but
+  does not make them safe — its default of 60 frames/s still permits 60 log
+  lines a second from one socket.
+
 - **`docs/API.md` documented a `JOIN_TOKEN_SECRET` fallback that no longer
   exists, and recommended it.** The join-token section said an unset
   `JOIN_TOKEN_SECRET` falls back to `JWT_SECRET` "because `gameserver-dotnet`

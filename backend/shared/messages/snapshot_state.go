@@ -45,9 +45,11 @@ func NewSnapshotState() *SnapshotState {
 // moves backwards.
 //
 // Returns ErrUnknownHandle when a delta references an interned handle this state
-// has no binding for. The state is left untouched in that case: a partially
-// applied snapshot is worse than an unapplied one, because it looks like valid
-// state. The caller must request a keyframe (MsgResync) and apply that instead.
+// has no binding for, or when a KEYFRAME carries a bare handle at all (which a
+// well-formed sender never emits). The state is left untouched in either case: a
+// partially applied snapshot is worse than an unapplied one, because it looks
+// like valid state. The caller must request a keyframe (MsgResync) and apply
+// that instead.
 func (s *SnapshotState) Apply(msg SnapshotMessage) error {
 	if s.Entities == nil {
 		s.Entities = make(map[string]EntitySnapshot)
@@ -61,11 +63,22 @@ func (s *SnapshotState) Apply(msg SnapshotMessage) error {
 	resolved := make([]EntitySnapshot, len(msg.Entities))
 	for i, e := range msg.Entities {
 		if e.Handle != 0 && e.ID == "" {
+			// A KEYFRAME must introduce every binding it uses, so a bare handle
+			// here means the sender is malformed. Reject it WITHOUT consulting
+			// the table: those bindings belong to the interval this keyframe is
+			// ending, so resolving against them would silently attach this
+			// entity to whatever held the same handle number last interval —
+			// the wrong-entity corruption interning is most likely to cause,
+			// and the one nothing downstream can detect. The check can never
+			// fire on valid input: a sender clears its handle table and
+			// restarts numbering before encoding a keyframe, so every entity in
+			// one carries both id and handle.
+			if msg.Full {
+				return fmt.Errorf("handle %d on keyframe at tick %d (a keyframe must carry the id): %w",
+					e.Handle, msg.Tick, ErrUnknownHandle)
+			}
 			id, ok := s.handles[e.Handle]
 			if !ok {
-				// On a keyframe this cannot legitimately happen: a keyframe
-				// re-introduces every binding. If it does, the sender is wrong
-				// rather than us, and the same recovery applies.
 				return fmt.Errorf("handle %d at tick %d: %w", e.Handle, msg.Tick, ErrUnknownHandle)
 			}
 			e.ID = id

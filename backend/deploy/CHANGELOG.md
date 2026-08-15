@@ -48,6 +48,50 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   makes an isolated second stack expressible.
 
 ### Fixed
+- **CD generated a hostless `GAMESERVER_PUBLIC_ADDR`, silently reintroducing the
+  bug it was supposed to deploy the fix for.** `cd.yml`'s env-file generator
+  defaulted the value to `:${GAMESERVER_CONTAINER_PORT}` whenever
+  `vars.GAMESERVER_PUBLIC_ADDR` was unset, on the same false premise corrected
+  elsewhere — that clients normalize a listen-style address to loopback. Only
+  some do: the Go smoketest rewrites it, a C# `TcpClient` throws on it. The
+  value reaches clients verbatim, so a hostless one fails two steps later, in
+  the client, where nobody looks.
+  This was not theoretical. A manual fix to the deployed artefact was overwritten
+  by the next CD run, which put `:9200` back into the live registry; the only
+  reason clients kept connecting was the defensive normalization on the client
+  side, which was never meant to be load-bearing.
+  The generator is now environment-aware and refuses to emit an undialable value:
+  - **dev** — defaults to `127.0.0.1:<port>` with a `::notice::`. The dev box is
+    the client's host, so loopback is correct there and nothing better can be
+    inferred without knowing the operator's network. The notice names the case
+    where it is wrong (a phone on the LAN) and how to override it.
+  - **staging / production** — no default. An unset value is a hard `::error::`
+    and the deploy fails, because loopback would tell every client to dial
+    itself and would do so silently.
+  - **any environment** — an explicitly set but hostless value is also rejected.
+    The host list (`""`, `0.0.0.0`, `::`, `[::]`) matches `NormalizeDialAddr` in
+    `backend/smoketest/smoke/helpers.go` so both ends agree on what counts as
+    listen-style. Bracketed IPv6 (`[2001:db8::1]:9200`) passes through unchanged.
+  Logic exercised across 11 input/environment combinations before landing.
+  The compose default is deliberately left hostless: `127.0.0.1` would be wrong
+  for a VPS, and the generator is the right place to make the decision because it
+  is the only layer that knows which environment it is deploying to.
+- **`GAMESERVER_PUBLIC_ADDR`'s comment documented the opposite of the actual
+  contract.** It claimed a bare `":9200"` "is normalized by the client to
+  127.0.0.1:9200, which is right for a local stack". That is not the contract:
+  `GameServer/Program.cs` states the advertised address is handed to clients
+  verbatim and so must be **dialable by the client**, and the repo's own
+  integration test configures a host-qualified value and asserts it comes back
+  unchanged (`backend/integration_test/selfreg_flow_test.go`). Only the Go
+  smoketest rewrites listen-style addresses, and it does so defensively for
+  arbitrary deploys — it is not a guarantee the protocol makes. Taking the old
+  comment at face value cost real debugging time: a C# `TcpClient` throws on a
+  hostless address where Go's `net.Dial` resolves it, so a Unity client failed
+  the second hop against a stack that looked correct. The comment now states the
+  real requirement (host-qualified whenever ports are published, bare `":port"`
+  only for host mode) and flags that the default value below it is hostless.
+
+### Fixed
 - **Scratch/second-stack configuration passed through exported environment
   variables was silently ignored.** On this project's dev box `docker` is a
   shell shim to the Windows `docker.exe` (`docs/CICD.md` §4a), and WSL only

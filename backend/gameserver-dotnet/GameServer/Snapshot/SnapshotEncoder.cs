@@ -24,7 +24,8 @@ public static class SnapshotEncoder
                 X = e.Position.X,
                 Y = e.Position.Y,
                 Hp = e.Hp,
-                MaxHp = e.MaxHp
+                MaxHp = e.MaxHp,
+                Speed = e.Speed
             };
             EntityTypes.SetType(ent, e.Type);
             msg.Entities.Add(ent);
@@ -37,5 +38,18 @@ public static class SnapshotEncoder
     public static List<EntityState> GetNearbyEntities(EcsWorld world, Vec2 center, float radius)
     {
         return world.GetEntitiesInRange(center, radius);
+    }
+
+    /// <summary>
+    /// Fill <paramref name="destination"/> with the entities within AOI radius of a
+    /// centre point, allocating nothing. Same count-don't-saturate overflow contract as
+    /// <see cref="EcsWorld.GetEntitiesInRange(Vec2, float, Span{EntityState})"/> and
+    /// <c>AoiLogic.GetNearbyEntities</c>: the return value is the total match count and
+    /// may exceed the buffer's length.
+    /// </summary>
+    public static int GetNearbyEntities(
+        EcsWorld world, Vec2 center, float radius, Span<EntityState> destination)
+    {
+        return world.GetEntitiesInRange(center, radius, destination);
     }
 }

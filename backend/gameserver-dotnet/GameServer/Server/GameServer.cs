@@ -5,6 +5,7 @@ using System.Net.Sockets;
 using Microsoft.Extensions.Logging;
 using Shared.GameLogic.Components;
 using GameServer.Agones;
+
 using GameServer.Events;
 using GameServer.Input;
 using GameServer.Net;
@@ -35,7 +36,19 @@ public class ServerOptions
     public string ServerId { get; set; } = "";
     public string MapId { get; set; } = "map_01";
     public string Mode { get; set; } = "map"; // "map" or "dungeon"
+    /// <summary>
+    /// Legacy single-rate setting. When <see cref="SimulationRates"/> is null every group
+    /// runs at this rate, which is the pre-multi-rate server exactly.
+    /// </summary>
     public int TickRate { get; set; } = GameConstants.DefaultTickRate;
+
+    /// <summary>
+    /// The multi-rate configuration. Null means "derive a uniform configuration from
+    /// <see cref="TickRate"/>", which is what every existing test does and why none of them
+    /// changed behaviour.
+    /// </summary>
+    public SimulationRates? SimulationRates { get; set; }
+
     public int Capacity { get; set; } = 100;
     /// <summary>
     /// HS256 secret (or comma-separated rotation list) for the Nakama-issued
@@ -77,6 +90,41 @@ public class ServerOptions
     public IServerRegistry? ServerRegistry { get; set; }
 
     /// <summary>
+    /// Builds the per-tick simulation phase this host runs, or null for a host that
+    /// simulates nothing of its own and only relays whatever entities exist.
+    ///
+    /// <para>A factory rather than an instance because the phase needs the world, which
+    /// the host owns and creates. A factory rather than a flag because the core must not
+    /// name any particular gameplay: the composition root in <c>Program.cs</c> decides
+    /// what the game is, and this type stays content-agnostic. See
+    /// <see cref="ISimulationPhase"/>.</para>
+    ///
+    /// <para>Default null. Tests and custom scenarios opt in explicitly.</para>
+    /// </summary>
+    public Func<EcsWorld, ILoggerFactory, Action<SimulationGroup, long, long>?, ISimulationPhase>?
+        SimulationPhaseFactory { get; set; }
+
+    /// <summary>
+    /// Supplies the number published as <c>enemies_alive</c> on the status endpoint.
+    ///
+    /// <para>Set by the composition root, which knows what the game is. Null means the
+    /// server publishes 0 — a content-free build has nothing to count, which is the
+    /// correct answer rather than a missing feature.</para>
+    ///
+    /// <para>This replaced an <c>ISimulationPhase.TrackedEntityCount</c> member. That put
+    /// the number behind a content-agnostic interface whose only consumer immediately
+    /// renamed it after the content, and forced every future phase to summarise itself as
+    /// a single unlabelled int — which stops composing as soon as there are two.</para>
+    /// </summary>
+    public Func<EcsWorld, int>? StatusEntityCount { get; set; }
+
+    /// <summary>Nakama HTTP API base URL (e.g. <c>http://rpg-nakama:7350</c>). Null disables economy integration.</summary>
+    public string? NakamaUrl { get; set; }
+
+    /// <summary>Nakama <c>runtime.http_key</c> for server-to-server RPC calls.</summary>
+    public string NakamaHttpKey { get; set; } = "";
+
+    /// <summary>
     /// How this server describes itself in the registry. Required when
     /// <see cref="ServerRegistry"/> is set; ignored otherwise.
     /// </summary>
@@ -100,6 +148,7 @@ public sealed class GameServerHost : IAsyncDisposable
     private readonly IPlayerStore _playerStore;
     private readonly IAgonesSdk _agonesSdk;
     private readonly EventPublisher? _publisher;
+    private readonly Nakama.NakamaClient? _nakamaClient;
     private readonly GameMetrics? _metrics;
     private readonly ILogger _logger;
     /// <summary>Keyring join tokens are verified against (JOIN_TOKEN_SECRET).</summary>
@@ -108,10 +157,33 @@ public sealed class GameServerHost : IAsyncDisposable
     private readonly JtiTracker _jtiTracker = new();
     private readonly ILoggerFactory _loggerFactory;
 
+    /// <summary>
+    /// The resolved simulation rates. Held past the constructor because the join response
+    /// has to tell the client the CRITICAL rate to predict at (#93); without it the client
+    /// falls back to its own hardcoded guess and desyncs silently.
+    /// </summary>
+    private readonly SimulationRates _rates;
+
     private readonly RegistrationService? _registration;
 
     private ITransportListener? _listener;
     private CancellationTokenSource? _cts;
+
+    /// <summary>
+    /// Completed with the bound address once the listener is up, so a caller can learn the
+    /// port an ephemeral (":0") bind actually got. Faulted if the bind throws and cancelled
+    /// if the server shuts down before binding, so a waiter can never hang.
+    /// </summary>
+    private readonly TaskCompletionSource<string> _listening =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>
+    /// The address the listener is bound to ("127.0.0.1:54321"), available as soon as the
+    /// bind succeeds. Callers that listen on ":0" — tests, and any deployment that lets the
+    /// kernel pick — must await this instead of choosing a port up front: picking a port,
+    /// releasing it, and rebinding it later is a TOCTOU race another process can win.
+    /// </summary>
+    public Task<string> ListeningAddressAsync => _listening.Task;
 
     /// <summary>0 until the first ShutdownAsync caller wins the race, 1 afterwards.</summary>
     private int _shutdownStarted;
@@ -132,6 +204,21 @@ public sealed class GameServerHost : IAsyncDisposable
 
     /// <summary>Reconnect holds currently pending. Diagnostics and tests.</summary>
     public int PendingHolds => _holds.Count;
+
+    /// <summary>Current simulation tick number.</summary>
+    public ulong CurrentTick => _tickLoop.CurrentTick;
+
+    /// <summary>Number of enemies currently alive.</summary>
+    /// <summary>
+    /// The number the status endpoint publishes as <c>enemies_alive</c>.
+    ///
+    /// <para>The core does not compute it and does not know what it counts. The
+    /// composition root supplies <see cref="ServerOptions.StatusEntityCount"/> — it is
+    /// the one place that is allowed to know what the game is — and the property name is
+    /// kept because the Unity DOTS sample polls <c>/status</c> and reads that field. The
+    /// name is a wire contract; what fills it is not.</para>
+    /// </summary>
+    public int EnemiesAlive => _options.StatusEntityCount?.Invoke(_world) ?? 0;
 
     public GameServerHost(ServerOptions options)
     {
@@ -159,25 +246,56 @@ public sealed class GameServerHost : IAsyncDisposable
         _playerStore = options.PlayerStore ?? new MemoryPlayerStore();
         _agonesSdk = options.AgonesSdk ?? new NoopAgonesSdk();
 
+        if (!string.IsNullOrWhiteSpace(options.NakamaUrl))
+        {
+            _nakamaClient = new Nakama.NakamaClient(
+                options.NakamaUrl,
+                options.NakamaHttpKey,
+                _loggerFactory.CreateLogger<Nakama.NakamaClient>());
+        }
+
         var eventStream = options.EventStream ?? new NoopEventStream();
         _publisher = new EventPublisher(eventStream, _loggerFactory.CreateLogger<EventPublisher>(), _metrics);
+
+        SimulationRates rates = options.SimulationRates ?? SimulationRates.Uniform(options.TickRate);
+        _rates = rates;
 
         _inputHandler = new InputHandler(
             _world,
             _loggerFactory.CreateLogger<InputHandler>(),
             OnEntityDeath,
-            options.TickRate,
+            // MovementHz, which is also the value published as JoinTokenResponse.tick_rate:
+            // the rate a client predicts at has to be the rate this handler integrates at,
+            // and reading the same property in both places is what keeps them from drifting
+            // (docs/API.md, "tick_rate is the client's prediction rate").
+            //
+            // It is the base-timeline rate for a second reason too: the attack cooldown is
+            // counted in base ticks (Combat.CooldownUntilTick is compared against the base
+            // tick), so AttackCooldownTicks must be derived from the rate that advances it.
+            // Passing the world rate here would make a 500ms cooldown last 2s.
+            rates.MovementHz,
             options.MapBounds);
+
+        // The observer is handed to the phase at construction rather than set afterwards:
+        // a phase must hold no mutable instance state (ADR-12), and a settable observer is
+        // precisely that.
+        GameMetrics? metrics = _metrics;
+        Action<SimulationGroup, long, long>? onGroupRan = metrics == null
+            ? null
+            : (group, start, end) => metrics.RecordGroupRun(group, start, end);
+        ISimulationPhase? simulationPhase =
+            options.SimulationPhaseFactory?.Invoke(_world, _loggerFactory, onGroupRan);
 
         _tickLoop = new TickLoop(
             _world,
             _inputHandler,
             _connections,
-            options.TickRate,
+            rates,
             GameConstants.DefaultAoiRadius,
             _loggerFactory.CreateLogger<TickLoop>(),
             _metrics,
-            options.KeyframeInterval);
+            options.KeyframeInterval,
+            simulationPhase);
 
         _saver = new AsyncSaver(
             _playerStore,
@@ -210,10 +328,26 @@ public sealed class GameServerHost : IAsyncDisposable
 
         // Bind the configured transport. TCP and KCP both yield a reliable ordered
         // stream, so everything above the listener is transport-agnostic.
-        _listener = TransportFactory.Listen(_options.Transport, addr, _options.TransportKey, _logger);
+        try
+        {
+            _listener = TransportFactory.Listen(_options.Transport, addr, _options.TransportKey, _logger);
+        }
+        catch (Exception ex)
+        {
+            // Anyone awaiting ListeningAddressAsync must observe the bind failure rather
+            // than wait for an address that will never arrive.
+            _listening.TrySetException(ex);
+            throw;
+        }
 
         // Log the actual bound address (important when port=0 for ephemeral port allocation)
         var actualAddr = _listener.LocalEndPoint;
+
+        // Publish the bound address before anything else can await it. The socket is already
+        // listening at this point, so a client that connects on this signal lands in the
+        // accept backlog even if the accept loop has not started yet.
+        _listening.TrySetResult(actualAddr);
+
         _logger.LogInformation(
             "Game server listening on {Addr} via {Transport} (mode={Mode}, map={MapId}, id={ServerId})",
             actualAddr, _listener.Kind, _options.Mode, _options.MapId, _options.ServerId);
@@ -277,6 +411,10 @@ public sealed class GameServerHost : IAsyncDisposable
             // Closing the listener also tears down every live KCP session: unlike TCP
             // there is no socket per peer whose close the kernel would propagate.
             try { _listener?.Dispose(); } catch { /* ignore */ }
+
+            // If we are shutting down before the bind ever completed, release anyone waiting
+            // on the address instead of leaving them on a task that will never finish.
+            _listening.TrySetCanceled();
 
             // Drain the hold table by removal so each CTS has exactly one owner. The
             // reconnect path (HandleConnectionAsync) races us for the same entries and
@@ -483,8 +621,20 @@ public sealed class GameServerHost : IAsyncDisposable
             _logger.LogInformation("Player {UserId} joined (total: {Count})", userId, _connections.Count);
 
             // Step 5: Send JoinTokenResp
+            //
+            // TickRate is the CRITICAL rate, not the world rate: it is the cadence of
+            // input, movement integration and combat, which is exactly what the client
+            // predicts. The world rate governs the snapshot cadence, which the client
+            // observes from the snapshots themselves and does not have to be told.
+            //
+            // It rides only the success path. A rejected join has no session to predict
+            // in, and the caller has not proved it is entitled to anything, so answering
+            // an unauthenticated peer with the server's simulation configuration would be
+            // giving away tuning data for nothing. Absent means 0, which the schema
+            // defines as "refuse to predict" — the correct answer to a failed join.
             var resp = WireProtocol.NewEnvelope(MsgType.JoinTokenResp,
-                new JoinTokenResponse { Ok = true, UserId = userId }, conn.Encoding);
+                new JoinTokenResponse { Ok = true, UserId = userId, TickRate = (uint)_rates.MovementHz },
+                conn.Encoding);
             await conn.WriteOneAsync(resp);
 
             // Step 6: Start read/write loops + heartbeat
@@ -750,13 +900,19 @@ public sealed class GameServerHost : IAsyncDisposable
 
     private void OnEntityDeath(EntityState victim, EntityState killer)
     {
-        if (_publisher == null) return;
+        if (_publisher != null)
+        {
+            var payload = new DeathPayload(
+                victim.Id, victim.Type, killer.Id, _options.MapId, _options.ServerId);
+            _ = _publisher.PublishDeathAsync("entity_killed", payload);
+        }
 
-        var payload = new DeathPayload(
-            victim.Id, victim.Type, killer.Id, _options.MapId, _options.ServerId);
-
-        // Fire-and-forget
-        _ = _publisher.PublishDeathAsync("entity_killed", payload);
+        // Award gold + leaderboard score when a player kills a mob
+        if (_nakamaClient != null && killer.Type == "player" && victim.Type == "mob")
+        {
+            _ = _nakamaClient.RewardKillAsync(killer.Id, victim.Id, _options.MapId);
+            _ = _nakamaClient.SubmitKillAsync(killer.Id);
+        }
     }
 
     private static async Task SendError(Connection conn, string error)
@@ -785,6 +941,7 @@ public sealed class GameServerHost : IAsyncDisposable
         {
             await _registration.DisposeAsync();
         }
+        _nakamaClient?.Dispose();
         // Disposed only here, once the run loop is guaranteed done with it — disposing
         // it inside ShutdownAsync would hand RunAsync's background tasks a dead token
         // source while they are still unwinding.

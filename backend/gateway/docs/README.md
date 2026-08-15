@@ -153,6 +153,61 @@ All three Redis stores share one client/pool.
 
 See `shared/config` for the full list.
 
+## Logging
+
+Structured JSON on stdout (`shared/logger`, slog). `LOG_LEVEL` selects the
+level; the default is `info`.
+
+**One client session produces three info lines** — that is the whole budget,
+and it is deliberate. The gateway is not in the gameplay data path (ADR-3), so
+every event worth a line happens once per *session*, not once per message:
+
+```json
+{"level":"INFO","msg":"auth ok","conn":1,"user":"85330f00-…","ip":"127.0.0.1","dur_ms":2}
+{"level":"INFO","msg":"enter world assigned","conn":1,"user":"85330f00-…","map":"map_01","server":"gs-dotnet-map_01","server_addr":"127.0.0.1:9200","transport":"tcp","dur_ms":0}
+{"level":"INFO","msg":"client disconnected","conn":1,"user":"85330f00-…","ip":"127.0.0.1","dur_ms":6}
+```
+
+`conn` is a process-local connection number, not a durable id. Its only job is
+correlation: `grep '"conn":1'` returns one session's complete history,
+including the debug lines.
+
+| Event | Level | Frequency |
+|-------|-------|-----------|
+| `client connected` | debug | per TCP accept — anyone who can open a socket can mint it |
+| `auth ok` | info | once per session |
+| `auth failed` | warn (error for `reason=session_store`) | **first per connection**, then debug |
+| `enter world assigned` | info | once per session |
+| `enter world failed` | warn / error | once per attempt |
+| `duplicate login detected`, `client evicted` | info | once per eviction |
+| `session expired` | info | once per session (the identity is cleared with it) |
+| `client disconnect` / `client disconnected` | info when the connection had a session, else debug | once per session |
+| `unexpected message type` | warn | **first per connection**, then debug |
+| ping / pong | *not logged at all* | per message |
+
+Two rules produce that table:
+
+- **Nothing a client can repeat gets a line.** Heartbeats are the only frame a
+  connected client repeats, and at 200 clients on a 10s interval that is 20
+  frames a second; they are silent. The two rejection lines a client *could*
+  drive on demand — a socket looping bad tokens, or one sending gameplay frames
+  to the gateway — are latched to the first occurrence per connection, because
+  the message limiter's 60 frames/s default still permits 60 lines a second
+  from a single socket.
+- **Nothing an unauthenticated peer does reaches info.** A connect-and-say-
+  nothing scanner is debug-only; a client only earns info lines by presenting a
+  frame that verifies.
+
+**Credentials are never logged.** Not the client JWT, not the issued join
+token, not the signing secrets. Both tokens are bearer credentials: a log line
+holding one is a log line that can be replayed into a session. Auth failures
+carry a `reason` and the verifier's error (which says *why* a token was
+rejected without quoting it) instead. `TestLogNeverContainsCredentials` scans
+the log of a full handshake for all three and fails on a substring match.
+
+User ids *are* logged, consistently with the game server, which prints them on
+join — following one player across the two hops depends on it.
+
 ## Metrics
 
 A second listener (separate from the realtime port) serves Prometheus metrics

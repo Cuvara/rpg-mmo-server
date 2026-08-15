@@ -6,6 +6,105 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`JoinTokenResponse.TickRate` — the simulation tick rate on the wire
+  (`wire.proto` field 4).** Closes
+  [#93](https://github.com/Cuvara/rpg-mmo-server/issues/93), the same defect as #91
+  one field over. The tick rate was never sent: server and client agreed on 15Hz
+  only because two hardcoded literals, in two repositories, happened to match — and
+  the server could be moved off that value by configuration the client had no way to
+  observe. Set `SIM_CRITICAL_HZ=30` and you get a server that starts cleanly, a
+  client that joins and renders and logs nothing unusual, and a player who reports
+  rubber-banding. **Nothing in that chain fails**, and no test could catch it,
+  because the client was not wrong about anything it could see — it was never told.
+
+  `uint32 tick_rate = 4` on `JoinTokenResponse`, purely additive: no existing field
+  number or order moved, so old and new peers interoperate in both directions. The
+  value is the **CRITICAL** rate — the cadence of input, movement and combat, which
+  is what a client replays when it predicts — not the world rate that governs
+  snapshot cadence.
+
+  It rides the join response rather than the snapshot because the rate is
+  session-constant: the server reads it once at startup and never changes it, so
+  putting it on `SnapshotMessage` would pay bytes per player per tick forever to
+  re-send a number that cannot move. It is not on `EnterWorldResponse` because that
+  comes from the gateway, which does not run the simulation (ADR-3) and would become
+  a second source of truth for a value the game server owns.
+
+- **`tick_rate` absent or `0` means "not supplied", and a client must refuse to
+  predict.** proto3 elides a zero, so a pre-0.x server is indistinguishable from one
+  reporting 0Hz — which is not a rate. Receivers must **not** fall back to 15:
+  silently defaulting is exactly the assumption this field removes, and would
+  reintroduce the bug while looking like it had been fixed. The Go
+  `messages.JoinTokenResponse` mirror carries the field as
+  `TickRate uint32 \`json:"tick_rate,omitempty"\`` — the Go side only ever decodes
+  this message, since the game server, not the gateway, produces it.
+
+- **`EntitySnapshot.Speed` — per-entity movement speed on the wire (`wire.proto`
+  field 9), for client-side prediction.** Closes
+  [#91](https://github.com/Cuvara/rpg-mmo-server/issues/91), which was the last
+  silent failure mode in the client's prediction loop: prediction replays local input
+  through the same `Shared.GameLogic` movement code the server runs, that code needs
+  a speed, and nothing on the wire carried one. The client could only assume
+  `ServerDefaults.DefaultPlayerSpeed`. The assumption holds until anything changes a
+  player's speed — a buff, a mount, a slow — and then the two sides integrate
+  different distances every tick with **no error on either side**. It presents as
+  rubber-banding, which reads as a network problem and gets debugged in the wrong
+  layer.
+
+  `float speed = 9` — fixed32, so 5 bytes per entity per message with no varint
+  shrink for common values. Written on **every** mention including handle-only ones:
+  a receiver that resolves a handle expects complete state, and sending it only
+  beside the id would leave it correct once per keyframe interval and stale between.
+  Deliberately not interned — that would buy ~5 bytes and inherit the whole
+  handle-lifecycle contract for a value with no identity.
+
+- **`speed <= 0` means "not sent", not "immobile" — a rule, not an accident.**
+  proto3 elides a zero float, so a sender predating this field is indistinguishable
+  from a stationary entity. Receivers must fall back to a configured default;
+  trusting the value outright means an old server pins a client's predicted speed to
+  zero and the local player stops moving. `TestSpeedZeroMeansNotSent` pins the wire
+  behaviour the rule rests on, across both encodings.
+
+- **`TestSpeedSurvivesBothEncodings`** — guards against one codec dropping the field
+  and not the other, which would surface only as prediction drift on whichever
+  encoding a client happened to negotiate.
+
+### Changed
+- **`TestJSONWireShapeUnchanged` rebaselined.** `speed` is written unconditionally,
+  like every other entity value field in `EntitySnapshot` — no `omitempty` — so the
+  legacy JSON shape gains a key on every entity. Additive and safe for a legacy
+  reader: both codecs skip unknown keys. The round-trip fixture now carries a
+  non-zero speed, because a zero would round-trip identically through a codec that
+  dropped the field entirely and the test would pass vacuously.
+
+
+### Added
+- **`SnapshotState.Apply` now rejects a keyframe that carries a bare interned
+  handle, instead of resolving it against the outgoing interval's table.**
+  To be plain about the status: this is **latent, not a live bug**. No sender in
+  this repo can produce the triggering frame — `SnapshotDeltaState.EncodeFull`
+  clears its handle table and restarts numbering at 1 *before* encoding, so every
+  entity in a keyframe carries both `id` and `handle`, and `wire.proto` states
+  the same contract. Nothing was breaking. This is defence against a future or
+  third-party sender.
+  It is worth guarding because of *how* it fails rather than how likely it is.
+  Handles reset at every keyframe, so a bare handle on a keyframe still resolves
+  — against bindings from the interval the keyframe is ending. The lookup
+  succeeds, no error is raised, and the entity is silently rebound to whatever
+  last held that number: one entity's updates rendered as another's, undetectable
+  downstream. The guard therefore does **not** consult the table at all when
+  `Full` is set; consulting it is the failure.
+  Ordering is unchanged — the check still runs in the resolve pass, before any
+  mutation, so a rejected keyframe leaves state untouched rather than clearing
+  the world and refilling it a resync later. Returns `ErrUnknownHandle` (wrapped,
+  so existing `errors.Is` recovery paths keep working) with a message naming the
+  keyframe case.
+  Raised by the Unity client team while auditing their implementation against
+  `gameserver-dotnet/docs/API.md`; the doc was corrected in the same change and
+  now describes this behaviour normatively.
+  Covered by `TestKeyframeWithBareHandleIsRefusedNotResolvedAgainstStaleTable`,
+  which sets up a *resolvable* stale binding specifically so the test fails if
+  the guard is removed and the lookup is allowed to succeed.
 - `GatewayKickChannel` constant (`"gateway:kick"`) in `constants/keys.go` for
   cross-gateway duplicate-login Pub/Sub coordination
 - **MsgPing/MsgPong (type 11/12) heartbeat messages.** `PingMessage{timestamp}`

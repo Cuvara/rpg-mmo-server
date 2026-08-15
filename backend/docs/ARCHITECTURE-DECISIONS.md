@@ -924,6 +924,13 @@ IDs), not another encoding swap.
 
 ## ADR-10 — Shared simulation: pure logic boundary, ECS on the server only
 
+> **Narrowed by [ADR-12](#adr-12--the-server-goes-to-real-ecs-staged-under-the-constraints-adr-10-and-adr-11-set)
+> (2026-08-14).** Decision 1 said Arch is the server's entity storage; it is now also
+> the server's *execution* model, staged. The boundary this ADR draws is unchanged and
+> is the binding constraint on how far that can go: no `Arch.Core` type crosses into
+> `Shared.GameLogic`, its `in EntityState` / `in Vec2` signatures are frozen, and the
+> golden vectors stay bit-exact.
+
 **Status:** accepted 2026-08-11, not yet implemented.
 
 **Context.** The game server is to move its entity storage to
@@ -1241,6 +1248,304 @@ hint mechanism turns out to be unable to see component types defined outside the
 server assembly — which would be a stronger argument against Arch than anything
 found here.
 
+> **Amended by [ADR-12](#adr-12--the-server-goes-to-real-ecs-staged-under-the-constraints-adr-10-and-adr-11-set)
+> (2026-08-14).** The server is moving to real systems over components, which is
+> exactly the direction that makes this ADR's two failure modes more likely. Nothing
+> here is relaxed: `CommandBuffer` stays out, and decision 2's guard becomes a
+> per-commit obligation — a new component type gets its hint line in the same commit
+> that introduces it. ADR-12 additionally rules out query shapes the reflection guard
+> cannot enumerate, `Arch.System`'s source generator among them.
+
+---
+
+## ADR-12 — The server goes to real ECS, staged, under the constraints ADR-10 and ADR-11 set
+
+**Status:** accepted 2026-08-14. Supersedes nothing; **narrows** ADR-10 decision 1 and
+is governed by ADR-11.
+
+**Context.** ADR-10 put Arch under the server as *storage* and stopped there: the layer
+above it addressed the world as whole `EntityState` values, so `EcsWorld.Update(get, set)`
+composed seven components into a struct on every read and wrote all seven back on every
+write. No systems existed; `TickLoop.TickOnce` called a handler that addressed entities by
+`string`. That is an ECS used as a dictionary with extra steps.
+
+An analysis was commissioned on whether to finish the job. It recommended **not** to, on
+three grounds, each of which is correct and none of which has gone away:
+
+1. **NativeAOT is a landmine, not a gradient** (ADR-11). `World/ArchAotHints.cs` needs one
+   `new T[1]` per component type; a missing line compiles clean, passes CI — which runs
+   JIT'd and structurally cannot see the problem — and throws `NotSupportedException` on
+   the first tick that creates that archetype in production. Real ECS multiplies
+   archetypes, and the idiomatic tool for the structural churn systems want is
+   `CommandBuffer`, which ADR-11 measured as still throwing with hints in place.
+2. **It targets the wrong 20%.** `BENCHMARK.md` puts the serialization:AOI ratio at ~5:1
+   and still lists "move serialization off the tick" as outstanding. The AOI hot loop is
+   *already* component-native — `EcsWorld.GetEntitiesInRange` iterates
+   `GetChunkIterator()` and tests `chunk.GetSpan<Position>()[i]`. Rewriting it would be
+   rewriting the part that is already ECS.
+3. **`Shared.GameLogic` cannot follow.** ADR-10 forbids Arch types in it, and the Unity
+   client consumes it as pinned source (`sgl-v0.1.6`). Changing `in EntityState` /
+   `in Vec2` signatures forces a lockstep client release for zero server throughput, and
+   the golden vectors stay bit-exact only while those signatures hold.
+
+The decision to proceed anyway was taken by the project owner with that analysis in hand.
+This ADR records it, and records the constraints that make it survivable, so that a future
+reader does not find ADR-10 and ADR-11 arguing against the code they are reading and
+conclude the code is a mistake.
+
+**Decision.**
+
+1. **The server moves to real systems over components, in stages, one PR per stage**, each
+   independently revertible and green: (1) the input path, (2) enemy AI, (3) the
+   snapshot/AOI walk. Not one commit, and not a rewrite.
+2. **`CommandBuffer` remains banned** — ADR-11 decision 3 is unchanged and is now
+   load-bearing rather than incidental. Every structural operation a system needs goes
+   through the existing deferred queue drained by `EcsWorld.ApplyStructuralChanges()` at
+   one explicit point in `TickLoop.TickOnce`. One structural phase per tick; no hidden
+   mid-iteration mutation. The queue's operation kinds are to be enumerated in the module
+   `CHANGELOG` as they are added, because "which structural ops exist" is exactly the
+   question a reader debugging an ordering bug will ask.
+3. **Every new component type gets its AOT hint line in the same commit that introduces
+   it**, and `ArchAotHintTests` — which reflects over every component struct in the
+   assembly — must still pass. This is ADR-11 decision 2 restated as a per-commit
+   obligation because the migration is what makes it likely to be forgotten.
+4. **Generic query shapes that the reflection guard cannot see are not permitted.** In
+   particular, `Arch.System`'s source generator produces query types the existing test
+   does not enumerate; adopting it would create unhinted surface. Either the guard is
+   extended to cover the generated shapes first, or the generator is not used.
+5. **`Shared.GameLogic` stays engine-free and ECS-free.** ADR-10's boundary is unchanged.
+   Systems read components and convert at the call boundary when invoking shared
+   arithmetic; `in EntityState` / `in Vec2` signatures are frozen for the duration.
+   `MovementSystem.Integrate`'s FMA-denying local split is not to be touched. Golden
+   vectors stay bit-exact.
+6. **No stage may change the wire.** Snapshot output stays byte-identical. Where the old
+   code had an observable accident, the accident is preserved and pinned by a test named
+   after what it is, rather than quietly corrected under cover of a refactor.
+7. **Speed is not claimed without measurement.** Stage 3 in particular is structural
+   clarity, not throughput: its inner loop is already chunk-iterating and compose-free.
+
+**Consequences.**
+
+- The archetype count is now a thing to watch. Today the server has two archetypes
+  (with and without `PlayerTag`) and eight component types. If a design needs more
+  archetypes than the hint list can practically track, that is a stop-and-report
+  condition, not something to ship.
+- CI's value against this class of bug is limited by construction — it runs JIT'd. The
+  `publish`-and-run smoke job from ADR-11 decision 4 is the only automated thing that can
+  catch a missing hint, which raises its priority.
+- The analysis's second point stands and is not answered by this work: the tick's largest
+  term is still serialization, and no stage here touches it. Moving serialization off the
+  tick remains the highest-value outstanding item and is tracked separately.
+
+**Revisit if** a stage lands and measurement shows no benefit at its own level (in which
+case stop and keep what has landed — each stage is revertible precisely so that this is
+cheap), or if Arch fixes `CommandBuffer` (which would relax decision 2 but not decision 3),
+or if the archetype count outgrows the hint mechanism.
+
+**Stage log.**
+
+| Stage | Landed | Component types added | Structural op kinds | Measured at its own level |
+|---|---|---|---|---|
+| 1 — input path | PR #79 | none | add, remove (unchanged) | 6 762 858 → 192 984 B/tick at 200 players (35×) |
+| 2 — enemy AI | PR #81 | `EnemyAi` (hinted same commit) | add, remove (unchanged) | 367 → 172 B/tick (−53%), but only −0.36% of a 50-player tick |
+| 3 — snapshot/AOI | PR #83 | none | add, remove (unchanged) | 21 692 → 21 628 B/tick at 50 players (−0.3%); noise at 200. **No throughput win, as predicted.** |
+| 4 — serialization off the tick | PR #86 | none | add, remove (unchanged) | tick-thread alloc 192 935 → 32 B/tick at 200 players. Work moved, not removed; wall-clock unmeasurable here |
+| 5 — query-driven systems | PR #87 | `EnemySpawnState` (hinted same commit) | add, remove (unchanged) | **nothing: 108 B/tick both sides.** Commissioned as architecture after the performance premise was disproved |
+
+Two things stage 2 settled that this ADR could only predict:
+
+- **Spawn and despawn did not need a new structural op kind.** The prediction was that
+  entity creation and destruction inside systems would force the deferred queue to grow;
+  it did not. `EnemyAi` is applied at creation, so it rides on the existing *add* as a
+  tag payload rather than as an add-component operation. Decision 2 holds unmodified and
+  `CommandBuffer` is still not needed for anything.
+- **The hint guard fires in practice, not just in principle.** Deleting the single
+  `new EnemyAi[1],` line builds clean and fails `ArchAotHintTests` naming the type. That
+  is the second time this has been demonstrated on real code (the first was `Locomotion`
+  under ADR-11), and it is the evidence decision 3 rests on.
+
+Stage 2 also produced the first instance of the rule in decision 7 biting: it measures a
+53% cut of the phase it targets and **0.36% of the tick**, because serialization dominates
+by two orders of magnitude. That is recorded rather than dressed up, and it strengthens
+rather than weakens the case that the outstanding item is moving serialization off the
+tick.
+
+**Stage 3 closed the migration, and confirmed the analysis was right about it.** The AOI
+inner loop was already chunk-iterating and compose-free, and stage 1 had already removed
+its per-client allocation, so there was nothing left to win and nothing was won: −0.3% at
+50 players, noise at 200. Decision 7 was written for exactly this and the result is
+recorded as it came out.
+
+What stage 3 did produce is the precondition for the work that actually matters.
+Serialization still runs inside the tick, and it could not be lifted out while encoding
+was interleaved with locked per-viewer world reads — there was no moment at which a
+viewer's snapshot input existed independently of the world. There is now: the broadcast
+gathers every viewer under one read lock, then encodes outside it, so the encode phase
+holds no world reference and no lock. **A stage 4 that moves serialization off the tick is
+therefore reachable, and is the only remaining item with a measured case behind it**
+(`BENCHMARK.md` §9, and the ~5:1 serialization:AOI ratio the original analysis cited).
+
+Net across the first three stages: the input path was worth doing (35× less allocation per
+tick), the AI and snapshot stages were worth doing for structure and not for speed, and
+the thing the analysis said was the real 80% was left for stage 4.
+
+**Stage 4 did it, and in doing so found the premise was wrong.** Encoding and
+serialization now happen on each connection's own write task; tick-thread allocation at
+200 players fell from 192 935 to 32 B/tick. But splitting the old phase B by hand first
+showed the ratio the analysis cited does not reproduce: at 200 players the AOI gather is
+~874–1177 µs/tick, `SnapshotDeltaState.Encode` is ~998–1272 µs/tick, and protobuf
+`ToByteArray` is **~79–144 µs/tick — 4–6% of the tick, not 80%**.
+
+That reframes what is left. The two dominant terms are:
+
+1. **The brute-force AOI scan**, O(viewers × entities), which the extension-seam table has
+   always listed as "spatial grid / quadtree" for production. At 200 players it is 40 000
+   distance tests per tick.
+2. **Delta/message building inside `Encode`**, which allocates 134 699 B/tick at 200
+   players, almost entirely `EntitySnapshot` objects. That is a **pooling** problem, not a
+   threading one.
+
+Neither is an ECS problem, which is the honest place for this migration to stop on
+performance grounds. Further work on tick cost should be argued on its own terms rather
+than as a continuation of this ADR.
+
+**Stage 5 was then commissioned anyway, deliberately and with that measurement in hand**,
+as an architectural requirement rather than a performance one — the user's position being
+that the shape should be right before gameplay is written against it. It measures exactly
+nothing (108 B/tick on both sides; steady-state population is 4–6 enemies, so a chunk loop
+cannot show anything) and the record should say so plainly rather than dress it up. What it
+changed:
+
+- The core stopped naming the gameplay: `CountWith<TTag>` / `QueryWith<TTag>` replaced an
+  `EnemyCount` property and an enemy-named query on `EcsWorld` and `WorldWriter`.
+- Systems that are per-entity-linear iterate chunks; the two that are not — spawn, which
+  creates, and reap, which decides per entity and then performs a structural change — keep
+  handle access with the reason stated at each.
+- Ordering became declared rather than call-ordered, via a `SystemSchedule` that rejects
+  ambiguous orders at construction.
+- **The rule this ADR states was already broken behind the seam on day one**, and is now
+  enforced. `EnemySpawnSystem` kept its wave accumulator and id counter in private fields;
+  they are a component now, and `SimulationStateArchitectureTests` fails the build on any
+  mutable instance field in a phase or system. It was verified to fire by reintroducing the
+  original field. An honour-system rule in an ADR is worth very little; this is the third
+  guard in the module to be demonstrated rather than assumed.
+
+**On parallelism, which the release gate now requires.** Stage 4 already put encode and
+serialize on per-connection threads — that is real server multithreading, and the tick
+thread's share of a snapshot is now a gather plus a flag. Parallel *simulation* is a
+different question, and stage 5's `ComponentAccess` is the part that makes it expressible:
+two systems may run concurrently exactly when neither writes what the other reads or
+writes. Two preconditions are recorded and are **not** met today, both verified in the
+code: `EcsWorld._structural` is an unsynchronised `List<StructuralOp>` safe only because
+one thread mutates it under the write lock, and the iteration-depth guard that decides
+immediate-versus-deferred structural changes is `[ThreadStatic]`, so it would become a
+per-worker fact rather than a property of the world. Neither may be left to be discovered
+by the change that first spawns a worker.
+
+One correctness result is worth separating from the performance story: moving encoding to
+the moment of writing **fixed a pre-existing data-loss bug**. The old order encoded on the
+tick — advancing the delta encoder's `_lastSent` — and only then handed the envelope to a
+bounded channel that drops the oldest under load, so a dropped frame's updates were
+recorded as sent and never retransmitted until the next keyframe. Lazy encoding makes a
+frame that is never sent also never encoded.
+
+
+---
+
+## ADR-13 — Simulation runs at three configurable rates on one integer tick timeline; replication does not follow it
+
+**Status:** accepted 2026-08-15. Extends ADR-12 (the ECS schedule it adds a rate dimension
+to). Depends on #93 being fixed in the same change, for the reason in *Consequences*.
+
+**Context.** The server ran one fixed 15Hz loop. Everything that needed to happen more often
+than every 66ms — input, movement, hit detection — could not, and everything that would have
+been fine at 200ms paid the 66ms rate anyway. The obvious move, raising the global tick to
+60Hz, was rejected before it was tried: it quadruples the cost of every system whether or not
+it benefits, and it quadruples snapshot bandwidth, which the measured 45.9 KB/s per client at
+200 players (BENCHMARK.md) cannot absorb inside ADR-7's `< 50 KB/s` mobile budget.
+
+**Decisions.**
+
+1. **Three groups, named for responsibility, not frequency.** `Critical`, `World`,
+   `Background`. The Hz behind each is configuration — `SIM_CRITICAL_HZ`, `SIM_WORLD_HZ`,
+   `SIM_BACKGROUND_HZ`, defaulting to 60/15/5 — so a group named `Hz60` would be a lie the
+   first time an operator tuned it. A system declares its group and nothing else about
+   timing; `GAMESERVER_TICK_RATE` still works and means "every group at that one rate".
+
+2. **One canonical base tick, derived rather than configured.** The base rate is the critical
+   rate, and every other group must divide it exactly; `RunsOn` is `(tick - 1) % every == 0`.
+   A configuration whose rates have no integer timeline — 60/25/5, whose true common base is
+   300Hz — is **rejected at startup**, not accommodated. Accommodating it would silently run
+   the server five times faster than anyone asked for.
+
+3. **Integer scheduling, not float accumulators.** Accumulating wall-clock deltas and firing
+   on a threshold drifts, makes "which tick did this run on" unanswerable, and makes a replay
+   of the same inputs produce a different schedule. The tick number has to be an identity
+   because input acknowledgement, cooldowns, reconciliation and replay are all expressed in
+   it.
+
+4. **Each group integrates with its own dt.** A system in the world group receives `1/15`,
+   not `1/60`, because it runs 15 times a second. Handing it the base timestep while running
+   it every fourth tick is the defining bug of a multi-rate scheduler and it is silent: every
+   speed and duration in that group would be wrong by the rate ratio, with nothing to
+   observe but "the game feels off".
+
+5. **Durations counted in ticks are derived from the rate that advances them.** The attack
+   cooldown is `ceil(500ms x rate)` base ticks and is compared against the base tick, so it
+   is derived from the *critical* rate. A 500ms cooldown stays 500ms at 15, 30 and 60Hz.
+
+6. **Group order is fixed Critical -> World -> Background, and is not configurable.** It
+   encodes write ownership: on a tick where several groups are due, the faster group's writes
+   land before the slower group reads them, so a slow group can never overwrite newer state
+   with a value it computed from an older read. This is the cross-rate hazard the whole
+   design has to answer, and the answer is an ordering rule rather than per-component
+   arbitration.
+
+7. **Replication is gated to the world rate, not the base rate.** Simulating at 60Hz does not
+   mean sending at 60Hz. Sending every base tick would quadruple downstream bandwidth to
+   deliver state the client interpolates across anyway, and would silently redefine the
+   keyframe interval, which counts *snapshots*: 30 snapshots is 2 seconds at 15Hz and half a
+   second at 60Hz. Simulation rate and replication rate stay separate concepts.
+
+8. **Overload drops the backlog; it never chases it.** Past 8 base ticks of lag the loop
+   resynchronises to now and counts what it discarded
+   (`gameserver_tick_backlog_dropped_total`). A catch-up loop is worse than useless here:
+   each catch-up tick costs more than the budget it reclaims, so a server that falls behind
+   falls further behind. Simulation time then runs behind wall time under sustained overload,
+   which is a bounded and measurable failure rather than a spiral.
+
+9. **The background group ships empty, deliberately.** No system in the current simulation
+   tolerates a 200ms scheduling delay without a visible behaviour change — enemy reaping
+   looks like cleanup but is what stops a dead enemy from being observable in the snapshot
+   built later in the same tick. Inventing a tenant so the group looks used would be shipping
+   a regression to satisfy a diagram. The infrastructure is built, tested and documented with
+   the rule for what may enter it.
+
+**Consequences.**
+
+- **The base tick advances four times faster in wall-clock time at the default.** The tick
+  number on the wire is unchanged in format and meaning — it is still the authoritative
+  simulation tick — but its *rate* is now a deployment-time property. That is exactly the
+  defect #93 describes, and it is why the tick rate goes on the wire in the same change: a
+  client that assumes 15 while the server runs 60 predicts wrongly, gets corrected by every
+  snapshot, and the player sees rubber-banding rather than a misconfiguration.
+- **A single-rate configuration is byte-for-byte the old server.** With one rate there is one
+  timeline, the world group runs every base tick, snapshots ship every tick, and the held-input
+  window collapses to a single tick — so movement is one step per packet, as before. The
+  snapshot byte-identity digests and the enemy characterization tests pass unchanged, which is
+  the evidence for this claim rather than the assertion of it.
+- **Movement became continuous, and that is a real behavioural change at multi-rate.** The
+  server now integrates the newest input once per critical tick and holds it for one world
+  interval, instead of once per received packet. Without it a client sending at 15Hz against a
+  60Hz server would move at quarter speed — speed would be a function of the client's send
+  rate, which `MovementSystem` already documents as forbidden. A client that goes quiet coasts
+  for at most one world interval (66ms at the default); an explicit deadzone input stops it
+  immediately.
+- **Per-server capacity is not claimed to improve.** The point of multi-rate is high frequency
+  where it is needed and low frequency where it is not, not throughput. No capacity claim is
+  made here, and the tick ceiling remains unmeasurable on the current hardware (ADR-7).
+
+
 ---
 
 ## Summary of decisions
@@ -1258,3 +1563,5 @@ found here.
 | 9 | Wire encoding | Protobuf from one committed schema; JSON kept during migration and distinguished by the first body byte, so components upgrade in any order |
 | 10 | Shared simulation | Arch replaces `GameWorld` on the server; `Shared.GameLogic` stays ECS-free and ships to Unity as multi-targeted **source**; golden vectors run on both sides in CI; only IEEE-exact float ops permitted in shared code |
 | 11 | Arch under NativeAOT | Arch publishes clean and then throws at runtime without per-component AOT hints; hints are **generated or guarded, never hand-written**; `CommandBuffer` is broken under AOT and is not used; the `publish` CI job must **run** the binary, not just build it |
+| 12 | ECS migration | Server goes to **real ECS with Arch**, staged one PR at a time, over the analysis's objection and by owner decision; `CommandBuffer` stays banned and structural ops stay deferred to one phase per tick; every new component gets its AOT hint line in the same commit; no query shape the hint guard cannot see; `Shared.GameLogic` and the wire are frozen throughout |
+| 13 | Simulation rates | Three responsibility-named groups (`Critical`/`World`/`Background`) at configurable Hz (`SIM_*_HZ`, default 60/15/5) on one derived integer base-tick timeline; rates that do not divide the base are rejected at startup; each group integrates with its own dt; group order Critical->World->Background is the cross-rate write-ownership rule; **replication stays at the world rate**; overload drops the backlog and counts it; the background group ships empty because nothing currently tolerates 200ms |

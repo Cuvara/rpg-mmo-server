@@ -4,6 +4,7 @@ using Shared.GameLogic.Components;
 using GameServer.Agones;
 using GameServer.Events;
 using GameServer.Observability;
+using GameServer.Scaffolding;
 using GameServer.Persistence;
 using GameServer.Net.Transport;
 using GameServer.Registry;
@@ -16,7 +17,41 @@ string addr = GetArg(args, "--addr") ?? Env("GAMESERVER_ADDR") ?? ":9000";
 string mapId = GetArg(args, "--map-id") ?? Env("GAMESERVER_MAP_ID") ?? "map_01";
 string serverId = GetArg(args, "--server-id") ?? Env("GAMESERVER_ID") ?? Env("POD_NAME") ?? $"gs-{Guid.NewGuid():N}"[..12];
 int capacity = int.TryParse(GetArg(args, "--capacity") ?? Env("GAMESERVER_CAPACITY"), out var cap) ? cap : 100;
-int tickRate = int.TryParse(GetArg(args, "--tick-rate") ?? Env("GAMESERVER_TICK_RATE"), out var tr) ? tr : 15;
+// Falls back to the shared constant, not to a literal. The client derives its own
+// integration step from the same constant, and it is compiled into both sides, so a
+// literal here means bumping GameConstants.DefaultTickRate moves the client and leaves
+// the server behind — a desync with no error on either side, which reads to a player as
+// rubber-banding rather than as a misconfiguration. The flag and the env var can still
+// move the server alone, but that is no longer silent: the critical rate now rides the
+// join response (`JoinTokenResponse.tick_rate`), so a client is told what to predict at
+// instead of assuming — #93.
+int tickRate = int.TryParse(GetArg(args, "--tick-rate") ?? Env("GAMESERVER_TICK_RATE"), out var tr)
+    ? tr : GameConstants.DefaultTickRate;
+// Multi-rate simulation. The three groups are named for what they do, not for how fast
+// they run, because how fast they run is configuration: SIM_CRITICAL_HZ / SIM_WORLD_HZ /
+// SIM_BACKGROUND_HZ, injected by the deployment (GitHub Environment -> .env -> compose, or
+// the Agones fleet env block). Changing a rate must never require touching a gameplay
+// system, which is why no system reads these.
+//
+// GAMESERVER_TICK_RATE still works and still means what it meant: when it is set and the
+// SIM_* variables are not, every group runs at that one rate and the server behaves exactly
+// as it did before this existed.
+// Checks flags as well as environment variables: `--tick-rate 30 --sim-world-hz 15`
+// must mean the same thing as the equivalent env vars, or the two configuration channels
+// would disagree about which one wins.
+bool anySimVar = GetArg(args, "--sim-critical-hz") != null || Env("SIM_CRITICAL_HZ") != null
+              || GetArg(args, "--sim-world-hz") != null || Env("SIM_WORLD_HZ") != null
+              || GetArg(args, "--sim-background-hz") != null || Env("SIM_BACKGROUND_HZ") != null;
+bool tickRateSet = (GetArg(args, "--tick-rate") ?? Env("GAMESERVER_TICK_RATE")) != null;
+int criticalHz = int.TryParse(GetArg(args, "--sim-critical-hz") ?? Env("SIM_CRITICAL_HZ"), out var chz)
+    ? chz
+    : (tickRateSet && !anySimVar ? tickRate : SimulationRates.DefaultCriticalHz);
+int worldHz = int.TryParse(GetArg(args, "--sim-world-hz") ?? Env("SIM_WORLD_HZ"), out var whz)
+    ? whz
+    : (tickRateSet && !anySimVar ? tickRate : SimulationRates.DefaultWorldHz);
+int backgroundHz = int.TryParse(GetArg(args, "--sim-background-hz") ?? Env("SIM_BACKGROUND_HZ"), out var bhz)
+    ? bhz
+    : (tickRateSet && !anySimVar ? tickRate : SimulationRates.DefaultBackgroundHz);
 // Delta snapshots between full keyframes. 0 or less = send a full snapshot every tick
 // (pre-delta behaviour), the escape hatch for a client that cannot merge deltas.
 int keyframeInterval = int.TryParse(GetArg(args, "--keyframe-interval") ?? Env("GAMESERVER_KEYFRAME_INTERVAL"), out var kf)
@@ -28,6 +63,10 @@ float mapHeight = float.TryParse(GetArg(args, "--map-height") ?? Env("GAMESERVER
     System.Globalization.CultureInfo.InvariantCulture, out var mh) && mh > 0f
     ? mh : GameConstants.DefaultMapHeight;
 bool useAgones = HasFlag(args, "--agones") || Env("AGONES_ENABLED") == "true";
+bool enableEnemySpawner = Env("GAMESERVER_ENEMIES") != "false"; // on by default, opt out with GAMESERVER_ENEMIES=false
+// Nakama integration: server-to-server RPC for economy + leaderboard
+string? nakamaUrl = Env("NAKAMA_URL"); // e.g. http://rpg-nakama:7350
+string nakamaHttpKey = Env("NAKAMA_HTTP_KEY") ?? "defaulthttpkey";
 string jwtSecret = GetArg(args, "--jwt-secret") ?? Env("JWT_SECRET") ?? "";
 // Secret the GATEWAY signs join tokens with. Deliberately NOT JWT_SECRET: this value
 // is distributed to every game-server pod, so a compromised pod must not be able to
@@ -80,7 +119,7 @@ logger.LogInformation("  Transport: {Transport}{Encryption}", transport,
 logger.LogInformation("  MapId:     {MapId}", mapId);
 logger.LogInformation("  ServerId:  {ServerId}", serverId);
 logger.LogInformation("  Capacity:  {Capacity}", capacity);
-logger.LogInformation("  TickRate:  {TickRate}Hz", tickRate);
+logger.LogInformation("  SimRates:  {Rates}", $"critical={criticalHz}Hz world={worldHz}Hz background={backgroundHz}Hz");
 logger.LogInformation("  Snapshots: {Mode}", keyframeInterval > 0
     ? $"delta, keyframe every {keyframeInterval} snapshots"
     : "full every tick (delta disabled)");
@@ -92,6 +131,7 @@ if (useAgones)
                       "still uses the no-op Agones SDK (no Ready/Health/Shutdown is reported " +
                       "to the sidecar). Do not rely on Agones health checks for this server yet.");
 }
+logger.LogInformation("  Nakama:    {Nakama}", string.IsNullOrWhiteSpace(nakamaUrl) ? "disabled (NAKAMA_URL unset)" : nakamaUrl);
 logger.LogInformation("  Metrics:   {Metrics}", string.IsNullOrWhiteSpace(metricsAddr) ? "disabled" : metricsAddr);
 logger.LogInformation("  GameDB:    {GameDb}",
     string.IsNullOrWhiteSpace(gameDbUrl) ? "memory" : PostgresPlayerStore.MaskDsn(gameDbUrl));
@@ -99,12 +139,35 @@ logger.LogInformation("  Registry:  {Registry}",
     string.IsNullOrWhiteSpace(redisAddr)
         ? "disabled (REDIS_ADDR unset -- the gateway will NOT find this server)"
         : $"redis {redisAddr}, advertising '{publicAddr}' ({transport})");
-if (!string.IsNullOrWhiteSpace(redisAddr) && publicAddr == addr && addr.StartsWith(':'))
+// A HOSTLESS advertised address (empty, 0.0.0.0, :: or [::] as the host part) is
+// not dialable by a client: the gateway hands the value back verbatim, so only
+// clients that rewrite it to loopback themselves will connect (a C# TcpClient
+// throws outright). Two shapes reach here and both deserve a word, but they are
+// not equally wrong:
+//   - unset, so publicAddr fell back to the listen address. Correct for host-mode
+//     deploys, wrong in a container with a published port. Informational.
+//   - explicitly SET and still hostless. The operator meant to advertise a mapped
+//     port but omitted the host, so it is wrong in every topology. A real warning.
+// Never fatal either way: the comment on publicAddr above documents that a bare
+// listen address IS correct for host mode, so refusing to start or to register
+// would break a supported topology.
+if (!string.IsNullOrWhiteSpace(redisAddr) && IsHostlessAddr(publicAddr))
 {
-    logger.LogInformation(
-        "  GAMESERVER_PUBLIC_ADDR is unset, so clients will be handed the listen address '{Addr}'. " +
-        "That is correct for host deployments; in containers with a published port, set it to " +
-        "<host>:<published-port> or clients will fail to connect.", addr);
+    if (publicAddr == addr)
+    {
+        logger.LogInformation(
+            "  GAMESERVER_PUBLIC_ADDR is unset, so clients will be handed the listen address '{Addr}'. " +
+            "That is correct for host deployments; in containers with a published port, set it to " +
+            "<host>:<published-port> or clients will fail to connect.", publicAddr);
+    }
+    else
+    {
+        logger.LogWarning(
+            "  GAMESERVER_PUBLIC_ADDR is set to '{PublicAddr}', which has no host part. Clients are handed " +
+            "that value verbatim and cannot dial it. Set it to <host>:<published-port> -- " +
+            "'127.0.0.1:{Port}' for a local stack, '<public-host>:{Port}' on a VPS.",
+            publicAddr, AddrPort(publicAddr), AddrPort(publicAddr));
+    }
 }
 
 // ── Migrate-only mode (CD schema step) ──
@@ -137,6 +200,20 @@ if (migrateOnly)
 }
 
 // ── Validate ──
+
+if (!SimulationRates.TryCreate(criticalHz, worldHz, backgroundHz, out SimulationRates? simRates, out string? simError))
+{
+    // Fail fast, do not fall back. A server that silently substitutes a default for an
+    // unusable rate is a server whose behaviour does not match its configuration, and the
+    // operator has no way to find out — the same class of silent divergence as the tick
+    // rate never reaching the client (#93).
+    logger.LogCritical("invalid simulation rate configuration: {Error}", simError);
+    return 2;
+}
+
+// TryCreate guarantees this on success; the local makes that guarantee visible to the
+// compiler instead of asserting it at each use site.
+SimulationRates simulationRates = simRates!;
 
 if (!TransportKind.IsValid(transport))
 {
@@ -272,6 +349,7 @@ var options = new ServerOptions
     MapId = mapId,
     Mode = mode,
     TickRate = tickRate,
+    SimulationRates = simulationRates,
     KeyframeInterval = keyframeInterval,
     MapBounds = MapBounds.FromSize(mapWidth, mapHeight),
     Capacity = capacity,
@@ -285,13 +363,30 @@ var options = new ServerOptions
     // The flag is kept so deployment manifests do not have to change when the
     // real SDK lands. See backend/docs/ARCHITECTURE-DECISIONS.md, ADR-6.
     AgonesSdk = new NoopAgonesSdk(),
-    // Always Noop: the C# server has no Redis client, so cross-server events are
-    // generated (entity_killed) and then discarded. See ADR-5.
+    // Always Noop: no Redis-backed IEventStream implementation exists yet, so
+    // cross-server events are generated (entity_killed) and then discarded.
+    // NOT for want of a Redis client — this process has one and uses it to
+    // self-register (Registry/RedisServerRegistry.cs, StackExchange.Redis).
+    // What is missing is the producer side of the stream; the gateway's relay
+    // subscribes to `events:game` and no live publisher feeds it. See ADR-5.
     EventStream = new NoopEventStream(),
     LoggerFactory = loggerFactory,
     Metrics = metrics,
     ServerRegistry = serverRegistry,
-    Registration = registrationOptions
+    Registration = registrationOptions,
+    // The composition root decides what the game is. The core host only knows it has
+    // a phase to tick; see ISimulationPhase.
+    SimulationPhaseFactory = enableEnemySpawner
+        ? (world, loggerFactory, onGroupRan) => new EnemySpawner(world, simulationRates, loggerFactory.CreateLogger<EnemySpawner>(), onGroupRan)
+        : null,
+    // The composition root is the one place allowed to know what the game is, so it is
+    // where the status endpoint's entity count comes from. The JSON field stays
+    // `enemies_alive` — the Unity DOTS sample polls /status and reads it.
+    StatusEntityCount = enableEnemySpawner
+        ? static world => world.CountWith<GameServer.World.Components.EnemyAi>()
+        : null,
+    NakamaUrl = nakamaUrl,
+    NakamaHttpKey = nakamaHttpKey
 };
 
 // ── Graceful shutdown on SIGINT / SIGTERM ──
@@ -322,6 +417,21 @@ using var sigTerm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, RequestS
 // ── Run ──
 
 var server = new GameServerHost(options);
+var startTime = DateTime.UtcNow;
+
+// Wire up the /status JSON endpoint with live server state.
+metricsEndpoint?.SetStatusProvider(() => new ServerStatus
+{
+    Ok = true,
+    TickRate = tickRate,
+    CurrentTick = server.CurrentTick,
+    PlayersOnline = metrics.PlayersOnline,
+    Entities = server.EntityCount,
+    EnemiesAlive = server.EnemiesAlive,
+    Redis = serverRegistry != null ? "connected" : "disconnected",
+    Postgres = postgresStore != null ? "connected" : "disconnected",
+    UptimeSeconds = (long)(DateTime.UtcNow - startTime).TotalSeconds
+});
 
 try
 {
@@ -348,11 +458,31 @@ return Environment.ExitCode;
 
 // ── Helpers ──
 
+/// <summary>
+/// Read <c>--name value</c> or <c>--name=value</c> from the command line.
+///
+/// <para>The <c>=</c> form used to be dropped silently: the loop only compared
+/// <c>args[i] == name</c> and took the next element, so <c>--map-id=map_02</c> matched
+/// nothing and the server started on the default map with no warning. That is not
+/// hypothetical — <c>deploy/agones/fleet-map-dotnet-dev.yaml</c> passes
+/// <c>--mode=map --map-id=map_01 --addr=:9000</c>, all three of which have been ignored
+/// for as long as the manifest has existed. It went unnoticed only because those values
+/// happen to equal the defaults; the first fleet with a non-default map would have
+/// silently served the wrong one.</para>
+/// </summary>
 static string? GetArg(string[] args, string name)
 {
-    for (int i = 0; i < args.Length - 1; i++)
+    for (int i = 0; i < args.Length; i++)
     {
-        if (args[i] == name) return args[i + 1];
+        if (args[i] == name)
+        {
+            return i + 1 < args.Length ? args[i + 1] : null;
+        }
+
+        if (args[i].StartsWith(name + "=", StringComparison.Ordinal))
+        {
+            return args[i][(name.Length + 1)..];
+        }
     }
     return null;
 }
@@ -366,4 +496,29 @@ static string? Env(string name)
 {
     var val = Environment.GetEnvironmentVariable(name);
     return string.IsNullOrEmpty(val) ? null : val;
+}
+
+/// <summary>
+/// True when <paramref name="addr"/> carries no usable host part, i.e. it is a
+/// listen-style address rather than something a client can dial. The host list
+/// matches the Go reference client's NormalizeDialAddr
+/// (backend/smoketest/smoke/helpers.go:231-241), so both sides agree on which
+/// addresses are "listen-style".
+/// </summary>
+static bool IsHostlessAddr(string addr)
+{
+    int i = addr.LastIndexOf(':');
+    if (i < 0) return false; // no port at all -- not a listen-style address
+    var host = addr[..i].Trim('[', ']');
+    return host is "" or "0.0.0.0" or "::";
+}
+
+/// <summary>
+/// Port part of a host:port pair, or the whole string when it has no colon.
+/// Used only to build a corrective suggestion in log messages.
+/// </summary>
+static string AddrPort(string addr)
+{
+    int i = addr.LastIndexOf(':');
+    return i < 0 ? addr : addr[(i + 1)..];
 }

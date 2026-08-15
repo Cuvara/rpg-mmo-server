@@ -31,37 +31,37 @@ namespace RpgMmo.Wire.V1 {
             "c3QSDgoGbWFwX2lkGAEgASgJIl8KEkVudGVyV29ybGRSZXNwb25zZRITCgtz",
             "ZXJ2ZXJfYWRkchgBIAEoCRISCgpqb2luX3Rva2VuGAIgASgJEhEKCXRyYW5z",
             "cG9ydBgDIAEoCRINCgVlcnJvchgEIAEoCSIhChBKb2luVG9rZW5SZXF1ZXN0",
-            "Eg0KBXRva2VuGAEgASgJIj8KEUpvaW5Ub2tlblJlc3BvbnNlEgoKAm9rGAEg",
-            "ASgIEg8KB3VzZXJfaWQYAiABKAkSDQoFZXJyb3IYAyABKAkiVgoMSW5wdXRN",
-            "ZXNzYWdlEgwKBHRpY2sYASABKAQSDgoGbW92ZV94GAIgASgCEg4KBm1vdmVf",
-            "eRgDIAEoAhIYChBhdHRhY2tfdGFyZ2V0X2lkGAQgASgJIpsBCg5FbnRpdHlT",
-            "bmFwc2hvdBIKCgJpZBgBIAEoCRIRCgl0eXBlX25hbWUYAiABKAkSCQoBeBgD",
-            "IAEoAhIJCgF5GAQgASgCEgoKAmhwGAUgASgFEg4KBm1heF9ocBgGIAEoBRIo",
-            "CgR0eXBlGAcgASgOMhoucnBnbW1vLndpcmUudjEuRW50aXR5VHlwZRIOCgZo",
-            "YW5kbGUYCCABKA0iggEKD1NuYXBzaG90TWVzc2FnZRIMCgR0aWNrGAEgASgE",
-            "EhAKCGFja190aWNrGAIgASgEEgwKBGZ1bGwYAyABKAgSMAoIZW50aXRpZXMY",
-            "BCADKAsyHi5ycGdtbW8ud2lyZS52MS5FbnRpdHlTbmFwc2hvdBIPCgdyZW1v",
-            "dmVkGAUgAygJIiMKEURpc2Nvbm5lY3RNZXNzYWdlEg4KBnJlYXNvbhgBIAEo",
-            "CSIPCg1SZXN5bmNSZXF1ZXN0IiQKElRyYW5zZmVyTWFwUmVxdWVzdBIOCgZt",
-            "YXBfaWQYASABKAkiMAoTVHJhbnNmZXJNYXBSZXNwb25zZRIKCgJvaxgBIAEo",
-            "CBINCgVlcnJvchgCIAEoCSIgCgtQaW5nTWVzc2FnZRIRCgl0aW1lc3RhbXAY",
-            "ASABKAMiNQoLUG9uZ01lc3NhZ2USEQoJdGltZXN0YW1wGAEgASgDEhMKC3Nl",
-            "cnZlcl90aW1lGAIgASgDIh0KC0tpY2tNZXNzYWdlEg4KBnJlYXNvbhgBIAEo",
-            "CSqLAwoHTXNnVHlwZRIYChRNU0dfVFlQRV9VTlNQRUNJRklFRBAAEhEKDU1T",
-            "R19UWVBFX0FVVEgQARIWChJNU0dfVFlQRV9BVVRIX1JFU1AQAhIYChRNU0df",
-            "VFlQRV9FTlRFUl9XT1JMRBADEh0KGU1TR19UWVBFX0VOVEVSX1dPUkxEX1JF",
-            "U1AQBBIXChNNU0dfVFlQRV9KT0lOX1RPS0VOEAUSHAoYTVNHX1RZUEVfSk9J",
-            "Tl9UT0tFTl9SRVNQEAYSEgoOTVNHX1RZUEVfSU5QVVQQBxIVChFNU0dfVFlQ",
-            "RV9TTkFQU0hPVBAIEhcKE01TR19UWVBFX0RJU0NPTk5FQ1QQCRITCg9NU0df",
-            "VFlQRV9SRVNZTkMQChIZChVNU0dfVFlQRV9UUkFOU0ZFUl9NQVAQDRIeChpN",
-            "U0dfVFlQRV9UUkFOU0ZFUl9NQVBfUkVTUBAOEhEKDU1TR19UWVBFX1BJTkcQ",
-            "CxIRCg1NU0dfVFlQRV9QT05HEAwSEQoNTVNHX1RZUEVfS0lDSxAPKp0BCgpF",
-            "bnRpdHlUeXBlEhsKF0VOVElUWV9UWVBFX1VOU1BFQ0lGSUVEEAASFgoSRU5U",
-            "SVRZX1RZUEVfUExBWUVSEAESEwoPRU5USVRZX1RZUEVfTU9CEAISEwoPRU5U",
-            "SVRZX1RZUEVfTlBDEAMSFAoQRU5USVRZX1RZUEVfSVRFTRAEEhoKFkVOVElU",
-            "WV9UWVBFX1BST0pFQ1RJTEUQBUJGWjNnaXRodWIuY29tL2R1eWN1b25nL3Jw",
-            "Zy1tbW8vc2hhcmVkL3Byb3RvL2dlbjt3aXJlcGKqAg5ScGdNbW8uV2lyZS5W",
-            "MWIGcHJvdG8z"));
+            "Eg0KBXRva2VuGAEgASgJIlIKEUpvaW5Ub2tlblJlc3BvbnNlEgoKAm9rGAEg",
+            "ASgIEg8KB3VzZXJfaWQYAiABKAkSDQoFZXJyb3IYAyABKAkSEQoJdGlja19y",
+            "YXRlGAQgASgNIlYKDElucHV0TWVzc2FnZRIMCgR0aWNrGAEgASgEEg4KBm1v",
+            "dmVfeBgCIAEoAhIOCgZtb3ZlX3kYAyABKAISGAoQYXR0YWNrX3RhcmdldF9p",
+            "ZBgEIAEoCSKqAQoORW50aXR5U25hcHNob3QSCgoCaWQYASABKAkSEQoJdHlw",
+            "ZV9uYW1lGAIgASgJEgkKAXgYAyABKAISCQoBeRgEIAEoAhIKCgJocBgFIAEo",
+            "BRIOCgZtYXhfaHAYBiABKAUSKAoEdHlwZRgHIAEoDjIaLnJwZ21tby53aXJl",
+            "LnYxLkVudGl0eVR5cGUSDgoGaGFuZGxlGAggASgNEg0KBXNwZWVkGAkgASgC",
+            "IoIBCg9TbmFwc2hvdE1lc3NhZ2USDAoEdGljaxgBIAEoBBIQCghhY2tfdGlj",
+            "axgCIAEoBBIMCgRmdWxsGAMgASgIEjAKCGVudGl0aWVzGAQgAygLMh4ucnBn",
+            "bW1vLndpcmUudjEuRW50aXR5U25hcHNob3QSDwoHcmVtb3ZlZBgFIAMoCSIj",
+            "ChFEaXNjb25uZWN0TWVzc2FnZRIOCgZyZWFzb24YASABKAkiDwoNUmVzeW5j",
+            "UmVxdWVzdCIkChJUcmFuc2Zlck1hcFJlcXVlc3QSDgoGbWFwX2lkGAEgASgJ",
+            "IjAKE1RyYW5zZmVyTWFwUmVzcG9uc2USCgoCb2sYASABKAgSDQoFZXJyb3IY",
+            "AiABKAkiIAoLUGluZ01lc3NhZ2USEQoJdGltZXN0YW1wGAEgASgDIjUKC1Bv",
+            "bmdNZXNzYWdlEhEKCXRpbWVzdGFtcBgBIAEoAxITCgtzZXJ2ZXJfdGltZRgC",
+            "IAEoAyIdCgtLaWNrTWVzc2FnZRIOCgZyZWFzb24YASABKAkqiwMKB01zZ1R5",
+            "cGUSGAoUTVNHX1RZUEVfVU5TUEVDSUZJRUQQABIRCg1NU0dfVFlQRV9BVVRI",
+            "EAESFgoSTVNHX1RZUEVfQVVUSF9SRVNQEAISGAoUTVNHX1RZUEVfRU5URVJf",
+            "V09STEQQAxIdChlNU0dfVFlQRV9FTlRFUl9XT1JMRF9SRVNQEAQSFwoTTVNH",
+            "X1RZUEVfSk9JTl9UT0tFThAFEhwKGE1TR19UWVBFX0pPSU5fVE9LRU5fUkVT",
+            "UBAGEhIKDk1TR19UWVBFX0lOUFVUEAcSFQoRTVNHX1RZUEVfU05BUFNIT1QQ",
+            "CBIXChNNU0dfVFlQRV9ESVNDT05ORUNUEAkSEwoPTVNHX1RZUEVfUkVTWU5D",
+            "EAoSGQoVTVNHX1RZUEVfVFJBTlNGRVJfTUFQEA0SHgoaTVNHX1RZUEVfVFJB",
+            "TlNGRVJfTUFQX1JFU1AQDhIRCg1NU0dfVFlQRV9QSU5HEAsSEQoNTVNHX1RZ",
+            "UEVfUE9ORxAMEhEKDU1TR19UWVBFX0tJQ0sQDyqdAQoKRW50aXR5VHlwZRIb",
+            "ChdFTlRJVFlfVFlQRV9VTlNQRUNJRklFRBAAEhYKEkVOVElUWV9UWVBFX1BM",
+            "QVlFUhABEhMKD0VOVElUWV9UWVBFX01PQhACEhMKD0VOVElUWV9UWVBFX05Q",
+            "QxADEhQKEEVOVElUWV9UWVBFX0lURU0QBBIaChZFTlRJVFlfVFlQRV9QUk9K",
+            "RUNUSUxFEAVCRlozZ2l0aHViLmNvbS9kdXljdW9uZy9ycGctbW1vL3NoYXJl",
+            "ZC9wcm90by9nZW47d2lyZXBiqgIOUnBnTW1vLldpcmUuVjFiBnByb3RvMw=="));
       descriptor = pbr::FileDescriptor.FromGeneratedCode(descriptorData,
           new pbr::FileDescriptor[] { },
           new pbr::GeneratedClrTypeInfo(new[] {typeof(global::RpgMmo.Wire.V1.MsgType), typeof(global::RpgMmo.Wire.V1.EntityType), }, null, new pbr::GeneratedClrTypeInfo[] {
@@ -71,9 +71,9 @@ namespace RpgMmo.Wire.V1 {
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EnterWorldRequest), global::RpgMmo.Wire.V1.EnterWorldRequest.Parser, new[]{ "MapId" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EnterWorldResponse), global::RpgMmo.Wire.V1.EnterWorldResponse.Parser, new[]{ "ServerAddr", "JoinToken", "Transport", "Error" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenRequest), global::RpgMmo.Wire.V1.JoinTokenRequest.Parser, new[]{ "Token" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenResponse), global::RpgMmo.Wire.V1.JoinTokenResponse.Parser, new[]{ "Ok", "UserId", "Error" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenResponse), global::RpgMmo.Wire.V1.JoinTokenResponse.Parser, new[]{ "Ok", "UserId", "Error", "TickRate" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.InputMessage), global::RpgMmo.Wire.V1.InputMessage.Parser, new[]{ "Tick", "MoveX", "MoveY", "AttackTargetId" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EntitySnapshot), global::RpgMmo.Wire.V1.EntitySnapshot.Parser, new[]{ "Id", "TypeName", "X", "Y", "Hp", "MaxHp", "Type", "Handle" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EntitySnapshot), global::RpgMmo.Wire.V1.EntitySnapshot.Parser, new[]{ "Id", "TypeName", "X", "Y", "Hp", "MaxHp", "Type", "Handle", "Speed" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.SnapshotMessage), global::RpgMmo.Wire.V1.SnapshotMessage.Parser, new[]{ "Tick", "AckTick", "Full", "Entities", "Removed" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.DisconnectMessage), global::RpgMmo.Wire.V1.DisconnectMessage.Parser, new[]{ "Reason" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.ResyncRequest), global::RpgMmo.Wire.V1.ResyncRequest.Parser, null, null, null, null, null),
@@ -1668,6 +1668,7 @@ namespace RpgMmo.Wire.V1 {
       ok_ = other.ok_;
       userId_ = other.userId_;
       error_ = other.error_;
+      tickRate_ = other.tickRate_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -1713,6 +1714,27 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "tick_rate" field.</summary>
+    public const int TickRateFieldNumber = 4;
+    private uint tickRate_;
+    /// <summary>
+    /// The CRITICAL simulation rate in Hz — the rate the client must predict at.
+    /// Session-constant: the server reads it once at startup and never changes it,
+    /// which is why it rides the join response and not every snapshot.
+    ///
+    /// 0 means "not supplied" (a pre-0.x server that predates this field). A client
+    /// that sees 0 must REFUSE to predict rather than assume 15: assuming is exactly
+    /// the silent desync this field closes (#93).
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint TickRate {
+      get { return tickRate_; }
+      set {
+        tickRate_ = value;
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -1731,6 +1753,7 @@ namespace RpgMmo.Wire.V1 {
       if (Ok != other.Ok) return false;
       if (UserId != other.UserId) return false;
       if (Error != other.Error) return false;
+      if (TickRate != other.TickRate) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -1741,6 +1764,7 @@ namespace RpgMmo.Wire.V1 {
       if (Ok != false) hash ^= Ok.GetHashCode();
       if (UserId.Length != 0) hash ^= UserId.GetHashCode();
       if (Error.Length != 0) hash ^= Error.GetHashCode();
+      if (TickRate != 0) hash ^= TickRate.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -1771,6 +1795,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(26);
         output.WriteString(Error);
       }
+      if (TickRate != 0) {
+        output.WriteRawTag(32);
+        output.WriteUInt32(TickRate);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -1793,6 +1821,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(26);
         output.WriteString(Error);
       }
+      if (TickRate != 0) {
+        output.WriteRawTag(32);
+        output.WriteUInt32(TickRate);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -1811,6 +1843,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (Error.Length != 0) {
         size += 1 + pb::CodedOutputStream.ComputeStringSize(Error);
+      }
+      if (TickRate != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(TickRate);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -1832,6 +1867,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.Error.Length != 0) {
         Error = other.Error;
+      }
+      if (other.TickRate != 0) {
+        TickRate = other.TickRate;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -1864,6 +1902,10 @@ namespace RpgMmo.Wire.V1 {
             Error = input.ReadString();
             break;
           }
+          case 32: {
+            TickRate = input.ReadUInt32();
+            break;
+          }
         }
       }
     #endif
@@ -1893,6 +1935,10 @@ namespace RpgMmo.Wire.V1 {
           }
           case 26: {
             Error = input.ReadString();
+            break;
+          }
+          case 32: {
+            TickRate = input.ReadUInt32();
             break;
           }
         }
@@ -2274,6 +2320,7 @@ namespace RpgMmo.Wire.V1 {
       maxHp_ = other.maxHp_;
       type_ = other.type_;
       handle_ = other.handle_;
+      speed_ = other.speed_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -2415,6 +2462,44 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "speed" field.</summary>
+    public const int SpeedFieldNumber = 9;
+    private float speed_;
+    /// <summary>
+    /// Movement speed in world units per second — the value the server's
+    /// MovementSystem.Integrate is actually multiplying by, for THIS entity right
+    /// now, not the spawn default.
+    ///
+    /// Exists for client-side prediction. Prediction replays local input through
+    /// the same Shared.GameLogic movement code the server runs, and that code needs
+    /// speed; without this field a client can only assume the spawn default. The
+    /// assumption holds until anything changes a player's speed — a buff, a mount,
+    /// a slow — and then client and server integrate different distances every
+    /// tick with NO error on either side. The client corrects on every snapshot, so
+    /// it presents as rubber-banding, which reads as a network problem and gets
+    /// debugged as one, in the wrong layer.
+    ///
+    /// ZERO MEANS "NOT SENT", NOT "IMMOBILE". proto3 elides a zero float, so a
+    /// pre-speed server and a genuinely immobile entity are indistinguishable on
+    /// the wire. A receiver MUST treat `speed &lt;= 0` as "no value" and fall back to
+    /// its configured default rather than concluding the entity cannot move —
+    /// trusting it unconditionally means an old server pins every client's
+    /// predicted speed to zero and the local player stops moving.
+    ///
+    /// Sent on every mention of an entity, never interned. Interning it would buy
+    /// ~5 bytes and inherit the whole handle-lifecycle contract above; speed is a
+    /// plain value with no identity, and the delta encoder already suppresses
+    /// entities whose state has not changed at all.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public float Speed {
+      get { return speed_; }
+      set {
+        speed_ = value;
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -2438,6 +2523,7 @@ namespace RpgMmo.Wire.V1 {
       if (MaxHp != other.MaxHp) return false;
       if (Type != other.Type) return false;
       if (Handle != other.Handle) return false;
+      if (!pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.Equals(Speed, other.Speed)) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -2453,6 +2539,7 @@ namespace RpgMmo.Wire.V1 {
       if (MaxHp != 0) hash ^= MaxHp.GetHashCode();
       if (Type != global::RpgMmo.Wire.V1.EntityType.Unspecified) hash ^= Type.GetHashCode();
       if (Handle != 0) hash ^= Handle.GetHashCode();
+      if (Speed != 0F) hash ^= pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.GetHashCode(Speed);
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -2503,6 +2590,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(64);
         output.WriteUInt32(Handle);
       }
+      if (Speed != 0F) {
+        output.WriteRawTag(77);
+        output.WriteFloat(Speed);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -2545,6 +2636,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(64);
         output.WriteUInt32(Handle);
       }
+      if (Speed != 0F) {
+        output.WriteRawTag(77);
+        output.WriteFloat(Speed);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -2578,6 +2673,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (Handle != 0) {
         size += 1 + pb::CodedOutputStream.ComputeUInt32Size(Handle);
+      }
+      if (Speed != 0F) {
+        size += 1 + 4;
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -2614,6 +2712,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.Handle != 0) {
         Handle = other.Handle;
+      }
+      if (other.Speed != 0F) {
+        Speed = other.Speed;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -2666,6 +2767,10 @@ namespace RpgMmo.Wire.V1 {
             Handle = input.ReadUInt32();
             break;
           }
+          case 77: {
+            Speed = input.ReadFloat();
+            break;
+          }
         }
       }
     #endif
@@ -2715,6 +2820,10 @@ namespace RpgMmo.Wire.V1 {
           }
           case 64: {
             Handle = input.ReadUInt32();
+            break;
+          }
+          case 77: {
+            Speed = input.ReadFloat();
             break;
           }
         }

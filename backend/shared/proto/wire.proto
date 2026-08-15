@@ -103,6 +103,14 @@ message JoinTokenResponse {
   bool ok = 1;
   string user_id = 2;
   string error = 3;
+  // The CRITICAL simulation rate in Hz — the rate the client must predict at.
+  // Session-constant: the server reads it once at startup and never changes it,
+  // which is why it rides the join response and not every snapshot.
+  //
+  // 0 means "not supplied" (a pre-0.x server that predates this field). A client
+  // that sees 0 must REFUSE to predict rather than assume 15: assuming is exactly
+  // the silent desync this field closes (#93).
+  uint32 tick_rate = 4;
 }
 
 // --- Gameplay ---
@@ -190,6 +198,32 @@ message EntitySnapshot {
   // Zero means "not interned": the sender is using `id` directly. That keeps the
   // field optional, so a peer that does not implement interning still works.
   uint32 handle = 8;
+
+  // Movement speed in world units per second — the value the server's
+  // MovementSystem.Integrate is actually multiplying by, for THIS entity right
+  // now, not the spawn default.
+  //
+  // Exists for client-side prediction. Prediction replays local input through
+  // the same Shared.GameLogic movement code the server runs, and that code needs
+  // speed; without this field a client can only assume the spawn default. The
+  // assumption holds until anything changes a player's speed — a buff, a mount,
+  // a slow — and then client and server integrate different distances every
+  // tick with NO error on either side. The client corrects on every snapshot, so
+  // it presents as rubber-banding, which reads as a network problem and gets
+  // debugged as one, in the wrong layer.
+  //
+  // ZERO MEANS "NOT SENT", NOT "IMMOBILE". proto3 elides a zero float, so a
+  // pre-speed server and a genuinely immobile entity are indistinguishable on
+  // the wire. A receiver MUST treat `speed <= 0` as "no value" and fall back to
+  // its configured default rather than concluding the entity cannot move —
+  // trusting it unconditionally means an old server pins every client's
+  // predicted speed to zero and the local player stops moving.
+  //
+  // Sent on every mention of an entity, never interned. Interning it would buy
+  // ~5 bytes and inherit the whole handle-lifecycle contract above; speed is a
+  // plain value with no identity, and the delta encoder already suppresses
+  // entities whose state has not changed at all.
+  float speed = 9;
 }
 
 // SnapshotMessage is a world state update sent to the client.

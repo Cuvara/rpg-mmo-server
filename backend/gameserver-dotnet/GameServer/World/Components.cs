@@ -118,6 +118,44 @@ public struct InputCursor
     /// <summary>Last processed input tick (monotonic).</summary>
     public ulong LastInputTick;
 
+    /// <summary>X of the most recently accepted movement direction.</summary>
+    /// <remarks>
+    /// Held so the critical group can keep integrating between input packets. A client
+    /// sends at its own rate — the smoke client sends 10 per second — and without this the
+    /// server would step that player only 10 times a second while simulating 60, which
+    /// makes movement speed a function of the client's send rate. The wire field is a
+    /// direction with no expiry of its own, so the expiry is the server's:
+    /// <see cref="HeldFromTick"/> plus one world interval. See
+    /// <c>InputHandler.ApplyHeldMovement</c>.
+    /// <para>Server-side only. It is not part of <c>EntityState</c> and never reaches the
+    /// wire.</para>
+    /// </remarks>
+    public float HeldMoveX;
+
+    /// <summary>Y of the most recently accepted movement direction.</summary>
+    public float HeldMoveY;
+
+    /// <summary>
+    /// Base tick on which the held direction was accepted. Zero means "nothing held".
+    /// </summary>
+    public ulong HeldFromTick;
+
+    /// <summary>
+    /// Base tick on which this entity's position was last advanced, by either path — a
+    /// packet or a held step. Zero means "never moved".
+    /// </summary>
+    /// <remarks>
+    /// This is what makes a movement step cover the time it actually represents. The tick
+    /// loop coalesces to at most one step per player per tick, so a burst of four inputs
+    /// arriving together used to become one step of one tick's worth and the other three
+    /// were discarded along with the simulated time they stood for. Scaling the step by
+    /// <c>baseTick - LastMoveTick</c> gives that time back without weakening the rule the
+    /// coalescing exists to enforce: a client that spams packets always has
+    /// <c>LastMoveTick == baseTick - 1</c>, so it earns exactly one tick per tick, and the
+    /// cap bounds the pathological case. See #100.
+    /// </remarks>
+    public ulong LastMoveTick;
+
     public InputCursor(ulong lastInputTick) => LastInputTick = lastInputTick;
 }
 
@@ -137,3 +175,27 @@ public struct PlayerTag
     public byte Reserved;
 }
 
+
+/// <summary>
+/// Archetype tag for entities driven by the enemy AI systems
+/// (<c>GameServer.Scaffolding</c>): they walk toward the origin each tick and are reaped when
+/// they reach the centre zone or die.
+///
+/// <para><b>This is not "is a mob".</b> Enemy-ness is ownership, not type. Plenty of
+/// entities carry <c>EntityKind.Value == "mob"</c> without being AI-driven — the test
+/// suite creates them constantly, and a mob placed by anything other than the spawner
+/// must sit where it was put. Deriving the tag from the type string would silently put
+/// every such mob on a march to the origin, so the tag is applied <b>only</b> at spawn
+/// by <see cref="EcsWorld.Spawn"/> and is preserved, never re-derived, when an existing
+/// entity is updated.</para>
+///
+/// <para>Carries a byte for the same reason <see cref="PlayerTag"/> does: a zero-size
+/// component would make the chunk's element stride zero, which is not a shape worth
+/// relying on in a pre-1.0 library.</para>
+/// </summary>
+[EcsComponent]
+public struct EnemyAi
+{
+    /// <summary>Unused; present only to give the tag a non-zero size.</summary>
+    public byte Reserved;
+}

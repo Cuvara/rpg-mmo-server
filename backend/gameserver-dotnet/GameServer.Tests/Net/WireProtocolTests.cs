@@ -201,7 +201,10 @@ public class WireProtocolTests
         var snapshot = new SnapshotMessage { Tick = 42, AckTick = 41, Full = true };
         snapshot.Entities.Add(new EntitySnapshot
         {
-            Id = "player1", Type = EntityType.Player, X = 10.5f, Y = 20.25f, Hp = 90, MaxHp = 100
+            Id = "player1", Type = EntityType.Player, X = 10.5f, Y = 20.25f, Hp = 90, MaxHp = 100,
+            // Non-zero on purpose: a zero here would pin only that the key exists, and
+            // the field's whole point is carrying a value that is NOT the default.
+            Speed = 5.5f
         });
         snapshot.Removed.Add("gone1");
 
@@ -210,7 +213,8 @@ public class WireProtocolTests
 
         Assert.Equal(
             "{\"tick\":42,\"ack_tick\":41,\"full\":true," +
-            "\"entities\":[{\"id\":\"player1\",\"type\":\"player\",\"x\":10.5,\"y\":20.25,\"hp\":90,\"max_hp\":100}]," +
+            "\"entities\":[{\"id\":\"player1\",\"type\":\"player\",\"x\":10.5,\"y\":20.25,\"hp\":90,\"max_hp\":100," +
+            "\"speed\":5.5}]," +
             "\"removed\":[\"gone1\"]}",
             payload);
 

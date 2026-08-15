@@ -106,6 +106,7 @@ services:
           --console.username "${NAKAMA_CONSOLE_USER:-admin}" \
           --console.password "${NAKAMA_CONSOLE_PASSWORD:-password}" \
           --socket.server_key "${NAKAMA_SERVER_KEY:-defaultkey}" \
+          --runtime.http_key "${NAKAMA_HTTP_KEY:-defaulthttpkey}" \
           --metrics.prometheus_port 9100
     ports:
       - "${NAKAMA_GRPC_PORT:-7349}:7349"      # gRPC API
@@ -234,6 +235,15 @@ services:
       GAMESERVER_MODE: map
       GAMESERVER_MAP_ID: ${GAMESERVER_MAP_ID:-map_01}
       GAMESERVER_ID: ${GAMESERVER_ID:-gs-dotnet-${GAMESERVER_MAP_ID:-map_01}}
+      # Multi-rate simulation. SIM_CRITICAL_HZ is the BASE tick rate; the other
+      # two must divide it exactly and must not exceed it, or the server exits
+      # with code 2 at startup rather than rounding. Snapshots are broadcast at
+      # the WORLD rate, not the base rate — raising SIM_WORLD_HZ raises outbound
+      # bandwidth per client proportionally. See
+      # backend/gameserver-dotnet/docs/README.md and docs/DESIGN.md.
+      SIM_CRITICAL_HZ: ${SIM_CRITICAL_HZ:-60}
+      SIM_WORLD_HZ: ${SIM_WORLD_HZ:-15}
+      SIM_BACKGROUND_HZ: ${SIM_BACKGROUND_HZ:-5}
       # /metrics + /healthz. Binds the wildcard, so it answers on any Host —
       # scraped in-network as gameserver-dotnet:9101 and from the host as
       # 127.0.0.1:9101, with no `Host:` header trickery on either path.
@@ -247,10 +257,23 @@ services:
       # ADVERTISED TO CLIENTS, and it is NOT the listen address. The container
       # listens on :9000 but is published on GAMESERVER_CONTAINER_PORT, and the
       # gateway hands this value back verbatim in MsgEnterWorldResp.ServerAddr —
-      # so it must be what a CLIENT can dial. A bare ":9200" is normalized by the
-      # client to 127.0.0.1:9200, which is right for a local stack; on a VPS set
-      # GAMESERVER_PUBLIC_ADDR=<public-host>:<published-port>.
+      # so it MUST BE DIALABLE BY THE CLIENT. That is the contract stated on
+      # `publicAddr` in GameServer/Program.cs; the game server warns at startup
+      # when this value has no host part.
+      #
+      # In a container with a published port that means HOST-QUALIFIED:
+      # <host>:<published-port> — 127.0.0.1:9200 for a local stack,
+      # <public-host>:<published-port> on a VPS. A bare ":9200" is NOT correct
+      # here: clients receive it verbatim and cannot dial it (a C# TcpClient
+      # throws; only clients that rewrite it to loopback themselves connect).
+      # A bare ":port" is correct ONLY for host-mode deploys, where the listen
+      # address already is the address clients reach.
+      #
+      # NOTE: the default below is hostless, so it is only right for host mode.
+      # Set GAMESERVER_PUBLIC_ADDR explicitly whenever ports are published.
       GAMESERVER_PUBLIC_ADDR: ${GAMESERVER_PUBLIC_ADDR:-:${GAMESERVER_CONTAINER_PORT:-9200}}
+      NAKAMA_URL: http://nakama:7350
+      NAKAMA_HTTP_KEY: ${NAKAMA_HTTP_KEY:-defaulthttpkey}
       GAME_DB_URL: postgres://${POSTGRES_GAME_USER:-game}:${POSTGRES_GAME_PASSWORD:-localdev}@postgres-game:5432/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable
     ports:
       - "${GAMESERVER_CONTAINER_PORT:-9200}:9000"

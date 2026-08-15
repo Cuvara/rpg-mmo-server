@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using Microsoft.Extensions.Logging.Abstractions;
 using GameServer.Observability;
+using GameServer.Tests.Infrastructure;
 
 namespace GameServer.Tests.Observability;
 
@@ -17,16 +18,6 @@ namespace GameServer.Tests.Observability;
 /// </summary>
 public class MetricsEndpointTests
 {
-    /// <summary>Grab a free TCP port by binding port 0 and releasing it.</summary>
-    private static int FreePort()
-    {
-        var l = new TcpListener(IPAddress.Loopback, 0);
-        l.Start();
-        int port = ((IPEndPoint)l.LocalEndpoint).Port;
-        l.Stop();
-        return port;
-    }
-
     private static async Task<(int status, string body)> GetAsync(string url)
     {
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
@@ -48,10 +39,22 @@ public class MetricsEndpointTests
     [InlineData("localhost:{0}", "localhost")]
     public async Task TryStart_BindsAndServesMetricsAndHealth(string addrTemplate, string requestHost)
     {
-        int port = FreePort();
+        // MetricsEndpoint binds an HttpListener, not a socket it can hand back: HttpListener
+        // prefixes need a literal port, there is no ephemeral-bind mode, and it reports
+        // nothing about what it took — so the ":0"-and-ask pattern used everywhere else in
+        // this suite does not apply here. A lease is the next best thing: the port stays
+        // held while the four [Theory] cases pick theirs in parallel, so they cannot be
+        // handed the same number (the old FreePort() released immediately, and the kernel
+        // will happily re-issue a port it just took back — three of the four cases failing
+        // together in one run is that signature, not four independent collisions). The
+        // handoff itself is still not atomic; see TestPorts.Lease.
+        var lease = new TestPorts.Lease();
+        int port = lease.Port;
         string addr = string.Format(addrTemplate, port);
 
         using var metrics = new GameMetrics("map_01", $"rpg.gameserver.test.endpoint.{Guid.NewGuid():N}");
+
+        lease.Dispose(); // release, then bind immediately — nothing between these two lines
         await using var endpoint = MetricsEndpoint.TryStart(addr, metrics, "gs-test", NullLogger.Instance);
 
         Assert.NotNull(endpoint); // null = it failed to bind, which is the regression

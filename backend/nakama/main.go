@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/duycuong/rpg-mmo/nakama/auth"
+	"github.com/duycuong/rpg-mmo/nakama/economy"
 	"github.com/heroiclabs/nakama-common/runtime"
 )
 
@@ -34,6 +35,22 @@ func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runti
 	}
 	if err := initializer.RegisterBeforeAuthenticateEmail(auth.BeforeAuthenticateEmail); err != nil {
 		return fmt.Errorf("register before authenticate email: %w", err)
+	}
+
+	// Economy RPCs
+	if err := initializer.RegisterRpc(economy.RPCRewardKill, economy.RewardKillRPC); err != nil {
+		return fmt.Errorf("register rpc %s: %w", economy.RPCRewardKill, err)
+	}
+	if err := initializer.RegisterRpc(economy.RPCSubmitKill, economy.SubmitKillRPC); err != nil {
+		return fmt.Errorf("register rpc %s: %w", economy.RPCSubmitKill, err)
+	}
+	if err := initializer.RegisterRpc(economy.RPCGetLeaderboard, economy.GetLeaderboardRPC); err != nil {
+		return fmt.Errorf("register rpc %s: %w", economy.RPCGetLeaderboard, err)
+	}
+
+	// Create leaderboards (idempotent)
+	if err := economy.SetupLeaderboards(ctx, logger, nk); err != nil {
+		return fmt.Errorf("setup leaderboards: %w", err)
 	}
 
 	logger.Info("rpg-mmo nakama module loaded in %dms", time.Since(start).Milliseconds())

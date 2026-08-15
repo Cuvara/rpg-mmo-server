@@ -422,7 +422,7 @@ with it) holding the visible state it last sent. Per tick, per client:
 - **Keyframe** (`full: true`) — the complete AOI set; the client discards anything
   not listed. Sent on join, on `resync` request, and every `keyframeInterval`
   snapshots (default 30 ≈ 2s at 15 Hz).
-- **Delta** — only entities whose `type/x/y/hp/max_hp` changed since the previous
+- **Delta** — only entities whose `type/x/y/hp/max_hp/speed` changed since the previous
   snapshot to *this* connection, plus a `removed[]` list of entities that left AOI or
   the world. Comparison is exact (bitwise float equality), not tolerance-based: a
   tolerance would let slow drift accumulate on the client with nothing to correct it.
@@ -494,6 +494,63 @@ All validation is server-authoritative:
 - If the client reconnects with a valid session token within the window, it
   resumes with full state. Otherwise the entity is removed and the session is
   invalidated.
+
+### Measured constants (2026-08-12)
+
+Two constants below are quoted as specifications throughout these docs. They
+have now been **measured against the running local stack from two independent
+directions each**, and the figures agree. Recorded here so they are evidence
+rather than restatement — this repo has at least one figure that outlived the
+measurement behind it (the 150-players-per-server ceiling, ADR-7), and the way
+to avoid repeating that is to say what a number is *of*.
+
+| Constant | Specified | Measured — how | Result |
+|---|---|---|---|
+| AOI radius (`GameConstants.DefaultAoiRadius`) | 50.0 units | **server**: distance between two players' persisted `player_states` rows, compared against whether each appeared in the other's snapshots | **61.00 units** apart → mutually invisible |
+| | | **client**: Unity client tracking at what separation a remote player left its world set | last visible **50.5**, absent by **62.2** |
+| Map-server entity hold | 30 s | **server, gauge sampling**: lag of `gameserver_entities` behind `players_online` across two disconnects | **29 s** and **32 s**, then converged |
+| | | **server, log end-to-end**: disconnect line to "Entity hold expired" line, across three two-process runs | **30, 31, 30, 30, 30, 31 s** |
+| | | **client**: time from a deliberate disconnect to the `removed` entry arriving at the surviving client | **30.1 s** |
+
+Three independent methods for the hold — two server-side using different data
+(Prometheus gauges vs the server's own log lines) and one client-side timing the
+wire — landing on 29-32 s. Both figures for AOI land the boundary within about a
+unit. The agreement across methods is the evidence; no single one of these is
+worth much alone.
+
+**The persistence write lands with the hold EXPIRY, not the disconnect.** In the
+measured run a client disconnected at 08:00:52 and its `player_states` row is
+stamped 08:01:21.56 — the save fires as the entity is reaped, ~30 s later. Anyone
+assuming save-on-disconnect will misjudge the crash-loss window by the full hold
+duration: if the process dies during a hold, up to 30 s of movement was never
+written.
+
+The agreement is the evidence, not either row alone. The two paths share no
+code and neither measurement was taken with sight of the other: the server-side
+AOI figure comes from persisted Postgres rows, the client-side one from a Unity
+client tracking what appeared in its own snapshots; the server-side hold figure
+comes from Prometheus gauge sampling, the client-side one from timing a `removed`
+entry on the wire. Individually each is arguable — a persisted position is only
+a snapshot of when the save fired, and a client-side inference could be a merge
+bug. Landing within ~1 unit and ~1 second of each other, they are not.
+
+A third constant, the heartbeat, is specified in `Net/Connection.cs` as a 10 s
+ping interval with a 30 s pong timeout. It is confirmed exercised: a two-process
+client run held connections in-world for **75 s and 74 s** — ~7 pings each, more
+than twice the timeout — and no `Heartbeat timeout` line appeared for either
+connection.
+
+Keep the two kinds of run distinct when reading results:
+
+- **Short runs prove visibility, not liveness.** A run under 30 s ends before the
+  pong timeout could fire, so it cannot test the heartbeat at all. Several ~25 s
+  two-client runs passed cleanly while saying nothing whatsoever about ping/pong.
+- **Long runs prove liveness.** Only a run exceeding the timeout — comfortably,
+  so a late pong is not mistaken for a passing one — is evidence the client
+  answers pings.
+
+Reading the first as the second is an easy mistake and it is why this note
+exists.
 
 ## Shutdown (2026-08-06)
 
@@ -908,6 +965,225 @@ iteration" from being an unstated assumption that a future system quietly breaks
 re-entrancy counter that drives it is `[ThreadStatic]`, because same-thread re-entrancy
 is the only case the lock does not already exclude.
 
+### Two ways in: `Update(get, set)` and `UpdateComponents(writer)`
+
+`EcsWorld` exposes the world at two granularities, and which one a caller uses is the
+current dividing line of the ECS migration.
+
+`Update(get, set)` is the original, whole-entity form: `get` composes an `EntityState`
+out of all seven components, `set` writes all seven back. It is convenient and it is
+expensive in a way that scales with how often it is called, not with how much actually
+changed — moving a player costs fourteen component lookups plus two managed-reference
+stores, because `EntityIdRef` and `EntityKind` are rewritten even though neither can
+change after spawn.
+
+`UpdateComponents(Action<WorldWriter>)` takes the same write lock and runs the same
+deferred structural phase, but hands the callback a `WorldWriter`: `Resolve(id)` returns
+an `EntityHandle`, and `PositionOf`/`HealthOf`/`CombatOf`/`LocomotionOf`/`InputCursorOf`
+return `ref` to the individual components. A system then reads what it reads and writes
+what it writes. The string id is paid for once per entity per scope instead of once per
+access — the first half of ADR-10's integer simulation handle, with the wire, the
+persistence layer and `EntityState.Id` all still on strings.
+
+`EntityHandle` wraps Arch's `Entity` so no `Arch.Core` type is public, and it is only
+valid inside the scope that produced it: a structural change can move an entity's slot
+and nothing revalidates a stored handle.
+
+**Who is on which side today.** The per-tick input path and `TryGetSnapshotAnchor` (the
+per-connection AOI centre + ack tick) use the component form. `EnemySpawner`,
+`AsyncSaver`, `GetEntitiesInRange` and the join/leave paths still use the whole-entity
+form. The attack branch of `InputHandler` is deliberately mixed: it composes whole
+`EntityState` values because `CombatLogic` and the death callback are `Shared.GameLogic`
+entry points shaped that way, but its write-back is component-level.
+
+**The AOI scan fills a caller-owned buffer.** `GetEntitiesInRange` used to open with
+`new List<EntityState>()` and was called once per connected client per tick. There is now
+a `Span<EntityState>` overload whose overflow contract is deliberately the same one
+`AoiLogic.GetNearbyEntities` publishes — *count, do not saturate*, so a short buffer
+returns the size it needed to be rather than a saturated length that cannot be
+distinguished from an exact fit. Each `Connection` owns its buffer and grows it once.
+Both forms share one scan implementation: the delta encoder's bookkeeping is
+order-sensitive, so a divergence in iteration order between them would be a wire change.
+
+**Input is bound to its entity at ingest.** `PushInput` resolves the user id on the
+network thread, so the simulation thread never hashes a string — movement coalescing is
+keyed by `EntityHandle`. `_index` is still the authority for join, reconnect and
+persistence; it is just off the per-input path. A handle can be invalidated by
+destruction (not by archetype moves — Arch's `Entity` is a stable identity), so
+`RebindStale` re-resolves the reconnect case at the top of the input phase.
+
+Measured end to end on `TickLoop.TickOnce`, the same probe run on this branch and on
+`develop` (Release, real `Connection` objects over a null transport, Protobuf, clustered
+so AOI matches): **436 276 → 21 692 B/tick at 50 players (20×)** and **6 762 858 →
+192 984 B/tick at 200 players (35×)**. Allocation is deterministic to under 0.05% across
+paired runs. Wall-clock is *not* claimed: this host's spread on one binary is ±50%, which
+is the contamination ADR-7 documents.
+
+**Where the risk moved.** The movement step still calls `MovementSystem.TryMove` — the
+arithmetic is not re-derived, and the golden vectors (ADR-10) are untouched. What is new
+is that it is handed only the three fields `TryMove` reads rather than a composed
+entity, and that assumption would fail *silently* if `TryMove` grew a fourth. So
+`ComponentInputPathTests.Movement_ComponentPath_IsBitExactAgainstWholeEntityTryMove`
+replays every position/speed/move/bounds combination in the movement fixture through the
+real handler and compares the stored position bit-for-bit against `TryMove` called with
+a fully populated `EntityState`.
+
+**One preserved oddity.** A self-targeted attack applies its cooldown and fires the death
+callback but discards its damage. That is the `get`/`set` path's behaviour — its final
+`set(userId, attackerCopy)` overwrote the target write when attacker and target were the
+same entity — and component writes have no such last-writer-wins accident, so the new
+path discards it explicitly to keep the wire output identical. It is pinned by a test
+named after what it is, not fixed here.
+
+### The enemy AI: three systems over an archetype query
+
+The AI is `EnemySpawnSystem` → `EnemyMoveSystem` → `EnemyReapSystem`, run in
+`EnemyAiPhase` order inside one world write scope. It replaced a single
+`Tick(get, set, tick)` that walked a `List<string>` of enemy ids and round-tripped a whole
+`EntityState` per enemy per tick.
+
+**Order is load-bearing, and explicit rather than declarative.** Spawn runs first so a new
+enemy takes its first step on the tick it appears — the original got that by spawning into
+the list it was about to walk, and it is visible in the snapshot. Reap runs last because
+"arrived at the centre" is a fact the move system produces earlier in the same tick.
+There is no `[UpdateInGroup]` because there is no server-side group tree: the one in the
+codebase is the Unity *client* package's DOTS scheduler, and the server-side equivalent
+would be `Arch.System`'s source generator, banned by ADR-12 because `ArchAotHintTests`
+cannot enumerate the query shapes it generates.
+
+**`EnemyAi` is ownership, not type.** Entities carry the tag only if the spawner created
+them, and it is preserved rather than re-derived when an existing entity is written back.
+Deriving it from `EntityKind.Value == "mob"` would put every test-placed mob on a march to
+the origin; re-deriving it on update would strip it from any enemy written back through
+`AddEntity`, which the combat path does on every hit.
+
+**This is where the deferred structural phase earns its keep.** Despawns are raised inside
+the write scope and drained by `ApplyStructuralChangesLocked` on the way out — before the
+snapshot broadcast, so a client never observes an enemy inside the despawn radius. The old
+shape could not do this: `RemoveEntity` inside the lock would deadlock, so ids were
+collected into a `PendingRemovals` list the tick loop drained after releasing it. Op kinds
+are still just *add* and *remove*; `EnemyAi` rides on the add as a tag payload.
+
+**Enemies deliberately do not use `MovementSystem`.** Their step is unclamped by map bounds
+and normalises with a reciprocal square root. It was preserved character-for-character and
+is pinned bit-exactly, because unifying the two movement models would move every enemy onto
+different floats — a gameplay decision with a wire consequence, not a refactor.
+
+Measured: the AI phase went 367 → 172 B/tick (−53%), deterministic across paired runs. In
+context that is **0.36%** of a 50-player tick, because snapshot encoding dominates. Per
+ADR-12 that is recorded, not dressed up.
+
+### The snapshot broadcast: gather under one lock, encode under none
+
+`TickLoop.TickOnce` broadcasts in two phases. Phase A calls `EcsWorld.ReadAll` once and,
+inside that single read scope, has every `Connection` gather its AOI anchor and its
+visible entities into buffers the connection owns. Phase B leaves the scope and encodes
+and sends, touching no world state.
+
+Before this, each viewer took the read lock twice — anchor, then AOI scan — so a
+200-player tick acquired it 400 times, and `WireProtocol.NewEnvelope` ran interleaved
+between those acquisitions.
+
+**The measurable effect is nil and that is the honest summary**: −0.3% allocation at 50
+players, noise at 200. The AOI inner loop was already chunk-iterating and compose-free and
+stage 1 had already removed its per-client list, so there was nothing left there.
+
+**The structural effect is the reason it exists.** Serialization still runs inside the
+tick. It could not be moved out while encoding was interleaved with locked world reads,
+because no point in the tick had a viewer's snapshot input standing free of the world.
+After phase A every connection holds a self-contained view — no world reference, no lock —
+so phase B can move to another thread without `EcsWorld` being involved. Whether to do
+that is BENCHMARK.md §9's outstanding item, and it is the one with a measured case behind
+it.
+
+The trade: a join or leave arriving mid-broadcast waits for the whole gather rather than
+slipping between two viewers. The gather is position tests over chunk spans with no
+serialization in it, which is why serialization was moved out of the locked phase rather
+than left in it.
+
+Wire output is unchanged, and is proven so rather than asserted: `SnapshotByteIdentityTests`
+SHA-256s every snapshot envelope of a deterministic 120-tick scenario, for Protobuf and
+JSON separately, against digests generated before the change.
+
+### Snapshot encoding runs on the connection, not on the tick
+
+The tick stages each viewer's AOI view on its own `Connection` and signals; the
+connection's existing write task encodes the `SnapshotMessage`, serializes it and writes
+it. Tick-thread allocation at 200 players went from 192 935 to 32 B/tick. Total CPU is
+unchanged — this moves work, it does not remove it, so it is a win where there are spare
+cores and roughly a wash on a single-vCPU pod.
+
+**Ordering is structural.** One write task per connection reads one channel, so tick
+N+1's frame cannot overtake tick N's. The queue carries a `SendItem` that is either a
+built envelope or a "snapshot staged" marker, so both share that one ordered path.
+
+**Two AOI buffers, and two is provably enough.** Buffer selection belongs to the tick
+thread and advances only when the previous job was claimed, so the buffer an encoder holds
+is never the one being written, and an unclaimed job is overwritten in place.
+
+**Back-pressure coalesces to the newest staged snapshot, losslessly.** A snapshot that is
+never claimed is never encoded, so it never advances the delta encoder's `_lastSent`, and
+the next one encoded carries every change since the last snapshot actually sent. This
+*fixed* a pre-existing bug: the old order encoded on the tick, advanced `_lastSent`, and
+only then handed the envelope to a bounded channel that drops the oldest under load — so a
+dropped frame's updates were recorded as sent and never retransmitted until the next
+keyframe.
+
+The visible consequence is that **ticks and snapshots are no longer 1:1 when the writer
+lags**. A lagging client now gets fewer, fresher snapshots instead of a backlog of stale
+ones. That is a deliberate behaviour change, not an internal detail.
+
+**Two bugs were made and caught here, both silent by nature.** Gating the marker on "no
+job already pending" is a permanent starvation bug, because the bounded queue drops the
+oldest and a lost marker would have stopped that connection's snapshots forever; markers
+are now unconditional and surplus ones cost nothing. And reading the buffer index outside
+the lock while the write task flipped it let a slow gather write into the buffer being
+encoded.
+
+**What this measured about the tick, which matters more than the change itself.** Splitting
+the old broadcast by hand at 200 players: AOI gather ~874–1177 µs/tick,
+`SnapshotDeltaState.Encode` ~998–1272 µs/tick, protobuf `ToByteArray` ~79–144 µs/tick.
+Serialization proper is 4–6% of the tick, not the 80% the original analysis assumed. The
+two real terms are the brute-force AOI scan (a spatial index is the standing production
+item) and `Encode`'s 134 699 B/tick of `EntitySnapshot` objects, which is a pooling
+problem. Neither is an ECS problem.
+
+### Systems, the schedule, and where simulation state lives
+
+The enemy phase is three `IEcsSystem`s in a `SystemSchedule`, run inside one world write
+scope. Each declares an `Order` and a `ComponentAccess` of reads and writes; ordering is
+declared, not the order three calls happen to appear in, and a duplicate `Order` is
+rejected at construction.
+
+**Systems iterate chunks when the work is per-entity-linear.** `EnemyMoveSystem` walks
+`Span<Position>` and `Span<Health>` through a `SimChunk` view, with the per-chunk body a
+`struct` visitor passed by `ref` so the call devirtualises and nothing is allocated.
+`EnemySpawnSystem` and `EnemyReapSystem` keep handle access on purpose — spawn creates and
+has no array to walk; reap decides per entity and then performs a structural change, which
+needs an identity a component span does not carry.
+
+**Simulation state lives in the world.** The spawner's wave accumulator and id counter were
+private fields on the system — invisible to the world, so unsnapshotable, unpersistable,
+and not reset when the world is. They are an `EnemySpawnState` component on a singleton
+entity that carries only that component, so it matches none of the queries requiring the
+seven standard ones and can never surface in a snapshot, an AOI scan or the entity count.
+`SimulationStateArchitectureTests` now fails the build on any mutable instance field in a
+phase or system, with `[SimulationScratch]` the one sanctioned exception for buffers that
+carry nothing between ticks. It was verified to fire by putting the original field back.
+
+**The core does not name the gameplay.** `CountWith<TTag>()` and
+`QueryWith<TTag>(Span<EntityHandle>)` replaced an `EnemyCount` property and an enemy-named
+query. The status endpoint's number comes from `ServerOptions.StatusEntityCount`, supplied
+by `Program.cs`; the `EnemiesAlive` JSON field name is a client contract and is unchanged.
+
+**Cost of the generator ban.** `SimChunk` exposes one fixed component set because a general
+N-component chunk query needs either a source generator — banned, since the AOT hint guard
+cannot enumerate generated query shapes — or a combinatorial hand-written API. A system
+with a different set means adding an explicit shape or justifying handle access.
+
+This measured nothing: 108 B/tick before and after. Steady state is 4–6 enemies. It was
+taken as a shape change, before gameplay is written against the seam.
+
 ### The `Shared.GameLogic` boundary is unchanged
 
 No `Arch.Core` type appears anywhere in `Shared.GameLogic` — not `World`, not `Entity`,
@@ -916,9 +1192,11 @@ out of components on the way out and writes components back on the way in; the s
 static functions (`MovementSystem.TryMove`, `CombatLogic.*`, `Vec2.DistanceSq`) are
 called with plain structs and never see the ECS.
 
-The cost is a struct copy per entity per read. At the current tick rate and player count
-this is not measurable, and it is the price of keeping the client's prediction code
-free of a pre-1.0 server dependency (ADR-10, "Why not share the ECS").
+The cost is a struct copy per entity per read, on the paths that still compose one — the
+input path no longer does (see "Two ways in", above). It is the price of keeping the
+client's prediction code free of a pre-1.0 server dependency (ADR-10, "Why not share the
+ECS"), and it is why the remaining round trips are being removed one caller at a time
+rather than by reshaping `Shared.GameLogic`.
 
 ### AOT hints: what breaks, and the guard that stops it (ADR-11)
 
@@ -1066,3 +1344,219 @@ version gap on a pre-release package this project did not choose directly. Re-ru
 audit on any Arch upgrade — `dotnet publish -p:TrimmerSingleWarn=false` and diff the
 diagnostic list against the 37 recorded here.
 
+## Multi-Rate Simulation Scheduler (2026-08-14)
+
+### What it replaced
+
+One loop, one rate. `TickLoop` woke every `1 / GAMESERVER_TICK_RATE` seconds (15 Hz by
+default), ran everything there was to run, and broadcast a snapshot. Every piece of
+simulation therefore paid the same price: enemy AI ran as often as movement integration,
+and movement integration ran no more often than enemy AI. The only way to make combat
+feel tighter was to raise the rate for *everything*, which multiplies snapshot bandwidth
+by the same factor — so the rate was pinned by the most expensive thing in the loop and
+by the wire, not by what any individual system needed.
+
+The loop is now driven by three groups at independently configured frequencies.
+
+### Groups are responsibilities, not frequencies
+
+`SimulationGroup` has three members — `Critical`, `World`, `Background` — and the names
+describe what belongs in each, never how fast it goes:
+
+- **`Critical`** — latency-sensitive, prediction-relevant work: player input, movement
+  integration, combat resolution. Runs on every base tick; this group *is* the base rate.
+- **`World`** — world simulation: AI, spawning, despawning, non-critical entity updates.
+  Also the cadence of the snapshot broadcast, which is why demoting it changes what
+  clients *see*, not only what the server computes.
+- **`Background`** — work where a delay of a whole interval is explicitly acceptable. At
+  the default 5 Hz that delay is 200 ms, which is a gameplay judgement rather than a
+  performance one.
+
+Naming them `Hz60`/`Hz15`/`Hz5` was rejected for a concrete reason: the frequencies are
+configuration (`SIM_CRITICAL_HZ`, `SIM_WORLD_HZ`, `SIM_BACKGROUND_HZ`), so a group named
+after its rate becomes a lie the first time an operator changes one, and every reference
+to it in gameplay code becomes misleading at the same instant.
+
+A system declares its group through `IEcsSystem.Group` and nothing else about frequency.
+It never counts ticks, never tests `tick % n`, never reads a configured Hz. That is the
+property that makes the rate model auditable: "what runs at what rate" is answerable by
+reading `SimulationRates` and `SimulationSchedule`, and changing a rate is a
+configuration change rather than a code change. `Group` defaults to `World` — world
+simulation is what a system did before groups existed, so an implementation that says
+nothing keeps its old cadence rather than being silently promoted to the base rate.
+
+### The base tick, and why integers rather than a float accumulator
+
+The obvious way to run several rates in one loop is an accumulator per group: add the
+wall-clock delta each frame, fire when it crosses `1/Hz`, subtract. It was rejected on
+three counts, all of which matter to this server specifically:
+
+1. **It drifts.** The residual after each fire is a float, and the error compounds.
+2. **"Which tick did this run on" stops having an answer.** Group boundaries land
+   wherever the accumulator happened to cross, so a group run is not attached to a tick
+   number.
+3. **It is not reproducible.** The same inputs replayed on another machine produce a
+   different schedule, because the schedule depends on frame timing rather than on
+   counting.
+
+Point 2 is disqualifying on its own. Tick numbers here are *identities*, not timestamps:
+`ack_tick` on the wire is the client's reconciliation anchor, cooldowns are stored as
+`Combat.CooldownUntilTick` and compared against the tick counter, and the keyframe phase
+is derived from tick arithmetic. A scheduling mechanism that makes tick identity fuzzy
+undermines all three.
+
+So there is exactly one counter. `SimulationRates.BaseHz` is **derived, not configured**:
+it is the critical rate, because the critical group runs on every base tick by
+definition. Each group reduces to an integer `Every` — base ticks between two runs —
+computed as `BaseHz / groupHz`, and `RunsOn` is
+
+```csharp
+(baseTick - 1) % every == 0
+```
+
+The counter starts at 1 (`_currentTick++` is the first statement of `TickOnce`), so the
+`-1` makes every group fire together on tick 1. That alignment is what makes the schedule
+diagrammable and testable:
+
+```
+base tick   1  2  3  4  5  6  7  8  9 10 11 12 13 ...   (60 Hz, period 16.7 ms)
+critical    x  x  x  x  x  x  x  x  x  x  x  x  x
+world       x           x           x           x       (every 4)
+background  x                                   x       (every 12)
+snapshot    x           x           x           x       (world rate)
+```
+
+### Every rate must divide the base rate exactly, or the server refuses to start
+
+`SimulationRates.TryCreate` rejects, with an operator-facing message naming the variable
+at fault and listing the divisors of the base rate:
+
+- any rate ≤ 0, or > `MaxHz` (240) — the ceiling is not a hardware claim, it turns a typo
+  like `SIM_CRITICAL_HZ=6000` into a startup failure instead of a busy loop that starves
+  the network threads on the same box;
+- `world > critical`, or `background > world` — the critical group is the base timeline
+  and must be the fastest, or the group names stop describing what runs when;
+- `critical % world != 0` or `critical % background != 0`.
+
+The divisibility rule is the load-bearing one. A configuration like 60/25/5 has no
+integer timeline at 60 Hz: its true common base is 300 Hz, so honouring it would silently
+run the whole server five times faster than anyone asked for. `Program.cs` treats a
+rejected configuration as fatal (`return 2`) rather than falling back to a default,
+because a server that quietly substitutes 60 for an unusable 25 is a server whose measured
+behaviour does not match its configuration — the failure mode that makes a
+misconfiguration unfindable.
+
+`GAMESERVER_TICK_RATE` still works and still means what it meant. When it is set and no
+`SIM_*_HZ` variable is, all three groups take that one rate (`SimulationRates.Uniform`):
+one timeline, world due on every base tick, snapshots at the simulation rate — the
+pre-multi-rate server byte for byte. That is what let the existing tick-sensitive and
+byte-identity tests stand unchanged rather than being rewritten around the new model.
+
+### The delta-time rule: each system integrates with its own group's dt
+
+`SimulationRates.DeltaTimeFor(group)` returns `1f / HzFor(group)`, and a system is handed
+that value at construction. `EnemySpawner` builds its three systems with
+`rates.DeltaTimeFor(SimulationGroup.World)`; `InputHandler` is constructed with
+`rates.CriticalHz`.
+
+**Handing a world-group system the base dt would be a bug, not an inefficiency.** A
+system that runs every 4th base tick but integrates `1/60` s of motion moves its entities
+at a quarter speed, and the error is silent: nothing crashes, `EnemySpeed` simply stops
+meaning units per second. The inverse — a critical system given the world dt — moves
+everything four times too fast. Because the dt travels with the group rather than being
+read from a global, `units per second` means the same thing in every group, and moving a
+system between groups changes when it runs without changing how far it moves.
+
+This rule has a second edge, visible in `InputHandler`. It takes the **critical** rate for
+both of its rate-derived values: the movement dt is the critical timestep, and
+`GameConstants.AttackCooldownTicks` counts base ticks, because `Combat.CooldownUntilTick`
+is compared against the base tick counter. Deriving the cooldown from the world rate
+would make a 500 ms cooldown last 2 s at 60/15. The rule is not "use your group's dt for
+everything" but "use the rate of the timeline the value is measured against".
+
+**The consequence for movement.** `move_x`/`move_y` are a *direction*, and
+`MovementSystem` requires travel distance to depend on wall-clock time and speed, "never
+on how many input packets a client sends". That held only while the simulation rate and
+the client's send rate matched. At a 60 Hz base with a client sending at 10–15 Hz,
+integrating solely on packet arrival makes speed proportional to send rate. So
+`InputHandler.ApplyHeldMovement` integrates the newest held direction once per base tick
+for players who sent nothing that tick, bounded to `WorldEvery` base ticks — one world
+interval, 66 ms at 60/15 — after which the direction expires and the player coasts no
+further. With a single rate `WorldEvery` is 1, the pass returns immediately, and the old
+packet-driven model is reproduced exactly.
+
+### Replication is gated to the world rate, not the base rate
+
+The snapshot broadcast is behind `_rates.RunsOn(SimulationGroup.World, _currentTick)` in
+`TickLoop.TickOnce`; on a base tick where the world group is not due, the loop records its
+metrics and returns before gathering viewers. Simulating at 60 Hz does not mean
+replicating at 60 Hz, and the two must not be allowed to become the same number by
+accident. Two independent consequences if they were:
+
+1. **Bandwidth.** Sending every base tick quadruples outbound bytes per client at the
+   default 60/15. The measured 45.9 KB/s per client at 200 players
+   (`backend/docs/BENCHMARK.md`) would leave the `< 50 KB/s` mobile budget ADR-7 sets —
+   to deliver intermediate state the client interpolates across anyway.
+2. **The keyframe interval silently changes meaning.** It counts *snapshots*, not
+   seconds: 30 snapshots is 2 s at 15 Hz and 0.5 s at 60 Hz. The same constant would
+   quadruple full-keyframe bandwidth on top of the delta increase, without anyone editing
+   a number.
+
+Gating at the world rate keeps both properties fixed, and keeps the client's snapshot
+buffer and interpolation window sized against a rate that did not move.
+
+### Group order is fixed: Critical → World → Background
+
+`SimulationSchedule` runs the due groups in that order and the order is not configurable.
+It encodes a **write-ownership rule**: on a tick where several groups are due, the faster
+group's writes land before the slower group reads them, so a slower group can never
+overwrite a newer value from a faster group with a staler one computed earlier in the
+same tick. Reversing it would let the 5 Hz group clobber a 60 Hz combat result — the
+precise cross-rate hazard that multi-rate scheduling introduces and that a single-rate
+loop cannot have.
+
+Within a group, ordering is each system's declared `Order`, with duplicates rejected at
+construction exactly as before. The duplicate check is now **per group**: two systems in
+different groups never run in the same pass and so cannot be ambiguous with each other,
+and forcing globally-unique `Order` values would couple unrelated groups' numbering for
+nothing.
+
+### Groups may be empty, and today two of them are
+
+`SimulationSchedule` skips a group with no systems entirely — it does not take a write
+scope, and it does not increment the group metrics. In the current build every
+`IEcsSystem` declares `World` (the three enemy-AI systems); the critical group's work
+lives in the tick-loop body rather than in declared systems, and the background group
+ships with nothing at all.
+
+That is a real state rather than a gap. Nothing in the current simulation can tolerate a
+200 ms scheduling delay without a visible behaviour change, and inventing a tenant for
+the background group so the diagram looks complete would be shipping a regression to
+satisfy a picture. The infrastructure is here, tested, and documented with the rule for
+what may go in it: a system belongs in `Background` when a whole interval of delay is
+acceptable *as gameplay*, not merely when it is cheap.
+
+### Overload policy: drop the backlog, never chase it
+
+The loop keeps a deadline in `Stopwatch` ticks and advances it by one period each
+iteration. The period is computed as `Stopwatch.Frequency / BaseHz`, not as
+`1000 / BaseHz` milliseconds: integer millisecond arithmetic truncates 16.67 to 16, a 4%
+fast clock — 2.4 extra ticks per second, with every duration expressed in ticks short by
+the same factor. The old loop could afford that truncation because `1000/15` is exact;
+the base rate cannot.
+
+When a tick runs long, `gameserver_tick_overruns_total` is incremented and the deadline is
+advanced without sleeping, so one slow tick is absorbed by the next few. Past
+`MaxLagTicks` (8) base ticks of accumulated lag the backlog is **dropped in one step**:
+the counter `gameserver_tick_backlog_dropped_total` is increased by the number of ticks
+lost, a WARNING is logged, and the deadline is resynchronised to now.
+
+The alternative — running the missed ticks back to back — is the unbounded catch-up loop.
+Each catch-up tick costs more than the budget it is trying to reclaim, so a server that
+falls behind falls *further* behind, and the mechanism meant to preserve real-time pacing
+is exactly what stops it recovering. Dropping instead means simulation time runs slower
+than wall time under sustained overload. That is a genuine cost — tick-based timers
+advance less than the elapsed clock, inputs in the dropped window are never applied, and
+whole world intervals vanish from the delta stream — but it is **visible, bounded and
+measurable**, which a spiral is not. Both counters and how to read them:
+`docs/METRICS.md`.

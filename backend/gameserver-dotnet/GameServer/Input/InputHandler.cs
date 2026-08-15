@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using Shared.GameLogic.Components;
 using Shared.GameLogic.Systems;
 using GameServer.World;
+using GameServer.World.Components;
 
 namespace GameServer.Input;
 
@@ -20,6 +21,7 @@ public sealed class InputHandler
     private readonly float _deltaTime;
     private readonly MapBounds _bounds;
     private readonly int _cooldownTicks;
+    private readonly int _maxBankedTicks;
 
     /// <summary>Fixed simulation timestep in seconds used for movement integration.</summary>
     public float DeltaTime => _deltaTime;
@@ -49,49 +51,213 @@ public sealed class InputHandler
             tickRate > 0 ? tickRate : GameConstants.DefaultTickRate);
         _bounds = bounds ?? MapBounds.Default;
         _cooldownTicks = GameConstants.AttackCooldownTicks(tickRate);
+        _maxBankedTicks = GameConstants.MaxBankedMovementTicks(
+            tickRate > 0 ? tickRate : GameConstants.DefaultTickRate);
+    }
+
+    /// <summary>
+    /// Ceiling on how many base ticks of elapsed time one movement step may cover, at this
+    /// handler's rate. See <see cref="GameConstants.MaxBankedMovementMs"/>.
+    /// </summary>
+    public int MaxBankedTicks => _maxBankedTicks;
+
+    /// <summary>
+    /// The timestep for a movement step landing on <paramref name="baseTick"/> for an
+    /// entity that last moved on <paramref name="lastMoveTick"/>.
+    ///
+    /// <para>This is the whole of #100's fix. A step covers the time since the entity last
+    /// moved rather than one fixed tick, so the three inputs that per-tick coalescing
+    /// discards from a burst no longer take their simulated time with them. It does not
+    /// weaken what coalescing defends: a client sending every tick always has
+    /// <c>lastMoveTick == baseTick - 1</c> and so earns exactly one tick per tick, and a
+    /// client that was silent is bounded by <see cref="MaxBankedTicks"/>.</para>
+    ///
+    /// <para>A first-ever move (<paramref name="lastMoveTick"/> of 0) is one tick, not the
+    /// whole age of the server.</para>
+    /// </summary>
+    private float StepDeltaTime(ulong baseTick, ulong lastMoveTick, ulong heldFromTick)
+    {
+        // Nothing held means the entity was STOPPED, not stalled: the last thing the client
+        // said was "I am not moving", and a deadzone input clears the hold. Standing still
+        // is not lost input, so a player who releases the stick, waits, and presses again is
+        // owed nothing for the pause — which is the most common thing a player does, and
+        // repaying it was a visible lurch on every restart.
+        if (heldFromTick == 0) return _deltaTime;
+
+        if (lastMoveTick == 0 || baseTick <= lastMoveTick) return _deltaTime;
+
+        ulong elapsed = baseTick - lastMoveTick;
+        if (elapsed > (ulong)_maxBankedTicks) elapsed = (ulong)_maxBankedTicks;
+        return _deltaTime * elapsed;
     }
 
     /// <summary>Attack cooldown length in simulation ticks at this handler's tick rate.</summary>
     public int CooldownTicks => _cooldownTicks;
 
+    /// <summary>
+    /// Reusable handle buffer for the held-movement pass. Scratch, not simulation state:
+    /// it is refilled from a query before every read, so its contents never survive a tick
+    /// in any meaningful sense.
+    /// </summary>
+    [GameServer.Server.SimulationScratch]
+    private EntityHandle[] _playerHandles = Array.Empty<EntityHandle>();
+
+    /// <summary>
+    /// Advance every player that has a held direction but received no input on this base
+    /// tick — the continuous half of the movement model.
+    ///
+    /// <para><b>Why this exists.</b> <c>move_x</c>/<c>move_y</c> are a direction, and
+    /// <see cref="MovementSystem"/> documents that travel distance must depend only on
+    /// wall-clock time and the entity's speed, "never on how many input packets a client
+    /// sends". That was only true while the simulation rate and the client's send rate
+    /// happened to match. Once the critical group runs at 60Hz and a client sends at 10 or
+    /// 15, integrating solely on packet arrival makes speed proportional to send rate. This
+    /// pass closes that gap: the newest direction is integrated once per critical tick.</para>
+    ///
+    /// <para><b>Why it is bounded.</b> A held direction expires
+    /// <paramref name="holdTicks"/> base ticks after it was accepted — one world interval.
+    /// A client that stops sending therefore coasts for at most that long (66ms at the
+    /// default 60/15) rather than drifting forever, and a client that sends an explicit
+    /// deadzone input stops immediately, because that clears the hold rather than
+    /// refreshing it.</para>
+    ///
+    /// <para><b>Why it is a no-op on a single-rate server.</b> With one rate,
+    /// <paramref name="holdTicks"/> is 1, and a held direction is by definition at least one
+    /// tick old on any tick where it would be applied here — so the condition can never be
+    /// true and behaviour is exactly the pre-multi-rate model, packet for packet. That is
+    /// what lets the byte-identity and characterization tests stand unchanged.</para>
+    /// </summary>
+    /// <param name="writer">Open world write scope.</param>
+    /// <param name="baseTick">The canonical base tick.</param>
+    /// <param name="holdTicks">
+    /// How many base ticks a direction stays valid for. One world interval; 1 disables the
+    /// pass entirely.
+    /// </param>
+    public void ApplyHeldMovement(WorldWriter writer, ulong baseTick, int holdTicks)
+    {
+        if (holdTicks <= 1) return;
+
+        int count = writer.QueryWith<PlayerTag>(_playerHandles);
+        if (count > _playerHandles.Length)
+        {
+            _playerHandles = new EntityHandle[count];
+            count = writer.QueryWith<PlayerTag>(_playerHandles);
+        }
+
+        int n = Math.Min(count, _playerHandles.Length);
+        for (int i = 0; i < n; i++)
+        {
+            ref readonly EntityHandle handle = ref _playerHandles[i];
+            if (!writer.IsAlive(in handle)) continue;
+
+            ref InputCursor cursor = ref writer.InputCursorOf(in handle);
+            if (cursor.HeldFromTick == 0) continue;          // nothing held
+            if (cursor.HeldFromTick == baseTick) continue;   // already stepped this tick
+            if (baseTick - cursor.HeldFromTick >= (ulong)holdTicks) continue; // expired
+
+            if (writer.HealthOf(in handle).Dead) continue;
+
+            float speed = writer.LocomotionOf(in handle).Speed;
+            ref Position position = ref writer.PositionOf(in handle);
+            var probe = new EntityState
+            {
+                Position = position.Value,
+                Speed = speed,
+                Dead = false,
+            };
+
+            // The same TryMove the packet path calls, with the same dt — one movement
+            // model, one arithmetic, whichever path stepped the entity.
+            MoveResult result = MovementSystem.TryMove(
+                in probe, cursor.HeldMoveX, cursor.HeldMoveY,
+                StepDeltaTime(baseTick, cursor.LastMoveTick, cursor.HeldFromTick), in _bounds,
+                out Vec2 newPosition);
+
+            if (result is MoveResult.Accepted or MoveResult.Clamped)
+            {
+                position.Value = newPosition;
+                cursor.LastMoveTick = baseTick;
+            }
+        }
+    }
+
     /// <summary>Process input for a user, taking the world write lock.</summary>
     /// <param name="currentTick">Current simulation tick (drives cooldowns).</param>
     public void ProcessInput(string userId, InputData input, ulong currentTick = 0, bool applyMovement = true)
     {
-        _world.Update((get, set) => ProcessInputLocked(get, set, userId, input, currentTick, applyMovement));
+        _world.UpdateComponents(writer => ProcessInput(writer, userId, input, currentTick, applyMovement));
     }
 
     /// <summary>
-    /// Process input inside an existing write lock.
-    /// 1. Get entity, skip if null or dead.
+    /// Process input inside an existing component write scope.
+    /// 1. Resolve the entity once, skip if unknown or dead.
     /// 2. Track LastInputTick (monotonic) — this is the value the client reconciles against.
     /// 3. Movement: integrate direction * speed * dt via <see cref="MovementSystem"/>,
     ///    clamped to the map bounds. Skipped when <paramref name="applyMovement"/> is false.
-    /// 4. Attack: get target, validate via CombatLogic, apply damage, handle death.
+    /// 4. Attack: resolve target, validate via CombatLogic, apply damage, handle death.
+    ///
+    /// <para><b>What changed from the <c>get</c>/<c>set</c> form.</b> Behaviour is
+    /// identical; the access pattern is not. The string id is resolved to an
+    /// <see cref="EntityHandle"/> once per entity per call instead of on every read and
+    /// every write, and the movement path touches only the three components it actually
+    /// uses — <c>Health</c>, <c>InputCursor</c>, <c>Position</c>, plus <c>Locomotion</c>
+    /// for speed — instead of composing and re-storing all seven. In particular the
+    /// <c>EntityIdRef</c> and <c>EntityKind</c> string references, which cannot change
+    /// after spawn, are no longer rewritten (and re-barriered) on every input.</para>
+    ///
+    /// <para><b>Where the round trip survives.</b> The attack branch still composes a
+    /// whole <see cref="EntityState"/> for attacker and target, because
+    /// <c>CombatLogic.ValidateAttack</c> / <c>CalculateDamage</c> / <c>HandleDeath</c>
+    /// and the death callback are <c>Shared.GameLogic</c> entry points shaped that way
+    /// and <c>Shared.GameLogic</c> is deliberately not being changed here. The write
+    /// back is already component-level: only the fields combat touches are stored.</para>
     /// </summary>
     /// <param name="applyMovement">
     /// False for superseded inputs when several arrived in the same tick: only the newest
     /// input moves the entity, so movement speed cannot be inflated by packet spam.
     /// Attacks are still processed (they have their own cooldown gate).
     /// </param>
-    public void ProcessInputLocked(
-        Func<string, EntityState?> get,
-        Action<string, EntityState> set,
+    public void ProcessInput(
+        WorldWriter writer,
         string userId,
         InputData input,
         ulong currentTick = 0,
         bool applyMovement = true)
+        => ProcessInput(writer, writer.Resolve(userId), userId, input, currentTick, applyMovement);
+
+    /// <summary>
+    /// Process a queued input that already carries its entity handle, resolved on the
+    /// network thread at ingest. This is what the tick loop calls: the simulation thread
+    /// never hashes a user id.
+    /// </summary>
+    /// <inheritdoc cref="ProcessInput(WorldWriter, string, InputData, ulong, bool)"/>
+    public void ProcessInput(
+        WorldWriter writer,
+        in PendingInput pending,
+        ulong currentTick = 0,
+        bool applyMovement = true)
+        => ProcessInput(writer, pending.Handle, pending.UserId, pending.Input, currentTick, applyMovement);
+
+    private void ProcessInput(
+        WorldWriter writer,
+        EntityHandle self,
+        string userId,
+        InputData input,
+        ulong currentTick,
+        bool applyMovement)
     {
-        var entity = get(userId);
-        if (entity == null) return;
-        var e = entity.Value;
+        // Revalidate: a handle resolved at ingest can be stale by the time the tick runs
+        // if the entity was destroyed in between. TickLoop rebinds first, so this is the
+        // backstop, not the mechanism.
+        if (!writer.IsAlive(in self)) return;
 
         // Skip if dead
-        if (e.Dead) return;
+        if (writer.HealthOf(self).Dead) return;
 
         // Monotonic tick check
-        if (input.Tick <= e.LastInputTick) return;
-        e.LastInputTick = input.Tick;
+        ref InputCursor cursor = ref writer.InputCursorOf(self);
+        if (input.Tick <= cursor.LastInputTick) return;
+        cursor.LastInputTick = input.Tick;
 
         // --- Movement ---
         // move_x/move_y are a DIRECTION, not a displacement: the server integrates
@@ -99,12 +265,55 @@ public sealed class InputHandler
         // more packets or larger vectors.
         if (applyMovement)
         {
+            // TryMove is called with the three fields it reads, not re-implemented from
+            // its parts: the golden vectors (ADR-10) pin this arithmetic bit-exactly and
+            // MovementParityTests pins this call site to TryMove's whole-EntityState
+            // form, so the two cannot drift.
+            float speed = writer.LocomotionOf(self).Speed;
+            ref Position position = ref writer.PositionOf(self);
+            var probe = new EntityState
+            {
+                Position = position.Value,
+                Speed = speed,
+                Dead = false, // already returned above if dead
+            };
+
             MoveResult moveResult = MovementSystem.TryMove(
-                in e, input.MoveX, input.MoveY, _deltaTime, in _bounds, out Vec2 newPosition);
+                in probe, input.MoveX, input.MoveY,
+                StepDeltaTime(currentTick, cursor.LastMoveTick, cursor.HeldFromTick), in _bounds, out Vec2 newPosition);
 
             if (moveResult is MoveResult.Accepted or MoveResult.Clamped)
             {
-                e.Position = newPosition;
+                position.Value = newPosition;
+
+                // Hold the direction so the critical group can keep integrating between
+                // packets (ApplyHeldMovement). Recorded after a successful step, so a
+                // rejected or deadzone input never becomes a held one.
+                cursor.HeldMoveX = input.MoveX;
+                cursor.HeldMoveY = input.MoveY;
+                cursor.HeldFromTick = currentTick;
+                cursor.LastMoveTick = currentTick;
+            }
+            else if (moveResult == MoveResult.None)
+            {
+                // An explicit stop. Clearing the hold is the difference between "the client
+                // released the stick" and "the client went quiet": the first must stop the
+                // entity now, the second is what the hold window is for.
+                cursor.HeldFromTick = 0;
+
+                // The stop is a MOVEMENT event for the purposes of owed time, even though
+                // it moves nothing: standing still is not lost input. The client told us it
+                // was not moving, so there is nothing to repay when it starts again.
+                //
+                // Without this, every deliberate stop was indistinguishable from a network
+                // stall, and the first input after it repaid the whole pause in one step —
+                // up to 250ms of travel in a single frame. Releasing and re-pressing is the
+                // most common thing a player does, which is why that read as constant
+                // jerkiness rather than as an occasional glitch.
+                //
+                // It does NOT cover a client that simply stops sending without a deadzone
+                // input; that gap is still repaid in one step, bounded by the cap. See #104.
+                cursor.LastMoveTick = currentTick;
             }
             else if (moveResult == MoveResult.Rejected)
             {
@@ -117,29 +326,48 @@ public sealed class InputHandler
         // --- Attack ---
         if (!string.IsNullOrEmpty(input.AttackTargetId))
         {
-            var target = get(input.AttackTargetId);
-            if (target != null)
+            _logger.LogDebug("Attack input from {UserId} targeting {TargetId}", userId, input.AttackTargetId);
+            EntityHandle target = writer.Resolve(input.AttackTargetId);
+            if (target.IsValid)
             {
-                var t = target.Value;
+                // Composed after movement, so the range check sees this tick's position —
+                // the same ordering the get/set form had.
+                EntityState attacker = writer.Compose(self);
+                EntityState t = writer.Compose(target);
 
                 // Cooldown is measured in simulation ticks, never wall-clock: the tick
                 // loop is the only clock the simulation has, so replaying the same input
                 // sequence always produces the same combat outcome.
-                string? attackErr = CombatLogic.ValidateAttack(in e, in t, currentTick);
+                string? attackErr = CombatLogic.ValidateAttack(in attacker, in t, currentTick);
                 if (attackErr == null)
                 {
-                    int damage = CombatLogic.CalculateDamage(in e, in t);
+                    int damage = CombatLogic.CalculateDamage(in attacker, in t);
                     t.Hp -= damage;
-                    e.CooldownUntilTick = currentTick + (ulong)_cooldownTicks;
+
+                    ulong cooldownUntil = currentTick + (ulong)_cooldownTicks;
+                    writer.CombatOf(self).CooldownUntilTick = cooldownUntil;
+                    attacker.CooldownUntilTick = cooldownUntil; // the killer state the callback sees
 
                     if (CombatLogic.HandleDeath(ref t))
                     {
                         _logger.LogInformation("Entity {VictimId} killed by {KillerId}",
-                            t.Id, e.Id);
-                        _onDeath?.Invoke(t, e);
+                            t.Id, attacker.Id);
+                        _onDeath?.Invoke(t, attacker);
                     }
 
-                    set(input.AttackTargetId, t);
+                    // Self-targeted attack: the get/set form ended with `set(userId, e)`,
+                    // which overwrote the target write with the attacker's pre-damage
+                    // copy — so damage to self was silently discarded while the cooldown
+                    // and the death callback still fired. Component writes have no such
+                    // last-writer-wins accident, so the discard is made explicit to keep
+                    // the wire output identical. See CHANGELOG: this is a latent bug that
+                    // is now visible, not one that is being fixed here.
+                    if (!self.SameAs(in target))
+                    {
+                        ref Health targetHealth = ref writer.HealthOf(target);
+                        targetHealth.Hp = t.Hp;
+                        targetHealth.Dead = t.Dead;
+                    }
                 }
                 else
                 {
@@ -147,7 +375,5 @@ public sealed class InputHandler
                 }
             }
         }
-
-        set(userId, e);
     }
 }

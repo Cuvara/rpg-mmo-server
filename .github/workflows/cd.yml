@@ -531,6 +531,14 @@ jobs:
           GATEWAY_ADDR: ${{ vars.GATEWAY_ADDR || ':8000' }}
           GAMESERVER_ADDR: ${{ vars.GAMESERVER_ADDR || ':9000' }}
           GAMESERVER_MAP_ID: ${{ vars.GAMESERVER_MAP_ID || 'map_01' }}
+          # Multi-rate simulation. SIM_CRITICAL_HZ is the BASE tick rate; the
+          # other two must divide it exactly and must not exceed it, or the game
+          # server exits 2 at startup instead of rounding. Snapshots ship at the
+          # WORLD rate, so SIM_WORLD_HZ is the one that moves bandwidth per
+          # client. See backend/gameserver-dotnet/docs/README.md.
+          SIM_CRITICAL_HZ: ${{ vars.SIM_CRITICAL_HZ || '60' }}
+          SIM_WORLD_HZ: ${{ vars.SIM_WORLD_HZ || '15' }}
+          SIM_BACKGROUND_HZ: ${{ vars.SIM_BACKGROUND_HZ || '5' }}
           REDIS_ADDR: ${{ vars.REDIS_ADDR || 'localhost:6379' }}
           GAME_DB_URL: ${{ vars.GAME_DB_URL || '' }}
           # --- containers mode (compose `realtime` profile) --------------------
@@ -546,11 +554,15 @@ jobs:
           # A wildcard is correct and works; it used to have to be a resolvable
           # name because the C# listener could not bind one.
           GAMESERVER_METRICS_ADDR: ${{ vars.GAMESERVER_METRICS_ADDR || ':9101' }}
-          # The address handed to CLIENTS in MsgEnterWorldResp.ServerAddr. Empty
-          # = ":<gameserver container port>", which clients normalize to
-          # loopback — correct on a dev box, WRONG on a VPS. Set it to
-          # <public-host>:<port> there.
+          # The address handed to CLIENTS in MsgEnterWorldResp.ServerAddr,
+          # VERBATIM — so it must be an address the client can dial. It is not
+          # the listen address whenever ports are published. Leaving it empty is
+          # only tolerated on `dev`, where it is filled in with loopback below;
+          # staging and production must set it explicitly or the deploy fails.
+          # See "Measured constants" / the transport notes in
+          # backend/gameserver-dotnet/docs/API.md.
           GAMESERVER_PUBLIC_ADDR: ${{ vars.GAMESERVER_PUBLIC_ADDR || '' }}
+          DEPLOY_ENVIRONMENT: ${{ needs.resolve.outputs.environment }}
           # --- monitoring (compose `monitoring` profile / grafana-otel-lgtm) ---
           MONITORING_ENABLED: ${{ vars.MONITORING_ENABLED || 'true' }}
           GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
@@ -591,7 +603,39 @@ jobs:
           # name, so ":8000"/":9200" stay true whichever mode is active.
           : "${GATEWAY_CONTAINER_PORT:=${GATEWAY_ADDR##*:}}"
           : "${GAMESERVER_CONTAINER_PORT:=${GAMESERVER_ADDR##*:}}"
-          : "${GAMESERVER_PUBLIC_ADDR:=:${GAMESERVER_CONTAINER_PORT}}"
+          # GAMESERVER_PUBLIC_ADDR is handed to clients verbatim, so it must be
+          # DIALABLE BY THEM. This used to default to ":<port>" — hostless — on
+          # the belief that clients normalize it to loopback. Only some do: the
+          # Go smoketest rewrites listen-style addresses, a C# TcpClient throws
+          # on one. A hostless value therefore fails two steps later, in the
+          # client, where nobody looks — so it is refused here instead.
+          if [ -z "${GAMESERVER_PUBLIC_ADDR}" ]; then
+            case "${DEPLOY_ENVIRONMENT}" in
+              dev)
+                # The dev box IS the client's host: runner, stack and client all
+                # sit on one machine. Loopback is correct and nothing else can be
+                # inferred without knowing the operator's network.
+                GAMESERVER_PUBLIC_ADDR=":${GAMESERVER_CONTAINER_PORT}"
+                GAMESERVER_PUBLIC_ADDR="127.0.0.1${GAMESERVER_PUBLIC_ADDR}"
+                echo "::notice::GAMESERVER_PUBLIC_ADDR unset; defaulting to ${GAMESERVER_PUBLIC_ADDR} for the dev environment. Set vars.GAMESERVER_PUBLIC_ADDR if clients connect from another machine (e.g. a phone on the LAN)."
+                ;;
+              *)
+                echo "::error::GAMESERVER_PUBLIC_ADDR is not set for environment '${DEPLOY_ENVIRONMENT}'. It is handed to clients verbatim, so there is no safe default off the dev box — loopback would tell every client to dial itself. Set the '${DEPLOY_ENVIRONMENT}' environment variable GAMESERVER_PUBLIC_ADDR to <public-host-or-ip>:${GAMESERVER_CONTAINER_PORT}."
+                exit 1
+                ;;
+            esac
+          fi
+          # Reject a hostless value however it arrived — including one set
+          # explicitly. The host list matches NormalizeDialAddr in
+          # backend/smoketest/smoke/helpers.go, so both ends agree on what counts
+          # as listen-style.
+          gs_host="${GAMESERVER_PUBLIC_ADDR%:*}"
+          case "${gs_host}" in
+            ""|"0.0.0.0"|"::"|"[::]")
+              echo "::error::GAMESERVER_PUBLIC_ADDR='${GAMESERVER_PUBLIC_ADDR}' has no usable host part. Clients receive this value verbatim and cannot dial it. Use <public-host-or-ip>:${GAMESERVER_CONTAINER_PORT}."
+              exit 1
+              ;;
+          esac
           umask 077
           envfile="$RPG_DEPLOY_DIR/deploy/.env"
           {
@@ -611,6 +655,9 @@ jobs:
             echo "GAMESERVER_ADDR=${GAMESERVER_ADDR}"
             echo "GAMESERVER_MAP_ID=${GAMESERVER_MAP_ID}"
             echo "GAMESERVER_RUNTIME=dotnet"
+            echo "SIM_CRITICAL_HZ=${SIM_CRITICAL_HZ}"
+            echo "SIM_WORLD_HZ=${SIM_WORLD_HZ}"
+            echo "SIM_BACKGROUND_HZ=${SIM_BACKGROUND_HZ}"
             echo "GAMESERVER_ID=gs-dotnet-${GAMESERVER_MAP_ID}"
             echo "GAME_DB_URL=${GAME_DB_URL}"
             echo "DEPLOY_MODE=${DEPLOY_MODE}"

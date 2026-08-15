@@ -193,10 +193,16 @@ type JoinTokenRequest struct {
 }
 
 // JoinTokenResponse confirms whether the join was accepted.
+// The game server — not the gateway — produces this message; the Go side only
+// ever decodes it (integration tests, smoketest, loadtest clients).
 type JoinTokenResponse struct {
 	OK     bool   `json:"ok"`
 	UserID string `json:"user_id,omitempty"`
 	Error  string `json:"error,omitempty"`
+	// TickRate is the CRITICAL simulation rate in Hz that the client must predict
+	// at. 0 means "not supplied" (a pre-0.x server); a client seeing 0 must refuse
+	// to predict rather than assume 15, which is the silent desync #93 closes.
+	TickRate uint32 `json:"tick_rate,omitempty"`
 }
 
 // InputMessage carries player input for one tick.
@@ -248,6 +254,13 @@ type EntitySnapshot struct {
 	HP     int     `json:"hp"`
 	MaxHP  int     `json:"max_hp"`
 	Handle uint32  `json:"-"`
+
+	// Speed is movement speed in world units per second, for client-side
+	// prediction. Zero means "not sent", NOT "immobile": proto3 elides a zero
+	// float, so a pre-speed sender is indistinguishable from a stationary
+	// entity. Receivers must fall back to a configured default rather than
+	// conclude the entity cannot move.
+	Speed float32 `json:"speed"`
 }
 
 // DisconnectMessage ends a session politely. Both encodings accept an empty

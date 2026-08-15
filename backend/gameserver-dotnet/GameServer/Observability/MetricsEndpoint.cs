@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using OpenTelemetry;
 using OpenTelemetry.Exporter;
@@ -27,20 +28,30 @@ public sealed class MetricsEndpoint : IAsyncDisposable
 
     private readonly MeterProvider _meterProvider;
     private readonly HttpListener _healthListener;
+    private readonly HttpListener? _statusListener;
     private readonly CancellationTokenSource _cts = new();
     private readonly ILogger _logger;
     private Task? _healthTask;
+    private Task? _statusTask;
+    private Func<ServerStatus>? _statusProvider;
 
     /// <summary>Prefix the Prometheus exporter is bound to (e.g. <c>http://+:9101/</c>).</summary>
     public string UriPrefix { get; }
 
-    private MetricsEndpoint(MeterProvider meterProvider, HttpListener healthListener, string uriPrefix, ILogger logger)
+    private MetricsEndpoint(MeterProvider meterProvider, HttpListener healthListener, HttpListener? statusListener, string uriPrefix, ILogger logger)
     {
         _meterProvider = meterProvider;
         _healthListener = healthListener;
+        _statusListener = statusListener;
         _logger = logger;
         UriPrefix = uriPrefix;
     }
+
+    /// <summary>
+    /// Register the callback that produces <c>/status</c> JSON responses.
+    /// Must be called after the server is fully wired up (tick loop, spawner, stores).
+    /// </summary>
+    public void SetStatusProvider(Func<ServerStatus> provider) => _statusProvider = provider;
 
     /// <summary>
     /// Start the metrics endpoint, or return <c>null</c> when disabled.
@@ -139,6 +150,15 @@ public sealed class MetricsEndpoint : IAsyncDisposable
                 .AddView(
                     GameMetrics.TickDurationInstrument,
                     new ExplicitBucketHistogramConfiguration { Boundaries = TickDurationBuckets })
+                // The group histogram needs its own view for the same reason the tick one
+                // does: the SDK's default boundaries start at 0 and step in units sized for
+                // milliseconds, while these values are recorded in seconds, so without this
+                // every observation lands in the lowest bucket and histogram_quantile over
+                // it returns nothing useful. Same boundaries as the tick, because a group's
+                // duration is bounded by the tick's and the two are read together.
+                .AddView(
+                    GameMetrics.GroupDurationInstrument,
+                    new ExplicitBucketHistogramConfiguration { Boundaries = TickDurationBuckets })
                 .AddPrometheusHttpListener(options =>
                 {
                     // OpenTelemetry builds its listener prefix as
@@ -175,10 +195,28 @@ public sealed class MetricsEndpoint : IAsyncDisposable
             health.Prefixes.Add(prefix + "healthz/");
             health.Start();
 
-            var endpoint = new MetricsEndpoint(provider!, health, prefix, logger);
-            endpoint._healthTask = Task.Run(() => endpoint.HealthLoopAsync(endpoint._cts.Token));
+            HttpListener? status = null;
+            try
+            {
+                status = new HttpListener();
+                status.Prefixes.Add(prefix + "status/");
+                status.Start();
+            }
+            catch (Exception ex2)
+            {
+                logger.LogWarning("Could not bind /status endpoint ({Reason}); /status disabled", ex2.Message);
+                try { status?.Close(); } catch { /* ignore */ }
+                status = null;
+            }
 
-            logger.LogInformation("Metrics endpoint listening on {Prefix} (/metrics, /healthz)", prefix);
+            var endpoint = new MetricsEndpoint(provider!, health, status, prefix, logger);
+            endpoint._healthTask = Task.Run(() => endpoint.HealthLoopAsync(endpoint._cts.Token));
+            if (status != null)
+            {
+                endpoint._statusTask = Task.Run(() => endpoint.StatusLoopAsync(endpoint._cts.Token));
+            }
+
+            logger.LogInformation("Metrics endpoint listening on {Prefix} (/metrics, /healthz, /status)", prefix);
             return endpoint;
         }
         catch (Exception ex)
@@ -194,6 +232,40 @@ public sealed class MetricsEndpoint : IAsyncDisposable
             try { health?.Close(); } catch { /* ignore */ }
             provider?.Dispose();
             return null;
+        }
+    }
+
+    private async Task StatusLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            HttpListenerContext ctx;
+            try
+            {
+                ctx = await _statusListener!.GetContextAsync();
+            }
+            catch (ObjectDisposedException) { break; }
+            catch (HttpListenerException) { break; }
+            catch (OperationCanceledException) { break; }
+
+            try
+            {
+                var provider = _statusProvider;
+                var status = provider?.Invoke() ?? new ServerStatus();
+                byte[] body = JsonSerializer.SerializeToUtf8Bytes(status, ServerStatusContext.Default.ServerStatus);
+
+                ctx.Response.StatusCode = 200;
+                ctx.Response.ContentType = "application/json; charset=utf-8";
+                ctx.Response.ContentLength64 = body.Length;
+                // Allow cross-origin polling from Unity WebGL builds or browser dev tools.
+                ctx.Response.AddHeader("Access-Control-Allow-Origin", "*");
+                await ctx.Response.OutputStream.WriteAsync(body, ct);
+                ctx.Response.Close();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Status response failed");
+            }
         }
     }
 
@@ -268,10 +340,16 @@ public sealed class MetricsEndpoint : IAsyncDisposable
 
         _cts.Cancel();
         try { _healthListener.Close(); } catch { /* ignore */ }
+        try { _statusListener?.Close(); } catch { /* ignore */ }
 
         if (_healthTask != null)
         {
             try { await _healthTask.WaitAsync(TimeSpan.FromSeconds(2)); }
+            catch { /* ignore */ }
+        }
+        if (_statusTask != null)
+        {
+            try { await _statusTask.WaitAsync(TimeSpan.FromSeconds(2)); }
             catch { /* ignore */ }
         }
 

@@ -46,6 +46,17 @@ no negotiation and no extra round trip.
    per connection. It never imposes one.
 3. Be prepared to decode either, since the same rule is what lets servers and
    clients upgrade independently.
+4. **The payload must be encoded in the same encoding as its envelope.**
+   `payload` is a nested `bytes` field, so on a Protobuf connection those bytes
+   must be the *Protobuf* serialisation of the inner message. JSON inside a
+   Protobuf envelope is not a supported hybrid; the peer will fail to parse it.
+5. **Never send `type = 0`.** It is rejected by the encoder, and the reason is
+   the sniffing rule above: proto3 elides field 1 when it is zero, so a `type 0`
+   envelope would not begin with `0x08` and the peer would classify the frame as
+   the wrong encoding. Decoding fails closed for the same reason — a body
+   beginning `0x12` parses as a well-formed `Envelope` carrying only field 2 with
+   `type` left at 0, and rejecting `type 0` turns that silent half-parse into an
+   error.
 
 The payload tables below describe the *message shapes*, which are the same in
 both encodings; the JSON column shows the legacy field names, which match the
@@ -60,11 +71,145 @@ both encodings; the JSON column shows the legacy field names, which match the
 | 3 | `enter_world` | client → gateway | `{ map_id }` |
 | 4 | `enter_world_resp` | gateway → client | `{ server_addr?, join_token?, transport?, error? }` |
 | 5 | `join_token` | client → gameserver | `{ token }` |
-| 6 | `join_token_resp` | gameserver → client | `{ ok, user_id?, error? }` |
+| 6 | `join_token_resp` | gameserver → client | `{ ok, user_id?, error?, tick_rate? }` — see below |
 | 7 | `input` | client → gameserver | `{ tick, move_x, move_y, attack_target_id? }` |
 | 8 | `snapshot` | gameserver → client | see below |
 | 9 | `disconnect` | either | `{}` |
 | 10 | `resync` | client → gameserver | `{}` (ignored) — request a full keyframe |
+| 11 | `ping` | either | `{ timestamp }` — heartbeat, see below |
+| 12 | `pong` | either | `{ timestamp, server_time }` — reply to `ping` |
+| 13 | `transfer_map` | client → gameserver | `{ map_id }` — request a move to another map, see below |
+| 14 | `transfer_map_resp` | gameserver → client | `{ ok, error }` |
+| 15 | `kick` | gameserver → client | `{ reason }` — forced disconnect; `reason` is a machine-readable string, not user-facing text |
+
+### `join_token_resp` (6) — `tick_rate` is the client's prediction rate
+
+```json
+{ "ok": true, "user_id": "u-42", "tick_rate": 60 }
+```
+
+**Normative definition.** `tick_rate` is **the rate, in Hz, at which the
+authoritative simulation tick advances — which is also the rate at which player
+movement is integrated.** A client building a prediction loop MUST use
+`dt = 1 / tick_rate` as its integration step, and MAY treat `tick_rate` as the
+conversion factor between the `tick` / `ack_tick` fields and wall-clock seconds.
+
+Those two things — the tick counter's rate and the movement integration rate —
+are **one number by contract, not by coincidence**, and the server is required to
+keep them equal:
+
+- Movement integrates once per simulation tick, using `1 / tick_rate` as its
+  timestep. `speed` is in world units per second, so the two must agree or the
+  same input produces a different displacement on each side.
+- `tick` and `ack_tick` are counted in these same ticks. A client reconciling
+  against `ack_tick` needs this rate to know how much simulated time an
+  acknowledged input covered.
+
+**It is not the snapshot cadence.** Snapshots follow the world rate, which is
+usually slower — at the default configuration the server simulates 60 times a
+second and sends 15 times a second. A client that mistakes this field for the
+send rate will size its interpolation buffer four times too small. The send
+cadence is observable from the snapshots themselves and is deliberately not
+advertised here.
+
+#### Why it is defined by meaning and not by the server's group name
+
+Internally the server schedules simulation in named rate groups (`Critical`,
+`World`, `Background` — ADR-13), and today `tick_rate` carries the critical
+group's frequency, because input, movement integration and combat are critical
+work and the critical group *is* the base tick timeline.
+
+**That is an implementation fact, and this field is not specified in terms of
+it.** The contract is the definition above: whatever the server's internal
+grouping, this field carries the rate at which it integrates movement and
+advances the tick counter. If movement were ever to move to a different group,
+the server would be required to keep advertising the *movement* rate here — or to
+add a new field and deprecate this one — rather than silently letting this value
+follow a group name while the client's prediction followed something else.
+
+A client is therefore correct to build its prediction `dt` from this field, and
+is not required to know that rate groups exist.
+
+The equality is enforced by test, not by convention:
+`JoinTickRateContractTests` asserts that the advertised value equals both the
+rate the movement integrator actually uses and the base tick rate, at several
+configurations. If a future change breaks the coupling, that test fails rather
+than a player feeling something soft.
+
+It rides the join response because it is **session-constant**: the server reads
+it once at startup and never changes it. Putting it on `snapshot` would re-send
+an unchanging number to every player on every tick forever, a trade this protocol
+rejects elsewhere for the same reason (the entity-type enum exists because a
+string type was ~19% of a keyframe). It is not on `enter_world_resp` because that
+comes from the gateway, which does not run the simulation (ADR-3) and would have
+to learn the rate second-hand.
+
+#### When it is absent or zero
+
+**`tick_rate` absent or `0` means "this server does not advertise its rate"** — a
+server predating the field. The rule, in order:
+
+1. A client **MUST NOT** assume 15, or any other constant. Assuming is the entire
+   defect this field closes
+   ([#93](https://github.com/Cuvara/rpg-mmo-server/issues/93)): predicting at 15
+   against a server tuned to 30 is wrong by a little on every tick, corrected by
+   every snapshot, and reads to a player as rubber-banding rather than as a
+   misconfiguration. Nothing on either side errors, and no counter moves.
+
+2. A client **SHOULD** measure the rate instead of guessing it. The server's tick
+   counter is on the wire: for any two snapshots, `(tick₂ − tick₁)` divided by the
+   wall-clock interval between them **is** the base tick rate, and therefore the
+   movement rate. This works even though snapshots arrive at the slower world rate,
+   because the `tick` they carry is a base tick — consecutive snapshots simply
+   differ by more than one. A handful of samples is enough to identify a rate from
+   the small set of plausible values, and the same measurement is a useful
+   **cross-check on the advertised value** even when it is present.
+
+3. A client **MAY** fall back to a locally configured rate, but only if that
+   fallback is **observable** — logged once per session, or exposed as a counter or
+   a visible dev-build indicator. A silent fallback to a configured constant is
+   behaviourally identical to the pre-#93 code and reintroduces the defect for the
+   one case the field exists to cover.
+
+4. A client **MAY** refuse to predict. This is the safest option for a
+   player-facing build: no prediction is honest input lag, whereas prediction at a
+   wrong rate is continuous, sub-threshold wrongness that smooths rather than snaps
+   and therefore never announces itself.
+
+What a client must not do is (1). Between (2), (3) and (4) the choice is the
+client's, provided the fallback in (3) is not silent.
+
+> **Note on the sibling rule.** `speed` (#91) is per-entity, varies during a
+> session, and a wrong value is bounded by whatever that entity's real speed is.
+> `tick_rate` is session-constant and scales *every* predicted displacement by a
+> whole ratio — at 15-vs-60 that is 4x per input, which lands under a typical snap
+> threshold and so is corrected by smoothing on every single reconcile. The two
+> fields warrant the same "0 means not sent" encoding and **not** the same silent
+> fallback.
+
+A **rejected** join (`ok: false`) carries no `tick_rate`. There is no session to
+predict in, and the caller has not proved it is entitled to the server's tuning.
+
+### Heartbeat (`ping` / `pong`) — MANDATORY
+
+**A client that does not answer `ping` is disconnected after 30 seconds.** This
+is not optional and it is not only a liveness hint:
+
+- The server sends `ping` (11) every **10 s** on every game-server connection.
+- The client MUST reply `pong` (12), echoing `timestamp` **unchanged** and
+  setting `server_time` to its own clock in ms since the Unix epoch.
+- If no `pong` arrives within **30 s**, the server logs `Heartbeat timeout for
+  <user>` and closes the connection. The entity then enters the normal 30 s
+  reconnect hold, so from the player's side it looks like an ordinary drop.
+
+Constants live in `GameServer/Net/Connection.cs` (`PingInterval`,
+`PongTimeout`). Sending `input` does **not** substitute for a `pong` — the
+timeout tracks pongs only.
+
+This is easy to miss because everything works for the first 30 seconds. A client
+that joins, moves, and receives snapshots correctly will still be dropped
+mid-session, and it presents as a random disconnect rather than as a missing
+message handler.
 
 ---
 
@@ -79,10 +224,57 @@ both encodings; the JSON column shows the legacy field names, which match the
   greater than the last one it accepted for that player, and echoes the newest
   accepted value back as `ack_tick`.
 - `move_x` / `move_y` — a **direction**, not a displacement. The server integrates
-  `direction * speed * dt` once per server tick. Vectors with magnitude > 1 are
+  `direction * speed * dt`, at most once per server tick. Vectors with magnitude > 1 are
   normalized; magnitude > 1.5 is dropped. Sending more packets does not move further.
 - `attack_target_id` — optional entity ID to attack this tick. Gated by range and by
   a tick-based cooldown (see below).
+
+### The movement model a predicting client must reproduce
+
+Three rules, and a client that implements the first two but not the third will diverge
+from the server exactly when the network is worst. They exist so that **travel distance
+depends on wall-clock time and the entity's speed, and never on how many packets arrived
+or when** — the invariant `MovementSystem` is written around.
+
+1. **At most one step per player per server tick.** Several inputs landing in the same
+   tick are coalesced to the newest; the rest do not each produce movement. This is what
+   stops a client travelling further by spamming.
+
+2. **A held direction keeps integrating between packets.** The newest accepted direction is
+   re-integrated on every simulation tick until a new input arrives or it expires one world
+   interval later (66 ms at the default 60/15 configuration). Without it, a client sending
+   at 15 Hz to a 60 Hz server would move at a quarter speed, because speed would become a
+   function of send rate. An input inside the deadzone — the stick released — clears the
+   hold immediately rather than refreshing it, so an explicit stop is instant.
+
+3. **A step covers the time since that entity last moved, not one fixed tick.** `dt` is
+   `min(now − last_move_tick, cap) / tick_rate`, where the cap is
+   `GameConstants.MaxBankedMovementMs` (**250 ms**). This is what makes rule 1 safe: when
+   four packets clump into one tick — TCP batching, a client GC pause, a mobile radio
+   waking — the three that coalescing discards no longer take their simulated time with
+   them. It does not weaken rule 1, because a client sending every tick always has
+   `last_move_tick == now − 1` and so earns exactly one tick of movement per tick.
+
+   **Only a moving entity accrues that time.** A deadzone input clears the hold, and an
+   entity with no held direction is *stopped*, not stalled — so a player who releases the
+   stick, waits, and presses again is owed nothing for the pause. This matters more than it
+   sounds: stopping and starting is the most common thing a player does, and repaying those
+   pauses put a quarter-second of travel into a single frame every time, which reads as
+   constant jerkiness rather than as an occasional glitch.
+
+   **A client that stops sending without a deadzone is a different case** and is still
+   repaid in one step, bounded by the cap. Sending an explicit zero vector on release is
+   therefore not optional politeness — it is how a client tells the server the difference
+   between "I stopped" and "my packets stopped", and the server cannot infer it.
+
+**The cap is part of the model, not a server-side safety valve.** A client that banks
+unbounded time reconciles against a server that does not, on precisely the frames where the
+network was worst — so a predicting client must apply the same 250 ms bound.
+
+Together these mean a client sending at *any* rate, evenly or in bursts, covers the same
+ground per second. Verified over a real socket in
+`GameServer.Tests/Server/SlowClientMovementTests.cs` rather than only in unit tests, for
+the reason recorded in `backend/TEAM.md`.
 
 ## `snapshot` (8) — gameserver → client, once per server tick per client
 
@@ -92,7 +284,7 @@ both encodings; the JSON column shows the legacy field names, which match the
   "ack_tick": 41,
   "full": true,
   "entities": [
-    { "id": "u1", "type": "player", "x": 12.5, "y": -3.0, "hp": 90, "max_hp": 100 }
+    { "id": "u1", "type": "player", "x": 12.5, "y": -3.0, "hp": 90, "max_hp": 100, "speed": 5.0 }
   ],
   "removed": ["mob_7"]
 }
@@ -106,10 +298,62 @@ both encodings; the JSON column shows the legacy field names, which match the
 | `entities` | array | always (may be `[]`) | Keyframe: everything in AOI. Delta: only entities whose visible state changed since the previous snapshot **sent to this connection**. |
 | `removed` | string[] | omitted when empty | Delta only: entity IDs that left the AOI or the world. Never present on a keyframe. |
 
-`entities[]` element: `id` (string), `type` (`player` \| `npc` \| `mob` \| `boss`),
-`x`, `y` (float32), `hp`, `max_hp` (int). Visible state is exactly these fields —
-a change in any of them puts the entity in the next delta; a change in a field the
-client cannot see (e.g. cooldown) does not.
+`entities[]` element: `id` (string), `type` (a category string — see below),
+`x`, `y` (float32), `hp`, `max_hp` (int), `speed` (float32). Visible state is exactly
+these fields — a change in any of them puts the entity in the next delta; a change in a
+field the client cannot see (e.g. cooldown) does not.
+
+**`speed`** is movement speed in world units per second, as the server is integrating it
+for that entity *right now* — not the spawn default. It exists so a client can predict
+local movement through the same `Shared.GameLogic` code the server runs; without it a
+client can only assume the default, and any buff, mount or slow desyncs the two with no
+error on either side (it presents as rubber-banding, which reads as a network fault).
+
+> **`speed <= 0` means "not sent", not "immobile".** proto3 elides a zero float, so a
+> server predating this field is indistinguishable from a stationary entity. A receiver
+> MUST fall back to its configured default rather than conclude the entity cannot move —
+> trusting the value unconditionally means an old server pins a client's predicted speed
+> to zero and the local player stops moving. JSON does not elide, so `"speed":0` is
+> explicit there; the rule is the same for both encodings.
+
+`speed` is sent on **every** mention of an entity, including handle-only ones. It is
+never interned: a client that resolves a handle expects complete state, and sending it
+only alongside the id would leave it correct once per keyframe interval and stale in
+between.
+
+### Entity type: enum with a string fallback (Protobuf only) — normative
+
+In JSON, `type` is simply a string and there is nothing to do. In Protobuf the
+category travels in **one of two fields, never both**:
+
+| Field | Proto # | Used when |
+|---|---|---|
+| `type` (`EntityType` enum) | 7 | The category is one this schema enumerates |
+| `type_name` (string) | 2 | It is not — the simulation produced a kind the schema does not know yet |
+
+**The rule: prefer `type`; when it is `ENTITY_TYPE_UNSPECIFIED` (0), read
+`type_name`.** `ENTITY_TYPE_UNSPECIFIED` literally means "see `type_name`". The
+writer never populates both, so the category is never ambiguous.
+
+| Enum value | # | String form |
+|---|---|---|
+| `ENTITY_TYPE_UNSPECIFIED` | 0 | *(see `type_name`)* |
+| `ENTITY_TYPE_PLAYER` | 1 | `player` |
+| `ENTITY_TYPE_MOB` | 2 | `mob` |
+| `ENTITY_TYPE_NPC` | 3 | `npc` |
+| `ENTITY_TYPE_ITEM` | 4 | `item` |
+| `ENTITY_TYPE_PROJECTILE` | 5 | `projectile` |
+
+A client that reads **only** the enum silently loses every future entity kind
+(they all arrive as `UNSPECIFIED`); one that reads **only** `type_name` gets an
+empty string for all five kinds above. Both halves are required.
+
+This fallback is a live path, not a hypothetical: entity categories are
+data-driven (`World/EcsWorld.cs` takes the type from the spawn kind), and the
+component docs already name a `"boss"` category that the enum does **not**
+include. Anything outside the five values above travels as `type_name`, by
+design — "a server that learns a new entity kind before the schema does must
+degrade, not break" (`shared/messages/proto.go`).
 
 ### Entity-id interning (Protobuf only) — normative
 
@@ -144,20 +388,330 @@ The Go reference implementation is `SnapshotState.Apply` in
 `backend/shared/messages/snapshot_state.go`; its desynchronise-and-recover tests
 are in `interning_test.go` alongside it.
 
+**The trap worth stating twice: handle `1` after a keyframe is a *different
+entity* than handle `1` before it.** Handles restart from 1 at every keyframe.
+Carry the table across and you will not get an error — you will attribute one
+entity's updates to another, which renders as a real entity in the wrong place.
+That is why rule 4 says clear, and why the merge algorithm below clears
+`handles` in the same step as `world`.
+
+#### Worked example — the same entity across a keyframe and a delta
+
+Captured from a live Protobuf connection. One entity, introduced then referenced:
+
+```
+KEYFRAME  payload=60 bytes   tick=15743  ack_tick=1  full=true
+08ff7a 1001 1801 2233 0a24<36-byte uuid> 1dabaaaa3e 2864 3064 3801 4001
+
+  08 ff7a      field 1  tick      = 15743
+  10 01        field 2  ack_tick  = 1
+  18 01        field 3  full      = true
+  22 33        field 4  entities, 51 bytes:
+     0a 24        field 1  id       = "b8547cf2-…-6403cf1e3f19"   <-- INTRODUCES the binding
+     1d abaaaa3e  field 3  x        = 0.3333
+     28 64        field 5  hp       = 100
+     30 64        field 6  max_hp   = 100
+     38 01        field 7  type     = 1 (ENTITY_TYPE_PLAYER)
+     40 01        field 8  handle   = 1                           <-- bind 1 -> that uuid
+                  field 2  type_name ABSENT — never set beside the enum
+```
+
+```
+DELTA     payload=20 bytes   tick=15744  ack_tick=2  full=false
+08807b 1002 220d 1dabaa2a3f 2864 3064 3801 4001
+
+  08 807b      field 1  tick      = 15744
+  10 02        field 2  ack_tick  = 2
+               field 3  full      ABSENT => false (proto3 omits zero values)
+  22 0d        field 4  entities, 13 bytes:
+               field 1  id        ABSENT                          <-- resolve via handle
+     1d abaa2a3f  field 3  x        = 0.6667
+     28 64        field 5  hp       = 100
+     30 64        field 6  max_hp   = 100
+     38 01        field 7  type     = 1 (ENTITY_TYPE_PLAYER)
+     40 01        field 8  handle   = 1                           <-- look up 1 -> uuid
+```
+
+> **Both captures above predate `speed` (field 9)** and are kept as they were, because
+> what they exist to show is the interning mechanism and re-capturing would change the
+> uuid and every offset for no gain. What field 9 adds is one more line on **every**
+> entity, keyframe and delta alike:
+>
+> ```
+>      4d 0000a040  field 9  speed    = 5.0
+> ```
+>
+> Tag `0x4d` = field 9, wire type 5 (fixed32), so it is **5 bytes per entity per
+> message** and does not shrink for common values the way a varint would. Measured on a
+> real encode, the delta below goes 20 → 25 bytes and its entity block header moves from
+> `22 0d` to `22 12`:
+>
+> ```
+> 08807b 1002 2212 1ddaac2a3f 2864 3064 3801 4001 4d0000a040
+> ```
+>
+> proto3 still elides it when it is exactly zero, which is the same thing as it being
+> absent — see the `speed <= 0` rule above.
+
+Same entity, 60 bytes → 20 bytes (65 → 25 with field 9). Three separate rules are visible in this one
+pair: `id` is sent exactly once (interning), `type_name` is absent in both frames
+because the enum carried the category, and `full` is absent from the delta
+because proto3 omits `false` — so a reader must treat *absent* as `false` rather
+than expecting the field.
+
+`TestDotnetInterop_MixedEncodingsOnOneServer` measures the encoding saving on a
+keyframe directly: **json=127B, proto=61B — 52.0% smaller**.
+
+#### Worked example — several entities at once
+
+Three players in view. The keyframe introduces each with **both** `id` and a
+**distinct** `handle`; handles are allocated from 1 in listing order. The very
+next delta carries all three by `handle` alone.
+
+```
+KEYFRAME  payload=167 bytes  tick=37640  ack_tick=1  full=true
+0888a602 1001 1801
+  22 33  0a24 "f6556309-…-ed0aacd88945"  1d 1500a041  2864 3064 3801 40 01   handle 1, x=20.000
+  22 33  0a24 "aa96957f-…-e2e82c1d08cb"  1d efee2e40  2864 3064 3801 40 02   handle 2, x= 2.733
+  22 33  0a24 "f0dccb4a-…-062ffc5c6c07"  1d 1500a041  2864 3064 3801 40 03   handle 3, x=20.000
+```
+
+```
+DELTA     payload=51 bytes   tick=37641  ack_tick=2   full=absent (false)
+0889a602 1002
+  22 0d  1d 9e88a041  2864 3064 3801 40 01     handle 1, x=20.067   (no id field)
+  22 0d  1d 33333340  2864 3064 3801 40 02     handle 2, x= 2.800   (no id field)
+  22 0d  1d 9e88a041  2864 3064 3801 40 03     handle 3, x=20.067   (no id field)
+```
+
+167 → 51 bytes for the same three entities. Note the handle space is **per
+connection**, not per entity type and not global: these numbers are 1/2/3 because
+that is the order this connection first saw them, and another client watching the
+same three entities may bind them to different numbers.
+
+#### Worked example — a removal beside surviving interned entities
+
+`removed` carries **entity IDs, never handles** — visible here as field 5
+(tag `0x2a`) holding a full 36-byte UUID, while the surviving entity in the same
+frame is still referenced by bare `handle`. This contrast is the thing to get
+right: one frame, two different ways of naming an entity.
+
+```
+DELTA     payload=60 bytes   tick=40784  ack_tick=339  full=absent (false)
+08d0be02 10d302
+  22 0d  1d 9a99993f  2864 3064 3801 40 01        surviving entity, handle 1, x=1.200 (no id)
+  2a 24  "0ce744f5-9559-4b85-a2ec-cbb4db28b6ab"   field 5 `removed` — a 36-byte ID
+```
+
+Do not route `removed` through the handle table, and do not expect a handle to be
+"released" by a removal — the binding simply stops being mentioned until the next
+keyframe rebuilds the space.
+
+Two different causes produce a `removed` entry and **the client cannot tell them
+apart**: the entity left the world (despawn, or a disconnect whose 30 s hold
+expired) or it merely left this client's AOI (radius 50). Treat `removed` as
+"stop rendering this", not as "this entity is gone forever" — it may reappear in
+a later snapshot with a fresh binding.
+
+#### A held entity is indistinguishable from a live one standing still
+
+The counterpart trap to the one above, and the more likely of the two to reach
+players. When a client disconnects, its entity is **not** removed — it is held
+for the reconnect grace period (30 s on a map server). During that window the
+entity is still in every nearby client's snapshots, at its last position, with
+full HP. **There is no "held" flag on the wire**, and there is deliberately no
+`disconnected` field on `EntitySnapshot`.
+
+So a remote player who has actually dropped renders, for up to 30 s, exactly like
+a remote player who is standing still. Nothing in the protocol lets a client tell
+them apart. If your game surfaces other players at all — nameplates, targeting,
+"is anyone here" logic — decide what you want that to look like, because the
+default is a ghost that looks alive and then vanishes with no warning.
+
+**A client therefore cannot observe when a peer leaves**, only when the server
+eventually says so. Any duration a client computes that ends at "my peer left" is
+an upper bound, inflated by up to the full hold — and it inflates *silently*,
+because a held entity is still arriving in snapshots and nothing marks it.
+
+Measured instance, because this is easy to dismiss as theoretical. Two clients in
+one session each timed their own co-presence window, both clocking from the
+moment the peer became visible:
+
+| Client | Reported | Actual |
+|---|---|---|
+| the one that exited first | 62.8 s | 63.0 s — correct |
+| the one that outlived it by 12 s | **74.9 s** | 63.0 s — **overstated by 11.9 s** |
+
+The overstatement equals the time it outlived its peer, to a tenth of a second.
+Server-side timestamps confirm the two exits were 11.96 s apart. Neither client
+was faulty; the second simply kept counting a co-presence that had already ended,
+because the peer's held entity was still in its world set.
+
+The consequence generalises: **a co-presence duration cannot be computed by one
+client.** The correct figure is the minimum across both — equivalently, second
+join to first exit — and it needs both clients' data by nature. A single client
+should name its metric for what it is (a local upper bound), not for what it
+looks like.
+
+This is the same trap as the rendering one above, and arguably the more dangerous
+face of it: there it produces a ghost someone may notice, here it silently
+corrupts a number that looks entirely reasonable.
+
+Two things a client CAN use, neither of them a disconnect signal:
+
+- The entity **stops changing**. A held entity's position and HP are frozen,
+  because the simulation marks it inactive (no AI targeting, no damage). Absence
+  of change is a hint, not proof — a player really can stand still.
+- The eventual `removed` entry, when the hold expires. That is the only
+  authoritative "gone" — and per the note above it does not distinguish a
+  despawn from an AOI exit either.
+
+Measured across two runs. In the second, three observers on **two different
+surfaces** agree — which is what makes it conclusive:
+
+| Observer | Surface | Value |
+|---|---|---|
+| The departing process, as it exited | its own last self-report | `x = 1.15` |
+| A **second, separate Unity runtime**, ~28 s later and still mid-hold | the live snapshot stream | `x = 1.15` |
+| The server, when the hold expired | the `player_states` row it wrote | `x = 1.147` |
+
+An earlier run gave the same result with two observers: a peer frozen at
+`x = 0.85` for 16 s, against a persisted `x = 0.854`.
+
+Read the legs separately, because they rule out different things. The two client
+observations are of the **live snapshot stream** — the server was still sending
+that entity, and sending it unchanged, so the freeze is not a client that quietly
+stopped receiving updates for it. That is the explanation a single observer could
+never eliminate, and it takes two independent runtimes to close. The persisted
+row is a **different surface**: written at hold expiry, it shows the server's own
+authoritative state never moved either, so the entity is genuinely inert rather
+than merely being reported as static.
+
+Do not treat the mid-hold client reading as evidence about persistence — at 28 s
+the hold had not expired and nothing had been written yet.
+
+Both constants are measured, not just specified — AOI confirmed at 50 units from
+two independent directions (a remote player last visible at 50.5 units apart and
+absent by 62.2), and the hold at ~30 s (a removal arriving 30.1 s after a
+deliberate disconnect). See "Measured constants" in `DESIGN.md`. They matter to a
+client for a practical reason: **two players further apart than the AOI radius
+legitimately do not appear in each other's snapshots**, so a multiplayer test
+that spawns or drives clients more than 50 units apart will fail with a correct
+server. Check the distance before suspecting the netcode.
+
+#### Worked example — mid-stream resync and the handle-space reset
+
+The trap made concrete. Before the resync this connection held four bindings;
+after it, three. **The same handle numbers now name different entities.**
+
+```
+handle 1: before = aa96957f… (another player)  ->  after = 14ba20e5… (C)   *** REBOUND ***
+handle 2: before = a8753636… (self)            ->  after = a8753636… (self)   unchanged
+handle 3: before = 0ce744f5… (B, since removed)->  after = 6c265217… (D)   *** REBOUND ***
+handle 4: before = 14ba20e5… (C)               ->  after = (unbound)
+```
+
+```
+KEYFRAME (after resync)  payload=168 bytes  tick=40799  ack_tick=350  full=true
+08dfbe02 10de02 1801
+  22 33  0a24 "14ba20e5-…-34af6de8c1a3"  1d 0000c033  2864 3064 3801 40 01   handle 1 -> C
+  22 33  0a24 "a8753636-…-42969da4b8b1"  1d 0000c033  2864 3064 3801 40 02   handle 2 -> self
+  22 33  0a24 "6c265217-…-06a5db35c9f9"  1d bcbbbb3f  2864 3064 3801 40 03   handle 3 -> D
+```
+
+A client that kept its old table across this keyframe would render **D's**
+movement as **B** (handle 3) and **C's** as some third player (handle 1) — with
+no error raised anywhere, because every handle still resolves. That is precisely
+why the keyframe branch clears `handles`: two of the four bindings changed
+meaning, and only re-reading the ids can tell you which.
+
+Note also that the keyframe re-sends every `id`, so clearing the table costs
+nothing — it is rebuilt from the same frame that invalidated it.
+
 ### Client merge algorithm (normative)
 
 ```
 on snapshot s:
-    if s.full:      world.clear()          # discard everything not re-listed
-    for e in s.entities:  world[e.id] = e  # upsert
-    for id in s.removed:  world.remove(id) # despawn
+    # STEP 1 — resolve every handle BEFORE touching any state.
+    resolved = []
+    for e in s.entities:
+        if e.handle != 0 and e.id is empty:
+            if s.full:                      # a keyframe MUST introduce every binding,
+                abort                       #   so this sender is malformed. Do NOT
+                                            #   consult the table — see below.
+            if e.handle not in handles:     # unresolvable
+                abort                       # apply NOTHING; send resync (10)
+            e.id = handles[e.handle]
+        resolved.append(e)
+
+    # STEP 2 — only now may state be mutated.
+    if s.full:
+        world.clear()                       # discard everything not re-listed
+        handles.clear()                     # handle space restarts at a keyframe
+
+    # STEP 3 — apply.
+    for e in resolved:
+        if e.handle != 0:  handles[e.handle] = e.id   # record/refresh binding
+        world[e.id] = e                               # upsert
+    for id in s.removed:   world.remove(id)           # despawn — by ID, not handle
+
+    # STEP 4 — clocks.
     tick     = max(tick, s.tick)
     ack_tick = max(ack_tick, s.ack_tick)   # monotonic; a 0 never lowers it
 ```
 
+On a JSON connection `handles` stays empty and steps 1 and 3's handle lines are
+no-ops, so this is one algorithm for both encodings — not two.
+
+Three details in that ordering are load-bearing:
+
+- **Resolve before mutating (step 1 before step 2).** An unresolvable handle must
+  abort the *whole* snapshot. A partially applied snapshot is worse than an
+  unapplied one, because it looks like valid state and nothing detects it. This
+  is also why clearing must not be hoisted above step 1: clear-then-abort empties
+  the world and only refills it a resync round-trip later.
+- **On a keyframe, a handle with no `id` is an error — do not resolve it.** A
+  keyframe re-introduces *every* binding, so on well-formed input step 1 resolves
+  nothing when `full` is true. The sender guarantees this structurally: it clears
+  its own handle table and restarts numbering at 1 *before* encoding a keyframe,
+  so every entity in it takes the "first mention" path and carries both `id` and
+  `handle`. A keyframe that references a bare handle therefore cannot be
+  legitimate — and resolving it against the *previous* interval's table is
+  exactly how you land in the wrong-entity failure described above, silently.
+  Rejecting it costs nothing (it can never fire on valid input) and converts a
+  silent corruption into a resync.
+
+> **Implementers note.** Earlier revisions of this section resolved handles
+> against the existing table on a keyframe too, and told implementers not to
+> reorder. That was safe for valid input but failed *silently* on a malformed
+> keyframe. The rule above keeps the all-or-nothing ordering (nothing is mutated
+> before validation) *and* fails closed. The Go reference
+> `messages.SnapshotState.Apply` now implements it, so the two agree — see
+> `TestKeyframeWithBareHandleIsRefusedNotResolvedAgainstStaleTable`.
+- **`removed` carries entity IDs, never handles.** Do not route it through the
+  handle table.
+
+Out-of-order or duplicated snapshots are still applied — the transport is ordered,
+so dropping them would silently diverge — but `tick` never moves backwards, which
+is what the `max` is for.
+
 Reference implementations, both covered by tests:
 `Shared.GameLogic.Systems.SnapshotMerger` (C#/Unity) and
 `messages.SnapshotState` (Go — used by the smoke test and integration tests).
+
+**Neither is a complete reference for the Protobuf path**, so do not copy either
+one and assume interning is handled:
+
+- `Shared.GameLogic.Systems.SnapshotMerger` implements **steps 2–4 only**. It has
+  no handle table and no resolution, because `EntityState` carries no `handle`
+  field at all — `Shared.GameLogic` is the pure simulation library and interning
+  is a wire concern. That layering is deliberate and fine, but it means **handles
+  must already be resolved before entities reach the merger.** Do the resolution
+  in your codec/transport layer and hand the merger entities whose `Id` is
+  populated. Feed it un-resolved Protobuf entities and it will upsert them under
+  an empty `Id`, silently collapsing every interned entity into one bucket.
+- `messages.SnapshotState` (Go) implements all four steps including handles, but
+  predates the keyframe guard in step 1 — see the implementers note above.
 
 ### Keyframe policy
 
@@ -199,6 +753,231 @@ client that reads only `tick` and `entities` still works against such a server.
 Empty payload. Promotes this connection's next snapshot to a keyframe. Send it when
 local reconstruction is lost or suspect (scene reload, merge error). It is cheap but
 not free — it costs one full AOI snapshot; do not send it every tick.
+
+---
+
+## `transfer_map` (13) / `transfer_map_resp` (14) — changing map
+
+Used for map-to-map movement and for entering an instanced dungeon.
+
+> **Server-side maturity: implemented, thinly tested.** The handler is merged
+> into `develop` (`GameServer/Server/GameServer.cs`, `HandleTransferMapAsync`)
+> and covered by exactly **three** C# unit tests —
+> `TransferMapTests.TransferMap_DifferentMap_SucceedsAndRemovesEntity`,
+> `_SameMap_ReturnsError`, `_EmptyMapId_ReturnsError`. There is **no
+> integration-test coverage at all**: nothing in `backend/integration_test/`
+> mentions transfer, so the full client → old server → gateway → new server
+> round trip has never been exercised end to end, in any language. The
+> single-server half is tested; the hop is not. Implement against it knowing
+> that, and expect to be the first to exercise step 3 onward.
+> (Those three tests are also the flaky ones — see the Known issues entry in this
+> module's CHANGELOG about `FreeTcpPort`.)
+
+### Message shapes
+
+```protobuf
+message TransferMapRequest  { string map_id = 1; }
+message TransferMapResponse { bool ok = 1; string error = 2; }
+```
+
+Both fields of the response are always meaningful: on failure `ok = false` and
+`error` carries a short machine-readable reason. Note this response has **no
+`server_addr` and no `join_token`** — unlike `enter_world_resp`, it does not
+hand you a destination. It only tells you the current server has released you.
+
+### The sequence — transfer is client-driven, and the client does the work
+
+Documented on `HandleTransferMapAsync` and verified against the implementation:
+
+1. Client sends `transfer_map { map_id }` to its **current game server**.
+2. Server validates, force-saves the player, replies `transfer_map_resp`,
+   removes the entity, and **closes the connection**.
+3. Client sends `enter_world { map_id }` to the **gateway** — the ordinary flow.
+4. Gateway assigns a server for the new map and mints a **new join token**.
+5. Client connects to the new game server and sends `join_token`.
+
+Three consequences the client must be built around:
+
+- **The game-server connection is dropped by the server, not by you.** Step 2
+  ends with `conn.Close()`. Expect the socket to die immediately after the
+  response and do not treat that as an error.
+- **A new join token is required, and only the gateway can mint one.** The old
+  token is bound to the old server. There is no server-to-server handoff — the
+  client re-enters through the gateway every time.
+- **You need a gateway connection to complete step 3.** If you dropped it after
+  the initial `enter_world`, you must reconnect *and re-send `auth`*: connection
+  identity is per-connection, and a fresh connection starts unauthenticated, so
+  `enter_world` on it is refused with `"not authenticated"`
+  (`gateway/server/server.go`, `checkSession`). **Keeping the gateway connection
+  open for the session's lifetime avoids a re-auth round trip on every
+  transfer** and is the recommended shape. The Redis session (`session:<user>`,
+  1 h TTL, `shared/constants/ttl.go`) is refreshed by activity, so a live
+  gateway connection stays valid.
+
+### The old entity is reaped immediately — no hold
+
+This is the one place the 30 s reconnect hold does **not** apply, and it is
+deliberate. `HandleTransferMapAsync` cancels any pending hold, removes the
+entity, and decrements the player count before closing:
+
+> "The entity is removed immediately (not held) because this is an intentional
+> transfer, not a disconnect: there is nothing to reconnect to."
+
+So a transferring player leaves **no ghost** in the old map — other clients get a
+`removed` entry promptly rather than up to 30 s of a frozen entity. That is the
+opposite of the disconnect path documented above, and it is worth knowing in
+both directions: if you see a held ghost, the peer dropped; if the entity
+disappears cleanly, it transferred.
+
+Because the save is forced *before* the response (`_saver.SavePlayerAsync`), the
+destination server reads fresh state — position carries across the hop.
+
+### Failure modes and what the client should do
+
+| Condition | What you see | Action |
+|---|---|---|
+| `map_id` empty | `ok=false, error="map_id is required"` | Client bug; connection stays usable |
+| Already on that map | `ok=false, error="already on this map"` | No-op; connection stays usable |
+| Server-side exception | `ok=false, error="internal error"` | Stay put; the connection may or may not survive — treat as fatal for the transfer |
+| **Target map has no live server** | *Not* reported here. Step 2 succeeds and your connection closes; the failure surfaces at step 3 as `enter_world_resp.error` = "no available server for map …" | **This is the dangerous one — see below** |
+| Token/session expired mid-hop | `enter_world_resp.error` = `"not authenticated"` or `"session expired"` | Re-run `auth` with a fresh Nakama token, then retry `enter_world` |
+
+**The unvalidated destination is the trap.** The current server does **not**
+check that the target map exists or has capacity — it only checks that `map_id`
+is non-empty and different from its own. It then destroys your entity and drops
+you. If the destination turns out to be unreachable at step 3, **you are
+nowhere**: off the old server, not on the new one, with the old entity already
+reaped. Recovery is to `enter_world` back to the original map, which spawns you
+fresh from persisted state.
+
+A client should therefore treat `transfer_map_resp { ok = true }` as *"you have
+left"*, not *"you have arrived"*, and keep the original `map_id` so it can fall
+back. Do not tear down the local world until step 5 succeeds.
+
+---
+
+## Transport: TCP and KCP
+
+The gateway tells you which transport the destination speaks — the `transport`
+field of `enter_world_resp`, `"tcp"` or `"kcp"`, where empty means `"tcp"`. A
+server on KCP is **not** listening on TCP at all, so there is no fallback: a
+TCP-only client must fail loudly on `"kcp"` rather than attempt a connection
+that cannot succeed.
+
+> **Client status: TCP only today.** Advertising `kcp` from the server therefore
+> breaks every current client. That is a deployment-order constraint, not a bug.
+
+### What changes on KCP, and what does not
+
+**The framing and the message layer do not change at all.** The same 4-byte
+big-endian length prefix, the same envelope, the same encoding sniffing, the
+same message types. KCP replaces the *stream transport* underneath and nothing
+above it — `KcpStream` exists precisely so "the length-prefixed codec in
+`WireProtocol` runs unchanged over" it. There is no KCP-specific handshake and
+no session-establishment message in this protocol: the KCP session forms at the
+ARQ layer, then `join_token` proceeds exactly as on TCP.
+
+What does change is that you need a KCP implementation and the exact ARQ
+parameters. The server's settings (`shared/transport/transport.go`) are:
+
+| Setting | Value | Why (from the source comments) |
+|---|---|---|
+| NoDelay | 1 | nodelay ARQ on |
+| Interval | 10 ms | matches a 10-15 Hz server tick; slower adds up to a full tick of jitter |
+| Resend | 2 | fast retransmit after 2 duplicate ACKs |
+| NoCongestion | 1 | congestion control **off** — a near-constant realtime bitrate; a TCP-style window only delays state the client already needs |
+| Send/Recv window | 128 / 128 packets | ~170 KB in flight; bounded per-session memory |
+| MTU | 1350 | kcp-go default, stays under common 1400-1500 B path MTUs so segments are never IP-fragmented |
+| FEC | 0 data / 0 parity — **disabled** | |
+| UDP socket buffer | 4 MiB | one socket multiplexes every session on a listener |
+
+### Encryption exists only on the KCP path
+
+**TCP is not "unencrypted for now" — it has no encryption path at all.**
+`TcpTransportListener(bind)` takes no key; `KcpTransportListener(bind,
+transportKey, logger)` does (`shared/transport/transport.go`). Gameplay traffic
+over TCP is plaintext on the wire. Encryption is therefore not a separable task:
+**it arrives with KCP or not at all.**
+
+When a key is set, AES-256 is applied **per UDP datagram, below the KCP ARQ** —
+every packet including the one carrying the join token. There is no negotiation,
+no key id and no downgrade path, so an encrypted listener and a plaintext dialer
+simply never form a session; the datagrams decrypt to noise and are dropped as
+malformed KCP segments. Fail-closed by construction.
+
+**Key derivation** (`shared/transport/crypto.go`, `DeriveKey`), which a client
+must reproduce exactly:
+
+- **64 hex characters** → decoded verbatim as 32 raw bytes. The recommended
+  production form (`openssl rand -hex 32`).
+- **anything else** → HKDF-SHA256, **no salt**, output length 32, with the info
+  string exactly:
+  ```
+  rpg-mmo/transport/kcp/aes-256
+  ```
+  (ASCII, no trailing newline, no null terminator.)
+- A 64-character string that is not valid hex falls through to the passphrase
+  path rather than erroring.
+
+**Datagram layout** — kcp-go's AES block crypt, which the C# port documents as
+needing to stay byte-identical:
+
+```
+| nonce (16 B, random) | crc32-IEEE of the KCP bytes (4 B, little endian) | KCP bytes |
+```
+
+Then **the whole buffer, nonce included**, is encrypted with **AES-CFB** using
+kcp-go's fixed initialisation vector:
+
+```
+167, 115, 79, 156, 18, 172, 27, 1, 164, 21, 242, 193, 252, 120, 230, 107
+```
+
+The random nonce is what makes the first ciphertext block differ per packet
+despite the fixed IV; it carries no other meaning and is discarded after
+decryption. The trailing partial block is XORed against the keystream block with
+**no padding**, as in textbook CFB. Header size is 20 B (16 nonce + 4 CRC).
+
+Any deviation here is a silent decrypt failure — the session never forms and
+there is no error message telling you why.
+
+### You do not have to hand-roll KCP
+
+`GameServer/Net/Transport/` already contains a **complete, dependency-free C#
+implementation**: `Kcp.cs` (a direct port of kcp-go's `kcp.go`, itself a port of
+`ikcp.c`), plus `KcpListener`, `KcpSession`, `KcpStream` and `KcpCrypto`. It
+pulls in **no external package** — nothing KCP-related appears in
+`GameServer.csproj` — so it is plain C# that can be ported to a Unity client
+rather than reimplemented or replaced with a third-party library.
+
+Two caveats: it lives in the server project, **not** in `Shared.GameLogic`, so it
+is not currently shipped to Unity; and it implements the *listener* side, so the
+dialer path needs the client half.
+
+### What is actually tested — read this before trusting the above
+
+The pure-C# KCP layer is well covered: **44 tests pass** in `KcpTransportTests`
+and related suites.
+
+The **cross-language** verification is a different story. `KcpInteropTests`
+exercises exactly the right things against the *real* `kcp-go` client — key
+derivation agreement, echo through the C# listener for plaintext / hex key /
+passphrase, a wrong-key-must-fail-closed case, and a full join for both
+plaintext and encrypted KCP. **All nine of them currently skip.**
+
+They skip because the Go probe they drive (`gameserver-dotnet/interop/kcpprobe`)
+**no longer builds**: its `go.sum` has no entry for `google.golang.org/protobuf
+v1.36.6`, which `shared` now requires — only `/go.mod` hashes for 2020-era
+versions. The harness catches the build failure and calls `Skip.If`, so the
+tests report as skipped rather than failed, and `dotnet test` stays green. CI
+runs `dotnet test --no-build -c Release` and skips do not fail a build, so this
+is invisible there too.
+
+**So: KCP is verified in C#-to-C#, and its agreement with the Go implementation
+is currently unverified.** The tests that would prove it exist and are the right
+tests — they are simply not running, and have not been since `shared` took its
+Protobuf dependency. Anyone implementing a KCP client should expect to fix that
+probe first, so there is a working cross-language oracle to develop against.
 
 ---
 

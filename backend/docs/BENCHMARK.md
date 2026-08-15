@@ -228,6 +228,9 @@ assumption. Interpolating the measured curve, that is breached at **~41 players*
 This is the JSON encoding, exactly as the extension-seam table predicts. An
 `EntitySnapshot` on the wire is ~95 bytes of JSON (`{"id":"lt-…","type":"player",
 "x":…,"y":…,"hp":100,"max_hp":100}`) for what is 6 fields, ~30 bytes packed.
+(Measured before `speed` was added as field 9 in 2026-08; the entity is 7 fields now,
++5 bytes in Protobuf. The figures below are left as captured rather than rescaled —
+a benchmark is a record of a run, not a live estimate.)
 Protobuf/FlatBuffers is the fix and it attacks the tick-time bottleneck and the
 bandwidth bottleneck at once.
 
@@ -370,8 +373,10 @@ Ordered by measured impact:
    per client against a 50 KB/s target, and **61%** of a packed entity is string
    data that no encoding can compress away (measured: 17.0 bytes of `id` plus 8.0
    of `type`, against 41.2 bytes marginal cost per entity).
-6. **Spatial-grid AOI** — worth doing, but it targets the 20% term. ADR-7 ranked
-   it first; the measurement demotes it below the items above.
+6. ~~**Spatial-grid AOI**~~ ❌ **Measured and rejected** — see
+   [Part V](#part-v--the-spatial-index-that-lost-2026-08-14). It was built,
+   verified correct against the brute-force scan, and is **2.8x slower** at
+   realistic density. The AOI scan's cost is not the distance tests.
 7. **⛔ BLOCKER — put the generator on a separate machine.** Not "before
    publishing a tier table": before *any* further capacity work. Bandwidth is now
    solved to the threshold and tick binds instead, and tick is the statistic a
@@ -1020,7 +1025,229 @@ while the byte budget counted a single entity in isolation. In a delta stream
 most mentions are repeats, so the amortised saving exceeds the per-message share.
 
 The remaining terms are the numeric fields and framing, which are already close
-to minimal: position as two floats, hp/max_hp as varints, and a handle. Further
+to minimal: position as two floats, hp/max_hp as varints, a handle, and (since
+field 9) speed as a third float. Further
 wire savings would need to change *what* is sent — delta-encoding positions
 against the previous tick, dropping `max_hp` from every update when it rarely
 changes, or tiering update rate by distance — not how it is encoded.
+
+## 23. Snapshot allocation: what pooling and buffer reuse actually removed
+
+Stage 4's breakdown left two allocation sources standing in the snapshot path —
+`Encode` building a fresh `EntitySnapshot` per entity per viewer (134 699 B/tick
+at 200 players) and `ToByteArray` allocating a new array per snapshot (44 280
+B/tick). Both are now gone. This section is the measurement.
+
+**Method — paired A/B inside one process.** Three arms run in the same binary
+over identical prebuilt inputs, 60 ticks after a warm-up, counted with
+`GC.GetAllocatedBytesForCurrentThread`. One binary, one run, so build, machine
+and day cannot confound the comparison; the harness's own world-building is
+hoisted out of the measured region so it is not charged to the arm that
+allocates least. It lives in `GameServer.Tests/Snapshot/SnapshotAllocationTests.cs`
+and runs with the suite, so the numbers can be reproduced with
+`dotnet test --filter PooledPath_AllocatesFarLessPerTick`.
+
+| viewers × 40 visible | legacy shape | pooled entities only | + reused buffers |
+|--:|--:|--:|--:|
+| 50 | 372 933 B/tick | 181 733 B/tick | **1 600 B/tick** |
+| 200 | 1 491 733 B/tick | 726 933 B/tick | **6 400 B/tick** |
+
+Byte-identical across three repeat runs. The residual is exactly **32 B per
+viewer per tick**: one `ByteString` wrapper object per snapshot, which is what
+`UnsafeByteOperations.UnsafeWrap` still allocates once the payload copy is gone.
+The two changes are worth roughly half each — pooling alone leaves the
+serialization arrays, buffer reuse alone leaves the per-entity objects.
+
+**Read this before quoting the absolute numbers.** The harness is a bounded
+reproduction, not the live server: AOI is pinned at 40 visible entities per
+viewer and every viewer sends on every tick, whereas the real server's AOI varies
+with position and the coalescing policy engages under load (§ stage 4 notes: at
+200 players the write tasks already could not keep up with 15 Hz). What transfers
+is the **ratio** and the **per-viewer residual**, not "1.49 MB/tick", which is a
+property of the harness's fixed 40-entity AOI.
+
+**No wall-clock claim is made, deliberately.** This host's run-to-run spread on
+an *unchanged* binary is wide enough to swallow an effect this size — the
+withdrawal in §16 is the precedent. Allocation is the claim; latency is not.
+Less garbage should mean fewer gen-0 collections and so less tick jitter, but
+that is a hypothesis this measurement does not test.
+
+---
+
+## Part V — the spatial index that lost (2026-08-14)
+
+**Result: a uniform spatial grid was implemented, proved correct, measured, and
+not merged.** It is slower than the brute-force scan everywhere the scan is
+expensive. This entry exists so nobody builds it again on the strength of the
+Big-O argument.
+
+### What was measured
+
+Paired in-process A/B: the same process builds a world, runs every viewer's AOI
+query through the brute-force scan, then through the index, back to back. The
+ratio *within* a run is the number that matters, because this host's absolute
+timings swing by ±50% (see §8) while the paired ratio does not. Five runs:
+
+| entities | spread | avg matches/query | brute | indexed | ratio (5 runs) |
+|---|---|---|---|---|---|
+| 200 | 1000x1000 (sparse) | 2.8 | 77–136 µs | 38–84 µs | 1.42–2.92x **faster** |
+| 200 | 250x250 (realistic) | 23.0 | 483–638 µs | 1380–1514 µs | **0.32–0.45x — ~2.8x slower** |
+| 400 | 250x250 (dense) | 42.9 | 782–1335 µs | 924–1606 µs | 0.81–0.89x slower |
+
+The realistic-density ratio is 0.32–0.45 across five runs. That spread is far
+tighter than the host noise, so the loss is real and reproducible, not an
+artefact.
+
+### Why it lost — the premise was wrong
+
+The case for an index was "40 000 distance tests per tick at 200 players, O(n²)".
+The count is right. The cost is not: those tests are sequential reads over
+contiguous chunk arrays, and 40 000 of them are worth microseconds. **The scan's
+real cost is composing an `EntityState` for each match**, and that is
+proportional to *matches* — a property of the game (how many players are near
+you) rather than of the algorithm. No index reduces it, because the matches are
+the answer.
+
+The index then made composition *worse*. The scan composes from the chunk it is
+already iterating; the index has only an entity handle, so it composes through
+seven random-access component lookups per match. Add the per-query sort that
+restores brute-force ordering (below) and the index pays more per match while
+saving only the near-free part.
+
+It wins in the sparse case for the same reason: at 2.8 matches per query there is
+almost nothing to compose, so what is left *is* the distance tests. That is also
+the case where the absolute cost is negligible — 77 µs to 38 µs on a 66 ms tick
+budget, 0.06%. **The index helps only where the cost does not matter.**
+
+### The ordering constraint, which is a real cost
+
+The delta encoder interns entity ids in AOI arrival order, so a change in
+iteration order changes the bytes on the wire for an identical set. A grid
+enumerates cell-major; the scan enumerates chunk-major. The first implementation
+therefore produced the correct set in the wrong order, and the differential test
+caught it on the first run. Fixing it means carrying each entity's scan ordinal
+through the index and re-sorting each query's matches back — correct, and a cost
+the Big-O argument never accounted for. Disabling that sort as a diagnostic did
+not rescue the result (realistic density still 0.53x).
+
+### What would have to be true to revisit
+
+- Populations where AOI sets are genuinely small while entity counts are large —
+  a much bigger map, or many more entities than viewers. The sparse row is that
+  regime, and it is 1.4–2.9x faster there.
+- A composition path the index can use as cheaply as the scan does, i.e. matches
+  grouped by chunk rather than by cell. That is a different data structure, not a
+  tuned version of this one.
+- A different bottleneck. If `EntityState` composition were pooled or removed
+  (Part IV's direction), the distance tests would become the dominant term and the
+  index's argument would come back.
+
+The implementation and its differential test are on `feat/aoi-spatial-index` at
+`2e3e5db`, reverted by the following commit. It is correct and covered; it is
+simply not worth running.
+
+### What this leaves, now that §23 has landed
+
+This section originally closed by pointing at `EntityState` composition as the
+term measured dominant twice. **Half of it has since been removed**: §23's pooling
+and buffer reuse took the encode path from 1 491 733 to 6 400 B/tick at 200
+viewers, which is the per-viewer-per-tick object churn inside `Encode`.
+
+What remains is the *other* half, which pooling does not touch: **the compose per
+match inside the AOI scan itself**. Every entity that passes the distance test is
+materialised into an `EntityState` — once per viewer, per tick — and that is the
+cost this Part measured as dominant and the index failed to reduce. It is a
+narrower and better-defined target than "stop materialising a struct per visible
+entity": the encode side is done, the scan side is not.
+
+On the evidence of this Part, and of §9 item 6 before it, that target should be
+**measured before it is built**. Four changes in this sequence were commissioned
+against a term that turned out not to be the expensive one.
+
+---
+
+## Part VI — multi-rate simulation: does replication follow the simulation rate? (2026-08-15)
+
+The multi-rate scheduler (ADR-13) raises the simulation rate 4× by default, from a
+single 15Hz loop to a 60Hz base tick with world systems every 4th tick. The design
+claims replication does **not** follow it: snapshots still ship at the world rate, so
+downstream bandwidth per client should be unchanged.
+
+That claim is the one worth measuring here, and it is also the one this host can
+measure honestly. Tick timings from this box are a lower bound of unknown tightness —
+the load generator shares the CPU with the server under test (ADR-7) — but **bytes on
+the wire do not care what else the host is doing**, and Part I established that
+bandwidth reproduces here to 0.3%.
+
+### Method
+
+Two configurations, same binary, same load, two runs each. `SIM_CRITICAL_HZ` is the
+only thing that changes between them:
+
+```
+A: SIM_CRITICAL_HZ=15 SIM_WORLD_HZ=15 SIM_BACKGROUND_HZ=5   (= the pre-change server)
+B: SIM_CRITICAL_HZ=60 SIM_WORLD_HZ=15 SIM_BACKGROUND_HZ=5   (= the new default)
+
+loadtest -join direct -players 50 -duration 45s -warmup 5s -encoding proto
+GAMESERVER_ENEMIES=false   (so the measurement is the player path, not wave timing)
+```
+
+`-join direct` bypasses the gateway: the gateway is not in the gameplay data path
+(ADR-3), and including it would only add join-time noise to a steady-state measurement.
+
+### Results
+
+| | A: 15/15/5 | B: 60/15/5 | change |
+|---|---|---|---|
+| Achieved base rate (ticks/s) | 15.02, 15.02 | 60.03, 59.99 | **4×, as configured** |
+| **Downstream per client (B/s)** | **8068, 8000** | **8145, 8146** | **+1.4%** |
+| Upstream per client (B/s) | 126, 126 | 126, 126 | none |
+| Snapshot interval p50 | 66.9ms, 67.0ms | 66.9ms, 66.9ms | none |
+| Snapshot interval p99 | 73.4ms, 73.6ms | 72.5ms, 73.3ms | none |
+| Input→ack p50 | 35.6ms, 35.6ms | 33.5ms, 34.8ms | −1.5ms |
+| Input→ack p99 | 68.1ms, 69.0ms | 68.8ms, 69.2ms | none |
+| Base tick duration p99 | 0.49ms, 0.49ms | 0.49ms, 0.50ms | none |
+| Base tick duration mean | 0.06ms | 0.03ms | halved |
+| Ticks over budget | 0% | 0% | none |
+
+### What this shows
+
+1. **Replication did not follow the simulation rate.** Simulation runs 4× more often and
+   downstream bandwidth moved by **1.4%**, against a run-to-run spread of 0.85% in
+   configuration A. The snapshot interval is unchanged at 66.9ms p50 — still 15 sends a
+   second. Had the two been coupled, this row would read ~32 KB/s per client and would
+   have blown ADR-7's `< 50 KB/s` mobile budget at a fraction of 200 players.
+
+2. **The 1.4% is real and explainable, not noise.** Movement is now continuous: a player
+   holding a direction moves on every base tick instead of only on packet arrival, so
+   marginally more entities have changed state when each snapshot is built, and the delta
+   encoder sends them. It is the cost of the movement model, not of the send rate.
+
+3. **The base tick keeps its schedule.** 60.03 and 59.99 ticks/s, not 62.5 — which is what
+   the previous `1000 / rate` integer-millisecond sleep would have produced at 60Hz
+   (`1000/60 = 16ms`, a 4% fast clock). The deadline scheduling in ADR-13 decision 3 is
+   what closes that gap, and this row is the evidence it works.
+
+4. **Mean tick cost halved** (0.06ms → 0.03ms) because three base ticks in four skip the
+   world group and the entire snapshot phase. Per *second* the server does more work, as
+   it must — the point is that the extra work is only the critical group.
+
+5. **Input acknowledgement improved slightly**, p50 35.6ms → 34.2ms averaged. Directionally
+   what a 4× input rate should do, but 1.5ms is close enough to the noise floor that it is
+   reported rather than claimed.
+
+### What this does NOT show
+
+- **No capacity claim.** 50 players on a host shared with the load generator says nothing
+  about the ceiling, which remains unmeasurable here (ADR-7). Multi-rate is a scheduling
+  change, not a throughput change, and no throughput improvement is asserted.
+- **Both levels are marked INVALID by the harness**, because all 50 clients report
+  `run: read: server closed the connection` at teardown. Joins, the 45s measurement window
+  and the snapshot reconciliation (99.97–100.26% of enqueued snapshots received) are all
+  clean, so the per-run numbers above stand; but the harness's own verdict is withheld and
+  is reported as withheld rather than being talked past.
+- **The harness's verdict thresholds are not rate-aware.** It prints `tick budget 66.67ms
+  @ 15Hz` regardless of the configured rate, so at a 60Hz base it is comparing against a
+  budget four times too generous. It did not affect these runs — nothing came close to
+  either budget — but it must be fixed before the harness is used to qualify a 60Hz
+  configuration.
