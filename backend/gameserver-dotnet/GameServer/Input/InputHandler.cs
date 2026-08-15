@@ -21,6 +21,7 @@ public sealed class InputHandler
     private readonly float _deltaTime;
     private readonly MapBounds _bounds;
     private readonly int _cooldownTicks;
+    private readonly int _maxBankedTicks;
 
     /// <summary>Fixed simulation timestep in seconds used for movement integration.</summary>
     public float DeltaTime => _deltaTime;
@@ -50,6 +51,37 @@ public sealed class InputHandler
             tickRate > 0 ? tickRate : GameConstants.DefaultTickRate);
         _bounds = bounds ?? MapBounds.Default;
         _cooldownTicks = GameConstants.AttackCooldownTicks(tickRate);
+        _maxBankedTicks = GameConstants.MaxBankedMovementTicks(
+            tickRate > 0 ? tickRate : GameConstants.DefaultTickRate);
+    }
+
+    /// <summary>
+    /// Ceiling on how many base ticks of elapsed time one movement step may cover, at this
+    /// handler's rate. See <see cref="GameConstants.MaxBankedMovementMs"/>.
+    /// </summary>
+    public int MaxBankedTicks => _maxBankedTicks;
+
+    /// <summary>
+    /// The timestep for a movement step landing on <paramref name="baseTick"/> for an
+    /// entity that last moved on <paramref name="lastMoveTick"/>.
+    ///
+    /// <para>This is the whole of #100's fix. A step covers the time since the entity last
+    /// moved rather than one fixed tick, so the three inputs that per-tick coalescing
+    /// discards from a burst no longer take their simulated time with them. It does not
+    /// weaken what coalescing defends: a client sending every tick always has
+    /// <c>lastMoveTick == baseTick - 1</c> and so earns exactly one tick per tick, and a
+    /// client that was silent is bounded by <see cref="MaxBankedTicks"/>.</para>
+    ///
+    /// <para>A first-ever move (<paramref name="lastMoveTick"/> of 0) is one tick, not the
+    /// whole age of the server.</para>
+    /// </summary>
+    private float StepDeltaTime(ulong baseTick, ulong lastMoveTick)
+    {
+        if (lastMoveTick == 0 || baseTick <= lastMoveTick) return _deltaTime;
+
+        ulong elapsed = baseTick - lastMoveTick;
+        if (elapsed > (ulong)_maxBankedTicks) elapsed = (ulong)_maxBankedTicks;
+        return _deltaTime * elapsed;
     }
 
     /// <summary>Attack cooldown length in simulation ticks at this handler's tick rate.</summary>
@@ -130,12 +162,14 @@ public sealed class InputHandler
             // The same TryMove the packet path calls, with the same dt — one movement
             // model, one arithmetic, whichever path stepped the entity.
             MoveResult result = MovementSystem.TryMove(
-                in probe, cursor.HeldMoveX, cursor.HeldMoveY, _deltaTime, in _bounds,
+                in probe, cursor.HeldMoveX, cursor.HeldMoveY,
+                StepDeltaTime(baseTick, cursor.LastMoveTick), in _bounds,
                 out Vec2 newPosition);
 
             if (result is MoveResult.Accepted or MoveResult.Clamped)
             {
                 position.Value = newPosition;
+                cursor.LastMoveTick = baseTick;
             }
         }
     }
@@ -238,7 +272,8 @@ public sealed class InputHandler
             };
 
             MoveResult moveResult = MovementSystem.TryMove(
-                in probe, input.MoveX, input.MoveY, _deltaTime, in _bounds, out Vec2 newPosition);
+                in probe, input.MoveX, input.MoveY,
+                StepDeltaTime(currentTick, cursor.LastMoveTick), in _bounds, out Vec2 newPosition);
 
             if (moveResult is MoveResult.Accepted or MoveResult.Clamped)
             {
@@ -250,6 +285,7 @@ public sealed class InputHandler
                 cursor.HeldMoveX = input.MoveX;
                 cursor.HeldMoveY = input.MoveY;
                 cursor.HeldFromTick = currentTick;
+                cursor.LastMoveTick = currentTick;
             }
             else if (moveResult == MoveResult.None)
             {

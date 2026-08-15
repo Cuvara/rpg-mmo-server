@@ -6,6 +6,60 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Bursty input arrival lost most of a player's movement (#100).** Per-tick coalescing
+  turns several inputs arriving in one tick into a single movement step — correctly, since
+  that is what stops a client travelling further by spamming packets — but the simulated
+  time the discarded inputs stood for went with them. A client whose packets clumped, which
+  is what TCP batching, a client GC pause or a mobile radio waking up all produce, covered a
+  fraction of the ground its send rate should have earned:
+
+  | Configuration | Even 15 Hz | Bursts of 4, same average rate |
+  |---|---|---|
+  | `60/15/5` | 6.00 ✅ | **2.75 — 46% of intended** |
+  | `15/15/5` (single-rate) | 6.00 ✅ | **1.67 — 28% of intended** |
+
+  **This predated multi-rate scheduling and was worse without it** — the held-input model
+  happened to cover part of the gap — so it was not a regression from the scheduler work; it
+  had been live in every configuration for as long as coalescing had existed.
+
+  A movement step now covers the time since that entity last moved,
+  `dt = min(now − last_move_tick, cap) / tick_rate`, instead of a fixed single tick. This
+  does not weaken what coalescing defends: a client sending every tick always has
+  `last_move_tick == now − 1` and so earns exactly one tick per tick, and a client that was
+  silent is bounded by the cap. It is the same rule expressed against time rather than
+  against packet count.
+
+  `GameConstants.MaxBankedMovementMs` is **250 ms**, and the number is load-bearing rather
+  than round: it has to cover one send interval of the slowest client we support, or that
+  client is never made whole. Measured — at 200 ms a bursting 15 Hz client against a 15 Hz
+  server recovers to 72% rather than 100%. It sits just above the ~200 ms dead-reckoning
+  limit in the netcode model because banking is the safer of the two operations: the client
+  demonstrably *did* send input covering the period and coalescing discarded it, where dead
+  reckoning extrapolates input that was never sent.
+
+  **A predicting client must apply the same cap** — it is part of the movement model, not a
+  server-side valve. `docs/API.md` now states all three movement rules together.
+
+  Byte identity is preserved: a client that sends every tick sees `elapsed == 1` and
+  therefore the same `dt` as before, so the snapshot digests and golden vectors are
+  untouched and were not regenerated.
+
+### Added
+- **`SlowClientMovementTests` measures movement over a real socket.** Joins over TCP, sends
+  input on a wall clock, and reads the position back **out of the snapshot stream** — the
+  number a client actually sees. It covers a 15 Hz client against a 60 Hz server, the
+  single-rate configuration, a 60 Hz client, both burst patterns, and the cap holding
+  against a 1.5 s silence.
+
+  It exists because the unit tests could not answer whether they exercised the live path:
+  they build the world by hand and push inputs straight into the queue, skipping the join
+  handshake, the network thread, the entity's real creation path, per-tick coalescing and
+  the encoder. Two readings of `TickLoop` disagreed about whether the server holds a
+  client's last input, and nothing in a green suite could settle it. `backend/TEAM.md` now
+  requires a live-path test for movement-adjacent behaviour, with the reasoning.
+
+
 ### Documentation
 - **`JoinTokenResponse.tick_rate` is now specified, not merely implemented.** The field
   shipped with #93 described by a code comment, and a client team building against it was
@@ -42,6 +96,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that can drift, and this drift is silent on both sides.
 
 ### Added
+- **`SlowClientMovementTests` measures movement over a real socket.** A reading of
+  `TickLoop` that stopped at the `applyMovement` line concluded the server integrates once
+  per packet, and a measurement against a running server appeared to confirm it. The unit
+  tests that assert otherwise build the world by hand and push inputs straight into the
+  queue, so they could not answer whether they exercised the live path. These join over
+  TCP, send input on a wall clock, and read the position back out of the snapshot stream —
+  the same number a client sees. A 15Hz client against a 60Hz server travels its full
+  speed; a 15Hz client against a 15Hz server is unchanged; a 60Hz client is unchanged.
+
 - **`JoinTickRateContractTests` enforces the contract behaviourally.** It measures one
   tick of movement and asserts the displacement is `speed / advertised_rate` — the
   client's own arithmetic — across four rate configurations, plus that the advertised rate

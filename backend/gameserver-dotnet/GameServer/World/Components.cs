@@ -140,6 +140,22 @@ public struct InputCursor
     /// </summary>
     public ulong HeldFromTick;
 
+    /// <summary>
+    /// Base tick on which this entity's position was last advanced, by either path — a
+    /// packet or a held step. Zero means "never moved".
+    /// </summary>
+    /// <remarks>
+    /// This is what makes a movement step cover the time it actually represents. The tick
+    /// loop coalesces to at most one step per player per tick, so a burst of four inputs
+    /// arriving together used to become one step of one tick's worth and the other three
+    /// were discarded along with the simulated time they stood for. Scaling the step by
+    /// <c>baseTick - LastMoveTick</c> gives that time back without weakening the rule the
+    /// coalescing exists to enforce: a client that spams packets always has
+    /// <c>LastMoveTick == baseTick - 1</c>, so it earns exactly one tick per tick, and the
+    /// cap bounds the pathological case. See #100.
+    /// </remarks>
+    public ulong LastMoveTick;
+
     public InputCursor(ulong lastInputTick) => LastInputTick = lastInputTick;
 }
 

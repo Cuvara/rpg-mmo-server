@@ -1,0 +1,339 @@
+using System.Net;
+using System.Net.Sockets;
+using GameServer.Net;
+using GameServer.Net.Transport;
+using GameServer.Persistence;
+using GameServer.Server;
+using Microsoft.Extensions.Logging.Abstractions;
+using GameServer.Tests.Infrastructure;
+using RpgMmo.Wire.V1;
+using Shared.GameLogic.Components;
+
+namespace GameServer.Tests.Server;
+
+/// <summary>
+/// The invariant <c>MovementSystem</c> states and the held-input model exists to uphold:
+/// <b>travel distance depends on wall-clock time and the entity's speed, never on how many
+/// input packets the client sent.</b> Measured end to end, over a socket.
+///
+/// <para><b>Why this exists next to unit tests that assert the same property.</b>
+/// <c>MultiRateSimulationTests</c> builds the world by hand and pushes inputs straight into
+/// the queue, which skips the join handshake, the network thread, the entity's real
+/// creation path and the snapshot encoder. When a measurement against a running server
+/// disagreed with those tests, the first question asked was whether they exercised the path
+/// the live server takes — and nothing could answer it. These drive the real server over
+/// TCP and read the position back out of the snapshot stream, which is the same number a
+/// client sees.</para>
+///
+/// <para>The failure mode being guarded is silent by construction: a client and a server
+/// that both integrate once per packet agree with each other perfectly while both moving at
+/// a fraction of the configured speed. No reconciliation is raised, no counter moves, and
+/// the only symptom is a character that feels sluggish.</para>
+///
+/// <para>These are wall-clock tests — the server runs its own tick loop, the test sends on
+/// a timer — so the tolerance is wide enough to absorb a tick or two of scheduling jitter
+/// and no wider. The distinction it has to make is 4x.</para>
+/// </summary>
+public class SlowClientMovementTests
+{
+    private const string JwtSecret = "slow-client-secret-32-bytes-aaaaa";
+    private const string ServerId = "gs-slow-client";
+    private const double RunSeconds = 1.2;
+
+    /// <summary>
+    /// A 15Hz client against a 60Hz base tick — what the smoke client and the DOTS sample
+    /// send at — must still travel at its full speed.
+    ///
+    /// <para>Without the held-input model the server integrates once per packet, and the
+    /// player covers a quarter of the ground: 18 packets x speed/60 instead of
+    /// 1.2s x speed. That quarter-speed number is what a running server was measured at,
+    /// and it is what this test exists to fail on.</para>
+    /// </summary>
+    [Fact]
+    public async Task AFifteenHertzClient_AgainstASixtyHertzServer_TravelsAtFullSpeed()
+    {
+        (float travelled, float speed) = await MeasureAsync(Rates(60, 15, 5), sendHz: 15);
+
+        float expected = speed * (float)RunSeconds;
+        float packetDriven = speed * 15f * (float)RunSeconds / 60f; // one step per packet
+
+        Assert.True(travelled > (expected + packetDriven) / 2f,
+            $"travelled {travelled:F2} in {RunSeconds}s at speed {speed}: expected about " +
+            $"{expected:F2}, and {packetDriven:F2} would mean the server integrated once " +
+            "per packet rather than holding the direction");
+
+        Assert.InRange(travelled, expected * 0.80f, expected * 1.10f);
+    }
+
+    /// <summary>
+    /// The same client against a single-rate server — the configuration <c>staging</c>
+    /// runs. One packet, one step, unchanged.
+    /// </summary>
+    [Fact]
+    public async Task AFifteenHertzClient_AgainstAFifteenHertzServer_IsUnchanged()
+    {
+        (float travelled, float speed) = await MeasureAsync(Rates(15, 15, 5), sendHz: 15);
+
+        float expected = speed * (float)RunSeconds;
+        Assert.InRange(travelled, expected * 0.80f, expected * 1.10f);
+    }
+
+    /// <summary>
+    /// A client sending on every base tick — what a predicting client would do — is also
+    /// unaffected, because a new input always arrives before the held one is due.
+    /// </summary>
+    [Fact]
+    public async Task ASixtyHertzClient_AgainstASixtyHertzServer_TravelsAtFullSpeed()
+    {
+        (float travelled, float speed) = await MeasureAsync(Rates(60, 15, 5), sendHz: 60);
+
+        float expected = speed * (float)RunSeconds;
+        Assert.InRange(travelled, expected * 0.80f, expected * 1.10f);
+    }
+
+    /// <summary>
+    /// The same 15 packets a second, delivered in bursts of four rather than evenly — what
+    /// TCP batching, a stalled render thread, a client GC pause or a mobile radio waking up
+    /// all produce.
+    ///
+    /// <para>This is the invariant's harder half and it is what #100 was. Per-tick
+    /// coalescing turns a burst of four inputs into <b>one</b> movement step, so before the
+    /// elapsed-time step the other three took their simulated time with them and a client
+    /// whose packets clumped lost most of its travel at an unchanged average send rate:
+    /// 2.75 units against 6.00 expected.</para>
+    /// </summary>
+    [Fact]
+    public async Task AClientWhosePacketsArriveInBursts_TravelsTheSameDistance()
+    {
+        (float travelled, float speed) = await MeasureAsync(Rates(60, 15, 5), sendHz: 15, burst: 4);
+
+        float expected = speed * (float)RunSeconds;
+
+        Assert.True(travelled > expected * 0.85f,
+            $"bursty client travelled {travelled:F2} against {expected:F2} expected: " +
+            "distance is depending on the arrival pattern, not on elapsed time (#100)");
+    }
+
+    /// <summary>
+    /// The same burst pattern against the single-rate configuration <c>staging</c> runs.
+    ///
+    /// <para>Worth its own case because this is where the defect was <b>worst</b> — 28% of
+    /// the intended distance, against 46% under multi-rate, because the held-input model
+    /// happened to cover part of the gap. What closes it is the elapsed-time step, not the
+    /// rate configuration.</para>
+    /// </summary>
+    [Fact]
+    public async Task AClientWhosePacketsArriveInBursts_AgainstASingleRateServer_TravelsTheSameDistance()
+    {
+        (float travelled, float speed) = await MeasureAsync(Rates(15, 15, 5), sendHz: 15, burst: 4);
+
+        float expected = speed * (float)RunSeconds;
+
+        Assert.True(travelled > expected * 0.85f,
+            $"single-rate server: bursty client travelled {travelled:F2} against " +
+            $"{expected:F2} expected (#100)");
+    }
+
+    /// <summary>
+    /// The cap, from the other side: a client that goes quiet and comes back must not be
+    /// able to bank the whole silence as travel. One step may claim at most
+    /// <see cref="GameConstants.MaxBankedMovementMs"/>.
+    /// </summary>
+    [Fact]
+    public async Task AClientThatGoesQuietAndReturns_BanksAtMostTheCap()
+    {
+        var rates = Rates(60, 15, 5);
+        (float travelled, float speed) =
+            await MeasureAsync(rates, sendHz: 15, burst: 1, silentGapMs: 1500);
+
+        float capUnits = speed * global::Shared.GameLogic.Components.GameConstants.MaxBankedMovementMs / 1000f;
+        float movingUnits = speed * (float)RunSeconds;
+
+        Assert.True(travelled <= movingUnits + capUnits * 1.5f,
+            $"travelled {travelled:F2}: 1.5s of silence appears to have been banked as " +
+            $"movement (the cap is {capUnits:F2} units on top of {movingUnits:F2})");
+    }
+
+    // ── Harness ──
+
+    private static SimulationRates Rates(int critical, int world, int background)
+    {
+        Assert.True(SimulationRates.TryCreate(critical, world, background, out var rates, out string? error), error);
+        return rates!;
+    }
+
+    /// <summary>
+    /// Join, send input at <paramref name="sendHz"/> for <see cref="RunSeconds"/>, and
+    /// return how far the server says the player moved along +X, plus its speed.
+    /// </summary>
+    private static async Task<(float travelled, float speed)> MeasureAsync(
+        SimulationRates rates, int sendHz, int burst = 1, int silentGapMs = 0)
+    {
+        string userId = $"slow-{Guid.NewGuid():N}"[..16];
+
+        var options = new ServerOptions
+        {
+            ServerAddr = ":0",
+            ServerId = ServerId,
+            MapId = "map_slow_client",
+            Mode = "map",
+            Transport = TransportKind.Tcp,
+            TickRate = rates.CriticalHz,
+            SimulationRates = rates,
+            Capacity = 4,
+            JwtSecret = JwtSecret,
+            JoinTokenSecret = JwtSecret,
+            SaveInterval = TimeSpan.FromSeconds(30),
+            PlayerStore = new MemoryPlayerStore(),
+            LoggerFactory = NullLoggerFactory.Instance
+        };
+
+        var server = new GameServerHost(options);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        var (runTask, port) = await TestPorts.StartServerAsync(server, cts.Token);
+
+        try
+        {
+            using var client = new TcpClient();
+            await ConnectWithRetryAsync(client, port);
+            await using var stream = client.GetStream();
+
+            await SendAsync(stream, MsgType.JoinToken,
+                new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret) });
+
+            var joinEnv = await WireProtocol.DecodeAsync(stream, cts.Token);
+            Assert.NotNull(joinEnv);
+            var joinResp = WireProtocol.GetPayload<JoinTokenResponse>(joinEnv!);
+            Assert.True(joinResp.Ok, joinResp.Error);
+            Assert.Equal((uint)rates.MovementHz, joinResp.TickRate);
+
+            // Spawn state, before any input.
+            EntitySnapshot spawn = await ReadOwnEntityAsync(stream, userId, cts.Token);
+            float startX = spawn.X;
+            float speed = spawn.Speed > 0 ? spawn.Speed : TestHelpers.CreatePlayer("probe", 0, 0).Speed;
+
+            // Send at the requested rate for the measurement window. Snapshots are drained
+            // concurrently so the socket's receive buffer cannot fill and stall the writes.
+            var drain = Task.Run(() => DrainAsync(stream, userId, cts.Token), cts.Token);
+
+            int interval = 1000 / sendHz;
+            int packets = (int)(RunSeconds * sendHz);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            for (int p = 1; p <= packets; p++)
+            {
+                await SendAsync(stream, MsgType.Input,
+                    new InputMessage { Tick = (ulong)p, MoveX = 1f, MoveY = 0f });
+
+                // In burst mode only every Nth packet is followed by a wait, so N packets
+                // land back to back and the rest of the interval is idle. Average rate is
+                // identical; arrival pattern is not.
+                if (burst > 1 && p % burst != 0) continue;
+
+                int due = p * interval;
+                int wait = due - (int)sw.ElapsedMilliseconds;
+                if (wait > 0) await Task.Delay(wait, cts.Token);
+            }
+
+            if (silentGapMs > 0)
+            {
+                // Go quiet, then send one more input. Whatever that single step adds is the
+                // banking the cap has to bound.
+                await Task.Delay(silentGapMs, cts.Token);
+                await SendAsync(stream, MsgType.Input,
+                    new InputMessage { Tick = (ulong)(packets + 1), MoveX = 1f, MoveY = 0f });
+            }
+
+            // One world interval past the last packet, so the final held step lands and is
+            // included in a snapshot, then stop and take the newest position seen.
+            await Task.Delay(200, cts.Token);
+            cts.CancelAfter(TimeSpan.FromSeconds(5));
+
+            float lastX = await drain;
+            return (lastX - startX, speed);
+        }
+        finally
+        {
+            cts.Cancel();
+            await server.ShutdownAsync();
+            try { await runTask; } catch (OperationCanceledException) { /* expected */ }
+        }
+    }
+
+    /// <summary>
+    /// Read snapshots until cancelled, returning the newest X seen for the player. Deltas
+    /// omit unchanged entities, so a frame without our entity is normal and is skipped
+    /// rather than treated as an answer.
+    /// </summary>
+    private static async Task<float> DrainAsync(NetworkStream stream, string userId, CancellationToken ct)
+    {
+        float lastX = float.NaN;
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                var env = await WireProtocol.DecodeAsync(stream, ct);
+                if (env == null) break;
+                if ((MsgType)env.Type != MsgType.Snapshot) continue;
+
+                var msg = WireProtocol.GetPayload<SnapshotMessage>(env);
+                foreach (var e in msg.Entities)
+                {
+                    if (e.Id == userId) lastX = e.X;
+                }
+            }
+        }
+        catch (OperationCanceledException) { /* expected: the window closed */ }
+        catch (IOException) { /* expected: the socket closed under us */ }
+
+        Assert.False(float.IsNaN(lastX), "the player never appeared in any snapshot");
+        return lastX;
+    }
+
+    private static async Task<EntitySnapshot> ReadOwnEntityAsync(
+        NetworkStream stream, string userId, CancellationToken ct)
+    {
+        for (int frames = 0; frames < 200; frames++)
+        {
+            var env = await WireProtocol.DecodeAsync(stream, ct);
+            if (env == null) break;
+            if ((MsgType)env.Type != MsgType.Snapshot) continue;
+
+            var msg = WireProtocol.GetPayload<SnapshotMessage>(env);
+            foreach (var e in msg.Entities)
+            {
+                if (e.Id == userId) return e;
+            }
+        }
+        throw new InvalidOperationException($"player {userId} never appeared in a snapshot");
+    }
+
+    private static async Task SendAsync(Stream stream, MsgType type, JoinTokenRequest payload)
+        => await WriteFrameAsync(stream, WireProtocol.NewEnvelope(type, payload, WireEncoding.Json));
+
+    private static async Task SendAsync(Stream stream, MsgType type, InputMessage payload)
+        => await WriteFrameAsync(stream, WireProtocol.NewEnvelope(type, payload, WireEncoding.Json));
+
+    private static async Task WriteFrameAsync(Stream stream, GameServer.Net.Envelope env)
+    {
+        byte[] frame = WireProtocol.Encode(env);
+        await stream.WriteAsync(frame);
+        await stream.FlushAsync();
+    }
+
+    private static async Task ConnectWithRetryAsync(TcpClient client, int port)
+    {
+        for (int attempt = 0; attempt < 50; attempt++)
+        {
+            try
+            {
+                await client.ConnectAsync(IPAddress.Loopback, port);
+                return;
+            }
+            catch (SocketException)
+            {
+                await Task.Delay(100);
+            }
+        }
+        throw new TimeoutException($"game server never started listening on :{port}");
+    }
+}
