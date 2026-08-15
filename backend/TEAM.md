@@ -202,11 +202,27 @@ Four instances, all real, all from a single week:
 | `effective speed 5` read as **evidence snapshots had arrived** | the value was correct | it was the **configured constant being echoed back**; it would have read 5 with no snapshot ever received |
 | A burstiness figure quoted as a **baseline** | it was measured, not guessed | the metric ranges **33–45 across runs**; a baseline of one sample is not a baseline |
 | A predictor reading **0.133 s** between sends | 15 Hz sends, and 0.133 is a real interval | the predictor's clock ran at **2x** — the true gap was 0.0669 s, and 0.133 is exactly what a doubled clock produces |
+| A send rate of **7.5 Hz** against a configured 15 | it *disagreed* with the prediction, which is what this rule tells you to look for — so it was investigated and treated as a second, independent defect | **the same 2x clock**, read through an instrument measured in the predictor's own elapsed time. 0.138 s on a doubled clock is ~0.069 s real: the sender had been delivering ~15 Hz all along, and there was no second defect |
 
-Note what the last three have in common with the first: none produced an implausible value.
-Two of them produced a value that was *arithmetically consistent with a wrong model*, which
-is the hardest kind to catch after the fact and the easiest to catch before, because the
-prediction and the model are written down together.
+Note what these have in common: none produced an implausible value. Three produced values
+that were *arithmetically consistent with a wrong model*, which is the hardest kind to catch
+after the fact and the easiest to catch before, because the prediction and the model are
+written down together.
+
+**The last row is the failure mode that survives this rule, so read it twice.** There the
+rule was followed: the expected value was written down (15 Hz), the measurement disagreed,
+and the mismatch was investigated. It still produced a wrong conclusion — a second
+independent defect that did not exist — because **the discrepancy was in the measuring
+device, not in the thing being measured**, and both readings came from the same broken
+clock. The arithmetic was consistent with two wrong models at once, and the one chosen was
+the one that flattered a change already made.
+
+So: **when a number disagrees with your prediction, the instrument is a candidate, not just
+the subject.** Before concluding that the system is wrong, ask what the number was measured
+*with*, whether that instrument shares any state with the thing under suspicion, and whether
+an independent clock or counter says the same. In the row above, one `Stopwatch` outside the
+predictor would have settled it — and the reading that eventually did settle it was taken
+after the "fix", so it could not attribute anything to it either way.
 
 In practice this costs one line in the test or the report:
 
