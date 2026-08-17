@@ -5,6 +5,28 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Strict address mode (`SMOKE_STRICT_ADDR` / `--strict-addr`, default off).** The
+  runner normalizes listen-style addresses (`:9000`, `0.0.0.0:9000`, `[::]:9200`)
+  to loopback before dialing. That is right for host-mode deploys, but it silently
+  hides the Agones failure mode it is about to be used to prove: with
+  `portPolicy: Dynamic` the game server must learn its scheduler-assigned address
+  from the sidecar and register that; if it does not it advertises the hostless
+  `:9000`, the gateway forwards it verbatim, and no real client can dial it — while
+  the smoke test rewrites it, connects to whatever else listens on port 9000 of the
+  local host, and reports PASS.
+  - With the flag on, a listen-style `ServerAddr` from `MsgEnterWorldResp` fails the
+    `gateway_auth` step with a message naming the address and the likely cause (the
+    Agones sidecar status read, or `GAMESERVER_PUBLIC_ADDR`).
+  - Applies to the **game-server hop only**. `GATEWAY_ADDR` is operator-supplied
+    local config (`:8000` by default), not an advertised address, and keeps the
+    rewrite in both modes.
+  - Rejects only *listen-style* addresses: a loopback address the server
+    deliberately advertised (`127.0.0.1:9000`, plausible under k3d) passes through.
+  - Default off, and strict-off is asserted byte-for-byte identical to
+    `NormalizeDialAddr` — CD's post-deploy smoke step and host-mode local dev are
+    unaffected.
+
 ### Fixed
 - **`gamestate_reload` could fail a deploy that did everything right.** It compared
   the reloaded spawn against the row snapshot `gamestate_player_row` took a step

@@ -266,6 +266,11 @@ func (r *Runner) stepGatewayAuthEnter() (string, error) {
 	if enterResp.ServerAddr == "" || enterResp.JoinToken == "" {
 		return "", fmt.Errorf("enter world: missing server_addr/join_token")
 	}
+	// Strict address mode rejects a listen-style ServerAddr here, at the hop
+	// that produced it, instead of dialing something else on that port.
+	if _, err := ResolveServerDialAddr(enterResp.ServerAddr, r.cfg.StrictAddr); err != nil {
+		return "", fmt.Errorf("enter world: %w", err)
+	}
 	r.serverAddr = enterResp.ServerAddr
 	r.joinToken = enterResp.JoinToken
 	// The gateway tells us which transport the target game server speaks; an
@@ -279,7 +284,7 @@ func (r *Runner) stepGatewayAuthEnter() (string, error) {
 // ---------------------------------------------------------------- steps f+g+h
 
 func (r *Runner) stepGameServerFlow() (string, error) {
-	conn, err := r.dial(r.serverTrans, r.serverAddr)
+	conn, err := r.dialServer(r.serverTrans, r.serverAddr)
 	if err != nil {
 		return "", err
 	}
@@ -421,9 +426,25 @@ drain:
 // ---------------------------------------------------------------- wire utils
 
 // dial connects over the given transport kind (empty means tcp), rewriting
-// listen-style addresses into dialable loopback ones.
+// listen-style addresses into dialable loopback ones. Used for the gateway hop,
+// whose address is operator-supplied local config (GATEWAY_ADDR, ":8000" by
+// default) rather than something a server advertised — strict address mode
+// therefore does not apply to it.
 func (r *Runner) dial(kind, addr string) (net.Conn, error) {
-	target := NormalizeDialAddr(addr)
+	return r.dialTarget(kind, NormalizeDialAddr(addr))
+}
+
+// dialServer connects to a game server address the gateway advertised. Under
+// --strict-addr a listen-style address fails here instead of being rewritten.
+func (r *Runner) dialServer(kind, addr string) (net.Conn, error) {
+	target, err := ResolveServerDialAddr(addr, r.cfg.StrictAddr)
+	if err != nil {
+		return nil, err
+	}
+	return r.dialTarget(kind, target)
+}
+
+func (r *Runner) dialTarget(kind, target string) (net.Conn, error) {
 	conn, err := transport.Dial(kind, target, r.cfg.Timeout)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s over %s: %w", target, transport.Normalize(kind), err)

@@ -237,6 +237,112 @@ func TestNormalizeDialAddr(t *testing.T) {
 	}
 }
 
+// Strict off must stay byte-for-byte NormalizeDialAddr: CD's post-deploy smoke
+// step and host-mode local dev depend on the rewrite.
+func TestResolveServerDialAddr_StrictOff(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{":9000", "127.0.0.1:9000"},
+		{"0.0.0.0:9000", "127.0.0.1:9000"},
+		{"[::]:9200", "127.0.0.1:9200"},
+		{"10.1.2.3:7306", "10.1.2.3:7306"},
+		{"127.0.0.1:9000", "127.0.0.1:9000"},
+		{"gs.example.com:9000", "gs.example.com:9000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			got, err := ResolveServerDialAddr(tt.in, false)
+			if err != nil {
+				t.Fatalf("ResolveServerDialAddr(%q, false) err = %v, want nil", tt.in, err)
+			}
+			if got != tt.want {
+				t.Errorf("ResolveServerDialAddr(%q, false) = %q, want %q", tt.in, got, tt.want)
+			}
+			if want := NormalizeDialAddr(tt.in); got != want {
+				t.Errorf("strict-off diverged from NormalizeDialAddr: %q vs %q", got, want)
+			}
+		})
+	}
+}
+
+func TestResolveServerDialAddr_StrictOn(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		wantErr bool
+		want    string // expected passthrough when wantErr is false
+	}{
+		{name: "no host", in: ":9000", wantErr: true},
+		{name: "wildcard v4", in: "0.0.0.0:9000", wantErr: true},
+		{name: "wildcard v6", in: "[::]:9200", wantErr: true},
+		// A routable address, and a loopback one a server deliberately
+		// advertised: under k3d the dialable address may well look like
+		// loopback, so strict mode rejects listen-style addresses only.
+		{name: "routable", in: "10.1.2.3:7306", want: "10.1.2.3:7306"},
+		{name: "loopback advertised on purpose", in: "127.0.0.1:9000", want: "127.0.0.1:9000"},
+		{name: "hostname", in: "gs.example.com:9000", want: "gs.example.com:9000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ResolveServerDialAddr(tt.in, true)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ResolveServerDialAddr(%q, true) err = %v, wantErr %v", tt.in, err, tt.wantErr)
+			}
+			if tt.wantErr {
+				// The failure line must name the offending address, or the
+				// operator reading only that line cannot act on it.
+				if !strings.Contains(err.Error(), tt.in) {
+					t.Errorf("error %q does not name the address %q", err, tt.in)
+				}
+				if !strings.Contains(err.Error(), "GAMESERVER_PUBLIC_ADDR") {
+					t.Errorf("error %q does not point at the likely cause", err)
+				}
+				if got != "" {
+					t.Errorf("got addr %q alongside an error, want empty", got)
+				}
+				return
+			}
+			if got != tt.want {
+				t.Errorf("ResolveServerDialAddr(%q, true) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_StrictAddr(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		args []string
+		want bool
+	}{
+		{name: "default off", env: map[string]string{"JWT_SECRET": "s"}, want: false},
+		{name: "env on", env: map[string]string{"JWT_SECRET": "s", "SMOKE_STRICT_ADDR": "1"}, want: true},
+		{name: "env true", env: map[string]string{"JWT_SECRET": "s", "SMOKE_STRICT_ADDR": "true"}, want: true},
+		{name: "env falsy", env: map[string]string{"JWT_SECRET": "s", "SMOKE_STRICT_ADDR": "off"}, want: false},
+		{name: "flag on", env: map[string]string{"JWT_SECRET": "s"}, args: []string{"--strict-addr"}, want: true},
+		{
+			name: "flag overrides env",
+			env:  map[string]string{"JWT_SECRET": "s", "SMOKE_STRICT_ADDR": "1"},
+			args: []string{"--strict-addr=false"},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := LoadConfig(fakeEnv(tt.env), tt.args)
+			if err != nil {
+				t.Fatalf("LoadConfig() err = %v", err)
+			}
+			if cfg.StrictAddr != tt.want {
+				t.Errorf("StrictAddr = %v, want %v", cfg.StrictAddr, tt.want)
+			}
+		})
+	}
+}
+
 func TestFormatStep(t *testing.T) {
 	tests := []struct {
 		name     string
