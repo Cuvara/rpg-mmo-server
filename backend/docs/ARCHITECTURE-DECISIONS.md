@@ -1670,6 +1670,18 @@ feat(migration): remove Go gameserver, C# .NET 10 is primary`. The cluster conte
    advertises an address that Agones may still be about to kill, which is precisely the
    ordering that would let the two writers disagree. Ready first, then register; on shutdown,
    deregister first, then `ShutdownAsync`.
+
+   > **Correction, same day: this one was already true in code.** Written as though it were
+   > work to do; it is not. `GameServer.RunAsync` completes the bind at
+   > `GameServer/Server/GameServer.cs:349`, calls `ReadyAsync()` at 356, and only then
+   > `_registration.StartAsync()` at 364 — and the descent already deregisters at 443 before
+   > `ShutdownAsync()` at 450. What was actually missing was decision 1 alone: `Program.cs:365`
+   > hardcoded `new NoopAgonesSdk()`, so the correctly ordered calls all went to the no-op.
+   >
+   > The decision stands as the rule; what it needs is a test pinning the order so a future
+   > refactor cannot quietly invert it, not a restructure. Recorded rather than edited away
+   > because "the ADR asked for work that was already done" is the error that sends someone
+   > looking for it.
 4. **The health loop only starts once a real SDK is wired.** `AgonesHealthLoop` running
    against `NoopAgonesSdk` produces reassuring log lines about pings that were never sent, and
    is worse than no loop. Until decision 1 lands, `disabled: true` goes on the dotnet fleet
@@ -1747,4 +1759,4 @@ this ADR should record where.
 | 11 | Arch under NativeAOT | Arch publishes clean and then throws at runtime without per-component AOT hints; hints are **generated or guarded, never hand-written**; `CommandBuffer` is broken under AOT and is not used; the `publish` CI job must **run** the binary, not just build it |
 | 12 | ECS migration | Server goes to **real ECS with Arch**, staged one PR at a time, over the analysis's objection and by owner decision; `CommandBuffer` stays banned and structural ops stay deferred to one phase per tick; every new component gets its AOT hint line in the same commit; no query shape the hint guard cannot see; `Shared.GameLogic` and the wire are frozen throughout |
 | 13 | Simulation rates | Three responsibility-named groups (`Critical`/`World`/`Background`) at configurable Hz (`SIM_*_HZ`, default 60/15/5) on one derived integer base-tick timeline; rates that do not divide the base are rejected at startup; each group integrates with its own dt; group order Critical->World->Background is the cross-rate write-ownership rule; **replication stays at the world rate**; overload drops the backlog and counts it; the background group ships empty because nothing currently tolerates 200ms |
-| 14 | Agones | **Not yet implemented.** The C# server's Agones SDK is a no-op and `--agones` changes nothing; implement it over the **HTTP sidecar on `localhost:9358`**, not the gRPC C# SDK, to hold the module's NativeAOT/no-dependencies rule. Agones owns pod lifecycle, Redis owns the `map_id -> server` lookup, and the server registers **only after** reporting Ready. Health stays `disabled: true` until a real SDK is wired; the autoscaler is buffer-based on server count because ADR-7's CCU ceiling is unknown. Whether the realtime tier moves off `DEPLOY_MODE=containers` to k8s is **not** decided here |
+| 14 | Agones | **Not yet implemented.** The C# server's Agones SDK is a no-op and `--agones` changes nothing; implement it over the **HTTP sidecar on `localhost:9358`**, not the gRPC C# SDK, to hold the module's NativeAOT/no-dependencies rule. Agones owns pod lifecycle, Redis owns the `map_id -> server` lookup, and the server registers **only after** reporting Ready — an ordering `GameServer.RunAsync` already implements, so what it needs is a test pinning it, not a change. Health stays `disabled: true` until a real SDK is wired; the autoscaler is buffer-based on server count because ADR-7's CCU ceiling is unknown. Whether the realtime tier moves off `DEPLOY_MODE=containers` to k8s is **not** decided here |

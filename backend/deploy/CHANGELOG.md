@@ -5,7 +5,67 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **`agones/fleet-map-dotnet-dev.yaml` now sets `health.disabled: true`** (ADR-14 decision 4).
+  The C# server's Agones SDK is `NoopAgonesSdk` — it never pings the sidecar and `--agones`
+  only logs a warning — so with health enabled the pod would fail `failureThreshold` checks
+  and be killed and recreated forever. The flag is the difference between "not wired up yet"
+  and "crash-looping". `initialDelaySeconds`/`periodSeconds`/`failureThreshold` are kept: the
+  Agones v1 Fleet `health` block accepts all four fields independently (verified against CRD
+  `fleets.agones.dev`), so the timings stay in the file and are inert while `disabled` is set.
+  Removing the flag is ADR-14 stage 4 — after `HttpAgonesSdk` lands and the pod is shown to
+  stay Ready over a sustained run, and not before.
+- **The four Go-image fleet manifests are marked ⚠️ SUPERSEDED rather than deleted**:
+  `fleet-map.yaml`, `fleet-map-dev.yaml`, `fleet-dungeon.yaml`, `fleet-dungeon-dev.yaml`. Their
+  images come from `backend/gameserver/`, deleted in `670a803`, and `docker/Dockerfile.gameserver`
+  went with it, so `rpg-mmo/gameserver:dev` cannot even be rebuilt. They are kept because the
+  `docker-desktop` cluster is *still running* `map-servers-dev` and `dungeon-servers-dev` from
+  those files; deleting the manifests would leave live fleets with no source describing them.
+  Deletion belongs to ADR-14 stage 8, together with retiring the running fleets.
+  `autoscaler.yaml`, `autoscaler-dev.yaml` and `allocation-dev.yaml` gained notes recording that
+  they still select those superseded fleets, not the C# one.
+- **`docs/K3S.md`** gained a "Which fleet is real" section: what the fleets are for, why the
+  dotnet fleet's health is disabled, and the order in which Agones becomes real (SDK →
+  deploy the dotnet fleet → prove no restart loop → `ALLOCATOR=agones` → `ALLOCATED` off 0).
+  The manifest table now lists `fleet-map-dotnet-dev.yaml` and flags the superseded files.
+
+  **Follow-up, needs a human and is not part of this change:**
+  `kubectl -n rpg-realtime delete fleet map-servers-dev dungeon-servers-dev`. Both are Ready,
+  13 days old, `ALLOCATED 0`, running deleted source. Nothing here was applied to any cluster.
+
 ### Fixed
+- **`docs/K3S.md` "Images" told you to build with a Dockerfile that no longer exists.** The
+  build command and the k3d/k3s import rows referenced `docker/Dockerfile.gameserver` and
+  `rpg-mmo/gameserver:dev`; both now use `Dockerfile.gameserver-dotnet` /
+  `rpg-mmo/gameserver-dotnet:dev`. The "Reality-pass applied to the fleets" bullets about
+  SDK-driven health are labelled as describing the Go fleets, since they are false for the C#
+  one.
+- **The post-deploy smoke test dialed default ports, not the environment's published
+  ones.** Production is the first environment to move off the default port numbers. Its
+  deploy succeeded and the stack was healthy, yet `Post-deploy smoke test` failed on its
+  very first step. Two addresses were wrong, both in the same way:
+  - `NAKAMA_URL` was never written into the generated `deploy/.env`, so the smoke test fell
+    back to its own `DefaultNakamaURL` of `http://localhost:7350` while production
+    publishes Nakama on `NAKAMA_HTTP_PORT=7360`. Nothing listens on 7350 there.
+  - `GATEWAY_ADDR` in `deploy/.env` is the address the gateway listens on *inside* its
+    container (`:8000`). The published port is `GATEWAY_CONTAINER_PORT`, which production
+    sets to `8010`, so the gateway hop would have failed next.
+
+  Both are now exported in the `post-deploy-smoke` step *after* it sources `deploy/.env`,
+  derived from `NAKAMA_HTTP_PORT` and `GATEWAY_CONTAINER_PORT`. Overriding in the step
+  rather than in the generated file matters twice over: `GATEWAY_ADDR` also feeds the
+  derivation of `GATEWAY_CONTAINER_PORT` and must keep naming the port the container's
+  hardcoded `--addr=:8000` binds, and a host-mode game server inherits `deploy/.env`,
+  where `NAKAMA_URL` being unset is precisely what disables its Nakama S2S integration.
+
+  Why this survived two environments: dev and staging pass only because their ports happen
+  to equal the smoke test's own defaults, so the whole class of bug is invisible until an
+  environment moves off them. The deploy job's healthcheck could not catch it either — it
+  probes the *metrics* ports, which were already forwarded per-environment, so it reports
+  green while the client-facing path is unreachable. The game-server hop needed no fix: the
+  smoke test follows `EnterWorldResponse.ServerAddr`, i.e. `GAMESERVER_PUBLIC_ADDR`, which
+  the "Write environment file" step already validates.
+
 - **A brand-new environment could never complete its first deploy.** Schema migrations ran
   in `db-migrate`, which is ahead of `deploy` in the job graph. On an environment that has
   never been deployed the database does not exist yet, so `--migrate-only` failed on

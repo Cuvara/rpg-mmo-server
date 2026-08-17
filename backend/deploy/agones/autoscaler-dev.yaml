@@ -1,5 +1,9 @@
 # DEV autoscaler — buffer of 1, capped at 2 replicas so a laptop cluster does
 # not spawn a fleet of pods. Applied only with `setup-dev.sh --with-autoscaler`.
+#
+# NOTE: fleetName below targets `map-servers-dev`, the SUPERSEDED Go fleet. It
+# does not scale the C# fleet (`map-servers-dotnet-dev`). Repointing it is part of
+# ADR-14 stage 7 (buffer-based autoscaler per decision 5), not of this file today.
 apiVersion: autoscaling.agones.dev/v1
 kind: FleetAutoscaler
 metadata:

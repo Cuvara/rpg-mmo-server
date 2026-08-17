@@ -101,16 +101,86 @@ and with `--all` Agones itself. `--fleets-only` keeps the namespaces.
 
 | File | Purpose |
 |------|---------|
-| `agones/fleet-map.yaml` | Prod map fleet — `ghcr.io/cuvara/rpg-mmo-gameserver:latest`, config from Secret/ConfigMap |
-| `agones/fleet-dungeon.yaml` | Prod dungeon fleet, `replicas: 0` (allocate on demand) |
-| `agones/fleet-map-dev.yaml` | Local image `rpg-mmo/gameserver:dev`, `IfNotPresent`, literal env, `replicas: 1` |
-| `agones/fleet-dungeon-dev.yaml` | Same, dungeon mode, `replicas: 0` |
-| `agones/autoscaler.yaml` / `autoscaler-dev.yaml` | Buffer autoscaler (prod 2/1–10, dev 1/1–2) |
+| `agones/fleet-map.yaml` | ⚠️ superseded (Go image) — prod map fleet, config from Secret/ConfigMap |
+| `agones/fleet-dungeon.yaml` | ⚠️ superseded (Go image) — prod dungeon fleet, `replicas: 0` (allocate on demand) |
+| `agones/fleet-map-dev.yaml` | ⚠️ superseded (Go image `rpg-mmo/gameserver:dev`), but this is what the cluster is running |
+| `agones/fleet-dungeon-dev.yaml` | ⚠️ superseded, dungeon mode, `replicas: 0` |
+| `agones/fleet-map-dotnet-dev.yaml` | **The current one.** C# server, `rpg-mmo/gameserver-dotnet:dev`, health `disabled: true` — see below |
+| `agones/autoscaler.yaml` / `autoscaler-dev.yaml` | Buffer autoscaler (prod 2/1–10, dev 1/1–2) — both still target the superseded map fleets |
 | `agones/allocation.yaml` / `allocation-dev.yaml` | `GameServerAllocation` — `kubectl create`, never `apply` |
 | `k3s/namespaces.yaml` | `rpg-realtime` / `rpg-meta` / `rpg-data` |
 
+### Which fleet is real
+
+Nine manifests, one live server implementation. Read this before applying any of
+them. Full rationale: [ADR-14](../../docs/ARCHITECTURE-DECISIONS.md) — this
+section is the operational summary, not a restatement.
+
+**What the fleets are for.** A `Fleet` is Agones' unit of game-server supply: it
+keeps N pods of one spec Ready and hands them out one at a time when the gateway
+(or `kubectl create -f allocation*.yaml`) allocates. Map fleets hold long-lived
+per-`map_id` servers; dungeon fleets are `replicas: 0` and exist to be allocated
+per party. Neither is on the deploy path today — dev, staging and production all
+run `DEPLOY_MODE=containers` under docker compose, and CI never applies anything
+in `agones/`.
+
+**The four Go-image manifests are marked superseded, not deleted.** They run
+`rpg-mmo/gameserver:dev` / `ghcr.io/…/rpg-mmo-gameserver:latest`, built from
+`backend/gameserver/`, which was deleted in `670a803`; `docker/Dockerfile.gameserver`
+went with it, so the dev image cannot be rebuilt. They survive because
+`map-servers-dev` and `dungeon-servers-dev` are *still running* on this cluster
+from those files, and a live fleet with no manifest is worse than a manifest
+marked stale. `setup-dev.sh` still applies the Go dev fleets — that is
+deliberately unchanged here so this change alters nothing that runs.
+
+> **Follow-up, needs a human.** Retiring the running fleets is a `kubectl delete`
+> against `docker-desktop` and is **not** part of this or any manifest change:
+> `kubectl -n rpg-realtime delete fleet map-servers-dev dungeon-servers-dev`.
+> ADR-14 stage 8 pairs that with deleting the four files and repointing
+> `setup-dev.sh`. Nobody has run it; both fleets are Ready with `ALLOCATED 0`.
+
+**Why the dotnet fleet's health is disabled.** `fleet-map-dotnet-dev.yaml` sets
+`health.disabled: true`. The C# server's Agones SDK is `NoopAgonesSdk` — it never
+pings the sidecar, and `--agones` only logs a warning. With health enabled the pod
+fails `failureThreshold` checks and Agones kills and recreates it forever, so the
+flag is the difference between "not wired up yet" and "crash-looping". The
+`initialDelaySeconds`/`periodSeconds`/`failureThreshold` values stay in the file
+(the Agones v1 `health` block accepts all four fields independently; the timings
+are simply inert while `disabled` is set) so stage 4 does not have to re-derive
+them.
+
+**The order in which Agones becomes real.** Each step is a precondition of the
+next; skipping ahead produces a restart loop or an allocation that returns a pod
+nothing can join.
+
+1. `HttpAgonesSdk` lands against the sidecar on `localhost:9358` (ADR-14 stage 1,
+   no deployment). The *ordering* the ADR asks for is already implemented in
+   `GameServer/Server/GameServer.cs` — bind, then `ReadyAsync()`, then
+   `_registration.StartAsync()`; on the way down `DeregisterAsync()` before
+   `ShutdownAsync()` — so what stages 1–3 add is the SDK behind it, not the
+   sequence. `Program.cs` hardcoded `new NoopAgonesSdk()`; that is the line that
+   changes.
+2. Deploy `fleet-map-dotnet-dev.yaml` **with `health.disabled: true` still set**
+   and confirm the pod reaches `Ready` and stays there. Deploying and un-disabling
+   in one change conflates two failures — a server that cannot come up, and a
+   ping loop that cannot keep up.
+3. Only then remove `health.disabled: true`, and confirm the pod survives the ping
+   period: `kubectl -n rpg-realtime get gs -w`, `RESTARTS` stays 0 and the
+   GameServer stays `Ready` over a sustained run. This is its own verification
+   step, not a side effect of the SDK merging. If it flaps, put the flag back
+   rather than widening `failureThreshold` — a starved ping task is a real
+   liveness failure, and ADR-13's overload path is what should keep a merely-slow
+   server from looking dead.
+4. Set `ALLOCATOR=agones` on the gateway (it defaults to `none`).
+5. Verify allocation end to end: `MsgEnterWorld` for an unserved map →
+   `kubectl -n rpg-realtime get fleet` shows `ALLOCATED` move off 0 → a client
+   joins the returned address. This is the first step that proves anything;
+   1–4 only reduce risk.
+
 ### Reality-pass applied to the fleets
 
+Written for the **Go** fleets and still true of them; the two SDK bullets do not
+hold for the C# fleet, whose SDK is a no-op (see "Which fleet is real" above).
 Checked against the game server configuration
 and `docker/Dockerfile.gameserver-dotnet`:
 
@@ -139,8 +209,12 @@ why the dev fleets exist. Build the local image first:
 
 ```bash
 cd backend/deploy
-docker build -f docker/Dockerfile.gameserver -t rpg-mmo/gameserver:dev ..
+docker build -f docker/Dockerfile.gameserver-dotnet -t rpg-mmo/gameserver-dotnet:dev ..
 ```
+
+(`docker/Dockerfile.gameserver` — the Go one that produced `rpg-mmo/gameserver:dev`
+for the superseded fleets — no longer exists. That image can only be whatever is
+already in the local store.)
 
 Note the `..` — the build context must be `backend/`, and under WSL `docker.exe`
 cannot resolve absolute `/mnt/*` paths, so run it cwd-relative from
@@ -151,8 +225,8 @@ Getting that image into the cluster:
 | Cluster | Import step |
 |---------|-------------|
 | Docker Desktop k8s | none — shares the Docker image store |
-| k3d | `k3d image import rpg-mmo/gameserver:dev -c rpg-dev` |
-| real k3s | `docker save rpg-mmo/gameserver:dev \| sudo k3s ctr images import -` |
+| k3d | `k3d image import rpg-mmo/gameserver-dotnet:dev -c rpg-dev` |
+| real k3s | `docker save rpg-mmo/gameserver-dotnet:dev \| sudo k3s ctr images import -` |
 
 ### Talking to the host
 

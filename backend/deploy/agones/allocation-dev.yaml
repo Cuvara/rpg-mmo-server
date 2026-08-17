@@ -8,6 +8,10 @@
 #
 # This is the manual stand-in for what the Gateway allocator will eventually
 # call through the Agones allocation API (gateway/registry).
+#
+# NOTE: the selector below matches `dungeon-servers-dev`, the SUPERSEDED Go fleet.
+# Allocating from it yields a pod running deleted code. Dungeon instancing on the
+# C# server is ADR-14 stage 6.
 apiVersion: allocation.agones.dev/v1
 kind: GameServerAllocation
 metadata:
