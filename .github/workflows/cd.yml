@@ -388,6 +388,16 @@ jobs:
           BACKUP_KEEP: ${{ vars.BACKUP_KEEP || '7' }}
           POSTGRES_DB: ${{ vars.POSTGRES_DB || 'nakama' }}
           POSTGRES_USER: ${{ vars.POSTGRES_USER || 'nakama' }}
+          # Which containers to dump, derived from the same prefix the stack is
+          # deployed under. Without this the scripts fall back to the bare `rpg-`
+          # names, so a prefixed environment would dump ANOTHER environment's
+          # databases and report success — and then the migration that this dump
+          # is supposed to protect would run against a database with no usable
+          # checkpoint. Wrong target, green result, which is the worst shape a
+          # backup failure can take.
+          META_CONTAINER: ${{ vars.COMPOSE_NAME_PREFIX || 'rpg' }}-postgres
+          GAME_CONTAINER: ${{ vars.COMPOSE_NAME_PREFIX || 'rpg' }}-postgres-game
+          REDIS_CONTAINER: ${{ vars.COMPOSE_NAME_PREFIX || 'rpg' }}-redis
         run: |
           set -euo pipefail
           # --skip-missing: on a first-ever deploy the postgres containers do not
@@ -550,6 +560,22 @@ jobs:
           GAMESERVER_CONTAINER_PORT: ${{ vars.GAMESERVER_CONTAINER_PORT || '' }}
           GATEWAY_METRICS_PORT: ${{ vars.GATEWAY_METRICS_PORT || '9102' }}
           GAMESERVER_METRICS_PORT: ${{ vars.GAMESERVER_METRICS_PORT || '9101' }}
+          # Stack-isolation knobs. docker-compose.yml already parameterises every
+          # container name and published port for exactly this ("Running a SECOND,
+          # isolated stack beside a live one"), but CD never forwarded them, so two
+          # environments on one runner necessarily collided: same container names,
+          # so a deploy REPLACED the other environment's containers, and same
+          # postgres/redis/nakama ports underneath. Defaults reproduce the values
+          # compose falls back to, so an environment that sets none of these behaves
+          # exactly as it did before.
+          COMPOSE_NAME_PREFIX: ${{ vars.COMPOSE_NAME_PREFIX || 'rpg' }}
+          POSTGRES_PORT: ${{ vars.POSTGRES_PORT || '5432' }}
+          POSTGRES_GAME_PORT: ${{ vars.POSTGRES_GAME_PORT || '5433' }}
+          REDIS_PORT: ${{ vars.REDIS_PORT || '6379' }}
+          NAKAMA_GRPC_PORT: ${{ vars.NAKAMA_GRPC_PORT || '7349' }}
+          NAKAMA_HTTP_PORT: ${{ vars.NAKAMA_HTTP_PORT || '7350' }}
+          NAKAMA_CONSOLE_PORT: ${{ vars.NAKAMA_CONSOLE_PORT || '7351' }}
+          NAKAMA_METRICS_PORT: ${{ vars.NAKAMA_METRICS_PORT || '9100' }}
           # Listen address of the C# metrics endpoint INSIDE its container.
           # A wildcard is correct and works; it used to have to be a resolvable
           # name because the C# listener could not bind one.
@@ -665,6 +691,14 @@ jobs:
             echo "GAMESERVER_CONTAINER_PORT=${GAMESERVER_CONTAINER_PORT}"
             echo "GATEWAY_METRICS_PORT=${GATEWAY_METRICS_PORT}"
             echo "GAMESERVER_METRICS_PORT=${GAMESERVER_METRICS_PORT}"
+            echo "COMPOSE_NAME_PREFIX=${COMPOSE_NAME_PREFIX}"
+            echo "POSTGRES_PORT=${POSTGRES_PORT}"
+            echo "POSTGRES_GAME_PORT=${POSTGRES_GAME_PORT}"
+            echo "REDIS_PORT=${REDIS_PORT}"
+            echo "NAKAMA_GRPC_PORT=${NAKAMA_GRPC_PORT}"
+            echo "NAKAMA_HTTP_PORT=${NAKAMA_HTTP_PORT}"
+            echo "NAKAMA_CONSOLE_PORT=${NAKAMA_CONSOLE_PORT}"
+            echo "NAKAMA_METRICS_PORT=${NAKAMA_METRICS_PORT}"
             echo "GAMESERVER_METRICS_ADDR=${GAMESERVER_METRICS_ADDR}"
             echo "GAMESERVER_PUBLIC_ADDR=${GAMESERVER_PUBLIC_ADDR}"
             echo "GATEWAY_IMAGE=rpg-mmo/gateway:${GITHUB_SHA}"
@@ -728,6 +762,18 @@ jobs:
           RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
           MONITORING_ENABLED: ${{ vars.MONITORING_ENABLED || 'true' }}
           DEPLOY_MODE: ${{ steps.paths.outputs.deploy_mode }}
+          # The compose PROJECT owns the network and the named volumes, so two
+          # environments sharing a project name share their postgres and redis
+          # data — a worse collision than the container names, because it is
+          # invisible until the data is wrong. Set as an environment variable
+          # rather than written into .env: the process environment beats the
+          # compose file's own `name:` attribute, whereas relying on .env for a
+          # COMPOSE_* setting depends on load order.
+          #
+          # The default is the compose file's `name:`, so an environment that
+          # sets nothing keeps the project it already had — renaming it would
+          # orphan the running containers and the volumes holding their data.
+          COMPOSE_PROJECT_NAME: ${{ vars.COMPOSE_PROJECT_NAME || 'rpg-mmo-meta' }}
         working-directory: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
         run: |
           set -euo pipefail
