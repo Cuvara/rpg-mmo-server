@@ -248,6 +248,45 @@ containers before `deploy-local.sh` starts the binaries again.
 `production`) that overrides the ref mapping, a `skip_tests` boolean for
 emergency builds, and a `build_images` boolean.
 
+### Two environments on one runner
+
+Nothing stops one machine from carrying several of those labels, and today one
+does. When it happens, the environments must be told apart or they will fight,
+and **a different `RPG_DEPLOY_DIR` alone is not enough** — that moves the files
+and leaves everything else shared. Six variables decide isolation:
+
+| Variable | Default | Isolates |
+|---|---|---|
+| `COMPOSE_PROJECT_NAME` | the compose file's `name:` (`rpg-mmo-meta`) | the network and the **named volumes** — i.e. the postgres and redis *data* |
+| `COMPOSE_NAME_PREFIX` | `rpg` | container names (`rpg-gateway`, `rpg-postgres`, …) |
+| `RPG_DEPLOY_DIR` | `/opt/rpg-mmo` | binaries, `deploy/.env`, logs, backups |
+| `GAME_DB_URL` | *(unset → in-memory store)* | which game database migrations run against |
+| `REDIS_ADDR` | `localhost:6379` | which registry the game server publishes into |
+| every `*_PORT` | compose's own defaults | what each service publishes on the host |
+
+The port set is `POSTGRES_PORT`, `POSTGRES_GAME_PORT`, `REDIS_PORT`,
+`NAKAMA_GRPC_PORT`, `NAKAMA_HTTP_PORT`, `NAKAMA_CONSOLE_PORT`,
+`NAKAMA_METRICS_PORT`, `GATEWAY_CONTAINER_PORT`, `GATEWAY_METRICS_PORT`,
+`GAMESERVER_CONTAINER_PORT`, `GAMESERVER_METRICS_PORT`, `GRAFANA_PORT`,
+`PROMETHEUS_PORT`, `OTLP_GRPC_PORT`, `OTLP_HTTP_PORT`.
+
+**Every default reproduces what is in use today**, so an environment that sets
+none of these keeps behaving as it did. Two consequences worth stating outright:
+
+- **Do not rename `COMPOSE_PROJECT_NAME` on a live environment.** Compose would
+  no longer recognise the running containers or the volumes holding their data;
+  the stack would come up empty beside the old one rather than replacing it.
+- **The backup scripts follow `COMPOSE_NAME_PREFIX`.** `cd.yml` derives
+  `META_CONTAINER`, `GAME_CONTAINER` and `REDIS_CONTAINER` from it. If they are
+  ever set by hand, set them consistently — a prefix mismatch makes the pre-deploy
+  dump target the *other* environment's databases and still report success, and the
+  migration it exists to protect then runs with no usable checkpoint.
+
+`GAMESERVER_PUBLIC_ADDR` is not isolation but is easy to get wrong alongside it:
+it is what the game server self-registers into Redis and what the gateway hands
+back in `MsgEnterWorldResp`, so it must name a host and port a **client** can
+reach — not the container port, and not a placeholder.
+
 ### Container images (GHCR)
 
 The `build-images` job pushes `ghcr.io/cuvara/rpg-mmo-gateway` and

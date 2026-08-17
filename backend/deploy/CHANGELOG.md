@@ -6,6 +6,33 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **Two environments on one runner could not coexist, and the failure was silent.**
+  `docker-compose.yml` already parameterises every container name
+  (`COMPOSE_NAME_PREFIX`) and every published port for exactly this case — its header
+  documents running "a SECOND, isolated stack beside a live one" — but `cd.yml` never
+  forwarded those variables into the `.env` it generates. The consequences, all of which
+  applied to `dev`, `staging` and `production` simultaneously because the sole runner
+  carries all three labels:
+  - Container names were always `rpg-*`, so a deploy **replaced the other environment's
+    containers** rather than standing beside them. Setting a different `RPG_DEPLOY_DIR`
+    did not help: the directory changed, the container names did not.
+  - `postgres`, `postgres-game`, `redis` and `nakama` published on fixed ports
+    underneath, so even distinct container names would have collided on binding.
+  - The compose **project** was fixed, so two environments shared one network and one set
+    of named volumes — meaning shared postgres and redis *data*. Worse than the name
+    collision, because nothing reports it until the data is wrong.
+  - `backup.sh` / `redis-backup.sh` resolve containers from `META_CONTAINER`,
+    `GAME_CONTAINER` and `REDIS_CONTAINER`, which CD also never set. A prefixed
+    environment would have dumped **another environment's** databases and reported
+    success — and the migration that dump exists to protect would then run with no
+    usable checkpoint. Wrong target, green result.
+
+  `cd.yml` now forwards `COMPOSE_NAME_PREFIX`, `COMPOSE_PROJECT_NAME`, the postgres,
+  redis and nakama ports, and the three backup container names. **Every default
+  reproduces the value in use today**, so an environment that sets none of them behaves
+  exactly as before — importantly including `COMPOSE_PROJECT_NAME`, whose default is the
+  compose file's own `name:`; renaming a live project would orphan its containers and the
+  volumes holding their data.
 - **GHCR registry path changed from `ghcr.io/dycuong03/` to `ghcr.io/cuvara/`** in
   `cd.yml` and all deploy docs. The personal account registry returned `permission_denied`
   on production deploys; the org registry matches the repo ownership.
