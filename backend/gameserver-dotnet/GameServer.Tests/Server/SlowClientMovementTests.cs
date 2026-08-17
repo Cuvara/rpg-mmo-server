@@ -179,11 +179,13 @@ public class SlowClientMovementTests
     {
         var rates = Rates(critical, world, background);
 
-        (float largest, float speed) = await LargestSingleStepAsync(rates, pauseMs: 800);
+        (float largest, float speed, string diag) = await LargestSingleStepAsync(rates, pauseMs: 800);
 
         // Positions are read from SNAPSHOTS, which ship at the world rate, so one sample
         // interval already contains WorldEvery base steps. That, not the base step, is the
-        // baseline a normal frame is compared against.
+        // baseline a normal frame is compared against. Samples spanning a lost frame are
+        // discarded by SampleStepsAsync rather than rescaled — see there for why rescaling
+        // silently hid the very repayment this asserts.
         float normal = speed / rates.WorldHz;
 
         // A client that goes quiet WITHOUT saying so is the genuine lost-input case, and
@@ -194,7 +196,7 @@ public class SlowClientMovementTests
 
         Assert.True(largest <= capUnits + normal * 1.5f,
             $"largest sampled movement was {largest:F4}: repayment is not bounded by the " +
-            $"{capUnits:F2}-unit cap");
+            $"{capUnits:F2}-unit cap{diag}");
 
         // The complement, and the reason it is asserted rather than assumed: silence the
         // server never heard about MUST still be repaid. Without this, the invariant above
@@ -203,7 +205,7 @@ public class SlowClientMovementTests
         // summed travel is not what the defect changes.
         Assert.True(largest > normal * 1.5f,
             $"largest sampled movement was {largest:F4}, no larger than a normal " +
-            $"{normal:F4}: unheard silence is no longer being repaid at all (#100)");
+            $"{normal:F4}: unheard silence is no longer being repaid at all (#100){diag}");
     }
 
     /// <summary>
@@ -229,14 +231,18 @@ public class SlowClientMovementTests
     {
         var rates = Rates(critical, world, background);
 
-        (float largest, float speed) =
+        (float largest, float speed, string diag) =
             await LargestSingleStepAsync(rates, pauseMs: 800, stopExplicitly: true);
 
+        // One snapshot interval, as above. A lost frame used to make two consecutive
+        // mentions span two steps and land on exactly 2.00x — the same value this rejects —
+        // so a busy CI runner reported a repaid pause on a server that had done nothing
+        // wrong. Those pairs are now discarded at the source.
         float normal = speed / rates.WorldHz;
 
         Assert.True(largest < normal * 2f,
             $"largest sampled movement after an explicit stop was {largest:F4} against a " +
-            $"normal {normal:F4} ({largest / normal:F1}x): the pause was repaid as travel");
+            $"normal {normal:F4} ({largest / normal:F1}x): the pause was repaid as travel{diag}");
     }
 
     // ── Harness ──
@@ -251,7 +257,78 @@ public class SlowClientMovementTests
     /// stick, rather than its packets stopping arriving. The server can tell these apart
     /// and must.
     /// </param>
-    private static async Task<(float largest, float speed)> LargestSingleStepAsync(
+    /// <summary>One recorded movement between two consecutive reports of the player.</summary>
+    private readonly record struct StepSample(float Distance, ulong Tick, ulong FrameGap);
+
+    /// <summary>
+    /// What the sampler saw, kept so a failure can explain itself.
+    ///
+    /// <para>These assertions fail on a number without any way to tell a simulation defect
+    /// from a measurement artefact, and that cost two CI investigations: a lost frame made
+    /// the raw difference land on exactly 2.00x, which is the same value the explicit-stop
+    /// threshold rejects. The discard counters are here so the next failure says which it
+    /// was instead of leaving it to be re-derived.</para>
+    /// </summary>
+    private sealed class StepLog
+    {
+        public readonly List<StepSample> Samples = new();
+
+        /// <summary>Newest base tick seen on any snapshot, for marking the resume.</summary>
+        public ulong LatestFrameTick;
+
+        /// <summary>Snapshots whose tick gap showed at least one frame never arrived.</summary>
+        public int LostFrames;
+
+        /// <summary>Pairs dropped because they spanned one of those gaps.</summary>
+        public int DiscardedPairs;
+
+        /// <summary>
+        /// Base tick at which the client started moving again, or 0 before that.
+        ///
+        /// <para>Samples earlier than this are not evidence about a repaid pause, and
+        /// including them is what made this suite flake. Under load the server's own tick
+        /// loop runs late, and the elapsed-time step then integrates two ticks of movement
+        /// into one — which is #100 working as specified, not a defect. Observed at exactly
+        /// 2.00x with <c>lostFrames=0</c>, in the FIRST movement phase, several hundred
+        /// milliseconds before the pause the message blamed.</para>
+        /// </summary>
+        public ulong ResumeTick;
+
+        /// <summary>Largest sampled step at or after <see cref="ResumeTick"/>.</summary>
+        public float LargestAfterResume()
+        {
+            float largest = 0f;
+            foreach (var s in Samples)
+            {
+                if (s.Tick < ResumeTick) continue;
+                if (s.Distance > largest) largest = s.Distance;
+            }
+            return largest;
+        }
+
+        public string Describe(float largest)
+        {
+            var top = new List<StepSample>(Samples);
+            top.Sort(static (a, b) => b.Distance.CompareTo(a.Distance));
+
+            var sb = new System.Text.StringBuilder();
+            int before = 0;
+            foreach (var s in Samples) if (s.Tick < ResumeTick) before++;
+
+            sb.Append($" [samples={Samples.Count} beforeResume={before} ")
+              .Append($"resumeTick={ResumeTick} lostFrames={LostFrames} ")
+              .Append($"discardedPairs={DiscardedPairs} largest={largest:F4} top=");
+            for (int i = 0; i < top.Count && i < 3; i++)
+            {
+                if (i > 0) sb.Append(", ");
+                sb.Append($"{top[i].Distance:F4}@tick{top[i].Tick}(gap{top[i].FrameGap})");
+            }
+            sb.Append(']');
+            return sb.ToString();
+        }
+    }
+
+    private static async Task<(float largest, float speed, string diag)> LargestSingleStepAsync(
         SimulationRates rates, int pauseMs, bool stopExplicitly = false)
     {
         string userId = $"lurch-{Guid.NewGuid():N}"[..16];
@@ -276,8 +353,9 @@ public class SlowClientMovementTests
             EntitySnapshot spawn = await ReadOwnEntityAsync(stream, userId, cts.Token);
             float speed = spawn.Speed;
 
-            var steps = new List<float>();
-            var samples = Task.Run(() => SampleStepsAsync(stream, userId, steps, cts.Token), cts.Token);
+            var log = new StepLog();
+            var samples = Task.Run(
+                () => SampleStepsAsync(stream, userId, log, rates.WorldEvery, cts.Token), cts.Token);
 
             ulong tick = 0;
             // Move for a while at the world rate.
@@ -297,6 +375,9 @@ public class SlowClientMovementTests
             // Stand still, then start again. This is the restart that used to lurch.
             await Task.Delay(pauseMs, cts.Token);
 
+            // Everything sampled from here on is what these tests are about: the restart.
+            log.ResumeTick = log.LatestFrameTick;
+
             for (int i = 0; i < 8; i++)
             {
                 await SendAsync(stream, MsgType.Input,
@@ -308,10 +389,11 @@ public class SlowClientMovementTests
             cts.CancelAfter(TimeSpan.FromSeconds(3));
             await samples;
 
-            Assert.NotEmpty(steps);
-            float largest = 0f;
-            foreach (float d in steps) if (d > largest) largest = d;
-            return (largest, speed);
+            Assert.NotEmpty(log.Samples);
+            float largest = log.LargestAfterResume();
+            Assert.True(largest > 0f,
+                $"no movement was sampled after the restart{log.Describe(largest)}");
+            return (largest, speed, log.Describe(largest));
         }
         finally
         {
@@ -321,11 +403,46 @@ public class SlowClientMovementTests
         }
     }
 
-    /// <summary>Record the distance between consecutive reported positions.</summary>
+    /// <summary>
+    /// Record the distance between consecutive reported positions, <b>discarding any pair
+    /// that spans a snapshot the transport lost.</b>
+    ///
+    /// <para><b>Why the discard is necessary.</b> The outbound snapshot channel drops the
+    /// oldest frame under load. When the dropped frame was one that mentioned the player,
+    /// the next mention is two movement steps away from the last one, so the raw difference
+    /// reads as a single step of exactly twice the normal size — and "a step several times
+    /// the normal size" is precisely what the assertions here treat as the defect. A busy
+    /// CI runner therefore produced "the pause was repaid as travel" against a server that
+    /// had done nothing wrong. Observed as exactly 2.00x, which is the tell: a timing
+    /// artefact would not land on a round multiple.</para>
+    ///
+    /// <para><b>Why the gap is not simply divided out.</b> That was the first attempt and it
+    /// is wrong here. Dividing distance by the tick gap also divides away the thing two of
+    /// these tests exist to see: banked repayment puts a whole silent interval's travel into
+    /// one tick, and the mention before it is a whole silent interval earlier, so the
+    /// quotient comes back at exactly one normal step. It measured the defect as absent.</para>
+    ///
+    /// <para><b>What distinguishes the two.</b> A drop and a legitimate absence look the
+    /// same if only the frames mentioning the player are tracked — but not if <i>every</i>
+    /// snapshot's tick is tracked. Snapshots ship at the world rate, so consecutive frames
+    /// are <paramref name="worldEvery"/> base ticks apart; a larger jump means a frame never
+    /// arrived. That is independent of whether the player was in it, which is what makes it
+    /// usable: an entity standing still is absent from deltas while frames keep arriving on
+    /// schedule.</para>
+    /// </summary>
+    /// <param name="worldEvery">
+    /// Base ticks between two snapshots, i.e. <c>SimulationRates.WorldEvery</c>. A received
+    /// gap wider than this is a lost frame.
+    /// </param>
     private static async Task SampleStepsAsync(
-        NetworkStream stream, string userId, List<float> steps, CancellationToken ct)
+        NetworkStream stream, string userId, StepLog log, int worldEvery,
+        CancellationToken ct)
     {
         float previous = float.NaN;
+        ulong previousTick = 0;
+        ulong lastFrameTick = 0;
+        bool haveFrame = false;
+
         try
         {
             while (!ct.IsCancellationRequested)
@@ -335,11 +452,35 @@ public class SlowClientMovementTests
                 if ((MsgType)env.Type != MsgType.Snapshot) continue;
 
                 var msg = WireProtocol.GetPayload<SnapshotMessage>(env);
+
+                // Frame accounting first, and for every snapshot rather than only the ones
+                // carrying the player: this is what separates a lost frame from an entity
+                // that simply did not move.
+                bool lostFrame = haveFrame && msg.Tick > lastFrameTick + (ulong)worldEvery;
+                lastFrameTick = msg.Tick;
+                log.LatestFrameTick = msg.Tick;
+                haveFrame = true;
+
+                if (lostFrame)
+                {
+                    // Whatever the player did across the missing frames cannot be attributed
+                    // to one step, so the next pair starts fresh instead of being measured
+                    // against a position from before the gap.
+                    log.LostFrames++;
+                    if (!float.IsNaN(previous)) log.DiscardedPairs++;
+                    previous = float.NaN;
+                }
+
                 foreach (var e in msg.Entities)
                 {
                     if (e.Id != userId) continue;
-                    if (!float.IsNaN(previous)) steps.Add(Math.Abs(e.X - previous));
+                    if (!float.IsNaN(previous))
+                    {
+                        log.Samples.Add(new StepSample(
+                            Math.Abs(e.X - previous), msg.Tick, msg.Tick - previousTick));
+                    }
                     previous = e.X;
+                    previousTick = msg.Tick;
                 }
             }
         }
@@ -422,7 +563,11 @@ public class SlowClientMovementTests
 
             // Send at the requested rate for the measurement window. Snapshots are drained
             // concurrently so the socket's receive buffer cannot fill and stall the writes.
-            var drain = Task.Run(() => DrainAsync(stream, userId, cts.Token), cts.Token);
+            //
+            // Its own cancellation source, so the drain can be stopped while the connection
+            // stays usable for the keyframe request that follows.
+            using var drainCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+            var drain = Task.Run(() => DrainAsync(stream, userId, drainCts.Token), drainCts.Token);
 
             int interval = 1000 / sendHz;
             int packets = (int)(RunSeconds * sendHz);
@@ -452,12 +597,26 @@ public class SlowClientMovementTests
             }
 
             // One world interval past the last packet, so the final held step lands and is
-            // included in a snapshot, then stop and take the newest position seen.
+            // included in a snapshot.
             await Task.Delay(200, cts.Token);
-            cts.CancelAfter(TimeSpan.FromSeconds(5));
 
-            float lastX = await drain;
-            return (lastX - startX, speed);
+            // Stop draining, then ask for a KEYFRAME and read the position out of that.
+            //
+            // Taking "the newest position seen" is not a measurement of the server: deltas
+            // omit unchanged entities and the outbound channel drops the oldest frame under
+            // load, so the last frame that happened to arrive can be several ticks stale.
+            // The distance then reads short — and short is exactly what these tests fail on,
+            // so a dropped tail was indistinguishable from the defect and produced "travelled
+            // 3.17 against 6.00 expected" on a server that had moved the full distance.
+            //
+            // A keyframe carries every entity in the AOI unconditionally, so the position in
+            // it is the server's own, not whatever survived the transport.
+            drainCts.Cancel();
+            await drain;
+
+            await SendResyncAsync(stream);
+            EntitySnapshot final = await ReadKeyframeEntityAsync(stream, userId, cts.Token);
+            return (final.X - startX, speed);
         }
         finally
         {
@@ -497,6 +656,34 @@ public class SlowClientMovementTests
         return lastX;
     }
 
+    /// <summary>
+    /// Read until a <b>keyframe</b> that mentions the player, and return its entity.
+    ///
+    /// <para>Requires <c>Full</c> rather than accepting any snapshot: a delta arriving
+    /// between the resync request and the keyframe answers with whatever changed, which is
+    /// the stale reading this exists to avoid.</para>
+    /// </summary>
+    private static async Task<EntitySnapshot> ReadKeyframeEntityAsync(
+        NetworkStream stream, string userId, CancellationToken ct)
+    {
+        for (int frames = 0; frames < 400; frames++)
+        {
+            var env = await WireProtocol.DecodeAsync(stream, ct);
+            if (env == null) break;
+            if ((MsgType)env.Type != MsgType.Snapshot) continue;
+
+            var msg = WireProtocol.GetPayload<SnapshotMessage>(env);
+            if (!msg.Full) continue;
+
+            foreach (var e in msg.Entities)
+            {
+                if (e.Id == userId) return e;
+            }
+        }
+        throw new InvalidOperationException(
+            $"player {userId} never appeared in a keyframe after MsgResync");
+    }
+
     private static async Task<EntitySnapshot> ReadOwnEntityAsync(
         NetworkStream stream, string userId, CancellationToken ct)
     {
@@ -520,6 +707,21 @@ public class SlowClientMovementTests
 
     private static async Task SendAsync(Stream stream, MsgType type, InputMessage payload)
         => await WriteFrameAsync(stream, WireProtocol.NewEnvelope(type, payload, WireEncoding.Json));
+
+    /// <summary>
+    /// Ask for a keyframe. The envelope is built here rather than through
+    /// <c>WireProtocol.NewEnvelope</c> because <c>MsgResync</c> has no body the server
+    /// reads — <c>GameServer.HandleMessage</c> says so explicitly and only calls
+    /// <c>RequestFull()</c> — so there is no payload type to pick, and picking one anyway
+    /// would imply the server parses it.
+    /// </summary>
+    private static async Task SendResyncAsync(Stream stream)
+        => await WriteFrameAsync(stream, new GameServer.Net.Envelope
+        {
+            Type = (byte)MsgType.Resync,
+            Payload = Array.Empty<byte>(),
+            Encoding = WireEncoding.Json
+        });
 
     private static async Task WriteFrameAsync(Stream stream, GameServer.Net.Envelope env)
     {
