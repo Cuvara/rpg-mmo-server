@@ -193,7 +193,25 @@ production / `build_images=true`; it is **not** on the deploy path.
 | `build-plugin` | `ubuntu-latest` | `_go-module.yml` with `needs_docker: true` → `docker build -f nakama-plugin.Dockerfile --target export` → uploads `nakama-plugin-<sha>`. Parallel with the binary builds. |
 | `build-images` | `ubuntu-latest` | Gateway + gameserver container images → GHCR. Conditional (see below). |
 | `bundle` | `ubuntu-latest` | Downloads `bin-*-<sha>` (`merge-multiple`) + `nakama-plugin-<sha>`, adds `docker-compose.yml`, `Makefile`, `.env.example`, `deploy-local.sh`, `COMMIT`, asserts every expected file is present, uploads `deploy-bundle-<sha>` (14 days, `include-hidden-files` for `.env.example`). Compiles nothing. |
-| `deploy` | `${{ fromJSON(resolve.runner_labels) }}` | Checkout → download bundle → `install` into `$RPG_DEPLOY_DIR` (keeping `.prev` binaries) → write `.env` from Environment secrets → `docker compose up -d` → then **either** `deploy-local.sh restart` (host mode) **or** build images + bring up the `realtime` profile + register the game server (containers mode). Outputs `deploy_dir`, `deploy_mode`. See §3b. |
+| `deploy` | `${{ fromJSON(resolve.runner_labels) }}` | Checkout → download bundle → `install` into `$RPG_DEPLOY_DIR` (keeping `.prev` binaries) → write `.env` from Environment secrets → **bring up the data tier** (postgres, redis, nakama; no `realtime` profile) → **apply pending migrations** → `docker compose up -d` with the remaining profiles → then **either** `deploy-local.sh restart` (host mode) **or** build images + bring up the `realtime` profile + register the game server (containers mode). Outputs `deploy_dir`, `deploy_mode`. See §3b. |
+
+> **Why migrations run inside `deploy` and not in `db-migrate`.** They were in the earlier
+> job, which cannot work on an environment that has never been deployed: the database does
+> not exist yet, `--migrate-only` fails on connect, and `deploy` — the job that would have
+> created it — is gated on that migration succeeding. A first production deploy failed
+> exactly that way with `Failed to connect to 127.0.0.1:5443`, having already pushed its
+> images.
+>
+> Splitting the stack in two keeps the ordering that mattered and fixes the one that did
+> not: the data tier comes up, migrations run against it, and only then does the `realtime`
+> profile start. **Schema is still migrated before any new binary serves traffic.** The
+> data-tier step deliberately omits `--remove-orphans` and the `realtime` profile, so it
+> cannot disturb a running gateway or game server while the schema changes, and it waits on
+> `pg_isready` rather than on compose reporting the container started — on a first deploy
+> postgres has an empty data directory to initialise first.
+>
+> `db-migrate` is now backup-only, and its display name says so. The job id is unchanged
+> because `deploy` depends on it and the backup is still what gates the deploy.
 | `post-deploy-smoke` | same labels as `deploy` | Sources `$RPG_DEPLOY_DIR/deploy/.env` and runs `bin/smoketest` (Nakama health → device auth → `gateway_token` RPC → gateway `MsgAuth`/`MsgEnterWorld` → game server join → input/snapshot → disconnect). Separate job so "deploy broke" and "the flow broke" are distinguishable at a glance. Takes the deploy dir from `needs.deploy.outputs.deploy_dir`, so it needs no `environment:` (no second production approval). |
 | `summary` | `ubuntu-latest` | `if: always()` — step-summary table with ref, commit, runner, deploy dir and the `deploy` / `post-deploy-smoke` results. |
 
