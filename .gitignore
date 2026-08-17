@@ -37,6 +37,10 @@ Thumbs.db
 # Claude Code
 .claude/
 
+# Serena MCP server — per-developer project index and memories, regenerated on
+# demand and machine-specific. project.local.yml carries local paths.
+.serena/
+
 # Compiled gateway binary (build artifact, was committed by mistake)
 /backend/gateway/gateway
 
