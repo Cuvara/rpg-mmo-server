@@ -101,7 +101,7 @@ and with `--all` Agones itself. `--fleets-only` keeps the namespaces.
 
 | File | Purpose |
 |------|---------|
-| `agones/fleet-map.yaml` | Prod map fleet — `ghcr.io/dycuong03/rpg-mmo-gameserver:latest`, config from Secret/ConfigMap |
+| `agones/fleet-map.yaml` | Prod map fleet — `ghcr.io/cuvara/rpg-mmo-gameserver:latest`, config from Secret/ConfigMap |
 | `agones/fleet-dungeon.yaml` | Prod dungeon fleet, `replicas: 0` (allocate on demand) |
 | `agones/fleet-map-dev.yaml` | Local image `rpg-mmo/gameserver:dev`, `IfNotPresent`, literal env, `replicas: 1` |
 | `agones/fleet-dungeon-dev.yaml` | Same, dungeon mode, `replicas: 0` |
@@ -134,7 +134,7 @@ and `docker/Dockerfile.gameserver-dotnet`:
 
 ### Images
 
-`ghcr.io/dycuong03/rpg-mmo-gameserver:latest` is **not published yet**, which is
+`ghcr.io/cuvara/rpg-mmo-gameserver:latest` is **not published yet**, which is
 why the dev fleets exist. Build the local image first:
 
 ```bash

@@ -5,6 +5,19 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **GHCR registry path changed from `ghcr.io/dycuong03/` to `ghcr.io/cuvara/`** in
+  `cd.yml` and all deploy docs. The personal account registry returned `permission_denied`
+  on production deploys; the org registry matches the repo ownership.
+- **Production environment variables provisioned.** Added `GAMESERVER_PUBLIC_ADDR`,
+  `GAMESERVER_CONTAINER_PORT`, `GATEWAY_CONTAINER_PORT`, and `REDIS_PASSWORD` to both
+  staging and production GitHub environments. `GAMESERVER_PUBLIC_ADDR` is a placeholder
+  (`<VPS_PUBLIC_IP>:9200`) — replace when VPS is provisioned.
+
+### Added
+- **`workflow_dispatch` trigger on `publish-shared-gamelogic.yml`** — allows manual
+  re-run of the Shared.GameLogic publish pipeline without a code change.
+
 ### Added
 - **`stack.sh` — one command that brings the whole backend up locally.**
   Everything needed to bring up a stack a client can actually connect to

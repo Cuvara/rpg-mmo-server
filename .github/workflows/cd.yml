@@ -240,8 +240,8 @@ jobs:
           file: backend/deploy/docker/Dockerfile.gateway
           push: true
           tags: |
-            ghcr.io/dycuong03/rpg-mmo-gateway:${{ steps.meta.outputs.short_sha }}
-            ghcr.io/dycuong03/rpg-mmo-gateway:latest
+            ghcr.io/cuvara/rpg-mmo-gateway:${{ steps.meta.outputs.short_sha }}
+            ghcr.io/cuvara/rpg-mmo-gateway:latest
           cache-from: type=gha,scope=gateway
           cache-to: type=gha,scope=gateway,mode=max
 
@@ -252,8 +252,8 @@ jobs:
           file: backend/deploy/docker/Dockerfile.gameserver-dotnet
           push: true
           tags: |
-            ghcr.io/dycuong03/rpg-mmo-gameserver-dotnet:${{ steps.meta.outputs.short_sha }}
-            ghcr.io/dycuong03/rpg-mmo-gameserver-dotnet:latest
+            ghcr.io/cuvara/rpg-mmo-gameserver-dotnet:${{ steps.meta.outputs.short_sha }}
+            ghcr.io/cuvara/rpg-mmo-gameserver-dotnet:latest
           cache-from: type=gha,scope=gameserver-dotnet
           cache-to: type=gha,scope=gameserver-dotnet,mode=max
 
@@ -262,8 +262,8 @@ jobs:
           {
             echo "### Container images pushed"
             echo ""
-            echo "- \`ghcr.io/dycuong03/rpg-mmo-gateway:${{ steps.meta.outputs.short_sha }}\` (+ \`:latest\`)"
-            echo "- \`ghcr.io/dycuong03/rpg-mmo-gameserver-dotnet:${{ steps.meta.outputs.short_sha }}\` (+ \`:latest\`)"
+            echo "- \`ghcr.io/cuvara/rpg-mmo-gateway:${{ steps.meta.outputs.short_sha }}\` (+ \`:latest\`)"
+            echo "- \`ghcr.io/cuvara/rpg-mmo-gameserver-dotnet:${{ steps.meta.outputs.short_sha }}\` (+ \`:latest\`)"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ------------------------------------------------------------------ bundle

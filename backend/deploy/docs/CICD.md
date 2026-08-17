@@ -250,8 +250,8 @@ emergency builds, and a `build_images` boolean.
 
 ### Container images (GHCR)
 
-The `build-images` job pushes `ghcr.io/dycuong03/rpg-mmo-gateway` and
-`ghcr.io/dycuong03/rpg-mmo-gameserver` (tags: `<short-sha>` + `latest`) **only
+The `build-images` job pushes `ghcr.io/cuvara/rpg-mmo-gateway` and
+`ghcr.io/cuvara/rpg-mmo-gameserver` (tags: `<short-sha>` + `latest`) **only
 when** the resolved environment is `production` **or** `workflow_dispatch` set
 `build_images=true`. Auth is `docker/login-action@v3` with the built-in
 `GITHUB_TOKEN` (`permissions: packages: write` on that job); layers are cached

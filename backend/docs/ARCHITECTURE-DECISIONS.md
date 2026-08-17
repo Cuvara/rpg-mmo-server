@@ -931,7 +931,23 @@ IDs), not another encoding swap.
 > `Shared.GameLogic`, its `in EntityState` / `in Vec2` signatures are frozen, and the
 > golden vectors stay bit-exact.
 
-**Status:** accepted 2026-08-11, not yet implemented.
+**Status:** accepted 2026-08-11. **Implemented** — both halves, as of 2026-08-17.
+
+> **What landed since.** The Context below describes the state on 2026-08-11 and is
+> left as written; two of its statements are no longer true of the code:
+>
+> - *"the client references nothing today"* — the Unity project consumes
+>   `Shared.GameLogic` as a UPM git package, pinned in `packages-lock.json` to
+>   `sgl-v0.1.9`. Client and server run the same movement, combat and validation code,
+>   which is what this ADR existed to make possible.
+> - *"not yet implemented"* — the server's Arch migration ran to completion in five
+>   stages under [ADR-12](#adr-12--the-server-goes-to-real-ecs-staged-under-the-constraints-adr-10-and-adr-11-set);
+>   `SystemSchedule`, `SimulationSchedule`, `SimChunk`, `WorldReader`/`WorldWriter` and
+>   `ComponentAccess` are all on `develop`.
+>
+> The boundary itself is unchanged and still holds: no `Arch.Core` type crosses into
+> `Shared.GameLogic`, the `in EntityState` / `in Vec2` signatures are frozen, and the
+> golden vectors are bit-exact across both runtimes.
 
 **Context.** The game server is to move its entity storage to
 [Arch](https://github.com/genaray/Arch), an archetype/chunk ECS for C#. At the
@@ -1441,6 +1457,33 @@ one thread mutates it under the write lock, and the iteration-depth guard that d
 immediate-versus-deferred structural changes is `[ThreadStatic]`, so it would become a
 per-worker fact rather than a property of the world. Neither may be left to be discovered
 by the change that first spawns a worker.
+
+> **Both preconditions were fixed on 2026-08-17, ahead of any worker — as this paragraph
+> asked.** The paragraph above is left as written; what changed is below.
+>
+> - **The structural queue is per worker slot** and drains in slot order. Locking a single
+>   shared list would have fixed the data race and left the real hazard: ops are replayed
+>   through `Arch.Create`, so queue order sets creation order, which sets chunk layout,
+>   iteration order, and the order floats accumulate. A shared queue makes that arrival
+>   order — the golden vectors would break intermittently rather than never.
+> - **Deferral is now a world-level flag**, `_parallelRegion`, set for the span of a
+>   parallel region. `[ThreadStatic] _iterationDepth` is kept for the same-thread
+>   re-entrancy it always caught; it is simply no longer the whole rule. Inside a region
+>   every worker defers, whether or not that particular worker is mid-query.
+> - **`EcsWorld.UpdateComponentsParallel(workerCount, body)`** runs a body on N real
+>   threads so both fixes are exercised rather than asserted, and
+>   `GameServer.Tests/World/ParallelRegionDeterminismTests.cs` pins the result: identical
+>   world across 25 runs, across worker counts, with replay in slot order and not in
+>   completion order. The suite was verified to fire by reintroducing the shared queue —
+>   exactly the two order-sensitive tests fail and the other eight still pass.
+>
+> **The schedule still runs serially, and that is now a workload decision rather than a
+> safety one.** Of the three systems in it, two declare `Structural` and are excluded from
+> concurrency by `IsDisjointFrom`'s first line; the third has nothing to pair with. Every
+> pair conflicts, so a parallel step would serialise them anyway and pay for the threads —
+> and decision 7 above forbids claiming speed without measurement. The condition to revisit
+> is two or more non-structural systems with disjoint component sets, which arrives with
+> gameplay content, not before it.
 
 One correctness result is worth separating from the performance story: moving encoding to
 the moment of writing **fixed a pre-existing data-loss bug**. The old order encoded on the
