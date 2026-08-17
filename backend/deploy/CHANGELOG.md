@@ -66,6 +66,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   smoke test follows `EnterWorldResponse.ServerAddr`, i.e. `GAMESERVER_PUBLIC_ADDR`, which
   the "Write environment file" step already validates.
 
+### Fixed
 - **A brand-new environment could never complete its first deploy.** Schema migrations ran
   in `db-migrate`, which is ahead of `deploy` in the job graph. On an environment that has
   never been deployed the database does not exist yet, so `--migrate-only` failed on

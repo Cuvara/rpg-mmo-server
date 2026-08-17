@@ -47,9 +47,11 @@ func main() {
 	allocatorMode := flag.String("allocator", "", "Game server allocator: none or agones (overrides ALLOCATOR; default none)")
 	allocNamespace := flag.String("allocator-namespace", "", "Kubernetes namespace holding the Agones fleets (overrides ALLOCATOR_NAMESPACE)")
 	allocFleetMap := flag.String("allocator-fleet-map", "", "Agones Fleet for map servers (overrides ALLOCATOR_FLEET_MAP)")
-	allocFleetDungeon := flag.String("allocator-fleet-dungeon", "", "Agones Fleet for dungeon servers (overrides ALLOCATOR_FLEET_DUNGEON)")
+	allocFleetDungeon := flag.String("allocator-fleet-dungeon", "", "Agones Fleet for dungeon servers (overrides ALLOCATOR_FLEET_DUNGEON). No default: no dungeon fleet is deployed yet, and unset makes a dungeon allocation fail immediately and legibly")
 	allocTransport := flag.String("allocator-transport", "", "Realtime transport the allocated fleet's game servers listen with: tcp or kcp (overrides ALLOCATOR_TRANSPORT; defaults to --transport)")
 	metricsAddr := flag.String("metrics-addr", "", "Prometheus metrics listen address, e.g. :9102 (overrides METRICS_ADDR; \"off\" or an empty METRICS_ADDR disables it)")
+	allocWaitTimeout := flag.Duration("allocation-wait-timeout", 0, "How long to wait for a freshly allocated game server to register itself before failing the join as retryable (overrides ALLOCATION_WAIT_TIMEOUT; default 15s). The wait blocks the client connection's read loop, which is also what records its MsgPong, so a value above 20s (pongTimeout-pingInterval) would let the heartbeat disconnect the client mid-allocation; the gateway refuses to start above it")
+	allocPollInterval := flag.Duration("allocation-poll-interval", 0, "How often to re-check the registry while waiting for an allocated game server (overrides ALLOCATION_POLL_INTERVAL; default 250ms)")
 	allocKubeconfig := flag.String("allocator-kubeconfig", "", "Kubeconfig path for the allocator (default: in-cluster config, then $KUBECONFIG, then ~/.kube/config)")
 	transportKey := flag.String("transport-key", "", "Pre-shared key encrypting the KCP listener, 32-byte hex recommended (overrides TRANSPORT_KEY; empty = plaintext)")
 	joinTokenSecret := flag.String("join-token-secret", "", "HS256 secret (comma-separated list to rotate) for gateway->gameserver join tokens (overrides JOIN_TOKEN_SECRET; REQUIRED)")
@@ -218,7 +220,9 @@ func main() {
 		agonesCfg := registry.AgonesConfig{
 			Namespace:    firstNonEmpty(*allocNamespace, os.Getenv("ALLOCATOR_NAMESPACE"), registry.DefaultNamespace),
 			FleetMap:     firstNonEmpty(*allocFleetMap, os.Getenv("ALLOCATOR_FLEET_MAP"), registry.DefaultFleetMap),
-			FleetDungeon: firstNonEmpty(*allocFleetDungeon, os.Getenv("ALLOCATOR_FLEET_DUNGEON"), registry.DefaultFleetDungeon),
+			// No default fleet: dungeon allocation is unconfigured until a
+			// dungeon fleet exists (ADR-14 stage 6).
+			FleetDungeon: firstNonEmpty(*allocFleetDungeon, os.Getenv("ALLOCATOR_FLEET_DUNGEON")),
 			Kubeconfig:   firstNonEmpty(*allocKubeconfig, os.Getenv("ALLOCATOR_KUBECONFIG")),
 			// Allocated servers are announced to clients before the pod's own
 			// registration lands, so the allocator must know what the fleet
@@ -230,17 +234,45 @@ func main() {
 			log.Error("invalid allocator transport", "err", terr)
 			os.Exit(1)
 		}
+		// An allocated pod is not dialable the moment the allocation API
+		// answers: it still has to boot, bind, report Ready and self-register.
+		// The registry waits for its own entry before a join token is minted,
+		// bounded by these two knobs (flag wins, then env, then default).
+		waitTimeout := resolveDuration(*allocWaitTimeout, "ALLOCATION_WAIT_TIMEOUT", registry.DefaultAllocationWaitTimeout, log)
+		pollInterval := resolveDuration(*allocPollInterval, "ALLOCATION_POLL_INTERVAL", registry.DefaultAllocationPollInterval, log)
+		// Fail fast on a wait that would starve the heartbeat. handleEnterWorld
+		// blocks the connection's read loop for this long, and that same loop is
+		// what records the client's MsgPong — so a wait at or above
+		// MaxHandlerBlockingWait makes the gateway disconnect the very client it
+		// is waiting for, with a symptom that points nowhere near the cause.
+		// Same fail-fast precedent as a missing JOIN_TOKEN_SECRET: a
+		// misconfiguration that only bites the first player is worse than not
+		// starting.
+		if waitTimeout > server.MaxHandlerBlockingWait {
+			log.Error("allocation wait would starve the client heartbeat; refusing to start",
+				"allocation_wait_timeout", waitTimeout,
+				"max_handler_blocking_wait", server.MaxHandlerBlockingWait,
+				"why", "EnterWorld blocks the connection's read loop for the wait, "+
+					"and that loop is what records MsgPong; a wait this long lets the "+
+					"heartbeat time out and disconnect the client mid-allocation",
+				"fix", "lower --allocation-wait-timeout / ALLOCATION_WAIT_TIMEOUT")
+			os.Exit(1)
+		}
 		alloc, aerr := registry.NewAgonesAllocator(agonesCfg)
 		if aerr != nil {
 			log.Error("agones allocator init failed", "err", aerr)
 			os.Exit(1)
 		}
-		reg = registry.NewRegistryServiceWithAllocator(serverRegistry, alloc, registry.WithMetrics(met), registry.WithLogger(log))
+		reg = registry.NewRegistryServiceWithAllocator(serverRegistry, alloc,
+			registry.WithMetrics(met), registry.WithLogger(log),
+			registry.WithAllocationWait(waitTimeout, pollInterval))
 		log.Info("agones allocator enabled",
 			"namespace", agonesCfg.Namespace,
 			"fleet_map", agonesCfg.FleetMap,
-			"fleet_dungeon", agonesCfg.FleetDungeon,
+			"fleet_dungeon", firstNonEmpty(agonesCfg.FleetDungeon, "(unconfigured)"),
 			"transport", agonesCfg.Transport,
+			"allocation_wait_timeout", waitTimeout,
+			"allocation_poll_interval", pollInterval,
 		)
 	} else {
 		log.Info("allocator disabled (unserved maps return an error)")
@@ -367,6 +399,26 @@ func resolveAllocator(flagValue string) (string, error) {
 		return "", fmt.Errorf("unknown allocator %q (want %q or %q)", mode, allocatorNone, allocatorAgones)
 	}
 	return mode, nil
+}
+
+// resolveDuration picks a duration from the flag (wins when positive), then the
+// named env var, then def. An unparseable or non-positive env value is logged
+// and ignored rather than failing start-up: a bad tuning knob must not take the
+// gateway down.
+func resolveDuration(flagValue time.Duration, envKey string, def time.Duration, log *slog.Logger) time.Duration {
+	if flagValue > 0 {
+		return flagValue
+	}
+	raw := os.Getenv(envKey)
+	if raw == "" {
+		return def
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		log.Warn("invalid duration in environment, using default", "env", envKey, "value", raw, "default", def)
+		return def
+	}
+	return d
 }
 
 // firstNonEmpty returns the first non-empty string, or "" when all are empty.

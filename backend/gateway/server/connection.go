@@ -127,6 +127,26 @@ const (
 	pongTimeout  = 30 * time.Second
 )
 
+// MaxHandlerBlockingWait is the longest a message handler may block before it
+// starves the heartbeat, and is exported so start-up can refuse a configuration
+// that exceeds it.
+//
+// A connection is served by ONE goroutine: the read loop dispatches a frame,
+// and the next frame — including the client's MsgPong — is not read until that
+// handler returns. A handler that blocks therefore stops this connection's
+// pongs from being recorded, and HeartbeatLoop closes the connection after
+// pongTimeout of silence. handleEnterWorld is the one handler that can block for
+// a configurable time (it waits for a freshly allocated game server to
+// register), which is exactly the case that must not exceed this.
+//
+// The margin is one full pingInterval: at pongTimeout-pingInterval a single lost
+// or delayed ping still leaves a whole ping period for a pong to arrive and be
+// processed before the connection is judged dead. Anything closer, and the
+// gateway drops the very client it is holding the socket open for — with a
+// symptom (client vanishes during a slow allocation) that points nowhere near
+// the cause.
+const MaxHandlerBlockingWait = pongTimeout - pingInterval
+
 // halfCloser is the optional half-close capability of a net.Conn.
 // *net.TCPConn and *net.UnixConn implement it; kcp.UDPSession does not.
 type halfCloser interface{ CloseWrite() error }

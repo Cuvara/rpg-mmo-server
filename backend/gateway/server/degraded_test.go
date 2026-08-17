@@ -157,6 +157,13 @@ func TestClientSafeAssignError(t *testing.T) {
 			want: msgNoServerAvailable,
 		},
 		{
+			// "your server is booting" (retry shortly) must not collapse into
+			// "this map is full/unavailable" (do not retry).
+			name: "allocated server still starting is its own message",
+			err:  fmt.Errorf("assign map: allocated server for map map_01: %w: gs-1 did not register within 20s", registry.ErrServerStarting),
+			want: msgServerStarting,
+		},
+		{
 			name: "not implemented stays specific",
 			err:  fmt.Errorf("assign map: %w", gameerrors.New(gameerrors.ErrNotImplemented, "dungeon transfer")),
 			want: msgNotImplemented,
@@ -201,6 +208,16 @@ func TestNoServerAvailableIsMatchable(t *testing.T) {
 	err := fmt.Errorf("assign map: %w map_01", registry.ErrNoServerAvailable)
 	if !errors.Is(err, registry.ErrNoServerAvailable) {
 		t.Fatal("wrapped ErrNoServerAvailable is not matchable with errors.Is")
+	}
+
+	// The two conditions must never be confused for each other: one says
+	// "do not retry", the other says "retry shortly".
+	starting := fmt.Errorf("assign map: %w: gs-1", registry.ErrServerStarting)
+	if !errors.Is(starting, registry.ErrServerStarting) {
+		t.Fatal("wrapped ErrServerStarting is not matchable with errors.Is")
+	}
+	if errors.Is(starting, registry.ErrNoServerAvailable) || errors.Is(err, registry.ErrServerStarting) {
+		t.Fatal("ErrServerStarting and ErrNoServerAvailable must be distinct sentinels")
 	}
 }
 
