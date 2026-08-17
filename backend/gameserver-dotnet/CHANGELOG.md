@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [v1.5.2] — 2026-08-17
+
 ### Fixed
 - **`SlowClientMovementTests` measured the transport and blamed the simulation.** Two of its
   cases flaked on CI during one afternoon, each costing an investigation, and both readings
@@ -39,6 +41,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   earlier, so the quotient comes back at exactly one normal step. Both banking tests then
   measured the defect as *absent* while passing. Caught by running them; it would have
   shipped two permanently green, permanently blind tests.
+
+## [v1.5.0] — 2026-08-17
 
 ### Added
 - **`EcsWorld.UpdateComponentsParallel(workerCount, body)`** — runs a body on N threads
