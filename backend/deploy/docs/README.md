@@ -148,7 +148,7 @@ docker build -f docker/Dockerfile.gameserver-dotnet  -t rpg-mmo/gameserver:dev .
 
 # or via the build script (auto-detects docker vs docker.exe)
 scripts/build-all.sh --images                        # -> rpg-mmo/{gateway,gameserver}:dev
-IMAGE_PREFIX=ghcr.io/dycuong03 IMAGE_TAG=v1 scripts/build-all.sh --images --skip-tests
+IMAGE_PREFIX=ghcr.io/cuvara IMAGE_TAG=v1 scripts/build-all.sh --images --skip-tests
 ```
 
 Smoke-check a built image (distroless has no shell, so probe from the host):
@@ -170,11 +170,11 @@ artifact bundle.
 
 | Image | Tags |
 |-------|------|
-| `ghcr.io/dycuong03/rpg-mmo-gateway` | `<short-sha>`, `latest` |
-| `ghcr.io/dycuong03/rpg-mmo-gameserver` | `<short-sha>`, `latest` |
+| `ghcr.io/cuvara/rpg-mmo-gateway` | `<short-sha>`, `latest` |
+| `ghcr.io/cuvara/rpg-mmo-gameserver` | `<short-sha>`, `latest` |
 
 `agones/fleet-map.yaml` and `agones/fleet-dungeon.yaml` both reference
-`ghcr.io/dycuong03/rpg-mmo-gameserver:latest` — renaming the image in `cd.yml`
+`ghcr.io/cuvara/rpg-mmo-gameserver:latest` — renaming the image in `cd.yml`
 means renaming it in both manifests too.
 
 ### Compose parity testing (optional)

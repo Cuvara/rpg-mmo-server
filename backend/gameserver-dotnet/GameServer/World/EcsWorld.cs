@@ -106,20 +106,99 @@ public sealed class EcsWorld : IDisposable
     /// entering the snapshot broadcast allocates nothing.</summary>
     private readonly WorldReader _reader;
 
-    public EcsWorld()
+    public EcsWorld() : this(1) { }
+
+    /// <summary>
+    /// Create a world whose deferred-structural queue has room for
+    /// <paramref name="maxWorkerSlots"/> concurrent producers.
+    ///
+    /// <para>One slot is the serial world and the default: identical storage to the
+    /// single list this replaced. More than one is only useful to
+    /// <see cref="UpdateComponentsParallel"/>, and the slots are allocated up front
+    /// because a worker must never allocate its queue on the hot path.</para>
+    /// </summary>
+    public EcsWorld(int maxWorkerSlots)
     {
+        if (maxWorkerSlots < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxWorkerSlots), maxWorkerSlots, "A world needs at least one structural slot.");
+        }
+
         _writer = new WorldWriter(this);
         _reader = new WorldReader(this);
+
+        _structuralSlots = new List<StructuralOp>[maxWorkerSlots];
+        for (int i = 0; i < maxWorkerSlots; i++) _structuralSlots[i] = new List<StructuralOp>();
     }
 
-    /// <summary>Queued structural changes, drained by <see cref="ApplyStructuralChanges"/>.</summary>
-    private readonly List<StructuralOp> _structural = new();
+    /// <summary>
+    /// Queued structural changes, drained by <see cref="ApplyStructuralChanges"/>, one
+    /// list per worker slot.
+    ///
+    /// <para><b>Why per-slot rather than one locked list.</b> The hazard a shared queue
+    /// carries is not the data race — a lock fixes that — it is the <b>order</b>. Ops are
+    /// replayed in queue order, and replay calls <c>Arch.Create</c>, so queue order
+    /// decides the order entities are created, which decides chunk layout, which decides
+    /// iteration order, which decides the order floats accumulate. Under a shared queue
+    /// that order is arrival order, i.e. whichever worker happened to get there first.
+    /// The golden vectors and the byte-identical snapshot digests would then break
+    /// intermittently — the failure mode that is hardest to attribute and hardest to
+    /// reproduce.</para>
+    ///
+    /// <para>With one list per slot and a drain that walks slots in index order, the
+    /// replay order is a function of (slot index, position within slot) and of nothing
+    /// else. It does not depend on how the workers were scheduled, so the same inputs
+    /// produce the same world on every run and on every core count.</para>
+    /// </summary>
+    private readonly List<StructuralOp>[] _structuralSlots;
+
+    /// <summary>
+    /// Which structural slot THIS thread writes into. Zero — the slot the serial world
+    /// uses — unless <see cref="UpdateComponentsParallel"/> assigned one.
+    ///
+    /// <para>Thread-static is right here and wrong for <see cref="_iterationDepth"/>,
+    /// which is the distinction that took the longest to see: "which worker am I" is
+    /// genuinely a property of the thread, whereas "is anything iterating this world" is
+    /// a property of the world.</para>
+    /// </summary>
+    [ThreadStatic]
+    private static int _workerSlot;
+
+    /// <summary>
+    /// True between the start and the join of a <see cref="UpdateComponentsParallel"/>
+    /// region.
+    ///
+    /// <para>This is the world-level half of the deferral decision that
+    /// <see cref="_iterationDepth"/> cannot answer. That flag is thread-static, so under
+    /// workers it says "is <i>this thread</i> iterating" — one worker could take the
+    /// immediate path, mutating archetypes, while another is mid-iteration over them.
+    /// Deferral has to be a property of the world, and inside a parallel region the
+    /// answer is unconditionally yes.</para>
+    ///
+    /// <para>Written only by the thread that opens and closes the region, and read by
+    /// the workers it starts; the thread start and the join are themselves barriers, so
+    /// no interlocked access is needed and the query hot path keeps a plain read.</para>
+    /// </summary>
+    private volatile bool _parallelRegion;
+
+    /// <summary>
+    /// Whether a structural change must be queued rather than applied now.
+    ///
+    /// <para>Either because this thread is mid-iteration and mutating archetypes under
+    /// it would invalidate the iteration, or because a parallel region is open and
+    /// immediate application is not a safe thing for any worker to do.</para>
+    /// </summary>
+    private bool DeferStructural => _iterationDepth > 0 || _parallelRegion;
 
     /// <summary>
     /// Non-zero while THIS thread is inside an Arch query iteration. Thread-static
     /// rather than a plain field so concurrent readers cannot race on it; the
     /// reader/writer lock already prevents a writer from overlapping a reader, so
     /// what remains is same-thread re-entrancy, which is exactly what this catches.
+    ///
+    /// <para>It is deliberately <b>not</b> the whole deferral rule — see
+    /// <see cref="_parallelRegion"/> and <see cref="DeferStructural"/>.</para>
     /// </summary>
     [ThreadStatic]
     private static int _iterationDepth;
@@ -397,6 +476,109 @@ public sealed class EcsWorld : IDisposable
         }
         finally
         {
+            ApplyStructuralChangesLocked();
+            _rwLock.ExitWriteLock();
+        }
+    }
+
+    /// <summary>
+    /// Run <paramref name="body"/> on <paramref name="workerCount"/> threads inside one
+    /// write scope, then apply the structural changes they queued.
+    ///
+    /// <para><b>Nothing in the tick loop calls this.</b> It exists so that the two
+    /// preconditions ADR-12 records as blocking parallel simulation can be
+    /// <i>demonstrated</i> rather than asserted: the per-slot structural queue and the
+    /// world-level deferral flag are only exercised by a region that actually starts
+    /// workers. Wiring it into the schedule is a separate decision and needs a workload
+    /// that benefits — today every pair of systems in the schedule conflicts, so a
+    /// parallel step would run them one at a time anyway.</para>
+    ///
+    /// <para><b>What this does not do.</b> It does not check that the bodies are safe to
+    /// run together. That is <see cref="Server.ComponentAccess.IsDisjointFrom"/>'s job and
+    /// it belongs to whoever builds the schedule; this primitive assumes the caller has
+    /// already established disjointness. Two bodies writing the same component through
+    /// this will race, exactly as they would through any other parallel-for.</para>
+    ///
+    /// <para><b>What it guarantees.</b> Every worker sees <see cref="DeferStructural"/>
+    /// true, so spawns and despawns are queued rather than applied under another worker's
+    /// iteration; each worker queues into its own slot, so the queues themselves never
+    /// race; and the drain replays slots in index order, so the resulting world does not
+    /// depend on the order the workers finished. The last of those is the property the
+    /// golden vectors need.</para>
+    /// </summary>
+    /// <param name="workerCount">
+    /// Number of workers, from 1 to the <c>maxWorkerSlots</c> the world was built with.
+    /// One is a legitimate value and is what the determinism harness compares against.
+    /// </param>
+    /// <param name="body">
+    /// Called once per worker with the shared writer and that worker's index. Worker 0
+    /// runs on the calling thread, so a single-worker region starts no threads at all.
+    /// </param>
+    public void UpdateComponentsParallel(int workerCount, Action<WorldWriter, int> body)
+    {
+        ArgumentNullException.ThrowIfNull(body);
+
+        if (workerCount < 1 || workerCount > _structuralSlots.Length)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(workerCount), workerCount,
+                $"This world was built with {_structuralSlots.Length} structural slot(s). " +
+                "Construct it with a larger maxWorkerSlots to run more workers -- slots are " +
+                "allocated up front precisely so a worker never allocates its queue.");
+        }
+
+        _rwLock.EnterWriteLock();
+        _parallelRegion = true;
+        try
+        {
+            var threads = workerCount > 1 ? new Thread[workerCount - 1] : Array.Empty<Thread>();
+            var failures = new Exception?[workerCount];
+
+            // Dedicated threads rather than the thread pool: a pool thread carries
+            // _workerSlot away with it after the region ends, and the pool is shared with
+            // the connection handlers, so borrowing from it here couples simulation
+            // latency to network load.
+            for (int i = 1; i < workerCount; i++)
+            {
+                int slot = i;
+                var t = new Thread(() =>
+                {
+                    _workerSlot = slot;
+                    try { body(_writer, slot); }
+                    catch (Exception ex) { failures[slot] = ex; }
+                    finally { _workerSlot = 0; }
+                })
+                { IsBackground = true, Name = $"sim-worker-{slot}" };
+
+                threads[i - 1] = t;
+                t.Start();
+            }
+
+            _workerSlot = 0;
+            try { body(_writer, 0); }
+            catch (Exception ex) { failures[0] = ex; }
+
+            for (int i = 0; i < threads.Length; i++) threads[i].Join();
+
+            // Rethrow only after every worker has been joined. Leaving a worker running
+            // while the write lock unwinds would let it touch the world outside the
+            // region, which is worse than the original fault.
+            List<Exception>? thrown = null;
+            for (int i = 0; i < failures.Length; i++)
+            {
+                if (failures[i] is { } ex) (thrown ??= new List<Exception>()).Add(ex);
+            }
+
+            if (thrown is not null)
+            {
+                throw thrown.Count == 1
+                    ? thrown[0]
+                    : new AggregateException("One or more simulation workers failed.", thrown);
+            }
+        }
+        finally
+        {
+            _parallelRegion = false;
             ApplyStructuralChangesLocked();
             _rwLock.ExitWriteLock();
         }
@@ -708,9 +890,8 @@ public sealed class EcsWorld : IDisposable
 
     // ---------------------------------------------------------------- internals
 
-    /// <summary>A deferred structural change. Only created when <see cref="_iterationDepth"/> &gt; 0.</summary>
     /// <summary>
-    /// A deferred structural change. Only created when <see cref="_iterationDepth"/> &gt; 0.
+    /// A deferred structural change. Only created when <see cref="DeferStructural"/>.
     ///
     /// <para><b>Two kinds, still: add and remove.</b> Adding the enemy systems did not
     /// need a third — <c>EnemyAi</c> is applied at creation, so it rides on the add as a
@@ -742,12 +923,25 @@ public sealed class EcsWorld : IDisposable
 
     private void ApplyStructuralChangesLocked()
     {
-        if (_structural.Count == 0) return;
+        int total = 0;
+        for (int s = 0; s < _structuralSlots.Length; s++) total += _structuralSlots[s].Count;
+        if (total == 0) return;
 
-        // Copy and clear first: applying an op must not observe the queue it is
-        // draining, and _iterationDepth is guaranteed 0 here (write lock held).
-        var ops = _structural.ToArray();
-        _structural.Clear();
+        // Copy and clear first: applying an op must not observe the queue it is draining.
+        // Both deferral conditions are false here -- the write lock is held, so no
+        // parallel region is open, and nothing is iterating -- so the replayed ops take
+        // the immediate path rather than re-queueing themselves.
+        //
+        // Slots are walked in index order, and each slot in insertion order. That, and
+        // not the order the workers finished in, is what makes the replay deterministic.
+        var ops = new StructuralOp[total];
+        int n = 0;
+        for (int s = 0; s < _structuralSlots.Length; s++)
+        {
+            List<StructuralOp> slot = _structuralSlots[s];
+            for (int i = 0; i < slot.Count; i++) ops[n++] = slot[i];
+            slot.Clear();
+        }
 
         foreach (var op in ops)
         {
@@ -760,9 +954,9 @@ public sealed class EcsWorld : IDisposable
 
     private void AddEntityLocked(EntityState state, EntityTags tags)
     {
-        if (_iterationDepth > 0)
+        if (DeferStructural)
         {
-            _structural.Add(StructuralOp.Add(state, tags));
+            _structuralSlots[_workerSlot].Add(StructuralOp.Add(state, tags));
             return;
         }
 
@@ -819,9 +1013,9 @@ public sealed class EcsWorld : IDisposable
 
     private void RemoveEntityLocked(string id)
     {
-        if (_iterationDepth > 0)
+        if (DeferStructural)
         {
-            _structural.Add(StructuralOp.Remove(id));
+            _structuralSlots[_workerSlot].Add(StructuralOp.Remove(id));
             return;
         }
 

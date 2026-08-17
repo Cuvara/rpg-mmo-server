@@ -41,11 +41,11 @@ public readonly struct ComponentAccess
     /// <summary>
     /// Whether two systems could run concurrently, on component access alone.
     ///
-    /// <para><b>Nothing calls this to schedule work yet</b> — the schedule runs serially.
-    /// It is here, and tested, because it is the predicate a parallel step would need,
-    /// and writing it now is what proves the declared sets are sufficient to express it.
-    /// Two further preconditions are <i>not</i> captured by this predicate and are
-    /// recorded in <see cref="SystemSchedule"/>.</para>
+    /// <para><b>Nothing calls this to schedule work yet</b> — the schedule runs serially,
+    /// for the reason given on <see cref="SystemSchedule"/>: every pair of systems in it
+    /// currently conflicts, so there is nothing for a parallel step to overlap. It is here,
+    /// and tested, because it is the predicate a parallel step would need, and writing it
+    /// now is what proves the declared sets are sufficient to express it.</para>
     /// </summary>
     public bool IsDisjointFrom(in ComponentAccess other)
     {
@@ -114,24 +114,26 @@ public interface IEcsSystem
 /// checkable, where before they were the order of three method calls in a private
 /// method.</para>
 ///
-/// <para><b>Why it runs serially, and what a parallel version would still need.</b>
-/// <see cref="ComponentAccess.IsDisjointFrom"/> answers the component half of "can these
-/// two run together". Two things it does not answer, both verified in the current code and
-/// both blocking:</para>
-/// <list type="number">
-/// <item><description><c>EcsWorld._structural</c> is a plain <c>List&lt;StructuralOp&gt;</c>
-/// with no lock of its own. It is safe today only because exactly one thread mutates it
-/// while holding the write lock. Concurrent systems would race on the queue itself, which
-/// is why <see cref="ComponentAccess.Structural"/> excludes a system from concurrency
-/// outright rather than trying to reason about which components it touches.</description></item>
-/// <item><description><c>EcsWorld</c>'s iteration-depth guard is <c>[ThreadStatic]</c>, so
-/// "is anything iterating right now" would become a per-worker fact rather than a property
-/// of the world — and that flag is what decides whether a spawn or despawn applies
-/// immediately or is deferred. Under workers, one worker could take the immediate path
-/// while another is mid-iteration.</description></item>
-/// </list>
-/// <para>Both must be fixed before a system runs on another thread. Neither is fixed here,
-/// because nothing runs on another thread here.</para>
+/// <para><b>Why it still runs serially.</b> Not because the world cannot take workers —
+/// it now can. The two preconditions this comment used to record as blocking are fixed in
+/// <c>EcsWorld</c>: the deferred-structural queue is per worker slot and drains in slot
+/// order, and the deferral decision is a world-level flag rather than the
+/// <c>[ThreadStatic]</c> iteration depth. <c>EcsWorld.UpdateComponentsParallel</c> runs a
+/// body on N threads, and <c>ParallelRegionDeterminismTests</c> demonstrates that the
+/// resulting world does not depend on how the workers were scheduled.</para>
+///
+/// <para>It runs serially because <b>there is nothing here to run in parallel</b>. Of the
+/// three systems in the schedule today, two declare
+/// <see cref="ComponentAccess.Structural"/> and are excluded from concurrency by the first
+/// line of <see cref="ComponentAccess.IsDisjointFrom"/>; the third has nothing left to pair
+/// with. Every pair conflicts, so a parallel step would run them one at a time and pay for
+/// the threads. Decision 7 of ADR-12 — speed is not claimed without measurement — cuts
+/// against building it before there is a workload that benefits.</para>
+///
+/// <para>The condition to revisit this is concrete: two or more non-structural systems
+/// whose component sets are disjoint. At that point <see cref="ComponentAccess"/> already
+/// answers which pairs may run together, and the world already guarantees the result does
+/// not depend on the order they finish.</para>
 /// </summary>
 public sealed class SystemSchedule
 {

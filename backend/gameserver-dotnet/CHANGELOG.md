@@ -6,6 +6,60 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`EcsWorld.UpdateComponentsParallel(workerCount, body)`** — runs a body on N threads
+  inside one write scope. **Nothing in the tick loop calls it.** It exists so the two
+  parallel-simulation preconditions ADR-12 records can be demonstrated rather than
+  asserted; a fix to a concurrency hazard that is never run concurrently is a claim, not a
+  result. It does not check that the bodies are safe to run together — that is
+  `ComponentAccess.IsDisjointFrom`'s job and belongs to whoever builds the schedule.
+- **`ParallelRegionDeterminismTests`** — the determinism harness. Asserts the world is
+  byte-identical across 25 runs and across worker counts, that structural ops replay in
+  slot order rather than in the order workers finished, that a spawn inside a region stays
+  invisible until the region ends, and that a failing worker surfaces only after every
+  worker has joined. Verified to fire by reintroducing the shared queue: exactly the two
+  order-sensitive tests fail, the other eight still pass.
+
+### Fixed
+- **The deferred-structural queue was a single unsynchronised `List<StructuralOp>`**, safe
+  only because exactly one thread mutated it under the write lock. It is now one list per
+  worker slot, drained in slot order. Locking a shared list would have fixed the data race
+  and left the hazard that actually matters: ops are replayed through `Arch.Create`, so
+  queue order sets creation order, which sets chunk layout, which sets iteration order,
+  which sets the order floats accumulate. Under a shared queue that becomes arrival order,
+  so the golden vectors and the byte-identical snapshot digests would have broken
+  *intermittently* — the failure mode that is hardest to attribute. Replay order is now a
+  function of (slot index, position within slot) and of nothing else.
+- **The immediate-versus-deferred decision was `[ThreadStatic]`**, so under workers it
+  answered "is *this thread* iterating" when the question is "is anything iterating this
+  world" — one worker could take the immediate path and mutate archetypes while another was
+  mid-iteration over them. Deferral is now also driven by a world-level `_parallelRegion`
+  flag covering the span of a parallel region. The thread-static depth is kept for the
+  same-thread re-entrancy it always caught; it is no longer the whole rule.
+- Both were fixed **ahead of any worker**, which is what ADR-12 asked for: *"Neither may be
+  left to be discovered by the change that first spawns a worker."*
+
+### Changed
+- `EcsWorld` gained an optional `maxWorkerSlots` constructor parameter, defaulting to 1.
+  The default world allocates exactly one queue, as before, and the serial path is
+  unchanged — pinned by a test so a future widening of the deferral rule shows up as a
+  failure rather than as a quiet behaviour change.
+- **`SystemSchedule` still runs serially, but for a different reason**, and its doc comment
+  now says which. It is no longer blocked on world safety; it is blocked on there being
+  anything to overlap. Two of the three systems in the schedule declare `Structural` and
+  are excluded from concurrency outright, and the third has nothing to pair with, so every
+  pair conflicts. Revisit when two non-structural systems have disjoint component sets.
+- **ADR-10's status was still `not yet implemented`** long after both halves of it
+  shipped. The server's Arch migration completed in five stages under ADR-12, and the
+  Unity client now consumes `Shared.GameLogic` as a UPM package pinned to `sgl-v0.1.9`
+  — so the ADR that exists to govern the shared-simulation boundary read as pending
+  work to anyone deciding whether that boundary applies to them yet. The `Context`
+  section is left as written, since it records the state on the date the decision was
+  taken; a dated note above it lists the two statements that the code has since
+  overtaken.
+
+## [v1.4.1] — 2026-08-15
+
 ### Fixed
 - **A coalesced stop input failed to clear held movement in single-rate mode.** When the
   server fell behind and drained a batch containing both a stop (deadzone) and a later

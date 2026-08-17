@@ -61,7 +61,7 @@ The MVP is intentionally interface-driven: the default wiring is TCP + JSON + in
 | gameserver-dotnet | `backend/gameserver-dotnet/` | ✅ | C# .NET 10 game server (primary). `Shared.GameLogic/` (pure C# logic shared with Unity client), `GameServer/` (NativeAOT console app), `GameServer.Tests/` (xUnit). Wire-compatible with Go gateway |
 | gateway | `backend/gateway/` | ✅ | TCP/KCP listener (auth + redirect, **not** a gameplay proxy), JWT auth + session manager (`session/`), server registry + Agones allocator (`registry/`), join-token/map transfer (`transfer/`), Redis Streams event relay (`events/`) |
 | integration_test | `backend/integration_test/` | ✅ | E2E tests: gateway + C# gameserver interop (build tag `integration`) |
-| nakama | `backend/nakama/` | Planned | Nakama Go plugins — auth, economy, leaderboard, social |
+| nakama | `backend/nakama/` | Partial | Nakama Go plugins. **Implemented**: `auth/` (gateway-token issue + validate, JWT keyring, per-user rate limit, profile), `economy/` (leaderboard, reward). **Not started**: social, matchmaking |
 | deploy | `backend/deploy/` | Partial | Agones fleet manifests (`agones/fleet-map.yaml`, `fleet-dungeon.yaml`, autoscaler, allocation) |
 
 Each module has its own `CLAUDE.md` with detailed role-specific instructions, plus `docs/` and `CHANGELOG.md`. Read the module CLAUDE.md before working in a module. `backend/TEAM.md` defines cross-module contracts and mandatory rules:
