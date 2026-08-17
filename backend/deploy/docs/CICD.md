@@ -334,8 +334,19 @@ when** the resolved environment is `production` **or** `workflow_dispatch` set
 `build_images=true`. Auth is `docker/login-action@v3` with the built-in
 `GITHUB_TOKEN` (`permissions: packages: write` on that job); layers are cached
 with `type=gha`. Dev/staging deploys skip this entirely and keep using the host
-binaries from the artifact bundle. The gameserver image name must stay in sync
-with `agones/fleet-map.yaml` and `agones/fleet-dungeon.yaml`.
+binaries from the artifact bundle. No Agones manifest references a GHCR image any
+more — the prod fleets were deleted with the Go server (see `K3S.md`), and the
+only fleet, `agones/fleet-map-dotnet-dev.yaml`, uses the local tag
+`rpg-mmo/gameserver-dotnet:dev`.
+
+> **`cd.yml` should pass `--build-arg GIT_REVISION=$(git rev-parse HEAD)` to the
+> gameserver image build.** `docker/Dockerfile.gameserver-dotnet` stamps it into
+> `org.opencontainers.image.revision`, which is what makes "was this image built
+> from the commit under test?" answerable — a question that has already been
+> answered wrongly once (see `K3S.md`, "Deploying the dotnet fleet"). Without the
+> arg the label reads `unknown` and `validate-manifests.py --check-image` fails,
+> which is the intended behaviour, not a bug. The workflow lives outside
+> `deploy/` and has not been changed here.
 
 ### Concurrency
 

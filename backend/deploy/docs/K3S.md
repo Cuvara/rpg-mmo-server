@@ -14,7 +14,7 @@ plus the path from a laptop cluster to a real k3s VPS.
 
 ```bash
 cd backend/deploy
-./k3s/setup-dev.sh --with-dungeon      # install Agones, namespaces, fleets, wait for Ready
+./k3s/setup-dev.sh                     # Agones, namespaces, Secret/ConfigMap, the fleet, wait for Ready
 kubectl get gameservers -n rpg-realtime
 ./k3s/teardown-dev.sh                  # reverse (--all also removes Agones)
 ```
@@ -67,7 +67,16 @@ Idempotent — every step is an `apply`, so re-running is a no-op plus waits.
 
 1. **Resolve kubectl** — Linux `kubectl`, else `kubectl.exe`, else Docker
    Desktop's bundled path. Override with `KUBECTL_BIN=`.
-2. **Preflight** — bail immediately with instructions if no context/cluster.
+2. **Preflight** — bail immediately with instructions if no context/cluster, and
+   classify the cluster from the context name (`docker-desktop` / `k3d-*` /
+   unknown). Two later steps depend on that answer and both fail *silently* when
+   it is guessed: whether a local image tag resolves without an import, and what
+   hostname a pod uses to reach the host's compose stack.
+2b. **Image check + import** — verify `rpg-mmo/gameserver-dotnet:dev` carries the
+   git revision of the current HEAD (skip with `--skip-image-check`), then import
+   it into the cluster when the cluster does not share the host's image store.
+   On k3d, skipping the import does not error: `IfNotPresent` falls through to a
+   registry pull and the GameServer sits in `ImagePullBackOff`.
 3. **Install Agones** `$AGONES_VERSION` via `kubectl apply --server-side` on the
    release `install.yaml`. Server-side is required: the CRDs exceed the 262 kB
    `last-applied-configuration` annotation that client-side apply writes.
@@ -76,20 +85,24 @@ Idempotent — every step is an `apply`, so re-running is a no-op plus waits.
    and applying a Fleet too early fails with *no endpoints available for service
    agones-controller-service*.
 5. **Namespaces** — `rpg-realtime`, `rpg-meta`, `rpg-data` (`k3s/namespaces.yaml`).
-6. **Dev config** — Secret `rpg-realtime-secrets` (`jwt-secret`) and ConfigMap
-   `gameserver-config` (`redis-addr`, `game-db-url`), created via
-   `create --dry-run=client -o yaml | apply` so they are idempotent.
-7. **Fleets** — `fleet-map-dev.yaml` (+ `--with-dungeon`, `--with-autoscaler`),
-   or the ghcr.io ones with `--prod-fleets`.
-8. **Wait for Ready** — polls `GameServer.status.state` until one is `Ready`.
-   That is the real end-to-end proof: the pod started, the binary connected to
-   the SDK sidecar, and `sdk.Ready()` returned.
+6. **Dev config** — Secret `rpg-realtime-secrets` (`jwt-secret`,
+   `join-token-secret`, `redis-password`, `transport-key`) **sourced from
+   `../.env`**, and ConfigMap `gameserver-config` (`redis-addr`), created via
+   `create --dry-run=client -o yaml | apply` so they are idempotent. Sourcing
+   `.env` is what keeps the pod's secrets equal to the compose-run gateway's;
+   re-run the script after any `.env` change.
+7. **Fleet** — `fleet-map-dotnet-dev.yaml`. There is only one, and there is no
+   autoscaler (see "Why there is no autoscaler").
+8. **Wait for Ready** — polls `GameServer.status.state` until one is `Ready`:
+   the pod started, the binary reached the SDK sidecar, and `ReadyAsync()`
+   returned. It does **not** prove a client can reach the server — Ready is
+   reported from inside the pod, the client dials the node from outside.
 9. **Print** `agones-system` pods, fleets, gameservers, and the follow-up
    commands (address\:port, allocation, logs, teardown).
 
-Flags: `--with-dungeon`, `--with-autoscaler`, `--prod-fleets`, `--skip-agones`.
-Env: `AGONES_VERSION`, `KUBECTL_BIN`, `JWT_SECRET`, `JOIN_TOKEN_SECRET`,
-`REDIS_ADDR`, `GAME_DB_URL`.
+Flags: `--skip-agones`, `--skip-image-check`.
+Env: `AGONES_VERSION`, `KUBECTL_BIN`, `GAMESERVER_IMAGE`, `POD_REDIS_ADDR`, and
+everything it reads out of `../.env`.
 
 `teardown-dev.sh` reverses it: autoscalers first (a live one recreates replicas
 under a dying fleet), then fleets, stray GameServers, config objects, namespaces,
@@ -101,65 +114,67 @@ and with `--all` Agones itself. `--fleets-only` keeps the namespaces.
 
 | File | Purpose |
 |------|---------|
-| `agones/fleet-map.yaml` | ⚠️ superseded (Go image) — prod map fleet, config from Secret/ConfigMap |
-| `agones/fleet-dungeon.yaml` | ⚠️ superseded (Go image) — prod dungeon fleet, `replicas: 0` (allocate on demand) |
-| `agones/fleet-map-dev.yaml` | ⚠️ superseded (Go image `rpg-mmo/gameserver:dev`), but this is what the cluster is running |
-| `agones/fleet-dungeon-dev.yaml` | ⚠️ superseded, dungeon mode, `replicas: 0` |
-| `agones/fleet-map-dotnet-dev.yaml` | **The current one.** C# server, `rpg-mmo/gameserver-dotnet:dev`, health `disabled: true` — see below |
-| `agones/autoscaler.yaml` / `autoscaler-dev.yaml` | Buffer autoscaler (prod 2/1–10, dev 1/1–2) — both still target the superseded map fleets |
-| `agones/allocation.yaml` / `allocation-dev.yaml` | `GameServerAllocation` — `kubectl create`, never `apply` |
+| `agones/fleet-map-dotnet-dev.yaml` | **The only fleet.** C# server, `rpg-mmo/gameserver-dotnet:dev`, `replicas: 1`, health `disabled: true` — see below |
+| `agones/secret-example.yaml` | Template for the `rpg-realtime-secrets` Secret. Dev placeholders only; not the real object |
+| `agones/allocation-dev.yaml` | `GameServerAllocation` — `kubectl create`, never `apply` |
 | `k3s/namespaces.yaml` | `rpg-realtime` / `rpg-meta` / `rpg-data` |
 
 ### Which fleet is real
 
-Nine manifests, one live server implementation. Read this before applying any of
-them. Full rationale: [ADR-14](../../docs/ARCHITECTURE-DECISIONS.md) — this
-section is the operational summary, not a restatement.
+One fleet, one server implementation. Full rationale:
+[ADR-14](../../docs/ARCHITECTURE-DECISIONS.md) — this section is the operational
+summary, not a restatement.
 
-**What the fleets are for.** A `Fleet` is Agones' unit of game-server supply: it
-keeps N pods of one spec Ready and hands them out one at a time when the gateway
-(or `kubectl create -f allocation*.yaml`) allocates. Map fleets hold long-lived
-per-`map_id` servers; dungeon fleets are `replicas: 0` and exist to be allocated
-per party. Neither is on the deploy path today — dev, staging and production all
-run `DEPLOY_MODE=containers` under docker compose, and CI never applies anything
-in `agones/`.
+**What a fleet is for.** A `Fleet` is Agones' unit of game-server supply: it
+keeps N pods of one spec Ready and hands them out when the gateway (or
+`kubectl create -f allocation-dev.yaml`) allocates. It is not on the deploy path
+— dev, staging and production all run `DEPLOY_MODE=containers` under docker
+compose, and CI never applies anything in `agones/`.
 
-**The four Go-image manifests are marked superseded, not deleted.** They run
-`rpg-mmo/gameserver:dev` / `ghcr.io/…/rpg-mmo-gameserver:latest`, built from
-`backend/gameserver/`, which was deleted in `670a803`; `docker/Dockerfile.gameserver`
-went with it, so the dev image cannot be rebuilt. They survive because
-`map-servers-dev` and `dungeon-servers-dev` are *still running* on this cluster
-from those files, and a live fleet with no manifest is worse than a manifest
-marked stale. `setup-dev.sh` still applies the Go dev fleets — that is
-deliberately unchanged here so this change alters nothing that runs.
+**The five Go-image manifests are DELETED, not marked.** `fleet-map.yaml`,
+`fleet-map-dev.yaml`, `fleet-dungeon.yaml`, `fleet-dungeon-dev.yaml` and
+`allocation.yaml` ran `rpg-mmo/gameserver:dev` / `ghcr.io/…/rpg-mmo-gameserver:latest`,
+built from `backend/gameserver/`, deleted in `670a803` along with
+`docker/Dockerfile.gameserver`. That image cannot be rebuilt, so those files
+described software that does not exist.
 
-> **Follow-up, needs a human.** Retiring the running fleets is a `kubectl delete`
-> against `docker-desktop` and is **not** part of this or any manifest change:
-> `kubectl -n rpg-realtime delete fleet map-servers-dev dungeon-servers-dev`.
-> ADR-14 stage 8 pairs that with deleting the four files and repointing
-> `setup-dev.sh`. Nobody has run it; both fleets are Ready with `ALLOCATED 0`.
+They were previously kept with a `⚠️ SUPERSEDED` banner because the cluster was
+still *running* `map-servers-dev` and `dungeon-servers-dev` from them, and a live
+fleet with no manifest is worse than a stale manifest. That reason is gone: both
+fleets have been retired (`kubectl get fleets -n rpg-realtime` returns nothing),
+which is the other half of ADR-14 stage 8. A banner also never stopped anyone —
+`kubectl apply -f agones/` does not read comments. Deleting them does.
 
-**Why the dotnet fleet's health is disabled.** `fleet-map-dotnet-dev.yaml` sets
-`health.disabled: true`. The C# server's Agones SDK is `NoopAgonesSdk` — it never
-pings the sidecar, and `--agones` only logs a warning. With health enabled the pod
-fails `failureThreshold` checks and Agones kills and recreates it forever, so the
-flag is the difference between "not wired up yet" and "crash-looping". The
-`initialDelaySeconds`/`periodSeconds`/`failureThreshold` values stay in the file
-(the Agones v1 `health` block accepts all four fields independently; the timings
-are simply inert while `disabled` is set) so stage 4 does not have to re-derive
-them.
+The prod fleets went with them and no `fleet-map-dotnet.yaml` replaces them yet,
+deliberately: a production manifest for a fleet that has never run, pointing at
+an image tag that has never been published, is the same failure one generation
+later. Write it when there is a production cluster to write it against.
+
+**Why the dotnet fleet's health is disabled — the reason CHANGED.** The old
+answer, "the C# Agones SDK is a no-op", is no longer true: commit `62131f5`
+landed `HttpAgonesSdk`, which really does POST `/ready`, `/health`, `/allocate`
+and `/shutdown` to the sidecar, with the health loop at 2s against the manifest's
+5s `periodSeconds`.
+
+It stays disabled because **none of that has ever run against a real sidecar** —
+the SDK's tests stand a local `HttpListener` in for Agones. ADR-14 stage 4 is
+that experiment, and it is run with health still off so that a pod which fails to
+reach Ready reads as a pod that failed to reach Ready, not as a restart loop
+hiding which of image / secret / sidecar / SDK was at fault. Removing the flag is
+its own step with its own check (step 3 below). The three timing values stay in
+the file while inert — the Agones v1 `health` block accepts all four fields
+independently — so that step does not have to re-derive the policy.
 
 **The order in which Agones becomes real.** Each step is a precondition of the
 next; skipping ahead produces a restart loop or an allocation that returns a pod
 nothing can join.
 
-1. `HttpAgonesSdk` lands against the sidecar on `localhost:9358` (ADR-14 stage 1,
-   no deployment). The *ordering* the ADR asks for is already implemented in
-   `GameServer/Server/GameServer.cs` — bind, then `ReadyAsync()`, then
-   `_registration.StartAsync()`; on the way down `DeregisterAsync()` before
-   `ShutdownAsync()` — so what stages 1–3 add is the SDK behind it, not the
-   sequence. `Program.cs` hardcoded `new NoopAgonesSdk()`; that is the line that
-   changes.
+1. ✅ `HttpAgonesSdk` lands against the sidecar on `localhost:9358` (ADR-14
+   stage 1, no deployment) — **done**, commit `62131f5`. The *ordering* the ADR
+   asks for was already implemented in `GameServer/Server/GameServer.cs` — bind,
+   then `ReadyAsync()`, then `_registration.StartAsync()`; on the way down
+   `DeregisterAsync()` before `ShutdownAsync()` — so what stages 1–3 added was
+   the SDK behind it, not the sequence.
 2. Deploy `fleet-map-dotnet-dev.yaml` **with `health.disabled: true` still set**
    and confirm the pod reaches `Ready` and stays there. Deploying and un-disabling
    in one change conflates two failures — a server that cannot come up, and a
@@ -171,74 +186,300 @@ nothing can join.
    rather than widening `failureThreshold` — a starved ping task is a real
    liveness failure, and ADR-13's overload path is what should keep a merely-slow
    server from looking dead.
-4. Set `ALLOCATOR=agones` on the gateway (it defaults to `none`).
+4. Set `ALLOCATOR=agones` **and `ALLOCATOR_FLEET_MAP`** on the gateway (see
+   "Enabling the allocator" below — the compiled-in default names a fleet that
+   no longer exists).
 5. Verify allocation end to end: `MsgEnterWorld` for an unserved map →
    `kubectl -n rpg-realtime get fleet` shows `ALLOCATED` move off 0 → a client
    joins the returned address. This is the first step that proves anything;
-   1–4 only reduce risk.
+   1–4 only reduce risk. It additionally requires the sidecar status read
+   (ADR-15 decision 2 option A) and a cluster whose game-server ports the client
+   can actually dial — see "The address the client is given".
 
-### Reality-pass applied to the fleets
+### The fleet's configuration, checked against the binary
 
-Written for the **Go** fleets and still true of them; the two SDK bullets do not
-hold for the C# fleet, whose SDK is a no-op (see "Which fleet is real" above).
-Checked against the game server configuration
-and `docker/Dockerfile.gameserver-dotnet`:
+Checked against `GameServer/Program.cs` argument/env parsing, not against
+memory:
 
-- **Port `9000`** matches `GAMESERVER_ADDR` default `:9000`, `--addr=:9000` in the
-  fleet args, and `EXPOSE 9000` in the Dockerfile. `portPolicy: Dynamic` is now
-  explicit: Agones assigns the *host* port and publishes it on
-  `GameServer.status.ports[0].port`; the container always binds `:9000`.
-- **`--agones` is mandatory.** Without it `main.go` picks `NewNoopSDK`, never
-  calls `Ready()`, and Agones tears the pod down after the health timeout.
-- **Health is SDK-driven** — `StartHealthLoop` pings `sdk.Health()`. There is no
-  exec/HTTP probe because the runtime image is distroless (no shell, no curl).
-  `initialDelaySeconds` raised 5 → 10 to cover Postgres migration on start.
-- **Config plumbing added.** Prod fleets read `JWT_SECRET` from Secret
-  `rpg-realtime-secrets` and `REDIS_ADDR` / `GAME_DB_URL` from ConfigMap
-  `gameserver-config`, all `optional: true` so the fleet still starts before
-  those objects exist. `--redis` added so gateway and gameservers share one
-  registry and event stream.
-- **Dev fleets have zero external dependencies** by design: no `--redis`, no
-  `GAME_DB_URL`, so they reach `Ready` on a bare laptop cluster with the
-  in-memory registry and player store. Both are one uncomment away.
+- **Configuration is by environment, not by args.** Both work (`GetArg` accepts
+  `--flag value` and `--flag=value`), but one channel is easier to read than two,
+  and the env block is the one that matches `docker-compose.yml`. `--agones`
+  became `AGONES_ENABLED=true` for the same reason.
+- **Port `9000`** matches `GAMESERVER_ADDR`, and `EXPOSE 9000` in the Dockerfile.
+  `portPolicy: Dynamic`: Agones assigns the *host* port and publishes it on
+  `GameServer.status.ports[]`; the container always binds `:9000`.
+- **`ports[].name: game` is a contract.** The gateway's allocator picks the
+  client-facing port by that exact name (`gamePortName` in
+  `gateway/registry/agones_allocator.go`). Rename it and every allocation fails
+  with `no "game" port in allocation status`.
+- **Secrets come from the `rpg-realtime-secrets` Secret**, not from literals —
+  `jwt-secret` and `join-token-secret`, neither `optional`. See "Secrets" below.
+- **`REDIS_ADDR` comes from the `gameserver-config` ConfigMap**, and is *not*
+  `optional: true` either: an unset `REDIS_ADDR` is not an error in the server,
+  it just runs without registering, so the pod would be Ready, the logs clean,
+  and the gateway unable to find it.
+- **`LOG_LEVEL` was removed.** `grep -rn LOG_LEVEL backend/gameserver-dotnet/GameServer/`
+  returns nothing — the server pins the console logger to Information and reads
+  no level from the environment. The variable configured nothing while reading
+  as if it did.
+- **`replicas: 1` is load-bearing.** Every pod carries the same
+  `GAMESERVER_MAP_ID` and self-registers under it, so a second replica means two
+  servers claiming `map_01` and two disconnected copies of the world — ADR-2's
+  invariant broken by the replica count alone, with no allocation involved.
 
-### Images
+### Why there is no autoscaler
 
-`ghcr.io/cuvara/rpg-mmo-gameserver:latest` is **not published yet**, which is
-why the dev fleets exist. Build the local image first:
+`autoscaler.yaml` and `autoscaler-dev.yaml` were deleted along with the fleets
+they targeted. They are not coming back for the *map* fleet, and the reason is
+not the policy type — a buffer policy on server count is exactly what ADR-14
+decision 5 prescribes, because ADR-7's per-server player ceiling is unknown and
+nothing may be keyed on players-per-server.
+
+The reason is that **a buffer autoscaler is incoherent for this fleet**, on two
+counts:
+
+1. *Nothing consumes the buffer.* A buffer policy keeps N `Ready` (unallocated)
+   servers spare. Map servers are never allocated in normal operation — a pod
+   self-registers into Redis on startup and the gateway finds it through the
+   registry, not through an allocation. `ALLOCATED` stays 0 whether one player is
+   online or a thousand, so the buffer is never drawn down and the autoscaler
+   holds `minReplicas` forever. With the gateway's current policy (allocation
+   replaces an *absent* server and never adds a second one for a full map) that
+   is not a bug to fix; it is what the design says should happen.
+2. *Consuming it would be worse.* If the autoscaler did add a replica, that
+   replica would come up with the same `GAMESERVER_MAP_ID` and register itself
+   under it — manufacturing the exact split-world hazard ADR-2 forbids, without
+   any allocation being involved. The autoscaler would be the thing that broke
+   the invariant.
+
+Buffer autoscaling becomes coherent when there is a fleet whose pods really are
+spare capacity until handed out — the **dungeon** fleet, ADR-14 stage 6. Write it
+then, against that fleet, with a per-instance id. ADR-14 stage 7 should be read
+as belonging to stage 6, not to the map fleet.
+
+### Enabling the allocator
+
+The gateway's compiled-in defaults still name the retired Go fleets:
+
+```go
+DefaultFleetMap     = "map-servers-dev"      // gateway/registry/agones_allocator.go
+DefaultFleetDungeon = "dungeon-servers-dev"
+```
+
+Neither exists. `ALLOCATOR=agones` alone therefore POSTs allocations against a
+fleet that is not there, and the failure surfaces as "no server available" at the
+one moment allocation was supposed to help. Set the override too:
+
+```bash
+ALLOCATOR=agones
+ALLOCATOR_FLEET_MAP=map-servers-dotnet-dev
+# ALLOCATOR_NAMESPACE defaults to rpg-realtime, which is still correct.
+```
+
+`k3s/validate-manifests.py` prints a `[warn]` for this mismatch on every run.
+Changing the Go constants instead is the cleaner fix and belongs to the gateway,
+not here.
+
+### Allocating from the compose-run gateway
+
+The gateway **stays in docker compose**; only the game servers run under Agones.
+It therefore allocates *out-of-cluster*, over the Kubernetes API, and needs a
+kubeconfig — ADR-15 decision 3 item 6, "the one most likely to be discovered
+late, because `agones_allocator.go` is already written, already tested, and
+already works — on a developer's kubeconfig". Inside the gateway container none
+of `resolveRESTConfig`'s four sources exist, and `cmd/gateway/main.go` treats a
+failed allocator construction as **fatal** (exit 1): with `ALLOCATOR=agones` and
+no kubeconfig, the gateway does not start degraded, it does not start.
+
+`docker-compose.agones.yml` is the opt-in overlay that supplies it:
 
 ```bash
 cd backend/deploy
-docker build -f docker/Dockerfile.gameserver-dotnet -t rpg-mmo/gameserver-dotnet:dev ..
+
+# 1. Export a kubeconfig and REWRITE ITS SERVER URL for container-local view.
+k3d kubeconfig get rpg-dev > kubeconfig.local
+sed -i -E 's#server: https://(0\.0\.0\.0|127\.0\.0\.1):#server: https://host.docker.internal:#' \
+  kubeconfig.local
+
+# 2. VERIFY it from a container before wiring the gateway to it.
+docker run --rm -v "$PWD/kubeconfig.local:/kc:ro" -e KUBECONFIG=/kc \
+  --add-host host.docker.internal:host-gateway bitnami/kubectl:latest get nodes
+
+# 3. Bring the gateway up with the overlay.
+docker compose -f docker-compose.yml -f docker-compose.agones.yml \
+  --profile realtime up -d gateway
+docker compose logs gateway | grep -i allocator
 ```
 
-(`docker/Dockerfile.gameserver` — the Go one that produced `rpg-mmo/gameserver:dev`
-for the superseded fleets — no longer exists. That image can only be whatever is
-already in the local store.)
+Two things in step 1 **must be verified, not assumed**:
 
-Note the `..` — the build context must be `backend/`, and under WSL `docker.exe`
-cannot resolve absolute `/mnt/*` paths, so run it cwd-relative from
-`backend/deploy`.
+- **The API server URL must be reachable from inside the container.** k3d
+  publishes the API on a host port and writes `0.0.0.0:<port>` or
+  `127.0.0.1:<port>` into the kubeconfig; inside a container `127.0.0.1` is the
+  container. `host.docker.internal` is the usual rewrite, and the overlay adds
+  the `host-gateway` alias so it also resolves on Linux/WSL.
+- **That host string must be a SAN on the API server's certificate**, or TLS
+  fails with `x509: certificate is valid for …, not host.docker.internal`. k3d
+  takes SANs at create time:
+  `k3d cluster create rpg-dev --api-port 0.0.0.0:6550 --k3s-arg '--tls-san=host.docker.internal@server:*'`.
 
-Getting that image into the cluster:
+`kubeconfig.local` is git-ignored. A developer's `~/.kube/config` grants every
+cluster they have; for anything past a laptop, mint a ServiceAccount with
+`create` on `gameserverallocations.allocation.agones.dev` in `rpg-realtime` and
+build a kubeconfig around that token.
 
-| Cluster | Import step |
-|---------|-------------|
-| Docker Desktop k8s | none — shares the Docker image store |
-| k3d | `k3d image import rpg-mmo/gameserver-dotnet:dev -c rpg-dev` |
-| real k3s | `docker save rpg-mmo/gameserver-dotnet:dev \| sudo k3s ctr images import -` |
+The base `docker-compose.yml` carries the `ALLOCATOR_*` variables with
+`ALLOCATOR` defaulting to `none`, so the ordinary stack keeps working with no
+cluster present. The kubeconfig mount lives only in the overlay: compose creates
+a *directory* in place of a missing bind source, so a base-file mount would plant
+an empty `kubeconfig.local/` in every no-cluster stack.
+
+### The address the client is given
+
+`GAMESERVER_PUBLIC_ADDR` is **deliberately absent** from the fleet, and adding it
+back will not work: under `portPolicy: Dynamic` the host port is chosen by the
+scheduler, so no value written in a manifest can be right. The server instead
+reads its own address from the Agones sidecar's GameServer status and registers
+that (ADR-15 decision 2, option A) — in flight, not merged. Until it lands the
+server advertises the hostless `:9000` it listens on, the gateway forwards that
+verbatim (ADR-3: the gateway never dials it), and the client cannot connect.
+
+Separately, and independently of the status read: **`docker-desktop` does not
+publish Kubernetes `hostPort` to the host.** Measured on this box — a probe
+GameServer with `hostPort: 7306` answered from inside the cluster on the node IP
+`192.168.65.3:7306`, and was unreachable from both Windows and WSL2, while a
+docker compose published port on the same host answered fine. Since the client
+dials the game server directly, an address routable only inside the cluster means
+no real client can join. **Stage 4 (no restart loop) is provable on
+`docker-desktop`; stage 5 (end-to-end allocation) is not** — that needs a cluster
+that publishes the dynamic port range, which is why the target is moving to k3d.
+
+### Secrets
+
+The fleet reads every secret from the `rpg-realtime-secrets` Secret in
+`rpg-realtime`. `agones/secret-example.yaml` documents the keys and shows the
+shape; it is a **template with published dev placeholders**, and its
+`metadata.name` is deliberately `rpg-realtime-secrets-example` so that
+`kubectl apply -f agones/` cannot overwrite a real Secret with them.
+
+| Key | Env | Notes |
+|-----|-----|-------|
+| `jwt-secret` | `JWT_SECRET` | HS256, client auth tokens. Server only *warns* when unset, so a wrong value reads as "all tokens rejected" |
+| `join-token-secret` | `JOIN_TOKEN_SECRET` | HS256, gateway→gameserver join tokens. **Mandatory** — the server exits 2 without it. Never the same value as `jwt-secret`: it is on every pod, so a compromised pod must not be able to forge auth tokens. Rotate as `new,old` |
+| `redis-password` | `REDIS_PASSWORD` | Empty unless redis runs `--requirepass`. `optional` in the fleet |
+| `transport-key` | `TRANSPORT_KEY` | Pre-shared AES-256 key for KCP. **Unused today** (the fleet is TCP, and the server warns that the key is ignored on TCP). Carried anyway so enabling KCP is a manifest change, not a new secret-distribution problem |
+| `game-db-url` | `GAME_DB_URL` | Not set today (in-memory store). It is a DSN *containing a password*, so it belongs here and not in the ConfigMap when persistence is turned on |
+
+**Keeping them in sync with the gateway is the whole game.** The gateway runs in
+docker compose and reads `backend/deploy/.env`; the game server reads this
+Secret. If the two `JOIN_TOKEN_SECRET`s differ, the gateway mints a token the
+server cannot verify and **every join fails signature verification**, with
+nothing logging the cause at the point the mistake was made. So never type the
+values twice — generate the Secret *from* `.env`:
+
+```bash
+cd backend/deploy
+set -a; . ./.env; set +a
+kubectl create secret generic rpg-realtime-secrets \
+  --namespace rpg-realtime \
+  --from-literal=jwt-secret="$JWT_SECRET" \
+  --from-literal=join-token-secret="$JOIN_TOKEN_SECRET" \
+  --from-literal=redis-password="${REDIS_PASSWORD:-}" \
+  --from-literal=transport-key="${TRANSPORT_KEY:-}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+`k3s/setup-dev.sh` runs exactly that, so **re-running it is how you re-sync after
+any `.env` change**. Updating a Secret does not restart running pods and Fleets
+have no `kubectl rollout restart`; delete the GameServers and let Agones recreate
+them:
+
+```bash
+kubectl delete gs -n rpg-realtime -l agones.dev/fleet=map-servers-dotnet-dev
+```
+
+`.env` and `agones/secret-*.local.yaml` are both git-ignored. Nothing with a real
+value should ever be committed.
+
+### Deploying the dotnet fleet (ADR-14 stage 4)
+
+**Rebuild → verify → import → apply is one sequence, not four optional steps.**
+`imagePullPolicy: IfNotPresent` will happily run whatever `:dev` last pointed at,
+and a fleet deployed from a stale image comes up green and proves nothing. This
+has already happened: the `:dev` in the store on 2026-08-17 was built 5.4 hours
+*before* the commit that added the real Agones SDK, so a pod from it would have
+run the no-op SDK while the manifest, the ADR and the operator all believed
+otherwise.
+
+```bash
+# 1. REBUILD from the branch under test, stamping the revision into the image.
+cd backend
+docker build -f deploy/docker/Dockerfile.gameserver-dotnet \
+  --build-arg GIT_REVISION="$(git rev-parse HEAD)" \
+  -t rpg-mmo/gameserver-dotnet:dev .
+# (context must be backend/; under WSL, docker.exe cannot resolve absolute
+#  /mnt/* paths, so run it cwd-relative.)
+
+# 2. VERIFY the tag is what you think it is. Fails loudly if it is not.
+python3 deploy/k3s/validate-manifests.py \
+  --check-image rpg-mmo/gameserver-dotnet:dev \
+  --expect-revision "$(git rev-parse HEAD)"
+
+# 3. IMPORT — per cluster kind. Skipping it on k3d does not error: IfNotPresent
+#    falls through to a registry pull that fails, and the GameServer sits in
+#    ImagePullBackOff.
+#      docker-desktop : nothing — the node shares the host's docker image store
+#      k3d            : k3d image import rpg-mmo/gameserver-dotnet:dev -c <cluster>
+#      real k3s       : docker save rpg-mmo/gameserver-dotnet:dev | sudo k3s ctr images import -
+
+# 4. APPLY (setup-dev.sh does 2, 3 and 4, plus the Secret and ConfigMap).
+kubectl apply --dry-run=server -f deploy/agones/fleet-map-dotnet-dev.yaml   # rehearse
+deploy/k3s/setup-dev.sh --skip-agones
+```
+
+Then check what stage 4 is actually asking:
+
+```bash
+kubectl get gs -n rpg-realtime -w      # STATE reaches Ready and stays
+kubectl get pods -n rpg-realtime       # RESTARTS stays 0 over a sustained run
+kubectl logs -n rpg-realtime -l agones.dev/fleet=map-servers-dotnet-dev -c gameserver
+kubectl exec -n rpg-realtime <pod> -c gameserver -- env | grep AGONES   # sidecar port
+```
+
+> **Recommended, not implemented here:** have the server print its build revision
+> in the startup banner and expose it on the existing `/status` endpoint
+> (`GameServer/Observability/ServerStatus.cs`). That turns "is the running pod
+> the code under test?" from a procedure people skip into an assertion a smoke
+> test can make against a *running* server, which is strictly stronger than
+> inspecting an image label. It is a game-server change, not a deploy one.
 
 ### Talking to the host
 
-Dev fleets point `REDIS_ADDR` at `host.docker.internal:6379` — the local compose
-stack (`docker-compose.yml`) as seen from inside a pod. On k3d the equivalent
-name is `host.k3d.internal`. Postgres is the same idea:
+The data tier (Redis, both PostgreSQL instances, Nakama, lgtm) **stays in docker
+compose on the host** — that is deliberate, not a migration in progress, and
+ADR-15 decision 4 argues against splitting orchestrators any further than this
+one fleet. The consequence is that a pod must reach back to the host, and **the
+hostname for that is cluster-specific and not portable**:
+
+| Cluster | Host alias | Status |
+|---------|-----------|--------|
+| Docker Desktop k8s | `host.docker.internal` | verified working |
+| k3d | `host.k3d.internal` (injected into CoreDNS) | **not yet verified here** |
+| real k3s / anything else | neither exists | needs a real routable address |
+
+`setup-dev.sh` picks the default from the kubectl context and writes it into the
+`gameserver-config` ConfigMap. Override with `POD_REDIS_ADDR=<host>:6379` when
+the guess is wrong — and if you have to, record the working value in this table
+rather than guessing again. Note the failure is quiet: an unresolvable
+`REDIS_ADDR` makes the server log `Registry: disabled` and run unregistered, so
+the pod is Ready and the gateway still cannot find it.
+
+Postgres is the same idea (port 5433 is the host-side mapping of
+`rpg-postgres-game`), and its DSN carries a password, so it goes in the Secret:
 
 ```
 GAME_DB_URL=postgres://game:localdev@host.docker.internal:5433/gamestate?sslmode=disable
 ```
-
-(port 5433 — that is the host-side mapping of `rpg-postgres-game`).
 
 ---
 
@@ -250,19 +491,61 @@ that gap: it downloads the pinned Agones `install.yaml`, lifts the
 `openAPIV3Schema` out of each CRD and validates our resources against it with
 `jsonschema` (caching the release under `~/.cache/rpg-mmo/`).
 
+Schema validity is the cheap half. A Fleet can be perfectly schema-valid and
+still be wrong in ways that only surface as a client that cannot connect, so the
+script also asserts the **project contracts** no schema knows about:
+
+| Check | Why it exists |
+|-------|---------------|
+| a port named `game`, `portPolicy: Dynamic` | the allocator selects the client port by name; Static collides under `scheduling: Packed` |
+| `POD_NAME` from `fieldRef: metadata.name`, and **no `GAMESERVER_ID`** | the join token's `sid` is the GameServer name; `GAMESERVER_ID` wins over `POD_NAME` and would make every join fail |
+| no literal `value:` for `JWT_SECRET` / `JOIN_TOKEN_SECRET` / `TRANSPORT_KEY` / `REDIS_PASSWORD` / `GAME_DB_URL` | secrets belong in a Secret, not in git |
+| no `GAMESERVER_PUBLIC_ADDR` | no static value can be right under Dynamic ports |
+| no `rpg-mmo/gameserver:` image | that is the deleted Go server |
+| `replicas > 1` with a fixed `GAMESERVER_MAP_ID` | every replica registers the same map id — ADR-2 |
+| autoscaler policy is `Buffer`; `fleetName` / allocation selectors name a real fleet | ADR-14 decision 5, and a dangling `fleetName` survives every schema check |
+| the gateway's `DefaultFleetMap` / `DefaultNamespace` / `gamePortName` name something real | `[warn]`, not a failure — the env overrides exist |
+
 ```bash
 python3 k3s/validate-manifests.py                      # all agones/ + k3s/ manifests
-python3 k3s/validate-manifests.py --agones-version 1.58.0 agones/fleet-map.yaml
+python3 k3s/validate-manifests.py --agones-version 1.58.0 agones/fleet-map-dotnet-dev.yaml
+
+# Is the local image actually built from the code under test?
+python3 k3s/validate-manifests.py \
+  --check-image rpg-mmo/gameserver-dotnet:dev \
+  --expect-revision "$(git rev-parse HEAD)"
 ```
 
 Limits, so nobody over-trusts a green run:
 
 - `GameServerAllocation` is served by an **aggregated API**, not a CRD, so it has
-  no schema in `install.yaml` and is reported as *skipped*.
+  no schema in `install.yaml`; only the contract checks apply to it.
 - CRD schemas type-check structure, not semantics. A bogus enum value
   (`portPolicy: Bogus`) passes here and is rejected by the Agones **webhook** at
   apply time. Only a real cluster catches those.
+- `--check-image` compares the image's `org.opencontainers.image.revision`
+  label, which only exists on images built **after** that label was added to
+  `docker/Dockerfile.gameserver-dotnet`, and only when `--build-arg
+  GIT_REVISION=` was passed. An unlabelled image fails the check, which is the
+  correct answer: it cannot be shown to contain the code under test.
 - Requires `pyyaml` + `jsonschema`.
+
+### Stronger: server-side dry run
+
+With a cluster reachable, rehearse the apply against the real CRDs **and the
+Agones admission webhooks**, which is strictly stronger than any schema guess:
+
+```bash
+kubectl apply  --dry-run=server -f agones/fleet-map-dotnet-dev.yaml
+kubectl create --dry-run=server -f agones/allocation-dev.yaml   # create-only resource
+```
+
+Verified output on `docker-desktop` (Agones 1.59.0, k8s v1.34.1):
+
+```
+fleet.agones.dev/map-servers-dotnet-dev created (server dry run)
+gameserverallocation.allocation.agones.dev/<unknown> created (server dry run)
+```
 
 ---
 

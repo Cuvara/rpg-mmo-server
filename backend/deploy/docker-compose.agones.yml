@@ -1,0 +1,79 @@
+# Overlay: let the compose-run gateway allocate game servers from an Agones
+# fleet running in a Kubernetes cluster.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.agones.yml \
+#     --profile realtime up -d gateway
+#
+# It is an OVERLAY and not part of the base file for one concrete reason: the
+# kubeconfig bind mount below. Compose creates a DIRECTORY in place of a bind
+# source that does not exist, so a base-file mount would silently plant an empty
+# ./kubeconfig.local directory in every stack that has no cluster at all.
+#
+# ---------------------------------------------------------------------------
+# WHY THE GATEWAY NEEDS A KUBECONFIG
+# ---------------------------------------------------------------------------
+# The deploy path is not moving to Kubernetes. The gateway stays in compose and
+# only the game servers run under Agones, so the gateway allocates
+# OUT-OF-CLUSTER, over the Kubernetes API (ADR-15 decision 3, item 6 — the
+# prerequisite most likely to be discovered late, because the allocator is
+# already written, already tested, and already works on a developer's
+# kubeconfig).
+#
+# gateway/registry/agones_allocator.go resolveRESTConfig tries, in order:
+# in-cluster ServiceAccount -> ALLOCATOR_KUBECONFIG -> $KUBECONFIG ->
+# ~/.kube/config. None of the four exists inside the gateway container, and
+# cmd/gateway/main.go treats a failed allocator construction as FATAL (exit 1).
+# So without this mount, ALLOCATOR=agones does not start degraded — it does not
+# start.
+#
+# ---------------------------------------------------------------------------
+# PREPARING THE KUBECONFIG — two steps that must be VERIFIED, not assumed
+# ---------------------------------------------------------------------------
+# 1. The API server URL must be reachable FROM INSIDE THE CONTAINER.
+#    k3d publishes the API server on a host port and writes a kubeconfig naming
+#    `0.0.0.0:<port>` or `127.0.0.1:<port>`. Inside a container, 127.0.0.1 is
+#    the container. Rewrite it:
+#
+#      k3d kubeconfig get <cluster> > kubeconfig.local
+#      # then edit `server:` to https://host.docker.internal:<port>
+#      sed -i -E 's#server: https://(0\.0\.0\.0|127\.0\.0\.1):#server: https://host.docker.internal:#' \
+#        kubeconfig.local
+#
+# 2. The host string you rewrote it to must be covered by a SAN on the API
+#    server's certificate, or the TLS handshake fails verification with
+#    `x509: certificate is valid for ..., not host.docker.internal`. k3d takes
+#    the SAN list at cluster-create time:
+#
+#      k3d cluster create rpg-dev --api-port 0.0.0.0:6550 \
+#        --k3s-arg '--tls-san=host.docker.internal@server:*' ...
+#
+#    Verify before trusting it, from a throwaway container on the same network:
+#      docker run --rm -v "$PWD/kubeconfig.local:/kc:ro" \
+#        -e KUBECONFIG=/kc bitnami/kubectl:latest get nodes
+#
+# 3. Confirm it worked, from the gateway's own logs — it logs the allocator
+#    mode and fleet names at startup:
+#      docker compose logs gateway | grep -i allocator
+#
+# ---------------------------------------------------------------------------
+# CREDENTIALS
+# ---------------------------------------------------------------------------
+# Mounted read-only, never baked into an image, never committed —
+# `kubeconfig.local` is git-ignored. A developer's full ~/.kube/config grants
+# every cluster they have; for anything beyond a laptop, mint a ServiceAccount
+# with `create` on `gameserverallocations.allocation.agones.dev` in
+# rpg-realtime and build a kubeconfig around that token instead.
+services:
+  gateway:
+    environment:
+      # Literal, not ${ALLOCATOR:-agones}: .env sets ALLOCATOR=none for the base
+      # stack, and a default only applies to an UNSET variable, so the
+      # interpolated form would leave the allocator off in the one file whose
+      # entire purpose is to turn it on. Using this overlay IS the opt-in.
+      ALLOCATOR: agones
+    volumes:
+      - ${KUBECONFIG_HOST:-./kubeconfig.local}:/etc/rpg/kubeconfig:ro
+    extra_hosts:
+      # Makes host.docker.internal resolve on Linux/WSL too, so the rewritten
+      # kubeconfig server URL works the same way everywhere.
+      - "host.docker.internal:host-gateway"
