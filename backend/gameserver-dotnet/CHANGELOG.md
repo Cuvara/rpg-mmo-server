@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **ADR-14 — Agones owns the pod, Redis owns the lookup; the C# server's SDK is a stub and must
+  be written over the HTTP sidecar** (`backend/docs/ARCHITECTURE-DECISIONS.md`). Accepted
+  2026-08-17, **not yet implemented** — nothing in it has shipped, and it must not be cited as
+  evidence that Agones works for this server.
+  - Records what the startup log already admits: `GameServer/Agones/AgonesSdk.cs` is 58 lines
+    of interface plus `NoopAgonesSdk`, the only implementation in the solution, so `--agones` /
+    `AGONES_ENABLED` parses, logs a warning, and changes nothing. The gateway half is real and
+    tested (`gateway/registry/agones_allocator.go`), which is why the gap is one-sided.
+  - Four consequences named: an unserved map cannot be entered, a full map is refused because
+    ADR-2's allocation branch cannot produce a live server, a crashed server is dropped from
+    Redis by TTL but never replaced, and dungeon-per-party instancing cannot exist —
+    `--mode=dungeon` today only widens the disconnect hold window from 30s to 60s.
+  - Decides the SDK is implemented over the **Agones HTTP sidecar on `localhost:9358`**, not
+    the official C# SDK, which is gRPC and would pull `Grpc.Net.Client` against this module's
+    NativeAOT and minimal-dependency rules. The deleted Go server's `agones/sdk.go` (101 lines,
+    at `670a803^`) is the shape reference.
+  - Decides the ownership split ADR-1 requires: Agones owns pod lifecycle, Redis owns the
+    `map_id -> server` lookup, and the server registers into Redis **only after** reporting
+    Ready — deregistering before `ShutdownAsync` on the way out.
+  - Notes that `deploy/agones/fleet-map-dotnet-dev.yaml` sets a 5s health period and no
+    `disabled: true`, so deploying it today would restart-loop the pod; and that the cluster
+    still runs `map-servers-dev` / `dungeon-servers-dev` on `rpg-mmo/gameserver:dev`, the Go
+    server deleted in `670a803`. Retiring those is stage 8 of eight.
+  - Leaves explicitly open whether the realtime tier moves to Kubernetes at all — dev, staging
+    and production all run `DEPLOY_MODE=containers`, so Agones is a parallel path today.
+
 ### Fixed
 - **`SlowClientMovementTests` measured the transport and blamed the simulation.** Two of its
   cases flaked on CI during one afternoon, each costing an investigation, and both readings
