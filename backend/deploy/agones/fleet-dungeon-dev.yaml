@@ -1,3 +1,15 @@
+# ⚠️ SUPERSEDED — this fleet runs the DELETED Go game server.
+#
+# Same story as fleet-map-dev.yaml (read the banner there): image
+# `rpg-mmo/gameserver:dev` came from backend/gameserver/, removed in 670a803, and
+# its Dockerfile is gone. The cluster still runs `dungeon-servers-dev` from this
+# manifest, which is why the file is marked instead of deleted. There is no
+# dotnet dungeon fleet yet — dungeon instancing is ADR-14 stage 6 and does not
+# exist in the C# server, where `--mode=dungeon` only widens the disconnect hold
+# window. Retirement of both file and running fleet is ADR-14 stage 8.
+#
+# Everything below is historical. Do not apply it.
+#
 # DEV variant of fleet-dungeon.yaml — see fleet-map-dev.yaml for the rationale.
 #
 # replicas: 0 on purpose. Dungeons are allocated on demand:

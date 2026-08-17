@@ -1,3 +1,7 @@
+# ⚠️ SUPERSEDED — Go-image fleet, never deployed anywhere. See the banner in
+# fleet-map.yaml: the image is the deleted Go server's and the tag was never
+# published. Dungeon instancing itself is ADR-14 stage 6, unimplemented.
+#
 # Production dungeon-server fleet. See fleet-map.yaml for the config-source
 # contract (Secret rpg-realtime-secrets / ConfigMap gameserver-config).
 #

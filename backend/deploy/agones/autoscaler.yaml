@@ -1,3 +1,7 @@
+# Prod buffer autoscaler for `map-servers` — the SUPERSEDED Go fleet in
+# fleet-map.yaml. Buffer-based on server count is the policy ADR-14 decision 5
+# keeps, because ADR-7's per-server player ceiling is unknown; the fleetName is
+# what changes when a C# prod fleet exists (ADR-14 stage 7).
 apiVersion: autoscaling.agones.dev/v1
 kind: FleetAutoscaler
 metadata:
