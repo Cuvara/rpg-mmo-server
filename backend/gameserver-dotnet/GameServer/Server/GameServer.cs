@@ -76,6 +76,24 @@ public class ServerOptions
     public TimeSpan SaveInterval { get; set; } = TimeSpan.FromSeconds(30);
     public IPlayerStore? PlayerStore { get; set; }
     public IAgonesSdk? AgonesSdk { get; set; }
+
+    /// <summary>
+    /// Host to advertise instead of the Agones node address — <c>GAMESERVER_ADVERTISE_HOST</c> /
+    /// <c>--advertise-host</c>. <b>Host only, no port</b>, and read <b>only</b> when Agones is
+    /// enabled and its status read succeeded.
+    ///
+    /// <para>It exists because <c>status.address</c> is the node's address on the cluster
+    /// network and a client outside that network cannot dial it: on k3d the status says
+    /// <c>172.20.0.3</c> and the address that answers is <c>127.0.0.1</c>, published by the
+    /// serverlb. Agones knows the port and cannot know the host; this supplies the host and
+    /// never the port.</para>
+    ///
+    /// <para>Not to be confused with <c>GAMESERVER_PUBLIC_ADDR</c>
+    /// (<see cref="RegistrationOptions.PublicAddr"/>), which is a full <c>host:port</c> and
+    /// is what gets advertised when Agones is <b>off</b>. Exactly one of the two applies in
+    /// any given deployment.</para>
+    /// </summary>
+    public string? AdvertiseHost { get; set; }
     public IEventStream? EventStream { get; set; }
     public ILoggerFactory? LoggerFactory { get; set; }
 
@@ -384,17 +402,57 @@ public sealed class GameServerHost : IAsyncDisposable
             if (assigned != null)
             {
                 var configured = _registration.PublicAddr;
-                _registration.OverridePublicAddr(assigned.ToString());
+
+                // The port is always Agones'. Only the host can be overridden, and it has to
+                // be: status.address is the node address on the cluster network, which a
+                // client outside that network cannot dial (measured on k3d — the status says
+                // 172.20.0.3 and the address that answers is 127.0.0.1, published by the
+                // serverlb). Configuration supplying the port instead would put us straight
+                // back into the bug this whole path exists to fix.
+                var hostOverride = AgonesGameServerAddress.NormalizeHostOverride(
+                    _options.AdvertiseHost, _logger);
+                var advertised = hostOverride == null ? assigned : assigned.WithHost(hostOverride);
+
+                _registration.OverridePublicAddr(advertised.ToString());
+
+                // One line, deliberately naming where each half came from. When this is
+                // wrong in production it is wrong silently — the server runs, the registry
+                // looks healthy, and only the client knows — so the diagnosis has to be
+                // sitting in the log before anyone goes looking for it.
                 _logger.LogInformation(
-                    "Agones assigned {Assigned}; advertising it instead of the configured '{Configured}'",
-                    assigned, configured);
+                    "Advertising {Advertised} (host from {HostSource}, port {Port} from Agones status); " +
+                    "configured value '{Configured}' not used",
+                    advertised,
+                    hostOverride == null
+                        ? "Agones status.address"
+                        : "GAMESERVER_ADVERTISE_HOST",
+                    advertised.Port,
+                    configured);
+
+                if (hostOverride == null)
+                {
+                    // Not an error — inside the cluster it is right — but it is the single
+                    // most likely reason a client cannot connect to a working server.
+                    _logger.LogInformation(
+                        "GAMESERVER_ADVERTISE_HOST is unset, so clients are handed the Agones node " +
+                        "address '{Host}'. That is correct only where the node itself is reachable; " +
+                        "set it to the host clients actually dial (the load-balancer or ingress " +
+                        "address) if they are outside the cluster network.",
+                        advertised.Address);
+                }
             }
             else
             {
+                // GAMESERVER_ADVERTISE_HOST is deliberately NOT applied here. Without the
+                // status read there is no Agones port to pair it with, and pairing the
+                // override host with a CONFIGURED port would invent an address that was
+                // never assigned to anything — a plausible-looking value pointing nowhere,
+                // which is worse to debug than the honestly-wrong configured one.
                 _logger.LogWarning(
                     "Agones is enabled but its GameServer status could not be read; advertising " +
-                    "the configured address '{Configured}'. Under portPolicy: Dynamic that value " +
-                    "is almost certainly not dialable by a client.",
+                    "the configured address '{Configured}' unchanged. Under portPolicy: Dynamic " +
+                    "that value is almost certainly not dialable by a client. " +
+                    "GAMESERVER_ADVERTISE_HOST is not applied without a port from Agones.",
                     _registration.PublicAddr);
             }
         }

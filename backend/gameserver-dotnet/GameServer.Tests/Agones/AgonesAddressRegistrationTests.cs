@@ -136,6 +136,202 @@ public class AgonesAddressRegistrationTests
         Assert.Equal("192.168.65.3:7691", registry.FirstRegistered!.Addr);
     }
 
+    // ── GAMESERVER_ADVERTISE_HOST ──
+    //
+    // status.address is the NODE address, and a client outside the cluster network cannot
+    // dial it. Measured on k3d (k3s v1.31.5, Agones 1.59.0): the status reports 172.20.0.3
+    // and a connection to 172.20.0.3:7008 is refused from WSL2 and reported unreachable from
+    // Windows, where the Unity client runs — while 127.0.0.1:7008, published by the k3d
+    // serverlb, answers from both. So the port is right and only the host is wrong, and the
+    // override replaces exactly the host.
+
+    /// <summary>Host from the override, port from Agones. The whole point, in one assertion.</summary>
+    [Fact]
+    public async Task WithAnAdvertiseHost_TheHostIsOverriddenAndTheAgonesPortIsKept()
+    {
+        var sdk = new RecordingAgonesSdk
+        {
+            IsEnabled = true,
+            // Exactly what the k3d cluster reports.
+            Address = new AgonesGameServerAddress("172.20.0.3", 7008)
+        };
+        var registry = new RecordingRegistry(sdk.Clock);
+
+        await RunUntilRegisteredAsync(sdk, registry, advertiseHost: "127.0.0.1");
+
+        Assert.Equal("127.0.0.1:7008", registry.FirstRegistered!.Addr);
+    }
+
+    /// <summary>
+    /// Unset override keeps the pre-override behaviour exactly: the node address from the
+    /// status. Pinned so adding the knob cannot have quietly changed the default.
+    /// </summary>
+    [Fact]
+    public async Task WithoutAnAdvertiseHost_TheStatusAddressIsStillUsed()
+    {
+        var sdk = new RecordingAgonesSdk
+        {
+            IsEnabled = true,
+            Address = new AgonesGameServerAddress("172.20.0.3", 7008)
+        };
+        var registry = new RecordingRegistry(sdk.Clock);
+
+        await RunUntilRegisteredAsync(sdk, registry, advertiseHost: null);
+
+        Assert.Equal("172.20.0.3:7008", registry.FirstRegistered!.Addr);
+    }
+
+    /// <summary>
+    /// With Agones off the override does nothing at all. It is Agones-specific by
+    /// construction: there is no assigned port for it to pair with, and the compose path
+    /// must not gain a second way to produce a wrong address.
+    /// </summary>
+    [Fact]
+    public async Task WithAgonesDisabled_TheAdvertiseHostIsIgnored()
+    {
+        var sdk = new RecordingAgonesSdk
+        {
+            IsEnabled = false,
+            Address = new AgonesGameServerAddress("172.20.0.3", 7008)
+        };
+        var registry = new RecordingRegistry(sdk.Clock);
+
+        await RunUntilRegisteredAsync(
+            sdk, registry, configuredAddr: "203.0.113.9:9200", advertiseHost: "127.0.0.1");
+
+        Assert.Equal(0, sdk.GetAddressCalls);
+        Assert.Equal("203.0.113.9:9200", registry.FirstRegistered!.Addr);
+    }
+
+    /// <summary>
+    /// A failed status read must NOT compose the override host with the configured port.
+    /// That would invent an address that was never assigned to anything — a plausible-looking
+    /// value pointing nowhere, which is harder to diagnose than an honestly wrong one.
+    /// </summary>
+    [Fact]
+    public async Task WhenTheReadFails_TheAdvertiseHostIsNotComposedWithAConfiguredPort()
+    {
+        var sdk = new RecordingAgonesSdk { IsEnabled = true, Address = null };
+        var registry = new RecordingRegistry(sdk.Clock);
+
+        await RunUntilRegisteredAsync(
+            sdk, registry, configuredAddr: "203.0.113.9:9200", advertiseHost: "127.0.0.1");
+
+        var registered = registry.FirstRegistered!.Addr;
+        Assert.Equal("203.0.113.9:9200", registered);
+        Assert.DoesNotContain("127.0.0.1", registered, StringComparison.Ordinal);
+    }
+
+    /// <summary>A hostname, not just an IP: this is what a real ingress looks like.</summary>
+    [Fact]
+    public async Task AnAdvertiseHostMayBeAHostname()
+    {
+        var sdk = new RecordingAgonesSdk
+        {
+            IsEnabled = true,
+            Address = new AgonesGameServerAddress("172.20.0.3", 7008)
+        };
+        var registry = new RecordingRegistry(sdk.Clock);
+
+        await RunUntilRegisteredAsync(sdk, registry, advertiseHost: "gs.example.com");
+
+        Assert.Equal("gs.example.com:7008", registry.FirstRegistered!.Addr);
+    }
+
+    /// <summary>Blank and whitespace are "unset", not a host that happens to be empty.</summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task ABlankAdvertiseHost_IsTreatedAsUnset(string host)
+    {
+        var sdk = new RecordingAgonesSdk
+        {
+            IsEnabled = true,
+            Address = new AgonesGameServerAddress("172.20.0.3", 7008)
+        };
+        var registry = new RecordingRegistry(sdk.Clock);
+
+        await RunUntilRegisteredAsync(sdk, registry, advertiseHost: host);
+
+        Assert.Equal("172.20.0.3:7008", registry.FirstRegistered!.Addr);
+    }
+
+    /// <summary>
+    /// Someone confusing this with GAMESERVER_PUBLIC_ADDR and setting a full host:port gets
+    /// the host honoured and the port ignored — never a configured port on the wire.
+    /// </summary>
+    [Fact]
+    public async Task AnAdvertiseHostCarryingAPort_KeepsTheAgonesPort()
+    {
+        var sdk = new RecordingAgonesSdk
+        {
+            IsEnabled = true,
+            Address = new AgonesGameServerAddress("172.20.0.3", 7008)
+        };
+        var registry = new RecordingRegistry(sdk.Clock);
+
+        await RunUntilRegisteredAsync(sdk, registry, advertiseHost: "127.0.0.1:9999");
+
+        Assert.Equal("127.0.0.1:7008", registry.FirstRegistered!.Addr);
+    }
+
+    // ── Host normalisation, directly ──
+
+    /// <summary>Unset stays unset, so the caller keeps <c>status.address</c>.</summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("[")]
+    [InlineData("[]")]
+    public void NormalizeHostOverride_UnusableValues_AreNull(string? raw)
+    {
+        Assert.Null(AgonesGameServerAddress.NormalizeHostOverride(raw));
+    }
+
+    /// <summary>Plain hosts pass through, trimmed.</summary>
+    [Theory]
+    [InlineData("127.0.0.1", "127.0.0.1")]
+    [InlineData("  10.0.0.5  ", "10.0.0.5")]
+    [InlineData("gs.example.com", "gs.example.com")]
+    // A bare IPv6 literal is a host, not host:port — checked before the colon heuristic.
+    [InlineData("::1", "::1")]
+    [InlineData("2001:db8::1", "2001:db8::1")]
+    // Bracketed IPv6, with and without a port.
+    [InlineData("[::1]", "::1")]
+    [InlineData("[2001:db8::1]:7000", "2001:db8::1")]
+    // Confused with GAMESERVER_PUBLIC_ADDR: host honoured, port dropped.
+    [InlineData("127.0.0.1:9999", "127.0.0.1")]
+    [InlineData("gs.example.com:9999", "gs.example.com")]
+    public void NormalizeHostOverride_ReturnsTheHostPart(string raw, string expected)
+    {
+        Assert.Equal(expected, AgonesGameServerAddress.NormalizeHostOverride(raw));
+    }
+
+    /// <summary>
+    /// An IPv6 host is bracketed when composed, because the gateway hands the string to
+    /// clients verbatim and a bare <c>::1:7008</c> does not parse as an endpoint.
+    /// </summary>
+    [Fact]
+    public void AnIpv6Host_IsBracketedInTheAdvertisedString()
+    {
+        var addr = new AgonesGameServerAddress("172.20.0.3", 7008).WithHost("2001:db8::1");
+        Assert.Equal("[2001:db8::1]:7008", addr.ToString());
+    }
+
+    /// <summary>The port survives a host replacement. It is the half only Agones can supply.</summary>
+    [Fact]
+    public void WithHost_ReplacesOnlyTheHost()
+    {
+        var original = new AgonesGameServerAddress("172.20.0.3", 7008);
+        var moved = original.WithHost("127.0.0.1");
+
+        Assert.Equal(7008, moved.Port);
+        Assert.Equal("127.0.0.1", moved.Address);
+        Assert.Equal(7008, original.Port);
+        Assert.Equal("172.20.0.3", original.Address);
+    }
+
     // ── RegistrationService, directly ──
 
     /// <summary>
@@ -175,9 +371,11 @@ public class AgonesAddressRegistrationTests
     // ── Helpers ──
 
     private static async Task RunUntilRegisteredAsync(
-        RecordingAgonesSdk sdk, RecordingRegistry registry, string configuredAddr = ConfiguredAddr)
+        RecordingAgonesSdk sdk, RecordingRegistry registry,
+        string configuredAddr = ConfiguredAddr, string? advertiseHost = null)
     {
-        await using var server = new GameServerHost(NewOptions(sdk, registry, configuredAddr));
+        await using var server = new GameServerHost(
+            NewOptions(sdk, registry, configuredAddr, advertiseHost));
         using var runCts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
 
         var (runTask, _) = await TestPorts.StartServerAsync(server, runCts.Token);
@@ -205,7 +403,8 @@ public class AgonesAddressRegistrationTests
     };
 
     private static ServerOptions NewOptions(
-        IAgonesSdk sdk, IServerRegistry registry, string configuredAddr) => new()
+        IAgonesSdk sdk, IServerRegistry registry, string configuredAddr,
+        string? advertiseHost = null) => new()
     {
         ServerAddr = ":0",
         ServerId = ServerId,
@@ -219,6 +418,7 @@ public class AgonesAddressRegistrationTests
         HoldTtl = TimeSpan.FromSeconds(30),
         PlayerStore = new MemoryPlayerStore(),
         AgonesSdk = sdk,
+        AdvertiseHost = advertiseHost,
         ServerRegistry = registry,
         Registration = NewRegistrationOptions(configuredAddr),
         LoggerFactory = NullLoggerFactory.Instance

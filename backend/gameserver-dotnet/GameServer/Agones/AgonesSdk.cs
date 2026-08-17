@@ -14,14 +14,19 @@ namespace GameServer.Agones;
 /// in the fleet manifests) and no static configuration can name the host port, because
 /// Agones picks it at scheduling time — ADR-15 decision 2, option (A).</para>
 ///
-/// <para><b>Scope limit, stated where it cannot be missed:</b> <c>status.address</c> is the
-/// <i>node</i> address. It is routable from wherever that node is routable and no further.
-/// This type produces the correct value inside the cluster and the correct <i>shape</i>
-/// outside it; making it reachable from a phone on a mobile network is a deployment fact
-/// about ingress and node public IPs, not something this read solves.</para>
+/// <para><b>Scope limit, and it is not theoretical — it was measured.</b>
+/// <c>status.address</c> is the <i>node</i> address, routable from wherever that node is
+/// routable and no further. On the k3d dev cluster it is the node container's address on
+/// the Docker network (<c>172.20.0.3</c>), and a client cannot dial it: from WSL2 a
+/// connection to <c>172.20.0.3:7008</c> is refused and from Windows — where the Unity
+/// client runs — <c>Test-NetConnection</c> reports False, while <c>127.0.0.1:7008</c>,
+/// published by the k3d serverlb, answers from both. So the <b>port</b> from the status is
+/// authoritative and nothing else can supply it, while the <b>host</b> is a deployment fact
+/// the cluster cannot know. That is what <see cref="WithHost"/> and
+/// <c>GAMESERVER_ADVERTISE_HOST</c> exist for.</para>
 /// </summary>
-/// <param name="Address">Host part, from <c>status.address</c>.</param>
-/// <param name="Port">Host port Agones bound for the <c>game</c> port.</param>
+/// <param name="Address">Host part — from <c>status.address</c>, or an operator override.</param>
+/// <param name="Port">Host port Agones bound for the <c>game</c> port. Never configurable.</param>
 public sealed record AgonesGameServerAddress(string Address, int Port)
 {
     /// <summary>
@@ -33,8 +38,88 @@ public sealed record AgonesGameServerAddress(string Address, int Port)
     /// </summary>
     public const string GamePortName = "game";
 
-    /// <summary>The <c>host:port</c> form written into the server registry.</summary>
-    public override string ToString() => $"{Address}:{Port}";
+    /// <summary>
+    /// Replace the host while keeping the Agones-assigned port.
+    ///
+    /// <para>The port is deliberately not a parameter. It is the one part of this address
+    /// that only Agones can supply, and letting configuration reach it would recreate the
+    /// exact bug the status read exists to fix.</para>
+    /// </summary>
+    public AgonesGameServerAddress WithHost(string host) => this with { Address = host };
+
+    /// <summary>
+    /// Clean an operator-supplied advertise host into something that can be composed with a
+    /// port. Returns null when there is nothing usable, in which case the caller keeps
+    /// <c>status.address</c>.
+    ///
+    /// <para>Trims, treats blank as unset, and unwraps a bracketed IPv6 literal. It also
+    /// accepts — with a warning — a value that already carries a port: someone setting
+    /// <c>GAMESERVER_ADVERTISE_HOST</c> to <c>127.0.0.1:7000</c> has confused it with
+    /// <c>GAMESERVER_PUBLIC_ADDR</c>, and their intent for the host part is unambiguous.
+    /// Honouring the host and warning beats refusing, because refusing falls back to the
+    /// node address that is already known not to work.</para>
+    /// </summary>
+    /// <param name="raw">Raw configured value; null or blank means unset.</param>
+    /// <param name="logger">Optional; receives the confused-variable warning.</param>
+    public static string? NormalizeHostOverride(string? raw, ILogger? logger = null)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        var value = raw.Trim();
+
+        // "[::1]" or "[::1]:7000" — bracketed IPv6, with or without a port.
+        if (value.StartsWith('['))
+        {
+            int close = value.IndexOf(']');
+            if (close > 1)
+            {
+                var inner = value[1..close];
+                if (close + 1 < value.Length)
+                    WarnPortInHost(logger, value, inner);
+                return string.IsNullOrWhiteSpace(inner) ? null : inner;
+            }
+            return null; // "[" with no "]" is not an address
+        }
+
+        // A bare IP literal, v4 or v6, is already exactly the host. Checked before the
+        // colon heuristic below so "::1" and "2001:db8::1" are not mistaken for host:port.
+        if (System.Net.IPAddress.TryParse(value, out _)) return value;
+
+        // "host:port" — only when the tail is entirely digits. A hostname does not contain
+        // a colon, so anything else with one is left alone rather than silently truncated.
+        int colon = value.LastIndexOf(':');
+        if (colon > 0 && colon < value.Length - 1)
+        {
+            var tail = value[(colon + 1)..];
+            if (tail.All(char.IsAsciiDigit))
+            {
+                var host = value[..colon];
+                WarnPortInHost(logger, value, host);
+                return string.IsNullOrWhiteSpace(host) ? null : host;
+            }
+        }
+
+        return value;
+    }
+
+    private static void WarnPortInHost(ILogger? logger, string raw, string host) =>
+        logger?.LogWarning(
+            "GAMESERVER_ADVERTISE_HOST is '{Raw}', which includes a port. It is HOST-ONLY — " +
+            "the port always comes from the Agones GameServer status, because only Agones " +
+            "knows it under portPolicy: Dynamic. Using '{Host}' and ignoring the rest; " +
+            "GAMESERVER_PUBLIC_ADDR is the variable that takes a full host:port, and it is " +
+            "only used when Agones is disabled.",
+            raw, host);
+
+    /// <summary>
+    /// The <c>host:port</c> form written into the server registry. An IPv6 host is bracketed,
+    /// since the gateway hands this string to clients verbatim and a bare
+    /// <c>::1:7008</c> is not parsable as an endpoint.
+    /// </summary>
+    public override string ToString() =>
+        System.Net.IPAddress.TryParse(Address, out var ip)
+        && ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6
+            ? $"[{Address}]:{Port}"
+            : $"{Address}:{Port}";
 }
 
 /// <summary>Agones game server SDK abstraction.</summary>

@@ -7,6 +7,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`GAMESERVER_ADVERTISE_HOST` / `--advertise-host`** — host-only override for the address
+  composed from the Agones GameServer status. **Host** = this value if set, else
+  `status.address`; **port** = always the Agones-assigned `game` port, never configurable.
+  - **Measured, not theorised.** ADR-15 warned that `status.address` is the *node* address;
+    the consequence was not drawn until a live `portPolicy: Dynamic` GameServer on k3d
+    (k3d v5.8.3, k3s v1.31.5, Agones 1.59.0, ports 7000-7100 published by the serverlb)
+    reported `172.20.0.3:7008` and was probed: `127.0.0.1:7008` answers from WSL2 (`PONG`)
+    and from Windows, where the Unity client runs (`Test-NetConnection` True), while
+    `172.20.0.3:7008` is refused from WSL2 and unreachable from Windows. **The read gets the
+    port exactly right and the host wrong** — the port is the half only Agones can supply,
+    the host is a deployment fact the cluster cannot know.
+  - **The two address knobs do not overlap, on purpose.** `GAMESERVER_PUBLIC_ADDR` is a full
+    `host:port` used when Agones is **off**; `GAMESERVER_ADVERTISE_HOST` is host-only and used
+    when Agones is **on** and the status read succeeded. Setting the latter with Agones off
+    logs a warning and changes nothing; setting it to a full `host:port` by mistake logs a
+    warning, honours the host and discards the port.
+  - **Not applied when the status read fails.** With no Agones port to pair it with,
+    composing the override host with a *configured* port would invent an address that was
+    never assigned to anything — a plausible-looking value pointing nowhere, harder to
+    diagnose than the honestly-wrong configured one. That path falls back unchanged.
+  - IPv6 hosts are bracketed when composed (`[2001:db8::1]:7008`), since the gateway hands
+    the string to clients verbatim and a bare `::1:7008` does not parse as an endpoint.
+  - The composition logs which half came from where — `Advertising 127.0.0.1:7008 (host from
+    GAMESERVER_ADVERTISE_HOST, port 7008 from Agones status)` — because when this is wrong it
+    is wrong silently: the server runs, the registry looks healthy, and only the client knows.
+  - 24 further tests: override applied, override unset (pre-override behaviour pinned),
+    Agones disabled, failed read, hostname hosts, blank-as-unset, a value carrying a port, and
+    host normalisation including bare and bracketed IPv6.
 - **The server learns its own dialable address from Agones** (`GameServer/Agones/AgonesSdk.cs`,
   `GameServer/Registry/RegistrationService.cs`, `GameServer/Server/GameServer.cs`) — ADR-15
   decision 2, option (A). `IAgonesSdk` gains `GetAddressAsync()`; `HttpAgonesSdk` implements it
@@ -96,10 +124,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   endpoints, the lifecycle order, the health cadence, the never-throws rule and what is still
   unproven. The flag table row no longer describes a stub, and `AGONES_SDK_HTTP_PORT` is listed.
 - `docs/README.md`: that section now also documents `GET /gameserver`, why the advertised
-  address comes from the GameServer status under `portPolicy: Dynamic`, the by-name port
-  selection, the fallback list, and the limit that `status.address` is the *node* address —
-  routable from wherever the node is and no further. The `--public-addr` and `--agones` flag
-  rows say that Agones overrides the configured address.
+  port comes from the GameServer status under `portPolicy: Dynamic`, the by-name port
+  selection, and the fallback list. The `status.address`-is-the-node-address limit is no
+  longer a caveat but a sub-section with the k3d reachability matrix that measured it, the
+  `GAMESERVER_ADVERTISE_HOST` resolution table, and a side-by-side of the two address knobs
+  so the wrong one is harder to reach for. The `--public-addr` and `--agones` flag rows say
+  Agones overrides the configured address, and `--advertise-host` is listed.
 - **ADR-14 — Agones owns the pod, Redis owns the lookup; the C# server's SDK is a stub and must
   be written over the HTTP sidecar** (`backend/docs/ARCHITECTURE-DECISIONS.md`). Accepted
   2026-08-17, **not yet implemented** — nothing in it has shipped, and it must not be cited as

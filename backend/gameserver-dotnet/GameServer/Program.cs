@@ -99,6 +99,22 @@ string transportKey = Env(TransportKind.KeyEnvVar) ?? "";
 // the listen address whenever a container maps ports (listen :9000, clients reach
 // <host>:9200). Falls back to the listen address, which is correct for host mode.
 string publicAddr = GetArg(args, "--public-addr") ?? Env("GAMESERVER_PUBLIC_ADDR") ?? addr;
+// HOST ONLY, and Agones only. Replaces the host part of the address read from the Agones
+// GameServer status while the PORT still comes from that status, because under
+// portPolicy: Dynamic only Agones knows the port.
+//
+// Why this is not just GAMESERVER_PUBLIC_ADDR: status.address is the NODE address on the
+// cluster network. Measured on k3d — the status reports 172.20.0.3 and a client cannot
+// reach it (refused from WSL2, Test-NetConnection False from Windows), while 127.0.0.1,
+// which the k3d serverlb publishes, answers from both. The host is a deployment fact the
+// cluster cannot know; the port is one only the cluster knows. Hence two knobs:
+//
+//   GAMESERVER_PUBLIC_ADDR   full host:port, used when Agones is OFF
+//   GAMESERVER_ADVERTISE_HOST  host only,    used when Agones is ON and the status read worked
+//
+// Exactly one of them applies to any given deployment. Setting this one with Agones off
+// does nothing at all — see the start-up warning below.
+string? advertiseHost = GetArg(args, "--advertise-host") ?? Env("GAMESERVER_ADVERTISE_HOST");
 
 // ── Logging ──
 
@@ -131,6 +147,13 @@ logger.LogInformation("  MapSize:   {Width}x{Height} world units (centered on or
 logger.LogInformation("  Agones:    {Agones}", useAgones
     ? $"HTTP sidecar at localhost:{agonesPort}"
     : "disabled (no-op SDK)");
+if (useAgones)
+{
+    logger.LogInformation("  Advertise: {Advertise}",
+        string.IsNullOrWhiteSpace(advertiseHost)
+            ? "host from the Agones GameServer status (GAMESERVER_ADVERTISE_HOST unset), port from Agones"
+            : $"host '{advertiseHost}' (GAMESERVER_ADVERTISE_HOST), port from Agones");
+}
 logger.LogInformation("  Nakama:    {Nakama}", string.IsNullOrWhiteSpace(nakamaUrl) ? "disabled (NAKAMA_URL unset)" : nakamaUrl);
 logger.LogInformation("  Metrics:   {Metrics}", string.IsNullOrWhiteSpace(metricsAddr) ? "disabled" : metricsAddr);
 logger.LogInformation("  GameDB:    {GameDb}",
@@ -156,6 +179,19 @@ logger.LogInformation("  Registry:  {Registry}",
 // registration and advertises that instead (ADR-15 decision 2, option A). Saying
 // "clients will fail to connect" here would be wrong and would train operators to
 // ignore the line in the one topology where it still means something.
+// Set but inert: GAMESERVER_ADVERTISE_HOST only ever applies on the Agones path. Silence
+// here would leave an operator believing they had configured the advertised address while
+// the server advertised something else entirely.
+if (!string.IsNullOrWhiteSpace(advertiseHost) && !useAgones)
+{
+    logger.LogWarning(
+        "  GAMESERVER_ADVERTISE_HOST is set to '{Host}' but Agones is disabled, so it is " +
+        "IGNORED — it only replaces the host of an address read from the Agones GameServer " +
+        "status. Without Agones the advertised address is GAMESERVER_PUBLIC_ADDR " +
+        "(currently '{PublicAddr}'), which takes a full host:port.",
+        advertiseHost, publicAddr);
+}
+
 if (!string.IsNullOrWhiteSpace(redisAddr) && IsHostlessAddr(publicAddr) && useAgones)
 {
     logger.LogInformation(
@@ -383,6 +419,7 @@ var options = new ServerOptions
     SaveInterval = TimeSpan.FromSeconds(30),
     PlayerStore = playerStore,
     AgonesSdk = agonesSdk,
+    AdvertiseHost = advertiseHost,
     // Always Noop: no Redis-backed IEventStream implementation exists yet, so
     // cross-server events are generated (entity_killed) and then discarded.
     // NOT for want of a Redis client — this process has one and uses it to

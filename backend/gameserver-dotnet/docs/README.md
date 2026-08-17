@@ -94,7 +94,8 @@ set. Flags are **space-separated** (`--addr :9000`).
 | *(none)* | `AGONES_SDK_HTTP_PORT` | `9358` | Agones sidecar HTTP port. Only read when Agones is enabled; an unparsable value warns and falls back |
 | `--transport` | `GAMESERVER_TRANSPORT` | `tcp` | Realtime transport: `tcp` or `kcp` — see below |
 | *(none)* | `TRANSPORT_KEY` | *(empty)* | Pre-shared AES-256 key for KCP. Empty = cleartext (start-up WARNING). Ignored for TCP |
-| `--public-addr` | `GAMESERVER_PUBLIC_ADDR` | *(listen addr)* | Address advertised to clients through the registry. **Overridden when Agones is enabled and its GameServer status can be read** — the scheduler picks the port, so no configured value can be right; see the Agones section |
+| `--public-addr` | `GAMESERVER_PUBLIC_ADDR` | *(listen addr)* | Full `host:port` advertised to clients through the registry. Used **only when Agones is off** — with Agones on and the status read working, the port comes from Agones and the host from `GAMESERVER_ADVERTISE_HOST`; see the Agones section |
+| `--advertise-host` | `GAMESERVER_ADVERTISE_HOST` | *(unset → Agones `status.address`)* | **Host only, no port.** Replaces the host of the address read from the Agones GameServer status; the port always stays the Agones-assigned one. Ignored (with a warning) when Agones is off or the status read fails. Needed because `status.address` is the *node* address, which a client outside the cluster network cannot dial |
 | `--redis` | `REDIS_ADDR` | *(unset)* | Registry Redis; unset disables self-registration |
 | `--redis-password` | `REDIS_PASSWORD` | *(unset)* | Registry Redis password |
 
@@ -167,8 +168,9 @@ Lifecycle, in order:
 | first player joins | `POST /allocate`, once per process, off the join's critical path |
 | graceful shutdown | registry entry removed first, **then** `POST /shutdown` |
 
-**The advertised address comes from Agones, not from configuration** (ADR-15
-decision 2, option A). The fleets use `portPolicy: Dynamic`, so Agones picks the
+**The advertised port comes from Agones, never from configuration** (ADR-15
+decision 2, option A; the host is a separate question, answered right below). The
+fleets use `portPolicy: Dynamic`, so Agones picks the
 host port when it schedules the pod and *no* static value can be right: the
 manifest passes `--addr=:9000` and sets no `GAMESERVER_PUBLIC_ADDR`, so without
 this read the server registers the hostless `:9000`, the gateway copies it into
@@ -182,23 +184,69 @@ Ready — the address does not exist until the pod is scheduled — the server r
            "ports":[{"name":"game","port":7691}]}}
 ```
 
-and registers `192.168.65.3:7691`. The port is selected by name and never by
-index, matching `ports[].name` in `deploy/agones/fleet-*.yaml` and `gamePortName`
-in the gateway's `registry/agones_allocator.go`; picking `ports[0]` would silently
-advertise the wrong port the day a fleet declares a second one.
+The port is selected by name and never by index, matching `ports[].name` in
+`deploy/agones/fleet-*.yaml` and `gamePortName` in the gateway's
+`registry/agones_allocator.go`; picking `ports[0]` would silently advertise the
+wrong port the day a fleet declares a second one.
+
+##### The port comes from Agones, the host usually needs an override
+
+`status.address` is the **node** address, and outside the cluster network a client
+cannot dial it. Measured on k3d (k3d v5.8.3, k3s v1.31.5, Agones 1.59.0, gameserver
+ports 7000-7100 published by the serverlb) against a live `portPolicy: Dynamic`
+GameServer reporting `172.20.0.3:7008`:
+
+| From | To | Result |
+|---|---|---|
+| WSL2 | `127.0.0.1:7008` | **PONG** |
+| Windows (where the Unity client runs) | `127.0.0.1:7008` | **True** |
+| Windows | `172.20.0.3:7008` | False |
+| WSL2 | `172.20.0.3:7008` | connection refused |
+
+So the read gets the **port** exactly right — `7008` is the Agones-assigned dynamic
+port and nothing else can supply it — and the **host** wrong. Hence
+`GAMESERVER_ADVERTISE_HOST` / `--advertise-host`:
+
+| When Agones is **on** and the status read succeeded | |
+|---|---|
+| host | `GAMESERVER_ADVERTISE_HOST` if set, else `status.address` |
+| port | **always** the Agones-assigned `game` port — never configurable |
+
+On the k3d setup above, `GAMESERVER_ADVERTISE_HOST=127.0.0.1` produces
+`127.0.0.1:7008`, which is dialable from both WSL2 and Windows.
+
+> **Two address knobs, and they do not overlap. Read this before setting either.**
+>
+> | | `GAMESERVER_PUBLIC_ADDR` | `GAMESERVER_ADVERTISE_HOST` |
+> |---|---|---|
+> | Value | full `host:port` | **host only, no port** |
+> | Applies when | Agones is **off** | Agones is **on** *and* the status read succeeded |
+> | Supplies the port | yes | **never** |
+>
+> Exactly one applies to any given deployment. Setting `GAMESERVER_ADVERTISE_HOST`
+> with Agones disabled logs a warning and changes nothing. Setting it to a full
+> `host:port` by mistake logs a warning, honours the host and discards the port —
+> the port always comes from Agones.
 
 Every failure falls back to today's resolution — `--public-addr` /
 `GAMESERVER_PUBLIC_ADDR` / the listen address — and logs a warning: a sidecar that
 does not answer, a non-2xx, an unparsable body, a status with no address (the pod
-is not scheduled yet), or no port named `game`. Never fatal: a server nobody can
-reach still serves the players already on it, and a crash loop serves nobody. With
-Agones disabled the read is not attempted at all.
+is not scheduled yet), or no port named `game`. **`GAMESERVER_ADVERTISE_HOST` is
+not applied on that path**: with no Agones port to pair it with, composing it with
+a *configured* port would invent an address that was never assigned to anything —
+a plausible-looking value pointing nowhere, harder to diagnose than an honestly
+wrong one. Never fatal: a server nobody can reach still serves the players already
+on it, and a crash loop serves nobody. With Agones disabled the read is not
+attempted at all.
 
-> `status.address` is the **node** address. It is routable from wherever that node
-> is routable and no further. This read produces the correct value inside the
-> cluster and the correct *shape* outside it; making it reachable from a phone on a
-> mobile network is a deployment question about ingress and node public IPs, not
-> one this solves.
+Start-up and the composition both log which half came from where, because when
+this is wrong it is wrong silently — the server runs, the registry looks healthy,
+and only the client knows:
+
+```
+Advertising 127.0.0.1:7008 (host from GAMESERVER_ADVERTISE_HOST, port 7008 from
+Agones status); configured value ':9000' not used
+```
 
 **No call can throw.** A missing, slow or 500-ing sidecar is logged and ignored:
 every call site is either start-up or a background loop, and an exception in
