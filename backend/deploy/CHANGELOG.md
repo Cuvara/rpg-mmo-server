@@ -32,6 +32,39 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the environment. The variable configured nothing while reading as if it did.
 
 ### Added
+- **The dotnet fleet persists player state** (ADR-14 stage 4, second half). `GAME_DB_URL` is no
+  longer a commented-out block in `agones/fleet-map-dotnet-dev.yaml`: it is a real env entry
+  reading `game-db-url` from `rpg-realtime-secrets`, and `k3s/setup-dev.sh` now writes that key.
+  Until this, every pod ran the **in-memory** player store, so a world under a Fleet was lost on
+  every rollout, eviction or health kill — and the proof harness had to run `--skip-db`.
+
+  The value is not the compose DSN. Compose uses `postgres-game:5432`, a service name that
+  resolves only on the compose network; a pod reaches the same database the way any host process
+  does, through the **published** port: `host.k3d.internal:5433`. The script composes it from
+  `POSTGRES_GAME_*` in `.env` plus the cluster kind, with `POD_GAME_DB_URL` as a wholesale
+  override, and **never logs it** — it carries a password, which is also why it is in the Secret
+  and not in `gameserver-config`. On `docker-desktop` the value is deliberately **empty**: no
+  host string makes the compose postgres addressable from a pod there. The fleet therefore reads
+  the key with `optional: true`, matching `advertise-host` and not `redis-addr` — blank is a
+  handled state (`using in-memory player store (GAME_DB_URL unset …)`), while a *set but
+  unreachable* DSN makes the server log `postgres player store unavailable -- refusing to start`
+  and exit 1, i.e. a visible crash loop rather than a silent RAM-only world.
+
+  Measured from a pod in `rpg-realtime`:
+  `psql -h host.k3d.internal -p 5433 -U game -d gamestate -c '\dt'` → `player_states`,
+  `schema_migrations`. Proven end to end on k3d-rpg-dev with `map_01` served **only** by an
+  Agones pod (compose `rpg-gameserver` stopped for the run, so the ADR-2 one-server-per-map
+  invariant held), `smoketest --strict-addr --require-db`:
+
+  ```
+  PASS  gateway_auth                5ms  transport=tcp map=map_01 server=127.0.0.1:7052 (tcp)
+  PASS  gameserver_join          1.113s  snapshots=15 (keyframes=1 deltas=14) final_x=4.83 ack_tick=10
+  PASS  gamestate_migrations       18ms  version=1 (001_init) applied=2026-08-05T07:34:08Z
+  PASS  gamestate_player_row     13.03s  map=map_01 x=4.8333 y=0.0000 hp=100/100 (14 polls)
+  PASS  gamestate_reload        20.113s  respawned at x=4.8333 from persisted x=4.8333
+  SMOKE=PASS
+  ```
+
 - **`agones/secret-example.yaml`** — template for the `rpg-realtime-secrets` Secret, enumerating
   every secret the fleet needs (`jwt-secret`, `join-token-secret`, `redis-password`,
   `transport-key`, and `game-db-url` for when persistence is turned on) with dev placeholders
@@ -65,6 +98,49 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `DefaultFleetMap` / `DefaultNamespace` / `gamePortName` do not match the manifests.
 
 ### Changed
+- **Documented that `Allocated` is a one-way door, and what it blocks** (`docs/K3S.md` →
+  "Health, measured"). A `Fleet` will not scale down an `Allocated` GameServer, and this project
+  has no `Deallocate` anywhere — the state is left only by shutting the pod down. The C# server
+  reports `Allocate` to the sidecar on the first player join (`NotifyAgonesAllocatedOnce`), so a
+  single smoke run pins a pod there permanently. Useful as evidence that the Allocate report
+  works against a real sidecar; costly as an operational trap, because an `Allocated` pod
+  satisfies the replica count and therefore **`kubectl apply` of a changed template creates the
+  new GameServerSet but never rolls a pod onto it**. Delete the stale GameServer explicitly.
+- **Agones health is ENABLED on `map-servers-dotnet-dev`** — `health.disabled: true` is gone
+  from `agones/fleet-map-dotnet-dev.yaml`; the three timings (`initialDelaySeconds: 10`,
+  `periodSeconds: 5`, `failureThreshold: 3`) are unchanged, because the Agones v1 `health` block
+  treats all four fields independently. This is ADR-14 decision 4's second half, deliberately a
+  step of its own: stage 4 deployed *with* the flag so a pod that could not reach Ready read as
+  exactly that instead of as a restart loop hiding which of image / secret / sidecar / SDK was
+  wrong. That passed, so the flag comes off.
+
+  **No flapping.** Four independent windows on k3d-rpg-dev (image
+  `rpg-mmo/gameserver-dotnet:integration`, revision `4d928e7`, whose `gameserver-dotnet/` and
+  `shared/` trees are identical to `develop`; both halves then re-proven on
+  `rpg-mmo/gameserver-dotnet:develop`, revision `307f1e8`), sampled every 30s: pod `…-q7bdn-qjgl8` held
+  **11m18s** at `RESTARTS: 0`, pod `…-q7bdn-5bqwx` held **12m22s** at `RESTARTS: 0`, and pod `…-q7bdn-9vxgc` held **12m26s** at
+  `RESTARTS: 0`. A fourth window on `:develop` itself held **13m25s** at `RESTARTS: 0` and was
+  still `Allocated` when observation stopped. None produced an `Unhealthy`
+  event on the GameServer; the first two were ended by *another operator* scaling the fleet
+  1→3→1, not by health.
+
+  **And the ping is really enforced**, which `RESTARTS: 0` alone cannot show. `SIGSTOP` on the
+  `./GameServer` process (through the k3d node container — the image is distroless, so
+  `kubectl exec` has no shell) simulates a tick loop stalled long enough to starve the health
+  loop: `Ready` → `Unhealthy` → `Shutdown` in **~20s**, inside the 25s that
+  `initialDelaySeconds + periodSeconds * failureThreshold` predicts, with
+  `Warning Unhealthy … Health check failure` and `Deleted gameserver in state Unhealthy` in the
+  events, and a replacement Ready ~25s later.
+
+  So enabling this **couples availability to simulation latency**: the health ping shares a
+  process with the 60Hz tick loop, and a stall past 15s is now a deleted pod. ADR-13's overload
+  path is what should keep a merely-slow server from being killed as a dead one, and the CPU
+  limit was already raised 500m → 1000m for the same reason. **That path is not proven**: every
+  `backend/loadtest` run returns `INVALID: N/N players failed` with
+  `sample_errors: ["join: join: recv: EOF"]` while the server logs the joins and snapshots flow —
+  and it reproduces identically against the compose server and through the gateway, so it is a
+  pre-existing loadtest↔server mismatch on `develop`, not anything to do with Agones. Sustained
+  overload survival is therefore **untested**; see `docs/K3S.md` → "Health, measured".
 - **Three cluster facts replaced with measurements** — all three were previously shipped as
   parameterised guesses with a "verify, do not assume" note, and all three now have answers:
   - **k3d pod → compose data tier is `host.k3d.internal`** (`redis-cli -h host.k3d.internal

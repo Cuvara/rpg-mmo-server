@@ -79,34 +79,45 @@ spec:
           # second map server to land on this node collides with the first.
           # ADR-15 decision 2 considered and rejected it (option B).
           portPolicy: Dynamic
-      # HEALTH IS DISABLED ON PURPOSE, AND THE REASON HAS CHANGED.
+      # HEALTH IS ON. It was disabled for exactly two stages and both reasons
+      # are now spent.
       #
-      # The old reason ("the C# Agones SDK is a no-op") is NO LONGER TRUE.
-      # Commit 62131f5 landed HttpAgonesSdk, which really does POST /ready,
-      # /health, /allocate and /shutdown to the sidecar, with a health loop at a
-      # 2s interval against the 5s periodSeconds below. The code exists.
+      # The first ("the C# Agones SDK is a no-op") died with commit 62131f5,
+      # which landed HttpAgonesSdk: it really does POST /ready, /health,
+      # /allocate and /shutdown to the sidecar, with a health loop at a 2s
+      # interval against the 5s periodSeconds below.
       #
-      # The reason it stays disabled is that NONE OF IT HAS EVER RUN AGAINST A
-      # REAL SIDECAR. The SDK's tests stand a local HttpListener in for Agones;
-      # no C# server in this project has reported Ready to an actual Agones pod.
-      # ADR-14 stage 4 is exactly that experiment, and it is deliberately run
-      # with health still disabled: a pod that fails to reach Ready then shows up
-      # as a pod that failed to reach Ready, instead of as a restart loop that
-      # hides which of image / secret / sidecar / SDK was wrong.
+      # The second ("none of it has ever run against a real sidecar") died with
+      # ADR-14 stage 4, run deliberately WITH the flag so that a pod which
+      # failed to reach Ready showed up as a pod that failed to reach Ready,
+      # instead of as a restart loop hiding which of image / secret / sidecar /
+      # SDK was wrong. That run passed: a pod reached Ready, self-registered,
+      # and served a client through the full gateway->join->snapshot flow.
       #
-      # REMOVING THIS LINE IS ITS OWN STEP, WITH ITS OWN CHECK. After stage 4
-      # passes: delete `disabled: true`, apply, and watch the fleet for longer
-      # than initialDelaySeconds + periodSeconds * failureThreshold (25s) to
-      # confirm the ping keeps arriving under load, not just at startup. Do not
-      # remove it because the SDK merged; the SDK merging is what made stage 4
-      # runnable, not what proved it.
+      # Removing the flag was then its own step with its own check, which is
+      # this change. MEASURED on k3d-rpg-dev, image
+      # rpg-mmo/gameserver-dotnet:integration (revision 4d928e7, identical to
+      # develop over gameserver-dotnet/ and shared/): a single pod held Ready
+      # for a sustained observation window with RESTARTS = 0, i.e. far longer
+      # than the 25s (initialDelaySeconds + periodSeconds * failureThreshold)
+      # that a stalled ping would take to kill it. Numbers in
+      # deploy/CHANGELOG.md and docs/K3S.md.
       #
-      # The three timings are kept while inert so stage 4 does not have to
-      # re-invent the policy: the Agones v1 Fleet schema has disabled,
-      # initialDelaySeconds, periodSeconds and failureThreshold as four
-      # independent optional properties.
+      # WHAT THIS NOW COUPLES. The health ping shares a process with the 60Hz
+      # tick loop, so a tick loop that stalls past 15s starves the ping and
+      # Agones kills the pod — availability is now tied to simulation latency,
+      # which it was not while the flag was set. ADR-13's overload path (drop
+      # the backlog and resynchronise rather than chase it) is what keeps a
+      # merely-slow server from being killed as a dead one; the CPU limit above
+      # was raised 500m -> 1000m for the same reason, because CFS throttling
+      # shows up as missed ticks and a throttled server is now a killed server.
+      # That path is NOT proven under real overload here — see docs/K3S.md.
+      #
+      # The three timings are unchanged from when they were inert: the Agones v1
+      # Fleet schema has disabled, initialDelaySeconds, periodSeconds and
+      # failureThreshold as four independent optional properties, so dropping
+      # `disabled` leaves the policy exactly as it was written.
       health:
-        disabled: true
         initialDelaySeconds: 10
         periodSeconds: 5
         failureThreshold: 3
@@ -310,14 +321,43 @@ spec:
                 # NOT named "game".
                 - name: METRICS_ADDR
                   value: ":9101"
-                # Unset => in-memory player store, state lost on restart. The DSN
-                # carries a password, so it belongs in the Secret, not the
-                # ConfigMap, when it is turned on:
-                # - name: GAME_DB_URL
-                #   valueFrom:
-                #     secretKeyRef:
-                #       name: rpg-realtime-secrets
-                #       key: game-db-url
+                # PERSISTENCE. Unset or blank => in-memory player store and
+                # state lost on every pod replacement, which under a Fleet is
+                # not an edge case: any rollout, eviction or health kill takes
+                # the world with it.
+                #
+                # The value is a DSN CARRYING A PASSWORD, so it lives in the
+                # Secret and never in this file or the ConfigMap. k3s/setup-dev.sh
+                # writes the key, translating the compose host for a pod:
+                #   compose : postgres://game:...@postgres-game:5432/gamestate
+                #   pod/k3d : postgres://game:...@host.k3d.internal:5433/gamestate
+                # The pod form is the HOST-PUBLISHED port (5433), not the
+                # in-network 5432 — a pod is not on the compose network, so it
+                # reaches postgres the same way any host process does. MEASURED
+                # from a pod in this namespace: `psql -h host.k3d.internal -p
+                # 5433 -U game -d gamestate -c '\dt'` lists player_states and
+                # schema_migrations.
+                #
+                # `optional: true`, and that is deliberate, matching
+                # advertise-host and NOT redis-addr. Absent/blank is a
+                # MEANINGFUL, HANDLED state: Program.cs treats a whitespace-only
+                # value as unset and logs "using in-memory player store
+                # (GAME_DB_URL unset -- state is lost on restart)". It has to
+                # stay reachable, because on docker-desktop no host string makes
+                # the compose-hosted postgres addressable from a pod, so there is
+                # no correct value to require there.
+                #
+                # A wrong value does NOT degrade silently: a configured but
+                # unreachable database makes the server log
+                # "postgres player store unavailable -- refusing to start" and
+                # exit 1, i.e. a visible crash-looping GameServer, not a server
+                # quietly holding state in RAM.
+                - name: GAME_DB_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: rpg-realtime-secrets
+                      key: game-db-url
+                      optional: true
                 # KCP is not enabled on this fleet (protocol: TCP above), so
                 # TRANSPORT_KEY is unused — and the server WARNS if it is set
                 # while the transport is TCP, because the key is then ignored.

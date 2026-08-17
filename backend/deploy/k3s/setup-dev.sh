@@ -173,6 +173,43 @@ else
   log "         placeholders. These only work if the gateway is also using them."
 fi
 
+# game-db-url: the same host-translation problem as REDIS_ADDR below, with a
+# second twist — the PORT changes too.
+#
+# .env's GAME_DB_URL is the value for HOST-run processes and compose's own is
+# `postgres-game:5432`, a name that only resolves on the compose network. A pod
+# is on neither, so it reaches the compose-hosted game database exactly the way
+# any other host process does: through the PUBLISHED port, 5433, on the same
+# host alias used for redis. MEASURED from a pod in this namespace:
+#   psql -h host.k3d.internal -p 5433 -U game -d gamestate -c '\dt'
+#   -> player_states, schema_migrations
+#
+# Empty is a MEANINGFUL value, not a failure: the fleet consumes this key with
+# `optional: true` and the server treats blank as unset, running the in-memory
+# player store and saying so at startup. That is the only honest answer on
+# docker-desktop, where no host string makes the compose postgres addressable
+# from a pod. Override with POD_GAME_DB_URL=<dsn> and record the working value
+# in docs/K3S.md rather than guessing twice.
+case "$CLUSTER_KIND" in
+  docker-desktop) DEFAULT_DB_HOST="" ;;
+  k3d)            DEFAULT_DB_HOST="host.k3d.internal" ;;
+  *)              DEFAULT_DB_HOST="" ;;
+esac
+if [[ -n "${POD_GAME_DB_URL:-}" ]]; then
+  POD_GAME_DB="$POD_GAME_DB_URL"
+elif [[ -n "$DEFAULT_DB_HOST" ]]; then
+  POD_GAME_DB="postgres://${POSTGRES_GAME_USER:-game}:${POSTGRES_GAME_PASSWORD:-localdev}@${DEFAULT_DB_HOST}:${POSTGRES_GAME_PORT:-5433}/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable"
+else
+  POD_GAME_DB=""
+fi
+# NEVER log $POD_GAME_DB itself — it carries the database password.
+if [[ -n "$POD_GAME_DB" ]]; then
+  log "pods will use the postgres player store (host ${DEFAULT_DB_HOST:-<from POD_GAME_DB_URL>})"
+else
+  log "pods will use the IN-MEMORY player store — no host alias for the compose"
+  log "         postgres on cluster kind '$CLUSTER_KIND'; set POD_GAME_DB_URL to change this"
+fi
+
 log "applying dev Secret/ConfigMap in $NAMESPACE"
 kube create secret generic rpg-realtime-secrets \
   --namespace "$NAMESPACE" \
@@ -180,6 +217,7 @@ kube create secret generic rpg-realtime-secrets \
   --from-literal=join-token-secret="${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}" \
   --from-literal=redis-password="${REDIS_PASSWORD:-}" \
   --from-literal=transport-key="${TRANSPORT_KEY:-}" \
+  --from-literal=game-db-url="$POD_GAME_DB" \
   --dry-run=client -o yaml | kube apply -f -
 
 # REDIS_ADDR here is what the POD uses, and a pod is not on the compose network.
