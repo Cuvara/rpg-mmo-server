@@ -122,9 +122,10 @@ spec:
               # `--flag value` and `--flag=value` alike), but mixing them splits
               # the fleet's configuration across two blocks that a reader has to
               # merge by hand, and the env block is the one that matches
-              # docker-compose.yml. Only `--agones` stays a flag: it is a
-              # presence flag, and AGONES_ENABLED=true below is its env twin, so
-              # it is expressed once, in env, like everything else.
+              # docker-compose.yml. There is deliberately no `args:` block at
+              # all — even `--agones`, which has AGONES_ENABLED=true as its exact
+              # env twin (Program.cs: `HasFlag("--agones") || AGONES_ENABLED ==
+              # "true"`).
               env:
                 # ---------------------------------------------------------
                 # SERVER-ID CHAIN — POD_NAME must stay the ONLY source.
@@ -235,10 +236,12 @@ spec:
                 # The data tier stays in docker compose ON THE HOST — that is
                 # deliberate (ADR-15 decision 4 argues against a split, and this
                 # fleet is the accepted exception for one stage, not a migration).
-                # host.docker.internal is why this manifest works on Docker
-                # Desktop and nowhere else. On any other cluster this address
-                # resolves to nothing and the server runs unregistered, so the
-                # gateway answers "no available server for map_01".
+                # The value therefore has to name the HOST from inside a pod, and
+                # that string is cluster-specific and NOT portable:
+                # host.docker.internal on Docker Desktop, host.k3d.internal on
+                # k3d, neither anywhere else. It lives in the ConfigMap rather
+                # than here for exactly that reason — k3s/setup-dev.sh picks it
+                # from the kubectl context, with a POD_REDIS_ADDR override.
                 #
                 # NOT `optional: true`. An absent ConfigMap would leave
                 # REDIS_ADDR unset, and an unset REDIS_ADDR is not an error in
