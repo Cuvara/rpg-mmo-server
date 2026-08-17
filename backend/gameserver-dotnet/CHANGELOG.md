@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [v1.5.0] — 2026-08-17
+
 ### Added
 - **`EcsWorld.UpdateComponentsParallel(workerCount, body)`** — runs a body on N threads
   inside one write scope. **Nothing in the tick loop calls it.** It exists so the two
