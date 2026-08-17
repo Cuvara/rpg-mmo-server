@@ -5,6 +5,33 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **`docs/REALTIME-FLOW.md`** — a new hop-by-hop account of what happens when a player
+  enters a map, written for someone who has not read this repo. Three flows: **A**, the
+  compose path that actually runs (push → `cd.yml` → bundle → self-hosted runner →
+  generated `deploy/.env` → `docker compose up` → smoke test, then the handshake ending
+  with the client talking directly to the game server); **B**, the Agones path as it
+  stands in the tree; and **C**, what a working Agones path would require, with every
+  arrow that does not exist marked as missing. Plus a table of what compose supplies that
+  Kubernetes would have to replace, and the four one-command checks for telling which
+  flow a given box is in. Linked from `docs/README.md`.
+
+  The document's centre is a break that is **not** where it looks like it is. The gateway's
+  `AgonesAllocator` correctly reads `status.address` and the `game` port and builds a
+  dialable address (`gateway/registry/agones_allocator.go:242-254`) — but it is never
+  called, because the pod self-registers first. Self-registration is gated on `REDIS_ADDR`
+  alone (`GameServer/Program.cs:87`, `:313`), the C# fleet sets it and passes no
+  `GAMESERVER_PUBLIC_ADDR`, so `publicAddr` falls back to the listen address
+  (`Program.cs:101`) and the registry holds a hostless `:9000` — wrong host and, under
+  `portPolicy: Dynamic`, wrong port. `FindServer` then finds that entry with capacity and
+  returns at `gateway/registry/registry.go:233-235`, so the allocator branch at `:237` is
+  never evaluated. Two defects stacked; fixing either alone leaves the flow broken, and
+  the address the pod would need cannot be known at manifest-authoring time because
+  `IAgonesSdk` has no status-read call (`GameServer/Agones/AgonesSdk.cs:5-19`).
+
+  ADR-15 argues the decision; this document only describes the mechanics. Nothing in it
+  was applied to any cluster, and Flow C describes nothing that currently runs.
+
 ### Changed
 - **`agones/fleet-map-dotnet-dev.yaml` now sets `health.disabled: true`** (ADR-14 decision 4).
   The C# server's Agones SDK is `NoopAgonesSdk` — it never pings the sidecar and `--agones`
