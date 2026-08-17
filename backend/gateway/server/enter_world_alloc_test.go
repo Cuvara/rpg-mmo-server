@@ -97,6 +97,23 @@ func startGatewayWithAllocator(t *testing.T, alloc *countingAllocator) (*Gateway
 	return gw, serverRegistry
 }
 
+// handleEnterWorld blocks the connection's read loop for the allocation wait,
+// and that same loop is what records MsgPong. The shipped default must sit
+// strictly below the point where that starves the heartbeat, or the gateway
+// disconnects the very client it is waiting for. cmd/gateway enforces the same
+// bound at start-up for configured values; this guards the default itself, which
+// no start-up check would catch until someone ran it.
+func TestAllocationWaitDefaultCannotStarveHeartbeat(t *testing.T) {
+	if registry.DefaultAllocationWaitTimeout >= MaxHandlerBlockingWait {
+		t.Fatalf("DefaultAllocationWaitTimeout = %s, must be < MaxHandlerBlockingWait = %s (pongTimeout %s - pingInterval %s)",
+			registry.DefaultAllocationWaitTimeout, MaxHandlerBlockingWait, pongTimeout, pingInterval)
+	}
+	if MaxHandlerBlockingWait != pongTimeout-pingInterval {
+		t.Errorf("MaxHandlerBlockingWait = %s, want pongTimeout-pingInterval = %s",
+			MaxHandlerBlockingWait, pongTimeout-pingInterval)
+	}
+}
+
 func TestGateway_EnterWorldAllocatesUnservedMap(t *testing.T) {
 	allocated := storage.ServerInfo{
 		ServerID: "map-servers-dev-xjh7p-6ndtl", // == GameServer/pod name

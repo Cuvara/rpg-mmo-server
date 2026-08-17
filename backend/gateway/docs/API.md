@@ -243,7 +243,7 @@ MsgEnterWorld{map_id}
        POST {apiserver}/apis/allocation.agones.dev/v1/namespaces/{ns}/gameserverallocations
        {"apiVersion":"allocation.agones.dev/v1","kind":"GameServerAllocation",
         "metadata":{"namespace":"rpg-realtime"},
-        "spec":{"selectors":[{"matchLabels":{"agones.dev/fleet":"map-servers-dev"}}],
+        "spec":{"selectors":[{"matchLabels":{"agones.dev/fleet":"map-servers-dotnet-dev"}}],
                 "scheduling":"Packed"}}
   <- status{state:"Allocated", gameServerName, address, ports:[{name:"game",port}]}
   -> poll registry for gameServerName until the POD registers itself
@@ -276,6 +276,21 @@ only `constants.JoinTokenTTL` (30s), minting earlier would burn the client's onl
 token on an address that is not answering. If the entry never appears the client
 gets the retryable `server is starting, retry shortly` and **no** token.
 
+**Allocation is single-flight per `map_id`.** Concurrent `MsgEnterWorld` calls for
+one unserved map produce exactly one allocation; the rest wait for it and share
+its outcome. Without that, the retry this API asks for is an amplifier — each
+retry of `server is starting, retry shortly` would allocate another pod, only one
+can ever win the `map_id` registration, and nothing deallocates the losers. A
+failed allocation is never cached, so the next request is free to try again.
+
+**The wait is bounded by the heartbeat, not just by taste.** `MsgEnterWorld` is
+handled on the connection's own read-loop goroutine, which is also what records
+the client's `MsgPong`, so the wait cannot approach `pongTimeout` (30s) without
+the gateway disconnecting the client it is waiting for. The ceiling is
+`pongTimeout - pingInterval` = **20s** (`server.MaxHandlerBlockingWait`); the
+gateway **refuses to start** with a larger `--allocation-wait-timeout`, and the
+15s default sits below it with a margin.
+
 The already-registered path is unaffected: no allocation, no polling, no added
 latency.
 
@@ -294,10 +309,10 @@ through the downward API), then the legacy `gs-<mode>-<map_id>` default.
 |------|-----|---------|-------------|
 | `--allocator` | `ALLOCATOR` | `none` | `none` or `agones` |
 | `--allocator-namespace` | `ALLOCATOR_NAMESPACE` | `rpg-realtime` | Namespace holding the fleets |
-| `--allocator-fleet-map` | `ALLOCATOR_FLEET_MAP` | `map-servers-dev` | Fleet for map allocations |
-| `--allocator-fleet-dungeon` | `ALLOCATOR_FLEET_DUNGEON` | `dungeon-servers-dev` | Fleet for dungeon allocations |
+| `--allocator-fleet-map` | `ALLOCATOR_FLEET_MAP` | `map-servers-dotnet-dev` | Fleet for map allocations. The allocator never validates the name, so a fleet that does not exist fails at the first allocation, not at start-up |
+| `--allocator-fleet-dungeon` | `ALLOCATOR_FLEET_DUNGEON` | *(none)* | Fleet for dungeon allocations. Unset by design — no dungeon fleet is deployed, so `KindDungeon` fails with `no fleet configured for allocation kind` naming the setting to fix |
 | `--allocator-kubeconfig` | `ALLOCATOR_KUBECONFIG` | in-cluster, then `$KUBECONFIG`, then `~/.kube/config` | Credential source |
-| `--allocation-wait-timeout` | `ALLOCATION_WAIT_TIMEOUT` | `20s` | How long to wait for an allocated pod to register itself before replying `server is starting, retry shortly`. Generous because pod cold start is unmeasured; bounded below `JoinTokenTTL` (30s) so the wait can never outlast the token minted after it |
+| `--allocation-wait-timeout` | `ALLOCATION_WAIT_TIMEOUT` | `15s` | How long to wait for an allocated pod to register itself before replying `server is starting, retry shortly`. Generous because pod cold start is unmeasured; below `JoinTokenTTL` (30s) so the wait cannot outlast the token minted after it, and strictly below `server.MaxHandlerBlockingWait` (20s) so it cannot starve the connection's heartbeat. **The gateway refuses to start above 20s.** |
 | `--allocation-poll-interval` | `ALLOCATION_POLL_INTERVAL` | `250ms` | Registry re-check interval during that wait (≤80 single-key reads over the full window) |
 
 Both accept Go duration strings (`15s`, `500ms`). Flag wins, then env, then the
@@ -312,6 +327,8 @@ than failing start-up. They only apply when `--allocator=agones`.
 | `(*SessionManager).RefreshSession(ctx, sessionID) error` | `gateway/session` | Re-arms the session TTL; errors when the session is gone |
 | `registry.NewRegistryServiceWithAllocator(reg, alloc)` | `gateway/registry` | Registry that asks an `Allocator` for a new instance when a map has **no** live server |
 | `registry.WithAllocationWait(timeout, interval)` | `gateway/registry` | Bounds the wait for an allocated server's own registry entry |
+| `registry.ErrKindNotConfigured` | `gateway/registry` | Sentinel: no Fleet configured for the requested allocation kind (the default state of `KindDungeon`) |
+| `server.MaxHandlerBlockingWait` | `gateway/server` | `pongTimeout - pingInterval`: the longest a handler may block the read loop before starving the heartbeat |
 | `registry.ErrServerStarting` | `gateway/registry` | Retryable sentinel: allocated server never registered inside the wait window |
 | `registry.NewAgonesAllocator(AgonesConfig) (*AgonesAllocator, error)` | `gateway/registry` | Allocator backed by the Agones `GameServerAllocation` API |
 | `registry.AllocationRequest` / `KindAllocator` | `gateway/registry` | Kind-aware allocation (`KindMap`, `KindDungeon`) |

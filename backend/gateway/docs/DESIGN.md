@@ -57,6 +57,89 @@ The already-registered path is untouched: no allocator call, no polling, no adde
 latency. It is the common case and a test asserts it performs zero `GetServer`
 calls.
 
+### Decision 3 — allocation is single-flight per `map_id`
+
+Telling clients to retry makes concurrency a correctness problem, not an
+efficiency one. Each retry of `server is starting, retry shortly` found the map
+still unserved and allocated *another* pod; only one of them can ever win the
+`map_id` registration (decision 1), nothing deallocates the rest — Agones does
+not reclaim an `Allocated` GameServer and no `Deallocate` path exists anywhere in
+this codebase — so on a `replicas: 1` fleet a single reconnecting player could
+exhaust the fleet and leave a trail of stuck pods.
+
+The first caller for a map allocates and waits; everyone who arrives while that
+runs blocks on the same call and shares its result. Kept as ~40 lines of
+map-of-channels under a dedicated mutex rather than adding
+`golang.org/x/sync/singleflight`: the module has no `golang.org/x/sync`
+dependency today (only transitive `go.sum` hashes), the package's extra surface
+(`DoChan`, `Forget`, shared-result counting) is unused here, and the one subtlety
+we *do* need — never caching a result — is a `delete` we want to be able to see.
+
+Two properties that are not obvious and are tested:
+
+- **A failed allocation is not cached.** The in-flight entry is removed as soon
+  as the leader finishes, success or failure, so one transient allocator error
+  cannot poison a map until restart. Success needs no cache either: by then the
+  server is in the registry and `FindServer` resolves it before reaching the
+  allocator.
+- **The leader's work is detached from the leader's own context**
+  (`context.WithoutCancel`). Followers must not lose an allocation because the
+  client that happened to arrive first hung up. A follower that gives up leaves
+  the leader running for everyone else.
+
+The existing-server path never touches the mutex or the map.
+
+### Decision 4 — refuse a wait that would starve the heartbeat
+
+A connection is served by one goroutine: the read loop dispatches a frame and
+does not read the next one — including `MsgPong` — until that handler returns.
+`handleEnterWorld` is now the one handler that blocks for a *configurable* time,
+so a large `--allocation-wait-timeout` silently stops the client's pongs from
+being recorded and `HeartbeatLoop` closes the connection after `pongTimeout`
+(30s). The gateway would drop the very client it was holding the socket open for,
+with a symptom — "clients vanish during slow allocations" — that points nowhere
+near the cause.
+
+`server.MaxHandlerBlockingWait` = `pongTimeout - pingInterval` = **20s** makes
+the coupling explicit and exported, and `cmd/gateway` **exits 1** above it (same
+fail-fast precedent as a missing `JOIN_TOKEN_SECRET`). The margin is one full
+ping period: at the ceiling, a single lost or delayed ping still leaves a whole
+interval for a pong to arrive and be processed.
+
+The default came down **20s → 15s** as a direct consequence: a default sitting
+exactly on a ceiling has no room for scheduling and poll-interval slop, and it is
+the value nobody is choosing deliberately. A test in `gateway/server` asserts
+`DefaultAllocationWaitTimeout < MaxHandlerBlockingWait`, which no start-up check
+would catch until someone ran it.
+
+### Decision 5 — the allocator's default fleet names the fleet that exists
+
+`DefaultFleetMap` was `map-servers-dev`, the retired **Go** fleet whose game
+server was deleted in `670a803` and whose manifests are gone. Nothing caught it:
+`NewAgonesAllocator` only builds a REST client, so the gateway started clean and
+failed at the first allocation — the one code path that matters, at the one
+moment it matters. It is now `map-servers-dotnet-dev`, the only deployed fleet,
+and a test asserts the constant against that literal so the next rename fails in
+CI rather than in the cluster.
+
+`DefaultFleetDungeon` was deleted rather than repointed. No dungeon fleet exists
+(ADR-14 stage 6 is unstarted), so any default would be the same trap one
+generation later. An unset fleet is now simply not registered for that kind, and
+`Allocate(KindDungeon)` fails with `ErrKindNotConfigured` naming the flag to set
+— a configuration error stated as one, instead of a Kubernetes 404 for a fleet
+that was never going to be there.
+
+**Not implemented: validating the fleet at construction.** It is tempting —
+`NewAgonesAllocator` has a REST client in hand — but it is the wrong trade twice
+over. It makes the gateway's start-up depend on cluster reachability, and the
+gateway is the redirector that must come up during a cluster outage (metrics,
+probes and already-registered maps all keep working without Agones). And reading
+a Fleet needs `get fleets` RBAC, which the gateway does not have and should not
+be granted: it holds exactly `create gameserverallocations`. A validating gateway
+would emit a 403 that looks identical to a missing fleet. The compensating
+control is the constant-vs-deployed-name test above, which catches the actual bug
+class with no runtime coupling at all.
+
 ### Consequences
 
 - `--allocator-transport` / `ALLOCATOR_TRANSPORT` **no longer reaches a client.**
@@ -110,8 +193,10 @@ that auth, so the allocator is one `http.Post` away.
 
 The request selects `agones.dev/fleet=<fleet>`, with `KindMap`/`KindDungeon`
 mapped to `--allocator-fleet-map` / `--allocator-fleet-dungeon`
-(`map-servers-dev` / `dungeon-servers-dev` by default, matching
-`deploy/agones/*-dev.yaml`). `AgonesAllocator` satisfies both the existing
+(*corrected 2026-08-17*: the map default is `map-servers-dotnet-dev`, the only
+deployed fleet; the dungeon kind has **no** default and fails with
+`ErrKindNotConfigured` until a dungeon fleet exists — see the 2026-08-17 entry at
+the top of this file). `AgonesAllocator` satisfies both the existing
 `Allocator` (map path, used by `RegistryService`) and the richer `KindAllocator`
 (the seam the dungeon transfer will use).
 

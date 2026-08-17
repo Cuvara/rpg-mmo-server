@@ -3,6 +3,8 @@ package registry
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -252,6 +254,132 @@ func TestRegistryService_AllocatorFallback(t *testing.T) {
 			t.Error("FindServer() should fail with the stub allocator")
 		}
 	})
+}
+
+// concurrentAllocator counts allocations atomically and, optionally, registers
+// the allocated server after a delay. It also blocks for `hold` so that
+// concurrent callers genuinely overlap rather than serialising by luck.
+type concurrentAllocator struct {
+	hits atomic.Int32
+
+	hold          time.Duration
+	err           error
+	store         storage.ServerRegistry
+	registerAfter time.Duration
+	info          storage.ServerInfo
+}
+
+func (c *concurrentAllocator) AllocateServer(_ context.Context, mapID string) (storage.ServerInfo, error) {
+	c.hits.Add(1)
+	time.Sleep(c.hold)
+	if c.err != nil {
+		return storage.ServerInfo{}, c.err
+	}
+	info := c.info
+	info.MapID = mapID
+	info.ServerID = c.info.ServerID + "-" + mapID
+	if c.store != nil {
+		self := info
+		time.AfterFunc(c.registerAfter, func() { _ = c.store.Register(context.Background(), self) })
+	}
+	return info, nil
+}
+
+// Concurrent joins on one unserved map must produce ONE allocation, not one per
+// caller. Without this, the retry we tell clients to perform amplifies: each
+// retry of "server is starting" allocates another pod, only one can win the
+// map_id registration (ADR-2) and nothing deallocates the losers.
+func TestRegistryService_AllocationIsSingleFlightPerMap(t *testing.T) {
+	const callers = 10
+	store := storage.NewMemoryServerRegistry()
+	alloc := &concurrentAllocator{
+		hold:          50 * time.Millisecond, // guarantees overlap
+		store:         store,
+		registerAfter: 60 * time.Millisecond,
+		info:          storage.ServerInfo{ServerID: "gs", Addr: "10.0.0.9:7257", Capacity: 50},
+	}
+	svc := NewRegistryServiceWithAllocator(store, alloc, WithAllocationWait(2*time.Second, 5*time.Millisecond))
+
+	type outcome struct {
+		info storage.ServerInfo
+		err  error
+	}
+	results := make([]outcome, callers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start // release everyone at once
+			info, err := svc.FindServer(context.Background(), "map_rush")
+			results[i] = outcome{info, err}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	if got := alloc.hits.Load(); got != 1 {
+		t.Errorf("allocator hits = %d, want exactly 1 for %d concurrent callers", got, callers)
+	}
+	for i, r := range results {
+		if r.err != nil {
+			t.Fatalf("caller %d: FindServer() error: %v", i, r.err)
+		}
+		if r.info.ServerID != "gs-map_rush" || r.info.Addr != "10.0.0.9:7257" {
+			t.Errorf("caller %d got %+v, want the single allocated server", i, r.info)
+		}
+	}
+}
+
+// Single-flight must be per map: a slow allocation for one map cannot block
+// another map's.
+func TestRegistryService_SingleFlightIsPerMap(t *testing.T) {
+	store := storage.NewMemoryServerRegistry()
+	alloc := &concurrentAllocator{
+		hold:          30 * time.Millisecond,
+		store:         store,
+		registerAfter: 35 * time.Millisecond,
+		info:          storage.ServerInfo{ServerID: "gs", Addr: "10.0.0.9:7257", Capacity: 50},
+	}
+	svc := NewRegistryServiceWithAllocator(store, alloc, WithAllocationWait(2*time.Second, 5*time.Millisecond))
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i, mapID := range []string{"map_a", "map_b"} {
+		wg.Add(1)
+		go func(i int, mapID string) {
+			defer wg.Done()
+			_, errs[i] = svc.FindServer(context.Background(), mapID)
+		}(i, mapID)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("map %d: FindServer() error: %v", i, err)
+		}
+	}
+	if got := alloc.hits.Load(); got != 2 {
+		t.Errorf("allocator hits = %d, want 2 (one per map)", got)
+	}
+}
+
+// A failed allocation must not be cached: the next caller has to be free to try
+// again, or one transient failure poisons the map until the gateway restarts.
+func TestRegistryService_FailedAllocationIsNotCached(t *testing.T) {
+	store := storage.NewMemoryServerRegistry()
+	alloc := &concurrentAllocator{err: errors.New("fleet exhausted")}
+	svc := NewRegistryServiceWithAllocator(store, alloc, WithAllocationWait(50*time.Millisecond, 5*time.Millisecond))
+
+	for i := 0; i < 3; i++ {
+		if _, err := svc.FindServer(context.Background(), "map_flaky"); !errors.Is(err, ErrNoServerAvailable) {
+			t.Fatalf("attempt %d: error = %v, want ErrNoServerAvailable", i, err)
+		}
+	}
+	if got := alloc.hits.Load(); got != 3 {
+		t.Errorf("allocator hits = %d, want 3 (a failure must not be cached)", got)
+	}
 }
 
 // countingRegistry counts GetServer calls so a test can prove the common path

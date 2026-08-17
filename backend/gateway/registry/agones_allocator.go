@@ -26,13 +26,27 @@ const (
 	KindDungeon = "dungeon"
 )
 
-// Defaults for the Agones allocator. They match backend/deploy/agones/*-dev.yaml.
+// Defaults for the Agones allocator.
+//
+// DefaultFleetMap names the ONE fleet that exists: `map-servers-dotnet-dev`,
+// running the C# .NET game server. It was `map-servers-dev` until 2026-08-17 —
+// the retired Go fleet, whose game server was deleted in 670a803 and whose
+// manifests are gone from the repo. That default could not be satisfied by any
+// fleet, and nothing noticed: NewAgonesAllocator only builds a REST client, it
+// never checks the fleet name, so the gateway started clean and failed at the
+// first allocation. Keep this value in step with backend/deploy/agones/ — a
+// default that names a fleet nobody can create is a trap no amount of
+// documented overriding fixes.
+//
+// There is deliberately NO default dungeon fleet: no dungeon fleet exists (ADR-14
+// stage 6 is unstarted). An unset FleetDungeon makes KindDungeon fail with
+// ErrKindNotConfigured, naming the flag to set, rather than producing a 404 from
+// the Kubernetes API for a fleet that was never going to be there.
 const (
-	DefaultNamespace    = "rpg-realtime"
-	DefaultFleetMap     = "map-servers-dev"
-	DefaultFleetDungeon = "dungeon-servers-dev"
-	DefaultCapacity     = 100
-	DefaultTimeout      = 10 * time.Second
+	DefaultNamespace = "rpg-realtime"
+	DefaultFleetMap  = "map-servers-dotnet-dev"
+	DefaultCapacity  = 100
+	DefaultTimeout   = 10 * time.Second
 
 	// allocationPath is the aggregated allocation API endpoint. %s is the namespace.
 	allocationPath = "/apis/allocation.agones.dev/v1/namespaces/%s/gameserverallocations"
@@ -47,6 +61,13 @@ const (
 // ErrNoCapacity is returned when the allocation API answers UnAllocated: every
 // GameServer in the fleet is already taken and the fleet cannot grow right now.
 var ErrNoCapacity = errors.New("no game server available in fleet")
+
+// ErrKindNotConfigured means the allocator has no Fleet name for the requested
+// kind, so there is nothing to allocate from. It is a configuration error, not a
+// capacity one, and it is reported here rather than as a Kubernetes 404 for a
+// fleet that does not exist. KindDungeon hits this by default: no dungeon fleet
+// is deployed yet.
+var ErrKindNotConfigured = errors.New("no fleet configured for allocation kind")
 
 // AllocationRequest describes what the gateway wants allocated.
 type AllocationRequest struct {
@@ -91,9 +112,7 @@ func (c *AgonesConfig) applyDefaults() {
 	if c.FleetMap == "" {
 		c.FleetMap = DefaultFleetMap
 	}
-	if c.FleetDungeon == "" {
-		c.FleetDungeon = DefaultFleetDungeon
-	}
+	// FleetDungeon has no default on purpose — see the const block.
 	if c.Capacity <= 0 {
 		c.Capacity = DefaultCapacity
 	}
@@ -148,14 +167,29 @@ func newAgonesAllocator(httpClient *http.Client, baseURL string, cfg AgonesConfi
 		http:      httpClient,
 		baseURL:   strings.TrimRight(baseURL, "/"),
 		namespace: cfg.Namespace,
-		fleets: map[string]string{
+		// Only kinds with a configured fleet are registered; the rest fail with
+		// ErrKindNotConfigured instead of posting an allocation for "".
+		fleets: nonEmptyFleets(map[string]string{
 			KindMap:     cfg.FleetMap,
 			KindDungeon: cfg.FleetDungeon,
-		},
+		}),
 		capacity:  cfg.Capacity,
 		timeout:   cfg.Timeout,
 		transport: cfg.Transport,
 	}
+}
+
+// nonEmptyFleets drops kinds whose fleet name is unset, so a missing
+// configuration surfaces as ErrKindNotConfigured rather than an allocation
+// posted against the empty fleet label.
+func nonEmptyFleets(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for kind, fleet := range in {
+		if fleet != "" {
+			out[kind] = fleet
+		}
+	}
+	return out
 }
 
 // resolveRESTConfig prefers the in-cluster service account, then an explicit
@@ -197,7 +231,16 @@ func (a *AgonesAllocator) Allocate(ctx context.Context, req AllocationRequest) (
 	}
 	fleet, ok := a.fleets[kind]
 	if !ok {
-		return storage.ServerInfo{}, fmt.Errorf("allocate: unknown kind %q", kind)
+		switch kind {
+		case KindMap:
+			return storage.ServerInfo{}, fmt.Errorf("allocate: %w %q (set --allocator-fleet-map / ALLOCATOR_FLEET_MAP)",
+				ErrKindNotConfigured, kind)
+		case KindDungeon:
+			return storage.ServerInfo{}, fmt.Errorf("allocate: %w %q: no dungeon fleet is deployed (set --allocator-fleet-dungeon / ALLOCATOR_FLEET_DUNGEON once one exists)",
+				ErrKindNotConfigured, kind)
+		default:
+			return storage.ServerInfo{}, fmt.Errorf("allocate: unknown kind %q", kind)
+		}
 	}
 
 	body, err := json.Marshal(newAllocationBody(a.namespace, fleet))

@@ -62,10 +62,10 @@ go run ./cmd/gateway/ --backend=redis --instance-id=gw-1
 | `--instance-id` | hostname | Consumer name inside the `gateway` event-stream consumer group |
 | `--allocator` | `ALLOCATOR` (`none`) | `none` or `agones` — allocate a GameServer when **no** live server serves a map. A map whose servers are all full is refused, not expanded |
 | `--allocator-namespace` | `rpg-realtime` | Namespace holding the Agones fleets |
-| `--allocator-fleet-map` | `map-servers-dev` | Fleet used for map allocations |
-| `--allocator-fleet-dungeon` | `dungeon-servers-dev` | Fleet used for dungeon allocations |
+| `--allocator-fleet-map` | `map-servers-dotnet-dev` | Fleet used for map allocations. Must name a fleet that exists — the allocator does not validate it, so a wrong value fails at the first allocation, not at start-up |
+| `--allocator-fleet-dungeon` | *(none)* | Fleet used for dungeon allocations. No default: no dungeon fleet is deployed, so a dungeon allocation fails immediately with `no fleet configured for allocation kind` instead of a Kubernetes 404 |
 | `--allocator-transport` | `ALLOCATOR_TRANSPORT` → `--transport` | Transport stamped on the allocation response. **Inert since 2026-08-17**: the transport announced to a client always comes from the pod's own registry entry |
-| `--allocation-wait-timeout` | `ALLOCATION_WAIT_TIMEOUT` (`20s`) | How long to wait for an allocated pod to register itself before failing the join as retryable (`server is starting, retry shortly`) |
+| `--allocation-wait-timeout` | `ALLOCATION_WAIT_TIMEOUT` (`15s`) | How long to wait for an allocated pod to register itself before failing the join as retryable (`server is starting, retry shortly`). **Hard ceiling 20s** (`pongTimeout - pingInterval`): the wait blocks the connection's read loop, which is what records `MsgPong`, so a larger value lets the heartbeat disconnect the client mid-allocation — the gateway refuses to start above it |
 | `--allocation-poll-interval` | `ALLOCATION_POLL_INTERVAL` (`250ms`) | Registry re-check interval during that wait |
 | `--allocator-kubeconfig` | in-cluster → `$KUBECONFIG` → `~/.kube/config` | Credential source for the allocation API |
 | `--transport-key` | `TRANSPORT_KEY` (empty) | Pre-shared key encrypting the KCP listener (32-byte hex recommended). Empty = plaintext, and a KCP listener logs a WARN |
@@ -79,7 +79,7 @@ go run ./cmd/gateway/ --backend=redis --instance-id=gw-1
 # Out of cluster (uses ~/.kube/config), against the dev fleets:
 go run ./cmd/gateway/ --addr=:8000 \
   --allocator=agones --allocator-namespace=rpg-realtime \
-  --allocator-fleet-map=map-servers-dev
+  --allocator-fleet-map=map-servers-dotnet-dev
 ```
 
 `MsgEnterWorld` for an unserved map POSTs a `GameServerAllocation`
