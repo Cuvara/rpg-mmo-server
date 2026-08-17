@@ -68,6 +68,16 @@ type ClientStats struct {
 	DeltasTotal    int `json:"deltas_total"`
 	InputsTotal    int `json:"inputs_total"`
 
+	// HeartbeatsTotal counts MsgPing frames the virtual players answered, on the
+	// game-server socket and on the held gateway socket respectively. They are
+	// reported separately and are excluded from SnapshotsTotal, SnapshotInterval
+	// and the byte counters: a heartbeat is harness upkeep, not gameplay, and
+	// folding it in would inflate exactly the throughput and recv% figures this
+	// harness produces. Zero on a run longer than 10s means the heartbeat is not
+	// being answered — the failure mode that used to evict players mid-run.
+	HeartbeatsTotal        int `json:"heartbeats_total,omitempty"`
+	GatewayHeartbeatsTotal int `json:"gateway_heartbeats_total,omitempty"`
+
 	// Throughput, measured over the window and reported per connected player.
 	RxBytesPerSecPerPlayer float64 `json:"rx_bytes_per_sec_per_player"`
 	TxBytesPerSecPerPlayer float64 `json:"tx_bytes_per_sec_per_player"`

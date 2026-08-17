@@ -6,7 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Virtual players are no longer evicted for outliving the heartbeat (#142).**
+  Both peers send `MsgPing` every 10s and close any connection that has not
+  answered with `MsgPong` within 30s (`Connection.cs`, `gateway/server/connection.go`),
+  and the generator answered on neither hop: `readLoop` skipped every non-snapshot
+  frame, and the `-hold-gateway` socket had no reader at all. Every run longer
+  than the 30s timeout therefore lost players mid-flight while the server itself
+  was healthy — with the giveaway that a *slower* ramp failed *more*, because it
+  kept the run alive longer (80 players lost 30 at ramp 10/s and 65 at ramp 3/s).
+  Players now answer on the game-server socket, on the held gateway socket, and
+  during the handshake round-trips, echoing the probe's timestamp unchanged and
+  replying in the connection's own encoding.
+
 ### Added
+- `heartbeats_total` and `gateway_heartbeats_total` in the JSON result. Heartbeat
+  frames are deliberately excluded from `snapshots_total`, the snapshot-interval
+  distribution, `recv%` and both byte counters — a `MsgPing`/`MsgPong` is harness
+  upkeep, not gameplay, and folding it in would bias the very throughput figures
+  this harness exists to make trustworthy. Zero on a run longer than 10s is the
+  signal that the heartbeat is unanswered again.
 - The generator now reconstructs authoritative state with `SnapshotState`, so it
   resolves interned entity handles the way a real client must. Without this it
   would consume handle-only entities with empty ids and report a smaller

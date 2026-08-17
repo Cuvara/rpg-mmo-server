@@ -189,6 +189,8 @@ func aggregateClients(stats []*PlayerStats, windowSec float64) ClientStats {
 		out.KeyframesTotal += s.Keyframes
 		out.DeltasTotal += s.Deltas
 		out.InputsTotal += s.Inputs
+		out.HeartbeatsTotal += s.Heartbeats
+		out.GatewayHeartbeatsTotal += int(atomic.LoadUint64(&s.GatewayHeartbeats))
 		out.RxBytesPerSecTotal += float64(atomic.LoadUint64(&s.BytesRx))
 		out.TxBytesPerSecTotal += float64(atomic.LoadUint64(&s.BytesTx))
 	}

@@ -41,6 +41,16 @@ type PlayerStats struct {
 	Deltas    int
 	Inputs    int
 
+	// Heartbeats counts MsgPing frames answered on the game-server socket, and
+	// GatewayHeartbeats the same on the held gateway socket. They are diagnostic
+	// only: heartbeat frames are deliberately kept out of Snapshots, SnapInterval,
+	// BytesRx and BytesTx, because a MsgPing is not gameplay traffic and counting
+	// it would bias the very throughput and recv% numbers this harness exists to
+	// make trustworthy. GatewayHeartbeats is written by the gateway hold goroutine
+	// and must be touched atomically.
+	Heartbeats        int
+	GatewayHeartbeats uint64
+
 	JoinLatency time.Duration
 	Joined      bool
 	Err         error
@@ -69,6 +79,7 @@ type player struct {
 	srvTrans  string
 
 	gwConn net.Conn
+	gwRead *bufio.Reader
 	gsConn net.Conn
 	gsRead *bufio.Reader
 
@@ -89,6 +100,12 @@ func (p *player) Run(ctx context.Context, joined chan<- struct{}) *PlayerStats {
 	if err := p.gatewayHandshake(); err != nil {
 		p.fail("gateway", err)
 		return p.stats
+	}
+	// Started before the join so that a slow join (the gateway may wait for a
+	// freshly allocated game server) cannot itself exceed the gateway's 30s pong
+	// timeout while nobody is answering.
+	if p.gwConn != nil && p.gwRead != nil {
+		go p.holdGatewayLoop(ctx, p.gwConn, p.gwRead)
 	}
 	start := time.Now()
 	if err := p.gameServerJoin(); err != nil {
@@ -174,6 +191,7 @@ func (p *player) gatewayHandshake() error {
 	}
 	p.gwConn = conn
 	r := bufio.NewReaderSize(conn, 8192)
+	p.gwRead = r
 
 	var authResp messages.AuthResponse
 	if err := p.roundTrip(conn, r, messages.MsgAuth,
@@ -202,6 +220,7 @@ func (p *player) gatewayHandshake() error {
 	if !p.cfg.HoldGateway {
 		_ = conn.Close()
 		p.gwConn = nil
+		p.gwRead = nil
 	}
 	return nil
 }
@@ -319,6 +338,23 @@ func (p *player) readLoop(ctx context.Context, sentCh <-chan pendingInput) error
 			}
 			return err
 		}
+		// Heartbeat first, and before any byte is attributed to gameplay. The
+		// game server pings every 10s and closes any connection that has not
+		// answered within 30s (Connection.cs, PingInterval/PongTimeout), so a
+		// reader that merely skips MsgPing evicts itself out of every run that
+		// outlives the timeout — which is why a *slower* ramp used to fail more.
+		if env.Type == messages.MsgPing || env.Type == messages.MsgPong {
+			if env.Type == messages.MsgPing {
+				if err := p.answerPing(p.gsConn, env); err != nil {
+					if ctx.Err() != nil {
+						return nil
+					}
+					return fmt.Errorf("game server heartbeat: %w", err)
+				}
+				p.stats.Heartbeats++
+			}
+			continue
+		}
 		now := time.Now()
 		measuring := p.measuring.Load()
 		if measuring {
@@ -388,6 +424,75 @@ func (p *player) readLoop(ctx context.Context, sentCh <-chan pendingInput) error
 			}
 			pending = pending[cut:]
 		}
+	}
+}
+
+// ---------------------------------------------------------------- heartbeat
+
+// answerPing replies to a heartbeat probe with a MsgPong carrying the probe's
+// own timestamp, exactly as the gateway's handlePing and Connection.HandlePing
+// do. The timestamp is echoed, never regenerated: the peer uses it to measure
+// RTT, so inventing a value would corrupt the peer's own measurement.
+//
+// The reply is built with env.Reply, so it goes back in whichever encoding the
+// probe arrived in and a -encoding=proto run never answers in JSON.
+//
+// It deliberately uses send (not sendCounted): the pong is harness overhead,
+// not gameplay traffic, so its bytes must stay out of BytesTx. It also does not
+// take a lock — the resync path already writes to gsConn from this goroutine
+// while the input ticker writes from the other, and net.Conn permits that.
+func (p *player) answerPing(conn net.Conn, env messages.Envelope) error {
+	var ping messages.PingMessage
+	if err := env.UnmarshalPayload(&ping); err != nil {
+		return fmt.Errorf("decode ping: %w", err)
+	}
+	pong, err := env.Reply(messages.MsgPong, messages.PongMessage{
+		Timestamp:  ping.Timestamp,
+		ServerTime: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		return fmt.Errorf("encode pong: %w", err)
+	}
+	if err := p.send(conn, pong); err != nil {
+		return fmt.Errorf("send pong: %w", err)
+	}
+	return nil
+}
+
+// holdGatewayLoop keeps the gateway socket alive for the whole run when
+// -hold-gateway is set.
+//
+// The gateway runs the same heartbeat (gateway/server/connection.go,
+// pingInterval 10s / pongTimeout 30s) and nothing else was ever reading this
+// socket, so a "held" gateway connection was in fact dropped after 30s and the
+// gateway-side load the flag exists to produce silently disappeared partway
+// through every long run.
+//
+// Failures here never fail the player: the gateway is out of the gameplay data
+// path once EnterWorld has returned (ADR-3), and the closing socket at shutdown
+// is a normal error, not a measurement.
+func (p *player) holdGatewayLoop(ctx context.Context, conn net.Conn, r io.Reader) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := conn.SetReadDeadline(time.Now().Add(p.cfg.Timeout)); err != nil {
+			return
+		}
+		env, _, err := decodeCounted(r)
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue // idle gateway socket: nothing to answer, keep waiting
+			}
+			return
+		}
+		if env.Type != messages.MsgPing {
+			continue
+		}
+		if err := p.answerPing(conn, env); err != nil {
+			return
+		}
+		atomic.AddUint64(&p.stats.GatewayHeartbeats, 1)
 	}
 }
 
@@ -495,6 +600,15 @@ func (p *player) roundTrip(conn net.Conn, r io.Reader, reqType messages.MsgType,
 		resp, _, err := decodeCounted(r)
 		if err != nil {
 			return fmt.Errorf("recv: %w", err)
+		}
+		// A heartbeat can land mid-handshake — the peer's ping timer does not
+		// wait for EnterWorld to return. Skipping it here would start the
+		// pong-timeout clock before the run has even begun.
+		if resp.Type == messages.MsgPing {
+			if err := p.answerPing(conn, resp); err != nil {
+				return fmt.Errorf("handshake heartbeat: %w", err)
+			}
+			continue
 		}
 		if resp.Type != wantType {
 			continue

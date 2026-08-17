@@ -28,8 +28,30 @@ JWT_SECRET=dev-secret-change-me ./loadtest -sweep 1,10,50,100 -json sweep.json
    -> MsgAuth / MsgEnterWorld (gateway)   -join=gateway   (skipped by -join=direct)
    -> MsgJoinToken (game server)
    -> MsgInput every tick  +  consume MsgSnapshot, merging deltas
+   -> answer MsgPing with MsgPong on every socket it holds open
    -> MsgDisconnect
 ```
+
+### Heartbeat
+
+Both peers run the same heartbeat: they send `MsgPing` every 10s and close any
+connection that has not answered with `MsgPong` within 30s
+(`gameserver-dotnet/GameServer/Net/Connection.cs`, `gateway/server/connection.go`).
+Each virtual player answers on both hops — the game-server socket and, under
+`-hold-gateway`, the gateway socket — echoing the probe's own timestamp
+unchanged, in the connection's encoding. It never *initiates* a ping: answering
+is the whole of the eviction contract, and an outbound ping would only add
+generator-side traffic to a tool whose own overhead is already the constraint
+(ADR-7).
+
+The player does not answer for free measurement-wise, so it is kept out of the
+measurements entirely: `MsgPing`/`MsgPong` frames count toward neither
+`snapshots_total`, the snapshot-interval distribution, `recv%`, nor the byte
+counters. They are reported separately as `heartbeats_total` and
+`gateway_heartbeats_total`. A run longer than 10s reporting zero heartbeats
+means the peer is not pinging — or the harness has regressed to the behaviour of
+issue #142, where players were evicted mid-run and a *slower* ramp failed more
+because it kept the run alive past the 30s timeout.
 
 ## What it measures
 
@@ -40,6 +62,7 @@ JWT_SECRET=dev-secret-change-me ./loadtest -sweep 1,10,50,100 -json sweep.json
 | Join latency | client-side |
 | Bytes/sec per client, both directions | client-side, full wire frames incl. length prefix |
 | Connection failures by phase | client-side (`auth`, `gateway`, `join`, `run`) |
+| Heartbeats answered, per hop | client-side, `MsgPing` → `MsgPong`; excluded from every gameplay figure above |
 | Tick duration p50/p95/p99 + exact over-budget fraction | `gameserver_tick_duration_seconds`, bucket-differenced |
 | Achieved tick rate | `gameserver_tick_duration_seconds_count` / window |
 | players_online, entities, snapshots_sent | game server `/metrics` |
