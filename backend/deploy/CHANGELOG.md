@@ -6,6 +6,28 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **A brand-new environment could never complete its first deploy.** Schema migrations ran
+  in `db-migrate`, which is ahead of `deploy` in the job graph. On an environment that has
+  never been deployed the database does not exist yet, so `--migrate-only` failed on
+  connect, `deploy` was gated on that migration, and `deploy` is the only job that would
+  have created the database it was waiting for. The first production deploy failed exactly
+  that way — `Failed to connect to 127.0.0.1:5443` — after having already pushed its images
+  to GHCR.
+
+  The ordering that put migrations first was protecting something real: the schema must be
+  migrated before any new binary serves traffic. That is kept. `deploy` now brings up the
+  **data tier alone** (postgres, redis, nakama — no `realtime` profile), runs the
+  migrations against it, and only then starts the gateway and game server.
+
+  Two details in the data-tier step are deliberate. It omits `--remove-orphans` and the
+  `realtime` profile, so it cannot disturb a running gateway or game server while the
+  schema changes. And it waits on `pg_isready` rather than on compose reporting the
+  container started — on a first deploy postgres still has an empty data directory to
+  initialise, and "container running" is not "accepting connections".
+
+  `db-migrate` is now backup-only and its display name says so. Its job id is unchanged
+  because `deploy` depends on it, and the pre-deploy dump is still what gates the deploy.
+
 - **Two environments on one runner could not coexist, and the failure was silent.**
   `docker-compose.yml` already parameterises every container name
   (`COMPOSE_NAME_PREFIX`) and every published port for exactly this case — its header
