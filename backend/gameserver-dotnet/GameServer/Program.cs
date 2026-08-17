@@ -99,6 +99,22 @@ string transportKey = Env(TransportKind.KeyEnvVar) ?? "";
 // the listen address whenever a container maps ports (listen :9000, clients reach
 // <host>:9200). Falls back to the listen address, which is correct for host mode.
 string publicAddr = GetArg(args, "--public-addr") ?? Env("GAMESERVER_PUBLIC_ADDR") ?? addr;
+// HOST ONLY, and Agones only. Replaces the host part of the address read from the Agones
+// GameServer status while the PORT still comes from that status, because under
+// portPolicy: Dynamic only Agones knows the port.
+//
+// Why this is not just GAMESERVER_PUBLIC_ADDR: status.address is the NODE address on the
+// cluster network. Measured on k3d — the status reports 172.20.0.3 and a client cannot
+// reach it (refused from WSL2, Test-NetConnection False from Windows), while 127.0.0.1,
+// which the k3d serverlb publishes, answers from both. The host is a deployment fact the
+// cluster cannot know; the port is one only the cluster knows. Hence two knobs:
+//
+//   GAMESERVER_PUBLIC_ADDR   full host:port, used when Agones is OFF
+//   GAMESERVER_ADVERTISE_HOST  host only,    used when Agones is ON and the status read worked
+//
+// Exactly one of them applies to any given deployment. Setting this one with Agones off
+// does nothing at all — see the start-up warning below.
+string? advertiseHost = GetArg(args, "--advertise-host") ?? Env("GAMESERVER_ADVERTISE_HOST");
 
 // ── Logging ──
 
@@ -108,6 +124,10 @@ using var loggerFactory = LoggerFactory.Create(builder =>
     builder.SetMinimumLevel(LogLevel.Information);
 });
 var logger = loggerFactory.CreateLogger("Program");
+
+// Resolved once so a bad AGONES_SDK_HTTP_PORT warns once rather than in both the
+// start-up banner and the SDK constructor. Meaningless when useAgones is false.
+int agonesPort = useAgones ? HttpAgonesSdk.ResolvePort(logger) : HttpAgonesSdk.DefaultPort;
 
 logger.LogInformation("GameServer .NET starting");
 logger.LogInformation("  Mode:      {Mode}", mode);
@@ -124,12 +144,15 @@ logger.LogInformation("  Snapshots: {Mode}", keyframeInterval > 0
     ? $"delta, keyframe every {keyframeInterval} snapshots"
     : "full every tick (delta disabled)");
 logger.LogInformation("  MapSize:   {Width}x{Height} world units (centered on origin)", mapWidth, mapHeight);
-logger.LogInformation("  Agones:    {Agones}", useAgones);
+logger.LogInformation("  Agones:    {Agones}", useAgones
+    ? $"HTTP sidecar at localhost:{agonesPort}"
+    : "disabled (no-op SDK)");
 if (useAgones)
 {
-    logger.LogWarning("--agones/AGONES_ENABLED is set but has NO effect: the C# server " +
-                      "still uses the no-op Agones SDK (no Ready/Health/Shutdown is reported " +
-                      "to the sidecar). Do not rely on Agones health checks for this server yet.");
+    logger.LogInformation("  Advertise: {Advertise}",
+        string.IsNullOrWhiteSpace(advertiseHost)
+            ? "host from the Agones GameServer status (GAMESERVER_ADVERTISE_HOST unset), port from Agones"
+            : $"host '{advertiseHost}' (GAMESERVER_ADVERTISE_HOST), port from Agones");
 }
 logger.LogInformation("  Nakama:    {Nakama}", string.IsNullOrWhiteSpace(nakamaUrl) ? "disabled (NAKAMA_URL unset)" : nakamaUrl);
 logger.LogInformation("  Metrics:   {Metrics}", string.IsNullOrWhiteSpace(metricsAddr) ? "disabled" : metricsAddr);
@@ -151,7 +174,33 @@ logger.LogInformation("  Registry:  {Registry}",
 // Never fatal either way: the comment on publicAddr above documents that a bare
 // listen address IS correct for host mode, so refusing to start or to register
 // would break a supported topology.
-if (!string.IsNullOrWhiteSpace(redisAddr) && IsHostlessAddr(publicAddr))
+// Under Agones the hostless value is EXPECTED and is not the value that gets registered:
+// the host server reads the assigned address from the sidecar between Ready and
+// registration and advertises that instead (ADR-15 decision 2, option A). Saying
+// "clients will fail to connect" here would be wrong and would train operators to
+// ignore the line in the one topology where it still means something.
+// Set but inert: GAMESERVER_ADVERTISE_HOST only ever applies on the Agones path. Silence
+// here would leave an operator believing they had configured the advertised address while
+// the server advertised something else entirely.
+if (!string.IsNullOrWhiteSpace(advertiseHost) && !useAgones)
+{
+    logger.LogWarning(
+        "  GAMESERVER_ADVERTISE_HOST is set to '{Host}' but Agones is disabled, so it is " +
+        "IGNORED — it only replaces the host of an address read from the Agones GameServer " +
+        "status. Without Agones the advertised address is GAMESERVER_PUBLIC_ADDR " +
+        "(currently '{PublicAddr}'), which takes a full host:port.",
+        advertiseHost, publicAddr);
+}
+
+if (!string.IsNullOrWhiteSpace(redisAddr) && IsHostlessAddr(publicAddr) && useAgones)
+{
+    logger.LogInformation(
+        "  The advertised address '{Addr}' has no host part, which is expected under Agones: " +
+        "the address handed to clients is read from the GameServer status after Ready and " +
+        "registered in its place. If that read fails, this value is registered instead and " +
+        "clients will not be able to dial it.", publicAddr);
+}
+else if (!string.IsNullOrWhiteSpace(redisAddr) && IsHostlessAddr(publicAddr))
 {
     if (publicAddr == addr)
     {
@@ -338,6 +387,17 @@ if (!string.IsNullOrWhiteSpace(redisAddr))
     }
 }
 
+// ── Agones SDK ──
+
+// ADR-14 decision 1: the real client speaks the sidecar's HTTP interface, not gRPC, so the
+// module keeps its NativeAOT and no-external-dependencies rules. Off by default and
+// selected only by --agones / AGONES_ENABLED=true; the no-op branch is byte-for-byte the
+// behaviour that shipped before, including no health loop (the host skips it when the SDK
+// reports IsEnabled == false).
+IAgonesSdk agonesSdk = useAgones
+    ? new HttpAgonesSdk(loggerFactory.CreateLogger<HttpAgonesSdk>(), $"http://localhost:{agonesPort}/")
+    : new NoopAgonesSdk();
+
 // ── Build server options ──
 
 var options = new ServerOptions
@@ -358,11 +418,8 @@ var options = new ServerOptions
     HoldTtl = mode == "dungeon" ? TimeSpan.FromSeconds(60) : TimeSpan.FromSeconds(30),
     SaveInterval = TimeSpan.FromSeconds(30),
     PlayerStore = playerStore,
-    // Both branches are intentionally Noop: no real Agones SDK client exists for
-    // the C# server yet, so --agones/AGONES_ENABLED currently changes nothing.
-    // The flag is kept so deployment manifests do not have to change when the
-    // real SDK lands. See backend/docs/ARCHITECTURE-DECISIONS.md, ADR-6.
-    AgonesSdk = new NoopAgonesSdk(),
+    AgonesSdk = agonesSdk,
+    AdvertiseHost = advertiseHost,
     // Always Noop: no Redis-backed IEventStream implementation exists yet, so
     // cross-server events are generated (entity_killed) and then discarded.
     // NOT for want of a Redis client — this process has one and uses it to
@@ -448,8 +505,10 @@ catch (Exception ex)
 }
 finally
 {
-    // Order matters: drain the server (final save) before closing the DB pool.
+    // Order matters: drain the server (final save) before closing the DB pool — and before
+    // disposing the Agones client, whose HttpClient the drain's ShutdownAsync still needs.
     await server.DisposeAsync();
+    if (agonesSdk is IDisposable disposableAgones) disposableAgones.Dispose();
     if (postgresStore is not null) await postgresStore.DisposeAsync();
 }
 
