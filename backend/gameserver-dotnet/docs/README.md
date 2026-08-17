@@ -90,7 +90,8 @@ set. Flags are **space-separated** (`--addr :9000`).
 | `--metrics-addr` | `METRICS_ADDR` | `:9101` | Prometheus `/metrics` + `/healthz`. Empty, `off`, `none` or `disabled` turns it off — same vocabulary as the Go gateway. An address that parses as none of those disables the endpoint and logs an error; it does not stop the server |
 | `--game-db-url` | `GAME_DB_URL` | *(unset)* | Game-state PostgreSQL DSN — see below |
 | `--migrate-only` | `GAMESERVER_MIGRATE_ONLY=true` | off | Apply pending migrations, then exit — see below |
-| `--agones` | `AGONES_ENABLED=true` | off | Enable the Agones SDK integration |
+| `--agones` | `AGONES_ENABLED=true` | off | Report Ready / Health / Allocate / Shutdown to the Agones sidecar — see below |
+| *(none)* | `AGONES_SDK_HTTP_PORT` | `9358` | Agones sidecar HTTP port. Only read when Agones is enabled; an unparsable value warns and falls back |
 | `--transport` | `GAMESERVER_TRANSPORT` | `tcp` | Realtime transport: `tcp` or `kcp` — see below |
 | *(none)* | `TRANSPORT_KEY` | *(empty)* | Pre-shared AES-256 key for KCP. Empty = cleartext (start-up WARNING). Ignored for TCP |
 | `--public-addr` | `GAMESERVER_PUBLIC_ADDR` | *(listen addr)* | Address advertised to clients through the registry |
@@ -143,6 +144,43 @@ KCP — but only if it self-registers (`REDIS_ADDR` set). Under Agones the gatew
 announces allocated servers before their own registration lands and falls back to
 its own listen transport, so set `ALLOCATOR_TRANSPORT=kcp` on the gateway when the
 fleet speaks KCP and the gateway does not.
+
+#### Agones (`--agones`, `AGONES_SDK_HTTP_PORT`)
+
+Off by default. With the flag set, the server talks to the Agones sidecar over
+**HTTP on `localhost:9358`** — four POSTs with an empty JSON body: `/ready`,
+`/health`, `/allocate`, `/shutdown`. HTTP and not the official C# SDK on purpose
+(ADR-14 decision 1): that SDK is gRPC and would pull `Grpc.Net.Client` into a
+module whose rules are NativeAOT-compatible and no external dependencies.
+`System.Net.Http` is in-box and the request body is a string literal.
+
+Lifecycle, in order:
+
+| When | What |
+|------|------|
+| listener bound | `POST /ready` — **then** the Redis registry entry is written, never the other way round (ADR-14 decision 3) |
+| every 2s while running | `POST /health`. The fleet manifest's health block uses `periodSeconds: 5`, so two pings fit in one window and a single dropped request is not a strike |
+| first player joins | `POST /allocate`, once per process, off the join's critical path |
+| graceful shutdown | registry entry removed first, **then** `POST /shutdown` |
+
+**No call can throw.** A missing, slow or 500-ing sidecar is logged and ignored:
+every call site is either start-up or a background loop, and an exception in
+either turns a sidecar hiccup into a dead game server. Health failures are
+counted — the first logs a warning, every fifth consecutive one logs an error
+naming the count — because swallowing them silently would hide the cause of the
+pod restart that Agones will eventually perform when pings stop arriving.
+
+With Agones **disabled** nothing changes from the pre-SDK behaviour, including the
+health loop, which does not start at all: pinging the no-op SDK logged
+"health loop started" and reported nothing to anyone, which reads in a log exactly
+like a working liveness contract (ADR-14 decision 4).
+
+> ⚠️ **Unproven against a real sidecar.** No C# server in this project has ever
+> reported Ready to Agones. The tests use a local `HttpListener` standing in for
+> the sidecar, which pins the HTTP shape and the failure behaviour and nothing
+> about Kubernetes. ADR-14 stage 4 (deploy the dotnet fleet, watch for a restart
+> loop) is where this first gets evidence; until then the fleet manifest's health
+> block stays `disabled: true`.
 
 #### Join-token secret (`JOIN_TOKEN_SECRET`)
 

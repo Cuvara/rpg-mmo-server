@@ -109,6 +109,10 @@ using var loggerFactory = LoggerFactory.Create(builder =>
 });
 var logger = loggerFactory.CreateLogger("Program");
 
+// Resolved once so a bad AGONES_SDK_HTTP_PORT warns once rather than in both the
+// start-up banner and the SDK constructor. Meaningless when useAgones is false.
+int agonesPort = useAgones ? HttpAgonesSdk.ResolvePort(logger) : HttpAgonesSdk.DefaultPort;
+
 logger.LogInformation("GameServer .NET starting");
 logger.LogInformation("  Mode:      {Mode}", mode);
 logger.LogInformation("  Address:   {Addr}", addr);
@@ -124,13 +128,9 @@ logger.LogInformation("  Snapshots: {Mode}", keyframeInterval > 0
     ? $"delta, keyframe every {keyframeInterval} snapshots"
     : "full every tick (delta disabled)");
 logger.LogInformation("  MapSize:   {Width}x{Height} world units (centered on origin)", mapWidth, mapHeight);
-logger.LogInformation("  Agones:    {Agones}", useAgones);
-if (useAgones)
-{
-    logger.LogWarning("--agones/AGONES_ENABLED is set but has NO effect: the C# server " +
-                      "still uses the no-op Agones SDK (no Ready/Health/Shutdown is reported " +
-                      "to the sidecar). Do not rely on Agones health checks for this server yet.");
-}
+logger.LogInformation("  Agones:    {Agones}", useAgones
+    ? $"HTTP sidecar at localhost:{agonesPort}"
+    : "disabled (no-op SDK)");
 logger.LogInformation("  Nakama:    {Nakama}", string.IsNullOrWhiteSpace(nakamaUrl) ? "disabled (NAKAMA_URL unset)" : nakamaUrl);
 logger.LogInformation("  Metrics:   {Metrics}", string.IsNullOrWhiteSpace(metricsAddr) ? "disabled" : metricsAddr);
 logger.LogInformation("  GameDB:    {GameDb}",
@@ -338,6 +338,17 @@ if (!string.IsNullOrWhiteSpace(redisAddr))
     }
 }
 
+// ── Agones SDK ──
+
+// ADR-14 decision 1: the real client speaks the sidecar's HTTP interface, not gRPC, so the
+// module keeps its NativeAOT and no-external-dependencies rules. Off by default and
+// selected only by --agones / AGONES_ENABLED=true; the no-op branch is byte-for-byte the
+// behaviour that shipped before, including no health loop (the host skips it when the SDK
+// reports IsEnabled == false).
+IAgonesSdk agonesSdk = useAgones
+    ? new HttpAgonesSdk(loggerFactory.CreateLogger<HttpAgonesSdk>(), $"http://localhost:{agonesPort}/")
+    : new NoopAgonesSdk();
+
 // ── Build server options ──
 
 var options = new ServerOptions
@@ -358,11 +369,7 @@ var options = new ServerOptions
     HoldTtl = mode == "dungeon" ? TimeSpan.FromSeconds(60) : TimeSpan.FromSeconds(30),
     SaveInterval = TimeSpan.FromSeconds(30),
     PlayerStore = playerStore,
-    // Both branches are intentionally Noop: no real Agones SDK client exists for
-    // the C# server yet, so --agones/AGONES_ENABLED currently changes nothing.
-    // The flag is kept so deployment manifests do not have to change when the
-    // real SDK lands. See backend/docs/ARCHITECTURE-DECISIONS.md, ADR-6.
-    AgonesSdk = new NoopAgonesSdk(),
+    AgonesSdk = agonesSdk,
     // Always Noop: no Redis-backed IEventStream implementation exists yet, so
     // cross-server events are generated (entity_killed) and then discarded.
     // NOT for want of a Redis client — this process has one and uses it to
@@ -448,8 +455,10 @@ catch (Exception ex)
 }
 finally
 {
-    // Order matters: drain the server (final save) before closing the DB pool.
+    // Order matters: drain the server (final save) before closing the DB pool — and before
+    // disposing the Agones client, whose HttpClient the drain's ShutdownAsync still needs.
     await server.DisposeAsync();
+    if (agonesSdk is IDisposable disposableAgones) disposableAgones.Dispose();
     if (postgresStore is not null) await postgresStore.DisposeAsync();
 }
 

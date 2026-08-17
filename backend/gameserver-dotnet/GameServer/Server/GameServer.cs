@@ -188,6 +188,9 @@ public sealed class GameServerHost : IAsyncDisposable
     /// <summary>0 until the first ShutdownAsync caller wins the race, 1 afterwards.</summary>
     private int _shutdownStarted;
 
+    /// <summary>0 until the first player join has reported Allocate to Agones, 1 afterwards.</summary>
+    private int _allocateReported;
+
     /// <summary>Completed when the single real teardown finishes (or faults).</summary>
     private readonly TaskCompletionSource _shutdownComplete =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -352,13 +355,22 @@ public sealed class GameServerHost : IAsyncDisposable
             "Game server listening on {Addr} via {Transport} (mode={Mode}, map={MapId}, id={ServerId})",
             actualAddr, _listener.Kind, _options.Mode, _options.MapId, _options.ServerId);
 
-        // Mark ready with Agones
+        // Mark ready with Agones. The listener is already bound at this point, so Ready
+        // never claims a server that is not accepting. HttpAgonesSdk swallows sidecar
+        // failures, so this cannot throw and cannot delay the registration below by more
+        // than its request timeout.
         await _agonesSdk.ReadyAsync();
 
         // Publish ourselves into the server registry the gateway reads, and keep the
         // entry alive. Done after the listener is up so we never advertise an address
         // that is not accepting yet — and after the bind, so a port=0 ephemeral listen
         // advertises the port it actually got.
+        //
+        // It is also deliberately after ReadyAsync (ADR-14 decision 3): registering first
+        // would advertise an address that Agones may still be about to kill, which is the
+        // ordering that lets the two writers — Agones over pod lifecycle, this server over
+        // the Redis `map_id -> server` entry — disagree about whether the server exists.
+        // On shutdown the order reverses: deregister first, then Agones Shutdown.
         if (_registration != null)
         {
             await _registration.StartAsync(_cts.Token);
@@ -367,8 +379,20 @@ public sealed class GameServerHost : IAsyncDisposable
         // Start background tasks
         var tickTask = _tickLoop.RunAsync(_cts.Token);
         var saveTask = _saver.RunAsync(_cts.Token);
-        var healthTask = AgonesHealthLoop.RunAsync(_agonesSdk, TimeSpan.FromSeconds(2), _cts.Token,
-            _loggerFactory.CreateLogger("AgonesHealth"));
+
+        // The health loop only runs against a real SDK (ADR-14 decision 4). Pinging
+        // NoopAgonesSdk logged "health loop started" and then reported nothing to anyone,
+        // which reads in a log exactly like a working liveness contract.
+        //
+        // 2s, against the dotnet fleet manifest's health periodSeconds: 5 — two pings per
+        // window, so one dropped request is not a strike. Once the manifest's
+        // `disabled: true` comes off, a tick loop that starves this task long enough is a
+        // pod restart; ADR-13's overload path (drop the backlog, resynchronise) is what
+        // keeps a merely-slow server from being killed as a dead one.
+        var healthTask = _agonesSdk.IsEnabled
+            ? AgonesHealthLoop.RunAsync(_agonesSdk, TimeSpan.FromSeconds(2), _cts.Token,
+                _loggerFactory.CreateLogger("AgonesHealth"))
+            : Task.CompletedTask;
 
         // Accept loop
         var acceptTask = AcceptLoopAsync(_cts.Token);
@@ -459,6 +483,44 @@ public sealed class GameServerHost : IAsyncDisposable
             _shutdownComplete.TrySetException(ex);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Report Allocate to Agones the first time a player lands here (ADR-14).
+    ///
+    /// <para>Exactly once per process, and never on the join's critical path: Agones' own
+    /// allocation call already moves the GameServer to Allocated when the gateway allocates
+    /// through the API, so this is the self-allocating case (a client that reaches a Ready
+    /// pod directly) and a slow sidecar must not delay the player's join response by even
+    /// one request timeout.</para>
+    ///
+    /// <para>Not balanced by anything on the way down. Agones has no un-allocate: an
+    /// Allocated GameServer leaves that state by being shut down, which is what
+    /// <see cref="ShutdownAsync"/> reports. So a map server that empties stays Allocated
+    /// until it is drained — correct for the dungeon lifecycle, and for a map server it
+    /// means the fleet will not re-hand this pod out. Revisit alongside ADR-2's map-fleet
+    /// allocator policy, which is a precondition of ADR-14 stage 5 anyway.</para>
+    /// </summary>
+    private void NotifyAgonesAllocatedOnce()
+    {
+        if (!_agonesSdk.IsEnabled)
+            return;
+        if (Interlocked.Exchange(ref _allocateReported, 1) != 0)
+            return;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await _agonesSdk.AllocateAsync();
+            }
+            catch (Exception ex)
+            {
+                // HttpAgonesSdk does not throw; this guards a custom implementation from
+                // taking the process down through an unobserved task exception.
+                _logger.LogWarning(ex, "Agones Allocate failed");
+            }
+        });
     }
 
     private async Task AcceptLoopAsync(CancellationToken ct)
@@ -618,6 +680,7 @@ public sealed class GameServerHost : IAsyncDisposable
             // Fire-and-forget: the gateway's capacity view should be fresh, but a slow
             // or down Redis must never delay a player entering the world.
             _registration?.NotifyPlayerCountChanged();
+            NotifyAgonesAllocatedOnce();
             _logger.LogInformation("Player {UserId} joined (total: {Count})", userId, _connections.Count);
 
             // Step 5: Send JoinTokenResp

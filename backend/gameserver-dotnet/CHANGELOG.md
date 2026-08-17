@@ -6,7 +6,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Real Agones SDK over the HTTP sidecar** (`GameServer/Agones/AgonesSdk.cs`) — ADR-14
+  stages 1-3. `HttpAgonesSdk` POSTs an empty JSON body to `/ready`, `/health`, `/allocate`
+  and `/shutdown` on `localhost:9358` (`AGONES_SDK_HTTP_PORT` overrides the port; an
+  unparsable value warns and falls back rather than refusing to boot, because a server that
+  will not start is a restart loop). HTTP and not the official C# SDK on purpose: that SDK is
+  gRPC and would pull `Grpc.Net.Client` into a module whose rules are NativeAOT-compatible and
+  no external dependencies — `System.Net.Http` is in-box and the body is a string literal, so
+  no serializer is involved at all.
+  - **No method throws.** A missing, slow or 500-ing sidecar is logged and swallowed: every
+    call site is start-up or a background loop, and an exception in either turns a sidecar
+    hiccup into a dead game server. Health failures are *counted* rather than silently
+    dropped — first failure warns, every fifth consecutive one logs an error naming the count,
+    a recovery logs the gap — because Agones restarts the pod when pings stop, so a swallowed
+    error would otherwise hide the cause of a real restart.
+  - `--agones` / `AGONES_ENABLED=true` now selects it; the start-up warning saying the flag
+    "has NO effect" is gone because it became false. Unset still means `NoopAgonesSdk`.
+  - `IAgonesSdk` gains `IsEnabled`. The health loop keys off it and no longer runs against the
+    no-op (ADR-14 decision 4): it used to log "health loop started" and then report nothing to
+    anybody, which reads in a log exactly like a working liveness contract. **This is the one
+    behaviour difference with Agones disabled** — no health-loop log lines.
+  - Health ping interval 2s against the fleet manifest's `periodSeconds: 5`, so two pings fit
+    one window and one dropped request is not a strike.
+  - `AllocateAsync` fires once, on the first player to join, off the join's critical path.
+    Nothing balances it on the way down: Agones has no un-allocate, and an Allocated
+    GameServer leaves that state by being shut down.
+  - Ordering per ADR-14 decision 3 — Ready before the Redis registry write, deregister before
+    Agones Shutdown — was already what `GameServerHost.RunAsync` did; it is now commented as a
+    contract and pinned by tests, because it is invisible in a log and silently reversible by
+    anyone reordering two awaits.
+  - 18 tests (`GameServer.Tests/Agones/`): the four paths against a real local `HttpListener`,
+    a 500 and an absent sidecar not throwing, port resolution including four bad values, the
+    Ready-before-register and deregister-before-Shutdown orderings, Allocate-once, and the
+    disabled build reporting nothing while still registering at the same point.
+
+> ⚠️ **Not proved against Agones.** No C# server in this project has ever reported Ready to a
+> real sidecar. The tests stand a local `HttpListener` in for it, which pins the HTTP shape and
+> the failure behaviour and nothing about Kubernetes. ADR-14 stage 4 — deploy the dotnet fleet
+> and watch for a restart loop — is where this first gets evidence; until then the fleet
+> manifest's health block stays `disabled: true`.
+
 ### Documentation
+- `docs/README.md`: new "Agones (`--agones`, `AGONES_SDK_HTTP_PORT`)" section — the four
+  endpoints, the lifecycle order, the health cadence, the never-throws rule and what is still
+  unproven. The flag table row no longer describes a stub, and `AGONES_SDK_HTTP_PORT` is listed.
 - **ADR-14 — Agones owns the pod, Redis owns the lookup; the C# server's SDK is a stub and must
   be written over the HTTP sidecar** (`backend/docs/ARCHITECTURE-DECISIONS.md`). Accepted
   2026-08-17, **not yet implemented** — nothing in it has shipped, and it must not be cited as
