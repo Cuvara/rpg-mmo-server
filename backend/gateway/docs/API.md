@@ -50,7 +50,7 @@ to reach the gateway: the two are configured independently.
 | Id | Message | Precondition | Behavior |
 |----|---------|--------------|----------|
 | 1 | `MsgAuth` | none — the only frame accepted without a session | Verify JWT locally (`session.VerifyClientJWT`, shared secret, no Nakama call) → `SessionStore.Set("session:{user_id}", TTL=1h)` → reply `MsgAuthResp{OK}`. Invalid token/payload → `MsgAuthResp{OK:false, Error}` |
-| 3 | `MsgEnterWorld` | live session | Least-loaded live server for `MapID` with `PlayerCount < Capacity` → 30s join token (`sid` claim = server id) → `MsgEnterWorldResp` |
+| 3 | `MsgEnterWorld` | live session | Least-loaded live server for `MapID` with `PlayerCount < Capacity`; a map with **no** live server may be allocated (waited for), a map whose servers are all full is refused → 30s join token (`sid` claim = server id), minted last → `MsgEnterWorldResp` |
 | 9 | `MsgDisconnect` | live session | Destroy the session record, half-close the socket |
 | 11 | `MsgPing` | **none — handled before the session check** | Reply `MsgPong{Timestamp echoed, ServerTime}` |
 | 12 | `MsgPong` | **none — handled before the session check** | Refresh the connection's liveness timer |
@@ -153,7 +153,8 @@ classified below is reported as `internal error` and logged server-side.
 | `not authenticated` | frame sent before a successful `MsgAuth` |
 | `session expired` | session record gone (TTL, explicit disconnect, evicted elsewhere) |
 | `invalid enter world request` | `MsgEnterWorld` payload did not decode |
-| `no server available for map` | no live server with capacity, and allocation did not produce one |
+| `no server available for map` | the map's live server(s) are full, or the map has no server and allocation failed. **Do not retry** — retrying cannot create capacity |
+| `server is starting, retry shortly` | a game server was allocated for this map but had not registered itself when the wait window expired. **Retryable** — retry after a few seconds |
 | `not implemented` | the requested transfer mode is unimplemented (e.g. dungeon) |
 | `internal error` | anything else — store failure, allocator failure, token signing failure |
 | `rate limited` | connection tripped the inbound frame limiter |
@@ -232,22 +233,51 @@ Both increment `gateway_rate_limited_total{reason="connection"|"message"}`.
 
 ## Server allocation (added 2026-08-04)
 
-`MsgEnterWorld` for a map that no registered server hosts (or where every server is
-full) triggers an Agones allocation when the gateway runs with `--allocator=agones`:
+`MsgEnterWorld` for a map that **no registered server hosts at all** triggers an
+Agones allocation when the gateway runs with `--allocator=agones`:
 
 ```
 MsgEnterWorld{map_id}
   -> registry.FindServer            # storage.ServerRegistry lookup, capacity filtered
-  -> (miss) AgonesAllocator.Allocate
+  -> (map has ZERO live servers) AgonesAllocator.Allocate
        POST {apiserver}/apis/allocation.agones.dev/v1/namespaces/{ns}/gameserverallocations
        {"apiVersion":"allocation.agones.dev/v1","kind":"GameServerAllocation",
         "metadata":{"namespace":"rpg-realtime"},
         "spec":{"selectors":[{"matchLabels":{"agones.dev/fleet":"map-servers-dev"}}],
                 "scheduling":"Packed"}}
   <- status{state:"Allocated", gameServerName, address, ports:[{name:"game",port}]}
-  -> register {server_id: gameServerName, addr: "address:port"}
-  -> MsgEnterWorldResp{server_addr, join_token(sid = gameServerName)}
+  -> poll registry for gameServerName until the POD registers itself
+       (--allocation-wait-timeout, --allocation-poll-interval)
+  -> MsgEnterWorldResp{server_addr, transport, join_token(sid = gameServerName)}
+       # every field taken from the pod's OWN registry entry
 ```
+
+Two rules govern this path.
+
+**Allocation replaces an absent server; it never adds capacity to a full one**
+(ADR-2, one live game server per `map_id`). If the map already has live servers
+and every one is at capacity, `MsgEnterWorld` replies
+`no server available for map` and **no allocation is requested**. Registering a
+second server under one `map_id` would produce two disconnected copies of the
+world with no handoff between them; refusing the join is a loud, bounded
+failure, a silently split world is not. `FindServer` still logs a loud warning if
+a map ever does resolve to more than one server — that is the detector for the
+invariant being broken by some other means.
+
+**The join token is minted last, from the pod's own registry entry.** An
+allocation response only names the pod; the pod still has to start its NativeAOT
+container, bind, report `Ready` to the SDK sidecar, learn its own address and
+self-register. The gateway does **not** write that entry on the pod's behalf
+(ADR-1: one writer per datum — and a gateway-written entry has nothing re-arming
+its 15s TTL). It polls for the entry instead, and only then signs the token, so
+the address and `transport` announced to the client are the ones the server
+self-reported. Since join tokens are single-use, pinned to one `sid` and live
+only `constants.JoinTokenTTL` (30s), minting earlier would burn the client's only
+token on an address that is not answering. If the entry never appears the client
+gets the retryable `server is starting, retry shortly` and **no** token.
+
+The already-registered path is unaffected: no allocation, no polling, no added
+latency.
 
 `state: "UnAllocated"` (fleet exhausted) surfaces as `registry.ErrNoCapacity`, wrapped
 into the `MsgEnterWorldResp.error` string. Non-2xx responses report the Kubernetes
@@ -267,6 +297,12 @@ through the downward API), then the legacy `gs-<mode>-<map_id>` default.
 | `--allocator-fleet-map` | `ALLOCATOR_FLEET_MAP` | `map-servers-dev` | Fleet for map allocations |
 | `--allocator-fleet-dungeon` | `ALLOCATOR_FLEET_DUNGEON` | `dungeon-servers-dev` | Fleet for dungeon allocations |
 | `--allocator-kubeconfig` | `ALLOCATOR_KUBECONFIG` | in-cluster, then `$KUBECONFIG`, then `~/.kube/config` | Credential source |
+| `--allocation-wait-timeout` | `ALLOCATION_WAIT_TIMEOUT` | `20s` | How long to wait for an allocated pod to register itself before replying `server is starting, retry shortly`. Generous because pod cold start is unmeasured; bounded below `JoinTokenTTL` (30s) so the wait can never outlast the token minted after it |
+| `--allocation-poll-interval` | `ALLOCATION_POLL_INTERVAL` | `250ms` | Registry re-check interval during that wait (≤80 single-key reads over the full window) |
+
+Both accept Go duration strings (`15s`, `500ms`). Flag wins, then env, then the
+default; an unparseable or non-positive env value is logged and ignored rather
+than failing start-up. They only apply when `--allocator=agones`.
 
 ## Go API additions
 
@@ -274,7 +310,9 @@ through the downward API), then the legacy `gs-<mode>-<map_id>` default.
 |--------|---------|-------------|
 | `session.SessionKey(userID) string` | `gateway/session` | Canonical `session:{user_id}` key |
 | `(*SessionManager).RefreshSession(ctx, sessionID) error` | `gateway/session` | Re-arms the session TTL; errors when the session is gone |
-| `registry.NewRegistryServiceWithAllocator(reg, alloc)` | `gateway/registry` | Registry that asks an `Allocator` for a new instance when nothing has capacity |
+| `registry.NewRegistryServiceWithAllocator(reg, alloc)` | `gateway/registry` | Registry that asks an `Allocator` for a new instance when a map has **no** live server |
+| `registry.WithAllocationWait(timeout, interval)` | `gateway/registry` | Bounds the wait for an allocated server's own registry entry |
+| `registry.ErrServerStarting` | `gateway/registry` | Retryable sentinel: allocated server never registered inside the wait window |
 | `registry.NewAgonesAllocator(AgonesConfig) (*AgonesAllocator, error)` | `gateway/registry` | Allocator backed by the Agones `GameServerAllocation` API |
 | `registry.AllocationRequest` / `KindAllocator` | `gateway/registry` | Kind-aware allocation (`KindMap`, `KindDungeon`) |
 | `registry.ErrNoCapacity` | `gateway/registry` | Sentinel for `state: UnAllocated` (fleet exhausted) |

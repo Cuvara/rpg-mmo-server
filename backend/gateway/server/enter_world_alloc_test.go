@@ -18,10 +18,21 @@ import (
 
 // countingAllocator stands in for the Agones allocator: it records calls and
 // returns a canned GameServer (name == pod name == server id).
+//
+// A real allocation only tells the gateway which pod was picked; the pod itself
+// registers its address later, once it has booted and bound. selfRegister
+// reproduces that: when set, the pod publishes its own entry after
+// registerAfter, and it publishes a *different* address and transport from the
+// allocation response so a test can prove which one the client was handed.
 type countingAllocator struct {
 	info storage.ServerInfo
 	err  error
 	hits atomic.Int32
+
+	selfRegister  storage.ServerRegistry
+	registerAfter time.Duration
+	selfAddr      string
+	selfTransport string
 }
 
 func (c *countingAllocator) AllocateServer(_ context.Context, mapID string) (storage.ServerInfo, error) {
@@ -31,24 +42,47 @@ func (c *countingAllocator) AllocateServer(_ context.Context, mapID string) (sto
 	}
 	info := c.info
 	info.MapID = mapID
+	if c.selfRegister != nil {
+		self := info
+		if c.selfAddr != "" {
+			self.Addr = c.selfAddr
+		}
+		self.Transport = c.selfTransport
+		time.AfterFunc(c.registerAfter, func() {
+			_ = c.selfRegister.Register(context.Background(), self)
+		})
+	}
 	return info, nil
 }
 
 // startGatewayWithAllocator starts a gateway whose registry knows about
-// map_forest only, so any other map has to go through the allocator.
-func startGatewayWithAllocator(t *testing.T, alloc registry.Allocator) *Gateway {
+// map_forest (has room) and map_full (at capacity) only, so any other map has to
+// go through the allocator.
+//
+// The returned store is the same one the allocator may self-register into.
+func startGatewayWithAllocator(t *testing.T, alloc *countingAllocator) (*Gateway, storage.ServerRegistry) {
 	t.Helper()
 
 	serverRegistry := storage.NewMemoryServerRegistry()
-	if err := serverRegistry.Register(context.Background(), storage.ServerInfo{
-		ServerID: "srv1", MapID: "map_forest", Addr: "10.0.0.1:9000", Capacity: 100,
-	}); err != nil {
-		t.Fatalf("register: %v", err)
+	seed := []storage.ServerInfo{
+		{ServerID: "srv1", MapID: "map_forest", Addr: "10.0.0.1:9000", Capacity: 100},
+		{ServerID: "srv-full", MapID: "map_full", Addr: "10.0.0.2:9000", Capacity: 10, PlayerCount: 10},
+	}
+	for _, info := range seed {
+		if err := serverRegistry.Register(context.Background(), info); err != nil {
+			t.Fatalf("register %s: %v", info.ServerID, err)
+		}
+	}
+	if alloc != nil && alloc.selfRegister == nil && alloc.registerAfter > 0 {
+		alloc.selfRegister = serverRegistry
 	}
 
 	gw := New(
 		session.NewSessionManager(storage.NewMemorySessionStore()),
-		registry.NewRegistryServiceWithAllocator(serverRegistry, alloc),
+		registry.NewRegistryServiceWithAllocator(serverRegistry, alloc,
+			// Tests must not wait the production 20s for a pod that will never
+			// show up; the behaviour under test is the same.
+			registry.WithAllocationWait(300*time.Millisecond, 5*time.Millisecond)),
 		testSecret,
 		logger.New("error"),
 	)
@@ -60,50 +94,83 @@ func startGatewayWithAllocator(t *testing.T, alloc registry.Allocator) *Gateway 
 		t.Fatal("gateway did not start in time")
 	}
 	t.Cleanup(gw.Shutdown)
-	return gw
+	return gw, serverRegistry
 }
 
 func TestGateway_EnterWorldAllocatesUnservedMap(t *testing.T) {
 	allocated := storage.ServerInfo{
 		ServerID: "map-servers-dev-xjh7p-6ndtl", // == GameServer/pod name
-		Addr:     "192.168.65.3:7257",
+		Addr:     "192.168.65.3:9000",           // the allocation response's guess
 		Capacity: 100,
 	}
 
 	tests := []struct {
-		name      string
-		mapID     string
-		alloc     *countingAllocator
-		wantAddr  string
-		wantHits  int32
-		wantError bool
+		name string
+		// mapID the client asks for.
+		mapID string
+		alloc *countingAllocator
+		// wantAddr / wantTransport are what the client must be told.
+		wantAddr      string
+		wantTransport string
+		wantSID       string
+		wantHits      int32
+		wantError     string // exact client-facing message, "" = success
 	}{
 		{
-			name:     "unserved map triggers allocation",
-			mapID:    "map_desert",
-			alloc:    &countingAllocator{info: allocated},
-			wantAddr: "192.168.65.3:7257",
-			wantHits: 1,
+			// Allocation exists to serve a map with NO live server.
+			name:  "unserved map allocates and waits for the pod to register",
+			mapID: "map_desert",
+			alloc: &countingAllocator{
+				info:          allocated,
+				registerAfter: 20 * time.Millisecond,
+				selfAddr:      "192.168.65.3:7257", // the port the pod really got
+				selfTransport: "kcp",
+			},
+			// The self-reported entry wins over the allocation response.
+			wantAddr:      "192.168.65.3:7257",
+			wantTransport: "kcp",
+			wantSID:       allocated.ServerID,
+			wantHits:      1,
 		},
 		{
-			name:     "served map does not allocate",
-			mapID:    "map_forest",
-			alloc:    &countingAllocator{info: allocated},
-			wantAddr: "10.0.0.1:9000",
-			wantHits: 0,
+			// The token is minted last: if the pod never registers, no token and
+			// no address are handed out, and the failure is the retryable one.
+			name:      "allocated pod that never registers is a retryable error",
+			mapID:     "map_desert",
+			alloc:     &countingAllocator{info: allocated},
+			wantHits:  1,
+			wantError: msgServerStarting,
+		},
+		{
+			name:          "served map does not allocate",
+			mapID:         "map_forest",
+			alloc:         &countingAllocator{info: allocated},
+			wantAddr:      "10.0.0.1:9000",
+			wantTransport: "",
+			wantSID:       "srv1",
+			wantHits:      0,
+		},
+		{
+			// ADR-2: a full map must NOT gain a second live server. Refusing the
+			// join is the correct, loud failure; the client must not retry.
+			name:      "full map is refused without allocating",
+			mapID:     "map_full",
+			alloc:     &countingAllocator{info: allocated},
+			wantHits:  0,
+			wantError: msgNoServerAvailable,
 		},
 		{
 			name:      "allocation failure surfaces to the client",
 			mapID:     "map_desert",
 			alloc:     &countingAllocator{err: errors.New("fleet exhausted")},
 			wantHits:  1,
-			wantError: true,
+			wantError: msgNoServerAvailable,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gw := startGatewayWithAllocator(t, tt.alloc)
+			gw, store := startGatewayWithAllocator(t, tt.alloc)
 
 			conn := dialGateway(t, gw)
 			defer conn.Close()
@@ -124,9 +191,19 @@ func TestGateway_EnterWorldAllocatesUnservedMap(t *testing.T) {
 			if got := tt.alloc.hits.Load(); got != tt.wantHits {
 				t.Errorf("allocator hits = %d, want %d", got, tt.wantHits)
 			}
-			if tt.wantError {
-				if resp.Error == "" {
-					t.Fatal("expected an error response")
+			if tt.wantError != "" {
+				if resp.Error != tt.wantError {
+					t.Fatalf("Error = %q, want %q", resp.Error, tt.wantError)
+				}
+				if resp.JoinToken != "" {
+					t.Error("a failed assignment must not mint a join token")
+				}
+				if resp.ServerAddr != "" {
+					t.Errorf("ServerAddr = %q, want empty on failure", resp.ServerAddr)
+				}
+				// The gateway never writes a game server's registry entry.
+				if _, gerr := store.GetServer(context.Background(), allocated.ServerID); gerr == nil && tt.wantHits > 0 {
+					t.Error("gateway registered the allocated server itself; only the game server may")
 				}
 				return
 			}
@@ -135,6 +212,9 @@ func TestGateway_EnterWorldAllocatesUnservedMap(t *testing.T) {
 			}
 			if resp.ServerAddr != tt.wantAddr {
 				t.Errorf("ServerAddr = %q, want %q", resp.ServerAddr, tt.wantAddr)
+			}
+			if resp.Transport != tt.wantTransport {
+				t.Errorf("Transport = %q, want %q", resp.Transport, tt.wantTransport)
 			}
 			if resp.JoinToken == "" {
 				t.Fatal("JoinToken should not be empty")
@@ -145,12 +225,8 @@ func TestGateway_EnterWorldAllocatesUnservedMap(t *testing.T) {
 			if err != nil {
 				t.Fatalf("validate join token: %v", err)
 			}
-			wantSID := "srv1"
-			if tt.wantHits > 0 {
-				wantSID = allocated.ServerID
-			}
-			if sid != wantSID {
-				t.Errorf("join token sid = %q, want %q", sid, wantSID)
+			if sid != tt.wantSID {
+				t.Errorf("join token sid = %q, want %q", sid, tt.wantSID)
 			}
 		})
 	}

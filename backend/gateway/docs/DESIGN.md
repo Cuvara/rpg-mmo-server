@@ -1,5 +1,75 @@
 # Gateway — Design Decisions
 
+## 2026-08-17 — Allocation only replaces an absent server, and the token is minted last
+
+### Context
+
+Two latent problems in the allocation path became reachable the moment
+`ALLOCATOR=agones` was switched on for the first time. Neither could fire before,
+because allocation could not previously produce a live server.
+
+### Decision 1 — a full map is refused, never given a second server
+
+`FindServer` used to allocate whenever *no server had spare capacity*, which
+includes the case where the map already has a live server that is simply full. It
+then registered the result under the same `map_id`. That directly breaks the MVP
+invariant of **one live game server per `map_id`** (ADR-2): two instances are two
+disconnected copies of the world, players on them cannot see or interact with
+each other, and there is no handoff between them.
+
+Allocation now fires **only when the registry returns zero entries for the map**.
+Live-but-full resolves to `ErrNoServerAvailable` with no allocator call at all.
+Refusing a join is a loud, bounded failure that the client already handles; a
+silently split world is neither. Deliberately *not* softened into a fallback.
+
+The multi-server warning in `FindServer` stays: it is now the detector for the
+invariant being violated by some other route (a stray manual registration, a pod
+that outlived its deregistration).
+
+### Decision 2 — the join token is minted only once the target is dialable
+
+Join tokens live `constants.JoinTokenTTL` = **30s**, are single-use (the game
+server consumes the `jti`) and are pinned to one server id. The old code minted
+one the instant `FindServer` returned — including for a pod that had only just
+been allocated. An Agones pod at that moment has not started its NativeAOT
+container, bound its port, reported `Ready` to the sidecar, learned its own
+address or registered. If that took longer than 30s, the client burned its only
+token on an address that was not answering.
+
+`FindServer` now polls the registry for the allocated **`ServerID`** and returns
+the entry *the game server wrote about itself*, from which the token, address and
+transport are then derived. The gateway does **not** write that entry on the
+server's behalf: that would put two writers on one datum (ADR-1), and a
+gateway-written entry has nothing re-arming its 15s heartbeat TTL, so it would
+expire under a pod that is alive.
+
+Bounds: `--allocation-wait-timeout` (default **20s**) and
+`--allocation-poll-interval` (default **250ms**), flag → env → default. 20s is a
+deliberate compromise while pod cold start is unmeasured: longer than
+`retryTotalTimeout`'s 10s, because a pod start is much heavier than a Redis blip,
+but still under `JoinTokenTTL` so the wait can never outlast the token minted
+after it. Timing out yields `ErrServerStarting` → the client-facing
+`server is starting, retry shortly`, which is **retryable** and deliberately
+distinct from `no server available for map` (full/unavailable — do not retry).
+No token and no address are handed out in that case.
+
+The already-registered path is untouched: no allocator call, no polling, no added
+latency. It is the common case and a test asserts it performs zero `GetServer`
+calls.
+
+### Consequences
+
+- `--allocator-transport` / `ALLOCATOR_TRANSPORT` **no longer reaches a client.**
+  It stamps a transport onto the allocation response, and that response is now
+  used only for its `ServerID`; the announced transport always comes from the
+  pod's own registry entry. The flag is retained (it costs nothing and the
+  allocator still fills the field) but it is now inert — a candidate for removal.
+- A map whose only server is full is now a hard refusal for as long as it is
+  full. Raising capacity, or sharding into separate `map_id`s, is the answer —
+  not a second instance.
+- `gateway_allocations_total{result="ok"}` now means "allocated **and** the pod
+  registered", not "the allocation API answered 200".
+
 ## 2026-08-04 — Real Agones allocator (GameServerAllocation API)
 
 ### Context
@@ -159,7 +229,9 @@ dispatch cannot happen before `Run` starts the relay.
 `FindServer` now scans all live servers with spare capacity and returns the lowest
 `PlayerCount` instead of the first match — first-match piles players onto whichever server
 the store happened to list first. When nothing has capacity and an `Allocator` is configured,
-the registry allocates and registers the new instance. `StubAllocator` still returns
+the registry allocates and registers the new instance. *(Superseded 2026-08-17: allocation
+now fires only when the map has **no** live server, and the registry no longer writes the
+allocated entry — see the entry at the top of this file.)* `StubAllocator` still returns
 `ErrNotImplemented`, so `cmd/gateway` wires the registry *without* an allocator: the honest
 "no available server" error beats a misleading "allocator not implemented".
 
@@ -212,6 +284,13 @@ entry. It **must match the fleet manifest's** `--transport` argument; a mismatch
 sends the first client of a freshly allocated pod to the wrong transport, until
 the pod's own registration overwrites the entry. The default (inherit the
 gateway's transport) is correct for a uniform rollout, which is the normal case.
+
+> **Superseded 2026-08-17.** The gateway no longer registers the allocated
+> `ServerInfo` and no longer announces its transport: it waits for the pod's own
+> registry entry and announces that (see the 2026-08-17 entry at the top of this
+> file). `--allocator-transport` therefore no longer reaches any client — the
+> mismatch failure mode described above cannot occur any more, and the flag is
+> inert.
 
 
 ---

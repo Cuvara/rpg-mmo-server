@@ -5,7 +5,64 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **Allocation can no longer split a world: a full map is refused, not given a
+  second server.** `registry.FindServer` used to call the allocator whenever *no
+  server had spare capacity* — which includes a map whose single live server is
+  simply full — and then registered the result under the same `map_id`. That
+  breaks the MVP invariant of one live game server per `map_id` (ADR-2): two
+  instances are two disconnected copies of the world, players on them cannot see
+  or interact with each other, and there is no handoff between them. The branch
+  was unreachable while allocation could not produce a live server; enabling
+  `ALLOCATOR=agones` makes it reachable.
+
+  Allocation now fires **only when the map has zero live servers**. Live but all
+  full returns `ErrNoServerAvailable` with no allocator call, i.e. the existing
+  client-visible `no server available for map`. Refusing a join is a loud,
+  bounded failure; a silently split world is not — this is deliberately not a
+  fallback. The multi-server warning in `FindServer` is unchanged and is now the
+  detector for the invariant being broken by any other route.
+
+- **The join token is minted only once the target server is actually dialable.**
+  Join tokens are single-use, pinned to one server id and live 30s
+  (`constants.JoinTokenTTL`). `transfer.AssignMapKeyring` minted one the moment
+  `FindServer` returned — including for a pod Agones had only just allocated,
+  which still has to start its NativeAOT container, bind, report `Ready` to the
+  sidecar, learn its own address and self-register. If that took longer than 30s
+  the client burned its only token on an address that was not answering.
+
+  On the allocation path `FindServer` now polls the registry for the allocated
+  `ServerID` and returns the entry **the game server wrote about itself**; the
+  token, `ServerAddr` and `Transport` all come from that entry, so the client is
+  given the self-reported, dialable address rather than the allocation response's
+  guess. The gateway no longer writes that entry on the server's behalf — two
+  writers on one datum is forbidden (ADR-1) and a gateway-written entry has
+  nothing re-arming its 15s TTL. The already-registered path is unchanged: no
+  allocator call, no polling, no added latency (asserted by test).
+
+  `gateway_allocations_total{result="ok"}` now means "allocated **and** the pod
+  registered"; a pod that never registers counts as `result="fail"`.
+
+- `--allocator-transport` / `ALLOCATOR_TRANSPORT` is now **inert**. It stamps a
+  transport onto the allocation response, and that response is used only for its
+  `ServerID`; the transport announced to a client always comes from the pod's own
+  registry entry. The flag is retained but is a candidate for removal.
+
 ### Added
+- `registry.ErrServerStarting` and the client-facing
+  `server is starting, retry shortly`: a distinct, **retryable** EnterWorld
+  failure for "a server was allocated for this map but has not finished booting".
+  A client can now tell it apart from `no server available for map` (full or
+  unavailable — do not retry). No token and no address are handed out with it,
+  and it leaks no internal detail. Matchable with `errors.Is`.
+- `--allocation-wait-timeout` / `ALLOCATION_WAIT_TIMEOUT` (default **20s**) and
+  `--allocation-poll-interval` / `ALLOCATION_POLL_INTERVAL` (default **250ms**)
+  bound that wait (flag wins, then env, then default; an unparseable or
+  non-positive env value is logged and ignored rather than failing start-up).
+  20s is a deliberate compromise while pod cold start is unmeasured: longer than
+  `retryTotalTimeout`'s 10s because a pod start is far heavier than a Redis blip,
+  but below `JoinTokenTTL` (30s) so the wait can never outlast the token minted
+  after it. Also exposed programmatically as `registry.WithAllocationWait`.
 - **Per-request logging for the client handshake — the gateway was invisible.**
   A live run of the netcode sample completed a full handshake (Nakama device
   auth → `gateway_token` → map assignment → direct join → snapshots streaming)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/duycuong/rpg-mmo/gateway/metrics"
 	"github.com/duycuong/rpg-mmo/shared/storage"
@@ -13,22 +14,42 @@ import (
 )
 
 func TestRegistryMetrics_AllocationsTotal(t *testing.T) {
+	// An allocation counts as a success only once the allocated server has
+	// registered itself and a client could actually be sent there.
 	tests := []struct {
 		name             string
-		alloc            Allocator
+		newAlloc         func(store storage.ServerRegistry) Allocator
 		wantOK, wantFail float64
 		wantErr          bool
 	}{
 		{
-			name: "allocation succeeds",
-			alloc: &fakeAllocator{info: storage.ServerInfo{
-				ServerID: "gs-1", MapID: "map_void", Addr: "10.0.0.9:9000", Capacity: 50,
-			}},
+			name: "allocation succeeds once the server registers",
+			newAlloc: func(store storage.ServerRegistry) Allocator {
+				return &fakeAllocator{
+					info: storage.ServerInfo{
+						ServerID: "gs-1", MapID: "map_void", Addr: "10.0.0.9:9000", Capacity: 50,
+					},
+					selfRegister:  store,
+					registerAfter: 10 * time.Millisecond,
+				}
+			},
 			wantOK: 1,
 		},
 		{
-			name:     "allocation fails",
-			alloc:    &fakeAllocator{err: errors.New("fleet exhausted")},
+			name: "allocation fails",
+			newAlloc: func(storage.ServerRegistry) Allocator {
+				return &fakeAllocator{err: errors.New("fleet exhausted")}
+			},
+			wantFail: 1,
+			wantErr:  true,
+		},
+		{
+			name: "allocated server never registers counts as a failure",
+			newAlloc: func(storage.ServerRegistry) Allocator {
+				return &fakeAllocator{info: storage.ServerInfo{
+					ServerID: "gs-ghost", MapID: "map_void", Addr: "10.0.0.9:9000", Capacity: 50,
+				}}
+			},
 			wantFail: 1,
 			wantErr:  true,
 		},
@@ -37,7 +58,9 @@ func TestRegistryMetrics_AllocationsTotal(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m := metrics.New(prometheus.NewRegistry())
-			svc := NewRegistryServiceWithAllocator(storage.NewMemoryServerRegistry(), tt.alloc, WithMetrics(m))
+			store := storage.NewMemoryServerRegistry()
+			svc := NewRegistryServiceWithAllocator(store, tt.newAlloc(store), WithMetrics(m),
+				WithAllocationWait(200*time.Millisecond, 5*time.Millisecond))
 
 			_, err := svc.FindServer(context.Background(), "map_void")
 			if (err != nil) != tt.wantErr {

@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/duycuong/rpg-mmo/shared/storage"
@@ -107,8 +108,8 @@ func TestRegistryService_FindNoCapacity(t *testing.T) {
 	}
 
 	_, err := reg.FindServer(ctx, "map_cave")
-	if err == nil {
-		t.Error("FindServer() should fail when all servers are full")
+	if !errors.Is(err, ErrNoServerAvailable) {
+		t.Errorf("FindServer() error = %v, want ErrNoServerAvailable when all servers are full", err)
 	}
 }
 

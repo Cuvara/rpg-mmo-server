@@ -866,12 +866,22 @@ func (g *Gateway) handleDisconnect(cc *ClientConn) {
 // Client-facing messages for EnterWorld failures.
 const (
 	msgNoServerAvailable = "no server available for map"
-	msgNotImplemented    = "not implemented"
-	msgInternalError     = "internal error"
+	// msgServerStarting is the one retryable EnterWorld failure: a game server
+	// was allocated for the map but has not finished booting and registering
+	// itself. The client must be able to tell this apart from
+	// msgNoServerAvailable ("full or unserved" — do not retry) and retry
+	// shortly instead. It names no internal detail.
+	msgServerStarting = "server is starting, retry shortly"
+	msgNotImplemented = "not implemented"
+	msgInternalError  = "internal error"
 )
 
 func clientSafeAssignError(err error) string {
 	switch {
+	// ErrServerStarting is checked first: it is the more specific condition and
+	// must not be flattened into the do-not-retry message.
+	case errors.Is(err, registry.ErrServerStarting):
+		return msgServerStarting
 	case errors.Is(err, registry.ErrNoServerAvailable):
 		return msgNoServerAvailable
 	case gameerrors.Is(err, gameerrors.ErrNotImplemented):
