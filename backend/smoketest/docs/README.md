@@ -105,12 +105,53 @@ All endpoints are overridable via env and/or flags (flags win):
 | `SMOKE_DB_POLL_TIMEOUT` | `--db-poll-timeout` | `75s` | Deadline for the `player_states` row |
 | `SMOKE_DB_POLL_INTERVAL` | `--db-poll-interval` | `1s` | Gap between polls |
 | `SMOKE_HOLD_TTL` | `--hold-ttl` | `30s` | Game server reconnect hold, waited out before the reload check |
+| `SMOKE_STRICT_ADDR` | `--strict-addr` | `false` | Fail instead of rewriting when the advertised **game server** address is listen-style |
 
 The game server address is **not** configured — it comes from the
 `EnterWorldResponse`, exactly like a real client. Neither is the game server
 *transport*: the runner dials whatever `EnterWorldResponse.Transport` announces
 (empty = `tcp`), so a gateway on TCP in front of KCP game servers works without
 any extra flag.
+
+### Strict address mode (`--strict-addr`)
+
+By default a listen-style `ServerAddr` — `:9000`, `0.0.0.0:9000`, `[::]:9200` —
+is rewritten to `127.0.0.1:<port>` before dialing. That is correct for host-mode
+deploys and local dev, where a bare `:9000` genuinely *is* where clients connect,
+and the C# side agrees on which addresses count as listen-style
+(`GameServer/Program.cs`, `IsHostlessAddr`).
+
+Under Kubernetes it is a trap. With Agones and `portPolicy: Dynamic` the game
+server must learn its scheduler-assigned address from the sidecar and register
+*that*. If it does not, it advertises the hostless `:9000`, the gateway forwards
+it to the client verbatim, and no real client can dial it — but the smoke test's
+rewrite would connect to whatever sits on port 9000 of the local host (quite
+possibly an unrelated compose-run game server), collect snapshots, and report
+**PASS**. The run would prove nothing while the real client fails.
+
+**Turn it on for any run whose purpose is to prove that a Kubernetes/Agones-
+allocated game server is reachable**, i.e. every allocation or fleet verification
+run. Then a listen-style `ServerAddr` fails the `gateway_auth` step outright:
+
+```
+FAIL  gateway_auth  ...  error: enter world: strict address mode: game server advertised ":9000",
+a listen-style address no client can dial; the game server never learned its externally-dialable
+address — under Agones that is the sidecar GameServer status read (allocated address + dynamic
+port), otherwise set GAMESERVER_PUBLIC_ADDR to the host:port clients reach
+```
+
+Strictness applies to the **game-server hop only**. `GATEWAY_ADDR` is
+operator-supplied local config (`:8000` by default), not an address a server
+advertised, so it keeps the loopback rewrite in both modes. Strict mode also
+rejects *only* listen-style addresses: a loopback address the server deliberately
+advertised (`127.0.0.1:9000`, plausible under k3d port-forwarding) passes through
+untouched.
+
+```bash
+# Proving an Agones-allocated server is really reachable
+JWT_SECRET=dev-secret-change-me GATEWAY_ADDR=127.0.0.1:8000 \
+  bin/smoketest --strict-addr
+```
 
 ```bash
 # Full flow with both hops on KCP

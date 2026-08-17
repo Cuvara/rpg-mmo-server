@@ -6,6 +6,157 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [v1.5.2] — 2026-08-17
+
+### Fixed
+- **`SlowClientMovementTests` measured the transport and blamed the simulation.** Two of its
+  cases flaked on CI during one afternoon, each costing an investigation, and both readings
+  were wrong in the same direction: they reported a defect in a server that had behaved
+  correctly.
+  - `AnExplicitStopIsNotTreatedAsLostTime` judged **every** sampled step, including those
+    from the movement phase *before* the pause it is named for. Under load the server's own
+    tick loop runs late and the elapsed-time step then integrates two ticks into one — which
+    is #100 working as specified. That lands on exactly `2.00x`, the value the threshold
+    rejects. Observed at `0.6667@tick9` with the pause not ending until ~tick 21. It now
+    judges only samples at or after the restart, with the boundary taken from the snapshot
+    stream's own tick rather than from wall clock.
+  - Samples spanning a **lost** snapshot are discarded. The outbound channel drops the
+    oldest frame under load; when the dropped frame mentioned the player, the next mention
+    is two steps away and the raw difference again reads as exactly `2.00x`. Lost frames are
+    detected by tracking the tick of *every* snapshot, not only those carrying the player —
+    which is what distinguishes a dropped frame from an entity that legitimately did not
+    move and so was absent from a delta.
+  - `MeasureAsync` took "the newest position seen", which deltas and drops can leave several
+    ticks stale, reading as a short distance — again the failure shape. It now requests a
+    keyframe (`MsgResync`) and reads the position out of that, which carries every entity in
+    the AOI unconditionally.
+  - Failures now print the sample set: count, how many were before the restart, lost frames,
+    discarded pairs, and the three largest steps with their tick and gap. The first
+    occurrence after adding it identified the cause immediately, having previously been
+    misattributed twice.
+
+  **Rejected approach, recorded because it looked right.** Dividing each step by its tick gap
+  removes the drop artefact — and also removes the defect: banked repayment puts a whole
+  silent interval's travel into one tick and the previous mention is a whole interval
+  earlier, so the quotient comes back at exactly one normal step. Both banking tests then
+  measured the defect as *absent* while passing. Caught by running them; it would have
+  shipped two permanently green, permanently blind tests.
+
+## [v1.5.0] — 2026-08-17
+
+### Added
+- **`GAMESERVER_ADVERTISE_HOST` / `--advertise-host`** — host-only override for the address
+  composed from the Agones GameServer status. **Host** = this value if set, else
+  `status.address`; **port** = always the Agones-assigned `game` port, never configurable.
+  - **Measured, not theorised.** ADR-15 warned that `status.address` is the *node* address;
+    the consequence was not drawn until a live `portPolicy: Dynamic` GameServer on k3d
+    (k3d v5.8.3, k3s v1.31.5, Agones 1.59.0, ports 7000-7100 published by the serverlb)
+    reported `172.20.0.3:7008` and was probed: `127.0.0.1:7008` answers from WSL2 (`PONG`)
+    and from Windows, where the Unity client runs (`Test-NetConnection` True), while
+    `172.20.0.3:7008` is refused from WSL2 and unreachable from Windows. **The read gets the
+    port exactly right and the host wrong** — the port is the half only Agones can supply,
+    the host is a deployment fact the cluster cannot know.
+  - **The two address knobs do not overlap, on purpose.** `GAMESERVER_PUBLIC_ADDR` is a full
+    `host:port` used when Agones is **off**; `GAMESERVER_ADVERTISE_HOST` is host-only and used
+    when Agones is **on** and the status read succeeded. Setting the latter with Agones off
+    logs a warning and changes nothing; setting it to a full `host:port` by mistake logs a
+    warning, honours the host and discards the port.
+  - **Not applied when the status read fails.** With no Agones port to pair it with,
+    composing the override host with a *configured* port would invent an address that was
+    never assigned to anything — a plausible-looking value pointing nowhere, harder to
+    diagnose than the honestly-wrong configured one. That path falls back unchanged.
+  - IPv6 hosts are bracketed when composed (`[2001:db8::1]:7008`), since the gateway hands
+    the string to clients verbatim and a bare `::1:7008` does not parse as an endpoint.
+  - The composition logs which half came from where — `Advertising 127.0.0.1:7008 (host from
+    GAMESERVER_ADVERTISE_HOST, port 7008 from Agones status)` — because when this is wrong it
+    is wrong silently: the server runs, the registry looks healthy, and only the client knows.
+  - 24 further tests: override applied, override unset (pre-override behaviour pinned),
+    Agones disabled, failed read, hostname hosts, blank-as-unset, a value carrying a port, and
+    host normalisation including bare and bracketed IPv6.
+- **The server learns its own dialable address from Agones** (`GameServer/Agones/AgonesSdk.cs`,
+  `GameServer/Registry/RegistrationService.cs`, `GameServer/Server/GameServer.cs`) — ADR-15
+  decision 2, option (A). `IAgonesSdk` gains `GetAddressAsync()`; `HttpAgonesSdk` implements it
+  as `GET /gameserver` against the sidecar, taking `status.address` and the port whose **name**
+  is `game`, and the host advertises that pair into Redis instead of its configured address.
+  - **This is what has kept the Agones path from ever carrying a player**, and it is not the
+    health loop. `deploy/agones/fleet-map-dotnet-dev.yaml` uses `portPolicy: Dynamic`, so
+    Agones assigns the host port at scheduling time and no static value can be correct: the
+    manifest passes `--addr=:9000` and sets no `GAMESERVER_PUBLIC_ADDR`, so the server
+    registered the hostless `:9000`, the gateway copied it into `MsgEnterWorldResp.ServerAddr`
+    verbatim (`transfer/map_assign.go` → `server/server.go`), and the client dialled nothing.
+  - The port is chosen **by name, never by index** — matching `ports[].name` in the fleet
+    manifests and `gamePortName` in the gateway's `registry/agones_allocator.go`. `ports[0]`
+    works right up until a fleet declares a second container port, and then silently
+    advertises the wrong one.
+  - The read sits **between `ReadyAsync` and the registry write**, and both halves are
+    load-bearing: the address does not exist until the pod is scheduled, and the *first* value
+    written to Redis must already be correct — a value repaired one heartbeat later is a
+    15-second window in which the gateway hands clients a dead address.
+  - **Falls back to today's exact resolution on everything**: Agones disabled (the read is not
+    even attempted), sidecar unreachable, non-2xx, unparsable body, a status with no address,
+    or no port named `game`. Each logs a warning and none is fatal, for the same reason as the
+    rest of this class — a server nobody can reach still serves the players already on it.
+    Running outside a cluster is byte-for-byte unchanged.
+  - `RegistrationService` gains `PublicAddr` and `OverridePublicAddr(string)`. The override
+    throws after `StartAsync` rather than half-applying, since by then the wrong value is
+    already in Redis.
+  - The AOT rules are intact: one source-generated `JsonSerializerContext` for the three fields
+    read, no reflection-based serialization, no new package (`System.Net.Http` is in-box —
+    the official Agones C# SDK is gRPC, which is why ADR-14 decision 1 chose HTTP).
+  - Start-up logging: under Agones a hostless `--public-addr` is now reported as *expected*
+    rather than as "clients will fail to connect", because it is no longer the value that
+    gets registered.
+  - 28 tests (`GameServer.Tests/Agones/`, 46 in the directory total): the success shape, a
+    500, an absent sidecar, malformed JSON, a missing/empty address, an out-of-range port, a
+    missing `game` port, and port selection where `game` is **not** index 0; plus the wiring —
+    the assigned address is the first thing registered, the read lands after Ready and before
+    registration, a failed read registers the configured address, and with Agones disabled the
+    SDK is never asked and the configured address is registered unchanged.
+  - **The response shape is observed, not assumed.** The success fixture is a verbatim capture
+    from a live Agones **1.59.0** sidecar (`kubectl port-forward` to
+    `map-servers-dev-kl485-gsmrh` in `rpg-realtime`), which returned HTTP 200 and
+    `{"status":{"address":"192.168.65.3","ports":[{"name":"game","port":7691}], ...}}`. What
+    remains unproven is this server making that call from inside a pod.
+- **Real Agones SDK over the HTTP sidecar** (`GameServer/Agones/AgonesSdk.cs`) — ADR-14
+  stages 1-3. `HttpAgonesSdk` POSTs an empty JSON body to `/ready`, `/health`, `/allocate`
+  and `/shutdown` on `localhost:9358` (`AGONES_SDK_HTTP_PORT` overrides the port; an
+  unparsable value warns and falls back rather than refusing to boot, because a server that
+  will not start is a restart loop). HTTP and not the official C# SDK on purpose: that SDK is
+  gRPC and would pull `Grpc.Net.Client` into a module whose rules are NativeAOT-compatible and
+  no external dependencies — `System.Net.Http` is in-box and the body is a string literal, so
+  no serializer is involved at all.
+  - **No method throws.** A missing, slow or 500-ing sidecar is logged and swallowed: every
+    call site is start-up or a background loop, and an exception in either turns a sidecar
+    hiccup into a dead game server. Health failures are *counted* rather than silently
+    dropped — first failure warns, every fifth consecutive one logs an error naming the count,
+    a recovery logs the gap — because Agones restarts the pod when pings stop, so a swallowed
+    error would otherwise hide the cause of a real restart.
+  - `--agones` / `AGONES_ENABLED=true` now selects it; the start-up warning saying the flag
+    "has NO effect" is gone because it became false. Unset still means `NoopAgonesSdk`.
+  - `IAgonesSdk` gains `IsEnabled`. The health loop keys off it and no longer runs against the
+    no-op (ADR-14 decision 4): it used to log "health loop started" and then report nothing to
+    anybody, which reads in a log exactly like a working liveness contract. **This is the one
+    behaviour difference with Agones disabled** — no health-loop log lines.
+  - Health ping interval 2s against the fleet manifest's `periodSeconds: 5`, so two pings fit
+    one window and one dropped request is not a strike.
+  - `AllocateAsync` fires once, on the first player to join, off the join's critical path.
+    Nothing balances it on the way down: Agones has no un-allocate, and an Allocated
+    GameServer leaves that state by being shut down.
+  - Ordering per ADR-14 decision 3 — Ready before the Redis registry write, deregister before
+    Agones Shutdown — was already what `GameServerHost.RunAsync` did; it is now commented as a
+    contract and pinned by tests, because it is invisible in a log and silently reversible by
+    anyone reordering two awaits.
+  - 18 tests (`GameServer.Tests/Agones/`): the four paths against a real local `HttpListener`,
+    a 500 and an absent sidecar not throwing, port resolution including four bad values, the
+    Ready-before-register and deregister-before-Shutdown orderings, Allocate-once, and the
+    disabled build reporting nothing while still registering at the same point.
+
+> ⚠️ **Not proved against Agones.** No C# server in this project has ever reported Ready to a
+> real sidecar. The tests stand a local `HttpListener` in for it, which pins the HTTP shape and
+> the failure behaviour and nothing about Kubernetes. ADR-14 stage 4 — deploy the dotnet fleet
+> and watch for a restart loop — is where this first gets evidence; until then the fleet
+> manifest's health block stays `disabled: true`.
+
 ### Documentation
 - **ADR-14's decision 3 asked for work that was already done.** It states that the server
   must register into Redis only after reporting Ready, written as though that were pending.
@@ -21,6 +172,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ADR-10 and nakama status corrections fixed earlier the same day.
 
 ### Documentation
+- `docs/README.md`: new "Agones (`--agones`, `AGONES_SDK_HTTP_PORT`)" section — the four
+  endpoints, the lifecycle order, the health cadence, the never-throws rule and what is still
+  unproven. The flag table row no longer describes a stub, and `AGONES_SDK_HTTP_PORT` is listed.
+- `docs/README.md`: that section now also documents `GET /gameserver`, why the advertised
+  port comes from the GameServer status under `portPolicy: Dynamic`, the by-name port
+  selection, and the fallback list. The `status.address`-is-the-node-address limit is no
+  longer a caveat but a sub-section with the k3d reachability matrix that measured it, the
+  `GAMESERVER_ADVERTISE_HOST` resolution table, and a side-by-side of the two address knobs
+  so the wrong one is harder to reach for. The `--public-addr` and `--agones` flag rows say
+  Agones overrides the configured address, and `--advertise-host` is listed.
 - **ADR-14 — Agones owns the pod, Redis owns the lookup; the C# server's SDK is a stub and must
   be written over the HTTP sidecar** (`backend/docs/ARCHITECTURE-DECISIONS.md`). Accepted
   2026-08-17, **not yet implemented** — nothing in it has shipped, and it must not be cited as

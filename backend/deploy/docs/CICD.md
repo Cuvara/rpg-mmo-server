@@ -213,6 +213,7 @@ production / `build_images=true`; it is **not** on the deploy path.
 > `db-migrate` is now backup-only, and its display name says so. The job id is unchanged
 > because `deploy` depends on it and the backup is still what gates the deploy.
 | `post-deploy-smoke` | same labels as `deploy` | Sources `$RPG_DEPLOY_DIR/deploy/.env`, overrides the two client-facing addresses (below), and runs `bin/smoketest` (Nakama health → device auth → `gateway_token` RPC → gateway `MsgAuth`/`MsgEnterWorld` → game server join → input/snapshot → disconnect). Separate job so "deploy broke" and "the flow broke" are distinguishable at a glance. Takes the deploy dir from `needs.deploy.outputs.deploy_dir`, so it needs no `environment:` (no second production approval). |
+| `post-deploy-smoke` | same labels as `deploy` | Sources `$RPG_DEPLOY_DIR/deploy/.env` and runs `bin/smoketest` (Nakama health → device auth → `gateway_token` RPC → gateway `MsgAuth`/`MsgEnterWorld` → game server join → input/snapshot → disconnect). Separate job so "deploy broke" and "the flow broke" are distinguishable at a glance. Takes the deploy dir from `needs.deploy.outputs.deploy_dir`, so it needs no `environment:` (no second production approval). |
 | `summary` | `ubuntu-latest` | `if: always()` — step-summary table with ref, commit, runner, deploy dir and the `deploy` / `post-deploy-smoke` results. |
 
 **`post-deploy-smoke` inputs.** `deploy/.env` is written for the **services**, and the
@@ -334,8 +335,19 @@ when** the resolved environment is `production` **or** `workflow_dispatch` set
 `build_images=true`. Auth is `docker/login-action@v3` with the built-in
 `GITHUB_TOKEN` (`permissions: packages: write` on that job); layers are cached
 with `type=gha`. Dev/staging deploys skip this entirely and keep using the host
-binaries from the artifact bundle. The gameserver image name must stay in sync
-with `agones/fleet-map.yaml` and `agones/fleet-dungeon.yaml`.
+binaries from the artifact bundle. No Agones manifest references a GHCR image any
+more — the prod fleets were deleted with the Go server (see `K3S.md`), and the
+only fleet, `agones/fleet-map-dotnet-dev.yaml`, uses the local tag
+`rpg-mmo/gameserver-dotnet:dev`.
+
+> **`cd.yml` should pass `--build-arg GIT_REVISION=$(git rev-parse HEAD)` to the
+> gameserver image build.** `docker/Dockerfile.gameserver-dotnet` stamps it into
+> `org.opencontainers.image.revision`, which is what makes "was this image built
+> from the commit under test?" answerable — a question that has already been
+> answered wrongly once (see `K3S.md`, "Deploying the dotnet fleet"). Without the
+> arg the label reads `unknown` and `validate-manifests.py --check-image` fails,
+> which is the intended behaviour, not a bug. The workflow lives outside
+> `deploy/` and has not been changed here.
 
 ### Concurrency
 

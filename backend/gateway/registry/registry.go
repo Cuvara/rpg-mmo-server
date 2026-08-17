@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/duycuong/rpg-mmo/gateway/metrics"
@@ -22,6 +23,32 @@ const (
 	// retryTotalTimeout caps the total time spent retrying so a slow Redis does
 	// not hold a client connection open indefinitely.
 	retryTotalTimeout = 10 * time.Second
+
+	// DefaultAllocationWaitTimeout bounds how long FindServer waits for a
+	// freshly allocated game server to publish its own registry entry.
+	//
+	// A newly allocated Agones pod has to pull/start the NativeAOT container,
+	// bind its port, report Ready to the SDK sidecar, learn its own address and
+	// self-register into the registry before a client can reach it. That cold
+	// start is not measured yet, so the default is deliberately generous —
+	// larger than registry.retryTotalTimeout (10s, a Redis blip) because a pod
+	// start is a much heavier event — while staying below
+	// constants.JoinTokenTTL (30s) so the wait can never be longer than the
+	// life of the token minted after it.
+	//
+	// Lowered from 20s to 15s on 2026-08-17: 20s sat exactly on
+	// server.MaxHandlerBlockingWait, the point at which the wait starves the
+	// connection's own heartbeat (the read loop cannot record a MsgPong while a
+	// handler blocks). Sitting on a ceiling leaves no room for scheduling and
+	// poll-interval slop, and the failure it produces is the gateway dropping
+	// the very client it is waiting for. cmd/gateway now refuses to start above
+	// that ceiling.
+	DefaultAllocationWaitTimeout = 15 * time.Second
+
+	// DefaultAllocationPollInterval is how often that wait re-reads the
+	// registry. 250ms costs at most 80 single-key reads over the full timeout
+	// and adds at most 250ms of detection lag once the server appears.
+	DefaultAllocationPollInterval = 250 * time.Millisecond
 )
 
 // logger is the minimal logging surface RegistryService needs. It matches
@@ -44,6 +71,25 @@ type RegistryService struct {
 
 	// log is nil unless WithLogger was passed; every use must be nil-checked.
 	log logger
+
+	// allocWaitTimeout / allocPollInterval bound the wait for a freshly
+	// allocated server's own registry entry. Zero means the default.
+	allocWaitTimeout  time.Duration
+	allocPollInterval time.Duration
+
+	// allocMu guards allocInFlight only. It is never taken on the
+	// existing-server path.
+	allocMu       sync.Mutex
+	allocInFlight map[string]*allocationCall
+}
+
+// allocationCall is one in-flight allocate-and-wait for a single map_id. Every
+// caller that joins it blocks on done and then reads info/err, which are
+// written exactly once by the leader before done is closed.
+type allocationCall struct {
+	done chan struct{}
+	info storage.ServerInfo
+	err  error
 }
 
 // Option customises a RegistryService at construction time.
@@ -72,7 +118,23 @@ func NewRegistryServiceWithAllocator(reg storage.ServerRegistry, alloc Allocator
 	return newRegistryService(&RegistryService{reg: reg, allocator: alloc}, opts)
 }
 
+// WithAllocationWait sets how long FindServer waits for a freshly allocated
+// game server to register itself, and how often it re-checks. Non-positive
+// values keep the corresponding default.
+func WithAllocationWait(timeout, interval time.Duration) Option {
+	return func(s *RegistryService) {
+		if timeout > 0 {
+			s.allocWaitTimeout = timeout
+		}
+		if interval > 0 {
+			s.allocPollInterval = interval
+		}
+	}
+}
+
 func newRegistryService(s *RegistryService, opts []Option) *RegistryService {
+	s.allocWaitTimeout = DefaultAllocationWaitTimeout
+	s.allocPollInterval = DefaultAllocationPollInterval
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -85,6 +147,16 @@ func newRegistryService(s *RegistryService, opts []Option) *RegistryService {
 // client-facing message, so it must be matchable with errors.Is rather than by
 // string comparison.
 var ErrNoServerAvailable = errors.New("no available server for map")
+
+// ErrServerStarting means a game server was allocated for the map but did not
+// publish its own registry entry inside the allocation wait window, so there is
+// no address a client could be sent to yet.
+//
+// It is a *retryable* condition and deliberately distinct from
+// ErrNoServerAvailable: the map is not full or unserved, its server is booting.
+// The gateway maps it to its own client-facing message so a client can tell
+// "do not retry" from "retry shortly". Must be matchable with errors.Is.
+var ErrServerStarting = errors.New("allocated server has not registered yet")
 
 // isRetriable returns true for errors that are likely transient (Redis blip,
 // network timeout) as opposed to logical conditions (no server for map, not
@@ -187,18 +259,38 @@ func (s *RegistryService) getServerWithRetry(ctx context.Context, serverID strin
 
 // FindServer locates the least-loaded live server for mapID that still has
 // capacity (PlayerCount < Capacity). Ties break on ServerID so the choice is
-// deterministic. When no server has room and an allocator is configured, it
-// requests a new instance and registers it. Returns an error when nothing can
-// serve the map.
+// deterministic.
 //
-// MVP invariant: a map is expected to be served by exactly ONE live game
-// server. Nothing enforces that — neither registry implementation guards
-// against a second server claiming the same map_id, and the allocator
-// deliberately registers an extra instance for a full map. Two instances of one
-// map are two disconnected copies of the world: players on different instances
-// cannot see each other and there is no handoff between them. That is a
-// deliberate MVP limitation (see backend/docs/ARCHITECTURE-DECISIONS.md, ADR-2),
-// so the condition is surfaced loudly here rather than failing the request.
+// MVP invariant: a map is served by exactly ONE live game server (ADR-2). Two
+// instances of one map are two disconnected copies of the world: players on
+// different instances cannot see or interact with each other and there is no
+// handoff between them. FindServer therefore never adds a second server to a
+// map:
+//
+//   - Live servers exist and one has room -> that server is returned.
+//   - Live servers exist and every one is FULL -> ErrNoServerAvailable, with no
+//     allocation. Refusing a join is a loud, bounded failure; a silently split
+//     world is not. Allocation exists to replace an *absent* server, never to
+//     add capacity to a full one.
+//   - No live server at all, and an allocator is configured -> a new instance is
+//     requested.
+//
+// Nothing else enforces the invariant — neither registry implementation guards
+// against a second server claiming the same map_id — so a map that still
+// resolves to more than one server is logged loudly here as the detector for it
+// being violated by some other means.
+//
+// Allocation does not return the allocation response directly. The gateway must
+// not write the allocated server's registry entry on its behalf: that would put
+// two writers on one datum (ADR-1) and an entry the gateway wrote has nothing
+// re-arming its TTL. Instead FindServer waits, bounded by allocWaitTimeout, for
+// the game server's *own* entry to appear and returns that — so the address and
+// transport handed to a client are the ones the server self-reported and is
+// actually listening on. If it never appears, ErrServerStarting is returned and
+// no address is announced.
+//
+// Allocation is single-flight per map_id (see allocateOnce): concurrent callers
+// for one unserved map produce one allocation, not one each.
 func (s *RegistryService) FindServer(ctx context.Context, mapID string) (storage.ServerInfo, error) {
 	servers, err := s.findByMapIDWithRetry(ctx, mapID)
 	if err != nil {
@@ -234,21 +326,134 @@ func (s *RegistryService) FindServer(ctx context.Context, mapID string) (storage
 		return best, nil
 	}
 
+	// Servers exist for this map but all of them are full. Allocating here would
+	// register a second live server for one map_id and split the world, so it is
+	// a refusal, not a fallback (ADR-2).
+	if len(servers) > 0 {
+		return storage.ServerInfo{}, fmt.Errorf("%w %s: all %d servers full", ErrNoServerAvailable, mapID, len(servers))
+	}
+
 	if s.allocator != nil {
-		allocated, aerr := s.allocator.AllocateServer(ctx, mapID)
-		if aerr != nil {
-			s.metrics.AllocationResult(false)
-			return storage.ServerInfo{}, fmt.Errorf("%w %s: allocate: %w", ErrNoServerAvailable, mapID, aerr)
-		}
-		if rerr := s.reg.Register(ctx, allocated); rerr != nil {
-			s.metrics.AllocationResult(false)
-			return storage.ServerInfo{}, fmt.Errorf("register allocated server %s: %w", allocated.ServerID, rerr)
-		}
-		s.metrics.AllocationResult(true)
-		return allocated, nil
+		return s.allocateOnce(ctx, mapID)
 	}
 
 	return storage.ServerInfo{}, fmt.Errorf("%w %s", ErrNoServerAvailable, mapID)
+}
+
+// allocateOnce runs allocateAndWait for mapID under single-flight: the first
+// caller for a map does the work, every caller that arrives while it is running
+// waits for it and shares its outcome.
+//
+// Without this, the retry we ask clients to perform is an amplifier. A client
+// told "server is starting, retry shortly" retries, the retry finds the map
+// still unserved and allocates ANOTHER pod, and so on — while ADR-2 guarantees
+// only one of those pods can ever win the map_id registration and nothing
+// deallocates the losers (Agones will not reclaim an Allocated GameServer). On a
+// replicas:1 fleet that exhausts the fleet from a single player reconnecting.
+//
+// The result is deliberately NOT cached: the entry is removed as soon as the
+// leader finishes, whether it succeeded or failed, so one transient allocation
+// failure cannot poison a map until restart. A success needs no cache either —
+// by then the server is in the registry, and the next FindServer resolves it
+// before ever reaching this function.
+func (s *RegistryService) allocateOnce(ctx context.Context, mapID string) (storage.ServerInfo, error) {
+	s.allocMu.Lock()
+	if call, ok := s.allocInFlight[mapID]; ok {
+		s.allocMu.Unlock()
+		if s.log != nil {
+			s.log.Warn("joining an allocation already in flight for this map",
+				"map_id", mapID)
+		}
+		select {
+		case <-call.done:
+			return call.info, call.err
+		case <-ctx.Done():
+			// This caller gave up (client disconnected); the leader carries on
+			// for everyone else.
+			return storage.ServerInfo{}, fmt.Errorf("await allocation for map %s: %w", mapID, ctx.Err())
+		}
+	}
+	if s.allocInFlight == nil {
+		s.allocInFlight = make(map[string]*allocationCall)
+	}
+	call := &allocationCall{done: make(chan struct{})}
+	s.allocInFlight[mapID] = call
+	s.allocMu.Unlock()
+
+	// The leader's work is detached from its own caller's cancellation: the
+	// followers' outcome must not depend on which client happened to arrive
+	// first, and a leader that disconnects mid-allocation would otherwise abort
+	// an allocation the followers are still waiting on. The wait stays bounded
+	// by allocWaitTimeout, and the allocator call by its own timeout.
+	call.info, call.err = s.allocateAndWait(context.WithoutCancel(ctx), mapID)
+
+	s.allocMu.Lock()
+	delete(s.allocInFlight, mapID)
+	s.allocMu.Unlock()
+	close(call.done)
+
+	return call.info, call.err
+}
+
+// allocateAndWait requests one new instance for mapID and blocks until that
+// instance has registered itself, or the wait window expires.
+func (s *RegistryService) allocateAndWait(ctx context.Context, mapID string) (storage.ServerInfo, error) {
+	allocated, aerr := s.allocator.AllocateServer(ctx, mapID)
+	if aerr != nil {
+		s.metrics.AllocationResult(false)
+		return storage.ServerInfo{}, fmt.Errorf("%w %s: allocate: %w", ErrNoServerAvailable, mapID, aerr)
+	}
+	ready, werr := s.awaitRegistration(ctx, allocated.ServerID)
+	if werr != nil {
+		s.metrics.AllocationResult(false)
+		return storage.ServerInfo{}, fmt.Errorf("allocated server for map %s: %w", mapID, werr)
+	}
+	s.metrics.AllocationResult(true)
+	return ready, nil
+}
+
+// awaitRegistration polls the registry until serverID has published its own
+// entry, or until allocWaitTimeout elapses.
+//
+// Every read error is treated as "not there yet" and simply retried: a missing
+// key is the expected state for most of the wait, and a transient store error
+// during a pod cold start is indistinguishable from it in any way that would
+// change the outcome. The timeout, not the error class, is what ends the wait.
+func (s *RegistryService) awaitRegistration(ctx context.Context, serverID string) (storage.ServerInfo, error) {
+	timeout := s.allocWaitTimeout
+	if timeout <= 0 {
+		timeout = DefaultAllocationWaitTimeout
+	}
+	interval := s.allocPollInterval
+	if interval <= 0 {
+		interval = DefaultAllocationPollInterval
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		info, err := s.reg.GetServer(ctx, serverID)
+		if err == nil {
+			return info, nil
+		}
+		lastErr = err
+
+		select {
+		case <-ctx.Done():
+			if s.log != nil {
+				s.log.Warn("allocated game server never registered itself",
+					"server_id", serverID, "waited", timeout, "last_error", lastErr)
+			}
+			return storage.ServerInfo{}, fmt.Errorf("%w: %s did not register within %s: %w",
+				ErrServerStarting, serverID, timeout, lastErr)
+		case <-ticker.C:
+		}
+	}
 }
 
 // GetServer returns a single live server by ID, retrying transient errors

@@ -67,6 +67,12 @@ public sealed class RegistrationService : IAsyncDisposable
     private Task? _loop;
     private int _lastPublishedCount = -1;
 
+    /// <summary>
+    /// The address actually advertised. Seeded from <see cref="RegistrationOptions.PublicAddr"/>
+    /// and replaceable up to <see cref="StartAsync"/> — see <see cref="OverridePublicAddr"/>.
+    /// </summary>
+    private string _publicAddr;
+
     /// <summary>Successful (re)registrations. Exposed for tests.</summary>
     internal int RegisterCount => _registerCount;
     private int _registerCount;
@@ -83,12 +89,43 @@ public sealed class RegistrationService : IAsyncDisposable
         _playerCount = playerCount;
         _logger = logger;
         _interval = interval ?? RegistryDefaults.HeartbeatInterval(options.Ttl);
+        _publicAddr = options.PublicAddr;
+    }
+
+    /// <summary>The address this service advertises. Diagnostics, logging and tests.</summary>
+    public string PublicAddr => Volatile.Read(ref _publicAddr);
+
+    /// <summary>
+    /// Replace the advertised address before registration starts.
+    ///
+    /// <para>This exists for exactly one caller: under Agones with
+    /// <c>portPolicy: Dynamic</c> the dialable address is chosen by the scheduler and is
+    /// only readable from the GameServer status once the pod is scheduled — after the host
+    /// has been constructed, so it cannot come in through
+    /// <see cref="RegistrationOptions"/> (ADR-15 decision 2, option A).</para>
+    ///
+    /// <para>Only valid before <see cref="StartAsync"/>. Changing the address afterwards
+    /// would leave the entry already in Redis pointing at the old value until the next
+    /// heartbeat repaired it — a window in which the gateway hands clients an address
+    /// nothing is listening on — so it throws rather than half-applying.</para>
+    /// </summary>
+    /// <param name="addr">Non-empty <c>host:port</c> to advertise instead.</param>
+    /// <exception cref="InvalidOperationException">Registration has already started.</exception>
+    public void OverridePublicAddr(string addr)
+    {
+        if (string.IsNullOrWhiteSpace(addr))
+            throw new ArgumentException("advertised address must not be empty", nameof(addr));
+        if (_loop != null)
+            throw new InvalidOperationException(
+                $"{nameof(OverridePublicAddr)} must be called before {nameof(StartAsync)}");
+
+        Volatile.Write(ref _publicAddr, addr);
     }
 
     private ServerInfo BuildInfo() => new(
         _options.ServerId,
         _options.MapId,
-        _options.PublicAddr,
+        PublicAddr,
         _options.Transport,
         _options.Capacity,
         _playerCount());

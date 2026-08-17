@@ -76,6 +76,24 @@ public class ServerOptions
     public TimeSpan SaveInterval { get; set; } = TimeSpan.FromSeconds(30);
     public IPlayerStore? PlayerStore { get; set; }
     public IAgonesSdk? AgonesSdk { get; set; }
+
+    /// <summary>
+    /// Host to advertise instead of the Agones node address — <c>GAMESERVER_ADVERTISE_HOST</c> /
+    /// <c>--advertise-host</c>. <b>Host only, no port</b>, and read <b>only</b> when Agones is
+    /// enabled and its status read succeeded.
+    ///
+    /// <para>It exists because <c>status.address</c> is the node's address on the cluster
+    /// network and a client outside that network cannot dial it: on k3d the status says
+    /// <c>172.20.0.3</c> and the address that answers is <c>127.0.0.1</c>, published by the
+    /// serverlb. Agones knows the port and cannot know the host; this supplies the host and
+    /// never the port.</para>
+    ///
+    /// <para>Not to be confused with <c>GAMESERVER_PUBLIC_ADDR</c>
+    /// (<see cref="RegistrationOptions.PublicAddr"/>), which is a full <c>host:port</c> and
+    /// is what gets advertised when Agones is <b>off</b>. Exactly one of the two applies in
+    /// any given deployment.</para>
+    /// </summary>
+    public string? AdvertiseHost { get; set; }
     public IEventStream? EventStream { get; set; }
     public ILoggerFactory? LoggerFactory { get; set; }
 
@@ -187,6 +205,9 @@ public sealed class GameServerHost : IAsyncDisposable
 
     /// <summary>0 until the first ShutdownAsync caller wins the race, 1 afterwards.</summary>
     private int _shutdownStarted;
+
+    /// <summary>0 until the first player join has reported Allocate to Agones, 1 afterwards.</summary>
+    private int _allocateReported;
 
     /// <summary>Completed when the single real teardown finishes (or faults).</summary>
     private readonly TaskCompletionSource _shutdownComplete =
@@ -352,13 +373,100 @@ public sealed class GameServerHost : IAsyncDisposable
             "Game server listening on {Addr} via {Transport} (mode={Mode}, map={MapId}, id={ServerId})",
             actualAddr, _listener.Kind, _options.Mode, _options.MapId, _options.ServerId);
 
-        // Mark ready with Agones
+        // Mark ready with Agones. The listener is already bound at this point, so Ready
+        // never claims a server that is not accepting. HttpAgonesSdk swallows sidecar
+        // failures, so this cannot throw and cannot delay the registration below by more
+        // than its request timeout.
         await _agonesSdk.ReadyAsync();
+
+        // Learn the address Agones gave us, and advertise THAT (ADR-15 decision 2, option A).
+        //
+        // Under `portPolicy: Dynamic` the host port is chosen by the scheduler, so no
+        // configuration can name it: the fleet manifest passes `--addr=:9000` and sets no
+        // GAMESERVER_PUBLIC_ADDR, and without this read the server registers the hostless
+        // `:9000`, which the gateway hands to the client verbatim and the client cannot
+        // dial. That — not the health loop — is why the Agones path has never carried a
+        // player.
+        //
+        // The read sits HERE and nowhere else: after ReadyAsync, because the address only
+        // exists once the pod is scheduled, and before StartAsync, because the first thing
+        // written to Redis must already be the right value rather than a wrong one repaired
+        // a heartbeat later.
+        //
+        // Every failure mode falls back to the configured address, which is what running
+        // outside a cluster must keep doing. GetAddressAsync never throws and returns null
+        // on anything it cannot use.
+        if (_agonesSdk.IsEnabled && _registration != null)
+        {
+            var assigned = await _agonesSdk.GetAddressAsync();
+            if (assigned != null)
+            {
+                var configured = _registration.PublicAddr;
+
+                // The port is always Agones'. Only the host can be overridden, and it has to
+                // be: status.address is the node address on the cluster network, which a
+                // client outside that network cannot dial (measured on k3d — the status says
+                // 172.20.0.3 and the address that answers is 127.0.0.1, published by the
+                // serverlb). Configuration supplying the port instead would put us straight
+                // back into the bug this whole path exists to fix.
+                var hostOverride = AgonesGameServerAddress.NormalizeHostOverride(
+                    _options.AdvertiseHost, _logger);
+                var advertised = hostOverride == null ? assigned : assigned.WithHost(hostOverride);
+
+                _registration.OverridePublicAddr(advertised.ToString());
+
+                // One line, deliberately naming where each half came from. When this is
+                // wrong in production it is wrong silently — the server runs, the registry
+                // looks healthy, and only the client knows — so the diagnosis has to be
+                // sitting in the log before anyone goes looking for it.
+                _logger.LogInformation(
+                    "Advertising {Advertised} (host from {HostSource}, port {Port} from Agones status); " +
+                    "configured value '{Configured}' not used",
+                    advertised,
+                    hostOverride == null
+                        ? "Agones status.address"
+                        : "GAMESERVER_ADVERTISE_HOST",
+                    advertised.Port,
+                    configured);
+
+                if (hostOverride == null)
+                {
+                    // Not an error — inside the cluster it is right — but it is the single
+                    // most likely reason a client cannot connect to a working server.
+                    _logger.LogInformation(
+                        "GAMESERVER_ADVERTISE_HOST is unset, so clients are handed the Agones node " +
+                        "address '{Host}'. That is correct only where the node itself is reachable; " +
+                        "set it to the host clients actually dial (the load-balancer or ingress " +
+                        "address) if they are outside the cluster network.",
+                        advertised.Address);
+                }
+            }
+            else
+            {
+                // GAMESERVER_ADVERTISE_HOST is deliberately NOT applied here. Without the
+                // status read there is no Agones port to pair it with, and pairing the
+                // override host with a CONFIGURED port would invent an address that was
+                // never assigned to anything — a plausible-looking value pointing nowhere,
+                // which is worse to debug than the honestly-wrong configured one.
+                _logger.LogWarning(
+                    "Agones is enabled but its GameServer status could not be read; advertising " +
+                    "the configured address '{Configured}' unchanged. Under portPolicy: Dynamic " +
+                    "that value is almost certainly not dialable by a client. " +
+                    "GAMESERVER_ADVERTISE_HOST is not applied without a port from Agones.",
+                    _registration.PublicAddr);
+            }
+        }
 
         // Publish ourselves into the server registry the gateway reads, and keep the
         // entry alive. Done after the listener is up so we never advertise an address
         // that is not accepting yet — and after the bind, so a port=0 ephemeral listen
         // advertises the port it actually got.
+        //
+        // It is also deliberately after ReadyAsync (ADR-14 decision 3): registering first
+        // would advertise an address that Agones may still be about to kill, which is the
+        // ordering that lets the two writers — Agones over pod lifecycle, this server over
+        // the Redis `map_id -> server` entry — disagree about whether the server exists.
+        // On shutdown the order reverses: deregister first, then Agones Shutdown.
         if (_registration != null)
         {
             await _registration.StartAsync(_cts.Token);
@@ -367,8 +475,20 @@ public sealed class GameServerHost : IAsyncDisposable
         // Start background tasks
         var tickTask = _tickLoop.RunAsync(_cts.Token);
         var saveTask = _saver.RunAsync(_cts.Token);
-        var healthTask = AgonesHealthLoop.RunAsync(_agonesSdk, TimeSpan.FromSeconds(2), _cts.Token,
-            _loggerFactory.CreateLogger("AgonesHealth"));
+
+        // The health loop only runs against a real SDK (ADR-14 decision 4). Pinging
+        // NoopAgonesSdk logged "health loop started" and then reported nothing to anyone,
+        // which reads in a log exactly like a working liveness contract.
+        //
+        // 2s, against the dotnet fleet manifest's health periodSeconds: 5 — two pings per
+        // window, so one dropped request is not a strike. Once the manifest's
+        // `disabled: true` comes off, a tick loop that starves this task long enough is a
+        // pod restart; ADR-13's overload path (drop the backlog, resynchronise) is what
+        // keeps a merely-slow server from being killed as a dead one.
+        var healthTask = _agonesSdk.IsEnabled
+            ? AgonesHealthLoop.RunAsync(_agonesSdk, TimeSpan.FromSeconds(2), _cts.Token,
+                _loggerFactory.CreateLogger("AgonesHealth"))
+            : Task.CompletedTask;
 
         // Accept loop
         var acceptTask = AcceptLoopAsync(_cts.Token);
@@ -459,6 +579,44 @@ public sealed class GameServerHost : IAsyncDisposable
             _shutdownComplete.TrySetException(ex);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Report Allocate to Agones the first time a player lands here (ADR-14).
+    ///
+    /// <para>Exactly once per process, and never on the join's critical path: Agones' own
+    /// allocation call already moves the GameServer to Allocated when the gateway allocates
+    /// through the API, so this is the self-allocating case (a client that reaches a Ready
+    /// pod directly) and a slow sidecar must not delay the player's join response by even
+    /// one request timeout.</para>
+    ///
+    /// <para>Not balanced by anything on the way down. Agones has no un-allocate: an
+    /// Allocated GameServer leaves that state by being shut down, which is what
+    /// <see cref="ShutdownAsync"/> reports. So a map server that empties stays Allocated
+    /// until it is drained — correct for the dungeon lifecycle, and for a map server it
+    /// means the fleet will not re-hand this pod out. Revisit alongside ADR-2's map-fleet
+    /// allocator policy, which is a precondition of ADR-14 stage 5 anyway.</para>
+    /// </summary>
+    private void NotifyAgonesAllocatedOnce()
+    {
+        if (!_agonesSdk.IsEnabled)
+            return;
+        if (Interlocked.Exchange(ref _allocateReported, 1) != 0)
+            return;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await _agonesSdk.AllocateAsync();
+            }
+            catch (Exception ex)
+            {
+                // HttpAgonesSdk does not throw; this guards a custom implementation from
+                // taking the process down through an unobserved task exception.
+                _logger.LogWarning(ex, "Agones Allocate failed");
+            }
+        });
     }
 
     private async Task AcceptLoopAsync(CancellationToken ct)
@@ -618,6 +776,7 @@ public sealed class GameServerHost : IAsyncDisposable
             // Fire-and-forget: the gateway's capacity view should be fresh, but a slow
             // or down Redis must never delay a player entering the world.
             _registration?.NotifyPlayerCountChanged();
+            NotifyAgonesAllocatedOnce();
             _logger.LogInformation("Player {UserId} joined (total: {Count})", userId, _connections.Count);
 
             // Step 5: Send JoinTokenResp

@@ -201,6 +201,42 @@ services:
       # Prometheus endpoint (/metrics, /healthz). Scraped in-network by the
       # `monitoring` profile as gateway:9102; set to "off" to disable.
       METRICS_ADDR: ":9102"
+      # ---------------------------------------------------------------------
+      # Agones allocator — OPT-IN, and off by default on purpose.
+      # ---------------------------------------------------------------------
+      # The deploy path is NOT moving to Kubernetes: the gateway stays here in
+      # compose and only the game servers run under Agones (ADR-15 decision 4
+      # accepts that split for this one stage). So the gateway allocates
+      # OUT-OF-CLUSTER, over the Kubernetes API, and needs a kubeconfig — see
+      # the volumes block below and docs/K3S.md "Allocating from the
+      # compose-run gateway".
+      #
+      # Default `none`: with no allocator, an unserved map is simply an error,
+      # and the whole stack keeps working with no cluster present at all.
+      # Setting ALLOCATOR=agones without a reachable cluster is FATAL — the
+      # gateway exits 1 at construction rather than starting degraded.
+      ALLOCATOR: ${ALLOCATOR:-none}
+      # These must name the fleets that actually exist. The Go defaults
+      # (map-servers-dev / dungeon-servers-dev) name the RETIRED Go fleets, so
+      # leaving them unset points allocation at nothing.
+      ALLOCATOR_NAMESPACE: ${ALLOCATOR_NAMESPACE:-rpg-realtime}
+      ALLOCATOR_FLEET_MAP: ${ALLOCATOR_FLEET_MAP:-map-servers-dotnet-dev}
+      # No dungeon fleet exists (ADR-14 stage 6). Left at the Go default so it
+      # is obviously wrong if anything ever asks for one, rather than pointing
+      # at a plausible name that is equally absent.
+      ALLOCATOR_FLEET_DUNGEON: ${ALLOCATOR_FLEET_DUNGEON:-}
+      # What the FLEET's servers listen with, not what this gateway listens
+      # with. It is stamped onto the allocated ServerInfo and announced to the
+      # client BEFORE the pod's own registration lands, so a mismatch tells the
+      # client to speak the wrong protocol. The fleet is TCP today.
+      ALLOCATOR_TRANSPORT: ${ALLOCATOR_TRANSPORT:-tcp}
+      # Path INSIDE the container. The kubeconfig itself is mounted by the
+      # docker-compose.agones.yml overlay, NOT here: a bind mount of a file
+      # that does not exist makes compose create a DIRECTORY in its place, so
+      # putting it in the base file would break the default no-cluster stack
+      # for everyone who never wants an allocator.
+      #   docker compose -f docker-compose.yml -f docker-compose.agones.yml up -d
+      ALLOCATOR_KUBECONFIG: ${ALLOCATOR_KUBECONFIG:-/etc/rpg/kubeconfig}
     ports:
       - "${GATEWAY_CONTAINER_PORT:-8100}:8000"
       - "${GATEWAY_METRICS_PORT:-9102}:9102"
@@ -223,9 +259,12 @@ services:
         condition: service_healthy
       postgres-game:
         condition: service_healthy
-    # NOTE: the C# arg parser only matches SPACE-separated flags (`--addr :9000`,
-    # not `--addr=:9000`) — GameServer/Program.cs GetArg. Configuration is
-    # therefore done through the environment below, which works either way.
+    # NOTE: configuration is done through the environment below, not through
+    # args. (A previous version of this comment claimed the C# arg parser only
+    # matches space-separated flags — it does not: GameServer/Program.cs GetArg
+    # handles `--addr :9000` and `--addr=:9000` alike. The env block is used
+    # because one configuration channel is easier to read than two, and because
+    # agones/fleet-map-dotnet-dev.yaml uses the same one.)
     environment:
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
       # Verifies join tokens signed by the gateway. Same value as the gateway

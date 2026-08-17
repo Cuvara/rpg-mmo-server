@@ -8,7 +8,7 @@ All open-source, $0 license: Docker, k3s, Agones, PostgreSQL, Redis, Grafana, Pr
 | Area | Files | Status |
 |------|-------|--------|
 | Local dev backing stack | `docker-compose.yml`, `nakama-plugin.Dockerfile`, `Makefile`, `.env.example` | ✅ Usable |
-| Agones game server fleets | `agones/fleet-map.yaml`, `agones/fleet-dungeon.yaml`, `agones/autoscaler.yaml`, `agones/allocation.yaml` | ✅ Manifests authored |
+| Agones game server fleet | `agones/fleet-map-dotnet-dev.yaml`, `agones/secret-example.yaml`, `agones/allocation-dev.yaml` | ✅ Authored + server-side dry-run clean. **Never deployed** — ADR-14 stage 4 is the first run |
 | Build automation | `scripts/build-all.sh` (repo root) | ✅ Usable |
 | CD pipeline | `.github/workflows/cd.yml`, `scripts/deploy-local.sh` | ✅ Two modes: host binaries or full-docker (`vars.DEPLOY_MODE`) |
 | VPS bootstrap | `scripts/bootstrap-vps.sh` | ✅ Docker + deploy user + Actions runner + ufw, idempotent, `--dry-run` |
@@ -143,8 +143,15 @@ context is `backend/gameserver-dotnet/`.
 # local (WSL: use docker.exe and run from backend/deploy — absolute /mnt/* paths
 # do not survive the Windows CLI's path translation, cwd-relative ones do)
 cd backend/deploy
-docker build -f docker/Dockerfile.gateway            -t rpg-mmo/gateway:dev    ..
-docker build -f docker/Dockerfile.gameserver-dotnet  -t rpg-mmo/gameserver:dev ../gameserver-dotnet
+docker build -f docker/Dockerfile.gateway -t rpg-mmo/gateway:dev ..
+# Context is backend/ (`..`), NOT backend/gameserver-dotnet — the Dockerfile
+# COPYs gameserver-dotnet/... from it. The tag is gameserver-DOTNET; plain
+# rpg-mmo/gameserver:dev was the deleted Go server.
+# GIT_REVISION is stamped into org.opencontainers.image.revision so the tag's
+# contents can be checked later — see K3S.md.
+docker build -f docker/Dockerfile.gameserver-dotnet \
+  --build-arg GIT_REVISION="$(git rev-parse HEAD)" \
+  -t rpg-mmo/gameserver-dotnet:dev ..
 
 # or via the build script (auto-detects docker vs docker.exe)
 scripts/build-all.sh --images                        # -> rpg-mmo/{gateway,gameserver}:dev
@@ -173,9 +180,12 @@ artifact bundle.
 | `ghcr.io/cuvara/rpg-mmo-gateway` | `<short-sha>`, `latest` |
 | `ghcr.io/cuvara/rpg-mmo-gameserver` | `<short-sha>`, `latest` |
 
-`agones/fleet-map.yaml` and `agones/fleet-dungeon.yaml` both reference
-`ghcr.io/cuvara/rpg-mmo-gameserver:latest` — renaming the image in `cd.yml`
-means renaming it in both manifests too.
+No Agones manifest references a GHCR image any more: the prod fleets were
+deleted with the Go game server, and `agones/fleet-map-dotnet-dev.yaml` uses the
+local tag `rpg-mmo/gameserver-dotnet:dev`. See `K3S.md` — and note that a
+mutable local tag is a claim about content, which is why the Dockerfile now
+stamps `org.opencontainers.image.revision` from a `GIT_REVISION` build arg and
+`k3s/validate-manifests.py --check-image` can assert it.
 
 ### Compose parity testing (optional)
 

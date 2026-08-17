@@ -42,7 +42,13 @@ Custom Go binary — the **entry point** for Unity clients. Standalone process, 
 - Client sends `EnterWorld(map_id)` via KCP
 - Lookup server with capacity for that map
 - If available: reserve slot, issue `join_token`, redirect client
-- If not available: request Agones allocation, wait for new server, then redirect
+- If the map has **no** live server: request Agones allocation, then wait (bounded
+  by `--allocation-wait-timeout`) for that pod to register **itself**, and issue
+  the `join_token` from its own entry. Timeout → `server is starting, retry
+  shortly` (retryable), no token
+- If the map's live servers are all **full**: refuse with `no server available for
+  map`. Never allocate a second server for a `map_id` — that splits the world
+  (ADR-2)
 - Update player location in Redis: `player:{user_id}:location = server_id`
 
 ### 5. Event Relay — Redis Streams (Drawio Page 4)

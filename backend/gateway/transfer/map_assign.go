@@ -33,6 +33,15 @@ func AssignMap(ctx context.Context, userID, mapID string, reg *registry.Registry
 // AssignMapKeyring is AssignMap with a pre-parsed join-token keyring, which is
 // what the gateway uses on the hot path so the keyring is parsed once at
 // start-up instead of on every EnterWorld.
+//
+// Order matters: the token is minted only *after* FindServer has resolved a
+// server that is actually registered — for an already-live server that is
+// immediate, and for a freshly allocated one FindServer blocks until the pod
+// self-registers (registry.ErrServerStarting if it never does). Join tokens are
+// single-use, pinned to one server id and live only constants.JoinTokenTTL, so
+// minting one for a server that is still booting would burn the client's only
+// token on an address that is not answering. Every field below therefore comes
+// from the entry FindServer returned, never from an allocation response.
 func AssignMapKeyring(ctx context.Context, userID, mapID string, reg *registry.RegistryService, joinKeys jwt.Keyring) (AssignResult, error) {
 	srv, err := reg.FindServer(ctx, mapID)
 	if err != nil {
