@@ -6,6 +6,56 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **A client was handed a game server for a map it did not ask for, and every
+  layer reported success.** Reproduced on a live k3d Agones fleet: with
+  `ALLOCATOR=agones` and a fleet serving `map_01`, `MsgEnterWorld{map_id:
+  "map_77"}` allocated a pod, minted a valid join token for it, and answered with
+  its address; the client joined, played and the smoke test passed. The cause is a
+  chain of individually reasonable steps — allocation targets a **Fleet**, never a
+  `map_id`; the wait that follows polls the registry by **`ServerID`**; and a pod
+  self-registers under its fleet's own `GAMESERVER_MAP_ID` at boot — so the poll
+  found the pod's *pre-existing* `map_01` entry on its first read and returned a
+  healthy server for the wrong world. Nothing compared the two maps. `FindServer`
+  now does, on the allocation path *and* on the registry path, and refuses with a
+  new `ErrFleetMapMismatch`. Deliberately **not** a flavour of
+  `ErrNoServerAvailable`: that one says "the map is full, grow the fleet", this one
+  says "the fleet you configured hosts a different map, fix `GAMESERVER_MAP_ID`" —
+  opposite operator responses, so collapsing them sends the operator to the wrong
+  knob. The registry-path check is a store-integrity check rather than a fleet one
+  (`FindByMapID` is keyed by `map_id`, so an entry for another map means the index
+  is lying) and it refuses rather than filtering: a silent filter degrades into
+  "no server for this map" and, with an allocator configured, into an allocation
+  the map does not need.
+- **The same bug leaked GameServers without bound.** Because the pod registers
+  under `map_01`, `map_77` is still unregistered afterwards, so the *next* request
+  allocated another pod — three watched going `Allocated` for one retry loop, none
+  ever reclaimed (Agones has no un-allocate, this codebase has no `Deallocate`).
+  The existing single-flight does not help: it merges callers that overlap in
+  time, and a client retrying is sequential. A guard that only rejects *after*
+  allocating still burns a pod per attempt, so a proven mismatch is now remembered
+  per `map_id` for `--allocation-mismatch-ttl` / `ALLOCATION_MISMATCH_TTL`
+  (default **60s**, negative disables and is logged loudly), consulted **before**
+  the allocation API is called. Bound: **one GameServer per `map_id` per TTL**,
+  asserted by a test. This is a deliberate exception to allocation's "never cache
+  a failure" rule, and the difference is the failure's nature: a transient failure
+  (Redis blip, momentarily exhausted fleet) fixes itself in seconds, so caching it
+  poisons a map that was about to work; a fleet's map is fixed for the life of its
+  pods, so no retry can turn the answer into "yes" while each retry costs a pod
+  permanently. The TTL keeps the cache from outliving its truth — a fleet
+  redeployed with the right map is usable again within a minute, no restart.
+- **`MsgEnterWorld` no longer invites the retry that drives the leak.** A map the
+  deployment cannot serve now answers `map is not available` — terminal, and
+  distinct from both `server is starting, retry shortly` (retryable) and
+  `no server available for map` (the map exists but is full). It names no fleet,
+  namespace or server id.
+
+  **Not fixed, and out of this module's reach:** the gateway still cannot make a
+  fleet serve an arbitrary map. The real answer is patching the allocated pod's
+  `GAMESERVER_MAP_ID` through `GameServerAllocation` metadata, which requires the
+  C# game server to read its map from the pod's annotations instead of the env var
+  baked into the fleet spec (`backend/gameserver-dotnet/` + `backend/deploy/`).
+  The gateway also has no map catalogue, so "a map that does not exist in the
+  game" and "a map whose fleet is not deployed yet" are indistinguishable here.
 - **The Agones allocator's default map fleet named a fleet that no longer
   exists.** `DefaultFleetMap` was `map-servers-dev` — the retired **Go** fleet,
   whose game server was deleted in `670a803` and whose manifests are gone from

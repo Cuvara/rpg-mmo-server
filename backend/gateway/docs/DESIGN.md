@@ -89,6 +89,87 @@ Two properties that are not obvious and are tested:
 
 The existing-server path never touches the mutex or the map.
 
+### Decision 3b — the server you get must serve the map you asked for
+
+Decision 2 closed "the pod has not registered yet". It did not close "the pod
+registered, but for a different map", and that gap shipped a silent join to the
+wrong world.
+
+The mechanism, in order:
+
+1. Allocation is by **Fleet**, never by map. `AgonesAllocator.Allocate` posts a
+   `GameServerAllocation` whose only selector is `agones.dev/fleet: <fleet>`; the
+   requested `map_id` is used solely to fill in the returned `ServerInfo`. There
+   is exactly one map fleet (`ALLOCATOR_FLEET_MAP`), and its pods serve whatever
+   its fleet spec's `GAMESERVER_MAP_ID` says.
+2. The wait polls by **`ServerID`**, not by map, because the point of the wait is
+   "has *this pod* published its entry".
+3. A pod self-registers under its own map at boot. So when a client asks for
+   `map_77` and the only fleet serves `map_01`, the allocation succeeds, the poll
+   hits the pod's pre-existing `map_01` entry on the first read, and the wait
+   returns a healthy entry — for the wrong map.
+
+Reproduced on a k3d Agones fleet on 2026-08-17: `map_77` requested, the client
+handed `map-servers-dotnet-dev-…` at `127.0.0.1:7002` (map `map_01`), join
+accepted, snapshots flowing, smoke test `PASS`. No error was logged anywhere; the
+only tell was the latency (448ms vs ~3ms on the registry path).
+
+`FindServer` now compares the resolved entry's `MapID` with the requested one on
+**both** paths and returns `ErrFleetMapMismatch`, which is:
+
+- **not** `ErrNoServerAvailable`. That means "the map is full / we are out of
+  capacity" and points an operator at fleet size. This means "the fleet you
+  configured hosts a different map" and points at `GAMESERVER_MAP_ID`. Collapsing
+  them would send the operator to the wrong knob.
+- **not** `ErrServerStarting`, which is the one *retryable* assignment failure.
+  This one is terminal: no retry changes which map a fleet serves.
+
+On the registry path the same comparison is a store-integrity check rather than a
+fleet one: `FindByMapID` is keyed by `map_id`, so an entry for another map means
+the index is lying. It is refused, not filtered: filtering would degrade into "no
+server for this map" and, with an allocator configured, into an allocation the
+map does not need.
+
+### Decision 3c — the one failure that *is* cached
+
+The mismatch also leaks. Because the pod registers under `map_01`, `map_77` stays
+unregistered, so the *next* sequential request allocates again. Decision 3's
+single-flight does not help: it merges callers that overlap in time, and a client
+retry loop does not. Three GameServers were watched going `Allocated` for one
+`map_77` retry loop, and none of them ever comes back — Agones has no un-allocate
+and this codebase has no `Deallocate`. A guard that only rejects *after* the
+allocation still burns one pod per attempt.
+
+So a proven mismatch is remembered per `map_id` for `--allocation-mismatch-ttl`
+(default **60s**), and `FindServer` consults it *before* calling the allocation
+API. The bound is **one GameServer per `map_id` per TTL**, asserted by a test.
+
+This is a deliberate exception to decision 3's "never cache a failure", and the
+difference is the failure's nature, not its severity:
+
+| | transient allocation failure | fleet/map mismatch |
+|---|---|---|
+| Cause | Redis blip, fleet momentarily exhausted, lost boot race | fleet spec's `GAMESERVER_MAP_ID` |
+| Changes without operator action | yes, seconds | no, not while those pods run |
+| Cost of retrying | one API call | one permanently-`Allocated` GameServer |
+| Cost of caching | poisons a map that was about to work | none within the TTL |
+
+The TTL exists so the cache cannot outlive its truth: redeploying the fleet with
+the right map makes the gateway usable again within a minute, no restart. A
+negative value disables the memory outright — logged loudly at start-up, since it
+re-arms the drain.
+
+**What this does not solve.** The gateway still cannot serve a map no fleet was
+deployed for. The real fix is to stop allocating by fleet-only and patch the
+allocated pod's `GAMESERVER_MAP_ID` through `GameServerAllocation`'s `metadata`
+(Agones applies annotations/labels to the allocated GameServer), which requires
+the C# game server to read its map from the pod's own annotations rather than the
+env var baked into the fleet spec. That is `backend/gameserver-dotnet/` plus
+`backend/deploy/`, neither of which this change owns. Nor does the guard
+distinguish "a map that does not exist in the game" from "a map whose fleet is
+not deployed yet" — the gateway has no map catalogue, so both surface as
+`map is not available`.
+
 ### Decision 4 — refuse a wait that would starve the heartbeat
 
 A connection is served by one goroutine: the read loop dispatches a frame and
