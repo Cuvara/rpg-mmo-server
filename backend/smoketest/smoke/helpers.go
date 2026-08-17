@@ -42,6 +42,17 @@ type Config struct {
 	// post-deploy smoke step sources, so no extra credential is needed there.
 	GameDBURL string // GAME_DB_URL
 
+	// StrictAddr fails the run when the gateway advertises a listen-style
+	// game-server address (":9000", "0.0.0.0:9000", "[::]:9200") instead of
+	// rewriting it to loopback. Default OFF: host-mode deploys and the CD
+	// post-deploy smoke step legitimately reach a bare ":9000" on the host.
+	// Turn it ON for any run whose purpose is to prove that a Kubernetes /
+	// Agones-allocated game server is reachable by a real client — there the
+	// rewrite would hide the very defect the run is meant to catch. It applies
+	// to the game-server hop only, never to GatewayAddr, which is operator
+	// config rather than something a server advertised.
+	StrictAddr bool // SMOKE_STRICT_ADDR
+
 	SkipDB          bool          // SMOKE_SKIP_DB    — skip every persistence check
 	RequireDB       bool          // SMOKE_REQUIRE_DB — a skipped persistence check fails the run
 	ExpectMigration int           // SMOKE_EXPECT_MIGRATION — required schema_migrations version
@@ -119,6 +130,7 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 
 		DeviceID:        getenv("SMOKE_DEVICE_ID"),
 		GameDBURL:       getenv("GAME_DB_URL"),
+		StrictAddr:      isTruthy(getenv("SMOKE_STRICT_ADDR")),
 		SkipDB:          isTruthy(getenv("SMOKE_SKIP_DB")),
 		RequireDB:       isTruthy(getenv("SMOKE_REQUIRE_DB")),
 		ExpectMigration: DefaultExpectMigration,
@@ -166,6 +178,7 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	fs.IntVar(&cfg.MinSnapshots, "min-snapshots", cfg.MinSnapshots, "Minimum snapshots required to pass")
 	fs.StringVar(&cfg.DeviceID, "device-id", cfg.DeviceID, "Nakama device id to authenticate with (default: random per run)")
 	fs.StringVar(&cfg.GameDBURL, "game-db-url", cfg.GameDBURL, "Game-state PostgreSQL DSN; unset skips the game-state checks")
+	fs.BoolVar(&cfg.StrictAddr, "strict-addr", cfg.StrictAddr, "Fail when the gateway advertises a listen-style game server address instead of rewriting it to loopback")
 	fs.BoolVar(&cfg.SkipDB, "skip-db", cfg.SkipDB, "Skip every persistence check (realtime flow only)")
 	fs.BoolVar(&cfg.RequireDB, "require-db", cfg.RequireDB, "Fail instead of skipping when a persistence check cannot run")
 	fs.IntVar(&cfg.ExpectMigration, "expect-migration-version", cfg.ExpectMigration, "Required schema_migrations version")
@@ -232,12 +245,46 @@ func isTruthy(v string) bool {
 // "[::]:9200") into dialable loopback addresses. Real host:port pairs pass
 // through untouched.
 func NormalizeDialAddr(addr string) string {
-	host, port := splitHostPort(addr)
+	if !IsListenAddr(addr) {
+		return addr
+	}
+	_, port := splitHostPort(addr)
+	return "127.0.0.1:" + port
+}
+
+// IsListenAddr reports whether addr is listen-style — a bind address with no
+// host part (":9000", "0.0.0.0:9000", "[::]:9200") rather than something a
+// client can dial. The C# side keeps a matching helper (GameServer/Program.cs,
+// IsHostlessAddr) so both ends agree on which addresses are listen-style.
+// A loopback address a server deliberately advertised ("127.0.0.1:9000") is
+// NOT listen-style: under k3d that may be exactly where the client connects.
+func IsListenAddr(addr string) bool {
+	host, _ := splitHostPort(addr)
 	switch host {
 	case "", "0.0.0.0", "::", "[::]":
-		return "127.0.0.1:" + port
+		return true
 	}
-	return addr
+	return false
+}
+
+// ResolveServerDialAddr turns the ServerAddr a gateway advertised in
+// MsgEnterWorldResp into the address the smoke test dials.
+//
+// With strict off (the default) it is exactly NormalizeDialAddr: listen-style
+// addresses are rewritten to loopback, which is correct for host-mode deploys
+// where a bare ":9000" really is reachable on the host.
+//
+// With strict on a listen-style address is a hard failure. That rewrite would
+// otherwise connect to whatever else happens to sit on that port locally and
+// report PASS for a game server no real client could reach — precisely the
+// defect a Kubernetes/Agones run exists to catch.
+func ResolveServerDialAddr(addr string, strict bool) (string, error) {
+	if strict && IsListenAddr(addr) {
+		return "", fmt.Errorf("strict address mode: game server advertised %q, a listen-style address no client can dial; "+
+			"the game server never learned its externally-dialable address — under Agones that is the sidecar GameServer "+
+			"status read (allocated address + dynamic port), otherwise set GAMESERVER_PUBLIC_ADDR to the host:port clients reach", addr)
+	}
+	return NormalizeDialAddr(addr), nil
 }
 
 // splitHostPort is a forgiving split on the last colon; it tolerates the

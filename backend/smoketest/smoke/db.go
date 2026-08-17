@@ -499,7 +499,7 @@ func (r *Runner) stepGameStateReload() (string, error) {
 		return "", fmt.Errorf("reload: enter world gave no join token: %s", enterResp.Error)
 	}
 
-	conn, err := r.dial(transport.Normalize(enterResp.Transport), enterResp.ServerAddr)
+	conn, err := r.dialServer(transport.Normalize(enterResp.Transport), enterResp.ServerAddr)
 	if err != nil {
 		return "", fmt.Errorf("reload: %w", err)
 	}
