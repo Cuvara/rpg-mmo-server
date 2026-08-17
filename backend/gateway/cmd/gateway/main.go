@@ -52,6 +52,7 @@ func main() {
 	metricsAddr := flag.String("metrics-addr", "", "Prometheus metrics listen address, e.g. :9102 (overrides METRICS_ADDR; \"off\" or an empty METRICS_ADDR disables it)")
 	allocWaitTimeout := flag.Duration("allocation-wait-timeout", 0, "How long to wait for a freshly allocated game server to register itself before failing the join as retryable (overrides ALLOCATION_WAIT_TIMEOUT; default 15s). The wait blocks the client connection's read loop, which is also what records its MsgPong, so a value above 20s (pongTimeout-pingInterval) would let the heartbeat disconnect the client mid-allocation; the gateway refuses to start above it")
 	allocPollInterval := flag.Duration("allocation-poll-interval", 0, "How often to re-check the registry while waiting for an allocated game server (overrides ALLOCATION_POLL_INTERVAL; default 250ms)")
+	allocMismatchTTL := flag.Duration("allocation-mismatch-ttl", 0, "How long to refuse further allocations for a map after an allocated server turned out to serve a different map (overrides ALLOCATION_MISMATCH_TTL; default 60s, negative disables). Agones cannot un-allocate, so without this a client retrying an unservable map drains the fleet one GameServer per attempt")
 	allocKubeconfig := flag.String("allocator-kubeconfig", "", "Kubeconfig path for the allocator (default: in-cluster config, then $KUBECONFIG, then ~/.kube/config)")
 	transportKey := flag.String("transport-key", "", "Pre-shared key encrypting the KCP listener, 32-byte hex recommended (overrides TRANSPORT_KEY; empty = plaintext)")
 	joinTokenSecret := flag.String("join-token-secret", "", "HS256 secret (comma-separated list to rotate) for gateway->gameserver join tokens (overrides JOIN_TOKEN_SECRET; REQUIRED)")
@@ -263,10 +264,13 @@ func main() {
 			log.Error("agones allocator init failed", "err", aerr)
 			os.Exit(1)
 		}
+		mismatchTTL := resolveMismatchTTL(*allocMismatchTTL, log)
 		reg = registry.NewRegistryServiceWithAllocator(serverRegistry, alloc,
 			registry.WithMetrics(met), registry.WithLogger(log),
-			registry.WithAllocationWait(waitTimeout, pollInterval))
+			registry.WithAllocationWait(waitTimeout, pollInterval),
+			registry.WithMapMismatchTTL(mismatchTTL))
 		log.Info("agones allocator enabled",
+			"allocation_mismatch_ttl", mismatchTTL,
 			"namespace", agonesCfg.Namespace,
 			"fleet_map", agonesCfg.FleetMap,
 			"fleet_dungeon", firstNonEmpty(agonesCfg.FleetDungeon, "(unconfigured)"),
@@ -405,6 +409,36 @@ func resolveAllocator(flagValue string) (string, error) {
 // named env var, then def. An unparseable or non-positive env value is logged
 // and ignored rather than failing start-up: a bad tuning knob must not take the
 // gateway down.
+// resolveMismatchTTL resolves --allocation-mismatch-ttl / ALLOCATION_MISMATCH_TTL.
+//
+// It cannot reuse resolveDuration because a NEGATIVE value is meaningful here:
+// it disables the memory of "this fleet does not serve that map" and restores
+// the unbounded allocate-per-retry behaviour. That is an escape hatch for an
+// operator who knows their fleet's map changes under a running gateway, not a
+// default, so it is logged loudly when taken.
+func resolveMismatchTTL(flagValue time.Duration, log *slog.Logger) time.Duration {
+	ttl := flagValue
+	if ttl == 0 {
+		if raw := os.Getenv("ALLOCATION_MISMATCH_TTL"); raw != "" {
+			d, err := time.ParseDuration(raw)
+			if err != nil {
+				log.Warn("invalid duration in environment, using default",
+					"env", "ALLOCATION_MISMATCH_TTL", "value", raw, "default", registry.DefaultMapMismatchTTL)
+				return registry.DefaultMapMismatchTTL
+			}
+			ttl = d
+		}
+	}
+	if ttl < 0 {
+		log.Warn("allocation mismatch memory disabled; a client retrying a map no fleet serves will allocate a GameServer per attempt and Agones cannot un-allocate them",
+			"allocation_mismatch_ttl", ttl)
+	}
+	if ttl == 0 {
+		return registry.DefaultMapMismatchTTL
+	}
+	return ttl
+}
+
 func resolveDuration(flagValue time.Duration, envKey string, def time.Duration, log *slog.Logger) time.Duration {
 	if flagValue > 0 {
 		return flagValue

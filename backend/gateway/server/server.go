@@ -872,6 +872,13 @@ const (
 	// msgNoServerAvailable ("full or unserved" — do not retry) and retry
 	// shortly instead. It names no internal detail.
 	msgServerStarting = "server is starting, retry shortly"
+	// msgUnknownMap is the terminal EnterWorld failure: no fleet or server in
+	// this deployment hosts the requested map. It must not read like
+	// msgServerStarting — a client that retries this one drives the very
+	// allocation leak registry.rememberMismatch exists to bound — and it must not
+	// read like msgNoServerAvailable either, which means "this map exists but is
+	// full". It names no fleet, namespace or server id.
+	msgUnknownMap     = "map is not available"
 	msgNotImplemented = "not implemented"
 	msgInternalError  = "internal error"
 )
@@ -882,6 +889,10 @@ func clientSafeAssignError(err error) string {
 	// must not be flattened into the do-not-retry message.
 	case errors.Is(err, registry.ErrServerStarting):
 		return msgServerStarting
+	// A map the deployment cannot serve is terminal for this client: retrying
+	// cannot make a fleet host a different map, and every retry allocates.
+	case errors.Is(err, registry.ErrFleetMapMismatch):
+		return msgUnknownMap
 	case errors.Is(err, registry.ErrNoServerAvailable):
 		return msgNoServerAvailable
 	case gameerrors.Is(err, gameerrors.ErrNotImplemented):

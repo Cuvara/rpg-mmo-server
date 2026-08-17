@@ -155,6 +155,7 @@ classified below is reported as `internal error` and logged server-side.
 | `invalid enter world request` | `MsgEnterWorld` payload did not decode |
 | `no server available for map` | the map's live server(s) are full, or the map has no server and allocation failed. **Do not retry** — retrying cannot create capacity |
 | `server is starting, retry shortly` | a game server was allocated for this map but had not registered itself when the wait window expired. **Retryable** — retry after a few seconds |
+| `map is not available` | no fleet or server in this deployment hosts the requested `map_id`: the pod that answered the allocation serves a different map (its fleet's `GAMESERVER_MAP_ID`), or the registry index returned a server for another map. **Terminal — do not retry**: retrying cannot change which map a fleet serves, and every retry costs a GameServer Agones never un-allocates. Distinct from `no server available for map`, which means the map exists but is full |
 | `not implemented` | the requested transfer mode is unimplemented (e.g. dungeon) |
 | `internal error` | anything else — store failure, allocator failure, token signing failure |
 | `rate limited` | connection tripped the inbound frame limiter |
@@ -283,6 +284,44 @@ retry of `server is starting, retry shortly` would allocate another pod, only on
 can ever win the `map_id` registration, and nothing deallocates the losers. A
 failed allocation is never cached, so the next request is free to try again.
 
+**An allocated server must serve the map that was asked for.** Allocation targets
+a **Fleet**, not a `map_id`: the request Agones receives is "give me a GameServer
+of fleet X", and the pod it returns serves whatever its own fleet spec's
+`GAMESERVER_MAP_ID` says. Nothing in the allocation request carries the requested
+map. The wait that follows polls the registry by **`ServerID`**, so for a
+single-map fleet asked to serve some other map it succeeds *instantly* — the pod
+self-registered under its fleet map at boot — and returns an entry for the wrong
+world. Until 2026-08-17 the gateway announced that entry: the client joined a
+map it never asked for, with a valid join token, and every layer logged success.
+The map on the entry is now compared with the requested one, and a mismatch is
+refused with `map is not available` (`registry.ErrFleetMapMismatch`) — a
+configuration fault, deliberately **not** a flavour of `ErrNoServerAvailable`,
+because "grow the fleet" and "fix `GAMESERVER_MAP_ID`" are opposite operator
+responses. The same comparison runs on the registry path: `FindByMapID` is keyed
+by `map_id`, so an entry it returns for another map means the store's index is
+lying, and that is refused too rather than quietly filtered.
+
+**A proven mismatch is remembered, and it is the one cached failure.** Agones has
+no un-allocate and this project has no `Deallocate`, so an `Allocated` GameServer
+never returns to the pool. The single-flight above merges *concurrent* callers
+only; a client retrying is sequential, and each sequential attempt found the map
+still unregistered (the pod registered under the fleet's map, not the requested
+one) and allocated another pod — an unbounded drain from one client politely
+retrying a `map_id` that does not exist. The verdict is therefore cached for
+`--allocation-mismatch-ttl` (default **60s**), bounding the cost to **one
+GameServer per `map_id` per TTL**. This does not contradict "a failed allocation
+is never cached": those failures are transient (Redis blip, momentarily exhausted
+fleet) and resolve by themselves, so caching one would poison a map that is about
+to work. A fleet's map is fixed for the life of its pods — no number of retries
+turns the answer into "yes" — while the TTL still lets a corrected fleet be
+picked up without restarting the gateway.
+
+What this does **not** fix: the gateway still cannot make a fleet serve an
+arbitrary map. The real answer is patching `GAMESERVER_MAP_ID` per allocation
+through `GameServerAllocation` metadata, which needs the game server to read its
+map from a source it does not read today (`backend/gameserver-dotnet/`). Until
+then a `map_id` is servable only if some fleet was deployed for it.
+
 **The wait is bounded by the heartbeat, not just by taste.** `MsgEnterWorld` is
 handled on the connection's own read-loop goroutine, which is also what records
 the client's `MsgPong`, so the wait cannot approach `pongTimeout` (30s) without
@@ -309,15 +348,18 @@ through the downward API), then the legacy `gs-<mode>-<map_id>` default.
 |------|-----|---------|-------------|
 | `--allocator` | `ALLOCATOR` | `none` | `none` or `agones` |
 | `--allocator-namespace` | `ALLOCATOR_NAMESPACE` | `rpg-realtime` | Namespace holding the fleets |
-| `--allocator-fleet-map` | `ALLOCATOR_FLEET_MAP` | `map-servers-dotnet-dev` | Fleet for map allocations. The allocator never validates the name, so a fleet that does not exist fails at the first allocation, not at start-up |
+| `--allocator-fleet-map` | `ALLOCATOR_FLEET_MAP` | `map-servers-dotnet-dev` | Fleet for map allocations — **one fleet for every `map_id`**. The allocator never validates the name, so a fleet that does not exist fails at the first allocation, not at start-up; and because allocation is by fleet, a request for a `map_id` this fleet does not serve is only caught *after* the allocation, by the map comparison above |
 | `--allocator-fleet-dungeon` | `ALLOCATOR_FLEET_DUNGEON` | *(none)* | Fleet for dungeon allocations. Unset by design — no dungeon fleet is deployed, so `KindDungeon` fails with `no fleet configured for allocation kind` naming the setting to fix |
 | `--allocator-kubeconfig` | `ALLOCATOR_KUBECONFIG` | in-cluster, then `$KUBECONFIG`, then `~/.kube/config` | Credential source |
 | `--allocation-wait-timeout` | `ALLOCATION_WAIT_TIMEOUT` | `15s` | How long to wait for an allocated pod to register itself before replying `server is starting, retry shortly`. Generous because pod cold start is unmeasured; below `JoinTokenTTL` (30s) so the wait cannot outlast the token minted after it, and strictly below `server.MaxHandlerBlockingWait` (20s) so it cannot starve the connection's heartbeat. **The gateway refuses to start above 20s.** |
 | `--allocation-poll-interval` | `ALLOCATION_POLL_INTERVAL` | `250ms` | Registry re-check interval during that wait (≤80 single-key reads over the full window) |
+| `--allocation-mismatch-ttl` | `ALLOCATION_MISMATCH_TTL` | `60s` | How long a proven "the configured fleet does not serve this `map_id`" verdict is remembered, refusing further allocations for that map with `map is not available`. Bounds the leak to one GameServer per map per window. A **negative** value disables the memory and restores allocate-per-retry; it is logged loudly at start-up and is an escape hatch, not a tuning knob |
 
-Both accept Go duration strings (`15s`, `500ms`). Flag wins, then env, then the
-default; an unparseable or non-positive env value is logged and ignored rather
-than failing start-up. They only apply when `--allocator=agones`.
+All three accept Go duration strings (`15s`, `500ms`). Flag wins, then env, then
+the default; an unparseable value is logged and ignored rather than failing
+start-up. For the two wait knobs a non-positive env value is also ignored; for
+`--allocation-mismatch-ttl` a negative value is honoured, because negative means
+"disabled" there. They only apply when `--allocator=agones`.
 
 ## Go API additions
 

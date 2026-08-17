@@ -33,6 +33,10 @@ type countingAllocator struct {
 	registerAfter time.Duration
 	selfAddr      string
 	selfTransport string
+	// selfMapID overrides the map the pod publishes. A fleet is allocated by
+	// name, and its pods serve whatever their fleet spec's GAMESERVER_MAP_ID
+	// says — which is not necessarily the map the client asked for.
+	selfMapID string
 }
 
 func (c *countingAllocator) AllocateServer(_ context.Context, mapID string) (storage.ServerInfo, error) {
@@ -48,6 +52,9 @@ func (c *countingAllocator) AllocateServer(_ context.Context, mapID string) (sto
 			self.Addr = c.selfAddr
 		}
 		self.Transport = c.selfTransport
+		if c.selfMapID != "" {
+			self.MapID = c.selfMapID
+		}
 		time.AfterFunc(c.registerAfter, func() {
 			_ = c.selfRegister.Register(context.Background(), self)
 		})
@@ -114,6 +121,58 @@ func TestAllocationWaitDefaultCannotStarveHeartbeat(t *testing.T) {
 	}
 }
 
+// A client that keeps asking for a map no fleet serves must not keep draining
+// the fleet. The gateway's single-flight only merges CONCURRENT callers; a retry
+// loop is sequential, and every sequential attempt used to allocate another
+// GameServer that Agones can never un-allocate.
+func TestGateway_UnservableMapDoesNotLeakAllocationsAcrossRetries(t *testing.T) {
+	const retries = 4
+	alloc := &countingAllocator{
+		info: storage.ServerInfo{
+			ServerID: "map-servers-dotnet-dev-q7bdn-hctpd",
+			Addr:     "127.0.0.1:7002",
+			Capacity: 100,
+		},
+		registerAfter: 10 * time.Millisecond,
+		selfAddr:      "127.0.0.1:7002",
+		selfMapID:     "map_01", // the only map the configured fleet serves
+	}
+	gw, _ := startGatewayWithAllocator(t, alloc)
+
+	for i := 0; i < retries; i++ {
+		conn := dialGateway(t, gw)
+		token, _ := jwt.Sign("user1", testSecret, time.Hour)
+		authEnv, _ := messages.NewEnvelope(messages.MsgAuth, messages.AuthRequest{Token: token})
+		sendEnvelope(t, conn, authEnv)
+		readEnvelope(t, conn)
+
+		enterEnv, _ := messages.NewEnvelope(messages.MsgEnterWorld, messages.EnterWorldRequest{MapID: "map_77"})
+		sendEnvelope(t, conn, enterEnv)
+
+		var resp messages.EnterWorldResponse
+		if err := readEnvelope(t, conn).UnmarshalPayload(&resp); err != nil {
+			t.Fatalf("attempt %d: unmarshal: %v", i, err)
+		}
+		if resp.Error != msgUnknownMap {
+			t.Fatalf("attempt %d: Error = %q, want %q", i, resp.Error, msgUnknownMap)
+		}
+		if resp.Error == msgServerStarting {
+			t.Fatalf("attempt %d: an unservable map must not be reported as retryable", i)
+		}
+		if resp.JoinToken != "" || resp.ServerAddr != "" {
+			t.Fatalf("attempt %d: handed out token=%q addr=%q for a map the fleet cannot serve",
+				i, resp.JoinToken, resp.ServerAddr)
+		}
+		conn.Close()
+	}
+
+	// The bound the fix guarantees: one allocation per map per mismatch TTL
+	// (registry.DefaultMapMismatchTTL, far longer than this test).
+	if got := alloc.hits.Load(); got != 1 {
+		t.Errorf("allocator hits = %d over %d requests, want exactly 1", got, retries)
+	}
+}
+
 func TestGateway_EnterWorldAllocatesUnservedMap(t *testing.T) {
 	allocated := storage.ServerInfo{
 		ServerID: "map-servers-dev-xjh7p-6ndtl", // == GameServer/pod name
@@ -177,6 +236,23 @@ func TestGateway_EnterWorldAllocatesUnservedMap(t *testing.T) {
 			wantError: msgNoServerAvailable,
 		},
 		{
+			// The fleet answered, the pod is healthy — but it serves its own
+			// fleet map, not the requested one. The client must be refused, not
+			// silently dropped into another world, and the message must not be
+			// the retryable one: a retry cannot change a fleet's map and each
+			// retry allocates a GameServer Agones will never reclaim.
+			name:  "allocated pod serving another map is refused, not announced",
+			mapID: "map_77",
+			alloc: &countingAllocator{
+				info:          allocated,
+				registerAfter: 20 * time.Millisecond,
+				selfAddr:      "192.168.65.3:7257",
+				selfMapID:     "map_01", // the fleet's GAMESERVER_MAP_ID
+			},
+			wantHits:  1,
+			wantError: msgUnknownMap,
+		},
+		{
 			name:      "allocation failure surfaces to the client",
 			mapID:     "map_desert",
 			alloc:     &countingAllocator{err: errors.New("fleet exhausted")},
@@ -218,9 +294,13 @@ func TestGateway_EnterWorldAllocatesUnservedMap(t *testing.T) {
 				if resp.ServerAddr != "" {
 					t.Errorf("ServerAddr = %q, want empty on failure", resp.ServerAddr)
 				}
-				// The gateway never writes a game server's registry entry.
-				if _, gerr := store.GetServer(context.Background(), allocated.ServerID); gerr == nil && tt.wantHits > 0 {
-					t.Error("gateway registered the allocated server itself; only the game server may")
+				// The gateway never writes a game server's registry entry. Only
+				// meaningful when the pod itself never registered — otherwise the
+				// entry under test is the pod's own.
+				if tt.alloc.registerAfter == 0 {
+					if _, gerr := store.GetServer(context.Background(), allocated.ServerID); gerr == nil && tt.wantHits > 0 {
+						t.Error("gateway registered the allocated server itself; only the game server may")
+					}
 				}
 				return
 			}

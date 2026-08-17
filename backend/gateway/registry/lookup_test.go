@@ -110,6 +110,11 @@ type fakeAllocator struct {
 	registerAfter time.Duration
 	selfAddr      string
 	selfTransport string
+	// selfMapID overrides the map the pod registers itself under. It reproduces
+	// the real fleet: a pod's map comes from the fleet spec's own
+	// GAMESERVER_MAP_ID, so a fleet asked to serve some other map still answers
+	// the allocation and still registers under the map it was built for.
+	selfMapID string
 }
 
 func (f *fakeAllocator) AllocateServer(_ context.Context, mapID string) (storage.ServerInfo, error) {
@@ -126,6 +131,9 @@ func (f *fakeAllocator) AllocateServer(_ context.Context, mapID string) (storage
 		}
 		if f.selfTransport != "" {
 			self.Transport = f.selfTransport
+		}
+		if f.selfMapID != "" {
+			self.MapID = f.selfMapID
 		}
 		time.AfterFunc(f.registerAfter, func() {
 			_ = f.selfRegister.Register(context.Background(), self)
@@ -254,6 +262,176 @@ func TestRegistryService_AllocatorFallback(t *testing.T) {
 			t.Error("FindServer() should fail with the stub allocator")
 		}
 	})
+}
+
+// A fleet is allocated by fleet name, never by map: the gateway asks Agones for
+// "a GameServer of fleet X" and the pod it gets serves whatever map its fleet
+// spec's GAMESERVER_MAP_ID says. awaitRegistration polls by ServerID, so a pod
+// that self-registered under another map at boot satisfies the wait instantly
+// and used to be announced to the client as the server for the requested map —
+// wrong world, valid join token, no error anywhere.
+func TestRegistryService_AllocatedServerMustServeTheRequestedMap(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name string
+		// requested is the map the client asks for; served is the map the pod
+		// actually registers itself under.
+		requested string
+		served    string
+		wantErr   error
+		wantOK    bool
+	}{
+		{
+			name:      "pod registers under the fleet's own map, not the requested one",
+			requested: "map_77",
+			served:    "map_01",
+			wantErr:   ErrFleetMapMismatch,
+		},
+		{
+			name:      "pod registers under the requested map",
+			requested: "map_01",
+			served:    "map_01",
+			wantOK:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := storage.NewMemoryServerRegistry()
+			alloc := &fakeAllocator{
+				info:          storage.ServerInfo{ServerID: "map-servers-dotnet-dev-q7bdn-hctpd", Addr: "127.0.0.1:7002", Capacity: 100},
+				selfRegister:  store,
+				registerAfter: 5 * time.Millisecond,
+				selfMapID:     tt.served,
+			}
+			svc := NewRegistryServiceWithAllocator(store, alloc, fastWait())
+
+			got, err := svc.FindServer(ctx, tt.requested)
+			if tt.wantOK {
+				if err != nil {
+					t.Fatalf("FindServer(%q) error: %v", tt.requested, err)
+				}
+				if got.MapID != tt.requested || got.ServerID != alloc.info.ServerID {
+					t.Errorf("got %+v, want the allocated server for %q", got, tt.requested)
+				}
+				return
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("FindServer(%q) = %+v, err = %v; want %v (the pod serves %q, not %q)",
+					tt.requested, got, err, tt.wantErr, tt.served, tt.requested)
+			}
+			// The error must not masquerade as a capacity problem or as a
+			// still-booting server: both invite an operator or a client to wait
+			// and retry, and neither is what happened.
+			if errors.Is(err, ErrNoServerAvailable) {
+				t.Error("a fleet/map mismatch must not be reported as ErrNoServerAvailable (capacity)")
+			}
+			if errors.Is(err, ErrServerStarting) {
+				t.Error("a fleet/map mismatch must not be reported as ErrServerStarting (retryable)")
+			}
+			// No address of the wrong-map server may leak out.
+			if got.Addr != "" || got.ServerID != "" {
+				t.Errorf("returned %+v on failure, want the zero ServerInfo", got)
+			}
+		})
+	}
+}
+
+// Agones has no un-allocate and this project has no Deallocate, so every
+// allocation for a map the fleet cannot serve is a GameServer that never comes
+// back. The single-flight only dedupes CONCURRENT callers; a client retrying
+// politely is sequential, and each attempt used to burn another pod. The
+// mismatch is therefore remembered for a bounded window.
+func TestRegistryService_UnservableMapAllocatesAtMostOncePerTTL(t *testing.T) {
+	const attempts = 5
+	store := storage.NewMemoryServerRegistry()
+	alloc := &fakeAllocator{
+		info:          storage.ServerInfo{ServerID: "gs-pod", Addr: "127.0.0.1:7002", Capacity: 100},
+		selfRegister:  store,
+		registerAfter: 5 * time.Millisecond,
+		selfMapID:     "map_01",
+	}
+	svc := NewRegistryServiceWithAllocator(store, alloc, fastWait(), WithMapMismatchTTL(time.Minute))
+
+	for i := 0; i < attempts; i++ {
+		if _, err := svc.FindServer(context.Background(), "map_77"); !errors.Is(err, ErrFleetMapMismatch) {
+			t.Fatalf("attempt %d: error = %v, want ErrFleetMapMismatch", i, err)
+		}
+	}
+	if alloc.hits != 1 {
+		t.Errorf("allocator hits = %d over %d requests, want exactly 1 (a mismatch must be remembered, not re-allocated)",
+			alloc.hits, attempts)
+	}
+
+	// A different map is unaffected: the memory is per map, not a global stop.
+	other := &fakeAllocator{
+		info:          storage.ServerInfo{ServerID: "gs-ok", Addr: "127.0.0.1:7003", Capacity: 100},
+		selfRegister:  store,
+		registerAfter: 5 * time.Millisecond,
+	}
+	svc2 := NewRegistryServiceWithAllocator(store, other, fastWait(), WithMapMismatchTTL(time.Minute))
+	if _, err := svc2.FindServer(context.Background(), "map_02"); err != nil {
+		t.Fatalf("unrelated map: FindServer() error: %v", err)
+	}
+}
+
+// The memory must expire: a fleet redeployed with the right GAMESERVER_MAP_ID
+// has to become usable without restarting the gateway.
+func TestRegistryService_MismatchMemoryExpires(t *testing.T) {
+	store := storage.NewMemoryServerRegistry()
+	alloc := &fakeAllocator{
+		info:          storage.ServerInfo{ServerID: "gs-pod", Addr: "127.0.0.1:7002", Capacity: 100},
+		selfRegister:  store,
+		registerAfter: 5 * time.Millisecond,
+		selfMapID:     "map_01",
+	}
+	svc := NewRegistryServiceWithAllocator(store, alloc, fastWait(), WithMapMismatchTTL(20*time.Millisecond))
+
+	for i := 0; i < 2; i++ {
+		if _, err := svc.FindServer(context.Background(), "map_77"); !errors.Is(err, ErrFleetMapMismatch) {
+			t.Fatalf("attempt %d: error = %v, want ErrFleetMapMismatch", i, err)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if alloc.hits != 2 {
+		t.Errorf("allocator hits = %d, want 2 (one per expired TTL window)", alloc.hits)
+	}
+}
+
+// FindByMapID is keyed by map_id, so an entry it returns for another map means
+// the store's index is wrong. Announcing it would be the same silent bug as the
+// allocation path's, so it is refused rather than filtered away.
+func TestRegistryService_RegistryPathRejectsWrongMapEntry(t *testing.T) {
+	ctx := context.Background()
+	store := &lyingRegistry{
+		ServerRegistry: storage.NewMemoryServerRegistry(),
+		lie:            storage.ServerInfo{ServerID: "liar", MapID: "map_01", Addr: "127.0.0.1:7002", Capacity: 100},
+	}
+	alloc := &fakeAllocator{info: storage.ServerInfo{ServerID: "gs-pod", Capacity: 100}}
+	svc := NewRegistryServiceWithAllocator(store, alloc, fastWait())
+
+	got, err := svc.FindServer(ctx, "map_77")
+	if !errors.Is(err, ErrFleetMapMismatch) {
+		t.Fatalf("FindServer() = %+v, err = %v; want ErrFleetMapMismatch", got, err)
+	}
+	if got.Addr != "" {
+		t.Errorf("returned %+v, want the zero ServerInfo", got)
+	}
+	if alloc.hits != 0 {
+		t.Errorf("allocator hits = %d, want 0 (a lying store is not a reason to allocate)", alloc.hits)
+	}
+}
+
+// lyingRegistry returns an entry for a map that was not asked for, standing in
+// for a corrupted or buggy store index.
+type lyingRegistry struct {
+	storage.ServerRegistry
+	lie storage.ServerInfo
+}
+
+func (l *lyingRegistry) FindByMapID(_ context.Context, _ string) ([]storage.ServerInfo, error) {
+	return []storage.ServerInfo{l.lie}, nil
 }
 
 // concurrentAllocator counts allocations atomically and, optionally, registers
