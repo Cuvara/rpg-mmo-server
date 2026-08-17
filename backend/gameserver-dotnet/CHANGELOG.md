@@ -7,6 +7,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Documentation
+- **ADR-14's decision 3 asked for work that was already done.** It states that the server
+  must register into Redis only after reporting Ready, written as though that were pending.
+  `GameServer.RunAsync` already does it: the bind completes at
+  `GameServer/Server/GameServer.cs:349`, `ReadyAsync()` runs at 356, `_registration.StartAsync()`
+  at 364, and the descent deregisters at 443 before `ShutdownAsync()` at 450. What was actually
+  missing was decision 1 alone — `Program.cs:365` hardcoded `new NoopAgonesSdk()`, so a
+  correctly ordered sequence of calls all landed on the no-op.
+
+  The decision stands as the rule; it needs a test pinning the order against a future refactor,
+  not a restructure. Corrected in place with a dated note rather than edited away, because an
+  ADR that asks for finished work sends the next reader hunting for it — the same failure the
+  ADR-10 and nakama status corrections fixed earlier the same day.
+
+### Documentation
 - **ADR-14 — Agones owns the pod, Redis owns the lookup; the C# server's SDK is a stub and must
   be written over the HTTP sidecar** (`backend/docs/ARCHITECTURE-DECISIONS.md`). Accepted
   2026-08-17, **not yet implemented** — nothing in it has shipped, and it must not be cited as
