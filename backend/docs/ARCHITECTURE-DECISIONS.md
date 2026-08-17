@@ -1593,7 +1593,7 @@ it benefits, and it quadruples snapshot bandwidth, which the measured 45.9 KB/s 
 
 ## ADR-14 — Agones owns the pod, Redis owns the lookup; the C# server's SDK is a stub and must be written over the HTTP sidecar
 
-**Status:** accepted 2026-08-17, **not yet implemented**. Nothing in this ADR has shipped.
+**Status:** accepted 2026-08-17. **Superseded in part — stages 1-4 have since shipped and are proven; see ADR-16.** The line below said "not yet implemented, nothing in this ADR has shipped"; that was true when written and stopped being true the same day, which is exactly the staleness this document keeps warning about. `HttpAgonesSdk` exists and reports Ready/Health/Allocate/Shutdown, the address is read from the sidecar, and a real client has joined an Agones-managed server. Stages 5-8 remain open.
 Extends ADR-2 (whose allocation branch this is the missing half of) and is constrained by
 ADR-1 (one writer per datum) and ADR-7 (the unknown player ceiling).
 
@@ -1742,6 +1742,117 @@ this ADR should record where.
 
 ---
 
+## ADR-16 — The realtime tier runs on Agones, and the address it hands a client is measured, not configured
+
+**Status:** accepted 2026-08-17, **proven end to end on k3d**. Implements ADR-14 stages 1-4,
+supersedes ADR-15's decision 2 in one respect (the status read alone is not sufficient), and
+answers ADR-15's open "which cluster" question for local development. Constrained by ADR-1
+(one writer per datum), ADR-2 (one live server per `map_id`), ADR-3 (the gateway is a
+redirector) and ADR-7 (the unknown per-server ceiling).
+
+**What is proven.** A client completed the full production flow — Nakama device auth,
+`gateway_token` RPC, `MsgAuth`, `MsgEnterWorld`, direct dial, `MsgInput`/`MsgSnapshot` — against
+an **Agones-managed C# game server**, at an address only Agones could have supplied:
+
+```
+PASS  gateway_auth      map=map_01  server=127.0.0.1:7097 (tcp)
+PASS  gameserver_join   snapshots=15 (keyframes=1 deltas=14) final_x=4.83 ack_tick=10
+SMOKE=PASS
+```
+
+The run used `--strict-addr`, so the smoke test was forbidden from rewriting a listen-style
+address to loopback. That matters: without it the harness silently repairs the exact defect
+this ADR exists to fix, and reports PASS while a real client fails.
+
+A GameServer also reached `Allocated` **without any gateway allocation**, because the server
+reports `Allocate` to the sidecar on first player join (`NotifyAgonesAllocatedOnce`). "A pod is
+Allocated" is therefore not evidence that the gateway's allocation path ran.
+
+**Decision 1 — Docker Desktop's Kubernetes cannot host this architecture; k3d can.**
+Docker Desktop publishes *Docker* ports to the host and does **not** publish Kubernetes
+`hostPort`. Measured: an Agones GameServer with `portPolicy: Dynamic` received `hostPort: 7306`
+on its pod spec, answered from inside the cluster, and was unreachable from both Windows and
+WSL2, with a compose port reachable at the same moment as a control.
+
+| target | Windows | WSL2 | in-cluster |
+|---|---|---|---|
+| k8s hostPort `127.0.0.1:7306` | FAIL | FAIL | — |
+| node IP `192.168.65.3:7306` | FAIL | FAIL | PONG |
+| compose `127.0.0.1:8000` | OK | OK | — |
+
+Under ADR-3 the gateway hands `ServerAddr` to the client verbatim and the client dials the game
+server directly, so an address routable only inside the cluster means no client can ever join an
+Agones-managed server. k3d works because a k3d node is a Docker container and its published
+range goes through Docker's own port publishing. Cluster `rpg-dev` publishes **7000-7100**, and
+Agones' `MIN_PORT`/`MAX_PORT` are set to match — a mismatch there hands out ports outside the
+published range while every component still reports healthy.
+
+**Decision 2 — the advertised address is composed: port from Agones, host from configuration.**
+ADR-15 decided the server reads its address from the sidecar (`GET /gameserver`) and registers
+it. That is necessary and **not sufficient**: `status.address` is the *node* address
+(`172.20.0.3` on k3d) and is not dialable by a client. The port cannot come from configuration —
+it is assigned at scheduling time and only the status read can know it. So:
+
+> **host** = `GAMESERVER_ADVERTISE_HOST` if set, else `status.address`; **port** = always the
+> Agones-assigned port of the `game`-named port. On a failed read the override is ignored
+> entirely rather than composed with a configured port, because an address that was never
+> assigned to anything is worse than an obviously wrong one.
+
+The server remains the sole writer of its own registry entry (ADR-1); it asks Agones only "what
+address did you give me", never "which server serves this map".
+
+**This works because there is one node and one published range.** On a multi-node cluster the
+correct host differs per pod and a single fleet-level env var cannot express it; the answers are
+an ingress or a per-pod value via the downward API, and neither exists in this repo.
+
+**Decision 3 — ADR-2's invariant is now enforced in code, not merely warned about.**
+`FindServer` allocates **only when a map has zero live servers**. When servers exist but are all
+full it returns `ErrNoServerAvailable` without allocating. The previous behaviour — allocate a
+second instance for a full map — would have produced two disconnected copies of one world the
+first time Agones actually worked. Refusing a join is a loud, bounded failure; a silently split
+world is not.
+
+**Decision 4 — the join token is minted last.** It is single-use, `sid`-pinned and lives 30s.
+After allocating, the gateway waits (bounded, default 15s) for the pod to publish its **own**
+registry entry and mints from that entry, so the 30s starts when the address is real. The
+gateway never writes a server's entry: an entry it wrote would have nothing re-arming its 15s
+TTL, and that TTL is what makes a crashed server vanish. A timeout returns a distinct retryable
+error. The wait is refused at startup if it approaches `pongTimeout - pingInterval`, because it
+blocks the connection's read loop, which is also what records `MsgPong`.
+
+**Consequences.**
+
+- **Allocated pods are never reclaimed.** Agones has no un-allocate and this project has no
+  `Deallocate` path, so an Allocated GameServer leaves that state only by being shut down.
+  Observed directly: a fleet scaled to 0 kept its Allocated pod. Single-flight per `map_id`
+  bounds the leak per gateway instance; two gateway instances still allocate one pod each.
+- **The map-fleet allocator policy (ADR-2's open item) is still open**, and is now the binding
+  question rather than a theoretical one: fleet pods self-register at boot, so a Ready pod is
+  already in the registry and `FindServer` finds it without allocating; and a fleet hardcodes
+  `GAMESERVER_MAP_ID`, so an allocation for another map would hand back a server for the wrong
+  one. Whether the allocation branch can fire at all for map servers is under experiment.
+- **The deploy path does not change.** Dev, staging and production remain
+  `DEPLOY_MODE=containers`. Agones is proven, not adopted; ADR-15's decision-3 prerequisites
+  (StatefulSets, ConfigMaps, registry, RBAC) are untouched and still stand between this and a
+  real cluster.
+- **`--allocator-transport` is inert**, since the allocation response is now used only for its
+  `ServerID`.
+
+**Operational facts worth not re-deriving.** Pods reach the compose data tier as
+`host.k3d.internal`. The gateway container reaches the API server by joining network
+`k3d-<cluster>` and using `https://k3d-<cluster>-serverlb:6443`, which is in the API
+certificate's SAN list — `host.docker.internal` is not, and client-go verifies by default. k3d
+does **not** share the Docker image store, so local tags must be imported or
+`imagePullPolicy: IfNotPresent` silently falls through to a registry pull. Image tags here lag
+the branch routinely; verify `org.opencontainers.image.revision` against the commit under test
+before believing a deploy.
+
+**Revisit if** the tier moves to a multi-node cluster (decision 2's host override stops
+expressing the answer), if a `Deallocate`/reap story is needed, or if ADR-7's load-generator
+blocker clears and a measured per-server ceiling makes a CCU-keyed policy defensible.
+
+---
+
 ## Summary of decisions
 
 | # | Area | Decision |
@@ -1759,4 +1870,5 @@ this ADR should record where.
 | 11 | Arch under NativeAOT | Arch publishes clean and then throws at runtime without per-component AOT hints; hints are **generated or guarded, never hand-written**; `CommandBuffer` is broken under AOT and is not used; the `publish` CI job must **run** the binary, not just build it |
 | 12 | ECS migration | Server goes to **real ECS with Arch**, staged one PR at a time, over the analysis's objection and by owner decision; `CommandBuffer` stays banned and structural ops stay deferred to one phase per tick; every new component gets its AOT hint line in the same commit; no query shape the hint guard cannot see; `Shared.GameLogic` and the wire are frozen throughout |
 | 13 | Simulation rates | Three responsibility-named groups (`Critical`/`World`/`Background`) at configurable Hz (`SIM_*_HZ`, default 60/15/5) on one derived integer base-tick timeline; rates that do not divide the base are rejected at startup; each group integrates with its own dt; group order Critical->World->Background is the cross-rate write-ownership rule; **replication stays at the world rate**; overload drops the backlog and counts it; the background group ships empty because nothing currently tolerates 200ms |
-| 14 | Agones | **Not yet implemented.** The C# server's Agones SDK is a no-op and `--agones` changes nothing; implement it over the **HTTP sidecar on `localhost:9358`**, not the gRPC C# SDK, to hold the module's NativeAOT/no-dependencies rule. Agones owns pod lifecycle, Redis owns the `map_id -> server` lookup, and the server registers **only after** reporting Ready — an ordering `GameServer.RunAsync` already implements, so what it needs is a test pinning it, not a change. Health stays `disabled: true` until a real SDK is wired; the autoscaler is buffer-based on server count because ADR-7's CCU ceiling is unknown. Whether the realtime tier moves off `DEPLOY_MODE=containers` to k8s is **not** decided here |
+| 14 | Agones | **Stages 1-4 shipped 2026-08-17 and are proven — see ADR-16.** The decisions below stand; the status claim does not. Originally: the C# server's Agones SDK is a no-op and `--agones` changes nothing; implement it over the **HTTP sidecar on `localhost:9358`**, not the gRPC C# SDK, to hold the module's NativeAOT/no-dependencies rule. Agones owns pod lifecycle, Redis owns the `map_id -> server` lookup, and the server registers **only after** reporting Ready — an ordering `GameServer.RunAsync` already implements, so what it needs is a test pinning it, not a change. Health stays `disabled: true` until a real SDK is wired; the autoscaler is buffer-based on server count because ADR-7's CCU ceiling is unknown. Whether the realtime tier moves off `DEPLOY_MODE=containers` to k8s is **not** decided here |
+| 16 | Agones on k3s | Realtime tier **proven** on Agones/k3d: a real client joined an Agones-managed server in strict-address mode. Docker Desktop k8s cannot host it (Kubernetes `hostPort` is never published to the host); k3d with a mapped port range can. The advertised address is **composed** — port from the Agones status read, host from `GAMESERVER_ADVERTISE_HOST` — because `status.address` is the node address and is not dialable. ADR-2 is now enforced in code (allocate only for a map with no live server); the join token is minted only after the pod self-registers. Allocated pods are never reclaimed; the map-fleet allocator policy stays open; the deploy path stays `DEPLOY_MODE=containers` |
