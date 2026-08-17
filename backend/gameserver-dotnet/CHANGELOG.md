@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`SlowClientMovementTests` measured the transport and blamed the simulation.** Two of its
+  cases flaked on CI during one afternoon, each costing an investigation, and both readings
+  were wrong in the same direction: they reported a defect in a server that had behaved
+  correctly.
+  - `AnExplicitStopIsNotTreatedAsLostTime` judged **every** sampled step, including those
+    from the movement phase *before* the pause it is named for. Under load the server's own
+    tick loop runs late and the elapsed-time step then integrates two ticks into one — which
+    is #100 working as specified. That lands on exactly `2.00x`, the value the threshold
+    rejects. Observed at `0.6667@tick9` with the pause not ending until ~tick 21. It now
+    judges only samples at or after the restart, with the boundary taken from the snapshot
+    stream's own tick rather than from wall clock.
+  - Samples spanning a **lost** snapshot are discarded. The outbound channel drops the
+    oldest frame under load; when the dropped frame mentioned the player, the next mention
+    is two steps away and the raw difference again reads as exactly `2.00x`. Lost frames are
+    detected by tracking the tick of *every* snapshot, not only those carrying the player —
+    which is what distinguishes a dropped frame from an entity that legitimately did not
+    move and so was absent from a delta.
+  - `MeasureAsync` took "the newest position seen", which deltas and drops can leave several
+    ticks stale, reading as a short distance — again the failure shape. It now requests a
+    keyframe (`MsgResync`) and reads the position out of that, which carries every entity in
+    the AOI unconditionally.
+  - Failures now print the sample set: count, how many were before the restart, lost frames,
+    discarded pairs, and the three largest steps with their tick and gap. The first
+    occurrence after adding it identified the cause immediately, having previously been
+    misattributed twice.
+
+  **Rejected approach, recorded because it looked right.** Dividing each step by its tick gap
+  removes the drop artefact — and also removes the defect: banked repayment puts a whole
+  silent interval's travel into one tick and the previous mention is a whole interval
+  earlier, so the quotient comes back at exactly one normal step. Both banking tests then
+  measured the defect as *absent* while passing. Caught by running them; it would have
+  shipped two permanently green, permanently blind tests.
+
 ### Added
 - **`EcsWorld.UpdateComponentsParallel(workerCount, body)`** — runs a body on N threads
   inside one write scope. **Nothing in the tick loop calls it.** It exists so the two

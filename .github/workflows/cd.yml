@@ -20,10 +20,16 @@ name: CD — Build & Deploy
 #                └─ test-integration ────────────────►bundle
 #                                     build-images(*)     │
 #                                                         ▼
-#                                      db-migrate (backup + schema)
+#                                      db-migrate (backup only)
 #                                                         │
 #                                                         ▼
 #                                        deploy ─► post-deploy-smoke ─► summary
+#
+#   Schema migrations run INSIDE deploy, between bringing up the data tier and
+#   starting the realtime profile. They cannot run in db-migrate: that job is
+#   ahead of deploy, so on an environment whose database does not exist yet the
+#   migration fails on connect and the job that would have created the database
+#   never runs. See the note in db-migrate.
 #   (*) build-images runs only for production / build_images=true and is not
 #       on the deploy path.
 #
@@ -365,7 +371,11 @@ jobs:
   # if it is skipped the schema still converges, just at an unpredictable moment
   # and with no backup taken.
   db-migrate:
-    name: Back up + migrate databases
+    # Backup only. Migrations moved into `deploy`, between the data tier and the
+    # realtime profile — see the note where they used to be. The job id is kept
+    # because `deploy` depends on it by name and the backup is still what gates the
+    # deploy.
+    name: Back up databases
     needs: [resolve, bundle]
     runs-on: ${{ fromJSON(needs.resolve.outputs.runner_labels) }}
     environment: ${{ needs.resolve.outputs.environment }}
@@ -417,21 +427,18 @@ jobs:
           bash backend/deploy/db/redis-backup.sh --skip-missing \
             || echo "::warning::redis backup failed (non-fatal, see DR doc)"
 
-      - name: Apply pending migrations
-        env:
-          GAME_DB_URL: ${{ vars.GAME_DB_URL || '' }}
-        run: |
-          set -euo pipefail
-          if [ -z "${GAME_DB_URL}" ]; then
-            echo "GAME_DB_URL is not set for this environment — the gameserver runs on the"
-            echo "in-memory store, so there is no schema to migrate. Skipping."
-            echo "- db-migrate: skipped (GAME_DB_URL unset)" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          chmod +x dist/bin/gameserver-dotnet
-          # Exits non-zero on unreachable DB, failed migration, or checksum drift.
-          ./dist/bin/gameserver-dotnet --migrate-only --game-db-url "${GAME_DB_URL}"
-          echo "- db-migrate: migrations applied" >> "$GITHUB_STEP_SUMMARY"
+      # Migrations used to run here and could not: this job runs BEFORE `deploy`, and on
+      # an environment that has never been deployed the database does not exist yet.
+      # `--migrate-only` then fails on connect, `deploy` never runs, and nothing ever
+      # creates the database it was waiting for. A first production deploy failed exactly
+      # that way with "Failed to connect to 127.0.0.1:5443".
+      #
+      # They now run inside `deploy`, between bringing up the data tier and starting the
+      # gateway and game server. That keeps the property this ordering existed for — the
+      # schema is migrated before any new binary serves traffic — and adds the one it was
+      # missing, that the database is up before something tries to migrate it.
+      #
+      # The backup above stays here, before `deploy` touches anything.
 
   # ----------------------------------------------------------------- deploy
   deploy:
@@ -753,10 +760,71 @@ jobs:
           docker image ls --filter reference='rpg-mmo/*' \
             --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}'
 
+      # ------------------------------------------------- data tier, then migrate
+      # The data tier comes up on its own first, so that migrations have a database to
+      # run against and still run before any new binary serves traffic. Without the
+      # split, migrations had to happen in an earlier job — which cannot work on an
+      # environment whose database does not exist yet, because the job that would
+      # create it is gated on the migration succeeding.
+      #
+      # Bringing up the realtime profile is deliberately NOT part of this step: that is
+      # what keeps "schema first, then the code that depends on it" true.
+      - name: Start the data tier (postgres, redis, nakama)
+        env:
+          RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
+          MONITORING_ENABLED: ${{ vars.MONITORING_ENABLED || 'true' }}
+          COMPOSE_PROJECT_NAME: ${{ vars.COMPOSE_PROJECT_NAME || 'rpg-mmo-meta' }}
+          COMPOSE_NAME_PREFIX: ${{ vars.COMPOSE_NAME_PREFIX || 'rpg' }}
+        working-directory: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
+        run: |
+          set -euo pipefail
+          cd "$RPG_DEPLOY_DIR/deploy"
+
+          profile_args=()
+          if [ "${MONITORING_ENABLED}" != "false" ]; then profile_args=(--profile monitoring); fi
+
+          # No --profile realtime and no --remove-orphans: this must not disturb a
+          # gateway or game server that is already running while the schema changes.
+          docker compose "${profile_args[@]}" up -d
+
+          # Wait for the game database specifically. Compose reporting the container as
+          # started is not the same as postgres accepting connections, and on a first
+          # deploy it has an empty data directory to initialise first.
+          name_prefix="${COMPOSE_NAME_PREFIX:-rpg}"
+          for _ in $(seq 1 60); do
+            if docker exec "${name_prefix}-postgres-game" pg_isready -q 2>/dev/null; then
+              echo "game database is accepting connections"
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Apply pending migrations
+        env:
+          RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
+          GAME_DB_URL: ${{ vars.GAME_DB_URL || '' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GAME_DB_URL}" ]; then
+            echo "GAME_DB_URL is not set for this environment — the gameserver runs on the"
+            echo "in-memory store, so there is no schema to migrate. Skipping."
+            echo "- db-migrate: skipped (GAME_DB_URL unset)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          chmod +x "$RPG_DEPLOY_DIR/bin/gameserver-dotnet"
+          # Exits non-zero on unreachable DB, failed migration, or checksum drift. The
+          # data tier is up by now, so an unreachable database here is a real fault
+          # rather than the ordering problem it used to be.
+          "$RPG_DEPLOY_DIR/bin/gameserver-dotnet" --migrate-only --game-db-url "${GAME_DB_URL}"
+          echo "- db-migrate: migrations applied" >> "$GITHUB_STEP_SUMMARY"
+
       # postgres + redis + nakama (+ the `monitoring` profile: grafana/otel-lgtm,
       # + the `realtime` profile in containers mode: gateway + gameserver).
       # The plugin .so is mounted from ./modules, monitoring configs from
       # ./monitoring — both installed by the sync step above.
+      #
+      # The data services are already up from the step above; this adds the realtime
+      # profile on top and is where --remove-orphans belongs.
       - name: Start / update the stack (docker compose)
         env:
           RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
