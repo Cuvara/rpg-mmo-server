@@ -981,6 +981,17 @@ jobs:
   # `deploy` (same labels) and reads env from the file the services read; values
   # are never echoed. Deliberately a separate job so a broken smoke test is
   # visibly distinct from a broken deploy.
+  #
+  # deploy/.env is written for the SERVICES, and the smoke test is a CLIENT, so
+  # sourcing it is not enough on its own: two of the addresses it needs are the
+  # ones the services listen on, not the ones a client on the host can dial.
+  # They only looked interchangeable because dev and staging leave every port at
+  # its default, which happens to equal the smoke test's own fallback — so this
+  # whole class of bug stays invisible until an environment moves off the
+  # defaults, as production is the first to do. The deploy job's healthcheck
+  # cannot catch it either: it probes the METRICS ports, which are already
+  # forwarded per-environment, so it goes green while the client-facing path is
+  # unreachable. Hence the overrides below, applied AFTER the file is sourced.
   post-deploy-smoke:
     name: Post-deploy smoke test
     needs: [resolve, deploy]
@@ -995,6 +1006,28 @@ jobs:
           # shellcheck disable=SC1091
           . "$RPG_DEPLOY_DIR/deploy/.env"
           set +a
+
+          # NAKAMA_URL is absent from deploy/.env by design — compose hands the
+          # game server the in-network http://nakama:7350 instead — so the smoke
+          # test was falling back to its own DefaultNakamaURL of :7350 and dialing
+          # a port nothing publishes. Derive it from the published port. Kept a
+          # step-local export rather than a line in deploy/.env: a host-mode game
+          # server inherits that file, where NAKAMA_URL unset is what DISABLES its
+          # Nakama S2S integration, and switching that on is not this fix's job.
+          export NAKAMA_URL="http://127.0.0.1:${NAKAMA_HTTP_PORT:-7350}"
+
+          # GATEWAY_ADDR in deploy/.env is the gateway's LISTEN address, and it
+          # must stay that: the container's command hardcodes --addr=:8000 and
+          # GATEWAY_CONTAINER_PORT is derived from it when an environment does not
+          # set one. The dialable address is the published port, which is exactly
+          # GATEWAY_CONTAINER_PORT — equal to the listen port in host mode, mapped
+          # onto it in containers mode, so one expression is right for both.
+          export GATEWAY_ADDR="127.0.0.1:${GATEWAY_CONTAINER_PORT:-8000}"
+
+          # The game server hop needs no equivalent: the smoke test dials whatever
+          # EnterWorldResponse.ServerAddr carries, i.e. GAMESERVER_PUBLIC_ADDR,
+          # which the "Write environment file" step already refuses to leave
+          # hostless or wrong for a published port.
           "$RPG_DEPLOY_DIR/bin/smoketest"
 
   # ----------------------------------------------------------------- summary
