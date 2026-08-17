@@ -1591,6 +1591,145 @@ it benefits, and it quadruples snapshot bandwidth, which the measured 45.9 KB/s 
 
 ---
 
+## ADR-14 — Agones owns the pod, Redis owns the lookup; the C# server's SDK is a stub and must be written over the HTTP sidecar
+
+**Status:** accepted 2026-08-17, **not yet implemented**. Nothing in this ADR has shipped.
+Extends ADR-2 (whose allocation branch this is the missing half of) and is constrained by
+ADR-1 (one writer per datum) and ADR-7 (the unknown player ceiling).
+
+**Context.** The gateway's Agones integration is real and tested. `AgonesAllocator` POSTs to
+`/apis/allocation.agones.dev/v1/namespaces/%s/gameserverallocations` through a Kubernetes REST
+client (`gateway/registry/agones_allocator.go`), with unit tests and an end-to-end
+`enter_world_alloc_test.go`; it is off by default (`--allocator none`) and opted into with
+`ALLOCATOR=agones`. ADR-2 already records what that allocator does when a map is full — the
+registry allocates a second instance and registers it under the same `map_id`
+(`gateway/registry/registry.go`, the `s.allocator != nil` branch; ADR-2 cites lines 77-91,
+which have since moved to ~237-249).
+
+The game server's half does not exist. `GameServer/Agones/AgonesSdk.cs` is 58 lines and
+contains an `IAgonesSdk` interface (`ReadyAsync`/`ShutdownAsync`/`AllocateAsync`/`HealthAsync`),
+a `NoopAgonesSdk` that returns `Task.CompletedTask` from all four, and an `AgonesHealthLoop`
+that dutifully pings the no-op. `grep -rn ": IAgonesSdk"` returns exactly one implementation
+across the whole solution, and it is the no-op. There is no HTTP client and no reference to the
+sidecar port anywhere in the module. `Program.cs` is honest about it and says so at startup:
+
+> `--agones/AGONES_ENABLED is set but has NO effect: the C# server still uses the no-op Agones
+> SDK (no Ready/Health/Shutdown is reported to the sidecar). Do not rely on Agones health checks
+> for this server yet.`
+
+That warning is the fact this ADR formalises. `--agones` parses (`Program.cs:65`), logs, and
+changes nothing.
+
+Four gaps follow from it, and they are the whole case for doing the work:
+
+1. **A map with no server means the client cannot enter.** `FindServer` returns
+   `ErrNoServerAvailable` and `MsgEnterWorld` fails. Someone has to start a process by hand.
+2. **A full map means rejection.** ADR-2's MVP policy is one live server per `map_id` and a
+   full map refuses joins. The allocation branch that would produce a second one is written and
+   tested — but with no game server able to report Ready, allocating produces a pod that never
+   becomes allocatable. The branch is a no-op in practice.
+3. **A crashed server is removed but not replaced.** `RegistrationService` re-arms a 15s Redis
+   TTL every 5s, so a dead server leaves the registry within seconds — that half works. Nothing
+   then brings a new one up.
+4. **Dungeon-per-party instancing cannot exist at all.** `--mode=dungeon` currently changes one
+   thing: the disconnect hold window, 60s instead of 30s (`Program.cs:358`). There is no
+   allocate-per-party, no instance lifecycle, no shutdown. Instanced dungeons are a headline
+   feature of the design and they are blocked on this, not on gameplay code.
+
+Two more facts belong in the record before any decision is read.
+
+**The manifests would currently kill the server.** `deploy/agones/` holds nine manifests (map
+and dungeon fleets, autoscaler, allocation, dev and prod variants). `fleet-map-dotnet-dev.yaml`
+sets `health: initialDelaySeconds: 10, periodSeconds: 5, failureThreshold: 3` and does **not**
+set `disabled: true` — no manifest in the directory sets it. Deploying that file today gives a
+pod that never pings, fails three checks, and is killed and restarted forever.
+
+**The cluster is running the deleted server.** `kubectl get fleets -n rpg-realtime` shows
+`map-servers-dev` and `dungeon-servers-dev`, both Ready, both 13 days old, both ALLOCATED 0, on
+image `rpg-mmo/gameserver:dev` — the **Go** game server, deleted from the repo in `670a803
+feat(migration): remove Go gameserver, C# .NET 10 is primary`. The cluster context is
+`docker-desktop`, not a VPS.
+
+**Decision.**
+
+1. **Implement `IAgonesSdk` against the Agones HTTP sidecar on `localhost:9358`, not against
+   the official Agones C# SDK.** That SDK is gRPC and would pull `Grpc.Net.Client` and its
+   transitive tree into a module whose `CLAUDE.md` states "NativeAOT compatible — no
+   reflection-based serialization" and "No other external dependencies (keep the dependency
+   tree minimal)". `System.Net.Http` is in-box, the sidecar's REST surface is four POSTs, and
+   this module's JSON path is already AOT-safe through source generators. A working reference
+   exists in this repo's own history — `git show 670a803^:backend/gameserver/agones/sdk.go`,
+   101 lines plus a 63-line test, implementing Ready/Shutdown/Allocate/Health and a health
+   loop over the official Go SDK. The shape is known; only the transport changes.
+2. **Agones owns pod lifecycle; Redis owns the `map_id -> server` lookup.** These are two
+   sources of truth about whether a server is available — Agones writes GameServer state, the
+   server writes its own Redis entry — and ADR-1 forbids two writers for one datum. They are
+   made to be two *different* data: Agones answers "does this pod exist and is it healthy",
+   Redis answers "which address serves this map". Neither reads the other's answer.
+3. **The server registers into Redis only after reporting Ready.** Registering first
+   advertises an address that Agones may still be about to kill, which is precisely the
+   ordering that would let the two writers disagree. Ready first, then register; on shutdown,
+   deregister first, then `ShutdownAsync`.
+4. **The health loop only starts once a real SDK is wired.** `AgonesHealthLoop` running
+   against `NoopAgonesSdk` produces reassuring log lines about pings that were never sent, and
+   is worse than no loop. Until decision 1 lands, `disabled: true` goes on the dotnet fleet
+   manifest's health block rather than being left to the restart loop to discover.
+5. **The autoscaler is buffer-based on server count, not threshold-based on CCU.** ADR-7's
+   per-server ceiling is unknown and not measurable on this hardware — the load generator
+   shares the box and uses more CPU than the server under test. A buffer policy ("keep N ready
+   servers spare") needs no such number. Any policy keyed on players-per-server is a guess
+   until ADR-7's blocker is cleared, and must not be written as if it were measured.
+
+**Staged work.** Each stage is independently landable and the earlier ones change no runtime
+behaviour, which is deliberate — the SDK can be written and tested long before anything is
+deployed against it.
+
+| # | Stage | Size | Changes runtime? |
+|---|---|---|---|
+| 1 | `HttpAgonesSdk` over the sidecar, unit-tested against a fake HTTP handler | M | No — still selected only under `--agones` |
+| 2 | Lifecycle wiring: Ready on listen, Health loop, Shutdown on drain | M | Yes, under the flag |
+| 3 | Registration ordering per decisions 2-3, with a test that pins the order | S | Yes, under the flag |
+| 4 | Deploy `fleet-map-dotnet-dev.yaml` and prove no restart loop over a sustained run | S | Deployment only |
+| 5 | Enable `ALLOCATOR=agones` in dev and demonstrate an end-to-end allocation from `MsgEnterWorld` to a joined client | M | Yes |
+| 6 | Dungeon instancing: allocate per party, lifecycle, shutdown | L | Yes |
+| 7 | Buffer-based `FleetAutoscaler` per decision 5 | S | Yes |
+| 8 | Retire `map-servers-dev` and `dungeon-servers-dev`, and delete the Go-image manifests | S | Deployment only |
+
+Stage 5 is the first point at which anything is *proved*. Stages 1-4 reduce risk; they do not
+demonstrate that the thing works.
+
+**Consequences.**
+
+- **Nothing here is demonstrated.** No C# server has ever reported Ready to an Agones sidecar
+  in this project. Every claim above about what will happen after stage 1 is a design
+  intention, and this ADR should not be cited as evidence that Agones works for the C# server.
+  The evidence, when it exists, is the stage-5 result.
+- **ADR-2's warning becomes reachable rather than theoretical.** Today the multi-instance
+  hazard it describes — two servers under one `map_id`, two disconnected copies of the world —
+  cannot occur, because allocation cannot produce a live server. Stage 5 makes it possible for
+  the first time. ADR-2's follow-up "decide the map-fleet allocator policy" therefore stops
+  being an M-sized cleanup and becomes a precondition of stage 5.
+- **What is NOT decided: whether the realtime tier moves to Kubernetes.** Dev, staging and
+  production all run `DEPLOY_MODE=containers` under docker compose today. Agones is a
+  parallel path, not the deploy path, and the only cluster it has ever run on is
+  `docker-desktop`. Adopting Agones for the realtime tier changes that tier's deploy story,
+  its runner requirements and its rollback procedure. That decision is deliberately left open
+  here — an SDK implementation does not commit the project to it, and the two should not be
+  bundled into one change.
+- **The health loop is a liveness contract, not a formality.** Once decision 4's `disabled:
+  true` comes off, a tick loop that stalls long enough to starve the ping task is a pod
+  restart. That is arguably the correct behaviour, but it is a new failure mode, and ADR-13's
+  overload path — which drops the backlog and resynchronises rather than chasing it — is what
+  keeps a merely-slow server from being killed as a dead one.
+
+**Revisit if** the official Agones C# SDK ships an AOT-friendly non-gRPC path (which would
+reopen decision 1), or if ADR-7's load-generator blocker clears and a real per-server ceiling
+makes a CCU-keyed autoscaler defensible (decision 5), or if the realtime tier moves to k3s for
+reasons unrelated to Agones — in which case the open question above is answered elsewhere and
+this ADR should record where.
+
+---
+
 ## Summary of decisions
 
 | # | Area | Decision |
@@ -1608,3 +1747,4 @@ it benefits, and it quadruples snapshot bandwidth, which the measured 45.9 KB/s 
 | 11 | Arch under NativeAOT | Arch publishes clean and then throws at runtime without per-component AOT hints; hints are **generated or guarded, never hand-written**; `CommandBuffer` is broken under AOT and is not used; the `publish` CI job must **run** the binary, not just build it |
 | 12 | ECS migration | Server goes to **real ECS with Arch**, staged one PR at a time, over the analysis's objection and by owner decision; `CommandBuffer` stays banned and structural ops stay deferred to one phase per tick; every new component gets its AOT hint line in the same commit; no query shape the hint guard cannot see; `Shared.GameLogic` and the wire are frozen throughout |
 | 13 | Simulation rates | Three responsibility-named groups (`Critical`/`World`/`Background`) at configurable Hz (`SIM_*_HZ`, default 60/15/5) on one derived integer base-tick timeline; rates that do not divide the base are rejected at startup; each group integrates with its own dt; group order Critical->World->Background is the cross-rate write-ownership rule; **replication stays at the world rate**; overload drops the backlog and counts it; the background group ships empty because nothing currently tolerates 200ms |
+| 14 | Agones | **Not yet implemented.** The C# server's Agones SDK is a no-op and `--agones` changes nothing; implement it over the **HTTP sidecar on `localhost:9358`**, not the gRPC C# SDK, to hold the module's NativeAOT/no-dependencies rule. Agones owns pod lifecycle, Redis owns the `map_id -> server` lookup, and the server registers **only after** reporting Ready. Health stays `disabled: true` until a real SDK is wired; the autoscaler is buffer-based on server count because ADR-7's CCU ceiling is unknown. Whether the realtime tier moves off `DEPLOY_MODE=containers` to k8s is **not** decided here |
