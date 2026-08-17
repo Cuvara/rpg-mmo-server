@@ -361,6 +361,44 @@ public sealed class GameServerHost : IAsyncDisposable
         // than its request timeout.
         await _agonesSdk.ReadyAsync();
 
+        // Learn the address Agones gave us, and advertise THAT (ADR-15 decision 2, option A).
+        //
+        // Under `portPolicy: Dynamic` the host port is chosen by the scheduler, so no
+        // configuration can name it: the fleet manifest passes `--addr=:9000` and sets no
+        // GAMESERVER_PUBLIC_ADDR, and without this read the server registers the hostless
+        // `:9000`, which the gateway hands to the client verbatim and the client cannot
+        // dial. That — not the health loop — is why the Agones path has never carried a
+        // player.
+        //
+        // The read sits HERE and nowhere else: after ReadyAsync, because the address only
+        // exists once the pod is scheduled, and before StartAsync, because the first thing
+        // written to Redis must already be the right value rather than a wrong one repaired
+        // a heartbeat later.
+        //
+        // Every failure mode falls back to the configured address, which is what running
+        // outside a cluster must keep doing. GetAddressAsync never throws and returns null
+        // on anything it cannot use.
+        if (_agonesSdk.IsEnabled && _registration != null)
+        {
+            var assigned = await _agonesSdk.GetAddressAsync();
+            if (assigned != null)
+            {
+                var configured = _registration.PublicAddr;
+                _registration.OverridePublicAddr(assigned.ToString());
+                _logger.LogInformation(
+                    "Agones assigned {Assigned}; advertising it instead of the configured '{Configured}'",
+                    assigned, configured);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Agones is enabled but its GameServer status could not be read; advertising " +
+                    "the configured address '{Configured}'. Under portPolicy: Dynamic that value " +
+                    "is almost certainly not dialable by a client.",
+                    _registration.PublicAddr);
+            }
+        }
+
         // Publish ourselves into the server registry the gateway reads, and keep the
         // entry alive. Done after the listener is up so we never advertise an address
         // that is not accepting yet — and after the bind, so a port=0 ephemeral listen

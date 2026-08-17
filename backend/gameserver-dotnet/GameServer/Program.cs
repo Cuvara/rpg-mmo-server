@@ -151,7 +151,20 @@ logger.LogInformation("  Registry:  {Registry}",
 // Never fatal either way: the comment on publicAddr above documents that a bare
 // listen address IS correct for host mode, so refusing to start or to register
 // would break a supported topology.
-if (!string.IsNullOrWhiteSpace(redisAddr) && IsHostlessAddr(publicAddr))
+// Under Agones the hostless value is EXPECTED and is not the value that gets registered:
+// the host server reads the assigned address from the sidecar between Ready and
+// registration and advertises that instead (ADR-15 decision 2, option A). Saying
+// "clients will fail to connect" here would be wrong and would train operators to
+// ignore the line in the one topology where it still means something.
+if (!string.IsNullOrWhiteSpace(redisAddr) && IsHostlessAddr(publicAddr) && useAgones)
+{
+    logger.LogInformation(
+        "  The advertised address '{Addr}' has no host part, which is expected under Agones: " +
+        "the address handed to clients is read from the GameServer status after Ready and " +
+        "registered in its place. If that read fails, this value is registered instead and " +
+        "clients will not be able to dial it.", publicAddr);
+}
+else if (!string.IsNullOrWhiteSpace(redisAddr) && IsHostlessAddr(publicAddr))
 {
     if (publicAddr == addr)
     {

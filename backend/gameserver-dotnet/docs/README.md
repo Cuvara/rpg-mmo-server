@@ -90,11 +90,11 @@ set. Flags are **space-separated** (`--addr :9000`).
 | `--metrics-addr` | `METRICS_ADDR` | `:9101` | Prometheus `/metrics` + `/healthz`. Empty, `off`, `none` or `disabled` turns it off — same vocabulary as the Go gateway. An address that parses as none of those disables the endpoint and logs an error; it does not stop the server |
 | `--game-db-url` | `GAME_DB_URL` | *(unset)* | Game-state PostgreSQL DSN — see below |
 | `--migrate-only` | `GAMESERVER_MIGRATE_ONLY=true` | off | Apply pending migrations, then exit — see below |
-| `--agones` | `AGONES_ENABLED=true` | off | Report Ready / Health / Allocate / Shutdown to the Agones sidecar — see below |
+| `--agones` | `AGONES_ENABLED=true` | off | Report Ready / Health / Allocate / Shutdown to the Agones sidecar, and take the **advertised address** from the GameServer status instead of `--public-addr` — see below |
 | *(none)* | `AGONES_SDK_HTTP_PORT` | `9358` | Agones sidecar HTTP port. Only read when Agones is enabled; an unparsable value warns and falls back |
 | `--transport` | `GAMESERVER_TRANSPORT` | `tcp` | Realtime transport: `tcp` or `kcp` — see below |
 | *(none)* | `TRANSPORT_KEY` | *(empty)* | Pre-shared AES-256 key for KCP. Empty = cleartext (start-up WARNING). Ignored for TCP |
-| `--public-addr` | `GAMESERVER_PUBLIC_ADDR` | *(listen addr)* | Address advertised to clients through the registry |
+| `--public-addr` | `GAMESERVER_PUBLIC_ADDR` | *(listen addr)* | Address advertised to clients through the registry. **Overridden when Agones is enabled and its GameServer status can be read** — the scheduler picks the port, so no configured value can be right; see the Agones section |
 | `--redis` | `REDIS_ADDR` | *(unset)* | Registry Redis; unset disables self-registration |
 | `--redis-password` | `REDIS_PASSWORD` | *(unset)* | Registry Redis password |
 
@@ -148,20 +148,57 @@ fleet speaks KCP and the gateway does not.
 #### Agones (`--agones`, `AGONES_SDK_HTTP_PORT`)
 
 Off by default. With the flag set, the server talks to the Agones sidecar over
-**HTTP on `localhost:9358`** — four POSTs with an empty JSON body: `/ready`,
-`/health`, `/allocate`, `/shutdown`. HTTP and not the official C# SDK on purpose
-(ADR-14 decision 1): that SDK is gRPC and would pull `Grpc.Net.Client` into a
-module whose rules are NativeAOT-compatible and no external dependencies.
-`System.Net.Http` is in-box and the request body is a string literal.
+**HTTP on `localhost:9358`** — four POSTs with an empty JSON body (`/ready`,
+`/health`, `/allocate`, `/shutdown`) plus one read, `GET /gameserver`. HTTP and
+not the official C# SDK on purpose (ADR-14 decision 1): that SDK is gRPC and would
+pull `Grpc.Net.Client` into a module whose rules are NativeAOT-compatible and no
+external dependencies. `System.Net.Http` is in-box, the request bodies are string
+literals, and the one response parsed goes through a `System.Text.Json` source
+generator.
 
 Lifecycle, in order:
 
 | When | What |
 |------|------|
-| listener bound | `POST /ready` — **then** the Redis registry entry is written, never the other way round (ADR-14 decision 3) |
+| listener bound | `POST /ready` |
+| after Ready, before registering | `GET /gameserver` — learn the address Agones assigned, and advertise **that** (see below) |
+| — | **then** the Redis registry entry is written, never the other way round (ADR-14 decision 3) |
 | every 2s while running | `POST /health`. The fleet manifest's health block uses `periodSeconds: 5`, so two pings fit in one window and a single dropped request is not a strike |
 | first player joins | `POST /allocate`, once per process, off the join's critical path |
 | graceful shutdown | registry entry removed first, **then** `POST /shutdown` |
+
+**The advertised address comes from Agones, not from configuration** (ADR-15
+decision 2, option A). The fleets use `portPolicy: Dynamic`, so Agones picks the
+host port when it schedules the pod and *no* static value can be right: the
+manifest passes `--addr=:9000` and sets no `GAMESERVER_PUBLIC_ADDR`, so without
+this read the server registers the hostless `:9000`, the gateway copies it into
+`MsgEnterWorldResp.ServerAddr` verbatim, and the client dials nothing. So after
+Ready — the address does not exist until the pod is scheduled — the server reads
+`GET /gameserver` and composes `status.address` with the port whose **name** is
+`game`:
+
+```json
+{"status":{"state":"Ready","address":"192.168.65.3",
+           "ports":[{"name":"game","port":7691}]}}
+```
+
+and registers `192.168.65.3:7691`. The port is selected by name and never by
+index, matching `ports[].name` in `deploy/agones/fleet-*.yaml` and `gamePortName`
+in the gateway's `registry/agones_allocator.go`; picking `ports[0]` would silently
+advertise the wrong port the day a fleet declares a second one.
+
+Every failure falls back to today's resolution — `--public-addr` /
+`GAMESERVER_PUBLIC_ADDR` / the listen address — and logs a warning: a sidecar that
+does not answer, a non-2xx, an unparsable body, a status with no address (the pod
+is not scheduled yet), or no port named `game`. Never fatal: a server nobody can
+reach still serves the players already on it, and a crash loop serves nobody. With
+Agones disabled the read is not attempted at all.
+
+> `status.address` is the **node** address. It is routable from wherever that node
+> is routable and no further. This read produces the correct value inside the
+> cluster and the correct *shape* outside it; making it reachable from a phone on a
+> mobile network is a deployment question about ingress and node public IPs, not
+> one this solves.
 
 **No call can throw.** A missing, slow or 500-ing sidecar is logged and ignored:
 every call site is either start-up or a background loop, and an exception in
@@ -175,12 +212,22 @@ health loop, which does not start at all: pinging the no-op SDK logged
 "health loop started" and reported nothing to anyone, which reads in a log exactly
 like a working liveness contract (ADR-14 decision 4).
 
-> ⚠️ **Unproven against a real sidecar.** No C# server in this project has ever
-> reported Ready to Agones. The tests use a local `HttpListener` standing in for
-> the sidecar, which pins the HTTP shape and the failure behaviour and nothing
-> about Kubernetes. ADR-14 stage 4 (deploy the dotnet fleet, watch for a restart
-> loop) is where this first gets evidence; until then the fleet manifest's health
-> block stays `disabled: true`.
+> ⚠️ **Still unproven end to end, with one exception.** No C# server in this
+> project has ever reported Ready to Agones, and no client has ever dialled an
+> address this server learned from a sidecar. The tests use a local `HttpListener`
+> standing in for the sidecar, which pins the HTTP shape and the failure behaviour
+> and nothing about Kubernetes.
+>
+> The exception is the response shape of `GET /gameserver`, which was captured from
+> a **real Agones 1.59.0 sidecar** (`kubectl port-forward` to
+> `map-servers-dev-kl485-gsmrh` in `rpg-realtime`) and is used verbatim as the
+> success fixture in `GameServer.Tests/Agones/HttpAgonesSdkAddressTests.cs`. The
+> endpoint and the field names are therefore observed, not assumed; what remains
+> unobserved is this server making that call from inside a pod.
+>
+> ADR-14 stage 4 (deploy the dotnet fleet, watch for a restart loop) is where the
+> rest gets evidence; until then the fleet manifest's health block stays
+> `disabled: true`.
 
 #### Join-token secret (`JOIN_TOKEN_SECRET`)
 

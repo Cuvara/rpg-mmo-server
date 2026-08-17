@@ -270,6 +270,14 @@ public class AgonesLifecycleTests
             FirstHealth.TrySetResult();
             return Task.CompletedTask;
         }
+
+        /// <summary>
+        /// No assigned address, so the host keeps the configured one and the ordering
+        /// assertions in this class stay about Ready/register alone. The address read is
+        /// covered in <see cref="AgonesAddressRegistrationTests"/>.
+        /// </summary>
+        public Task<AgonesGameServerAddress?> GetAddressAsync() =>
+            Task.FromResult<AgonesGameServerAddress?>(null);
     }
 
     /// <summary>

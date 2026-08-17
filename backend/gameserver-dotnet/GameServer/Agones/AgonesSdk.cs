@@ -1,6 +1,41 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
 
 namespace GameServer.Agones;
+
+/// <summary>
+/// The externally-dialable address Agones assigned to this GameServer: the node address
+/// from <c>status.address</c> paired with the host port Agones bound for the container
+/// port named <see cref="GamePortName"/>.
+///
+/// <para>Under <c>portPolicy: Dynamic</c> this pair is the <b>only</b> correct value to
+/// advertise to clients. The container still listens on its configured port (<c>:9000</c>
+/// in the fleet manifests) and no static configuration can name the host port, because
+/// Agones picks it at scheduling time — ADR-15 decision 2, option (A).</para>
+///
+/// <para><b>Scope limit, stated where it cannot be missed:</b> <c>status.address</c> is the
+/// <i>node</i> address. It is routable from wherever that node is routable and no further.
+/// This type produces the correct value inside the cluster and the correct <i>shape</i>
+/// outside it; making it reachable from a phone on a mobile network is a deployment fact
+/// about ingress and node public IPs, not something this read solves.</para>
+/// </summary>
+/// <param name="Address">Host part, from <c>status.address</c>.</param>
+/// <param name="Port">Host port Agones bound for the <c>game</c> port.</param>
+public sealed record AgonesGameServerAddress(string Address, int Port)
+{
+    /// <summary>
+    /// The container port name the address is composed from. Matches <c>ports[].name</c> in
+    /// <c>deploy/agones/fleet-*.yaml</c> and the <c>gamePortName</c> constant in the
+    /// gateway's <c>registry/agones_allocator.go</c> — the three must agree, and selecting
+    /// by name rather than by index is what keeps them agreeing when a fleet grows a second
+    /// port (metrics, for instance) that lands ahead of the game port in the array.
+    /// </summary>
+    public const string GamePortName = "game";
+
+    /// <summary>The <c>host:port</c> form written into the server registry.</summary>
+    public override string ToString() => $"{Address}:{Port}";
+}
 
 /// <summary>Agones game server SDK abstraction.</summary>
 public interface IAgonesSdk
@@ -25,6 +60,20 @@ public interface IAgonesSdk
 
     /// <summary>Send a health ping.</summary>
     Task HealthAsync();
+
+    /// <summary>
+    /// Read the address Agones assigned to this GameServer, or null when it is unknown.
+    ///
+    /// <para>Null is the normal answer in three cases and none of them is an error the
+    /// caller should escalate: Agones is not in use, the sidecar did not answer, or the
+    /// status carries no usable <c>status.address</c> + <c>game</c> port pair. Every caller
+    /// must fall back to its configured address on null — running outside a cluster has to
+    /// keep behaving exactly as it did before this method existed.</para>
+    ///
+    /// <para>Only meaningful <b>after</b> <see cref="ReadyAsync"/>: the address is assigned
+    /// when the pod is scheduled, so an earlier read races the scheduler.</para>
+    /// </summary>
+    Task<AgonesGameServerAddress?> GetAddressAsync();
 }
 
 /// <summary>No-op Agones SDK for local development (no Agones sidecar).</summary>
@@ -44,6 +93,14 @@ public sealed class NoopAgonesSdk : IAgonesSdk
 
     /// <inheritdoc/>
     public Task HealthAsync() => Task.CompletedTask;
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Always null: there is no Agones here, so there is no assigned address, and the
+    /// caller keeps the address it was configured with.
+    /// </remarks>
+    public Task<AgonesGameServerAddress?> GetAddressAsync() =>
+        Task.FromResult<AgonesGameServerAddress?>(null);
 }
 
 /// <summary>
@@ -211,6 +268,85 @@ public sealed class HttpAgonesSdk : IAgonesSdk, IDisposable
         }
     }
 
+    /// <summary>
+    /// Read the GameServer object from the sidecar and compose the dialable address from it.
+    ///
+    /// <para>Verified live against Agones <b>1.59.0</b>: <c>GET /gameserver</c> answers 200
+    /// with the object in snake_case, of which only three fields are used —
+    /// <c>status.address</c>, and the <c>name</c>/<c>port</c> of the entry in
+    /// <c>status.ports</c> named <c>game</c>:</para>
+    /// <code>
+    /// {"object_meta":{...},
+    ///  "status":{"state":"Ready","address":"192.168.65.3",
+    ///            "ports":[{"name":"game","port":7691}], ...}}
+    /// </code>
+    ///
+    /// <para>The port is selected <b>by name, never by index</b>. A fleet that later
+    /// declares a second container port would silently start advertising the wrong one.</para>
+    ///
+    /// <para>Like every other method here, this never throws: transport failure, timeout,
+    /// non-2xx, unparsable body and a status missing the fields all return null, and the
+    /// caller advertises its configured address instead.</para>
+    /// </summary>
+    public async Task<AgonesGameServerAddress?> GetAddressAsync()
+    {
+        try
+        {
+            using var resp = await _http.GetAsync("gameserver").ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Agones sidecar GET /gameserver returned {Status}",
+                    (int)resp.StatusCode);
+                return null;
+            }
+
+            var body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+            // Source-generated contract, not the reflection resolver: this module is
+            // NativeAOT and GameServer.Tests/Aot/JsonReflectionGuardTests enforces it.
+            var gs = JsonSerializer.Deserialize(body, AgonesJsonContext.Default.AgonesGameServerJson);
+
+            var status = gs?.Status;
+            if (status == null || string.IsNullOrWhiteSpace(status.Address))
+            {
+                _logger.LogWarning(
+                    "Agones GameServer status carries no address; the pod may not be scheduled yet");
+                return null;
+            }
+
+            var gamePort = status.Ports?.FirstOrDefault(
+                p => string.Equals(p.Name, AgonesGameServerAddress.GamePortName, StringComparison.Ordinal));
+            if (gamePort == null)
+            {
+                _logger.LogWarning(
+                    "Agones GameServer status has no port named '{Name}' (found: {Found}); " +
+                    "the fleet manifest's ports[].name and this server must agree",
+                    AgonesGameServerAddress.GamePortName,
+                    status.Ports == null || status.Ports.Count == 0
+                        ? "none"
+                        : string.Join(", ", status.Ports.Select(p => p.Name ?? "<unnamed>")));
+                return null;
+            }
+
+            if (gamePort.Port <= 0 || gamePort.Port > 65535)
+            {
+                _logger.LogWarning(
+                    "Agones GameServer status port '{Name}' is {Port}, which is not a usable port",
+                    AgonesGameServerAddress.GamePortName, gamePort.Port);
+                return null;
+            }
+
+            return new AgonesGameServerAddress(status.Address!.Trim(), gamePort.Port);
+        }
+        catch (Exception ex)
+        {
+            // HttpRequestException (no sidecar), TaskCanceledException (timeout),
+            // JsonException (a body we cannot read), ObjectDisposedException (teardown).
+            _logger.LogWarning(ex, "Agones sidecar GET /gameserver failed");
+            return null;
+        }
+    }
+
     private async Task PostAsync(string path, string label)
     {
         if (await PostCoreAsync(path).ConfigureAwait(false))
@@ -263,6 +399,46 @@ public sealed class HttpAgonesSdk : IAgonesSdk, IDisposable
             _http.Dispose();
     }
 }
+
+// ── GameServer status DTOs ──
+//
+// Only the fields this server actually consumes are modelled. The sidecar's object is
+// much larger (object_meta, spec.health, status.addresses, players, counters, lists);
+// System.Text.Json ignores what is not declared, so an Agones upgrade that adds fields
+// is a non-event, while one that renames status.address or status.ports[].name is a
+// null return and a warning rather than a crash.
+//
+// snake_case, matching the sidecar's own wire form as observed on Agones 1.59.0.
+
+/// <summary>The subset of the Agones GameServer object this server reads.</summary>
+internal sealed class AgonesGameServerJson
+{
+    [JsonPropertyName("status")] public AgonesStatusJson? Status { get; set; }
+}
+
+/// <summary>The subset of <c>GameServer.status</c> this server reads.</summary>
+internal sealed class AgonesStatusJson
+{
+    /// <summary>Node address the pod's host ports are published on.</summary>
+    [JsonPropertyName("address")] public string? Address { get; set; }
+
+    /// <summary>Host ports Agones bound, one per named container port.</summary>
+    [JsonPropertyName("ports")] public List<AgonesPortJson>? Ports { get; set; }
+}
+
+/// <summary>One entry of <c>GameServer.status.ports</c>.</summary>
+internal sealed class AgonesPortJson
+{
+    /// <summary>Container port name from the fleet manifest — <c>game</c> is the one used.</summary>
+    [JsonPropertyName("name")] public string? Name { get; set; }
+
+    /// <summary>Host port Agones assigned to it.</summary>
+    [JsonPropertyName("port")] public int Port { get; set; }
+}
+
+/// <summary>AOT-safe JSON contract for the Agones GameServer status read.</summary>
+[JsonSerializable(typeof(AgonesGameServerJson))]
+internal sealed partial class AgonesJsonContext : JsonSerializerContext;
 
 /// <summary>Periodic health check loop for Agones.</summary>
 public static class AgonesHealthLoop

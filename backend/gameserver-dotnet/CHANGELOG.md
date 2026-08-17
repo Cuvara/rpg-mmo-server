@@ -7,6 +7,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **The server learns its own dialable address from Agones** (`GameServer/Agones/AgonesSdk.cs`,
+  `GameServer/Registry/RegistrationService.cs`, `GameServer/Server/GameServer.cs`) — ADR-15
+  decision 2, option (A). `IAgonesSdk` gains `GetAddressAsync()`; `HttpAgonesSdk` implements it
+  as `GET /gameserver` against the sidecar, taking `status.address` and the port whose **name**
+  is `game`, and the host advertises that pair into Redis instead of its configured address.
+  - **This is what has kept the Agones path from ever carrying a player**, and it is not the
+    health loop. `deploy/agones/fleet-map-dotnet-dev.yaml` uses `portPolicy: Dynamic`, so
+    Agones assigns the host port at scheduling time and no static value can be correct: the
+    manifest passes `--addr=:9000` and sets no `GAMESERVER_PUBLIC_ADDR`, so the server
+    registered the hostless `:9000`, the gateway copied it into `MsgEnterWorldResp.ServerAddr`
+    verbatim (`transfer/map_assign.go` → `server/server.go`), and the client dialled nothing.
+  - The port is chosen **by name, never by index** — matching `ports[].name` in the fleet
+    manifests and `gamePortName` in the gateway's `registry/agones_allocator.go`. `ports[0]`
+    works right up until a fleet declares a second container port, and then silently
+    advertises the wrong one.
+  - The read sits **between `ReadyAsync` and the registry write**, and both halves are
+    load-bearing: the address does not exist until the pod is scheduled, and the *first* value
+    written to Redis must already be correct — a value repaired one heartbeat later is a
+    15-second window in which the gateway hands clients a dead address.
+  - **Falls back to today's exact resolution on everything**: Agones disabled (the read is not
+    even attempted), sidecar unreachable, non-2xx, unparsable body, a status with no address,
+    or no port named `game`. Each logs a warning and none is fatal, for the same reason as the
+    rest of this class — a server nobody can reach still serves the players already on it.
+    Running outside a cluster is byte-for-byte unchanged.
+  - `RegistrationService` gains `PublicAddr` and `OverridePublicAddr(string)`. The override
+    throws after `StartAsync` rather than half-applying, since by then the wrong value is
+    already in Redis.
+  - The AOT rules are intact: one source-generated `JsonSerializerContext` for the three fields
+    read, no reflection-based serialization, no new package (`System.Net.Http` is in-box —
+    the official Agones C# SDK is gRPC, which is why ADR-14 decision 1 chose HTTP).
+  - Start-up logging: under Agones a hostless `--public-addr` is now reported as *expected*
+    rather than as "clients will fail to connect", because it is no longer the value that
+    gets registered.
+  - 28 tests (`GameServer.Tests/Agones/`, 46 in the directory total): the success shape, a
+    500, an absent sidecar, malformed JSON, a missing/empty address, an out-of-range port, a
+    missing `game` port, and port selection where `game` is **not** index 0; plus the wiring —
+    the assigned address is the first thing registered, the read lands after Ready and before
+    registration, a failed read registers the configured address, and with Agones disabled the
+    SDK is never asked and the configured address is registered unchanged.
+  - **The response shape is observed, not assumed.** The success fixture is a verbatim capture
+    from a live Agones **1.59.0** sidecar (`kubectl port-forward` to
+    `map-servers-dev-kl485-gsmrh` in `rpg-realtime`), which returned HTTP 200 and
+    `{"status":{"address":"192.168.65.3","ports":[{"name":"game","port":7691}], ...}}`. What
+    remains unproven is this server making that call from inside a pod.
 - **Real Agones SDK over the HTTP sidecar** (`GameServer/Agones/AgonesSdk.cs`) — ADR-14
   stages 1-3. `HttpAgonesSdk` POSTs an empty JSON body to `/ready`, `/health`, `/allocate`
   and `/shutdown` on `localhost:9358` (`AGONES_SDK_HTTP_PORT` overrides the port; an
@@ -51,6 +95,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `docs/README.md`: new "Agones (`--agones`, `AGONES_SDK_HTTP_PORT`)" section — the four
   endpoints, the lifecycle order, the health cadence, the never-throws rule and what is still
   unproven. The flag table row no longer describes a stub, and `AGONES_SDK_HTTP_PORT` is listed.
+- `docs/README.md`: that section now also documents `GET /gameserver`, why the advertised
+  address comes from the GameServer status under `portPolicy: Dynamic`, the by-name port
+  selection, the fallback list, and the limit that `status.address` is the *node* address —
+  routable from wherever the node is and no further. The `--public-addr` and `--agones` flag
+  rows say that Agones overrides the configured address.
 - **ADR-14 — Agones owns the pod, Redis owns the lookup; the C# server's SDK is a stub and must
   be written over the HTTP sidecar** (`backend/docs/ARCHITECTURE-DECISIONS.md`). Accepted
   2026-08-17, **not yet implemented** — nothing in it has shipped, and it must not be cited as
