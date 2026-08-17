@@ -411,13 +411,42 @@ added to the game server is a *host*, not a full address:
 `GAMESERVER_PUBLIC_ADDR` replaces the whole thing and cannot carry a port it does
 not know.
 
-`k3s/setup-dev.sh` already writes the `advertise-host` key into the
-`gameserver-config` ConfigMap — `127.0.0.1` on k3d, empty on docker-desktop where
-no value can be correct — and `fleet-map-dotnet-dev.yaml` carries the matching
-env block **commented out**, because the game-server side is in flight and the
-variable name (expected `GAMESERVER_ADVERTISE_HOST`) is not yet confirmed.
-Shipping an env var the binary does not read would look configured and do
-nothing. Uncommenting it is the whole change once the name lands.
+That override is **`GAMESERVER_ADVERTISE_HOST`** (flag form `--advertise-host`;
+the flag wins). It takes a **host only** — IPv4, IPv6 bare or bracketed, or a
+hostname — and the composed result is
+`<GAMESERVER_ADVERTISE_HOST or status.address>:<Agones-assigned game port>`.
+
+- **The port is never configurable.** It is assigned per pod at scheduling time,
+  and supplying it is the entire purpose of the sidecar read.
+- **Do not set `GAMESERVER_PUBLIC_ADDR` as well.** That one is read only when
+  Agones is off, and it replaces the whole address, so it cannot carry a port it
+  does not know.
+- Misuse is caught, not silently applied: set with Agones off → warned and
+  ignored; set to a full `host:port` → warned, host honoured, port discarded;
+  blank → treated as unset. On a **failed** status read the override is ignored
+  *entirely*, so no half-composed address is ever registered — the variable has
+  no effect at all without a successful read, by design.
+
+`k3s/setup-dev.sh` writes the `advertise-host` key into the `gameserver-config`
+ConfigMap per cluster kind — `127.0.0.1` on k3d, **empty on docker-desktop**,
+where no value can be correct — and `fleet-map-dotnet-dev.yaml` reads it with
+`optional: true`. Optional is right here and is not the `REDIS_ADDR` case:
+absent-or-blank is a meaningful, handled state (advertise `status.address`
+unmodified), not a silent misconfiguration.
+
+> ### This is a single-node arrangement and does not scale past one node
+>
+> `GAMESERVER_ADVERTISE_HOST` works **because the cluster has one node with a
+> published port range**, so one well-known host serves every pod. That is a
+> property of the *deployment*, not of the code.
+>
+> On a multi-node cluster the correct host **differs per pod** — it depends on
+> which node the scheduler placed it on — and a single env var on the fleet
+> cannot express a per-pod value. The answers there are an ingress in front of
+> the fleet, or a per-node value injected through the downward API
+> (`spec.nodeName` / `status.hostIP`). **Neither exists in this repo.** Do not
+> read the k3d setup as evidence that the address problem is solved in general;
+> it is solved for one node.
 
 **Consequence for the ADR-14 stages: stage 4 (no restart loop) is provable on
 `docker-desktop`; stage 5 (end-to-end allocation) is not**, because no client can

@@ -199,10 +199,9 @@ spec:
                 # reaching it from a phone is an ingress question this does not
                 # answer.
                 #
-                # ====================================================
-                # PLACEHOLDER — WIRING READY, NAME NOT FINAL. DO NOT
-                # UNCOMMENT UNTIL THE GAME SERVER READS IT.
-                # ====================================================
+                # GAMESERVER_ADVERTISE_HOST — the HOST HALF of that address, and
+                # only the host half.
+                #
                 # The status read alone is not enough on k3d. MEASURED: Agones
                 # reports status.address = 172.20.0.3, the node CONTAINER's
                 # Docker-network address — correct inside the cluster and NOT
@@ -210,28 +209,40 @@ spec:
                 # -port>, published by the k3d serverlb, reachable from both
                 # Windows (where the Unity client runs) and WSL2.
                 #
-                # So the client-facing address is composed from TWO sources: the
-                # PORT from the Agones status read (assigned per pod at
-                # scheduling time — nothing else can know it), and the HOST from
-                # configuration. That is exactly why this is not
-                # GAMESERVER_PUBLIC_ADDR: that one replaces the whole address
-                # and therefore cannot carry a port it does not know.
+                # So the advertised address is composed from TWO sources:
+                #   <GAMESERVER_ADVERTISE_HOST or status.address>:<Agones port>
+                # The PORT IS NEVER CONFIGURABLE — it is assigned per pod at
+                # scheduling time, and supplying it is the entire purpose of the
+                # sidecar status read. That is exactly why this is not
+                # GAMESERVER_PUBLIC_ADDR (above), which replaces the whole
+                # address and therefore cannot carry a port it does not know.
+                # DO NOT SET BOTH: GAMESERVER_PUBLIC_ADDR is read only when
+                # Agones is OFF.
                 #
-                # The game-server side is in flight; the variable is expected to
-                # be GAMESERVER_ADVERTISE_HOST but the name is NOT CONFIRMED, so
-                # this stays commented rather than shipping a name the binary may
-                # not read — an env var nothing consumes looks configured and is
-                # not. The ConfigMap key already exists (k3s/setup-dev.sh writes
-                # `advertise-host`: 127.0.0.1 on k3d, empty on docker-desktop,
-                # where no value can work because Kubernetes hostPort is not
-                # published to the host at all). Uncommenting is the whole
-                # change once the name is confirmed.
-                # - name: GAMESERVER_ADVERTISE_HOST
-                #   valueFrom:
-                #     configMapKeyRef:
-                #       name: gameserver-config
-                #       key: advertise-host
-                #       optional: true
+                # Host only — IPv4, IPv6 (bare or bracketed), or a hostname.
+                # Misuse is caught rather than silently applied: set with Agones
+                # off -> warned and ignored; set to a full host:port -> warned,
+                # host honoured, port discarded; blank -> treated as unset. And
+                # on a failed status read the override is ignored ENTIRELY, so
+                # no half-composed address is ever registered.
+                #
+                # `optional: true` is right here and is not the REDIS_ADDR case:
+                # absent/blank is a MEANINGFUL, HANDLED state (advertise
+                # status.address unmodified), not a silent misconfiguration.
+                # k3s/setup-dev.sh writes the key per cluster kind — 127.0.0.1
+                # on k3d, EMPTY on docker-desktop, where no value can be correct
+                # because Kubernetes hostPort is never published to the host.
+                #
+                # SINGLE-NODE ONLY. See docs/K3S.md — one well-known host can
+                # serve every pod exactly because this is one node with a
+                # published port range. On a multi-node cluster the right host
+                # differs per pod and one env var on the fleet cannot say so.
+                - name: GAMESERVER_ADVERTISE_HOST
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: advertise-host
+                      optional: true
                 - name: JWT_SECRET
                   valueFrom:
                     secretKeyRef:
