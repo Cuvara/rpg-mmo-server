@@ -212,8 +212,29 @@ production / `build_images=true`; it is **not** on the deploy path.
 >
 > `db-migrate` is now backup-only, and its display name says so. The job id is unchanged
 > because `deploy` depends on it and the backup is still what gates the deploy.
-| `post-deploy-smoke` | same labels as `deploy` | Sources `$RPG_DEPLOY_DIR/deploy/.env` and runs `bin/smoketest` (Nakama health → device auth → `gateway_token` RPC → gateway `MsgAuth`/`MsgEnterWorld` → game server join → input/snapshot → disconnect). Separate job so "deploy broke" and "the flow broke" are distinguishable at a glance. Takes the deploy dir from `needs.deploy.outputs.deploy_dir`, so it needs no `environment:` (no second production approval). |
+| `post-deploy-smoke` | same labels as `deploy` | Sources `$RPG_DEPLOY_DIR/deploy/.env`, overrides the two client-facing addresses (below), and runs `bin/smoketest` (Nakama health → device auth → `gateway_token` RPC → gateway `MsgAuth`/`MsgEnterWorld` → game server join → input/snapshot → disconnect). Separate job so "deploy broke" and "the flow broke" are distinguishable at a glance. Takes the deploy dir from `needs.deploy.outputs.deploy_dir`, so it needs no `environment:` (no second production approval). |
 | `summary` | `ubuntu-latest` | `if: always()` — step-summary table with ref, commit, runner, deploy dir and the `deploy` / `post-deploy-smoke` results. |
+
+**`post-deploy-smoke` inputs.** `deploy/.env` is written for the **services**, and the
+smoke test is a **client**, so sourcing it is not sufficient — two of the addresses it
+needs are listen addresses, not dialable ones. The step therefore exports these on top,
+after sourcing:
+
+| Variable | Value exported | Why not `deploy/.env` |
+|---|---|---|
+| `NAKAMA_URL` | `http://127.0.0.1:${NAKAMA_HTTP_PORT}` | Absent from `.env` by design (compose gives the game server the in-network `http://nakama:7350`). A host-mode game server inherits `.env`, and `NAKAMA_URL` unset is what **disables** its Nakama S2S integration. |
+| `GATEWAY_ADDR` | `127.0.0.1:${GATEWAY_CONTAINER_PORT}` | `.env`'s value is the gateway's listen address, which also feeds the derivation of `GATEWAY_CONTAINER_PORT` and must keep matching the container's hardcoded `--addr=:8000`. |
+
+`GATEWAY_CONTAINER_PORT` equals the listen port in host mode and is mapped onto it in
+containers mode, so one expression is correct for both. The game-server hop needs no
+override: the smoke test dials whatever `EnterWorldResponse.ServerAddr` carries, i.e.
+`GAMESERVER_PUBLIC_ADDR`, which "Write environment file" already validates as dialable.
+
+> Anything the smoke test reads that is left to its own default is only correct while the
+> environment happens to use the default port. Dev and staging do; production does not, and
+> was the first deploy to fail on it. The healthcheck in `deploy` does **not** cover this —
+> it probes the *metrics* ports, which are forwarded per-environment, so it goes green
+> while the client-facing path is unreachable.
 
 **Artifact flow:** `bin-{gateway,gameserver,smoketest}-<sha>` + `nakama-plugin-<sha>`
 → `bundle` → `deploy-bundle-<sha>` → `deploy`. All names carry `<sha>` so

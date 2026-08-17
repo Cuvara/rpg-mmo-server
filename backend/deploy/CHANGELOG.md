@@ -6,6 +6,32 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **The post-deploy smoke test dialed default ports, not the environment's published
+  ones.** Production is the first environment to move off the default port numbers. Its
+  deploy succeeded and the stack was healthy, yet `Post-deploy smoke test` failed on its
+  very first step. Two addresses were wrong, both in the same way:
+  - `NAKAMA_URL` was never written into the generated `deploy/.env`, so the smoke test fell
+    back to its own `DefaultNakamaURL` of `http://localhost:7350` while production
+    publishes Nakama on `NAKAMA_HTTP_PORT=7360`. Nothing listens on 7350 there.
+  - `GATEWAY_ADDR` in `deploy/.env` is the address the gateway listens on *inside* its
+    container (`:8000`). The published port is `GATEWAY_CONTAINER_PORT`, which production
+    sets to `8010`, so the gateway hop would have failed next.
+
+  Both are now exported in the `post-deploy-smoke` step *after* it sources `deploy/.env`,
+  derived from `NAKAMA_HTTP_PORT` and `GATEWAY_CONTAINER_PORT`. Overriding in the step
+  rather than in the generated file matters twice over: `GATEWAY_ADDR` also feeds the
+  derivation of `GATEWAY_CONTAINER_PORT` and must keep naming the port the container's
+  hardcoded `--addr=:8000` binds, and a host-mode game server inherits `deploy/.env`,
+  where `NAKAMA_URL` being unset is precisely what disables its Nakama S2S integration.
+
+  Why this survived two environments: dev and staging pass only because their ports happen
+  to equal the smoke test's own defaults, so the whole class of bug is invisible until an
+  environment moves off them. The deploy job's healthcheck could not catch it either — it
+  probes the *metrics* ports, which were already forwarded per-environment, so it reports
+  green while the client-facing path is unreachable. The game-server hop needed no fix: the
+  smoke test follows `EnterWorldResponse.ServerAddr`, i.e. `GAMESERVER_PUBLIC_ADDR`, which
+  the "Write environment file" step already validates.
+
 - **A brand-new environment could never complete its first deploy.** Schema migrations ran
   in `db-migrate`, which is ahead of `deploy` in the job graph. On an environment that has
   never been deployed the database does not exist yet, so `--migrate-only` failed on
