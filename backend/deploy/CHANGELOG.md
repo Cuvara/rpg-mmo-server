@@ -93,7 +93,25 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     translate, and the mount silently becomes a **directory** (`read /kc: is a directory`, which
     reads like a kubeconfig bug and is not). Same missing-bind-source trap that keeps the mount
     out of the base compose file.
-- **Prepared the client-address host override, commented out on purpose.** The Agones status read
+- **`GAMESERVER_ADVERTISE_HOST` is now live in the fleet** (was staged commented-out pending the
+  confirmed name). Read from the `gameserver-config` ConfigMap with `optional: true`, which is
+  the right call here and is *not* the `REDIS_ADDR` case: absent-or-blank is a meaningful,
+  handled state — advertise `status.address` unmodified — rather than a silent
+  misconfiguration. It is **host only**; the composed result is
+  `<GAMESERVER_ADVERTISE_HOST or status.address>:<Agones-assigned port>` and the port is never
+  configurable, since supplying it is the entire purpose of the sidecar status read.
+  `GAMESERVER_PUBLIC_ADDR` stays unset and must not be set alongside it — it is read only when
+  Agones is off.
+- **Wrote down that this does not scale past one node.** `GAMESERVER_ADVERTISE_HOST` works
+  because the cluster is a *single node with a published port range*, so one well-known host
+  serves every pod. That is a property of the deployment, not of the code. On a multi-node
+  cluster the correct host differs per pod — it depends where the scheduler placed it — and one
+  env var on the fleet cannot express a per-pod value; the answers are an ingress or a per-node
+  value through the downward API (`spec.nodeName` / `status.hostIP`), and neither exists here.
+  Stated in `docs/K3S.md` beside the address table, and repeated at both places that set the
+  value, so the k3d result is not mistaken for the address problem being solved in general.
+- **Prepared the client-address host override, commented out on purpose** *(superseded by the
+  entry above — the name was confirmed as `GAMESERVER_ADVERTISE_HOST` and the block is live)*. The Agones status read
   is not sufficient on either local cluster: `status.address` is the node address, measured as
   `192.168.65.3` on docker-desktop (unreachable from Windows and WSL2 — Docker Desktop publishes
   Docker ports to the host but not Kubernetes `hostPort`, so **no** host string helps) and

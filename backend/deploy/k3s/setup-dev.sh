@@ -224,10 +224,14 @@ log "pods will reach redis at $POD_REDIS_ADDR (cluster kind: $CLUSTER_KIND)"
 # not GAMESERVER_PUBLIC_ADDR, which replaces the whole address and cannot know
 # the port.
 #
-# PLACEHOLDER — nothing reads this key yet. The game-server side is in flight
-# and the env var name is not final (likely GAMESERVER_ADVERTISE_HOST); the key
-# is created now so the fleet manifest only has to uncomment one env block.
-# An unused ConfigMap key is inert.
+# Consumed by the fleet as GAMESERVER_ADVERTISE_HOST (optional). HOST ONLY — a
+# full host:port is warned about and its port discarded. Blank is a meaningful,
+# handled state: advertise status.address unmodified.
+#
+# SINGLE-NODE ONLY. One well-known host can serve every pod exactly because this
+# is one node with a published port range; on a multi-node cluster the right
+# host differs per pod and no single ConfigMap value can say so. See
+# docs/K3S.md.
 case "$CLUSTER_KIND" in
   k3d)            DEFAULT_ADVERTISE_HOST="127.0.0.1" ;;
   # Docker Desktop does NOT publish Kubernetes hostPort to the host, so no host
