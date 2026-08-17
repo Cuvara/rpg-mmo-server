@@ -33,7 +33,32 @@ spec:
           containerPort: 9000
           protocol: TCP
           portPolicy: Dynamic
+      # HEALTH IS DISABLED ON PURPOSE — do not "fix" this by removing the flag.
+      #
+      # The C# server's Agones SDK is a no-op: GameServer/Agones/AgonesSdk.cs
+      # contains only NoopAgonesSdk, whose HealthAsync returns Task.CompletedTask
+      # without touching the sidecar. `--agones` below parses, logs a warning and
+      # changes nothing. With health enabled, the pod therefore fails every check,
+      # trips failureThreshold and is killed and recreated forever — Agones is
+      # right, there is genuinely no liveness signal.
+      #
+      # WHAT REMOVES THIS: ADR-14 stage 1 lands `HttpAgonesSdk` (the real sidecar
+      # client on localhost:9358) — the Ready-then-register ordering already exists
+      # in GameServer/Server/GameServer.cs, only the SDK behind it is missing.
+      # Stage 4 then deploys this fleet WITH the flag still set and confirms the pod
+      # reaches Ready; deleting the `disabled: true` line is the step AFTER that,
+      # with its own check that the pod survives the ping period. Do not remove it
+      # merely because the SDK merged.
+      # See backend/docs/ARCHITECTURE-DECISIONS.md ADR-14 decision 4.
+      #
+      # The three timing values below are kept deliberately. The Agones v1 Fleet
+      # schema (verified against CRD fleets.agones.dev: health has four
+      # independent optional properties — disabled, initialDelaySeconds,
+      # periodSeconds, failureThreshold) accepts them alongside `disabled: true`;
+      # they are simply inert while it is set, so the intended policy survives in
+      # the file instead of having to be re-invented at stage 4.
       health:
+        disabled: true
         initialDelaySeconds: 10
         periodSeconds: 5
         failureThreshold: 3
@@ -47,6 +72,9 @@ spec:
                 - "--mode=map"
                 - "--map-id=map_01"
                 - "--addr=:9000"
+                # No effect today beyond a startup warning — the C# server's SDK
+                # is a no-op, so no Ready/Health/Shutdown reaches the sidecar
+                # (ADR-14). Kept so stage 2 needs no manifest change to switch on.
                 - "--agones"
                 # Uncomment to share the registry/event stream with a gateway
                 # running outside the cluster (needs REDIS_ADDR below):

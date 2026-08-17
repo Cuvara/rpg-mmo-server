@@ -1,3 +1,21 @@
+# ⚠️ SUPERSEDED — this fleet runs the DELETED Go game server.
+#
+# `rpg-mmo/gameserver:dev` was built from backend/gameserver/, removed in
+# 670a803 "feat(migration): remove Go gameserver, C# .NET 10 is primary".
+# docker/Dockerfile.gameserver is gone too, so the image cannot even be rebuilt.
+# Nothing in this file describes code that exists. The replacement is
+# fleet-map-dotnet-dev.yaml (image rpg-mmo/gameserver-dotnet:dev).
+#
+# Kept rather than deleted, on purpose: the cluster still RUNS `map-servers-dev`
+# from this manifest (created 13 days before ADR-14 was written), and deleting
+# the file would leave a live fleet with no source describing it. ADR-14 stage 8
+# owns the deletion, together with the `kubectl delete fleet` that retires the
+# running one — the two must happen in one step, in that order.
+# See backend/docs/ARCHITECTURE-DECISIONS.md ADR-14 and docs/K3S.md "Which fleet
+# is real".
+#
+# Everything below is historical. Do not apply it.
+#
 # DEV variant of fleet-map.yaml — for a LOCAL cluster (Docker Desktop
 # Kubernetes / k3d), applied by k3s/setup-dev.sh.
 #
