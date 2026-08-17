@@ -127,11 +127,12 @@ deploy/
       beta/
       launch/
       growth/
-  agones/
-    fleet-map.yaml
-    fleet-dungeon.yaml
-    autoscaler.yaml
-    allocation.yaml
+  agones/                       # ACTUAL contents differ from this target:
+    fleet-map-dotnet-dev.yaml   #   the only fleet (C# server)
+    secret-example.yaml         #   Secret template, dev placeholders
+    allocation-dev.yaml         #   GameServerAllocation (kubectl create)
+    #  no fleet-map/fleet-dungeon (Go images, deleted with the Go server),
+    #  no autoscaler (incoherent for a map fleet — see docs/K3S.md)
   db/
     init-meta.sql
     init-gamestate.sql
