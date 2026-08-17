@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **ADR-10's status was still `not yet implemented`** long after both halves of it
+  shipped. The server's Arch migration completed in five stages under ADR-12, and the
+  Unity client now consumes `Shared.GameLogic` as a UPM package pinned to `sgl-v0.1.9`
+  — so the ADR that exists to govern the shared-simulation boundary read as pending
+  work to anyone deciding whether that boundary applies to them yet. The `Context`
+  section is left as written, since it records the state on the date the decision was
+  taken; a dated note above it lists the two statements that the code has since
+  overtaken.
+
 ## [v1.4.1] — 2026-08-15
 
 ### Fixed

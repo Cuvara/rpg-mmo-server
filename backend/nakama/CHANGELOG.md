@@ -5,6 +5,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **The repo-level `CLAUDE.md` listed this module as `Planned`** while `auth/` and
+  `economy/` were both implemented and under test. That row is the first thing anyone
+  reads when deciding where a piece of work belongs, so it was routing auth and economy
+  questions away from code that already answers them. Now `Partial`, naming what exists
+  (`auth/`, `economy/`) and what does not (social, matchmaking).
+
 ### Added
 - Rate limiting on the `gateway_token` RPC: 0.2 calls/s sustained, burst 5, per
   authenticated user id (not per IP — callers are authenticated here, and carrier

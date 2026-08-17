@@ -931,7 +931,23 @@ IDs), not another encoding swap.
 > `Shared.GameLogic`, its `in EntityState` / `in Vec2` signatures are frozen, and the
 > golden vectors stay bit-exact.
 
-**Status:** accepted 2026-08-11, not yet implemented.
+**Status:** accepted 2026-08-11. **Implemented** — both halves, as of 2026-08-17.
+
+> **What landed since.** The Context below describes the state on 2026-08-11 and is
+> left as written; two of its statements are no longer true of the code:
+>
+> - *"the client references nothing today"* — the Unity project consumes
+>   `Shared.GameLogic` as a UPM git package, pinned in `packages-lock.json` to
+>   `sgl-v0.1.9`. Client and server run the same movement, combat and validation code,
+>   which is what this ADR existed to make possible.
+> - *"not yet implemented"* — the server's Arch migration ran to completion in five
+>   stages under [ADR-12](#adr-12--the-server-goes-to-real-ecs-staged-under-the-constraints-adr-10-and-adr-11-set);
+>   `SystemSchedule`, `SimulationSchedule`, `SimChunk`, `WorldReader`/`WorldWriter` and
+>   `ComponentAccess` are all on `develop`.
+>
+> The boundary itself is unchanged and still holds: no `Arch.Core` type crosses into
+> `Shared.GameLogic`, the `in EntityState` / `in Vec2` signatures are frozen, and the
+> golden vectors are bit-exact across both runtimes.
 
 **Context.** The game server is to move its entity storage to
 [Arch](https://github.com/genaray/Arch), an archetype/chunk ECS for C#. At the
