@@ -186,15 +186,20 @@ kube create secret generic rpg-realtime-secrets \
 # .env's REDIS_ADDR is the value for HOST-run processes and is deliberately not
 # reused. The host string is CLUSTER-SPECIFIC and not portable:
 #   docker-desktop : host.docker.internal   (injected by Docker Desktop)
-#   k3d            : host.k3d.internal      (injected by k3d into CoreDNS)
-#                    — NOT yet verified against a running k3d pod here; if the
-#                    server logs "Registry: disabled" or cannot resolve it,
-#                    override with POD_REDIS_ADDR=<host-ip>:6379 and say so in
-#                    docs/K3S.md rather than guessing again.
-#   anything else  : neither exists. The data tier stays in docker compose on
+#   k3d            : host.k3d.internal      (injected by k3d)  — MEASURED from a
+#                    pod: redis-cli -h host.k3d.internal -p 6379 ping -> PONG.
+#                    host.docker.internal and the bridge address 172.17.0.1 also
+#                    answer from a k3d pod, and neither is used here: the first
+#                    is a Docker Desktop convention that happens to be inherited
+#                    (so it quietly implies a Docker Desktop that may not be
+#                    there), the second is an unstable bridge IP. host.k3d.internal
+#                    is the one k3d itself injects.
+#   anything else  : none of them exist. The data tier stays in docker compose on
 #                    the host (ADR-15 decision 4 accepts this split for exactly
 #                    this stage), so a cluster with no host alias needs a real
 #                    routable address here.
+# Override with POD_REDIS_ADDR=<host>:6379 and record the working value in
+# docs/K3S.md rather than guessing twice.
 case "$CLUSTER_KIND" in
   docker-desktop) DEFAULT_POD_REDIS="host.docker.internal:6379" ;;
   k3d)            DEFAULT_POD_REDIS="host.k3d.internal:6379" ;;
@@ -206,9 +211,38 @@ POD_REDIS_ADDR="${POD_REDIS_ADDR:-$DEFAULT_POD_REDIS}"
    set POD_REDIS_ADDR=<host>:6379 explicitly"
 log "pods will reach redis at $POD_REDIS_ADDR (cluster kind: $CLUSTER_KIND)"
 
+# advertise-host: the HOST part of the address handed to the client, while the
+# PORT still comes from the Agones status read (ADR-15 decision 2 option A).
+#
+# Why a host override is needed at all, and why only the host: on k3d, Agones'
+# status.address is the node CONTAINER's Docker-network address (measured:
+# 172.20.0.3). That is correct inside the cluster and NOT DIALABLE BY A CLIENT.
+# The address that works is 127.0.0.1:<agones-assigned-port>, published by the
+# k3d serverlb — measured reachable from both Windows (where the Unity client
+# runs) and WSL2. So the port must keep coming from Agones (it is assigned per
+# pod at scheduling time) and only the host is substituted. That is why this is
+# not GAMESERVER_PUBLIC_ADDR, which replaces the whole address and cannot know
+# the port.
+#
+# PLACEHOLDER — nothing reads this key yet. The game-server side is in flight
+# and the env var name is not final (likely GAMESERVER_ADVERTISE_HOST); the key
+# is created now so the fleet manifest only has to uncomment one env block.
+# An unused ConfigMap key is inert.
+case "$CLUSTER_KIND" in
+  k3d)            DEFAULT_ADVERTISE_HOST="127.0.0.1" ;;
+  # Docker Desktop does NOT publish Kubernetes hostPort to the host, so no host
+  # string makes an Agones-assigned port reachable there. Empty on purpose:
+  # there is no correct value, and inventing one would hide that.
+  docker-desktop) DEFAULT_ADVERTISE_HOST="" ;;
+  *)              DEFAULT_ADVERTISE_HOST="" ;;
+esac
+ADVERTISE_HOST="${GAMESERVER_ADVERTISE_HOST:-$DEFAULT_ADVERTISE_HOST}"
+log "clients will be told to dial host '${ADVERTISE_HOST:-<unset — status.address as-is>}'"
+
 kube create configmap gameserver-config \
   --namespace "$NAMESPACE" \
   --from-literal=redis-addr="$POD_REDIS_ADDR" \
+  --from-literal=advertise-host="$ADVERTISE_HOST" \
   --dry-run=client -o yaml | kube apply -f -
 
 # ---------------------------------------------------------------------------

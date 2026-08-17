@@ -65,6 +65,49 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `DefaultFleetMap` / `DefaultNamespace` / `gamePortName` do not match the manifests.
 
 ### Changed
+- **Three cluster facts replaced with measurements** — all three were previously shipped as
+  parameterised guesses with a "verify, do not assume" note, and all three now have answers:
+  - **k3d pod → compose data tier is `host.k3d.internal`** (`redis-cli -h host.k3d.internal
+    -p 6379 ping` → `PONG` from a pod). `host.docker.internal` and `172.17.0.1` also answer
+    there and are still not used: the first is a Docker Desktop convention that happens to be
+    inherited, so it quietly implies a Docker Desktop that may not be present; the second is an
+    unstable bridge IP.
+  - **Gateway → k3d API server now joins k3d's Docker network** instead of going through
+    `host.docker.internal`. client-go verifies the API certificate, and `host.docker.internal`
+    is **not** a SAN on the k3d cert, so that route needs either TLS verification disabled — not
+    acceptable in a service holding allocation credentials — or the cluster recreated with an
+    extra `--tls-san`. `k3d-<cluster>-serverlb` **is** a SAN, so attaching the gateway to the
+    external `k3d-<cluster>` network and dialling `https://k3d-<cluster>-serverlb:6443` verifies
+    as itself with no cert change and no recreate. Confirmed in this worktree:
+    `kubectl get nodes` through the rewritten kubeconfig returns
+    `k3d-rpg-dev-server-0 Ready control-plane,master`, with no `-k` and no
+    `insecure-skip-tls-verify`. The network name and serverlb hostname are cluster-name-derived
+    (`k3d-<cluster>`), so `K3D_NETWORK` is a parameter, not a constant.
+    Two consequences worth stating because both fail quietly: the gateway is attached to **both**
+    `default` and the k3d network, since naming `networks:` on a service *replaces* its network
+    list rather than adding to it (k3d-only would leave a working allocator on a gateway that
+    cannot reach redis); and the k3d network is `external`, which is the second reason this stays
+    in the overlay — compose refuses to start when an external network is missing.
+  - **The documented verification command must be cwd-relative.** `-v "$PWD/kubeconfig.local:…"`
+    fails on this WSL2 box: `docker` is Docker Desktop's shim, absolute `/mnt/*` paths do not
+    translate, and the mount silently becomes a **directory** (`read /kc: is a directory`, which
+    reads like a kubeconfig bug and is not). Same missing-bind-source trap that keeps the mount
+    out of the base compose file.
+- **Prepared the client-address host override, commented out on purpose.** The Agones status read
+  is not sufficient on either local cluster: `status.address` is the node address, measured as
+  `192.168.65.3` on docker-desktop (unreachable from Windows and WSL2 — Docker Desktop publishes
+  Docker ports to the host but not Kubernetes `hostPort`, so **no** host string helps) and
+  `172.20.0.3` on k3d (the node container's Docker-network address, where the working client
+  address is `127.0.0.1:<agones-assigned-port>` via the serverlb). The client address is therefore
+  composed from two sources — **port** from the status read, which is the only thing that knows
+  the per-pod port, and **host** from configuration — which is why the game server's override is a
+  *host* and not `GAMESERVER_PUBLIC_ADDR`. `setup-dev.sh` now writes an `advertise-host` key into
+  the `gameserver-config` ConfigMap (`127.0.0.1` on k3d, empty on docker-desktop where no value
+  can be right), and the fleet carries the matching env block **commented out**: the game-server
+  side is in flight and the variable name is not confirmed, and an env var the binary does not
+  read looks configured while doing nothing. Uncommenting is the whole change once the name lands.
+  Consequence for the staged plan: **ADR-14 stage 4 is provable on docker-desktop, stage 5 is
+  not** — no client can reach an allocated pod there at all. Stage 5 needs k3d.
 - **Rewrote `agones/fleet-map-dotnet-dev.yaml`** into a deployable fleet for ADR-14 stage 4:
   secrets via `secretKeyRef` instead of the literals `dev-secret-change-me` /
   `dev-join-secret-change-me` that were committed in the manifest; configuration moved to the

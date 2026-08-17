@@ -293,17 +293,46 @@ no kubeconfig, the gateway does not start degraded, it does not start.
 
 `docker-compose.agones.yml` is the opt-in overlay that supplies it:
 
+**The route is: join k3d's own Docker network. Not `host.docker.internal`.**
+client-go verifies the API server certificate and there is no acceptable way to
+turn that off in a service holding allocation credentials, so the kubeconfig must
+name a host that is both routable from the container *and* a SAN on the k3d
+certificate. Read off the live listener, k3d issues:
+
+```
+DNS:k3d-rpg-dev-server-0, DNS:k3d-rpg-dev-serverlb, DNS:kubernetes,
+DNS:kubernetes.default, DNS:kubernetes.default.svc,
+DNS:kubernetes.default.svc.cluster.local, DNS:localhost,
+IP:10.43.0.1, IP:127.0.0.1, IP:172.20.0.3, IP:::1
+```
+
+`host.docker.internal` is **not** among them. Both routes reach the API — a
+`/version` request answers over either — but only one keeps verification intact:
+
+| | Route | Verdict |
+|---|---|---|
+| **A** | attach the gateway to network `k3d-<cluster>`, dial `https://k3d-<cluster>-serverlb:6443` | **recommended** — that name *is* a SAN, so TLS passes with no cert change and no cluster recreate |
+| B | `https://host.docker.internal:<api-port>` | rejected — needs verification disabled, or the cluster recreated with `--k3s-arg '--tls-san=host.docker.internal@server:*'`. Recreating a cluster to avoid one `sed` is the wrong trade |
+
 ```bash
 cd backend/deploy
+K3D_CLUSTER=rpg-dev
 
-# 1. Export a kubeconfig and REWRITE ITS SERVER URL for container-local view.
-k3d kubeconfig get rpg-dev > kubeconfig.local
-sed -i -E 's#server: https://(0\.0\.0\.0|127\.0\.0\.1):#server: https://host.docker.internal:#' \
+# 1. Export a kubeconfig and point it at the serverlb on its IN-NETWORK port
+#    6443 (not the published host port; k3d writes a host-side 0.0.0.0/127.0.0.1
+#    URL, and inside a container 127.0.0.1 is the container).
+k3d kubeconfig get "$K3D_CLUSTER" > kubeconfig.local
+sed -i -E "s#server: https://[^[:space:]]+#server: https://k3d-${K3D_CLUSTER}-serverlb:6443#" \
   kubeconfig.local
 
-# 2. VERIFY it from a container before wiring the gateway to it.
-docker run --rm -v "$PWD/kubeconfig.local:/kc:ro" -e KUBECONFIG=/kc \
-  --add-host host.docker.internal:host-gateway bitnami/kubectl:latest get nodes
+# 2. VERIFY from a container on that network, before wiring the gateway to it.
+#    RUN FROM backend/deploy WITH A CWD-RELATIVE MOUNT PATH: on this WSL2 box
+#    `docker` is Docker Desktop's shim, absolute /mnt/* paths do not translate,
+#    and the mount silently becomes a DIRECTORY — kubectl then reports
+#    `read /kc: is a directory`, which reads like a kubeconfig bug and is not.
+docker run --rm --network "k3d-${K3D_CLUSTER}" \
+  -v "./kubeconfig.local:/kc:ro" -e KUBECONFIG=/kc \
+  bitnami/kubectl:latest get nodes
 
 # 3. Bring the gateway up with the overlay.
 docker compose -f docker-compose.yml -f docker-compose.agones.yml \
@@ -311,17 +340,27 @@ docker compose -f docker-compose.yml -f docker-compose.agones.yml \
 docker compose logs gateway | grep -i allocator
 ```
 
-Two things in step 1 **must be verified, not assumed**:
+Measured output of step 2 in this worktree — no `-k`, no
+`insecure-skip-tls-verify`; the CA travels in the kubeconfig and the serverlb
+name verifies as itself:
 
-- **The API server URL must be reachable from inside the container.** k3d
-  publishes the API on a host port and writes `0.0.0.0:<port>` or
-  `127.0.0.1:<port>` into the kubeconfig; inside a container `127.0.0.1` is the
-  container. `host.docker.internal` is the usual rewrite, and the overlay adds
-  the `host-gateway` alias so it also resolves on Linux/WSL.
-- **That host string must be a SAN on the API server's certificate**, or TLS
-  fails with `x509: certificate is valid for …, not host.docker.internal`. k3d
-  takes SANs at create time:
-  `k3d cluster create rpg-dev --api-port 0.0.0.0:6550 --k3s-arg '--tls-san=host.docker.internal@server:*'`.
+```
+NAME                   STATUS   ROLES                  AGE   VERSION
+k3d-rpg-dev-server-0   Ready    control-plane,master   63m   v1.31.5+k3s1
+```
+
+**The network name and the serverlb hostname are both derived from the cluster
+name** — `k3d-<cluster>` and `k3d-<cluster>-serverlb`. They are parameters, not
+constants; set `K3D_NETWORK` for any cluster not called `rpg-dev`.
+
+Two further notes on the overlay: the gateway is attached to **both** `default`
+and the k3d network, because naming `networks:` on a service *replaces* its
+network list rather than adding to it — listing only the k3d one would cut the
+gateway off from redis, giving a working allocator and a gateway that cannot
+reach its own registry. And the k3d network is declared `external`, which is the
+second reason this lives in an overlay: compose refuses to start when an external
+network is missing, so naming it in the base file would make the whole stack
+depend on a k3d cluster existing.
 
 `kubeconfig.local` is git-ignored. A developer's `~/.kube/config` grants every
 cluster they have; for anything past a laptop, mint a ServiceAccount with
@@ -344,15 +383,33 @@ that (ADR-15 decision 2, option A) — in flight, not merged. Until it lands the
 server advertises the hostless `:9000` it listens on, the gateway forwards that
 verbatim (ADR-3: the gateway never dials it), and the client cannot connect.
 
-Separately, and independently of the status read: **`docker-desktop` does not
-publish Kubernetes `hostPort` to the host.** Measured on this box — a probe
-GameServer with `hostPort: 7306` answered from inside the cluster on the node IP
-`192.168.65.3:7306`, and was unreachable from both Windows and WSL2, while a
-docker compose published port on the same host answered fine. Since the client
-dials the game server directly, an address routable only inside the cluster means
-no real client can join. **Stage 4 (no restart loop) is provable on
-`docker-desktop`; stage 5 (end-to-end allocation) is not** — that needs a cluster
-that publishes the dynamic port range, which is why the target is moving to k3d.
+**The status read alone is not sufficient, on either cluster.** `status.address`
+is the *node* address, and on neither local cluster is the node address something
+a client can dial:
+
+| Cluster | `status.address` | Dialable by a client? |
+|---------|------------------|----------------------|
+| docker-desktop | `192.168.65.3` | **No.** Measured: a probe GameServer with `hostPort: 7306` answered on `192.168.65.3:7306` from inside the cluster and was unreachable from both Windows and WSL2, while a compose-published port on the same host answered fine. Docker Desktop publishes *Docker* ports to the host, not Kubernetes `hostPort` — so **no** host string helps |
+| k3d | `172.20.0.3` (node container's Docker-network address) | Not as-is — but `127.0.0.1:<agones-assigned-port>` **is**, published by the k3d serverlb, measured reachable from both Windows (where the Unity client runs) and WSL2 |
+
+So on k3d the client-facing address is composed from two sources: the **port**
+from the Agones status read (assigned per pod at scheduling time — nothing else
+can know it) and the **host** from configuration. That is why the override being
+added to the game server is a *host*, not a full address:
+`GAMESERVER_PUBLIC_ADDR` replaces the whole thing and cannot carry a port it does
+not know.
+
+`k3s/setup-dev.sh` already writes the `advertise-host` key into the
+`gameserver-config` ConfigMap — `127.0.0.1` on k3d, empty on docker-desktop where
+no value can be correct — and `fleet-map-dotnet-dev.yaml` carries the matching
+env block **commented out**, because the game-server side is in flight and the
+variable name (expected `GAMESERVER_ADVERTISE_HOST`) is not yet confirmed.
+Shipping an env var the binary does not read would look configured and do
+nothing. Uncommenting it is the whole change once the name lands.
+
+**Consequence for the ADR-14 stages: stage 4 (no restart loop) is provable on
+`docker-desktop`; stage 5 (end-to-end allocation) is not**, because no client can
+reach an allocated pod there at all. Stage 5 needs k3d.
 
 ### Secrets
 
@@ -464,8 +521,14 @@ hostname for that is cluster-specific and not portable**:
 | Cluster | Host alias | Status |
 |---------|-----------|--------|
 | Docker Desktop k8s | `host.docker.internal` | verified working |
-| k3d | `host.k3d.internal` (injected into CoreDNS) | **not yet verified here** |
-| real k3s / anything else | neither exists | needs a real routable address |
+| k3d | `host.k3d.internal` | **measured** — `redis-cli -h host.k3d.internal -p 6379 ping` → `PONG` from a pod |
+| real k3s / anything else | none exists | needs a real routable address |
+
+On k3d, `host.docker.internal` and the bridge address `172.17.0.1` also answer
+from a pod, and neither is the default. `host.docker.internal` is a Docker
+Desktop convention that happens to be inherited, so using it quietly implies a
+Docker Desktop that may not be there; `172.17.0.1` is an unstable bridge IP.
+`host.k3d.internal` is the one k3d injects itself.
 
 `setup-dev.sh` picks the default from the kubectl context and writes it into the
 `gameserver-config` ConfigMap. Override with `POD_REDIS_ADDR=<host>:6379` when
