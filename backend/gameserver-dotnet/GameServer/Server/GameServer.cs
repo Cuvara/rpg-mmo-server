@@ -94,6 +94,29 @@ public class ServerOptions
     /// any given deployment.</para>
     /// </summary>
     public string? AdvertiseHost { get; set; }
+
+    /// <summary>
+    /// Hold the registry entry back until this pod's Agones GameServer reaches
+    /// <c>Allocated</c>, instead of publishing it right after Ready —
+    /// <c>GAMESERVER_REGISTER_ON_ALLOCATED</c> / <c>--register-on-allocated</c>.
+    ///
+    /// <para><b>Default false, which is the behaviour that shipped.</b> A fleet that has not
+    /// been migrated must not change behaviour because this code exists; the flag is the
+    /// migration.</para>
+    ///
+    /// <para><b>Inert unless Agones is enabled.</b> Outside a cluster — docker-compose, a
+    /// local run, every test — there is no allocation to wait for, so gating on one would
+    /// mean never registering at all. <see cref="IAgonesSdk.IsEnabled"/> is checked before
+    /// this flag is honoured.</para>
+    ///
+    /// <para>What it buys: a <c>Ready</c> but unallocated replica holds no registry entry, so
+    /// it is genuinely spare and <c>FindServer</c> cannot hand live players a pod Agones is
+    /// free to delete on the next scale-down (ADR-18 decision 4, mechanism 2). It narrows
+    /// ADR-14 decision 3, which put registration after Ready — Ready is still a precondition,
+    /// it is simply no longer sufficient.</para>
+    /// </summary>
+    public bool RegisterOnAllocated { get; set; }
+
     public IEventStream? EventStream { get; set; }
     public ILoggerFactory? LoggerFactory { get; set; }
 
@@ -183,6 +206,13 @@ public sealed class GameServerHost : IAsyncDisposable
     private readonly SimulationRates _rates;
 
     private readonly RegistrationService? _registration;
+
+    /// <summary>
+    /// The background wait for <c>Allocated</c> and the registration that follows it, when
+    /// <see cref="ServerOptions.RegisterOnAllocated"/> is armed. Null on every other path.
+    /// Held so shutdown can observe it rather than leave it dangling.
+    /// </summary>
+    private Task? _gatedRegistration;
 
     private ITransportListener? _listener;
     private CancellationTokenSource? _cts;
@@ -467,9 +497,64 @@ public sealed class GameServerHost : IAsyncDisposable
         // ordering that lets the two writers — Agones over pod lifecycle, this server over
         // the Redis `map_id -> server` entry — disagree about whether the server exists.
         // On shutdown the order reverses: deregister first, then Agones Shutdown.
+        //
+        // Under GAMESERVER_REGISTER_ON_ALLOCATED the entry is held back further still, until
+        // Agones reports this GameServer as Allocated (ADR-18 decision 4, mechanism 2). That
+        // narrows ADR-14 decision 3 rather than reversing it: Ready still comes first and is
+        // still a precondition — it has simply stopped being sufficient, because on a fleet
+        // whose replicas all carry one GAMESERVER_MAP_ID a second Ready pod is a second live
+        // server for that map with no allocation involved.
+        //
+        // The wait runs OFF this path, in the background, and that is load-bearing in two
+        // ways: the health loop below has to be pinging while a buffer pod sits unallocated
+        // (a pod that blocks here never pings and Agones kills it), and the listener has to
+        // be accepting, because a client that reaches a just-allocated pod directly should
+        // not be refused while the state read is still in flight.
         if (_registration != null)
         {
-            await _registration.StartAsync(_cts.Token);
+            if (_options.RegisterOnAllocated && _agonesSdk.IsEnabled)
+            {
+                var gateLogger = _loggerFactory.CreateLogger("AgonesAllocationGate");
+                var gateCt = _cts.Token;
+                _gatedRegistration = Task.Run(async () =>
+                {
+                    try
+                    {
+                        if (!await AgonesAllocationGate.WaitForAllocatedAsync(
+                                _agonesSdk, gateCt, gateLogger))
+                        {
+                            // Cancelled: shutting down before ever being allocated. Nothing
+                            // was published, so there is nothing to take away.
+                            return;
+                        }
+
+                        await _registration.StartAsync(gateCt);
+                    }
+                    catch (OperationCanceledException) { /* shutdown raced the gate */ }
+                    catch (Exception ex)
+                    {
+                        // An unobserved exception here would take the process down at a GC
+                        // rather than at the fault. Registration failure is already
+                        // non-fatal everywhere else and stays so here.
+                        _logger.LogError(ex,
+                            "Gated registration failed; this server will not appear in the registry");
+                    }
+                }, CancellationToken.None);
+            }
+            else
+            {
+                if (_options.RegisterOnAllocated && !_agonesSdk.IsEnabled)
+                {
+                    // Honouring the flag here would mean waiting for an allocation that
+                    // cannot happen, i.e. never registering. Say so rather than hanging.
+                    _logger.LogWarning(
+                        "GAMESERVER_REGISTER_ON_ALLOCATED is set but Agones is disabled, so it is " +
+                        "IGNORED — there is no GameServer object to reach Allocated. Registering " +
+                        "at startup as usual.");
+                }
+
+                await _registration.StartAsync(_cts.Token);
+            }
         }
 
         // Start background tasks
@@ -554,6 +639,18 @@ public sealed class GameServerHost : IAsyncDisposable
             await DrainClientsAsync();
 
             _connections.CloseAll();
+
+            // Settle the allocation gate before deregistering. It is already cancelled by
+            // the Cancel above, but it can be mid-flight between "state read said Allocated"
+            // and "StartAsync", and a registration landing AFTER the deregistration would
+            // leave an entry pointing at a server that is gone until the 15s TTL reaped it —
+            // the gateway would hand clients a black hole for that whole window. Bounded, so
+            // a wedged sidecar read cannot hold up a drain.
+            if (_gatedRegistration != null)
+            {
+                try { await _gatedRegistration.WaitAsync(TimeSpan.FromSeconds(5)); }
+                catch { /* cancelled, faulted or too slow; deregistration below covers it */ }
+            }
 
             // Leave the registry before the final save: the point is to stop the
             // gateway handing new clients to a server that is going away, rather than

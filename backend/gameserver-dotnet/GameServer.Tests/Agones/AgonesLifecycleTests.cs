@@ -278,6 +278,13 @@ public class AgonesLifecycleTests
         /// </summary>
         public Task<AgonesGameServerAddress?> GetAddressAsync() =>
             Task.FromResult<AgonesGameServerAddress?>(null);
+
+        /// <summary>
+        /// Never consulted here: these tests leave <c>RegisterOnAllocated</c> off, which is
+        /// the default, so the state is not part of the ordering under test. The gate has
+        /// its own tests in <see cref="AgonesAllocationGateTests"/>.
+        /// </summary>
+        public Task<string?> GetStateAsync() => Task.FromResult<string?>(null);
     }
 
     /// <summary>

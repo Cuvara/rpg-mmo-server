@@ -1671,6 +1671,15 @@ feat(migration): remove Go gameserver, C# .NET 10 is primary`. The cluster conte
    ordering that would let the two writers disagree. Ready first, then register; on shutdown,
    deregister first, then `ShutdownAsync`.
 
+   > **Narrowed 2026-08-18 by #151, opt-in.** Ready turned out to be necessary but not
+   > sufficient: on a fleet whose replicas all carry one `GAMESERVER_MAP_ID`, a second
+   > `Ready` pod is a second *live* server for that map with no allocation involved (ADR-18,
+   > measured). `GAMESERVER_REGISTER_ON_ALLOCATED=true` therefore holds the registry entry
+   > until `status.state` reads `Allocated`. The ordering this decision protects is intact —
+   > Ready still precedes registration, the address read still sits between them, and
+   > shutdown still deregisters before `ShutdownAsync`. **Default off**, so an unmigrated
+   > fleet behaves exactly as this decision describes; the flag is the migration.
+
    > **Correction, same day: this one was already true in code.** Written as though it were
    > work to do; it is not. `GameServer.RunAsync` completes the bind at
    > `GameServer/Server/GameServer.cs:349`, calls `ReadyAsync()` at 356, and only then
@@ -2292,6 +2301,16 @@ a `Ready` pod is not yet claiming a world. Two mechanisms would do it, and neith
    the buffer becomes real spare capacity, and the cold start leaves the join path. This is a
    game-server behaviour change with its own tests, not a manifest change, and is tracked as
    #151.
+
+   > **Landed 2026-08-18 as an opt-in, #151.** `GAMESERVER_REGISTER_ON_ALLOCATED=true`
+   > (Agones only; ignored with a warning otherwise) polls `GET /gameserver` and registers
+   > only on `Allocated`. An unreadable state is "keep waiting", never "assume allocated",
+   > and the wait runs off the start-up path so the health loop keeps pinging. **Default
+   > off**, so decisions 1-3 above still describe the fleet as it is deployed: the
+   > prohibition and the `verify.sh` `cluster.autoscaler` check stand down per decision 3
+   > only for a fleet actually running with the flag on, and `verify.sh` layer 3 and
+   > `refusal.split_world` must first learn that a `Ready`-and-unregistered pod is
+   > legitimate. `replicas > 1` for a *second map* is untouched — that is mechanism 1.
 
 **What this ADR does not claim.** It does not claim the ~9 s cold start is on the player's
 path. It is not: with no `Ready` pod, `AllocateServer` fails immediately and `FindServer`

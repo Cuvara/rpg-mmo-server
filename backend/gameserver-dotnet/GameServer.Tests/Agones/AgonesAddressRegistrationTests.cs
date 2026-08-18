@@ -332,6 +332,158 @@ public class AgonesAddressRegistrationTests
         Assert.Equal("172.20.0.3", original.Address);
     }
 
+    // ── Registration gated on Agones Allocated (issue #151, ADR-18 decision 4) ──
+
+    /// <summary>
+    /// The whole point: with the gate armed, a pod that is Ready but not allocated writes
+    /// NOTHING to the registry. That is what makes a spare replica actually spare — the
+    /// measured k3d failure was two members in <c>servers:map:map_01</c> with no allocation
+    /// involved, and <c>FindServer</c> handing live players the one Agones may delete next.
+    /// </summary>
+    [Fact]
+    public async Task WhenGated_AReadyButUnallocatedServerDoesNotRegister()
+    {
+        var sdk = new RecordingAgonesSdk { IsEnabled = true, State = AgonesGameServerState.Ready };
+        var registry = new RecordingRegistry(sdk.Clock);
+
+        await using var server = new GameServerHost(
+            NewOptions(sdk, registry, ConfiguredAddr, registerOnAllocated: true));
+        using var runCts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        var (runTask, _) = await TestPorts.StartServerAsync(server, runCts.Token);
+        try
+        {
+            // Long enough for several gate polls (the interval is 1s) — a registration that
+            // was merely slow rather than withheld would land inside this window.
+            await Assert.ThrowsAsync<TimeoutException>(
+                () => registry.Registered1.Task.WaitAsync(TimeSpan.FromSeconds(3)));
+            Assert.Empty(registry.Registered);
+            Assert.True(sdk.GetStateCalls > 0, "the gate never read the GameServer state");
+        }
+        finally
+        {
+            runCts.Cancel();
+            try { await runTask; } catch (OperationCanceledException) { /* expected */ }
+        }
+    }
+
+    /// <summary>
+    /// ...and the moment Agones allocates it, it registers — with the Agones-assigned
+    /// address, so gating did not cost the ADR-15 address fix.
+    /// </summary>
+    [Fact]
+    public async Task WhenGated_AllocationReleasesTheRegistration()
+    {
+        var sdk = new RecordingAgonesSdk
+        {
+            IsEnabled = true,
+            State = AgonesGameServerState.Ready,
+            Address = new AgonesGameServerAddress("192.168.65.3", 7691)
+        };
+        var registry = new RecordingRegistry(sdk.Clock);
+
+        await using var server = new GameServerHost(
+            NewOptions(sdk, registry, ConfiguredAddr, registerOnAllocated: true));
+        using var runCts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        var (runTask, _) = await TestPorts.StartServerAsync(server, runCts.Token);
+        try
+        {
+            await Assert.ThrowsAsync<TimeoutException>(
+                () => registry.Registered1.Task.WaitAsync(TimeSpan.FromSeconds(2)));
+
+            // The allocation the gateway's allocator would have performed.
+            sdk.State = AgonesGameServerState.Allocated;
+
+            await registry.Registered1.Task.WaitAsync(TimeSpan.FromSeconds(20));
+            Assert.Equal("192.168.65.3:7691", registry.FirstRegistered!.Addr);
+        }
+        finally
+        {
+            runCts.Cancel();
+            try { await runTask; } catch (OperationCanceledException) { /* expected */ }
+        }
+    }
+
+    /// <summary>
+    /// A pod that comes up already Allocated — a container restart of a live server —
+    /// registers without waiting for anything. The gate sees Allocated on its first read.
+    /// </summary>
+    [Fact]
+    public async Task WhenGated_AServerThatIsAlreadyAllocatedRegistersImmediately()
+    {
+        var sdk = new RecordingAgonesSdk
+        {
+            IsEnabled = true,
+            State = AgonesGameServerState.Allocated,
+            Address = new AgonesGameServerAddress("192.168.65.3", 7691)
+        };
+        var registry = new RecordingRegistry(sdk.Clock);
+
+        await using var server = new GameServerHost(
+            NewOptions(sdk, registry, ConfiguredAddr, registerOnAllocated: true));
+        using var runCts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        var (runTask, _) = await TestPorts.StartServerAsync(server, runCts.Token);
+        try
+        {
+            await registry.Registered1.Task.WaitAsync(TimeSpan.FromSeconds(20));
+            Assert.Equal("192.168.65.3:7691", registry.FirstRegistered!.Addr);
+        }
+        finally
+        {
+            runCts.Cancel();
+            try { await runTask; } catch (OperationCanceledException) { /* expected */ }
+        }
+    }
+
+    /// <summary>
+    /// The flag is inert without Agones. docker-compose and every local run have no
+    /// GameServer object to reach Allocated, so honouring it there would mean never
+    /// registering at all; the server logs that it is ignoring it and registers at startup.
+    /// </summary>
+    [Fact]
+    public async Task WhenGatedButAgonesIsDisabled_RegistrationStillHappensAtStartup()
+    {
+        var sdk = new RecordingAgonesSdk { IsEnabled = false, State = AgonesGameServerState.Ready };
+        var registry = new RecordingRegistry(sdk.Clock);
+
+        await using var server = new GameServerHost(
+            NewOptions(sdk, registry, ConfiguredAddr, registerOnAllocated: true));
+        using var runCts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        var (runTask, _) = await TestPorts.StartServerAsync(server, runCts.Token);
+        try
+        {
+            await registry.Registered1.Task.WaitAsync(TimeSpan.FromSeconds(20));
+            Assert.Equal(ConfiguredAddr, registry.FirstRegistered!.Addr);
+            Assert.Equal(0, sdk.GetStateCalls);
+        }
+        finally
+        {
+            runCts.Cancel();
+            try { await runTask; } catch (OperationCanceledException) { /* expected */ }
+        }
+    }
+
+    /// <summary>
+    /// Default OFF: with the flag unset, an Agones-enabled server registers right after
+    /// Ready exactly as it did before this option existed, and never reads the state. A
+    /// fleet that has not been migrated must not change behaviour because this code shipped.
+    /// </summary>
+    [Fact]
+    public async Task WhenNotGated_RegistrationHappensAtStartupAndTheStateIsNeverRead()
+    {
+        var sdk = new RecordingAgonesSdk
+        {
+            IsEnabled = true,
+            State = AgonesGameServerState.Ready,
+            Address = new AgonesGameServerAddress("192.168.65.3", 7691)
+        };
+        var registry = new RecordingRegistry(sdk.Clock);
+
+        await RunUntilRegisteredAsync(sdk, registry);
+
+        Assert.Equal("192.168.65.3:7691", registry.FirstRegistered!.Addr);
+        Assert.Equal(0, sdk.GetStateCalls);
+    }
+
     // ── RegistrationService, directly ──
 
     /// <summary>
@@ -404,7 +556,7 @@ public class AgonesAddressRegistrationTests
 
     private static ServerOptions NewOptions(
         IAgonesSdk sdk, IServerRegistry registry, string configuredAddr,
-        string? advertiseHost = null) => new()
+        string? advertiseHost = null, bool registerOnAllocated = false) => new()
     {
         ServerAddr = ":0",
         ServerId = ServerId,
@@ -419,6 +571,7 @@ public class AgonesAddressRegistrationTests
         PlayerStore = new MemoryPlayerStore(),
         AgonesSdk = sdk,
         AdvertiseHost = advertiseHost,
+        RegisterOnAllocated = registerOnAllocated,
         ServerRegistry = registry,
         Registration = NewRegistrationOptions(configuredAddr),
         LoggerFactory = NullLoggerFactory.Instance
@@ -464,6 +617,27 @@ public class AgonesAddressRegistrationTests
             if (GetAddressSequence == 0) GetAddressSequence = Clock.Next();
             Interlocked.Increment(ref _getAddressCalls);
             return Task.FromResult(Address);
+        }
+
+        /// <summary>
+        /// What the fake sidecar reports as <c>status.state</c>. Settable while the server
+        /// runs, so a test can hold a pod at <c>Ready</c> and then allocate it. Null is a
+        /// failed read, which the gate must treat as "keep waiting".
+        /// </summary>
+        public string? State
+        {
+            get => Volatile.Read(ref _state);
+            set => Volatile.Write(ref _state, value);
+        }
+        private string? _state = AgonesGameServerState.Ready;
+
+        private int _getStateCalls;
+        public int GetStateCalls => Volatile.Read(ref _getStateCalls);
+
+        public Task<string?> GetStateAsync()
+        {
+            Interlocked.Increment(ref _getStateCalls);
+            return Task.FromResult(State);
         }
     }
 
