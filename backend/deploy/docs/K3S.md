@@ -856,6 +856,49 @@ AsyncSaver sweep (30s) and the reconnect hold, not a hang.
 
 ---
 
+## Measuring on this cluster — read before you quote a number
+
+Two properties of this local rig corrupt measurements taken through it. Neither
+is a server defect, and both have already been mistaken for one. Full treatment
+and the figure-by-figure audit: [`backend/docs/BENCHMARK.md`](../../docs/BENCHMARK.md).
+
+### The host clock is not usable for rates (#153)
+
+**Never derive a rate from a wall clock on this box** — not `date`, not
+`$SECONDS`, not `time.time()`, not `DateTime.UtcNow`, and not a Prometheus
+`rate()` resting on server-assigned scrape timestamps. `CLOCK_REALTIME` here runs
+*fast* against `CLOCK_MONOTONIC` by **+11.1%, +16.7% and +16.65%** in three
+separate sessions. The amount drifts, so it cannot be corrected with a constant,
+only avoided.
+
+**This applies inside pods.** k3d nodes are containers on this kernel and share
+its clock, so `kubectl exec ... date` carries the identical artifact — a pod is
+not a second opinion.
+
+Twenty-second reproduction:
+
+```bash
+python3 -c "
+import time
+m0=time.monotonic(); r0=time.time()
+time.sleep(20)
+print('monotonic', time.monotonic()-m0, 'realtime', time.time()-r0)"
+# monotonic 20.00009545798821 realtime 23.331291913986206   -> +16.65%
+```
+
+It has already cost real work: issue #147 reported the game server ticking at
+**54 Hz** against an advertised 60. It was filed, propagated into an ADR in an
+open PR, and blamed for a client prediction defect — and every bit of it was the
+instrument. `TickLoop` paces on `Stopwatch` (`CLOCK_MONOTONIC`); the observer
+timed it with `date` (`CLOCK_REALTIME`). #147 is closed as not-a-defect.
+
+**So: to check the tick rate, read the server's own metrics** — the tick
+histogram at `/metrics` (`gameserver_tick_duration_seconds`) is built from
+`Stopwatch.GetTimestamp()` and never touches the wall clock. Do not time the loop
+from outside with a shell.
+
+---
+
 ## Offline validation
 
 `kubectl apply --dry-run=client` cannot check a `Fleet` without a live API

@@ -116,8 +116,12 @@ measurement of what serialization costs. No server-side change was needed.
 
 ### Measurement mechanics
 
-- Client-observed **snapshot interval** = wall-clock gap between consecutive
-  `MsgSnapshot` arrivals, per player, pooled across players.
+- Client-observed **snapshot interval** = **monotonic** gap between consecutive
+  `MsgSnapshot` arrivals, per player, pooled across players. Monotonic, not
+  wall-clock: the generator takes both endpoints from Go's `time.Now()` and
+  subtracts them with `Time.Sub`, which uses the monotonic reading Go embeds in
+  every `time.Time`. On this host that distinction is worth 10-17% — see
+  [the host clock](#the-host-clock-and-which-figures-it-touches).
 - Client-observed **ack latency** = time from an `MsgInput` leaving the socket to
   the first snapshot whose `ack_tick` covers that input's tick. Each input
   contributes exactly one sample.
@@ -258,6 +262,14 @@ a ~2% drift present at zero load, so it is timer granularity in the tick loop's
 sleep, not a load effect. Harmless now, but it means the effective budget is
 ~68ms and any future "we tick at exactly 15Hz" assumption is wrong.
 
+> **This is not the host-clock bug (#153), and the arithmetic is how you tell.**
+> Both figures are measured against `Stopwatch`/Go-monotonic, so the 10-17% fast
+> `CLOCK_REALTIME` never enters them; had it, 15Hz would have read as **~12.9**,
+> not 14.7. A reading near 54Hz on a 60Hz loop, or near 12.9 on a 15Hz one, is
+> the *instrument* — see
+> [the host clock](#the-host-clock-and-which-figures-it-touches). A reading of
+> 14.7 on a 15Hz loop is the *server*.
+
 ---
 
 ## 6. Ceilings that are config, not capacity
@@ -339,12 +351,84 @@ deflates the numbers in ways that are not quantified away:
 6. **Single map, single server, no Agones allocation, no gateway in the path.**
    Nothing here measures allocation latency, map transfer, or gateway login
    throughput; those are ADR-7 items 4 and 5 and remain unmeasured.
+7. **`CLOCK_REALTIME` on this host runs 10-17% fast** against `CLOCK_MONOTONIC`,
+   by an amount that drifts between sessions. Nothing in this document is
+   computed from it — every figure here is monotonic-derived, audited
+   figure-by-figure below — but any *new* measurement taken with `date`, a shell
+   `$SECONDS`, or a Prometheus `rate()` over server-assigned scrape timestamps
+   will be wrong by that much. See
+   [the host clock](#the-host-clock-and-which-figures-it-touches). Refs #153.
 
 **How to read the result:** treat 150 as a *floor* for a quiet dedicated VPS core
 and a *ceiling* for anything noisier. The bottleneck identification
 (serialization ≫ AOI, 5:1) is far more robust than the absolute number, because
 it is a ratio measured within the same run conditions and reproduced two
 independent ways.
+
+### The host clock, and which figures it touches
+
+**Rule: never derive a rate from a wall clock on this box.** Not `date`, not
+`$SECONDS`, not `time.time()`, not `DateTime.UtcNow`, not a Prometheus `rate()`
+that leans on server-assigned scrape timestamps.
+
+On this WSL2 host `CLOCK_REALTIME` runs *fast* relative to `CLOCK_MONOTONIC`, and
+**the amount is not stable** — measured at **+11.1%**, **+16.7%** and **+16.65%**
+in three sessions on different days. It cannot be corrected with a constant, only
+avoided. `timedatectl` has reported `System clock synchronized:` both `no` and
+`yes` at different moments; clocksource is `tsc` under Hyper-V. **k3d pods share
+this kernel**, so a measurement taken inside a pod carries the identical artifact.
+
+Reproduce it in twenty seconds:
+
+```bash
+python3 -c "
+import time
+m0=time.monotonic(); r0=time.time()
+time.sleep(20)
+print('monotonic', time.monotonic()-m0, 'realtime', time.time()-r0)"
+# monotonic 20.00009545798821 realtime 23.331291913986206   -> +16.65%
+```
+
+**This has already cost real work.** Issue #147 reported the game server ticking
+at **54 Hz** against an advertised 60, was filed, propagated into an ADR in an
+open PR, and was cited as the likely root cause of a client prediction defect.
+All of it was the instrument: `TickLoop` paces on `Stopwatch`
+(`CLOCK_MONOTONIC`), and the observer timed it with `date` (`CLOCK_REALTIME`).
+The same idle process, measured against both clocks at once, read 59.99 Hz and
+54.57 Hz simultaneously. #147 is closed as not-a-defect. Refs #153.
+
+#### Audit: every figure in this document, against its clock
+
+Traced to source, not assumed. **No figure in this document is affected.** The
+load generator is Go, where `time.Now()` embeds a monotonic reading and
+`Time.Sub`/`time.Since` use it in preference to the wall clock; the server is C#,
+where the tick histogram and the loop pacing both come from
+`Stopwatch.GetTimestamp()`. Neither ever reads `CLOCK_REALTIME` for an interval.
+
+| Figure | Interval comes from | Affected? |
+|---|---|---|
+| tick p50 / p99 / mean, % ticks over budget | C# `Stopwatch.GetTimestamp()` / `Stopwatch.Frequency` (`GameMetrics.RecordTickDuration`, `TickLoop`) | **No** |
+| achieved `ticks/s` | scrape-to-scrape `afterGS.At.Sub(beforeGS.At)`, both `At` set from Go `time.Now()` at scrape time, never round-tripped through a string | **No** |
+| snapshot interval p50 / p99 | Go `now.Sub(lastSnap)`, both endpoints from `time.Now()` | **No** |
+| ack latency p99 | Go `now.Sub(pi.sent)`, same | **No** |
+| join latency | Go `time.Since(start)` | **No** |
+| KB/s per client, MB/s total | byte counters ÷ `time.Since(windowStart).Seconds()` | **No** |
+| peak RSS (MiB) | a byte count — no interval in it at all | **No** |
+| Protobuf-vs-JSON savings %, the 5:1 `still`-vs-`cluster` ratio, run-to-run spread % | ratios of the rows above, taken within one run | **No** — and a ratio would cancel a shared skew even if there were one |
+
+Two corollaries worth stating, because both are easy to get backwards:
+
+- **The 14.7Hz drift ([§5](#the-15hz-that-is-really-147hz)) is real and is *not*
+  this bug.** A 16.7% fast wall clock would have made 15Hz read as **~12.9**, not
+  14.7. The 2% shortfall is measured against `Stopwatch` and stands; confound 4
+  (Windows/WSL timer granularity) remains the live explanation.
+- **The re-check #153 asked for is done and it changed no number.** The issue was
+  right that the hazard is severe and right to demand the audit; the audit's
+  answer happens to be that the harness was already clock-correct. That is a
+  property of the harness, not a reason to relax the rule — the rule protects the
+  *next* measurement, which may well be taken by hand at a shell prompt.
+
+If you add a measurement to this document, state the clock it came from.
 
 ---
 

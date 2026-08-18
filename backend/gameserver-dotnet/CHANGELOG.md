@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **The host clock is a measurement hazard, and every BENCHMARK figure has now been audited
+  against it (#153).** `CLOCK_REALTIME` on this WSL2 box runs *fast* relative to
+  `CLOCK_MONOTONIC` — measured at **+11.1%, +16.7% and +16.65%** in three sessions on
+  different days — and the amount drifts, so it cannot be corrected with a constant, only
+  avoided. `backend/docs/BENCHMARK.md` gains the twenty-second reproduction, the rule
+  (**never derive a rate from a wall clock on this box**), and a figure-by-figure audit
+  traced to source. **Verdict: no figure in the document is affected.** Tick p50/p99/mean
+  come from `Stopwatch.GetTimestamp()`/`Stopwatch.Frequency`; every client-side rate,
+  latency and the achieved `ticks/s` come from Go `time.Time` subtraction, which uses the
+  monotonic reading Go embeds in `time.Now()`; peak RSS is a byte count with no interval in
+  it; and the Protobuf-vs-JSON savings and the 5:1 `still`-vs-`cluster` ratio are ratios
+  within one run, which would cancel a shared skew anyway. Corrected one piece of wording
+  that said otherwise — §2 described the snapshot interval as a "wall-clock gap", which
+  would have led a reader to discard a sound figure. Also recorded why the **14.7Hz** drift
+  is *not* this bug and the arithmetic that proves it: a 16.7% fast clock would have made
+  15Hz read as ~12.9, not 14.7, so timer granularity remains the live explanation. The
+  hazard is not hypothetical — it produced #147 ("the tick loop runs at 54 Hz while
+  advertising 60"), which was filed, propagated into an ADR in an open PR, and blamed for a
+  client prediction defect before being closed as not-a-defect; `TickLoop` paces on
+  `Stopwatch` and the observer timed it with `date`. Refs #153, #147, ADR-7.
+
 ## [v1.5.2] — 2026-08-17
 
 ### Fixed

@@ -5,6 +5,21 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **`K3S.md` now warns that the host clock cannot be used for rates, including from inside a
+  pod (#153).** `CLOCK_REALTIME` on this box runs fast against `CLOCK_MONOTONIC` by
+  **+11.1%, +16.7% and +16.65%** across three sessions, by a drifting amount that cannot be
+  corrected for. New section *Measuring on this cluster* carries the twenty-second
+  reproduction and the rule: **never derive a rate from a wall clock on this box** — not
+  `date`, `$SECONDS`, `time.time()`, `DateTime.UtcNow`, nor a Prometheus `rate()` resting on
+  server-assigned scrape timestamps. Called out specifically for k3d because a k3d node is a
+  container on this kernel and shares its clock, so `kubectl exec ... date` reproduces the
+  artifact rather than providing a second opinion. Points readers at the server's own
+  `gameserver_tick_duration_seconds` histogram, which is built from `Stopwatch.GetTimestamp()`,
+  instead of timing the loop from a shell. This already cost a filed issue (#147, closed as
+  not-a-defect) that reported 54 Hz against an advertised 60 and reached an ADR in an open PR.
+  Refs #153, #147.
+
 ### Added
 - **`verify.sh` check `cluster.autoscaler` — a `FleetAutoscaler` on a single-map fleet is now
   a FAIL, not a paragraph.** It fails when any `FleetAutoscaler` targets a fleet whose pod
