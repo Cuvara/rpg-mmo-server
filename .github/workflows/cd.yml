@@ -911,7 +911,18 @@ jobs:
           # explicit and reversible. map_02 is untouched: no fleet serves it.
           if [ "${#file_args[@]}" -gt 0 ]; then
             docker compose "${file_args[@]}" "${profile_args[@]}" stop gameserver-dotnet || true
-            echo "compose gameserver-dotnet stopped: map_01 is served by the Agones fleet"
+            # Verify, do not assert. The first version of this printed "stopped"
+            # unconditionally after a `|| true`, and the compose ps two lines later
+            # showed the container still Up — the log line was simply false. A stale
+            # second registrant for map_01 is ADR-2's split world, so this is worth
+            # failing the deploy over rather than reporting cheerfully.
+            if docker ps --format '{{.Names}}' | grep -qx "${COMPOSE_NAME_PREFIX:-rpg}-gameserver"; then
+              echo "::error::ALLOCATOR=agones but the compose game server is still running." \
+                   "It registers the same map_id as the fleet, which is two live servers for" \
+                   "one map — ADR-2's split world. Stop it before this deploy is trusted."
+              exit 1
+            fi
+            echo "compose gameserver-dotnet is stopped: map_01 is served by the Agones fleet"
           fi
           # `up -d` does NOT recreate a container whose bind-mounted files
           # changed — only its image/config/env are compared. Without this, a
