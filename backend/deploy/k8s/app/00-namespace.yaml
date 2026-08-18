@@ -1,0 +1,21 @@
+# The app tier's own namespace.
+#
+# It is NOT `rpg-realtime`. That namespace holds the live dev fleet
+# (`map-servers-dotnet-dev`) which ADR-16 proved end to end and which the
+# compose-run gateway allocates from; anything applied there is applied to a
+# running system. This namespace is the k8s-hosted app tier — gateway AND
+# fleet inside the cluster — and it is deliberately disposable.
+#
+# The fleet lives here too, not in `rpg-realtime`, because the allocation Role
+# below is namespaced: the ServiceAccount must have `create` on
+# gameserverallocations in THE NAMESPACE THE FLEET IS IN, and keeping both in
+# one namespace is what makes the narrow Role sufficient. Splitting them would
+# need a second RoleBinding in the fleet's namespace, i.e. a change to the dev
+# namespace, which is exactly what this work must not touch.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rpg-k8s-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    rpg-mmo/tier: app

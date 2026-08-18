@@ -33,10 +33,17 @@ name: CD — Build & Deploy
 #   (*) build-images runs only for production / build_images=true and is not
 #       on the deploy path.
 #
-# The `deploy` job has two modes, chosen per environment by vars.DEPLOY_MODE:
+# The `deploy` job has three modes, chosen per environment by vars.DEPLOY_MODE:
 #   host       (default) — bundle binaries supervised by scripts/deploy-local.sh
 #   containers           — images built on the runner, brought up by the compose
 #                          `realtime` profile. See backend/deploy/docs/CICD.md.
+#   k8s                  — the WHOLE stack (data tier, Nakama, gateway, Agones
+#                          map fleet) as k3s workloads, applied by
+#                          backend/deploy/k8s/dev-up.sh. No compose container is
+#                          in the path and no service is addressed by
+#                          host.k3d.internal. Used by DEV ONLY; staging and
+#                          production stay on their compose/host modes, which
+#                          this mode does not touch.
 
 on:
   push:
@@ -467,8 +474,8 @@ jobs:
         run: |
           set -euo pipefail
           case "${DEPLOY_MODE}" in
-            host|containers) ;;
-            *) echo "::error::vars.DEPLOY_MODE must be 'host' or 'containers' (got '${DEPLOY_MODE}')"; exit 1 ;;
+            host|containers|k8s) ;;
+            *) echo "::error::vars.DEPLOY_MODE must be 'host', 'containers' or 'k8s' (got '${DEPLOY_MODE}')"; exit 1 ;;
           esac
           echo "deploy_dir=${RPG_DEPLOY_DIR}" >> "$GITHUB_OUTPUT"
           echo "deploy_mode=${DEPLOY_MODE}"   >> "$GITHUB_OUTPUT"
@@ -827,7 +834,7 @@ jobs:
       # publish, so they have to go first. Safe when nothing is running:
       # deploy-local.sh stop just reports "not running" for a missing pidfile.
       - name: Stop host-mode realtime services
-        if: steps.paths.outputs.deploy_mode == 'containers'
+        if: steps.paths.outputs.deploy_mode != 'host'
         env:
           RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
         run: |
@@ -845,7 +852,7 @@ jobs:
       # cwd-relative — under WSL `docker` is a shim for docker.exe, which cannot
       # resolve absolute /mnt/* paths.
       - name: Build realtime images on the runner
-        if: steps.paths.outputs.deploy_mode == 'containers'
+        if: steps.paths.outputs.deploy_mode == 'containers' || steps.paths.outputs.deploy_mode == 'k8s'
         working-directory: backend
         run: |
           set -euo pipefail
@@ -866,6 +873,10 @@ jobs:
       # Bringing up the realtime profile is deliberately NOT part of this step: that is
       # what keeps "schema first, then the code that depends on it" true.
       - name: Start the data tier (postgres, redis, nakama)
+        # k8s mode owns its own data tier inside the cluster; these compose
+        # steps would bring the OLD dev stack back up alongside it, and both
+        # want the same host ports.
+        if: steps.paths.outputs.deploy_mode != 'k8s'
         env:
           RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
           MONITORING_ENABLED: ${{ vars.MONITORING_ENABLED || 'true' }}
@@ -896,6 +907,10 @@ jobs:
           done
 
       - name: Apply pending migrations
+        # k8s mode owns its own data tier inside the cluster; these compose
+        # steps would bring the OLD dev stack back up alongside it, and both
+        # want the same host ports.
+        if: steps.paths.outputs.deploy_mode != 'k8s'
         env:
           RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
           GAME_DB_URL: ${{ vars.GAME_DB_URL || '' }}
@@ -922,6 +937,10 @@ jobs:
       # The data services are already up from the step above; this adds the realtime
       # profile on top and is where --remove-orphans belongs.
       - name: Start / update the stack (docker compose)
+        # k8s mode owns its own data tier inside the cluster; these compose
+        # steps would bring the OLD dev stack back up alongside it, and both
+        # want the same host ports.
+        if: steps.paths.outputs.deploy_mode != 'k8s'
         env:
           RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
           MONITORING_ENABLED: ${{ vars.MONITORING_ENABLED || 'true' }}
@@ -1033,6 +1052,60 @@ jobs:
             [ "${state}" = healthy ] && break
             sleep 2
           done
+
+      # --------------------------------------------------------- k8s mode only
+      # The whole dev stack as k3s workloads. dev-up.sh is the single entry
+      # point and is the SAME script an operator runs by hand, so CI and the
+      # box cannot drift apart. It is idempotent.
+      #
+      # GIT_SHA pins an IMMUTABLE image tag. The moving `:develop` tag is
+      # retagged by hand and silently lagged the branch here -- the cluster ran
+      # `develop-307f1e8` while develop was at b633aff, so the deployment under
+      # test was not the commit under test. `Build realtime images on the
+      # runner` above already tags ${GITHUB_SHA}; this consumes that tag and the
+      # verify step below asserts the running image carries it.
+      - name: Deploy to Kubernetes (k8s mode)
+        if: steps.paths.outputs.deploy_mode == 'k8s'
+        env:
+          KUBE_CONTEXT: ${{ vars.KUBE_CONTEXT || 'k3d-rpg-dev' }}
+          GIT_SHA: ${{ github.sha }}
+          RPG_K8S_RUN_DIR: ${{ vars.RPG_K8S_RUN_DIR || '/tmp/claude-1000/rpg-k8s-dev' }}
+        working-directory: backend/deploy/k8s
+        run: |
+          set -euo pipefail
+          chmod +x dev-up.sh rollback-to-compose.sh
+          ./dev-up.sh
+
+      # The verification suite IS the healthcheck for this mode -- it proves the
+      # cluster, the data tier, the ADR-2 registry invariant, the advertised
+      # address and the full client flow, rather than curling a metrics port.
+      # A FAIL here fails the deploy.
+      - name: Post-deploy verification (k8s mode)
+        if: steps.paths.outputs.deploy_mode == 'k8s'
+        env:
+          KUBE_CONTEXT: ${{ vars.KUBE_CONTEXT || 'k3d-rpg-dev' }}
+          GIT_SHA: ${{ github.sha }}
+        working-directory: backend/deploy/k8s
+        run: |
+          set -euo pipefail
+          K="kubectl --context ${KUBE_CONTEXT}"
+
+          # Prove the running image is the commit being deployed BEFORE trusting
+          # anything the suite says about behaviour.
+          want_gw="rpg-mmo/gateway:${GIT_SHA}"
+          got_gw="$($K get deploy gateway -n rpg-k8s-realtime \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')"
+          if [ "$got_gw" != "$want_gw" ]; then
+            echo "::error::gateway is running '${got_gw}', not the deployed commit '${want_gw}'"
+            exit 1
+          fi
+          echo "gateway image pinned to the deployed commit: ${got_gw}"
+
+          JWT_SECRET="$($K get secret rpg-app-secrets -n rpg-k8s-realtime \
+            -o jsonpath='{.data.jwt-secret}' | base64 -d)"
+          export JWT_SECRET
+          chmod +x verify/verify.sh
+          ./verify/verify.sh --target k8s-dev
 
       # ------------------------------------------------------- host mode only
       # deploy-local.sh both (re)starts the binaries AND writes the game
@@ -1173,6 +1246,12 @@ jobs:
   post-deploy-smoke:
     name: Post-deploy smoke test
     needs: [resolve, deploy]
+    # In k8s mode this is not skipped coverage: the deploy job's
+    # `Post-deploy verification` runs the same smoketest binary, with
+    # --strict-addr and --require-db, as layer 4 of verify.sh. This job is
+    # skipped because it sources deploy/.env, which describes the COMPOSE stack
+    # and is not what k8s mode deployed.
+    if: needs.deploy.outputs.deploy_mode != 'k8s'
     runs-on: ${{ fromJSON(needs.resolve.outputs.runner_labels) }}
     steps:
       - name: Run smoketest

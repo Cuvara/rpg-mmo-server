@@ -5,7 +5,152 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`verify.sh` layer 5 reported PASS on a client run that never reached the deployment.**
+  The check's stated claim is that the real client "completed its live-backend PlayMode
+  tests against THIS gateway", but it asserted only `failed=0` and a test count — so a run
+  of `total=30 passed=29 failed=0` passed every assertion while its single `LiveBackend`
+  case was *Ignored*, having connected to the default `127.0.0.1:8000` rather than the
+  deployment. The client was unverified and the suite said otherwise. Layer 5 now requires
+  at least one `LiveBackend` case to be present **and** to have Passed, and reports the
+  Ignored case's own reason (which names the address it actually dialled) when it has not.
+  Categories are inherited from ancestor `<test-suite>` elements, because NUnit records
+  `[Category]` on the fixture rather than on each case.
+- **The invocation layer 5 prints did not work from WSL.** It used a
+  `CUVARA_GATEWAY_HOST=... Unity.exe` prefix, and environment variables do not cross into
+  a Windows process that way — only `WSLENV` carries them. Following the printed command
+  therefore ran the client against its defaults. It now exports the variables, lists them
+  in `WSLENV`, and resolves the editor from `ProjectSettings/ProjectVersion.txt` instead of
+  globbing the Hub directory (which picks 2021.3 and starts downgrading the asset database
+  of a Unity 6 project).
+- **`dev-up.sh` pinned images it had never made available, so roll-forward was broken.**
+  The import step warned and continued when a tag was absent from the local docker store,
+  and the script then pinned that exact tag onto the gateway Deployment and the Fleet.
+  k3d does not share the host docker image store, so the pods went straight to
+  `ImagePullBackOff` and `kubectl rollout status` burned its full 180s timeout before
+  failing with `timed out waiting for the condition` — a message naming neither the image
+  nor the reason. Rollback to compose worked, roll-forward did not, so the cutover was
+  provable once and not repeatable. A missing image is now fatal at the point it is
+  detected, and the error names the two `docker build` commands that fix it. Three
+  independent ways in are all closed: absent from both stores, absent with
+  `IMPORT_IMAGES=0` (which skipped the whole loop while the pin still happened — the node
+  is now asked directly, whether or not we imported), and present but stamped with a
+  different commit.
+- **A gateway image could not be tied to a commit.** `Dockerfile.gateway` never declared
+  `ARG GIT_REVISION`, so the `--build-arg GIT_REVISION=...` that every build path passes
+  was silently discarded and the image carried no provenance label — a stale image was
+  indistinguishable from a correct one by inspection, which is what makes a mis-pinned
+  tag so hard to see. It now stamps `org.opencontainers.image.revision` like the game
+  server does, and `dev-up.sh` refuses to pin an image whose stamp disagrees with the
+  commit it is deploying.
+- **A hostPort Deployment under RollingUpdate deadlocks on a single node.** Adding
+  `hostPort` to the gateway made every deploy *after the first* wedge: the replacement pod
+  cannot be scheduled until the outgoing one frees the port, and RollingUpdate will not
+  terminate the outgoing one until the replacement is Ready. `kubectl rollout status` sits on
+  "1 old replicas are pending termination" while the new pod is Pending with
+  "node(s) didn't have free ports for the requested pod ports". Both hostPort workloads now
+  declare `strategy: Recreate`. This passes the first time and fails forever after, which is
+  why it is written into the manifest rather than left to be rediscovered.
+- **`dev-up.sh` drained the fleet on every run, including a no-op one**, taking `map_01` down
+  each deploy. It compared the game server image *after* `kubectl apply` had already reset the
+  Fleet spec to the manifest's moving `:develop` tag, so the comparison was unequal every
+  time. It now reads the running image *before* the apply, and re-pins the spec without a
+  drain when nothing changed.
+- **`dev-up.sh` now ESTABLISHES the Agones port floor rather than asserting it**, so a fresh
+  cluster — and therefore CD — reaches the correct state without a human having run
+  `kubectl set env` first.
+
 ### Added
+- **A real host route for the k8s dev stack — `hostPort` 7000/7001 out of k3d's published
+  range, replacing the port-forwards.** k3d's serverlb publishes `7000-7100` and nothing in
+  the default NodePort range `30000-32767`, so the gateway's NodePort was allocated and
+  unreachable: the gateway answered inside the cluster while no client on the host could dial
+  it, and Nakama — which the client must reach *before* the gateway — had no host route at
+  all. Every component reported healthy and the deployment was unusable, the same failure
+  class as advertising a hostless address. The range is now SPLIT rather than borrowed from:
+  the Agones controller runs with `MIN_PORT=7010`, reserving `7000-7009` for infrastructure,
+  so the allocator can never hand a GameServer the gateway's port and leave it Pending.
+  `dev-up.sh` refuses to run if that pin is missing, because changing one without the other
+  reintroduces the collision. On a real cluster this is a LoadBalancer or an Ingress and the
+  hostPort disappears.
+- **`registry.stack_identity` and `flow.stack_identity` — the suite now proves WHICH stack
+  answered.** On a box where the previous stack is still running, `127.0.0.1:8000` and `:7350`
+  belong to it, so a suite pointed at the conventional addresses goes green having verified
+  the deployment it was meant to replace. Dialing a port is not evidence of whose port it is.
+  The first check attributes the registry (the live server is a GameServer of the fleet under
+  test); the second attributes the gateway (the server it assigned belongs to that fleet).
+  The k8s target also moves off 8000/7350 entirely, so the ambiguity cannot arise.
+
+- **Dev runs entirely on k3s/Agones (`backend/deploy/k8s/dev-up.sh`).** The dev environment
+  was a hybrid — game servers under Agones in `rpg-realtime`, but gateway, Nakama, Redis and
+  both PostgreSQL instances in docker compose, reached from the pods by `host.k3d.internal`.
+  ADR-15 decision 4 calls that the worst place to stop, because the host alias is what makes
+  it work on one machine and nowhere else. `dev-up.sh` brings the whole stack up in-cluster
+  (`rpg-k8s-data` + `rpg-k8s-realtime`), retires the compose stack and the legacy fleet, and
+  is the same script CD runs, so the box and CI cannot drift. Verified end to end:
+  `verify.sh --target k8s-dev` reports `VERIFY=PASS`, 18 PASS / 0 FAIL, with the full client
+  flow (auth → gateway token → EnterWorld → direct game-server dial → snapshots → the
+  `player_states` write and the reload after the hold) running against in-cluster DNS only.
+- **`backend/deploy/k8s/rollback-to-compose.sh` — dev back on the pre-cutover stack in
+  minutes.** Scales the in-cluster workloads to zero, drains the k8s fleet, restarts the
+  compose containers and restores the `rpg-realtime` fleet. Destroys nothing: every PVC,
+  every compose volume and every compose container survives, so the rollback is reversible by
+  re-running `dev-up.sh`. Exercised, not just written — see the entry under Fixed for the two
+  defects the first run found.
+- **`DEPLOY_MODE=k8s` in `.github/workflows/cd.yml`.** A third deploy mode alongside `host`
+  and `containers`: it runs `dev-up.sh` and then `verify.sh --target k8s-dev` as the
+  post-deploy healthcheck, so a push to `develop` reproduces the k8s deployment and fails the
+  deploy if the suite does. Staging and production are untouched — they select their mode
+  through `vars.DEPLOY_MODE` and never see this path. The compose data-tier, migration and
+  stack steps are gated off in this mode; `post-deploy-smoke` is skipped because the same
+  smoketest runs, with `--strict-addr --require-db`, as layer 4 of the suite.
+
+### Fixed
+- **An `Allocated` GameServer survives `kubectl scale fleet --replicas=0`.** Agones treats
+  allocated as in use, so scaling alone left the pod running *and* its registry entry live.
+  The first cutover run therefore reported the legacy fleet retired while its server was
+  still serving map_01, and the game server image pin silently did not take because the old
+  pod was never replaced. Both scripts now call `drain_fleet`, which scales to zero and then
+  deletes the GameServers explicitly; the delete is a graceful pod termination, so the
+  server's SIGTERM path deregisters itself instead of leaving an entry to expire on the 15s
+  heartbeat TTL — the window in which the gateway hands a client the address of a server that
+  is gone (ADR-2).
+- **`docker stop`/`docker start` under the WSL Docker Desktop shim intermittently return
+  non-zero after succeeding**, which under `set -e` aborted `dev-up.sh` before it started the
+  port-forwards and aborted `rollback-to-compose.sh` before it restored the legacy fleet. In
+  both cases the script exited leaving dev unreachable. The status is now tolerated and the
+  actual container state asserted afterwards.
+- **A port-forward that fails to bind left a live-looking pidfile and a zero exit**, so dev
+  came up with an unreachable Nakama and nothing said so. `pf()` now polls until the socket
+  accepts a connection and fails with the forward's own log if it never does.
+- **The fleet image comparison read the Fleet spec, which `kubectl apply` had just rewritten**
+  back to the manifest's `:develop`, so every run compared unequal and drained the fleet —
+  taking map_01 down on a no-op re-run. It now compares against the image a GameServer is
+  actually running.
+- **`redis-cli --no-raw SMEMBERS` on an empty set yielded a member literally named `array)`**
+  (from `(empty array)`), which the deregistration loop then dutifully deleted. Both scripts
+  use `--raw`, which prints one member per line and nothing at all for an empty set.
+- **`VERIFY_SECRETS_ALLOW_EMPTY` silently dropped every exemption but the last** for a secret
+  named in more than one entry, because the lookup assigned instead of appending. A key the
+  operator had exempted still failed the check
+  (`backend/deploy/k8s/verify/lib/checks_cluster.sh`).
+
+### Changed
+- **`backend/deploy/k8s/verify/targets/k8s-dev.env` now describes the deployment that
+  exists.** It shipped as placeholders (`rpg-realtime`/`rpg-data`, fleet
+  `map-servers-dotnet-dev`, secrets `rpg-*-secrets`) that matched no manifest, so every layer-1
+  check failed on absent objects. It now names `rpg-k8s-realtime`/`rpg-k8s-data`, fleet
+  `map-servers-dotnet-k8s` and the real secrets, and sets `VERIFY_ADDR_ALLOW_LOOPBACK=1` with
+  the measurement behind it: on k3d the node address `172.20.0.3` is **not** dialable from
+  WSL2 or Windows while `127.0.0.1:<agones port>` is, because the serverlb publishes
+  7000-7100 onto the host. That must return to `0` on any cluster where the client is not on
+  the node; `registry.addr_dialable` is what keeps it honest, because it opens the address.
+- **Images are pinned to an immutable tag.** `dev-up.sh` resolves `rpg-mmo/*:${GIT_SHA}` and
+  CD passes `github.sha`, then asserts the running gateway carries it before trusting the
+  suite. The moving `:develop` tag is retagged by hand and had silently lagged: at cutover the
+  cluster ran `develop-307f1e8` while `develop` was at `b633aff`, so the deployment under test
+  was not the commit under test.
+
 - **`backend/deploy/environments.tsv` — reserved stack identity per environment.** One row
   per GitHub Environment declaring the deploy directory, compose project, container prefix
   and every published port it is allowed to own. It is an assertion over the GitHub
