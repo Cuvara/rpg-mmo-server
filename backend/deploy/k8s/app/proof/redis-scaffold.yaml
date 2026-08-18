@@ -1,0 +1,78 @@
+# SCAFFOLD. NOT THE DATA TIER. Apply only when `rpg-k8s-data` is absent.
+#
+# The real Redis (plus both PostgreSQL instances and Nakama) belongs in the
+# `rpg-k8s-data` namespace and is owned elsewhere. This file exists because
+# the app tier cannot be PROVEN without a registry to write to and read from:
+# the game server writes its own entry, the gateway looks it up, and with no
+# Redis at all both sides come up clean and prove nothing.
+#
+# It is NOT a StatefulSet and has NO PersistentVolumeClaim, deliberately —
+# emptyDir, one replica, no persistence. Sessions and the registry are
+# TTL-bearing and self-healing (the registry entry is re-armed every 5s with a
+# 15s TTL), so losing them costs a reconnect. Anything durable belongs in the
+# real data tier, and giving this a PVC would make it look like one.
+#
+# When rpg-k8s-data lands: delete this, re-apply ../20-configmaps.yaml (whose
+# committed values already point at rpg-k8s-data), and restart both workloads.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: rpg-k8s-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: redis
+    rpg-mmo/scaffold: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis
+        rpg-mmo/scaffold: "true"
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          imagePullPolicy: IfNotPresent
+          # ADR-4: Redis here is not a cache and is not evictable. Sessions,
+          # the registry and the event streams share one instance separated by
+          # key prefix, and an eviction would silently drop a live session or
+          # a server registration rather than reporting an error.
+          args: ["redis-server", "--maxmemory-policy", "noeviction", "--save", ""]
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: rpg-k8s-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: redis
+    rpg-mmo/scaffold: "true"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis

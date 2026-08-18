@@ -1,0 +1,21 @@
+# Overrides ../20-configmaps.yaml to point at the scaffold Redis in THIS
+# namespace instead of the (not yet existing) rpg-k8s-data one. Apply after
+# 20-configmaps.yaml; delete and re-apply the real file once the data tier
+# exists. Only the redis-addr values differ — advertise-host is repeated
+# because applying a ConfigMap replaces its whole data map.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+  namespace: rpg-k8s-realtime
+data:
+  redis-addr: "redis.rpg-k8s-realtime.svc.cluster.local:6379"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gameserver-config
+  namespace: rpg-k8s-realtime
+data:
+  redis-addr: "redis.rpg-k8s-realtime.svc.cluster.local:6379"
+  advertise-host: "127.0.0.1"
