@@ -5,6 +5,27 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **Dev serves `map_01` from the Agones fleet, not from the compose game server.**
+  The gateway runs with `ALLOCATOR=agones`, attached to both the compose network and
+  `k3d-rpg-dev`, reaching the API through `https://k3d-<cluster>-serverlb:6443` with TLS
+  verification intact. Verified end to end: smoke test 10/10 in `--strict-addr` mode,
+  including `gamestate_player_row` and `gamestate_reload` against a pod whose address
+  only Agones could supply. Reversible in three commands — see `docs/K3S.md`.
+  This is a **dev** switch. Staging and production remain `DEPLOY_MODE=containers`,
+  and ADR-15's six prerequisites for a real cluster are still untouched.
+
+  Three findings from doing it, now in `docs/K3S.md`:
+  - `.env` drifts from what CD deployed, so restarting a service from the file can
+    change its secrets underneath it. Read them from the container, and not with
+    `docker exec printenv` — the image is distroless and that silently yields the
+    exec error text.
+  - The kubeconfig bind must be cwd-relative; the Docker Desktop shim turns an
+    absolute `/mnt/*` bind into a directory, surfacing as `read /kc: is a directory`.
+  - A fleet at `replicas: 1` has no spare pod, so the allocation path cannot fire
+    once that pod is Allocated.
+
+
 ### Removed
 - **Deleted the five Go-image manifests** — `agones/fleet-map.yaml`,
   `fleet-map-dev.yaml`, `fleet-dungeon.yaml`, `fleet-dungeon-dev.yaml` and

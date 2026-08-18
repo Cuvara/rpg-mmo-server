@@ -10,6 +10,58 @@ plus the path from a laptop cluster to a real k3s VPS.
 
 ---
 
+## Dev runs on Agones (switched 2026-08-18)
+
+The dev realtime tier now serves `map_01` from the Agones fleet, not from the
+compose `gameserver-dotnet` service. The gateway runs with `ALLOCATOR=agones`,
+attached to both the compose network and `k3d-rpg-dev`. Verified end to end:
+the smoke test passes 10/10 in `--strict-addr` mode, including
+`gamestate_player_row` and `gamestate_reload`.
+
+To reproduce, or to undo:
+
+```bash
+cd backend/deploy
+# switch ON
+kubectl config view --minify --flatten --context k3d-rpg-dev > kubeconfig.local
+sed -i 's|server: https://127.0.0.1:6550|server: https://k3d-rpg-dev-serverlb:6443|' kubeconfig.local
+chmod 600 kubeconfig.local                      # gitignored; never commit it
+# set ALLOCATOR=agones (+ ALLOCATOR_* , KUBECONFIG_HOST, K3D_NETWORK) in .env
+kubectl --context k3d-rpg-dev scale fleet map-servers-dotnet-dev -n rpg-realtime --replicas=1
+docker stop rpg-gameserver                      # hand map_01 to the fleet; wait out its 15s TTL
+docker compose --profile realtime -f docker-compose.yml -f docker-compose.override.yml \
+               -f docker-compose.agones.yml up -d gateway
+
+# switch OFF
+# set ALLOCATOR=none in .env, then:
+kubectl --context k3d-rpg-dev scale fleet map-servers-dotnet-dev -n rpg-realtime --replicas=0
+docker start rpg-gameserver
+docker compose --profile realtime up -d gateway
+```
+
+### Three things that bit, in the order they bit
+
+**1. `.env` drifts from what is deployed.** CD writes its own secrets into the
+running containers; the `.env` in the working tree is not updated to match. The
+gateway had been running with CD's `JWT_SECRET` and picked up the stale file
+value on restart, so every login failed with `invalid token` until `.env` was
+synced. Read the truth from the container, never from the file:
+`docker inspect rpg-gateway --format '{{range .Config.Env}}{{println .}}{{end}}'`
+— **`docker exec rpg-gateway printenv` does not work**, the image is distroless
+and you will silently capture the exec error text as the value.
+
+**2. The kubeconfig bind must be cwd-relative.** `docker` here is the Docker
+Desktop shim and absolute `/mnt/*` paths do not translate; the mount silently
+becomes a *directory* and `kubectl` reports `read /kc: is a directory`, which
+reads like a kubeconfig problem and is not. Run compose from `backend/deploy`
+and keep `KUBECONFIG_HOST=./kubeconfig.local`.
+
+**3. A fleet at `replicas: 1` has no spare pod, so allocation can never fire.**
+Once the single pod is Allocated to `map_01`, a request for an unserved map
+returns `no game server available in fleet (state "UnAllocated")` — correct, but
+it means the allocation path is unreachable until the fleet carries spare Ready
+capacity. Raise `replicas` before expecting an allocation to succeed.
+
 ## TL;DR
 
 ```bash
