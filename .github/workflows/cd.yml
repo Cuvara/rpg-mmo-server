@@ -1014,12 +1014,37 @@ jobs:
 
           rc=0
           probe gateway    "http://127.0.0.1:${GATEWAY_METRICS_PORT:-9102}/healthz" || rc=1
-          # No Host header: the C# metrics listener binds the wildcard, so a
-          # plain request from the host matches. If this ever 404s again, the
-          # wildcard bind has regressed — do NOT paper over it with a header.
-          probe gameserver "http://127.0.0.1:${GAMESERVER_METRICS_PORT:-9101}/healthz" || rc=1
           tcp   gateway    "${GATEWAY_CONTAINER_PORT:-8000}"                           || rc=1
-          tcp   gameserver "${GAMESERVER_CONTAINER_PORT:-9200}"                        || rc=1
+          # Where the game server is depends on who runs it. Under ALLOCATOR=agones the
+          # compose service is deliberately stopped and the fleet serves the map, so
+          # probing the compose container would fail for the one reason that is correct.
+          # Probe what a client is actually handed instead: the address the server
+          # registered for its own map. That is the value the gateway returns verbatim,
+          # so a probe of anything else proves less.
+          if grep -qE '^ALLOCATOR=agones[[:space:]]*$' .env 2>/dev/null; then
+            gs_map="${GAMESERVER_MAP_ID:-map_01}"
+            gs_addr=""
+            for key in $(docker exec "${COMPOSE_NAME_PREFIX:-rpg}-redis" redis-cli --scan --pattern 'servers:id:*' 2>/dev/null); do
+              m=$(docker exec "${COMPOSE_NAME_PREFIX:-rpg}-redis" redis-cli hget "$key" map_id 2>/dev/null | tr -d '\r')
+              if [ "$m" = "$gs_map" ]; then
+                gs_addr=$(docker exec "${COMPOSE_NAME_PREFIX:-rpg}-redis" redis-cli hget "$key" addr 2>/dev/null | tr -d '\r')
+                break
+              fi
+            done
+            if [ -z "$gs_addr" ]; then
+              echo "::error::ALLOCATOR=agones but no game server is registered for map '${gs_map}'. The gateway will answer MsgEnterWorld with 'no server available for map'."
+              rc=1
+            else
+              echo "map '${gs_map}' is served from ${gs_addr} (Agones fleet)"
+              tcp gameserver "${gs_addr##*:}" || rc=1
+            fi
+          else
+            # No Host header: the C# metrics listener binds the wildcard, so a
+            # plain request from the host matches. If this ever 404s again, the
+            # wildcard bind has regressed — do NOT paper over it with a header.
+            probe gameserver "http://127.0.0.1:${GAMESERVER_METRICS_PORT:-9101}/healthz" || rc=1
+            tcp   gameserver "${GAMESERVER_CONTAINER_PORT:-9200}"                        || rc=1
+          fi
           docker ps --filter name=rpg- --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
           if [ "$rc" != 0 ]; then
             echo "--- gateway logs ---";    docker logs --tail 50 rpg-gateway    2>&1 || true
