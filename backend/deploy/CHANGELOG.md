@@ -5,6 +5,40 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **ADR-15 — what running the realtime tier on Kubernetes would cost, and the
+  dynamic-address problem that blocks it** (`backend/docs/ARCHITECTURE-DECISIONS.md`).
+  Status is **proposed, not accepted**: ADR-14 left the move to k8s explicitly undecided and
+  this records the price rather than paying it. What it establishes:
+  - **The two deploy stories do not meet.** `dev`, `staging` and `production` are all
+    `DEPLOY_MODE=containers` and `cd.yml` applies no Kubernetes manifest anywhere. There is
+    no k3s — the context is `docker-desktop` v1.34.1 and `deploy/k3s/setup-dev.sh` only
+    `kubectl apply`s into whatever context is current — and `deploy/k8s/` does not exist
+    despite the root `CLAUDE.md` describing a base/overlays tree.
+  - **One thing is decided, because it blocks either answer: the game server cannot learn
+    its own address.** With `portPolicy: Dynamic` the real address lives only in GameServer
+    status, the fleet supplies no `GAMESERVER_PUBLIC_ADDR`, and `IAgonesSdk` cannot read
+    status — so the server advertises `:9000` into Redis and the gateway hands that to
+    clients verbatim. **This, not the health loop, is why `ALLOCATED` is 0.** The recommended
+    fix is a GameServer-status read on the sidecar; static ports and gateway-side
+    registration are considered and rejected (packing loss, and an ADR-1 two-writer
+    violation respectively). PR #139 is necessary but not sufficient — it adds the four
+    POSTs and no status read.
+  - **Six prerequisites outside `deploy/agones/`** are tabulated against what
+    `docker-compose.yml` provides today: StatefulSets and PVCs for the three stateful
+    services, ConfigMaps for the initdb and monitoring mounts, image-baked or
+    initContainer-delivered `nakama.so`, Secrets for the seven values CD writes into a
+    mode-0600 `.env`, a registry push per environment, and a ServiceAccount with `create`
+    on `gameserverallocations.allocation.agones.dev` — without which `AgonesAllocator`,
+    which today rides the developer's kubeconfig, gets a 403 in-cluster.
+  - **Sizing:** this outweighs ADR-14's stages 1-8 and precedes them; ADR-14's S/M sizes for
+    stages 4-5 are honest only on `docker-desktop`.
+  - ADR-3 survives unchanged — allocation sits inside `MsgEnterWorld` and nowhere else, and
+    the gateway stays out of the gameplay path. Autoscaling stays off CCU per ADR-7.
+
+  Documentation only. No manifest, workflow or compose file changed, and nothing was applied
+  to any cluster.
+
 ### Changed
 - **Dev serves `map_01` from the Agones fleet, not from the compose game server.**
   The gateway runs with `ALLOCATOR=agones`, attached to both the compose network and

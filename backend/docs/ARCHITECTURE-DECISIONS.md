@@ -1742,6 +1742,219 @@ this ADR should record where.
 
 ---
 
+## ADR-15 — What it would cost to run the realtime tier on Kubernetes, and the dynamic-address problem that blocks it
+
+**Status:** **proposed 2026-08-17, not accepted.** **Partly overtaken by ADR-16 (2026-08-17).** Decision 2 below — the server reads its address from the sidecar — was implemented and then found necessary but *not sufficient*: `status.address` is the node address and is not dialable by a client, so the advertised address is composed from the Agones-assigned port and a configured host. The blocking finding and decision-3 prerequisites stand as written; read ADR-16 before acting on this one. This ADR does not decide whether the
+realtime tier moves to Kubernetes. It exists to write down what answering that question
+costs, because ADR-14 left it open and nothing since has priced it. Extends ADR-14 (this is
+its "what is NOT decided" bullet, expanded); constrained by ADR-1 (one writer per datum),
+ADR-2 (one live server per `map_id`), ADR-3 (the gateway is a redirector) and ADR-7 (the
+unknown per-server ceiling).
+
+Only the recommendation in decision 2 is a recommendation. Everything else numbered below
+is a statement of what would have to be true before the go/no-go is answerable at all.
+
+**Context.** There are two deployment stories in this repo and they do not meet.
+
+The one that runs: push -> `.github/workflows/cd.yml` -> bundle -> self-hosted runner ->
+`docker compose up -d` -> smoke test. All three environments are on it — `gh api` reports
+`DEPLOY_MODE=containers` for `dev`, `staging` and `production` alike, and the workflow
+contains no `kubectl` invocation anywhere. Images are built on the runner as local tags
+(`rpg-mmo/gateway:<sha>`, `rpg-mmo/gameserver-dotnet:<sha>`); the `build-images` job that
+pushes to `ghcr.io/cuvara/` runs only for the `production` environment or on a manual
+`build_images` dispatch.
+
+The one that does not run: `kubectl apply` by hand into whatever context is current, then
+Agones fleets that nothing allocates from. Three facts about it are worth stating plainly,
+because the directory names suggest otherwise:
+
+- **There is no k3s.** `kubectl config current-context` is `docker-desktop`, the single node
+  is `docker-desktop` at `v1.34.1`, and there is no `k3s` binary on `PATH`.
+  `backend/deploy/k3s/` holds `lib.sh`, `namespaces.yaml`, `setup-dev.sh`,
+  `teardown-dev.sh` and `validate-manifests.py`; `setup-dev.sh` installs nothing and says so
+  itself — "Every step is `kubectl apply`". The directory is named for an intention.
+- **`backend/deploy/k8s/` does not exist.** The repo-root `CLAUDE.md` describes
+  `k8s/base/{nakama,gateway,redis,postgresql}` and `k8s/overlays/{dev,beta,launch,growth}`.
+  None of it has been written. The only Kubernetes manifests in the repo are the nine in
+  `deploy/agones/`, and they cover the game server only.
+- **The fleets that are up are unbuildable.** `map-servers-dev` and `dungeon-servers-dev`
+  are Ready, 13 days old, `ALLOCATED 0`, on image `rpg-mmo/gameserver:dev` — the Go server
+  deleted in `670a803`, whose `docker/Dockerfile.gameserver` went with it. PR #137 marked
+  those manifests superseded rather than deleting them; that image cannot be rebuilt.
+
+So Agones is not "half deployed". It is a parallel path that has never carried a player, and
+the reason is not only the no-op SDK that ADR-14 addresses.
+
+**The blocking finding: the game server cannot learn its own address.**
+`fleet-map-dotnet-dev.yaml:35` sets `portPolicy: Dynamic`, so Agones assigns a host port per
+GameServer and the real address exists only in the GameServer status. It is visible right
+now:
+
+```
+$ kubectl get gs -n rpg-realtime
+NAME                              STATE   ADDRESS        PORT   NODE
+dungeon-servers-dev-2kdvr-zzmxb   Ready   192.168.65.3   7101   docker-desktop
+map-servers-dev-kl485-gsmrh       Ready   192.168.65.3   7691   docker-desktop
+```
+
+Nothing in the game server can read those two columns. The fleet supplies eight environment
+variables — `POD_NAME`, `JWT_SECRET`, `JOIN_TOKEN_SECRET`, `SIM_CRITICAL_HZ`,
+`SIM_WORLD_HZ`, `SIM_BACKGROUND_HZ`, `REDIS_ADDR`, `LOG_LEVEL` — and `GAMESERVER_PUBLIC_ADDR`
+is not among them, because no static value could be correct for a port assigned at
+scheduling time. `IAgonesSdk` exposes `ReadyAsync`/`ShutdownAsync`/`AllocateAsync`/
+`HealthAsync` and no way to read GameServer status. `Program.cs:101` therefore resolves
+`publicAddr = --public-addr ?? GAMESERVER_PUBLIC_ADDR ?? addr`, and the manifest passes
+`--addr=:9000`, so the server would advertise the hostless `:9000`.
+
+Follow that value: `RegistrationService` writes it into Redis, `transfer/map_assign.go:49`
+copies `srv.Addr` into the assignment, and `server.go:843` hands it to the client as
+`MsgEnterWorldResp.ServerAddr`. The client dials `:9000` and fails. `Program.cs:154` detects
+the hostless address and logs a warning; it is deliberately never fatal, which is right for
+host mode and means Kubernetes gets no stop.
+
+**This is why `ALLOCATED` is 0 and the dotnet fleet has never been deployed** — not merely
+the health loop. PR #139, in flight, implements the four sidecar POSTs and adds no status
+read; the interface is unchanged at four methods. It is necessary and it is not sufficient.
+
+**The handshake, and where allocation sits inside it.** ADR-3's invariant is that the
+gateway authenticates and redirects, and gameplay traffic never passes through it. Nothing
+here changes that:
+
+```
+Client -> Gateway     MsgAuth { JWT }                     (JWT verified locally)
+Client -> Gateway     MsgEnterWorld { MapID }
+                      +-- registry lookup: which address serves MapID?
+                      +-- miss/full -> AgonesAllocator POST gameserverallocations   <-- k8s enters here, and only here
+                      +-- ...which returns a pod that must then register ITSELF
+Gateway -> Client     MsgEnterWorldResp { ServerAddr, JoinToken }
+Client -> GameServer  MsgJoinToken { Token }              (direct; gateway is gone)
+GameServer -> Client  MsgSnapshot ... per tick
+```
+
+The allocation sits inside step 2 and nowhere else. Under Kubernetes every hop is unchanged
+except one: `ServerAddr` stops being a value someone configured and becomes a value the
+scheduler chose. That single change is the whole of the problem, and it lands on the one
+step in the handshake that the gateway cannot verify — it forwards an address it never
+dials.
+
+**Decision.**
+
+1. **The go/no-go is not decided here, and must not be inferred from ADR-14.** Implementing
+   the Agones SDK does not commit the project to Kubernetes; deploying one fleet on
+   `docker-desktop` does not either. What follows is the price list, not the purchase.
+
+2. **The dynamic-address problem is decided, because it blocks either answer: the game
+   server learns its own address by reading GameServer status from the sidecar.** Three
+   options were considered.
+
+   - **(A) Read GameServer status.** The Agones sidecar's REST surface on `localhost:9358`
+     serves the GameServer object alongside the four POSTs PR #139 already implements. The
+     server reads it after `ReadyAsync`, composes `status.address` with the port named
+     `game`, and registers *that* into Redis. Cost is one more endpoint on `HttpAgonesSdk`,
+     one AOT-source-generated JSON model of the fields actually used, and a fallback to
+     today's resolution when the read fails or Agones is off — which is what running outside
+     a cluster must keep doing.
+   - **(B) `portPolicy: Static`.** `containerPort == hostPort`, so `:9000` becomes true and
+     a host part is all `GAMESERVER_PUBLIC_ADDR` needs. It gives up what `scheduling: Packed`
+     is for: one GameServer per port per node, and ADR-2's second-instance allocation branch
+     collides with the first the moment two map servers want one node.
+   - **(C) The gateway trusts the allocation response and writes the registry entry
+     itself.** The allocation POST already returns the address and ports, so the gateway
+     could skip the server's self-registration entirely. This is rejected on two counts.
+     It puts two writers on one datum, which ADR-1 forbids — `RegistrationService` still
+     writes its own entry — and it inverts ADR-14 decision 2, under which Redis answers
+     "which address serves this map" and Agones answers "does this pod exist and is it
+     healthy", with neither reading the other. It also discards the liveness signal:
+     the entry's 15s TTL re-armed every 5s is what makes a crashed server vanish, and an
+     entry the gateway wrote has nothing re-arming it.
+
+   **(A) is the recommendation.** It is the only one of the three that leaves ADR-1's
+   ownership and ADR-14's split intact: the server remains the sole writer of its own
+   registry entry, and it asks Agones only "what address did you give me", never "which
+   server serves this map".
+
+   > One limit belongs with the recommendation rather than after it. `status.address` is
+   > the **node** address — `192.168.65.3` above — routable from wherever the node is
+   > routable and no further. The status read produces the correct value inside the cluster
+   > and the correct *shape* outside it; making that address reachable by a phone on a
+   > mobile network is a deployment fact about ingress and node public IPs, not something
+   > the read solves.
+
+3. **Six prerequisites stand between "Agones works" and "Agones means anything", and all of
+   them are outside `deploy/agones/`.** They are what `docker compose up` currently provides
+   for free:
+
+   | # | What compose does today | What Kubernetes needs |
+   |---|---|---|
+   | 1 | `postgres`, `postgres-game`, `redis` on named volumes (`postgres-data`, `postgres-game-data`, `redis-data`) | StatefulSets and PVCs, plus a storage class that exists on the target node |
+   | 2 | `./db/init-gamestate.sql` mounted as an initdb script; `./monitoring/{prometheus.yaml,grafana-dashboards.yaml,dashboards}` mounted into `lgtm` | ConfigMaps, and a first-run story for the initdb script that a PVC's second boot does not re-run |
+   | 3 | `./modules` host-mounted into `nakama` for the `nakama.so` Go plugin | A host mount is not available; the plugin is baked into an image (`nakama-plugin.Dockerfile` exists) or delivered by an initContainer |
+   | 4 | Seven secrets in a `umask 077` / `chmod 600` `.env` written by CD — `JWT_SECRET`, `JOIN_TOKEN_SECRET`, `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `NAKAMA_CONSOLE_PASSWORD`, `NAKAMA_SERVER_KEY`, `GRAFANA_ADMIN_PASSWORD` | Kubernetes Secrets, and a way for CD to write them that is not "echo into a file on the runner" |
+   | 5 | Local image tags; `imagePullPolicy: IfNotPresent` resolves them because Docker Desktop shares the daemon's image store | A registry push per environment and pull credentials per namespace. A real node shares nothing with the runner's daemon |
+   | 6 | `AgonesAllocator` falls back to `$KUBECONFIG` then `~/.kube/config`, so it allocates as the developer | In-cluster it needs a ServiceAccount with `create` on `gameserverallocations.allocation.agones.dev`. Without it, allocation returns 403 and ADR-2's branch fails at the one moment it matters |
+
+   Item 6 is the one most likely to be discovered late, because `agones_allocator.go` is
+   already written, already tested, and already works — on a developer's kubeconfig.
+
+4. **Partial adoption is not a middle path, and would be the worst outcome available.**
+   Moving the realtime tier alone leaves the data tier in compose, so the game server reaches
+   PostgreSQL and Redis across the cluster boundary by `host.docker.internal` — which is
+   exactly what `fleet-map-dotnet-dev.yaml` does today and exactly why it works only on
+   Docker Desktop. Two orchestrators means two rollback procedures, two health stories, and
+   a smoke test that has to know which half it is testing.
+
+5. **No autoscaling policy in this ADR is keyed on players.** ADR-7's per-server ceiling is
+   unknown and not measurable on this hardware, and ADR-14 decision 5 already settled the
+   fleet autoscaler as buffer-based on server count for that reason. The same constraint
+   binds an HPA, a node count and a tier sizing: anything derived from players-per-server is
+   a guess until ADR-7's load-generator blocker clears.
+
+**Honest size.** This is larger than ADR-14's stages 1-8 put together, and it is a
+*precondition* for several of them rather than a follow-on. ADR-14 sizes stage 4 ("deploy
+`fleet-map-dotnet-dev.yaml` and prove no restart loop") at S and stage 5 ("enable
+`ALLOCATOR=agones` and demonstrate end-to-end allocation") at M. Those sizes are honest on
+`docker-desktop`, where the image store is shared, the kubeconfig is the developer's and the
+data tier is one `host.docker.internal` away. On any cluster that is not this laptop, stage 5
+inherits every row of decision 3's table plus decision 2's status read. Reading the ADR-14
+table as the cost of getting Agones into production would understate it by an order of
+magnitude.
+
+**What is explicitly not decided, and what would decide it.**
+
+- **Whether the realtime tier moves to Kubernetes at all.** The deciding evidence is a
+  reason compose cannot serve: a scaling need, a multi-node need, or a fleet lifecycle
+  need that a `docker compose up` on one VPS genuinely cannot meet. No such need has been
+  demonstrated. Dungeon-per-party instancing (ADR-14 stage 6) is the strongest candidate
+  and has not been costed against a non-Kubernetes implementation.
+- **Whether the whole stack moves or nothing does.** Decision 4 argues against a split;
+  it does not choose between the two remaining ends.
+- **Which cluster.** `docker-desktop` is a development artefact. k3s on a VPS, k3d, and a
+  managed cluster have not been compared, and the tier costs in the root `CLAUDE.md` are
+  ADR-7 estimates that assume neither.
+- **Whether `backend/deploy/k3s/` should be renamed now.** It describes no k3s and applies
+  into whatever context is current, which is a foot-gun independent of this decision.
+
+**Consequences.**
+
+- **Nothing here is demonstrated, and less is demonstrated than in ADR-14.** ADR-14 could at
+  least point at a tested Go SDK to port. This ADR describes work that has no precedent in
+  the repo at all: no StatefulSet, no ConfigMap, no Kubernetes Secret and no cluster-side
+  RBAC has ever been written here.
+- **ADR-14 stage 5 acquires a dependency it does not name.** On a real cluster it cannot
+  succeed without decision 2's status read, because an allocated pod that advertises `:9000`
+  is indistinguishable from no pod at all from the client's side.
+- **The address problem is worth fixing even if Kubernetes is rejected.** A server that can
+  be told its own reachable address is the general form of the bug, and `--public-addr`
+  already exists for the compose case. Decision 2 makes the Agones case work the same way
+  rather than adding a second mechanism.
+- **The `k3s` directory name will keep costing time.** Every reader who finds it assumes a
+  cluster provisioner and finds a `kubectl apply` wrapper.
+
+**Revisit if** a scaling or lifecycle need arrives that compose demonstrably cannot serve
+(dungeon instancing is the likeliest), or if ADR-7's blocker clears and a measured ceiling
+makes a fleet-sizing argument possible, or if the data tier moves to managed services — in
+which case decision 4's objection to a split largely dissolves and the realtime tier could
+move alone.
 ## ADR-16 — The realtime tier runs on Agones, and the address it hands a client is measured, not configured
 
 **Status:** accepted 2026-08-17, **proven end to end on k3d**. Implements ADR-14 stages 1-4,
@@ -1871,4 +2084,5 @@ blocker clears and a measured per-server ceiling makes a CCU-keyed policy defens
 | 12 | ECS migration | Server goes to **real ECS with Arch**, staged one PR at a time, over the analysis's objection and by owner decision; `CommandBuffer` stays banned and structural ops stay deferred to one phase per tick; every new component gets its AOT hint line in the same commit; no query shape the hint guard cannot see; `Shared.GameLogic` and the wire are frozen throughout |
 | 13 | Simulation rates | Three responsibility-named groups (`Critical`/`World`/`Background`) at configurable Hz (`SIM_*_HZ`, default 60/15/5) on one derived integer base-tick timeline; rates that do not divide the base are rejected at startup; each group integrates with its own dt; group order Critical->World->Background is the cross-rate write-ownership rule; **replication stays at the world rate**; overload drops the backlog and counts it; the background group ships empty because nothing currently tolerates 200ms |
 | 14 | Agones | **Stages 1-4 shipped 2026-08-17 and are proven — see ADR-16.** The decisions below stand; the status claim does not. Originally: the C# server's Agones SDK is a no-op and `--agones` changes nothing; implement it over the **HTTP sidecar on `localhost:9358`**, not the gRPC C# SDK, to hold the module's NativeAOT/no-dependencies rule. Agones owns pod lifecycle, Redis owns the `map_id -> server` lookup, and the server registers **only after** reporting Ready — an ordering `GameServer.RunAsync` already implements, so what it needs is a test pinning it, not a change. Health stays `disabled: true` until a real SDK is wired; the autoscaler is buffer-based on server count because ADR-7's CCU ceiling is unknown. Whether the realtime tier moves off `DEPLOY_MODE=containers` to k8s is **not** decided here |
+| 15 | Realtime tier on k8s | **Proposed, not accepted — this one records an open question.** All three environments are `DEPLOY_MODE=containers`; there is no k3s (context is `docker-desktop`), no `deploy/k8s/`, and `cd.yml` applies no manifest. One thing *is* decided because it blocks either answer: with `portPolicy: Dynamic` the server cannot learn its own address, advertises `:9000` and the gateway hands that to clients verbatim — so the SDK must **read GameServer status from the sidecar**, not use static ports and not let the gateway write the registry entry (which would break ADR-1 and ADR-14's split). Six prerequisites — StatefulSets/PVCs, ConfigMaps, plugin packaging, Secrets, a registry, and allocation RBAC — sit outside `deploy/agones/` and outweigh ADR-14's stages 1-8, which they precede. ADR-3 is unchanged: allocation lives inside `MsgEnterWorld` and the gateway stays out of the gameplay path |
 | 16 | Agones on k3s | Realtime tier **proven** on Agones/k3d: a real client joined an Agones-managed server in strict-address mode. Docker Desktop k8s cannot host it (Kubernetes `hostPort` is never published to the host); k3d with a mapped port range can. The advertised address is **composed** — port from the Agones status read, host from `GAMESERVER_ADVERTISE_HOST` — because `status.address` is the node address and is not dialable. ADR-2 is now enforced in code (allocate only for a map with no live server); the join token is minted only after the pod self-registers. Allocated pods are never reclaimed; the map-fleet allocator policy stays open; the deploy path stays `DEPLOY_MODE=containers` |
