@@ -480,6 +480,70 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # FIRST thing after the checkout, and deliberately before the bundle sync:
+      # everything below this point writes to the deploy directory or claims a
+      # port, and neither is reversible once another environment's stack has
+      # been taken over. All three environments are stacks on ONE host, so a
+      # deploy that resolves to someone else's directory / compose project /
+      # container names / ports does not fail — it wins, silently. `staging`
+      # shipped with dev's values for all four.
+      #
+      # See backend/deploy/preflight-isolation.sh for exactly what this proves
+      # and, at the bottom of that file, what it cannot.
+      - name: Isolation preflight (refuse to deploy onto another environment)
+        env:
+          DEPLOY_ENVIRONMENT: ${{ needs.resolve.outputs.environment }}
+          RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
+          COMPOSE_PROJECT_NAME: ${{ vars.COMPOSE_PROJECT_NAME || 'rpg-mmo-meta' }}
+          COMPOSE_NAME_PREFIX: ${{ vars.COMPOSE_NAME_PREFIX || 'rpg' }}
+          MONITORING_ENABLED: ${{ vars.MONITORING_ENABLED || 'true' }}
+          # Every port this deploy will publish on the host. The defaults repeat
+          # docker-compose.yml's own, so an environment that overrides nothing is
+          # described accurately rather than under-claimed.
+          GATEWAY_ADDR: ${{ vars.GATEWAY_ADDR || ':8000' }}
+          GAMESERVER_ADDR: ${{ vars.GAMESERVER_ADDR || ':9000' }}
+          GATEWAY_CONTAINER_PORT: ${{ vars.GATEWAY_CONTAINER_PORT || '' }}
+          GAMESERVER_CONTAINER_PORT: ${{ vars.GAMESERVER_CONTAINER_PORT || '' }}
+          GATEWAY_METRICS_PORT: ${{ vars.GATEWAY_METRICS_PORT || '9102' }}
+          GAMESERVER_METRICS_PORT: ${{ vars.GAMESERVER_METRICS_PORT || '9101' }}
+          POSTGRES_PORT: ${{ vars.POSTGRES_PORT || '5432' }}
+          POSTGRES_GAME_PORT: ${{ vars.POSTGRES_GAME_PORT || '5433' }}
+          REDIS_PORT: ${{ vars.REDIS_PORT || '6379' }}
+          NAKAMA_GRPC_PORT: ${{ vars.NAKAMA_GRPC_PORT || '7349' }}
+          NAKAMA_HTTP_PORT: ${{ vars.NAKAMA_HTTP_PORT || '7350' }}
+          NAKAMA_CONSOLE_PORT: ${{ vars.NAKAMA_CONSOLE_PORT || '7351' }}
+          NAKAMA_METRICS_PORT: ${{ vars.NAKAMA_METRICS_PORT || '9100' }}
+          GRAFANA_PORT: ${{ vars.GRAFANA_PORT || '3000' }}
+          PROMETHEUS_PORT: ${{ vars.PROMETHEUS_PORT || '9090' }}
+          OTLP_GRPC_PORT: ${{ vars.OTLP_GRPC_PORT || '4317' }}
+          OTLP_HTTP_PORT: ${{ vars.OTLP_HTTP_PORT || '4318' }}
+        run: |
+          set -euo pipefail
+          # Same derivation the "Write environment file" step uses, so the ports
+          # claimed here are the ports that step will publish.
+          : "${GATEWAY_CONTAINER_PORT:=${GATEWAY_ADDR##*:}}"
+          : "${GAMESERVER_CONTAINER_PORT:=${GAMESERVER_ADDR##*:}}"
+          ports="gateway:${GATEWAY_CONTAINER_PORT}"
+          ports="${ports} gateway-metrics:${GATEWAY_METRICS_PORT}"
+          ports="${ports} gameserver:${GAMESERVER_CONTAINER_PORT}"
+          ports="${ports} gameserver-metrics:${GAMESERVER_METRICS_PORT}"
+          ports="${ports} postgres:${POSTGRES_PORT}"
+          ports="${ports} postgres-game:${POSTGRES_GAME_PORT}"
+          ports="${ports} redis:${REDIS_PORT}"
+          ports="${ports} nakama-grpc:${NAKAMA_GRPC_PORT}"
+          ports="${ports} nakama-http:${NAKAMA_HTTP_PORT}"
+          ports="${ports} nakama-console:${NAKAMA_CONSOLE_PORT}"
+          ports="${ports} nakama-metrics:${NAKAMA_METRICS_PORT}"
+          # The monitoring ports are only published when the profile is on.
+          if [ "${MONITORING_ENABLED}" != "false" ]; then
+            ports="${ports} grafana:${GRAFANA_PORT}"
+            ports="${ports} prometheus:${PROMETHEUS_PORT}"
+            ports="${ports} otlp-grpc:${OTLP_GRPC_PORT}"
+            ports="${ports} otlp-http:${OTLP_HTTP_PORT}"
+          fi
+          export ISOLATION_PORTS="${ports}"
+          bash backend/deploy/preflight-isolation.sh
+
       - name: Download deployment bundle
         uses: actions/download-artifact@v4
         with:
@@ -605,6 +669,7 @@ jobs:
           # backend/gameserver-dotnet/docs/API.md.
           GAMESERVER_PUBLIC_ADDR: ${{ vars.GAMESERVER_PUBLIC_ADDR || '' }}
           DEPLOY_ENVIRONMENT: ${{ needs.resolve.outputs.environment }}
+          COMPOSE_PROJECT_NAME: ${{ vars.COMPOSE_PROJECT_NAME || 'rpg-mmo-meta' }}
           # --- monitoring (compose `monitoring` profile / grafana-otel-lgtm) ---
           MONITORING_ENABLED: ${{ vars.MONITORING_ENABLED || 'true' }}
           GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
@@ -703,6 +768,17 @@ jobs:
             echo "GAMESERVER_ID=gs-dotnet-${GAMESERVER_MAP_ID}"
             echo "GAME_DB_URL=${GAME_DB_URL}"
             echo "DEPLOY_MODE=${DEPLOY_MODE}"
+            # Ownership stamp. deploy/.env is regenerated WHOLESALE on every
+            # deploy, so a directory shared by two environments loses one of
+            # them silently. preflight-isolation.sh reads this line back on the
+            # next deploy and refuses when it names a different environment.
+            echo "DEPLOY_ENVIRONMENT=${DEPLOY_ENVIRONMENT}"
+            # Also written here, not only exported into the compose steps: a
+            # human running `docker compose ps` / `logs` / `down` from this
+            # directory otherwise gets the DEFAULT project (the compose file's
+            # own `name:`), i.e. someone else's stack. Process env still wins
+            # for CD's own steps, so this changes nothing about the deploy.
+            echo "COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME}"
             # Agones allocation. Off unless the environment says otherwise, so a
             # cluster outage cannot take down an environment that never used one.
             # When on, the gateway allocates from the fleet and the deploy step
@@ -862,6 +938,14 @@ jobs:
           # sets nothing keeps the project it already had — renaming it would
           # orphan the running containers and the volumes holding their data.
           COMPOSE_PROJECT_NAME: ${{ vars.COMPOSE_PROJECT_NAME || 'rpg-mmo-meta' }}
+          # The script below addresses containers by name (the agones stop-check,
+          # the redis deregistration, the postgres-game wait). Those expressions
+          # were written as ${COMPOSE_NAME_PREFIX:-rpg} but the variable was never
+          # in this step's environment, so every one of them silently resolved to
+          # the DEV container regardless of which environment was deploying —
+          # production's deploy checked, and deregistered against, dev's stack.
+          COMPOSE_NAME_PREFIX: ${{ vars.COMPOSE_NAME_PREFIX || 'rpg' }}
+          GAMESERVER_MAP_ID: ${{ vars.GAMESERVER_MAP_ID || 'map_01' }}
         working-directory: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
         run: |
           set -euo pipefail
@@ -944,7 +1028,7 @@ jobs:
           # is not accepting connections yet, so wait for its healthcheck before
           # the restart step below.
           for _ in $(seq 1 60); do
-            state="$(docker inspect -f '{{.State.Health.Status}}' rpg-postgres-game 2>/dev/null || echo missing)"
+            state="$(docker inspect -f '{{.State.Health.Status}}' "${COMPOSE_NAME_PREFIX:-rpg}-postgres-game" 2>/dev/null || echo missing)"
             echo "postgres-game: ${state}"
             [ "${state}" = healthy ] && break
             sleep 2
@@ -1056,10 +1140,15 @@ jobs:
             probe gameserver "http://127.0.0.1:${GAMESERVER_METRICS_PORT:-9101}/healthz" || rc=1
             tcp   gameserver "${GAMESERVER_CONTAINER_PORT:-9200}"                        || rc=1
           fi
-          docker ps --filter name=rpg- --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+          # Prefix comes from the sourced .env. A literal "rpg-" here is not just
+          # untidy: as a docker SUBSTRING filter it also matches rpg-prod-* and
+          # rpg-stg-*, so every environment's deploy listed every other
+          # environment's containers as if they were its own.
+          np="${COMPOSE_NAME_PREFIX:-rpg}"
+          docker ps --filter "name=^${np}-" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
           if [ "$rc" != 0 ]; then
-            echo "--- gateway logs ---";    docker logs --tail 50 rpg-gateway    2>&1 || true
-            echo "--- gameserver logs ---"; docker logs --tail 50 rpg-gameserver 2>&1 || true
+            echo "--- gateway logs ---";    docker logs --tail 50 "${np}-gateway"    2>&1 || true
+            echo "--- gameserver logs ---"; docker logs --tail 50 "${np}-gameserver" 2>&1 || true
           fi
           exit "$rc"
 

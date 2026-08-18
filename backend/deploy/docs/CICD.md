@@ -322,6 +322,83 @@ none of these keeps behaving as it did. Two consequences worth stating outright:
   dump target the *other* environment's databases and still report success, and the
   migration it exists to protect then runs with no usable checkpoint.
 
+#### The reserved-identity registry and the preflight guard
+
+The section above is advice, and advice is exactly what failed: `staging` was
+created with **no** isolation variables at all, so it resolved to dev's
+`RPG_DEPLOY_DIR`, dev's compose project, dev's container names and dev's ports.
+Nothing in the pipeline objected. A staging deploy would have regenerated dev's
+`deploy/.env` from staging's variables (silently dropping `ALLOCATOR=agones`,
+which staging does not set) and taken dev's containers over.
+
+Two things now stand between that and the stack:
+
+1. **`backend/deploy/environments.tsv`** — one row per GitHub Environment,
+   declaring the deploy directory, compose project, container prefix and every
+   published port that environment is allowed to own. It is an *assertion over*
+   the GitHub Environment variables, not a source of truth: changing a value
+   here does not change a deploy. It exists because the variables themselves are
+   invisible to code review, and this file is not.
+
+2. **`backend/deploy/preflight-isolation.sh`**, run by the `deploy` job as
+   **Isolation preflight**, immediately after the checkout and *before* the
+   bundle sync — the first step that would otherwise write into the deploy
+   directory. It fails the deploy when:
+   - the resolved deploy dir / compose project / prefix / any port is reserved
+     for a **different** row in `environments.tsv` (this needs nothing running,
+     and is the check that catches "staging is configured exactly like dev");
+   - the resolved values contradict this environment's **own** row (drift
+     between the variables and the reviewed file, in either direction);
+   - `$RPG_DEPLOY_DIR/deploy/.env` carries a `DEPLOY_ENVIRONMENT` stamp naming
+     another environment (deploys now write that stamp);
+   - a container named `<prefix>-<service>` exists under a **different** compose
+     project — `up -d` would adopt it;
+   - a port it is about to publish is already published by a container in
+     another compose project, or bound by any non-docker process.
+
+   What it **cannot** catch is listed at the bottom of the script itself and is
+   worth reading before trusting it: an unlisted environment that is not
+   currently running, two rows in `environments.tsv` edited to agree with each
+   other but wrong, ports opened after the check (Agones fleet GameServers, a
+   binary someone starts by hand), races between two simultaneous deploys, and
+   anything on another host.
+
+**Changing a port for an environment is therefore a two-sided edit**: the GitHub
+Environment variable *and* its row in `environments.tsv`, in the same change.
+Doing one without the other fails the next deploy loudly, which is the intent.
+
+#### The three reserved port sets
+
+Offsets are `dev` → `+10` production → `+20` staging, which keeps them readable.
+`7000–7100` is deliberately skipped everywhere: k3d's serverlb publishes that
+whole range for the Agones fleet.
+
+| | dev | production | staging |
+|---|---|---|---|
+| `RPG_DEPLOY_DIR` | `/mnt/e/rpg-mmo-deploy` | `/mnt/e/rpg-mmo-deploy-prod` | `/mnt/e/rpg-mmo-deploy-staging` |
+| `COMPOSE_PROJECT_NAME` | *(unset → `rpg-mmo-meta`)* | `rpg-mmo-prod` | `rpg-mmo-staging` |
+| `COMPOSE_NAME_PREFIX` | *(unset → `rpg`)* | `rpg-prod` | `rpg-stg` |
+| gateway / metrics | 8000 / 9102 | 8010 / 9112 | 8020 / 9122 |
+| gameserver / metrics | 9200 / 9101 | 9210 / 9111 | 9220 / 9121 |
+| postgres / postgres-game | 5432 / 5433 | 5442 / 5443 | 5452 / 5453 |
+| redis | 6379 | 6389 | 6399 |
+| nakama gRPC / HTTP / console / metrics | 7349 / 7350 / 7351 / 9100 | 7359 / 7360 / 7361 / 9110 | 7369 / 7370 / 7371 / 9120 |
+| grafana / prometheus | 3001 / 9090 | 3002 / 9091 | 3003 / 9092 |
+| OTLP gRPC / HTTP | 4317 / 4318 | 4327 / 4328 | 4337 / 4338 |
+
+`dev` keeps the unset defaults on purpose: renaming `COMPOSE_PROJECT_NAME` on a
+live stack orphans its containers **and its data volumes** (see the warning
+above), and dev is the only proven Agones environment here.
+
+#### `DEPLOY_MODE=host` isolates too, but through systemd
+
+`scripts/deploy-local.sh` derives its unit names from `COMPOSE_NAME_PREFIX`
+(`${prefix}-gateway.service`), because systemd unit names are global to the host
+and a fixed `rpg-` prefix meant a host-mode staging deploy would restart dev's
+units. Pidfiles and logs were already per-`RPG_DEPLOY_DIR`. Note the preflight
+guard sees a pure host-mode environment only through its ports — it has no
+containers to check.
+
 `GAMESERVER_PUBLIC_ADDR` is not isolation but is easy to get wrong alongside it:
 it is what the game server self-registers into Redis and what the gateway hands
 back in `MsgEnterWorldResp`, so it must name a host and port a **client** can

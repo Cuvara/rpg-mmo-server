@@ -5,7 +5,55 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`backend/deploy/environments.tsv` — reserved stack identity per environment.** One row
+  per GitHub Environment declaring the deploy directory, compose project, container prefix
+  and every published port it is allowed to own. It is an assertion over the GitHub
+  Environment variables, not a source of truth: the variables still drive the deploy, but
+  they are invisible to code review and this file is not. Changing a port now means editing
+  the variable *and* the row, in the same change.
+- **`backend/deploy/preflight-isolation.sh` — pre-deploy collision guard**, wired into
+  `cd.yml` as the `Isolation preflight` step of the `deploy` job, immediately after the
+  checkout and before the bundle sync (the first step that would otherwise write into the
+  deploy directory). It refuses the deploy when the resolved deploy dir, compose project,
+  container prefix or any published port is reserved for a different environment, when the
+  resolved values contradict this environment's own row, when the target `deploy/.env`
+  carries another environment's `DEPLOY_ENVIRONMENT` stamp, when a `<prefix>-<service>`
+  container exists under a different compose project, or when a port it is about to publish
+  is held by another project or by a non-docker listener. The limits are enumerated at the
+  bottom of the script — chiefly that it cannot see a collision that is not live and is not
+  declared in the registry.
+- **`DEPLOY_ENVIRONMENT` and `COMPOSE_PROJECT_NAME` in the generated `deploy/.env`.** The
+  first is the ownership stamp the guard reads back; the second means a human running
+  `docker compose ps|logs|down` in a deploy directory targets that stack's project rather
+  than the compose file's default `name:` — i.e. somebody else's containers.
+
 ### Fixed
+- **`staging` had no isolation from `dev` at all.** Its GitHub Environment variables set
+  the same `RPG_DEPLOY_DIR` (`/mnt/e/rpg-mmo-deploy`), no `COMPOSE_PROJECT_NAME`, no
+  `COMPOSE_NAME_PREFIX` and the same published ports as `dev`, while `production` was
+  isolated correctly. A staging deploy would have regenerated dev's `deploy/.env` wholesale
+  from staging's variables — dropping `ALLOCATOR=agones`, which staging does not set, back
+  to `none` — and `up -d` would have adopted dev's containers into staging's deploy. The
+  variable values that resolve this are documented in `docs/CICD.md` ("The three reserved
+  port sets") and asserted by `environments.tsv`; the variables themselves are set in the
+  GitHub Environment, outside this repo.
+- **Container names in `cd.yml` resolved to the `dev` stack for every environment.** The
+  `Start / update the stack` step addresses containers as `${COMPOSE_NAME_PREFIX:-rpg}-…`
+  for the Agones stop-check and the Redis deregistration, but `COMPOSE_NAME_PREFIX` was
+  never in that step's `env:`, so the fallback always won: a production deploy checked, and
+  deregistered against, **dev's** containers. `GAMESERVER_MAP_ID` had the same problem in
+  the same block, and the `postgres-game` readiness wait was hardcoded to
+  `rpg-postgres-game`. All three now take the environment's prefix.
+- **The containers-mode healthcheck listed and logged the wrong environment's containers.**
+  `docker ps --filter name=rpg-` is a *substring* filter, so it matched `rpg-prod-*` and
+  `rpg-stg-*` too, and the failure-path `docker logs` calls named `rpg-gateway` /
+  `rpg-gameserver` literally. Both now anchor on the prefix from the sourced `.env`.
+- **`scripts/deploy-local.sh` used globally-fixed systemd unit names.** `rpg-gateway.service`
+  / `rpg-gameserver.service` are host-global, so in `DEPLOY_MODE=host` a staging deploy
+  would have restarted dev's units even with separate deploy directories. Unit names now
+  derive from `COMPOSE_NAME_PREFIX`, defaulting to `rpg` so existing single-environment
+  hosts are unaffected.
 - **CD silently reverted the Agones switch on every deploy.** The dev stack was moved to
   serve `map_01` from the Agones fleet; the next push to `develop` put it straight back on
   the compose game server with `ALLOCATOR=none`, and nothing reported it. Three causes,

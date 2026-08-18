@@ -1,0 +1,28 @@
+# Reserved stack identities, one row per GitHub Environment.
+#
+# WHY THIS FILE EXISTS
+# All three environments are stacks on ONE host, and their real configuration
+# lives in GitHub Environment variables, which are not reviewable in a PR and
+# not diffable. `staging` shipped pointing at dev's deploy directory, dev's
+# compose project and dev's ports; nothing anywhere said that was wrong.
+#
+# This file is the reviewable half of that configuration: it declares what each
+# environment is allowed to own. preflight-isolation.sh cross-checks the values
+# CD actually resolved against these rows and fails the deploy when an
+# environment resolves to a value RESERVED BY A DIFFERENT ROW — which it can
+# detect with nothing running at all, unlike the live container/port checks.
+#
+# It is an ASSERTION, not a source of truth. Changing a port here does not
+# change a deploy; change the GitHub Environment variable and this row together,
+# in the same change, or the next deploy fails loudly (which is the point).
+#
+# Columns (tab-separated):
+#   environment  deploy_dir  compose_project  name_prefix  ports (comma-separated)
+#
+# An environment with no row here is not blocked — the guard warns and falls
+# back to the live checks only.
+#
+environment	deploy_dir	compose_project	name_prefix	ports
+dev	/mnt/e/rpg-mmo-deploy	rpg-mmo-meta	rpg	8000,9102,9200,9101,5432,5433,6379,7349,7350,7351,9100,3001,9090,4317,4318
+staging	/mnt/e/rpg-mmo-deploy-staging	rpg-mmo-staging	rpg-stg	8020,9122,9220,9121,5452,5453,6399,7369,7370,7371,9120,3003,9092,4337,4338
+production	/mnt/e/rpg-mmo-deploy-prod	rpg-mmo-prod	rpg-prod	8010,9112,9210,9111,5442,5443,6389,7359,7360,7361,9110,3002,9091,4327,4328
