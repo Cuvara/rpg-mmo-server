@@ -713,7 +713,7 @@ jobs:
             echo "ALLOCATOR_TRANSPORT=${ALLOCATOR_TRANSPORT:-tcp}"
             echo "ALLOCATOR_KUBECONFIG=${ALLOCATOR_KUBECONFIG:-/etc/rpg/kubeconfig}"
             echo "KUBECONFIG_HOST=${KUBECONFIG_HOST:-./kubeconfig.local}"
-            echo "K3D_NETWORK=${K3D_NETWORK:-k3d-rpg-dev}
+            echo "K3D_NETWORK=${K3D_NETWORK:-k3d-rpg-dev}"
             echo "GATEWAY_CONTAINER_PORT=${GATEWAY_CONTAINER_PORT}"
             echo "GAMESERVER_CONTAINER_PORT=${GAMESERVER_CONTAINER_PORT}"
             echo "GATEWAY_METRICS_PORT=${GATEWAY_METRICS_PORT}"
