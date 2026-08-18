@@ -1,0 +1,39 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Retargeting the whole tier is this one line — but see namespace.yaml and
+# README.md §Namespaces before changing it.
+namespace: rpg-k8s-data
+
+# includeSelectors:false — these are descriptive labels. Folding them into the
+# StatefulSet selectors would make the selectors depend on this block, and a
+# StatefulSet selector is immutable after creation.
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: rpg-mmo
+      rpg-mmo/tier: data
+
+resources:
+  - namespace.yaml
+  - postgres-meta.yaml
+  - postgres-game.yaml
+  - redis.yaml
+  - nakama.yaml
+  # Placeholder credentials only. Replace with your own filled-in copy for
+  # anything that is not a laptop — README.md §Secrets.
+  - secrets.example.yaml
+
+configMapGenerator:
+  - name: redis-config
+    files:
+      - redis.conf
+
+# NOT generated here: `gamestate-initdb`. Its content is
+# deploy/db/init-gamestate.sql, which lives outside this directory, and
+# kustomize refuses file sources above the kustomization root:
+#   security; file '.../db/init-gamestate.sql' is not in or below '.../k8s/data'
+# Copying the SQL in would create a THIRD copy of a schema that two tests
+# already pin to two existing copies, so apply.sh generates the ConfigMap from
+# the original file instead. Run apply.sh, not `kubectl apply -k`, for a first
+# boot. See README.md §The initdb ConfigMap.
