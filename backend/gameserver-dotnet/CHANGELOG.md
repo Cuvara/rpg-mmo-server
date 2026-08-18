@@ -138,6 +138,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the bug. The alternative considered and rejected was adding a second field and leaving this
   one wrong; that keeps a field whose only use is to mislead.
 
+- **`RedisServerRegistryTests` TTL assertion no longer breaks on hosts with clock steps
+  (#161).** The test asserted an absolute remaining TTL (`Assert.InRange(…, 1, 15)`) and read
+  16.87s against a 15s ceiling on a host whose `CLOCK_REALTIME` stepped backward during the
+  window. A relative `TimeSpan` expiry (`PEXPIRE`) cannot exceed its configured TTL by
+  construction — Redis computes the deadline on its own clock — so the reading was a backward
+  clock step inflating `deadline − now`. Replaced with a decay assertion: read the TTL twice
+  with a 500ms gap and assert the second is strictly less than the first. Monotonic regardless
+  of clock steps in either direction.
+- **`SlowClientMovementTests.AnExplicitStopIsNotTreatedAsLostTime` no longer flakes at
+  `critical:15` (#154).** A scheduling hiccup at the 66.7ms tick interval produced a snapshot
+  pair spanning two world ticks instead of one, with ~2x normal movement. The test read that
+  as a repaid pause and failed. Fixed by adding `LargestSingleStepAfterResume(worldEvery)`
+  which discards multi-interval pairs (`FrameGap > worldEvery`), keeping only single-tick
+  samples. The repayment test (`ASilentClientsRepayment_IsBoundedByTheCap`) still uses the
+  unfiltered `LargestAfterResume()` because multi-tick samples there are legitimate repayment
+  steps, not scheduling artifacts.
+
 ### Documentation
 - **Distinguished clock *rate skew* from clock *steps* in `BENCHMARK.md`, with the sign table
   that tells them apart (#153).** This host has both faults and they need different responses:
