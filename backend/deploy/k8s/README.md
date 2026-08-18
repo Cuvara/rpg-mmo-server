@@ -216,6 +216,12 @@ Do not inherit this shape by promoting the manifests. Each row is a real decisio
    because allocation targets a fleet and every pod in one carries the same map. ADR-18 covers
    the autoscaler itself.
 
+<!-- HEADING IS LOAD-BEARING. The section "Why EnterWorld waits on one branch and refuses on
+     the others" (added by the #148 branch) quotes this heading verbatim to point readers at
+     the table below it. Renaming this heading breaks that pointer SILENTLY: a wrong link text
+     is not a merge conflict and no test sees it. If it must change, change the reference in
+     the same commit. -->
+
 ### What `EnterWorld` does when no server is ready, and what the client is told
 
 "No live server for this map" is **four** conditions with three different client messages,
