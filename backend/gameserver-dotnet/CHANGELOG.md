@@ -57,6 +57,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     reads the state at all.
 
 ### Fixed
+- **A join refused for capacity was completely silent (#145).** The capacity check called
+  `SendError` and logged nothing, so `grep -c full` over a pod log during a 120-player run
+  that was cut off at 100 joins returned **0**. An operator could not tell a server correctly
+  turning players away from a server that was broken — the two produced identical logs.
+  The refusal now logs at Warning with the user, the current count, the limit, and the fact
+  that the limit is `GAMESERVER_CAPACITY` rather than a resource limit. Warning rather than
+  Information because the number being hit is a chosen admission limit, so hitting it is the
+  signal that the choice needs revisiting.
+
+  Covered by `CapacityRejectionTests`, including the negative case — a join that fits must
+  not log a capacity warning, or a line emitted on every join would satisfy the positive
+  test. These are the first tests in the suite to assert on log output; everything else runs
+  on `NullLoggerFactory`, which is precisely why a missing log line was invisible.
+
 - **`/status` reported a rate nobody had configured (#144).** The endpoint filled
   `tick_rate` from the legacy `--tick-rate` / `GAMESERVER_TICK_RATE` scalar. No current
   deployment sets that variable, so the field reported the compiled-in default of **15**

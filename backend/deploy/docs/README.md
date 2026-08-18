@@ -261,7 +261,7 @@ when sizing a deployment:
 
 | Setting | Default | Effect |
 |---|---|---|
-| `GAMESERVER_CAPACITY` | 100 | Join is refused with "Server is full". A **policy limit, not headroom against a measured ceiling** — there is no measured ceiling to have headroom against. Raise it deliberately once one exists. |
+| `GAMESERVER_CAPACITY` | 100, and **set explicitly in both map fleets** | Join is refused with "Server is full", and the refusal is now logged at Warning with the count and the limit — a full server and a broken one used to produce identical (empty) logs. A **policy limit, not headroom against a measured ceiling** — there is no measured ceiling to have headroom against. What 100 *is* justified by: 100 players observed running with tick p99 0.49 ms against a 66.67 ms budget and 0% of ticks over budget. Why it is not higher: the load generator shares the box (ADR-7) and k3d's `serverlb` sits in the gameplay data path (#143), so headroom at 100 says nothing about 150. Raise it when those two are cleared and a run brackets a real ceiling — #145. |
 | `GATEWAY_CONN_RATE_PER_MIN` | 10 per source IP | Fine for real clients (one connect each), but it blocks load testing and any NAT with many players behind one address. Raise it if a carrier NAT is expected. |
 
 | Tier | Cost/mo ⚠️ | Setup | CCU ⚠️ |

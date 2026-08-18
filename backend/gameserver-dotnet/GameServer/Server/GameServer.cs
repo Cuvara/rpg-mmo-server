@@ -796,6 +796,21 @@ public sealed class GameServerHost : IAsyncDisposable
             // Step 4: Check capacity
             if (_connections.Count >= _options.Capacity)
             {
+                // LOG IT. This refusal used to be silent: SendError told the client and
+                // nothing told the operator, so a server turning players away and a server
+                // that was broken produced identical logs — zero lines either way. That is
+                // how a 120-player run stopped dead at 100 joins with no explanation on the
+                // server side at all (#145).
+                //
+                // Warning, not Information: the number being hit is an admission limit that
+                // was chosen (GAMESERVER_CAPACITY), so hitting it is the signal that the
+                // choice needs revisiting — and it is exactly the same event the gateway
+                // sees as "this server is full, skip it" when it reads PlayerCount and
+                // Capacity out of the registry.
+                _logger.LogWarning(
+                    "Join rejected for {UserId}: server at capacity {Connections}/{Capacity}. " +
+                    "This is the configured admission limit (GAMESERVER_CAPACITY), not a resource limit",
+                    claims.UserId, _connections.Count, _options.Capacity);
                 await SendError(tempConn, "Server is full");
                 tempConn.Close();
                 return;

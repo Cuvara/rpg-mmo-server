@@ -19,6 +19,40 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `unknown` and the guard that refuses to pin an image stamped with a different commit silently skipped.
   Both images are now stamped with the deploying commit.
 
+### Changed
+- **`GAMESERVER_CAPACITY` is now set explicitly in both map fleets — 100 is a decision
+  instead of a default (#145).** `deploy/k8s/app/50-fleet-map.yaml` and
+  `deploy/agones/fleet-map-dotnet-dev.yaml` both left it unset, so `Program.cs` fell back to
+  a compiled-in 100. That constant is what stopped a 120-player load run at exactly 100
+  joins with 20 clients refused — not CPU, not memory, not the simulation. And it was never
+  pod-local: the value is published into the Redis registry and the gateway enforces it
+  (`FindServer` skips a server whose `PlayerCount >= Capacity`), so the fleet's admission
+  limit was an unset environment variable inheriting a constant nobody had chosen.
+
+  **The value stays 100, and that is the point.** What justifies it: 100 concurrent players
+  observed on this fleet with tick p99 at 0.49 ms against a 66.67 ms budget (0.7% of it), 0%
+  of ticks over budget at every level tested, 240m of a 1000m CPU limit and 54Mi of a 256Mi
+  memory limit. 100 is a level this fleet has actually run and been measured at.
+
+  **Why it was not raised on that headroom.** Headroom at 100 is not evidence about 150. The
+  load generator shares the box with the server under test and uses more CPU than it
+  (ADR-7) — tick p99 on this host has read 67.4-70.8 ms quiet and 224.7-240.6 ms with a
+  deploy sharing it, a 3.3x swing — and on k3d every gameplay packet crosses the `serverlb`
+  TCP proxy (#143), the likeliest cause of the 1252.9 ms ack p99 at 80 players while tick p99
+  stayed at 0.49 ms. ADR-7 therefore still says the ceiling is UNKNOWN. This repo has already
+  had to retract one number invented from apparent headroom (the "150 players per server"
+  figure); raising this one on the same evidence would be that again. The rationale, and the
+  conditions under which it moves, are written next to the value in both manifests.
+
+- **CPU request 200m -> 250m in both map fleets.** `scheduling: Packed` packs pods by
+  *request*, and 200m described the pod at idle (17m-ish) far better than under load
+  (measured peak 240m at 100 players), so the scheduler was reserving less than the pod uses
+  in exactly the situation where packing matters. Limits are unchanged at 1000m — this
+  changes what is reserved, not what may be used. The memory request stays 128Mi on purpose:
+  measured peak is 54Mi at 100 players and 82Mi at 200 (the highest figure `BENCHMARK.md`
+  has ever recorded), so it already sits above load rather than at idle. Both requests are
+  now above measured peak, which is the property that was missing.
+
 ### Documentation
 - **`K3S.md` and ADR-16 now record that the k3d serverlb sits in the gameplay data path and
   triples snapshot jitter (#143).** The Agones dynamic port range 7000-7100 is published by the
