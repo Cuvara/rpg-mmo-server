@@ -6,6 +6,26 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`dev-up.sh` pinned images it had never made available, so roll-forward was broken.**
+  The import step warned and continued when a tag was absent from the local docker store,
+  and the script then pinned that exact tag onto the gateway Deployment and the Fleet.
+  k3d does not share the host docker image store, so the pods went straight to
+  `ImagePullBackOff` and `kubectl rollout status` burned its full 180s timeout before
+  failing with `timed out waiting for the condition` — a message naming neither the image
+  nor the reason. Rollback to compose worked, roll-forward did not, so the cutover was
+  provable once and not repeatable. A missing image is now fatal at the point it is
+  detected, and the error names the two `docker build` commands that fix it. Three
+  independent ways in are all closed: absent from both stores, absent with
+  `IMPORT_IMAGES=0` (which skipped the whole loop while the pin still happened — the node
+  is now asked directly, whether or not we imported), and present but stamped with a
+  different commit.
+- **A gateway image could not be tied to a commit.** `Dockerfile.gateway` never declared
+  `ARG GIT_REVISION`, so the `--build-arg GIT_REVISION=...` that every build path passes
+  was silently discarded and the image carried no provenance label — a stale image was
+  indistinguishable from a correct one by inspection, which is what makes a mis-pinned
+  tag so hard to see. It now stamps `org.opencontainers.image.revision` like the game
+  server does, and `dev-up.sh` refuses to pin an image whose stamp disagrees with the
+  commit it is deploying.
 - **A hostPort Deployment under RollingUpdate deadlocks on a single node.** Adding
   `hostPort` to the gateway made every deploy *after the first* wedge: the replacement pod
   cannot be scheduled until the outgoing one frees the port, and RollingUpdate will not

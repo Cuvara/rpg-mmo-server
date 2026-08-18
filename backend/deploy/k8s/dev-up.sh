@@ -71,13 +71,51 @@ if [ "$IMPORT_IMAGES" = "1" ]; then
   say "import images into the k3d node"
   for img in "$GATEWAY_IMAGE" "$GAMESERVER_IMAGE"; do
     if docker image inspect "$img" >/dev/null 2>&1; then
-      echo "importing $img"
+      # A tag proves nothing about which commit is inside it: these are built ad
+      # hoc on this host, and a tag left behind by an earlier build is
+      # indistinguishable by name from a fresh one. Compare the stamped
+      # revision against the commit we are pinning, and refuse on a mismatch.
+      rev=$(docker image inspect "$img" \
+        --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null)
+      if [ -n "$rev" ] && [ "$rev" != "unknown" ] && [ "$rev" != "$GIT_SHA" ]; then
+        echo "::error::$img is stamped with revision $rev but this run pins $GIT_SHA." >&2
+        echo "  Rebuild it, or pass GATEWAY_IMAGE/GAMESERVER_IMAGE explicitly." >&2
+        exit 1
+      fi
+      echo "importing $img (revision ${rev:-unstamped})"
       docker save "$img" | docker exec -i k3d-rpg-dev-server-0 ctr -n k8s.io images import -
+    elif docker exec k3d-rpg-dev-server-0 ctr -n k8s.io images ls -q 2>/dev/null | grep -qx "docker.io/$img"; then
+      echo "$img already in the node; not re-importing"
     else
-      echo "WARNING: $img not in the local docker store; the cluster keeps whatever it already has"
+      # Refuse, do not warn. This used to print a warning and carry on, and the
+      # script then pinned this exact tag onto the Deployment and the Fleet and
+      # waited for a rollout that could never happen: the pods sat in
+      # ImagePullBackOff and `rollout status` burned its full timeout before
+      # failing with nothing that named the cause. k3d does not share the host
+      # docker image store, so "not built" and "not imported" both land here and
+      # both are fatal to a pin.
+      echo "::error::$img is in neither the local docker store nor the k3d node, so pinning it would" >&2
+      echo "  leave every pod in ImagePullBackOff. Build it first, from backend/:" >&2
+      echo "    docker build -f deploy/docker/Dockerfile.gateway           --build-arg GIT_REVISION=\$(git rev-parse HEAD) -t rpg-mmo/gateway:\$(git rev-parse HEAD) ." >&2
+      echo "    docker build -f deploy/docker/Dockerfile.gameserver-dotnet --build-arg GIT_REVISION=\$(git rev-parse HEAD) -t rpg-mmo/gameserver-dotnet:\$(git rev-parse HEAD) ." >&2
+      echo "  or re-run with GATEWAY_IMAGE / GAMESERVER_IMAGE set to tags that exist." >&2
+      exit 1
     fi
   done
 fi
+
+# The pin below happens whether or not we imported, so the presence check has to
+# happen whether or not we imported too -- with IMPORT_IMAGES=0 the loop above is
+# skipped entirely and a missing tag would again be discovered only as a rollout
+# timeout. Ask the node directly: it is the only authority on what can start.
+for img in "$GATEWAY_IMAGE" "$GAMESERVER_IMAGE"; do
+  if ! docker exec k3d-rpg-dev-server-0 ctr -n k8s.io images ls -q 2>/dev/null \
+       | grep -qx "docker.io/$img"; then
+    echo "::error::$img is not present in the k3d node, so pinning it would leave" >&2
+    echo "  every pod in ImagePullBackOff. Build it and re-run with IMPORT_IMAGES=1." >&2
+    exit 1
+  fi
+done
 
 # ---------------------------------------------------------------- manifests
 say "apply the data tier (rpg-k8s-data)"
