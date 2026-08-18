@@ -2066,6 +2066,171 @@ blocker clears and a measured per-server ceiling makes a CCU-keyed policy defens
 
 ---
 
+## ADR-17 — On k8s, every component is one replica and every gateway rollout is a join outage; that is accepted for dev and must be re-decided above it
+
+**Status:** accepted 2026-08-18, as a **statement of posture**, not a change to any manifest.
+Nothing here alters the deployment; it records what the deployment already is, so that
+"the realtime tier runs on Kubernetes" (ADR-16) is not read as "Kubernetes is providing
+availability". It is providing scheduling and lifecycle. Constrained by ADR-1 (one writer
+per datum), ADR-2 (one live server per `map_id`), ADR-3 (the gateway is a redirector),
+ADR-4 (Redis is a system of record, not a cache) and ADR-6 (the ≤30s gameplay loss window).
+Extends ADR-16, which proved the tier works and did not price its availability.
+
+### Context
+
+ADR-16 proved a real client can join an Agones-managed server on k3d. What it did not
+state is that the resulting deployment has no redundancy anywhere, and that one of its
+correctness fixes — `strategy: Recreate` on the two `hostPort` workloads — converts every
+deploy into a planned outage of the join path. Both facts are individually deliberate.
+Together they are the availability story of the tier, and until now nothing wrote them
+down in one place, so the first reader of `backend/deploy/k8s/` could reasonably assume
+otherwise.
+
+### Current state
+
+Read from the manifests on `develop` and confirmed against the live cluster
+(`kubectl --context k3d-rpg-dev get deploy,sts -A`, 2026-08-18):
+
+```
+NS                 KIND          NAME             REPLICAS   READY   STRATEGY
+rpg-k8s-realtime   Deployment    gateway          1          1       Recreate
+rpg-k8s-data       Deployment    nakama           1          1       Recreate
+rpg-k8s-data       StatefulSet   redis            1          1       -
+rpg-k8s-data       StatefulSet   postgres-meta    1          1       -
+rpg-k8s-data       StatefulSet   postgres-game    1          1       -
+```
+
+Plus the Agones Fleet `map-servers-dotnet-k8s`, also at 1, for a reason of its own (ADR-2:
+every replica carries the same `GAMESERVER_MAP_ID`, so a second replica is a second live
+server for `map_01`).
+
+| Component | Owns | Loss of it |
+|---|---|---|
+| `gateway` (`app/40-gateway.yaml`) | Nothing durable — sessions and the registry live in Redis, so any replica could serve any client | No `MsgAuth`, no `MsgEnterWorld`. In-progress sessions untouched |
+| `nakama` (`data/nakama.yaml`) | Accounts, economy, leaderboards, and the `gateway_token` RPC that is the flow's first hop | No new `gateway_token`. JWTs already minted stay valid until expiry |
+| `redis` (`data/redis.yaml`, `data/redis.conf`) | Sessions (TTL), server registry `servers:*`, event stream `events:*`; `maxmemory-policy noeviction` set explicitly (ADR-4) | Joins fail. Gameplay does not: `RegistrationService` wraps every registry call, logs and retries off the tick loop, and **every heartbeat is also a repair**, so a wiped Redis self-heals within one heartbeat interval |
+| `postgres-game` (`data/postgres-game.yaml`) | `player_states` — authoritative position/HP, written only by the game server (ADR-1) | Gameplay continues; `AsyncSaver.SaveAllAsync` catches per-player, increments `gameserver.player.saves{status="error"}` and carries on, so the loss is **silent to the player and visible only in metrics** |
+| `postgres-meta` (`data/postgres-meta.yaml`) | Nakama's own database; migrated by `nakama migrate up`, never by us (ADR-1) | Nakama cannot authenticate |
+
+One PVC each, `ReadWriteOnce`, no standby, no replica.
+
+**Why `Recreate` is on the two `hostPort` workloads.** The gateway binds `hostPort: 7000`
+and Nakama binds `hostPort: 7001`, because k3d's serverlb publishes `7000-7100` onto the
+host and nothing in the default NodePort range `30000-32767` — a NodePort Service here is
+allocated, printed by `kubectl get svc`, and unreachable. A hostPort is a node-level
+resource, so under RollingUpdate on a single node the replacement pod cannot be scheduled
+until the outgoing one releases the port, while RollingUpdate will not terminate the
+outgoing one until the replacement is Ready: `kubectl rollout status` sits on
+`1 old replicas are pending termination` against a Pending pod whose event reads
+`node(s) didn't have free ports for the requested pod ports`. It passes the **first**
+deploy, when the old pod has no hostPort yet, and wedges every deploy after it.
+
+**Why in-progress gameplay survives a gateway restart.** Verified in code, not assumed.
+Under ADR-3 the gateway hands back `{ServerAddr, JoinToken}` and leaves the path; the
+client dials the game server directly. The game server verifies the join token itself —
+`JwtKeyring.Parse(options.JoinTokenSecret)`, then `Verify`, a server-id claim check and an
+in-process JTI replay tracker (`GameServer/Server/GameServer.cs`) — and makes no call to
+the gateway at any point in a session. The blast radius of a gateway restart is joins.
+
+### Decision
+
+**1. `Recreate` stays, and the outage it causes is accepted for dev.** It is the only
+strategy that terminates on a single node with a hostPort. Reversing it to RollingUpdate
+"because that is the default" reintroduces a deadlock that passes once and then blocks
+every subsequent deploy, including CD's.
+
+**2. The cost is stated where an operator will meet it, not left to be rediscovered.**
+Every gateway rollout drops the join path entirely; so does every Nakama rollout. A player
+whose connection drops during either window cannot reconnect, because a reconnect needs a
+fresh `gateway_token` **and** a fresh join token — join tokens are single-use and `sid`-pinned
+(ADR-16 decision 4). The prose lives in `backend/deploy/k8s/README.md` §Availability posture,
+next to the manifests it describes.
+
+**3. The window is not measured, and is not claimed to be small.** It is bounded below by
+the outgoing pod's termination and the incoming pod's readiness (`initialDelaySeconds: 2`,
+`periodSeconds: 5` on the gateway) and above by the default 30s termination grace period,
+plus an image pull when the tag is not already on the node. Under ADR-7's standing rule an
+unmeasured figure is not quoted as if measured, so no number is written down. Measure it by
+polling `127.0.0.1:7000` from the host across a `kubectl rollout restart`; not from
+`kubectl rollout status`, which reports the pod and not the port.
+
+**4. Nothing above dev inherits this shape by promotion.** Three questions must be answered
+before a tier that is not this one:
+
+- **The gateway's hostPort, before any multi-replica gateway.** The hostPort is what forced
+  `Recreate`, and it also pins the pod to a node, capping the Deployment at one replica per
+  node. The real-cluster answer is a LoadBalancer Service or an Ingress, at which point the
+  hostPort and `Recreate` both disappear. Removing it is **necessary and not sufficient**:
+  ADR-16 records that single-flight per `map_id` is per gateway instance, so two replicas
+  racing on a cold map allocate one GameServer each and Agones has no un-allocate. Answer
+  both, or the second gateway replica leaks a pod per cold map.
+- **Redis persistence and replication.** ADR-4 rules out treating this Redis as an evictable
+  cache, which also rules out the reflex answer of "add a read replica and let it lag": the
+  registry and the event stream are systems of record. The decision is which of ADR-4's
+  split path and a Sentinel/managed-Redis topology comes first, and it is a decision, not a
+  replica count.
+- **The two PostgreSQL instances.** One PVC each, no standby; recovery is restore-from-backup
+  at backup RPO (`backend/deploy/docs/DATABASE.md`, `DISASTER-RECOVERY.md`). Accepted for dev,
+  and the thing that most obviously does not survive contact with real accounts and economy,
+  which `postgres-meta` owns.
+
+**5. This ADR decides nothing about the deploy mode.** ADR-16's position stands: dev runs on
+k8s; staging and production remain `DEPLOY_MODE=containers` and reach none of this.
+
+### Consequences
+
+- **CD deploys are outages.** A push to `develop` with `vars.DEPLOY_MODE=k8s` runs `dev-up.sh`,
+  which restarts the gateway whenever the image pin changes. Any client-side or load
+  measurement running across a deploy will see connection refusals on the join path that are
+  not a defect.
+- **"Runs on k8s" cannot be cited as an availability property** of this project anywhere —
+  docs, issues, or a pitch. There is exactly one of everything.
+- **A rolling-update-shaped fix is not available while the hostPort is.** Anyone reaching for
+  `maxSurge`/`maxUnavailable` here is fixing the symptom of the port binding.
+- **The fleet's single replica is a separate constraint with a separate cause** (ADR-2, map
+  assignment is fleet-wide) and is not solved by anything in this ADR. It is load-bearing,
+  not a capacity dial: measured on k3d 2026-08-18, scaling `map-servers-dotnet-k8s` from 1 to
+  2 put the new GameServer in `Ready` at t=5.38s and **both** pods into `servers:map:map_01`
+  within a second of that, with no allocation involved, because the C# server self-registers
+  right after `ReadyAsync` rather than on allocation — and `FindServer` then hands clients the
+  least-loaded of the two, i.e. the second copy of the world. (5.38s is pod-start latency, not
+  a capacity figure.) So the answer to "when does the single replica stop being necessary" is
+  **#151** — gate self-registration on `Allocated` rather than `Ready` — not a larger fleet.
+  #151 unlocks `replicas > 1` **for one map only**: allocation targets a fleet and every pod
+  in it still carries the same `GAMESERVER_MAP_ID`, so a second *map* remains unserved
+  (`ErrFleetMapMismatch`) until map id is per-pod. Two separate unlocks, not one.
+  Absent a FleetAutoscaler, a cold map does **not** make the first player *wait*: with no
+  `Ready` pod the allocation fails outright (`ErrNoServerAvailable`,
+  `gateway/registry/registry.go:559`) and the client gets the terminal
+  `no server available for map` in milliseconds (`clientSafeAssignError`,
+  `gateway/server/server.go:886`). The cost is a wrong-looking refusal, not latency — #148's
+  "~9s on the player's path" was the premise measurement removed, and #152 is the refusal
+  being terminal where it should be retryable. ADR-18 decides the autoscaler question; this
+  ADR does not.
+- **Known-adjacent:** #143 — k3d's serverlb sits in the gameplay data path and
+  triples snapshot jitter, so local capacity numbers measure the proxy; #147 — a reported 54 Hz
+  tick against an advertised 60 Hz base rate, which that investigation reports as a
+  measurement artifact — the loop paces on `CLOCK_MONOTONIC` while the observer timed it
+  against a `CLOCK_REALTIME` running ~10% fast on the WSL2 host — rather than a code defect.
+  #147 is **closed** on that basis and the host clock itself is filed as #153; #148 — no
+  FleetAutoscaler and `replicas: 1`, premises corrected on the issue itself and the autoscaler
+  refused (ADR-18).
+
+### Follow-up work
+
+- **S** — Measure the gateway rollout outage window with a host-side poll across
+  `kubectl rollout restart`, and record the number next to the posture section. Until then it
+  stays explicitly unmeasured.
+- **S** — Alert on `gameserver.player.saves{status="error"}` (`AsyncSaver`), so a `postgres-game` outage is not
+  a silent one; it is the only failure in the table that a player cannot see and an operator
+  currently would not either.
+- **M** — Answer the gateway exposure question (LoadBalancer/Ingress vs hostPort) together
+  with cross-instance single-flight, as one decision. Either alone makes the deployment worse.
+- **L** — Decide the Redis topology for the first tier above dev, against ADR-4's split path
+  rather than by adding replicas.
+
+---
+
 ## Summary of decisions
 
 | # | Area | Decision |
@@ -2086,3 +2251,4 @@ blocker clears and a measured per-server ceiling makes a CCU-keyed policy defens
 | 14 | Agones | **Stages 1-4 shipped 2026-08-17 and are proven — see ADR-16.** The decisions below stand; the status claim does not. Originally: the C# server's Agones SDK is a no-op and `--agones` changes nothing; implement it over the **HTTP sidecar on `localhost:9358`**, not the gRPC C# SDK, to hold the module's NativeAOT/no-dependencies rule. Agones owns pod lifecycle, Redis owns the `map_id -> server` lookup, and the server registers **only after** reporting Ready — an ordering `GameServer.RunAsync` already implements, so what it needs is a test pinning it, not a change. Health stays `disabled: true` until a real SDK is wired; the autoscaler is buffer-based on server count because ADR-7's CCU ceiling is unknown. Whether the realtime tier moves off `DEPLOY_MODE=containers` to k8s is **not** decided here |
 | 15 | Realtime tier on k8s | **Proposed, not accepted — this one records an open question.** All three environments are `DEPLOY_MODE=containers`; there is no k3s (context is `docker-desktop`), no `deploy/k8s/`, and `cd.yml` applies no manifest. One thing *is* decided because it blocks either answer: with `portPolicy: Dynamic` the server cannot learn its own address, advertises `:9000` and the gateway hands that to clients verbatim — so the SDK must **read GameServer status from the sidecar**, not use static ports and not let the gateway write the registry entry (which would break ADR-1 and ADR-14's split). Six prerequisites — StatefulSets/PVCs, ConfigMaps, plugin packaging, Secrets, a registry, and allocation RBAC — sit outside `deploy/agones/` and outweigh ADR-14's stages 1-8, which they precede. ADR-3 is unchanged: allocation lives inside `MsgEnterWorld` and the gateway stays out of the gameplay path |
 | 16 | Agones on k3s | Realtime tier **proven** on Agones/k3d: a real client joined an Agones-managed server in strict-address mode. Docker Desktop k8s cannot host it (Kubernetes `hostPort` is never published to the host); k3d with a mapped port range can. The advertised address is **composed** — port from the Agones status read, host from `GAMESERVER_ADVERTISE_HOST` — because `status.address` is the node address and is not dialable. ADR-2 is now enforced in code (allocate only for a map with no live server); the join token is minted only after the pod self-registers. Allocated pods are never reclaimed; the map-fleet allocator policy stays open; the deploy path stays `DEPLOY_MODE=containers` |
+| 17 | Availability posture on k8s | **Statement of posture, not a manifest change.** Every workload in `deploy/k8s/` is **one replica** — gateway, Nakama, Redis, both PostgreSQL instances, and the map Fleet — so k8s provides scheduling and lifecycle here, **not redundancy**. `strategy: Recreate` on the two `hostPort` workloads (gateway 7000, Nakama 7001) is **required**: RollingUpdate deadlocks on a single node because the replacement cannot schedule until the outgoing pod frees the port. The accepted cost is that **every gateway or Nakama rollout drops the join path entirely**; in-progress sessions survive, because the game server verifies the join token itself and never calls the gateway (ADR-3). The window is **unmeasured** and not quoted. Before any tier above dev: answer the gateway hostPort exposure question *together with* cross-instance single-flight (ADR-16), and decide Redis persistence/replication against ADR-4 rather than by adding replicas |
