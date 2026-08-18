@@ -146,3 +146,50 @@ register registry.addr_dialable 3 "advertised address accepts a connection" \
   "something is listening on the advertised host:port from where the suite runs" \
   "not that it speaks the game protocol -- flow.smoke proves that" \
   check_registry_addr_dialable
+
+# The trap this exists for: on a box where the OLD stack is still running, the
+# usual addresses (127.0.0.1:8000, :7350) belong to it, not to the deployment
+# under test. A suite pointed at those goes green having proven the previous
+# stack works. Dialing a port is therefore not enough -- the answer has to be
+# attributed. The gateway allocates from a named Agones fleet, so the server it
+# hands back is a fact only THIS deployment can produce.
+check_registry_stack_identity() {
+  if [ -z "${VERIFY_FLEET:-}" ]; then
+    skip "no VERIFY_FLEET declared -- cannot attribute the registration to a fleet, so a registry answer from ANOTHER stack would read as a pass"
+    return
+  fi
+  if [ -z "${VERIFY_REDIS_EXEC:-}" ]; then
+    skip "no Redis exec prefix -- registry ownership UNVERIFIED"
+    return
+  fi
+  [ ${#REG_LIVE[@]} -eq 0 ] && collect_registry
+  if [ ${#REG_LIVE[@]} -eq 0 ]; then
+    skip "no live registration to attribute (see registry.one_server)"
+    return
+  fi
+  local ns="${VERIFY_FLEET%%/*}" fleet="${VERIFY_FLEET##*/}"
+  local entry sid foreign=() owned=()
+  # Agones names a Fleet's GameServers "<fleet>-<replicaset>-<pod>", and the
+  # server registers under its POD_NAME, so the fleet name is a prefix of the
+  # registered id. Cross-check against the live GameServer list too, so a
+  # coincidental name cannot satisfy it.
+  local live_gs
+  live_gs=$(k get gs -n "$ns" -l "agones.dev/fleet=$fleet" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
+  for entry in "${REG_LIVE[@]}"; do
+    sid=$(echo "$entry" | awk '{print $1}')
+    if printf '%s\n' "$live_gs" | grep -qx "$sid"; then owned+=("$sid"); else foreign+=("$sid"); fi
+  done
+  if [ ${#foreign[@]} -gt 0 ]; then
+    fail "the registered server does not belong to the fleet under test" \
+      "every live server for $VERIFY_MAP_ID to be a GameServer of $VERIFY_FLEET" \
+      "not in that fleet: ${foreign[*]}" \
+      "you are probably inspecting a DIFFERENT stack's Redis, or an old server is still registered"
+    return
+  fi
+  pass "${owned[*]} is a live GameServer of $VERIFY_FLEET -- the registry under test belongs to this deployment"
+}
+
+register registry.stack_identity 3 "the registration belongs to THIS deployment" \
+  "the live server for the map is a GameServer of the fleet under test, so the registry being read is this deployment's and not another stack's" \
+  "it attributes the REGISTRY, not the gateway you dialed -- flow.stack_identity does that hop" \
+  check_registry_stack_identity

@@ -94,8 +94,22 @@ spec:
                 --runtime.http_key "${NAKAMA_HTTP_KEY}" \
                 --metrics.prometheus_port 9100
           ports:
+            # hostPort on http ONLY. The client authenticates to Nakama before
+            # it ever reaches the gateway, so with no host route to Nakama the
+            # very first hop of the flow is impossible from outside the cluster
+            # -- a ClusterIP Service is reachable by the gateway and by nothing
+            # a player runs.
+            #
+            # 7001 comes out of the infrastructure half of k3d's published
+            # 7000-7100 range; the Agones controller runs with MIN_PORT=7010 so
+            # its allocator can never hand this port to a GameServer. See the
+            # long note in ../app/40-gateway.yaml.
+            #
+            # grpc/console/metrics stay cluster-internal on purpose: nothing a
+            # player runs needs them, and the console especially should not be
+            # on the host.
             - { name: grpc,    containerPort: 7349 }
-            - { name: http,    containerPort: 7350 }
+            - { name: http,    containerPort: 7350, hostPort: 7001 }
             - { name: console, containerPort: 7351 }
             - { name: metrics, containerPort: 9100 }
           # Compose runs `/nakama/nakama healthcheck`, which is an HTTP GET of

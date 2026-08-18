@@ -70,8 +70,32 @@ spec:
           # (/usr/local/bin/gateway) with these strings and fail exec.
           args: ["--addr=:8000", "--backend=redis"]
           ports:
+            # hostPort, NOT a port-forward and NOT a plain NodePort.
+            #
+            # k3d's serverlb publishes 7000-7100 onto the host and NOTHING in
+            # the default NodePort range 30000-32767, so a NodePort Service is
+            # allocated but unreachable -- the gateway answers inside the
+            # cluster while no client on this box can dial it. That is the same
+            # failure class as advertising a hostless address: every component
+            # reports healthy and the system is unusable.
+            #
+            # 7000-7100 is Agones' dynamic range, so borrowing from it blindly
+            # can leave a GameServer Pending when the allocator picks a port
+            # something else already holds. Instead the range is SPLIT, and the
+            # split is enforced on the Agones side: the controller runs with
+            # MIN_PORT=7010, so 7000-7009 is reserved for infrastructure and
+            # the allocator can never collide with it. Changing one without the
+            # other is what reintroduces the collision.
+            #   7000  gateway (this)
+            #   7001  nakama HTTP
+            #   7010-7100  Agones GameServers
+            #
+            # On a real cluster this is a LoadBalancer or an Ingress and the
+            # hostPort disappears; it is here because k3d publishes a fixed
+            # host range and nothing else.
             - name: client
               containerPort: 8000
+              hostPort: 7000
               protocol: TCP
             - name: metrics
               containerPort: 9102

@@ -6,6 +6,26 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **A real host route for the k8s dev stack — `hostPort` 7000/7001 out of k3d's published
+  range, replacing the port-forwards.** k3d's serverlb publishes `7000-7100` and nothing in
+  the default NodePort range `30000-32767`, so the gateway's NodePort was allocated and
+  unreachable: the gateway answered inside the cluster while no client on the host could dial
+  it, and Nakama — which the client must reach *before* the gateway — had no host route at
+  all. Every component reported healthy and the deployment was unusable, the same failure
+  class as advertising a hostless address. The range is now SPLIT rather than borrowed from:
+  the Agones controller runs with `MIN_PORT=7010`, reserving `7000-7009` for infrastructure,
+  so the allocator can never hand a GameServer the gateway's port and leave it Pending.
+  `dev-up.sh` refuses to run if that pin is missing, because changing one without the other
+  reintroduces the collision. On a real cluster this is a LoadBalancer or an Ingress and the
+  hostPort disappears.
+- **`registry.stack_identity` and `flow.stack_identity` — the suite now proves WHICH stack
+  answered.** On a box where the previous stack is still running, `127.0.0.1:8000` and `:7350`
+  belong to it, so a suite pointed at the conventional addresses goes green having verified
+  the deployment it was meant to replace. Dialing a port is not evidence of whose port it is.
+  The first check attributes the registry (the live server is a GameServer of the fleet under
+  test); the second attributes the gateway (the server it assigned belongs to that fleet).
+  The k8s target also moves off 8000/7350 entirely, so the ambiguity cannot arise.
+
 - **Dev runs entirely on k3s/Agones (`backend/deploy/k8s/dev-up.sh`).** The dev environment
   was a hybrid — game servers under Agones in `rpg-realtime`, but gateway, Nakama, Redis and
   both PostgreSQL instances in docker compose, reached from the pods by `host.k3d.internal`.

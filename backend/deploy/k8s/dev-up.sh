@@ -178,22 +178,53 @@ fi
 echo "compose dev stack stopped (containers and volumes kept)"
 
 # ---------------------------------------------------------------- exposure
-# k3d's serverlb publishes ONLY 7000-7100 (the Agones host-port range, which is
-# why a GameServer's advertised 127.0.0.1:<port> is genuinely dialable) and
-# 6550. The gateway NodePort lands in 30000-32767 and Nakama has no node port
-# at all, so both are reached through a port-forward. Bound to 0.0.0.0 so the
-# Unity Editor on Windows reaches them as well as WSL2.
-say "port-forwards"
-# A port-forward that fails to bind still leaves a live-looking pidfile and a
-# zero exit, so dev silently comes up with an unreachable gateway. Assert the
-# socket is actually listening and fail with the forward's own log if not.
+# The gateway and Nakama are reached on REAL published ports, not port-forwards:
+# 40-gateway.yaml and data/nakama.yaml carry hostPort 7000 / 7001, which k3d's
+# serverlb publishes onto the host because 7000-7100 is a mapped range. The
+# Agones controller is pinned to MIN_PORT=7010 so its allocator can never take
+# those two. Nothing here needs to start or supervise anything for the CLIENT
+# path, which is the point -- a port-forward is a developer's terminal, not a
+# deployment.
+say "check the published client path"
+if [ "$($K get deploy agones-controller -n agones-system -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' 2>/dev/null | grep -c '^MIN_PORT=7010$')" != "1" ]; then
+  echo "ERROR: the Agones controller is not pinned to MIN_PORT=7010." >&2
+  echo "The infrastructure ports 7000-7009 are then inside the allocator's range" >&2
+  echo "and a GameServer can be handed the gateway's port, leaving it Pending." >&2
+  echo "Fix: kubectl --context $CTX set env deploy/agones-controller -n agones-system MIN_PORT=7010" >&2
+  exit 1
+fi
+for probe in "gateway 7000" "nakama 7001"; do
+  set -- $probe
+  for i in $(seq 1 30); do
+    if timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$2" 2>/dev/null; then break; fi
+    sleep 1
+  done
+done
+# NOTE: a bare TCP connect is NOT proof here -- the k3d serverlb accepts on
+# every mapped port whether or not anything is behind it. Nakama's /healthcheck
+# is an application-level answer, so it is what gets asserted.
+if ! curl -fsS --max-time 5 http://127.0.0.1:7001/healthcheck >/dev/null 2>&1; then
+  echo "ERROR: Nakama does not answer /healthcheck on the published port 7001." >&2
+  exit 1
+fi
+echo "nakama http answers on 127.0.0.1:7001"
+echo "gateway published on 127.0.0.1:7000"
+
+# The ONLY forward that remains, and it is not part of the deployment: the
+# verification suite's persistence assertions run on THIS host and need a route
+# to postgres-game, which is a headless ClusterIP by design. No client uses it.
+say "test-runner-only port-forward (postgres-game)"
+mkdir -p "$RUN_DIR"
 pf() { # name localport namespace target targetport
   local name="$1" lport="$2" ns="$3" target="$4" tport="$5"
   local pidf="$RUN_DIR/$name.pid" pid
-  if [ -f "$pidf" ] && kill -0 "$(cat "$pidf")" 2>/dev/null; then
+  if [ -f "$pidf" ] && kill -0 "$(cat "$pidf")" 2>/dev/null \
+     && timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$lport" 2>/dev/null; then
     echo "$name already forwarded (pid $(cat "$pidf")) on :$lport"; return 0
   fi
-  rm -f "$pidf"
+  # A pidfile whose process is alive but whose socket is NOT listening is the
+  # trap: the forward looks established and nothing is bound. Kill and redo.
+  [ -f "$pidf" ] && { kill "$(cat "$pidf")" 2>/dev/null || true; rm -f "$pidf"; }
   nohup $K port-forward --address 0.0.0.0 -n "$ns" "$target" "$lport:$tport" \
     >"$RUN_DIR/$name.log" 2>&1 &
   pid=$!
@@ -214,11 +245,7 @@ pf() { # name localport namespace target targetport
   sed 's/^/    /' "$RUN_DIR/$name.log" >&2
   return 1
 }
-pf gateway       8000  rpg-k8s-realtime svc/gateway       8000
-pf nakama        7350  rpg-k8s-data     svc/nakama        7350
-pf nakama-grpc   7349  rpg-k8s-data     svc/nakama        7349
-pf postgres-game 15433 rpg-k8s-data     svc/postgres-game 5432
-sleep 3
+pf postgres-game 15433 rpg-k8s-data svc/postgres-game 5432
 
 say "state"
 $K get pods -n rpg-k8s-data -n rpg-k8s-data 2>/dev/null || true

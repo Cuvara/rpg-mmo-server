@@ -59,10 +59,54 @@ check_flow_smoke() {
     warn "flow passed but WITHOUT persistence: $db_mode. Movement and snapshots are proven; the player_states write and the reload after the hold are NOT."
     return
   fi
+  VERIFY_SMOKE_OUTPUT="$out"
   pass "SMOKE=PASS with --strict-addr and $db_mode"
+}
+
+# Attribute the GATEWAY, not just the registry. registry.stack_identity proves
+# the Redis being read is this deployment's; this proves the gateway actually
+# DIALED belongs to it too, which is the half that a leftover stack on the
+# conventional ports would otherwise satisfy silently.
+VERIFY_SMOKE_OUTPUT=""
+check_flow_stack_identity() {
+  if [ -z "${VERIFY_FLEET:-}" ]; then
+    skip "no VERIFY_FLEET declared -- the gateway that answered cannot be attributed to this deployment"
+    return
+  fi
+  if [ -z "$VERIFY_SMOKE_OUTPUT" ]; then
+    skip "flow.smoke did not run or did not complete -- nothing to attribute (this is NOT a pass: the gateway that answered $VERIFY_GATEWAY_ADDR is unidentified)"
+    return
+  fi
+  # The smoke test prints: PASS gateway_auth ... server=<host:port> (tcp)
+  local got
+  got=$(printf '%s\n' "$VERIFY_SMOKE_OUTPUT" | sed -n 's/.*[[:space:]]server=\([^[:space:]]*\).*/\1/p' | head -1)
+  if [ -z "$got" ]; then
+    skip "could not read the assigned server address out of the smoke transcript -- gateway UNATTRIBUTED"
+    return
+  fi
+  local ns="${VERIFY_FLEET%%/*}" fleet="${VERIFY_FLEET##*/}" want=""
+  # Every address this fleet's GameServers can advertise: the Agones-assigned
+  # port composed with the advertise host the fleet is configured with.
+  want=$(k get gs -n "$ns" -l "agones.dev/fleet=$fleet" \
+    -o jsonpath='{range .items[*]}{.status.ports[0].port}{"\n"}{end}' 2>/dev/null)
+  local port="${got##*:}" ok=0 p
+  for p in $want; do [ "$p" = "$port" ] && ok=1; done
+  if [ "$ok" != "1" ]; then
+    fail "the gateway that answered does not belong to this deployment" \
+      "an assigned server on a port of fleet $VERIFY_FLEET (ports: $(echo $want | tr '\n' ' '))" \
+      "gateway $VERIFY_GATEWAY_ADDR assigned $got" \
+      "another stack is answering on $VERIFY_GATEWAY_ADDR -- check for a leftover compose gateway on that port"
+    return
+  fi
+  pass "gateway $VERIFY_GATEWAY_ADDR assigned $got, whose port belongs to fleet $VERIFY_FLEET -- the stack under test is the one that answered"
 }
 
 register flow.smoke 4 "full client flow end to end, strict address" \
   "auth, gateway token, EnterWorld, a DIRECT dial of the advertised game-server address, input->snapshot, the player_states write and the reload after the reconnect hold" \
   "one client on one map; it says nothing about concurrency, capacity or any map other than \$VERIFY_MAP_ID" \
   check_flow_smoke
+
+register flow.stack_identity 4 "the gateway that answered IS this deployment" \
+  "the server the dialed gateway assigned is a GameServer of the fleet under test, so the whole flow ran against this stack and not a leftover one on the same port" \
+  "it cannot distinguish two deployments that share a fleet; it distinguishes THIS stack from any other one answering the same address" \
+  check_flow_stack_identity
