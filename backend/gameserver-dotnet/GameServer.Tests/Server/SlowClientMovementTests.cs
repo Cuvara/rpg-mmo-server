@@ -179,7 +179,7 @@ public class SlowClientMovementTests
     {
         var rates = Rates(critical, world, background);
 
-        (float largest, float speed, string diag) = await LargestSingleStepAsync(rates, pauseMs: 800);
+        (float largest, _, float speed, string diag) = await LargestSingleStepAsync(rates, pauseMs: 800);
 
         // Positions are read from SNAPSHOTS, which ship at the world rate, so one sample
         // interval already contains WorldEvery base steps. That, not the base step, is the
@@ -231,13 +231,14 @@ public class SlowClientMovementTests
     {
         var rates = Rates(critical, world, background);
 
-        (float largest, float speed, string diag) =
+        (_, float largest, float speed, string diag) =
             await LargestSingleStepAsync(rates, pauseMs: 800, stopExplicitly: true);
 
         // One snapshot interval, as above. A lost frame used to make two consecutive
         // mentions span two steps and land on exactly 2.00x — the same value this rejects —
         // so a busy CI runner reported a repaid pause on a server that had done nothing
-        // wrong. Those pairs are now discarded at the source.
+        // wrong. Those pairs are now discarded: LargestSingleStepAfterResume keeps only
+        // single-interval samples (#154).
         float normal = speed / rates.WorldHz;
 
         Assert.True(largest < normal * 2f,
@@ -294,26 +295,33 @@ public class SlowClientMovementTests
         /// </summary>
         public ulong ResumeTick;
 
-        /// <summary>
-        /// Largest sampled step at or after <see cref="ResumeTick"/>, normalized by
-        /// frame gap so that a pair spanning N world ticks is compared as distance/N
-        /// rather than as its raw distance (#154). Without this, a scheduling hiccup
-        /// that makes two world ticks land in one sample reads as 2.00x — the same
-        /// value the explicit-stop threshold rejects — and the test reports a repaid
-        /// pause on a server that did nothing wrong.
-        /// </summary>
-        public float LargestAfterResume(int worldEvery)
+        /// <summary>Largest sampled step at or after <see cref="ResumeTick"/>.</summary>
+        public float LargestAfterResume()
         {
             float largest = 0f;
             foreach (var s in Samples)
             {
                 if (s.Tick < ResumeTick) continue;
-                // Normalize: a pair spanning N world ticks is N normal steps, not one
-                // large step. The gap is in base ticks; divide by worldEvery to get
-                // the number of world intervals.
-                int spans = Math.Max(1, (int)(s.FrameGap / (ulong)worldEvery));
-                float normalized = s.Distance / spans;
-                if (normalized > largest) largest = normalized;
+                if (s.Distance > largest) largest = s.Distance;
+            }
+            return largest;
+        }
+
+        /// <summary>
+        /// Largest sampled step at or after <see cref="ResumeTick"/>, considering
+        /// only single-interval pairs (#154). A pair spanning more than one world
+        /// interval is discarded rather than rescaled — it is a scheduling artifact,
+        /// not a measurement of a single step, and rescaling hides the repayment
+        /// that <c>ASilentClientsRepayment</c> exists to see.
+        /// </summary>
+        public float LargestSingleStepAfterResume(int worldEvery)
+        {
+            float largest = 0f;
+            foreach (var s in Samples)
+            {
+                if (s.Tick < ResumeTick) continue;
+                if (s.FrameGap > (ulong)worldEvery) continue; // skip multi-interval pairs
+                if (s.Distance > largest) largest = s.Distance;
             }
             return largest;
         }
@@ -340,7 +348,7 @@ public class SlowClientMovementTests
         }
     }
 
-    private static async Task<(float largest, float speed, string diag)> LargestSingleStepAsync(
+    private static async Task<(float largest, float largestSingleStep, float speed, string diag)> LargestSingleStepAsync(
         SimulationRates rates, int pauseMs, bool stopExplicitly = false)
     {
         string userId = $"lurch-{Guid.NewGuid():N}"[..16];
@@ -402,10 +410,11 @@ public class SlowClientMovementTests
             await samples;
 
             Assert.NotEmpty(log.Samples);
-            float largest = log.LargestAfterResume(rates.WorldEvery);
+            float largest = log.LargestAfterResume();
+            float largestSingle = log.LargestSingleStepAfterResume(rates.WorldEvery);
             Assert.True(largest > 0f,
                 $"no movement was sampled after the restart{log.Describe(largest)}");
-            return (largest, speed, log.Describe(largest));
+            return (largest, largestSingle, speed, log.Describe(largest));
         }
         finally
         {
