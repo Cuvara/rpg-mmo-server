@@ -21,6 +21,21 @@ metadata:
     app.kubernetes.io/name: gateway
 spec:
   replicas: 1
+  # Recreate, NOT the default RollingUpdate. This Deployment binds a hostPort,
+  # and a hostPort is a node-level resource: on a single-node cluster the
+  # replacement pod cannot be scheduled until the outgoing one releases the
+  # port, while RollingUpdate will not terminate the outgoing one until the
+  # replacement is Ready. The result is a permanent deadlock --
+  # "1 old replicas are pending termination" against a Pending pod whose event
+  # reads "node(s) didn't have free ports for the requested pod ports".
+  #
+  # It survives the FIRST deploy (the old pod has no hostPort yet) and wedges
+  # every deploy after it, which is why it is stated here rather than
+  # rediscovered. The cost is a few seconds of gateway downtime per deploy; the
+  # gateway is not on the gameplay data path (ADR-3), so an in-flight session
+  # is unaffected -- only new joins wait.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: gateway

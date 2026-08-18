@@ -36,6 +36,12 @@ spec:
   strategy:
     # Nakama and its migrations share one database; two versions running at once
     # during a rollout is not something this stack has been shown to survive.
+    #
+    # It is now load-bearing for a SECOND reason: this pod binds hostPort 7001,
+    # and a hostPort is a node-level resource. Under RollingUpdate on a single
+    # node the replacement cannot schedule until the outgoing pod frees the
+    # port, and the outgoing pod is not terminated until the replacement is
+    # Ready -- a permanent deadlock. Do not "modernise" this to RollingUpdate.
     type: Recreate
   template:
     metadata:

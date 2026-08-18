@@ -5,6 +5,24 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **A hostPort Deployment under RollingUpdate deadlocks on a single node.** Adding
+  `hostPort` to the gateway made every deploy *after the first* wedge: the replacement pod
+  cannot be scheduled until the outgoing one frees the port, and RollingUpdate will not
+  terminate the outgoing one until the replacement is Ready. `kubectl rollout status` sits on
+  "1 old replicas are pending termination" while the new pod is Pending with
+  "node(s) didn't have free ports for the requested pod ports". Both hostPort workloads now
+  declare `strategy: Recreate`. This passes the first time and fails forever after, which is
+  why it is written into the manifest rather than left to be rediscovered.
+- **`dev-up.sh` drained the fleet on every run, including a no-op one**, taking `map_01` down
+  each deploy. It compared the game server image *after* `kubectl apply` had already reset the
+  Fleet spec to the manifest's moving `:develop` tag, so the comparison was unequal every
+  time. It now reads the running image *before* the apply, and re-pins the spec without a
+  drain when nothing changed.
+- **`dev-up.sh` now ESTABLISHES the Agones port floor rather than asserting it**, so a fresh
+  cluster — and therefore CD — reaches the correct state without a human having run
+  `kubectl set env` first.
+
 ### Added
 - **A real host route for the k8s dev stack — `hostPort` 7000/7001 out of k3d's published
   range, replacing the port-forwards.** k3d's serverlb publishes `7000-7100` and nothing in

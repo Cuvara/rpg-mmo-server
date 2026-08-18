@@ -29,6 +29,10 @@ COMPOSE_DEV_CONTAINERS="${COMPOSE_DEV_CONTAINERS:-rpg-gateway rpg-nakama rpg-red
 LEGACY_FLEET_NS="${LEGACY_FLEET_NS:-rpg-realtime}"
 LEGACY_FLEET="${LEGACY_FLEET:-map-servers-dotnet-dev}"
 K8S_FLEET="${K8S_FLEET:-map-servers-dotnet-k8s}"
+# Floor of the Agones dynamic port range. Everything BELOW it in k3d's
+# published 7000-7100 is reserved for infrastructure (gateway 7000, nakama
+# 7001). See app/40-gateway.yaml.
+AGONES_MIN_PORT="${AGONES_MIN_PORT:-7010}"
 
 mkdir -p "$RUN_DIR"
 say() { printf '\n== %s\n' "$*"; }
@@ -85,6 +89,14 @@ $K rollout status -n rpg-k8s-data statefulset/postgres-game --timeout=180s
 $K rollout status -n rpg-k8s-data statefulset/redis         --timeout=180s
 $K rollout status -n rpg-k8s-data deploy/nakama             --timeout=300s
 
+# Read the images the cluster is ALREADY running, before `apply` overwrites the
+# specs with whatever tag the manifests carry. Comparing after the apply always
+# reports a change -- the manifest tag is `:develop` and the deploy pins a
+# commit -- so the fleet was drained and map_01 taken down on every run,
+# including a no-op one.
+pre_gs=$($K get fleet "$K8S_FLEET" -n rpg-k8s-realtime \
+  -o jsonpath='{.spec.template.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+
 say "apply the app tier (rpg-k8s-realtime)"
 # The Secret is NOT in the repo. It must already exist, or be applied from a
 # filled copy of 30-secret-template.yaml kept outside the tree.
@@ -108,13 +120,17 @@ $K set image -n rpg-k8s-realtime deploy/gateway gateway="$GATEWAY_IMAGE"
 # spec: the `apply` above rewrites the spec back to whatever the manifest
 # carries, so a spec comparison is unequal on every run and would drain and
 # recreate the fleet -- taking map_01 down -- even when nothing changed.
-cur_gs=$($K get gs -n rpg-k8s-realtime -l "agones.dev/fleet=$K8S_FLEET" \
-  -o jsonpath='{.items[0].spec.template.spec.containers[0].image}' 2>/dev/null || true)
-if [ "$cur_gs" != "$GAMESERVER_IMAGE" ]; then
-  echo "game server image change: ${cur_gs:-none} -> $GAMESERVER_IMAGE"
+if [ "$pre_gs" != "$GAMESERVER_IMAGE" ]; then
+  echo "game server image change: ${pre_gs:-none} -> $GAMESERVER_IMAGE"
   drain_fleet rpg-k8s-realtime "$K8S_FLEET" || true
   $K patch fleet "$K8S_FLEET" -n rpg-k8s-realtime --type=json     -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/template/spec/containers/0/image\",\"value\":\"$GAMESERVER_IMAGE\"}]"
   $K scale fleet "$K8S_FLEET" -n rpg-k8s-realtime --replicas=1
+else
+  # No drain needed, but `apply` just reset the spec to the manifest's moving
+  # tag; put the pinned one back so the Fleet's spec matches what is running.
+  $K patch fleet "$K8S_FLEET" -n rpg-k8s-realtime --type=json \
+    -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/template/spec/containers/0/image\",\"value\":\"$GAMESERVER_IMAGE\"}]" >/dev/null
+  echo "game server image unchanged ($GAMESERVER_IMAGE); fleet left running"
 fi
 
 say "wait for the gateway"
@@ -185,13 +201,22 @@ echo "compose dev stack stopped (containers and volumes kept)"
 # those two. Nothing here needs to start or supervise anything for the CLIENT
 # path, which is the point -- a port-forward is a developer's terminal, not a
 # deployment.
-say "check the published client path"
-if [ "$($K get deploy agones-controller -n agones-system -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' 2>/dev/null | grep -c '^MIN_PORT=7010$')" != "1" ]; then
-  echo "ERROR: the Agones controller is not pinned to MIN_PORT=7010." >&2
-  echo "The infrastructure ports 7000-7009 are then inside the allocator's range" >&2
-  echo "and a GameServer can be handed the gateway's port, leaving it Pending." >&2
-  echo "Fix: kubectl --context $CTX set env deploy/agones-controller -n agones-system MIN_PORT=7010" >&2
-  exit 1
+# Reserve 7000-7009 for infrastructure by pinning the Agones allocator's floor.
+# ESTABLISHED here, not merely asserted: this is a property of the deployment,
+# so a fresh cluster (and therefore CD) must end up with it without a human
+# having run a kubectl command first. It is idempotent.
+say "reserve the infrastructure ports (Agones MIN_PORT=7010)"
+cur_min=$($K get deploy agones-controller -n agones-system \
+  -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' 2>/dev/null \
+  | sed -n 's/^MIN_PORT=//p')
+if [ "$cur_min" != "$AGONES_MIN_PORT" ]; then
+  echo "MIN_PORT is ${cur_min:-unset}, setting $AGONES_MIN_PORT"
+  # A GameServer already holding a port below the new floor keeps it; the floor
+  # only constrains future allocations, so this does not disturb a live fleet.
+  $K set env deploy/agones-controller -n agones-system "MIN_PORT=$AGONES_MIN_PORT"
+  $K rollout status deploy/agones-controller -n agones-system --timeout=180s
+else
+  echo "MIN_PORT already $AGONES_MIN_PORT"
 fi
 for probe in "gateway 7000" "nakama 7001"; do
   set -- $probe
