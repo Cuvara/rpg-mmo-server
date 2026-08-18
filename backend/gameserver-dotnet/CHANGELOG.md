@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Documentation
+- **`BENCHMARK.md` records the k3d serverlb as a third local-measurement trap (#143).** On k3d
+  the Agones port range is published by an nginx TCP proxy, so a capacity sweep through an
+  Agones pod measures the proxy: snapshot interval p99 **211.9 ms** through the serverlb against
+  **72.7 ms** direct to a compose server, same binary and load. Nothing already in the document
+  was measured that way — Part I and Part II both ran against a directly-dialled server — but
+  the local Agones rig is the obvious next place someone would sweep, so the trap is recorded
+  next to the existing confounds with the rule to prefer the compose or direct-to-node path.
+  Refs #143, ADR-16.
+
+### Documentation
 - **The host clock is a measurement hazard, and every BENCHMARK figure has now been audited
   against it (#153).** `CLOCK_REALTIME` on this WSL2 box runs *fast* relative to
   `CLOCK_MONOTONIC` — measured at **+11.1%, +16.7% and +16.65%** in three sessions on

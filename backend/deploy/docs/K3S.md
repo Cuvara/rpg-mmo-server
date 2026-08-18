@@ -897,6 +897,34 @@ histogram at `/metrics` (`gameserver_tick_duration_seconds`) is built from
 `Stopwatch.GetTimestamp()` and never touches the wall clock. Do not time the loop
 from outside with a shell.
 
+### The serverlb is in the gameplay data path (#143)
+
+**Do not take capacity numbers through an Agones pod on this cluster.** Use the
+compose path, or dial a node directly. Same binary, same load, same box — only
+the network path differs:
+
+| 50 players, 20s, proto | snapshot interval p99 | tick p99 | recv | verdict |
+|---|--:|--:|--:|---|
+| Agones pod via k3d serverlb (`127.0.0.1:7069`) | **211.9 ms** | — | — | DEGRADED — over 2x the 133.3ms budget |
+| compose server, direct (`127.0.0.1:9200`) | **72.7 ms** | 0.58 ms | 100% | healthy |
+
+At 80 players the compose path still reports tick p99 **3.06ms** and **0% of
+ticks over budget**, so the simulation is not the constraint in either row.
+
+**Cause.** The Agones dynamic port range 7000-7100 is published by the
+`k3d-<cluster>-serverlb` container, which is an **nginx TCP proxy** — the same
+mechanism documented in [Cluster options](#cluster-options) and
+[The address the client is given](#the-address-the-client-is-given) as the reason
+k3d works here where Docker Desktop does not. So every gameplay packet to an
+Agones pod crosses a proxy that has no counterpart on a real node, where the
+client dials the node directly. It is a property of this rig, not a regression,
+and it is not something to "fix" — the proxy is why the port is reachable at all.
+
+**Consequence:** a capacity sweep run through the serverlb reports a ceiling
+roughly **3x too low** and it looks like a game-server limit. The k3d path is
+correct for what it is for — proving allocation, addressing and the end-to-end
+join flow (ADR-16). It is not a measurement surface.
+
 ---
 
 ## Offline validation

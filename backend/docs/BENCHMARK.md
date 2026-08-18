@@ -358,6 +358,13 @@ deflates the numbers in ways that are not quantified away:
    `$SECONDS`, or a Prometheus `rate()` over server-assigned scrape timestamps
    will be wrong by that much. See
    [the host clock](#the-host-clock-and-which-figures-it-touches). Refs #153.
+8. **A measurement taken through the k3d serverlb measures the proxy.** Every
+   gameplay packet to an Agones pod on k3d crosses an nginx TCP proxy that does
+   not exist on a real node, and it triples snapshot jitter. Nothing in this
+   document was measured that way — Part I and Part II both ran against a
+   directly-dialled server — but the local Agones rig is the obvious place to
+   sweep capacity next. See
+   [the k3d serverlb](#the-k3d-serverlb-is-in-the-gameplay-data-path). Refs #143.
 
 **How to read the result:** treat 150 as a *floor* for a quiet dedicated VPS core
 and a *ceiling* for anything noisier. The bottleneck identification
@@ -429,6 +436,39 @@ Two corollaries worth stating, because both are easy to get backwards:
   *next* measurement, which may well be taken by hand at a shell prompt.
 
 If you add a measurement to this document, state the clock it came from.
+
+### The k3d serverlb is in the gameplay data path
+
+**Do not take capacity numbers through an Agones pod on k3d.** Use the compose
+path, or dial a node directly. Same binary, same load, same box — only the
+network path differs:
+
+| 50 players, 20s, proto | snapshot interval p99 | tick p99 | recv | verdict |
+|---|--:|--:|--:|---|
+| Agones pod via k3d serverlb (`127.0.0.1:7069`) | **211.9 ms** | — | — | DEGRADED — over 2x the 133.3ms budget |
+| compose server, direct (`127.0.0.1:9200`) | **72.7 ms** | 0.58 ms | 100% | healthy |
+
+At 80 players the compose path still reports tick p99 **3.06ms** and **0% of
+ticks over budget**, so the simulation is not the constraint in either row. The
+proxy is.
+
+**Cause.** On k3d the Agones dynamic port range (7000-7100) is published by the
+`k3d-<cluster>-serverlb` container, an nginx TCP proxy, so every gameplay packet
+to an Agones pod traverses it. On a real node the client dials the node directly
+and the hop does not exist. This is the same mechanism that makes k3d usable for
+us at all — Docker Desktop never publishes Kubernetes `hostPort`, k3d does
+([ADR-16](ARCHITECTURE-DECISIONS.md) decision 1) — so it is a property of the
+local rig, not a regression.
+
+**Why it is worth a section.** It runs in the opposite direction from the
+distortion people expect. ADR-7's confound depresses numbers through *CPU*
+contention; this one depresses them through the *network path*, and it does so
+by roughly 3x. Without it written down, the first person to sweep capacity on
+k3d reports a ceiling about a third of the truth and attributes it to the game
+server. That makes three local-measurement traps on this box, all of which make
+a healthy system look broken: the co-located load generator (ADR-7, confound 1),
+the host clock ([#153](#the-host-clock-and-which-figures-it-touches)), and this
+one. Refs #143.
 
 ---
 

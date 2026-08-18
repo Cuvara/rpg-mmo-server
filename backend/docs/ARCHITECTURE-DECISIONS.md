@@ -2000,6 +2000,19 @@ range goes through Docker's own port publishing. Cluster `rpg-dev` publishes **7
 Agones' `MIN_PORT`/`MAX_PORT` are set to match — a mismatch there hands out ports outside the
 published range while every component still reports healthy.
 
+> **What that costs a measurement, and it is not small (#143).** The published range is served
+> by the `k3d-<cluster>-serverlb` container, an nginx TCP proxy, so on k3d **every gameplay
+> packet to an Agones pod traverses a proxy that does not exist on a real node**, where a client
+> dials the node directly. Measured with the same binary under the same load at 50 players:
+> snapshot interval p99 **211.9 ms** through the serverlb against **72.7 ms** direct to a
+> compose server — a third distinct local-measurement distortion, alongside ADR-7's co-located
+> load generator and #153's unusable host clock. The mechanism is the same one this decision
+> depends on, so it is a property of the local rig and not a regression; it does mean a capacity
+> sweep run through k3d reports a ceiling roughly 3x too low and looks like a game-server limit.
+> **Take capacity numbers on the compose path, or direct to a node — never through the
+> serverlb.** See [`BENCHMARK.md`](BENCHMARK.md) and
+> [`deploy/docs/K3S.md`](../deploy/docs/K3S.md).
+
 **Decision 2 — the advertised address is composed: port from Agones, host from configuration.**
 ADR-15 decided the server reads its address from the sidecar (`GET /gameserver`) and registers
 it. That is necessary and **not sufficient**: `status.address` is the *node* address

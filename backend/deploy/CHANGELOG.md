@@ -6,6 +6,23 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Documentation
+- **`K3S.md` and ADR-16 now record that the k3d serverlb sits in the gameplay data path and
+  triples snapshot jitter (#143).** The Agones dynamic port range 7000-7100 is published by the
+  `k3d-<cluster>-serverlb` container, an nginx TCP proxy, so on k3d every gameplay packet to an
+  Agones pod crosses a hop that has no counterpart on a real node. Measured with the same binary
+  under the same load at 50 players: snapshot interval p99 **211.9 ms** through the serverlb
+  against **72.7 ms** direct to a compose server, while the compose path at 80 players still
+  reports tick p99 3.06ms and 0% of ticks over budget — so the simulation is not the constraint
+  in either case, the proxy is. This is the same mechanism ADR-16 decision 1 depends on (Docker
+  Desktop never publishes Kubernetes `hostPort`, k3d does), so it is a property of the local rig
+  rather than a regression, and it is not something to fix. Documented because it runs opposite
+  to the distortion people expect — ADR-7's confound depresses numbers through CPU contention,
+  this one through the network path — and without it the first person to sweep capacity on k3d
+  reports a ceiling roughly 3x too low and blames the game server. **Take capacity numbers on
+  the compose path or direct to a node; k3d is for proving allocation and addressing, not a
+  measurement surface.** Refs #143, ADR-16, ADR-7.
+
+### Documentation
 - **`K3S.md` now warns that the host clock cannot be used for rates, including from inside a
   pod (#153).** `CLOCK_REALTIME` on this box runs fast against `CLOCK_MONOTONIC` by
   **+11.1%, +16.7% and +16.65%** across three sessions, by a drifting amount that cannot be
