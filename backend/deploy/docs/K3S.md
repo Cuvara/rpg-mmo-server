@@ -447,6 +447,46 @@ spare capacity until handed out — the **dungeon** fleet, ADR-14 stage 6. Write
 then, against that fleet, with a per-instance id. ADR-14 stage 7 should be read
 as belonging to stage 6, not to the map fleet.
 
+#### Measured, 2026-08-18 (k3d `k3d-rpg-dev`, fleet `map-servers-dotnet-k8s`)
+
+Point 2 above was asserted rather than demonstrated, and it was proposed as a
+fix again on that basis (issue #148). It is now measured. Scaling the fleet
+`1 -> 2` with one pod already `Allocated`:
+
+```
+t=0.42s  new GameServer appears           state=Scheduled
+t=5.38s  new GameServer                    state=Ready
+         SCARD servers:map:map_01 = 2
+         map-servers-dotnet-k8s-qvvzr-xwx49  (Allocated)
+         map-servers-dotnet-k8s-qvvzr-9nz8g  (Ready, never allocated)
+```
+
+Two registrants for one `map_id` within a second of the second pod reaching
+`Ready`, with **no allocation involved**. `registry.FindServer` then returns the
+*least loaded* of the two — the spare — so the pod Agones is free to delete on
+the next scale-down is the one live players are sent to. The fleet was restored
+to `replicas: 1` immediately.
+
+Two corrections to the premises #148 was filed on, both measured:
+
+* **The ~9 s cold start is not on the player's path, and a buffer would not be
+  removing a wait.** With no `Ready` pod, `AllocateServer` fails immediately and
+  `FindServer` returns `ErrNoServerAvailable`; the client gets a refusal in
+  milliseconds, not a wait. (Cold `Ready` also measures 5.38 s now, not 8.97 s —
+  the image is warm in containerd.)
+* **An autoscaler does nothing for the "a second map cannot be served" half.**
+  Allocation targets a *fleet*, and every pod of this fleet is `map_01`
+  whatever the replica count, so a second map is refused with
+  `ErrFleetMapMismatch` either way. Per-pod map id is the fix; see ADR-18.
+
+This is now enforced rather than described. `verify.sh` check
+**`cluster.autoscaler`** FAILS if any `FleetAutoscaler` targets a fleet whose
+template pins a fleet-wide `GAMESERVER_MAP_ID`, and stands down for a fleet that
+does not — so it stops being an error at exactly the moment the real fix lands.
+Proven both ways on 2026-08-18: PASS with no autoscaler, FAIL with one created
+against this fleet (`maxReplicas: 1`, so the probe could not actually spawn the
+splitting pod), then deleted.
+
 ### Enabling the allocator
 
 The gateway's compiled-in defaults still name the retired Go fleets:

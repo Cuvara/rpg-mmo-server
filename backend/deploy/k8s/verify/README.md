@@ -55,12 +55,28 @@ is built on demand into `$TMPDIR`.
 | `cluster.workloads` | every Deployment/StatefulSet/DaemonSet in those namespaces has all declared replicas Ready | readiness is the probe's opinion; a workload with no readiness probe passes while broken |
 | `cluster.pvcs` | each declared PVC is `Bound` | nothing about the data on it, nor about PVCs nobody declared |
 | `cluster.fleet` | the Agones fleet exists and carries ≥ `VERIFY_FLEET_MIN_REPLICAS` GameServers | nothing about which map those pods serve — that is layer 3 |
+| `cluster.autoscaler` | no `FleetAutoscaler` targets a fleet whose pod template pins one `GAMESERVER_MAP_ID` for every replica | nothing about fleets it does not name, and nothing about a map id supplied per pod through `valueFrom` — that case is reported as unpinned and the rule stands down |
 | `cluster.restarts` | no container in the namespaces has `restartCount > 0` | the window is pod lifetime, not a fixed period: a pod recreated a minute ago hides yesterday's crash loop |
 | `cluster.secrets` | each declared Secret exists and every key decodes to a non-empty value | nothing about the value being *correct*. Values are never printed — only key names and byte lengths |
 
 `cluster.fleet` reports **WARN** when the fleet is at size but has zero Ready
-replicas (everything Allocated). That is not an error, but it is the state in
-which `refusal.unknown_map` cannot reach the branch it tests.
+replicas (everything Allocated) **and** the fleet does not pin a fleet-wide
+`GAMESERVER_MAP_ID`. On a fleet that does pin one — the map fleet — `ready=0` is
+the designed steady state rather than a shortfall, and the check passes saying
+so. Warning about the correct state trains the reader to reach for the fix that
+breaks it. Either way `refusal.unknown_map` cannot reach the branch it tests in
+that state, and its own SKIP says so.
+
+`cluster.autoscaler` is a **FAIL**, not a warning, and it is the one check here
+that guards a change nothing else can see. A buffer `FleetAutoscaler` on the map
+fleet applies cleanly, brings a pod to `Ready`, and makes `cluster.fleet` look
+*better* — while the spare pod self-registers as a second live server for
+`map_01`, because the C# server registers at startup rather than on allocation.
+Measured on k3d 2026-08-18: `1 -> 2` replicas put a second member into
+`servers:map:map_01` 5.4 s later with no allocation involved. See **ADR-18** and
+`backend/deploy/docs/K3S.md`. A fleet with a per-pod map id does not trip this
+check, which is the point — it must stop being an error the moment the real fix
+lands.
 
 Keys that are legitimately empty are named one at a time in
 `VERIFY_SECRETS_ALLOW_EMPTY="ns/name:key,key"` and print as `empty-by-config`.

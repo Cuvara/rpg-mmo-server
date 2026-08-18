@@ -111,10 +111,58 @@ checks do not run on this deployment and both are deliberate:
 
 The C# server self-registers at **startup**, not on allocation, and every
 replica in this fleet carries the same `GAMESERVER_MAP_ID`. A second replica is
-therefore a second live server for `map_01` — ADR-2's split world. The
-consequence is that a fleet whose one pod is Allocated reports `ready=0`, which
-`cluster.fleet` warns about; that warning is expected here. Scaling the fleet
-needs per-replica map assignment first, which does not exist yet.
+therefore a second live server for `map_01` — ADR-2's split world.
+
+Measured on k3d, 2026-08-18: scaling this fleet `1 -> 2` put the new pod into
+`Ready` after **5.38 s**, and `servers:map:map_01` held **two** members within a
+second of that, with **no allocation involved**. `registry.FindServer` then
+returns the *least loaded* of the two — the unallocated spare — so live players
+are handed a pod Agones may delete on the next scale-down. The single replica is
+load-bearing for ADR-2, not a capacity dial.
+
+The consequence is that a fleet whose one pod is Allocated reports `ready=0`.
+That is the **correct** steady state here, and `cluster.fleet` says so rather
+than warning about it; `cluster.autoscaler` **fails** if a `FleetAutoscaler`
+ever appears on this fleet. Scaling the fleet needs per-replica map assignment
+first, which does not exist yet — see **ADR-18**.
+
+### Why `EnterWorld` waits on one branch and refuses on the others
+
+The four conditions, the message each one sends the client and the `file:line`
+for every path are tabulated in **"What `EnterWorld` does when no server is
+ready, and what the client is told"** in this file. Two things that table
+records but does not argue, kept here because the autoscaler decision (ADR-18)
+turns on both:
+
+**Waiting, not refusing, is the right answer when a pod has been allocated and
+has not registered yet.** Allocation is single-flight per `map_id`
+(`allocateOnce`), so a hundred clients arriving at one unserved map produce one
+pod and one wait, not a hundred allocations — which matters because Agones has
+no un-allocate and this gateway has no `Deallocate`, so every surplus allocation
+is a pod leaked for good. The 15 s bound is what makes the wait safe rather than
+merely kind: it sits below `server.MaxHandlerBlockingWait`, past which the wait
+starves the connection's own heartbeat and the gateway drops the very client it
+is waiting for. That ceiling is **derived, not a constant** —
+`pongTimeout - pingInterval` (`connection.go:148`), 20 s at today's 30 s/10 s —
+so changing the ping cadence moves it, and `cmd/gateway` refuses to start above
+it rather than letting the two drift apart silently.
+
+**Exactly one of the refusals is wrong, and it is deliberately left as found.**
+When the fleet has no `Ready` GameServer at all, the allocation fails outright
+and the client is given the *terminal* `no server available for map` even though
+a replacement pod may be seconds from Ready. That is the only branch where the
+disposition does not match the condition: *all servers full* earns its terminal
+answer under ADR-2 — allocating there would register a second live server for one
+`map_id` and split the world — and *no fleet serves this map* earns its own,
+since no number of retries makes a fleet host a different map. Making the
+exhausted-fleet case retryable is defensible but is not a deploy-time change: the
+terminal answer exists because every retry allocates. Tracked as #152; do not
+"fix" it here.
+
+**Note what none of this is.** No branch of `EnterWorld` waits on *pod startup*.
+The retryable wait above begins after an allocation has already succeeded. That
+is why a buffer of Ready pods removes no wait from the join path, and why ADR-18
+refuses one.
 
 ## Availability posture: one replica of everything, and what a rollout costs
 

@@ -82,6 +82,105 @@ check_pvcs_bound() {
   pass "Bound: $VERIFY_PVCS"
 }
 
+# Echoes the literal GAMESERVER_MAP_ID baked into a fleet's pod template, or
+# nothing when the template does not pin one (per-pod map id, or a fleet that
+# does not use the variable at all).
+#
+# This is the discriminator for every "may this fleet hold spare Ready pods?"
+# question below, because the C# server self-registers into Redis at STARTUP --
+# right after ReadyAsync, before any allocation (GameServer.cs) -- keyed by
+# whatever GAMESERVER_MAP_ID it was given. A fleet-wide literal therefore makes
+# every Ready pod a live server for the SAME map.
+#
+# Only a literal `value:` counts. A `valueFrom` (downward API, ConfigMap) is a
+# map id the fleet does not itself fix, so it is reported as not-pinned and the
+# stricter checks stand down rather than guess.
+fleet_wide_map_id() {
+  local ns="$1" name="$2"
+  k get fleet "$name" -n "$ns" -o json 2>/dev/null | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+spec=d.get("spec",{}).get("template",{}).get("spec",{}).get("template",{}).get("spec",{})
+for c in spec.get("containers",[]) or []:
+    for e in c.get("env",[]) or []:
+        if e.get("name")=="GAMESERVER_MAP_ID" and "value" in e:
+            print(e["value"]); sys.exit(0)
+'
+}
+
+# Names any FleetAutoscaler in the cluster whose fleetName is this fleet.
+# Cluster-wide on purpose: an autoscaler in the wrong namespace does nothing,
+# and one in the right namespace is the whole hazard, so the namespace is
+# compared rather than pre-filtered.
+fleet_autoscalers() {
+  local ns="$1" name="$2"
+  k get fleetautoscalers -A -o json 2>/dev/null | python3 -c '
+import json,sys
+ns,fleet=sys.argv[1],sys.argv[2]
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+for it in d.get("items",[]):
+    m=it.get("metadata",{}); s=it.get("spec",{})
+    if m.get("namespace")==ns and s.get("fleetName")==fleet:
+        pol=s.get("policy",{}).get("type","?")
+        print("%s/%s(policy=%s)" % (m.get("namespace"), m.get("name"), pol))
+' "$ns" "$name"
+}
+
+# NO FleetAutoscaler on a fleet whose pods all carry the same map id.
+#
+# This check exists because the trap it guards is invisible in every other
+# signal: the manifest applies, the pod goes Ready, the fleet reads *healthier*
+# than before (ready=1 instead of ready=0, so cluster.fleet stops warning), and
+# the damage is a SECOND registry entry for one map_id.
+# `registry.FindServer` then returns the least-loaded of the two -- i.e. the
+# unallocated spare -- so live players are handed a pod Agones is free to delete
+# on the next scale-down, and the two halves of the map cannot see each other
+# (ADR-2, ADR-18).
+#
+# Measured on k3d 2026-08-18: scaling this fleet 1 -> 2 put a second member into
+# `servers:map:map_01` 5.4s later, with no allocation involved.
+#
+# Deliberately a FAIL, not a WARN. Prose saying "do not add one" is already in
+# 50-fleet-map.yaml, deploy/CLAUDE.md and docs/K3S.md, and prose did not stop it
+# being proposed again.
+check_no_single_map_autoscaler() {
+  if [ -z "${VERIFY_FLEET:-}" ]; then
+    skip "no Agones fleet declared (VERIFY_FLEET empty) -- autoscaler posture UNVERIFIED for this target"
+    return
+  fi
+  local ns="${VERIFY_FLEET%%/*}" name="${VERIFY_FLEET##*/}"
+  if ! k get fleet "$name" -n "$ns" >/dev/null 2>&1; then
+    fail "fleet not found" "$VERIFY_FLEET exists" "absent" \
+      "kubectl --context $KUBE_CONTEXT get fleet -A"
+    return
+  fi
+
+  local mapid autos
+  mapid=$(fleet_wide_map_id "$ns" "$name")
+  autos=$(fleet_autoscalers "$ns" "$name" | tr '\n' ' ')
+  autos="${autos% }"
+
+  if [ -z "$mapid" ]; then
+    if [ -n "$autos" ]; then
+      pass "fleet pins no fleet-wide GAMESERVER_MAP_ID, so a spare Ready pod is genuinely spare; autoscaler(s) permitted: $autos"
+    else
+      pass "fleet pins no fleet-wide GAMESERVER_MAP_ID; no autoscaler present (permitted either way)"
+    fi
+    return
+  fi
+
+  if [ -n "$autos" ]; then
+    fail "FleetAutoscaler on a single-map fleet" \
+      "no FleetAutoscaler targeting $VERIFY_FLEET while its template pins GAMESERVER_MAP_ID=$mapid" \
+      "$autos" \
+      "kubectl --context $KUBE_CONTEXT delete fleetautoscaler <name> -n $ns  # every Ready pod self-registers as a second live server for $mapid (ADR-2/ADR-18); see backend/deploy/docs/K3S.md 'Why there is no autoscaler'"
+    return
+  fi
+  pass "no FleetAutoscaler targets $VERIFY_FLEET, which pins GAMESERVER_MAP_ID=$mapid fleet-wide -- a buffer of Ready pods would be a buffer of live servers for $mapid"
+}
+
 # A fleet at its declared size. Agones counts Ready and Allocated separately;
 # a fleet whose whole capacity is Allocated has zero spare, which is not an
 # error but is worth naming, because an EnterWorld for an unserved map then
@@ -112,7 +211,26 @@ print(d.get("spec",{}).get("replicas",0), st.get("replicas",0), st.get("readyRep
     return
   fi
   if [ "$ready" -eq 0 ]; then
-    warn "fleet at size but with no spare capacity: current=$cur ready=$ready allocated=$alloc (spec=$want). Every pod is Allocated, so a further EnterWorld -- including the unknown-map refusal probe -- cannot obtain one."
+    # ready=0 with everything Allocated is two different situations, and the old
+    # blanket WARN flattened them.
+    #
+    # On a fleet that pins GAMESERVER_MAP_ID fleet-wide it is the DESIGNED
+    # steady state, not a shortfall: a spare Ready pod on such a fleet is a
+    # second live server for that map, so "no spare capacity" is the invariant
+    # holding (ADR-2, ADR-18). Warning about it trains the reader to expect a
+    # warning here, which is exactly how the buffer autoscaler that breaks the
+    # invariant gets proposed as the fix.
+    #
+    # The one thing the old WARN carried that is worth keeping -- that
+    # refusal.unknown_map cannot reach its branch -- is stated by that check's
+    # own SKIP, so nothing is lost by saying it once.
+    local pinned
+    pinned=$(fleet_wide_map_id "$ns" "$name")
+    if [ -n "$pinned" ]; then
+      pass "current=$cur ready=$ready allocated=$alloc (spec=$want, min=$min). ready=0 is CORRECT here: the template pins GAMESERVER_MAP_ID=$pinned fleet-wide, so a spare Ready pod would be a second live server for $pinned. refusal.unknown_map cannot run in this state and says so."
+      return
+    fi
+    warn "fleet at size but with no spare capacity: current=$cur ready=$ready allocated=$alloc (spec=$want). Every pod is Allocated, so a further EnterWorld -- including the unknown-map refusal probe -- cannot obtain one. This fleet does NOT pin a fleet-wide map id, so spare capacity is meaningful for it and its absence is worth acting on."
     return
   fi
   pass "current=$cur ready=$ready allocated=$alloc (spec=$want, min=$min)"
@@ -213,6 +331,10 @@ register cluster.fleet      1 "Agones fleet at its declared size" \
   "the fleet exists and carries at least VERIFY_FLEET_MIN_REPLICAS GameServers" \
   "nothing about whether those pods serve the right map -- see registry.* for that" \
   check_fleet_replicas
+register cluster.autoscaler 1 "no buffer autoscaler on a single-map fleet" \
+  "no FleetAutoscaler targets a fleet whose pod template pins one GAMESERVER_MAP_ID for every replica -- on such a fleet a spare Ready pod is a second live server for that map, because the C# server self-registers at startup rather than on allocation (ADR-2, ADR-18)" \
+  "nothing about fleets it does not name, and nothing about a map id supplied per pod via valueFrom -- that case is reported as unpinned and the rule stands down" \
+  check_no_single_map_autoscaler
 register cluster.restarts   1 "no container has restarted" \
   "no container in the target namespaces has restartCount > 0 since it was created" \
   "the window is pod lifetime, not a fixed period; a pod recreated a minute ago hides yesterday's crash loop" \
