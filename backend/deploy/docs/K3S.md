@@ -892,18 +892,36 @@ open PR, and blamed for a client prediction defect — and every bit of it was t
 instrument. `TickLoop` paces on `Stopwatch` (`CLOCK_MONOTONIC`); the observer
 timed it with `date` (`CLOCK_REALTIME`). #147 is closed as not-a-defect.
 
-**So: to check the tick rate, read the server's own metrics** — the tick
-histogram at `/metrics` (`gameserver_tick_duration_seconds`) is built from
-`Stopwatch.GetTimestamp()` and never touches the wall clock. Do not time the loop
-from outside with a shell.
+**So: to check the tick rate, read the rate the server measured itself.** It
+publishes one, so you never have to supply a clock:
 
-**And do not compute it from `/status` either.** That endpoint reports
-`tick_rate` (the *configured* rate), `current_tick` and `uptime_seconds`, so
-`current_tick / uptime_seconds` looks like the answer. It is not:
-`uptime_seconds` comes from `DateTime.UtcNow`, which is `CLOCK_REALTIME`, so on
-this box the quotient reads **~51 Hz on a healthy 60 Hz loop** and **~12.9 Hz on
-a healthy 15 Hz loop** — #147 all over again, from inside the server. Flagged to
-the owner of `/status` (#144).
+| Surface | Field |
+|---|---|
+| `/status` JSON | **`achieved_tick_hz`** |
+| `/metrics` | **`gameserver_achieved_tick_hz`** (gauge, labelled `map_id`) |
+
+Both are fed once per base tick from `Stopwatch.GetTimestamp()` — the same
+timestamps that pace the loop — over a 2s sliding window. Compare against the
+**configured** rate on the same endpoint, `sim_critical_hz`: a healthy server has
+the two equal to within rounding.
+
+> **`achieved_tick_hz == 0` means "not measured yet"**, i.e. the process is
+> younger than ~2s and no window has completed. It does **not** mean the loop has
+> stopped — `current_tick` distinguishes those. On k3d you will see `0` on a
+> freshly scheduled pod; wait a couple of seconds and re-read rather than
+> reporting a dead server.
+
+**Do not compute the rate yourself** — not with `date` from a shell, and not as
+`current_tick / uptime_seconds` from `/status`. That quotient is the arithmetic
+behind #147: on builds before the #144 fix `uptime_seconds` came from
+`DateTime.UtcNow` (`CLOCK_REALTIME`), making a healthy 60 Hz loop read **~51 Hz**
+— observed live at **54.10 Hz**. After the fix `uptime_seconds` is monotonic, so
+the quotient is no longer skewed, but it is a since-boot average that hides a
+loop which degraded recently. `achieved_tick_hz` is the answer in both cases.
+
+The tick histogram `gameserver_tick_duration_seconds` on `/metrics` is likewise
+built from `Stopwatch.GetTimestamp()` and is safe. Full treatment:
+[`gameserver-dotnet/docs/METRICS.md`](../../gameserver-dotnet/docs/METRICS.md#do-not-compute-a-rate--read-achieved_tick_hz).
 
 ### The serverlb is in the gameplay data path (#143)
 

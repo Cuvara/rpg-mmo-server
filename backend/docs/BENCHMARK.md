@@ -455,26 +455,59 @@ Two corollaries worth stating, because both are easy to get backwards:
   *next* measurement, which may well be taken by hand at a shell prompt.
 
 
-#### The one live trap: do not compute Hz from `/status`
+#### To check the tick rate, read `achieved_tick_hz`
 
-`/status` reports `tick_rate` — the **configured** rate, the "advertised 60" — plus
-`current_tick` and `uptime_seconds`. The obvious move is therefore:
+The server publishes its **measured** rate, so an observer never has to supply a
+clock:
 
-```
-achieved Hz = current_tick / uptime_seconds     # WRONG on this box
-```
+| Surface | Field |
+|---|---|
+| `/status` JSON | **`achieved_tick_hz`** |
+| `/metrics` | **`gameserver_achieved_tick_hz`** (gauge, labelled `map_id`) |
 
-**Do not.** `uptime_seconds` is computed from `DateTime.UtcNow`
-(`GameServer/Program.cs`), which is `CLOCK_REALTIME`, so on this host it is
-inflated by the same 10-17%. That division returns **~51 Hz on a healthy 60 Hz
-loop**, or **~12.9 Hz on a healthy 15 Hz loop** — reproducing #147 exactly,
-except from inside the server's own status endpoint instead of from `date`. The
-trap is latent in the code today; flagged to the owner of `/status` (#144).
+Both come from an `AchievedRateMeter` fed once per base tick from
+`Stopwatch.GetTimestamp()` — the *same* timestamps that pace the loop, so the
+measurement and the schedule it measures cannot disagree about what a second is.
+It is a **2 second sliding window**, and there is deliberately no `DateTime`
+overload.
 
-**Use `gameserver_tick_duration_seconds` from `/metrics` instead.** It is built
-from `Stopwatch.GetTimestamp()` and never touches the wall clock. Until an
-explicitly `Stopwatch`-derived achieved-rate field exists, that histogram is the
-only self-reported timing on the server that can be trusted on this box.
+Read it against the **configured** rate on the same endpoint: `sim_critical_hz`
+(with `tick_rate` the same number, and `sim_world_hz` / `sim_background_hz` for
+the other groups). A healthy server has `achieved_tick_hz ≈ sim_critical_hz`.
+Configured and measured are now distinct fields, which is the whole point.
+
+> **`achieved_tick_hz == 0` means "not measured yet"** — no window has completed,
+> i.e. the process is younger than ~2s. It does **not** mean the loop has
+> stopped; `current_tick` distinguishes those. This is the one way to misread the
+> field.
+
+**Do not compute the rate yourself from `current_tick / uptime_seconds`.** This
+is the arithmetic that produced #147, and it is wrong in one of two ways
+depending on which build you are on:
+
+- **Before the #144 fix**, `uptime_seconds` came from `DateTime.UtcNow` —
+  `CLOCK_REALTIME` — so on this host the quotient returned **~51 Hz on a healthy
+  60 Hz loop** and **~12.9 Hz on a healthy 15 Hz loop**. Reproduced live at
+  **54.10 Hz** (`38250 / 707`) on a loop genuinely running 60. That is #147 from
+  inside the server's own endpoint, with no `date` involved.
+- **After it**, `uptime_seconds` is `Stopwatch`-derived, so the quotient is no
+  longer clock-skewed — but it is a **since-boot average**, which hides a loop
+  that degraded recently. Merely worse, rather than wrong.
+
+Either way `achieved_tick_hz` is the answer. Note the behaviour change in the
+second case: `uptime_seconds` is now elapsed *process* time, so it no longer
+follows a clock step (NTP correction, suspend/resume) and can legitimately
+disagree with `date`-derived arithmetic on a drifting host. That disagreement is
+the intended outcome.
+
+Full treatment, including the two-clock account of the old arithmetic:
+[`gameserver-dotnet/docs/METRICS.md`](../gameserver-dotnet/docs/METRICS.md#do-not-compute-a-rate--read-achieved_tick_hz).
+
+**Scope:** the gauge measures the **base timeline only**. World and background are
+exact integer divisors of the base rate, so publishing three measured rates would
+be one measurement plus two pieces of arithmetic — three things that can drift
+instead of one. For per-group measured rates use
+`rate(gameserver_sim_group_runs_total[...])`.
 
 #### The gateway heartbeat is the one true wall-clock interval
 

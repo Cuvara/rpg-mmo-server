@@ -7,6 +7,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Documentation
+- **`BENCHMARK.md` and `K3S.md` now point at the measured `achieved_tick_hz` instead of warning
+  people off arithmetic (#153/#144).** The gauge landed with #144, so the docs give the answer
+  rather than only the prohibition: read **`achieved_tick_hz`** on `/status` or
+  **`gameserver_achieved_tick_hz`** on `/metrics`, and compare it against the configured
+  `sim_critical_hz` — a healthy server has the two equal to within rounding. Both are fed once
+  per base tick from `Stopwatch.GetTimestamp()`, over a 2s sliding window. Documented the one
+  way to misread it: **`achieved_tick_hz == 0` means "not measured yet"** (process younger than
+  ~2s, no completed window), not a stopped loop — `current_tick` distinguishes those, and a
+  freshly scheduled k3d pod will show `0` briefly. Also recorded that the gauge covers the
+  **base timeline only** — world and background are exact integer divisors, so three measured
+  rates would be one measurement plus two pieces of arithmetic; per-group measured rates come
+  from `rate(gameserver_sim_group_runs_total[...])`. The `current_tick / uptime_seconds`
+  quotient is documented as wrong in one of two ways depending on build: clock-skewed before
+  the #144 uptime fix (observed live at **54.10 Hz** on a loop genuinely running 60), and a
+  since-boot average that hides recent degradation after it. Notes the consequent behaviour
+  change — `uptime_seconds` is elapsed process time now, so it no longer follows a clock step
+  and can legitimately disagree with `date`-derived arithmetic. Links
+  `gameserver-dotnet/docs/METRICS.md` rather than restating it. Refs #153, #147, #144.
+
+### Documentation
 - **Warned that the achieved tick rate must not be computed from `/status` (#153).** The
   endpoint reports `tick_rate` (the *configured* rate), `current_tick` and `uptime_seconds`,
   which invites `current_tick / uptime_seconds` — but `uptime_seconds` is derived from
