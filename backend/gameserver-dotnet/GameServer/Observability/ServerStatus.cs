@@ -65,6 +65,31 @@ public sealed class ServerStatus
     public int BackgroundHz { get; set; }
 
     /// <summary>
+    /// The rate the base timeline is <b>actually</b> advancing at, in Hz, measured by the
+    /// server over a short sliding window on the monotonic clock. Compare against
+    /// <see cref="CriticalHz"/>, which is what was <i>configured</i>: a healthy server has
+    /// these equal to within rounding.
+    ///
+    /// <para><b>This field exists so that nobody computes a rate themselves.</b> With a
+    /// configured rate, a tick counter and an uptime on the same object and no measured
+    /// rate, the obvious move is <c>current_tick / uptime_seconds</c> — and that is issue
+    /// #147: a defect filed against a server running at exactly 60 Hz, propagated into an
+    /// ADR and blamed for a client prediction defect, because the observer's clock was 10-17%
+    /// fast (#153). An observer that must supply a clock will eventually supply a bad one.</para>
+    ///
+    /// <para><b>0 means "not measured yet"</b> — no window has completed, i.e. the process
+    /// is younger than <see cref="Server.AchievedRateMeter.DefaultWindowSeconds"/>. It does
+    /// not mean the loop has stopped; <c>current_tick</c> distinguishes those.</para>
+    ///
+    /// <para>Base timeline only. The world and background groups are exact integer divisors
+    /// of it (`SimulationRates`), so publishing three measured rates would be publishing one
+    /// measurement and two pieces of arithmetic — three things to drift instead of one. Per
+    /// group, `rate(gameserver_sim_group_runs_total[...])` on `/metrics` is the measurement.</para>
+    /// </summary>
+    [JsonPropertyName("achieved_tick_hz")]
+    public double AchievedTickHz { get; set; }
+
+    /// <summary>
     /// The base tick counter — one increment per critical-group tick, i.e. per
     /// <see cref="CriticalHz"/>.
     /// </summary>

@@ -506,6 +506,10 @@ metricsEndpoint?.SetStatusProvider(() =>
     var status = new ServerStatus
     {
         Ok = true,
+        // MEASURED, from Stopwatch. Published alongside the configured rates precisely so
+        // that no reader has to divide current_tick by uptime_seconds to get one — that
+        // arithmetic mixed a monotonic counter with a wall clock and produced #147.
+        AchievedTickHz = server.AchievedTickHz,
         CurrentTick = server.CurrentTick,
         PlayersOnline = metrics.PlayersOnline,
         Capacity = capacity,

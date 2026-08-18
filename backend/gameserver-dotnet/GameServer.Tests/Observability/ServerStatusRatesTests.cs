@@ -105,11 +105,30 @@ public class ServerStatusRatesTests
         var root = doc.RootElement;
 
         Assert.Equal(60, root.GetProperty("tick_rate").GetInt32());
+        Assert.True(root.TryGetProperty("achieved_tick_hz", out _),
+            "achieved_tick_hz must be present: without a measured rate on the object, an " +
+            "observer computes one from current_tick/uptime_seconds, which is #147");
         Assert.Equal(60, root.GetProperty("sim_critical_hz").GetInt32());
         Assert.Equal(15, root.GetProperty("sim_world_hz").GetInt32());
         Assert.Equal(5, root.GetProperty("sim_background_hz").GetInt32());
         Assert.Equal(100, root.GetProperty("capacity").GetInt32());
         Assert.Equal(726335UL, root.GetProperty("current_tick").GetUInt64());
+    }
+
+    /// <summary>
+    /// `tick_rate` is CONFIGURED and `achieved_tick_hz` is MEASURED, and `ApplyRates` must
+    /// touch only the former. If applying the configuration could ever write the measured
+    /// field, /status would report a rate it had not measured while looking like it had —
+    /// the exact failure this issue is about, one field over.
+    /// </summary>
+    [Fact]
+    public void ApplyRates_DoesNotTouchTheMeasuredRate()
+    {
+        var status = new ServerStatus { AchievedTickHz = 59.8 };
+        status.ApplyRates(SimulationRates.Default);
+
+        Assert.Equal(60, status.TickRate);
+        Assert.Equal(59.8, status.AchievedTickHz);
     }
 
     [Fact]

@@ -37,6 +37,7 @@ human inspection and for the Unity DOTS sample, which polls it.
 {
   "ok": true,
   "tick_rate": 60,
+  "achieved_tick_hz": 59.97,
   "sim_critical_hz": 60,
   "sim_world_hz": 15,
   "sim_background_hz": 5,
@@ -62,26 +63,55 @@ so it reported the compiled-in default of 15 on servers whose prediction rate wa
 | Field | Meaning |
 |-------|---------|
 | `tick_rate` | The rate movement is integrated at and the tick counter advances at — the **critical** group. **Defined to be the same number as the wire field `join_token_resp.tick_rate`** (normative definition in `API.md`); both read `SimulationRates.MovementHz`, and `ServerStatusRatesTests` fails if either grows its own source. Kept under this name because clients already read it under this name from both surfaces |
+| `achieved_tick_hz` | The rate the base timeline is **actually** advancing at, measured by the server over a 2s sliding window on the monotonic clock. Compare against `sim_critical_hz`: a healthy server has them equal to within rounding. **`0` means "not measured yet"** — no window has completed, i.e. the process is younger than ~2s; it does not mean the loop has stopped, and `current_tick` distinguishes those |
 | `sim_critical_hz` | Critical-group Hz — input, movement, combat. Equal to `tick_rate`; published separately so a reader after "the critical rate" need not know that `tick_rate` happens to be it. `current_tick` counts these |
 | `sim_world_hz` | World-group Hz — AI, spawning, **and the snapshot broadcast cadence**. This, not `tick_rate`, is what a client's interpolation buffer is sized against and what governs bandwidth per client |
 | `sim_background_hz` | Background-group Hz |
 | `capacity` | The admission limit (`GAMESERVER_CAPACITY`) this server enforces and publishes into the registry |
 | `uptime_seconds` | Seconds since process start on a **monotonic** clock (`Stopwatch`), not wall time — see below |
 
-### `uptime_seconds` is monotonic on purpose
+### Do not compute a rate — read `achieved_tick_hz`
 
-`current_tick / uptime_seconds` is the obvious way to derive an *achieved* tick
-rate, and it used to divide a `CLOCK_MONOTONIC`-paced counter (the tick loop is
-paced by `Stopwatch`) by a `CLOCK_REALTIME` duration (`DateTime.UtcNow`). On a host
-whose realtime clock runs 10-17% fast — this one does, see #153 — that quotient
-reports a 60 Hz loop as roughly 54 Hz. That is exactly issue #147: a defect filed
-against a server that did not have one, because the observer supplied the clock.
-Both terms now come from the same monotonic source.
+With a configured rate, a tick counter and an uptime on one object and no measured
+rate, the obvious move is:
 
-Note this still yields an *average since boot*, which is all it claims to be. There
-is no instantaneous achieved-rate gauge on this endpoint; for that use
-`gameserver_sim_group_runs_total`, whose `rate()` over a window is measured against
-Prometheus' own timestamps.
+```
+achieved Hz  =  current_tick / uptime_seconds        # DON'T
+```
+
+That division used to mix two clocks: `current_tick` is advanced by a
+`Stopwatch`-paced loop (`CLOCK_MONOTONIC`) and `uptime_seconds` came from
+`DateTime.UtcNow` (`CLOCK_REALTIME`). On a host whose realtime clock runs 10-17%
+fast — this one does, see #153 — the quotient reports a **healthy 60 Hz loop as
+~54 Hz**. That is issue #147 in full: a defect filed against a server that did not
+have one, propagated into an ADR and blamed for a client prediction defect, then
+closed as not-a-defect. The loop was never wrong; the instrument was.
+
+Two changes close that off, and both are needed:
+
+1. **`uptime_seconds` is now monotonic** (`Stopwatch`, not `DateTime.UtcNow`), so
+   the quotient no longer straddles two clocks. This *changes the meaning of a
+   documented field*: it is elapsed process time, not a wall-clock difference, so
+   it no longer tracks a clock step (NTP correction, suspend/resume) and can
+   disagree with `date`-derived arithmetic on a drifting host. That disagreement is
+   the point — an interval should never have come from a wall clock.
+2. **`achieved_tick_hz` is published**, so nobody has to do the arithmetic at all.
+   An observer that must supply a clock will eventually supply a bad one, and the
+   result looks exactly like a server defect.
+
+`achieved_tick_hz` is measured over a **2 second sliding window**, entirely from
+`Stopwatch.GetTimestamp()`, sampled once per base tick inside the loop itself
+(`AchievedRateMeter`). It is O(1) and allocation-free per tick, so it does not
+perturb the budget it measures.
+
+**Base timeline only, deliberately.** The world and background groups are exact
+integer divisors of the base rate, so publishing three measured rates would be
+publishing one measurement and two pieces of arithmetic — three things that can
+drift instead of one. For a per-group measured rate use
+`rate(gameserver_sim_group_runs_total[...])` on `/metrics`, which is measured
+against Prometheus' own timestamps.
+
+The same value is exported as the Prometheus gauge `gameserver_achieved_tick_hz`.
 
 ## Metric reference (scraped names)
 
@@ -93,6 +123,7 @@ Prometheus' own timestamps.
 | `gameserver_sim_group_runs_total` | counter | `map_id`, `group` | Times a simulation group has run. The ratio between groups **is** the configured rate ratio |
 | `gameserver_tick_overruns_total` | counter | `map_id` | Base ticks whose work exceeded the base period — see below |
 | `gameserver_tick_backlog_dropped_total` | counter | `map_id` | Base ticks discarded because the loop fell too far behind the wall clock — see below |
+| `gameserver_achieved_tick_hz` | gauge | `map_id` | **Measured** base-tick rate over a 2s window, from the monotonic clock. Compare with the configured `SIM_CRITICAL_HZ` — a healthy server has them equal. Never derived from wall time: a wall-clock rate on a host with a fast `CLOCK_REALTIME` reports a healthy loop as slow (#147/#153). `0` = not measured yet |
 | `gameserver_players_online` | gauge | `map_id` | Connected players |
 | `gameserver_entities` | gauge | — | Entities in the world |
 | `gameserver_snapshots_sent_total` | counter | `map_id` | Snapshot messages sent |

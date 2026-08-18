@@ -70,6 +70,21 @@ public sealed class TickLoop
     /// <summary>Current simulation tick.</summary>
     public ulong CurrentTick => _currentTick;
 
+    /// <summary>
+    /// Measures the rate the base timeline is actually advancing at. Fed from the loop
+    /// below with the same <see cref="Stopwatch"/> timestamps that pace it, so the achieved
+    /// rate and the schedule it is measuring cannot disagree about what a second is.
+    /// </summary>
+    private readonly AchievedRateMeter _rateMeter = new();
+
+    /// <summary>
+    /// The measured base-tick rate in Hz over the last completed window, or 0 for the first
+    /// window of process life. Published so that nobody has to derive a rate by dividing a
+    /// tick counter by an uptime — the arithmetic that produced #147. See
+    /// <see cref="AchievedRateMeter"/>.
+    /// </summary>
+    public double AchievedTickHz => _rateMeter.AchievedHz;
+
 
     /// <summary>
     /// Single-rate construction: every group runs at <paramref name="tickRate"/>. This is
@@ -171,6 +186,10 @@ public sealed class TickLoop
             TickOnce();
 
             long now = Stopwatch.GetTimestamp();
+            // Monotonic in, monotonic out. `now` is the same clock that sets the deadline
+            // this loop is paced by, which is the entire point of measuring here rather
+            // than letting an observer time the loop from outside with its own.
+            _rateMeter.Sample(_currentTick, now);
             double elapsedMs = (now - tickStart) * 1000.0 / Stopwatch.Frequency;
 
             if (elapsedMs > periodMs)

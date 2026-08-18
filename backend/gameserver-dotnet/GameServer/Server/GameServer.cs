@@ -259,6 +259,17 @@ public sealed class GameServerHost : IAsyncDisposable
     /// <summary>Current simulation tick number.</summary>
     public ulong CurrentTick => _tickLoop.CurrentTick;
 
+    /// <summary>
+    /// The <b>measured</b> base-tick rate in Hz over the last completed window — as opposed
+    /// to <see cref="ServerOptions.SimulationRates"/>, which is what was configured. 0 until
+    /// the first window completes.
+    ///
+    /// <para>Derived entirely from <see cref="System.Diagnostics.Stopwatch"/>. Publishing
+    /// this is what stops an observer deriving a rate from <c>current_tick / uptime</c>,
+    /// which mixes clocks and reported a healthy 60Hz loop as 54Hz (#147, #153).</para>
+    /// </summary>
+    public double AchievedTickHz => _tickLoop.AchievedTickHz;
+
     /// <summary>Number of enemies currently alive.</summary>
     /// <summary>
     /// The number the status endpoint publishes as <c>enemies_alive</c>.
@@ -347,6 +358,10 @@ public sealed class GameServerHost : IAsyncDisposable
             _metrics,
             options.KeyframeInterval,
             simulationPhase);
+
+        // Wired here rather than next to the entity-count provider above, because the tick
+        // loop that owns the meter does not exist until this line.
+        _metrics?.SetAchievedTickHzProvider(() => _tickLoop.AchievedTickHz);
 
         _saver = new AsyncSaver(
             _playerStore,

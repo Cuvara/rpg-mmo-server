@@ -55,6 +55,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     releases it with the Agones-assigned address, that an already-`Allocated` pod registers
     immediately, that the flag is ignored without Agones, and that the default path never
     reads the state at all.
+- **`/status` publishes `achieved_tick_hz` — a *measured* base-tick rate, from the monotonic
+  clock (#144, #153).** The endpoint exposed a configured rate, a tick counter and an uptime,
+  and no measured rate, so the obvious move for anyone checking whether the loop was healthy
+  was `current_tick / uptime_seconds`. That mixes clocks, and on this host it reports a
+  healthy 60 Hz loop as ~54 Hz: issue #147, filed against a server that was running at
+  exactly 60, propagated into an ADR and blamed for a client prediction defect before being
+  closed as not-a-defect. Fixing the field labels alone would have left that trap armed —
+  the gauge is what disarms it, because an observer that has to supply its own clock will
+  eventually supply a bad one and the result looks exactly like a server defect.
+
+  `AchievedRateMeter` samples once per base tick from `Stopwatch.GetTimestamp()` — the same
+  timestamps that pace the loop — over a 2 second sliding window. O(1) and allocation-free
+  per tick, so it does not perturb the budget it measures. There is deliberately **no**
+  overload accepting a `DateTime`: a wall-clock-derived achieved rate would reproduce #147
+  *inside* the server, carrying the server's authority, which is worse than the bug it
+  replaces. `0` means "no window completed yet", not "stalled"; `current_tick` distinguishes
+  those, and it is documented rather than signalled with a null that would break typed
+  readers.
+
+  **Base timeline only.** The world and background groups are exact integer divisors of the
+  base rate, so three measured rates would be one measurement plus two pieces of arithmetic —
+  three things that can drift instead of one. Per group,
+  `rate(gameserver_sim_group_runs_total[...])` is already the measurement.
+
+  Also exported as the Prometheus gauge `gameserver_achieved_tick_hz`.
 
 ### Fixed
 - **A join refused for capacity was completely silent (#145).** The capacity check called
@@ -104,9 +129,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   issue #147: a defect filed against a server that did not have one, because the observer
   supplied the clock. Uptime is now monotonic, so both terms of the quotient share a source.
 
-  This is an average since boot and claims nothing more; there is no instantaneous
-  achieved-rate gauge here. `rate(gameserver_sim_group_runs_total[...])` remains the way to
-  measure one.
+  **This changes the meaning of a documented field, which this repo has been bitten by
+  before, so it is stated rather than slipped in:** `uptime_seconds` is now elapsed process
+  time, not a wall-clock difference. It therefore no longer follows a clock step — an NTP
+  correction, a suspend/resume — and can disagree with `date`-derived arithmetic on a
+  drifting host. That disagreement is the point: an elapsed interval should never have come
+  from a wall clock, and the previous behaviour was not a feature anyone relied on, it was
+  the bug. The alternative considered and rejected was adding a second field and leaving this
+  one wrong; that keeps a field whose only use is to mislead.
 
 ### Documentation
 - **Distinguished clock *rate skew* from clock *steps* in `BENCHMARK.md`, with the sign table
