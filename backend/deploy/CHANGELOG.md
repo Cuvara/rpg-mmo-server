@@ -6,6 +6,23 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`verify.sh` layer 5 reported PASS on a client run that never reached the deployment.**
+  The check's stated claim is that the real client "completed its live-backend PlayMode
+  tests against THIS gateway", but it asserted only `failed=0` and a test count — so a run
+  of `total=30 passed=29 failed=0` passed every assertion while its single `LiveBackend`
+  case was *Ignored*, having connected to the default `127.0.0.1:8000` rather than the
+  deployment. The client was unverified and the suite said otherwise. Layer 5 now requires
+  at least one `LiveBackend` case to be present **and** to have Passed, and reports the
+  Ignored case's own reason (which names the address it actually dialled) when it has not.
+  Categories are inherited from ancestor `<test-suite>` elements, because NUnit records
+  `[Category]` on the fixture rather than on each case.
+- **The invocation layer 5 prints did not work from WSL.** It used a
+  `CUVARA_GATEWAY_HOST=... Unity.exe` prefix, and environment variables do not cross into
+  a Windows process that way — only `WSLENV` carries them. Following the printed command
+  therefore ran the client against its defaults. It now exports the variables, lists them
+  in `WSLENV`, and resolves the editor from `ProjectSettings/ProjectVersion.txt` instead of
+  globbing the Hub directory (which picks 2021.3 and starts downgrading the asset database
+  of a Unity 6 project).
 - **`dev-up.sh` pinned images it had never made available, so roll-forward was broken.**
   The import step warned and continued when a tag was absent from the local docker store,
   and the script then pinned that exact tag onto the gateway Deployment and the Fleet.
