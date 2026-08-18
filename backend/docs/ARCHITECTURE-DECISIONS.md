@@ -2190,14 +2190,24 @@ k8s; staging and production remain `DEPLOY_MODE=containers` and reach none of th
 - **The fleet's single replica is a separate constraint with a separate cause** (ADR-2, map
   assignment is fleet-wide) and is not solved by anything in this ADR. It is load-bearing,
   not a capacity dial: measured on k3d 2026-08-18, scaling `map-servers-dotnet-k8s` from 1 to
-  2 puts **both** pods into `servers:map:map_01` within ~5s of the second reaching Ready, with
-  no allocation involved, because the C# server self-registers right after `ReadyAsync` rather
-  than on allocation — and `FindServer` then hands clients the least-loaded of the two, i.e.
-  the second copy of the world. Absent a FleetAutoscaler, the first player into a cold map
-  also waits for a pod (#148).
+  2 put the new GameServer in `Ready` at t=5.38s and **both** pods into `servers:map:map_01`
+  within a second of that, with no allocation involved, because the C# server self-registers
+  right after `ReadyAsync` rather than on allocation — and `FindServer` then hands clients the
+  least-loaded of the two, i.e. the second copy of the world. (5.38s is pod-start latency, not
+  a capacity figure.) So the answer to "when does the single replica stop being necessary" is
+  **#151** — gate self-registration on `Allocated` rather than `Ready` — not a larger fleet.
+  #151 unlocks `replicas > 1` **for one map only**: allocation targets a fleet and every pod
+  in it still carries the same `GAMESERVER_MAP_ID`, so a second *map* remains unserved
+  (`ErrFleetMapMismatch`) until map id is per-pod. Two separate unlocks, not one.
+  Absent a FleetAutoscaler, the first player into a cold map also waits for a pod (#148), and
+  an exhausted fleet is reported with a terminal refusal (#152). ADR-18 decides the autoscaler
+  question; this ADR does not.
 - **Known-adjacent, already open:** #143 — k3d's serverlb sits in the gameplay data path and
-  triples snapshot jitter, so local capacity numbers measure the proxy; #147 — the tick loop
-  runs at 54 Hz while advertising 60; #148 — no FleetAutoscaler and `replicas: 1`.
+  triples snapshot jitter, so local capacity numbers measure the proxy; #147 — a reported 54 Hz
+  tick against an advertised 60 Hz base rate, which that investigation reports as a
+  measurement artifact — the loop paces on `CLOCK_MONOTONIC` while the observer timed it
+  against a `CLOCK_REALTIME` running ~10% fast on the WSL2 host — rather than a code defect;
+  #148 — no FleetAutoscaler and `replicas: 1`.
 
 ### Follow-up work
 
