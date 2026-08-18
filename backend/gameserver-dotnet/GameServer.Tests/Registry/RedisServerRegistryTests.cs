@@ -55,10 +55,15 @@ public class RedisServerRegistryTests
         Assert.True(await db.SetContainsAsync("servers:map:map_shape", serverId));
         Assert.Equal(TimeSpan.Zero, await db.KeyTimeToLiveAsync("servers:map:map_shape") ?? TimeSpan.Zero);
 
-        // The hash carries the liveness TTL.
-        var ttl = await db.KeyTimeToLiveAsync($"servers:id:{serverId}");
-        Assert.NotNull(ttl);
-        Assert.InRange(ttl!.Value.TotalSeconds, 1, 15);
+        // The hash carries the liveness TTL. Assert decay between two reads rather
+        // than an absolute remaining value — that is immune to clock steps (see #161).
+        var ttl1 = await db.KeyTimeToLiveAsync($"servers:id:{serverId}");
+        Assert.NotNull(ttl1);
+        await Task.Delay(500);
+        var ttl2 = await db.KeyTimeToLiveAsync($"servers:id:{serverId}");
+        Assert.NotNull(ttl2);
+        Assert.True(ttl2!.Value < ttl1!.Value,
+            $"TTL did not decay between two reads ({ttl1.Value.TotalSeconds:F2}s -> {ttl2.Value.TotalSeconds:F2}s)");
     }
 
     [SkippableFact]
