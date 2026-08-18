@@ -30,29 +30,51 @@ cd backend/deploy/k8s
 Idempotent, and the same script CD runs in `DEPLOY_MODE=k8s`, so the box and CI
 cannot drift apart. It imports images into the k3d node, applies both tiers,
 pins the image tags, retires the legacy fleet and the compose stack, and starts
-the port-forwards.
+the published host ports.
 
 The Secret is **not** in the repo. `app/30-secret-template.yaml` is a template;
 fill a copy outside the tree and apply it before the first run.
 
 ### Ports
 
-k3d's serverlb publishes only `7000-7100` (the Agones host-port range) and
-`6550`. The gateway's NodePort lands in 30000-32767 and Nakama has no node port
-at all, so `dev-up.sh` port-forwards them, bound to `0.0.0.0` so the Unity
-Editor on Windows reaches them as well as WSL2:
+k3d's serverlb publishes `7000-7100` (per port) and `6550->6443`, and nothing
+in the default NodePort range `30000-32767`. So the client-facing ports are
+**hostPorts inside the published range** — the same mechanism Agones already
+uses to make a GameServer dialable at `127.0.0.1:<port>`, which means one
+exposure mechanism in this deployment rather than two.
 
-| Host port | Reaches |
-|---|---|
-| 8000 | `svc/gateway` — what the client dials first |
-| 7350 / 7349 | `svc/nakama` HTTP / gRPC |
-| 15433 | `svc/postgres-game` — for the suite's persistence assertions |
-| 7000-7100 | Agones-assigned game-server ports, published by k3d directly |
+The range is **split**, not borrowed from:
 
-The forwards are supervised only by their pidfiles under
-`${RPG_K8S_RUN_DIR:-/tmp/claude-1000/rpg-k8s-dev}`. Re-run `dev-up.sh` to
-restore any that died; it checks each socket actually accepts a connection and
-fails loudly rather than leaving a live-looking pidfile behind an unbound port.
+| Host port | Reaches | How |
+|---|---|---|
+| 7000 | gateway | `hostPort` on the gateway pod |
+| 7001 | Nakama HTTP | `hostPort` on the Nakama pod |
+| 7010-7100 | Agones GameServers | Agones dynamic allocation |
+| 15433 | postgres-game | port-forward, **test runner only** |
+
+`dev-up.sh` pins the Agones controller to `MIN_PORT=7010`, reserving
+`7000-7009` for infrastructure so the allocator can never hand a GameServer the
+gateway's port. It establishes that floor rather than assuming it, and refuses
+to continue without it — changing one without the other brings the collision
+back as an intermittent unschedulable GameServer.
+
+Only Nakama's **HTTP** port is published. `NetworkBootstrapConfig.cs` in the
+netcode package reads `CUVARA_NAKAMA_HOST`, `CUVARA_NAKAMA_PORT` and
+`CUVARA_NAKAMA_SCHEME` and dials HTTP; gRPC (7349) and the console (7351) stay
+cluster-internal, and the console especially should not be on the host.
+
+**Nothing supervises the client path.** There is no forward to keep alive and
+no shell to keep open — that is the point. The one remaining `kubectl
+port-forward`, for `postgres-game` on 15433, exists so the verification suite's
+persistence assertions can run *from this host*; no client uses it and the
+deployment does not depend on it.
+
+**What a hostPort costs.** It pins the pod to a node and allows one replica per
+node. On this single-node k3d that costs nothing. On a multi-node cluster it is
+the same "works only here" trap as a loopback advertise-host — the gateway
+would be reachable only on whichever node scheduled it. The real-cluster answer
+is a LoadBalancer Service or an Ingress, at which point the hostPorts go away
+and the `gateway` Service becomes what clients actually reach.
 
 ### Why the advertised address is `127.0.0.1`
 

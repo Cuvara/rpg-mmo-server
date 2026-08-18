@@ -210,29 +210,38 @@ spec:
             capabilities:
               drop: ["ALL"]
 ---
-# Client-facing Service.
+# Client-facing Service. ClusterIP, and deliberately NOT NodePort.
 #
-# type: NodePort is the honest portable answer — on a real single-node k3s the
-# client dials <node public IP>:<nodePort> with that port open in the
-# firewall. ON THIS k3d BOX IT IS NOT REACHABLE FROM THE HOST, and that is a
-# measured fact, not an oversight: `docker ps` shows k3d-rpg-dev-serverlb
-# publishing 7000-7100 and 6550->6443 and NOTHING ELSE, while the default
-# service-node-port range is 30000-32767. Nothing in that range crosses the
-# node container's boundary.
+# The client does NOT reach the gateway through this Service at all -- it
+# reaches the pod's hostPort 7000 (see the ports block above). This Service
+# exists for in-cluster addressing and to keep `kubectl get svc` meaningful.
 #
-# The two ways to close that gap on k3d, and why neither is in this file:
-#   (a) hostPort inside 7000-7100 — reachable, because that range IS
-#       published. But that range is Agones' MIN_PORT..MAX_PORT, and the
-#       Agones port allocator does not know about a hostPort it did not
-#       assign. A collision makes a GameServer pod unschedulable and it stays
-#       Pending — including a DEV GameServer in rpg-realtime, on the same
-#       node. Borrowing from Agones' range to expose a non-Agones service can
-#       wedge the live dev fleet, so it is refused here.
-#   (b) republishing a port on the k3d loadbalancer (`k3d cluster edit
-#       --port-add`) — recreates the serverlb container, i.e. interrupts the
-#       published 7000-7100 range that the dev fleet's clients use.
-# On this box, use `kubectl port-forward` (see README). It is a development
-# access path and it is labelled as one.
+# It WAS a NodePort, and that was worse than useless here: k3d's serverlb
+# publishes 7000-7100 and 6550->6443 and nothing else, while the default
+# service-node-port range is 30000-32767. So the NodePort was allocated,
+# printed by `kubectl get svc` as `8000:32276/TCP`, and unreachable from the
+# host -- an entry that looks exactly like the client's route while being a
+# dead end. Two people read it as the route before it was removed.
+#
+# Why hostPort instead, and why it is safe:
+#   Agones GameServers already reach the host this way -- a hostPort inside
+#   7000-7100 is how map-servers-dotnet-k8s advertises a dialable
+#   127.0.0.1:<port>. Using the same mechanism for the gateway means ONE
+#   exposure mechanism in this deployment rather than two.
+#   The collision risk is real and is handled by SPLITTING the range rather
+#   than borrowing from it: the Agones controller runs with MIN_PORT=7010, so
+#   7000-7009 is reserved for infrastructure and the allocator can never hand
+#   a GameServer the gateway's port. dev-up.sh establishes that floor and
+#   refuses to continue without it, because changing one without the other
+#   brings the collision back as an intermittent Pending GameServer.
+#
+# WHAT A hostPort COSTS, stated plainly: it pins the pod to a node, and only
+# one replica can exist per node. On this single-node k3d that costs nothing.
+# On a multi-node cluster it is the same "works only here" trap as a loopback
+# advertise-host: the gateway would be reachable only on whichever node
+# happened to schedule it. The real-cluster answer is a LoadBalancer Service
+# or an Ingress, at which point BOTH the hostPort and this note go away and
+# this Service becomes the thing clients actually reach.
 apiVersion: v1
 kind: Service
 metadata:
@@ -242,7 +251,7 @@ metadata:
     app.kubernetes.io/part-of: rpg-mmo
     app.kubernetes.io/name: gateway
 spec:
-  type: NodePort
+  type: ClusterIP
   selector:
     app.kubernetes.io/name: gateway
   ports:

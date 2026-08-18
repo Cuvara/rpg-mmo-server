@@ -47,53 +47,50 @@ $K apply -f 40-gateway.yaml -f 50-fleet-map.yaml
 
 ## How a client reaches this tier
 
-Two hops, and they are reached in **two different ways** — which is the
-uncomfortable part of running the gateway inside k3d.
+Two hops, and now **one mechanism** for both — which is the point of the
+current shape.
 
-**Hop 2 first, because it is the one that works properly.** The client dials
-the game server directly (ADR-3). Agones assigns a dynamic host port from
-`MIN_PORT..MAX_PORT` = **7000-7100**, and the k3d serverlb container publishes
-exactly `0.0.0.0:7000-7100` to the host — verified with `docker ps`, not
-assumed. So `127.0.0.1:<agones port>` is genuinely dialable from Windows and
-WSL2, and that is why `advertise-host: 127.0.0.1` is correct here.
+**Hop 2, the game server.** The client dials it directly (ADR-3). Agones
+assigns a dynamic host port and the k3d serverlb publishes `0.0.0.0:7000-7100`
+to the host — verified with `docker ps`, not assumed — so
+`127.0.0.1:<agones port>` is genuinely dialable from Windows and WSL2, which is
+why `advertise-host: 127.0.0.1` is correct here.
 
-**Hop 1, the gateway, has no such published port.** The default NodePort range
-is 30000-32767 and the serverlb publishes **nothing** in it — only 7000-7100
-and 6550->6443. On this box, use a port-forward:
+**Hop 1, the gateway.** Reached the same way: a `hostPort` inside that same
+published range. The default NodePort range is 30000-32767 and the serverlb
+publishes nothing in it, so a NodePort Service is allocated and unreachable —
+it prints in `kubectl get svc` as `8000:32276/TCP` and looks exactly like the
+client's route while being a dead end. The Service is therefore ClusterIP now,
+and the client path is the pod's hostPort.
 
-```bash
-kubectl --context k3d-rpg-dev port-forward -n rpg-k8s-realtime svc/gateway 18000:8000
-# client then dials 127.0.0.1:18000
-```
+| Host port | Reaches |
+|---|---|
+| 7000 | gateway (`hostPort`, containerPort 8000) |
+| 7001 | Nakama HTTP (`hostPort`, containerPort 7350) |
+| 7010-7100 | Agones GameServers |
 
-The two rejected alternatives, and why:
+**The collision is handled by splitting the range, not by hoping.** 7000-7100
+is Agones' allocation range, and the allocator does not know about a hostPort it
+did not assign — a collision leaves a GameServer Pending, intermittently and
+maddeningly. So the Agones controller runs with `MIN_PORT=7010`, reserving
+7000-7009 for infrastructure. `dev-up.sh` establishes that floor and refuses to
+continue without it: changing the hostPorts without the floor, or the floor
+without the hostPorts, brings the collision straight back.
 
-* **`hostPort` in 7000-7100** would be reachable — that range *is* published.
-  But it is Agones' range, and the Agones port allocator does not know about a
-  hostPort it did not assign. A collision leaves a GameServer pod
-  unschedulable and Pending — including a **dev** GameServer in
-  `rpg-realtime`, on the same single node. Borrowing from Agones' range to
-  expose a non-Agones service can wedge the live dev fleet.
-* **`k3d cluster edit --port-add`** recreates the serverlb container, i.e.
-  interrupts the published 7000-7100 range the dev fleet's clients use.
+`k3d cluster edit --port-add` remains rejected — it recreates the serverlb
+container and so interrupts the published 7000-7100 range the fleet's clients
+are using.
 
-**On a real single-node k3s node** neither problem exists: the gateway's
-NodePort (or a LoadBalancer/ingress in front of it) is dialable at the node's
-public address with the port open in the firewall, and 7000-7100/tcp is opened
-alongside it for the game servers.
+**What this costs.** A `hostPort` pins the pod to a node and allows one replica
+per node. On this single-node k3d that is free. On a multi-node cluster it is
+the same "works only here" trap as a loopback advertise-host, and the answer
+there is a LoadBalancer Service or an Ingress — at which point the hostPorts
+disappear and the `gateway` Service becomes what clients reach.
 
-### The advertise host
-
-`GAMESERVER_ADVERTISE_HOST` is the **host half only**; the port is always the
-Agones-assigned one, read back from the sidecar's GameServer status (ADR-16
-decision 2).
-
-| Where | Value | Why |
-|---|---|---|
-| k3d (here) | `127.0.0.1` | the serverlb publishes the port range to the host loopback; `status.address` is `172.20.0.3`, the node **container's** docker-network address, not dialable by a client |
-| real single-node k3s | the node's **public** IP or DNS name | `status.address` would be the node's private/internal IP — the right shape, the wrong network |
-| Docker Desktop k8s | *(empty — and it still does not work)* | Kubernetes `hostPort` is never published to the host there at all (ADR-16 decision 1) |
-| multi-node | **no correct value exists** | the right host differs per pod; the answers are an ingress or `status.hostIP` via the downward API, and neither exists in this repo |
+A `kubectl port-forward` survives for **postgres-game only**, so the
+verification suite can assert persistence from the host. It is a test-runner
+convenience, clearly labelled, and no client and no part of the deployment
+depends on it.
 
 ## Proof (2026-08-18, cluster `k3d-rpg-dev`, namespace `rpg-k8s-realtime`)
 
@@ -171,9 +168,15 @@ state: Allocated
 
 ### The full client flow, in strict-address mode
 
-`smoketest` run from the host against this tier — Nakama and the gateway
-through port-forwards, the **game server dialled directly** at the address the
-gateway advertised. `--strict-addr` forbids the harness from rewriting a
+`smoketest` run from the host against this tier, with the **game server
+dialled directly** at the address the gateway advertised.
+
+> **Historical transcript.** This run predates the move to published
+> hostPorts: it reached Nakama and the gateway through port-forwards on
+> 17350/18000. The current route is 7001/7000 with no forward; see
+> "How a client reaches this tier" above. The transcript is kept because what
+> it proves — the strict-address flow end to end — is unchanged by how the
+> first two hops were reached. `--strict-addr` forbids the harness from rewriting a
 listen-style address to loopback, which is what makes this evidence rather
 than decoration: without it the harness silently repairs the exact defect the
 advertise-host composition exists to fix.
@@ -201,7 +204,7 @@ waits for a reply:
 ```
 127.0.0.1:7017 (game server)      connect+write, held open, no EOF (timeout)  <- real listener
 127.0.0.1:7099 (unmapped port)    connect, immediate EOF                      <- control
-127.0.0.1:18000 (gw port-forward) connect+write, held open, no EOF (timeout)
+127.0.0.1:7000 (gateway hostPort) connect+write, held open, no EOF (timeout)
 gateway /healthz -> ok    /readyz -> ready
 ```
 
@@ -211,10 +214,11 @@ gateway /healthz -> ok    /readyz -> ready
   at boot, so `map_01` always has a live server and `FindServer` finds it
   without allocating (ADR-16 records this as an open question). The allocation
   was proven by posting one directly as the ServiceAccount.
-* **The gateway is not reachable from the host without a port-forward** on
-  k3d, for the reasons above. The client hop that a real deployment would use
-  (NodePort / LoadBalancer on the node's public address) is untested here
-  because no port outside 7000-7100 is published.
+* **The client hop a real deployment would use is still untested.** The
+  gateway IS now reachable from the host — hostPort 7000, no forward — but
+  that is a k3d-shaped answer that depends on the serverlb publishing
+  7000-7100. A LoadBalancer or Ingress on a node's public address, which is
+  what a real cluster would use, has never been exercised.
 * **Nothing was tested under load, and nothing was tested with more than one
   player, one map or one gateway replica.** In particular the two-replica
   allocation race ADR-16 describes is untried.
