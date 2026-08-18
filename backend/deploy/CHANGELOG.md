@@ -5,6 +5,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **A containers-mode deploy could start a second stack beside the live k8s one, and nothing stopped it.**
+  The per-step `deploy_mode != 'k8s'` conditions protect k8s mode from the compose steps, but nothing
+  protected the cluster from `DEPLOY_MODE` being set back to `containers`. Measured 2026-08-18: a deploy
+  in that state ran against a cluster already serving dev and left two gateways, two Redis instances and
+  two registries up for an hour, with clients split by which port they dialled. CD now refuses a
+  containers-mode deploy while `rpg-k8s-realtime`'s gateway has a ready replica, and names
+  `rollback-to-compose.sh` as the supported way down. Verified both ways against the live cluster: it
+  exits 1 while k8s is serving, and stands down when the namespace is absent.
+- **CD-built images carried no provenance, so `dev-up.sh`'s revision check was inert on everything CD
+  produced.** The build step did not pass `--build-arg GIT_REVISION`, so the label defaulted to
+  `unknown` and the guard that refuses to pin an image stamped with a different commit silently skipped.
+  Both images are now stamped with the deploying commit.
+
 ### Added
 - **`verify.sh` check `cluster.autoscaler` — a `FleetAutoscaler` on a single-map fleet is now
   a FAIL, not a paragraph.** It fails when any `FleetAutoscaler` targets a fleet whose pod

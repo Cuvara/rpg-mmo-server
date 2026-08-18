@@ -851,14 +851,55 @@ jobs:
       # backend/gameserver-dotnet/, so backend/ covers both. Paths are kept
       # cwd-relative — under WSL `docker` is a shim for docker.exe, which cannot
       # resolve absolute /mnt/* paths.
+      # A containers-mode deploy while the k8s realtime tier is serving does not
+      # replace it -- it brings the OLD compose stack up ALONGSIDE it. That is not
+      # hypothetical: on 2026-08-18 a deploy at DEPLOY_MODE=containers ran against
+      # a cluster already serving dev and left two gateways, two Redis instances
+      # and two registries up for an hour. The per-step `!= 'k8s'` conditions below
+      # protect k8s mode from compose; nothing protected the cluster from someone
+      # setting the variable back. This does.
+      - name: Refuse containers mode while k8s is serving this environment
+        if: steps.paths.outputs.deploy_mode == 'containers'
+        env:
+          KUBE_CONTEXT: ${{ vars.KUBE_CONTEXT || 'k3d-rpg-dev' }}
+        run: |
+          set -uo pipefail
+          if ! command -v kubectl >/dev/null 2>&1; then
+            echo "kubectl not installed; nothing to check"
+            exit 0
+          fi
+          if ! kubectl --context "$KUBE_CONTEXT" get ns rpg-k8s-realtime >/dev/null 2>&1; then
+            echo "no rpg-k8s-realtime namespace on ${KUBE_CONTEXT}; containers mode is unambiguous"
+            exit 0
+          fi
+          live="$(kubectl --context "$KUBE_CONTEXT" get deploy gateway -n rpg-k8s-realtime \
+            -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)"
+          if [ "${live:-0}" -gt 0 ]; then
+            echo "::error::DEPLOY_MODE=containers, but the k8s realtime tier on ${KUBE_CONTEXT}" >&2
+            echo "  is serving this environment (${live} ready gateway replica(s) in rpg-k8s-realtime)." >&2
+            echo "  Deploying compose now would start a SECOND stack beside it -- two gateways," >&2
+            echo "  two registries, and clients split across them by which port they dial." >&2
+            echo "  Either set DEPLOY_MODE=k8s, or take the cluster down first with" >&2
+            echo "  backend/deploy/k8s/rollback-to-compose.sh, which retires it in the right order." >&2
+            exit 1
+          fi
+          echo "rpg-k8s-realtime exists but is not serving; containers mode is safe"
+
       - name: Build realtime images on the runner
         if: steps.paths.outputs.deploy_mode == 'containers' || steps.paths.outputs.deploy_mode == 'k8s'
         working-directory: backend
         run: |
           set -euo pipefail
+          # --build-arg GIT_REVISION stamps org.opencontainers.image.revision.
+          # Without it these images are built with the label defaulting to
+          # "unknown", and dev-up.sh's check that a pinned image really carries
+          # the commit being deployed silently skips -- the guard exists but
+          # never fires on anything CD produced.
           docker build -f deploy/docker/Dockerfile.gateway \
+            --build-arg "GIT_REVISION=${GITHUB_SHA}" \
             -t "rpg-mmo/gateway:${GITHUB_SHA}" -t rpg-mmo/gateway:dev .
           docker build -f deploy/docker/Dockerfile.gameserver-dotnet \
+            --build-arg "GIT_REVISION=${GITHUB_SHA}" \
             -t "rpg-mmo/gameserver-dotnet:${GITHUB_SHA}" -t rpg-mmo/gameserver-dotnet:dev .
           docker image ls --filter reference='rpg-mmo/*' \
             --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}'
