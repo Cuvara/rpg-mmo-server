@@ -77,7 +77,7 @@ set. Flags are **space-separated** (`--addr :9000`).
 | `--addr` | `GAMESERVER_ADDR` | `:9000` | Game traffic listen address |
 | `--map-id` | `GAMESERVER_MAP_ID` | `map_01` | Map identifier, also the `map_id` metric label |
 | `--server-id` | `GAMESERVER_ID` / `POD_NAME` | random | Server identity checked against the join token |
-| `--capacity` | `GAMESERVER_CAPACITY` | `100` | Maximum concurrent players |
+| `--capacity` | `GAMESERVER_CAPACITY` | `100` | Maximum concurrent players. A join beyond it is refused with `"Server is full"` **and logged at Warning** with the count, the limit and the user — this refusal was silent until #145, so a server turning players away and a broken one produced identical logs. The value is published into the registry and enforced by the gateway too, so it is a fleet-wide admission limit, not a pod-local one. Also reported as `capacity` on `/status` |
 | `--sim-critical-hz` | `SIM_CRITICAL_HZ` | `60` | Frequency of the **critical** group (input, movement, combat). This is also the **base tick rate** of the loop — every other group is derived from it |
 | `--sim-world-hz` | `SIM_WORLD_HZ` | `15` | Frequency of the **world** group (AI, spawning, despawning) **and of the snapshot broadcast**. Must divide `SIM_CRITICAL_HZ` exactly and must not exceed it, or the server exits with code 2 |
 | `--sim-background-hz` | `SIM_BACKGROUND_HZ` | `5` | Frequency of the **background** group (work that tolerates a whole interval of delay). Must divide `SIM_CRITICAL_HZ` exactly and must not exceed `SIM_WORLD_HZ` |

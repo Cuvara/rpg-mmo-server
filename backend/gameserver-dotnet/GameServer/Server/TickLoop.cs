@@ -70,6 +70,28 @@ public sealed class TickLoop
     /// <summary>Current simulation tick.</summary>
     public ulong CurrentTick => _currentTick;
 
+    /// <summary>
+    /// Measures the rate the base timeline is actually advancing at. Fed from the loop
+    /// below with the same <see cref="Stopwatch"/> timestamps that pace it, so the achieved
+    /// rate and the schedule it is measuring cannot disagree about what a second is.
+    ///
+    /// <para>Its window is a constructor parameter defaulting to
+    /// <see cref="AchievedRateMeter.DefaultWindowSeconds"/>, so production behaviour is
+    /// unchanged and a test can ask for a short one. That is not a cosmetic seam: without
+    /// it, the only way to prove the loop feeds the meter is to run a real loop for longer
+    /// than the default window, and a multi-second busy loop inside a parallel test suite
+    /// competes with every other test for the cores it is trying to measure.</para>
+    /// </summary>
+    private readonly AchievedRateMeter _rateMeter;
+
+    /// <summary>
+    /// The measured base-tick rate in Hz over the last completed window, or 0 for the first
+    /// window of process life. Published so that nobody has to derive a rate by dividing a
+    /// tick counter by an uptime — the arithmetic that produced #147. See
+    /// <see cref="AchievedRateMeter"/>.
+    /// </summary>
+    public double AchievedTickHz => _rateMeter.AchievedHz;
+
 
     /// <summary>
     /// Single-rate construction: every group runs at <paramref name="tickRate"/>. This is
@@ -85,9 +107,10 @@ public sealed class TickLoop
         ILogger logger,
         GameMetrics? metrics = null,
         int keyframeInterval = GameConstants.DefaultKeyframeInterval,
-        ISimulationPhase? simulationPhase = null)
+        ISimulationPhase? simulationPhase = null,
+        double achievedRateWindowSeconds = AchievedRateMeter.DefaultWindowSeconds)
         : this(world, handler, connections, SimulationRates.Uniform(tickRate), aoiRadius,
-               logger, metrics, keyframeInterval, simulationPhase)
+               logger, metrics, keyframeInterval, simulationPhase, achievedRateWindowSeconds)
     {
     }
 
@@ -100,8 +123,10 @@ public sealed class TickLoop
         ILogger logger,
         GameMetrics? metrics = null,
         int keyframeInterval = GameConstants.DefaultKeyframeInterval,
-        ISimulationPhase? simulationPhase = null)
+        ISimulationPhase? simulationPhase = null,
+        double achievedRateWindowSeconds = AchievedRateMeter.DefaultWindowSeconds)
     {
+        _rateMeter = new AchievedRateMeter(achievedRateWindowSeconds);
         _world = world;
         _handler = handler;
         _connections = connections;
@@ -171,6 +196,10 @@ public sealed class TickLoop
             TickOnce();
 
             long now = Stopwatch.GetTimestamp();
+            // Monotonic in, monotonic out. `now` is the same clock that sets the deadline
+            // this loop is paced by, which is the entire point of measuring here rather
+            // than letting an observer time the loop from outside with its own.
+            _rateMeter.Sample(_currentTick, now);
             double elapsedMs = (now - tickStart) * 1000.0 / Stopwatch.Frequency;
 
             if (elapsedMs > periodMs)

@@ -289,6 +289,46 @@ spec:
                   value: "15"
                 - name: SIM_BACKGROUND_HZ
                   value: "5"
+                # -----------------------------------------------------------
+                # ADMISSION LIMIT — 100 IS NOW A DECISION, NOT A DEFAULT.
+                # -----------------------------------------------------------
+                # Unset, Program.cs falls back to a compiled-in 100. That is
+                # what stopped a 120-player load run at exactly 100 joins with
+                # 20 clients refused — not CPU, not memory, not the simulation
+                # (#145). The value is not local to the pod either: it is
+                # published into the Redis registry and the gateway enforces it
+                # (FindServer skips a server whose PlayerCount >= Capacity), so
+                # the fleet's admission limit was an unset environment variable
+                # inheriting a constant.
+                #
+                # WHAT 100 IS JUSTIFIED BY. 100 concurrent players were observed
+                # on this fleet with tick p99 at 0.49ms against a 66.67ms
+                # budget (0.7%), 0% of ticks over budget at any level, 240m of a
+                # 1000m CPU limit and 54Mi of a 256Mi memory limit. So 100 is a
+                # level this fleet has actually run, measured, on this hardware.
+                #
+                # WHY IT IS NOT HIGHER, GIVEN THAT HEADROOM. Because headroom at
+                # 100 is not evidence about 150. Two distortions sit on every
+                # number above and both push the same way:
+                #   - the load generator shares this box with the server under
+                #     test and uses more CPU than it (ADR-7). Tick p99 on this
+                #     host has read 67.4-70.8ms quiet and 224.7-240.6ms with a
+                #     deploy sharing it, a 3.3x swing, so every tick figure here
+                #     is a lower bound of unknown tightness.
+                #   - on k3d every gameplay packet crosses the serverlb TCP
+                #     proxy (#143), the likeliest cause of the 1252.9ms ack p99
+                #     seen at 80 players while tick p99 stayed at 0.49ms.
+                # ADR-7 therefore still says the per-server ceiling is UNKNOWN.
+                # This repo has already had to retract one number invented from
+                # apparent headroom (the "150 players per server" figure), and
+                # raising this one on the same evidence would be that again.
+                #
+                # RAISE IT WHEN, AND ONLY WHEN: ADR-7's load-generator blocker
+                # is cleared (a separate machine) and #143 is cleared, and a run
+                # on that setup brackets a real ceiling. Then this number moves
+                # with the measurement cited next to it.
+                - name: GAMESERVER_CAPACITY
+                  value: "100"
                 # The data tier stays in docker compose ON THE HOST — that is
                 # deliberate (ADR-15 decision 4 argues against a split, and this
                 # fleet is the accepted exception for one stage, not a migration).
@@ -397,10 +437,25 @@ spec:
               # idle is ~3% of a core, and NativeAOT cold start is 1.54s from
               # `docker run` to "Game server listening", so there is no burst at
               # startup to reserve for either.
+              #
+              # CPU REQUEST 200m -> 250m (#145). `scheduling: Packed` packs pods
+              # by REQUEST, so a request that describes idle rather than load is
+              # a scheduler that overcommits a node under exactly the conditions
+              # that matter. Measured peak on this fleet at 100 players is 240m;
+              # 200m was below it, 250m is above it. The limit is untouched at
+              # 1000m — this changes what the scheduler reserves, not what the
+              # pod may use.
+              #
+              # The MEMORY request stays 128Mi deliberately: measured peak at
+              # 100 players is 54Mi and the highest figure BENCHMARK.md has ever
+              # recorded is 82Mi at 200 players, so 128Mi already sits above
+              # load, not at idle. Both requests are now above measured peak,
+              # which is the property that was missing, and neither is a guess
+              # about a player count nobody has run.
               resources:
                 requests:
                   memory: "128Mi"
-                  cpu: "200m"
+                  cpu: "250m"
                 limits:
                   memory: "256Mi"
                   cpu: "1000m"

@@ -55,6 +55,88 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     releases it with the Agones-assigned address, that an already-`Allocated` pod registers
     immediately, that the flag is ignored without Agones, and that the default path never
     reads the state at all.
+- **`/status` publishes `achieved_tick_hz` — a *measured* base-tick rate, from the monotonic
+  clock (#144, #153).** The endpoint exposed a configured rate, a tick counter and an uptime,
+  and no measured rate, so the obvious move for anyone checking whether the loop was healthy
+  was `current_tick / uptime_seconds`. That mixes clocks, and on this host it reports a
+  healthy 60 Hz loop as ~54 Hz: issue #147, filed against a server that was running at
+  exactly 60, propagated into an ADR and blamed for a client prediction defect before being
+  closed as not-a-defect. Fixing the field labels alone would have left that trap armed —
+  the gauge is what disarms it, because an observer that has to supply its own clock will
+  eventually supply a bad one and the result looks exactly like a server defect.
+
+  `AchievedRateMeter` samples once per base tick from `Stopwatch.GetTimestamp()` — the same
+  timestamps that pace the loop — over a 2 second sliding window. O(1) and allocation-free
+  per tick, so it does not perturb the budget it measures. There is deliberately **no**
+  overload accepting a `DateTime`: a wall-clock-derived achieved rate would reproduce #147
+  *inside* the server, carrying the server's authority, which is worse than the bug it
+  replaces. `0` means "no window completed yet", not "stalled"; `current_tick` distinguishes
+  those, and it is documented rather than signalled with a null that would break typed
+  readers.
+
+  **Base timeline only.** The world and background groups are exact integer divisors of the
+  base rate, so three measured rates would be one measurement plus two pieces of arithmetic —
+  three things that can drift instead of one. Per group,
+  `rate(gameserver_sim_group_runs_total[...])` is already the measurement.
+
+  Also exported as the Prometheus gauge `gameserver_achieved_tick_hz`.
+
+### Fixed
+- **A join refused for capacity was completely silent (#145).** The capacity check called
+  `SendError` and logged nothing, so `grep -c full` over a pod log during a 120-player run
+  that was cut off at 100 joins returned **0**. An operator could not tell a server correctly
+  turning players away from a server that was broken — the two produced identical logs.
+  The refusal now logs at Warning with the user, the current count, the limit, and the fact
+  that the limit is `GAMESERVER_CAPACITY` rather than a resource limit. Warning rather than
+  Information because the number being hit is a chosen admission limit, so hitting it is the
+  signal that the choice needs revisiting.
+
+  Covered by `CapacityRejectionTests`, including the negative case — a join that fits must
+  not log a capacity warning, or a line emitted on every join would satisfy the positive
+  test. These are the first tests in the suite to assert on log output; everything else runs
+  on `NullLoggerFactory`, which is precisely why a missing log line was invisible.
+
+- **`/status` reported a rate nobody had configured (#144).** The endpoint filled
+  `tick_rate` from the legacy `--tick-rate` / `GAMESERVER_TICK_RATE` scalar. No current
+  deployment sets that variable, so the field reported the compiled-in default of **15**
+  forever — on servers running the standard `SIM_CRITICAL_HZ=60` configuration, i.e. wrong
+  by 4x, and silently disagreeing with both the startup banner and the join response. The
+  Unity DOTS sample polls this endpoint and reads that field.
+
+  The root problem was the shape, not the number: the server runs three simulation groups
+  at three frequencies (ADR-13), so one unqualified rate cannot be right for every reader.
+  `/status` now publishes rates derived from the resolved `SimulationRates`, each field
+  named for its group:
+  - `tick_rate` — kept, and **defined as the critical/movement rate, identical to the wire
+    field `join_token_resp.tick_rate`** (normative definition in `docs/API.md`). It keeps
+    its name because clients already read it under that name from both surfaces; what was
+    wrong was its source, not its name. A contract test asserts the two surfaces cannot
+    diverge — both read `SimulationRates.MovementHz`.
+  - `sim_critical_hz`, `sim_world_hz`, `sim_background_hz` — the three configured group
+    rates, explicit. `sim_world_hz` is the one that matters for a client jitter buffer and
+    for bandwidth: snapshots broadcast on the world cadence, not the critical one.
+  - `capacity` — the admission limit the server enforces, previously unobservable.
+
+  The mapping now lives in a testable `ServerStatus.ApplyRates`; it was inline in
+  `Program.cs`, a top-level-statement file with no seam, which is why it could read an
+  unrelated variable for as long as it did without a test noticing.
+
+- **`/status` reported uptime on the wrong clock.** `uptime_seconds` came from
+  `DateTime.UtcNow` (`CLOCK_REALTIME`) while `current_tick` is advanced by a
+  `Stopwatch`-paced loop (`CLOCK_MONOTONIC`). `current_tick / uptime_seconds` is the obvious
+  way to derive an achieved tick rate, and on a host whose realtime clock runs 10-17% fast
+  — this one does (#153) — that quotient reports a 60 Hz loop as ~54 Hz. That is precisely
+  issue #147: a defect filed against a server that did not have one, because the observer
+  supplied the clock. Uptime is now monotonic, so both terms of the quotient share a source.
+
+  **This changes the meaning of a documented field, which this repo has been bitten by
+  before, so it is stated rather than slipped in:** `uptime_seconds` is now elapsed process
+  time, not a wall-clock difference. It therefore no longer follows a clock step — an NTP
+  correction, a suspend/resume — and can disagree with `date`-derived arithmetic on a
+  drifting host. That disagreement is the point: an elapsed interval should never have come
+  from a wall clock, and the previous behaviour was not a feature anyone relied on, it was
+  the bug. The alternative considered and rejected was adding a second field and leaving this
+  one wrong; that keeps a field whose only use is to mislead.
 
 ### Documentation
 - **Distinguished clock *rate skew* from clock *steps* in `BENCHMARK.md`, with the sign table

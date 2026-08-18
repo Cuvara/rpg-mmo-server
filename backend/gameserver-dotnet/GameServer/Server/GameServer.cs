@@ -259,6 +259,17 @@ public sealed class GameServerHost : IAsyncDisposable
     /// <summary>Current simulation tick number.</summary>
     public ulong CurrentTick => _tickLoop.CurrentTick;
 
+    /// <summary>
+    /// The <b>measured</b> base-tick rate in Hz over the last completed window — as opposed
+    /// to <see cref="ServerOptions.SimulationRates"/>, which is what was configured. 0 until
+    /// the first window completes.
+    ///
+    /// <para>Derived entirely from <see cref="System.Diagnostics.Stopwatch"/>. Publishing
+    /// this is what stops an observer deriving a rate from <c>current_tick / uptime</c>,
+    /// which mixes clocks and reported a healthy 60Hz loop as 54Hz (#147, #153).</para>
+    /// </summary>
+    public double AchievedTickHz => _tickLoop.AchievedTickHz;
+
     /// <summary>Number of enemies currently alive.</summary>
     /// <summary>
     /// The number the status endpoint publishes as <c>enemies_alive</c>.
@@ -347,6 +358,10 @@ public sealed class GameServerHost : IAsyncDisposable
             _metrics,
             options.KeyframeInterval,
             simulationPhase);
+
+        // Wired here rather than next to the entity-count provider above, because the tick
+        // loop that owns the meter does not exist until this line.
+        _metrics?.SetAchievedTickHzProvider(() => _tickLoop.AchievedTickHz);
 
         _saver = new AsyncSaver(
             _playerStore,
@@ -796,6 +811,21 @@ public sealed class GameServerHost : IAsyncDisposable
             // Step 4: Check capacity
             if (_connections.Count >= _options.Capacity)
             {
+                // LOG IT. This refusal used to be silent: SendError told the client and
+                // nothing told the operator, so a server turning players away and a server
+                // that was broken produced identical logs — zero lines either way. That is
+                // how a 120-player run stopped dead at 100 joins with no explanation on the
+                // server side at all (#145).
+                //
+                // Warning, not Information: the number being hit is an admission limit that
+                // was chosen (GAMESERVER_CAPACITY), so hitting it is the signal that the
+                // choice needs revisiting — and it is exactly the same event the gateway
+                // sees as "this server is full, skip it" when it reads PlayerCount and
+                // Capacity out of the registry.
+                _logger.LogWarning(
+                    "Join rejected for {UserId}: server at capacity {Connections}/{Capacity}. " +
+                    "This is the configured admission limit (GAMESERVER_CAPACITY), not a resource limit",
+                    claims.UserId, _connections.Count, _options.Capacity);
                 await SendError(tempConn, "Server is full");
                 tempConn.Close();
                 return;
