@@ -1,0 +1,82 @@
+# ADDRESSES ONLY. No secret, no password, no DSN carrying one.
+#
+# Two ConfigMaps rather than one because the two workloads are configured by
+# different people for different reasons: the gateway's keys are about who it
+# allocates from, the game server's are about what address it advertises and
+# where it registers. They deliberately repeat `redis-addr` instead of sharing
+# a key — the day the fleet moves to its own Redis instance, that is a value
+# change, not a refactor.
+#
+# ---------------------------------------------------------------------------
+# ASSUMPTION ABOUT THE DATA TIER — VERIFY BEFORE BELIEVING A DEPLOY
+# ---------------------------------------------------------------------------
+# Redis, both PostgreSQL instances and Nakama are being put into the
+# `rpg-k8s-data` namespace by separate work. That namespace did not exist when
+# these values were written, so the service names below are ASSUMED to be the
+# compose service names carried over unchanged:
+#     redis / postgres / postgres-game / nakama
+# If the sibling names its Service anything else (`rpg-redis`, `redis-master`,
+# a Helm-generated name), THIS FILE IS THE ONLY THING THAT CHANGES. That is
+# the whole reason the address is here and not in the Deployment or the Fleet.
+#
+# CONFIRMED 2026-08-18: `rpg-k8s-data` now exists and its Services are
+# `redis`, `postgres-game`, `postgres-meta`, `nakama` — so the two names this
+# tier actually uses (redis, postgres-game) were assumed correctly. The META
+# database is `postgres-meta`, NOT `postgres`; nothing here dials it (it is
+# Nakama's, ADR-1), but a copy-paste from compose would get that one wrong.
+#
+# It is in-cluster DNS on purpose. `host.k3d.internal` is what makes the DEV
+# fleet in `rpg-realtime` work on this box and nowhere else (it names the
+# docker host, so the pod reaches the compose data tier through published host
+# ports). A k8s-hosted data tier is reached by Service DNS, which is the same
+# string on every cluster.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+  namespace: rpg-k8s-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: gateway
+data:
+  # Sessions + the server registry (ADR-4: one instance, prefix-separated
+  # roles). The gateway READS the registry; the game server WRITES its own
+  # entry (ADR-1, ADR-14 decision 2). Both must therefore point at the same
+  # Redis or the gateway looks up a registry nobody writes to and every
+  # MsgEnterWorld fails with "no server available" while the fleet is Ready.
+  redis-addr: "redis.rpg-k8s-data.svc.cluster.local:6379"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gameserver-config
+  namespace: rpg-k8s-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: gameserver
+data:
+  redis-addr: "redis.rpg-k8s-data.svc.cluster.local:6379"
+  # THE HOST HALF OF THE ADVERTISED ADDRESS, AND ONLY THE HOST HALF.
+  # (ADR-16 decision 2. The port is never configurable — it is assigned per
+  # pod at scheduling time and read back from the Agones sidecar.)
+  #
+  # 127.0.0.1 is correct HERE, on k3d, and is correct for a reason worth
+  # keeping: the k3d serverlb container publishes 7000-7100 to the host with
+  # docker's own port publishing, and Agones' MIN_PORT/MAX_PORT are set to the
+  # same range, so every dynamic port a GameServer can receive is reachable at
+  # 127.0.0.1:<that port> from Windows and WSL2 alike. status.address is the
+  # NODE container's docker-network address (172.20.0.3 on this cluster) and
+  # is not dialable by a client, which is why the read alone is insufficient.
+  #
+  # ON A REAL SINGLE-NODE k3s NODE this is the node's PUBLIC address — the IP
+  # or DNS name a client on the internet dials — e.g. "gs.example.com" or the
+  # VPS's public IPv4, with 7000-7100/tcp open in the firewall. NOT the node's
+  # private/internal IP (which is what status.address would give you and what
+  # this override exists to replace) and NOT 127.0.0.1, which would send every
+  # client to its own loopback.
+  #
+  # ON A MULTI-NODE CLUSTER NO VALUE IS CORRECT. The right host differs per
+  # pod, and one fleet-level env var cannot say so; the answers are an ingress
+  # or a per-pod value via the downward API (status.hostIP), and neither
+  # exists in this repo. ADR-16 records this as the condition to revisit on.
+  advertise-host: "127.0.0.1"
