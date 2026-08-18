@@ -6,6 +6,56 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`--register-on-allocated` / `GAMESERVER_REGISTER_ON_ALLOCATED`: hold the registry entry
+  back until Agones reports this GameServer `Allocated` (#151).** Off by default — with the
+  flag unset the server registers immediately after `ReadyAsync()`, byte for byte the
+  behaviour that shipped, so an unmigrated fleet sees no change.
+
+  The problem it fixes was measured on k3d and recorded in ADR-18: every pod of the map
+  fleet carries the same fleet-wide `GAMESERVER_MAP_ID`, so a second `Ready` replica is a
+  second *live* server for that map with **no allocation involved** — scaling 1 → 2 put two
+  members into `servers:map:map_01` within a second of the new pod reaching Ready, and
+  `registry.FindServer` then hands live players the unallocated spare that Agones is free to
+  delete on the next scale-down. With the flag on, a `Ready`-but-unallocated pod holds no
+  registry entry and is genuinely spare, which is the unlock for `replicas > 1` and a buffer
+  `FleetAutoscaler`.
+
+  - `IAgonesSdk.GetStateAsync()` reads `status.state` from the same `GET /gameserver`
+    document the address read already parses; `HttpAgonesSdk` now shares one fetch between
+    the two so they cannot drift on what a non-2xx or an unparsable body means.
+  - `AgonesAllocationGate.WaitForAllocatedAsync` polls it every second. An **unreadable**
+    state is "keep waiting", never "assume allocated"; the wait has no timeout and never
+    fails the server. It runs on a background task so the health loop keeps pinging (a pod
+    that blocked on the wait would be killed for missing pings) and the listener keeps
+    accepting.
+  - **Ready still comes first.** This narrows ADR-14 decision 3 rather than reversing it —
+    Ready remains a precondition of being allocatable and has simply stopped being sufficient
+    for being registered. The Agones address read stays between Ready and registration
+    (ADR-15 decision 2), and shutdown still deregisters before Agones `Shutdown`.
+  - **Inert without Agones.** With `IsEnabled` false there is no GameServer object to reach
+    `Allocated`, so honouring the flag would mean never registering; the server logs that it
+    is ignoring it and registers at start-up. docker-compose, local runs and every test are
+    unaffected.
+  - **Deallocation and restart:** once registered, the entry stays for the life of the
+    process and is removed only by the existing shutdown path or by its TTL. The gate is not
+    re-armed and a state that stops reading `Allocated` does not deregister — Agones has no
+    un-allocate (an `Allocated` GameServer leaves that state by being shut down, which ends
+    the process anyway), and a second writer that could yank a live server out of the
+    registry on one transient read failure is the two-writers-one-datum hazard ADR-1 forbids.
+    A pod that restarts while `Allocated` re-registers at once, because the gate's first read
+    already says so.
+  - Shutdown settles an in-flight gate (bounded, 5s) before deregistering, so a registration
+    cannot land *after* the deregistration and leave the gateway handing out a black hole
+    until the 15s TTL reaped it.
+  - Tests: `AgonesAllocationGateTests` (gate opens only on an exact `Allocated`, keeps
+    waiting on every other state, on an unreadable one and on a throwing SDK, and returns
+    false on cancellation), `HttpAgonesSdkAddressTests` state cases against the fake sidecar,
+    and host-level cases pinning that a gated Ready pod writes nothing, that allocation
+    releases it with the Agones-assigned address, that an already-`Allocated` pod registers
+    immediately, that the flag is ignored without Agones, and that the default path never
+    reads the state at all.
+
 ### Documentation
 - **Distinguished clock *rate skew* from clock *steps* in `BENCHMARK.md`, with the sign table
   that tells them apart (#153).** This host has both faults and they need different responses:
@@ -21,8 +71,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   failed. The Redis flake itself is deliberately not fixed or filed here: it is out of scope,
   the backward-step hypothesis is not reproducible on demand, and hardening a test against an
   undemonstrated cause is how a flake acquires a wrong fix that hides it. Refs #153, #147.
-
-### Documentation
 - **`BENCHMARK.md` and `K3S.md` now point at the measured `achieved_tick_hz` instead of warning
   people off arithmetic (#153/#144).** The gauge landed with #144, so the docs give the answer
   rather than only the prohibition: read **`achieved_tick_hz`** on `/status` or
@@ -41,8 +89,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   change — `uptime_seconds` is elapsed process time now, so it no longer follows a clock step
   and can legitimately disagree with `date`-derived arithmetic. Links
   `gameserver-dotnet/docs/METRICS.md` rather than restating it. Refs #153, #147, #144.
-
-### Documentation
 - **Warned that the achieved tick rate must not be computed from `/status` (#153).** The
   endpoint reports `tick_rate` (the *configured* rate), `current_tick` and `uptime_seconds`,
   which invites `current_tick / uptime_seconds` — but `uptime_seconds` is derived from
@@ -54,8 +100,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `Stopwatch.GetTimestamp()`). **No code change made here** — `ServerStatus` and the missing
   `Stopwatch`-derived achieved-rate field belong to #144 and were flagged to its owner rather
   than changed under it. Refs #153, #147, #144.
-
-### Documentation
 - **`BENCHMARK.md` records the k3d serverlb as a third local-measurement trap (#143).** On k3d
   the Agones port range is published by an nginx TCP proxy, so a capacity sweep through an
   Agones pod measures the proxy: snapshot interval p99 **211.9 ms** through the serverlb against
@@ -64,8 +108,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the local Agones rig is the obvious next place someone would sweep, so the trap is recorded
   next to the existing confounds with the rule to prefer the compose or direct-to-node path.
   Refs #143, ADR-16.
-
-### Documentation
 - **The host clock is a measurement hazard, and every BENCHMARK figure has now been audited
   against it (#153).** `CLOCK_REALTIME` on this WSL2 box runs *fast* relative to
   `CLOCK_MONOTONIC` — measured at **+11.1%, +16.7% and +16.65%** in three sessions on

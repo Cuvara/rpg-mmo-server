@@ -4,11 +4,23 @@
 
 # --- an unserved map must be refused NON-retryably ------------------------
 #
-# Three distinct client-facing strings, and the difference is load-bearing
+# Four distinct client-facing strings, and the difference is load-bearing
 # (backend/gateway/server/server.go):
 #   "map is not available"              terminal   -- no fleet hosts this map
 #   "server is starting, retry shortly" retryable  -- allocated, still booting
-#   "no server available for map"       terminal   -- the map exists but is full
+#   "no server available for map"       terminal   -- the map is full, or the
+#                                                     allocation failed for a
+#                                                     reason other than an
+#                                                     empty fleet
+#   "all servers busy, retry shortly"   retryable  -- the fleet has no Ready pod
+#
+# The last one is retryable and safe to retry (#157): it is returned when the
+# allocation API answers UnAllocated, a decoded 2xx body stating that NO
+# GameServer was handed out, so the retry it invites leaks nothing. It is also
+# the string this probe sees when the fleet is empty, which is precisely when
+# the branch under test was never reached -- so it is INCONCLUSIVE here, not a
+# failure. Do not "fix" that into a fail: it would make an empty fleet look like
+# a gateway bug.
 #
 # A client told "retry shortly" for a map no fleet serves retries, and every
 # retry permanently consumes a GameServer: Agones has no un-allocate and the
@@ -39,12 +51,15 @@ check_refusal_unknown_map() {
         '"server is starting, retry shortly" (retryable)' \
         "RegistryService.rememberMismatch / clientSafeAssignError in backend/gateway"
       ;;
+    *'message="all servers busy, retry shortly"'*)
+      skip "INCONCLUSIVE, not a pass: the gateway answered \"all servers busy, retry shortly\", which means the fleet had no Ready GameServer to allocate, so the map-mismatch branch was never reached. This is the expected answer for an empty fleet since #157 and is NOT a gateway fault -- retrying it allocates nothing. Re-run with spare Ready replicas in the fleet (see cluster.fleet)."
+      ;;
     *'message="no server available for map"'*)
-      skip "INCONCLUSIVE, not a pass: the gateway answered \"no server available for map\", which means the fleet had no Ready GameServer to allocate, so the map-mismatch branch was never reached. Re-run with spare Ready replicas in the fleet (see cluster.fleet)."
+      skip "INCONCLUSIVE, not a pass: the gateway answered \"no server available for map\", which since #157 means the allocation failed for a reason OTHER than an empty fleet (transport error, non-2xx, undecodable body), so the map-mismatch branch was never reached. Check the gateway logs for the allocator error before re-running."
       ;;
     *)
       fail "unexpected answer to the unknown-map probe" \
-        "one of the three known refusal strings" "$(echo "$out" | head -2)" \
+        "one of the four known refusal strings" "$(echo "$out" | head -2)" \
         "backend/gateway/server/server.go clientSafeAssignError"
       ;;
   esac

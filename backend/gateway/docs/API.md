@@ -153,8 +153,9 @@ classified below is reported as `internal error` and logged server-side.
 | `not authenticated` | frame sent before a successful `MsgAuth` |
 | `session expired` | session record gone (TTL, explicit disconnect, evicted elsewhere) |
 | `invalid enter world request` | `MsgEnterWorld` payload did not decode |
-| `no server available for map` | the map's live server(s) are full, or the map has no server and allocation failed. **Do not retry** — retrying cannot create capacity |
-| `server is starting, retry shortly` | a game server was allocated for this map but had not registered itself when the wait window expired. **Retryable** — retry after a few seconds |
+| `no server available for map` | the map's live server(s) are full, or the map has no server and allocation failed for a reason other than an exhausted fleet. **Do not retry** — retrying cannot create capacity, and ADR-2 forbids adding a second server to a full map |
+| `all servers busy, retry shortly` | the map has no live server and the allocation API answered `UnAllocated`: every GameServer in the fleet is taken and none is `Ready` at this instant (`registry.ErrNoCapacity`). **Retryable** — retry after a few seconds. Distinct from `no server available for map`: nothing here is full, the fleet is momentarily empty and the Fleet controller is already bringing a replacement to `Ready` (5.38s measured on k3d, ADR-18) |
+| `server is starting, retry shortly` | a game server **was** allocated for this map but had not registered itself when the wait window expired. **Retryable** — retry after a few seconds. Distinct from `all servers busy, retry shortly`, where no server was allocated at all |
 | `map is not available` | no fleet or server in this deployment hosts the requested `map_id`: the pod that answered the allocation serves a different map (its fleet's `GAMESERVER_MAP_ID`), or the registry index returned a server for another map. **Terminal — do not retry**: retrying cannot change which map a fleet serves, and every retry costs a GameServer Agones never un-allocates. Distinct from `no server available for map`, which means the map exists but is full |
 | `not implemented` | the requested transfer mode is unimplemented (e.g. dungeon) |
 | `internal error` | anything else — store failure, allocator failure, token signing failure |
@@ -284,6 +285,26 @@ retry of `server is starting, retry shortly` would allocate another pod, only on
 can ever win the `map_id` registration, and nothing deallocates the losers. A
 failed allocation is never cached, so the next request is free to try again.
 
+**An exhausted fleet is retryable; every other allocator failure is not.** When
+the allocation API answers `UnAllocated`, `AllocateServer` returns
+`registry.ErrNoCapacity` and `MsgEnterWorld` replies `all servers busy, retry
+shortly` rather than the terminal `no server available for map`. The split is
+narrow on purpose. `UnAllocated` is a decoded 2xx body stating that **no**
+GameServer was handed out, so the retry it invites costs one allocation POST and
+leaks no pod — and the retry that finally succeeds usually costs not even that,
+because a pod self-registers at startup *before* any allocation (ADR-18), so once
+the replacement is `Ready` the next `MsgEnterWorld` resolves it straight from the
+registry with no allocator call. Any other allocator failure — transport error,
+non-2xx status, undecodable body — may have allocated a pod whose response was
+lost, and since Agones has no un-allocate and this gateway has no `Deallocate`,
+inviting a retry there is precisely how un-reclaimable pods accumulate. Those
+keep the terminal message. Note what is **not** bounded: nothing caps how often a
+client may retry `all servers busy`. That bound belongs to the client's backoff,
+not the gateway — a gateway-side wait would convert a millisecond refusal into a
+multi-second stall on the join path for a condition that may never clear, and the
+`allocateOnce` single-flight already collapses concurrent retries for one map
+into one allocation attempt. Issue #152.
+
 **An allocated server must serve the map that was asked for.** Allocation targets
 a **Fleet**, not a `map_id`: the request Agones receives is "give me a GameServer
 of fleet X", and the pod it returns serves whatever its own fleet spec's
@@ -374,7 +395,7 @@ start-up. For the two wait knobs a non-positive env value is also ignored; for
 | `registry.ErrServerStarting` | `gateway/registry` | Retryable sentinel: allocated server never registered inside the wait window |
 | `registry.NewAgonesAllocator(AgonesConfig) (*AgonesAllocator, error)` | `gateway/registry` | Allocator backed by the Agones `GameServerAllocation` API |
 | `registry.AllocationRequest` / `KindAllocator` | `gateway/registry` | Kind-aware allocation (`KindMap`, `KindDungeon`) |
-| `registry.ErrNoCapacity` | `gateway/registry` | Sentinel for `state: UnAllocated` (fleet exhausted) |
+| `registry.ErrNoCapacity` | `gateway/registry` | Sentinel for `state: UnAllocated` (fleet exhausted). Matchable through `allocateAndWait`'s two-verb `%w` wrap, which is what lets the gateway answer `all servers busy, retry shortly` instead of the terminal message |
 | `(*RegistryService).GetServer(ctx, serverID)` | `gateway/registry` | Single live server lookup |
 | `events.NewRelay(stream, name, sink, logger) *Relay` | `gateway/events` | Real `EventRelay` over any `storage.EventStream` |
 | `events.Sink` / `events.SinkFunc` | `gateway/events` | Per-event callback contract |

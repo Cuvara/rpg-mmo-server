@@ -96,6 +96,7 @@ set. Flags are **space-separated** (`--addr :9000`).
 | *(none)* | `TRANSPORT_KEY` | *(empty)* | Pre-shared AES-256 key for KCP. Empty = cleartext (start-up WARNING). Ignored for TCP |
 | `--public-addr` | `GAMESERVER_PUBLIC_ADDR` | *(listen addr)* | Full `host:port` advertised to clients through the registry. Used **only when Agones is off** — with Agones on and the status read working, the port comes from Agones and the host from `GAMESERVER_ADVERTISE_HOST`; see the Agones section |
 | `--advertise-host` | `GAMESERVER_ADVERTISE_HOST` | *(unset → Agones `status.address`)* | **Host only, no port.** Replaces the host of the address read from the Agones GameServer status; the port always stays the Agones-assigned one. Ignored (with a warning) when Agones is off or the status read fails. Needed because `status.address` is the *node* address, which a client outside the cluster network cannot dial |
+| `--register-on-allocated` | `GAMESERVER_REGISTER_ON_ALLOCATED=true` | off | Hold the registry entry back until Agones reports this GameServer **Allocated**, instead of publishing it right after Ready. Agones-only; ignored (with a warning) when Agones is off — see below |
 | `--redis` | `REDIS_ADDR` | *(unset)* | Registry Redis; unset disables self-registration |
 | `--redis-password` | `REDIS_PASSWORD` | *(unset)* | Registry Redis password |
 
@@ -247,6 +248,68 @@ and only the client knows:
 Advertising 127.0.0.1:7008 (host from GAMESERVER_ADVERTISE_HOST, port 7008 from
 Agones status); configured value ':9000' not used
 ```
+
+##### Registering on `Allocated` instead of on Ready (`--register-on-allocated`)
+
+**Default off, and the default is the behaviour that shipped.** With the flag unset
+the server registers immediately after `ReadyAsync()`, exactly as before; a fleet
+that has not been migrated sees no change from this option existing.
+
+Why it exists: every pod of the map fleet carries the same fleet-wide
+`GAMESERVER_MAP_ID`, so a second `Ready` replica is a second **live** server for
+that map with no allocation involved. Measured on k3d, scaling the fleet 1 → 2 put
+two members into `servers:map:map_01` within a second of the new pod reaching
+Ready, and `registry.FindServer` then returns the *least loaded* of the two — the
+unallocated spare, which Agones is free to delete on the next scale-down. That is
+ADR-2's one-live-server-per-map invariant broken by the replica count alone, which
+is why the fleet is pinned at `replicas: 1` and why ADR-18 refuses a buffer
+`FleetAutoscaler`.
+
+With `GAMESERVER_REGISTER_ON_ALLOCATED=true` and Agones enabled, the server polls
+`GET /gameserver` every second and publishes its registry entry only once
+`status.state` reads `Allocated`. A `Ready`-but-unallocated pod therefore holds no
+registry entry and is genuinely spare.
+
+What does **not** change:
+
+- **Ready still comes first.** This narrows ADR-14 decision 3 rather than reversing
+  it: Ready remains a precondition of being allocatable, it has simply stopped
+  being sufficient for being *registered*. On the way down the order is unchanged —
+  deregister, then Agones `Shutdown`.
+- **The address read stays where it is**, between Ready and registration, so the
+  Agones-assigned `host:port` is still the first value written (ADR-15 decision 2).
+- **The health loop keeps running while the pod waits.** The wait happens on a
+  background task, not on the start-up path — a pod that blocked here would stop
+  pinging and Agones would kill it — and the listener is accepting throughout, so a
+  client reaching a just-allocated pod is not refused while the state read is in
+  flight.
+- **Agones off changes nothing.** There is no GameServer object to reach
+  `Allocated`, so honouring the flag would mean never registering. The server logs
+  that it is ignoring the flag and registers at start-up. docker-compose, local
+  runs and the test suite are unaffected.
+
+An **unreadable** state — no sidecar, a timeout, a non-2xx, a body without
+`status.state` — is treated as "keep waiting", never as "assume allocated". The
+wait has no timeout and never fails the server: a pod that waits forever holds no
+entry and serves nobody, which is the safe end of the failure; the unsafe end is a
+spare pod taking live players.
+
+**Deallocation and restart.** Once registered, the entry stays for the life of the
+process and is removed only by the existing shutdown path (deregister, then Agones
+`Shutdown`) or by its 15s TTL lapsing. The gate is not re-armed and the server does
+not deregister if a later state read stops saying `Allocated`. Two reasons: Agones
+has no un-allocate — an `Allocated` GameServer leaves that state by being shut
+down, which already terminates the process — and a second writer that could yank a
+live server out of the registry on one transient read failure is exactly the
+two-writers-one-datum hazard ADR-1 forbids. A pod that **restarts** while its
+GameServer is `Allocated` re-registers at once: the gate's first read already says
+`Allocated`.
+
+> **Tooling note.** A pod that is `Ready` and deliberately unregistered is a new
+> legitimate state. `verify.sh` layer 3, the integration suite and
+> `refusal.split_world` assume a pod registers shortly after becoming Ready, and
+> must be taught this state before the flag is turned on for a fleet. Nothing
+> changes while it is off.
 
 **No call can throw.** A missing, slow or 500-ing sidecar is logged and ignored:
 every call site is either start-up or a background loop, and an exception in

@@ -204,6 +204,72 @@ public class HttpAgonesSdkAddressTests
         Assert.Null(await new NoopAgonesSdk().GetAddressAsync());
     }
 
+    // ── status.state, the allocation gate's input (issue #151) ──
+
+    /// <summary>The live capture reports Ready, and the state read returns it verbatim.</summary>
+    [Fact]
+    public async Task LiveSidecarShape_YieldsTheState()
+    {
+        using var sidecar = new FakeStatusSidecar(LiveBody);
+        using var sdk = new HttpAgonesSdk(NullLogger.Instance, sidecar.BaseAddress, TestTimeout);
+
+        Assert.Equal("Ready", await sdk.GetStateAsync());
+    }
+
+    /// <summary>An allocated GameServer reads as exactly the constant the gate compares to.</summary>
+    [Fact]
+    public async Task AllocatedState_MatchesTheConstantTheGateCompares()
+    {
+        const string body = """
+            {"status":{"state":"Allocated","address":"10.0.0.7",
+             "ports":[{"name":"game","port":7691}]}}
+            """;
+        using var sidecar = new FakeStatusSidecar(body);
+        using var sdk = new HttpAgonesSdk(NullLogger.Instance, sidecar.BaseAddress, TestTimeout);
+
+        Assert.Equal(AgonesGameServerState.Allocated, await sdk.GetStateAsync());
+    }
+
+    /// <summary>
+    /// No state, no status, a non-2xx and an unparsable body are all null — "unreadable",
+    /// which the gate treats as "keep waiting" rather than as a state.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"status":{"address":"10.0.0.7"}}""", 200)]
+    [InlineData("""{"status":{"state":"   ","address":"10.0.0.7"}}""", 200)]
+    [InlineData("""{}""", 200)]
+    [InlineData("""{"status":{"state":"Allocated"}}""", 500)]
+    [InlineData("not json at all", 200)]
+    public async Task UnreadableState_IsNull(string body, int status)
+    {
+        using var sidecar = new FakeStatusSidecar(body, status);
+        using var sdk = new HttpAgonesSdk(NullLogger.Instance, sidecar.BaseAddress, TestTimeout);
+
+        Assert.Null(await sdk.GetStateAsync());
+    }
+
+    /// <summary>No sidecar at all is a null and never an exception.</summary>
+    [Fact]
+    public async Task StateRead_WithNoSidecar_IsNullAndDoesNotThrow()
+    {
+        var lease = new TestPorts.Lease();
+        var dead = $"http://localhost:{lease.Port}/";
+        lease.Dispose();
+
+        using var sdk = new HttpAgonesSdk(NullLogger.Instance, dead, TestTimeout);
+
+        string? state = "unset";
+        Assert.Null(await Record.ExceptionAsync(async () => state = await sdk.GetStateAsync()));
+        Assert.Null(state);
+    }
+
+    /// <summary>The no-op SDK has no GameServer object, so it has no state.</summary>
+    [Fact]
+    public async Task NoopSdk_HasNoState()
+    {
+        Assert.Null(await new NoopAgonesSdk().GetStateAsync());
+    }
+
     /// <summary>The port name must stay the one the fleet manifests and the gateway use.</summary>
     [Fact]
     public void GamePortName_MatchesTheFleetManifestsAndTheGateway()

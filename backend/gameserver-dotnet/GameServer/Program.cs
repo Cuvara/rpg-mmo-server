@@ -115,6 +115,13 @@ string publicAddr = GetArg(args, "--public-addr") ?? Env("GAMESERVER_PUBLIC_ADDR
 // Exactly one of them applies to any given deployment. Setting this one with Agones off
 // does nothing at all — see the start-up warning below.
 string? advertiseHost = GetArg(args, "--advertise-host") ?? Env("GAMESERVER_ADVERTISE_HOST");
+// Hold the registry entry back until Agones reports this GameServer Allocated, instead of
+// publishing it right after Ready. OFF by default: a fleet that has not been migrated must
+// behave exactly as it did before this option existed. Agones only — with no sidecar there
+// is no allocation to wait for, and gating on one would mean never registering (the server
+// logs and ignores it in that case).
+bool registerOnAllocated =
+    HasFlag(args, "--register-on-allocated") || Env("GAMESERVER_REGISTER_ON_ALLOCATED") == "true";
 
 // ── Logging ──
 
@@ -154,6 +161,12 @@ if (useAgones)
             ? "host from the Agones GameServer status (GAMESERVER_ADVERTISE_HOST unset), port from Agones"
             : $"host '{advertiseHost}' (GAMESERVER_ADVERTISE_HOST), port from Agones");
 }
+logger.LogInformation("  Register:  {Register}",
+    registerOnAllocated && useAgones
+        ? "on Agones Allocated (a Ready-but-unallocated pod holds no registry entry)"
+        : registerOnAllocated
+            ? "at startup (GAMESERVER_REGISTER_ON_ALLOCATED set but Agones is disabled -- IGNORED)"
+            : "at startup, right after Ready (default)");
 logger.LogInformation("  Nakama:    {Nakama}", string.IsNullOrWhiteSpace(nakamaUrl) ? "disabled (NAKAMA_URL unset)" : nakamaUrl);
 logger.LogInformation("  Metrics:   {Metrics}", string.IsNullOrWhiteSpace(metricsAddr) ? "disabled" : metricsAddr);
 logger.LogInformation("  GameDB:    {GameDb}",
@@ -420,6 +433,7 @@ var options = new ServerOptions
     PlayerStore = playerStore,
     AgonesSdk = agonesSdk,
     AdvertiseHost = advertiseHost,
+    RegisterOnAllocated = registerOnAllocated,
     // Always Noop: no Redis-backed IEventStream implementation exists yet, so
     // cross-server events are generated (entity_killed) and then discarded.
     // NOT for want of a Redis client — this process has one and uses it to

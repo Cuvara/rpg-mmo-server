@@ -159,6 +159,31 @@ public interface IAgonesSdk
     /// when the pod is scheduled, so an earlier read races the scheduler.</para>
     /// </summary>
     Task<AgonesGameServerAddress?> GetAddressAsync();
+
+    /// <summary>
+    /// Read <c>status.state</c> from this GameServer object, or null when it cannot be read.
+    ///
+    /// <para>Null means "unknown", never "not allocated": no sidecar, an unanswered request,
+    /// or a body without the field all land here. A caller gating behaviour on a particular
+    /// state must therefore treat null as "keep waiting" and never as a state in its own
+    /// right — see <see cref="AgonesAllocationGate"/>.</para>
+    /// </summary>
+    Task<string?> GetStateAsync();
+}
+
+/// <summary>
+/// The <c>status.state</c> values of an Agones GameServer this server reasons about.
+/// Only the two it actually branches on are named; the lifecycle has more
+/// (<c>Scheduled</c>, <c>RequestReady</c>, <c>Shutdown</c>, <c>Unhealthy</c>) and they are
+/// all handled as "not the one we are waiting for".
+/// </summary>
+public static class AgonesGameServerState
+{
+    /// <summary>Ready to be allocated, and not yet handed to anyone.</summary>
+    public const string Ready = "Ready";
+
+    /// <summary>Handed out by an allocation. This is the state that means "serving".</summary>
+    public const string Allocated = "Allocated";
 }
 
 /// <summary>No-op Agones SDK for local development (no Agones sidecar).</summary>
@@ -186,6 +211,14 @@ public sealed class NoopAgonesSdk : IAgonesSdk
     /// </remarks>
     public Task<AgonesGameServerAddress?> GetAddressAsync() =>
         Task.FromResult<AgonesGameServerAddress?>(null);
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Always null: there is no Agones here, so there is no GameServer object with a state.
+    /// The allocation gate is never armed on this path (it requires
+    /// <see cref="IsEnabled"/>), so nothing ever waits on this answer.
+    /// </remarks>
+    public Task<string?> GetStateAsync() => Task.FromResult<string?>(null);
 }
 
 /// <summary>
@@ -377,21 +410,7 @@ public sealed class HttpAgonesSdk : IAgonesSdk, IDisposable
     {
         try
         {
-            using var resp = await _http.GetAsync("gameserver").ConfigureAwait(false);
-            if (!resp.IsSuccessStatusCode)
-            {
-                _logger.LogWarning("Agones sidecar GET /gameserver returned {Status}",
-                    (int)resp.StatusCode);
-                return null;
-            }
-
-            var body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-
-            // Source-generated contract, not the reflection resolver: this module is
-            // NativeAOT and GameServer.Tests/Aot/JsonReflectionGuardTests enforces it.
-            var gs = JsonSerializer.Deserialize(body, AgonesJsonContext.Default.AgonesGameServerJson);
-
-            var status = gs?.Status;
+            var status = await GetStatusAsync().ConfigureAwait(false);
             if (status == null || string.IsNullOrWhiteSpace(status.Address))
             {
                 _logger.LogWarning(
@@ -430,6 +449,53 @@ public sealed class HttpAgonesSdk : IAgonesSdk, IDisposable
             _logger.LogWarning(ex, "Agones sidecar GET /gameserver failed");
             return null;
         }
+    }
+
+    /// <summary>
+    /// Read <c>status.state</c> from the same <c>GET /gameserver</c> document
+    /// <see cref="GetAddressAsync"/> parses — <c>"Ready"</c>, <c>"Allocated"</c>,
+    /// <c>"Scheduled"</c>, and the rest of the Agones lifecycle, verbatim and uninterpreted.
+    ///
+    /// <para>Never throws, and null is "could not read it": no sidecar, timeout, non-2xx,
+    /// unparsable body, or a status with no state. A caller polling for a particular state
+    /// must keep polling on null rather than concluding anything from it.</para>
+    /// </summary>
+    public async Task<string?> GetStateAsync()
+    {
+        try
+        {
+            var status = await GetStatusAsync().ConfigureAwait(false);
+            var state = status?.State;
+            return string.IsNullOrWhiteSpace(state) ? null : state!.Trim();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Agones sidecar GET /gameserver failed");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// One <c>GET /gameserver</c>, deserialized to the status subtree. Shared by the address
+    /// and state reads so the two cannot drift apart on what a non-2xx or an unparsable body
+    /// means. Throws only what the caller's catch already handles.
+    /// </summary>
+    private async Task<AgonesStatusJson?> GetStatusAsync()
+    {
+        using var resp = await _http.GetAsync("gameserver").ConfigureAwait(false);
+        if (!resp.IsSuccessStatusCode)
+        {
+            _logger.LogWarning("Agones sidecar GET /gameserver returned {Status}",
+                (int)resp.StatusCode);
+            return null;
+        }
+
+        var body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+        // Source-generated contract, not the reflection resolver: this module is
+        // NativeAOT and GameServer.Tests/Aot/JsonReflectionGuardTests enforces it.
+        var gs = JsonSerializer.Deserialize(body, AgonesJsonContext.Default.AgonesGameServerJson);
+        return gs?.Status;
     }
 
     private async Task PostAsync(string path, string label)
@@ -504,6 +570,12 @@ internal sealed class AgonesGameServerJson
 /// <summary>The subset of <c>GameServer.status</c> this server reads.</summary>
 internal sealed class AgonesStatusJson
 {
+    /// <summary>
+    /// Lifecycle state — <c>Scheduled</c>, <c>RequestReady</c>, <c>Ready</c>,
+    /// <c>Allocated</c>, <c>Shutdown</c>, <c>Unhealthy</c>. Read by the allocation gate.
+    /// </summary>
+    [JsonPropertyName("state")] public string? State { get; set; }
+
     /// <summary>Node address the pod's host ports are published on.</summary>
     [JsonPropertyName("address")] public string? Address { get; set; }
 
@@ -552,5 +624,102 @@ public static class AgonesHealthLoop
         }
 
         logger.LogInformation("Agones health loop stopped");
+    }
+}
+
+/// <summary>
+/// Waits for this pod's own Agones GameServer to reach <c>Allocated</c> before its caller
+/// does anything that claims a world — today, exactly one thing: publishing the Redis
+/// registry entry the gateway hands clients (ADR-18 decision 4, mechanism 2).
+///
+/// <para><b>Why this exists.</b> The server registers at startup, right after
+/// <c>ReadyAsync()</c>. Every <c>Ready</c> replica of a fleet whose pods all carry the same
+/// <c>GAMESERVER_MAP_ID</c> is therefore a <i>live</i> server for that map, with no
+/// allocation involved — measured on k3d, scaling the map fleet 1 -> 2 put two members into
+/// <c>servers:map:map_01</c> within a second of the second pod reaching Ready. That is
+/// ADR-2's one-live-server-per-map invariant broken by the replica count alone, and it is
+/// why the fleet is pinned at <c>replicas: 1</c> with no autoscaler.</para>
+///
+/// <para><b>What it does not do.</b> It never gives up and it never fails the server: an
+/// unreadable state is "keep waiting", not "assume allocated". A pod that waits forever
+/// holds no registry entry and serves nobody, which is the safe end of the failure — the
+/// unsafe end is a spare pod that takes live players. The health loop must already be
+/// running while this waits, or Agones kills the pod for missing pings; the caller in
+/// <c>GameServerHost.RunAsync</c> starts this off the critical path for exactly that reason.
+/// </para>
+/// </summary>
+public static class AgonesAllocationGate
+{
+    /// <summary>
+    /// How often the state is re-read. Short enough that the allocation -> registration leg
+    /// is not what a joining client waits on (the gateway's <c>awaitRegistration</c> allows
+    /// 15s), long enough that a pod parked in the buffer for hours is not a busy loop
+    /// against its own sidecar.
+    /// </summary>
+    public static readonly TimeSpan DefaultPollInterval = TimeSpan.FromSeconds(1);
+
+    /// <summary>Poll until the GameServer reports <c>Allocated</c>, or until cancelled.</summary>
+    /// <param name="sdk">SDK to read the state through. Must be an enabled one.</param>
+    /// <param name="ct">Cancelled on shutdown; that is the only way this returns false.</param>
+    /// <param name="logger">Where the wait is narrated. A pod stuck here must say so.</param>
+    /// <param name="pollInterval">Null uses <see cref="DefaultPollInterval"/>.</param>
+    /// <returns>True once <c>Allocated</c> was observed; false if cancelled first.</returns>
+    public static async Task<bool> WaitForAllocatedAsync(
+        IAgonesSdk sdk, CancellationToken ct, ILogger logger, TimeSpan? pollInterval = null)
+    {
+        var interval = pollInterval ?? DefaultPollInterval;
+        string? lastState = null;
+        int polls = 0;
+
+        logger.LogInformation(
+            "Waiting for this GameServer to reach {Allocated} before registering " +
+            "(polling every {Interval}s); until then it holds no registry entry and the " +
+            "gateway will not hand clients to it",
+            AgonesGameServerState.Allocated, interval.TotalSeconds);
+
+        while (!ct.IsCancellationRequested)
+        {
+            string? state;
+            try
+            {
+                state = await sdk.GetStateAsync().ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) { break; }
+            catch (Exception ex)
+            {
+                // HttpAgonesSdk never throws; this guards a custom implementation from
+                // ending the wait — and therefore the registration — on one bad read.
+                logger.LogWarning(ex, "Reading the Agones GameServer state failed; still waiting");
+                state = null;
+            }
+
+            if (string.Equals(state, AgonesGameServerState.Allocated, StringComparison.Ordinal))
+            {
+                logger.LogInformation(
+                    "GameServer reached {Allocated} after {Polls} state reads; registering now",
+                    AgonesGameServerState.Allocated, polls + 1);
+                return true;
+            }
+
+            polls++;
+            if (!string.Equals(state, lastState, StringComparison.Ordinal))
+            {
+                // State transitions are the useful line. Null is a read failure, not a
+                // state, and is logged as such so it is not mistaken for a lifecycle step.
+                logger.LogInformation(
+                    "GameServer state is {State}; not registering yet",
+                    state ?? "<unreadable>");
+                lastState = state;
+            }
+
+            try { await Task.Delay(interval, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { break; }
+        }
+
+        logger.LogInformation(
+            "Stopped waiting for {Allocated} after {Polls} state reads (shutting down); " +
+            "this server never registered",
+            AgonesGameServerState.Allocated, polls);
+        return false;
     }
 }
