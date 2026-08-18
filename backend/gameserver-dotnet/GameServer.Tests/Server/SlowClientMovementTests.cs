@@ -294,14 +294,26 @@ public class SlowClientMovementTests
         /// </summary>
         public ulong ResumeTick;
 
-        /// <summary>Largest sampled step at or after <see cref="ResumeTick"/>.</summary>
-        public float LargestAfterResume()
+        /// <summary>
+        /// Largest sampled step at or after <see cref="ResumeTick"/>, normalized by
+        /// frame gap so that a pair spanning N world ticks is compared as distance/N
+        /// rather than as its raw distance (#154). Without this, a scheduling hiccup
+        /// that makes two world ticks land in one sample reads as 2.00x — the same
+        /// value the explicit-stop threshold rejects — and the test reports a repaid
+        /// pause on a server that did nothing wrong.
+        /// </summary>
+        public float LargestAfterResume(int worldEvery)
         {
             float largest = 0f;
             foreach (var s in Samples)
             {
                 if (s.Tick < ResumeTick) continue;
-                if (s.Distance > largest) largest = s.Distance;
+                // Normalize: a pair spanning N world ticks is N normal steps, not one
+                // large step. The gap is in base ticks; divide by worldEvery to get
+                // the number of world intervals.
+                int spans = Math.Max(1, (int)(s.FrameGap / (ulong)worldEvery));
+                float normalized = s.Distance / spans;
+                if (normalized > largest) largest = normalized;
             }
             return largest;
         }
@@ -390,7 +402,7 @@ public class SlowClientMovementTests
             await samples;
 
             Assert.NotEmpty(log.Samples);
-            float largest = log.LargestAfterResume();
+            float largest = log.LargestAfterResume(rates.WorldEvery);
             Assert.True(largest > 0f,
                 $"no movement was sampled after the restart{log.Describe(largest)}");
             return (largest, speed, log.Describe(largest));
