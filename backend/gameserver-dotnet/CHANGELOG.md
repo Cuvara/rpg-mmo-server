@@ -7,6 +7,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Documentation
+- **Distinguished clock *rate skew* from clock *steps* in `BENCHMARK.md`, with the sign table
+  that tells them apart (#153).** This host has both faults and they need different responses:
+  rate skew understates any measured rate and is fixed by never deriving a rate from the wall
+  clock; a step corrupts a single reading and is not fixed by that rule at all. Added because
+  matching on magnitude alone already produced one wrong attribution — a Redis TTL assertion
+  reading **16.87s against a 15s ceiling** looked like the 10-17% skew at +12.5%, but the
+  registry sets a *relative* expiry (`PEXPIRE`), so Redis computes the deadline on its own
+  clock and the remainder cannot exceed 15s by construction; and decisively, a fast clock makes
+  a TTL decay faster, so it reads **lower**, never higher. The observation ran the wrong way for
+  the mechanism it was blamed on. Recorded as a worked example with the rule it teaches —
+  **magnitude matching is not diagnosis, confirm the sign** — which is the same discipline #147
+  failed. The Redis flake itself is deliberately not fixed or filed here: it is out of scope,
+  the backward-step hypothesis is not reproducible on demand, and hardening a test against an
+  undemonstrated cause is how a flake acquires a wrong fix that hides it. Refs #153, #147.
+
+### Documentation
 - **`BENCHMARK.md` and `K3S.md` now point at the measured `achieved_tick_hz` instead of warning
   people off arithmetic (#153/#144).** The gauge landed with #144, so the docs give the answer
   rather than only the prohibition: read **`achieved_tick_hz`** on `/status` or

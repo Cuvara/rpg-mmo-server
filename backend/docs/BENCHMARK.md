@@ -546,6 +546,36 @@ from a monotonic source. The fix is to store the pong time as a
 **Left unfixed deliberately:** it is gateway runtime behaviour, not a document
 figure, and changing a heartbeat timeout wants its own change and tests.
 
+#### Rate skew and clock steps are different faults — check the sign
+
+This host has two distinct clock problems, and matching a discrepancy on
+*magnitude alone* attributes one to the other. Before blaming either, check which
+direction the error runs:
+
+| | Rate skew | Clock step |
+|---|---|---|
+| What it is | `CLOCK_REALTIME` advances ~10-17% too fast, continuously | The clock jumps, e.g. on an NTP resync (`timedatectl` here has flapped between `synchronized: no` and `yes`) |
+| Effect on a measured **duration** | inflated — a real 20s reads as ~23.3s | one-off offset, either direction |
+| Effect on a measured **rate** | **understated** — a real 60 Hz reads as ~51 Hz | one-off, either direction |
+| Effect on a **countdown/TTL** | decays faster, so remaining time reads **lower** | remaining time can read **higher** (backward step) or lower |
+| Does "never derive a rate from a wall clock" fix it? | Yes | **No** — a step corrupts a single reading, not a rate |
+
+**Worked example, because this caught a real wrong hypothesis.** A Redis TTL
+assertion failed reading **16.87s against a 15s ceiling**, and +12.5% sits neatly
+inside the 10-17% skew band — so it looked like this bug. It is not. The registry
+sets a **relative** expiry (`KeyExpireAsync(key, ttl)` → `PEXPIRE`), so Redis
+computes the deadline on its own clock and the remainder cannot exceed 15s by
+construction. And decisively, **a fast clock makes a TTL decay faster, so it
+reads lower, never higher.** The observation ran the wrong way for the mechanism
+it was attributed to. A backward *step* between the `PEXPIRE` and the read is the
+leading explanation — same unhealthy-clock family, different fault, and untouched
+by the rule above. (Leading hypothesis, not established: the flap is not
+reproducible on demand.)
+
+The general lesson is cheap to apply: **magnitude matching is not diagnosis.**
+Confirm the sign before attributing a discrepancy to a known clock fault — which
+is the same discipline #147 failed, in a different costume.
+
 If you add a measurement to this document, state the clock it came from.
 
 ### The k3d serverlb is in the gameplay data path
