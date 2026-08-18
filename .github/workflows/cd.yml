@@ -1021,7 +1021,11 @@ jobs:
           # Probe what a client is actually handed instead: the address the server
           # registered for its own map. That is the value the gateway returns verbatim,
           # so a probe of anything else proves less.
-          if grep -qE '^ALLOCATOR=agones[[:space:]]*$' .env 2>/dev/null; then
+          # This step sources $RPG_DEPLOY_DIR/deploy/.env but does not cd there, so
+          # read the value it already has rather than grepping a file that is not in
+          # the working directory — the first version did, silently took the else
+          # branch, and probed the container it was written to stop probing.
+          if [ "${ALLOCATOR:-none}" = "agones" ]; then
             gs_map="${GAMESERVER_MAP_ID:-map_01}"
             gs_addr=""
             for key in $(docker exec "${COMPOSE_NAME_PREFIX:-rpg}-redis" redis-cli --scan --pattern 'servers:id:*' 2>/dev/null); do
