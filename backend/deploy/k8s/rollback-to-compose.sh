@@ -87,16 +87,26 @@ say "start the compose dev stack"
 # non-zero with a vsock error AFTER starting the container. Under `set -e` that
 # aborted the rollback BEFORE the legacy fleet was restored, leaving dev with
 # neither stack serving map_01. Tolerate the status, assert on real state.
+# One `docker ps -a` for the whole list; see the note in dev-up.sh. Started in
+# one call so compose's own dependency order is preserved by the daemon.
+existing="$(docker ps -a --format '{{.Names}}' 2>/dev/null || true)"
+to_start=""
 for c in $COMPOSE_DEV_CONTAINERS; do
-  if docker ps -a --format '{{.Names}}' | grep -qx "$c"; then
-    echo "starting $c"; docker start "$c" >/dev/null 2>&1 || true
+  if printf '%s\n' "$existing" | grep -qx "$c"; then
+    to_start="$to_start $c"
   else
     echo "WARNING: container $c does not exist -- bring it up with docker compose instead" >&2
   fi
 done
+if [ -n "$to_start" ]; then
+  echo "starting:$to_start"
+  # shellcheck disable=SC2086
+  docker start $to_start >/dev/null 2>&1 || true
+fi
+running="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
 missing=""
 for c in $COMPOSE_DEV_CONTAINERS; do
-  docker ps --format '{{.Names}}' | grep -qx "$c" || missing="$missing $c"
+  printf '%s\n' "$running" | grep -qx "$c" || missing="$missing $c"
 done
 if [ -n "$missing" ]; then
   echo "ERROR: compose dev containers did not start:$missing" >&2

@@ -151,14 +151,23 @@ say "stop the compose dev stack (containers and volumes are KEPT)"
 # `set -e` that aborted the script BEFORE the port-forwards, leaving dev with
 # no reachable gateway and an exit status that still looked fine. Tolerate the
 # status, then assert on the actual container state.
+# One `docker ps` for the whole list, not one per container: under the Docker
+# Desktop WSL shim each invocation is a Windows process launch costing seconds,
+# and the naive loop spent minutes here.
+running="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
+to_stop=""
 for c in $COMPOSE_DEV_CONTAINERS; do
-  if docker ps --format '{{.Names}}' | grep -qx "$c"; then
-    echo "stopping $c"; docker stop "$c" >/dev/null 2>&1 || true
-  fi
+  printf '%s\n' "$running" | grep -qx "$c" && to_stop="$to_stop $c"
 done
+if [ -n "$to_stop" ]; then
+  echo "stopping:$to_stop"
+  # shellcheck disable=SC2086
+  docker stop $to_stop >/dev/null 2>&1 || true
+fi
+running="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
 still_up=""
 for c in $COMPOSE_DEV_CONTAINERS; do
-  docker ps --format '{{.Names}}' | grep -qx "$c" && still_up="$still_up $c"
+  printf '%s\n' "$running" | grep -qx "$c" && still_up="$still_up $c"
 done
 if [ -n "$still_up" ]; then
   echo "ERROR: compose dev containers still running:$still_up" >&2
