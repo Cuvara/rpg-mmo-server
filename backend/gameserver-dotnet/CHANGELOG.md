@@ -7,6 +7,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Documentation
+- **Warned that the achieved tick rate must not be computed from `/status` (#153).** The
+  endpoint reports `tick_rate` (the *configured* rate), `current_tick` and `uptime_seconds`,
+  which invites `current_tick / uptime_seconds` — but `uptime_seconds` is derived from
+  `DateTime.UtcNow` (`GameServer/Program.cs`), i.e. `CLOCK_REALTIME`, which runs 10-17% fast
+  on this host. The quotient therefore reads **~51 Hz on a healthy 60 Hz loop** and **~12.9 Hz
+  on a healthy 15 Hz loop**, reproducing #147 from inside the server's own status endpoint
+  rather than from `date`. Documented in `BENCHMARK.md` and `K3S.md` with the safe
+  alternative (`gameserver_tick_duration_seconds` on `/metrics`, built from
+  `Stopwatch.GetTimestamp()`). **No code change made here** — `ServerStatus` and the missing
+  `Stopwatch`-derived achieved-rate field belong to #144 and were flagged to its owner rather
+  than changed under it. Refs #153, #147, #144.
+
+### Documentation
 - **`BENCHMARK.md` records the k3d serverlb as a third local-measurement trap (#143).** On k3d
   the Agones port range is published by an nginx TCP proxy, so a capacity sweep through an
   Agones pod measures the proxy: snapshot interval p99 **211.9 ms** through the serverlb against

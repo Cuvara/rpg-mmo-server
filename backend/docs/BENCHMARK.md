@@ -435,6 +435,28 @@ Two corollaries worth stating, because both are easy to get backwards:
   property of the harness, not a reason to relax the rule — the rule protects the
   *next* measurement, which may well be taken by hand at a shell prompt.
 
+
+#### The one live trap: do not compute Hz from `/status`
+
+`/status` reports `tick_rate` — the **configured** rate, the "advertised 60" — plus
+`current_tick` and `uptime_seconds`. The obvious move is therefore:
+
+```
+achieved Hz = current_tick / uptime_seconds     # WRONG on this box
+```
+
+**Do not.** `uptime_seconds` is computed from `DateTime.UtcNow`
+(`GameServer/Program.cs`), which is `CLOCK_REALTIME`, so on this host it is
+inflated by the same 10-17%. That division returns **~51 Hz on a healthy 60 Hz
+loop**, or **~12.9 Hz on a healthy 15 Hz loop** — reproducing #147 exactly,
+except from inside the server's own status endpoint instead of from `date`. The
+trap is latent in the code today; flagged to the owner of `/status` (#144).
+
+**Use `gameserver_tick_duration_seconds` from `/metrics` instead.** It is built
+from `Stopwatch.GetTimestamp()` and never touches the wall clock. Until an
+explicitly `Stopwatch`-derived achieved-rate field exists, that histogram is the
+only self-reported timing on the server that can be trusted on this box.
+
 If you add a measurement to this document, state the clock it came from.
 
 ### The k3d serverlb is in the gameplay data path

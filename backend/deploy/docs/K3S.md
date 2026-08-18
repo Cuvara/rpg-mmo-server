@@ -897,6 +897,14 @@ histogram at `/metrics` (`gameserver_tick_duration_seconds`) is built from
 `Stopwatch.GetTimestamp()` and never touches the wall clock. Do not time the loop
 from outside with a shell.
 
+**And do not compute it from `/status` either.** That endpoint reports
+`tick_rate` (the *configured* rate), `current_tick` and `uptime_seconds`, so
+`current_tick / uptime_seconds` looks like the answer. It is not:
+`uptime_seconds` comes from `DateTime.UtcNow`, which is `CLOCK_REALTIME`, so on
+this box the quotient reads **~51 Hz on a healthy 60 Hz loop** and **~12.9 Hz on
+a healthy 15 Hz loop** — #147 all over again, from inside the server. Flagged to
+the owner of `/status` (#144).
+
 ### The serverlb is in the gameplay data path (#143)
 
 **Do not take capacity numbers through an Agones pod on this cluster.** Use the
