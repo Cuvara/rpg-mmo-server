@@ -2199,15 +2199,22 @@ k8s; staging and production remain `DEPLOY_MODE=containers` and reach none of th
   #151 unlocks `replicas > 1` **for one map only**: allocation targets a fleet and every pod
   in it still carries the same `GAMESERVER_MAP_ID`, so a second *map* remains unserved
   (`ErrFleetMapMismatch`) until map id is per-pod. Two separate unlocks, not one.
-  Absent a FleetAutoscaler, the first player into a cold map also waits for a pod (#148), and
-  an exhausted fleet is reported with a terminal refusal (#152). ADR-18 decides the autoscaler
-  question; this ADR does not.
-- **Known-adjacent, already open:** #143 — k3d's serverlb sits in the gameplay data path and
+  Absent a FleetAutoscaler, a cold map does **not** make the first player *wait*: with no
+  `Ready` pod the allocation fails outright (`ErrNoServerAvailable`,
+  `gateway/registry/registry.go:559`) and the client gets the terminal
+  `no server available for map` in milliseconds (`clientSafeAssignError`,
+  `gateway/server/server.go:886`). The cost is a wrong-looking refusal, not latency — #148's
+  "~9s on the player's path" was the premise measurement removed, and #152 is the refusal
+  being terminal where it should be retryable. ADR-18 decides the autoscaler question; this
+  ADR does not.
+- **Known-adjacent:** #143 — k3d's serverlb sits in the gameplay data path and
   triples snapshot jitter, so local capacity numbers measure the proxy; #147 — a reported 54 Hz
   tick against an advertised 60 Hz base rate, which that investigation reports as a
   measurement artifact — the loop paces on `CLOCK_MONOTONIC` while the observer timed it
-  against a `CLOCK_REALTIME` running ~10% fast on the WSL2 host — rather than a code defect;
-  #148 — no FleetAutoscaler and `replicas: 1`.
+  against a `CLOCK_REALTIME` running ~10% fast on the WSL2 host — rather than a code defect.
+  #147 is **closed** on that basis and the host clock itself is filed as #153;
+  #148 — no FleetAutoscaler and `replicas: 1`;
+  premises corrected on the issue itself, autoscaler refused (ADR-18).
 
 ### Follow-up work
 

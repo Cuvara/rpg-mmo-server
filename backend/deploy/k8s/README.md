@@ -131,7 +131,7 @@ second replica without answering a question first. Read this before writing
 | `redis` (`rpg-k8s-data`) | StatefulSet, 1 PVC | 1 | Sessions (TTL), server registry `servers:*`, event stream `events:*` — **not a cache**, `noeviction` (ADR-4) | Joins fail while it is down; gameplay is untouched, and each game server repairs its own registry entry on the next heartbeat |
 | `postgres-game` (`rpg-k8s-data`) | StatefulSet, 1 PVC | 1 | `player_states` — authoritative player position/HP, written only by the game server (ADR-1) | Gameplay continues and the 30s save sweep **fails silently into a log line and `gameserver.player.saves{status="error"}`**; new players cannot load saved state |
 | `postgres-meta` (`rpg-k8s-data`) | StatefulSet, 1 PVC | 1 | Nakama's own database — accounts, storage, leaderboards. Migrated by Nakama, never by us | Nakama cannot authenticate |
-| `map-servers-dotnet-k8s` | Agones Fleet | 1 | The live server for `map_01` | Everyone on the map drops. See [Why the fleet is `replicas: 1`](#why-the-fleet-is-replicas-1), and #151 for what would actually unlock more than one |
+| `map-servers-dotnet-k8s` | Agones Fleet | 1 | The live server for `map_01` | Everyone on the map drops. The map is unjoinable, refused in milliseconds rather than queued. See [Why the fleet is `replicas: 1`](#why-the-fleet-is-replicas-1), and #151 for what would actually unlock more than one |
 
 Blast radii per dependency, with measured RTO/RPO numbers, are in
 [`../docs/DISASTER-RECOVERY.md`](../docs/DISASTER-RECOVERY.md). This section is
@@ -206,20 +206,23 @@ Do not inherit this shape by promoting the manifests. Each row is a real decisio
    restore-from-backup, at backup RPO. That is a stated position, not an
    omission — see `../docs/DATABASE.md`.
 4. **The fleet cannot be scaled until map assignment is per-replica** (ADR-2), and
-   there is no FleetAutoscaler, so the first player into a cold map waits for a
-   pod (#148). Scaling it today does not add capacity, it splits the world: a second
+   there is no FleetAutoscaler — but a cold map does **not** make the first player
+   *wait*: with no `Ready` pod the allocation fails outright and the client gets the
+   terminal `no server available for map` in milliseconds. The cost is a wrong-looking
+   refusal, not latency (#148, #152). Scaling it today does not add capacity, it splits the world: a second
    pod self-registers into `servers:map:map_01` on becoming Ready, without any
    allocation. The unlock is **#151** — register on `Allocated` rather than `Ready` — and it
    buys `replicas > 1` for **one map only**; a second map needs a per-pod `GAMESERVER_MAP_ID`,
    because allocation targets a fleet and every pod in one carries the same map. ADR-18 covers
    the autoscaler itself.
 
-Related open issues: **#143** (k3d serverlb sits in the gameplay data path and
+Related issues: **#143** (k3d serverlb sits in the gameplay data path and
 triples snapshot jitter), **#147** (a reported 54 Hz tick against an advertised 60 Hz base rate,
 which the #147 investigation reports as a measurement artifact — the loop paces on
 `CLOCK_MONOTONIC` while the observer timed it against a `CLOCK_REALTIME` running ~10%
 fast on the WSL2 host — rather than a code defect),
-**#148** (no FleetAutoscaler and `replicas: 1`).
+**#148** (no FleetAutoscaler and `replicas: 1` — premises corrected on the issue,
+autoscaler refused in ADR-18).
 
 ## Roll back
 
