@@ -423,6 +423,25 @@ where the tick histogram and the loop pacing both come from
 | peak RSS (MiB) | a byte count — no interval in it at all | **No** |
 | Protobuf-vs-JSON savings %, the 5:1 `still`-vs-`cluster` ratio, run-to-run spread % | ratios of the rows above, taken within one run | **No** — and a ratio would cancel a shared skew even if there were one |
 
+**Scope of the audit: the gateway was swept too, and no figure here depends on
+it.** Nothing in this document is measured through the gateway — confound 6
+records that Part I and Part II both ran with no gateway in the path — but it was
+checked rather than assumed. The gateway derives **no rates at all**: every
+`rate` in it is a rate *limiter* (a configured policy), and `shared/ratelimit`
+refills from `now.Sub(b.last)` with both endpoints from `time.Now()`, so it is
+monotonic and correct. Session `CreatedAt`/`LastActivity` are wall-clock
+*stamps*, not intervals, and expiry is enforced by Redis' own TTL rather than by
+arithmetic in Go.
+
+The sweep did turn up one true wall-clock interval, which is a robustness matter
+rather than a measurement one and is recorded here only so the audit is closed
+rather than left open: `gateway/server/connection.go` compares
+`time.Since(time.UnixMilli(last)) > pongTimeout`. `time.UnixMilli` returns a
+`time.Time` with **no** monotonic reading — verified, not assumed: a
+monotonic-bearing `time.Time` renders a trailing `m=+…` and the rebuilt one does
+not — so `time.Since` falls back to wall-clock subtraction there. See
+[the gateway heartbeat](#the-gateway-heartbeat-is-the-one-true-wall-clock-interval).
+
 Two corollaries worth stating, because both are easy to get backwards:
 
 - **The 14.7Hz drift ([§5](#the-15hz-that-is-really-147hz)) is real and is *not*
@@ -456,6 +475,43 @@ trap is latent in the code today; flagged to the owner of `/status` (#144).
 from `Stopwatch.GetTimestamp()` and never touches the wall clock. Until an
 explicitly `Stopwatch`-derived achieved-rate field exists, that histogram is the
 only self-reported timing on the server that can be trusted on this box.
+
+#### The gateway heartbeat is the one true wall-clock interval
+
+Found by the sweep above; **not** a figure in this document, and it changes no
+number here. Recorded because the audit named the gateway as unchecked and this
+is what checking it produced.
+
+`gateway/server/connection.go` enforces the heartbeat as:
+
+```go
+if time.Since(time.UnixMilli(last)) > pongTimeout {   // wall clock, not monotonic
+```
+
+`pingInterval` is 10s and `pongTimeout` 30s, so the code documents a margin of
+one full `pingInterval`: `MaxHandlerBlockingWait = pongTimeout - pingInterval` =
+**20s**. The gateway refuses to start with `--allocation-wait-timeout` above that
+value, precisely because the allocation wait blocks the read loop that records
+`MsgPong`.
+
+**The two sides of that margin run on different clocks.** The allocation wait is
+a Go timer/context deadline, which is monotonic; the pong timeout is wall-clock.
+On this host, where `CLOCK_REALTIME` runs ~16.65% fast, a nominal 30s pong budget
+elapses in about **25.7s** of real time, so the enforced margin is nearer **17.1s**
+than the 20s the constant asserts. The default 15s allocation wait still fits, so
+nothing is broken today — but the guard compares a monotonic duration against a
+wall-clock-enforced constant, and the safety margin it computes is not the one in
+force.
+
+This is not specific to this box. A wall clock can also be *stepped* by NTP, in
+either direction, on any host; that is the standard reason timeouts are taken
+from a monotonic source. The fix is to store the pong time as a
+`Stopwatch`-equivalent monotonic stamp — in Go, keep the `time.Time` from
+`time.Now()` (or `time.Since` a stored one) rather than round-tripping it through
+`UnixMilli`, which is exactly what strips the monotonic reading.
+
+**Left unfixed deliberately:** it is gateway runtime behaviour, not a document
+figure, and changing a heartbeat timeout wants its own change and tests.
 
 If you add a measurement to this document, state the clock it came from.
 
