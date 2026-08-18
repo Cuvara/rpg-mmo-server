@@ -32,6 +32,12 @@ Docs:
   Sentinel upgrade path.
 - `MONITORING.md` — `make monitoring-up` (one `grafana/otel-lgtm` container), scrape
   targets, the "RPG Gameplay" dashboard, metric contracts, Grafana Cloud / k3s paths.
+- `REALTIME-FLOW.md` — what happens hop by hop when a player enters a map: the
+  compose flow that runs today (deploy → `.env` → handshake → direct gameplay
+  connection), the Agones flow as it stands (fleets Ready, `ALLOCATED 0`, and the
+  address the gateway would hand out if they did), and what a working Agones path
+  would require. Also the one-command checks for telling which of the three you
+  are looking at.
 - `K3S.md` — dev cluster bootstrap (`k3s/setup-dev.sh`), Agones install + fleets,
   cluster options on WSL2, offline manifest validation, graduation to a real k3s VPS.
 
