@@ -56,6 +56,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     immediately, that the flag is ignored without Agones, and that the default path never
     reads the state at all.
 
+### Fixed
+- **`/status` reported a rate nobody had configured (#144).** The endpoint filled
+  `tick_rate` from the legacy `--tick-rate` / `GAMESERVER_TICK_RATE` scalar. No current
+  deployment sets that variable, so the field reported the compiled-in default of **15**
+  forever — on servers running the standard `SIM_CRITICAL_HZ=60` configuration, i.e. wrong
+  by 4x, and silently disagreeing with both the startup banner and the join response. The
+  Unity DOTS sample polls this endpoint and reads that field.
+
+  The root problem was the shape, not the number: the server runs three simulation groups
+  at three frequencies (ADR-13), so one unqualified rate cannot be right for every reader.
+  `/status` now publishes rates derived from the resolved `SimulationRates`, each field
+  named for its group:
+  - `tick_rate` — kept, and **defined as the critical/movement rate, identical to the wire
+    field `join_token_resp.tick_rate`** (normative definition in `docs/API.md`). It keeps
+    its name because clients already read it under that name from both surfaces; what was
+    wrong was its source, not its name. A contract test asserts the two surfaces cannot
+    diverge — both read `SimulationRates.MovementHz`.
+  - `sim_critical_hz`, `sim_world_hz`, `sim_background_hz` — the three configured group
+    rates, explicit. `sim_world_hz` is the one that matters for a client jitter buffer and
+    for bandwidth: snapshots broadcast on the world cadence, not the critical one.
+  - `capacity` — the admission limit the server enforces, previously unobservable.
+
+  The mapping now lives in a testable `ServerStatus.ApplyRates`; it was inline in
+  `Program.cs`, a top-level-statement file with no seam, which is why it could read an
+  unrelated variable for as long as it did without a test noticing.
+
+- **`/status` reported uptime on the wrong clock.** `uptime_seconds` came from
+  `DateTime.UtcNow` (`CLOCK_REALTIME`) while `current_tick` is advanced by a
+  `Stopwatch`-paced loop (`CLOCK_MONOTONIC`). `current_tick / uptime_seconds` is the obvious
+  way to derive an achieved tick rate, and on a host whose realtime clock runs 10-17% fast
+  — this one does (#153) — that quotient reports a 60 Hz loop as ~54 Hz. That is precisely
+  issue #147: a defect filed against a server that did not have one, because the observer
+  supplied the clock. Uptime is now monotonic, so both terms of the quotient share a source.
+
+  This is an average since boot and claims nothing more; there is no instantaneous
+  achieved-rate gauge here. `rate(gameserver_sim_group_runs_total[...])` remains the way to
+  measure one.
+
 ### Documentation
 - **Distinguished clock *rate skew* from clock *steps* in `BENCHMARK.md`, with the sign table
   that tells them apart (#153).** This host has both faults and they need different responses:

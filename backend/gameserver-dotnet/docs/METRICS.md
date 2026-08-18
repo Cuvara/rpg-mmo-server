@@ -27,6 +27,62 @@ Meter `rpg.gameserver` + `OpenTelemetry.Exporter.Prometheus.HttpListener`).
   the real wildcard prefix is set on the listener via `ConfigureHttpListener`, which
   runs before `Start()`. Covered by `MetricsEndpointTests`.
 
+## `/status` — the JSON snapshot an operator and the sample client read
+
+`GET /status` on the same listener returns a small JSON object aggregating live
+server state. It is not Prometheus exposition and is not scraped; it exists for
+human inspection and for the Unity DOTS sample, which polls it.
+
+```json
+{
+  "ok": true,
+  "tick_rate": 60,
+  "sim_critical_hz": 60,
+  "sim_world_hz": 15,
+  "sim_background_hz": 5,
+  "current_tick": 726335,
+  "players_online": 12,
+  "capacity": 100,
+  "entities": 34,
+  "enemies_alive": 22,
+  "redis": "connected",
+  "postgres": "connected",
+  "uptime_seconds": 12105
+}
+```
+
+**Every rate field names its group.** The server runs three simulation groups at
+three frequencies (ADR-13), so an unqualified "tick rate" is a question with three
+answers rather than a fact, and whichever one is printed alone, some reader is
+wrong by a factor. That is not hypothetical: until #144 this endpoint published the
+legacy `--tick-rate` / `GAMESERVER_TICK_RATE` scalar, which **no deployment sets**,
+so it reported the compiled-in default of 15 on servers whose prediction rate was
+60 — a value that looked like a fact and was a stale default.
+
+| Field | Meaning |
+|-------|---------|
+| `tick_rate` | The rate movement is integrated at and the tick counter advances at — the **critical** group. **Defined to be the same number as the wire field `join_token_resp.tick_rate`** (normative definition in `API.md`); both read `SimulationRates.MovementHz`, and `ServerStatusRatesTests` fails if either grows its own source. Kept under this name because clients already read it under this name from both surfaces |
+| `sim_critical_hz` | Critical-group Hz — input, movement, combat. Equal to `tick_rate`; published separately so a reader after "the critical rate" need not know that `tick_rate` happens to be it. `current_tick` counts these |
+| `sim_world_hz` | World-group Hz — AI, spawning, **and the snapshot broadcast cadence**. This, not `tick_rate`, is what a client's interpolation buffer is sized against and what governs bandwidth per client |
+| `sim_background_hz` | Background-group Hz |
+| `capacity` | The admission limit (`GAMESERVER_CAPACITY`) this server enforces and publishes into the registry |
+| `uptime_seconds` | Seconds since process start on a **monotonic** clock (`Stopwatch`), not wall time — see below |
+
+### `uptime_seconds` is monotonic on purpose
+
+`current_tick / uptime_seconds` is the obvious way to derive an *achieved* tick
+rate, and it used to divide a `CLOCK_MONOTONIC`-paced counter (the tick loop is
+paced by `Stopwatch`) by a `CLOCK_REALTIME` duration (`DateTime.UtcNow`). On a host
+whose realtime clock runs 10-17% fast — this one does, see #153 — that quotient
+reports a 60 Hz loop as roughly 54 Hz. That is exactly issue #147: a defect filed
+against a server that did not have one, because the observer supplied the clock.
+Both terms now come from the same monotonic source.
+
+Note this still yields an *average since boot*, which is all it claims to be. There
+is no instantaneous achieved-rate gauge on this endpoint; for that use
+`gameserver_sim_group_runs_total`, whose `rate()` over a window is measured against
+Prometheus' own timestamps.
+
 ## Metric reference (scraped names)
 
 | Metric | Type | Labels | Meaning |

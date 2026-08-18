@@ -488,20 +488,35 @@ using var sigTerm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, RequestS
 // ── Run ──
 
 var server = new GameServerHost(options);
-var startTime = DateTime.UtcNow;
+// Monotonic, not DateTime.UtcNow. `current_tick / uptime_seconds` is how an observer
+// derives an achieved tick rate, and the tick loop is paced by Stopwatch (CLOCK_MONOTONIC);
+// dividing it by a wall-clock duration measures the host's clock drift as well as the
+// server. On this box that drift is 10-17% and it already produced one filed-and-closed
+// non-defect (#147, diagnosed in #153). Both terms of that quotient now come from the same
+// clock. See ServerStatus.UptimeSeconds.
+var uptime = System.Diagnostics.Stopwatch.StartNew();
 
 // Wire up the /status JSON endpoint with live server state.
-metricsEndpoint?.SetStatusProvider(() => new ServerStatus
+metricsEndpoint?.SetStatusProvider(() =>
 {
-    Ok = true,
-    TickRate = tickRate,
-    CurrentTick = server.CurrentTick,
-    PlayersOnline = metrics.PlayersOnline,
-    Entities = server.EntityCount,
-    EnemiesAlive = server.EnemiesAlive,
-    Redis = serverRegistry != null ? "connected" : "disconnected",
-    Postgres = postgresStore != null ? "connected" : "disconnected",
-    UptimeSeconds = (long)(DateTime.UtcNow - startTime).TotalSeconds
+    // Rates come from the RESOLVED SimulationRates, never from the legacy `tickRate`
+    // scalar. `tickRate` is `--tick-rate` / GAMESERVER_TICK_RATE, which no deployment
+    // sets, so reading it here reported the compiled-in default forever regardless of
+    // what the server was running — #144.
+    var status = new ServerStatus
+    {
+        Ok = true,
+        CurrentTick = server.CurrentTick,
+        PlayersOnline = metrics.PlayersOnline,
+        Capacity = capacity,
+        Entities = server.EntityCount,
+        EnemiesAlive = server.EnemiesAlive,
+        Redis = serverRegistry != null ? "connected" : "disconnected",
+        Postgres = postgresStore != null ? "connected" : "disconnected",
+        UptimeSeconds = (long)uptime.Elapsed.TotalSeconds
+    };
+    status.ApplyRates(simulationRates);
+    return status;
 });
 
 try
