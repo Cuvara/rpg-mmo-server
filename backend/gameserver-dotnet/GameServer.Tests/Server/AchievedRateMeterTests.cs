@@ -168,33 +168,47 @@ public class AchievedRateMeterTests
     /// the arithmetic; this proves the loop feeds it, which is the half a pure unit test
     /// cannot cover and the half that was missing before.
     ///
-    /// <para>This one really does spend wall time — it is measuring a real loop, so there is
-    /// nothing to inject. The tolerance is deliberately loose (a shared CI box schedules the
-    /// loop late and the achieved rate then genuinely IS lower); the assertion that matters
-    /// is that the value is populated and in the right neighbourhood, not that this host can
-    /// hit 30 Hz exactly.</para>
+    /// <para><b>It asks for a 200ms window rather than the 2s default, and so runs for well
+    /// under a second.</b> The first version ran a real loop for three seconds, which in a
+    /// parallel xUnit suite means three seconds of a busy tick loop competing with every
+    /// other test for the cores it is trying to measure — and this suite already has a
+    /// documented history of contention-sensitive failures. The window length is the thing
+    /// under test only in the unit tests above; here it is scaffolding, so it should be as
+    /// small as it can be while still completing.</para>
+    ///
+    /// <para>The tolerance is deliberately loose: a loaded host schedules the loop late and
+    /// the achieved rate then genuinely IS lower. The claim is that the value is populated
+    /// and in the right neighbourhood, not that this box hits 30 Hz exactly — asserting
+    /// tightly here would be asserting on the test host, which is the mistake this whole
+    /// issue is about.</para>
     /// </summary>
     [Fact]
     public async Task ARunningTickLoop_PublishesANonZeroAchievedRate()
     {
-        var world = new GameServer.World.EcsWorld();
+        // `using`: every other test in this suite disposes its world, and this one leaked
+        // one. An EcsWorld owns a ReaderWriterLockSlim and an Arch world, and Arch tracks
+        // worlds in process-global state — leaking them from a parallel suite is not a
+        // tidiness point.
+        using var world = new GameServer.World.EcsWorld();
         var connections = new GameServer.Net.ConnectionManager();
         var logger = Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
         var handler = new GameServer.Input.InputHandler(world, logger, null, 30, null);
         var loop = new TickLoop(
-            world, handler, connections, 30, global::Shared.GameLogic.Components.GameConstants.DefaultAoiRadius, logger);
+            world, handler, connections, 30,
+            global::Shared.GameLogic.Components.GameConstants.DefaultAoiRadius, logger,
+            achievedRateWindowSeconds: 0.2);
 
         using var cts = new CancellationTokenSource();
         var run = loop.RunAsync(cts.Token);
 
-        // One window (2s) plus margin for the loop to publish.
-        await Task.Delay(TimeSpan.FromMilliseconds(3000));
+        // One 200ms window plus margin for the loop to publish across it.
+        await Task.Delay(TimeSpan.FromMilliseconds(600));
         cts.Cancel();
         try { await run; } catch (OperationCanceledException) { /* expected */ }
 
         Assert.True(loop.CurrentTick > 0, "the loop did not tick at all");
         Assert.True(loop.AchievedTickHz > 0d,
             $"achieved rate was never published (current_tick={loop.CurrentTick})");
-        Assert.InRange(loop.AchievedTickHz, 15d, 45d);
+        Assert.InRange(loop.AchievedTickHz, 5d, 60d);
     }
 }
