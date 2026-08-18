@@ -216,6 +216,31 @@ Do not inherit this shape by promoting the manifests. Each row is a real decisio
    because allocation targets a fleet and every pod in one carries the same map. ADR-18 covers
    the autoscaler itself.
 
+### What `EnterWorld` does when no server is ready, and what the client is told
+
+"No live server for this map" is **four** conditions with three different client messages,
+and conflating them is how "add a buffer so the first player stops waiting" became a
+plausible sentence. All four are decided in `FindServer`
+(`gateway/registry/registry.go`) and mapped to client text by `clientSafeAssignError`
+(`gateway/server/server.go:886`):
+
+| Condition | Path | Client is told | Retryable? | Duration |
+|---|---|---|---|---|
+| Allocation **succeeds**, pod not yet registered | `awaitRegistration` blocks up to `--allocation-wait-timeout` (`DefaultAllocationWaitTimeout` = 15s, `registry.go:46`) -> `ErrServerStarting` (`registry.go:188`) | `server is starting, retry shortly` | **Yes** — the only retryable one | Up to 15s |
+| Fleet has **no `Ready` pod** to allocate | `AllocateServer` fails -> `ErrNoServerAvailable` (`registry.go:559`) | `no server available for map` | No — terminal | Milliseconds. There is nothing to wait *for* |
+| Map **has** live servers and every one is **full** | Refusal without allocating, because a second server for one `map_id` would split the world (ADR-2) -> `ErrNoServerAvailable` (`registry.go:408`) | `no server available for map` | No — terminal | Milliseconds |
+| **No fleet serves the map** at all | `ErrFleetMapMismatch` (`registry.go:211`), and `rememberMismatch` suppresses re-allocation for `DefaultMapMismatchTTL` = 60s (`registry.go:60`, `:480`) | `map is not available` | No — terminal, and remembered 60s | Milliseconds |
+
+Message strings are at `server.go:868`, `:874` and `:881`. Two things the table is meant to
+settle:
+
+- **The deployment does wait on the first row, deliberately, and does not wait on the other
+  three.** #148 was about the second row — the fleet having no `Ready` pod — where there is
+  nothing to wait *for*, so a buffer autoscaler removes a latency that was never on the
+  player's path.
+- **Exactly one of the three refusals is wrong**, and it is row two — see #152. Rows three and
+  four earn theirs.
+
 Related issues: **#143** (k3d serverlb sits in the gameplay data path and
 triples snapshot jitter), **#147** (a reported 54 Hz tick against an advertised 60 Hz base rate,
 which the #147 investigation reports as a measurement artifact — the loop paces on
