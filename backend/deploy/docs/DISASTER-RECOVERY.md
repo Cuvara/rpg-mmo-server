@@ -66,6 +66,29 @@ Two things the table makes obvious:
 
 ---
 
+### On k8s, the same blast radii — plus a planned one, every deploy
+
+The dev environment now runs entirely in `k3d-rpg-dev` (`backend/deploy/k8s/`). The
+table above still holds there: it describes what each dependency owns, and moving a
+process into a pod does not change that. Two things it does **not** cover:
+
+- **There is exactly one replica of everything** — `gateway`, `nakama`, `redis`,
+  `postgres-meta`, `postgres-game`, and the `map-servers-dotnet-k8s` Fleet. Kubernetes is
+  providing scheduling and lifecycle, not redundancy, and no row above becomes less severe
+  for being scheduled by a controller.
+- **`gateway` and `nakama` deploy with `strategy: Recreate`,** because both bind a
+  `hostPort` and a rolling update deadlocks on a single node. So every rollout of either is
+  a **planned** instance of its row in the table: nothing can authenticate or join until the
+  replacement pod is Ready, while in-progress gameplay carries on (ADR-3). It is not a
+  failure and there is nothing to recover; it is a window to schedule around. The duration
+  is unmeasured.
+
+Both are recorded as **ADR-17** in `backend/docs/ARCHITECTURE-DECISIONS.md`, with the full
+posture and the decisions that must precede any tier above dev in
+[`../k8s/README.md`](../k8s/README.md) §Availability posture.
+
+---
+
 ## Failure drill: Redis
 
 > **Status: EXECUTED 2026-08-06 10:03–10:11 UTC.** See

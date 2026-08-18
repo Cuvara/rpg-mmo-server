@@ -14,7 +14,7 @@ All open-source, $0 license: Docker, k3s, Agones, PostgreSQL, Redis, Grafana, Pr
 | VPS bootstrap | `scripts/bootstrap-vps.sh` | ✅ Docker + deploy user + Actions runner + ufw, idempotent, `--dry-run` |
 | Gateway / gameserver images | `docker/Dockerfile.gateway`, `docker/Dockerfile.gameserver-dotnet` | ✅ Built + smoke-tested |
 | k3s / Agones dev bootstrap | `k3s/setup-dev.sh`, `k3s/teardown-dev.sh`, `k3s/lib.sh`, `k3s/namespaces.yaml`, `k3s/validate-manifests.py` | ✅ Authored + manifests schema-validated (needs a live cluster) |
-| k8s base/overlays (Nakama, Gateway, Redis, Postgres) | — | Planned |
+| Full k8s dev stack (Nakama, gateway, Redis, both PostgreSQL, Agones fleet) | `k8s/data/`, `k8s/app/`, `k8s/dev-up.sh`, `k8s/rollback-to-compose.sh`, `k8s/verify/` | ✅ Dev runs on it. **One replica of everything and `Recreate` on the two `hostPort` workloads — see `k8s/README.md` §Availability posture and ADR-17** |
 | DB init + backup scripts, prod Redis config (Sentinel, eviction) | — | Planned |
 | Dev observability (Grafana + Prometheus + Loki + Tempo) | `docker-compose.yml` profile `monitoring`, `monitoring/` | ✅ Usable (`make monitoring-up`) |
 
@@ -40,6 +40,10 @@ Docs:
   are looking at.
 - `K3S.md` — dev cluster bootstrap (`k3s/setup-dev.sh`), Agones install + fleets,
   cluster options on WSL2, offline manifest validation, graduation to a real k3s VPS.
+- `../k8s/README.md` — the k8s dev stack that actually runs (namespaces `rpg-k8s-data`
+  and `rpg-k8s-realtime`): bring-up, ports, verification, rollback, and the
+  **availability posture** — one replica everywhere, why `Recreate` is required on the
+  `hostPort` workloads, and what a gateway rollout costs (ADR-17).
 
 ## Local dev backing stack
 

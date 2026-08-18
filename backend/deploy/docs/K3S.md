@@ -8,6 +8,18 @@ plus the path from a laptop cluster to a real k3s VPS.
 - Agones version: **1.59.0**, pinned to match `agones.dev/agones v1.59.0` in
   the Agones SDK. Override with `AGONES_VERSION=…`.
 
+> **This file covers the cluster/Agones bootstrap and the earlier hybrid stack**
+> (fleet in `rpg-realtime`, everything else in compose, reached as
+> `host.k3d.internal`). Dev has since moved **entirely** into the cluster —
+> namespaces `rpg-k8s-data` and `rpg-k8s-realtime`, manifests in
+> `backend/deploy/k8s/`, brought up by `k8s/dev-up.sh`; the `rpg-realtime` fleet is
+> scaled to 0 and kept only as the rollback target. For that stack read
+> [`../k8s/README.md`](../k8s/README.md), and in particular its **Availability
+> posture** section: every workload there is a single replica, and the two
+> `hostPort` workloads deploy with `strategy: Recreate`, so **every gateway or
+> Nakama rollout drops the join path** (ADR-17). Do not carry an availability
+> assumption from this file into that one.
+
 ---
 
 ## Dev runs on Agones (switched 2026-08-18)

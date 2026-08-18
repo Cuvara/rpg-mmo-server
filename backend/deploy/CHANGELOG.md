@@ -104,6 +104,25 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   through `vars.DEPLOY_MODE` and never see this path. The compose data-tier, migration and
   stack steps are gated off in this mode; `post-deploy-smoke` is skipped because the same
   smoketest runs, with `--strict-addr --require-db`, as layer 4 of the suite.
+- **The availability posture of the k8s dev stack is documented, and recorded as ADR-17.**
+  Every workload in `deploy/k8s/` runs a single replica — `gateway`, `nakama`, `redis`,
+  `postgres-meta`, `postgres-game` and the `map-servers-dotnet-k8s` Fleet — so Kubernetes is
+  providing scheduling and lifecycle here, **not redundancy**, and nothing said so. Worse,
+  `strategy: Recreate` on the two `hostPort` workloads (required: RollingUpdate deadlocks on a
+  single node, see the entry below) makes **every gateway or Nakama rollout a full outage of
+  the join path** — no `MsgAuth`, no `MsgEnterWorld`, no `gateway_token` — which is fine and is
+  not a defect, but was discoverable only by reading a manifest comment. `k8s/README.md` gains
+  an **Availability posture** section with a per-workload ownership table, the rollout cost,
+  and the questions that must be answered before any tier above dev (the gateway's hostPort
+  exposure *together with* ADR-16's per-instance single-flight; Redis persistence/replication
+  against ADR-4, which rules out treating it as an evictable cache). `docs/DISASTER-RECOVERY.md`
+  gains the k8s addendum — same blast radii, plus one that happens on purpose every deploy;
+  `docs/K3S.md` gains a banner distinguishing itself from the stack that now runs; and the
+  `docs/README.md` inventory row reading "k8s base/overlays — Planned" is corrected, since that
+  stack shipped. The rollout window is deliberately **not** given a number: nobody has measured
+  it (ADR-7's rule), and how to measure it is written down instead. In-progress gameplay
+  survives all of it, verified in code rather than assumed — the game server verifies the join
+  token itself and never calls the gateway during a session (ADR-3). No manifest changed.
 
 ### Fixed
 - **An `Allocated` GameServer survives `kubectl scale fleet --replicas=0`.** Agones treats
