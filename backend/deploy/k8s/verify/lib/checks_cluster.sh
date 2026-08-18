@@ -160,9 +160,13 @@ check_secrets() {
     # normally the failure -- an unset REDIS_PASSWORD looks identical to a
     # forgotten one -- so the exemption is per key and visible in the output,
     # never a blanket relaxation.
+    # Append rather than assign: the same secret may legitimately be named in
+    # more than one entry, and an assignment here silently drops every
+    # exemption but the last -- which surfaces as a FAIL on a key the operator
+    # believes they exempted.
     local allowed=""
     for a in ${VERIFY_SECRETS_ALLOW_EMPTY:-}; do
-      [ "${a%%:*}" = "$ref" ] && allowed="${a#*:}"
+      [ "${a%%:*}" = "$ref" ] && allowed="${allowed:+$allowed,}${a#*:}"
     done
     local res
     res=$(echo "$out" | ALLOW_EMPTY="$allowed" python3 -c '

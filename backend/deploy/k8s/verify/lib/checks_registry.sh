@@ -6,7 +6,23 @@
 #   servers:map:{map_id}    SET of server ids, no TTL         <- index, pruned lazily
 # The index outlives dead servers, so liveness must be read from the hashes.
 
-redis_cli() { $VERIFY_REDIS_EXEC redis-cli ${VERIFY_REDIS_AUTH:+-a "$VERIFY_REDIS_AUTH"} "$@" 2>/dev/null | tr -d '\r'; }
+# `2>/dev/null` here used to turn a FAILED exec into an empty string, which
+# reads identically to "this key does not exist". Under the Docker Desktop WSL
+# shim `docker exec` intermittently dies with a vsock error -- measured at ~5
+# failures in 40 calls on this box -- so a healthy, heartbeating registration
+# was reported as an expired hash and layer 3 failed at random. Retry on a
+# non-zero exit, and surface the transport error instead of swallowing it if
+# every attempt fails.
+redis_cli() {
+  local out rc attempt
+  for attempt in 1 2 3; do
+    out=$($VERIFY_REDIS_EXEC redis-cli ${VERIFY_REDIS_AUTH:+-a "$VERIFY_REDIS_AUTH"} "$@" 2>/dev/null); rc=$?
+    if [ $rc -eq 0 ]; then printf '%s' "$out" | tr -d '\r'; return 0; fi
+    sleep 1
+  done
+  echo "redis_cli: '$VERIFY_REDIS_EXEC redis-cli $*' failed $attempt times (last exit $rc)" >&2
+  return $rc
+}
 
 # live_servers -> one "server_id addr transport" line per LIVE registration for
 # $VERIFY_MAP_ID. Sets REG_LIVE to the array and REG_STALE to index members
