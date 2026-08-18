@@ -5,6 +5,49 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`verify.sh` check `cluster.autoscaler` — a `FleetAutoscaler` on a single-map fleet is now
+  a FAIL, not a paragraph.** It fails when any `FleetAutoscaler` targets a fleet whose pod
+  template carries a literal fleet-wide `GAMESERVER_MAP_ID`, and stands down for a fleet that
+  does not — so it stops being an error at exactly the moment a per-pod map id lands, rather
+  than becoming the next thing to argue past. The hazard it guards is invisible in every other
+  signal: the manifest applies, the pod reaches `Ready`, and the fleet reads *healthier* than
+  before, while the spare pod self-registers as a second live server for `map_01`. Measured on
+  `k3d-rpg-dev` 2026-08-18 — scaling the fleet `1 -> 2` put the new pod into `Ready` after
+  **5.38 s** and `servers:map:map_01` held **two** members within a second of that, with no
+  allocation involved; `registry.FindServer` then returns the least-loaded of the two, i.e. the
+  unallocated spare. Fleet restored to `replicas: 1` immediately. Proven both ways: PASS with
+  no autoscaler present, FAIL with one created against this fleet (capped at `maxReplicas: 1`
+  so the probe could not spawn the splitting pod), then deleted. Refs #148, #151, ADR-18.
+- **The `EnterWorld` cold-start policy is written down** (`deploy/k8s/README.md`). It was
+  already implemented and only readable in `gateway/server/server.go`: *allocated but not yet
+  registered* is retryable (`server is starting, retry shortly`, after the gateway itself
+  waited up to `--allocation-wait-timeout`, 15 s), *map served but full* and *map not served by
+  any fleet* are terminal, the latter remembered for 60 s because every retry allocates a pod
+  that is never reclaimed. One case is named as **unstated and deliberately unchanged here**:
+  when the fleet has no `Ready` GameServer at all the allocation fails outright and the client
+  gets the terminal answer even though a pod may be seconds away (#152). The distinction is
+  load-bearing and is stated in ADR-18 too: `EnterWorld` *does* wait on the branch where the
+  allocation succeeds and `awaitRegistration` blocks for the pod's own registry entry; what
+  it never does is wait when the fleet has no `Ready` pod to allocate, which is the case
+  #148 was about. Conflating the two is how "add a buffer so the first player stops waiting"
+  became a plausible sentence. Refs #148.
+
+### Changed
+- **`cluster.fleet` no longer WARNs about `ready=0` on a fleet that pins a fleet-wide map id.**
+  On that fleet `ready=0` is the designed steady state — a spare `Ready` pod would be a second
+  live server for the map — so the check now passes and says why. A warning that fires on the
+  correct state reads as an instruction to break it, which is how the buffer autoscaler came to
+  be proposed as the fix. The warning is kept, with its reasoning, for fleets where spare
+  capacity is meaningful. The one thing the old WARN carried that is worth keeping — that
+  `refusal.unknown_map` cannot reach its branch in this state — is already stated by that
+  check's own SKIP.
+- **`deploy/docs/K3S.md` "Why there is no autoscaler" is now measured rather than asserted**,
+  and records the two premises of #148 that measurement contradicts: the ~9 s cold start is not
+  on the player's path (with no `Ready` pod the allocation fails immediately and the client is
+  refused in milliseconds, it does not wait), and an autoscaler does nothing for the "a second
+  map cannot be served" symptom, which is a consequence of allocation targeting a *fleet*.
+
 ### Fixed
 - **`verify.sh` layer 5 reported PASS on a client run that never reached the deployment.**
   The check's stated claim is that the real client "completed its live-backend PlayMode

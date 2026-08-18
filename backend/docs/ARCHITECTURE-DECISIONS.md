@@ -2228,6 +2228,95 @@ k8s; staging and production remain `DEPLOY_MODE=containers` and reach none of th
   with cross-instance single-flight, as one decision. Either alone makes the deployment worse.
 - **L** — Decide the Redis topology for the first tier above dev, against ADR-4's split path
   rather than by adding replicas.
+## ADR-18 — A buffer FleetAutoscaler and `replicas > 1` unlock at the same moment, and it is not this one
+
+**Status:** accepted 2026-08-18, **measured on k3d**. Constrained by ADR-2 (one live server
+per `map_id`) and ADR-1 (one writer per datum). Narrows ADR-14 decision 5, which prescribed a
+buffer autoscaler in general terms; refuses the specific request in issue #148. Does not
+touch ADR-3 or ADR-7.
+
+**The question.** The map fleet `map-servers-dotnet-k8s` is pinned at `replicas: 1` and has no
+`FleetAutoscaler`. Once its one pod is `Allocated` the fleet reports `ready=0`, which looks
+like a fleet running out of capacity, and the obvious remedy — Agones' own buffer model, "keep
+N Ready spare" — was proposed on exactly that reading. It is the wrong remedy, and the reason
+is not capacity.
+
+**Decision 1 — no `FleetAutoscaler` may target a fleet that pins one `GAMESERVER_MAP_ID` for
+every replica.** On such a fleet a spare `Ready` pod is not spare. The C# server self-registers
+into Redis at **startup**, immediately after `ReadyAsync()` and before any allocation, keyed by
+the map id it was given (`GameServer.RunAsync`). Every `Ready` replica is therefore a *live
+server* for the same map. Measured on `k3d-rpg-dev`, 2026-08-18, scaling `1 -> 2` with one pod
+already `Allocated`:
+
+```
+t=0.42s  new GameServer appears   state=Scheduled
+t=5.38s  new GameServer           state=Ready
+         SCARD servers:map:map_01 = 2
+```
+
+Two registrants for one `map_id`, **with no allocation involved**. `registry.FindServer` then
+returns the *least loaded* of the two — the unallocated spare — so live players are handed the
+pod Agones is free to delete on the next scale-down, and the two halves of `map_01` cannot see
+each other. The autoscaler would be the thing that broke ADR-2. The fleet was restored to
+`replicas: 1` immediately.
+
+**Decision 2 — `ready=0` on this fleet is the correct steady state, and tooling must say so.**
+The previous `cluster.fleet` WARN ("no spare capacity") described the invariant holding as
+though it were a deficiency, and a warning that fires on the correct state is an instruction to
+break it — which is how #148 came to be filed. `verify.sh` now passes on `ready=0` for a fleet
+that pins a fleet-wide map id, and reserves the warning for fleets where spare capacity is
+meaningful.
+
+**Decision 3 — the prohibition is enforced, not documented.** It was already documented, in
+three places, in capitals, and was proposed anyway. `verify.sh` check `cluster.autoscaler`
+**FAILS** when any `FleetAutoscaler` targets a fleet whose pod template carries a literal
+fleet-wide `GAMESERVER_MAP_ID`, and **stands down** for a fleet that does not — so it stops
+being an error at exactly the moment the real fix lands, rather than becoming the next thing
+someone has to argue past. Proven both ways on 2026-08-18: PASS with none present, FAIL with
+one created against this fleet, then deleted.
+
+**Decision 4 — the unlock is a per-pod map id, and it unlocks both things at once.** `replicas
+> 1` and a buffer autoscaler are the same decision wearing two hats: both are safe exactly when
+a `Ready` pod is not yet claiming a world. Two mechanisms would do it, and neither exists:
+
+1. **Per-pod map id** — the pod learns its map from something other than the fleet spec. This
+   is the one that also fixes the second half of #148 (a second map cannot be served at all
+   today), because allocation targets a *fleet*: every pod of this fleet answers `map_01`
+   whatever the replica count, so an allocation for `map_02` is refused with
+   `ErrFleetMapMismatch` with or without an autoscaler (per-pod map id is tracked as part of
+   #151's "what it does not unblock"). **An autoscaler does nothing for this
+   half of the problem** — that is worth stating, because the two symptoms were filed together
+   and only one of them is about spare pods at all.
+2. **Register on `Allocated`, not on `Ready`** — the server watches its own GameServer state
+   and registers only once Agones has handed it out. Buffer pods then hold no registry entry,
+   the buffer becomes real spare capacity, and the cold start leaves the join path. This is a
+   game-server behaviour change with its own tests, not a manifest change, and is tracked as
+   #151.
+
+**What this ADR does not claim.** It does not claim the ~9 s cold start is on the player's
+path. It is not: with no `Ready` pod, `AllocateServer` fails immediately and `FindServer`
+returns `ErrNoServerAvailable` (`gateway/registry/registry.go:559`), which
+`clientSafeAssignError` maps to the terminal `no server available for map`
+(`gateway/server/server.go:886`), so the client gets a refusal in milliseconds rather than a
+wait. (Cold `Ready` measures 5.38 s today, not the 8.97 s in #148 — the image is warm in
+containerd; both numbers are pod-start latency, and neither is a capacity figure. ADR-7 is
+untouched.)
+
+**And it is not a claim that `EnterWorld` never waits.** It does, on a different branch: when
+the allocation *succeeds*, `awaitRegistration` blocks up to `--allocation-wait-timeout` (15 s)
+for the pod's own registry entry, and the client is told `server is starting, retry shortly`
+(`ErrServerStarting`). That wait is correct and deliberate — it is single-flight per `map_id`,
+so a hundred clients at one unserved map produce one pod and one wait. The no-wait property
+above is scoped to the case #148 was actually about: **the fleet having no `Ready` pod to
+allocate at all**, where there is nothing to wait *for* and the refusal is immediate. Confusing
+the two branches is how "add a buffer so the first player stops waiting" became a plausible
+sentence; they are separate paths with separate client messages, tabulated in
+`deploy/k8s/README.md`.
+
+**Revisit when** either mechanism in decision 4 lands. At that point `cluster.autoscaler` stops
+firing by construction, `replicas > 1` becomes a capacity question rather than a correctness
+one, and ADR-14 decision 5's buffer policy becomes the right thing to write — against a fleet
+whose spare pods are spare.
 
 ---
 
@@ -2252,3 +2341,4 @@ k8s; staging and production remain `DEPLOY_MODE=containers` and reach none of th
 | 15 | Realtime tier on k8s | **Proposed, not accepted — this one records an open question.** All three environments are `DEPLOY_MODE=containers`; there is no k3s (context is `docker-desktop`), no `deploy/k8s/`, and `cd.yml` applies no manifest. One thing *is* decided because it blocks either answer: with `portPolicy: Dynamic` the server cannot learn its own address, advertises `:9000` and the gateway hands that to clients verbatim — so the SDK must **read GameServer status from the sidecar**, not use static ports and not let the gateway write the registry entry (which would break ADR-1 and ADR-14's split). Six prerequisites — StatefulSets/PVCs, ConfigMaps, plugin packaging, Secrets, a registry, and allocation RBAC — sit outside `deploy/agones/` and outweigh ADR-14's stages 1-8, which they precede. ADR-3 is unchanged: allocation lives inside `MsgEnterWorld` and the gateway stays out of the gameplay path |
 | 16 | Agones on k3s | Realtime tier **proven** on Agones/k3d: a real client joined an Agones-managed server in strict-address mode. Docker Desktop k8s cannot host it (Kubernetes `hostPort` is never published to the host); k3d with a mapped port range can. The advertised address is **composed** — port from the Agones status read, host from `GAMESERVER_ADVERTISE_HOST` — because `status.address` is the node address and is not dialable. ADR-2 is now enforced in code (allocate only for a map with no live server); the join token is minted only after the pod self-registers. Allocated pods are never reclaimed; the map-fleet allocator policy stays open; the deploy path stays `DEPLOY_MODE=containers` |
 | 17 | Availability posture on k8s | **Statement of posture, not a manifest change.** Every workload in `deploy/k8s/` is **one replica** — gateway, Nakama, Redis, both PostgreSQL instances, and the map Fleet — so k8s provides scheduling and lifecycle here, **not redundancy**. `strategy: Recreate` on the two `hostPort` workloads (gateway 7000, Nakama 7001) is **required**: RollingUpdate deadlocks on a single node because the replacement cannot schedule until the outgoing pod frees the port. The accepted cost is that **every gateway or Nakama rollout drops the join path entirely**; in-progress sessions survive, because the game server verifies the join token itself and never calls the gateway (ADR-3). The window is **unmeasured** and not quoted. Before any tier above dev: answer the gateway hostPort exposure question *together with* cross-instance single-flight (ADR-16), and decide Redis persistence/replication against ADR-4 rather than by adding replicas |
+| 18 | Fleet autoscaling | **No `FleetAutoscaler` on a fleet that pins one `GAMESERVER_MAP_ID` for every replica.** The C# server self-registers at startup, not on allocation, so a "spare" Ready pod is a second live server for that map: measured on k3d 2026-08-18, scaling `1 -> 2` put two members into `servers:map:map_01` 5.4s later with no allocation involved, and `FindServer` returns the least-loaded — the spare. `ready=0` is therefore the correct steady state and tooling says so instead of warning. Enforced by `verify.sh` check `cluster.autoscaler` (FAIL), which stands down for a fleet with a per-pod map id. `replicas > 1` and a buffer autoscaler unlock together, on a per-pod map id or on registering at `Allocated` rather than `Ready` — an autoscaler does nothing for the "second map cannot be served" symptom, which is a fleet-targeted-allocation problem |
