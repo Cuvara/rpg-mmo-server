@@ -111,10 +111,18 @@ SERVICES=(
 )
 
 # --------------------------------------------------------------- systemd mode
+# Unit names are prefixed with COMPOSE_NAME_PREFIX, not the literal "rpg":
+# systemd unit names are GLOBAL to the host, and all three environments run on
+# one box. With a fixed prefix a host-mode staging deploy would restart dev's
+# rpg-gateway.service — the same class of collision the compose prefix exists to
+# prevent. Default stays "rpg", so an existing single-environment host is
+# unaffected.
+SYSTEMD_UNIT_PREFIX="${COMPOSE_NAME_PREFIX:-rpg}"
+
 has_systemd_unit() {
 	command -v systemctl >/dev/null 2>&1 || return 1
-	systemctl list-unit-files "rpg-$1.service" >/dev/null 2>&1 &&
-		systemctl cat "rpg-$1.service" >/dev/null 2>&1
+	systemctl list-unit-files "${SYSTEMD_UNIT_PREFIX}-$1.service" >/dev/null 2>&1 &&
+		systemctl cat "${SYSTEMD_UNIT_PREFIX}-$1.service" >/dev/null 2>&1
 }
 
 # ---------------------------------------------------------------- nohup mode
@@ -133,8 +141,8 @@ is_running() {
 stop_one() {
 	local name="$1"
 	if has_systemd_unit "$name"; then
-		info "systemctl stop rpg-$name"
-		sudo -n systemctl stop "rpg-$name" 2>/dev/null || systemctl stop "rpg-$name"
+		info "systemctl stop ${SYSTEMD_UNIT_PREFIX}-$name"
+		sudo -n systemctl stop "${SYSTEMD_UNIT_PREFIX}-$name" 2>/dev/null || systemctl stop "${SYSTEMD_UNIT_PREFIX}-$name"
 		return 0
 	fi
 	local pf pid
@@ -160,8 +168,8 @@ stop_one() {
 start_one() {
 	local name="$1" bin="$2" args="$3"
 	if has_systemd_unit "$name"; then
-		info "systemctl restart rpg-$name"
-		sudo -n systemctl restart "rpg-$name" 2>/dev/null || systemctl restart "rpg-$name"
+		info "systemctl restart ${SYSTEMD_UNIT_PREFIX}-$name"
+		sudo -n systemctl restart "${SYSTEMD_UNIT_PREFIX}-$name" 2>/dev/null || systemctl restart "${SYSTEMD_UNIT_PREFIX}-$name"
 		return 0
 	fi
 	local exe="$BIN_DIR/$bin"
@@ -287,7 +295,7 @@ do_status() {
 	for entry in "${SERVICES[@]}"; do
 		IFS='|' read -r name _ _ port <<<"$entry"
 		if has_systemd_unit "$name"; then
-			info "$name: systemd -> $(systemctl is-active "rpg-$name" 2>/dev/null || echo unknown)"
+			info "$name: systemd -> $(systemctl is-active "${SYSTEMD_UNIT_PREFIX}-$name" 2>/dev/null || echo unknown)"
 		elif is_running "$name"; then
 			info "$name: running (pid $(cat "$(pidfile "$name")"))"
 		else
