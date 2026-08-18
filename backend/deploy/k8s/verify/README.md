@@ -200,7 +200,8 @@ only one of them is a pass:
 | `RESULT=ok` (admitted) | FAIL — the gateway served a map no fleet hosts |
 | `"map is not available"` | PASS |
 | `"server is starting, retry shortly"` | FAIL — retryable refusal; every retry leaks a GameServer |
-| `"no server available for map"` | SKIP (inconclusive) — the fleet had nothing to allocate, so the branch under test was never reached |
+| `"all servers busy, retry shortly"` | SKIP (inconclusive) — the fleet had no `Ready` pod to allocate, so the branch under test was never reached. Expected for an empty fleet since #157, and not a gateway fault: that refusal allocates nothing, so retrying it is safe |
+| `"no server available for map"` | SKIP (inconclusive) — since #157 this means the allocation failed for a reason *other* than an empty fleet (transport error, non-2xx, undecodable body); check the gateway logs before re-running |
 
 `refusal.alloc_wait` runs a throwaway container: `--network none`, no published
 ports, `--backend=memory`, expected to die on startup. It cannot touch the
