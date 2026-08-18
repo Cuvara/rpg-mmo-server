@@ -25,7 +25,7 @@ Read first: ADR-16 (what shipped and how it was proven), ADR-15 decision 3
 | `30-secret-template.yaml` | Template. `jwt-secret`, `join-token-secret` (**different values**), `redis-password`, `game-db-url`, `transport-key` |
 | `40-gateway.yaml` | Gateway Deployment + NodePort Service (client) + ClusterIP Service (metrics) |
 | `50-fleet-map.yaml` | `map-servers-dotnet-k8s` Fleet, `replicas: 1`, dynamic port, health on, no autoscaler |
-| `proof/*` | Scaffold Redis and a ConfigMap override, for proving the tier before `rpg-k8s-data` exists. **Not the data tier** |
+| `proof/*` | Scaffold Redis and a ConfigMap override, for bringing this tier up before `rpg-k8s-data` exists. **Not the data tier** — with that namespace present, skip both files |
 
 ## Apply
 
@@ -40,7 +40,7 @@ docker save rpg-mmo/gameserver-dotnet:develop  | docker exec -i k3d-rpg-dev-serv
 $K apply -f 00-namespace.yaml -f 05-agones-sdk-rbac.yaml -f 10-rbac.yaml -f 20-configmaps.yaml
 # Secret: fill a copy OUTSIDE the repo, or use `kubectl create secret generic`.
 $K apply -f /tmp/rpg-app.secret.yaml
-# Only while rpg-k8s-data does not exist:
+# ONLY while rpg-k8s-data does not exist (skip both once it does):
 $K apply -f proof/redis-scaffold.yaml -f proof/configmaps-scaffold.yaml
 $K apply -f 40-gateway.yaml -f 50-fleet-map.yaml
 ```
@@ -102,37 +102,46 @@ Images: `rpg-mmo/gateway:develop` (gateway images carry **no**
 string), `rpg-mmo/gameserver-dotnet:develop` (revision `307f1e8`, three
 deploy-script commits behind `develop`'s `2ec7ebb`).
 
+Wired to the **real** data tier in `rpg-k8s-data` — Redis, PostgreSQL
+(`postgres-game`) and Nakama — not to the scaffold. `jwt-secret` is the same
+value as `rpg-k8s-data/nakama`'s `JWT_SECRET`, which is the cross-namespace
+contract that makes a Nakama-issued client token verifiable at the gateway;
+`join-token-secret` is a different value (ADR-8).
+
 ```
 $ kubectl get pods,gs -n rpg-k8s-realtime
-pod/gateway-58f9776b7d-hmdtz             1/1   Running
-pod/map-servers-dotnet-k8s-wlvw4-9gfjg   2/2   Running
-pod/redis-86667ddbff-wh2c5               1/1   Running
-gameserver.agones.dev/map-servers-dotnet-k8s-wlvw4-9gfjg   Ready   172.20.0.3   7056
+pod/gateway-5ccfdcd7bb-48gm2             1/1   Running
+pod/map-servers-dotnet-k8s-wlvw4-9j4vl   2/2   Running
+gameserver.agones.dev/map-servers-dotnet-k8s-wlvw4-9j4vl   Ready   172.20.0.3   7017
 ```
 
-Gateway picked up the in-cluster ServiceAccount with no kubeconfig:
+Gateway picked up the in-cluster ServiceAccount with no kubeconfig, and the
+in-cluster Redis:
 
 ```
+"msg":"using redis backend","addr":"redis.rpg-k8s-data.svc.cluster.local:6379"
 "msg":"agones allocator enabled","namespace":"rpg-k8s-realtime",
 "fleet_map":"map-servers-dotnet-k8s","fleet_dungeon":"(unconfigured)","transport":"tcp"
 ```
 
-The game server composed the address rather than advertising its listen value:
+The game server composed the address rather than advertising its listen value,
+and took the PostgreSQL player store rather than the in-memory one:
 
 ```
-Advertising 127.0.0.1:7056 (host from GAMESERVER_ADVERTISE_HOST, port 7056 from
+using postgres player store (postgres://game:****@postgres-game.rpg-k8s-data.svc.cluster.local:5432/gamestate)
+Advertising 127.0.0.1:7017 (host from GAMESERVER_ADVERTISE_HOST, port 7017 from
   Agones status); configured value ':9000' not used
-Registered map-servers-dotnet-k8s-wlvw4-9gfjg in Redis: map=map_01
-  addr=127.0.0.1:7056 transport=tcp capacity=100 ttl=15s
+Registered map-servers-dotnet-k8s-wlvw4-9j4vl in Redis: map=map_01
+  addr=127.0.0.1:7017 transport=tcp capacity=100 ttl=15s
 ```
 
-Registry entry (`HGETALL servers:id:map-servers-dotnet-k8s-wlvw4-9gfjg`) —
-host-qualified, server id == GameServer name:
+Registry entry (`HGETALL servers:id:map-servers-dotnet-k8s-wlvw4-9j4vl`, read
+from `rpg-k8s-data/redis-0`) — host-qualified, server id == GameServer name:
 
 ```
-server_id  map-servers-dotnet-k8s-wlvw4-9gfjg
+server_id  map-servers-dotnet-k8s-wlvw4-9j4vl
 map_id     map_01
-addr       127.0.0.1:7056
+addr       127.0.0.1:7017
 transport  tcp
 capacity   100
 player_count 0
@@ -160,29 +169,54 @@ address: 172.20.0.3        # <- the NODE address: this is what is NOT dialable
 state: Allocated
 ```
 
-Reachability from the host. A bare connect proves nothing on k3d — the
-serverlb accepts on **every** port in 7000-7100 and only then fails upstream —
-so each dial writes a byte and waits for a reply:
+### The full client flow, in strict-address mode
+
+`smoketest` run from the host against this tier — Nakama and the gateway
+through port-forwards, the **game server dialled directly** at the address the
+gateway advertised. `--strict-addr` forbids the harness from rewriting a
+listen-style address to loopback, which is what makes this evidence rather
+than decoration: without it the harness silently repairs the exact defect the
+advertise-host composition exists to fix.
 
 ```
-127.0.0.1:7056 (game server)     connect+write, held open, no EOF  (timeout)  <- real listener
-127.0.0.1:7099 (unmapped port)   connect, immediate EOF                       <- control
+PASS  nakama_health               5ms  http://127.0.0.1:17350/healthcheck
+PASS  device_auth                10ms  device_id=smoketest-6ac1cedf30e0959d
+PASS  gateway_token_rpc           3ms  user_id=ae87841c-d367-4212-bd72-991b6a2b2ad2
+PASS  gateway_auth                7ms  transport=tcp map=map_01 server=127.0.0.1:7017 (tcp)
+PASS  gameserver_join          1.109s  snapshots=15 (keyframes=1 deltas=14) final_x=4.83 ack_tick=10
+PASS  nakama_account              6ms  user=ae87841c... devices=1
+PASS  nakama_profile              5ms  player/profile level=1
+PASS  gamestate_migrations       13ms  version=1 (001_init) applied=2026-08-18T03:40:41Z
+PASS  gamestate_player_row    24.085s  map=map_01 x=4.8333 hp=100/100 (25 polls)
+PASS  gamestate_reload         9.029s  respawned at x=4.8333 from persisted x=4.8333
+SMOKE=PASS
+```
+
+### Reachability from the host
+
+A bare connect proves nothing on k3d — the serverlb accepts on **every** port
+in 7000-7100 and only then fails upstream — so each dial writes a byte and
+waits for a reply:
+
+```
+127.0.0.1:7017 (game server)      connect+write, held open, no EOF (timeout)  <- real listener
+127.0.0.1:7099 (unmapped port)    connect, immediate EOF                      <- control
 127.0.0.1:18000 (gw port-forward) connect+write, held open, no EOF (timeout)
 gateway /healthz -> ok    /readyz -> ready
 ```
 
 ## What is NOT proven
 
-* **No client ever completed the handshake against this tier.** No
-  `MsgAuth`/`MsgEnterWorld`/join/snapshot run was made — that needs Nakama and
-  a signed JWT, and Nakama is the sibling namespace's. The evidence here stops
-  at "each hop is dialable and the registry entry is correct".
 * **The gateway's own allocation path never fired.** Fleet pods self-register
   at boot, so `map_01` always has a live server and `FindServer` finds it
   without allocating (ADR-16 records this as an open question). The allocation
   was proven by posting one directly as the ServiceAccount.
-* **The real data tier.** Redis here is `proof/redis-scaffold.yaml`, not
-  `rpg-k8s-data`; `GAME_DB_URL` is blank, so the player store is in-memory and
-  Nakama is absent entirely.
+* **The gateway is not reachable from the host without a port-forward** on
+  k3d, for the reasons above. The client hop that a real deployment would use
+  (NodePort / LoadBalancer on the node's public address) is untested here
+  because no port outside 7000-7100 is published.
+* **Nothing was tested under load, and nothing was tested with more than one
+  player, one map or one gateway replica.** In particular the two-replica
+  allocation race ADR-16 describes is untried.
 * **Nothing about capacity.** ADR-7's per-server ceiling is still unknown and
   is not measurable on this box.

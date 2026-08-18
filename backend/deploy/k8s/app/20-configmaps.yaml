@@ -19,6 +19,12 @@
 # a Helm-generated name), THIS FILE IS THE ONLY THING THAT CHANGES. That is
 # the whole reason the address is here and not in the Deployment or the Fleet.
 #
+# CONFIRMED 2026-08-18: `rpg-k8s-data` now exists and its Services are
+# `redis`, `postgres-game`, `postgres-meta`, `nakama` — so the two names this
+# tier actually uses (redis, postgres-game) were assumed correctly. The META
+# database is `postgres-meta`, NOT `postgres`; nothing here dials it (it is
+# Nakama's, ADR-1), but a copy-paste from compose would get that one wrong.
+#
 # It is in-cluster DNS on purpose. `host.k3d.internal` is what makes the DEV
 # fleet in `rpg-realtime` work on this box and nowhere else (it names the
 # docker host, so the pod reaches the compose data tier through published host
