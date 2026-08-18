@@ -164,6 +164,30 @@ func TestClientSafeAssignError(t *testing.T) {
 			want: msgServerStarting,
 		},
 		{
+			// The fleet had no Ready GameServer at that instant
+			// (allocation API answered UnAllocated). Nothing was allocated,
+			// a replacement pod is typically seconds away, and the client
+			// must be told to retry rather than given the terminal
+			// "this map is full" answer. Issue #152.
+			name: "momentarily exhausted fleet is retryable, not terminal",
+			err: fmt.Errorf("assign map: %w map_desert: allocate: %w",
+				registry.ErrNoServerAvailable,
+				fmt.Errorf("allocate: fleet map-servers-dotnet-k8s: %w (state %q)",
+					registry.ErrNoCapacity, "UnAllocated")),
+			want: msgFleetBusy,
+		},
+		{
+			// The narrowing that keeps the pod leak bounded: only an
+			// UnAllocated answer proves no GameServer was handed out. Any
+			// other allocator failure may have allocated a pod whose
+			// response was lost, so it keeps the terminal message.
+			name: "other allocator failures stay terminal",
+			err: fmt.Errorf("assign map: %w map_desert: allocate: %w",
+				registry.ErrNoServerAvailable,
+				errors.New("allocate: allocation api status 500: internal")),
+			want: msgNoServerAvailable,
+		},
+		{
 			name: "not implemented stays specific",
 			err:  fmt.Errorf("assign map: %w", gameerrors.New(gameerrors.ErrNotImplemented, "dungeon transfer")),
 			want: msgNotImplemented,
@@ -218,6 +242,48 @@ func TestNoServerAvailableIsMatchable(t *testing.T) {
 	}
 	if errors.Is(starting, registry.ErrNoServerAvailable) || errors.Is(err, registry.ErrServerStarting) {
 		t.Fatal("ErrServerStarting and ErrNoServerAvailable must be distinct sentinels")
+	}
+
+	// allocateAndWait wraps BOTH sentinels into one error with a two-verb
+	// %w, which is the only reason the gateway can tell a momentarily
+	// exhausted fleet apart from a full map at all (#152). If that wrap ever
+	// loses a branch, the exhausted-fleet case silently reverts to the
+	// terminal message and no other test would notice.
+	exhausted := fmt.Errorf("%w %s: allocate: %w", registry.ErrNoServerAvailable, "map_desert",
+		fmt.Errorf("allocate: fleet f: %w (state %q)", registry.ErrNoCapacity, "UnAllocated"))
+	if !errors.Is(exhausted, registry.ErrNoCapacity) {
+		t.Fatal("ErrNoCapacity must survive allocateAndWait's two-verb %w wrap")
+	}
+	if !errors.Is(exhausted, registry.ErrNoServerAvailable) {
+		t.Fatal("ErrNoServerAvailable must survive alongside ErrNoCapacity in the same wrap")
+	}
+	// The narrow branch must not fire on the broad sentinel alone, or every
+	// full map would be told to retry — which ADR-2 forbids and which no
+	// amount of retrying can satisfy.
+	if errors.Is(err, registry.ErrNoCapacity) {
+		t.Fatal("a bare ErrNoServerAvailable must not match ErrNoCapacity")
+	}
+}
+
+// TestEnterWorldMessagesAreDistinct guards the property the whole
+// classification rests on: a client decides whether to retry by comparing the
+// message it got. Two failures sharing a string are one failure to the client,
+// and the retryable/terminal split silently disappears.
+func TestEnterWorldMessagesAreDistinct(t *testing.T) {
+	msgs := map[string]string{
+		"no server available": msgNoServerAvailable,
+		"server starting":     msgServerStarting,
+		"unknown map":         msgUnknownMap,
+		"fleet busy":          msgFleetBusy,
+		"not implemented":     msgNotImplemented,
+		"internal error":      msgInternalError,
+	}
+	seen := make(map[string]string, len(msgs))
+	for name, msg := range msgs {
+		if other, dup := seen[msg]; dup {
+			t.Errorf("%s and %s share the message %q; a client cannot tell them apart", name, other, msg)
+		}
+		seen[msg] = name
 	}
 }
 

@@ -633,3 +633,49 @@ default is generic, so a newly introduced error type cannot start leaking; it
 just reports `internal error` until someone deliberately classifies it. The
 `registry.ErrNoServerAvailable` sentinel exists so the one genuinely useful
 condition survives that collapse without string matching.
+
+#### Decision — an exhausted fleet is retryable, a full map is not (#152)
+
+Until 2026-08-18 `clientSafeAssignError` gave one terminal answer,
+`no server available for map`, to two conditions that are not alike:
+
+- **the map has live servers and all are full** (`registry.go:408`, no allocator
+  call at all). Stable. ADR-2 forbids growing out of it. Terminal is correct.
+- **the map has no live server and the allocation API answered `UnAllocated`**
+  (`registry.go:559`, wrapping `registry.ErrNoCapacity`). Self-correcting: the
+  Fleet controller is already bringing a replacement pod to `Ready`, measured at
+  5.38s on k3d (ADR-18).
+
+The two were already distinguishable at the point of classification and nobody
+had noticed: `allocateAndWait` wraps with a **two-verb** `%w`
+(`"%w %s: allocate: %w"`), so `errors.Is(err, registry.ErrNoCapacity)` matches
+through it while `errors.Is(err, registry.ErrNoServerAvailable)` still does too.
+No registry change was needed — only a new `case`, placed **before** the
+`ErrNoServerAvailable` case so the broader sentinel cannot swallow the narrower
+one, and a new message `all servers busy, retry shortly`.
+
+**Why this does not reopen the pod leak.** The reason the terminal answer existed
+is that every retry allocates and Agones has no un-allocate. That reason does not
+apply here: `UnAllocated` is a decoded 2xx body stating that no GameServer was
+handed out, so retrying it costs one allocation POST and **no pod**. Better, the
+successful retry usually costs no POST either — pods self-register at startup
+before any allocation (ADR-18), so once the replacement is `Ready` the next
+`EnterWorld` resolves it on the registry path. The branch is therefore narrowed to
+`ErrNoCapacity` alone: a transport error, a non-2xx status or an undecodable body
+may each have allocated a pod whose response was lost, so those keep the terminal
+message. Compare `ErrServerStarting`, which *is* retryable today and where each
+retry genuinely does allocate a fresh pod — the new branch is strictly the safer
+of the two.
+
+**Why the retry is not bounded server-side.** `ErrServerStarting`'s bound is a
+*wait* (`allocWaitTimeout`), not a retry cap; nothing stops a client looping on it
+either. Adding a gateway-side wait for fleet capacity was rejected: it turns a
+millisecond refusal into a multi-second stall on the join path — the issue's own
+point is that today's cost is a wrong-looking refusal, *not* latency — and it
+would wait on a condition that may never clear (a genuinely full fleet with no
+autoscaler, which ADR-18 pins this deployment to). The bound belongs to the
+client's backoff. What the gateway does contribute is `allocateOnce`, which
+collapses concurrent retries for one `map_id` into a single allocation attempt.
+The residual, named rather than fixed: N clients retrying sequentially drive up
+to N allocation POSTs per round against the Agones API. That is API load, not a
+leak, and it is the price of the honest answer.

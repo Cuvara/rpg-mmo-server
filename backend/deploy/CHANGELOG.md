@@ -38,9 +38,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   registered* is retryable (`server is starting, retry shortly`, after the gateway itself
   waited up to `--allocation-wait-timeout`, 15 s), *map served but full* and *map not served by
   any fleet* are terminal, the latter remembered for 60 s because every retry allocates a pod
-  that is never reclaimed. One case is named as **unstated and deliberately unchanged here**:
-  when the fleet has no `Ready` GameServer at all the allocation fails outright and the client
-  gets the terminal answer even though a pod may be seconds away (#152). The distinction is
+  that is never reclaimed. One case was named as **unstated and deliberately unchanged there**
+  — when the fleet has no `Ready` GameServer at all the allocation fails outright and the
+  client gets the terminal answer even though a pod may be seconds away (#152); it was fixed
+  in the gateway by #157 and the table now records the new answer. The distinction is
   load-bearing and is stated in ADR-18 too: `EnterWorld` *does* wait on the branch where the
   allocation succeeds and `awaitRegistration` blocks for the pod's own registry entry; what
   it never does is wait when the fleet has no `Ready` pod to allocate, which is the case
@@ -48,6 +49,28 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   became a plausible sentence. Refs #148.
 
 ### Changed
+- **The `EnterWorld` refusal table records the fix to its own exception** (#157,
+  `deploy/k8s/README.md`). The table had four conditions and three messages, and named row two
+  — *fleet has no `Ready` pod* — as the one refusal whose disposition did not match its
+  condition, tracked as #152 and left as found because every retry allocates and Agones has no
+  un-allocate. #157 split that row: an `UnAllocated` answer from the allocation API
+  (`registry.ErrNoCapacity`) now returns the retryable `all servers busy, retry shortly`, while
+  every *other* allocation failure keeps the terminal `no server available for map`. The
+  narrowing is what keeps the pod leak bounded — `UnAllocated` is a decoded 2xx body stating
+  that no GameServer was handed out, whereas a lost response may have allocated one. Five
+  conditions, four messages, and every disposition now matches its condition. **Nothing about
+  the deployment changes**: no buffer, no autoscaler, no longer wait. `EnterWorld` still
+  refuses in milliseconds on that branch and leaves the backoff to the client, so ADR-18 is
+  untouched and the measured 5.38 s cold start stays off the player's path.
+- **`verify.sh` check `refusal.unknown_map` follows the gateway's new string.** The check
+  reads the refusal text, and an empty fleet now answers `all servers busy, retry shortly`
+  where it used to answer `no server available for map`. Without this the empty-fleet case
+  would have fallen through to the catch-all and reported a **FAIL** for a healthy gateway —
+  the check's own inconclusive branch, misfiled as a defect. Both strings now SKIP as
+  inconclusive with distinct reasons: the new one means the fleet had nothing to allocate,
+  the old one now means the allocation failed for some *other* reason and the gateway logs
+  are worth reading. The retryable-refusal FAIL branch is unchanged and still fires on
+  `server is starting, retry shortly`, which is the leak it exists to catch.
 - **`cluster.fleet` no longer WARNs about `ready=0` on a fleet that pins a fleet-wide map id.**
   On that fleet `ready=0` is the designed steady state — a spare `Ready` pod would be a second
   live server for the map — so the check now passes and says why. A warning that fires on the

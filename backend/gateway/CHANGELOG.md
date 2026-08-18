@@ -5,6 +5,40 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **A momentarily exhausted fleet no longer gets the terminal "do not retry"
+  answer** (#152). `EnterWorld` collapsed two unlike conditions into one message:
+  *this map has live servers and all are full* (`registry.go:408`, stable, ADR-2
+  forbids growing out of it) and *this map has no live server and the allocation
+  API answered `UnAllocated`* (`registry.go:559`), which routinely clears in
+  seconds as the Fleet controller brings a replacement pod to `Ready` — 5.38s
+  measured on k3d (ADR-18). The second now answers with a new retryable message,
+  `all servers busy, retry shortly`, distinct from both
+  `no server available for map` (this map is full — terminal) and
+  `server is starting, retry shortly` (a server *was* allocated and is booting).
+  No registry change was needed: `allocateAndWait` already wraps with a two-verb
+  `%w`, so `registry.ErrNoCapacity` was matchable at the gateway all along — only
+  a new `case`, ordered **before** `ErrNoServerAvailable` so the broader sentinel
+  cannot swallow the narrower one.
+- **The retryable branch is narrowed to `ErrNoCapacity` alone, and that is what
+  keeps it off the pod leak.** The terminal answer existed because every retry
+  allocates and Agones has no un-allocate; that reason does not hold here, because
+  `UnAllocated` is a decoded 2xx body stating no GameServer was handed out — a
+  retry costs one allocation POST and **no pod**, and the retry that succeeds
+  usually costs not even that, since pods self-register at startup before any
+  allocation (ADR-18) and the next `EnterWorld` then resolves on the registry
+  path. Every *other* allocator failure (transport error, non-2xx status,
+  undecodable body) may have allocated a pod whose response was lost, so those
+  keep the terminal message. A gateway-side wait for fleet capacity was
+  considered and **rejected**: it would turn a millisecond refusal into a
+  multi-second stall on the join path for a condition that may never clear, and
+  the bound belongs to the client's backoff. Named, not fixed: nothing caps how
+  often a client may retry, so N clients retrying sequentially drive up to N
+  allocation POSTs per round against the Agones API — API load, not a leak.
+  Tests cover the new classification, the narrowing, the two-verb `%w`
+  matchability, and that all six client-facing `EnterWorld` messages are
+  pairwise distinct.
+
 ### Fixed
 - **A client was handed a game server for a map it did not ask for, and every
   layer reported success.** Reproduced on a live k3d Agones fleet: with

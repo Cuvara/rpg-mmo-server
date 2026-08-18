@@ -2200,12 +2200,19 @@ k8s; staging and production remain `DEPLOY_MODE=containers` and reach none of th
   in it still carries the same `GAMESERVER_MAP_ID`, so a second *map* remains unserved
   (`ErrFleetMapMismatch`) until map id is per-pod. Two separate unlocks, not one.
   Absent a FleetAutoscaler, a cold map does **not** make the first player *wait*: with no
-  `Ready` pod the allocation fails outright (`ErrNoServerAvailable`,
-  `gateway/registry/registry.go:559`) and the client gets the terminal
-  `no server available for map` in milliseconds (`clientSafeAssignError`,
-  `gateway/server/server.go:886`). The cost is a wrong-looking refusal, not latency — #148's
-  "~9s on the player's path" was the premise measurement removed, and #152 is the refusal
-  being terminal where it should be retryable. ADR-18 decides the autoscaler question; this
+  `Ready` pod the allocation fails in milliseconds (`registry.ErrNoCapacity`,
+  `gateway/registry/registry.go:559`) and the client is refused, never held
+  (`clientSafeAssignError`, `gateway/server/server.go:906`). The cost is a wrong-looking
+  refusal, not latency — #148's "~9s on the player's path" was the premise measurement
+  removed, and #152 was the refusal being terminal where it should be retryable.
+  **Amended 2026-08-18 (#157):** that refusal is now the *retryable*
+  `all servers busy, retry shortly` rather than the terminal
+  `no server available for map`, keyed on `ErrNoCapacity` alone so the pod leak stays
+  bounded — an `UnAllocated` answer proves no GameServer was handed out, while any other
+  allocation failure may have allocated one whose response was lost and keeps the terminal
+  message. This changes what the client is *told*, not what the deployment *does*: the
+  gateway still refuses in milliseconds and puts no wait on the join path, so the reasoning
+  above and ADR-18's conclusion are unaffected. ADR-18 decides the autoscaler question; this
   ADR does not.
 - **Known-adjacent:** #143 — k3d's serverlb sits in the gameplay data path and
   triples snapshot jitter, so local capacity numbers measure the proxy; #147 — a reported 54 Hz

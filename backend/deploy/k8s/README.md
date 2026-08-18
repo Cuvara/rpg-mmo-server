@@ -128,7 +128,7 @@ first, which does not exist yet — see **ADR-18**.
 
 ### Why `EnterWorld` waits on one branch and refuses on the others
 
-The four conditions, the message each one sends the client and the `file:line`
+The five conditions, the message each one sends the client and the `file:line`
 for every path are tabulated in **"What `EnterWorld` does when no server is
 ready, and what the client is told"** in this file. Two things that table
 records but does not argue, kept here because the autoscaler decision (ADR-18)
@@ -147,22 +147,35 @@ is waiting for. That ceiling is **derived, not a constant** —
 so changing the ping cadence moves it, and `cmd/gateway` refuses to start above
 it rather than letting the two drift apart silently.
 
-**Exactly one of the refusals is wrong, and it is deliberately left as found.**
-When the fleet has no `Ready` GameServer at all, the allocation fails outright
-and the client is given the *terminal* `no server available for map` even though
-a replacement pod may be seconds from Ready. That is the only branch where the
-disposition does not match the condition: *all servers full* earns its terminal
-answer under ADR-2 — allocating there would register a second live server for one
-`map_id` and split the world — and *no fleet serves this map* earns its own,
-since no number of retries makes a fleet host a different map. Making the
-exhausted-fleet case retryable is defensible but is not a deploy-time change: the
-terminal answer exists because every retry allocates. Tracked as #152; do not
-"fix" it here.
+**The one refusal that was wrong has been fixed, and not here.** When the fleet
+has no `Ready` GameServer at all the allocation used to fail into the *terminal*
+`no server available for map`, even though a replacement pod is typically
+seconds from `Ready` — the only branch whose disposition did not match its
+condition. #157 gives that case its own retryable message,
+`all servers busy, retry shortly`. It was a gateway change, not a deploy-time
+one, and the deploy side is unchanged by it: nothing here needs a buffer, a
+longer wait or an autoscaler as a result.
 
-**Note what none of this is.** No branch of `EnterWorld` waits on *pod startup*.
-The retryable wait above begins after an allocation has already succeeded. That
-is why a buffer of Ready pods removes no wait from the join path, and why ADR-18
-refuses one.
+The reason the terminal answer existed at all was that every retry allocates and
+Agones has no un-allocate, so a retry loop leaks a pod per attempt. That reason
+does not apply to this one branch, which is why it could be changed alone: the
+allocation API's `UnAllocated` answer is a decoded 2xx body stating that **no**
+GameServer was handed out. The retry costs one allocation POST and no pod, and
+the retry that finally succeeds usually costs neither, because a `Ready` pod
+self-registers into Redis before any allocation (ADR-18) — so the next
+`EnterWorld` resolves it on the registry path with no allocator call. The fix is
+deliberately keyed on that sentinel alone (`registry.ErrNoCapacity`); every other
+allocation failure may have allocated a pod whose response was lost, and those
+keep the terminal answer. The other refusals earn theirs unchanged: *all servers
+full* under ADR-2, since allocating there would register a second live server for
+one `map_id` and split the world, and *no fleet serves this map* since no number
+of retries makes a fleet host a different map.
+
+**Note what none of this is.** No branch of `EnterWorld` waits on *pod startup* —
+including the one #157 made retryable, which still refuses in milliseconds and
+leaves the backoff to the client. The only wait `EnterWorld` performs begins
+after an allocation has already succeeded. That is why a buffer of Ready pods
+removes no wait from the join path, and why ADR-18 refuses one.
 
 ## Availability posture: one replica of everything, and what a rollout costs
 
@@ -255,9 +268,11 @@ Do not inherit this shape by promoting the manifests. Each row is a real decisio
    omission — see `../docs/DATABASE.md`.
 4. **The fleet cannot be scaled until map assignment is per-replica** (ADR-2), and
    there is no FleetAutoscaler — but a cold map does **not** make the first player
-   *wait*: with no `Ready` pod the allocation fails outright and the client gets the
-   terminal `no server available for map` in milliseconds. The cost is a wrong-looking
-   refusal, not latency (#148, #152). Scaling it today does not add capacity, it splits the world: a second
+   *wait*: with no `Ready` pod the allocation fails in milliseconds and the client is
+   refused, never held. Since #157 that refusal is the *retryable*
+   `all servers busy, retry shortly` rather than a terminal one, which corrects what the
+   player is told without putting any wait on the join path (#148, #152). Scaling it today
+   does not add capacity, it splits the world: a second
    pod self-registers into `servers:map:map_01` on becoming Ready, without any
    allocation. The unlock is **#151** — register on `Allocated` rather than `Ready` — and it
    buys `replicas > 1` for **one map only**; a second map needs a per-pod `GAMESERVER_MAP_ID`,
@@ -272,28 +287,37 @@ Do not inherit this shape by promoting the manifests. Each row is a real decisio
 
 ### What `EnterWorld` does when no server is ready, and what the client is told
 
-"No live server for this map" is **four** conditions with three different client messages,
+"No live server for this map" is **five** conditions with four different client messages,
 and conflating them is how "add a buffer so the first player stops waiting" became a
-plausible sentence. All four are decided in `FindServer`
+plausible sentence. All five are decided in `FindServer`
 (`gateway/registry/registry.go`) and mapped to client text by `clientSafeAssignError`
-(`gateway/server/server.go:886`):
+(`gateway/server/server.go:906`):
 
 | Condition | Path | Client is told | Retryable? | Duration |
 |---|---|---|---|---|
 | Allocation **succeeds**, pod not yet registered | `awaitRegistration` blocks up to `--allocation-wait-timeout` (`DefaultAllocationWaitTimeout` = 15s, `registry.go:46`) -> `ErrServerStarting` (`registry.go:188`) | `server is starting, retry shortly` | **Yes** — the only retryable one | Up to 15s |
-| Fleet has **no `Ready` pod** to allocate | `AllocateServer` fails -> `ErrNoServerAvailable` (`registry.go:559`) | `no server available for map` | No — terminal | Milliseconds. There is nothing to wait *for* |
+| Fleet has **no `Ready` pod** to allocate | The allocation API answers `UnAllocated` -> `ErrNoCapacity` (`agones_allocator.go:63`), wrapped alongside `ErrNoServerAvailable` by a two-verb `%w` (`registry.go:559`) | `all servers busy, retry shortly` | **Yes** — since #157 | Milliseconds to refuse. The condition itself clears in ~5.4s as the Fleet controller brings a replacement to `Ready` |
+| Allocation fails for **any other reason** (transport error, non-2xx, undecodable body) | `AllocateServer` fails -> `ErrNoServerAvailable` only (`registry.go:559`) | `no server available for map` | No — terminal | Milliseconds |
 | Map **has** live servers and every one is **full** | Refusal without allocating, because a second server for one `map_id` would split the world (ADR-2) -> `ErrNoServerAvailable` (`registry.go:408`) | `no server available for map` | No — terminal | Milliseconds |
 | **No fleet serves the map** at all | `ErrFleetMapMismatch` (`registry.go:211`), and `rememberMismatch` suppresses re-allocation for `DefaultMapMismatchTTL` = 60s (`registry.go:60`, `:480`) | `map is not available` | No — terminal, and remembered 60s | Milliseconds |
 
-Message strings are at `server.go:868`, `:874` and `:881`. Two things the table is meant to
-settle:
+Message strings are at `server.go:868`, `:876`, `:883` and `:901`. Two things the table is
+meant to settle:
 
-- **The deployment does wait on the first row, deliberately, and does not wait on the other
-  three.** #148 was about the second row — the fleet having no `Ready` pod — where there is
+- **The deployment does wait on the first row, deliberately, and does not wait on any of the
+  others.** #148 was about the second row — the fleet having no `Ready` pod — where there is
   nothing to wait *for*, so a buffer autoscaler removes a latency that was never on the
-  player's path.
-- **Exactly one of the three refusals is wrong**, and it is row two — see #152. Rows three and
-  four earn theirs.
+  player's path. Row two being *retryable* since #157 does not change that: the gateway still
+  refuses in milliseconds and does not hold the client while the replacement pod boots.
+- **Every row's disposition now matches its condition.** Row two used to be the exception —
+  a self-correcting condition given a terminal answer — and #157 fixed it. What made that
+  safe is that the row is keyed on `ErrNoCapacity` specifically: an `UnAllocated` answer is
+  a decoded 2xx body stating that **no** GameServer was handed out, so the retry it invites
+  leaks no pod, and the retry that succeeds usually costs no allocation at all because a
+  `Ready` pod self-registers before any allocation (ADR-18). Row three is the *other* half of
+  the old row two and stays terminal for exactly that reason: a lost response may have
+  allocated a pod. Rows four and five earn their terminal answers under ADR-2 and from the
+  fact that no retry changes which map a fleet serves.
 
 Related issues: **#143** (k3d serverlb sits in the gameplay data path and
 triples snapshot jitter), **#147** (a reported 54 Hz tick against an advertised 60 Hz base rate,
