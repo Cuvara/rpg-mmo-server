@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -253,11 +254,30 @@ func TestGateway_EnterWorldAllocatesUnservedMap(t *testing.T) {
 			wantError: msgUnknownMap,
 		},
 		{
+			// An allocator failure that is NOT a capacity answer may have
+			// allocated a pod whose response was lost, so it keeps the
+			// terminal message: telling a client to retry that is how
+			// un-reclaimable pods accumulate.
 			name:      "allocation failure surfaces to the client",
 			mapID:     "map_desert",
-			alloc:     &countingAllocator{err: errors.New("fleet exhausted")},
+			alloc:     &countingAllocator{err: errors.New("allocate: allocation api status 500: internal")},
 			wantHits:  1,
 			wantError: msgNoServerAvailable,
+		},
+		{
+			// The fleet answered `UnAllocated`: no GameServer was handed
+			// out and none is Ready right now, but the Fleet controller is
+			// already bringing a replacement up (5.38s on k3d, ADR-18).
+			// The client must get the retryable message, not the terminal
+			// one — issue #152. Retrying costs one allocation POST and no
+			// pod, and the retry that succeeds usually costs neither,
+			// because a Ready pod self-registers before any allocation.
+			name:  "momentarily exhausted fleet is retryable",
+			mapID: "map_desert",
+			alloc: &countingAllocator{err: fmt.Errorf("allocate: fleet map-servers-dotnet-k8s: %w (state %q)",
+				registry.ErrNoCapacity, "UnAllocated")},
+			wantHits:  1,
+			wantError: msgFleetBusy,
 		},
 	}
 
