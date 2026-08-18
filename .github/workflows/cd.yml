@@ -317,6 +317,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist/bin dist/deploy dist/scripts
           cp backend/deploy/docker-compose.yml dist/deploy/
+          cp backend/deploy/docker-compose.agones.yml dist/deploy/
           cp backend/deploy/Makefile dist/deploy/
           cp backend/deploy/.env.example dist/deploy/
           # Everything docker-compose.yml bind-mounts must travel with it, or
@@ -502,6 +503,7 @@ jobs:
           mkdir -p "$RPG_DEPLOY_DIR/deploy/modules"
           install -m 0644 dist/deploy/nakama.so          "$RPG_DEPLOY_DIR/deploy/modules/nakama.so"
           install -m 0644 dist/deploy/docker-compose.yml "$RPG_DEPLOY_DIR/deploy/docker-compose.yml"
+          install -m 0644 dist/deploy/docker-compose.agones.yml "$RPG_DEPLOY_DIR/deploy/docker-compose.agones.yml"
           install -m 0644 dist/deploy/Makefile           "$RPG_DEPLOY_DIR/deploy/Makefile"
           install -m 0644 dist/deploy/.env.example       "$RPG_DEPLOY_DIR/deploy/.env.example"
           # Compose bind-mount sources. Replaced wholesale so a file deleted in
@@ -560,6 +562,13 @@ jobs:
           GAME_DB_URL: ${{ vars.GAME_DB_URL || '' }}
           # --- containers mode (compose `realtime` profile) --------------------
           DEPLOY_MODE: ${{ steps.paths.outputs.deploy_mode }}
+          ALLOCATOR: ${{ vars.ALLOCATOR || 'none' }}
+          ALLOCATOR_NAMESPACE: ${{ vars.ALLOCATOR_NAMESPACE }}
+          ALLOCATOR_FLEET_MAP: ${{ vars.ALLOCATOR_FLEET_MAP }}
+          ALLOCATOR_TRANSPORT: ${{ vars.ALLOCATOR_TRANSPORT }}
+          ALLOCATOR_KUBECONFIG: ${{ vars.ALLOCATOR_KUBECONFIG }}
+          KUBECONFIG_HOST: ${{ vars.KUBECONFIG_HOST }}
+          K3D_NETWORK: ${{ vars.K3D_NETWORK }}
           # Published host ports for the realtime containers. Empty = derive them
           # from GATEWAY_ADDR / GAMESERVER_ADDR below, so the containers take
           # over exactly the ports every other component already expects.
@@ -694,6 +703,17 @@ jobs:
             echo "GAMESERVER_ID=gs-dotnet-${GAMESERVER_MAP_ID}"
             echo "GAME_DB_URL=${GAME_DB_URL}"
             echo "DEPLOY_MODE=${DEPLOY_MODE}"
+            # Agones allocation. Off unless the environment says otherwise, so a
+            # cluster outage cannot take down an environment that never used one.
+            # When on, the gateway allocates from the fleet and the deploy step
+            # adds docker-compose.agones.yml (kubeconfig mount + k3d network).
+            echo "ALLOCATOR=${ALLOCATOR:-none}"
+            echo "ALLOCATOR_NAMESPACE=${ALLOCATOR_NAMESPACE:-rpg-realtime}"
+            echo "ALLOCATOR_FLEET_MAP=${ALLOCATOR_FLEET_MAP:-map-servers-dotnet-dev}"
+            echo "ALLOCATOR_TRANSPORT=${ALLOCATOR_TRANSPORT:-tcp}"
+            echo "ALLOCATOR_KUBECONFIG=${ALLOCATOR_KUBECONFIG:-/etc/rpg/kubeconfig}"
+            echo "KUBECONFIG_HOST=${KUBECONFIG_HOST:-./kubeconfig.local}"
+            echo "K3D_NETWORK=${K3D_NETWORK:-k3d-rpg-dev}
             echo "GATEWAY_CONTAINER_PORT=${GATEWAY_CONTAINER_PORT}"
             echo "GAMESERVER_CONTAINER_PORT=${GAMESERVER_CONTAINER_PORT}"
             echo "GATEWAY_METRICS_PORT=${GATEWAY_METRICS_PORT}"
@@ -867,10 +887,32 @@ jobs:
           else
             echo "realtime profile: disabled (DEPLOY_MODE=host)"
           fi
+          # Agones: when the environment opts in, the gateway needs the overlay —
+          # ALLOCATOR=agones, the kubeconfig mount and the k3d network. Without
+          # this the deploy silently reverts the switch: the gateway comes back up
+          # from the base file with ALLOCATOR=none, and nothing says so. Adding
+          # The bundle ships no docker-compose.override.yml (that file is local-dev
+          # only), so naming -f here loses nothing that was being loaded before.
+          file_args=()
+          if grep -qE '^ALLOCATOR=agones[[:space:]]*$' .env 2>/dev/null; then
+            file_args=(-f docker-compose.yml -f docker-compose.agones.yml)
+            echo "agones overlay: ENABLED (ALLOCATOR=agones in .env)"
+          else
+            echo "agones overlay: disabled (ALLOCATOR is not agones)"
+          fi
           # `pull` cannot fetch the locally built rpg-mmo/* tags — tolerated, the
           # images are already in the daemon's store.
-          docker compose "${profile_args[@]}" pull --quiet || true
-          docker compose "${profile_args[@]}" up -d --remove-orphans
+          docker compose "${file_args[@]}" "${profile_args[@]}" pull --quiet || true
+          docker compose "${file_args[@]}" "${profile_args[@]}" up -d --remove-orphans
+          # The fleet and the compose game server both register for map_01, and two
+          # live servers under one map_id is ADR-2's split world — two disconnected
+          # copies with no handoff. Compose merges `profiles` by union, so an overlay
+          # cannot take the service out of the realtime profile; stopping it here is
+          # explicit and reversible. map_02 is untouched: no fleet serves it.
+          if [ "${#file_args[@]}" -gt 0 ]; then
+            docker compose "${file_args[@]}" "${profile_args[@]}" stop gameserver-dotnet || true
+            echo "compose gameserver-dotnet stopped: map_01 is served by the Agones fleet"
+          fi
           # `up -d` does NOT recreate a container whose bind-mounted files
           # changed — only its image/config/env are compared. Without this, a
           # new prometheus.yaml or dashboard sits on disk unread until someone

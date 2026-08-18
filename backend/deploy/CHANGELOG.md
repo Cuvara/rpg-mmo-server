@@ -5,6 +5,25 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **CD silently reverted the Agones switch on every deploy.** The dev stack was moved to
+  serve `map_01` from the Agones fleet; the next push to `develop` put it straight back on
+  the compose game server with `ALLOCATOR=none`, and nothing reported it. Three causes,
+  all now closed:
+  - CD deploys from a bundle (`$RPG_DEPLOY_DIR/deploy`), not from the working tree, so an
+    `.env` edited in the repo never reached the running stack;
+  - the bundle never shipped `docker-compose.agones.yml`, so the overlay could not be
+    applied even if asked for;
+  - the generated `.env` is written wholesale from environment variables and had no
+    allocator keys, so `ALLOCATOR` reset to `none` on every run.
+  The bundle now carries the overlay, the generated `.env` carries `ALLOCATOR*`,
+  `KUBECONFIG_HOST` and `K3D_NETWORK` from environment variables, and the deploy step adds
+  `-f docker-compose.agones.yml` when `ALLOCATOR=agones`. It also stops the compose
+  `gameserver-dotnet` in that case: the fleet serves `map_01` and two live servers under
+  one `map_id` is ADR-2's split world. Compose merges `profiles` by union, so an overlay
+  cannot take a service out of a profile — stopping it explicitly is the honest way.
+
+
 ### Documentation
 - **ADR-15 — what running the realtime tier on Kubernetes would cost, and the
   dynamic-address problem that blocks it** (`backend/docs/ARCHITECTURE-DECISIONS.md`).
