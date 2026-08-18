@@ -922,7 +922,14 @@ jobs:
                    "one map — ADR-2's split world. Stop it before this deploy is trusted."
               exit 1
             fi
-            echo "compose gameserver-dotnet is stopped: map_01 is served by the Agones fleet"
+            # Its registry entry outlives it by up to the 15s heartbeat TTL, and for
+            # that window the gateway can still hand a client the address of a server
+            # that is gone. Deregister explicitly rather than waiting the TTL out.
+            gs_id="${GAMESERVER_ID:-gs-dotnet-${GAMESERVER_MAP_ID:-map_01}}"
+            redis_cli() { docker exec "${COMPOSE_NAME_PREFIX:-rpg}-redis" redis-cli "$@"; }
+            redis_cli del "servers:id:${gs_id}" >/dev/null 2>&1 || true
+            redis_cli srem "servers:map:${GAMESERVER_MAP_ID:-map_01}" "${gs_id}" >/dev/null 2>&1 || true
+            echo "compose gameserver-dotnet is stopped and deregistered (${gs_id}); map_01 is served by the Agones fleet"
           fi
           # `up -d` does NOT recreate a container whose bind-mounted files
           # changed — only its image/config/env are compared. Without this, a
