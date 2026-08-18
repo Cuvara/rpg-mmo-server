@@ -2212,9 +2212,9 @@ k8s; staging and production remain `DEPLOY_MODE=containers` and reach none of th
   tick against an advertised 60 Hz base rate, which that investigation reports as a
   measurement artifact — the loop paces on `CLOCK_MONOTONIC` while the observer timed it
   against a `CLOCK_REALTIME` running ~10% fast on the WSL2 host — rather than a code defect.
-  #147 is **closed** on that basis and the host clock itself is filed as #153;
-  #148 — no FleetAutoscaler and `replicas: 1`;
-  premises corrected on the issue itself, autoscaler refused (ADR-18).
+  #147 is **closed** on that basis and the host clock itself is filed as #153; #148 — no
+  FleetAutoscaler and `replicas: 1`, premises corrected on the issue itself and the autoscaler
+  refused (ADR-18).
 
 ### Follow-up work
 

@@ -245,7 +245,8 @@ Related issues: **#143** (k3d serverlb sits in the gameplay data path and
 triples snapshot jitter), **#147** (a reported 54 Hz tick against an advertised 60 Hz base rate,
 which the #147 investigation reports as a measurement artifact — the loop paces on
 `CLOCK_MONOTONIC` while the observer timed it against a `CLOCK_REALTIME` running ~10%
-fast on the WSL2 host — rather than a code defect),
+fast on the WSL2 host — rather than a code defect; **closed** on that basis, with the host
+clock itself filed as **#153**),
 **#148** (no FleetAutoscaler and `replicas: 1` — premises corrected on the issue,
 autoscaler refused in ADR-18).
 
