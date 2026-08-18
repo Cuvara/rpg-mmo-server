@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **Audited the generator's clock discipline against the host-clock hazard (#153), and it is
+  clean — no code change needed.** `CLOCK_REALTIME` on this box runs 10-17% fast against
+  `CLOCK_MONOTONIC`, which would corrupt any rate derived from it, so every interval the
+  generator computes was traced to source. All of them are monotonic: the measurement window
+  (`time.Since(windowStart)`), the server-side scrape window
+  (`afterGS.At.Sub(beforeGS.At)`, both `At` set from `time.Now()` at scrape time), snapshot
+  interval (`now.Sub(lastSnap)`), ack latency and join latency. Go embeds a monotonic reading
+  in every `time.Now()` and `Time.Sub`/`time.Since` prefer it, and nothing in `load/` strips
+  that reading — no `.UTC()`, `.Round()`, `.Truncate()` or string round-trip stands between a
+  timestamp and its subtraction. Recorded here because the property is load-bearing and
+  silent: introducing any of those calls on a `time.Time`, or reading a duration off a
+  server-supplied wall-clock field, would degrade every rate the tool reports by 10-17% with
+  no test failing. Refs #153.
+
 ### Fixed
 - **Virtual players are no longer evicted for outliving the heartbeat (#142).**
   Both peers send `MsgPing` every 10s and close any connection that has not

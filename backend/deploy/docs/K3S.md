@@ -856,6 +856,103 @@ AsyncSaver sweep (30s) and the reconnect hold, not a hang.
 
 ---
 
+## Measuring on this cluster — read before you quote a number
+
+Two properties of this local rig corrupt measurements taken through it. Neither
+is a server defect, and both have already been mistaken for one. Full treatment
+and the figure-by-figure audit: [`backend/docs/BENCHMARK.md`](../../docs/BENCHMARK.md).
+
+### The host clock is not usable for rates (#153)
+
+**Never derive a rate from a wall clock on this box** — not `date`, not
+`$SECONDS`, not `time.time()`, not `DateTime.UtcNow`, and not a Prometheus
+`rate()` resting on server-assigned scrape timestamps. `CLOCK_REALTIME` here runs
+*fast* against `CLOCK_MONOTONIC` by **+11.1%, +16.7% and +16.65%** in three
+separate sessions. The amount drifts, so it cannot be corrected with a constant,
+only avoided.
+
+**This applies inside pods.** k3d nodes are containers on this kernel and share
+its clock, so `kubectl exec ... date` carries the identical artifact — a pod is
+not a second opinion.
+
+Twenty-second reproduction:
+
+```bash
+python3 -c "
+import time
+m0=time.monotonic(); r0=time.time()
+time.sleep(20)
+print('monotonic', time.monotonic()-m0, 'realtime', time.time()-r0)"
+# monotonic 20.00009545798821 realtime 23.331291913986206   -> +16.65%
+```
+
+It has already cost real work: issue #147 reported the game server ticking at
+**54 Hz** against an advertised 60. It was filed, propagated into an ADR in an
+open PR, and blamed for a client prediction defect — and every bit of it was the
+instrument. `TickLoop` paces on `Stopwatch` (`CLOCK_MONOTONIC`); the observer
+timed it with `date` (`CLOCK_REALTIME`). #147 is closed as not-a-defect.
+
+**So: to check the tick rate, read the rate the server measured itself.** It
+publishes one, so you never have to supply a clock:
+
+| Surface | Field |
+|---|---|
+| `/status` JSON | **`achieved_tick_hz`** |
+| `/metrics` | **`gameserver_achieved_tick_hz`** (gauge, labelled `map_id`) |
+
+Both are fed once per base tick from `Stopwatch.GetTimestamp()` — the same
+timestamps that pace the loop — over a 2s sliding window. Compare against the
+**configured** rate on the same endpoint, `sim_critical_hz`: a healthy server has
+the two equal to within rounding.
+
+> **`achieved_tick_hz == 0` means "not measured yet"**, i.e. the process is
+> younger than ~2s and no window has completed. It does **not** mean the loop has
+> stopped — `current_tick` distinguishes those. On k3d you will see `0` on a
+> freshly scheduled pod; wait a couple of seconds and re-read rather than
+> reporting a dead server.
+
+**Do not compute the rate yourself** — not with `date` from a shell, and not as
+`current_tick / uptime_seconds` from `/status`. That quotient is the arithmetic
+behind #147: on builds before the #144 fix `uptime_seconds` came from
+`DateTime.UtcNow` (`CLOCK_REALTIME`), making a healthy 60 Hz loop read **~51 Hz**
+— observed live at **54.10 Hz**. After the fix `uptime_seconds` is monotonic, so
+the quotient is no longer skewed, but it is a since-boot average that hides a
+loop which degraded recently. `achieved_tick_hz` is the answer in both cases.
+
+The tick histogram `gameserver_tick_duration_seconds` on `/metrics` is likewise
+built from `Stopwatch.GetTimestamp()` and is safe. Full treatment:
+[`gameserver-dotnet/docs/METRICS.md`](../../gameserver-dotnet/docs/METRICS.md#do-not-compute-a-rate--read-achieved_tick_hz).
+
+### The serverlb is in the gameplay data path (#143)
+
+**Do not take capacity numbers through an Agones pod on this cluster.** Use the
+compose path, or dial a node directly. Same binary, same load, same box — only
+the network path differs:
+
+| 50 players, 20s, proto | snapshot interval p99 | tick p99 | recv | verdict |
+|---|--:|--:|--:|---|
+| Agones pod via k3d serverlb (`127.0.0.1:7069`) | **211.9 ms** | — | — | DEGRADED — over 2x the 133.3ms budget |
+| compose server, direct (`127.0.0.1:9200`) | **72.7 ms** | 0.58 ms | 100% | healthy |
+
+At 80 players the compose path still reports tick p99 **3.06ms** and **0% of
+ticks over budget**, so the simulation is not the constraint in either row.
+
+**Cause.** The Agones dynamic port range 7000-7100 is published by the
+`k3d-<cluster>-serverlb` container, which is an **nginx TCP proxy** — the same
+mechanism documented in [Cluster options](#cluster-options) and
+[The address the client is given](#the-address-the-client-is-given) as the reason
+k3d works here where Docker Desktop does not. So every gameplay packet to an
+Agones pod crosses a proxy that has no counterpart on a real node, where the
+client dials the node directly. It is a property of this rig, not a regression,
+and it is not something to "fix" — the proxy is why the port is reachable at all.
+
+**Consequence:** a capacity sweep run through the serverlb reports a ceiling
+roughly **3x too low** and it looks like a game-server limit. The k3d path is
+correct for what it is for — proving allocation, addressing and the end-to-end
+join flow (ADR-16). It is not a measurement surface.
+
+---
+
 ## Offline validation
 
 `kubectl apply --dry-run=client` cannot check a `Fleet` without a live API

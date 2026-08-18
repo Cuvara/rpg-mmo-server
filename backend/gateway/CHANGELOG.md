@@ -39,6 +39,28 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   matchability, and that all six client-facing `EnterWorld` messages are
   pairwise distinct.
 
+### Documentation
+- **Audited the gateway's clock discipline for #153; it derives no rates, and one true
+  wall-clock interval was found and left unfixed.** The gateway contributes no figure to
+  `backend/docs/BENCHMARK.md` (nothing there is measured through it), but it was checked rather
+  than assumed. Every `rate` in the module is a rate *limiter* — a configured policy, not a
+  measurement — and `shared/ratelimit` refills from `now.Sub(b.last)` with both endpoints from
+  `time.Now()`, so it is monotonic and correct. Session `CreatedAt`/`LastActivity` are
+  wall-clock stamps rather than intervals, and expiry is enforced by Redis' own TTL, not by
+  arithmetic in Go. **The exception is the heartbeat**: `server/connection.go` tests
+  `time.Since(time.UnixMilli(last)) > pongTimeout`, and `time.UnixMilli` returns a `time.Time`
+  carrying **no** monotonic reading (verified — a monotonic-bearing `time.Time` renders a
+  trailing `m=+…` and the rebuilt one does not), so `time.Since` degrades to wall-clock
+  subtraction. Consequence: `MaxHandlerBlockingWait = pongTimeout - pingInterval` asserts a 20s
+  margin and the gateway refuses to start with `--allocation-wait-timeout` above it, but the
+  allocation wait is a monotonic context deadline while the pong timeout is wall-clock — the two
+  sides of that margin run on different clocks. On this host a nominal 30s pong budget elapses
+  in ~25.7s real, making the enforced margin ~17.1s rather than 20s. The 15s default still fits,
+  so nothing is broken today. Not specific to this box either: a wall clock can be stepped by
+  NTP on any host, which is the standard reason timeouts come from a monotonic source. **Left
+  unfixed deliberately** — runtime behaviour, not a document figure, and a heartbeat timeout
+  change wants its own commit and tests. Refs #153.
+
 ### Fixed
 - **A client was handed a game server for a map it did not ask for, and every
   layer reported success.** Reproduced on a live k3d Agones fleet: with

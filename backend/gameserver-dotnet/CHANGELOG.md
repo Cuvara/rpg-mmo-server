@@ -56,6 +56,79 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     immediately, that the flag is ignored without Agones, and that the default path never
     reads the state at all.
 
+### Documentation
+- **Distinguished clock *rate skew* from clock *steps* in `BENCHMARK.md`, with the sign table
+  that tells them apart (#153).** This host has both faults and they need different responses:
+  rate skew understates any measured rate and is fixed by never deriving a rate from the wall
+  clock; a step corrupts a single reading and is not fixed by that rule at all. Added because
+  matching on magnitude alone already produced one wrong attribution — a Redis TTL assertion
+  reading **16.87s against a 15s ceiling** looked like the 10-17% skew at +12.5%, but the
+  registry sets a *relative* expiry (`PEXPIRE`), so Redis computes the deadline on its own
+  clock and the remainder cannot exceed 15s by construction; and decisively, a fast clock makes
+  a TTL decay faster, so it reads **lower**, never higher. The observation ran the wrong way for
+  the mechanism it was blamed on. Recorded as a worked example with the rule it teaches —
+  **magnitude matching is not diagnosis, confirm the sign** — which is the same discipline #147
+  failed. The Redis flake itself is deliberately not fixed or filed here: it is out of scope,
+  the backward-step hypothesis is not reproducible on demand, and hardening a test against an
+  undemonstrated cause is how a flake acquires a wrong fix that hides it. Refs #153, #147.
+- **`BENCHMARK.md` and `K3S.md` now point at the measured `achieved_tick_hz` instead of warning
+  people off arithmetic (#153/#144).** The gauge landed with #144, so the docs give the answer
+  rather than only the prohibition: read **`achieved_tick_hz`** on `/status` or
+  **`gameserver_achieved_tick_hz`** on `/metrics`, and compare it against the configured
+  `sim_critical_hz` — a healthy server has the two equal to within rounding. Both are fed once
+  per base tick from `Stopwatch.GetTimestamp()`, over a 2s sliding window. Documented the one
+  way to misread it: **`achieved_tick_hz == 0` means "not measured yet"** (process younger than
+  ~2s, no completed window), not a stopped loop — `current_tick` distinguishes those, and a
+  freshly scheduled k3d pod will show `0` briefly. Also recorded that the gauge covers the
+  **base timeline only** — world and background are exact integer divisors, so three measured
+  rates would be one measurement plus two pieces of arithmetic; per-group measured rates come
+  from `rate(gameserver_sim_group_runs_total[...])`. The `current_tick / uptime_seconds`
+  quotient is documented as wrong in one of two ways depending on build: clock-skewed before
+  the #144 uptime fix (observed live at **54.10 Hz** on a loop genuinely running 60), and a
+  since-boot average that hides recent degradation after it. Notes the consequent behaviour
+  change — `uptime_seconds` is elapsed process time now, so it no longer follows a clock step
+  and can legitimately disagree with `date`-derived arithmetic. Links
+  `gameserver-dotnet/docs/METRICS.md` rather than restating it. Refs #153, #147, #144.
+- **Warned that the achieved tick rate must not be computed from `/status` (#153).** The
+  endpoint reports `tick_rate` (the *configured* rate), `current_tick` and `uptime_seconds`,
+  which invites `current_tick / uptime_seconds` — but `uptime_seconds` is derived from
+  `DateTime.UtcNow` (`GameServer/Program.cs`), i.e. `CLOCK_REALTIME`, which runs 10-17% fast
+  on this host. The quotient therefore reads **~51 Hz on a healthy 60 Hz loop** and **~12.9 Hz
+  on a healthy 15 Hz loop**, reproducing #147 from inside the server's own status endpoint
+  rather than from `date`. Documented in `BENCHMARK.md` and `K3S.md` with the safe
+  alternative (`gameserver_tick_duration_seconds` on `/metrics`, built from
+  `Stopwatch.GetTimestamp()`). **No code change made here** — `ServerStatus` and the missing
+  `Stopwatch`-derived achieved-rate field belong to #144 and were flagged to its owner rather
+  than changed under it. Refs #153, #147, #144.
+- **`BENCHMARK.md` records the k3d serverlb as a third local-measurement trap (#143).** On k3d
+  the Agones port range is published by an nginx TCP proxy, so a capacity sweep through an
+  Agones pod measures the proxy: snapshot interval p99 **211.9 ms** through the serverlb against
+  **72.7 ms** direct to a compose server, same binary and load. Nothing already in the document
+  was measured that way — Part I and Part II both ran against a directly-dialled server — but
+  the local Agones rig is the obvious next place someone would sweep, so the trap is recorded
+  next to the existing confounds with the rule to prefer the compose or direct-to-node path.
+  Refs #143, ADR-16.
+- **The host clock is a measurement hazard, and every BENCHMARK figure has now been audited
+  against it (#153).** `CLOCK_REALTIME` on this WSL2 box runs *fast* relative to
+  `CLOCK_MONOTONIC` — measured at **+11.1%, +16.7% and +16.65%** in three sessions on
+  different days — and the amount drifts, so it cannot be corrected with a constant, only
+  avoided. `backend/docs/BENCHMARK.md` gains the twenty-second reproduction, the rule
+  (**never derive a rate from a wall clock on this box**), and a figure-by-figure audit
+  traced to source. **Verdict: no figure in the document is affected.** Tick p50/p99/mean
+  come from `Stopwatch.GetTimestamp()`/`Stopwatch.Frequency`; every client-side rate,
+  latency and the achieved `ticks/s` come from Go `time.Time` subtraction, which uses the
+  monotonic reading Go embeds in `time.Now()`; peak RSS is a byte count with no interval in
+  it; and the Protobuf-vs-JSON savings and the 5:1 `still`-vs-`cluster` ratio are ratios
+  within one run, which would cancel a shared skew anyway. Corrected one piece of wording
+  that said otherwise — §2 described the snapshot interval as a "wall-clock gap", which
+  would have led a reader to discard a sound figure. Also recorded why the **14.7Hz** drift
+  is *not* this bug and the arithmetic that proves it: a 16.7% fast clock would have made
+  15Hz read as ~12.9, not 14.7, so timer granularity remains the live explanation. The
+  hazard is not hypothetical — it produced #147 ("the tick loop runs at 54 Hz while
+  advertising 60"), which was filed, propagated into an ADR in an open PR, and blamed for a
+  client prediction defect before being closed as not-a-defect; `TickLoop` paces on
+  `Stopwatch` and the observer timed it with `date`. Refs #153, #147, ADR-7.
+
 ## [v1.5.2] — 2026-08-17
 
 ### Fixed
