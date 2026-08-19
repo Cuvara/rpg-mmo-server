@@ -6,6 +6,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`cleanup-branches.yml`: delete remote branches whose content is already on `develop`, weekly.**
+  Ported from the client repo and **corrected on the way**: that version tests with
+  `git branch -r --merged`, which is wrong on a squash-merge repo — a squash creates a new sha with
+  no parent link to the branch, so `--merged`, `git cherry` and subject matching report a fully
+  merged branch as unmerged. Not occasionally: for essentially every branch. Measured 2026-08-19,
+  this repo had 50 local / 30 remote branches and 32 stale worktrees (3.3 GB) needing a manual
+  sweep, while the client's weekly run had been green and had never deleted anything.
+  This version tests **content**: merge `develop` with the branch in-memory
+  (`git merge-tree --write-tree`) and delete only if the resulting tree is identical to `develop`'s.
+  A conflicting merge is not evidence either way — a squashed branch whose CHANGELOG entry was
+  reworded conflicts while being fully merged — so those are reported under "NEEDS A HUMAN" and
+  never deleted. Branches with an open PR, anything newer than the age cutoff (default 7 days),
+  and `develop`/`main`/`master`/`staging`/`release-*` are all skipped. `workflow_dispatch` takes a
+  `dry-run` input that defaults to true; the scheduled run passes no inputs and is therefore live.
 - **`backend/docs/CLIENT-SERVER-FLOW.drawio` — the client/server flow as it actually runs on k3d +
   Agones.** Two pages: the runtime topology (client, serverlb published range, the two realtime
   workloads, the data tier, agones-system) and the join sequence, which spells out all four
