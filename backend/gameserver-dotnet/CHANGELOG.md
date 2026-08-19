@@ -7,6 +7,56 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`TickBreakdownBench`: the tick-breakdown harness issue #162 says is missing, committed and
+  re-runnable.** `BENCH_TICK=1 dotnet test -c Release --filter FullyQualifiedName~TickBreakdownBench`;
+  skipped by default. `Stopwatch.GetTimestamp()` only, never a wall clock (#153), stated in the
+  file's own doc comment so the next reader need not trust the commit message.
+  At **200 viewers `TickOnce` is ~121 µs, of which the AOI gather is 77–83% and the entire system
+  schedule is 0.5 µs**; at 500 viewers 897 µs with the gather at 78.8%. Scan cost is a consistent
+  2.5–3.9 ns per entity examined, O(viewers × entities). This settles where the tick budget goes:
+  the brute-force AOI scan, not simulation.
+  On the docs' "serialization is 4–6% of the tick": **obsolete rather than wrong.** Those figures
+  decompose a pre-stage-4 phase B; `Encode` and `ToByteArray` are no longer on the tick thread at
+  all, so the denominator no longer contains the numerator and a committed harness cannot express
+  the claim. Partially addresses #162 (the ADR-12/DESIGN.md stage-4 µs remain unverifiable).
+  Also measured: off-tick encoding is **not free to the tick** — the same 200-viewer tick costs
+  274 µs with every write task live against 149 µs idle, measured in both orders.
+- **`DESIGN.md`: "Where the tick budget goes, and when parallelism starts to pay".** Guidance for
+  whoever implements real gameplay later, written as thresholds to check rather than a narrative:
+  the measured tick breakdown, the crossover points (~70 000 entities for component work, ~500
+  viewers for a pooled AOI gather, **no reproducible gain at 200**, nothing at 50), what not to do
+  with the number attached (parallelising the schedule is one to two orders of magnitude slower), the testable
+  condition under which that changes (`ComponentAccess.IsDisjointFrom` over two non-structural
+  systems), how to re-measure, the clock rule, and the two measurement traps that produced wrong
+  numbers before being caught (a spinning barrier-parked pool inflating neighbouring arms; tier-0
+  JIT making the first configuration in a process read impossibly flat).
+  It closes by restating the `TEAM.md` boundary in operational terms: **synthetic load inside a
+  benchmark is fine; synthetic gameplay inside `GameServer/` is not** — if a performance change
+  only looks good against a workload invented to justify it, the measurement is what is wrong.
+- **`ParallelPrimitiveBenchmark`: what `UpdateComponentsParallel` actually costs, committed and
+  re-runnable.** `BENCH_PARALLEL=1 dotnet test -c Release --filter ParallelPrimitiveBenchmark`;
+  skipped by default so CI is unaffected (810 passed / 7 skipped with it in place). `Stopwatch`
+  only — never a wall clock, per #153 — with arms interleaved round-robin inside one run so a load
+  spike hits all of them rather than one.
+  Headline numbers: **165–225 µs per additional worker** before any work runs; break-even against
+  serial at **~70 000 entities** while the live world holds 30; peak speedup **1.28×** at 100 000
+  entities with two workers, and `w=8` slower than serial even there. Parallelising the current
+  three-system schedule would be **one to two orders of magnitude slower** for zero overlap — measured
+  13×-824× across implementations and runs, since the serial arm is 1-11 µs and the ratio moves with
+  load while the direction does not.
+  Two results overturn the obvious assumptions. The read/write lock is **not** the constraint — the
+  write lock is taken once on the calling thread before the first `new Thread`, whole-region cost is
+  0.04 µs, and worker bodies differ by only 1.05–1.4×, the signature of no serialisation; the
+  ceiling is per-region thread creation, and the change that would make this pay off is a persistent
+  worker pool on a barrier. And slot-ordered replay is **cheaper** than a shared queue, so the
+  determinism guarantee costs nothing.
+  ADR-12's parallelism section now carries these figures, so "the schedule runs serially" is a
+  decision with a number behind it rather than an argument.
+- **ADR-12's count of the order-sensitive determinism tests corrected** from two to three, by
+  inspection: `WorkerCountDoesNotChangeTheResultingWorld` compares a slot-ordered 1-worker digest
+  against a 4-worker one and cannot survive arrival-order replay either. Also recorded that
+  `ASpawnInsideAParallelRegionIsNotVisibleUntilTheRegionEnds` is mislabelled — it claims to cover
+  "every worker" but runs `workerCount: 1`, which starts no thread.
 - **`sgl-release-reminder.yml`: catch the case where `publish-shared-gamelogic` goes green and
   publishes nothing.** That workflow derives its tag from `Shared.GameLogic/package.json` and skips
   both tag and release creation when the tag already exists — reporting success either way. So SGL

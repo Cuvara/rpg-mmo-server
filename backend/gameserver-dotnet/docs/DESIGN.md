@@ -1560,3 +1560,125 @@ advance less than the elapsed clock, inputs in the dropped window are never appl
 whole world intervals vanish from the delta stream — but it is **visible, bounded and
 measurable**, which a spiral is not. Both counters and how to read them:
 `docs/METRICS.md`.
+
+---
+
+## Where the tick budget goes, and when parallelism starts to pay (measured 2026-08-19)
+
+**Read this before adding a system, and before reaching for threads.** Every figure here
+comes from a committed, re-runnable harness. Nothing in this section is an estimate.
+
+### The tick, measured
+
+At **200 viewers** (204 entities, 16.0 entities per viewer on average), 15 Hz uniform so
+every tick broadcasts:
+
+| phase | median | share |
+|---|---|---|
+| **`TickOnce`, whole** | **121 µs** | 100% |
+| AOI gather | 100 µs | **77–83%** |
+| Input apply (write scope) | 14.5 µs | 12% |
+| `ConnectionManager.CopyTo` | 3.0 µs | 2% |
+| **`SimulationSchedule.RunDue` — every system, all of them** | **0.5 µs** | **0.4%** |
+| Input drain | 0.6 µs | 0.5% |
+| `ApplyStructuralChanges` | 0.1 µs | 0.1% |
+
+At 500 viewers: `TickOnce` 897 µs, gather 707 µs (78.8%). The scan costs a consistent
+**2.5–3.9 ns per entity examined** and is O(viewers × entities) — brute force, no spatial
+index (and ADR-10 records that a uniform grid was built, proved correct, and measured
+**2.8× slower** at realistic density; read `BENCHMARK.md` Part V before proposing one).
+
+**The number that matters to you when you add gameplay: the entire system schedule is
+0.5 µs of a 121 µs tick.** You are spending from that line, not from the 121. There is a
+great deal of room there, and almost none in the gather. A system that costs 50 µs has
+grown the schedule a hundredfold and the tick by 40%.
+
+### The thresholds. Check against these; do not re-derive them
+
+| you are considering | it starts to pay at | today's value |
+|---|---|---|
+| `EcsWorld.UpdateComponentsParallel` for component work | **~70 000 entities** | `EnemyAiTuning.MaxEnemies` = 30 |
+| a pooled, parallel AOI gather | **~500 viewers** (1.4–3.3× there; **no reproducible gain at 200**, every measured range contains 1.0; not worth dispatching at 50) | — |
+| parallelising the system schedule | **never, at the current shape** — see below | — |
+
+### What not to do, with the number attached
+
+**Do not parallelise the system schedule.** Measured: **1.6 µs → 1.34 ms at 30 entities, a
+regression of one to two orders of magnitude, for exactly zero overlap** (measured 13×-824× across implementations and runs; the serial arm is 1-11 µs, so the digits move with load while the direction never does).** `enemy.spawn` and `enemy.reap` both
+declare `Structural`, and `ComponentAccess.IsDisjointFrom` returns `false` for *any*
+structural system, so the three systems still run one at a time and merely pay for nine
+thread creations.
+
+This is the change the next person will reach for, because "the schedule is serial" reads
+like an omission. It is not; it is a decision, and the number above is why.
+
+**The condition under which that answer changes** is not a judgement call — it is a
+property you can test: **two or more non-structural systems whose component sets are
+disjoint.** Declare `ComponentAccess` on your systems accurately and ask
+`IsDisjointFrom`. Note that today `enemy.move` × `enemy.reap` would conflict on
+`Position` *even if `reap` dropped `Structural`*, because `move` writes what `reap` reads.
+So relaxing `Structural` alone is not enough; the component sets have to actually
+separate.
+
+### Where the cost really is, if you want the tick faster
+
+The gather, and it is 77–88% of the tick at every population measured. Two facts about it:
+
+- **It is per-viewer independent** — each viewer writes its own double-buffered array
+  under its own `_snapshotLock`, nothing accumulates across viewers. Proven, not asserted:
+  `PooledGatherMatchesSerialGather` runs a serial and a pooled gather from identical world
+  state and compares each viewer's staged entity set. **It therefore needs no determinism
+  machinery.** The per-slot structural queue exists for structural ops; the gather has
+  none.
+- **A parked worker pool changes the arithmetic, and the primitive decides the result.**
+  `UpdateComponentsParallel`'s 165–225 µs per worker is thread *creation*, which a parked
+  pool removes (round-trip minimum ~0.5 µs). What replaces it is a *blocking* cost that
+  only appears when the box has no spare core — and there, `Barrier` costs 150 µs at four
+  workers against a semaphore's 48 µs. Measure the primitive, not just the idea.
+
+**And note that off-tick work is not free to the tick.** The same 200-viewer tick measured
+with every connection write task live costs **274 µs** against **149 µs** idle — measured
+in both orders, order-independent. Anything you add competes for cores with the
+serialization that stage 4 moved off the tick.
+
+### How to measure your own change
+
+Two committed harnesses, both skipped by default so CI is unaffected:
+
+```bash
+BENCH_TICK=1     dotnet test GameServer.Tests -c Release --filter FullyQualifiedName~TickBreakdownBench      --logger "console;verbosity=detailed"
+BENCH_PARALLEL=1 dotnet test GameServer.Tests -c Release --filter ParallelPrimitiveBenchmark --logger "console;verbosity=detailed"
+```
+
+**Clock rule, and it is not optional.** `Stopwatch` / `Stopwatch.GetTimestamp()` only —
+**never** `DateTime`, `DateTimeOffset` or `Environment.TickCount`. This host's
+`CLOCK_REALTIME` runs 10–17% fast with unstable skew (issue #153); it has already produced
+one filed issue that was purely an instrument artefact (#147, closed). A wall-clock figure
+from this box is not a weak measurement, it is a wrong one.
+
+**Interleave the arms of a comparison round-robin inside one run**, so a load spike hits
+every arm rather than one, and quote ratios from same-run arms only. Absolute magnitudes
+here are not portable: the 500-viewer serial gather median moved **707 → 1244 µs between
+two runs**, a 76% swing, which is larger than several of the deltas this section reports.
+That is ADR-7's shared-load-generator blocker applying to this harness too.
+
+**Two traps that produced wrong numbers before they were caught**, both documented in
+`TickBreakdownBench.cs`:
+
+- A barrier-parked pool that **spins between dispatches** inflates unrelated arms measured
+  near it. Park properly or measure in a separate process.
+- **The first configuration in a process runs on tier-0 JIT.** A 1..500 viewer sweep read a
+  flat ~1 µs/viewer for its first three sizes regardless of entity count — impossible for
+  an O(viewers × entities) scan. Warm the process before the first reported arm.
+
+### This section describes core, not gameplay
+
+`backend/TEAM.md` holds the project to **core plumbing only, no gameplay content**,
+because gameplay written before the flows are proven has to be rewritten when a flow
+changes. The three enemy systems live under `Scaffolding/` and that directory name is the
+statement — they exist so the schedule has something to run, not as a design for enemies.
+
+The line to keep when you start real gameplay: **synthetic load inside a benchmark is
+fine; synthetic gameplay inside `GameServer/` is not.** If a performance change only looks
+good against a workload you invented to justify it, the measurement is the thing that is
+wrong.
