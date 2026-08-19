@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`sgl-release-reminder` reported unreleased work that did not exist.** It counted commits between
+  the tag and HEAD touching `Shared.GameLogic/`. This repo squash-merges, so the squash commit on
+  `main` carries a new sha and no parent link to develop's individual commits, and the count
+  re-includes everything the squash already absorbed. On introduction it claimed **8 unreleased
+  commits** on `develop` — listing, among them, the release commit that created the tag — while
+  `sgl-v0.1.9`, `develop` and `main` all held the byte-identical tree `ae67c33c`. Acting on it would
+  have published a new version of an unchanged package.
+  It now compares `git rev-parse <ref>:<path>`, which is immune to how the merge was made — the same
+  reason `cleanup-branches.yml` compares trees rather than trusting `git branch --merged`. The
+  report also shows the file-level diff instead of a commit list, since commit topology is not a
+  reliable artefact across a squash merge.
+
 ### Added
 - **`TickBreakdownBench`: the tick-breakdown harness issue #162 says is missing, committed and
   re-runnable.** `BENCH_TICK=1 dotnet test -c Release --filter FullyQualifiedName~TickBreakdownBench`;
