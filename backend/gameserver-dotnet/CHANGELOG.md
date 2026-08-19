@@ -7,6 +7,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`TickBreakdownBench`: the tick-breakdown harness issue #162 says is missing, committed and
+  re-runnable.** `BENCH_TICK=1 dotnet test -c Release --filter FullyQualifiedName~TickBreakdownBench`;
+  skipped by default. `Stopwatch.GetTimestamp()` only, never a wall clock (#153), stated in the
+  file's own doc comment so the next reader need not trust the commit message.
+  At **200 viewers `TickOnce` is ~121 µs, of which the AOI gather is 77–83% and the entire system
+  schedule is 0.5 µs**; at 500 viewers 897 µs with the gather at 78.8%. Scan cost is a consistent
+  2.5–3.9 ns per entity examined, O(viewers × entities). This settles where the tick budget goes:
+  the brute-force AOI scan, not simulation.
+  On the docs' "serialization is 4–6% of the tick": **obsolete rather than wrong.** Those figures
+  decompose a pre-stage-4 phase B; `Encode` and `ToByteArray` are no longer on the tick thread at
+  all, so the denominator no longer contains the numerator and a committed harness cannot express
+  the claim. Partially addresses #162 (the ADR-12/DESIGN.md stage-4 µs remain unverifiable).
+  Also measured: off-tick encoding is **not free to the tick** — the same 200-viewer tick costs
+  274 µs with every write task live against 149 µs idle, measured in both orders.
+- **`DESIGN.md`: "Where the tick budget goes, and when parallelism starts to pay".** Guidance for
+  whoever implements real gameplay later, written as thresholds to check rather than a narrative:
+  the measured tick breakdown, the crossover points (~70 000 entities for component work, ~500
+  viewers for a pooled AOI gather, **no reproducible gain at 200**, nothing at 50), what not to do
+  with the number attached (parallelising the schedule is a 782–824× regression), the testable
+  condition under which that changes (`ComponentAccess.IsDisjointFrom` over two non-structural
+  systems), how to re-measure, the clock rule, and the two measurement traps that produced wrong
+  numbers before being caught (a spinning barrier-parked pool inflating neighbouring arms; tier-0
+  JIT making the first configuration in a process read impossibly flat).
+  It closes by restating the `TEAM.md` boundary in operational terms: **synthetic load inside a
+  benchmark is fine; synthetic gameplay inside `GameServer/` is not** — if a performance change
+  only looks good against a workload invented to justify it, the measurement is what is wrong.
 - **`ParallelPrimitiveBenchmark`: what `UpdateComponentsParallel` actually costs, committed and
   re-runnable.** `BENCH_PARALLEL=1 dotnet test -c Release --filter ParallelPrimitiveBenchmark`;
   skipped by default so CI is unaffected (810 passed / 7 skipped with it in place). `Stopwatch`
