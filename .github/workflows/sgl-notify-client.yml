@@ -1,0 +1,118 @@
+name: SGL release — tell the client
+
+# When Shared.GameLogic publishes a new sgl-v* tag, the client repo has no way to find
+# out. Nothing in either repo knows the other exists: the coupling is a UPM git URL in
+# Packages/manifest.json plus a resolved commit in packages-lock.json, and both are
+# edited by a human who has to remember.
+#
+# So a release lands, the client stays pinned to the old tag, and the divergence is
+# invisible — worse than invisible, because the golden-vector tests replay fixtures from
+# the PINNED package and keep passing against the stale ones. The check that exists to
+# catch prediction divergence certifies it.
+#
+# This job closes the loop in the only direction that can be automated today: it tells
+# the client. It does not bump anything — deciding to move to a new simulation version is
+# a judgement call, and the bump touches two files that must move together.
+#
+# WHY THIS NEEDS THE GitHub App AND NOT GITHUB_TOKEN:
+#
+# GITHUB_TOKEN is scoped to the repository that minted it. It cannot reach into
+# IndieRPGMMOAdventure at all. Cross-repo is the app's actual justification, alongside
+# org-level secrets — everything else in this repo runs fine on GITHUB_TOKEN and should
+# keep doing so.
+#
+# It dispatches a WORKFLOW (`actions: write`), not a repository_dispatch event, which
+# would need `contents: write` — a permission the installation has not been granted. The
+# same workflow-dispatch path is already proven in the org by unity-build-workflows'
+# license-rotation job, which fires a workflow in the toolkit repo this way.
+
+on:
+  push:
+    tags:
+      - 'sgl-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "sgl-v* tag to announce (defaults to the newest one)"
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    name: Dispatch the client's pin check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve the tag being announced
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${INPUT_TAG}" ]]; then
+            TAG="${INPUT_TAG}"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG=$(gh api "repos/${GITHUB_REPOSITORY}/tags" --paginate -q '.[].name' | grep '^sgl-v' | sort -V | tail -1)
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Announcing ${TAG}"
+
+      # Narrowed on purpose: this token can start a workflow in one repo and nothing
+      # else. The installation carries far more than that, and a token minted with an
+      # empty body would carry all of it for the life of the job.
+      - name: Mint a bot token scoped to one repo and one permission
+        id: bot
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: IndieRPGMMOAdventure
+          permission-actions: write
+
+      - name: Ask the client to re-check its pin
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -uo pipefail
+          CLIENT=Cuvara/IndieRPGMMOAdventure
+          WF=sgl-pin-check.yml
+
+          if gh api -X POST "repos/${CLIENT}/actions/workflows/${WF}/dispatches" \
+               -f ref=develop \
+               -f "inputs[reason]=Shared.GameLogic ${TAG} was published" >/dev/null 2>&1; then
+            echo "Dispatched ${WF} on ${CLIENT}."
+            {
+              echo "### ${TAG} announced to the client"
+              echo ""
+              echo "Dispatched \`${WF}\` on \`${CLIENT}\` (branch \`develop\`)."
+              echo ""
+              echo "That job reports whether the client's \`manifest.json\` and \`packages-lock.json\`"
+              echo "agree, and how far behind this release the pin now is. **It does not bump anything** —"
+              echo "moving to a new simulation version is a judgement call, and the two files have to"
+              echo "move together or the bump is silently ignored."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            # A failure here means the release is unannounced, not that the release is
+            # bad. Say which, so nobody re-cuts a perfectly good tag chasing this.
+            {
+              echo "### Could not announce ${TAG}"
+              echo ""
+              echo "The dispatch to \`${CLIENT}\` failed. **The release itself is fine** — this job only"
+              echo "notifies. Re-run it, or run the client's \`${WF}\` by hand."
+              echo ""
+              echo "Most likely causes, in order:"
+              echo "1. the app installation lacks \`actions: write\` on \`${CLIENT}\`;"
+              echo "2. \`${WF}\` does not exist on the client's \`develop\` branch yet;"
+              echo "3. \`APP_ID\` / \`APP_PRIVATE_KEY\` are not visible to this repo."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Could not dispatch ${WF} on ${CLIENT}. The ${TAG} release is unaffected; only the notification failed."
+            exit 1
+          fi
