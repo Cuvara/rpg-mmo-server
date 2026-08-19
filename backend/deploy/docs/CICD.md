@@ -476,6 +476,15 @@ toolchain it has no reason to carry. The verification step now exports
 with `::error::` if the bundle is missing either — a pipeline defect must not be
 reported as a broken deployment.
 
+That fix left one gap, now closed: building the probe in CD made a deploy the
+first place a non-compiling probe could surface, on a change already merged.
+`ci.yml` gates it at PR time as `test-verify-probe`. The module has no test
+files, so that job runs `go vet` and a build and deliberately does **not** run
+`go test` — a green `[no test files]` is the ambiguous "passed while asserting
+nothing" signal this pipeline already refuses elsewhere. The probe links against
+`backend/shared` through a `replace` directive, so a wire-format change can break
+it there and nowhere else in CI.
+
 ### 4a. The `dev` runner is WSL, and `docker` there is a shim
 
 **Read this before debugging a failed `dev` deploy.** It is the least obvious
