@@ -1,0 +1,309 @@
+<mxfile host="app.diagrams.net" agent="Claude Code" version="24.0.0">
+  <diagram name="1 — Topology and join flow" id="topology">
+    <mxGraphModel dx="1800" dy="1200" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="1150" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="&lt;b&gt;rpg-mmo-server — client/server flow on k3d + Agones&lt;/b&gt;&lt;br&gt;develop @ c3a381e · verified against cluster k3d-rpg-dev on 2026-08-19 · CD run 32212621900 PASS" style="text;html=1;align=center;verticalAlign=middle;fontSize=16;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="1620" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- ============ CLIENT ============ -->
+        <mxCell id="clientBox" value="&lt;b&gt;Unity 6 client (6000.3.9f1)&lt;/b&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#6c8ebf;dashed=1;verticalAlign=top;fontSize=13;spacingTop=4;" vertex="1" parent="1">
+          <mxGeometry x="40" y="180" width="280" height="420" as="geometry" />
+        </mxCell>
+        <mxCell id="netcode" value="&lt;b&gt;Packages/com.cuvara.netcode&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;vendored, ~120 files&lt;br&gt;transport · dual Protobuf/JSON codec&lt;br&gt;entity-handle interning&lt;br&gt;LocalMovePredictor + reconciliation&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="220" width="240" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="conn2" value="&lt;b&gt;TWO connections, not one&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;ADR-3: the gateway is a redirector and is&lt;br&gt;NEVER in the gameplay data path. The client&lt;br&gt;holds one socket to the gateway and a second,&lt;br&gt;separate socket direct to the game server.&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="350" width="240" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="clientcodec" value="&lt;font style=&quot;font-size:10px&quot;&gt;&lt;b&gt;Wire:&lt;/b&gt; Protobuf by default; legacy JSON still&lt;br&gt;accepted. The two are told apart by the FIRST&lt;br&gt;BODY BYTE, not by negotiation.&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="480" width="240" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- ============ HOST / CLUSTER ============ -->
+        <mxCell id="hostBox" value="&lt;b&gt;WSL2 host — k3d cluster &quot;rpg-dev&quot; (single node)&lt;/b&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#333333;verticalAlign=top;fontSize=13;spacingTop=4;" vertex="1" parent="1">
+          <mxGeometry x="380" y="140" width="1280" height="960" as="geometry" />
+        </mxCell>
+
+        <mxCell id="serverlb" value="&lt;b&gt;k3d-rpg-dev-serverlb&lt;/b&gt; — nginx TCP proxy, publishes &lt;b&gt;7000-7100&lt;/b&gt; onto the host&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;This is the only reason k3d works here: Docker Desktop&#39;s Kubernetes never publishes a k8s hostPort (ADR-16 d1, measured).&lt;br&gt;&lt;b&gt;Cost (#143):&lt;/b&gt; every gameplay packet to an Agones pod crosses this proxy — snapshot p99 211.9 ms here vs 72.7 ms direct to compose. Never measure capacity through it.&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=center;" vertex="1" parent="1">
+          <mxGeometry x="400" y="180" width="1240" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- namespace: realtime -->
+        <mxCell id="nsRealtime" value="&lt;b&gt;namespace rpg-k8s-realtime&lt;/b&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#82b366;dashed=1;verticalAlign=top;spacingTop=4;" vertex="1" parent="1">
+          <mxGeometry x="400" y="290" width="800" height="360" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gateway" value="&lt;b&gt;gateway&lt;/b&gt; (Go) — Deployment, replicas: 1&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;containerPort 8000 → &lt;b&gt;hostPort 7000&lt;/b&gt;&lt;br&gt;strategy: &lt;b&gt;Recreate&lt;/b&gt; — a hostPort is a node-level&lt;br&gt;resource, so a rolling pod could never bind.&lt;br&gt;&lt;b&gt;Every rollout is a join outage (ADR-17).&lt;/b&gt;&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="430" y="340" width="300" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gwnote" value="&lt;font style=&quot;font-size:10px&quot;&gt;&lt;b&gt;FindServer allocates ONLY when a map has zero&lt;br&gt;live servers&lt;/b&gt; (ADR-2, enforced in code). Servers&lt;br&gt;present but full → ErrNoServerAvailable, no&lt;br&gt;allocation. Allocating there would create a&lt;br&gt;second live server for one map_id = split world.&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="430" y="480" width="300" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gsPod" value="&lt;b&gt;Agones Fleet map-servers-dotnet-k8s&lt;/b&gt; — replicas: &lt;b&gt;1&lt;/b&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#9673a6;verticalAlign=top;spacingTop=4;" vertex="1" parent="1">
+          <mxGeometry x="780" y="330" width="390" height="290" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gsMain" value="&lt;b&gt;game server&lt;/b&gt; (C# .NET 10, Arch ECS)&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;containerPort 9000, &lt;b&gt;portPolicy: Dynamic&lt;/b&gt;&lt;br&gt;port named &quot;game&quot; — a CONTRACT the allocator reads&lt;br&gt;sim 60 Hz · snapshots 15 Hz&lt;br&gt;GAMESERVER_MAP_ID is fleet-wide → map_01&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="800" y="365" width="350" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sidecar" value="&lt;b&gt;agones sidecar&lt;/b&gt; (HTTP, localhost:9358)&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;server POSTs /ready /health /allocate /shutdown&lt;br&gt;server GETs /gameserver to learn its own address&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="800" y="480" width="350" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="addrNote" value="&lt;font style=&quot;font-size:10px&quot;&gt;&lt;b&gt;Advertised address is COMPOSED (ADR-16 d2):&lt;/b&gt;&lt;br&gt;host = GAMESERVER_ADVERTISE_HOST (127.0.0.1 here), else status.address&lt;br&gt;port = &lt;b&gt;always&lt;/b&gt; the Agones-assigned port — only the status read can know it.&lt;br&gt;status.address is the NODE ip (172.20.0.2) and is NOT dialable from WSL2.&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="800" y="550" width="350" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- namespace: agones-system -->
+        <mxCell id="nsAgones" value="&lt;b&gt;namespace agones-system&lt;/b&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#9673a6;dashed=1;verticalAlign=top;spacingTop=4;" vertex="1" parent="1">
+          <mxGeometry x="1240" y="290" width="390" height="360" as="geometry" />
+        </mxCell>
+        <mxCell id="agAlloc" value="&lt;b&gt;agones-allocator&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;hands out a GameServer on request&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="1270" y="340" width="330" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="agCtrl" value="&lt;b&gt;agones-controller&lt;/b&gt; (2 replicas)&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;schedules fleet pods, assigns host ports from&lt;br&gt;MIN_PORT=7010 / MAX_PORT=7100 — pinned to match&lt;br&gt;what the serverlb publishes. A mismatch hands out&lt;br&gt;unreachable ports while everything reports healthy.&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="1270" y="420" width="330" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="agNote" value="&lt;font style=&quot;font-size:10px&quot;&gt;&lt;b&gt;Allocated pods are never reclaimed.&lt;/b&gt; Agones has&lt;br&gt;no un-allocate and this project has no Deallocate&lt;br&gt;path, so an Allocated GameServer leaves that state&lt;br&gt;only by being shut down. A fleet scaled to 0 keeps&lt;br&gt;its Allocated pod (observed).&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="1270" y="530" width="330" height="95" as="geometry" />
+        </mxCell>
+
+        <!-- namespace: data -->
+        <mxCell id="nsData" value="&lt;b&gt;namespace rpg-k8s-data&lt;/b&gt;  —  all StatefulSets, one PVC each, replicas: 1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#b85450;dashed=1;verticalAlign=top;spacingTop=4;" vertex="1" parent="1">
+          <mxGeometry x="400" y="690" width="1230" height="380" as="geometry" />
+        </mxCell>
+
+        <mxCell id="nakama" value="&lt;b&gt;nakama&lt;/b&gt; — hostPort &lt;b&gt;7001&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;device auth, accounts, economy, leaderboards&lt;br&gt;Go plugin exposes the &lt;b&gt;gateway_token&lt;/b&gt; RPC&lt;br&gt;strategy: Recreate&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="430" y="740" width="280" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="redis" value="&lt;b&gt;redis&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;server registry servers:map:* / servers:id:*&lt;br&gt;sessions (TTL), event stream&lt;br&gt;&lt;b&gt;noeviction&lt;/b&gt; — a system of record, NOT a cache (ADR-4)&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="750" y="740" width="300" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="pgGame" value="&lt;b&gt;postgres-game&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;player_states — authoritative position/HP&lt;br&gt;written ONLY by the game server (ADR-1)&lt;br&gt;30 s save sweep&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="1090" y="740" width="300" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="pgMeta" value="&lt;b&gt;postgres-meta&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;Nakama&#39;s own DB. Migrated by Nakama, never by us.&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="430" y="870" width="280" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="regNote" value="&lt;font style=&quot;font-size:10px&quot;&gt;&lt;b&gt;The server is the SOLE writer of its own registry entry (ADR-1).&lt;/b&gt; It asks Agones only &quot;what address did you give me&quot;, never &quot;which server serves this map&quot;.&lt;br&gt;The entry carries a &lt;b&gt;15 s TTL re-armed by the server&#39;s own heartbeat&lt;/b&gt; — that TTL is what makes a crashed server vanish. The gateway never writes a server&#39;s entry:&lt;br&gt;an entry the gateway wrote would have nothing re-arming it.  &lt;b&gt;Self-registration happens at STARTUP&lt;/b&gt;, so a Ready pod is already in the registry and FindServer resolves it with no allocation at all.&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="750" y="870" width="640" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="obs" value="&lt;b&gt;Observed on the cluster, 2026-08-19&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;GameServer map-servers-dotnet-k8s-bjbr4-vb5tv — state &lt;b&gt;Allocated&lt;/b&gt;, node ip 172.20.0.2, port &lt;b&gt;7021&lt;/b&gt;&lt;br&gt;redis: servers:map:map_01 → exactly one member (ADR-2 satisfied)&lt;br&gt;fleet ready=0 — the &lt;b&gt;correct&lt;/b&gt; steady state when the one pod is Allocated, not a fault&lt;br&gt;images: gateway &amp; gameserver both @ c3a381e — matches develop HEAD exactly&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="400" y="970" width="700" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="whyOne" value="&lt;font style=&quot;font-size:10px&quot;&gt;&lt;b&gt;Why the fleet is replicas: 1 — load-bearing, not a capacity dial.&lt;/b&gt;&lt;br&gt;Every replica carries the same GAMESERVER_MAP_ID and the server self-registers at&lt;br&gt;startup, so a 2nd replica is a 2nd live server for map_01 — ADR-2&#39;s split world.&lt;br&gt;Measured: scaling 1→2 put a second member in servers:map:map_01 5.38 s later,&lt;br&gt;with no allocation involved. Scaling needs per-replica map assignment first (#151).&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="1120" y="970" width="510" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- ============ EDGES ============ -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#d79b00;strokeWidth=2;exitX=1;exitY=0.25;entryX=0;entryY=0.5;" edge="1" parent="1" source="clientBox" target="nakama">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="350" y="285" /><mxPoint x="350" y="785" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e1l" value="&lt;b&gt;1&lt;/b&gt; device auth → &lt;b&gt;2&lt;/b&gt; gateway_token RPC&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;http 127.0.0.1:7001 · returns a JWT&lt;/font&gt;" style="text;html=1;align=center;fillColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="90" y="640" width="250" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#82b366;strokeWidth=2;exitX=1;exitY=0.35;entryX=0;entryY=0.5;" edge="1" parent="1" source="clientBox" target="gateway">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3l" value="&lt;b&gt;3&lt;/b&gt; auth(1)/auth_resp(2) · &lt;b&gt;4&lt;/b&gt; enter_world(3)/enter_world_resp(4)&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;tcp 127.0.0.1:&lt;b&gt;7000&lt;/b&gt; — connection #1&lt;/font&gt;" style="text;html=1;align=center;fillColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="315" y="300" width="130" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#666666;dashed=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="gateway" target="redis">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="740" y="400" /><mxPoint x="740" y="785" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e5l" value="&lt;b&gt;5&lt;/b&gt; FindServer — read the registry" style="text;html=1;align=center;fillColor=#ffffff;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="600" y="660" width="180" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#9673a6;dashed=1;exitX=1;exitY=0.15;entryX=0;entryY=0.5;" edge="1" parent="1" source="gateway" target="agAlloc">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="1215" y="358" /><mxPoint x="1215" y="370" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e6l" value="&lt;b&gt;6&lt;/b&gt; allocate — ONLY if zero live servers&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;single-flight per map_id&lt;/font&gt;" style="text;html=1;align=center;fillColor=#ffffff;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="290" width="230" height="34" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#9673a6;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="sidecar" target="redis">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="975" y="660" /><mxPoint x="900" y="660" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e7l" value="&lt;b&gt;7&lt;/b&gt; server self-registers at startup&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;addr = advertise-host + Agones port&lt;/font&gt;" style="text;html=1;align=center;fillColor=#ffffff;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="960" y="655" width="220" height="34" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#b85450;strokeWidth=3;exitX=1;exitY=0.7;entryX=0;entryY=0.5;" edge="1" parent="1" source="clientBox" target="gsMain">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="345" y="474" /><mxPoint x="345" y="150" /><mxPoint x="770" y="150" /><mxPoint x="770" y="415" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e8l" value="&lt;b&gt;8&lt;/b&gt; DIRECT dial — connection #2, gateway not involved&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;join_token(5)/join_token_resp(6) then input(7) ⇄ snapshot(8), ping/pong&lt;br&gt;address is verbatim what enter_world_resp gave — e.g. 127.0.0.1:7022&lt;/font&gt;" style="text;html=1;align=center;fillColor=#ffffff;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="430" y="105" width="380" height="46" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#b85450;dashed=1;exitX=1;exitY=0.9;entryX=0.5;entryY=0;" edge="1" parent="1" source="gsPod" target="pgGame">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="1240" y="591" /><mxPoint x="1240" y="700" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e9l" value="&lt;b&gt;9&lt;/b&gt; 30 s save sweep → player_states" style="text;html=1;align=center;fillColor=#ffffff;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="655" width="200" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#d79b00;dashed=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="nakama" target="pgMeta">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+
+  <diagram name="2 — Join sequence" id="sequence">
+    <mxGraphModel dx="1800" dy="1200" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="1300" math="0" shadow="0">
+      <root>
+        <mxCell id="s0" />
+        <mxCell id="s1" parent="s0" />
+
+        <mxCell id="stitle" value="&lt;b&gt;Join sequence — what actually happens when a client enters map_01&lt;/b&gt;&lt;br&gt;traced from CD run 32212621900 (develop @ c3a381e), post-deploy verification VERIFY=PASS" style="text;html=1;align=center;fontSize=15;" vertex="1" parent="s1">
+          <mxGeometry x="40" y="20" width="1620" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- lifelines -->
+        <mxCell id="lfClient" value="&lt;b&gt;Unity client&lt;/b&gt;" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=0;collapsible=0;size=40;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="s1">
+          <mxGeometry x="60" y="90" width="180" height="1130" as="geometry" />
+        </mxCell>
+        <mxCell id="lfNakama" value="&lt;b&gt;Nakama&lt;/b&gt;&lt;br&gt;:7001" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=0;collapsible=0;size=40;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="s1">
+          <mxGeometry x="320" y="90" width="160" height="1130" as="geometry" />
+        </mxCell>
+        <mxCell id="lfGw" value="&lt;b&gt;gateway&lt;/b&gt;&lt;br&gt;:7000" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=0;collapsible=0;size=40;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="s1">
+          <mxGeometry x="560" y="90" width="160" height="1130" as="geometry" />
+        </mxCell>
+        <mxCell id="lfRedis" value="&lt;b&gt;Redis&lt;/b&gt;&lt;br&gt;registry" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=0;collapsible=0;size=40;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="s1">
+          <mxGeometry x="800" y="90" width="160" height="1130" as="geometry" />
+        </mxCell>
+        <mxCell id="lfAgones" value="&lt;b&gt;Agones&lt;/b&gt;&lt;br&gt;allocator" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=0;collapsible=0;size=40;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="s1">
+          <mxGeometry x="1040" y="90" width="160" height="1130" as="geometry" />
+        </mxCell>
+        <mxCell id="lfGs" value="&lt;b&gt;game server&lt;/b&gt;&lt;br&gt;Agones pod" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=0;collapsible=0;size=40;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="s1">
+          <mxGeometry x="1280" y="90" width="160" height="1130" as="geometry" />
+        </mxCell>
+        <mxCell id="lfPg" value="&lt;b&gt;postgres&lt;/b&gt;&lt;br&gt;-game" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=0;collapsible=0;size=40;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="s1">
+          <mxGeometry x="1500" y="90" width="140" height="1130" as="geometry" />
+        </mxCell>
+
+        <!-- phase 0 -->
+        <mxCell id="p0" value="&lt;b&gt;0 · before any client — the pod registers itself&lt;/b&gt;" style="text;html=1;align=left;fontSize=12;fontStyle=1;fillColor=#f5f5f5;strokeColor=#999999;" vertex="1" parent="s1">
+          <mxGeometry x="60" y="180" width="1580" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="m0a" value="POST /ready → sidecar, then GET /gameserver to read its OWN assigned port" style="html=1;endArrow=block;strokeColor=#9673a6;fontSize=10;" edge="1" parent="s1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1360" y="225" as="sourcePoint" /><mxPoint x="1360" y="225" as="targetPoint" />
+            <Array as="points"><mxPoint x="1440" y="215" /><mxPoint x="1440" y="235" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="m0b" value="SETEX servers:id:&amp;lt;name&amp;gt; + SADD servers:map:map_01 — addr = advertise-host + Agones port, TTL 15 s" style="html=1;endArrow=block;strokeColor=#9673a6;fontSize=10;verticalAlign=bottom;" edge="1" parent="s1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1360" y="255" as="sourcePoint" /><mxPoint x="880" y="255" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="n0" value="&lt;font style=&quot;font-size:10px&quot;&gt;This is why a Ready pod is already joinable with &lt;b&gt;no allocation at all&lt;/b&gt;. The heartbeat re-arms the 15 s TTL; stop the heartbeat and the entry — and the server — vanishes on its own.&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=left;spacingLeft=8;" vertex="1" parent="s1">
+          <mxGeometry x="60" y="275" width="700" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- phase 1 -->
+        <mxCell id="p1" value="&lt;b&gt;1 · authenticate with Nakama&lt;/b&gt;" style="text;html=1;align=left;fontSize=12;fontStyle=1;fillColor=#f5f5f5;strokeColor=#999999;" vertex="1" parent="s1">
+          <mxGeometry x="60" y="345" width="1580" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="m1" value="device auth" style="html=1;endArrow=block;strokeColor=#d79b00;fontSize=10;verticalAlign=bottom;" edge="1" parent="s1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="150" y="390" as="sourcePoint" /><mxPoint x="400" y="390" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="m2" value="rpc gateway_token → JWT (signed with the SHARED JWT_SECRET)" style="html=1;endArrow=block;strokeColor=#d79b00;fontSize=10;dashed=1;verticalAlign=bottom;" edge="1" parent="s1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="400" y="425" as="sourcePoint" /><mxPoint x="150" y="425" as="targetPoint" /></mxGeometry>
+        </mxCell>
+
+        <!-- phase 2 -->
+        <mxCell id="p2" value="&lt;b&gt;2 · gateway: authenticate, then resolve a server for the map  (connection #1)&lt;/b&gt;" style="text;html=1;align=left;fontSize=12;fontStyle=1;fillColor=#f5f5f5;strokeColor=#999999;" vertex="1" parent="s1">
+          <mxGeometry x="60" y="465" width="1580" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="m3" value="auth(1) { token }" style="html=1;endArrow=block;strokeColor=#82b366;fontSize=10;verticalAlign=bottom;" edge="1" parent="s1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="150" y="510" as="sourcePoint" /><mxPoint x="640" y="510" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="m4" value="auth_resp(2) { ok, user_id }" style="html=1;endArrow=block;strokeColor=#82b366;fontSize=10;dashed=1;verticalAlign=bottom;" edge="1" parent="s1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="640" y="545" as="sourcePoint" /><mxPoint x="150" y="545" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="m5" value="enter_world(3) { map_id: map_01 }" style="html=1;endArrow=block;strokeColor=#82b366;fontSize=10;verticalAlign=bottom;" edge="1" parent="s1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="150" y="585" as="sourcePoint" /><mxPoint x="640" y="585" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="m6" value="FindServer(map_01) — least loaded live server" style="html=1;endArrow=block;strokeColor=#b85450;fontSize=10;verticalAlign=bottom;" edge="1" parent="s1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="640" y="620" as="sourcePoint" /><mxPoint x="880" y="620" as="targetPoint" /></mxGeometry>
+        </mxCell>
+
+        <mxCell id="branch" value="&lt;b&gt;FindServer outcome decides everything below (ADR-2 enforced in code)&lt;/b&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#666666;dashed=1;verticalAlign=top;fontSize=11;spacingTop=2;align=left;spacingLeft=8;" vertex="1" parent="s1">
+          <mxGeometry x="60" y="650" width="1580" height="230" as="geometry" />
+        </mxCell>
+        <mxCell id="bA" value="&lt;b&gt;A · a live server exists and has room&lt;/b&gt; → &lt;b&gt;no allocation&lt;/b&gt;. Normal path: the Ready pod self-registered at startup, so this is the usual outcome." style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;spacingLeft=8;fontSize=10;" vertex="1" parent="s1">
+          <mxGeometry x="80" y="680" width="1540" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="bB" value="&lt;b&gt;B · zero live servers&lt;/b&gt; → allocate ONE, single-flight per map_id, then &lt;b&gt;WAIT (bounded, default 15 s)&lt;/b&gt; for the pod to publish its OWN entry.&lt;br&gt;A hundred clients at one unserved map produce one pod and one wait, not a hundred allocations — which matters because every surplus allocation is a pod leaked for good." style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=left;spacingLeft=8;fontSize=10;" vertex="1" parent="s1">
+          <mxGeometry x="80" y="722" width="1540" height="46" as="geometry" />
+        </mxCell>
+        <mxCell id="bC" value="&lt;b&gt;C · servers exist but ALL FULL&lt;/b&gt; → ErrNoServerAvailable, &lt;b&gt;terminal refusal, no allocation&lt;/b&gt;. Allocating here would register a 2nd live server for one map_id and split the world." style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;spacingLeft=8;fontSize=10;" vertex="1" parent="s1">
+          <mxGeometry x="80" y="776" width="1540" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="bD" value="&lt;b&gt;D · fleet momentarily has no Ready GameServer&lt;/b&gt; → &lt;b&gt;retryable&lt;/b&gt; &quot;all servers busy, retry shortly&quot; (#157). Keyed on registry.ErrNoCapacity alone — a decoded 2xx saying NO GameServer was handed out,&lt;br&gt;so the retry costs one POST and no pod. Every other allocation failure may have leaked a pod whose response was lost, and those keep the terminal answer.  &lt;b&gt;No branch waits on pod startup.&lt;/b&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=left;spacingLeft=8;fontSize=10;" vertex="1" parent="s1">
+          <mxGeometry x="80" y="818" width="1540" height="46" as="geometry" />
+        </mxCell>
+
+        <mxCell id="m7" value="allocate (branch B only)" style="html=1;endArrow=block;strokeColor=#9673a6;fontSize=10;dashed=1;verticalAlign=bottom;" edge="1" parent="s1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="640" y="905" as="sourcePoint" /><mxPoint x="1120" y="905" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="m8" value="mint join token LAST — single-use, sid-pinned, 30 s TTL, minted FROM the server&#39;s own entry so the 30 s starts when the address is real" style="html=1;endArrow=block;strokeColor=#82b366;fontSize=10;verticalAlign=bottom;" edge="1" parent="s1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="640" y="950" as="sourcePoint" /><mxPoint x="640" y="950" as="targetPoint" />
+            <Array as="points"><mxPoint x="720" y="940" /><mxPoint x="720" y="960" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="m9" value="enter_world_resp(4) { server_addr: 127.0.0.1:7022, join_token, transport: tcp }" style="html=1;endArrow=block;strokeColor=#82b366;fontSize=10;dashed=1;verticalAlign=bottom;" edge="1" parent="s1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="640" y="990" as="sourcePoint" /><mxPoint x="150" y="990" as="targetPoint" /></mxGeometry>
+        </mxCell>
+
+        <!-- phase 3 -->
+        <mxCell id="p3" value="&lt;b&gt;3 · DIRECT to the game server  (connection #2 — the gateway is never in this path, ADR-3)&lt;/b&gt;" style="text;html=1;align=left;fontSize=12;fontStyle=1;fillColor=#f5f5f5;strokeColor=#999999;" vertex="1" parent="s1">
+          <mxGeometry x="60" y="1015" width="1580" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="m10" value="dial server_addr VERBATIM, then join_token(5)" style="html=1;endArrow=block;strokeColor=#b85450;strokeWidth=2;fontSize=10;verticalAlign=bottom;" edge="1" parent="s1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="150" y="1060" as="sourcePoint" /><mxPoint x="1360" y="1060" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="m11" value="join_token_resp(6) { ok, user_id, tick_rate: 60 }  — tick_rate is the SIM rate (dt = 1/60), NOT the snapshot cadence" style="html=1;endArrow=block;strokeColor=#b85450;fontSize=10;dashed=1;verticalAlign=bottom;" edge="1" parent="s1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1360" y="1095" as="sourcePoint" /><mxPoint x="150" y="1095" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="m12" value="input(7) { tick, move_x, move_y } — once per client tick, 60 Hz" style="html=1;endArrow=block;strokeColor=#b85450;strokeWidth=2;fontSize=10;verticalAlign=bottom;" edge="1" parent="s1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="150" y="1130" as="sourcePoint" /><mxPoint x="1360" y="1130" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="m13" value="snapshot(8) — 15 Hz, keyframe then deltas; client merges + reconciles against ack_tick" style="html=1;endArrow=block;strokeColor=#b85450;strokeWidth=2;fontSize=10;dashed=1;verticalAlign=bottom;" edge="1" parent="s1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1360" y="1165" as="sourcePoint" /><mxPoint x="150" y="1165" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="m14" value="30 s sweep → player_states (ADR-1: the game server is the ONLY writer)" style="html=1;endArrow=block;strokeColor=#b85450;fontSize=10;dashed=1;verticalAlign=bottom;" edge="1" parent="s1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="1360" y="1200" as="sourcePoint" /><mxPoint x="1560" y="1200" as="targetPoint" /></mxGeometry>
+        </mxCell>
+
+        <mxCell id="obs2" value="&lt;b&gt;What the deploy actually observed (CD 32212621900)&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;nakama_health 3 ms · device_auth 10 ms · gateway_token_rpc 2 ms · gateway_auth → server=127.0.0.1:7022 (tcp) · gameserver_join &lt;b&gt;15 snapshots (2 keyframes, 13 deltas)&lt;/b&gt;, final_x=4.83, ack_tick=10&lt;br&gt;gamestate_player_row → map_01 x=4.8333 hp=100/100 · gamestate_reload → respawned from persisted state after reconnect&lt;br&gt;Run with &lt;b&gt;--strict-addr&lt;/b&gt;: the harness was FORBIDDEN from rewriting a listen-style address to loopback. Without it the harness silently repairs the exact defect this design exists to prevent and reports PASS while a real client fails.&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;spacingLeft=8;" vertex="1" parent="s1">
+          <mxGeometry x="60" y="1230" width="1580" height="80" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

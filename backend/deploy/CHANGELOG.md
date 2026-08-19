@@ -6,6 +6,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`backend/docs/CLIENT-SERVER-FLOW.drawio` — the client/server flow as it actually runs on k3d +
+  Agones.** Two pages: the runtime topology (client, serverlb published range, the two realtime
+  workloads, the data tier, agones-system) and the join sequence, which spells out all four
+  `FindServer` outcomes and which of them allocate — the part readers most often get wrong, because
+  the common path allocates nothing at all: a Ready pod self-registers at startup and the gateway
+  resolves it straight from the registry. Drawn against the live cluster and CD run 32212621900
+  (`develop` @ c3a381e, `VERIFY=PASS`), and the observed state is stamped on the diagram so a later
+  reader can tell what it was true of. `CORE_FLOW.md` — partly stale since the Go game server was
+  deleted — now points at it, and says the diagram wins where the two disagree.
 - **`ci.yml` now gates `backend/deploy/k8s/verify/probe` at PR time (`test-verify-probe`).** The
   probe was in no CI workflow and never had been. Shipping it in the deployment bundle made
   `build-verify-probe` in `cd.yml` the first place a non-compiling probe could surface — during a
