@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using Arch.Core;
 using GameServer.World.Components;
@@ -130,7 +131,15 @@ public sealed class EcsWorld : IDisposable
 
         _structuralSlots = new List<StructuralOp>[maxWorkerSlots];
         for (int i = 0; i < maxWorkerSlots; i++) _structuralSlots[i] = new List<StructuralOp>();
+
+        // No thread is started here: the pool starts a worker the first time a region
+        // actually asks for it, so a one-slot world -- and the many multi-slot worlds the
+        // tests build and drop -- own nothing.
+        _pool = new SimWorkerPool(this, maxWorkerSlots);
     }
+
+    /// <summary>The world's parked simulation workers. See <see cref="SimWorkerPool"/>.</summary>
+    private readonly SimWorkerPool _pool;
 
     /// <summary>
     /// Queued structural changes, drained by <see cref="ApplyStructuralChanges"/>, one
@@ -439,6 +448,88 @@ public sealed class EcsWorld : IDisposable
         }
     }
 
+    /// <summary>
+    /// Take the read lock <b>once</b> and run <paramref name="body"/> on
+    /// <paramref name="workerCount"/> workers against that one consistent view.
+    ///
+    /// <para>The read-side counterpart of <see cref="UpdateComponentsParallel"/>, and the
+    /// reason the worker pool exists at all: the AOI gather is N independent per-viewer
+    /// range queries, each writing into a buffer its own connection owns, and it is
+    /// 77-83% of a 200-viewer tick (docs/DESIGN.md, "Where the tick budget goes").</para>
+    ///
+    /// <para><b>No determinism machinery, deliberately.</b> The write-side region needs
+    /// per-slot structural queues and slot-ordered replay because <c>Arch.Create</c> order
+    /// decides chunk layout and therefore float accumulation order. A read region has no
+    /// structural ops to order: <see cref="WorldReader"/> exposes only
+    /// <see cref="WorldReader.TryGetSnapshotAnchor"/> and
+    /// <see cref="WorldReader.GetEntitiesInRange"/>, both pure reads, and the world is not
+    /// mutated at all while the read lock is held. Output therefore cannot depend on how
+    /// the workers interleaved, so <see cref="_parallelRegion"/> is <b>not</b> set here and
+    /// no drain follows. Adding the slot machinery anyway would cost time and imply a
+    /// hazard that does not exist.</para>
+    ///
+    /// <para><b>The lock is held by the owner, not by the workers</b>, and that is
+    /// sufficient: the calling thread enters the read lock before any worker is woken and
+    /// does not leave the scope until every worker has rendezvoused, so the workers run
+    /// strictly inside a read-locked interval and no writer can enter. The scan path they
+    /// use takes no lock of its own.</para>
+    ///
+    /// <para><b>What the caller must still guarantee</b> is that the per-worker bodies do
+    /// not share mutable state with each other. That is a property of the callback, not of
+    /// this method, exactly as it is for the write-side region.</para>
+    /// </summary>
+    /// <param name="workerCount">1 to <c>maxWorkerSlots</c>. One runs inline on the
+    /// caller and starts no thread.</param>
+    /// <param name="body">Called once per worker with the shared reader and that worker's
+    /// index. Worker 0 runs on the calling thread.</param>
+    public void ReadAllParallel(int workerCount, Action<WorldReader, int> body)
+    {
+        ArgumentNullException.ThrowIfNull(body);
+
+        if (workerCount < 1 || workerCount > _structuralSlots.Length)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(workerCount), workerCount,
+                $"This world was built with {_structuralSlots.Length} worker slot(s).");
+        }
+
+        if (workerCount == 1)
+        {
+            // Identical to ReadAll, including the iteration-depth bookkeeping. Nothing is
+            // dispatched, so a one-worker read region costs what the serial one costs.
+            _rwLock.EnterReadLock();
+            _iterationDepth++;
+            try { body(_reader, 0); }
+            finally
+            {
+                _iterationDepth--;
+                _rwLock.ExitReadLock();
+            }
+            return;
+        }
+
+        _rwLock.EnterReadLock();
+        try
+        {
+            var failures = new Exception?[workerCount];
+            _pool.RunReadRegion(workerCount, body, failures);
+
+            List<Exception>? thrown = null;
+            for (int i = 0; i < failures.Length; i++)
+            {
+                if (failures[i] is { } ex) (thrown ??= new List<Exception>()).Add(ex);
+            }
+
+            if (thrown is not null)
+            {
+                throw thrown.Count == 1
+                    ? thrown[0]
+                    : new AggregateException("One or more gather workers failed.", thrown);
+            }
+        }
+        finally { _rwLock.ExitReadLock(); }
+    }
+
     /// <summary>AOI scan for <see cref="WorldReader"/>; the read lock is already held.</summary>
     internal int ScanRangeLockedForReader(Vec2 center, float radius, Span<EntityState> destination) =>
         ScanRangeLocked(center, radius, destination, null);
@@ -531,36 +622,28 @@ public sealed class EcsWorld : IDisposable
         _parallelRegion = true;
         try
         {
-            var threads = workerCount > 1 ? new Thread[workerCount - 1] : Array.Empty<Thread>();
             var failures = new Exception?[workerCount];
 
-            // Dedicated threads rather than the thread pool: a pool thread carries
-            // _workerSlot away with it after the region ends, and the pool is shared with
-            // the connection handlers, so borrowing from it here couples simulation
-            // latency to network load.
-            for (int i = 1; i < workerCount; i++)
+            if (workerCount == 1)
             {
-                int slot = i;
-                var t = new Thread(() =>
-                {
-                    _workerSlot = slot;
-                    try { body(_writer, slot); }
-                    catch (Exception ex) { failures[slot] = ex; }
-                    finally { _workerSlot = 0; }
-                })
-                { IsBackground = true, Name = $"sim-worker-{slot}" };
-
-                threads[i - 1] = t;
-                t.Start();
+                // No rendezvous, no pool, no thread: the single-worker region is the
+                // determinism harness's baseline and must stay exactly as cheap as a
+                // serial scope.
+                _workerSlot = 0;
+                try { body(_writer, 0); }
+                catch (Exception ex) { failures[0] = ex; }
+            }
+            else
+            {
+                // Dedicated, world-owned threads rather than the thread pool: a pool
+                // thread carries _workerSlot away with it after the region ends, and the
+                // pool is shared with the connection handlers, so borrowing from it here
+                // couples simulation latency to network load. The threads are parked
+                // between regions rather than created per region -- see SimWorkerPool.
+                _pool.RunWriteRegion(workerCount, body, failures);
             }
 
-            _workerSlot = 0;
-            try { body(_writer, 0); }
-            catch (Exception ex) { failures[0] = ex; }
-
-            for (int i = 0; i < threads.Length; i++) threads[i].Join();
-
-            // Rethrow only after every worker has been joined. Leaving a worker running
+            // Rethrow only after every worker has rendezvoused. Leaving a worker running
             // while the write lock unwinds would let it touch the world outside the
             // region, which is worse than the original fault.
             List<Exception>? thrown = null;
@@ -581,6 +664,312 @@ public sealed class EcsWorld : IDisposable
             _parallelRegion = false;
             ApplyStructuralChangesLocked();
             _rwLock.ExitWriteLock();
+        }
+    }
+
+    /// <summary>
+    /// The world's own simulation worker threads, parked between regions.
+    ///
+    /// <para><b>Why a pool at all.</b> The first shape of
+    /// <see cref="UpdateComponentsParallel"/> started a fresh <see cref="Thread"/> per
+    /// worker per region and joined it at the end. That is correct, and it is also the
+    /// whole cost: measured on this box, 165-225 microseconds per additional worker, paid
+    /// before a single component is touched, which put break-even against the serial path
+    /// near 70 000 entities. Parking N threads once and waking them per region removes
+    /// thread creation from the region entirely.</para>
+    ///
+    /// <para><b>What it must keep.</b> Two properties of the per-region-thread shape are
+    /// load-bearing and are preserved here. First, the threads are <i>dedicated</i>: a
+    /// thread-pool thread would carry <see cref="_workerSlot"/> away with it after the
+    /// region, and that pool is shared with the connection handlers, so borrowing from it
+    /// would couple simulation latency to network load. Second, slot identity is stable:
+    /// each thread sets <see cref="_workerSlot"/> once, at start, and never changes it, so
+    /// the mapping from worker to structural queue is fixed for the life of the world. It
+    /// can no longer drift with scheduling, which is what slot-ordered replay -- and
+    /// therefore the golden vectors -- depend on.</para>
+    ///
+    /// <para><b>Wake protocol.</b> One generation counter per worker, on its own cache
+    /// line, plus a <see cref="ManualResetEventSlim"/> used only when a worker gives up
+    /// spinning. A worker resets its event <i>before</i> re-reading its generation, so a
+    /// signal that lands in the gap is never lost: if the owner bumped the generation
+    /// before the reset, the read after the reset sees it; if the owner sets the event
+    /// after the reset, the event stays signalled and the following wait returns at once.
+    /// The owner bumps only the generations of the workers a region actually uses, so a
+    /// w=2 region does not wake six parked threads.</para>
+    ///
+    /// <para><b>Who spins.</b> The region owner spins while it waits for the rendezvous;
+    /// a finished worker parks immediately. That asymmetry is measured, not stylistic --
+    /// see <c>WorkerParkSpinMicros</c>, which records what a worker-side spin bought and
+    /// what it cost the code that ran next.</para>
+    ///
+    /// <para><b>What it costs now.</b> An empty region on this 12-core host: 24 / 44 / 103
+    /// microseconds at 2 / 4 / 8 workers, i.e. roughly 15-24 microseconds per additional
+    /// worker, against 156-178 microseconds per additional worker for the per-region
+    /// threads this replaced. Break-even against a serial pass over the same component
+    /// work moved from about 70 000 entities to about 8 000. Both are re-measurable with
+    /// <c>BENCH_PARALLEL=1</c>.</para>
+    /// </summary>
+    private sealed class SimWorkerPool : IDisposable
+    {
+        /// <summary>
+        /// How long the region owner spins waiting for its workers before blocking.
+        ///
+        /// <para>Free in the sense that matters: the owner has nothing else to do until the
+        /// rendezvous, and the spin ends the instant the last worker decrements. It does not
+        /// outlive the region, so it cannot inflate whatever the caller runs next.</para>
+        /// </summary>
+        private const double OwnerWaitSpinMicros = 100.0;
+
+        /// <summary>
+        /// How long a finished worker spins on its generation before parking. <b>Zero, and
+        /// that is a measured choice.</b>
+        ///
+        /// <para>A 25 microsecond worker spin made back-to-back regions ~1.7x cheaper
+        /// (w=4 empty region 31 us hot against 59 us parked). It also inflated whatever ran
+        /// in the following 25 microseconds by up to 6x: with the spin on, a serial pass
+        /// over 30 entities immediately after a region measured 12.5 us; with it off, the
+        /// same pass measured 1.9 us. The live tick dispatches at most one region per 66 ms
+        /// and then immediately serializes snapshots on the calling thread, so the spin
+        /// could only ever collect the cost and never the benefit. Restore it only with a
+        /// workload that actually issues regions back to back, and re-measure what runs
+        /// after them when you do.</para>
+        /// </summary>
+        private const double WorkerParkSpinMicros = 0.0;
+
+        /// <summary>Ints per generation cell, so two workers never share a cache line.</summary>
+        private const int Stride = 16;
+
+        private static readonly long OwnerSpinTicks =
+            (long)(OwnerWaitSpinMicros * Stopwatch.Frequency / 1_000_000.0);
+
+        private static readonly long WorkerSpinTicks =
+            (long)(WorkerParkSpinMicros * Stopwatch.Frequency / 1_000_000.0);
+
+        private readonly EcsWorld _world;
+        private readonly Thread?[] _threads;
+        private readonly ManualResetEventSlim?[] _wake;
+
+        /// <summary>Per-worker generation, strided one per cache line. The worker reads
+        /// its own cell; the owner writes it to publish a region.</summary>
+        private readonly int[] _generation;
+
+        /// <summary>The owner's copy of each generation, so publishing is a plain volatile
+        /// write rather than a read-modify-write on a shared cell.</summary>
+        private readonly int[] _published;
+
+        private readonly ManualResetEventSlim _done = new(false, 0);
+        private readonly object _startLock = new();
+
+        private Action<WorldWriter, int>? _writeBody;
+        private Action<WorldReader, int>? _readBody;
+        private Exception?[]? _failures;
+        private int _pending;
+        private volatile bool _shutdown;
+
+        internal SimWorkerPool(EcsWorld world, int maxWorkerSlots)
+        {
+            _world = world;
+            _threads = new Thread?[maxWorkerSlots];
+            _wake = new ManualResetEventSlim?[maxWorkerSlots];
+            _generation = new int[maxWorkerSlots * Stride];
+            _published = new int[maxWorkerSlots];
+        }
+
+        /// <summary>How many worker threads this world has started so far. The whole point
+        /// of the pool is that this stops growing, so the tests read it.</summary>
+        internal int StartedThreadCount
+        {
+            get
+            {
+                int n = 0;
+                lock (_startLock)
+                {
+                    for (int i = 0; i < _threads.Length; i++) if (_threads[i] is not null) n++;
+                }
+                return n;
+            }
+        }
+
+        /// <summary>
+        /// Run <paramref name="body"/> on slots 1..<paramref name="workerCount"/>-1 and
+        /// return only once every one of them has finished. Slot 0 belongs to the caller
+        /// and is run here on the calling thread, between publishing the work and waiting
+        /// for it, so the owner's own share overlaps the workers' wake-up.
+        /// </summary>
+        internal void RunWriteRegion(int workerCount, Action<WorldWriter, int> body, Exception?[] failures) =>
+            Dispatch(workerCount, body, null, failures);
+
+        /// <summary>
+        /// The read-side region. Same threads, same rendezvous, no slot machinery: a
+        /// <see cref="WorldReader"/> cannot request a structural change, so there is
+        /// nothing to queue and nothing whose replay order could matter.
+        /// </summary>
+        internal void RunReadRegion(int workerCount, Action<WorldReader, int> body, Exception?[] failures) =>
+            Dispatch(workerCount, null, body, failures);
+
+        private void Dispatch(
+            int workerCount,
+            Action<WorldWriter, int>? writeBody,
+            Action<WorldReader, int>? readBody,
+            Exception?[] failures)
+        {
+            EnsureStarted(workerCount);
+
+            _writeBody = writeBody;
+            _readBody = readBody;
+            _failures = failures;
+            _done.Reset();
+            Volatile.Write(ref _pending, workerCount - 1);
+
+            // Publishing the generation is the release that makes the body, _failures and
+            // _pending visible to a worker, which reads its generation first.
+            for (int slot = 1; slot < workerCount; slot++)
+            {
+                Volatile.Write(ref _generation[slot * Stride], ++_published[slot]);
+                _wake[slot]!.Set();
+            }
+
+            _workerSlot = 0;
+            try { Invoke(writeBody, readBody, 0); }
+            catch (Exception ex) { failures[0] = ex; }
+
+            WaitForWorkers();
+
+            _writeBody = null;
+            _readBody = null;
+            _failures = null;
+        }
+
+        private void Invoke(Action<WorldWriter, int>? writeBody, Action<WorldReader, int>? readBody, int slot)
+        {
+            if (writeBody is not null)
+            {
+                writeBody(_world._writer, slot);
+                return;
+            }
+
+            if (readBody is null) return;
+
+            // Mirror the serial ReadAll scope: every thread that iterates the world says
+            // so, so the deferral rule reads the same on a worker as on the tick thread.
+            _iterationDepth++;
+            try { readBody(_world._reader, slot); }
+            finally { _iterationDepth--; }
+        }
+
+        private void WaitForWorkers()
+        {
+            long deadline = Stopwatch.GetTimestamp() + OwnerSpinTicks;
+            while (Volatile.Read(ref _pending) != 0)
+            {
+                if (Stopwatch.GetTimestamp() >= deadline)
+                {
+                    // Park. The last worker out sets _done, and _done was reset before any
+                    // worker could run, so this cannot miss the signal.
+                    while (Volatile.Read(ref _pending) != 0) _done.Wait();
+                    return;
+                }
+                Thread.SpinWait(20);
+            }
+        }
+
+        private void EnsureStarted(int workerCount)
+        {
+            lock (_startLock)
+            {
+                ObjectDisposedException.ThrowIf(_shutdown, this);
+
+                for (int slot = 1; slot < workerCount; slot++)
+                {
+                    if (_threads[slot] is not null) continue;
+
+                    _wake[slot] = new ManualResetEventSlim(false, 0);
+                    int captured = slot;
+                    var t = new Thread(() => WorkerLoop(captured))
+                    {
+                        IsBackground = true,
+                        Name = $"sim-worker-{slot}",
+                    };
+                    _threads[slot] = t;
+                    t.Start();
+                }
+            }
+        }
+
+        private void WorkerLoop(int slot)
+        {
+            // Set once, for the life of the thread. This is the invariant the per-region
+            // threads could only re-establish on every region.
+            _workerSlot = slot;
+
+            ManualResetEventSlim wake = _wake[slot]!;
+            int cell = slot * Stride;
+            int seen = 0;
+
+            while (true)
+            {
+                // Reset before the read: a Set that lands after this reset survives to the
+                // Wait below, and a generation bump from before it is caught by the read
+                // that follows. The barrier stops the store and the load being reordered.
+                wake.Reset();
+                Interlocked.MemoryBarrier();
+
+                if (Volatile.Read(ref _generation[cell]) == seen)
+                {
+                    long deadline = Stopwatch.GetTimestamp() + WorkerSpinTicks;
+                    while (Volatile.Read(ref _generation[cell]) == seen)
+                    {
+                        if (Stopwatch.GetTimestamp() >= deadline)
+                        {
+                            wake.Wait();
+                            break;
+                        }
+                        Thread.SpinWait(20);
+                    }
+
+                    if (Volatile.Read(ref _generation[cell]) == seen) continue; // spurious
+                }
+
+                seen = Volatile.Read(ref _generation[cell]);
+                if (_shutdown) return;
+
+                var writeBody = _writeBody;
+                var readBody = _readBody;
+                var failures = _failures;
+                try { Invoke(writeBody, readBody, slot); }
+                catch (Exception ex) { if (failures is not null) failures[slot] = ex; }
+
+                // A full fence, so the body's writes and the failure cell are visible to
+                // the owner before it can observe the count reaching zero.
+                if (Interlocked.Decrement(ref _pending) == 0) _done.Set();
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (_startLock)
+            {
+                if (_shutdown) return;
+                _shutdown = true;
+
+                for (int slot = 1; slot < _threads.Length; slot++)
+                {
+                    if (_threads[slot] is null) continue;
+                    Volatile.Write(ref _generation[slot * Stride], ++_published[slot]);
+                    _wake[slot]!.Set();
+                }
+            }
+
+            for (int slot = 1; slot < _threads.Length; slot++)
+            {
+                // Bounded: the threads are background threads, so a worker wedged inside a
+                // caller's body must not turn disposing a world into a hang.
+                _threads[slot]?.Join(TimeSpan.FromSeconds(5));
+                _threads[slot] = null;
+            }
+
+            for (int slot = 1; slot < _wake.Length; slot++) _wake[slot]?.Dispose();
+            _done.Dispose();
         }
     }
 
@@ -734,6 +1123,9 @@ public sealed class EcsWorld : IDisposable
 
     public void Dispose()
     {
+        // Before the lock and the Arch world go: a parked worker must never wake to find
+        // either of them disposed.
+        _pool.Dispose();
         _rwLock.Dispose();
         ArchWorld.Destroy(_arch);
     }
