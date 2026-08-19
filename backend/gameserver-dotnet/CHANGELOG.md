@@ -7,6 +7,62 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **Four flaky-test families in `GameServer.Tests`, and 11 tests that silently vanished from green
+  runs** (issue #175). Only test infrastructure changed; no product code and no assertion was
+  weakened — every replacement below pins at least as much as the assertion it replaces.
+  - **Port collisions (`TestPorts.Lease` -> bind handoff).** `Lease` releases the port immediately
+    before the real bind, and the kernel will re-issue a port it has just taken back; with ~25
+    handoffs per run across collections xUnit runs in parallel, the race fired in **4 of 12**
+    baseline runs. `HttpListener` cannot avoid it — its prefixes need a literal port, it has no
+    ephemeral-bind mode, and it reports nothing about what it bound. New
+    `TestPorts.BindWithRetry` retries the whole lease-release-bind sequence on a **new** lease,
+    five attempts, then reproduces the original failure. Applied in `HttpAgonesSdkTests`,
+    `HttpAgonesSdkAddressTests` and `MetricsEndpointTests`. The last also retries on
+    `MetricsEndpoint.TryStart` returning `null`, because it swallows the bind error by design
+    (a metrics endpoint must not kill the game server) so the collision arrived as
+    `Assert.NotNull` rather than as an exception. A genuine bind regression fails all five
+    attempts and still fails the test.
+  - **11 Redis-gated tests skipped while reporting a cause that had not happened.**
+    `RedisFixture.Available` collapsed every failure into one message reading
+    `docker unavailable, no redis to test against`, including runs where docker was plainly
+    available (Postgres-gated tests ran alongside) and only the container readiness probe had
+    timed out. `EphemeralRedis.StartAsync` now returns the *outcome*, and the two states are
+    treated differently: **no docker daemon** is an absent dependency and still skips; **docker
+    answered but the container never became usable** now **fails**, naming the real cause. The
+    readiness deadline moved from `DateTime.UtcNow` to `Stopwatch` — this host's
+    `CLOCK_REALTIME` runs 10-17% fast and has been observed stepping backwards (#153), so the
+    "60s" budget was expiring after ~51s of real time and turning load into absent coverage.
+    Same wall-clock fix in `RegistrationServiceTests` (two deadlines) and in
+    `EphemeralPostgres.WaitReadyAsync`, which carried the identical defect. `docker run` also
+    retries on a fresh lease when the published port is taken, so the new hard-fail cannot be
+    triggered by the port race above.
+  - **Redis TTL assertions now read the level, not the decay.** `RedisServerRegistryTests`
+    compared two `PTTL` reads on the stated grounds that decay is "immune to clock steps
+    (see #161)". It is not, and the comment has been corrected: a run wrote a **15s** TTL and
+    Redis reported **17.23s** remaining, which is impossible under a monotonic clock — Redis
+    derives `PTTL` from its own wall clock, where a `Stopwatch` in this process cannot reach.
+    `Register_WritesTheExactHashShapeTheGatewayReads` now asserts
+    `InRange(ttl, 0, configured)` from a single self-consistent read, and
+    `Heartbeat_ReArmsTtl_AndReportsMissingEntry` asserts `InRange(after, ttl-1s, ttl)` instead
+    of `after > before` — pinning the value the product must write rather than only its
+    direction.
+  - **`Heartbeat_KeepsTheEntryAliveBeyondItsTtl` ran at half the margin its comment claimed.**
+    The comment said a 2s TTL gives a "~667ms" heartbeat interval; `RegistryDefaults
+    .HeartbeatInterval` is `Math.Max(1000, ttl/3)`, so it was 1000ms and the test had a 2x
+    margin, not production's 3x. TTL raised to 3s (the smallest the floor does not distort)
+    **and the wait raised 5s -> 8s with it**, so the entry still outlives more than two full
+    TTLs — raising the TTL alone would have left the wait shorter than one TTL, which a dead
+    heartbeat would also survive.
+  - **`ConnectionManagerTests` had a real data race, and a deadline that measured the box.**
+    `_tcpPairs` was a plain `List<T>` mutated from all four `Task.Run` bodies with no
+    synchronisation; it is now a `ConcurrentBag<T>`. A dropped entry there is a socket triple
+    `Dispose` never closes, leaking into the next test. `ConcurrentAccess_NoDeadlock` also
+    opened a real loopback listener, connect and accept **inside** its timed region — 400
+    handshakes and 1200 sockets against a 10s budget, median 5.21s under load — while its
+    named failure mode is structurally impossible (`ConnectionManager` is a
+    `ConcurrentDictionary` with no locks). The connections are now built up front and the
+    **10s deadline is kept**: with the sockets hoisted out it is a real liveness assertion
+    again and still fails immediately if a lock is introduced.
 - **`sgl-release-reminder` reported unreleased work that did not exist.** It counted commits between
   the tag and HEAD touching `Shared.GameLogic/`. This repo squash-merges, so the squash commit on
   `main` carries a new sha and no parent link to develop's individual commits, and the count

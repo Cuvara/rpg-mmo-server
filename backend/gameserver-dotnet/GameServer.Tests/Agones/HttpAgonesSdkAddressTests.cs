@@ -300,14 +300,22 @@ public class HttpAgonesSdkAddressTests
             _statusCode = statusCode;
 
             // HttpListener prefixes need a literal port and it cannot report an ephemeral
-            // bind, so Lease is the right tool here (see TestPorts).
-            var lease = new TestPorts.Lease();
-            BaseAddress = $"http://localhost:{lease.Port}/";
-            lease.Dispose(); // release immediately before binding, per Lease's contract
+            // bind, so a lease is the right tool here (see TestPorts). The lease-to-bind
+            // handoff is still not atomic, so bind through BindWithRetry: on "Address
+            // already in use" it comes back with a different port instead of failing a
+            // test that has nothing to do with ports.
+            string baseAddress = "";
+            _listener = TestPorts.BindWithRetry(port =>
+            {
+                string prefix = $"http://localhost:{port}/";
+                var listener = new HttpListener();
+                listener.Prefixes.Add(prefix);
+                listener.Start(); // throws HttpListenerException if the port was taken
+                baseAddress = prefix;
+                return listener;
+            })!;
 
-            _listener = new HttpListener();
-            _listener.Prefixes.Add(BaseAddress);
-            _listener.Start();
+            BaseAddress = baseAddress;
             _ = Task.Run(AcceptLoopAsync);
         }
 
