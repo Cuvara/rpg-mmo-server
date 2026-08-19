@@ -83,6 +83,7 @@ set. Flags are **space-separated** (`--addr :9000`).
 | `--sim-background-hz` | `SIM_BACKGROUND_HZ` | `5` | Frequency of the **background** group (work that tolerates a whole interval of delay). Must divide `SIM_CRITICAL_HZ` exactly and must not exceed `SIM_WORLD_HZ` |
 | `--tick-rate` | `GAMESERVER_TICK_RATE` | *(unset → `60/15/5`)* | **Legacy single-rate switch.** Sets *every* group to this one rate, i.e. base = world = background, snapshots every tick — the pre-multi-rate server exactly. Only applies when no `SIM_*_HZ` environment variable is set; any of them present wins and the tick rate is ignored |
 | `--keyframe-interval` | `GAMESERVER_KEYFRAME_INTERVAL` | `30` | Delta snapshots between full keyframes; `0` disables delta encoding (see `docs/API.md`) |
+| `--gather-workers` | `GAMESERVER_GATHER_WORKERS` | `1` | Threads the AOI gather may use. `1` is serial. Above `1` it applies only from 500 viewers up — measured gain is 2.0-2.7x at 500 viewers / 4 workers, inside the noise at 200, a loss at 50 (see `docs/DESIGN.md`, "Where the tick budget goes") |
 | `--map-width` | `GAMESERVER_MAP_WIDTH` | `1000` | Map width in world units |
 | `--map-height` | `GAMESERVER_MAP_HEIGHT` | `1000` | Map height in world units |
 | `--jwt-secret` | `JWT_SECRET` | *(empty)* | HS256 secret for the Nakama→client auth token. Only used here as the `JOIN_TOKEN_SECRET` fallback |

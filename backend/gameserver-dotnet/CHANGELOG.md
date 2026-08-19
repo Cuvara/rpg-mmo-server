@@ -7,6 +7,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`EcsWorld.SimWorkerPool`: the simulation workers are now parked and reused, not created per
+  region.** `UpdateComponentsParallel` used to `new Thread` per worker per region and join them,
+  which cost **165–225 µs per additional worker** before any work ran. The pool starts N dedicated
+  threads lazily, parks them on a per-worker generation counter (own cache line, `ManualResetEventSlim`
+  for the blocked case, interlocked countdown for the join), and wakes only the workers a region
+  actually uses.
+  Measured on this host, workers parked — which is what the live tick always meets, since regions are
+  66 ms apart: an empty region costs **32-35 / 52-54 / 94-95 µs at 2 / 4 / 8 workers**, i.e. **13–18 µs
+  per additional worker at w≥4**, against 178 / 474 / 1094 µs before. Break-even against a serial pass
+  over the same component work moved from **~70 000 entities to ~8 000**. Three overhead-floor runs and
+  three crossover sweeps; the ratios reproduce, the absolute p99s do not (3–10× the median on a shared
+  box).
+  Not a `Barrier`, deliberately: a barrier rendezvous measures 150 µs at 4 workers against 48 µs for a
+  semaphore-style one. Not thread-pool threads either — the two properties the per-region shape was
+  chosen for are preserved. Threads are owned by the world, and each sets `_workerSlot` **once at
+  start and never again**, so slot identity, and with it slot-ordered structural replay, is more
+  stable than before rather than less. `workerCount: 1` still starts no thread and runs inline.
+- **`EcsWorld.ReadAllParallel`: the AOI gather can now be split across those workers.** This is the
+  phase the pool was built for: at 200 viewers the gather is **77–83% of `TickOnce`** while the entire
+  system schedule is 0.5–1.9 µs. It carries **none** of the determinism machinery the write-side
+  region needs, and that is checked rather than assumed — `WorldReader` exposes only pure reads, so a
+  read region has no structural ops whose replay order could matter, and `PooledGatherEquivalenceTests`
+  compares the pooled gather against the serial one element-for-element at 2, 4 and 8 workers.
+  **Off by default** (`--gather-workers` / `GAMESERVER_GATHER_WORKERS`, default `1` = the previous
+  serial path exactly) and gated at 500 viewers, because the gain is conditional and two measurements
+  disagree in the middle: a loss at 50 viewers (0.51–1.05×), **disputed at 200** — 2.06–2.08× measured
+  on the phase across three runs within 1% of each other, but 0.96–1.27× measured through the whole
+  tick — and a gain at 500 on both (1.8–2.4× phase-level, 2.0–2.7× through the tick). Turning it on by
+  default would be quoting the phase number for the tick.
+- **`AoiGatherBenchmark`** (`BENCH_PARALLEL=1`), measuring serial against pooled gather at 50 / 200 /
+  500 viewers with arms interleaved inside a run, plus `ParallelPrimitiveBenchmark.Bench1b_ParkedOverheadFloor`
+  for the dispatch cost with workers parked rather than hot.
+- **`docs/DESIGN.md`: "Where the tick budget goes, and when parallelism pays".** Written for whoever
+  starts gameplay work: the measured per-phase tick breakdown, the two thresholds to check a workload
+  against (~8 000 entities for component work, ~500 viewers for the gather, nothing at 50), the number
+  attached to what not to do (parallelising the schedule is a **118× regression** at the live
+  workload, down from 782–824× but still a regression), how to check the condition that would change
+  the answer (`ComponentAccess.IsDisjointFrom`), and the five measurement rules — including the two
+  traps that produced wrong numbers here.
+
+### Fixed
+- **`ParallelPrimitiveBenchmark` measured tier-0 JIT code for its first configuration.** The first
+  arm in a process read impossibly flat — 500 entities slower than 2 000, and 30 entities at
+  103 ns/entity against 9.5 ns/entity for the same body at 10 000 — because per-arm warm-up rounds
+  supply neither the call count nor the wall time tier-1 promotion needs. `WarmUpJit` now exercises
+  the whole shape on a throwaway world first. The `Bench5` schedule ratio was wrong by ~10× because
+  of this.
+- **A spinning worker inflated whatever was measured after it, by up to 6×.** With a 25 µs
+  worker-side spin, a serial pass over 30 entities read 12.5 µs; with the spin off, 1.9 µs. Workers
+  now park immediately and only the region owner spins — which also matches the live tick, where
+  regions are 66 ms apart and the spin could only ever collect the cost.
+
 - **`ParallelPrimitiveBenchmark`: what `UpdateComponentsParallel` actually costs, committed and
   re-runnable.** `BENCH_PARALLEL=1 dotnet test -c Release --filter ParallelPrimitiveBenchmark`;
   skipped by default so CI is unaffected (810 passed / 7 skipped with it in place). `Stopwatch`

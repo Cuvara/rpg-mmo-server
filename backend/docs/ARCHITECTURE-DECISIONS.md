@@ -1542,6 +1542,60 @@ by the change that first spawns a worker.
 > changed: the workload crossed ~70 000 entities, or the per-region thread creation was
 > replaced.
 
+> **Per-region thread creation was replaced on 2026-08-19. The verdict on the schedule did
+> not change; the phase that was worth parallelising turned out to be a different one.**
+>
+> The previous entry named the fix — "a persistent worker pool parked on a barrier" — and
+> it was built, with one correction to that sentence: **not a barrier.** A `Barrier`
+> rendezvous measured 150 µs at 4 workers and 339 µs at 8, against 48 µs and 104 µs for a
+> semaphore-style one. `EcsWorld.SimWorkerPool` uses a per-worker generation counter on its
+> own cache line, a `ManualResetEventSlim` per worker for the parked case, and an
+> interlocked countdown for the join. The two properties the previous shape was chosen for
+> are preserved and are the reason the .NET thread pool is still not used: threads are
+> dedicated and owned by the world, and each sets `_workerSlot` **once at start and never
+> again**, so slot identity is now more stable than it was, not less. Threads start lazily
+> on the first region that needs them, so `workerCount: 1` still starts nothing.
+>
+> | measurement | before (thread per region) | after (parked pool) |
+> |---|---|---|
+> | cost of one **additional** worker, empty body | 165–225 µs | **13–18 µs** (w≥4, workers parked) |
+> | empty region, w = 2 / 4 / 8, workers parked | 178 / 474 / 1094 µs | **32-35 / 52-54 / 94-95 µs** |
+> | break-even vs serial, component work at w=4 | ≈70 000 entities | **≈8 000 entities** |
+> | the three-system schedule at 30 entities | 782–824× regression | **118× regression** |
+>
+> **So the schedule stays serial, and the question to ask has changed.** Thread creation is
+> gone and break-even fell by roughly 9×; the live workload is 30 entities, still 250×
+> below the new threshold, and three parallel regions over it still cost 188 µs against
+> 1.6 µs serial. The condition to revisit is unchanged and is now the *only* one: two or
+> more non-structural systems with disjoint component sets (`ComponentAccess.IsDisjointFrom`)
+> over a workload past ~8 000 entities.
+>
+> **What the pool was actually built for is the AOI gather, and that is a read region, not
+> a write one.** At 200 viewers the gather is 77–83% of `TickOnce` and the entire schedule
+> is 0.5–1.9 µs; the phase with work in it was never the schedule.
+> `EcsWorld.ReadAllParallel` splits the gather over the same threads and **deliberately
+> carries none of the determinism machinery above**: `WorldReader` exposes only pure reads,
+> so a read region has no structural ops whose replay order could matter, and each viewer
+> writes a buffer its own connection owns. That claim is tested, not asserted —
+> `PooledGatherEquivalenceTests` compares the pooled gather against the serial one
+> element-for-element at 2, 4 and 8 workers.
+>
+> It is **opt-in and off by default** (`--gather-workers`, default 1), and gated at 500
+> viewers, because the measurement is conditional and two measurements disagree in the
+> middle of the range: a loss at 50 viewers (0.51–1.05×), **disputed at 200** (2.06–2.08×
+> measured on the phase across three runs within 1% of each other, 0.96–1.27× measured
+> through the whole tick), a gain at 500 on both (1.8–2.4× phase-level, 2.0–2.7× through
+> the tick). Shipping it on by default would be claiming the phase-level number for the
+> tick, which decision 7 forbids. The disagreement is recorded rather than resolved; it
+> needs a host that is not also running the load generator (ADR-7).
+>
+> One measurement trap is worth carrying forward, because it produced a 6× phantom: a pool
+> whose workers **spin** between dispatches inflates whatever is measured next to it. With
+> a 25 µs worker-side spin, a serial pass over 30 entities read 12.5 µs; with the spin off,
+> 1.9 µs. `SimWorkerPool` therefore parks its workers immediately and lets only the region
+> owner spin — which also matches production, where regions are 66 ms apart and every
+> worker is blocked in the kernel when the next one arrives.
+
 One correctness result is worth separating from the performance story: moving encoding to
 the moment of writing **fixed a pre-existing data-loss bug**. The old order encoded on the
 tick — advancing the delta encoder's `_lastSent` — and only then handed the envelope to a
