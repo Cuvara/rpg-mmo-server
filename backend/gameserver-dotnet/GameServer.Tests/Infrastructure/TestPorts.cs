@@ -89,4 +89,65 @@ internal static class TestPorts
             try { _listener.Stop(); } catch { /* teardown */ }
         }
     }
+
+    /// <summary>
+    /// Take a <see cref="Lease"/>, release it, bind — and when that loses the race, do the
+    /// whole thing again with a <b>new</b> lease.
+    /// <para>
+    /// <see cref="Lease"/> narrows the lease-to-bind window but cannot close it: the port is
+    /// nobody's between <see cref="Lease.Dispose"/> and the real bind, and the kernel will
+    /// re-issue a port it has just taken back. A suite doing ~25 of these handoffs per run
+    /// across collections xUnit runs in parallel loses that race regularly. Retrying is the
+    /// only fix available to a binder that must be told a literal number
+    /// (<see cref="System.Net.HttpListener"/>), because there is no port it can be given that
+    /// is guaranteed still free a microsecond later — but a *different* port almost certainly
+    /// is.
+    /// </para>
+    /// <para>
+    /// <paramref name="bind"/> is called with a just-released port and must either return the
+    /// bound object, or signal failure in one of the two ways a binder in this suite can:
+    /// throwing (<see cref="System.Net.HttpListenerException"/> /
+    /// <see cref="SocketException"/>, as a raw <c>HttpListener</c> does) or returning
+    /// <c>null</c> (as <c>MetricsEndpoint.TryStart</c> does — it swallows the bind error by
+    /// design, since a metrics endpoint must not kill the game server).
+    /// </para>
+    /// <para>
+    /// This weakens nothing. A genuine bind regression fails on every attempt and the caller
+    /// still sees the original exception, or still sees <c>null</c> and still fails its
+    /// assertion. Only a transient collision is absorbed.
+    /// </para>
+    /// </summary>
+    /// <param name="bind">Binds to the supplied port; returns null or throws on failure.</param>
+    /// <param name="attempts">How many fresh ports to try before giving up.</param>
+    /// <returns>The bound object, or null when every attempt returned null.</returns>
+    public static T? BindWithRetry<T>(Func<int, T?> bind, int attempts = 5) where T : class
+    {
+        Exception? lastThrow = null;
+
+        for (int attempt = 1; attempt <= attempts; attempt++)
+        {
+            int port;
+            using (var lease = new Lease()) { port = lease.Port; }
+
+            try
+            {
+                var bound = bind(port);
+                if (bound is not null) return bound;
+                lastThrow = null; // it failed by returning null, not by throwing
+            }
+            catch (Exception ex) when (ex is HttpListenerException or SocketException)
+            {
+                lastThrow = ex;
+            }
+
+            // Back off a little so a genuinely busy moment is not retried five times
+            // inside the same microsecond.
+            if (attempt < attempts) Thread.Sleep(20 * attempt);
+        }
+
+        // Every attempt failed. Reproduce the failure the caller would have seen without
+        // the retry, so a real regression looks exactly like it always did.
+        if (lastThrow is not null) throw lastThrow;
+        return null;
+    }
 }
