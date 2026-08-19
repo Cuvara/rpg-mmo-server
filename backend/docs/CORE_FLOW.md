@@ -10,6 +10,12 @@
 > **For architecture decisions and current limitations, read
 > [`ARCHITECTURE-DECISIONS.md`](ARCHITECTURE-DECISIONS.md) first.** Where the two
 > documents disagree, that one is newer and wins.
+>
+> **For the flow as it runs today, open
+> [`CLIENT-SERVER-FLOW.drawio`](CLIENT-SERVER-FLOW.drawio)** (draw.io / diagrams.net,
+> two pages: k3d+Agones topology, and the join sequence with all four `FindServer`
+> branches). It was drawn against a live cluster and a passing deploy, so where this
+> document's sequence disagrees with it, the diagram is what the code does.
 
 Canonical reference for how a player goes from cold start to gameplay, and what the
 backend actually does per tick. Statements about current behavior were read out of
