@@ -406,11 +406,19 @@ The same idle process, measured against both clocks at once, read 59.99 Hz and
 
 #### Audit: every figure in this document, against its clock
 
-Traced to source, not assumed. **No figure in this document is affected.** The
-load generator is Go, where `time.Now()` embeds a monotonic reading and
-`Time.Sub`/`time.Since` use it in preference to the wall clock; the server is C#,
-where the tick histogram and the loop pacing both come from
-`Stopwatch.GetTimestamp()`. Neither ever reads `CLOCK_REALTIME` for an interval.
+Traced to source, not assumed. **No figure in this document is known to be
+affected, and exactly one class could not be traced — it is named and marked in
+the table rather than quietly passed.** The load generator is Go, where
+`time.Now()` embeds a monotonic reading and `Time.Sub`/`time.Since` use it in
+preference to the wall clock; the server is C#, where the tick histogram and the
+loop pacing both come from `Stopwatch.GetTimestamp()`. Neither ever reads
+`CLOCK_REALTIME` for an interval.
+
+**The audit covers every Part, not only the loadtest sweeps.** Parts III, IV and
+VI report the same statistics as Part I from the same harness, so the first six
+rows below carry them. Parts covering in-process measurements (§23, Part V) do
+not go through the loadtest at all and are audited separately in the last three
+rows.
 
 | Figure | Interval comes from | Affected? |
 |---|---|---|
@@ -421,7 +429,24 @@ where the tick histogram and the loop pacing both come from
 | join latency | Go `time.Since(start)` | **No** |
 | KB/s per client, MB/s total | byte counters ÷ `time.Since(windowStart).Seconds()` | **No** |
 | peak RSS (MiB) | a byte count — no interval in it at all | **No** |
+| `host.load_avg_1` / `_5` / `_15` ([§16](#16-reproduction-a-withdrawn-claim-and-a-run-that-lied-in-our-favour)) | read verbatim from `/proc/loadavg` (`loadtest/load/host.go:60`) — a kernel-computed figure, no interval taken in the harness | **No** |
+| allocation B/tick ([§23](#23-snapshot-allocation-what-pooling-and-buffer-reuse-actually-removed)) | `GC.GetAllocatedBytesForCurrentThread` — a byte count over a fixed 60-tick loop, no clock read at all. §23 states outright that **no wall-clock claim is made** | **No** |
+| brute-vs-indexed µs, Part V ([Part V](#part-v--the-spatial-index-that-lost-2026-08-14)) | ⚠️ **Not traceable.** The paired in-process A/B harness was never committed — `2e3e5db` carries `SpatialGrid`, `EcsWorld` and `AoiIndexDifferentialTests` and no benchmark file — so the clock behind the µs columns cannot be read back from the repo | ⚠️ **Ratios: no.** The 1.42–2.92× / 0.32–0.45× / 0.81–0.89× ratios are taken within one run, so a shared skew cancels and the *conclusion* of Part V stands. **Absolute µs: unverified** — see below |
 | Protobuf-vs-JSON savings %, the 5:1 `still`-vs-`cluster` ratio, run-to-run spread % | ratios of the rows above, taken within one run | **No** — and a ratio would cancel a shared skew even if there were one |
+
+**The one unverified figure, kept rather than deleted.** Part V's absolute
+microsecond columns (77–136 µs brute, 38–84 µs indexed, and the rest) are the
+only figures in this document whose clock cannot be traced to source, because the
+harness that produced them was not kept. They are **not** withdrawn and **not**
+removed: deleting them would destroy the record of a measurement that was
+actually taken, and the skew band on this host is 10-17%, far narrower than the
+2.8× effect Part V reports. Read them as **order-of-magnitude only** — they are
+there to show that the distance tests cost microseconds against a 66 ms budget, a
+claim three orders of magnitude clear of any clock artefact. What would replace
+them: re-run the A/B with a committed harness that states its clock, the way
+[§23](#23-snapshot-allocation-what-pooling-and-buffer-reuse-actually-removed)'s
+`SnapshotAllocationTests.cs` does. Until then, quote Part V's **ratios**, never
+its microseconds. Refs #153.
 
 **Scope of the audit: the gateway was swept too, and no figure here depends on
 it.** Nothing in this document is measured through the gateway — confound 6
@@ -450,9 +475,13 @@ Two corollaries worth stating, because both are easy to get backwards:
   (Windows/WSL timer granularity) remains the live explanation.
 - **The re-check #153 asked for is done and it changed no number.** The issue was
   right that the hazard is severe and right to demand the audit; the audit's
-  answer happens to be that the harness was already clock-correct. That is a
-  property of the harness, not a reason to relax the rule — the rule protects the
-  *next* measurement, which may well be taken by hand at a shell prompt.
+  answer happens to be that every harness still in the repo was already
+  clock-correct. That is a property of the harnesses, not a reason to relax the
+  rule — the rule protects the *next* measurement, which may well be taken by
+  hand at a shell prompt. The audit did downgrade one figure class it could not
+  trace (Part V's absolute microseconds, above) from *verified* to
+  *order-of-magnitude only*, without changing its value or the conclusion it
+  supports.
 
 
 #### To check the tick rate, read `achieved_tick_hz`
@@ -1363,6 +1392,16 @@ The realistic-density ratio is 0.32–0.45 across five runs. That spread is far
 tighter than the host noise, so the loss is real and reproducible, not an
 artefact.
 
+> **Quote the ratios, not the microseconds.** The harness that produced this
+> table was never committed (`2e3e5db` carries `SpatialGrid`, `EcsWorld` and
+> `AoiIndexDifferentialTests`, no benchmark), so the clock behind the µs columns
+> cannot be traced — the one figure class in this document the #153 clock audit
+> could not close. The ratio columns are unaffected: both arms run back to back in
+> one process, so any skew is shared and cancels. The absolute µs are kept, not
+> deleted, because the record of the measurement matters and because a 10-17%
+> skew cannot touch a 2.8× result — but read them as order of magnitude. See
+> [the audit](#audit-every-figure-in-this-document-against-its-clock).
+
 ### Why it lost — the premise was wrong
 
 The case for an index was "40 000 distance tests per tick at 200 players, O(n²)".
@@ -1382,7 +1421,9 @@ saving only the near-free part.
 It wins in the sparse case for the same reason: at 2.8 matches per query there is
 almost nothing to compose, so what is left *is* the distance tests. That is also
 the case where the absolute cost is negligible — 77 µs to 38 µs on a 66 ms tick
-budget, 0.06%. **The index helps only where the cost does not matter.**
+budget, order 0.1%. (An order-of-magnitude reading, per the caveat above; a
+10-17% clock skew moves it nowhere near mattering.) **The index helps only where
+the cost does not matter.**
 
 ### The ordering constraint, which is a real cost
 

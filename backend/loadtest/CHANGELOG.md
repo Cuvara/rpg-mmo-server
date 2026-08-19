@@ -7,6 +7,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Documentation
+- **Closed the last gap in the #153 clock audit: `BENCHMARK.md` claimed to cover "every figure
+  in this document" and its table covered only the loadtest-derived ones.** Three figure
+  classes were unaudited: `host.load_avg_1/_5/_15` (read verbatim from `/proc/loadavg` in
+  `load/host.go`, no interval taken — clean), §23's allocation B/tick
+  (`GC.GetAllocatedBytesForCurrentThread` over a fixed 60-tick loop, no clock read — clean),
+  and Part V's brute-vs-indexed microsecond columns. The last one **cannot be traced**: the
+  paired in-process A/B harness was never committed (`2e3e5db` carries `SpatialGrid`,
+  `EcsWorld` and `AoiIndexDifferentialTests` and no benchmark), so the clock behind
+  77-136 µs / 1380-1514 µs is unreadable from the repo. The numbers are **kept and marked**,
+  not deleted — deleting them would destroy the record of a measurement that was taken, and a
+  10-17% skew cannot touch a 2.8x result. They are downgraded to order-of-magnitude, Part V's
+  conclusion is unchanged because it rests on within-run ratios where a shared skew cancels,
+  and the replacement is named: re-run the A/B with a committed harness that states its clock,
+  the way `SnapshotAllocationTests.cs` does. Refs #153.
 - **Audited the generator's clock discipline against the host-clock hazard (#153), and it is
   clean — no code change needed.** `CLOCK_REALTIME` on this box runs 10-17% fast against
   `CLOCK_MONOTONIC`, which would corrupt any rate derived from it, so every interval the
