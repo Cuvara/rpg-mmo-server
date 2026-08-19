@@ -39,6 +39,30 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   wire-format change can break it here and nowhere else in CI.
 
 ### Fixed
+- **`ci-dotnet.yml` `Publish AOT` hung on `apt-get` and failed PRs for reasons unrelated to the
+  code under test.** The `Install AOT prerequisites` step ran an unconditional
+  `sudo apt-get update && sudo apt-get install -y clang zlib1g-dev` on every run. **Neither package
+  needed installing:** the `ubuntu-24.04` runner image ships Clang 16/17/18 with an unversioned
+  `clang` alternative (`images/ubuntu/scripts/build/install-clang.sh` in `actions/runner-images`
+  calls `update-alternatives` for `clang`), and successful job logs read
+  `zlib1g-dev is already the newest version (1:1.3.dfsg-3.1ubuntu2.1)` /
+  `0 upgraded, 1 newly installed` — the one "new" package being the 20.5 kB `clang` metapackage.
+  What the step did buy was a full index refresh against the Ubuntu mirrors on every run: it
+  failed or hung four times on 2026-08-19, and in cancelled job 96015524448 `apt-get update` sat
+  on `https://archive.ubuntu.com` from 09:06:37 to the 09:31 cancellation after the
+  `azure.archive.ubuntu.com` mirror returned `Ign:` for every index. Even the *successful* runs
+  paid 17-37 s of mirror latency (`Fetched 11.4 MB in 17s`, then `Fetched 5846 B in 37s (156 B/s)`)
+  in a job that otherwise completes in 2-5 minutes. False failures on at least PRs #169, #171, #172.
+  The step is now `Verify AOT prerequisites`: it probes with `command -v clang` and
+  `dpkg-query -s zlib1g-dev` / `/usr/include/zlib.h`, does **no network I/O** when both are present
+  (the expected path), falls back to `apt-get` for only the missing package — 3 attempts with
+  backoff — and exits 1 with an explicit `::error::` if a prerequisite is still absent, so a runner
+  image that ever drops Clang fails here with a clear message instead of as an obscure link error
+  inside `dotnet publish`. It also carries `timeout-minutes: 5`, so a mirror hang costs five
+  minutes instead of the job's whole `timeout-minutes: 25` budget. **Every step after it is
+  unchanged** — per ADR-11 decision 4 the smoke-run must remain a real join, not a start-and-ping,
+  because an un-hinted Arch component publishes cleanly and only throws `NotSupportedException` on
+  the first player spawn. Documented in `backend/deploy/docs/CICD.md` § 6.
 - **The k8s post-deploy verification needed a Go toolchain the deploy runner does not have, and two
   checks died on `go: command not found`.** `verify.sh` built `probe/` on demand and
   `lib/checks_flow.sh` built `backend/smoketest` on demand; both run in the `deploy` job, which runs on

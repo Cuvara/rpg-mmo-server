@@ -764,6 +764,38 @@ Two deliberate choices:
   That is correct fail-fast behaviour for a deploy, but it must never be what
   stands between a PR and a merge. PR gating is GitHub-hosted only.
 
+#### `Publish AOT` verifies its prerequisites, it does not install them
+
+The `Publish AOT` job in `ci-dotnet.yml` needs `clang` and the zlib development
+headers to link the NativeAOT binary. It used to get them with an unconditional
+`sudo apt-get update && sudo apt-get install -y clang zlib1g-dev`.
+
+**Both are already on the `ubuntu-24.04` runner image**, so that step installed
+nothing of substance — the image ships Clang 16/17/18 with an unversioned
+`clang` alternative, and job logs show `zlib1g-dev is already the newest
+version` with `0 upgraded, 1 newly installed` (the `clang` metapackage, 20.5 kB).
+What it did do is contact the Ubuntu mirrors on every run. On 2026-08-19 that
+`apt-get update` hung four times — twice for 15-25 minutes, against the job's
+`timeout-minutes: 25` — and produced red Xs on PRs #169, #171 and #172 that had
+nothing to do with the code under test.
+
+The step is now a **probe**: `command -v clang` plus a `dpkg-query -s
+zlib1g-dev` / `/usr/include/zlib.h` check. On the common path it does no network
+I/O at all. It falls back to `apt-get` (3 attempts, backoff) only for what is
+genuinely missing, and it exits 1 with an explicit `::error::` if a prerequisite
+is still absent afterwards — a future image that drops Clang must fail here with
+a clear message, not as an obscure link error inside `dotnet publish`. The step
+carries `timeout-minutes: 5`, so a mirror hang costs five minutes instead of the
+job's entire budget.
+
+**What did not change:** every step after it. Per ADR-11 decision 4 a clean
+NativeAOT publish does *not* imply a working binary — Arch allocates chunk
+backing arrays through `System.Array.CreateInstance(Type, int)`, so an
+un-hinted component publishes without warning and throws `NotSupportedException`
+on the first archetype creation, i.e. the first player spawn. The job's
+smoke-run therefore performs a **real join**, not a start-and-ping, and must
+stay unconditional.
+
 #### Known gap: wire-compat coverage
 
 The Go gateway and the C# game server share a wire protocol
