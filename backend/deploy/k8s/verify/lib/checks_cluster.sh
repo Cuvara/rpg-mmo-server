@@ -236,28 +236,121 @@ print(d.get("spec",{}).get("replicas",0), st.get("replicas",0), st.get("readyRep
   pass "current=$cur ready=$ready allocated=$alloc (spec=$want, min=$min)"
 }
 
+# Restart classification, shared by check_no_restarts. Kept in a variable so the
+# python does not have to survive two levels of shell quoting.
+_RESTART_CLASSIFY_PY='
+import datetime, json, os, sys, time
+
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+
+window = int(os.environ.get("RESTART_WINDOW", "1800"))
+now = time.time()
+
+
+def epoch(stamp):
+    if not stamp:
+        return None
+    try:
+        return datetime.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=datetime.timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+for pod in doc.get("items", []):
+    meta = pod.get("metadata", {})
+    status = pod.get("status", {})
+    statuses = (status.get("initContainerStatuses") or []) + (status.get("containerStatuses") or [])
+    for cs in statuses:
+        count = cs.get("restartCount", 0)
+        if count <= 0:
+            continue
+        term = (cs.get("lastState") or {}).get("terminated") or {}
+        finished = term.get("finishedAt")
+        exit_code = term.get("exitCode")
+        reason = term.get("reason") or "?"
+        state = cs.get("state") or {}
+        running = "running" in state
+        if running:
+            current = "Running since %s" % state["running"].get("startedAt", "?")
+        elif "waiting" in state:
+            current = "NOT running -- waiting: %s" % ((state["waiting"] or {}).get("reason") or "?")
+        else:
+            current = "NOT running -- terminated"
+        age = None
+        seconds = epoch(finished)
+        if seconds is not None:
+            age = int(now - seconds)
+        age_text = "age unknown" if age is None else "%dm%02ds ago" % (age // 60, age % 60)
+        detail = "%s/%s:%s restarts=%d, last exit=%s (%s) at %s [%s], now %s" % (
+            meta.get("namespace", "?"), meta.get("name", "?"), cs.get("name", "?"),
+            count, exit_code, reason, finished or "unknown", age_text, current)
+        # Inside the window, of unknown age, or not running right now: the
+        # deployment under test owns it. Anything else predates this run.
+        fresh = (not running) or age is None or age <= window
+        print(("RECENT " if fresh else "OLD ") + detail)
+'
+
+# restartCount is CUMULATIVE over a pod's whole life and is never reset, so a
+# single host reboot -- which on k3d terminates every container in the cluster
+# with exit 255 -- makes a bare "restartCount == 0" assertion fail forever, on
+# every future deploy, until somebody deletes every pod. That is a check that
+# stops describing the deployment under test and starts describing the box's
+# uptime, so it is scoped by TIME instead:
+#
+#   FAIL  a container that restarted inside VERIFY_RESTART_WINDOW seconds, or
+#         that is not Running right now (a crash loop, at any age).
+#   WARN  a container whose only restarts are older than the window. Reported,
+#         named, and explicitly labelled as coverage this check gave up.
+#
+# The narrowing is deliberate and is printed in the verdict: outside the window
+# this check proves nothing, and says so rather than reading as green.
 check_no_restarts() {
-  local bad=() ns line
+  local window="${VERIFY_RESTART_WINDOW:-1800}"
+  local recent=() old=() ns line
   for ns in $VERIFY_NAMESPACES; do
-    while read -r line; do
-      [ -n "$line" ] && bad+=("$line")
-    done < <(k get pods -n "$ns" -o json 2>/dev/null | python3 -c '
-import json,sys
-try: d=json.load(sys.stdin)
-except Exception: sys.exit(0)
-for p in d.get("items",[]):
-    for cs in p.get("status",{}).get("containerStatuses",[]) or []:
-        if cs.get("restartCount",0) > 0:
-            print(f'"'"'{p["metadata"]["namespace"]}/{p["metadata"]["name"]}:{cs["name"]}={cs["restartCount"]}'"'"')
-')
+    while IFS= read -r line; do
+      case "$line" in
+        "RECENT "*) recent+=("${line#RECENT }") ;;
+        "OLD "*)    old+=("${line#OLD }") ;;
+      esac
+    done < <(k get pods -n "$ns" -o json 2>/dev/null \
+      | RESTART_WINDOW="$window" python3 -c "$_RESTART_CLASSIFY_PY")
   done
-  if [ ${#bad[@]} -gt 0 ]; then
-    fail "container(s) have restarted" "restartCount == 0 for every container" \
-      "${bad[*]}" \
-      "kubectl --context $KUBE_CONTEXT logs <pod> -n <ns> --previous"
+
+  # One entry per line, continuation lines indented under "observed:".
+  _restart_lines() { printf '%s\n' "$@" | sed '2,$s/^/                /'; }
+
+  if [ ${#recent[@]} -gt 0 ]; then
+    # Diagnosis, not an exemption. When several containers across more than one
+    # namespace all terminated at the SAME second, the cause is the node or the
+    # container runtime going down (on k3d: the k3d node container, Docker
+    # Desktop, or the WSL2 host), not a workload defect -- no application bug
+    # kills the Agones controller and Postgres simultaneously. Saying so here
+    # is the difference between a five-minute triage and an hour of it. It
+    # still FAILS: a cluster that lost every container minutes before the
+    # verification has not been shown to have settled.
+    local hint="kubectl --context $KUBE_CONTEXT logs <pod> -n <ns> -c <container> --previous; kubectl --context $KUBE_CONTEXT describe pod <pod> -n <ns>"
+    local stamps ns_count
+    stamps=$(printf '%s\n' "${recent[@]}" | sed -n 's/.*) at \([^ ]*\) \[.*/\1/p' | sort -u | grep -c . )
+    ns_count=$(printf '%s\n' "${recent[@]}" | cut -d/ -f1 | sort -u | wc -l)
+    if [ ${#recent[@]} -gt 1 ] && [ "$stamps" = "1" ] && [ "$ns_count" -gt 1 ]; then
+      hint="ALL ${#recent[@]} containers, across $ns_count namespaces, died at the SAME instant -- that is the NODE or the container runtime restarting (k3d node container / Docker / the host), not a crash loop. This clears on its own ${window}s after the event; it is not something to fix in a workload. ${hint}"
+    fi
+    fail "container(s) restarted inside the ${window}s window, or are not running now" \
+      "every container Running, with no restart in the last ${window}s (VERIFY_RESTART_WINDOW)" \
+      "$(_restart_lines "${recent[@]}")" \
+      "$hint"
     return
   fi
-  pass "no container restart in $VERIFY_NAMESPACES since pod creation"
+  if [ ${#old[@]} -gt 0 ]; then
+    warn "every container is Running and none restarted in the last ${window}s, but these carry OLDER restarts that this check deliberately does NOT judge -- outside the window it proves nothing about why they died, so treat the list as unexplained history, not as health: $(_restart_lines "${old[@]}")"
+    return
+  fi
+  pass "no container restart in $VERIFY_NAMESPACES within the last ${window}s, and every container is Running"
 }
 
 # Secrets exist and every key holds a non-empty value. Values are never printed
@@ -335,9 +428,9 @@ register cluster.autoscaler 1 "no buffer autoscaler on a single-map fleet" \
   "no FleetAutoscaler targets a fleet whose pod template pins one GAMESERVER_MAP_ID for every replica -- on such a fleet a spare Ready pod is a second live server for that map, because the C# server self-registers at startup rather than on allocation (ADR-2, ADR-18)" \
   "nothing about fleets it does not name, and nothing about a map id supplied per pod via valueFrom -- that case is reported as unpinned and the rule stands down" \
   check_no_single_map_autoscaler
-register cluster.restarts   1 "no container has restarted" \
-  "no container in the target namespaces has restartCount > 0 since it was created" \
-  "the window is pod lifetime, not a fixed period; a pod recreated a minute ago hides yesterday's crash loop" \
+register cluster.restarts   1 "no recent container restart, and nothing crash-looping" \
+  "no container in the target namespaces restarted within the last VERIFY_RESTART_WINDOW seconds (default 1800), and every container is Running right now -- so an active crash loop fails at any age" \
+  "restarts OLDER than the window are reported as a WARN with the container named, and are NOT judged: this check says nothing about why they died. It also cannot see a crash that predates the current pod, because restartCount is reset when a pod is recreated" \
   check_no_restarts
 register cluster.secrets    1 "declared Secrets present and non-empty" \
   "each declared Secret exists and every key decodes to a non-empty value" \

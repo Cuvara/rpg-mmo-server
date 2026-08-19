@@ -6,6 +6,30 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **The k8s post-deploy verification needed a Go toolchain the deploy runner does not have, and two
+  checks died on `go: command not found`.** `verify.sh` built `probe/` on demand and
+  `lib/checks_flow.sh` built `backend/smoketest` on demand; both run in the `deploy` job, which runs on
+  the self-hosted runner and — unlike the `_go-module.yml` test jobs — never installs Go. CD run
+  32207995779 (develop @ 864f319) therefore reported `data.nakama_plugin` FAIL ("probe build failed"),
+  `flow.smoke` FAIL ("go: command not found") and `flow.stack_identity` SKIP, which the suite is
+  explicit is not a pass. Both binaries are now built on `ubuntu-latest` from the same commit and
+  travel in the deployment bundle: `build-smoketest` already produced `bin/smoketest`, and a new
+  `build-verify-probe` job produces `bin/verify-probe`. The verification step exports
+  `VERIFY_SMOKETEST_BIN` / `VERIFY_PROBE_BIN` at them and fails the step outright if the bundle is
+  missing either, so a pipeline defect cannot be reported as a broken deployment. `actions/setup-go`
+  on the deploy job was rejected deliberately: applying prebuilt artifacts to a cluster should not
+  require a compiler, and a toolchain installed there would build binaries no CI job had gated.
+- **`cluster.restarts` was a time bomb: one host reboot failed every future deploy.** `restartCount`
+  is cumulative for the life of a pod and is never reset, and on k3d a restart of the WSL2 host or of
+  Docker terminates every container in the cluster with exit 255. Measured 2026-08-19: nine containers
+  across `rpg-k8s-data` and `agones-system` all died at `02:18:24Z` and came back at `02:18:44Z`, and a
+  bare "restartCount == 0 for every container" assertion would have failed from then until somebody
+  deleted every pod — a check describing the box's uptime rather than the deployment. The check is now
+  scoped by time: a restart inside `VERIFY_RESTART_WINDOW` seconds (default 1800, set explicitly in
+  `targets/k8s-dev.env`) FAILS, as does any container that is not `Running` right now — so an active
+  crash loop still fails at any age — and older restarts are a WARN that names every container and
+  states out loud that outside the window the check proves nothing. The scope narrowing is printed in
+  the verdict rather than hidden in the registration.
 - **A containers-mode deploy could start a second stack beside the live k8s one, and nothing stopped it.**
   The per-step `deploy_mode != 'k8s'` conditions protect k8s mode from the compose steps, but nothing
   protected the cluster from `DEPLOY_MODE` being set back to `containers`. Measured 2026-08-18: a deploy
@@ -20,6 +44,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Both images are now stamped with the deploying commit.
 
 ### Changed
+- **Verification failures now name their subject.** `cluster.restarts` printed only "container(s) have
+  restarted"; it now lists, one per line, `ns/pod:container`, the restart count, the previous exit code
+  and reason, how long ago it died and whether the container is running now. When every recent restart
+  shares one timestamp across more than one namespace it additionally says the cause is the node or the
+  container runtime, not a workload — diagnosis, not an exemption, and it still fails. `verify.sh` no
+  longer swallows the probe build error into `/dev/null`, and a `VERIFY_PROBE_BIN` /
+  `VERIFY_SMOKETEST_BIN` that is set but not executable is now a named configuration failure instead of
+  a silent fall-through to a source build.
+- **`VERIFY_SMOKETEST_BIN` no longer defaults to a hardcoded scratch path** in `targets/k8s-dev.env`
+  and `targets/dev-agones.env` (`/tmp/claude-1000/...`, correct on exactly one machine). Empty is the
+  default and means "build from source"; CI supplies the bundle path.
 - **`GAMESERVER_CAPACITY` is now set explicitly in both map fleets — 100 is a decision
   instead of a default (#145).** `deploy/k8s/app/50-fleet-map.yaml` and
   `deploy/agones/fleet-map-dotnet-dev.yaml` both left it unset, so `Program.cs` fell back to
@@ -84,6 +119,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Refs #153, #147.
 
 ### Added
+- `build-verify-probe` job in `.github/workflows/cd.yml`, building
+  `backend/deploy/k8s/verify/probe` via `_go-module.yml` into the deployment bundle as
+  `bin/verify-probe`. The bundle staging step now refuses to publish without it.
+- `VERIFY_RESTART_WINDOW` (seconds, default 1800) and `VERIFY_PROBE_BIN` target/environment knobs.
 - **`verify.sh` check `cluster.autoscaler` — a `FleetAutoscaler` on a single-map fleet is now
   a FAIL, not a paragraph.** It fails when any `FleetAutoscaler` targets a fleet whose pod
   template carries a literal fleet-wide `GAMESERVER_MAP_ID`, and stands down for a fleet that

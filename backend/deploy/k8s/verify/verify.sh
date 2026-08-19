@@ -71,14 +71,30 @@ fi
 : "${VERIFY_UNITY_NAKAMA_HOST:=127.0.0.1}"
 : "${VERIFY_UNITY_NAKAMA_PORT:=7350}"
 
-# run_probe -- the protocol-level observer, built on demand from probe/.
+# run_probe -- the protocol-level observer.
+#
+# VERIFY_PROBE_BIN points at a prebuilt binary and is the shape CI uses: the
+# deploy runner applies artifacts to a cluster and has no business carrying a Go
+# toolchain, so cd.yml builds probe/ on the build runner, ships it in the
+# deployment bundle and exports the path here. Building from probe/ on demand is
+# the fallback for an operator running this by hand.
 PROBE_BIN="${VERIFY_PROBE_BIN:-}"
+if [ -n "$PROBE_BIN" ] && [ ! -x "$PROBE_BIN" ]; then
+  echo "VERIFY_PROBE_BIN is set to '$PROBE_BIN', which is not an executable file." >&2
+  echo "Refusing to silently fall back to a source build: a stale or mistyped path" >&2
+  echo "must not read as 'the probe could not be built'." >&2
+  exit 2
+fi
 run_probe() {
   if [ -z "$PROBE_BIN" ]; then
     PROBE_BIN="${TMPDIR:-/tmp}/rpg-verify-probe"
     if [ ! -x "$PROBE_BIN" ] || [ "$HERE/probe/main.go" -nt "$PROBE_BIN" ]; then
-      ( cd "$HERE/probe" && go build -o "$PROBE_BIN" . ) >/dev/null 2>&1 || {
-        echo "RESULT=error probe build failed (is go on PATH? try: cd $HERE/probe && go build)"; return 1; }
+      local berr
+      if ! berr=$( cd "$HERE/probe" && go build -o "$PROBE_BIN" . 2>&1 ); then
+        echo "RESULT=error probe build failed: $(echo "$berr" | tail -2 | tr '\n' ' ')"
+        echo "RESULT=error set VERIFY_PROBE_BIN to a prebuilt probe, or put go on PATH and run: cd $HERE/probe && go build"
+        return 1
+      fi
     fi
   fi
   NAKAMA_URL="$VERIFY_NAKAMA_URL" NAKAMA_SERVER_KEY="$VERIFY_NAKAMA_SERVER_KEY" \

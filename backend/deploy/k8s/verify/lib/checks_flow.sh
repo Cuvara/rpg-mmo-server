@@ -14,17 +14,27 @@
 
 check_flow_smoke() {
   local bin="${VERIFY_SMOKETEST_BIN:-}"
-  if [ -z "$bin" ] || [ ! -x "$bin" ]; then
-    # Build it from source rather than skipping: a missing binary is a property
-    # of the runner, not of the deployment, and must not turn into a gap in
-    # coverage. Only a build that FAILS is reported as a failure.
+  # A VERIFY_SMOKETEST_BIN that is set but not runnable is a configuration
+  # error, not a missing toolchain: falling through to a source build here would
+  # hide a stale bundle path behind a "go: command not found".
+  if [ -n "$bin" ] && [ ! -x "$bin" ]; then
+    fail "VERIFY_SMOKETEST_BIN does not point at an executable" \
+      "an executable file at the configured path" \
+      "VERIFY_SMOKETEST_BIN=$bin ($([ -e "$bin" ] && echo "exists but is not executable" || echo "does not exist"))" \
+      "the deployment bundle: CI exports this from dist/bin/smoketest, built by the build-smoketest job"
+    return
+  fi
+  if [ -z "$bin" ]; then
+    # No prebuilt binary configured. Build it from source rather than skipping:
+    # a missing binary is a property of the runner, not of the deployment, and
+    # must not turn into a gap in coverage. Only a build that FAILS is a failure.
     bin="${TMPDIR:-/tmp}/rpg-verify-smoketest"
     local berr
     if ! berr=$( cd "$HERE/../../../smoketest" && go build -o "$bin" ./cmd/smoketest 2>&1 ); then
       fail "smoketest binary unavailable and could not be built" \
         "an executable at VERIFY_SMOKETEST_BIN, or a buildable backend/smoketest" \
         "$(echo "$berr" | tail -2)" \
-        "cd backend/smoketest && go build ./cmd/smoketest (is go on PATH?)"
+        "set VERIFY_SMOKETEST_BIN to a prebuilt binary (this is what CI does -- the deploy runner has no Go toolchain), or: cd backend/smoketest && go build ./cmd/smoketest"
       return
     fi
   fi

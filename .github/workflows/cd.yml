@@ -187,6 +187,25 @@ jobs:
       artifact_name: bin-smoketest-${{ github.sha }}
       artifact_path: bin/smoketest
 
+  # The deployment verification suite's protocol probe
+  # (backend/deploy/k8s/verify/probe). It is built HERE, on ubuntu-latest, and
+  # travels in the deployment bundle for the same reason the smoketest binary
+  # does: the `deploy` job runs on a self-hosted runner whose job is to apply
+  # already-built artifacts to a cluster, and it has no Go toolchain on PATH.
+  # It used to build the probe and the smoketest on the deploy box, which
+  # failed with "go: command not found" and took data.nakama_plugin, flow.smoke
+  # and (by dependency) flow.stack_identity down with it.
+  build-verify-probe:
+    name: Build verification probe binary
+    needs: test-shared
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/deploy/k8s/verify/probe
+      run_tests: false
+      run_build: go build -o ../../../../../bin/verify-probe .
+      artifact_name: bin-verify-probe-${{ github.sha }}
+      artifact_path: bin/verify-probe
+
   # ------------------------------------------------------------ nakama plugin
   # -buildmode=plugin is ABI-locked to the Nakama server image, so the .so is
   # built inside the matching container (see backend/deploy/nakama-plugin.Dockerfile).
@@ -284,7 +303,7 @@ jobs:
   # here — only artifacts + repo files are collected.
   bundle:
     name: Assemble deployment bundle
-    needs: [test-integration, build-gateway, build-smoketest, build-plugin]
+    needs: [test-integration, build-gateway, build-smoketest, build-verify-probe, build-plugin]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -336,7 +355,7 @@ jobs:
           cp -r backend/deploy/db         dist/deploy/db
           cp scripts/deploy-local.sh dist/scripts/
           echo "${GITHUB_SHA}" > dist/COMMIT
-          for f in bin/gateway bin/smoketest bin/gameserver-dotnet deploy/nakama.so \
+          for f in bin/gateway bin/smoketest bin/verify-probe bin/gameserver-dotnet deploy/nakama.so \
                    scripts/deploy-local.sh \
                    deploy/monitoring/prometheus.yaml \
                    deploy/monitoring/grafana-dashboards.yaml \
@@ -1145,6 +1164,25 @@ jobs:
           JWT_SECRET="$($K get secret rpg-app-secrets -n rpg-k8s-realtime \
             -o jsonpath='{.data.jwt-secret}' | base64 -d)"
           export JWT_SECRET
+
+          # This runner has no Go toolchain on PATH, and should not need one: it
+          # applies prebuilt artifacts to a cluster. Both binaries the suite
+          # would otherwise `go build` on the spot come out of the deployment
+          # bundle instead, built by build-smoketest / build-verify-probe on
+          # ubuntu-latest from this same commit.
+          #   verify/verify.sh    -> VERIFY_PROBE_BIN     (data.nakama_plugin)
+          #   lib/checks_flow.sh  -> VERIFY_SMOKETEST_BIN (flow.smoke)
+          # Both paths are asserted here rather than left to fail inside a
+          # check: a missing bundle binary is a pipeline defect, and it must not
+          # be reported as "the deployment is broken".
+          VERIFY_SMOKETEST_BIN="${GITHUB_WORKSPACE}/dist/bin/smoketest"
+          VERIFY_PROBE_BIN="${GITHUB_WORKSPACE}/dist/bin/verify-probe"
+          for b in "$VERIFY_SMOKETEST_BIN" "$VERIFY_PROBE_BIN"; do
+            [ -f "$b" ] || { echo "::error::deployment bundle is missing $b"; exit 1; }
+            chmod +x "$b"
+          done
+          export VERIFY_SMOKETEST_BIN VERIFY_PROBE_BIN
+
           chmod +x verify/verify.sh
           ./verify/verify.sh --target k8s-dev
 

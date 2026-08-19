@@ -98,6 +98,12 @@ JWT_SECRET="$(kubectl --context k3d-rpg-dev get secret -n rpg-k8s-realtime \
   ./verify.sh --target k8s-dev
 ```
 
+Running it by hand needs `go` on PATH, because `probe/` and `backend/smoketest`
+are built from source when `VERIFY_PROBE_BIN` / `VERIFY_SMOKETEST_BIN` are unset.
+CD does not: it exports both at binaries built on `ubuntu-latest` and shipped in
+the deployment bundle, because the deploy runner has no Go toolchain and should
+not need one. See `verify/README.md`.
+
 `./verify.sh --list` explains what each check proves *and what it cannot*. Two
 checks do not run on this deployment and both are deliberate:
 
@@ -376,6 +382,20 @@ A push to `develop` deploys this, not the compose stack, when the dev GitHub
 Environment sets `vars.DEPLOY_MODE=k8s`. The job builds the images on the
 runner, tags them `${GITHUB_SHA}`, runs `dev-up.sh`, then runs
 `verify.sh --target k8s-dev` as the healthcheck — a FAIL fails the deploy.
+
+The verification step exports `VERIFY_SMOKETEST_BIN` and `VERIFY_PROBE_BIN` from
+`dist/bin/` (the deployment bundle) and fails the step if either is missing. The
+deploy job installs no Go: `build-smoketest` and `build-verify-probe` build them
+on `ubuntu-latest` from the deployed commit. Without that, `data.nakama_plugin`
+and `flow.smoke` fail with `go: command not found` and `flow.stack_identity`
+skips behind them.
+
+`cluster.restarts` fails on a container that restarted in the last
+`VERIFY_RESTART_WINDOW` seconds (1800 in `targets/k8s-dev.env`) or that is not
+running. If the WSL2 host or Docker restarted shortly before a deploy, every
+container in the cluster carries a fresh restart and this check fails naming
+them and identifying it as a node event; it clears once the event is older than
+the window.
 
 Staging and production are untouched: they select `containers`/`host` through
 their own `vars.DEPLOY_MODE` and never enter this path.

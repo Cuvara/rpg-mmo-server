@@ -41,8 +41,25 @@ probe/               small Go module: the two protocol-level observations
 ```
 
 `probe/` is its own Go module (`github.com/duycuong/rpg-mmo/deployverify`) with a
-`replace` onto `../../../../shared`. It does not touch the existing modules and
-is built on demand into `$TMPDIR`.
+`replace` onto `../../../../shared`. It does not touch the existing modules.
+
+**Where the binaries come from.** `probe/` and `backend/smoketest` are built on
+demand into `$TMPDIR` when `VERIFY_PROBE_BIN` / `VERIFY_SMOKETEST_BIN` are unset
+— convenient for an operator with `go` installed, and wrong for CI. The `deploy`
+job in `.github/workflows/cd.yml` runs on a **self-hosted runner with no Go
+toolchain on PATH**, and should not have one: its job is to apply prebuilt
+artifacts to a cluster. CD therefore builds both on `ubuntu-latest` from the same
+commit (`build-smoketest` → `bin/smoketest`, `build-verify-probe` →
+`bin/verify-probe`), ships them in the deployment bundle and exports:
+
+```bash
+export VERIFY_SMOKETEST_BIN="$GITHUB_WORKSPACE/dist/bin/smoketest"
+export VERIFY_PROBE_BIN="$GITHUB_WORKSPACE/dist/bin/verify-probe"
+```
+
+Either variable set to a path that is not executable is a hard error naming the
+path, not a quiet fall-through to a source build: a stale bundle path must not
+be reported as "the probe could not be built".
 
 ## The checks
 
@@ -56,7 +73,7 @@ is built on demand into `$TMPDIR`.
 | `cluster.pvcs` | each declared PVC is `Bound` | nothing about the data on it, nor about PVCs nobody declared |
 | `cluster.fleet` | the Agones fleet exists and carries ≥ `VERIFY_FLEET_MIN_REPLICAS` GameServers | nothing about which map those pods serve — that is layer 3 |
 | `cluster.autoscaler` | no `FleetAutoscaler` targets a fleet whose pod template pins one `GAMESERVER_MAP_ID` for every replica | nothing about fleets it does not name, and nothing about a map id supplied per pod through `valueFrom` — that case is reported as unpinned and the rule stands down |
-| `cluster.restarts` | no container in the namespaces has `restartCount > 0` | the window is pod lifetime, not a fixed period: a pod recreated a minute ago hides yesterday's crash loop |
+| `cluster.restarts` | no container in the namespaces restarted within the last `VERIFY_RESTART_WINDOW` seconds (default 1800), **and** every container is `Running` right now — so an active crash loop fails at any age | restarts **older** than the window are a WARN naming every container, and are not judged: the check says nothing about why they died. It also cannot see a crash that predates the current pod, because `restartCount` resets when a pod is recreated |
 | `cluster.secrets` | each declared Secret exists and every key decodes to a non-empty value | nothing about the value being *correct*. Values are never printed — only key names and byte lengths |
 
 `cluster.fleet` reports **WARN** when the fleet is at size but has zero Ready
@@ -77,6 +94,27 @@ Measured on k3d 2026-08-18: `1 -> 2` replicas put a second member into
 `backend/deploy/docs/K3S.md`. A fleet with a per-pod map id does not trip this
 check, which is the point — it must stop being an error the moment the real fix
 lands.
+
+`cluster.restarts` is scoped by **time**, and this is a deliberate narrowing the
+verdict prints out loud. `restartCount` is cumulative for the life of a pod and
+is never reset, so on k3d a single restart of Docker or of the WSL2 host — which
+terminates every container in the cluster with exit 255 — would fail a bare
+`restartCount == 0` assertion on every deploy from then until somebody deleted
+every pod. That check measures the box's uptime, not the deployment. Instead:
+
+- **FAIL** — a container that restarted inside `VERIFY_RESTART_WINDOW` seconds
+  (default `1800`), *or* that is not `Running` right now. A crash loop always
+  satisfies one of those, at any age.
+- **WARN** — a container whose only restarts are older than the window. It is
+  named, with its previous exit code, reason and age, and the message states
+  that outside the window the check proves nothing about why it died.
+
+When every recent restart shares one timestamp across more than one namespace,
+the failure additionally says so: a simultaneous cluster-wide termination is the
+node or the container runtime going down, not a workload defect. That is
+**diagnosis, not an exemption** — the check still fails, because a cluster that
+lost every container minutes before the run has not been shown to have settled.
+It clears on its own once the event is `VERIFY_RESTART_WINDOW` seconds old.
 
 Keys that are legitimately empty are named one at a time in
 `VERIFY_SECRETS_ALLOW_EMPTY="ns/name:key,key"` and print as `empty-by-config`.
@@ -140,8 +178,10 @@ the two flags that make it strict:
   **WARN**, naming what was not proven.
 
 The binary is taken from `VERIFY_SMOKETEST_BIN`, or built from
-`backend/smoketest` on demand. A missing binary is a property of the runner, not
-of the deployment, so it is never allowed to become a coverage gap.
+`backend/smoketest` on demand when that variable is empty. A missing binary is a
+property of the runner, not of the deployment, so it is never allowed to become
+a coverage gap — but a `VERIFY_SMOKETEST_BIN` that is *set* and not executable
+fails loudly with the path, rather than falling back and blaming the toolchain.
 
 ### Layer 5 — the client
 
@@ -243,9 +283,12 @@ docker inspect rpg-gateway --format '{{range .Config.Env}}{{println .}}{{end}}' 
 `docker exec <c> printenv` does **not** work on the distroless gateway image: it
 returns the exec error text, which reads exactly like a value.
 
-Requirements on the runner: `kubectl`, `curl`, `python3`, `bash` ≥ 4, plus `go`
-(to build `probe/` and, if needed, `smoketest`) and whatever the target's exec
-prefixes need (`docker` for the compose data tier).
+Requirements on the runner: `kubectl`, `curl`, `python3`, `bash` ≥ 4, and
+whatever the target's exec prefixes need (`docker` for the compose data tier).
+`go` is required **only** when `VERIFY_PROBE_BIN` and `VERIFY_SMOKETEST_BIN` are
+unset, i.e. when the two binaries have to be built from source. Point both at
+prebuilt binaries and the suite needs no Go toolchain at all — that is how CD
+runs it.
 
 ## Adding a target
 
