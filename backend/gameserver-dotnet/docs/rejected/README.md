@@ -74,3 +74,68 @@ the source, keep only single-interval pairs, no skip. Issue #154 is closed.
 existed only as uncommitted changes and would have been destroyed by a
 `git worktree remove --force`. Written against `1dfdc3b`, and it does **not**
 apply to `develop` — both files it touches have since changed.
+
+---
+
+## `2026-08-19-slow-client-burst-three.patch`
+
+**Problem it addressed:** #175 F1 — the two bursty-client cases in
+`SlowClientMovementTests` assert `travelled > expected * 0.85` and were reported
+as having almost no margin. The arithmetic in the issue is correct as far as it
+goes: `MeasureAsync(..., sendHz: 15, burst: 4)` idles `4 * (1000/15) = 264 ms`
+between bursts, and on the single-rate `Rates(15, 15, 5)` case the server's
+banking cap is `MaxBankedMovementTicks(15) = 4` ticks of `66.67 ms` = `266.7 ms`.
+That is 2.7 ms of design margin, and every millisecond `Task.Delay` overshoots is
+time the server discards by design.
+
+**What it did.** Changed `burst: 4` to `burst: 3` in both cases, on the reasoning
+that a 198 ms gap against a 266.7 ms cap buys 68 ms of jitter headroom instead of
+2.7 ms.
+
+**Why it was rejected: measured, it makes the test *more* likely to fail, not
+less.** 42 runs of each variant on a 12-core box under 8 added spinner processes
+(load average 11-16), values harvested from TRX by forcing the assertion to
+report its numbers:
+
+| variant | case | min | median | max | runs under 0.85 |
+|---|---|---|---|---|---|
+| `burst: 4` (current) | multi-rate 60/15/5 | 0.9300 | 0.9450 | 0.9717 | **0 / 42** |
+| `burst: 4` (current) | single-rate 15/15/5 | 0.8883 | 0.9450 | 1.0000 | **0 / 42** |
+| `burst: 3` (this patch) | multi-rate 60/15/5 | 0.8750 | 0.8883 | 0.9300 | 0 / 42 |
+| `burst: 3` (this patch) | single-rate 15/15/5 | **0.8333** | 0.8883 | 0.9450 | **3 / 42** |
+
+`burst: 2` was measured too and is indistinguishable from `burst: 4`
+(single-rate min 0.8883, median 0.9450).
+
+**Why `burst` cannot buy margin here.** The measured distance is quantised in
+whole simulation ticks, and what sets it is not the banking cap but **where the
+client's last burst lands**. `MeasureAsync` waits *after* sending packet `p` when
+`p % burst == 0`, so the final arrival is at
+`floor((packets - 1) / burst) * burst * interval`:
+
+- `burst: 4` -> `floor(17/4) * 4 * 66 ms` = **1056 ms**
+- `burst: 2` -> `floor(17/2) * 2 * 66 ms` = **1056 ms**
+- `burst: 3` -> `floor(17/3) * 3 * 66 ms` = **990 ms**
+
+`expected` is `speed * RunSeconds` = a full 1200 ms regardless. So the bursty
+cases start from a ceiling of `1056 / 1200` = 0.88 before any jitter at all, and
+`burst: 3` moves that ceiling down one 66.7 ms tick to `990 / 1200` = 0.825 —
+below the threshold on its own. The whole observed distribution shifts down by
+exactly one tick, which is what the table shows.
+
+The 2.7 ms cap margin is real, but it is not what the 42 runs were limited by:
+the single-rate minimum of 0.8883 is exactly 16 ticks, i.e. the full un-capped
+send window, meaning the cap did not bite once in 42 loaded runs.
+
+**Why the threshold was not lowered instead.** With banking removed
+(`MaxBankedMovementMs` forced to 1, 8 runs) the same cases measure **0.278**
+single-rate and **0.388** multi-rate — the #100 defect, and the same 28%/46%
+figures the test's own doc comment quotes. The 0.85 threshold sits 3.1x and 2.2x
+above the defect signal; it is the only thing separating the banked model from
+the unbanked one and it is nowhere near tight.
+
+**What landed instead.** Nothing in the assertions. The measurement above, and a
+comment on the two cases recording that `burst: 4` is load-bearing and why
+lowering it is a regression — so the next reader does not re-derive the same
+plausible-looking fix from the same correct arithmetic. F1 was reproduced
+**0 times in 42 loaded runs** here, on top of 0/32 in the original audit.

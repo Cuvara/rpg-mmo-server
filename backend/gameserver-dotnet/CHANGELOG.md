@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **`SlowClientMovementTests` bursty-client margin (issue #175 F1) — measured, and the proposed
+  fix rejected.** F1 was the one family diagnosed by arithmetic rather than reproduction. The
+  arithmetic still holds against the current tree (`MaxBankedMovementMs = 250`,
+  `MaxBankedMovementTicks(15) = 4` ticks = 266.7ms against a 264ms burst gap), but the prescribed
+  remedy — `burst: 4` -> `burst: 3` — **makes the test fail more often, not less**: 3 failures in
+  42 loaded runs against 0 in 42 for the current value. What bounds the measured distance is not
+  the banking cap but where the last burst lands: `MeasureAsync` waits *after* packet `p` when
+  `p % burst == 0`, so the final arrival is at 1056ms for `burst: 4` and `burst: 2` but 990ms for
+  `burst: 3`, while `expected` is a full 1200ms regardless. No assertion, threshold or schedule
+  was changed. The measurement, the rejected patch and the reasoning are recorded in
+  `docs/rejected/2026-08-19-slow-client-burst-three.patch` and `docs/rejected/README.md`, and the
+  two test cases now carry a comment saying `burst: 4` is load-bearing — the arithmetic that
+  suggests lowering it is correct and the conclusion is still wrong, so the next reader would
+  otherwise re-derive it. Reproduction rate this round: **0 / 42** under load average 11-16 on 12
+  cores, on top of 0 / 32 in the original audit.
+
 ### Fixed
 - **`EcsWorld` corrupted Arch's query state under concurrent reads — the reader/writer lock was
   never sufficient** (issue #176). The reported symptom was
