@@ -1477,6 +1477,19 @@ by the change that first spawns a worker.
 >   completion order. The suite was verified to fire by reintroducing the shared queue —
 >   exactly the two order-sensitive tests fail and the other eight still pass.
 >
+>   **Correction, 2026-08-19: the count is wrong — it should be three fail / seven pass.**
+>   `WorkerCountDoesNotChangeTheResultingWorld` compares a 1-worker digest (which spawns in
+>   slot order) against a 4-worker one, and cannot survive a shared arrival-order queue
+>   either, because `SpawnPerWorker` sleeps `(4 - slot) * 12` ms before spawning and so
+>   arrives in reverse slot order. This is an inspection result, not a re-run of the
+>   experiment; either the original miscounted or the reintroduction was narrower than "the
+>   shared queue". Also worth recording:
+>   `ASpawnInsideAParallelRegionIsNotVisibleUntilTheRegionEnds` is **mislabelled** — its
+>   comment says deferral "has to hold for every worker", but it runs `workerCount: 1`,
+>   which by `ASingleWorkerRegionStartsNoThread`'s own contract starts no thread at all. It
+>   tests the world-level flag on the calling thread only; multi-worker deferral is covered
+>   indirectly by the three order-sensitive tests and nowhere directly.
+>
 > **The schedule still runs serially, and that is now a workload decision rather than a
 > safety one.** Of the three systems in it, two declare `Structural` and are excluded from
 > concurrency by `IsDisjointFrom`'s first line; the third has nothing to pair with. Every
@@ -1484,6 +1497,50 @@ by the change that first spawns a worker.
 > and decision 7 above forbids claiming speed without measurement. The condition to revisit
 > is two or more non-structural systems with disjoint component sets, which arrives with
 > gameplay content, not before it.
+>
+> **Measured 2026-08-19, so the paragraph above is no longer an argument.**
+> `GameServer.Tests/World/ParallelPrimitiveBenchmark.cs` is committed and re-runnable
+> (`BENCH_PARALLEL=1 dotnet test -c Release --filter ParallelPrimitiveBenchmark`), skipped
+> by default, `Stopwatch` only — never a wall clock, per #153. Arms are interleaved
+> round-robin inside one run so a load spike hits all of them; run-to-run drift on the
+> parallel medians is ±25%, so read the ratios, not the digits.
+>
+> | measurement | result |
+> |---|---|
+> | cost of one **additional** worker, empty body | **165–225 µs**, p99 3–7× the median |
+> | `workerCount: 1` | indistinguishable from a serial scope — starts no thread |
+> | peak speedup, realistic per-entity body | **1.28×**, at 100 000 entities, at `w=2` |
+> | `w=8` at 100 000 entities | **slower than serial** |
+> | break-even vs serial | **≈70 000 entities** |
+> | live workload | `EnemyAiTuning.MaxEnemies` = **30** — ~2 000× below break-even |
+> | **the three-system schedule, parallelised, at 30 entities** | **1.6 µs → 1.34 ms, a 782–824× regression** for zero overlap |
+>
+> Two results overturn assumptions worth naming, because both point future work away from
+> where it would naturally go:
+>
+> - **The read/write lock is not the constraint. It is not in the picture at all.**
+>   `UpdateComponentsParallel` takes the write lock **once, on the calling thread, before
+>   the first `new Thread`**; workers call `*Locked` internals and never touch `_rwLock`
+>   (one that tried would deadlock behind its own owner). Whole-region lock cost is
+>   **0.04 µs**. The corroboration is that the slowest and fastest worker bodies differ by
+>   only 1.05–1.4× — once running, workers proceed at the same rate, which is the signature
+>   of no serialisation. **The ceiling is thread lifecycle**, and it is a deliberate
+>   choice: dedicated threads rather than pool threads, because a pool thread carries
+>   `_workerSlot` away after the region and the pool is shared with the connection
+>   handlers, which would couple simulation latency to network load. If a workload ever
+>   justifies this, the thing to build is a **persistent worker pool parked on a barrier** —
+>   not anything to do with the lock.
+> - **Slot-ordered replay costs less than a shared queue, not more.** Determinism here is
+>   free. Queue-and-replay is ~1.5× an immediate `Arch.Create` (0.35 vs 0.23 µs/op at
+>   10 000 ops) and an empty region on an 8-slot world times identically to a 1-slot one
+>   (0.05 µs), so walking slots costs nothing observable. The saving is on the enqueue
+>   side: `_structuralSlots[_workerSlot].Add` is an unsynchronised add to a thread-private
+>   list, where a shared queue would need a lock or `Interlocked` per op.
+>
+> So "the schedule runs serially" is now a **decision with a number behind it**, and the
+> number is 782×. Anyone proposing to parallelise it should be asked which of these two
+> changed: the workload crossed ~70 000 entities, or the per-region thread creation was
+> replaced.
 
 One correctness result is worth separating from the performance story: moving encoding to
 the moment of writing **fixed a pre-existing data-loss bug**. The old order encoded on the

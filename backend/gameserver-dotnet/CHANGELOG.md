@@ -7,6 +7,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`ParallelPrimitiveBenchmark`: what `UpdateComponentsParallel` actually costs, committed and
+  re-runnable.** `BENCH_PARALLEL=1 dotnet test -c Release --filter ParallelPrimitiveBenchmark`;
+  skipped by default so CI is unaffected (810 passed / 7 skipped with it in place). `Stopwatch`
+  only — never a wall clock, per #153 — with arms interleaved round-robin inside one run so a load
+  spike hits all of them rather than one.
+  Headline numbers: **165–225 µs per additional worker** before any work runs; break-even against
+  serial at **~70 000 entities** while the live world holds 30; peak speedup **1.28×** at 100 000
+  entities with two workers, and `w=8` slower than serial even there. Parallelising the current
+  three-system schedule would be a **782–824× regression** (1.6 µs → 1.34 ms) for zero overlap.
+  Two results overturn the obvious assumptions. The read/write lock is **not** the constraint — the
+  write lock is taken once on the calling thread before the first `new Thread`, whole-region cost is
+  0.04 µs, and worker bodies differ by only 1.05–1.4×, the signature of no serialisation; the
+  ceiling is per-region thread creation, and the change that would make this pay off is a persistent
+  worker pool on a barrier. And slot-ordered replay is **cheaper** than a shared queue, so the
+  determinism guarantee costs nothing.
+  ADR-12's parallelism section now carries these figures, so "the schedule runs serially" is a
+  decision with a number behind it rather than an argument.
+- **ADR-12's count of the order-sensitive determinism tests corrected** from two to three, by
+  inspection: `WorkerCountDoesNotChangeTheResultingWorld` compares a slot-ordered 1-worker digest
+  against a 4-worker one and cannot survive arrival-order replay either. Also recorded that
+  `ASpawnInsideAParallelRegionIsNotVisibleUntilTheRegionEnds` is mislabelled — it claims to cover
+  "every worker" but runs `workerCount: 1`, which starts no thread.
 - **`sgl-release-reminder.yml`: catch the case where `publish-shared-gamelogic` goes green and
   publishes nothing.** That workflow derives its tag from `Shared.GameLogic/package.json` and skips
   both tag and release creation when the tag already exists — reporting success either way. So SGL
