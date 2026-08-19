@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`docs/rejected/` — approaches that were written, evaluated and not taken.** First entry is
+  `2026-08-19-slow-client-rescale-and-skip.patch`: the #154 fix that rescaled multi-interval
+  snapshot samples (`StepLog.MovingIntervals`) instead of discarding them, and skipped the case via
+  `[SkippableTheory]` when every retry stalled. Worth keeping because it was not hypothetical —
+  3951c40 landed the rescaling on `develop` and dd316ca took it back out, so the next person to
+  reach for the same idea can find out it was already tried. A sample spanning a lost frame is not
+  a small measurement of one step, it is not a measurement of one step at all; dividing it down
+  produces a plausible-looking number and averages away the repayment `ASilentClientsRepayment`
+  exists to detect — the test keeps passing and loses the ability to fail. The patch is a record,
+  not a backlog: it does not apply to the current tree and is not meant to be applied.
 - **`--register-on-allocated` / `GAMESERVER_REGISTER_ON_ALLOCATED`: hold the registry entry
   back until Agones reports this GameServer `Allocated` (#151).** Off by default — with the
   flag unset the server registers immediately after `ReadyAsync()`, byte for byte the
