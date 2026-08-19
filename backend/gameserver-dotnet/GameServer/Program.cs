@@ -56,6 +56,11 @@ int backgroundHz = int.TryParse(GetArg(args, "--sim-background-hz") ?? Env("SIM_
 // (pre-delta behaviour), the escape hatch for a client that cannot merge deltas.
 int keyframeInterval = int.TryParse(GetArg(args, "--keyframe-interval") ?? Env("GAMESERVER_KEYFRAME_INTERVAL"), out var kf)
     ? kf : GameConstants.DefaultKeyframeInterval;
+// AOI-gather worker threads. 1 = serial, the default and the pre-pool behaviour.
+// Only takes effect above TickLoop.GatherParallelMinViewers viewers -- see
+// ServerOptions.GatherWorkers for why it is opt-in.
+int gatherWorkers = int.TryParse(GetArg(args, "--gather-workers") ?? Env("GAMESERVER_GATHER_WORKERS"), out var gw) && gw > 0
+    ? gw : 1;
 float mapWidth = float.TryParse(GetArg(args, "--map-width") ?? Env("GAMESERVER_MAP_WIDTH"),
     System.Globalization.CultureInfo.InvariantCulture, out var mw) && mw > 0f
     ? mw : GameConstants.DefaultMapWidth;
@@ -424,6 +429,7 @@ var options = new ServerOptions
     TickRate = tickRate,
     SimulationRates = simulationRates,
     KeyframeInterval = keyframeInterval,
+    GatherWorkers = gatherWorkers,
     MapBounds = MapBounds.FromSize(mapWidth, mapHeight),
     Capacity = capacity,
     JwtSecret = jwtSecret,

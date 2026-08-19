@@ -72,6 +72,21 @@ public class ServerOptions
     /// </summary>
     public int KeyframeInterval { get; set; } = GameConstants.DefaultKeyframeInterval;
 
+    /// <summary>
+    /// Threads the AOI gather may spread itself over. <b>One is serial and is the
+    /// default</b>, i.e. exactly the loop that shipped before the worker pool existed.
+    ///
+    /// <para>Above one, the gather is split across that many world-owned worker threads,
+    /// but only once the tick has at least <c>TickLoop.GatherParallelMinViewers</c>
+    /// viewers. It is opt-in rather than automatic because the measured gain is
+    /// conditional: a gain at 500 viewers on both available measurements (1.8-2.4x at four
+    /// workers phase-level, 2.0-2.7x through the tick), disputed at 200, and a loss at 50.
+    /// Do not raise it without re-running <c>AoiGatherBenchmark</c> on the target hardware
+    /// -- the numbers above come from a 12-core developer box that also hosts the load
+    /// generator (ADR-7).</para>
+    /// </summary>
+    public int GatherWorkers { get; set; } = 1;
+
     public TimeSpan HoldTtl { get; set; } = TimeSpan.FromSeconds(30);
     public TimeSpan SaveInterval { get; set; } = TimeSpan.FromSeconds(30);
     public IPlayerStore? PlayerStore { get; set; }
@@ -182,6 +197,9 @@ public sealed class GameServerHost : IAsyncDisposable
 {
     private readonly ServerOptions _options;
     private readonly EcsWorld _world;
+
+    /// <summary>Resolved <see cref="ServerOptions.GatherWorkers"/>; 1 means serial.</summary>
+    private readonly int _gatherWorkers;
     private readonly ConnectionManager _connections;
     private readonly TickLoop _tickLoop;
     private readonly AsyncSaver _saver;
@@ -302,7 +320,10 @@ public sealed class GameServerHost : IAsyncDisposable
         }
 
         _metrics = options.Metrics;
-        _world = new EcsWorld();
+        // Worker slots exist for the gather; the simulation schedule is still serial.
+        // One slot is the old world exactly.
+        _gatherWorkers = options.GatherWorkers < 1 ? 1 : options.GatherWorkers;
+        _world = new EcsWorld(_gatherWorkers);
         _metrics?.SetEntityCountProvider(() => _world.EntityCount);
         _connections = new ConnectionManager();
         _playerStore = options.PlayerStore ?? new MemoryPlayerStore();
@@ -357,7 +378,9 @@ public sealed class GameServerHost : IAsyncDisposable
             _loggerFactory.CreateLogger<TickLoop>(),
             _metrics,
             options.KeyframeInterval,
-            simulationPhase);
+            simulationPhase,
+            AchievedRateMeter.DefaultWindowSeconds,
+            _gatherWorkers);
 
         // Wired here rather than next to the entity-count provider above, because the tick
         // loop that owns the meter does not exist until this line.

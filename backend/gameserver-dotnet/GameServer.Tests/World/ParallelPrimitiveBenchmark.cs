@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Threading;
 using GameServer.World;
 using GameServer.World.Components;
 using Shared.GameLogic.Components;
@@ -145,6 +146,35 @@ public class ParallelPrimitiveBenchmark
         }
     }
 
+    /// <summary>
+    /// Drive every path a benchmark arm uses until the JIT has promoted it out of tier 0.
+    ///
+    /// <para><b>Why this is not optional.</b> The <i>first</i> configuration measured in a
+    /// process runs on tier-0 code and reads impossibly flat: an early sweep timed 500
+    /// entities slower than 2 000, and 30 entities at 103 ns/entity against 9.5 ns/entity
+    /// for the same body at 10 000. Per-arm warm-up rounds do not fix it, because tier-1
+    /// promotion needs both a call count and time for the background compile — a few dozen
+    /// rounds of a 9 microsecond body supply neither. So the whole shape is exercised once,
+    /// on a throwaway world, before the first configuration is timed.</para>
+    /// </summary>
+    private static void WarmUpJit()
+    {
+        using var world = MakeWorld(2_000, MaxSlots);
+        EntityHandle[] handles = AllHandles(world, 2_000);
+
+        for (int r = 0; r < 400; r++)
+        {
+            world.UpdateComponents(w => MoveRange(w, handles, 0, 2_000, 1f / 15f));
+            world.UpdateComponentsParallel(4, (w, slot) =>
+            {
+                Slice(2_000, 4, slot, out int from, out int to);
+                MoveRange(w, handles, from, to, 1f / 15f);
+            });
+        }
+
+        Thread.Sleep(200);   // let the tier-1 compilations land before anything is timed
+    }
+
     private static void Slice(int total, int workers, int slot, out int from, out int to)
     {
         int per = total / workers;
@@ -184,12 +214,69 @@ public class ParallelPrimitiveBenchmark
         Line($"{"w=1, world has 8 slots",-26} {new Stats(d[1])}");
     }
 
+    /// <summary>
+    /// The floor again, but with the workers <b>parked</b> rather than hot.
+    ///
+    /// <para><b>Why this exists.</b> A pooled worker's dispatch cost depends on whether it
+    /// is still spinning or already blocked in the kernel, and the live tick always meets
+    /// it blocked — regions are 66 ms apart. Workers currently park immediately
+    /// (<c>EcsWorld.SimWorkerPool.WorkerParkSpinMicros</c> is zero), so this arm and
+    /// <see cref="Bench1_OverheadFloor"/> should agree; they stop agreeing the moment
+    /// someone reintroduces a worker-side spin, which is exactly when the difference needs
+    /// to be visible rather than assumed.</para>
+    ///
+    /// <para>The gap is produced with a busy loop rather than <c>Thread.Sleep</c>: sleep
+    /// would also deschedule the <i>owner</i>, so the arm would measure the owner's own
+    /// wake-up as well as the workers'.</para>
+    /// </summary>
+    [SkippableFact]
+    public void Bench1b_ParkedOverheadFloor()
+    {
+        Skip.IfNot(Enabled, "Set BENCH_PARALLEL=1 to run.");
+
+        const int rounds = 400;
+        const double gapMicros = 2000;   // far past any plausible worker spin budget
+        long gapTicks = (long)(gapMicros * Stopwatch.Frequency / 1_000_000.0);
+
+        using var world = new EcsWorld(MaxSlots);
+
+        static void Gap(long ticks)
+        {
+            long until = Stopwatch.GetTimestamp() + ticks;
+            while (Stopwatch.GetTimestamp() < until) Thread.SpinWait(50);
+        }
+
+        Line($"== 1b. Overhead floor with workers parked ({gapMicros:F0} us idle between regions), " +
+             $"{rounds} rounds interleaved, microseconds ==");
+
+        foreach (int w in new[] { 1, 2, 4, 8 })
+        {
+            var samples = new List<long>(rounds);
+            var sw = new Stopwatch();
+
+            for (int r = -20; r < rounds; r++)
+            {
+                Gap(gapTicks);
+                sw.Restart();
+                world.UpdateComponentsParallel(w, (_, _) => { });
+                sw.Stop();
+                if (r >= 0) samples.Add(sw.ElapsedTicks);
+            }
+
+            var st = new Stats(samples);
+            double perWorker = w > 1 ? st.Median / (w - 1) : 0;
+            Line($"{"parallel w=" + w,-26} {st}  per extra worker {perWorker,8:F2}");
+        }
+    }
+
     // ------------------------------------------------------------ 2. scaling
 
     [SkippableFact]
     public void Bench2_Scaling()
     {
         Skip.IfNot(Enabled, "Set BENCH_PARALLEL=1 to run.");
+
+        WarmUpJit();
 
         Line("== 2. Scaling: identical total work, serial vs N workers. microseconds ==");
         Line($"{"entities",8} {"arm",-14} {"median",10} {"p99",10} {"min",10} {"speedup",9}");
@@ -225,6 +312,8 @@ public class ParallelPrimitiveBenchmark
     public void Bench2b_CrossoverSweep()
     {
         Skip.IfNot(Enabled, "Set BENCH_PARALLEL=1 to run.");
+
+        WarmUpJit();
 
         Line("== 2b. Crossover sweep (parallel w=4 vs serial). microseconds ==");
         Line($"{"entities",8} {"serial med",11} {"w4 med",11} {"w4/serial",10}");
@@ -403,6 +492,8 @@ public class ParallelPrimitiveBenchmark
     public void Bench5_RealScheduleWorkload()
     {
         Skip.IfNot(Enabled, "Set BENCH_PARALLEL=1 to run.");
+
+        WarmUpJit();
 
         Line("== 5. Live-schedule-sized workload vs region overhead. microseconds ==");
 
