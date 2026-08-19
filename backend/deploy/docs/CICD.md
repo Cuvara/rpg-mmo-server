@@ -165,7 +165,8 @@ resolve ────────────────────────
 test-shared ─┬─ test-gateway ─────┬─ build-gateway ───────────┐    │
              ├─ test-gameserver ──┼─ build-gameserver ────────┤    │
              ├─ test-smoketest ───┼─ build-smoketest ─────────┤    │
-             ├─ test-nakama ──────┴─ build-plugin ────────────┤    │
+             ├─ test-nakama ──────┼─ build-plugin ────────────┤    │
+             ├───────────────────-┴─ build-verify-probe ──────┤    │
              └──────────────────── test-integration ──────────┤    │
                                                               ▼    │
                                    build-images (*)         bundle │
@@ -190,6 +191,7 @@ production / `build_images=true`; it is **not** on the deploy path.
 | `test-gateway`, `test-gameserver`, `test-nakama`, `test-smoketest` | `ubuntu-latest` | `_go-module.yml`, one job per module, all parallel after `test-shared`. |
 | `test-integration` | `ubuntu-latest` | `_go-module.yml` on `backend/integration_test` (E2E, gateway + gameserver in-process). Needs the four module tests. |
 | `build-gateway` / `build-gameserver` / `build-smoketest` | `ubuntu-latest` | `_go-module.yml` with `run_tests: false`; each needs only *its own* module test, so it starts before integration finishes. Uploads `bin-<name>-<sha>`. |
+| `build-verify-probe` | `ubuntu-latest` | `_go-module.yml` on `backend/deploy/k8s/verify/probe` with `run_tests: false`. Uploads `bin-verify-probe-<sha>`. Exists because the k8s post-deploy verification must not compile anything on the deploy runner — see §4 below. |
 | `build-plugin` | `ubuntu-latest` | `_go-module.yml` with `needs_docker: true` → `docker build -f nakama-plugin.Dockerfile --target export` → uploads `nakama-plugin-<sha>`. Parallel with the binary builds. |
 | `build-images` | `ubuntu-latest` | Gateway + gameserver container images → GHCR. Conditional (see below). |
 | `bundle` | `ubuntu-latest` | Downloads `bin-*-<sha>` (`merge-multiple`) + `nakama-plugin-<sha>`, adds `docker-compose.yml`, `Makefile`, `.env.example`, `deploy-local.sh`, `COMMIT`, asserts every expected file is present, uploads `deploy-bundle-<sha>` (14 days, `include-hidden-files` for `.env.example`). Compiles nothing. |
@@ -237,7 +239,7 @@ override: the smoke test dials whatever `EnterWorldResponse.ServerAddr` carries,
 > it probes the *metrics* ports, which are forwarded per-environment, so it goes green
 > while the client-facing path is unreachable.
 
-**Artifact flow:** `bin-{gateway,gameserver,smoketest}-<sha>` + `nakama-plugin-<sha>`
+**Artifact flow:** `bin-{gateway,gameserver,smoketest,verify-probe}-<sha>` + `nakama-plugin-<sha>`
 → `bundle` → `deploy-bundle-<sha>` → `deploy`. All names carry `<sha>` so
 re-runs and concurrent branches never collide. Artifact uploads do not preserve
 the executable bit, which is why `deploy` uses `install -m 0755`.
@@ -454,7 +456,25 @@ What this pipeline relies on the runner providing:
 | Write access to `$RPG_DEPLOY_DIR` | The bundle is installed there. |
 | Installed as a systemd service | Deploys survive logout and reboot. |
 
-Go and the .NET SDK are **not** needed — only prebuilt binaries land there.
+| `kubectl` (k8s mode), `python3`, `bash` >= 4 | `dev-up.sh` and the post-deploy verification suite. |
+
+Go and the .NET SDK are **not** needed — only prebuilt binaries land there, and
+that is a constraint on the workflow, not just an observation about the box.
+
+**Anything the `deploy` job needs to run must be built by an `ubuntu-latest` job
+and travel in the bundle.** The k8s post-deploy verification broke this twice at
+once: `verify.sh` built `verify/probe` on demand and `verify/lib/checks_flow.sh`
+built `backend/smoketest` on demand, both with a bare `go build`. On the dev
+runner Go is not on the default non-login PATH, so CD run 32207995779 reported
+`data.nakama_plugin` FAIL ("probe build failed"), `flow.smoke` FAIL ("go: command
+not found") and `flow.stack_identity` SKIP. The fix is the bundle, not
+`actions/setup-go` on the deploy job: a compiler there would produce binaries no
+CI job had gated, and would make the apply-artifacts-to-a-cluster job depend on a
+toolchain it has no reason to carry. The verification step now exports
+`VERIFY_SMOKETEST_BIN=$GITHUB_WORKSPACE/dist/bin/smoketest` and
+`VERIFY_PROBE_BIN=$GITHUB_WORKSPACE/dist/bin/verify-probe`, and fails the step
+with `::error::` if the bundle is missing either — a pipeline defect must not be
+reported as a broken deployment.
 
 ### 4a. The `dev` runner is WSL, and `docker` there is a shim
 
