@@ -929,10 +929,35 @@ Three things, none of which Arch provides:
    sites) and is deliberately **not** part of this change. Until it lands,
    `EntityIdRef` puts a managed reference in every chunk — the exact cost ADR-10 says
    the handle exists to remove.
-2. **The reader/writer lock.** Arch's `World` is not thread-safe, and network threads
-   spawn/despawn entities and push input while the tick loop reads. The lock discipline
-   is unchanged from `GameWorld`; it is now protecting something that genuinely
-   requires it.
+2. **The reader/writer lock, plus a rule the lock cannot express.** Arch's `World` is
+   not thread-safe, and network threads spawn/despawn entities and push input while the
+   tick loop reads. The lock discipline came over from `GameWorld` unchanged — and, as
+   issue #176 established, a reader/writer lock alone is **not sufficient**, because
+   Arch's read path performs two writes to state shared by every concurrent reader:
+   `World.Query(in QueryDescription)` inserts into a plain `Dictionary` on a cache miss,
+   and the `Query` it returns rebuilds its matching-archetype list lazily the first time
+   it is used after a **new archetype** appeared. Two readers hitting either at once
+   produced `NullReferenceException at Arch.Core.QueryArchetypeEnumerator.MoveNext()`
+   and, twice, heap corruption that killed the test host in an unrelated later test.
+
+   The rule that fixes it, and that anyone touching `EcsWorld` has to keep:
+
+   > **A read path may only iterate a query out of `_readQueries`. It must never call
+   > `_arch.Query(...)`.** Those queries are resolved in the constructor and refreshed
+   > by `ExitWriteScope()`, i.e. only ever while the write lock is held. Code that
+   > already holds the **write** lock may call `_arch.Query(...)` freely.
+
+   `CountWith<TTag>` takes the **write** lock rather than the read lock for exactly this
+   reason: the tag set is open, so its query only exists from its first call and cannot
+   be pre-resolved. It is a diagnostics/scaffolding call, not a tick-path one.
+
+   Measured, against Arch 2.1.0-beta: eight threads iterating one shared query with a
+   stale memo and **no writer at all** faulted in 20/200 attempts; the same eight
+   threads with the memo already refreshed faulted 0/200. That second row is why the
+   fix is a pre-refresh rather than a mutex — iteration of an up-to-date query is a
+   genuine pure read, so `ReadAllParallel` stays parallel, and the AOI gather (77-83%
+   of a 200-viewer tick) is not serialised. Reproducer:
+   `GameServer.Tests/World/EcsWorldConcurrencyStress.cs`, gated behind `ECS_STRESS=1`.
 3. **A deferred structural-change phase**, below.
 
 Everything else — lookup, mutation, range scan, player enumeration — goes through Arch

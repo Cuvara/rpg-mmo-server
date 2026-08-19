@@ -1272,6 +1272,57 @@ found here.
 > that introduces it. ADR-12 additionally rules out query shapes the reflection guard
 > cannot enumerate, `Arch.System`'s source generator among them.
 
+> **Amended 2026-08-19 — a third Arch hazard: the read path is not a read**
+> (issue #176, `fix/gameserver/ecs-concurrent-read`).
+>
+> `EcsWorld` had always assumed that `ReaderWriterLockSlim` was sufficient: writers
+> exclusive, readers shared, Arch untouched during a read. That assumption is wrong,
+> and the counter-evidence is measured against Arch `2.1.0-beta`, not argued:
+>
+> | probe (8 threads, 200 attempts each) | result |
+> |---|---|
+> | iterate one shared `Query` whose archetype memo is **stale**, **no writer running** | **20/200 faulted**, `NullReferenceException at Arch.Core.QueryArchetypeEnumerator.MoveNext()` |
+> | iterate the same `Query` with the memo **already up to date** | **0/200** |
+> | 8 threads calling `World.Query()` with 8 **distinct** descriptions on a cold cache | **61/400 faulted**; in one case the world's query-cache `Dictionary` ended up holding **9** entries after 8 inserts |
+>
+> Two mutations hide behind Arch's read API:
+>
+> 1. `Arch.Core.World.Query(in QueryDescription)` memoises into a plain
+>    `Dictionary<QueryDescription, Query>` and **inserts on a miss**. A `Dictionary`
+>    torn by concurrent inserts does not throw at the tear — that is the path from a
+>    managed `NullReferenceException` to the `AccessViolationException` that killed
+>    the test host in an unrelated later test.
+> 2. The returned `Query` rebuilds its own matching-archetype list **lazily**, the
+>    first time it is used after the archetype *set* changed. (Adding or removing
+>    entities of an archetype that already exists does **not** invalidate it —
+>    measured. Creating a new archetype does.) The rebuild clears and refills a list
+>    other readers are enumerating.
+>
+> So the exposure window is not "while writers run"; it is the moments the archetype
+> set grows — world start-up and each first-of-a-kind spawn, which is exactly when
+> players are joining.
+>
+> **Decision 5. A read path may only iterate a `Query` the world resolved in advance,
+> and every write scope refreshes those queries on its way out.** `EcsWorld` owns its
+> read-path queries (`_readQueries`), resolves them in its constructor, and refreshes
+> them in `ExitWriteScope()` — the write lock is the only moment at which a rebuild can
+> happen with no other reader watching. `_arch.Query(...)` may still be called freely
+> from code that holds the **write** lock. `EcsWorld.CountWith<TTag>` takes the write
+> lock for this reason: the tag set is open, so its query cannot be pre-resolved.
+>
+> A mutex over the read path would also have been correct and was rejected on cost,
+> not taste: the AOI gather is 77-83% of a 200-viewer tick, and serialising it would
+> have made `ReadAllParallel` pointless. Because iteration of an up-to-date query is a
+> genuine pure read (row 2 of the table), pre-refreshing keeps the parallel gather.
+>
+> **Re-run this on any Arch upgrade**, alongside the AOT spike. The committed reproducer
+> is `GameServer.Tests/World/EcsWorldConcurrencyStress.cs`, gated behind `ECS_STRESS=1`;
+> it exercises `EcsWorld`, and before decision 5 it faulted in every run (10-15/2000
+> rounds mixed readers+writers, 19-38/2000 parallel gather). The three raw-Arch probes in
+> the table above are **not** committed — they assert the absence of a defect Arch still
+> has, so they would be a permanently red test; the table is the record, and the probes
+> are a few dozen lines to rebuild from it against a bare `Arch.Core.World`.
+
 ---
 
 ## ADR-12 — The server goes to real ECS, staged, under the constraints ADR-10 and ADR-11 set
