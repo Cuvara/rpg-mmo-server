@@ -61,7 +61,10 @@ public readonly struct PendingInput
 /// and every caller looks entities up by that string.</description></item>
 /// <item><description>A <see cref="ReaderWriterLockSlim"/>. Arch's world is not
 /// thread-safe, and network threads spawn/despawn entities and push input while the
-/// tick loop reads. This is the same lock discipline <c>GameWorld</c> had.</description></item>
+/// tick loop reads. This is the same lock discipline <c>GameWorld</c> had — plus one
+/// rule the lock alone cannot express, because <b>Arch's read path is not a read</b>: a
+/// read path may only iterate a query out of <c>_readQueries</c>, refreshed by the write
+/// scope that preceded it. See that field and issue #176.</description></item>
 /// <item><description>A deferred structural-change phase. ADR-11 forbids
 /// <c>Arch.Buffer.CommandBuffer</c> — it throws under NativeAOT even with hints — so
 /// spawns and despawns requested while a query is being iterated are queued and
@@ -107,6 +110,49 @@ public sealed class EcsWorld : IDisposable
     /// entering the snapshot broadcast allocates nothing.</summary>
     private readonly WorldReader _reader;
 
+    /// <summary>
+    /// The <see cref="Query"/> objects the <b>read</b> paths iterate, resolved once and
+    /// refreshed only while the write lock is held.
+    ///
+    /// <para><b>Why this exists (issue #176).</b> Arch's read path is not a read. Two
+    /// things it does are writes to state shared by every concurrent reader:</para>
+    /// <list type="number">
+    /// <item><description><c>Arch.Core.World.Query(in QueryDescription)</c> memoises into
+    /// a plain <c>Dictionary&lt;QueryDescription, Query&gt;</c> and <b>inserts on a
+    /// miss</b>. Two readers running two different descriptions insert concurrently; a
+    /// <see cref="Dictionary{TKey,TValue}"/> torn that way does not throw at the tear —
+    /// measured, it silently ends up with more entries than were inserted — and the
+    /// corruption surfaces later, anywhere.</description></item>
+    /// <item><description>The returned <c>Query</c> lazily rebuilds its own matching
+    /// archetype list the first time it is used after the archetype <i>set</i> changed
+    /// (adding entities to an existing archetype does not invalidate it; creating a new
+    /// archetype does). The rebuild clears and refills a list that other readers are
+    /// enumerating — which is the reported
+    /// <c>NullReferenceException at Arch.Core.QueryArchetypeEnumerator.MoveNext()</c>.
+    /// </description></item>
+    /// </list>
+    ///
+    /// <para><b>What is safe.</b> Measured directly against Arch 2.1.0-beta: eight
+    /// threads iterating one shared <c>Query</c> whose memo is stale faulted in 20 of 200
+    /// attempts <b>with no writer running at all</b>; the same eight threads iterating the
+    /// same <c>Query</c> with the memo already up to date faulted 0 of 200. So iteration
+    /// of an up-to-date query is a genuine pure read, and the whole hazard is the lazy
+    /// refresh and the cache insert.</para>
+    ///
+    /// <para><b>The rule that follows.</b> A read path may only iterate a query out of
+    /// this list, and every write scope refreshes the list on its way out — see
+    /// <see cref="ExitWriteScope"/>. That keeps the reader/writer lock as the primitive
+    /// and keeps <see cref="ReadAllParallel"/> genuinely parallel, which a mutex over the
+    /// AOI gather would not: the gather is 77-83% of a 200-viewer tick.</para>
+    /// </summary>
+    private readonly List<Query> _readQueries = new();
+
+    /// <summary>The AOI scan's query. Read paths only; refreshed under the write lock.</summary>
+    private readonly Query _allEntitiesQuery;
+
+    /// <summary>The player snapshot's query. Read paths only; refreshed under the write lock.</summary>
+    private readonly Query _playersQuery;
+
     public EcsWorld() : this(1) { }
 
     /// <summary>
@@ -128,6 +174,13 @@ public sealed class EcsWorld : IDisposable
 
         _writer = new WorldWriter(this);
         _reader = new WorldReader(this);
+
+        // Resolved here, on the only thread that can see this world, so the query cache
+        // is never written from a read path. See _readQueries.
+        _allEntitiesQuery = _arch.Query(in AllEntities);
+        _playersQuery = _arch.Query(in Players);
+        _readQueries.Add(_allEntitiesQuery);
+        _readQueries.Add(_playersQuery);
 
         _structuralSlots = new List<StructuralOp>[maxWorkerSlots];
         for (int i = 0; i < maxWorkerSlots; i++) _structuralSlots[i] = new List<StructuralOp>();
@@ -218,6 +271,44 @@ public sealed class EcsWorld : IDisposable
     private static readonly QueryDescription Players = new QueryDescription()
         .WithAll<EntityIdRef, EntityKind, Position, Health, Combat, Locomotion, InputCursor, PlayerTag>();
 
+    /// <summary>
+    /// Leave the write lock, refreshing the read-path queries first.
+    ///
+    /// <para><b>Every</b> write scope exits through here rather than calling
+    /// <c>_rwLock.ExitWriteLock()</c> directly, and that is the whole enforcement of the
+    /// rule in <see cref="_readQueries"/>: a write scope is the only place an archetype
+    /// can be created, and the exclusive lock is the only moment at which a query's
+    /// memoised archetype list can be rebuilt without another reader watching. Refreshing
+    /// anywhere else would be refreshing under the shared lock, which is the defect.</para>
+    /// </summary>
+    private void ExitWriteScope()
+    {
+        // The release is in a finally of its own: this runs from the finally of every
+        // write scope, and a throw here would leave the write lock held forever, which
+        // is a hung server rather than a failed operation.
+        try { RefreshReadQueriesLocked(); }
+        finally { _rwLock.ExitWriteLock(); }
+    }
+
+    /// <summary>
+    /// Force every read-path query to re-derive its matching archetypes now, while this
+    /// thread holds the write lock, so that no reader ever triggers the rebuild.
+    ///
+    /// <para>Constructing the chunk iterator is what performs the refresh — verified
+    /// against Arch 2.1.0-beta by watching <c>Query._allArchetypesHashCode</c> change on
+    /// the constructor alone — so the iterator is built and dropped without enumerating.
+    /// It is O(number of queries) when nothing changed, which is the normal case: the
+    /// memo is only invalidated by a <i>new archetype</i>, and this server creates a
+    /// handful of them in total.</para>
+    /// </summary>
+    private void RefreshReadQueriesLocked()
+    {
+        for (int i = 0; i < _readQueries.Count; i++)
+        {
+            _ = _readQueries[i].GetChunkIterator();
+        }
+    }
+
     /// <summary>Current entity count.</summary>
     public int EntityCount
     {
@@ -239,7 +330,7 @@ public sealed class EcsWorld : IDisposable
     {
         _rwLock.EnterWriteLock();
         try { AddEntityLocked(entity); }
-        finally { _rwLock.ExitWriteLock(); }
+        finally { ExitWriteScope(); }
     }
 
     /// <summary>
@@ -255,7 +346,7 @@ public sealed class EcsWorld : IDisposable
     {
         _rwLock.EnterWriteLock();
         try { AddEntityLocked(entity, tags); }
-        finally { _rwLock.ExitWriteLock(); }
+        finally { ExitWriteScope(); }
     }
 
     /// <summary>
@@ -264,12 +355,20 @@ public sealed class EcsWorld : IDisposable
     /// <para>Generic because the core must not name the gameplay: this replaced an
     /// <c>EnemyCount</c> property, which meant <c>World/</c> knew what an enemy was. The
     /// tag is supplied by whoever owns the content.</para>
+    ///
+    /// <para><b>Exclusive, not shared</b>, and deliberately so (issue #176). The tag set is
+    /// open — a closed generic first appears at its first call — so this query cannot be
+    /// resolved up front into <see cref="_readQueries"/> the way the AOI and player queries
+    /// are, and <c>Arch.Core.World.CountEntities</c> resolves it through the world's query
+    /// cache, which is a write. Nothing on the tick's hot path calls this: it answers a
+    /// diagnostics gauge and the scaffolding spawner's <c>AliveCount</c>. Taking the write
+    /// lock for it costs nothing measurable and removes the whole question.</para>
     /// </summary>
     public int CountWith<TTag>() where TTag : struct
     {
-        _rwLock.EnterReadLock();
+        _rwLock.EnterWriteLock();
         try { return _arch.CountEntities(in TaggedQuery<TTag>.Description); }
-        finally { _rwLock.ExitReadLock(); }
+        finally { ExitWriteScope(); }
     }
 
     /// <summary>Remove an entity by ID. A missing ID is a no-op.</summary>
@@ -277,7 +376,7 @@ public sealed class EcsWorld : IDisposable
     {
         _rwLock.EnterWriteLock();
         try { RemoveEntityLocked(id); }
-        finally { _rwLock.ExitWriteLock(); }
+        finally { ExitWriteScope(); }
     }
 
     /// <summary>
@@ -375,7 +474,9 @@ public sealed class EcsWorld : IDisposable
         float radiusSq = radius * radius;
         int matches = 0;
 
-        foreach (ref var chunk in _arch.Query(in AllEntities).GetChunkIterator())
+        // _allEntitiesQuery, never _arch.Query(...): this runs under the SHARED lock, and
+        // resolving or refreshing a query there is what issue #176 is.
+        foreach (ref var chunk in _allEntitiesQuery.GetChunkIterator())
         {
             var positions = chunk.GetSpan<Position>();
             int count = chunk.Count;
@@ -415,7 +516,7 @@ public sealed class EcsWorld : IDisposable
         finally
         {
             ApplyStructuralChangesLocked();
-            _rwLock.ExitWriteLock();
+            ExitWriteScope();
         }
     }
 
@@ -467,6 +568,14 @@ public sealed class EcsWorld : IDisposable
     /// the workers interleaved, so <see cref="_parallelRegion"/> is <b>not</b> set here and
     /// no drain follows. Adding the slot machinery anyway would cost time and imply a
     /// hazard that does not exist.</para>
+    ///
+    /// <para><b>"Pure read" is a property of this class, not of Arch</b> (issue #176).
+    /// Arch's own read path writes: it resolves queries through a shared dictionary and
+    /// rebuilds a query's matching-archetype list lazily, both under whatever lock the
+    /// caller happens to hold. Several workers doing that at once corrupted the enumerator
+    /// and, twice, the heap. What makes this region safe is that <see cref="WorldReader"/>
+    /// only ever iterates a query out of <see cref="_readQueries"/>, already refreshed by
+    /// the write scope that preceded this one — see <see cref="ExitWriteScope"/>.</para>
     ///
     /// <para><b>The lock is held by the owner, not by the workers</b>, and that is
     /// sufficient: the calling thread enters the read lock before any worker is woken and
@@ -553,7 +662,7 @@ public sealed class EcsWorld : IDisposable
         finally
         {
             ApplyStructuralChangesLocked();
-            _rwLock.ExitWriteLock();
+            ExitWriteScope();
         }
     }
 
@@ -568,7 +677,7 @@ public sealed class EcsWorld : IDisposable
         finally
         {
             ApplyStructuralChangesLocked();
-            _rwLock.ExitWriteLock();
+            ExitWriteScope();
         }
     }
 
@@ -663,7 +772,7 @@ public sealed class EcsWorld : IDisposable
         {
             _parallelRegion = false;
             ApplyStructuralChangesLocked();
-            _rwLock.ExitWriteLock();
+            ExitWriteScope();
         }
     }
 
@@ -1085,7 +1194,8 @@ public sealed class EcsWorld : IDisposable
         _iterationDepth++;
         try
         {
-            foreach (ref var chunk in _arch.Query(in Players).GetChunkIterator())
+            // _playersQuery, never _arch.Query(...) — see ScanRangeLocked and #176.
+            foreach (ref var chunk in _playersQuery.GetChunkIterator())
             {
                 int count = chunk.Count;
                 for (int i = 0; i < count; i++)
@@ -1118,7 +1228,7 @@ public sealed class EcsWorld : IDisposable
     {
         _rwLock.EnterWriteLock();
         try { ApplyStructuralChangesLocked(); }
-        finally { _rwLock.ExitWriteLock(); }
+        finally { ExitWriteScope(); }
     }
 
     public void Dispose()

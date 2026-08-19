@@ -7,6 +7,65 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`EcsWorld` corrupted Arch's query state under concurrent reads — the reader/writer lock was
+  never sufficient** (issue #176). The reported symptom was
+  `NullReferenceException at Arch.Core.QueryArchetypeEnumerator.MoveNext()`, raised from
+  `ScanRangeLocked` *while holding the read lock*, twice followed by an `AccessViolationException`
+  that killed the test host in an unrelated later test.
+  - **Cause: Arch's read path is not a read.** Two mutations hide behind it, both against state
+    shared by every concurrent reader. `Arch.Core.World.Query(in QueryDescription)` memoises into
+    a plain `Dictionary<QueryDescription, Query>` and **inserts on a miss**; and the `Query` it
+    returns rebuilds its own matching-archetype list **lazily**, the first time it is used after a
+    *new archetype* appeared. The rebuild clears and refills a list other readers are enumerating.
+    Neither is documented, and ADR-11 had recorded Arch's AOT hazards but not this one.
+  - **Measured, not inferred** (Arch `2.1.0-beta`, direct probes with no `EcsWorld` involved):
+    8 threads iterating one shared `Query` with a stale memo and **no writer running at all**
+    faulted **20/200**, with the reported stack; the same 8 threads with the memo already
+    refreshed faulted **0/200**; 8 threads calling `World.Query()` with 8 distinct descriptions
+    on a cold cache faulted **61/400**, and one run left the cache `Dictionary` holding **9**
+    entries after 8 inserts — a torn `Dictionary` is the route from a managed NRE to an
+    `AccessViolationException` somewhere else entirely.
+  - **This was a production defect, not a test artifact.** `TickLoop` runs the AOI gather through
+    `EcsWorld.ReadAllParallel`, whose doc comment argued it was safe because
+    `WorldReader`'s operations are "both pure reads"; every worker was resolving and refreshing
+    the same shared query. `AsyncSaver.SaveAllAsync` calls `PlayerStates()` off the save timer
+    while the tick thread is gathering — a second concurrent-reader pair, on a *different*
+    query description, so it also raced on the cache insert.
+  - **Fix.** `EcsWorld` now owns the queries its read paths iterate (`_readQueries`, resolved in
+    the constructor) and refreshes them in a new `ExitWriteScope()`, which every write scope exits
+    through — the write lock being the only moment a rebuild can happen with no reader watching.
+    `ScanRangeLocked` and `PlayerStates` iterate those fields instead of calling `_arch.Query(...)`.
+    `CountWith<TTag>` takes the **write** lock, because the tag set is open so its query cannot be
+    pre-resolved; it serves a diagnostics gauge and the scaffolding spawner's `AliveCount`, not the
+    tick path. Code holding the write lock (`QueryWithLocked`, `VisitChunksLocked`,
+    `SingletonLocked`) is unchanged — it was already exclusive.
+  - **No measurable performance cost** (`BENCH_TICK=1 TickBreakdownBench`, `Stopwatch` only — this
+    host's `CLOCK_REALTIME` runs 10-17% fast, #153). Median `TickOnce`, with fix vs `develop`:
+    **24.2 vs 28.4 µs** at 50 viewers, **136.1 vs 131.2 µs** at 200, **763.6 vs 908.3 µs** at 500.
+    The per-round ranges overlap at every level (200 viewers: 125.3-149.3 vs 124.8-157.5) and the
+    sign of the difference flips with viewer count, so the honest reading is *no cost detectable at
+    this host's noise level* — **not** that the fix is faster. Single run per arm; a load generator
+    shares this box (ADR-7).
+  - **Why the fix has this shape.** Serialising readers was the
+    obvious alternative and was rejected on measurement: the AOI gather is 77-83% of a 200-viewer
+    tick, and a mutex there would make `ReadAllParallel` pointless. Because iteration of an
+    *up-to-date* query is a genuine pure read (the 0/200 row above), pre-refreshing keeps the
+    gather parallel. The refresh itself is a chunk-iterator construction per read query per write
+    scope — two queries, and no rebuild at all unless a new archetype appeared.
+  - **Reproducer, gated so CI is unaffected:** `GameServer.Tests/World/EcsWorldConcurrencyStress.cs`,
+    skipped unless `ECS_STRESS=1` (`ECS_STRESS_ROUNDS`, `ECS_STRESS_MS` tune it). Before the fix it
+    faulted in every run — 10-15/2000 rounds on the mixed reader/writer scenario and 19-38/2000 on
+    the parallel-gather scenario, across three runs. After the fix: **0/2000 on both, five
+    consecutive runs** (20,000 rounds, zero faults).
+  - **The host abort was reproduced on unmodified `develop` while checking this.** Ten full-suite
+    runs at `9ec22dc` with no product change produced one
+    `System.AccessViolationException: Attempted to read or write protected memory` that took the
+    test host down mid-run ("Test Run Aborted", 134 of 830 tests executed), plus a second truncated
+    run with the same shape. That is the #176 signature, observed directly rather than inferred
+    from the earlier batch.
+  - Docs updated in the same change: ADR-11 gains decision 5 and the probe table; `docs/DESIGN.md`
+    states the rule ("a read path may only iterate a query out of `_readQueries`") next to the lock
+    it qualifies.
 - **Four flaky-test families in `GameServer.Tests`, and 11 tests that silently vanished from green
   runs** (issue #175). Only test infrastructure changed; no product code and no assertion was
   weakened — every replacement below pins at least as much as the assertion it replaces.
