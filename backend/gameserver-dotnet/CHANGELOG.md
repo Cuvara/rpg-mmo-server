@@ -7,6 +7,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`sgl-notify-client.yml`: a new `sgl-v*` tag now tells the client repo it exists.** Nothing in
+  either repo knew the other did: the coupling is a UPM git URL in the client's `manifest.json`
+  plus a resolved commit in its `packages-lock.json`, both edited by a human who has to remember.
+  A release would land and the client would stay pinned to the old tag with no signal — and the
+  golden-vector tests, which replay fixtures from the *pinned* package, would keep passing against
+  the stale ones. The job dispatches the client's `sgl-pin-check` workflow, which reports whether
+  its manifest and lock agree and how far behind the pin now is. **It deliberately does not bump
+  anything** — moving to a new simulation version is a judgement call, and the two files must move
+  together or the bump is silently ignored.
+  This is the one thing `GITHUB_TOKEN` cannot do: it is scoped to the repository that minted it and
+  cannot reach another repo at all. It dispatches a *workflow* (`actions: write`) rather than a
+  `repository_dispatch` event, which would need `contents: write` — a permission the app
+  installation has not been granted. The token is minted for one repo and one permission rather
+  than the installation's full set.
 - **`docs/rejected/` — approaches that were written, evaluated and not taken.** First entry is
   `2026-08-19-slow-client-rescale-and-skip.patch`: the #154 fix that rescaled multi-interval
   snapshot samples (`StepLog.MovingIntervals`) instead of discarding them, and skipped the case via
