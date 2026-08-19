@@ -10,7 +10,8 @@ name: CI — Backend
 #     ├─► test-nakama ─────┤
 #     ├─► test-smoketest ──┘
 #     │         └─► test-integration ─► build-{gateway,smoketest}
-#     └─► test-loadtest
+#     ├─► test-loadtest
+#     └─► test-verify-probe
 
 on:
   # `develop` is the integration branch every feature PR targets, so it MUST be
@@ -153,6 +154,27 @@ jobs:
       # live stack and is exercised by running the tool, not by CI.
       test_flags: '-v -race -timeout 60s'
       run_build: go build ./cmd/loadtest/
+
+  test-verify-probe:
+    name: Test verify probe
+    needs: test-shared
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/deploy/k8s/verify/probe
+      # The post-deploy verification suite's probe. cd.yml builds it into the
+      # deployment bundle so the deploy job needs no Go toolchain; without this
+      # job a probe that does not compile would surface for the first time in
+      # `build-verify-probe` during a deploy, on a change that had already been
+      # merged. It links against backend/shared via a replace directive, so a
+      # wire-format change can break it here and nowhere else in CI.
+      #
+      # run_tests is false because this module has NO test files. `go test ./...`
+      # would report a green `[no test files]`, which is the same ambiguous
+      # signal test-integration's comment above exists to stamp out: a job that
+      # says "tests passed" while asserting nothing. go vet still runs (it is
+      # unconditional in the reusable workflow), and run_build proves it links.
+      run_tests: false
+      run_build: go build -o /dev/null .
 
   test-integration:
     name: Integration tests

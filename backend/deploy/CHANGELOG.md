@@ -5,6 +5,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`ci.yml` now gates `backend/deploy/k8s/verify/probe` at PR time (`test-verify-probe`).** The
+  probe was in no CI workflow and never had been. Shipping it in the deployment bundle made
+  `build-verify-probe` in `cd.yml` the first place a non-compiling probe could surface — during a
+  deploy, on a change that had already been merged. The job runs `go vet` and `go build`, with
+  `run_tests: false` because the module has no test files: `go test ./...` would report a green
+  `[no test files]`, the same "passed while asserting nothing" signal `test-integration` carries a
+  comment to stamp out. The probe links against `backend/shared` via a `replace` directive, so a
+  wire-format change can break it here and nowhere else in CI.
+
 ### Fixed
 - **The k8s post-deploy verification needed a Go toolchain the deploy runner does not have, and two
   checks died on `go: command not found`.** `verify.sh` built `probe/` on demand and
