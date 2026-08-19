@@ -7,6 +7,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`sgl-release-reminder.yml`: catch the case where `publish-shared-gamelogic` goes green and
+  publishes nothing.** That workflow derives its tag from `Shared.GameLogic/package.json` and skips
+  both tag and release creation when the tag already exists — reporting success either way. So SGL
+  changes that land without a version bump produce a green run that released nothing, and nobody
+  investigates a green run.
+  The consequence is not a late release. The client consumes SGL as a UPM git package pinned to a
+  tag, so an unreleased commit is one it can never resolve, while `Packages/manifest.json` keeps
+  pointing at a tag that works and every build stays green. The golden vectors replay fixtures from
+  that pinned package, so the one cross-language check we have keeps validating the old behaviour
+  and keeps passing.
+  **Warns before the promotion, fails on `main`.** Batching several SGL commits and bumping once
+  before promoting is a legitimate way to work, so a pre-promotion warning must not block it; on
+  `main` the publish has already run and released nothing, which is a defect. Measured on
+  introduction: `main` was level with `sgl-v0.1.9` while `develop` already carried **8 commits
+  touching `Shared.GameLogic/`** under that same version.
 - **`sgl-notify-client.yml`: a new `sgl-v*` tag now tells the client repo it exists.** Nothing in
   either repo knew the other did: the coupling is a UPM git URL in the client's `manifest.json`
   plus a resolved commit in its `packages-lock.json`, both edited by a human who has to remember.
