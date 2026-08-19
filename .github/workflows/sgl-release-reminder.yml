@@ -16,9 +16,16 @@ name: Shared.GameLogic release reminder
 # replay fixtures from that pinned package: they keep validating the old behaviour and
 # keep passing.
 #
-# Measured when this was written: `main` was level with `sgl-v0.1.9`, but `develop`
-# already carried **8 commits touching Shared.GameLogic** under that same version number.
-# Promoting that without a bump is exactly the silent no-op above.
+# THE TEST IS CONTENT, NOT COMMIT COUNT, and that distinction is not academic. The first
+# version of this job counted commits between the tag and HEAD touching the path. On a
+# squash-merge repo that is meaningless: the squash commit on `main` carries a new sha and
+# no parent link to develop's individual commits, so the count re-includes everything the
+# squash already absorbed. It reported **8 unreleased commits** on `develop` — listing,
+# among them, the release commit that created the tag — while `sgl-v0.1.9`, `develop` and
+# `main` all held the byte-identical tree `ae67c33c`. Nothing was unreleased at all.
+#
+# Comparing `git rev-parse <ref>:<path>` is immune to how the merge was made, which is the
+# same reason `cleanup-branches.yml` compares trees rather than trusting `--merged`.
 #
 # WARN before the promotion, FAIL after it. Batching several SGL commits and bumping once
 # before promoting is a legitimate way to work, so a pre-promotion warning must not block
@@ -85,28 +92,41 @@ jobs:
           fi
 
           TAG_SHA=$(git rev-list -n 1 "${TAG}")
-          BEHIND=$(git rev-list --count "${TAG}..HEAD" -- "${SGL}/" 2>/dev/null || echo 0)
 
-          if [[ "${BEHIND}" == "0" ]]; then
+          # Compare the TREE of Shared.GameLogic, not the commit count between the tag
+          # and HEAD. This repo squash-merges: the squash commit on main has a new sha
+          # and no parent link to develop's individual commits, so `git rev-list
+          # tag..HEAD -- <path>` re-counts every commit the squash already absorbed.
+          # That reports unreleased work when the content is byte-identical — and the
+          # list it prints even includes the release commit that created the tag.
+          # Measured 2026-08-19: it claimed 8 unreleased commits while all three of
+          # sgl-v0.1.9, develop and main held the identical tree ae67c33c.
+          TAG_TREE=$(git rev-parse "${TAG}:${SGL}" 2>/dev/null || echo "missing")
+          HEAD_TREE=$(git rev-parse "HEAD:${SGL}" 2>/dev/null || echo "missing")
+
+          if [[ "${TAG_TREE}" == "${HEAD_TREE}" ]]; then
             {
               echo "### Shared.GameLogic is fully released"
               echo ""
-              echo "\`${TAG}\` (\`${TAG_SHA:0:8}\`) covers every commit touching \`${SGL}/\` on this ref."
+              echo "\`${TAG}\` (\`${TAG_SHA:0:8}\`) and this ref hold the identical \`${SGL}/\` tree"
+              echo "(\`${HEAD_TREE:0:12}\`), so there is nothing unreleased."
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::notice title=In sync::${TAG} covers all Shared.GameLogic commits on this ref."
             exit 0
           fi
 
-          COMMITS=$(git log --oneline "${TAG}..HEAD" -- "${SGL}/" | head -20)
+          # Content differs. Show WHAT differs — the file-level diff is the honest
+          # artefact here, since commit topology is unreliable across a squash merge.
+          FILES=$(git diff --stat "${TAG}" HEAD -- "${SGL}/" | tail -20)
 
           {
-            echo "### ${BEHIND} Shared.GameLogic commit(s) are not covered by any release"
+            echo "### Shared.GameLogic has unreleased changes"
             echo ""
             echo "\`package.json\` still says **${VERSION}**, and \`${TAG}\` already points at"
-            echo "\`${TAG_SHA:0:8}\`. Everything below changed \`${SGL}/\` after that tag:"
+            echo "\`${TAG_SHA:0:8}\`, whose \`${SGL}/\` tree differs from this ref's:"
             echo ""
             echo '```'
-            echo "${COMMITS}"
+            echo "${FILES}"
             echo '```'
             echo ""
             if (( ON_MAIN == 1 )); then
@@ -131,8 +151,8 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           if (( ON_MAIN == 1 )); then
-            echo "::error title=Publish was a no-op::${BEHIND} Shared.GameLogic commit(s) landed on main under the already-published version ${VERSION}. publish-shared-gamelogic.yml skipped tag and release creation and still reported success. The client can never receive these changes."
+            echo "::error title=Publish was a no-op::Shared.GameLogic content on main differs from tag ${TAG} while package.json still says ${VERSION}. publish-shared-gamelogic.yml skipped tag and release creation and still reported success. The client can never receive these changes."
             exit 1
           fi
 
-          echo "::warning title=Bump needed before promotion::${BEHIND} Shared.GameLogic commit(s) since ${TAG}, but package.json is still ${VERSION}. Bump it before this reaches main, or the publish will silently release nothing."
+          echo "::warning title=Bump needed before promotion::Shared.GameLogic content differs from ${TAG}, but package.json is still ${VERSION}. Bump it before this reaches main, or the publish will silently release nothing."
