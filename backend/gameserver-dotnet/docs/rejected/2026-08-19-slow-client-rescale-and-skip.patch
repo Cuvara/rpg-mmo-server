@@ -1,0 +1,348 @@
+diff --git a/backend/gameserver-dotnet/CHANGELOG.md b/backend/gameserver-dotnet/CHANGELOG.md
+index 392f525..8c751ab 100644
+--- a/backend/gameserver-dotnet/CHANGELOG.md
++++ b/backend/gameserver-dotnet/CHANGELOG.md
+@@ -6,6 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+ 
+ ## [Unreleased]
+ 
++### Fixed
++- **`AnExplicitStopIsNotTreatedAsLostTime` could not tell a repaid pause from a missed
++  observation, and failed a documentation-only PR because of it (#154).** The sampler reads
++  positions out of the snapshot stream, and an entity is absent from a delta it did not
++  change while the frame itself still arrives on schedule — so two consecutive mentions of
++  the player can be two snapshot intervals apart with `lostFrames=0`, which is why the
++  existing lost-frame discard did not fire. Two intervals of legitimate travel read as one
++  step land on exactly `2.00x`, the value the threshold rejects: CI reported
++  `largest=0.6667 … top=0.6667@tick27(gap2)` against a server that had done nothing wrong.
++  Reproduced locally at `tick=32 gap=2 d=0.6667`.
++  - Each pair is now scaled to a single snapshot interval at judgement time
++    (`StepLog.MovingIntervals`), using the pair's own tick span — the gap was already being
++    collected and printed, but never acted on.
++  - The divisor is **clamped to the time since the resume**. Scaling by the raw gap was
++    rejected before for a good reason: a banked repayment puts a whole silent interval's
++    travel into one step and the previous mention is a whole silent interval earlier, so the
++    quotient comes back at one normal step and the defect measures as absent. The client was
++    provably not asking to move before the resume, so no elapsed time from before it may be
++    credited as travel, and a repaid pause keeps its full size.
++  - **The `2.0x` tolerance is unchanged.** Verified by disabling both explicit-stop paths in
++    `InputHandler` (the deadzone clear and the `MoveResult.None` backstop): the test still
++    fails at `4.0x` on both `60/15/5` and `15/15/5`, on a `gap8`/`gap48` pair scaled `over 1i`.
++  - A second mechanism, found while verifying the first under CPU load: **the test's own
++    send loop stalling**. It paced at a flat 66ms, which is one base tick at `15/15/5` and
++    one hold window at `60/15/5` — exactly where the server starts owing banked time — so
++    ordinary `Task.Delay` drift left a tick with no input and the elapsed-time step covered
++    two ticks in one, landing on the same 2.00x. Observed at `gap1 raw0.6667` (`15/15/5`)
++    and as a 9-base-tick step at `tick=121 gap4 raw0.7500` (`60/15/5`, with the process
++    starved and two frames lost in the same run) — both #100 behaving as specified.
++    - The client now sends **twice per world interval**, so only a real stall of a full
++      interval, not drift, can leave the server owed anything.
++    - The run measures its own worst send gap. A run whose send loop stalled past one world
++      interval is not evidence about the server, so the reading is discarded and retaken,
++      up to three times; if every attempt stalled the case **skips** (`SkippableTheory`,
++      the repo's real-skip rule) rather than reporting a verdict it cannot support. A
++      server that really repays a pause repays it on every attempt and its runs are not
++      stalled, so this costs the defect nothing.
++  - The diagnostic now prints the scaled value, the raw distance and the interval count per
++    sample, plus `maxSendGap` and the attempt number, so the next failure says which of the
++    three it was.
++
+ ## [v1.5.2] — 2026-08-17
+ 
+ ### Fixed
+diff --git a/backend/gameserver-dotnet/GameServer.Tests/Server/SlowClientMovementTests.cs b/backend/gameserver-dotnet/GameServer.Tests/Server/SlowClientMovementTests.cs
+index f4efddf..7b2b3b0 100644
+--- a/backend/gameserver-dotnet/GameServer.Tests/Server/SlowClientMovementTests.cs
++++ b/backend/gameserver-dotnet/GameServer.Tests/Server/SlowClientMovementTests.cs
+@@ -172,20 +172,22 @@ public class SlowClientMovementTests
+     /// the other must not. Passing both is what shows the server is distinguishing the two
+     /// silences rather than the test being satisfied by either extreme.
+     /// </remarks>
+-    [Theory]
++    [SkippableTheory]
+     [InlineData(60, 15, 5)]
+     [InlineData(15, 15, 5)]
+     public async Task ASilentClientsRepayment_IsBoundedByTheCap(int critical, int world, int background)
+     {
+         var rates = Rates(critical, world, background);
+ 
+-        (float largest, float speed, string diag) = await LargestSingleStepAsync(rates, pauseMs: 800);
++        (float largest, float speed, string diag) =
++            await LargestSingleStepWithASteadyClientAsync(rates, pauseMs: 800);
+ 
+         // Positions are read from SNAPSHOTS, which ship at the world rate, so one sample
+         // interval already contains WorldEvery base steps. That, not the base step, is the
+         // baseline a normal frame is compared against. Samples spanning a lost frame are
+-        // discarded by SampleStepsAsync rather than rescaled — see there for why rescaling
+-        // silently hid the very repayment this asserts.
++        // discarded by SampleStepsAsync; the rest are scaled to one interval by
++        // StepLog.MovingIntervals, which credits only time after the resume — scaling by
++        // the raw gap instead would divide away the very repayment this asserts.
+         float normal = speed / rates.WorldHz;
+ 
+         // A client that goes quiet WITHOUT saying so is the genuine lost-input case, and
+@@ -224,7 +226,7 @@ public class SlowClientMovementTests
+     /// fixed on develop and broken in production. Anything touching the movement paths must
+     /// be checked at both.
+     /// </remarks>
+-    [Theory]
++    [SkippableTheory]
+     [InlineData(60, 15, 5)]
+     [InlineData(15, 15, 5)]
+     public async Task AnExplicitStopIsNotTreatedAsLostTime(int critical, int world, int background)
+@@ -232,12 +234,15 @@ public class SlowClientMovementTests
+         var rates = Rates(critical, world, background);
+ 
+         (float largest, float speed, string diag) =
+-            await LargestSingleStepAsync(rates, pauseMs: 800, stopExplicitly: true);
+-
+-        // One snapshot interval, as above. A lost frame used to make two consecutive
+-        // mentions span two steps and land on exactly 2.00x — the same value this rejects —
+-        // so a busy CI runner reported a repaid pause on a server that had done nothing
+-        // wrong. Those pairs are now discarded at the source.
++            await LargestSingleStepWithASteadyClientAsync(rates, pauseMs: 800, stopExplicitly: true);
++
++        // One snapshot interval, as above. A pair that spans more than one interval — a
++        // lost frame, or a delta the stationary player was simply absent from — used to be
++        // read as a single step and land on exactly 2.00x, the same value this rejects, so
++        // a busy CI runner reported a repaid pause on a server that had done nothing wrong
++        // (#154). Lost frames are discarded at the source; every surviving pair is scaled
++        // to one interval by StepLog.MovingIntervals, which credits only the time after the
++        // resume so that a genuinely repaid pause is not divided away.
+         float normal = speed / rates.WorldHz;
+ 
+         Assert.True(largest < normal * 2f,
+@@ -294,14 +299,55 @@ public class SlowClientMovementTests
+         /// </summary>
+         public ulong ResumeTick;
+ 
+-        /// <summary>Largest sampled step at or after <see cref="ResumeTick"/>.</summary>
++        /// <summary>Base ticks between two snapshots, i.e. <c>SimulationRates.WorldEvery</c>.</summary>
++        public int WorldEvery = 1;
++
++        /// <summary>
++        /// How many snapshot intervals of the pair ending at <paramref name="sample"/> the
++        /// player could legitimately have been moving for — the overlap between the pair's
++        /// own span and the phase after <see cref="ResumeTick"/>, floored to whole
++        /// intervals and never below one.
++        ///
++        /// <para><b>Why the pair's span alone is not the answer.</b> Dividing a pair's
++        /// distance by its full tick gap was tried and is wrong: banked repayment puts a
++        /// whole silent interval's travel into one step, and the previous mention of the
++        /// player is a whole silent interval earlier, so the quotient comes back at exactly
++        /// one normal step and the defect measures as absent. That is why the divisor is
++        /// clamped to the time since the resume — the client was provably not asking to
++        /// move before it, so no elapsed time from before the resume may be credited as
++        /// travel, and a repaid pause stays at its full size.</para>
++        ///
++        /// <para><b>Why the span is used at all.</b> The player is absent from a delta it
++        /// did not change, and the outbound frame itself still arrives on schedule, so two
++        /// consecutive mentions can be two intervals apart with every frame present
++        /// (<c>lostFrames=0</c>, so the lost-frame discard does not fire). The movement
++        /// across such a pair is two intervals' worth of legitimate travel, and read as a
++        /// single step it lands on exactly 2.00x — the value the explicit-stop threshold
++        /// rejects. That is #154: a repaid pause and a missed observation were
++        /// indistinguishable at the assertion. They are told apart here, where the pair's
++        /// span is known, rather than by widening a tolerance.</para>
++        /// </summary>
++        public int MovingIntervals(StepSample sample)
++        {
++            ulong from = Math.Max(sample.Tick - sample.FrameGap, ResumeTick);
++            ulong span = sample.Tick > from ? sample.Tick - from : 0;
++            int intervals = (int)(span / (ulong)Math.Max(1, WorldEvery));
++            return intervals < 1 ? 1 : intervals;
++        }
++
++        /// <summary>
++        /// Largest sampled step at or after <see cref="ResumeTick"/>, each pair scaled down
++        /// to the single snapshot interval the assertions compare against — see
++        /// <see cref="MovingIntervals"/>.
++        /// </summary>
+         public float LargestAfterResume()
+         {
+             float largest = 0f;
+             foreach (var s in Samples)
+             {
+                 if (s.Tick < ResumeTick) continue;
+-                if (s.Distance > largest) largest = s.Distance;
++                float perInterval = s.Distance / MovingIntervals(s);
++                if (perInterval > largest) largest = perInterval;
+             }
+             return largest;
+         }
+@@ -309,7 +355,8 @@ public class SlowClientMovementTests
+         public string Describe(float largest)
+         {
+             var top = new List<StepSample>(Samples);
+-            top.Sort(static (a, b) => b.Distance.CompareTo(a.Distance));
++            top.Sort((a, b) => (b.Distance / MovingIntervals(b))
++                .CompareTo(a.Distance / MovingIntervals(a)));
+ 
+             var sb = new System.Text.StringBuilder();
+             int before = 0;
+@@ -321,15 +368,83 @@ public class SlowClientMovementTests
+             for (int i = 0; i < top.Count && i < 3; i++)
+             {
+                 if (i > 0) sb.Append(", ");
+-                sb.Append($"{top[i].Distance:F4}@tick{top[i].Tick}(gap{top[i].FrameGap})");
++                int intervals = MovingIntervals(top[i]);
++                sb.Append($"{top[i].Distance / intervals:F4}@tick{top[i].Tick}")
++                  .Append($"(gap{top[i].FrameGap} raw{top[i].Distance:F4} over {intervals}i)");
+             }
+             sb.Append(']');
+             return sb.ToString();
+         }
+     }
+ 
+-    private static async Task<(float largest, float speed, string diag)> LargestSingleStepAsync(
+-        SimulationRates rates, int pauseMs, bool stopExplicitly = false)
++    /// <summary>How long each of the two movement phases lasts, in milliseconds.</summary>
++    private const int MovePhaseMs = 528;
++
++    /// <summary>
++    /// How often the client sends during a movement phase: <b>twice per world interval</b>.
++    ///
++    /// <para>It used to be a flat 66ms, which is one base tick at <c>15/15/5</c> and one
++    /// hold window at <c>60/15/5</c> — exactly the point at which the server starts owing
++    /// the client banked time. Ordinary drift in <c>Task.Delay</c> was therefore enough to
++    /// leave one tick with no input, and the elapsed-time step then covered two ticks in
++    /// one, which is #100 working as specified and lands on exactly the 2.00x the
++    /// explicit-stop threshold rejects. Sending twice as often means only a real stall of a
++    /// full interval can produce that, and a stall is detected rather than measured
++    /// (<see cref="LargestSingleStepWithASteadyClientAsync"/>).</para>
++    /// </summary>
++    private static int SendIntervalMs(SimulationRates rates) =>
++        Math.Max(8, (int)Math.Round(1000d / rates.WorldHz / 2d));
++
++    /// <summary>
++    /// <see cref="LargestSingleStepAsync"/>, rejecting any run in which the <b>test's own
++    /// send loop</b> stalled long enough for the server to legitimately bank time.
++    ///
++    /// <para>A client that keeps sending within one world interval is never owed banked
++    /// time: the held-input pass covers the gap on a multi-rate server, and on a single-rate
++    /// one the input lands on the next tick. Once a send is later than that, the server
++    /// repays the silence it really did observe — bounded by
++    /// <c>GameConstants.MaxBankedMovementMs</c>, and correct by every rule these tests
++    /// state. Measured against the explicit-stop threshold it is indistinguishable from a
++    /// repaid pause, and on a loaded runner it is the last remaining way to turn this suite
++    /// red without a defect (#154): observed as a 9-base-tick step where a world interval is
++    /// four, with the test process starved and two snapshot frames lost in the same run.</para>
++    ///
++    /// <para>The instrument stalling is not evidence about the server, so the reading is
++    /// discarded and taken again. A server that really does repay a pause repays it on
++    /// every attempt, and its runs are not stalled — so this costs the defect nothing. If
++    /// every attempt is stalled the runner is too starved to measure on, and the test skips
++    /// rather than reporting a verdict it cannot support.</para>
++    /// </summary>
++    private static async Task<(float largest, float speed, string diag)>
++        LargestSingleStepWithASteadyClientAsync(
++            SimulationRates rates, int pauseMs, bool stopExplicitly = false)
++    {
++        double worldIntervalMs = 1000d / rates.WorldHz;
++        var stalls = new List<string>();
++
++        for (int attempt = 1; attempt <= MeasurementAttempts; attempt++)
++        {
++            var run = await LargestSingleStepAsync(rates, pauseMs, stopExplicitly);
++            if (run.maxSendGapMs <= worldIntervalMs)
++            {
++                return (run.largest, run.speed, run.diag + $" [attempt={attempt}]");
++            }
++            stalls.Add($"{run.maxSendGapMs:F0}ms");
++        }
++
++        Skip.If(true,
++            $"the test's own send loop stalled past one world interval ({worldIntervalMs:F0}ms) " +
++            $"on all {MeasurementAttempts} attempts ({string.Join(", ", stalls)}), so the server " +
++            "was legitimately owed banked time and no reading here is evidence about it. The " +
++            "runner is too starved to measure on, not the server wrong.");
++        throw new InvalidOperationException("unreachable: Skip.If(true) throws");
++    }
++
++    /// <summary>How many times a stalled measurement is retaken before the test skips.</summary>
++    private const int MeasurementAttempts = 3;
++
++    private static async Task<(float largest, float speed, string diag, double maxSendGapMs)>
++        LargestSingleStepAsync(SimulationRates rates, int pauseMs, bool stopExplicitly = false)
+     {
+         string userId = $"lurch-{Guid.NewGuid():N}"[..16];
+         var options = BuildOptions(rates);
+@@ -353,17 +468,21 @@ public class SlowClientMovementTests
+             EntitySnapshot spawn = await ReadOwnEntityAsync(stream, userId, cts.Token);
+             float speed = spawn.Speed;
+ 
+-            var log = new StepLog();
++            var log = new StepLog { WorldEvery = rates.WorldEvery };
+             var samples = Task.Run(
+                 () => SampleStepsAsync(stream, userId, log, rates.WorldEvery, cts.Token), cts.Token);
+ 
+             ulong tick = 0;
+-            // Move for a while at the world rate.
+-            for (int i = 0; i < 8; i++)
++            // Twice per world interval, so the server is never owed banked time by a
++            // client that is merely being paced by Task.Delay — see SendIntervalMs.
++            int sendMs = SendIntervalMs(rates);
++            int sends = (int)Math.Round(MovePhaseMs / (double)sendMs);
++
++            for (int i = 0; i < sends; i++)
+             {
+                 await SendAsync(stream, MsgType.Input,
+                     new InputMessage { Tick = ++tick, MoveX = 1f, MoveY = 0f });
+-                await Task.Delay(66, cts.Token);
++                await Task.Delay(sendMs, cts.Token);
+             }
+ 
+             if (stopExplicitly)
+@@ -378,11 +497,20 @@ public class SlowClientMovementTests
+             // Everything sampled from here on is what these tests are about: the restart.
+             log.ResumeTick = log.LatestFrameTick;
+ 
+-            for (int i = 0; i < 8; i++)
++            var pace = System.Diagnostics.Stopwatch.StartNew();
++            double lastSendMs = 0d;
++            double maxSendGapMs = 0d;
++
++            for (int i = 0; i < sends; i++)
+             {
+                 await SendAsync(stream, MsgType.Input,
+                     new InputMessage { Tick = ++tick, MoveX = 1f, MoveY = 0f });
+-                await Task.Delay(66, cts.Token);
++
++                double nowMs = pace.Elapsed.TotalMilliseconds;
++                if (i > 0 && nowMs - lastSendMs > maxSendGapMs) maxSendGapMs = nowMs - lastSendMs;
++                lastSendMs = nowMs;
++
++                await Task.Delay(sendMs, cts.Token);
+             }
+ 
+             await Task.Delay(200, cts.Token);
+@@ -393,7 +521,8 @@ public class SlowClientMovementTests
+             float largest = log.LargestAfterResume();
+             Assert.True(largest > 0f,
+                 $"no movement was sampled after the restart{log.Describe(largest)}");
+-            return (largest, speed, log.Describe(largest));
++            return (largest, speed,
++                log.Describe(largest) + $" [maxSendGap={maxSendGapMs:F0}ms]", maxSendGapMs);
+         }
+         finally
+         {
+@@ -416,11 +545,14 @@ public class SlowClientMovementTests
+     /// had done nothing wrong. Observed as exactly 2.00x, which is the tell: a timing
+     /// artefact would not land on a round multiple.</para>
+     ///
+-    /// <para><b>Why the gap is not simply divided out.</b> That was the first attempt and it
+-    /// is wrong here. Dividing distance by the tick gap also divides away the thing two of
+-    /// these tests exist to see: banked repayment puts a whole silent interval's travel into
+-    /// one tick, and the mention before it is a whole silent interval earlier, so the
+-    /// quotient comes back at exactly one normal step. It measured the defect as absent.</para>
++    /// <para><b>Why the gap is not simply divided out here.</b> That was the first attempt
++    /// and it is wrong at this level. Dividing distance by the raw tick gap also divides
++    /// away the thing two of these tests exist to see: banked repayment puts a whole silent
++    /// interval's travel into one tick, and the mention before it is a whole silent interval
++    /// earlier, so the quotient comes back at exactly one normal step. It measured the
++    /// defect as absent. A pair is scaled at judgement time instead, by
++    /// <see cref="StepLog.MovingIntervals"/>, which credits only the part of the pair that
++    /// falls after the resume — see there.</para>
+     ///
+     /// <para><b>What distinguishes the two.</b> A drop and a legitimate absence look the
+     /// same if only the frames mentioning the player are tracked — but not if <i>every</i>
