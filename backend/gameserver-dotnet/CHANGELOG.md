@@ -25,7 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   whoever implements real gameplay later, written as thresholds to check rather than a narrative:
   the measured tick breakdown, the crossover points (~70 000 entities for component work, ~500
   viewers for a pooled AOI gather, **no reproducible gain at 200**, nothing at 50), what not to do
-  with the number attached (parallelising the schedule is a 782–824× regression), the testable
+  with the number attached (parallelising the schedule is one to two orders of magnitude slower), the testable
   condition under which that changes (`ComponentAccess.IsDisjointFrom` over two non-structural
   systems), how to re-measure, the clock rule, and the two measurement traps that produced wrong
   numbers before being caught (a spinning barrier-parked pool inflating neighbouring arms; tier-0
@@ -41,7 +41,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Headline numbers: **165–225 µs per additional worker** before any work runs; break-even against
   serial at **~70 000 entities** while the live world holds 30; peak speedup **1.28×** at 100 000
   entities with two workers, and `w=8` slower than serial even there. Parallelising the current
-  three-system schedule would be a **782–824× regression** (1.6 µs → 1.34 ms) for zero overlap.
+  three-system schedule would be **one to two orders of magnitude slower** for zero overlap — measured
+  13×-824× across implementations and runs, since the serial arm is 1-11 µs and the ratio moves with
+  load while the direction does not.
   Two results overturn the obvious assumptions. The read/write lock is **not** the constraint — the
   write lock is taken once on the calling thread before the first `new Thread`, whole-region cost is
   0.04 µs, and worker bodies differ by only 1.05–1.4×, the signature of no serialisation; the

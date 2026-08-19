@@ -1604,7 +1604,7 @@ grown the schedule a hundredfold and the tick by 40%.
 ### What not to do, with the number attached
 
 **Do not parallelise the system schedule.** Measured: **1.6 µs → 1.34 ms at 30 entities, a
-782–824× regression, for exactly zero overlap.** `enemy.spawn` and `enemy.reap` both
+regression of one to two orders of magnitude, for exactly zero overlap** (measured 13×-824× across implementations and runs; the serial arm is 1-11 µs, so the digits move with load while the direction never does).** `enemy.spawn` and `enemy.reap` both
 declare `Structural`, and `ComponentAccess.IsDisjointFrom` returns `false` for *any*
 structural system, so the three systems still run one at a time and merely pay for nine
 thread creations.

@@ -1513,7 +1513,7 @@ by the change that first spawns a worker.
 > | `w=8` at 100 000 entities | **slower than serial** |
 > | break-even vs serial | **≈70 000 entities** |
 > | live workload | `EnemyAiTuning.MaxEnemies` = **30** — ~2 000× below break-even |
-> | **the three-system schedule, parallelised, at 30 entities** | **1.6 µs → 1.34 ms, a 782–824× regression** for zero overlap |
+> | **the three-system schedule, parallelised, at 30 entities** | **two orders of magnitude slower**, for zero overlap — see the note on precision below |
 >
 > Two results overturn assumptions worth naming, because both point future work away from
 > where it would naturally go:
@@ -1537,10 +1537,20 @@ by the change that first spawns a worker.
 >   side: `_structuralSlots[_workerSlot].Add` is an unsynchronised add to a thread-private
 >   list, where a shared queue would need a lock or `Interlocked` per op.
 >
-> So "the schedule runs serially" is now a **decision with a number behind it**, and the
-> number is 782×. Anyone proposing to parallelise it should be asked which of these two
-> changed: the workload crossed ~70 000 entities, or the per-region thread creation was
-> replaced.
+> **On the precision of that multiplier, because it is not stable.** The serial arm is
+> 1-11 µs — small enough that the ratio is dominated by how clean it is, and this box is
+> shared with a load generator (ADR-7). Measured values for the same comparison have
+> ranged from **13× to 824×** across implementations and runs: 782-824× against the
+> original per-region-thread version, ~118× against the parked pool, and 13.6× on a run
+> whose serial arm was itself inflated to 10.97 µs by load (its own min was 0.86 µs).
+> Two effects account for the spread and both were found the hard way: the **first
+> configuration in a process runs on tier-0 JIT** and reads ~10× off, and **a spinning
+> parked worker inflates whatever is measured next by ~6×**.
+>
+> Quote this as **"one to two orders of magnitude slower, for zero overlap"**. The
+> direction is not in doubt across any run; the digits are. Anyone proposing to
+> parallelise the schedule should be asked which of two things changed: the workload
+> crossed the break-even entity count, or the per-region thread creation was replaced.
 
 One correctness result is worth separating from the performance story: moving encoding to
 the moment of writing **fixed a pre-existing data-loss bug**. The old order encoded on the
