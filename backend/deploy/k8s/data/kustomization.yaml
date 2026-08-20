@@ -20,9 +20,26 @@ resources:
   - postgres-game.yaml
   - redis.yaml
   - nakama.yaml
-  # Placeholder credentials only. Replace with your own filled-in copy for
-  # anything that is not a laptop — README.md §Secrets.
-  - secrets.example.yaml
+# secrets.example.yaml is deliberately NOT a resource any more.
+#
+# It was one, with a note saying to replace it "for anything that is not a
+# laptop". The trouble is what applying it DOES: kustomize owns the object, so
+# every `apply -k data/` overwrote whatever secrets the namespace already held,
+# including ones an operator had just created. Two silent consequences:
+#
+#   * dev ran on the literal placeholder `dev-secret-change-me` from the day the
+#     cluster was built. Nothing failed, because the app tier's rpg-app-secrets
+#     had been filled with the same placeholder, so both halves agreed.
+#   * staging, given a generated jwt-secret, failed verification with
+#     "local jwt verify: invalid signature". rpg-app-secrets kept the generated
+#     value -- it is applied out-of-band and never overwritten -- while this
+#     reset nakama's to the placeholder. Nothing in the deploy log says so; it
+#     reports "applied".
+#
+# The app tier already had this right: 30-secret-template.yaml is not applied and
+# dev-up.sh refuses to continue if rpg-app-secrets is absent. The data tier now
+# follows the same contract, and dev-up.sh guards these three the same way AND
+# asserts nakama's JWT_SECRET equals rpg-app-secrets' jwt-secret.
 
 configMapGenerator:
   - name: redis-config

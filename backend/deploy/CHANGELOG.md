@@ -56,6 +56,34 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the cluster it had just deployed. Same trap, one level up.
 
 ### Fixed
+- **`apply -k data/` applied `secrets.example.yaml` as real configuration, overwriting whatever
+  secrets the namespace already held — on every deploy.**
+
+  It was listed as a kustomize resource with a note to "replace it for anything that is not a
+  laptop". The note describes the intent; what the manifest *does* is make kustomize the owner of
+  those Secret objects, so an operator-created value is silently reset on the next apply.
+
+  Two consequences, both invisible in the deploy log, which says `applied`:
+
+  - **dev has been running on the literal placeholder `dev-secret-change-me`** since the cluster
+    was built. Nothing failed, because the app tier's `rpg-app-secrets` had been filled with the
+    same placeholder and the two halves agreed.
+  - **staging's first k8s deploy failed verification** with `local jwt verify: invalid signature`
+    (`data.nakama_plugin` and `flow.smoke`). Its `rpg-app-secrets` held a generated value — that
+    one is applied out-of-band and is never overwritten — while this reset Nakama's to the
+    placeholder. 18 of 24 checks passed; the stack was up and healthy and would have rejected
+    every client login.
+
+  The app tier already had this right: `30-secret-template.yaml` is not applied, and `dev-up.sh`
+  refuses to continue if `rpg-app-secrets` is absent. The data tier now follows the same contract:
+  the example is no longer a resource, `dev-up.sh` applies `data/namespace.yaml` first so there is
+  somewhere to put the secrets, then **fails with a named list if any of `postgres-meta`,
+  `postgres-game`, `nakama` is missing**.
+
+  It also now **asserts `nakama`'s `JWT_SECRET` equals `rpg-app-secrets`' `jwt-secret`**. The two
+  are applied from different places, so nothing else compares them, and a mismatch produces a
+  deployment that passes every liveness probe and fails every login.
+
 - **The `containers`-mode guard blocked every environment on a box where *any* k8s stack was
   running, while its error message said it was blocking on *this* environment's.**
 
