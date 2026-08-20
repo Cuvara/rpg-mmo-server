@@ -23,8 +23,19 @@ IMPORT_IMAGES="${IMPORT_IMAGES:-1}"
 GIT_SHA="${GIT_SHA:-$(git -C "$HERE" rev-parse HEAD 2>/dev/null || echo develop)}"
 GATEWAY_IMAGE="${GATEWAY_IMAGE:-rpg-mmo/gateway:${GIT_SHA}}"
 GAMESERVER_IMAGE="${GAMESERVER_IMAGE:-rpg-mmo/gameserver-dotnet:${GIT_SHA}}"
-# The compose dev stack. Stopped, never removed: `docker start` is the rollback.
+# The compose stack this cutover REPLACES. Stopped, never removed: `docker start`
+# is the rollback.
+#
+# Per environment, and it must be: the default names dev's containers, so a
+# staging run left with it would stop nothing (dev's are already down) and leave
+# STAGING's compose stack running beside the cluster that just replaced it --
+# two stacks serving one environment, which is the state this whole move exists
+# to end. The loop only stops names that are actually running, so a wrong value
+# fails silently.
 COMPOSE_DEV_CONTAINERS="${COMPOSE_DEV_CONTAINERS:-rpg-gateway rpg-nakama rpg-redis rpg-postgres rpg-postgres-game}"
+# The compose stack's Redis, read to clear registry entries the compose gateway
+# left behind. Same reasoning: dev's name by default, overridden per environment.
+COMPOSE_REDIS_CONTAINER="${COMPOSE_REDIS_CONTAINER:-rpg-redis}"
 # The pre-cutover Agones fleet, allocated from by the COMPOSE gateway.
 LEGACY_FLEET_NS="${LEGACY_FLEET_NS:-rpg-realtime}"
 LEGACY_FLEET="${LEGACY_FLEET:-map-servers-dotnet-dev}"
@@ -54,6 +65,17 @@ PUBLISHED_GATEWAY_PORT="${PUBLISHED_GATEWAY_PORT:-7000}"
 PUBLISHED_NAKAMA_PORT="${PUBLISHED_NAKAMA_PORT:-7001}"
 # Test-runner-only forward to postgres-game; one per cluster, so it also moves.
 PG_GAME_LOCAL_PORT="${PG_GAME_LOCAL_PORT:-15433}"
+# The k3d node to import images INTO, derived from the context rather than
+# spelled out. k3d names the single server node "<cluster-context>-server-0",
+# so k3d-rpg-dev -> k3d-rpg-dev-server-0 and k3d-rpg-stg -> k3d-rpg-stg-server-0.
+#
+# This was hardcoded to dev's node. On a second cluster that is not a failure to
+# import -- it is an import into the WRONG cluster: staging's images would land
+# on dev's node, the presence check below would find them there and report
+# success, and staging's pods would then sit in ImagePullBackOff for a reason
+# the log above says nothing about. Dev's node would also quietly accumulate
+# another environment's images.
+K3D_NODE="${K3D_NODE:-${CTX}-server-0}"
 
 mkdir -p "$RUN_DIR"
 say() { printf '\n== %s\n' "$*"; }
@@ -104,8 +126,8 @@ if [ "$IMPORT_IMAGES" = "1" ]; then
         exit 1
       fi
       echo "importing $img (revision ${rev:-unstamped})"
-      docker save "$img" | docker exec -i k3d-rpg-dev-server-0 ctr -n k8s.io images import -
-    elif docker exec k3d-rpg-dev-server-0 ctr -n k8s.io images ls -q 2>/dev/null | grep -qx "docker.io/$img"; then
+      docker save "$img" | docker exec -i "$K3D_NODE" ctr -n k8s.io images import -
+    elif docker exec "$K3D_NODE" ctr -n k8s.io images ls -q 2>/dev/null | grep -qx "docker.io/$img"; then
       echo "$img already in the node; not re-importing"
     else
       # Refuse, do not warn. This used to print a warning and carry on, and the
@@ -130,7 +152,7 @@ fi
 # skipped entirely and a missing tag would again be discovered only as a rollout
 # timeout. Ask the node directly: it is the only authority on what can start.
 for img in "$GATEWAY_IMAGE" "$GAMESERVER_IMAGE"; do
-  if ! docker exec k3d-rpg-dev-server-0 ctr -n k8s.io images ls -q 2>/dev/null \
+  if ! docker exec "$K3D_NODE" ctr -n k8s.io images ls -q 2>/dev/null \
        | grep -qx "docker.io/$img"; then
     echo "::error::$img is not present in the k3d node, so pinning it would leave" >&2
     echo "  every pod in ImagePullBackOff. Build it and re-run with IMPORT_IMAGES=1." >&2
@@ -207,16 +229,16 @@ if $K get fleet "$LEGACY_FLEET" -n "$LEGACY_FLEET_NS" >/dev/null 2>&1; then
     echo "WARNING: legacy fleet did not fully drain -- check kubectl get gs -n $LEGACY_FLEET_NS"
 fi
 
-if docker ps --format '{{.Names}}' | grep -qx rpg-redis; then
+if docker ps --format '{{.Names}}' | grep -qx "$COMPOSE_REDIS_CONTAINER"; then
   say "deregister leftovers from the compose registry"
   # --raw prints one member per line with no "1) " numbering and prints NOTHING
   # for an empty set. The --no-raw form turned "(empty array)" into a member
   # literally named `array)`, which was then "deregistered".
-  for id in $(docker exec rpg-redis redis-cli --raw SMEMBERS 'servers:map:map_01' 2>/dev/null); do
+  for id in $(docker exec "$COMPOSE_REDIS_CONTAINER" redis-cli --raw SMEMBERS 'servers:map:map_01' 2>/dev/null); do
     [ -n "$id" ] || continue
     echo "deregistering $id"
-    docker exec rpg-redis redis-cli DEL "servers:id:${id}" >/dev/null 2>&1 || true
-    docker exec rpg-redis redis-cli SREM 'servers:map:map_01' "$id" >/dev/null 2>&1 || true
+    docker exec "$COMPOSE_REDIS_CONTAINER" redis-cli DEL "servers:id:${id}" >/dev/null 2>&1 || true
+    docker exec "$COMPOSE_REDIS_CONTAINER" redis-cli SREM 'servers:map:map_01' "$id" >/dev/null 2>&1 || true
   done
 fi
 
