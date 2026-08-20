@@ -6,6 +6,36 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **`NAKAMA_CONSOLE_PASSWORD` rotated on both k8s clusters**, from the published placeholder
+  `password` to 48 random hex characters, a different value per cluster. Documented in
+  `k8s/data/README.md` §Secrets, including how to read it back — the cluster is the only copy.
+
+  Only `nakama.yaml` consumes it, so the rotation needed nothing but a Nakama restart. Verified
+  in both directions on both clusters rather than assumed: the old password now returns **401**,
+  the new one **200** with a token, and dev's password returns **401** against staging. A baseline
+  login was run *before* the change, so a passing test afterwards means the check can actually
+  tell the two states apart.
+
+  `NAKAMA_SERVER_KEY` remains `defaultkey`, deliberately: it is a client-facing contract,
+  hardcoded in `verify/targets/*.env` and defaulted in the Unity client, so moving it is a
+  coordinated change across both repositories.
+
+- **`data/README.md` §Secrets rewritten to match what the manifests now do.** It still described
+  `secrets.example.yaml` as applied "so a laptop bring-up needs no secret-management story" —
+  true until that file stopped being a kustomize resource, and the paragraph was left behind by
+  that change. It now states the contract the data tier actually has (create the Secrets before
+  the first deploy, `dev-up.sh` fails with a named list otherwise), gives the one extra command a
+  laptop bring-up needs, and records that **dev's JWT and join-token secrets were rotated off the
+  published placeholders on 2026-08-20**.
+
+  The rotation is operational, not code: `nakama`'s `JWT_SECRET` and `rpg-app-secrets`'
+  `jwt-secret` were set to the same fresh 32-byte value, `join-token-secret` to a different one,
+  and the three consumers restarted together — `nakama`, `gateway`, and a fleet drain, because a
+  GameServer reads the secret once at start and a rolling restart would leave it on the old value.
+  `NAKAMA_SERVER_KEY` was deliberately **not** rotated: it is a client-facing contract, hardcoded
+  in the verify targets and defaulted in the Unity client, so moving it is a coordinated change
+  rather than a server-side one.
+
 - **Staging moves from docker compose to k3s/Agones, in its own cluster `k3d-rpg-stg`.**
 
   A second environment on this path needs a second **cluster**, not a second namespace:
@@ -56,6 +86,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the cluster it had just deployed. Same trap, one level up.
 
 ### Fixed
+- **`verify/targets/k8s-*.env` hardcoded `VERIFY_NAKAMA_SERVER_KEY="defaultkey"`.** It now reads
+  the value from the cluster's `nakama` Secret, the same way `VERIFY_GATEWAY_IMAGE` already reads
+  the running image.
+
+  A literal is fine only while nothing rotates it. The moment the Secret moves, the target keeps
+  asserting the old value and every check that authenticates fails — naming Nakama, not this line.
+  Landed **before** the rotation it enables, so there is no window in which the two disagree:
+  with `defaultkey` still in the cluster, reading it yields `defaultkey` and the change is a no-op.
+
 - **`dev-up.sh` never imported the Nakama image, so a cluster it built could not start Nakama.**
 
   It imported `gateway` and `gameserver-dotnet` and stopped there. `rpg-mmo/nakama:<version>` is
