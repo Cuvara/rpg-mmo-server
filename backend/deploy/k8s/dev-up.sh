@@ -23,8 +23,19 @@ IMPORT_IMAGES="${IMPORT_IMAGES:-1}"
 GIT_SHA="${GIT_SHA:-$(git -C "$HERE" rev-parse HEAD 2>/dev/null || echo develop)}"
 GATEWAY_IMAGE="${GATEWAY_IMAGE:-rpg-mmo/gateway:${GIT_SHA}}"
 GAMESERVER_IMAGE="${GAMESERVER_IMAGE:-rpg-mmo/gameserver-dotnet:${GIT_SHA}}"
-# The compose dev stack. Stopped, never removed: `docker start` is the rollback.
+# The compose stack this cutover REPLACES. Stopped, never removed: `docker start`
+# is the rollback.
+#
+# Per environment, and it must be: the default names dev's containers, so a
+# staging run left with it would stop nothing (dev's are already down) and leave
+# STAGING's compose stack running beside the cluster that just replaced it --
+# two stacks serving one environment, which is the state this whole move exists
+# to end. The loop only stops names that are actually running, so a wrong value
+# fails silently.
 COMPOSE_DEV_CONTAINERS="${COMPOSE_DEV_CONTAINERS:-rpg-gateway rpg-nakama rpg-redis rpg-postgres rpg-postgres-game}"
+# The compose stack's Redis, read to clear registry entries the compose gateway
+# left behind. Same reasoning: dev's name by default, overridden per environment.
+COMPOSE_REDIS_CONTAINER="${COMPOSE_REDIS_CONTAINER:-rpg-redis}"
 # The pre-cutover Agones fleet, allocated from by the COMPOSE gateway.
 LEGACY_FLEET_NS="${LEGACY_FLEET_NS:-rpg-realtime}"
 LEGACY_FLEET="${LEGACY_FLEET:-map-servers-dotnet-dev}"
@@ -33,6 +44,38 @@ K8S_FLEET="${K8S_FLEET:-map-servers-dotnet-k8s}"
 # published 7000-7100 is reserved for infrastructure (gateway 7000, nakama
 # 7001). See app/40-gateway.yaml.
 AGONES_MIN_PORT="${AGONES_MIN_PORT:-7010}"
+# HOST-SIDE ports, i.e. what k3d's serverlb publishes -- NOT the hostPorts in the
+# manifests, which stay 7000/7001 in every cluster.
+#
+# These are separate because two k3d clusters on one box cannot publish the same
+# host port, and staging now runs its own cluster beside dev's. Staging maps
+# host 7200/7201 onto the same in-cluster 7000/7001, so the manifests are shared
+# unchanged and only the published side moves.
+#
+# Getting this wrong is not a visible failure, which is why it is a variable
+# rather than a literal: the checks below dial 127.0.0.1, so a staging run that
+# kept 7001 would curl DEV's Nakama, get a healthy answer, and pass while saying
+# nothing about the cluster it just deployed. The comment on the healthcheck
+# already warns that a bare TCP connect proves nothing here; this is the same
+# trap one level up.
+#
+# The Agones range is deliberately NOT offset: it is published 1:1 so that
+# <advertise-host>:<agones-port> is dialable exactly as the registry records it.
+PUBLISHED_GATEWAY_PORT="${PUBLISHED_GATEWAY_PORT:-7000}"
+PUBLISHED_NAKAMA_PORT="${PUBLISHED_NAKAMA_PORT:-7001}"
+# Test-runner-only forward to postgres-game; one per cluster, so it also moves.
+PG_GAME_LOCAL_PORT="${PG_GAME_LOCAL_PORT:-15433}"
+# The k3d node to import images INTO, derived from the context rather than
+# spelled out. k3d names the single server node "<cluster-context>-server-0",
+# so k3d-rpg-dev -> k3d-rpg-dev-server-0 and k3d-rpg-stg -> k3d-rpg-stg-server-0.
+#
+# This was hardcoded to dev's node. On a second cluster that is not a failure to
+# import -- it is an import into the WRONG cluster: staging's images would land
+# on dev's node, the presence check below would find them there and report
+# success, and staging's pods would then sit in ImagePullBackOff for a reason
+# the log above says nothing about. Dev's node would also quietly accumulate
+# another environment's images.
+K3D_NODE="${K3D_NODE:-${CTX}-server-0}"
 
 mkdir -p "$RUN_DIR"
 say() { printf '\n== %s\n' "$*"; }
@@ -83,8 +126,8 @@ if [ "$IMPORT_IMAGES" = "1" ]; then
         exit 1
       fi
       echo "importing $img (revision ${rev:-unstamped})"
-      docker save "$img" | docker exec -i k3d-rpg-dev-server-0 ctr -n k8s.io images import -
-    elif docker exec k3d-rpg-dev-server-0 ctr -n k8s.io images ls -q 2>/dev/null | grep -qx "docker.io/$img"; then
+      docker save "$img" | docker exec -i "$K3D_NODE" ctr -n k8s.io images import -
+    elif docker exec "$K3D_NODE" ctr -n k8s.io images ls -q 2>/dev/null | grep -qx "docker.io/$img"; then
       echo "$img already in the node; not re-importing"
     else
       # Refuse, do not warn. This used to print a warning and carry on, and the
@@ -109,7 +152,7 @@ fi
 # skipped entirely and a missing tag would again be discovered only as a rollout
 # timeout. Ask the node directly: it is the only authority on what can start.
 for img in "$GATEWAY_IMAGE" "$GAMESERVER_IMAGE"; do
-  if ! docker exec k3d-rpg-dev-server-0 ctr -n k8s.io images ls -q 2>/dev/null \
+  if ! docker exec "$K3D_NODE" ctr -n k8s.io images ls -q 2>/dev/null \
        | grep -qx "docker.io/$img"; then
     echo "::error::$img is not present in the k3d node, so pinning it would leave" >&2
     echo "  every pod in ImagePullBackOff. Build it and re-run with IMPORT_IMAGES=1." >&2
@@ -186,16 +229,16 @@ if $K get fleet "$LEGACY_FLEET" -n "$LEGACY_FLEET_NS" >/dev/null 2>&1; then
     echo "WARNING: legacy fleet did not fully drain -- check kubectl get gs -n $LEGACY_FLEET_NS"
 fi
 
-if docker ps --format '{{.Names}}' | grep -qx rpg-redis; then
+if docker ps --format '{{.Names}}' | grep -qx "$COMPOSE_REDIS_CONTAINER"; then
   say "deregister leftovers from the compose registry"
   # --raw prints one member per line with no "1) " numbering and prints NOTHING
   # for an empty set. The --no-raw form turned "(empty array)" into a member
   # literally named `array)`, which was then "deregistered".
-  for id in $(docker exec rpg-redis redis-cli --raw SMEMBERS 'servers:map:map_01' 2>/dev/null); do
+  for id in $(docker exec "$COMPOSE_REDIS_CONTAINER" redis-cli --raw SMEMBERS 'servers:map:map_01' 2>/dev/null); do
     [ -n "$id" ] || continue
     echo "deregistering $id"
-    docker exec rpg-redis redis-cli DEL "servers:id:${id}" >/dev/null 2>&1 || true
-    docker exec rpg-redis redis-cli SREM 'servers:map:map_01' "$id" >/dev/null 2>&1 || true
+    docker exec "$COMPOSE_REDIS_CONTAINER" redis-cli DEL "servers:id:${id}" >/dev/null 2>&1 || true
+    docker exec "$COMPOSE_REDIS_CONTAINER" redis-cli SREM 'servers:map:map_01' "$id" >/dev/null 2>&1 || true
   done
 fi
 
@@ -256,7 +299,7 @@ if [ "$cur_min" != "$AGONES_MIN_PORT" ]; then
 else
   echo "MIN_PORT already $AGONES_MIN_PORT"
 fi
-for probe in "gateway 7000" "nakama 7001"; do
+for probe in "gateway $PUBLISHED_GATEWAY_PORT" "nakama $PUBLISHED_NAKAMA_PORT"; do
   set -- $probe
   for i in $(seq 1 30); do
     if timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$2" 2>/dev/null; then break; fi
@@ -266,12 +309,12 @@ done
 # NOTE: a bare TCP connect is NOT proof here -- the k3d serverlb accepts on
 # every mapped port whether or not anything is behind it. Nakama's /healthcheck
 # is an application-level answer, so it is what gets asserted.
-if ! curl -fsS --max-time 5 http://127.0.0.1:7001/healthcheck >/dev/null 2>&1; then
-  echo "ERROR: Nakama does not answer /healthcheck on the published port 7001." >&2
+if ! curl -fsS --max-time 5 "http://127.0.0.1:${PUBLISHED_NAKAMA_PORT}/healthcheck" >/dev/null 2>&1; then
+  echo "ERROR: Nakama does not answer /healthcheck on the published port ${PUBLISHED_NAKAMA_PORT}." >&2
   exit 1
 fi
-echo "nakama http answers on 127.0.0.1:7001"
-echo "gateway published on 127.0.0.1:7000"
+echo "nakama http answers on 127.0.0.1:${PUBLISHED_NAKAMA_PORT}"
+echo "gateway published on 127.0.0.1:${PUBLISHED_GATEWAY_PORT}"
 
 # The ONLY forward that remains, and it is not part of the deployment: the
 # verification suite's persistence assertions run on THIS host and need a route
@@ -308,7 +351,7 @@ pf() { # name localport namespace target targetport
   sed 's/^/    /' "$RUN_DIR/$name.log" >&2
   return 1
 }
-pf postgres-game 15433 rpg-k8s-data svc/postgres-game 5432
+pf postgres-game "$PG_GAME_LOCAL_PORT" rpg-k8s-data svc/postgres-game 5432
 
 say "state"
 $K get pods -n rpg-k8s-data -n rpg-k8s-data 2>/dev/null || true

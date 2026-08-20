@@ -397,5 +397,24 @@ container in the cluster carries a fresh restart and this check fails naming
 them and identifying it as a node event; it clears once the event is older than
 the window.
 
-Staging and production are untouched: they select `containers`/`host` through
-their own `vars.DEPLOY_MODE` and never enter this path.
+**Staging runs this path too, in its own cluster** (`k3d-rpg-stg`), since
+2026-08-20. Production still selects `containers` through its own
+`vars.DEPLOY_MODE` and does not enter it.
+
+A second environment needs a second CLUSTER, not a second namespace: `dev-up.sh`
+and the manifests under `{data,app}` hardcode `rpg-k8s-data` and
+`rpg-k8s-realtime`. Pointing two environments at one cluster makes them one
+deployment — the last CD run wins and both report success.
+
+What differs per environment is the HOST side only; the manifests are shared
+unchanged, hostPorts included:
+
+| | context | gateway | nakama | agones range | verify target |
+|---|---|---|---|---|---|
+| dev | `k3d-rpg-dev` | host 7000 | host 7001 | 7010–7100 | `k8s-dev` |
+| staging | `k3d-rpg-stg` | host 7200 → node 7000 | host 7201 → node 7001 | 7210–7300 | `k8s-stg` |
+
+The infrastructure ports may be offset because clients dial them from explicit
+configuration. **The Agones range may not**: the gameserver registers
+`<advertise-host>:<agones-port>` and the client dials that verbatim, so it is
+published 1:1 in both clusters.

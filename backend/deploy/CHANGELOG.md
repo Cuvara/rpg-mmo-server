@@ -5,6 +5,78 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **Staging moves from docker compose to k3s/Agones, in its own cluster `k3d-rpg-stg`.**
+
+  A second environment on this path needs a second **cluster**, not a second namespace:
+  `dev-up.sh` and the manifests under `k8s/{data,app}` hardcode `rpg-k8s-data` and
+  `rpg-k8s-realtime`. Pointing staging at dev's cluster would have made the two environments
+  one deployment — whichever CD run finished last would win, and **both would report
+  success**. Separate clusters keep every manifest shared and unmodified.
+
+  What differs is the HOST side only, because two k3d clusters cannot publish the same host
+  port. The manifests' hostPorts stay 7000/7001 in both:
+
+  | | context | gateway | nakama | agones | verify target |
+  |---|---|---|---|---|---|
+  | dev | `k3d-rpg-dev` | host 7000 | host 7001 | 7010–7100 | `k8s-dev` |
+  | staging | `k3d-rpg-stg` | host 7200 → node 7000 | host 7201 → node 7001 | 7210–7300 | `k8s-stg` |
+
+  The infrastructure ports may be offset — clients dial them from explicit configuration.
+  **The Agones range may not**, and is published 1:1 in both: the gameserver registers
+  `<advertise-host>:<agones-port>` and the client dials that verbatim, so an offset there
+  hands out an address that does not exist.
+
+- **`dev-up.sh`: three more dev-specific literals became variables**, all found by reading the
+  script against a second cluster rather than by a failing run.
+
+  - The **k3d node images are imported into** was `k3d-rpg-dev-server-0`, spelled out. On a
+    second cluster that is not a failed import, it is an import into the *wrong cluster*:
+    staging's images would land on dev's node, the presence check immediately below would find
+    them there and report success, and staging's pods would then sit in `ImagePullBackOff` for
+    a reason nothing in the log mentions. Dev's node would also quietly accumulate another
+    environment's images. Now derived from the context — k3d names the server node
+    `<context>-server-0`.
+  - **`COMPOSE_DEV_CONTAINERS`** already existed but defaulted to dev's container names. A
+    staging run left with the default stops nothing — dev's are already down — and leaves
+    *staging's* compose stack running beside the cluster that just replaced it. Two stacks
+    serving one environment is the exact state this move exists to end, and the loop only stops
+    names that are actually running, so the wrong value fails silently.
+  - **`COMPOSE_REDIS_CONTAINER`**, for the step that clears registry entries the compose
+    gateway left behind, was `rpg-redis` in four places.
+
+- **`dev-up.sh`: the published gateway/Nakama ports and the postgres-game forward are now
+  variables** (`PUBLISHED_GATEWAY_PORT`, `PUBLISHED_NAKAMA_PORT`, `PG_GAME_LOCAL_PORT`),
+  defaulting to dev's values so dev is unchanged.
+
+  Not cosmetic. The script's own comment already warns that a bare TCP connect proves nothing
+  here, because k3d's serverlb accepts on every mapped port — which is why Nakama's
+  `/healthcheck` is what gets asserted. With the port hardcoded, a staging run would have
+  curled **dev's** Nakama, received a healthy answer, and passed while saying nothing about
+  the cluster it had just deployed. Same trap, one level up.
+
+### Fixed
+- **The `containers`-mode guard blocked every environment on a box where *any* k8s stack was
+  running, while its error message said it was blocking on *this* environment's.**
+
+  It defaulted `KUBE_CONTEXT` to `k3d-rpg-dev` regardless of environment, so it asked "is a
+  k8s stack serving here?" not "is one serving this environment?". Measured 2026-08-20:
+  staging's CD (run 32321855215) failed at this step because **dev's** gateway was up.
+  Staging had no k8s stack at all.
+
+  The consequence was worse than a failed deploy. The step that writes `.env` runs earlier and
+  had already rewritten it to a new image tag, while `Build & push container images` is skipped
+  on that path — so the tag the config advertised **was never built**, and staging kept serving
+  a stack 51 commits old with nothing to indicate it. Production was blocked by the same false
+  positive and it had gone unnoticed only because nobody had deployed it.
+
+  The check now runs only when the environment explicitly sets `KUBE_CONTEXT`. An environment
+  that names no cluster has no k8s deployment to collide with.
+
+- **CD ran `verify.sh --target k8s-dev` unconditionally in k8s mode.** The target file carries
+  the kube context *and* the published ports, so a staging deploy would have verified dev's
+  cluster and passed. Now `vars.K8S_VERIFY_TARGET`, defaulting to `k8s-dev`.
+
 ### Added
 - **`cleanup-branches.yml`: delete remote branches whose content is already on `develop`, weekly.**
   Ported from the client repo and **corrected on the way**: that version tests with
