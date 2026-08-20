@@ -6,6 +6,23 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **`NAKAMA_SERVER_KEY` rotated on both k8s clusters**, from `defaultkey` to 32 random hex
+  characters, a different value per cluster.
+
+  This is the one secret that is a **client-facing contract**, so it needed its consumers lined up
+  first. All but one already were — everything reads it from an env var or flag with `defaultkey`
+  merely as a default. The exception was `verify/targets/k8s-*.env`, fixed in a separate change
+  landed **before** this one so the file and the cluster never disagreed.
+
+  Verified in every direction on both clusters, with a baseline taken first so a later pass means
+  something: before, `defaultkey` authenticated **200** and a wrong key **401**; after, `defaultkey`
+  is **401**, each cluster's own key **200**, and each cluster's key against the other **401**.
+  Both CD runs were then re-run and returned `VERIFY=PASS` with 0 FAIL — the targets followed the
+  cluster without being edited, which is what the earlier change was for.
+
+  Running a client by hand now needs `--nakama-key`. Omitting it does not fail at launch: it
+  authenticates 401 and presents as a client that never reaches `IN WORLD`.
+
 - **`NAKAMA_CONSOLE_PASSWORD` rotated on both k8s clusters**, from the published placeholder
   `password` to 48 random hex characters, a different value per cluster. Documented in
   `k8s/data/README.md` §Secrets, including how to read it back — the cluster is the only copy.

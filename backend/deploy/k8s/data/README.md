@@ -318,10 +318,30 @@ kubectl --context k3d-rpg-dev get secret nakama -n rpg-k8s-data \
   -o jsonpath='{.data.NAKAMA_CONSOLE_PASSWORD}' | base64 -d; echo
 ```
 
-`NAKAMA_SERVER_KEY` is still `defaultkey` and was left alone deliberately: it is a
-client-facing contract, hardcoded in `verify/targets/*.env` and defaulted in the
-Unity client's `BackendCommandLine`, so moving it is a coordinated change across
-both repositories rather than a server-side rotation.
+### `NAKAMA_SERVER_KEY`
+
+Rotated on both clusters on 2026-08-20, from `defaultkey` to 32 random hex
+characters, a different value per cluster.
+
+Unlike the others this one is a **client-facing contract** — every client presents
+it to Nakama — so rotating it needed the consumers lined up first. They already
+were, with one exception: everything reads it from an env var or flag with
+`defaultkey` merely as a *default* (`verify.sh`, `checks_client.sh`,
+`checks_flow.sh`, `probe/main.go`, `smoketest`, `loadtest`, the client's
+`BackendCommandLine`, and `run-clients.sh --nakama-key`). The exception was
+`verify/targets/k8s-*.env`, which asserted the literal; it now reads the Secret,
+and that change was landed **before** the rotation so the two never disagreed.
+
+Read it the same way:
+
+```bash
+kubectl --context k3d-rpg-dev get secret nakama -n rpg-k8s-data \
+  -o jsonpath='{.data.NAKAMA_SERVER_KEY}' | base64 -d; echo
+```
+
+Running a client by hand now needs `--nakama-key`; omitting it does not fail at
+launch, it authenticates 401 and looks like a client that never joins. The
+client repo's `CLAUDE.md` says so at the invocation.
 
 For a real environment, copy to `secret-*.local.yaml` and add that pattern to
 `../../.gitignore` (it currently ignores `agones/secret-*.local.yaml`; extend it
