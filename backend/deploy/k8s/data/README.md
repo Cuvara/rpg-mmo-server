@@ -301,6 +301,28 @@ restarted together (`nakama`, `gateway`, and a fleet drain, since a GameServer
 reads the secret once at start). The same convention as
 `../../agones/secret-example.yaml`.
 
+### `NAKAMA_CONSOLE_PASSWORD`
+
+Rotated on both clusters on 2026-08-20, from the published placeholder `password`
+to 48 random hex characters — the length `../../docs/VPS-SETUP.md` already
+specifies for a real environment. Different value per cluster, so console access
+to one grants nothing on the other.
+
+Only `nakama.yaml` consumes it (`--console.password`); no verify target, workflow
+or client reads it, so rotating it needs nothing but a Nakama restart.
+
+**The cluster is the only copy.** To read it:
+
+```bash
+kubectl --context k3d-rpg-dev get secret nakama -n rpg-k8s-data \
+  -o jsonpath='{.data.NAKAMA_CONSOLE_PASSWORD}' | base64 -d; echo
+```
+
+`NAKAMA_SERVER_KEY` is still `defaultkey` and was left alone deliberately: it is a
+client-facing contract, hardcoded in `verify/targets/*.env` and defaulted in the
+Unity client's `BackendCommandLine`, so moving it is a coordinated change across
+both repositories rather than a server-side rotation.
+
 For a real environment, copy to `secret-*.local.yaml` and add that pattern to
 `../../.gitignore` (it currently ignores `agones/secret-*.local.yaml`; extend it
 to `k8s/data/secret-*.local.yaml` when the first one is written).

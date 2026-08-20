@@ -6,6 +6,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **`NAKAMA_CONSOLE_PASSWORD` rotated on both k8s clusters**, from the published placeholder
+  `password` to 48 random hex characters, a different value per cluster. Documented in
+  `k8s/data/README.md` §Secrets, including how to read it back — the cluster is the only copy.
+
+  Only `nakama.yaml` consumes it, so the rotation needed nothing but a Nakama restart. Verified
+  in both directions on both clusters rather than assumed: the old password now returns **401**,
+  the new one **200** with a token, and dev's password returns **401** against staging. A baseline
+  login was run *before* the change, so a passing test afterwards means the check can actually
+  tell the two states apart.
+
+  `NAKAMA_SERVER_KEY` remains `defaultkey`, deliberately: it is a client-facing contract,
+  hardcoded in `verify/targets/*.env` and defaulted in the Unity client, so moving it is a
+  coordinated change across both repositories.
+
 - **`data/README.md` §Secrets rewritten to match what the manifests now do.** It still described
   `secrets.example.yaml` as applied "so a laptop bring-up needs no secret-management story" —
   true until that file stopped being a kustomize resource, and the paragraph was left behind by
