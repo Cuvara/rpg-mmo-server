@@ -161,6 +161,25 @@ for img in "$GATEWAY_IMAGE" "$GAMESERVER_IMAGE"; do
 done
 
 # ---------------------------------------------------------------- manifests
+# The data tier's Secrets are NOT in the repo, for the same reason the app tier's
+# are not. secrets.example.yaml used to be a kustomize resource, so this apply
+# overwrote them with placeholders on every run -- see data/kustomization.yaml.
+#
+# The namespace goes first so the operator has somewhere to put them; the check
+# then runs before anything that would consume them.
+say "apply the data namespace, then check its secrets exist"
+$K apply -f "$HERE/data/namespace.yaml"
+missing=""
+for sec in postgres-meta postgres-game nakama; do
+  $K get secret "$sec" -n rpg-k8s-data >/dev/null 2>&1 || missing="$missing $sec"
+done
+if [ -n "$missing" ]; then
+  echo "ERROR: secrets absent in rpg-k8s-data:$missing" >&2
+  echo "Fill a copy of data/secrets.example.yaml OUTSIDE the repo and apply it first." >&2
+  echo "nakama's JWT_SECRET must equal rpg-k8s-realtime/rpg-app-secrets' jwt-secret." >&2
+  exit 1
+fi
+
 say "apply the data tier (rpg-k8s-data)"
 $K apply -k "$HERE/data"
 
@@ -187,6 +206,19 @@ done
 if ! $K get secret rpg-app-secrets -n rpg-k8s-realtime >/dev/null 2>&1; then
   echo "ERROR: secret rpg-k8s-realtime/rpg-app-secrets is absent." >&2
   echo "Fill a copy of app/30-secret-template.yaml OUTSIDE the repo and apply it first." >&2
+  exit 1
+fi
+
+# Asserted here, where both halves exist, and never assumed: they are applied
+# from different places -- the data tier by kustomize, this one out-of-band --
+# so nothing else compares them. A mismatch yields a stack that comes up
+# perfectly healthy and rejects every client login with
+# "local jwt verify: invalid signature". Measured on staging 2026-08-20.
+nk_jwt=$($K get secret nakama -n rpg-k8s-data -o jsonpath='{.data.JWT_SECRET}' 2>/dev/null | base64 -d 2>/dev/null || true)
+gw_jwt=$($K get secret rpg-app-secrets -n rpg-k8s-realtime -o jsonpath='{.data.jwt-secret}' 2>/dev/null | base64 -d 2>/dev/null || true)
+if [ -z "$nk_jwt" ] || [ "$nk_jwt" != "$gw_jwt" ]; then
+  echo "ERROR: nakama's JWT_SECRET does not equal rpg-app-secrets' jwt-secret." >&2
+  echo "  Nakama signs the gateway token; the gateway verifies it locally." >&2
   exit 1
 fi
 $K apply -f "$HERE/app/40-gateway.yaml" -f "$HERE/app/50-fleet-map.yaml"
