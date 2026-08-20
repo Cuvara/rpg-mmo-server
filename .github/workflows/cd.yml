@@ -483,8 +483,17 @@ jobs:
       #   containers          — gateway + gameserver images are built on this
       #                          runner and brought up by the compose `realtime`
       #                          profile, sharing the meta stack's network.
-      # Everything else (secrets, ports, monitoring) is identical, so moving an
-      # environment between the two is a single variable flip.
+      #   k8s                 — images built on this runner, applied to a k3d
+      #                          cluster by backend/deploy/k8s/dev-up.sh, and
+      #                          verified by verify.sh as the healthcheck.
+      # `k8s` was accepted by the case below long before it was listed here.
+      #
+      # Between host and containers the move IS a single variable flip. Moving to
+      # k8s is not: that environment needs its OWN cluster, because dev-up.sh and
+      # the manifests hardcode the namespaces rpg-k8s-data / rpg-k8s-realtime, so
+      # two environments pointed at one cluster become one deployment in which the
+      # last run wins and both report success. Set KUBE_CONTEXT,
+      # K8S_VERIFY_TARGET and the PUBLISHED_* ports per environment.
       - name: Resolve deploy dir + mode
         id: paths
         env:
@@ -877,10 +886,24 @@ jobs:
       # and two registries up for an hour. The per-step `!= 'k8s'` conditions below
       # protect k8s mode from compose; nothing protected the cluster from someone
       # setting the variable back. This does.
+      # Gated on the environment NAMING a cluster, not on one existing. The
+      # earlier version defaulted KUBE_CONTEXT to k3d-rpg-dev for every
+      # environment, so it asked "is any k8s stack on this box serving?" while
+      # its own error said "serving THIS environment". Those differ once more
+      # than one environment shares a box, and on 2026-08-20 they did: staging's
+      # CD failed at this step because DEV's k8s gateway was up. staging had no
+      # k8s stack at all. Its `.env` was still rewritten to a new image tag, and
+      # the image-build step is skipped on this path, so the tag it advertised
+      # was never built -- staging kept serving a 51-commit-old compose stack
+      # while its config claimed otherwise. Production was blocked by the same
+      # false positive and nobody had noticed, because nobody had deployed it.
+      #
+      # An environment with no KUBE_CONTEXT has no k8s deployment to collide
+      # with, so there is nothing to refuse.
       - name: Refuse containers mode while k8s is serving this environment
-        if: steps.paths.outputs.deploy_mode == 'containers'
+        if: steps.paths.outputs.deploy_mode == 'containers' && vars.KUBE_CONTEXT != ''
         env:
-          KUBE_CONTEXT: ${{ vars.KUBE_CONTEXT || 'k3d-rpg-dev' }}
+          KUBE_CONTEXT: ${{ vars.KUBE_CONTEXT }}
         run: |
           set -uo pipefail
           if ! command -v kubectl >/dev/null 2>&1; then
@@ -1130,6 +1153,15 @@ jobs:
           KUBE_CONTEXT: ${{ vars.KUBE_CONTEXT || 'k3d-rpg-dev' }}
           GIT_SHA: ${{ github.sha }}
           RPG_K8S_RUN_DIR: ${{ vars.RPG_K8S_RUN_DIR || '/tmp/claude-1000/rpg-k8s-dev' }}
+          # HOST-side ports k3d publishes. Two clusters on one box cannot publish
+          # the same one; the manifests' hostPorts stay 7000/7001 everywhere.
+          # Defaults are dev's, so dev is unchanged by this becoming a variable.
+          PUBLISHED_GATEWAY_PORT: ${{ vars.PUBLISHED_GATEWAY_PORT || '7000' }}
+          PUBLISHED_NAKAMA_PORT: ${{ vars.PUBLISHED_NAKAMA_PORT || '7001' }}
+          PG_GAME_LOCAL_PORT: ${{ vars.PG_GAME_LOCAL_PORT || '15433' }}
+          # Floor of the Agones range. Published 1:1, never offset: the registry
+          # records <advertise-host>:<agones-port> and the client dials it verbatim.
+          AGONES_MIN_PORT: ${{ vars.AGONES_MIN_PORT || '7010' }}
         working-directory: backend/deploy/k8s
         run: |
           set -euo pipefail
@@ -1145,6 +1177,7 @@ jobs:
         env:
           KUBE_CONTEXT: ${{ vars.KUBE_CONTEXT || 'k3d-rpg-dev' }}
           GIT_SHA: ${{ github.sha }}
+          K8S_VERIFY_TARGET: ${{ vars.K8S_VERIFY_TARGET || 'k8s-dev' }}
         working-directory: backend/deploy/k8s
         run: |
           set -euo pipefail
@@ -1184,7 +1217,11 @@ jobs:
           export VERIFY_SMOKETEST_BIN VERIFY_PROBE_BIN
 
           chmod +x verify/verify.sh
-          ./verify/verify.sh --target k8s-dev
+          # Per environment: each cluster has its own target file, and the
+          # target carries the context AND the published ports. Running k8s-dev
+          # against staging would dial dev's Nakama on 127.0.0.1:7001, get a
+          # healthy answer and pass, having verified the wrong cluster.
+          ./verify/verify.sh --target "${K8S_VERIFY_TARGET}"
 
       # ------------------------------------------------------- host mode only
       # deploy-local.sh both (re)starts the binaries AND writes the game

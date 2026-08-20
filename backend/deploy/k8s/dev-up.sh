@@ -33,6 +33,27 @@ K8S_FLEET="${K8S_FLEET:-map-servers-dotnet-k8s}"
 # published 7000-7100 is reserved for infrastructure (gateway 7000, nakama
 # 7001). See app/40-gateway.yaml.
 AGONES_MIN_PORT="${AGONES_MIN_PORT:-7010}"
+# HOST-SIDE ports, i.e. what k3d's serverlb publishes -- NOT the hostPorts in the
+# manifests, which stay 7000/7001 in every cluster.
+#
+# These are separate because two k3d clusters on one box cannot publish the same
+# host port, and staging now runs its own cluster beside dev's. Staging maps
+# host 7200/7201 onto the same in-cluster 7000/7001, so the manifests are shared
+# unchanged and only the published side moves.
+#
+# Getting this wrong is not a visible failure, which is why it is a variable
+# rather than a literal: the checks below dial 127.0.0.1, so a staging run that
+# kept 7001 would curl DEV's Nakama, get a healthy answer, and pass while saying
+# nothing about the cluster it just deployed. The comment on the healthcheck
+# already warns that a bare TCP connect proves nothing here; this is the same
+# trap one level up.
+#
+# The Agones range is deliberately NOT offset: it is published 1:1 so that
+# <advertise-host>:<agones-port> is dialable exactly as the registry records it.
+PUBLISHED_GATEWAY_PORT="${PUBLISHED_GATEWAY_PORT:-7000}"
+PUBLISHED_NAKAMA_PORT="${PUBLISHED_NAKAMA_PORT:-7001}"
+# Test-runner-only forward to postgres-game; one per cluster, so it also moves.
+PG_GAME_LOCAL_PORT="${PG_GAME_LOCAL_PORT:-15433}"
 
 mkdir -p "$RUN_DIR"
 say() { printf '\n== %s\n' "$*"; }
@@ -256,7 +277,7 @@ if [ "$cur_min" != "$AGONES_MIN_PORT" ]; then
 else
   echo "MIN_PORT already $AGONES_MIN_PORT"
 fi
-for probe in "gateway 7000" "nakama 7001"; do
+for probe in "gateway $PUBLISHED_GATEWAY_PORT" "nakama $PUBLISHED_NAKAMA_PORT"; do
   set -- $probe
   for i in $(seq 1 30); do
     if timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$2" 2>/dev/null; then break; fi
@@ -266,12 +287,12 @@ done
 # NOTE: a bare TCP connect is NOT proof here -- the k3d serverlb accepts on
 # every mapped port whether or not anything is behind it. Nakama's /healthcheck
 # is an application-level answer, so it is what gets asserted.
-if ! curl -fsS --max-time 5 http://127.0.0.1:7001/healthcheck >/dev/null 2>&1; then
-  echo "ERROR: Nakama does not answer /healthcheck on the published port 7001." >&2
+if ! curl -fsS --max-time 5 "http://127.0.0.1:${PUBLISHED_NAKAMA_PORT}/healthcheck" >/dev/null 2>&1; then
+  echo "ERROR: Nakama does not answer /healthcheck on the published port ${PUBLISHED_NAKAMA_PORT}." >&2
   exit 1
 fi
-echo "nakama http answers on 127.0.0.1:7001"
-echo "gateway published on 127.0.0.1:7000"
+echo "nakama http answers on 127.0.0.1:${PUBLISHED_NAKAMA_PORT}"
+echo "gateway published on 127.0.0.1:${PUBLISHED_GATEWAY_PORT}"
 
 # The ONLY forward that remains, and it is not part of the deployment: the
 # verification suite's persistence assertions run on THIS host and need a route
@@ -308,7 +329,7 @@ pf() { # name localport namespace target targetport
   sed 's/^/    /' "$RUN_DIR/$name.log" >&2
   return 1
 }
-pf postgres-game 15433 rpg-k8s-data svc/postgres-game 5432
+pf postgres-game "$PG_GAME_LOCAL_PORT" rpg-k8s-data svc/postgres-game 5432
 
 say "state"
 $K get pods -n rpg-k8s-data -n rpg-k8s-data 2>/dev/null || true
