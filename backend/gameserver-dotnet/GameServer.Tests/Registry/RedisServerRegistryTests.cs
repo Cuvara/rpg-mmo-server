@@ -20,11 +20,18 @@ public class RedisServerRegistryTests
     private static ServerInfo Info(string serverId, string mapId, int players = 0) =>
         new(serverId, mapId, "10.0.0.5:9200", "tcp", 100, players);
 
+    /// <summary>
+    /// The TTL <see cref="ConnectAsync"/> uses unless a test asks for another. Named rather
+    /// than inlined because the TTL assertions below assert on this exact value: a test that
+    /// pins the level Redis must report has to be able to say what that level is.
+    /// </summary>
+    private static readonly TimeSpan Ttl = TimeSpan.FromSeconds(15);
+
     private async Task<(RedisServerRegistry reg, IConnectionMultiplexer mux)> ConnectAsync(TimeSpan? ttl = null)
     {
         var options = RedisServerRegistry.BuildOptions(_redis.Addr, null);
         var mux = await ConnectionMultiplexer.ConnectAsync(options);
-        var reg = new RedisServerRegistry(mux, ttl ?? TimeSpan.FromSeconds(15), NullLogger.Instance);
+        var reg = new RedisServerRegistry(mux, ttl ?? Ttl, NullLogger.Instance);
         return (reg, mux);
     }
 
@@ -55,36 +62,58 @@ public class RedisServerRegistryTests
         Assert.True(await db.SetContainsAsync("servers:map:map_shape", serverId));
         Assert.Equal(TimeSpan.Zero, await db.KeyTimeToLiveAsync("servers:map:map_shape") ?? TimeSpan.Zero);
 
-        // The hash carries the liveness TTL.
-        var ttl = await db.KeyTimeToLiveAsync($"servers:id:{serverId}");
-        Assert.NotNull(ttl);
-        Assert.InRange(ttl!.Value.TotalSeconds, 1, 15);
+        // The hash carries the liveness TTL, and this asserts its LEVEL from a single
+        // read — not decay between two reads.
+        //
+        // This used to compare two reads, on the stated grounds that decay is "immune to
+        // clock steps (see #161)". That is false, and #175 has the counter-example: a run
+        // wrote a 15s TTL and Redis reported 17.23s remaining. Redis computes PTTL as
+        // `expire_at_ms - now_ms` from its OWN wall clock, so a remaining TTL above the
+        // configured maximum is arithmetically impossible unless CLOCK_REALTIME stepped
+        // backwards between the two reads — which is #153, observed here twice. A
+        // Stopwatch cannot rescue the old form either: the quantity asserted on is computed
+        // inside Redis, where this process's monotonic clock does not reach.
+        //
+        // A single read is self-consistent no matter what the clock does afterwards, and it
+        // pins the thing the test actually names: the deploy script's 3600s TTL. It is the
+        // stronger assertion — decay only proved the number moved down, this proves the
+        // number is inside the window the gateway's liveness contract requires.
+        var ttl1 = await db.KeyTimeToLiveAsync($"servers:id:{serverId}");
+        Assert.NotNull(ttl1);
+        Assert.InRange(ttl1!.Value, TimeSpan.Zero, Ttl);
     }
 
     [SkippableFact]
     public async Task Heartbeat_ReArmsTtl_AndReportsMissingEntry()
     {
         _redis.SkipUnlessAvailable(nameof(Heartbeat_ReArmsTtl_AndReportsMissingEntry));
-        var (reg, mux) = await ConnectAsync(TimeSpan.FromSeconds(10));
+        var hbTtl = TimeSpan.FromSeconds(10);
+        var (reg, mux) = await ConnectAsync(hbTtl);
         await using var _ = reg;
         var db = mux.GetDatabase();
 
         string serverId = $"gs-hb-{Guid.NewGuid():N}"[..16];
         await reg.RegisterAsync(Info(serverId, "map_hb"), default);
 
-        // Let the TTL visibly decay, then prove the heartbeat pushes it back up.
+        // Let some of the TTL burn off, then prove the heartbeat re-arms it.
+        //
+        // There is deliberately no "the TTL decayed below 9s" precondition any more. That
+        // read asserted on a quantity Redis derives from its own wall clock, and on this
+        // host that clock steps (#153): a run measured 10.254s remaining on a 10s TTL after
+        // a 2.5s wait, which no monotonic clock can produce. The precondition was measuring
+        // the box, not the product.
+        //
+        // What replaces it is stronger, not weaker. `after > before` only proved the
+        // direction; asserting the LEVEL pins the value the product is required to write —
+        // a heartbeat must reset the key to the full configured TTL, so anything below
+        // ttl-1s is a real defect that the old comparison would have passed happily.
         await Task.Delay(2500);
-        var beforeTtl = await db.KeyTimeToLiveAsync($"servers:id:{serverId}");
-        Assert.NotNull(beforeTtl);
-        Assert.True(beforeTtl!.Value.TotalSeconds < 9,
-            $"expected the TTL to have decayed below 9s, was {beforeTtl.Value.TotalSeconds}s");
 
         Assert.True(await reg.HeartbeatAsync(serverId, default));
 
         var afterTtl = await db.KeyTimeToLiveAsync($"servers:id:{serverId}");
         Assert.NotNull(afterTtl);
-        Assert.True(afterTtl!.Value > beforeTtl.Value,
-            $"heartbeat did not re-arm the TTL ({beforeTtl.Value.TotalSeconds}s -> {afterTtl.Value.TotalSeconds}s)");
+        Assert.InRange(afterTtl!.Value, hbTtl - TimeSpan.FromSeconds(1), hbTtl);
 
         // A heartbeat for an entry that is gone must report false, not throw — that
         // is the signal RegistrationService re-registers on.

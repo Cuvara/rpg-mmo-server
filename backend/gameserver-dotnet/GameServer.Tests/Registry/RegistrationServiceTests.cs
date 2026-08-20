@@ -59,10 +59,18 @@ public class RegistrationServiceTests
     public async Task Heartbeat_KeepsTheEntryAliveBeyondItsTtl()
     {
         _redis.SkipUnlessAvailable(nameof(Heartbeat_KeepsTheEntryAliveBeyondItsTtl));
-        // TTL 2s, so the heartbeat interval is ~667ms. Waiting 5s means the entry
-        // has outlived more than two full TTLs — it can only still be there because
-        // something refreshed it.
-        var ttl = TimeSpan.FromSeconds(2);
+        // TTL 3s, so the heartbeat interval is 1s: the entry is refreshed three times per
+        // TTL, the same 3x margin production runs at (15s TTL -> 5s interval). Waiting 8s
+        // means the entry has outlived more than two and a half full TTLs — it can only
+        // still be there because something refreshed it.
+        //
+        // This was a 2s TTL with a comment claiming a "~667ms" interval. It was not:
+        // RegistryDefaults.HeartbeatInterval is Math.Max(1000, ttl/3), so a 2s TTL hits the
+        // 1000ms floor and the test ran on a 2x margin while its comment described 3x. 3s
+        // is the smallest TTL the floor does not distort, and the wait is raised with it so
+        // the assertion still spans more than two TTLs — raising the TTL alone would have
+        // left a 5s wait shorter than one TTL, which a dead heartbeat would also survive.
+        var ttl = TimeSpan.FromSeconds(3);
         var (reg, mux) = await ConnectAsync(ttl);
         string serverId = $"gs-alive-{Guid.NewGuid():N}"[..16];
 
@@ -71,7 +79,7 @@ public class RegistrationServiceTests
         using var cts = new CancellationTokenSource();
         await svc.StartAsync(cts.Token);
 
-        await Task.Delay(5000);
+        await Task.Delay(8000);
 
         Assert.True(await mux.GetDatabase().KeyExistsAsync($"servers:id:{serverId}"),
             "the entry expired despite a running heartbeat");
@@ -103,8 +111,14 @@ public class RegistrationServiceTests
         Assert.False(await db.KeyExistsAsync($"servers:id:{serverId}"));
 
         // One heartbeat interval is ttl/3 = 1s; allow a generous margin.
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
-        while (DateTime.UtcNow < deadline && !await db.KeyExistsAsync($"servers:id:{serverId}"))
+        //
+        // Stopwatch, not DateTime.UtcNow: this host's CLOCK_REALTIME runs 10-17% fast and
+        // has been observed stepping backwards (#153, #175), so a wall-clock deadline is
+        // not the budget it claims to be — a forward step can end a "15s" wait early and
+        // fail an assertion about the product for a reason that has nothing to do with it.
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        while (elapsed.Elapsed < TimeSpan.FromSeconds(15)
+               && !await db.KeyExistsAsync($"servers:id:{serverId}"))
         {
             await Task.Delay(200);
         }
@@ -125,8 +139,13 @@ public class RegistrationServiceTests
         _redis.SkipUnlessAvailable(nameof(RedisOutage_DoesNotKillTheService_AndItReRegistersOnReconnect));
         // A dedicated container, because this one gets stopped and started and must
         // not disturb the other tests in the collection.
+        // SkipUnlessAvailable above already proved a docker daemon answers here, so a
+        // dedicated container failing to start now is an infrastructure failure and must
+        // not be laundered into a skip that reports green over unrun coverage (#175).
         await using var redis = await EphemeralRedis.TryStartAsync();
-        Skip.If(redis is null, "docker unavailable, no redis to test against");
+        Assert.True(redis is not null,
+            "docker is available but a dedicated redis container could not be started — " +
+            "an infrastructure failure, not a missing dependency");
 
         var ttl = TimeSpan.FromSeconds(3);
         var mux = await ConnectionMultiplexer.ConnectAsync(
@@ -148,9 +167,10 @@ public class RegistrationServiceTests
         // Redis comes back empty (no volume), which is the real disaster shape.
         redis.Start();
 
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(45);
+        // Stopwatch, not DateTime.UtcNow — same reason as above (#153, #175).
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
         bool back = false;
-        while (DateTime.UtcNow < deadline && !back)
+        while (elapsed.Elapsed < TimeSpan.FromSeconds(45) && !back)
         {
             try { back = await mux.GetDatabase().KeyExistsAsync($"servers:id:{serverId}"); }
             catch { /* still reconnecting */ }

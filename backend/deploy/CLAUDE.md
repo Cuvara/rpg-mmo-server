@@ -81,9 +81,16 @@ dividing tier CCU by the retracted 150 figure, so they were arithmetic on a
 number that no longer exists. They return when a ceiling is measured on separate
 hardware.
 
-Sizing notes: `GAMESERVER_CAPACITY` defaults to **100**. That is now a configured
-policy limit, not headroom against a measured ceiling — treat it as the number to
-raise deliberately once a real ceiling exists. `GATEWAY_CONN_RATE_PER_MIN`
+Sizing notes: `GAMESERVER_CAPACITY` is **100 and set explicitly in both map
+fleets** (#145) — it used to be unset, so the admission limit of every pod was a
+compiled-in constant nobody had chosen, and it is the number that stopped a
+120-player run at 100 joins. It is a configured policy limit, not headroom
+against a measured ceiling: 100 is a level this fleet has been measured running
+(tick p99 0.49ms of a 66.67ms budget, 0% of ticks over budget), while the ceiling
+itself stays UNKNOWN per ADR-7 because the load generator shares the box and
+k3d's serverlb sits in the data path (#143). Raise it when both are cleared and a
+run brackets a ceiling — not on apparent headroom, which is how the retracted 150
+figure happened. `GATEWAY_CONN_RATE_PER_MIN`
 defaults to 10/min per source IP — raise it if players will share a carrier NAT.
 
 ## Key Design Constraints
@@ -127,11 +134,12 @@ deploy/
       beta/
       launch/
       growth/
-  agones/
-    fleet-map.yaml
-    fleet-dungeon.yaml
-    autoscaler.yaml
-    allocation.yaml
+  agones/                       # ACTUAL contents differ from this target:
+    fleet-map-dotnet-dev.yaml   #   the only fleet (C# server)
+    secret-example.yaml         #   Secret template, dev placeholders
+    allocation-dev.yaml         #   GameServerAllocation (kubectl create)
+    #  no fleet-map/fleet-dungeon (Go images, deleted with the Go server),
+    #  no autoscaler (incoherent for a map fleet — see docs/K3S.md)
   db/
     init-meta.sql
     init-gamestate.sql

@@ -1,0 +1,282 @@
+# The gateway, in the cluster.
+#
+# ADR-3 is unchanged by moving it here: it authenticates, allocates if the map
+# has no live server, and hands back {ServerAddr, JoinToken}. Gameplay traffic
+# never passes through it, so this Deployment is NOT on the data path and its
+# resource sizing has nothing to do with player count per server.
+#
+# WHY A Deployment AND NOT A StatefulSet: the gateway holds no durable state.
+# Sessions and the registry are in Redis (--backend=redis), so any replica can
+# serve any client. It is horizontally scalable in principle — with one caveat
+# recorded in ADR-16: single-flight per map_id is PER GATEWAY INSTANCE, so two
+# replicas racing on a cold map can allocate one GameServer each, and Agones
+# has no un-allocate. replicas: 1 until that is solved.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: rpg-k8s-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: gateway
+spec:
+  replicas: 1
+  # Recreate, NOT the default RollingUpdate. This Deployment binds a hostPort,
+  # and a hostPort is a node-level resource: on a single-node cluster the
+  # replacement pod cannot be scheduled until the outgoing one releases the
+  # port, while RollingUpdate will not terminate the outgoing one until the
+  # replacement is Ready. The result is a permanent deadlock --
+  # "1 old replicas are pending termination" against a Pending pod whose event
+  # reads "node(s) didn't have free ports for the requested pod ports".
+  #
+  # It survives the FIRST deploy (the old pod has no hostPort yet) and wedges
+  # every deploy after it, which is why it is stated here rather than
+  # rediscovered. The cost is a few seconds of gateway downtime per deploy; the
+  # gateway is not on the gameplay data path (ADR-3), so an in-flight session
+  # is unaffected -- only new joins wait.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: rpg-mmo
+        app.kubernetes.io/name: gateway
+    spec:
+      # THIS LINE IS THE WHOLE OF ADR-15 decision 3 item 6.
+      # Without it the pod runs as `default`, resolveRESTConfig still picks up
+      # the in-cluster config (every pod gets a token), the gateway still
+      # starts clean, and the FIRST allocation returns 403 — at the one moment
+      # it matters, in a code path no unit test covers because out of cluster
+      # it allocates as the developer.
+      serviceAccountName: rpg-gateway
+      securityContext:
+        runAsNonRoot: true
+        # 65532 IS THE DISTROLESS `nonroot` UID, and it has to be spelled out.
+        # The image sets `USER nonroot:nonroot` by NAME, and the kubelet
+        # cannot verify a non-numeric user against runAsNonRoot: the pod fails
+        # with CreateContainerConfigError, "image has non-numeric user
+        # (nonroot), cannot verify user is non-root" — which reads like a
+        # broken image and is really a missing number. Measured on this
+        # cluster. Dropping runAsNonRoot instead would "fix" it by not
+        # checking.
+        runAsUser: 65532
+        runAsGroup: 65532
+      containers:
+        - name: gateway
+          # Import before applying — k3d does NOT share the host docker image
+          # store, so IfNotPresent falls through to a REGISTRY PULL of a tag
+          # that exists only locally, and the pod sits in ErrImagePull:
+          #   docker save rpg-mmo/gateway:develop | \
+          #     docker exec -i k3d-rpg-dev-server-0 ctr -n k8s.io images import -
+          # (`k3d image import` fails on this box: Docker Desktop uses a named
+          # pipe.) And note the gateway images carry NO
+          # org.opencontainers.image.revision label at all — unlike the
+          # gameserver images — so the usual "verify the label against the
+          # commit" check silently returns an empty string here. Verify by
+          # rebuilding, or by `docker image inspect --format '{{.Created}}'`
+          # against the commit date, and do not trust the tag.
+          image: rpg-mmo/gateway:develop
+          imagePullPolicy: IfNotPresent
+          # Compose passes the same two as `command:`; in Kubernetes that is
+          # `args:` — `command:` would REPLACE the image's ENTRYPOINT
+          # (/usr/local/bin/gateway) with these strings and fail exec.
+          args: ["--addr=:8000", "--backend=redis"]
+          ports:
+            # hostPort, NOT a port-forward and NOT a plain NodePort.
+            #
+            # k3d's serverlb publishes 7000-7100 onto the host and NOTHING in
+            # the default NodePort range 30000-32767, so a NodePort Service is
+            # allocated but unreachable -- the gateway answers inside the
+            # cluster while no client on this box can dial it. That is the same
+            # failure class as advertising a hostless address: every component
+            # reports healthy and the system is unusable.
+            #
+            # 7000-7100 is Agones' dynamic range, so borrowing from it blindly
+            # can leave a GameServer Pending when the allocator picks a port
+            # something else already holds. Instead the range is SPLIT, and the
+            # split is enforced on the Agones side: the controller runs with
+            # MIN_PORT=7010, so 7000-7009 is reserved for infrastructure and
+            # the allocator can never collide with it. Changing one without the
+            # other is what reintroduces the collision.
+            #   7000  gateway (this)
+            #   7001  nakama HTTP
+            #   7010-7100  Agones GameServers
+            #
+            # On a real cluster this is a LoadBalancer or an Ingress and the
+            # hostPort disappears; it is here because k3d publishes a fixed
+            # host range and nothing else.
+            - name: client
+              containerPort: 8000
+              hostPort: 7000
+              protocol: TCP
+            - name: metrics
+              containerPort: 9102
+              protocol: TCP
+          env:
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: rpg-app-secrets
+                  key: jwt-secret
+            # Must equal the fleet's JOIN_TOKEN_SECRET exactly, and must NOT
+            # equal JWT_SECRET. Not `optional` — a missing key must fail
+            # container creation visibly, not start a gateway that mints
+            # tokens no game server accepts.
+            - name: JOIN_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: rpg-app-secrets
+                  key: join-token-secret
+            - name: REDIS_ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: gateway-config
+                  key: redis-addr
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rpg-app-secrets
+                  key: redis-password
+                  optional: true
+            - name: METRICS_ADDR
+              value: ":9102"
+            # --- Agones allocation ---------------------------------------
+            # ALLOCATOR=agones is FATAL if the cluster is unreachable: the
+            # gateway exits 1 at construction rather than starting degraded.
+            # In cluster that is the behaviour you want — a gateway that came
+            # up without an allocator would serve every cold map with "no
+            # server available" and look healthy doing it.
+            - name: ALLOCATOR
+              value: "agones"
+            # The fleet's namespace, which is also this pod's namespace, which
+            # is also where the Role is bound. All three must agree: the Role
+            # is namespaced and grants nothing in any other namespace.
+            - name: ALLOCATOR_NAMESPACE
+              value: "rpg-k8s-realtime"
+            - name: ALLOCATOR_FLEET_MAP
+              value: "map-servers-dotnet-k8s"
+            # No dungeon fleet exists (ADR-14 stage 6 unstarted). Left unset
+            # so KindDungeon fails with ErrKindNotConfigured naming the knob,
+            # instead of a 404 for a fleet that was never going to be there.
+            - name: ALLOCATOR_FLEET_DUNGEON
+              value: ""
+            # What the FLEET listens with, not what this gateway listens with.
+            # It is announced to the client BEFORE the pod's own registration
+            # lands, so a mismatch tells the client to speak the wrong
+            # protocol. The fleet below is TCP.
+            - name: ALLOCATOR_TRANSPORT
+              value: "tcp"
+            # ALLOCATOR_KUBECONFIG IS ABSENT ON PURPOSE. DO NOT ADD IT.
+            # resolveRESTConfig tries rest.InClusterConfig() FIRST and only
+            # when Kubeconfig is empty; any value here — including the compose
+            # default /etc/rpg/kubeconfig, which is the natural thing to copy
+            # across — takes precedence over the ServiceAccount and makes the
+            # gateway fail on a path that does not exist in this image.
+          livenessProbe:
+            # /healthz is 200 while the process is alive EVEN WHEN REDIS IS
+            # DOWN, deliberately (gateway/metrics/metrics.go): a Redis outage
+            # must not roll-restart every gateway pod on top of the outage.
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            # /readyz is the one that reports dependencies, so it is the one
+            # that takes a pod out of the Service endpoints without killing it.
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            # The gateway is a redirector: per client it does one JWT verify,
+            # one registry lookup, one token mint. There is no per-tick work
+            # here at all, which is why these numbers are an order below the
+            # game server's and are not derived from BENCHMARK.md (which
+            # measures the game server).
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "500m"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+# Client-facing Service. ClusterIP, and deliberately NOT NodePort.
+#
+# The client does NOT reach the gateway through this Service at all -- it
+# reaches the pod's hostPort 7000 (see the ports block above). This Service
+# exists for in-cluster addressing and to keep `kubectl get svc` meaningful.
+#
+# It WAS a NodePort, and that was worse than useless here: k3d's serverlb
+# publishes 7000-7100 and 6550->6443 and nothing else, while the default
+# service-node-port range is 30000-32767. So the NodePort was allocated,
+# printed by `kubectl get svc` as `8000:32276/TCP`, and unreachable from the
+# host -- an entry that looks exactly like the client's route while being a
+# dead end. Two people read it as the route before it was removed.
+#
+# Why hostPort instead, and why it is safe:
+#   Agones GameServers already reach the host this way -- a hostPort inside
+#   7000-7100 is how map-servers-dotnet-k8s advertises a dialable
+#   127.0.0.1:<port>. Using the same mechanism for the gateway means ONE
+#   exposure mechanism in this deployment rather than two.
+#   The collision risk is real and is handled by SPLITTING the range rather
+#   than borrowing from it: the Agones controller runs with MIN_PORT=7010, so
+#   7000-7009 is reserved for infrastructure and the allocator can never hand
+#   a GameServer the gateway's port. dev-up.sh establishes that floor and
+#   refuses to continue without it, because changing one without the other
+#   brings the collision back as an intermittent Pending GameServer.
+#
+# WHAT A hostPort COSTS, stated plainly: it pins the pod to a node, and only
+# one replica can exist per node. On this single-node k3d that costs nothing.
+# On a multi-node cluster it is the same "works only here" trap as a loopback
+# advertise-host: the gateway would be reachable only on whichever node
+# happened to schedule it. The real-cluster answer is a LoadBalancer Service
+# or an Ingress, at which point BOTH the hostPort and this note go away and
+# this Service becomes the thing clients actually reach.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: rpg-k8s-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: gateway
+  ports:
+    - name: client
+      port: 8000
+      targetPort: client
+      protocol: TCP
+---
+# Metrics stay ClusterIP. Deliberately a SECOND Service rather than a second
+# port on the one above: a NodePort would expose /metrics on the node, and
+# nothing about this endpoint is client-facing.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-metrics
+  namespace: rpg-k8s-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: gateway
+  ports:
+    - name: metrics
+      port: 9102
+      targetPort: metrics
+      protocol: TCP

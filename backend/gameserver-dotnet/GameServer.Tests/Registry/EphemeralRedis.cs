@@ -35,13 +35,44 @@ internal sealed class EphemeralRedis : IAsyncDisposable
     }
 
     /// <summary>
-    /// Start a container and wait until it answers PING.
-    /// Returns null when docker is not usable here (the test then skips).
+    /// The outcome of trying to start the container, kept apart from the container itself
+    /// because <b>the two ways this can fail are not the same kind of event</b> and used to
+    /// be collapsed into one nullable return.
+    /// <para>
+    /// <see cref="DockerUsable"/> false means there is no docker daemon answering here — a
+    /// genuinely absent dependency, and a legitimate skip. <see cref="DockerUsable"/> true
+    /// with a null <see cref="Container"/> means docker answered, <c>docker run</c> was
+    /// attempted, and the container still never became usable: an <b>infrastructure
+    /// failure</b>. Reporting the second as "docker unavailable" is what let 11 registry
+    /// tests vanish from a green run under load (see issue #175).
+    /// </para>
     /// </summary>
-    public static async Task<EphemeralRedis?> TryStartAsync(CancellationToken ct = default)
+    internal readonly record struct StartOutcome(
+        EphemeralRedis? Container, bool DockerUsable, string? Failure);
+
+    /// <summary>
+    /// Start a container and wait until it answers PING.
+    /// <para>
+    /// Never throws; the caller decides whether the outcome is a skip or a failure. See
+    /// <see cref="StartOutcome"/> — the distinction is the point of the return type.
+    /// </para>
+    /// </summary>
+    public static async Task<EphemeralRedis?> TryStartAsync(CancellationToken ct = default) =>
+        (await StartAsync(ct)).Container;
+
+    internal static async Task<StartOutcome> StartAsync(CancellationToken ct = default)
     {
+        // TestDocker.Find() runs `docker version --format {{.Server.Version}}`, which needs
+        // a LIVE daemon, not merely the binary on PATH. So null here covers both "docker is
+        // not installed" and "the daemon is not running" — the two states that are honestly
+        // an absent dependency on a dev box — and non-null means the daemon answered, which
+        // makes everything after this point our problem rather than the environment's.
         string? docker = TestDocker.Find();
-        if (docker is null) return null;
+        if (docker is null)
+        {
+            return new StartOutcome(null, DockerUsable: false,
+                Failure: "no docker daemon answered `docker version`");
+        }
 
         string name = $"rpg-gs-test-redis-{Guid.NewGuid():N}"[..30];
 
@@ -53,35 +84,62 @@ internal sealed class EphemeralRedis : IAsyncDisposable
         // reconnect, every run, because the service was reconnecting to a port that had
         // moved. So the port is leased instead: held until the instant before `docker run`
         // binds it. That is a narrower window than the old release-immediately helper, not
-        // a closed one — see TestPorts.Lease.
-        var lease = new TestPorts.Lease();
-        int port = lease.Port;
-        lease.Dispose();
+        // a closed one — see TestPorts.Lease. So the run is retried on a fresh lease when
+        // the port was taken in that gap. That retry is not cosmetic any more: with the
+        // skip/fail split below, a lost port race would otherwise turn a transient
+        // collision into a hard suite failure.
+        int port = 0;
+        (int ExitCode, string StdOut, string StdErr) run = (-1, "", "never attempted");
 
-        var run = TestDocker.Exec(docker,
-            $"run -d --name {name} -p 127.0.0.1:{port}:6379 {Image}",
-            TimeSpan.FromMinutes(5));
+        for (int attempt = 1; attempt <= 3; attempt++)
+        {
+            using (var lease = new TestPorts.Lease()) { port = lease.Port; }
+
+            run = TestDocker.Exec(docker,
+                $"run -d --name {name} -p 127.0.0.1:{port}:6379 {Image}",
+                TimeSpan.FromMinutes(5));
+
+            if (run.ExitCode == 0) break;
+
+            bool portTaken = run.StdErr.Contains("address already in use", StringComparison.OrdinalIgnoreCase)
+                || run.StdErr.Contains("port is already allocated", StringComparison.OrdinalIgnoreCase);
+            if (!portTaken || attempt == 3) break;
+
+            Console.WriteLine(
+                $"[EphemeralRedis] port {port} was taken between the lease and `docker run`; retrying");
+            TestDocker.Exec(docker, $"rm -f {name}", TimeSpan.FromSeconds(60));
+        }
 
         if (run.ExitCode != 0)
         {
-            Console.WriteLine($"[EphemeralRedis] docker run failed: {run.StdErr.Trim()}");
-            return null;
+            string why = $"`docker run` failed (exit {run.ExitCode}): {run.StdErr.Trim()}";
+            Console.WriteLine($"[EphemeralRedis] {why}");
+            return new StartOutcome(null, DockerUsable: true, Failure: why);
         }
 
         var redis = new EphemeralRedis(docker, name, port);
         if (!await redis.WaitReadyAsync(TimeSpan.FromSeconds(60), ct))
         {
-            Console.WriteLine("[EphemeralRedis] container never became ready");
+            const string why =
+                "the container started but never answered PING within 60s";
+            Console.WriteLine($"[EphemeralRedis] {why}");
             await redis.DisposeAsync();
-            return null;
+            return new StartOutcome(null, DockerUsable: true, Failure: why);
         }
-        return redis;
+        return new StartOutcome(redis, DockerUsable: true, Failure: null);
     }
 
     private async Task<bool> WaitReadyAsync(TimeSpan timeout, CancellationToken ct)
     {
-        var deadline = DateTime.UtcNow + timeout;
-        while (DateTime.UtcNow < deadline)
+        // Stopwatch, not DateTime.UtcNow. This host's CLOCK_REALTIME runs 10-17% fast and
+        // has been observed stepping BACKWARDS (#153, and #175 pins a step arithmetically),
+        // so a wall-clock deadline is not the budget it claims to be: at 17% fast a "60s"
+        // budget expires after ~51s of real time, and a forward step ends it outright.
+        // That turned a slow container start under load into "docker unavailable" and
+        // silently removed 11 registry tests from the run. Stopwatch is monotonic, so the
+        // 60s below is 60 real seconds regardless of what the clock does.
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        while (elapsed.Elapsed < timeout)
         {
             ct.ThrowIfCancellationRequested();
             try
@@ -135,13 +193,25 @@ public sealed class RedisFixture : IAsyncLifetime
 {
     internal EphemeralRedis? Container { get; private set; }
 
+    /// <summary>True when a docker daemon answered — so a missing container is our fault.</summary>
+    private bool _dockerUsable;
+
+    /// <summary>Why the container is missing, when it is.</summary>
+    private string? _failure;
+
     /// <summary>True when a real Redis is available for the tests to use.</summary>
     public bool Available => Container is not null;
 
     /// <summary>Address of the shared container (empty when unavailable).</summary>
     public string Addr => Container?.Addr ?? "";
 
-    public async Task InitializeAsync() => Container = await EphemeralRedis.TryStartAsync();
+    public async Task InitializeAsync()
+    {
+        var outcome = await EphemeralRedis.StartAsync();
+        Container = outcome.Container;
+        _dockerUsable = outcome.DockerUsable;
+        _failure = outcome.Failure;
+    }
 
     public async Task DisposeAsync()
     {
@@ -149,16 +219,47 @@ public sealed class RedisFixture : IAsyncLifetime
     }
 
     /// <summary>
-    /// Skip the calling test — as a REAL xUnit skip — when docker is unavailable.
+    /// Skip the calling test — as a REAL xUnit skip — when docker is genuinely absent, and
+    /// FAIL it when docker is there but the container is not.
     ///
-    /// This must never be a silent early `return`: a soft skip is recorded as
-    /// Passed, so a run with no docker reports the same totals as a full run and
-    /// absence of coverage becomes indistinguishable from coverage. CI always has
-    /// docker, so a skip there is a genuine signal.
+    /// <para>
+    /// A skip must never be a silent early `return`: a soft skip is recorded as Passed, so a
+    /// run with no docker reports the same totals as a full run and absence of coverage
+    /// becomes indistinguishable from coverage. CI always has docker, so a skip there is a
+    /// genuine signal.
+    /// </para>
+    /// <para>
+    /// <b>The same argument is why not every missing container is a skip.</b> This used to
+    /// collapse every cause into one message reading "docker unavailable", including the
+    /// case where docker was plainly available — Postgres-gated tests ran in the same run —
+    /// and only the readiness probe had timed out under load. The effect was that these 11
+    /// registry tests disappeared from a green run, reporting the one cause that had not
+    /// happened, under exactly the load that the timing tests they sit beside exist to
+    /// survive (issue #175). So the two states are now separated:
+    /// </para>
+    /// <list type="bullet">
+    /// <item><b>No docker daemon</b> — an absent dependency. A legitimate skip: a dev box
+    /// without docker cannot run these and should not pretend to.</item>
+    /// <item><b>Docker answered, container never became usable</b> — an infrastructure
+    /// failure, and it FAILS. There is nothing absent to excuse it, the coverage was
+    /// expected to run, and a skip here is the run telling itself a comfortable lie.</item>
+    /// </list>
     /// </summary>
     public void SkipUnlessAvailable(string testName)
     {
-        Skip.IfNot(Available, $"{testName}: docker unavailable, no redis to test against");
+        if (Available) return;
+
+        // Docker genuinely absent (binary missing, or daemon not running): a real skip.
+        Skip.IfNot(_dockerUsable,
+            $"{testName}: no docker daemon on this machine, so there is no redis to test against");
+
+        // Docker answered but we could not get a container. Not an absent dependency —
+        // an environment we broke. Fail, loudly, with the cause that actually happened.
+        throw new InvalidOperationException(
+            $"{testName}: docker IS available, but the redis test container never became usable " +
+            $"— {_failure}. This is an infrastructure failure, not a missing dependency, so it " +
+            "fails rather than skipping: skipping here reported green over 11 unrun registry " +
+            "tests and named a cause that did not happen (issue #175).");
     }
 
     /// <summary>Wipe every key, simulating a fresh/flushed Redis.</summary>

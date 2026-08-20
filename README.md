@@ -25,6 +25,8 @@ that server. Gameplay traffic never passes through the gateway.
 
 📖 **[Core Flow](backend/docs/CORE_FLOW.md)** — end-to-end walkthrough: login→gameplay sequence, tick loop internals, cross-server events, deployment topology, extension seams. ⚠️ Written against the deleted Go game server; parts of it are stale — Architecture Decisions wins any conflict.
 
+🗺️ **[Client/server flow diagram](backend/docs/CLIENT-SERVER-FLOW.drawio)** — draw.io, two pages: the k3d + Agones topology, and the join sequence including all four `FindServer` outcomes and which of them allocate. Drawn against a live cluster and a passing deploy; the state it depicts is stamped on the diagram.
+
 ### Backend Modules
 
 | Module | Path | Description |

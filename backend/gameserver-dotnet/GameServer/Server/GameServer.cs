@@ -72,10 +72,66 @@ public class ServerOptions
     /// </summary>
     public int KeyframeInterval { get; set; } = GameConstants.DefaultKeyframeInterval;
 
+    /// <summary>
+    /// Threads the AOI gather may spread itself over. <b>One is serial and is the
+    /// default</b>, i.e. exactly the loop that shipped before the worker pool existed.
+    ///
+    /// <para>Above one, the gather is split across that many world-owned worker threads,
+    /// but only once the tick has at least <c>TickLoop.GatherParallelMinViewers</c>
+    /// viewers. It is opt-in rather than automatic because the measured gain is
+    /// conditional: a gain at 500 viewers on both available measurements (1.8-2.4x at four
+    /// workers phase-level, 2.0-2.7x through the tick), disputed at 200, and a loss at 50.
+    /// Do not raise it without re-running <c>AoiGatherBenchmark</c> on the target hardware
+    /// -- the numbers above come from a 12-core developer box that also hosts the load
+    /// generator (ADR-7).</para>
+    /// </summary>
+    public int GatherWorkers { get; set; } = 1;
+
     public TimeSpan HoldTtl { get; set; } = TimeSpan.FromSeconds(30);
     public TimeSpan SaveInterval { get; set; } = TimeSpan.FromSeconds(30);
     public IPlayerStore? PlayerStore { get; set; }
     public IAgonesSdk? AgonesSdk { get; set; }
+
+    /// <summary>
+    /// Host to advertise instead of the Agones node address — <c>GAMESERVER_ADVERTISE_HOST</c> /
+    /// <c>--advertise-host</c>. <b>Host only, no port</b>, and read <b>only</b> when Agones is
+    /// enabled and its status read succeeded.
+    ///
+    /// <para>It exists because <c>status.address</c> is the node's address on the cluster
+    /// network and a client outside that network cannot dial it: on k3d the status says
+    /// <c>172.20.0.3</c> and the address that answers is <c>127.0.0.1</c>, published by the
+    /// serverlb. Agones knows the port and cannot know the host; this supplies the host and
+    /// never the port.</para>
+    ///
+    /// <para>Not to be confused with <c>GAMESERVER_PUBLIC_ADDR</c>
+    /// (<see cref="RegistrationOptions.PublicAddr"/>), which is a full <c>host:port</c> and
+    /// is what gets advertised when Agones is <b>off</b>. Exactly one of the two applies in
+    /// any given deployment.</para>
+    /// </summary>
+    public string? AdvertiseHost { get; set; }
+
+    /// <summary>
+    /// Hold the registry entry back until this pod's Agones GameServer reaches
+    /// <c>Allocated</c>, instead of publishing it right after Ready —
+    /// <c>GAMESERVER_REGISTER_ON_ALLOCATED</c> / <c>--register-on-allocated</c>.
+    ///
+    /// <para><b>Default false, which is the behaviour that shipped.</b> A fleet that has not
+    /// been migrated must not change behaviour because this code exists; the flag is the
+    /// migration.</para>
+    ///
+    /// <para><b>Inert unless Agones is enabled.</b> Outside a cluster — docker-compose, a
+    /// local run, every test — there is no allocation to wait for, so gating on one would
+    /// mean never registering at all. <see cref="IAgonesSdk.IsEnabled"/> is checked before
+    /// this flag is honoured.</para>
+    ///
+    /// <para>What it buys: a <c>Ready</c> but unallocated replica holds no registry entry, so
+    /// it is genuinely spare and <c>FindServer</c> cannot hand live players a pod Agones is
+    /// free to delete on the next scale-down (ADR-18 decision 4, mechanism 2). It narrows
+    /// ADR-14 decision 3, which put registration after Ready — Ready is still a precondition,
+    /// it is simply no longer sufficient.</para>
+    /// </summary>
+    public bool RegisterOnAllocated { get; set; }
+
     public IEventStream? EventStream { get; set; }
     public ILoggerFactory? LoggerFactory { get; set; }
 
@@ -141,6 +197,9 @@ public sealed class GameServerHost : IAsyncDisposable
 {
     private readonly ServerOptions _options;
     private readonly EcsWorld _world;
+
+    /// <summary>Resolved <see cref="ServerOptions.GatherWorkers"/>; 1 means serial.</summary>
+    private readonly int _gatherWorkers;
     private readonly ConnectionManager _connections;
     private readonly TickLoop _tickLoop;
     private readonly AsyncSaver _saver;
@@ -166,6 +225,13 @@ public sealed class GameServerHost : IAsyncDisposable
 
     private readonly RegistrationService? _registration;
 
+    /// <summary>
+    /// The background wait for <c>Allocated</c> and the registration that follows it, when
+    /// <see cref="ServerOptions.RegisterOnAllocated"/> is armed. Null on every other path.
+    /// Held so shutdown can observe it rather than leave it dangling.
+    /// </summary>
+    private Task? _gatedRegistration;
+
     private ITransportListener? _listener;
     private CancellationTokenSource? _cts;
 
@@ -188,6 +254,9 @@ public sealed class GameServerHost : IAsyncDisposable
     /// <summary>0 until the first ShutdownAsync caller wins the race, 1 afterwards.</summary>
     private int _shutdownStarted;
 
+    /// <summary>0 until the first player join has reported Allocate to Agones, 1 afterwards.</summary>
+    private int _allocateReported;
+
     /// <summary>Completed when the single real teardown finishes (or faults).</summary>
     private readonly TaskCompletionSource _shutdownComplete =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -207,6 +276,17 @@ public sealed class GameServerHost : IAsyncDisposable
 
     /// <summary>Current simulation tick number.</summary>
     public ulong CurrentTick => _tickLoop.CurrentTick;
+
+    /// <summary>
+    /// The <b>measured</b> base-tick rate in Hz over the last completed window — as opposed
+    /// to <see cref="ServerOptions.SimulationRates"/>, which is what was configured. 0 until
+    /// the first window completes.
+    ///
+    /// <para>Derived entirely from <see cref="System.Diagnostics.Stopwatch"/>. Publishing
+    /// this is what stops an observer deriving a rate from <c>current_tick / uptime</c>,
+    /// which mixes clocks and reported a healthy 60Hz loop as 54Hz (#147, #153).</para>
+    /// </summary>
+    public double AchievedTickHz => _tickLoop.AchievedTickHz;
 
     /// <summary>Number of enemies currently alive.</summary>
     /// <summary>
@@ -240,7 +320,10 @@ public sealed class GameServerHost : IAsyncDisposable
         }
 
         _metrics = options.Metrics;
-        _world = new EcsWorld();
+        // Worker slots exist for the gather; the simulation schedule is still serial.
+        // One slot is the old world exactly.
+        _gatherWorkers = options.GatherWorkers < 1 ? 1 : options.GatherWorkers;
+        _world = new EcsWorld(_gatherWorkers);
         _metrics?.SetEntityCountProvider(() => _world.EntityCount);
         _connections = new ConnectionManager();
         _playerStore = options.PlayerStore ?? new MemoryPlayerStore();
@@ -295,7 +378,13 @@ public sealed class GameServerHost : IAsyncDisposable
             _loggerFactory.CreateLogger<TickLoop>(),
             _metrics,
             options.KeyframeInterval,
-            simulationPhase);
+            simulationPhase,
+            AchievedRateMeter.DefaultWindowSeconds,
+            _gatherWorkers);
+
+        // Wired here rather than next to the entity-count provider above, because the tick
+        // loop that owns the meter does not exist until this line.
+        _metrics?.SetAchievedTickHzProvider(() => _tickLoop.AchievedTickHz);
 
         _saver = new AsyncSaver(
             _playerStore,
@@ -352,23 +441,177 @@ public sealed class GameServerHost : IAsyncDisposable
             "Game server listening on {Addr} via {Transport} (mode={Mode}, map={MapId}, id={ServerId})",
             actualAddr, _listener.Kind, _options.Mode, _options.MapId, _options.ServerId);
 
-        // Mark ready with Agones
+        // Mark ready with Agones. The listener is already bound at this point, so Ready
+        // never claims a server that is not accepting. HttpAgonesSdk swallows sidecar
+        // failures, so this cannot throw and cannot delay the registration below by more
+        // than its request timeout.
         await _agonesSdk.ReadyAsync();
+
+        // Learn the address Agones gave us, and advertise THAT (ADR-15 decision 2, option A).
+        //
+        // Under `portPolicy: Dynamic` the host port is chosen by the scheduler, so no
+        // configuration can name it: the fleet manifest passes `--addr=:9000` and sets no
+        // GAMESERVER_PUBLIC_ADDR, and without this read the server registers the hostless
+        // `:9000`, which the gateway hands to the client verbatim and the client cannot
+        // dial. That — not the health loop — is why the Agones path has never carried a
+        // player.
+        //
+        // The read sits HERE and nowhere else: after ReadyAsync, because the address only
+        // exists once the pod is scheduled, and before StartAsync, because the first thing
+        // written to Redis must already be the right value rather than a wrong one repaired
+        // a heartbeat later.
+        //
+        // Every failure mode falls back to the configured address, which is what running
+        // outside a cluster must keep doing. GetAddressAsync never throws and returns null
+        // on anything it cannot use.
+        if (_agonesSdk.IsEnabled && _registration != null)
+        {
+            var assigned = await _agonesSdk.GetAddressAsync();
+            if (assigned != null)
+            {
+                var configured = _registration.PublicAddr;
+
+                // The port is always Agones'. Only the host can be overridden, and it has to
+                // be: status.address is the node address on the cluster network, which a
+                // client outside that network cannot dial (measured on k3d — the status says
+                // 172.20.0.3 and the address that answers is 127.0.0.1, published by the
+                // serverlb). Configuration supplying the port instead would put us straight
+                // back into the bug this whole path exists to fix.
+                var hostOverride = AgonesGameServerAddress.NormalizeHostOverride(
+                    _options.AdvertiseHost, _logger);
+                var advertised = hostOverride == null ? assigned : assigned.WithHost(hostOverride);
+
+                _registration.OverridePublicAddr(advertised.ToString());
+
+                // One line, deliberately naming where each half came from. When this is
+                // wrong in production it is wrong silently — the server runs, the registry
+                // looks healthy, and only the client knows — so the diagnosis has to be
+                // sitting in the log before anyone goes looking for it.
+                _logger.LogInformation(
+                    "Advertising {Advertised} (host from {HostSource}, port {Port} from Agones status); " +
+                    "configured value '{Configured}' not used",
+                    advertised,
+                    hostOverride == null
+                        ? "Agones status.address"
+                        : "GAMESERVER_ADVERTISE_HOST",
+                    advertised.Port,
+                    configured);
+
+                if (hostOverride == null)
+                {
+                    // Not an error — inside the cluster it is right — but it is the single
+                    // most likely reason a client cannot connect to a working server.
+                    _logger.LogInformation(
+                        "GAMESERVER_ADVERTISE_HOST is unset, so clients are handed the Agones node " +
+                        "address '{Host}'. That is correct only where the node itself is reachable; " +
+                        "set it to the host clients actually dial (the load-balancer or ingress " +
+                        "address) if they are outside the cluster network.",
+                        advertised.Address);
+                }
+            }
+            else
+            {
+                // GAMESERVER_ADVERTISE_HOST is deliberately NOT applied here. Without the
+                // status read there is no Agones port to pair it with, and pairing the
+                // override host with a CONFIGURED port would invent an address that was
+                // never assigned to anything — a plausible-looking value pointing nowhere,
+                // which is worse to debug than the honestly-wrong configured one.
+                _logger.LogWarning(
+                    "Agones is enabled but its GameServer status could not be read; advertising " +
+                    "the configured address '{Configured}' unchanged. Under portPolicy: Dynamic " +
+                    "that value is almost certainly not dialable by a client. " +
+                    "GAMESERVER_ADVERTISE_HOST is not applied without a port from Agones.",
+                    _registration.PublicAddr);
+            }
+        }
 
         // Publish ourselves into the server registry the gateway reads, and keep the
         // entry alive. Done after the listener is up so we never advertise an address
         // that is not accepting yet — and after the bind, so a port=0 ephemeral listen
         // advertises the port it actually got.
+        //
+        // It is also deliberately after ReadyAsync (ADR-14 decision 3): registering first
+        // would advertise an address that Agones may still be about to kill, which is the
+        // ordering that lets the two writers — Agones over pod lifecycle, this server over
+        // the Redis `map_id -> server` entry — disagree about whether the server exists.
+        // On shutdown the order reverses: deregister first, then Agones Shutdown.
+        //
+        // Under GAMESERVER_REGISTER_ON_ALLOCATED the entry is held back further still, until
+        // Agones reports this GameServer as Allocated (ADR-18 decision 4, mechanism 2). That
+        // narrows ADR-14 decision 3 rather than reversing it: Ready still comes first and is
+        // still a precondition — it has simply stopped being sufficient, because on a fleet
+        // whose replicas all carry one GAMESERVER_MAP_ID a second Ready pod is a second live
+        // server for that map with no allocation involved.
+        //
+        // The wait runs OFF this path, in the background, and that is load-bearing in two
+        // ways: the health loop below has to be pinging while a buffer pod sits unallocated
+        // (a pod that blocks here never pings and Agones kills it), and the listener has to
+        // be accepting, because a client that reaches a just-allocated pod directly should
+        // not be refused while the state read is still in flight.
         if (_registration != null)
         {
-            await _registration.StartAsync(_cts.Token);
+            if (_options.RegisterOnAllocated && _agonesSdk.IsEnabled)
+            {
+                var gateLogger = _loggerFactory.CreateLogger("AgonesAllocationGate");
+                var gateCt = _cts.Token;
+                _gatedRegistration = Task.Run(async () =>
+                {
+                    try
+                    {
+                        if (!await AgonesAllocationGate.WaitForAllocatedAsync(
+                                _agonesSdk, gateCt, gateLogger))
+                        {
+                            // Cancelled: shutting down before ever being allocated. Nothing
+                            // was published, so there is nothing to take away.
+                            return;
+                        }
+
+                        await _registration.StartAsync(gateCt);
+                    }
+                    catch (OperationCanceledException) { /* shutdown raced the gate */ }
+                    catch (Exception ex)
+                    {
+                        // An unobserved exception here would take the process down at a GC
+                        // rather than at the fault. Registration failure is already
+                        // non-fatal everywhere else and stays so here.
+                        _logger.LogError(ex,
+                            "Gated registration failed; this server will not appear in the registry");
+                    }
+                }, CancellationToken.None);
+            }
+            else
+            {
+                if (_options.RegisterOnAllocated && !_agonesSdk.IsEnabled)
+                {
+                    // Honouring the flag here would mean waiting for an allocation that
+                    // cannot happen, i.e. never registering. Say so rather than hanging.
+                    _logger.LogWarning(
+                        "GAMESERVER_REGISTER_ON_ALLOCATED is set but Agones is disabled, so it is " +
+                        "IGNORED — there is no GameServer object to reach Allocated. Registering " +
+                        "at startup as usual.");
+                }
+
+                await _registration.StartAsync(_cts.Token);
+            }
         }
 
         // Start background tasks
         var tickTask = _tickLoop.RunAsync(_cts.Token);
         var saveTask = _saver.RunAsync(_cts.Token);
-        var healthTask = AgonesHealthLoop.RunAsync(_agonesSdk, TimeSpan.FromSeconds(2), _cts.Token,
-            _loggerFactory.CreateLogger("AgonesHealth"));
+
+        // The health loop only runs against a real SDK (ADR-14 decision 4). Pinging
+        // NoopAgonesSdk logged "health loop started" and then reported nothing to anyone,
+        // which reads in a log exactly like a working liveness contract.
+        //
+        // 2s, against the dotnet fleet manifest's health periodSeconds: 5 — two pings per
+        // window, so one dropped request is not a strike. Once the manifest's
+        // `disabled: true` comes off, a tick loop that starves this task long enough is a
+        // pod restart; ADR-13's overload path (drop the backlog, resynchronise) is what
+        // keeps a merely-slow server from being killed as a dead one.
+        var healthTask = _agonesSdk.IsEnabled
+            ? AgonesHealthLoop.RunAsync(_agonesSdk, TimeSpan.FromSeconds(2), _cts.Token,
+                _loggerFactory.CreateLogger("AgonesHealth"))
+            : Task.CompletedTask;
 
         // Accept loop
         var acceptTask = AcceptLoopAsync(_cts.Token);
@@ -435,6 +678,18 @@ public sealed class GameServerHost : IAsyncDisposable
 
             _connections.CloseAll();
 
+            // Settle the allocation gate before deregistering. It is already cancelled by
+            // the Cancel above, but it can be mid-flight between "state read said Allocated"
+            // and "StartAsync", and a registration landing AFTER the deregistration would
+            // leave an entry pointing at a server that is gone until the 15s TTL reaped it —
+            // the gateway would hand clients a black hole for that whole window. Bounded, so
+            // a wedged sidecar read cannot hold up a drain.
+            if (_gatedRegistration != null)
+            {
+                try { await _gatedRegistration.WaitAsync(TimeSpan.FromSeconds(5)); }
+                catch { /* cancelled, faulted or too slow; deregistration below covers it */ }
+            }
+
             // Leave the registry before the final save: the point is to stop the
             // gateway handing new clients to a server that is going away, rather than
             // making them wait out the heartbeat TTL on a black hole.
@@ -459,6 +714,44 @@ public sealed class GameServerHost : IAsyncDisposable
             _shutdownComplete.TrySetException(ex);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Report Allocate to Agones the first time a player lands here (ADR-14).
+    ///
+    /// <para>Exactly once per process, and never on the join's critical path: Agones' own
+    /// allocation call already moves the GameServer to Allocated when the gateway allocates
+    /// through the API, so this is the self-allocating case (a client that reaches a Ready
+    /// pod directly) and a slow sidecar must not delay the player's join response by even
+    /// one request timeout.</para>
+    ///
+    /// <para>Not balanced by anything on the way down. Agones has no un-allocate: an
+    /// Allocated GameServer leaves that state by being shut down, which is what
+    /// <see cref="ShutdownAsync"/> reports. So a map server that empties stays Allocated
+    /// until it is drained — correct for the dungeon lifecycle, and for a map server it
+    /// means the fleet will not re-hand this pod out. Revisit alongside ADR-2's map-fleet
+    /// allocator policy, which is a precondition of ADR-14 stage 5 anyway.</para>
+    /// </summary>
+    private void NotifyAgonesAllocatedOnce()
+    {
+        if (!_agonesSdk.IsEnabled)
+            return;
+        if (Interlocked.Exchange(ref _allocateReported, 1) != 0)
+            return;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await _agonesSdk.AllocateAsync();
+            }
+            catch (Exception ex)
+            {
+                // HttpAgonesSdk does not throw; this guards a custom implementation from
+                // taking the process down through an unobserved task exception.
+                _logger.LogWarning(ex, "Agones Allocate failed");
+            }
+        });
     }
 
     private async Task AcceptLoopAsync(CancellationToken ct)
@@ -541,6 +834,21 @@ public sealed class GameServerHost : IAsyncDisposable
             // Step 4: Check capacity
             if (_connections.Count >= _options.Capacity)
             {
+                // LOG IT. This refusal used to be silent: SendError told the client and
+                // nothing told the operator, so a server turning players away and a server
+                // that was broken produced identical logs — zero lines either way. That is
+                // how a 120-player run stopped dead at 100 joins with no explanation on the
+                // server side at all (#145).
+                //
+                // Warning, not Information: the number being hit is an admission limit that
+                // was chosen (GAMESERVER_CAPACITY), so hitting it is the signal that the
+                // choice needs revisiting — and it is exactly the same event the gateway
+                // sees as "this server is full, skip it" when it reads PlayerCount and
+                // Capacity out of the registry.
+                _logger.LogWarning(
+                    "Join rejected for {UserId}: server at capacity {Connections}/{Capacity}. " +
+                    "This is the configured admission limit (GAMESERVER_CAPACITY), not a resource limit",
+                    claims.UserId, _connections.Count, _options.Capacity);
                 await SendError(tempConn, "Server is full");
                 tempConn.Close();
                 return;
@@ -618,6 +926,7 @@ public sealed class GameServerHost : IAsyncDisposable
             // Fire-and-forget: the gateway's capacity view should be fresh, but a slow
             // or down Redis must never delay a player entering the world.
             _registration?.NotifyPlayerCountChanged();
+            NotifyAgonesAllocatedOnce();
             _logger.LogInformation("Player {UserId} joined (total: {Count})", userId, _connections.Count);
 
             // Step 5: Send JoinTokenResp

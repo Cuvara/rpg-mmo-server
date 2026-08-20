@@ -197,12 +197,48 @@ func TestAgonesAllocator_UnknownKind(t *testing.T) {
 	}
 }
 
+// The default map fleet must name the fleet that actually exists. It named the
+// retired Go fleet (`map-servers-dev`) until 2026-08-17 and nothing caught it:
+// the allocator never validates the name, so the failure only appeared at the
+// first allocation.
+func TestAgonesConfig_DefaultMapFleetIsTheDeployedFleet(t *testing.T) {
+	const deployed = "map-servers-dotnet-dev"
+	if DefaultFleetMap != deployed {
+		t.Errorf("DefaultFleetMap = %q, want %q (the only deployed fleet; keep in step with backend/deploy/agones/)",
+			DefaultFleetMap, deployed)
+	}
+}
+
+// No dungeon fleet is deployed, so a dungeon allocation must fail as a
+// configuration error naming the flag to set — not as a Kubernetes 404 for a
+// fleet that never existed.
+func TestAgonesAllocator_DungeonKindUnconfiguredByDefault(t *testing.T) {
+	alloc := newAgonesAllocator(http.DefaultClient, "http://unused", AgonesConfig{})
+	if _, ok := alloc.fleets[KindDungeon]; ok {
+		t.Fatalf("dungeon fleet is configured by default: %+v", alloc.fleets)
+	}
+
+	_, err := alloc.Allocate(context.Background(), AllocationRequest{Kind: KindDungeon, MapID: "d"})
+	if !errors.Is(err, ErrKindNotConfigured) {
+		t.Fatalf("Allocate(dungeon) error = %v, want ErrKindNotConfigured", err)
+	}
+	if !strings.Contains(err.Error(), "ALLOCATOR_FLEET_DUNGEON") {
+		t.Errorf("error %q does not name the setting that fixes it", err)
+	}
+
+	// Explicitly configured, it works again.
+	configured := newAgonesAllocator(http.DefaultClient, "http://unused", AgonesConfig{FleetDungeon: "fleet-dungeon"})
+	if configured.fleets[KindDungeon] != "fleet-dungeon" {
+		t.Errorf("fleets = %+v, want the configured dungeon fleet", configured.fleets)
+	}
+}
+
 func TestAgonesConfig_Defaults(t *testing.T) {
 	alloc := newAgonesAllocator(http.DefaultClient, "http://unused/", AgonesConfig{})
 	if alloc.namespace != DefaultNamespace {
 		t.Errorf("namespace = %s, want %s", alloc.namespace, DefaultNamespace)
 	}
-	if alloc.fleets[KindMap] != DefaultFleetMap || alloc.fleets[KindDungeon] != DefaultFleetDungeon {
+	if alloc.fleets[KindMap] != DefaultFleetMap {
 		t.Errorf("fleets = %+v", alloc.fleets)
 	}
 	if alloc.capacity != DefaultCapacity || alloc.timeout != DefaultTimeout {

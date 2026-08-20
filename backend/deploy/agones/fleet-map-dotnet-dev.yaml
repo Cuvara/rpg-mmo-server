@@ -1,15 +1,41 @@
-# DEV variant of fleet-map.yaml for the .NET (C#) game server.
+# DEV map-server fleet for the C# (.NET 10 NativeAOT) game server.
 #
-# Identical to fleet-map-dev.yaml except:
-#   * image        : rpg-mmo/gameserver-dotnet:dev
-#   * resources    : higher baseline (NativeAOT binary uses ~30-45MB vs Go ~20MB)
-#                    requests 200m CPU / 128Mi, limits 500m CPU / 256Mi
+# This is the ONLY fleet manifest in this directory. The Go-image fleets
+# (fleet-map*.yaml, fleet-dungeon*.yaml) were deleted: the Go game server was
+# removed in 670a803 together with its Dockerfile, so those manifests described
+# software that cannot be built and `kubectl apply` on them produced pods with
+# no code behind them. There is no dungeon fleet yet — dungeon instancing is
+# ADR-14 stage 6 and does not exist in the C# server, where `--mode=dungeon`
+# only widens the disconnect hold window.
 #
-# Image must be present in the cluster's image store:
-#   Docker Desktop k8s : nothing to do — it shares the Docker image store.
-#   k3d                : k3d image import rpg-mmo/gameserver-dotnet:dev -c rpg-dev
-#   real k3s           : docker save rpg-mmo/gameserver-dotnet:dev | \
-#                          sudo k3s ctr images import -
+# Applied by k3s/setup-dev.sh. Validate before applying:
+#   python3 ../k3s/validate-manifests.py
+#   kubectl apply --dry-run=server -f fleet-map-dotnet-dev.yaml
+#
+# ---------------------------------------------------------------------------
+# THE IMAGE TAG IS A CLAIM, NOT A FACT.
+# ---------------------------------------------------------------------------
+# `imagePullPolicy: IfNotPresent` on Docker Desktop resolves `rpg-mmo/
+# gameserver-dotnet:dev` straight out of the host daemon's image store — no
+# registry, no import. That convenience is also the trap: whatever `:dev`
+# happened to point at last is what runs, and a fleet deployed against a stale
+# `:dev` comes up green while proving nothing. This has already happened once —
+# the `:dev` in the store on 2026-08-17 was built 5.4 hours BEFORE the commit
+# that added the real Agones SDK, so a pod from it ran the no-op SDK while the
+# manifest, the ADR and the operator all believed otherwise.
+#
+# So REBUILD AND VERIFY before every apply (docs/K3S.md "Deploying the dotnet
+# fleet" has the copy-paste form):
+#   cd backend && docker build -f deploy/docker/Dockerfile.gameserver-dotnet \
+#       --build-arg GIT_REVISION="$(git rev-parse HEAD)" \
+#       -t rpg-mmo/gameserver-dotnet:dev .
+#   docker image inspect rpg-mmo/gameserver-dotnet:dev \
+#       --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+#   # must equal `git rev-parse HEAD` of the branch under test
+#
+# On k3d/real k3s the store is NOT shared and the image must be imported:
+#   k3d image import rpg-mmo/gameserver-dotnet:dev -c rpg-dev
+#   docker save rpg-mmo/gameserver-dotnet:dev | sudo k3s ctr images import -
 apiVersion: agones.dev/v1
 kind: Fleet
 metadata:
@@ -20,6 +46,14 @@ metadata:
     rpg-mmo/role: map
     rpg-mmo/runtime: dotnet
 spec:
+  # ONE. Not a starting point to tune upwards.
+  #
+  # Every pod from this template carries the same GAMESERVER_MAP_ID and every
+  # pod self-registers under it in Redis (ADR-14 decision 2). Two replicas
+  # therefore means two servers claiming map_01 with two disconnected copies of
+  # the world — ADR-2's one-live-server-per-map_id invariant broken by the
+  # replica count alone, with no allocation involved. Scaling the map fleet
+  # needs a per-pod map id first, which does not exist.
   replicas: 1
   scheduling: Packed
   template:
@@ -29,10 +63,60 @@ spec:
         rpg-mmo/runtime: dotnet
     spec:
       ports:
+        # `name: game` is a CONTRACT, not a label. The gateway's allocator reads
+        # the allocation response and picks the port whose name is exactly
+        # "game" (gateway/registry/agones_allocator.go, const gamePortName);
+        # renaming it makes every allocation fail with
+        # `no "game" port in allocation status`.
         - name: game
           containerPort: 9000
-          protocol: TCP
+          protocol: TCP  # UDP when the fleet moves to KCP; see TRANSPORT_KEY below
+          # Dynamic on purpose — do NOT switch to Static.
+          # Agones assigns the host port at scheduling time and reports it on
+          # GameServer.status.ports. Static would make containerPort == hostPort
+          # and let a literal address be configured, at the cost of what
+          # `scheduling: Packed` is for: one GameServer per port per node, so the
+          # second map server to land on this node collides with the first.
+          # ADR-15 decision 2 considered and rejected it (option B).
           portPolicy: Dynamic
+      # HEALTH IS ON. It was disabled for exactly two stages and both reasons
+      # are now spent.
+      #
+      # The first ("the C# Agones SDK is a no-op") died with commit 62131f5,
+      # which landed HttpAgonesSdk: it really does POST /ready, /health,
+      # /allocate and /shutdown to the sidecar, with a health loop at a 2s
+      # interval against the 5s periodSeconds below.
+      #
+      # The second ("none of it has ever run against a real sidecar") died with
+      # ADR-14 stage 4, run deliberately WITH the flag so that a pod which
+      # failed to reach Ready showed up as a pod that failed to reach Ready,
+      # instead of as a restart loop hiding which of image / secret / sidecar /
+      # SDK was wrong. That run passed: a pod reached Ready, self-registered,
+      # and served a client through the full gateway->join->snapshot flow.
+      #
+      # Removing the flag was then its own step with its own check, which is
+      # this change. MEASURED on k3d-rpg-dev, image
+      # rpg-mmo/gameserver-dotnet:integration (revision 4d928e7, identical to
+      # develop over gameserver-dotnet/ and shared/): a single pod held Ready
+      # for a sustained observation window with RESTARTS = 0, i.e. far longer
+      # than the 25s (initialDelaySeconds + periodSeconds * failureThreshold)
+      # that a stalled ping would take to kill it. Numbers in
+      # deploy/CHANGELOG.md and docs/K3S.md.
+      #
+      # WHAT THIS NOW COUPLES. The health ping shares a process with the 60Hz
+      # tick loop, so a tick loop that stalls past 15s starves the ping and
+      # Agones kills the pod — availability is now tied to simulation latency,
+      # which it was not while the flag was set. ADR-13's overload path (drop
+      # the backlog and resynchronise rather than chase it) is what keeps a
+      # merely-slow server from being killed as a dead one; the CPU limit above
+      # was raised 500m -> 1000m for the same reason, because CFS throttling
+      # shows up as missed ticks and a throttled server is now a killed server.
+      # That path is NOT proven under real overload here — see docs/K3S.md.
+      #
+      # The three timings are unchanged from when they were inert: the Agones v1
+      # Fleet schema has disabled, initialDelaySeconds, periodSeconds and
+      # failureThreshold as four independent optional properties, so dropping
+      # `disabled` leaves the policy exactly as it was written.
       health:
         initialDelaySeconds: 10
         periodSeconds: 5
@@ -43,25 +127,155 @@ spec:
             - name: gameserver
               image: rpg-mmo/gameserver-dotnet:dev
               imagePullPolicy: IfNotPresent
-              args:
-                - "--mode=map"
-                - "--map-id=map_01"
-                - "--addr=:9000"
-                - "--agones"
-                # Uncomment to share the registry/event stream with a gateway
-                # running outside the cluster (needs REDIS_ADDR below):
-                # - "--redis"
+              # Configuration is by environment, not by args.
+              #
+              # Both channels work (GameServer/Program.cs GetArg accepts
+              # `--flag value` and `--flag=value` alike), but mixing them splits
+              # the fleet's configuration across two blocks that a reader has to
+              # merge by hand, and the env block is the one that matches
+              # docker-compose.yml. There is deliberately no `args:` block at
+              # all — even `--agones`, which has AGONES_ENABLED=true as its exact
+              # env twin (Program.cs: `HasFlag("--agones") || AGONES_ENABLED ==
+              # "true"`).
               env:
+                # ---------------------------------------------------------
+                # SERVER-ID CHAIN — POD_NAME must stay the ONLY source.
+                # ---------------------------------------------------------
+                # The join token is pinned to a server id (`sid` claim) and the
+                # game server rejects any token whose sid is not its own
+                # ("Token is for a different server",
+                # GameServer/Server/GameServer.cs) — a mandatory check with no
+                # empty-value bypass. The chain that has to hold:
+                #
+                #   Agones GameServer name -> pod name (Agones names the pod
+                #   after the GameServer) -> POD_NAME -> serverId in Program.cs
+                #   -> the Redis registry entry -> the `sid` the gateway signs
+                #   -> what the pod compares against on join.
+                #
+                # DO NOT ADD GAMESERVER_ID HERE. Program.cs resolves
+                # `--server-id ?? GAMESERVER_ID ?? POD_NAME ?? gs-<guid>`, so
+                # GAMESERVER_ID WINS over POD_NAME. docker-compose.yml sets
+                # GAMESERVER_ID=gs-dotnet-map_01 and is right to — one static
+                # container, one static id. Copying that line into this env
+                # block (the natural thing to do when the two are compared)
+                # gives every pod in the fleet the same hardcoded id while the
+                # allocator hands the client the GameServer's real name, and
+                # every join is then rejected for a reason the error message
+                # does not mention. The difference between the two env blocks
+                # is deliberate.
                 - name: POD_NAME
                   valueFrom:
                     fieldRef:
                       fieldPath: metadata.name
+                # Turns on the Agones SDK path. With HttpAgonesSdk merged this
+                # is no longer a no-op: the server POSTs /ready after it binds
+                # and before it registers into Redis, then runs the health loop.
+                - name: AGONES_ENABLED
+                  value: "true"
+                # AGONES_SDK_HTTP_PORT is deliberately NOT set. Agones injects it
+                # into the game-server container itself, and the SDK reads it
+                # with a 9358 default (GameServer/Agones/AgonesSdk.cs,
+                # PortEnvVar/DefaultPort). Setting it here would pin a value that
+                # the controller is free to change per pod. Confirm on the live
+                # pod during stage 4:
+                #   kubectl exec -n rpg-realtime <pod> -c gameserver -- env | grep AGONES
+                - name: GAMESERVER_MODE
+                  value: "map"
+                - name: GAMESERVER_MAP_ID
+                  value: "map_01"
+                - name: GAMESERVER_ADDR
+                  value: ":9000"
+                # GAMESERVER_PUBLIC_ADDR IS ABSENT ON PURPOSE. DO NOT ADD IT.
+                #
+                # It is the address handed to the client verbatim in
+                # MsgEnterWorldResp.ServerAddr, so it must be dialable BY THE
+                # CLIENT. Under portPolicy: Dynamic the host port is chosen by
+                # the scheduler at pod creation, so NO value written in this file
+                # can be correct — a literal here is wrong for every pod except
+                # by coincidence, and wrong silently: the gateway forwards it
+                # without ever dialing it, and the client just fails to connect.
+                #
+                # The fix is not a manifest value. The server reads its own
+                # address from the Agones sidecar's GameServer status
+                # (status.address plus the port named "game") and registers THAT
+                # — ADR-15 decision 2, option (A), in flight on
+                # feat/gameserver/agones-status-address. Until that lands, the
+                # server falls back to the listen address and advertises a
+                # hostless ":9000"; a client cannot dial it, which is precisely
+                # why ADR-14 stage 5 (end-to-end allocation) is blocked on the
+                # status read and stage 4 (no restart loop) is not.
+                #
+                # Note also that status.address is the NODE address. It is
+                # routable from wherever the node is routable and no further;
+                # reaching it from a phone is an ingress question this does not
+                # answer.
+                #
+                # GAMESERVER_ADVERTISE_HOST — the HOST HALF of that address, and
+                # only the host half.
+                #
+                # The status read alone is not enough on k3d. MEASURED: Agones
+                # reports status.address = 172.20.0.3, the node CONTAINER's
+                # Docker-network address — correct inside the cluster and NOT
+                # DIALABLE BY A CLIENT. What works is 127.0.0.1:<agones-assigned
+                # -port>, published by the k3d serverlb, reachable from both
+                # Windows (where the Unity client runs) and WSL2.
+                #
+                # So the advertised address is composed from TWO sources:
+                #   <GAMESERVER_ADVERTISE_HOST or status.address>:<Agones port>
+                # The PORT IS NEVER CONFIGURABLE — it is assigned per pod at
+                # scheduling time, and supplying it is the entire purpose of the
+                # sidecar status read. That is exactly why this is not
+                # GAMESERVER_PUBLIC_ADDR (above), which replaces the whole
+                # address and therefore cannot carry a port it does not know.
+                # DO NOT SET BOTH: GAMESERVER_PUBLIC_ADDR is read only when
+                # Agones is OFF.
+                #
+                # Host only — IPv4, IPv6 (bare or bracketed), or a hostname.
+                # Misuse is caught rather than silently applied: set with Agones
+                # off -> warned and ignored; set to a full host:port -> warned,
+                # host honoured, port discarded; blank -> treated as unset. And
+                # on a failed status read the override is ignored ENTIRELY, so
+                # no half-composed address is ever registered.
+                #
+                # `optional: true` is right here and is not the REDIS_ADDR case:
+                # absent/blank is a MEANINGFUL, HANDLED state (advertise
+                # status.address unmodified), not a silent misconfiguration.
+                # k3s/setup-dev.sh writes the key per cluster kind — 127.0.0.1
+                # on k3d, EMPTY on docker-desktop, where no value can be correct
+                # because Kubernetes hostPort is never published to the host.
+                #
+                # SINGLE-NODE ONLY. See docs/K3S.md — one well-known host can
+                # serve every pod exactly because this is one node with a
+                # published port range. On a multi-node cluster the right host
+                # differs per pod and one env var on the fleet cannot say so.
+                - name: GAMESERVER_ADVERTISE_HOST
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: advertise-host
+                      optional: true
                 - name: JWT_SECRET
-                  value: "dev-secret-change-me"
-                # Signs/verifies the gateway->gameserver join token. Must match the
-                # gateway's JOIN_TOKEN_SECRET, and is deliberately NOT JWT_SECRET.
+                  valueFrom:
+                    secretKeyRef:
+                      name: rpg-realtime-secrets
+                      key: jwt-secret
+                # Verifies the gateway->gameserver join token. MUST hold the same
+                # value as the gateway's JOIN_TOKEN_SECRET or every join fails
+                # signature verification, and must NOT equal JWT_SECRET: this
+                # value is on every game-server pod, so a compromised pod must
+                # not be able to forge client auth tokens.
+                #
+                # Neither key is `optional: true`. A missing key fails container
+                # creation with a visible CreateContainerConfigError, which is
+                # what you want: `optional` on jwt-secret would start a server
+                # that silently rejects every token, and the binary exits 2 on a
+                # missing JOIN_TOKEN_SECRET anyway, i.e. a crash loop instead of
+                # a clear config error.
                 - name: JOIN_TOKEN_SECRET
-                  value: "dev-join-secret-change-me"
+                  valueFrom:
+                    secretKeyRef:
+                      name: rpg-realtime-secrets
+                      key: join-token-secret
                 # Multi-rate simulation. SIM_CRITICAL_HZ is the BASE tick rate;
                 # the other two must divide it exactly and must not exceed it, or
                 # the container exits 2 at startup instead of rounding — which
@@ -75,17 +289,173 @@ spec:
                   value: "15"
                 - name: SIM_BACKGROUND_HZ
                   value: "5"
+                # -----------------------------------------------------------
+                # ADMISSION LIMIT — 100 IS NOW A DECISION, NOT A DEFAULT.
+                # -----------------------------------------------------------
+                # Unset, Program.cs falls back to a compiled-in 100. That is
+                # what stopped a 120-player load run at exactly 100 joins with
+                # 20 clients refused — not CPU, not memory, not the simulation
+                # (#145). The value is not local to the pod either: it is
+                # published into the Redis registry and the gateway enforces it
+                # (FindServer skips a server whose PlayerCount >= Capacity), so
+                # the fleet's admission limit was an unset environment variable
+                # inheriting a constant.
+                #
+                # WHAT 100 IS JUSTIFIED BY. 100 concurrent players were observed
+                # on this fleet with tick p99 at 0.49ms against a 66.67ms
+                # budget (0.7%), 0% of ticks over budget at any level, 240m of a
+                # 1000m CPU limit and 54Mi of a 256Mi memory limit. So 100 is a
+                # level this fleet has actually run, measured, on this hardware.
+                #
+                # WHY IT IS NOT HIGHER, GIVEN THAT HEADROOM. Because headroom at
+                # 100 is not evidence about 150. Two distortions sit on every
+                # number above and both push the same way:
+                #   - the load generator shares this box with the server under
+                #     test and uses more CPU than it (ADR-7). Tick p99 on this
+                #     host has read 67.4-70.8ms quiet and 224.7-240.6ms with a
+                #     deploy sharing it, a 3.3x swing, so every tick figure here
+                #     is a lower bound of unknown tightness.
+                #   - on k3d every gameplay packet crosses the serverlb TCP
+                #     proxy (#143), the likeliest cause of the 1252.9ms ack p99
+                #     seen at 80 players while tick p99 stayed at 0.49ms.
+                # ADR-7 therefore still says the per-server ceiling is UNKNOWN.
+                # This repo has already had to retract one number invented from
+                # apparent headroom (the "150 players per server" figure), and
+                # raising this one on the same evidence would be that again.
+                #
+                # RAISE IT WHEN, AND ONLY WHEN: ADR-7's load-generator blocker
+                # is cleared (a separate machine) and #143 is cleared, and a run
+                # on that setup brackets a real ceiling. Then this number moves
+                # with the measurement cited next to it.
+                - name: GAMESERVER_CAPACITY
+                  value: "100"
+                # The data tier stays in docker compose ON THE HOST — that is
+                # deliberate (ADR-15 decision 4 argues against a split, and this
+                # fleet is the accepted exception for one stage, not a migration).
+                # The value therefore has to name the HOST from inside a pod, and
+                # that string is cluster-specific and NOT portable:
+                # host.docker.internal on Docker Desktop, host.k3d.internal on
+                # k3d, neither anywhere else. It lives in the ConfigMap rather
+                # than here for exactly that reason — k3s/setup-dev.sh picks it
+                # from the kubectl context, with a POD_REDIS_ADDR override.
+                #
+                # NOT `optional: true`. An absent ConfigMap would leave
+                # REDIS_ADDR unset, and an unset REDIS_ADDR is not an error in
+                # the server — it just runs without registering, so the pod is
+                # Ready, the logs are clean, and the gateway can never find it.
+                # A CreateContainerConfigError is the better failure.
                 - name: REDIS_ADDR
-                  value: "host.docker.internal:6379"
-                # Leave GAME_DB_URL unset => in-memory player store. To persist:
-                # - name: GAME_DB_URL
-                #   value: "postgres://game:localdev@host.docker.internal:5433/gamestate?sslmode=disable"
-                - name: LOG_LEVEL
-                  value: "debug"
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: redis-addr
+                - name: REDIS_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: rpg-realtime-secrets
+                      key: redis-password
+                      optional: true
+                # /metrics + /healthz. Not published as an Agones port: nothing
+                # scrapes the cluster yet (monitoring/prometheus.yaml scrapes the
+                # compose network). Add a second named port when it does — but
+                # NOT named "game".
+                - name: METRICS_ADDR
+                  value: ":9101"
+                # PERSISTENCE. Unset or blank => in-memory player store and
+                # state lost on every pod replacement, which under a Fleet is
+                # not an edge case: any rollout, eviction or health kill takes
+                # the world with it.
+                #
+                # The value is a DSN CARRYING A PASSWORD, so it lives in the
+                # Secret and never in this file or the ConfigMap. k3s/setup-dev.sh
+                # writes the key, translating the compose host for a pod:
+                #   compose : postgres://game:...@postgres-game:5432/gamestate
+                #   pod/k3d : postgres://game:...@host.k3d.internal:5433/gamestate
+                # The pod form is the HOST-PUBLISHED port (5433), not the
+                # in-network 5432 — a pod is not on the compose network, so it
+                # reaches postgres the same way any host process does. MEASURED
+                # from a pod in this namespace: `psql -h host.k3d.internal -p
+                # 5433 -U game -d gamestate -c '\dt'` lists player_states and
+                # schema_migrations.
+                #
+                # `optional: true`, and that is deliberate, matching
+                # advertise-host and NOT redis-addr. Absent/blank is a
+                # MEANINGFUL, HANDLED state: Program.cs treats a whitespace-only
+                # value as unset and logs "using in-memory player store
+                # (GAME_DB_URL unset -- state is lost on restart)". It has to
+                # stay reachable, because on docker-desktop no host string makes
+                # the compose-hosted postgres addressable from a pod, so there is
+                # no correct value to require there.
+                #
+                # A wrong value does NOT degrade silently: a configured but
+                # unreachable database makes the server log
+                # "postgres player store unavailable -- refusing to start" and
+                # exit 1, i.e. a visible crash-looping GameServer, not a server
+                # quietly holding state in RAM.
+                - name: GAME_DB_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: rpg-realtime-secrets
+                      key: game-db-url
+                      optional: true
+                # KCP is not enabled on this fleet (protocol: TCP above), so
+                # TRANSPORT_KEY is unused — and the server WARNS if it is set
+                # while the transport is TCP, because the key is then ignored.
+                # It is still carried in the Secret so that turning KCP on is a
+                # two-line change here rather than a new secret-distribution
+                # problem discovered at the wrong moment. To enable:
+                #   protocol: UDP above, GAMESERVER_TRANSPORT=kcp here, the same
+                #   TRANSPORT_KEY on the gateway, and ALLOCATOR_TRANSPORT=kcp so
+                #   the gateway announces the right transport.
+                # - name: GAMESERVER_TRANSPORT
+                #   value: "kcp"
+                # - name: TRANSPORT_KEY
+                #   valueFrom:
+                #     secretKeyRef:
+                #       name: rpg-realtime-secrets
+                #       key: transport-key
+                # LOG_LEVEL was here and was removed: `grep -rn LOG_LEVEL
+                # backend/gameserver-dotnet/GameServer/` returns nothing. The C#
+                # server pins the console logger to Information in Program.cs and
+                # reads no level from the environment, so the variable set a
+                # value nobody consumed while reading as if verbosity were
+                # configured. Do not re-add it until the binary reads it.
+              # Sized against measurement, not against habit
+              # (backend/docs/BENCHMARK.md): ~30 MiB resident idle, ~50 MiB at
+              # 100 players, ~82 MiB at 200 — the highest number the benchmark
+              # ever recorded. 128Mi request sits above the working set the pod
+              # actually holds most of the time; 256Mi limit is ~3x the measured
+              # peak, which is the headroom the GC wants and no more.
+              #
+              # CPU limit raised 500m -> 1000m. At 200 players the benchmark
+              # measured 47.3% of one core, i.e. ~473m, which is INSIDE a 500m
+              # limit only by rounding — and CFS throttling there does not show
+              # up as "slow", it shows up as missed ticks, and once health is
+              # enabled a throttled server is a killed server. The box is 12
+              # cores and runs one of these pods; a limit that is never reached
+              # costs nothing. The 200m request is unchanged and still generous:
+              # idle is ~3% of a core, and NativeAOT cold start is 1.54s from
+              # `docker run` to "Game server listening", so there is no burst at
+              # startup to reserve for either.
+              #
+              # CPU REQUEST 200m -> 250m (#145). `scheduling: Packed` packs pods
+              # by REQUEST, so a request that describes idle rather than load is
+              # a scheduler that overcommits a node under exactly the conditions
+              # that matter. Measured peak on this fleet at 100 players is 240m;
+              # 200m was below it, 250m is above it. The limit is untouched at
+              # 1000m — this changes what the scheduler reserves, not what the
+              # pod may use.
+              #
+              # The MEMORY request stays 128Mi deliberately: measured peak at
+              # 100 players is 54Mi and the highest figure BENCHMARK.md has ever
+              # recorded is 82Mi at 200 players, so 128Mi already sits above
+              # load, not at idle. Both requests are now above measured peak,
+              # which is the property that was missing, and neither is a guess
+              # about a player count nobody has run.
               resources:
                 requests:
                   memory: "128Mi"
-                  cpu: "200m"
+                  cpu: "250m"
                 limits:
                   memory: "256Mi"
-                  cpu: "500m"
+                  cpu: "1000m"

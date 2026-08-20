@@ -1,0 +1,158 @@
+name: Shared.GameLogic release reminder
+
+# `publish-shared-gamelogic.yml` derives its tag from Shared.GameLogic/package.json and
+# skips when that tag already exists:
+#
+#     if git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
+#       echo "exists=true" ...          # -> Create tag and Create Release are skipped
+#
+# So if Shared.GameLogic changes land without a version bump, the publish job runs,
+# reports **success**, and releases nothing. Nobody investigates a green run.
+#
+# The consequence is not "a release is late". The client consumes SGL as a UPM git
+# package pinned to a tag, so an unreleased change is a change the client can never
+# receive — while `Packages/manifest.json` still points at a tag that resolves fine and
+# every build stays green. And the golden vectors, the one cross-language check there is,
+# replay fixtures from that pinned package: they keep validating the old behaviour and
+# keep passing.
+#
+# THE TEST IS CONTENT, NOT COMMIT COUNT, and that distinction is not academic. The first
+# version of this job counted commits between the tag and HEAD touching the path. On a
+# squash-merge repo that is meaningless: the squash commit on `main` carries a new sha and
+# no parent link to develop's individual commits, so the count re-includes everything the
+# squash already absorbed. It reported **8 unreleased commits** on `develop` — listing,
+# among them, the release commit that created the tag — while `sgl-v0.1.9`, `develop` and
+# `main` all held the byte-identical tree `ae67c33c`. Nothing was unreleased at all.
+#
+# Comparing `git rev-parse <ref>:<path>` is immune to how the merge was made, which is the
+# same reason `cleanup-branches.yml` compares trees rather than trusting `--merged`.
+#
+# WARN before the promotion, FAIL after it. Batching several SGL commits and bumping once
+# before promoting is a legitimate way to work, so a pre-promotion warning must not block
+# it. On `main` the mistake has already shipped — the publish has run and released
+# nothing — and that is a defect, not a reminder.
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'backend/gameserver-dotnet/Shared.GameLogic/**'
+      - '.github/workflows/sgl-release-reminder.yml'
+  pull_request:
+    paths:
+      - 'backend/gameserver-dotnet/Shared.GameLogic/**'
+      - '.github/workflows/sgl-release-reminder.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sgl-release-reminder-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unreleased:
+    name: Shared.GameLogic changes are covered by a version bump
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tags are the whole question. The default shallow fetch has none, which
+          # would make every version look unreleased.
+          fetch-depth: 0
+
+      - name: Compare Shared.GameLogic against its published tag
+        env:
+          SGL: backend/gameserver-dotnet/Shared.GameLogic
+        run: |
+          set -uo pipefail
+
+          VERSION=$(python3 -c "import json;print(json.load(open('${SGL}/package.json'))['version'])")
+          TAG="sgl-v${VERSION}"
+          echo "package.json : ${VERSION}"
+          echo "tag          : ${TAG}"
+
+          # On main this is a defect; anywhere else it is a reminder.
+          ON_MAIN=0
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]] && ON_MAIN=1
+
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            {
+              echo "### ${TAG} is not published yet"
+              echo ""
+              echo "\`${SGL}/package.json\` says **${VERSION}** and no \`${TAG}\` tag exists."
+              echo ""
+              echo "This is the normal state right after a version bump. \`publish-shared-gamelogic.yml\`"
+              echo "creates the tag and the release when this lands on \`main\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice title=Bump not yet released::${TAG} does not exist. publish-shared-gamelogic.yml will create it when this reaches main."
+            exit 0
+          fi
+
+          TAG_SHA=$(git rev-list -n 1 "${TAG}")
+
+          # Compare the TREE of Shared.GameLogic, not the commit count between the tag
+          # and HEAD. This repo squash-merges: the squash commit on main has a new sha
+          # and no parent link to develop's individual commits, so `git rev-list
+          # tag..HEAD -- <path>` re-counts every commit the squash already absorbed.
+          # That reports unreleased work when the content is byte-identical — and the
+          # list it prints even includes the release commit that created the tag.
+          # Measured 2026-08-19: it claimed 8 unreleased commits while all three of
+          # sgl-v0.1.9, develop and main held the identical tree ae67c33c.
+          TAG_TREE=$(git rev-parse "${TAG}:${SGL}" 2>/dev/null || echo "missing")
+          HEAD_TREE=$(git rev-parse "HEAD:${SGL}" 2>/dev/null || echo "missing")
+
+          if [[ "${TAG_TREE}" == "${HEAD_TREE}" ]]; then
+            {
+              echo "### Shared.GameLogic is fully released"
+              echo ""
+              echo "\`${TAG}\` (\`${TAG_SHA:0:8}\`) and this ref hold the identical \`${SGL}/\` tree"
+              echo "(\`${HEAD_TREE:0:12}\`), so there is nothing unreleased."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice title=In sync::${TAG} covers all Shared.GameLogic commits on this ref."
+            exit 0
+          fi
+
+          # Content differs. Show WHAT differs — the file-level diff is the honest
+          # artefact here, since commit topology is unreliable across a squash merge.
+          FILES=$(git diff --stat "${TAG}" HEAD -- "${SGL}/" | tail -20)
+
+          {
+            echo "### Shared.GameLogic has unreleased changes"
+            echo ""
+            echo "\`package.json\` still says **${VERSION}**, and \`${TAG}\` already points at"
+            echo "\`${TAG_SHA:0:8}\`, whose \`${SGL}/\` tree differs from this ref's:"
+            echo ""
+            echo '```'
+            echo "${FILES}"
+            echo '```'
+            echo ""
+            if (( ON_MAIN == 1 )); then
+              echo "**This is on \`main\`, so the publish has already run and released nothing.**"
+              echo "\`publish-shared-gamelogic.yml\` skips tag and release creation when the tag exists,"
+              echo "and reports success either way — the green run above published nothing."
+              echo ""
+              echo "The client cannot receive these changes. It consumes Shared.GameLogic as a UPM git"
+              echo "package pinned to a tag, so an unreleased commit is one it can never resolve, while"
+              echo "\`Packages/manifest.json\` keeps pointing at a tag that works and every build stays"
+              echo "green. The golden vectors replay fixtures from that pinned package, so they are"
+              echo "validating \`${TAG}\`'s behaviour and will not notice."
+              echo ""
+              echo "**Fix:** bump \`${SGL}/package.json\`, land it on \`main\`, and let the publish workflow"
+              echo "cut the new tag. Then bump the client's \`manifest.json\` **and** \`packages-lock.json\`."
+            else
+              echo "Batching several commits and bumping once before promoting is fine — this is a"
+              echo "reminder, not a failure. **Bump \`${SGL}/package.json\` before this reaches \`main\`.**"
+              echo "If it lands unbumped, the publish workflow will run, skip both the tag and the"
+              echo "release because \`${TAG}\` already exists, and report success having published nothing."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if (( ON_MAIN == 1 )); then
+            echo "::error title=Publish was a no-op::Shared.GameLogic content on main differs from tag ${TAG} while package.json still says ${VERSION}. publish-shared-gamelogic.yml skipped tag and release creation and still reported success. The client can never receive these changes."
+            exit 1
+          fi
+
+          echo "::warning title=Bump needed before promotion::Shared.GameLogic content differs from ${TAG}, but package.json is still ${VERSION}. Bump it before this reaches main, or the publish will silently release nothing."

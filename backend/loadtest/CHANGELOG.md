@@ -6,7 +6,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **Closed the last gap in the #153 clock audit: `BENCHMARK.md` claimed to cover "every figure
+  in this document" and its table covered only the loadtest-derived ones.** Three figure
+  classes were unaudited: `host.load_avg_1/_5/_15` (read verbatim from `/proc/loadavg` in
+  `load/host.go`, no interval taken — clean), §23's allocation B/tick
+  (`GC.GetAllocatedBytesForCurrentThread` over a fixed 60-tick loop, no clock read — clean),
+  and Part V's brute-vs-indexed microsecond columns. The last one **cannot be traced**: the
+  paired in-process A/B harness was never committed (`2e3e5db` carries `SpatialGrid`,
+  `EcsWorld` and `AoiIndexDifferentialTests` and no benchmark), so the clock behind
+  77-136 µs / 1380-1514 µs is unreadable from the repo. The numbers are **kept and marked**,
+  not deleted — deleting them would destroy the record of a measurement that was taken, and a
+  10-17% skew cannot touch a 2.8x result. They are downgraded to order-of-magnitude, Part V's
+  conclusion is unchanged because it rests on within-run ratios where a shared skew cancels,
+  and the replacement is named: re-run the A/B with a committed harness that states its clock,
+  the way `SnapshotAllocationTests.cs` does. Refs #153.
+- **Audited the generator's clock discipline against the host-clock hazard (#153), and it is
+  clean — no code change needed.** `CLOCK_REALTIME` on this box runs 10-17% fast against
+  `CLOCK_MONOTONIC`, which would corrupt any rate derived from it, so every interval the
+  generator computes was traced to source. All of them are monotonic: the measurement window
+  (`time.Since(windowStart)`), the server-side scrape window
+  (`afterGS.At.Sub(beforeGS.At)`, both `At` set from `time.Now()` at scrape time), snapshot
+  interval (`now.Sub(lastSnap)`), ack latency and join latency. Go embeds a monotonic reading
+  in every `time.Now()` and `Time.Sub`/`time.Since` prefer it, and nothing in `load/` strips
+  that reading — no `.UTC()`, `.Round()`, `.Truncate()` or string round-trip stands between a
+  timestamp and its subtraction. Recorded here because the property is load-bearing and
+  silent: introducing any of those calls on a `time.Time`, or reading a duration off a
+  server-supplied wall-clock field, would degrade every rate the tool reports by 10-17% with
+  no test failing. Refs #153.
+
+### Fixed
+- **Virtual players are no longer evicted for outliving the heartbeat (#142).**
+  Both peers send `MsgPing` every 10s and close any connection that has not
+  answered with `MsgPong` within 30s (`Connection.cs`, `gateway/server/connection.go`),
+  and the generator answered on neither hop: `readLoop` skipped every non-snapshot
+  frame, and the `-hold-gateway` socket had no reader at all. Every run longer
+  than the 30s timeout therefore lost players mid-flight while the server itself
+  was healthy — with the giveaway that a *slower* ramp failed *more*, because it
+  kept the run alive longer (80 players lost 30 at ramp 10/s and 65 at ramp 3/s).
+  Players now answer on the game-server socket, on the held gateway socket, and
+  during the handshake round-trips, echoing the probe's timestamp unchanged and
+  replying in the connection's own encoding.
+
 ### Added
+- `heartbeats_total` and `gateway_heartbeats_total` in the JSON result. Heartbeat
+  frames are deliberately excluded from `snapshots_total`, the snapshot-interval
+  distribution, `recv%` and both byte counters — a `MsgPing`/`MsgPong` is harness
+  upkeep, not gameplay, and folding it in would bias the very throughput figures
+  this harness exists to make trustworthy. Zero on a run longer than 10s is the
+  signal that the heartbeat is unanswered again.
 - The generator now reconstructs authoritative state with `SnapshotState`, so it
   resolves interned entity handles the way a real client must. Without this it
   would consume handle-only entities with empty ids and report a smaller

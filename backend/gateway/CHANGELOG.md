@@ -5,7 +5,240 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **A momentarily exhausted fleet no longer gets the terminal "do not retry"
+  answer** (#152). `EnterWorld` collapsed two unlike conditions into one message:
+  *this map has live servers and all are full* (`registry.go:408`, stable, ADR-2
+  forbids growing out of it) and *this map has no live server and the allocation
+  API answered `UnAllocated`* (`registry.go:559`), which routinely clears in
+  seconds as the Fleet controller brings a replacement pod to `Ready` — 5.38s
+  measured on k3d (ADR-18). The second now answers with a new retryable message,
+  `all servers busy, retry shortly`, distinct from both
+  `no server available for map` (this map is full — terminal) and
+  `server is starting, retry shortly` (a server *was* allocated and is booting).
+  No registry change was needed: `allocateAndWait` already wraps with a two-verb
+  `%w`, so `registry.ErrNoCapacity` was matchable at the gateway all along — only
+  a new `case`, ordered **before** `ErrNoServerAvailable` so the broader sentinel
+  cannot swallow the narrower one.
+- **The retryable branch is narrowed to `ErrNoCapacity` alone, and that is what
+  keeps it off the pod leak.** The terminal answer existed because every retry
+  allocates and Agones has no un-allocate; that reason does not hold here, because
+  `UnAllocated` is a decoded 2xx body stating no GameServer was handed out — a
+  retry costs one allocation POST and **no pod**, and the retry that succeeds
+  usually costs not even that, since pods self-register at startup before any
+  allocation (ADR-18) and the next `EnterWorld` then resolves on the registry
+  path. Every *other* allocator failure (transport error, non-2xx status,
+  undecodable body) may have allocated a pod whose response was lost, so those
+  keep the terminal message. A gateway-side wait for fleet capacity was
+  considered and **rejected**: it would turn a millisecond refusal into a
+  multi-second stall on the join path for a condition that may never clear, and
+  the bound belongs to the client's backoff. Named, not fixed: nothing caps how
+  often a client may retry, so N clients retrying sequentially drive up to N
+  allocation POSTs per round against the Agones API — API load, not a leak.
+  Tests cover the new classification, the narrowing, the two-verb `%w`
+  matchability, and that all six client-facing `EnterWorld` messages are
+  pairwise distinct.
+
+### Documentation
+- **Audited the gateway's clock discipline for #153; it derives no rates, and one true
+  wall-clock interval was found and left unfixed.** The gateway contributes no figure to
+  `backend/docs/BENCHMARK.md` (nothing there is measured through it), but it was checked rather
+  than assumed. Every `rate` in the module is a rate *limiter* — a configured policy, not a
+  measurement — and `shared/ratelimit` refills from `now.Sub(b.last)` with both endpoints from
+  `time.Now()`, so it is monotonic and correct. Session `CreatedAt`/`LastActivity` are
+  wall-clock stamps rather than intervals, and expiry is enforced by Redis' own TTL, not by
+  arithmetic in Go. **The exception is the heartbeat**: `server/connection.go` tests
+  `time.Since(time.UnixMilli(last)) > pongTimeout`, and `time.UnixMilli` returns a `time.Time`
+  carrying **no** monotonic reading (verified — a monotonic-bearing `time.Time` renders a
+  trailing `m=+…` and the rebuilt one does not), so `time.Since` degrades to wall-clock
+  subtraction. Consequence: `MaxHandlerBlockingWait = pongTimeout - pingInterval` asserts a 20s
+  margin and the gateway refuses to start with `--allocation-wait-timeout` above it, but the
+  allocation wait is a monotonic context deadline while the pong timeout is wall-clock — the two
+  sides of that margin run on different clocks. On this host a nominal 30s pong budget elapses
+  in ~25.7s real, making the enforced margin ~17.1s rather than 20s. The 15s default still fits,
+  so nothing is broken today. Not specific to this box either: a wall clock can be stepped by
+  NTP on any host, which is the standard reason timeouts come from a monotonic source. **Left
+  unfixed deliberately** — runtime behaviour, not a document figure, and a heartbeat timeout
+  change wants its own commit and tests. Refs #153.
+
+### Fixed
+- **A client was handed a game server for a map it did not ask for, and every
+  layer reported success.** Reproduced on a live k3d Agones fleet: with
+  `ALLOCATOR=agones` and a fleet serving `map_01`, `MsgEnterWorld{map_id:
+  "map_77"}` allocated a pod, minted a valid join token for it, and answered with
+  its address; the client joined, played and the smoke test passed. The cause is a
+  chain of individually reasonable steps — allocation targets a **Fleet**, never a
+  `map_id`; the wait that follows polls the registry by **`ServerID`**; and a pod
+  self-registers under its fleet's own `GAMESERVER_MAP_ID` at boot — so the poll
+  found the pod's *pre-existing* `map_01` entry on its first read and returned a
+  healthy server for the wrong world. Nothing compared the two maps. `FindServer`
+  now does, on the allocation path *and* on the registry path, and refuses with a
+  new `ErrFleetMapMismatch`. Deliberately **not** a flavour of
+  `ErrNoServerAvailable`: that one says "the map is full, grow the fleet", this one
+  says "the fleet you configured hosts a different map, fix `GAMESERVER_MAP_ID`" —
+  opposite operator responses, so collapsing them sends the operator to the wrong
+  knob. The registry-path check is a store-integrity check rather than a fleet one
+  (`FindByMapID` is keyed by `map_id`, so an entry for another map means the index
+  is lying) and it refuses rather than filtering: a silent filter degrades into
+  "no server for this map" and, with an allocator configured, into an allocation
+  the map does not need.
+- **The same bug leaked GameServers without bound.** Because the pod registers
+  under `map_01`, `map_77` is still unregistered afterwards, so the *next* request
+  allocated another pod — three watched going `Allocated` for one retry loop, none
+  ever reclaimed (Agones has no un-allocate, this codebase has no `Deallocate`).
+  The existing single-flight does not help: it merges callers that overlap in
+  time, and a client retrying is sequential. A guard that only rejects *after*
+  allocating still burns a pod per attempt, so a proven mismatch is now remembered
+  per `map_id` for `--allocation-mismatch-ttl` / `ALLOCATION_MISMATCH_TTL`
+  (default **60s**, negative disables and is logged loudly), consulted **before**
+  the allocation API is called. Bound: **one GameServer per `map_id` per TTL**,
+  asserted by a test. This is a deliberate exception to allocation's "never cache
+  a failure" rule, and the difference is the failure's nature: a transient failure
+  (Redis blip, momentarily exhausted fleet) fixes itself in seconds, so caching it
+  poisons a map that was about to work; a fleet's map is fixed for the life of its
+  pods, so no retry can turn the answer into "yes" while each retry costs a pod
+  permanently. The TTL keeps the cache from outliving its truth — a fleet
+  redeployed with the right map is usable again within a minute, no restart.
+- **`MsgEnterWorld` no longer invites the retry that drives the leak.** A map the
+  deployment cannot serve now answers `map is not available` — terminal, and
+  distinct from both `server is starting, retry shortly` (retryable) and
+  `no server available for map` (the map exists but is full). It names no fleet,
+  namespace or server id.
+
+  **Not fixed, and out of this module's reach:** the gateway still cannot make a
+  fleet serve an arbitrary map. The real answer is patching the allocated pod's
+  `GAMESERVER_MAP_ID` through `GameServerAllocation` metadata, which requires the
+  C# game server to read its map from the pod's annotations instead of the env var
+  baked into the fleet spec (`backend/gameserver-dotnet/` + `backend/deploy/`).
+  The gateway also has no map catalogue, so "a map that does not exist in the
+  game" and "a map whose fleet is not deployed yet" are indistinguishable here.
+- **The Agones allocator's default map fleet named a fleet that no longer
+  exists.** `DefaultFleetMap` was `map-servers-dev` — the retired **Go** fleet,
+  whose game server was deleted in `670a803` and whose manifests are gone from
+  the repo. The replacement is `map-servers-dotnet-dev`, and it is now the
+  default. The old value failed in the worst possible way: `NewAgonesAllocator`
+  only builds a REST client and never validates the fleet name, so a gateway with
+  `ALLOCATOR=agones` started perfectly and broke at the **first allocation** —
+  the one code path that matters, at the one moment it matters. A test now pins
+  the constant to the deployed fleet name so the next rename fails in CI instead
+  of in the cluster.
+- **`DefaultFleetDungeon` removed rather than repointed.** No dungeon fleet
+  exists (ADR-14 stage 6 unstarted), so any default would be the same trap one
+  generation later. A kind with no configured fleet is no longer registered at
+  all, and `Allocate(KindDungeon)` fails immediately with the new
+  `ErrKindNotConfigured`, naming `--allocator-fleet-dungeon` /
+  `ALLOCATOR_FLEET_DUNGEON` — a configuration error stated as one, instead of a
+  Kubernetes 404 for a fleet that was never going to be there.
+
+  **Not done, deliberately: validating the fleet at construction.** It would make
+  gateway start-up depend on cluster reachability — and the gateway is the
+  redirector that must come up *during* a cluster outage — and reading a Fleet
+  needs `get fleets` RBAC the gateway does not have and should not be granted (it
+  holds exactly `create gameserverallocations`), so it would emit a 403
+  indistinguishable from a missing fleet. The constant-vs-deployed-name test is
+  the compensating control.
+
+### Changed
+- **Allocation is now single-flight per `map_id`.** Concurrent `MsgEnterWorld`
+  calls for one unserved map produced one allocation **each**. Because only one
+  of those pods can ever win the `map_id` registration (ADR-2) and nothing
+  deallocates the rest — Agones does not reclaim an `Allocated` GameServer and
+  this codebase has no `Deallocate` path — the losers leak. The retry this
+  gateway explicitly asks clients to perform (`server is starting, retry
+  shortly`) turned that into a feedback loop: retry → map still unserved →
+  another pod → another retry. On a `replicas: 1` fleet one reconnecting player
+  could exhaust the fleet.
+
+  The first caller allocates and waits; callers arriving while that runs share
+  its outcome. A failed allocation is **not** cached, so one transient failure
+  cannot poison a map until restart. The leader's work is detached from its own
+  caller's context, so a leader that hangs up does not abort the allocation its
+  followers are waiting on. Different `map_id`s never block each other, and the
+  existing-server path never touches the lock. Implemented as a ~40-line
+  map-of-channels rather than adding `golang.org/x/sync/singleflight`: the module
+  has no `golang.org/x/sync` dependency today, and the package's extra surface is
+  unused here.
+
+- **The gateway refuses to start with an allocation wait that would starve the
+  client heartbeat**, and the default wait came down **20s → 15s**. A connection
+  is served by one goroutine: the read loop does not read the next frame —
+  including `MsgPong` — until the current handler returns. `handleEnterWorld` is
+  now the one handler that blocks for a configurable time, so a large
+  `--allocation-wait-timeout` stops pongs from being recorded and `HeartbeatLoop`
+  closes the connection after `pongTimeout` (30s): the gateway would drop the very
+  client it was waiting for, with a symptom that points nowhere near the cause.
+
+  The coupling is now explicit as `server.MaxHandlerBlockingWait` =
+  `pongTimeout - pingInterval` = **20s**, `cmd/gateway` exits 1 above it (same
+  fail-fast precedent as a missing `JOIN_TOKEN_SECRET`), and a test asserts the
+  default stays strictly under it — the old 20s default sat exactly on the
+  ceiling with no room for scheduling or poll-interval slop.
+
+- **Allocation can no longer split a world: a full map is refused, not given a
+  second server.** `registry.FindServer` used to call the allocator whenever *no
+  server had spare capacity* — which includes a map whose single live server is
+  simply full — and then registered the result under the same `map_id`. That
+  breaks the MVP invariant of one live game server per `map_id` (ADR-2): two
+  instances are two disconnected copies of the world, players on them cannot see
+  or interact with each other, and there is no handoff between them. The branch
+  was unreachable while allocation could not produce a live server; enabling
+  `ALLOCATOR=agones` makes it reachable.
+
+  Allocation now fires **only when the map has zero live servers**. Live but all
+  full returns `ErrNoServerAvailable` with no allocator call, i.e. the existing
+  client-visible `no server available for map`. Refusing a join is a loud,
+  bounded failure; a silently split world is not — this is deliberately not a
+  fallback. The multi-server warning in `FindServer` is unchanged and is now the
+  detector for the invariant being broken by any other route.
+
+- **The join token is minted only once the target server is actually dialable.**
+  Join tokens are single-use, pinned to one server id and live 30s
+  (`constants.JoinTokenTTL`). `transfer.AssignMapKeyring` minted one the moment
+  `FindServer` returned — including for a pod Agones had only just allocated,
+  which still has to start its NativeAOT container, bind, report `Ready` to the
+  sidecar, learn its own address and self-register. If that took longer than 30s
+  the client burned its only token on an address that was not answering.
+
+  On the allocation path `FindServer` now polls the registry for the allocated
+  `ServerID` and returns the entry **the game server wrote about itself**; the
+  token, `ServerAddr` and `Transport` all come from that entry, so the client is
+  given the self-reported, dialable address rather than the allocation response's
+  guess. The gateway no longer writes that entry on the server's behalf — two
+  writers on one datum is forbidden (ADR-1) and a gateway-written entry has
+  nothing re-arming its 15s TTL. The already-registered path is unchanged: no
+  allocator call, no polling, no added latency (asserted by test).
+
+  `gateway_allocations_total{result="ok"}` now means "allocated **and** the pod
+  registered"; a pod that never registers counts as `result="fail"`.
+
+- `--allocator-transport` / `ALLOCATOR_TRANSPORT` is now **inert**. It stamps a
+  transport onto the allocation response, and that response is used only for its
+  `ServerID`; the transport announced to a client always comes from the pod's own
+  registry entry. The flag is retained but is a candidate for removal.
+
 ### Added
+- `registry.ErrServerStarting` and the client-facing
+  `server is starting, retry shortly`: a distinct, **retryable** EnterWorld
+  failure for "a server was allocated for this map but has not finished booting".
+  A client can now tell it apart from `no server available for map` (full or
+  unavailable — do not retry). No token and no address are handed out with it,
+  and it leaks no internal detail. Matchable with `errors.Is`.
+- `--allocation-wait-timeout` / `ALLOCATION_WAIT_TIMEOUT` (default **15s**) and
+  `--allocation-poll-interval` / `ALLOCATION_POLL_INTERVAL` (default **250ms**)
+  bound that wait (flag wins, then env, then default; an unparseable or
+  non-positive env value is logged and ignored rather than failing start-up).
+  15s is a deliberate compromise while pod cold start is unmeasured: longer than
+  `retryTotalTimeout`'s 10s because a pod start is far heavier than a Redis blip,
+  below `JoinTokenTTL` (30s) so the wait can never outlast the token minted after
+  it, and strictly below `server.MaxHandlerBlockingWait` (20s) so it cannot starve
+  the connection's heartbeat. Also exposed programmatically as
+  `registry.WithAllocationWait`.
+- `registry.ErrKindNotConfigured`: the allocator has no Fleet for the requested
+  kind. `KindDungeon` returns it by default now that `DefaultFleetDungeon` is
+  gone.
+- `server.MaxHandlerBlockingWait` (`pongTimeout - pingInterval` = 20s): the
+  longest a message handler may block the connection's read loop before starving
+  its heartbeat. Exported so `cmd/gateway` can refuse a wait above it.
 - **Per-request logging for the client handshake — the gateway was invisible.**
   A live run of the netcode sample completed a full handshake (Nakama device
   auth → `gateway_token` → map assignment → direct join → snapshots streaming)

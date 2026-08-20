@@ -165,7 +165,8 @@ resolve ────────────────────────
 test-shared ─┬─ test-gateway ─────┬─ build-gateway ───────────┐    │
              ├─ test-gameserver ──┼─ build-gameserver ────────┤    │
              ├─ test-smoketest ───┼─ build-smoketest ─────────┤    │
-             ├─ test-nakama ──────┴─ build-plugin ────────────┤    │
+             ├─ test-nakama ──────┼─ build-plugin ────────────┤    │
+             ├───────────────────-┴─ build-verify-probe ──────┤    │
              └──────────────────── test-integration ──────────┤    │
                                                               ▼    │
                                    build-images (*)         bundle │
@@ -190,6 +191,7 @@ production / `build_images=true`; it is **not** on the deploy path.
 | `test-gateway`, `test-gameserver`, `test-nakama`, `test-smoketest` | `ubuntu-latest` | `_go-module.yml`, one job per module, all parallel after `test-shared`. |
 | `test-integration` | `ubuntu-latest` | `_go-module.yml` on `backend/integration_test` (E2E, gateway + gameserver in-process). Needs the four module tests. |
 | `build-gateway` / `build-gameserver` / `build-smoketest` | `ubuntu-latest` | `_go-module.yml` with `run_tests: false`; each needs only *its own* module test, so it starts before integration finishes. Uploads `bin-<name>-<sha>`. |
+| `build-verify-probe` | `ubuntu-latest` | `_go-module.yml` on `backend/deploy/k8s/verify/probe` with `run_tests: false`. Uploads `bin-verify-probe-<sha>`. Exists because the k8s post-deploy verification must not compile anything on the deploy runner — see §4 below. |
 | `build-plugin` | `ubuntu-latest` | `_go-module.yml` with `needs_docker: true` → `docker build -f nakama-plugin.Dockerfile --target export` → uploads `nakama-plugin-<sha>`. Parallel with the binary builds. |
 | `build-images` | `ubuntu-latest` | Gateway + gameserver container images → GHCR. Conditional (see below). |
 | `bundle` | `ubuntu-latest` | Downloads `bin-*-<sha>` (`merge-multiple`) + `nakama-plugin-<sha>`, adds `docker-compose.yml`, `Makefile`, `.env.example`, `deploy-local.sh`, `COMMIT`, asserts every expected file is present, uploads `deploy-bundle-<sha>` (14 days, `include-hidden-files` for `.env.example`). Compiles nothing. |
@@ -212,10 +214,32 @@ production / `build_images=true`; it is **not** on the deploy path.
 >
 > `db-migrate` is now backup-only, and its display name says so. The job id is unchanged
 > because `deploy` depends on it and the backup is still what gates the deploy.
+| `post-deploy-smoke` | same labels as `deploy` | Sources `$RPG_DEPLOY_DIR/deploy/.env`, overrides the two client-facing addresses (below), and runs `bin/smoketest` (Nakama health → device auth → `gateway_token` RPC → gateway `MsgAuth`/`MsgEnterWorld` → game server join → input/snapshot → disconnect). Separate job so "deploy broke" and "the flow broke" are distinguishable at a glance. Takes the deploy dir from `needs.deploy.outputs.deploy_dir`, so it needs no `environment:` (no second production approval). |
 | `post-deploy-smoke` | same labels as `deploy` | Sources `$RPG_DEPLOY_DIR/deploy/.env` and runs `bin/smoketest` (Nakama health → device auth → `gateway_token` RPC → gateway `MsgAuth`/`MsgEnterWorld` → game server join → input/snapshot → disconnect). Separate job so "deploy broke" and "the flow broke" are distinguishable at a glance. Takes the deploy dir from `needs.deploy.outputs.deploy_dir`, so it needs no `environment:` (no second production approval). |
 | `summary` | `ubuntu-latest` | `if: always()` — step-summary table with ref, commit, runner, deploy dir and the `deploy` / `post-deploy-smoke` results. |
 
-**Artifact flow:** `bin-{gateway,gameserver,smoketest}-<sha>` + `nakama-plugin-<sha>`
+**`post-deploy-smoke` inputs.** `deploy/.env` is written for the **services**, and the
+smoke test is a **client**, so sourcing it is not sufficient — two of the addresses it
+needs are listen addresses, not dialable ones. The step therefore exports these on top,
+after sourcing:
+
+| Variable | Value exported | Why not `deploy/.env` |
+|---|---|---|
+| `NAKAMA_URL` | `http://127.0.0.1:${NAKAMA_HTTP_PORT}` | Absent from `.env` by design (compose gives the game server the in-network `http://nakama:7350`). A host-mode game server inherits `.env`, and `NAKAMA_URL` unset is what **disables** its Nakama S2S integration. |
+| `GATEWAY_ADDR` | `127.0.0.1:${GATEWAY_CONTAINER_PORT}` | `.env`'s value is the gateway's listen address, which also feeds the derivation of `GATEWAY_CONTAINER_PORT` and must keep matching the container's hardcoded `--addr=:8000`. |
+
+`GATEWAY_CONTAINER_PORT` equals the listen port in host mode and is mapped onto it in
+containers mode, so one expression is correct for both. The game-server hop needs no
+override: the smoke test dials whatever `EnterWorldResponse.ServerAddr` carries, i.e.
+`GAMESERVER_PUBLIC_ADDR`, which "Write environment file" already validates as dialable.
+
+> Anything the smoke test reads that is left to its own default is only correct while the
+> environment happens to use the default port. Dev and staging do; production does not, and
+> was the first deploy to fail on it. The healthcheck in `deploy` does **not** cover this —
+> it probes the *metrics* ports, which are forwarded per-environment, so it goes green
+> while the client-facing path is unreachable.
+
+**Artifact flow:** `bin-{gateway,gameserver,smoketest,verify-probe}-<sha>` + `nakama-plugin-<sha>`
 → `bundle` → `deploy-bundle-<sha>` → `deploy`. All names carry `<sha>` so
 re-runs and concurrent branches never collide. Artifact uploads do not preserve
 the executable bit, which is why `deploy` uses `install -m 0755`.
@@ -300,6 +324,83 @@ none of these keeps behaving as it did. Two consequences worth stating outright:
   dump target the *other* environment's databases and still report success, and the
   migration it exists to protect then runs with no usable checkpoint.
 
+#### The reserved-identity registry and the preflight guard
+
+The section above is advice, and advice is exactly what failed: `staging` was
+created with **no** isolation variables at all, so it resolved to dev's
+`RPG_DEPLOY_DIR`, dev's compose project, dev's container names and dev's ports.
+Nothing in the pipeline objected. A staging deploy would have regenerated dev's
+`deploy/.env` from staging's variables (silently dropping `ALLOCATOR=agones`,
+which staging does not set) and taken dev's containers over.
+
+Two things now stand between that and the stack:
+
+1. **`backend/deploy/environments.tsv`** — one row per GitHub Environment,
+   declaring the deploy directory, compose project, container prefix and every
+   published port that environment is allowed to own. It is an *assertion over*
+   the GitHub Environment variables, not a source of truth: changing a value
+   here does not change a deploy. It exists because the variables themselves are
+   invisible to code review, and this file is not.
+
+2. **`backend/deploy/preflight-isolation.sh`**, run by the `deploy` job as
+   **Isolation preflight**, immediately after the checkout and *before* the
+   bundle sync — the first step that would otherwise write into the deploy
+   directory. It fails the deploy when:
+   - the resolved deploy dir / compose project / prefix / any port is reserved
+     for a **different** row in `environments.tsv` (this needs nothing running,
+     and is the check that catches "staging is configured exactly like dev");
+   - the resolved values contradict this environment's **own** row (drift
+     between the variables and the reviewed file, in either direction);
+   - `$RPG_DEPLOY_DIR/deploy/.env` carries a `DEPLOY_ENVIRONMENT` stamp naming
+     another environment (deploys now write that stamp);
+   - a container named `<prefix>-<service>` exists under a **different** compose
+     project — `up -d` would adopt it;
+   - a port it is about to publish is already published by a container in
+     another compose project, or bound by any non-docker process.
+
+   What it **cannot** catch is listed at the bottom of the script itself and is
+   worth reading before trusting it: an unlisted environment that is not
+   currently running, two rows in `environments.tsv` edited to agree with each
+   other but wrong, ports opened after the check (Agones fleet GameServers, a
+   binary someone starts by hand), races between two simultaneous deploys, and
+   anything on another host.
+
+**Changing a port for an environment is therefore a two-sided edit**: the GitHub
+Environment variable *and* its row in `environments.tsv`, in the same change.
+Doing one without the other fails the next deploy loudly, which is the intent.
+
+#### The three reserved port sets
+
+Offsets are `dev` → `+10` production → `+20` staging, which keeps them readable.
+`7000–7100` is deliberately skipped everywhere: k3d's serverlb publishes that
+whole range for the Agones fleet.
+
+| | dev | production | staging |
+|---|---|---|---|
+| `RPG_DEPLOY_DIR` | `/mnt/e/rpg-mmo-deploy` | `/mnt/e/rpg-mmo-deploy-prod` | `/mnt/e/rpg-mmo-deploy-staging` |
+| `COMPOSE_PROJECT_NAME` | *(unset → `rpg-mmo-meta`)* | `rpg-mmo-prod` | `rpg-mmo-staging` |
+| `COMPOSE_NAME_PREFIX` | *(unset → `rpg`)* | `rpg-prod` | `rpg-stg` |
+| gateway / metrics | 8000 / 9102 | 8010 / 9112 | 8020 / 9122 |
+| gameserver / metrics | 9200 / 9101 | 9210 / 9111 | 9220 / 9121 |
+| postgres / postgres-game | 5432 / 5433 | 5442 / 5443 | 5452 / 5453 |
+| redis | 6379 | 6389 | 6399 |
+| nakama gRPC / HTTP / console / metrics | 7349 / 7350 / 7351 / 9100 | 7359 / 7360 / 7361 / 9110 | 7369 / 7370 / 7371 / 9120 |
+| grafana / prometheus | 3001 / 9090 | 3002 / 9091 | 3003 / 9092 |
+| OTLP gRPC / HTTP | 4317 / 4318 | 4327 / 4328 | 4337 / 4338 |
+
+`dev` keeps the unset defaults on purpose: renaming `COMPOSE_PROJECT_NAME` on a
+live stack orphans its containers **and its data volumes** (see the warning
+above), and dev is the only proven Agones environment here.
+
+#### `DEPLOY_MODE=host` isolates too, but through systemd
+
+`scripts/deploy-local.sh` derives its unit names from `COMPOSE_NAME_PREFIX`
+(`${prefix}-gateway.service`), because systemd unit names are global to the host
+and a fixed `rpg-` prefix meant a host-mode staging deploy would restart dev's
+units. Pidfiles and logs were already per-`RPG_DEPLOY_DIR`. Note the preflight
+guard sees a pure host-mode environment only through its ports — it has no
+containers to check.
+
 `GAMESERVER_PUBLIC_ADDR` is not isolation but is easy to get wrong alongside it:
 it is what the game server self-registers into Redis and what the gateway hands
 back in `MsgEnterWorldResp`, so it must name a host and port a **client** can
@@ -313,8 +414,19 @@ when** the resolved environment is `production` **or** `workflow_dispatch` set
 `build_images=true`. Auth is `docker/login-action@v3` with the built-in
 `GITHUB_TOKEN` (`permissions: packages: write` on that job); layers are cached
 with `type=gha`. Dev/staging deploys skip this entirely and keep using the host
-binaries from the artifact bundle. The gameserver image name must stay in sync
-with `agones/fleet-map.yaml` and `agones/fleet-dungeon.yaml`.
+binaries from the artifact bundle. No Agones manifest references a GHCR image any
+more — the prod fleets were deleted with the Go server (see `K3S.md`), and the
+only fleet, `agones/fleet-map-dotnet-dev.yaml`, uses the local tag
+`rpg-mmo/gameserver-dotnet:dev`.
+
+> **`cd.yml` should pass `--build-arg GIT_REVISION=$(git rev-parse HEAD)` to the
+> gameserver image build.** `docker/Dockerfile.gameserver-dotnet` stamps it into
+> `org.opencontainers.image.revision`, which is what makes "was this image built
+> from the commit under test?" answerable — a question that has already been
+> answered wrongly once (see `K3S.md`, "Deploying the dotnet fleet"). Without the
+> arg the label reads `unknown` and `validate-manifests.py --check-image` fails,
+> which is the intended behaviour, not a bug. The workflow lives outside
+> `deploy/` and has not been changed here.
 
 ### Concurrency
 
@@ -344,7 +456,34 @@ What this pipeline relies on the runner providing:
 | Write access to `$RPG_DEPLOY_DIR` | The bundle is installed there. |
 | Installed as a systemd service | Deploys survive logout and reboot. |
 
-Go and the .NET SDK are **not** needed — only prebuilt binaries land there.
+| `kubectl` (k8s mode), `python3`, `bash` >= 4 | `dev-up.sh` and the post-deploy verification suite. |
+
+Go and the .NET SDK are **not** needed — only prebuilt binaries land there, and
+that is a constraint on the workflow, not just an observation about the box.
+
+**Anything the `deploy` job needs to run must be built by an `ubuntu-latest` job
+and travel in the bundle.** The k8s post-deploy verification broke this twice at
+once: `verify.sh` built `verify/probe` on demand and `verify/lib/checks_flow.sh`
+built `backend/smoketest` on demand, both with a bare `go build`. On the dev
+runner Go is not on the default non-login PATH, so CD run 32207995779 reported
+`data.nakama_plugin` FAIL ("probe build failed"), `flow.smoke` FAIL ("go: command
+not found") and `flow.stack_identity` SKIP. The fix is the bundle, not
+`actions/setup-go` on the deploy job: a compiler there would produce binaries no
+CI job had gated, and would make the apply-artifacts-to-a-cluster job depend on a
+toolchain it has no reason to carry. The verification step now exports
+`VERIFY_SMOKETEST_BIN=$GITHUB_WORKSPACE/dist/bin/smoketest` and
+`VERIFY_PROBE_BIN=$GITHUB_WORKSPACE/dist/bin/verify-probe`, and fails the step
+with `::error::` if the bundle is missing either — a pipeline defect must not be
+reported as a broken deployment.
+
+That fix left one gap, now closed: building the probe in CD made a deploy the
+first place a non-compiling probe could surface, on a change already merged.
+`ci.yml` gates it at PR time as `test-verify-probe`. The module has no test
+files, so that job runs `go vet` and a build and deliberately does **not** run
+`go test` — a green `[no test files]` is the ambiguous "passed while asserting
+nothing" signal this pipeline already refuses elsewhere. The probe links against
+`backend/shared` through a `replace` directive, so a wire-format change can break
+it there and nowhere else in CI.
 
 ### 4a. The `dev` runner is WSL, and `docker` there is a shim
 
@@ -624,6 +763,38 @@ Two deliberate choices:
   fail with `[backup] ERROR: docker not available (tried docker, docker.exe)`.
   That is correct fail-fast behaviour for a deploy, but it must never be what
   stands between a PR and a merge. PR gating is GitHub-hosted only.
+
+#### `Publish AOT` verifies its prerequisites, it does not install them
+
+The `Publish AOT` job in `ci-dotnet.yml` needs `clang` and the zlib development
+headers to link the NativeAOT binary. It used to get them with an unconditional
+`sudo apt-get update && sudo apt-get install -y clang zlib1g-dev`.
+
+**Both are already on the `ubuntu-24.04` runner image**, so that step installed
+nothing of substance — the image ships Clang 16/17/18 with an unversioned
+`clang` alternative, and job logs show `zlib1g-dev is already the newest
+version` with `0 upgraded, 1 newly installed` (the `clang` metapackage, 20.5 kB).
+What it did do is contact the Ubuntu mirrors on every run. On 2026-08-19 that
+`apt-get update` hung four times — twice for 15-25 minutes, against the job's
+`timeout-minutes: 25` — and produced red Xs on PRs #169, #171 and #172 that had
+nothing to do with the code under test.
+
+The step is now a **probe**: `command -v clang` plus a `dpkg-query -s
+zlib1g-dev` / `/usr/include/zlib.h` check. On the common path it does no network
+I/O at all. It falls back to `apt-get` (3 attempts, backoff) only for what is
+genuinely missing, and it exits 1 with an explicit `::error::` if a prerequisite
+is still absent afterwards — a future image that drops Clang must fail here with
+a clear message, not as an obscure link error inside `dotnet publish`. The step
+carries `timeout-minutes: 5`, so a mirror hang costs five minutes instead of the
+job's entire budget.
+
+**What did not change:** every step after it. Per ADR-11 decision 4 a clean
+NativeAOT publish does *not* imply a working binary — Arch allocates chunk
+backing arrays through `System.Array.CreateInstance(Type, int)`, so an
+un-hinted component publishes without warning and throws `NotSupportedException`
+on the first archetype creation, i.e. the first player spawn. The job's
+smoke-run therefore performs a **real join**, not a start-and-ping, and must
+stay unconditional.
 
 #### Known gap: wire-compat coverage
 

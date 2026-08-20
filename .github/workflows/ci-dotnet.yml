@@ -106,8 +106,60 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Install AOT prerequisites
-        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+      # NativeAOT needs clang and the zlib headers. Both are preinstalled on
+      # ubuntu-24.04, so this step normally does no network I/O at all; the
+      # apt path below is a fallback for a future image that drops them.
+      - name: Verify AOT prerequisites
+        # apt hangs on the Ubuntu mirrors have burned the job's whole 25 min
+        # budget before. Fail in 5 instead.
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # The ubuntu-24.04 runner image already ships clang (16/17/18, with an
+          # unversioned `clang` alternative) and zlib1g-dev. The unconditional
+          # `apt-get update && apt-get install -y clang zlib1g-dev` this step replaced
+          # therefore installed nothing but the tiny `clang` metapackage, yet still paid
+          # for a full index refresh -- and on 2026-08-19 that refresh hung on the Ubuntu
+          # mirrors four times (15-25 min against a 25 min job budget), turning a 2-5 min
+          # job into a red X unrelated to the code under test.
+          #
+          # So: probe first, touch the network only for what is genuinely missing, and
+          # fail fast and loudly if the runner image ever stops shipping these -- a
+          # missing clang must not surface as an obscure link error inside
+          # `dotnet publish`.
+          missing=""
+          command -v clang >/dev/null 2>&1 || missing="$missing clang"
+          if ! dpkg-query -s zlib1g-dev >/dev/null 2>&1 && [ ! -f /usr/include/zlib.h ]; then
+            missing="$missing zlib1g-dev"
+          fi
+
+          if [ -n "$missing" ]; then
+            echo "::warning::Runner image is missing:$missing -- installing from apt."
+            installed=0
+            for attempt in 1 2 3; do
+              if sudo apt-get update && sudo apt-get install -y $missing; then
+                installed=1
+                break
+              fi
+              echo "apt attempt $attempt failed; retrying in $((attempt * 10))s"
+              sleep $((attempt * 10))
+            done
+            [ "$installed" = 1 ] || echo "::warning::apt failed three times; verifying anyway."
+          fi
+
+          command -v clang >/dev/null 2>&1 || {
+            echo "::error::clang not found. NativeAOT cannot link without it."
+            exit 1
+          }
+          if ! dpkg-query -s zlib1g-dev >/dev/null 2>&1 && [ ! -f /usr/include/zlib.h ]; then
+            echo "::error::zlib development headers not found. NativeAOT cannot link without them."
+            exit 1
+          fi
+
+          echo "clang:      $(clang --version | head -n 1)"
+          echo "zlib1g-dev: $(dpkg-query -W -f='${Version}' zlib1g-dev 2>/dev/null || echo 'headers present')"
 
       - name: Publish NativeAOT
         run: dotnet publish GameServer/GameServer.csproj -c Release -o ./publish

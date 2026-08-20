@@ -1272,6 +1272,57 @@ found here.
 > that introduces it. ADR-12 additionally rules out query shapes the reflection guard
 > cannot enumerate, `Arch.System`'s source generator among them.
 
+> **Amended 2026-08-19 — a third Arch hazard: the read path is not a read**
+> (issue #176, `fix/gameserver/ecs-concurrent-read`).
+>
+> `EcsWorld` had always assumed that `ReaderWriterLockSlim` was sufficient: writers
+> exclusive, readers shared, Arch untouched during a read. That assumption is wrong,
+> and the counter-evidence is measured against Arch `2.1.0-beta`, not argued:
+>
+> | probe (8 threads, 200 attempts each) | result |
+> |---|---|
+> | iterate one shared `Query` whose archetype memo is **stale**, **no writer running** | **20/200 faulted**, `NullReferenceException at Arch.Core.QueryArchetypeEnumerator.MoveNext()` |
+> | iterate the same `Query` with the memo **already up to date** | **0/200** |
+> | 8 threads calling `World.Query()` with 8 **distinct** descriptions on a cold cache | **61/400 faulted**; in one case the world's query-cache `Dictionary` ended up holding **9** entries after 8 inserts |
+>
+> Two mutations hide behind Arch's read API:
+>
+> 1. `Arch.Core.World.Query(in QueryDescription)` memoises into a plain
+>    `Dictionary<QueryDescription, Query>` and **inserts on a miss**. A `Dictionary`
+>    torn by concurrent inserts does not throw at the tear — that is the path from a
+>    managed `NullReferenceException` to the `AccessViolationException` that killed
+>    the test host in an unrelated later test.
+> 2. The returned `Query` rebuilds its own matching-archetype list **lazily**, the
+>    first time it is used after the archetype *set* changed. (Adding or removing
+>    entities of an archetype that already exists does **not** invalidate it —
+>    measured. Creating a new archetype does.) The rebuild clears and refills a list
+>    other readers are enumerating.
+>
+> So the exposure window is not "while writers run"; it is the moments the archetype
+> set grows — world start-up and each first-of-a-kind spawn, which is exactly when
+> players are joining.
+>
+> **Decision 5. A read path may only iterate a `Query` the world resolved in advance,
+> and every write scope refreshes those queries on its way out.** `EcsWorld` owns its
+> read-path queries (`_readQueries`), resolves them in its constructor, and refreshes
+> them in `ExitWriteScope()` — the write lock is the only moment at which a rebuild can
+> happen with no other reader watching. `_arch.Query(...)` may still be called freely
+> from code that holds the **write** lock. `EcsWorld.CountWith<TTag>` takes the write
+> lock for this reason: the tag set is open, so its query cannot be pre-resolved.
+>
+> A mutex over the read path would also have been correct and was rejected on cost,
+> not taste: the AOI gather is 77-83% of a 200-viewer tick, and serialising it would
+> have made `ReadAllParallel` pointless. Because iteration of an up-to-date query is a
+> genuine pure read (row 2 of the table), pre-refreshing keeps the parallel gather.
+>
+> **Re-run this on any Arch upgrade**, alongside the AOT spike. The committed reproducer
+> is `GameServer.Tests/World/EcsWorldConcurrencyStress.cs`, gated behind `ECS_STRESS=1`;
+> it exercises `EcsWorld`, and before decision 5 it faulted in every run (10-15/2000
+> rounds mixed readers+writers, 19-38/2000 parallel gather). The three raw-Arch probes in
+> the table above are **not** committed — they assert the absence of a defect Arch still
+> has, so they would be a permanently red test; the table is the record, and the probes
+> are a few dozen lines to rebuild from it against a bare `Arch.Core.World`.
+
 ---
 
 ## ADR-12 — The server goes to real ECS, staged, under the constraints ADR-10 and ADR-11 set
@@ -1477,6 +1528,19 @@ by the change that first spawns a worker.
 >   completion order. The suite was verified to fire by reintroducing the shared queue —
 >   exactly the two order-sensitive tests fail and the other eight still pass.
 >
+>   **Correction, 2026-08-19: the count is wrong — it should be three fail / seven pass.**
+>   `WorkerCountDoesNotChangeTheResultingWorld` compares a 1-worker digest (which spawns in
+>   slot order) against a 4-worker one, and cannot survive a shared arrival-order queue
+>   either, because `SpawnPerWorker` sleeps `(4 - slot) * 12` ms before spawning and so
+>   arrives in reverse slot order. This is an inspection result, not a re-run of the
+>   experiment; either the original miscounted or the reintroduction was narrower than "the
+>   shared queue". Also worth recording:
+>   `ASpawnInsideAParallelRegionIsNotVisibleUntilTheRegionEnds` is **mislabelled** — its
+>   comment says deferral "has to hold for every worker", but it runs `workerCount: 1`,
+>   which by `ASingleWorkerRegionStartsNoThread`'s own contract starts no thread at all. It
+>   tests the world-level flag on the calling thread only; multi-worker deferral is covered
+>   indirectly by the three order-sensitive tests and nowhere directly.
+>
 > **The schedule still runs serially, and that is now a workload decision rather than a
 > safety one.** Of the three systems in it, two declare `Structural` and are excluded from
 > concurrency by `IsDisjointFrom`'s first line; the third has nothing to pair with. Every
@@ -1484,6 +1548,119 @@ by the change that first spawns a worker.
 > and decision 7 above forbids claiming speed without measurement. The condition to revisit
 > is two or more non-structural systems with disjoint component sets, which arrives with
 > gameplay content, not before it.
+>
+> **Measured 2026-08-19, so the paragraph above is no longer an argument.**
+> `GameServer.Tests/World/ParallelPrimitiveBenchmark.cs` is committed and re-runnable
+> (`BENCH_PARALLEL=1 dotnet test -c Release --filter ParallelPrimitiveBenchmark`), skipped
+> by default, `Stopwatch` only — never a wall clock, per #153. Arms are interleaved
+> round-robin inside one run so a load spike hits all of them; run-to-run drift on the
+> parallel medians is ±25%, so read the ratios, not the digits.
+>
+> | measurement | result |
+> |---|---|
+> | cost of one **additional** worker, empty body | **165–225 µs**, p99 3–7× the median |
+> | `workerCount: 1` | indistinguishable from a serial scope — starts no thread |
+> | peak speedup, realistic per-entity body | **1.28×**, at 100 000 entities, at `w=2` |
+> | `w=8` at 100 000 entities | **slower than serial** |
+> | break-even vs serial | **≈70 000 entities** |
+> | live workload | `EnemyAiTuning.MaxEnemies` = **30** — ~2 000× below break-even |
+> | **the three-system schedule, parallelised, at 30 entities** | **two orders of magnitude slower**, for zero overlap — see the note on precision below |
+>
+> Two results overturn assumptions worth naming, because both point future work away from
+> where it would naturally go:
+>
+> - **The read/write lock is not the constraint. It is not in the picture at all.**
+>   `UpdateComponentsParallel` takes the write lock **once, on the calling thread, before
+>   the first `new Thread`**; workers call `*Locked` internals and never touch `_rwLock`
+>   (one that tried would deadlock behind its own owner). Whole-region lock cost is
+>   **0.04 µs**. The corroboration is that the slowest and fastest worker bodies differ by
+>   only 1.05–1.4× — once running, workers proceed at the same rate, which is the signature
+>   of no serialisation. **The ceiling is thread lifecycle**, and it is a deliberate
+>   choice: dedicated threads rather than pool threads, because a pool thread carries
+>   `_workerSlot` away after the region and the pool is shared with the connection
+>   handlers, which would couple simulation latency to network load. If a workload ever
+>   justifies this, the thing to build is a **persistent worker pool parked on a barrier** —
+>   not anything to do with the lock.
+> - **Slot-ordered replay costs less than a shared queue, not more.** Determinism here is
+>   free. Queue-and-replay is ~1.5× an immediate `Arch.Create` (0.35 vs 0.23 µs/op at
+>   10 000 ops) and an empty region on an 8-slot world times identically to a 1-slot one
+>   (0.05 µs), so walking slots costs nothing observable. The saving is on the enqueue
+>   side: `_structuralSlots[_workerSlot].Add` is an unsynchronised add to a thread-private
+>   list, where a shared queue would need a lock or `Interlocked` per op.
+>
+> **On the precision of that multiplier, because it is not stable.** The serial arm is
+> 1-11 µs — small enough that the ratio is dominated by how clean it is, and this box is
+> shared with a load generator (ADR-7). Measured values for the same comparison have
+> ranged from **13× to 824×** across implementations and runs: 782-824× against the
+> original per-region-thread version, ~118× against the parked pool, and 13.6× on a run
+> whose serial arm was itself inflated to 10.97 µs by load (its own min was 0.86 µs).
+> Two effects account for the spread and both were found the hard way: the **first
+> configuration in a process runs on tier-0 JIT** and reads ~10× off, and **a spinning
+> parked worker inflates whatever is measured next by ~6×**.
+>
+> Quote this as **"one to two orders of magnitude slower, for zero overlap"**. The
+> direction is not in doubt across any run; the digits are. Anyone proposing to
+> parallelise the schedule should be asked which of two things changed: the workload
+> crossed the break-even entity count, or the per-region thread creation was replaced.
+
+> **Per-region thread creation was replaced on 2026-08-19. The verdict on the schedule did
+> not change; the phase that was worth parallelising turned out to be a different one.**
+>
+> The previous entry named the fix — "a persistent worker pool parked on a barrier" — and
+> it was built, with one correction to that sentence: **not a barrier.** A `Barrier`
+> rendezvous measured 150 µs at 4 workers and 339 µs at 8, against 48 µs and 104 µs for a
+> semaphore-style one. `EcsWorld.SimWorkerPool` uses a per-worker generation counter on its
+> own cache line, a `ManualResetEventSlim` per worker for the parked case, and an
+> interlocked countdown for the join. The two properties the previous shape was chosen for
+> are preserved and are the reason the .NET thread pool is still not used: threads are
+> dedicated and owned by the world, and each sets `_workerSlot` **once at start and never
+> again**, so slot identity is now more stable than it was, not less. Threads start lazily
+> on the first region that needs them, so `workerCount: 1` still starts nothing.
+>
+> | measurement | before (thread per region) | after (parked pool) |
+> |---|---|---|
+> | cost of one **additional** worker, empty body | 165–225 µs | **13–18 µs** (w≥4, workers parked) |
+> | empty region, w = 2 / 4 / 8, workers parked | 178 / 474 / 1094 µs | **32-35 / 52-54 / 94-95 µs** |
+> | break-even vs serial, component work at w=4 | ≈70 000 entities | **≈8 000 entities** |
+> | the three-system schedule at 30 entities | two orders of magnitude | **still one to two orders of magnitude** |
+> 
+> The last row is deliberately not given in digits. Its serial arm is 1-11 µs, so the
+> ratio moves with load and JIT tier while the direction never does — see the precision
+> note above. Measured instances: 782-824× (per-region threads), ~118× (parked pool),
+> 13.6× (parked pool, serial arm inflated to 10.97 µs by a busy box; its own min 0.86 µs).
+>
+> **So the schedule stays serial, and the question to ask has changed.** Thread creation is
+> gone and break-even fell by roughly 9×; the live workload is 30 entities, still 250×
+> below the new threshold, and three parallel regions over it still cost 188 µs against
+> 1.6 µs serial. The condition to revisit is unchanged and is now the *only* one: two or
+> more non-structural systems with disjoint component sets (`ComponentAccess.IsDisjointFrom`)
+> over a workload past ~8 000 entities.
+>
+> **What the pool was actually built for is the AOI gather, and that is a read region, not
+> a write one.** At 200 viewers the gather is 77–83% of `TickOnce` and the entire schedule
+> is 0.5–1.9 µs; the phase with work in it was never the schedule.
+> `EcsWorld.ReadAllParallel` splits the gather over the same threads and **deliberately
+> carries none of the determinism machinery above**: `WorldReader` exposes only pure reads,
+> so a read region has no structural ops whose replay order could matter, and each viewer
+> writes a buffer its own connection owns. That claim is tested, not asserted —
+> `PooledGatherEquivalenceTests` compares the pooled gather against the serial one
+> element-for-element at 2, 4 and 8 workers.
+>
+> It is **opt-in and off by default** (`--gather-workers`, default 1), and gated at 500
+> viewers, because the measurement is conditional and two measurements disagree in the
+> middle of the range: a loss at 50 viewers (0.51–1.05×), **disputed at 200** (2.06–2.08×
+> measured on the phase across three runs within 1% of each other, 0.96–1.27× measured
+> through the whole tick), a gain at 500 on both (1.8–2.4× phase-level, 2.0–2.7× through
+> the tick). Shipping it on by default would be claiming the phase-level number for the
+> tick, which decision 7 forbids. The disagreement is recorded rather than resolved; it
+> needs a host that is not also running the load generator (ADR-7).
+>
+> One measurement trap is worth carrying forward, because it produced a 6× phantom: a pool
+> whose workers **spin** between dispatches inflates whatever is measured next to it. With
+> a 25 µs worker-side spin, a serial pass over 30 entities read 12.5 µs; with the spin off,
+> 1.9 µs. `SimWorkerPool` therefore parks its workers immediately and lets only the region
+> owner spin — which also matches production, where regions are 66 ms apart and every
+> worker is blocked in the kernel when the next one arrives.
 
 One correctness result is worth separating from the performance story: moving encoding to
 the moment of writing **fixed a pre-existing data-loss bug**. The old order encoded on the
@@ -1591,6 +1768,774 @@ it benefits, and it quadruples snapshot bandwidth, which the measured 45.9 KB/s 
 
 ---
 
+## ADR-14 — Agones owns the pod, Redis owns the lookup; the C# server's SDK is a stub and must be written over the HTTP sidecar
+
+**Status:** accepted 2026-08-17. **Superseded in part — stages 1-4 have since shipped and are proven; see ADR-16.** The line below said "not yet implemented, nothing in this ADR has shipped"; that was true when written and stopped being true the same day, which is exactly the staleness this document keeps warning about. `HttpAgonesSdk` exists and reports Ready/Health/Allocate/Shutdown, the address is read from the sidecar, and a real client has joined an Agones-managed server. Stages 5-8 remain open.
+Extends ADR-2 (whose allocation branch this is the missing half of) and is constrained by
+ADR-1 (one writer per datum) and ADR-7 (the unknown player ceiling).
+
+**Context.** The gateway's Agones integration is real and tested. `AgonesAllocator` POSTs to
+`/apis/allocation.agones.dev/v1/namespaces/%s/gameserverallocations` through a Kubernetes REST
+client (`gateway/registry/agones_allocator.go`), with unit tests and an end-to-end
+`enter_world_alloc_test.go`; it is off by default (`--allocator none`) and opted into with
+`ALLOCATOR=agones`. ADR-2 already records what that allocator does when a map is full — the
+registry allocates a second instance and registers it under the same `map_id`
+(`gateway/registry/registry.go`, the `s.allocator != nil` branch; ADR-2 cites lines 77-91,
+which have since moved to ~237-249).
+
+The game server's half does not exist. `GameServer/Agones/AgonesSdk.cs` is 58 lines and
+contains an `IAgonesSdk` interface (`ReadyAsync`/`ShutdownAsync`/`AllocateAsync`/`HealthAsync`),
+a `NoopAgonesSdk` that returns `Task.CompletedTask` from all four, and an `AgonesHealthLoop`
+that dutifully pings the no-op. `grep -rn ": IAgonesSdk"` returns exactly one implementation
+across the whole solution, and it is the no-op. There is no HTTP client and no reference to the
+sidecar port anywhere in the module. `Program.cs` is honest about it and says so at startup:
+
+> `--agones/AGONES_ENABLED is set but has NO effect: the C# server still uses the no-op Agones
+> SDK (no Ready/Health/Shutdown is reported to the sidecar). Do not rely on Agones health checks
+> for this server yet.`
+
+That warning is the fact this ADR formalises. `--agones` parses (`Program.cs:65`), logs, and
+changes nothing.
+
+Four gaps follow from it, and they are the whole case for doing the work:
+
+1. **A map with no server means the client cannot enter.** `FindServer` returns
+   `ErrNoServerAvailable` and `MsgEnterWorld` fails. Someone has to start a process by hand.
+2. **A full map means rejection.** ADR-2's MVP policy is one live server per `map_id` and a
+   full map refuses joins. The allocation branch that would produce a second one is written and
+   tested — but with no game server able to report Ready, allocating produces a pod that never
+   becomes allocatable. The branch is a no-op in practice.
+3. **A crashed server is removed but not replaced.** `RegistrationService` re-arms a 15s Redis
+   TTL every 5s, so a dead server leaves the registry within seconds — that half works. Nothing
+   then brings a new one up.
+4. **Dungeon-per-party instancing cannot exist at all.** `--mode=dungeon` currently changes one
+   thing: the disconnect hold window, 60s instead of 30s (`Program.cs:358`). There is no
+   allocate-per-party, no instance lifecycle, no shutdown. Instanced dungeons are a headline
+   feature of the design and they are blocked on this, not on gameplay code.
+
+Two more facts belong in the record before any decision is read.
+
+**The manifests would currently kill the server.** `deploy/agones/` holds nine manifests (map
+and dungeon fleets, autoscaler, allocation, dev and prod variants). `fleet-map-dotnet-dev.yaml`
+sets `health: initialDelaySeconds: 10, periodSeconds: 5, failureThreshold: 3` and does **not**
+set `disabled: true` — no manifest in the directory sets it. Deploying that file today gives a
+pod that never pings, fails three checks, and is killed and restarted forever.
+
+**The cluster is running the deleted server.** `kubectl get fleets -n rpg-realtime` shows
+`map-servers-dev` and `dungeon-servers-dev`, both Ready, both 13 days old, both ALLOCATED 0, on
+image `rpg-mmo/gameserver:dev` — the **Go** game server, deleted from the repo in `670a803
+feat(migration): remove Go gameserver, C# .NET 10 is primary`. The cluster context is
+`docker-desktop`, not a VPS.
+
+**Decision.**
+
+1. **Implement `IAgonesSdk` against the Agones HTTP sidecar on `localhost:9358`, not against
+   the official Agones C# SDK.** That SDK is gRPC and would pull `Grpc.Net.Client` and its
+   transitive tree into a module whose `CLAUDE.md` states "NativeAOT compatible — no
+   reflection-based serialization" and "No other external dependencies (keep the dependency
+   tree minimal)". `System.Net.Http` is in-box, the sidecar's REST surface is four POSTs, and
+   this module's JSON path is already AOT-safe through source generators. A working reference
+   exists in this repo's own history — `git show 670a803^:backend/gameserver/agones/sdk.go`,
+   101 lines plus a 63-line test, implementing Ready/Shutdown/Allocate/Health and a health
+   loop over the official Go SDK. The shape is known; only the transport changes.
+2. **Agones owns pod lifecycle; Redis owns the `map_id -> server` lookup.** These are two
+   sources of truth about whether a server is available — Agones writes GameServer state, the
+   server writes its own Redis entry — and ADR-1 forbids two writers for one datum. They are
+   made to be two *different* data: Agones answers "does this pod exist and is it healthy",
+   Redis answers "which address serves this map". Neither reads the other's answer.
+3. **The server registers into Redis only after reporting Ready.** Registering first
+   advertises an address that Agones may still be about to kill, which is precisely the
+   ordering that would let the two writers disagree. Ready first, then register; on shutdown,
+   deregister first, then `ShutdownAsync`.
+
+   > **Narrowed 2026-08-18 by #151, opt-in.** Ready turned out to be necessary but not
+   > sufficient: on a fleet whose replicas all carry one `GAMESERVER_MAP_ID`, a second
+   > `Ready` pod is a second *live* server for that map with no allocation involved (ADR-18,
+   > measured). `GAMESERVER_REGISTER_ON_ALLOCATED=true` therefore holds the registry entry
+   > until `status.state` reads `Allocated`. The ordering this decision protects is intact —
+   > Ready still precedes registration, the address read still sits between them, and
+   > shutdown still deregisters before `ShutdownAsync`. **Default off**, so an unmigrated
+   > fleet behaves exactly as this decision describes; the flag is the migration.
+
+   > **Correction, same day: this one was already true in code.** Written as though it were
+   > work to do; it is not. `GameServer.RunAsync` completes the bind at
+   > `GameServer/Server/GameServer.cs:349`, calls `ReadyAsync()` at 356, and only then
+   > `_registration.StartAsync()` at 364 — and the descent already deregisters at 443 before
+   > `ShutdownAsync()` at 450. What was actually missing was decision 1 alone: `Program.cs:365`
+   > hardcoded `new NoopAgonesSdk()`, so the correctly ordered calls all went to the no-op.
+   >
+   > The decision stands as the rule; what it needs is a test pinning the order so a future
+   > refactor cannot quietly invert it, not a restructure. Recorded rather than edited away
+   > because "the ADR asked for work that was already done" is the error that sends someone
+   > looking for it.
+4. **The health loop only starts once a real SDK is wired.** `AgonesHealthLoop` running
+   against `NoopAgonesSdk` produces reassuring log lines about pings that were never sent, and
+   is worse than no loop. Until decision 1 lands, `disabled: true` goes on the dotnet fleet
+   manifest's health block rather than being left to the restart loop to discover.
+5. **The autoscaler is buffer-based on server count, not threshold-based on CCU.** ADR-7's
+   per-server ceiling is unknown and not measurable on this hardware — the load generator
+   shares the box and uses more CPU than the server under test. A buffer policy ("keep N ready
+   servers spare") needs no such number. Any policy keyed on players-per-server is a guess
+   until ADR-7's blocker is cleared, and must not be written as if it were measured.
+
+**Staged work.** Each stage is independently landable and the earlier ones change no runtime
+behaviour, which is deliberate — the SDK can be written and tested long before anything is
+deployed against it.
+
+| # | Stage | Size | Changes runtime? |
+|---|---|---|---|
+| 1 | `HttpAgonesSdk` over the sidecar, unit-tested against a fake HTTP handler | M | No — still selected only under `--agones` |
+| 2 | Lifecycle wiring: Ready on listen, Health loop, Shutdown on drain | M | Yes, under the flag |
+| 3 | Registration ordering per decisions 2-3, with a test that pins the order | S | Yes, under the flag |
+| 4 | Deploy `fleet-map-dotnet-dev.yaml` and prove no restart loop over a sustained run | S | Deployment only |
+| 5 | Enable `ALLOCATOR=agones` in dev and demonstrate an end-to-end allocation from `MsgEnterWorld` to a joined client | M | Yes |
+| 6 | Dungeon instancing: allocate per party, lifecycle, shutdown | L | Yes |
+| 7 | Buffer-based `FleetAutoscaler` per decision 5 | S | Yes |
+| 8 | Retire `map-servers-dev` and `dungeon-servers-dev`, and delete the Go-image manifests | S | Deployment only |
+
+Stage 5 is the first point at which anything is *proved*. Stages 1-4 reduce risk; they do not
+demonstrate that the thing works.
+
+**Consequences.**
+
+- **Nothing here is demonstrated.** No C# server has ever reported Ready to an Agones sidecar
+  in this project. Every claim above about what will happen after stage 1 is a design
+  intention, and this ADR should not be cited as evidence that Agones works for the C# server.
+  The evidence, when it exists, is the stage-5 result.
+- **ADR-2's warning becomes reachable rather than theoretical.** Today the multi-instance
+  hazard it describes — two servers under one `map_id`, two disconnected copies of the world —
+  cannot occur, because allocation cannot produce a live server. Stage 5 makes it possible for
+  the first time. ADR-2's follow-up "decide the map-fleet allocator policy" therefore stops
+  being an M-sized cleanup and becomes a precondition of stage 5.
+- **What is NOT decided: whether the realtime tier moves to Kubernetes.** Dev, staging and
+  production all run `DEPLOY_MODE=containers` under docker compose today. Agones is a
+  parallel path, not the deploy path, and the only cluster it has ever run on is
+  `docker-desktop`. Adopting Agones for the realtime tier changes that tier's deploy story,
+  its runner requirements and its rollback procedure. That decision is deliberately left open
+  here — an SDK implementation does not commit the project to it, and the two should not be
+  bundled into one change.
+- **The health loop is a liveness contract, not a formality.** Once decision 4's `disabled:
+  true` comes off, a tick loop that stalls long enough to starve the ping task is a pod
+  restart. That is arguably the correct behaviour, but it is a new failure mode, and ADR-13's
+  overload path — which drops the backlog and resynchronises rather than chasing it — is what
+  keeps a merely-slow server from being killed as a dead one.
+
+**Revisit if** the official Agones C# SDK ships an AOT-friendly non-gRPC path (which would
+reopen decision 1), or if ADR-7's load-generator blocker clears and a real per-server ceiling
+makes a CCU-keyed autoscaler defensible (decision 5), or if the realtime tier moves to k3s for
+reasons unrelated to Agones — in which case the open question above is answered elsewhere and
+this ADR should record where.
+
+---
+
+## ADR-15 — What it would cost to run the realtime tier on Kubernetes, and the dynamic-address problem that blocks it
+
+**Status:** **proposed 2026-08-17, not accepted.** **Partly overtaken by ADR-16 (2026-08-17).** Decision 2 below — the server reads its address from the sidecar — was implemented and then found necessary but *not sufficient*: `status.address` is the node address and is not dialable by a client, so the advertised address is composed from the Agones-assigned port and a configured host. The blocking finding and decision-3 prerequisites stand as written; read ADR-16 before acting on this one. This ADR does not decide whether the
+realtime tier moves to Kubernetes. It exists to write down what answering that question
+costs, because ADR-14 left it open and nothing since has priced it. Extends ADR-14 (this is
+its "what is NOT decided" bullet, expanded); constrained by ADR-1 (one writer per datum),
+ADR-2 (one live server per `map_id`), ADR-3 (the gateway is a redirector) and ADR-7 (the
+unknown per-server ceiling).
+
+Only the recommendation in decision 2 is a recommendation. Everything else numbered below
+is a statement of what would have to be true before the go/no-go is answerable at all.
+
+**Context.** There are two deployment stories in this repo and they do not meet.
+
+The one that runs: push -> `.github/workflows/cd.yml` -> bundle -> self-hosted runner ->
+`docker compose up -d` -> smoke test. All three environments are on it — `gh api` reports
+`DEPLOY_MODE=containers` for `dev`, `staging` and `production` alike, and the workflow
+contains no `kubectl` invocation anywhere. Images are built on the runner as local tags
+(`rpg-mmo/gateway:<sha>`, `rpg-mmo/gameserver-dotnet:<sha>`); the `build-images` job that
+pushes to `ghcr.io/cuvara/` runs only for the `production` environment or on a manual
+`build_images` dispatch.
+
+The one that does not run: `kubectl apply` by hand into whatever context is current, then
+Agones fleets that nothing allocates from. Three facts about it are worth stating plainly,
+because the directory names suggest otherwise:
+
+- **There is no k3s.** `kubectl config current-context` is `docker-desktop`, the single node
+  is `docker-desktop` at `v1.34.1`, and there is no `k3s` binary on `PATH`.
+  `backend/deploy/k3s/` holds `lib.sh`, `namespaces.yaml`, `setup-dev.sh`,
+  `teardown-dev.sh` and `validate-manifests.py`; `setup-dev.sh` installs nothing and says so
+  itself — "Every step is `kubectl apply`". The directory is named for an intention.
+- **`backend/deploy/k8s/` does not exist.** The repo-root `CLAUDE.md` describes
+  `k8s/base/{nakama,gateway,redis,postgresql}` and `k8s/overlays/{dev,beta,launch,growth}`.
+  None of it has been written. The only Kubernetes manifests in the repo are the nine in
+  `deploy/agones/`, and they cover the game server only.
+- **The fleets that are up are unbuildable.** `map-servers-dev` and `dungeon-servers-dev`
+  are Ready, 13 days old, `ALLOCATED 0`, on image `rpg-mmo/gameserver:dev` — the Go server
+  deleted in `670a803`, whose `docker/Dockerfile.gameserver` went with it. PR #137 marked
+  those manifests superseded rather than deleting them; that image cannot be rebuilt.
+
+So Agones is not "half deployed". It is a parallel path that has never carried a player, and
+the reason is not only the no-op SDK that ADR-14 addresses.
+
+**The blocking finding: the game server cannot learn its own address.**
+`fleet-map-dotnet-dev.yaml:35` sets `portPolicy: Dynamic`, so Agones assigns a host port per
+GameServer and the real address exists only in the GameServer status. It is visible right
+now:
+
+```
+$ kubectl get gs -n rpg-realtime
+NAME                              STATE   ADDRESS        PORT   NODE
+dungeon-servers-dev-2kdvr-zzmxb   Ready   192.168.65.3   7101   docker-desktop
+map-servers-dev-kl485-gsmrh       Ready   192.168.65.3   7691   docker-desktop
+```
+
+Nothing in the game server can read those two columns. The fleet supplies eight environment
+variables — `POD_NAME`, `JWT_SECRET`, `JOIN_TOKEN_SECRET`, `SIM_CRITICAL_HZ`,
+`SIM_WORLD_HZ`, `SIM_BACKGROUND_HZ`, `REDIS_ADDR`, `LOG_LEVEL` — and `GAMESERVER_PUBLIC_ADDR`
+is not among them, because no static value could be correct for a port assigned at
+scheduling time. `IAgonesSdk` exposes `ReadyAsync`/`ShutdownAsync`/`AllocateAsync`/
+`HealthAsync` and no way to read GameServer status. `Program.cs:101` therefore resolves
+`publicAddr = --public-addr ?? GAMESERVER_PUBLIC_ADDR ?? addr`, and the manifest passes
+`--addr=:9000`, so the server would advertise the hostless `:9000`.
+
+Follow that value: `RegistrationService` writes it into Redis, `transfer/map_assign.go:49`
+copies `srv.Addr` into the assignment, and `server.go:843` hands it to the client as
+`MsgEnterWorldResp.ServerAddr`. The client dials `:9000` and fails. `Program.cs:154` detects
+the hostless address and logs a warning; it is deliberately never fatal, which is right for
+host mode and means Kubernetes gets no stop.
+
+**This is why `ALLOCATED` is 0 and the dotnet fleet has never been deployed** — not merely
+the health loop. PR #139, in flight, implements the four sidecar POSTs and adds no status
+read; the interface is unchanged at four methods. It is necessary and it is not sufficient.
+
+**The handshake, and where allocation sits inside it.** ADR-3's invariant is that the
+gateway authenticates and redirects, and gameplay traffic never passes through it. Nothing
+here changes that:
+
+```
+Client -> Gateway     MsgAuth { JWT }                     (JWT verified locally)
+Client -> Gateway     MsgEnterWorld { MapID }
+                      +-- registry lookup: which address serves MapID?
+                      +-- miss/full -> AgonesAllocator POST gameserverallocations   <-- k8s enters here, and only here
+                      +-- ...which returns a pod that must then register ITSELF
+Gateway -> Client     MsgEnterWorldResp { ServerAddr, JoinToken }
+Client -> GameServer  MsgJoinToken { Token }              (direct; gateway is gone)
+GameServer -> Client  MsgSnapshot ... per tick
+```
+
+The allocation sits inside step 2 and nowhere else. Under Kubernetes every hop is unchanged
+except one: `ServerAddr` stops being a value someone configured and becomes a value the
+scheduler chose. That single change is the whole of the problem, and it lands on the one
+step in the handshake that the gateway cannot verify — it forwards an address it never
+dials.
+
+**Decision.**
+
+1. **The go/no-go is not decided here, and must not be inferred from ADR-14.** Implementing
+   the Agones SDK does not commit the project to Kubernetes; deploying one fleet on
+   `docker-desktop` does not either. What follows is the price list, not the purchase.
+
+2. **The dynamic-address problem is decided, because it blocks either answer: the game
+   server learns its own address by reading GameServer status from the sidecar.** Three
+   options were considered.
+
+   - **(A) Read GameServer status.** The Agones sidecar's REST surface on `localhost:9358`
+     serves the GameServer object alongside the four POSTs PR #139 already implements. The
+     server reads it after `ReadyAsync`, composes `status.address` with the port named
+     `game`, and registers *that* into Redis. Cost is one more endpoint on `HttpAgonesSdk`,
+     one AOT-source-generated JSON model of the fields actually used, and a fallback to
+     today's resolution when the read fails or Agones is off — which is what running outside
+     a cluster must keep doing.
+   - **(B) `portPolicy: Static`.** `containerPort == hostPort`, so `:9000` becomes true and
+     a host part is all `GAMESERVER_PUBLIC_ADDR` needs. It gives up what `scheduling: Packed`
+     is for: one GameServer per port per node, and ADR-2's second-instance allocation branch
+     collides with the first the moment two map servers want one node.
+   - **(C) The gateway trusts the allocation response and writes the registry entry
+     itself.** The allocation POST already returns the address and ports, so the gateway
+     could skip the server's self-registration entirely. This is rejected on two counts.
+     It puts two writers on one datum, which ADR-1 forbids — `RegistrationService` still
+     writes its own entry — and it inverts ADR-14 decision 2, under which Redis answers
+     "which address serves this map" and Agones answers "does this pod exist and is it
+     healthy", with neither reading the other. It also discards the liveness signal:
+     the entry's 15s TTL re-armed every 5s is what makes a crashed server vanish, and an
+     entry the gateway wrote has nothing re-arming it.
+
+   **(A) is the recommendation.** It is the only one of the three that leaves ADR-1's
+   ownership and ADR-14's split intact: the server remains the sole writer of its own
+   registry entry, and it asks Agones only "what address did you give me", never "which
+   server serves this map".
+
+   > One limit belongs with the recommendation rather than after it. `status.address` is
+   > the **node** address — `192.168.65.3` above — routable from wherever the node is
+   > routable and no further. The status read produces the correct value inside the cluster
+   > and the correct *shape* outside it; making that address reachable by a phone on a
+   > mobile network is a deployment fact about ingress and node public IPs, not something
+   > the read solves.
+
+3. **Six prerequisites stand between "Agones works" and "Agones means anything", and all of
+   them are outside `deploy/agones/`.** They are what `docker compose up` currently provides
+   for free:
+
+   | # | What compose does today | What Kubernetes needs |
+   |---|---|---|
+   | 1 | `postgres`, `postgres-game`, `redis` on named volumes (`postgres-data`, `postgres-game-data`, `redis-data`) | StatefulSets and PVCs, plus a storage class that exists on the target node |
+   | 2 | `./db/init-gamestate.sql` mounted as an initdb script; `./monitoring/{prometheus.yaml,grafana-dashboards.yaml,dashboards}` mounted into `lgtm` | ConfigMaps, and a first-run story for the initdb script that a PVC's second boot does not re-run |
+   | 3 | `./modules` host-mounted into `nakama` for the `nakama.so` Go plugin | A host mount is not available; the plugin is baked into an image (`nakama-plugin.Dockerfile` exists) or delivered by an initContainer |
+   | 4 | Seven secrets in a `umask 077` / `chmod 600` `.env` written by CD — `JWT_SECRET`, `JOIN_TOKEN_SECRET`, `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `NAKAMA_CONSOLE_PASSWORD`, `NAKAMA_SERVER_KEY`, `GRAFANA_ADMIN_PASSWORD` | Kubernetes Secrets, and a way for CD to write them that is not "echo into a file on the runner" |
+   | 5 | Local image tags; `imagePullPolicy: IfNotPresent` resolves them because Docker Desktop shares the daemon's image store | A registry push per environment and pull credentials per namespace. A real node shares nothing with the runner's daemon |
+   | 6 | `AgonesAllocator` falls back to `$KUBECONFIG` then `~/.kube/config`, so it allocates as the developer | In-cluster it needs a ServiceAccount with `create` on `gameserverallocations.allocation.agones.dev`. Without it, allocation returns 403 and ADR-2's branch fails at the one moment it matters |
+
+   Item 6 is the one most likely to be discovered late, because `agones_allocator.go` is
+   already written, already tested, and already works — on a developer's kubeconfig.
+
+4. **Partial adoption is not a middle path, and would be the worst outcome available.**
+   Moving the realtime tier alone leaves the data tier in compose, so the game server reaches
+   PostgreSQL and Redis across the cluster boundary by `host.docker.internal` — which is
+   exactly what `fleet-map-dotnet-dev.yaml` does today and exactly why it works only on
+   Docker Desktop. Two orchestrators means two rollback procedures, two health stories, and
+   a smoke test that has to know which half it is testing.
+
+5. **No autoscaling policy in this ADR is keyed on players.** ADR-7's per-server ceiling is
+   unknown and not measurable on this hardware, and ADR-14 decision 5 already settled the
+   fleet autoscaler as buffer-based on server count for that reason. The same constraint
+   binds an HPA, a node count and a tier sizing: anything derived from players-per-server is
+   a guess until ADR-7's load-generator blocker clears.
+
+**Honest size.** This is larger than ADR-14's stages 1-8 put together, and it is a
+*precondition* for several of them rather than a follow-on. ADR-14 sizes stage 4 ("deploy
+`fleet-map-dotnet-dev.yaml` and prove no restart loop") at S and stage 5 ("enable
+`ALLOCATOR=agones` and demonstrate end-to-end allocation") at M. Those sizes are honest on
+`docker-desktop`, where the image store is shared, the kubeconfig is the developer's and the
+data tier is one `host.docker.internal` away. On any cluster that is not this laptop, stage 5
+inherits every row of decision 3's table plus decision 2's status read. Reading the ADR-14
+table as the cost of getting Agones into production would understate it by an order of
+magnitude.
+
+**What is explicitly not decided, and what would decide it.**
+
+- **Whether the realtime tier moves to Kubernetes at all.** The deciding evidence is a
+  reason compose cannot serve: a scaling need, a multi-node need, or a fleet lifecycle
+  need that a `docker compose up` on one VPS genuinely cannot meet. No such need has been
+  demonstrated. Dungeon-per-party instancing (ADR-14 stage 6) is the strongest candidate
+  and has not been costed against a non-Kubernetes implementation.
+- **Whether the whole stack moves or nothing does.** Decision 4 argues against a split;
+  it does not choose between the two remaining ends.
+- **Which cluster.** `docker-desktop` is a development artefact. k3s on a VPS, k3d, and a
+  managed cluster have not been compared, and the tier costs in the root `CLAUDE.md` are
+  ADR-7 estimates that assume neither.
+- **Whether `backend/deploy/k3s/` should be renamed now.** It describes no k3s and applies
+  into whatever context is current, which is a foot-gun independent of this decision.
+
+**Consequences.**
+
+- **Nothing here is demonstrated, and less is demonstrated than in ADR-14.** ADR-14 could at
+  least point at a tested Go SDK to port. This ADR describes work that has no precedent in
+  the repo at all: no StatefulSet, no ConfigMap, no Kubernetes Secret and no cluster-side
+  RBAC has ever been written here.
+- **ADR-14 stage 5 acquires a dependency it does not name.** On a real cluster it cannot
+  succeed without decision 2's status read, because an allocated pod that advertises `:9000`
+  is indistinguishable from no pod at all from the client's side.
+- **The address problem is worth fixing even if Kubernetes is rejected.** A server that can
+  be told its own reachable address is the general form of the bug, and `--public-addr`
+  already exists for the compose case. Decision 2 makes the Agones case work the same way
+  rather than adding a second mechanism.
+- **The `k3s` directory name will keep costing time.** Every reader who finds it assumes a
+  cluster provisioner and finds a `kubectl apply` wrapper.
+
+**Revisit if** a scaling or lifecycle need arrives that compose demonstrably cannot serve
+(dungeon instancing is the likeliest), or if ADR-7's blocker clears and a measured ceiling
+makes a fleet-sizing argument possible, or if the data tier moves to managed services — in
+which case decision 4's objection to a split largely dissolves and the realtime tier could
+move alone.
+## ADR-16 — The realtime tier runs on Agones, and the address it hands a client is measured, not configured
+
+**Status:** accepted 2026-08-17, **proven end to end on k3d**. Implements ADR-14 stages 1-4,
+supersedes ADR-15's decision 2 in one respect (the status read alone is not sufficient), and
+answers ADR-15's open "which cluster" question for local development. Constrained by ADR-1
+(one writer per datum), ADR-2 (one live server per `map_id`), ADR-3 (the gateway is a
+redirector) and ADR-7 (the unknown per-server ceiling).
+
+**What is proven.** A client completed the full production flow — Nakama device auth,
+`gateway_token` RPC, `MsgAuth`, `MsgEnterWorld`, direct dial, `MsgInput`/`MsgSnapshot` — against
+an **Agones-managed C# game server**, at an address only Agones could have supplied:
+
+```
+PASS  gateway_auth      map=map_01  server=127.0.0.1:7097 (tcp)
+PASS  gameserver_join   snapshots=15 (keyframes=1 deltas=14) final_x=4.83 ack_tick=10
+SMOKE=PASS
+```
+
+The run used `--strict-addr`, so the smoke test was forbidden from rewriting a listen-style
+address to loopback. That matters: without it the harness silently repairs the exact defect
+this ADR exists to fix, and reports PASS while a real client fails.
+
+A GameServer also reached `Allocated` **without any gateway allocation**, because the server
+reports `Allocate` to the sidecar on first player join (`NotifyAgonesAllocatedOnce`). "A pod is
+Allocated" is therefore not evidence that the gateway's allocation path ran.
+
+**Decision 1 — Docker Desktop's Kubernetes cannot host this architecture; k3d can.**
+Docker Desktop publishes *Docker* ports to the host and does **not** publish Kubernetes
+`hostPort`. Measured: an Agones GameServer with `portPolicy: Dynamic` received `hostPort: 7306`
+on its pod spec, answered from inside the cluster, and was unreachable from both Windows and
+WSL2, with a compose port reachable at the same moment as a control.
+
+| target | Windows | WSL2 | in-cluster |
+|---|---|---|---|
+| k8s hostPort `127.0.0.1:7306` | FAIL | FAIL | — |
+| node IP `192.168.65.3:7306` | FAIL | FAIL | PONG |
+| compose `127.0.0.1:8000` | OK | OK | — |
+
+Under ADR-3 the gateway hands `ServerAddr` to the client verbatim and the client dials the game
+server directly, so an address routable only inside the cluster means no client can ever join an
+Agones-managed server. k3d works because a k3d node is a Docker container and its published
+range goes through Docker's own port publishing. Cluster `rpg-dev` publishes **7000-7100**, and
+Agones' `MIN_PORT`/`MAX_PORT` are set to match — a mismatch there hands out ports outside the
+published range while every component still reports healthy.
+
+> **What that costs a measurement, and it is not small (#143).** The published range is served
+> by the `k3d-<cluster>-serverlb` container, an nginx TCP proxy, so on k3d **every gameplay
+> packet to an Agones pod traverses a proxy that does not exist on a real node**, where a client
+> dials the node directly. Measured with the same binary under the same load at 50 players:
+> snapshot interval p99 **211.9 ms** through the serverlb against **72.7 ms** direct to a
+> compose server — a third distinct local-measurement distortion, alongside ADR-7's co-located
+> load generator and #153's unusable host clock. The mechanism is the same one this decision
+> depends on, so it is a property of the local rig and not a regression; it does mean a capacity
+> sweep run through k3d reports a ceiling roughly 3x too low and looks like a game-server limit.
+> **Take capacity numbers on the compose path, or direct to a node — never through the
+> serverlb.** See [`BENCHMARK.md`](BENCHMARK.md) and
+> [`deploy/docs/K3S.md`](../deploy/docs/K3S.md).
+
+**Decision 2 — the advertised address is composed: port from Agones, host from configuration.**
+ADR-15 decided the server reads its address from the sidecar (`GET /gameserver`) and registers
+it. That is necessary and **not sufficient**: `status.address` is the *node* address
+(`172.20.0.3` on k3d) and is not dialable by a client. The port cannot come from configuration —
+it is assigned at scheduling time and only the status read can know it. So:
+
+> **host** = `GAMESERVER_ADVERTISE_HOST` if set, else `status.address`; **port** = always the
+> Agones-assigned port of the `game`-named port. On a failed read the override is ignored
+> entirely rather than composed with a configured port, because an address that was never
+> assigned to anything is worse than an obviously wrong one.
+
+The server remains the sole writer of its own registry entry (ADR-1); it asks Agones only "what
+address did you give me", never "which server serves this map".
+
+**This works because there is one node and one published range.** On a multi-node cluster the
+correct host differs per pod and a single fleet-level env var cannot express it; the answers are
+an ingress or a per-pod value via the downward API, and neither exists in this repo.
+
+**Decision 3 — ADR-2's invariant is now enforced in code, not merely warned about.**
+`FindServer` allocates **only when a map has zero live servers**. When servers exist but are all
+full it returns `ErrNoServerAvailable` without allocating. The previous behaviour — allocate a
+second instance for a full map — would have produced two disconnected copies of one world the
+first time Agones actually worked. Refusing a join is a loud, bounded failure; a silently split
+world is not.
+
+**Decision 4 — the join token is minted last.** It is single-use, `sid`-pinned and lives 30s.
+After allocating, the gateway waits (bounded, default 15s) for the pod to publish its **own**
+registry entry and mints from that entry, so the 30s starts when the address is real. The
+gateway never writes a server's entry: an entry it wrote would have nothing re-arming its 15s
+TTL, and that TTL is what makes a crashed server vanish. A timeout returns a distinct retryable
+error. The wait is refused at startup if it approaches `pongTimeout - pingInterval`, because it
+blocks the connection's read loop, which is also what records `MsgPong`.
+
+**Consequences.**
+
+- **Allocated pods are never reclaimed.** Agones has no un-allocate and this project has no
+  `Deallocate` path, so an Allocated GameServer leaves that state only by being shut down.
+  Observed directly: a fleet scaled to 0 kept its Allocated pod. Single-flight per `map_id`
+  bounds the leak per gateway instance; two gateway instances still allocate one pod each.
+- **The map-fleet allocator policy (ADR-2's open item) is still open**, and is now the binding
+  question rather than a theoretical one: fleet pods self-register at boot, so a Ready pod is
+  already in the registry and `FindServer` finds it without allocating; and a fleet hardcodes
+  `GAMESERVER_MAP_ID`, so an allocation for another map would hand back a server for the wrong
+  one. Whether the allocation branch can fire at all for map servers is under experiment.
+- **The deploy path does not change.** Dev, staging and production remain
+  `DEPLOY_MODE=containers`. Agones is proven, not adopted; ADR-15's decision-3 prerequisites
+  (StatefulSets, ConfigMaps, registry, RBAC) are untouched and still stand between this and a
+  real cluster.
+- **`--allocator-transport` is inert**, since the allocation response is now used only for its
+  `ServerID`.
+
+**Operational facts worth not re-deriving.** Pods reach the compose data tier as
+`host.k3d.internal`. The gateway container reaches the API server by joining network
+`k3d-<cluster>` and using `https://k3d-<cluster>-serverlb:6443`, which is in the API
+certificate's SAN list — `host.docker.internal` is not, and client-go verifies by default. k3d
+does **not** share the Docker image store, so local tags must be imported or
+`imagePullPolicy: IfNotPresent` silently falls through to a registry pull. Image tags here lag
+the branch routinely; verify `org.opencontainers.image.revision` against the commit under test
+before believing a deploy.
+
+**Revisit if** the tier moves to a multi-node cluster (decision 2's host override stops
+expressing the answer), if a `Deallocate`/reap story is needed, or if ADR-7's load-generator
+blocker clears and a measured per-server ceiling makes a CCU-keyed policy defensible.
+
+---
+
+## ADR-17 — On k8s, every component is one replica and every gateway rollout is a join outage; that is accepted for dev and must be re-decided above it
+
+**Status:** accepted 2026-08-18, as a **statement of posture**, not a change to any manifest.
+Nothing here alters the deployment; it records what the deployment already is, so that
+"the realtime tier runs on Kubernetes" (ADR-16) is not read as "Kubernetes is providing
+availability". It is providing scheduling and lifecycle. Constrained by ADR-1 (one writer
+per datum), ADR-2 (one live server per `map_id`), ADR-3 (the gateway is a redirector),
+ADR-4 (Redis is a system of record, not a cache) and ADR-6 (the ≤30s gameplay loss window).
+Extends ADR-16, which proved the tier works and did not price its availability.
+
+### Context
+
+ADR-16 proved a real client can join an Agones-managed server on k3d. What it did not
+state is that the resulting deployment has no redundancy anywhere, and that one of its
+correctness fixes — `strategy: Recreate` on the two `hostPort` workloads — converts every
+deploy into a planned outage of the join path. Both facts are individually deliberate.
+Together they are the availability story of the tier, and until now nothing wrote them
+down in one place, so the first reader of `backend/deploy/k8s/` could reasonably assume
+otherwise.
+
+### Current state
+
+Read from the manifests on `develop` and confirmed against the live cluster
+(`kubectl --context k3d-rpg-dev get deploy,sts -A`, 2026-08-18):
+
+```
+NS                 KIND          NAME             REPLICAS   READY   STRATEGY
+rpg-k8s-realtime   Deployment    gateway          1          1       Recreate
+rpg-k8s-data       Deployment    nakama           1          1       Recreate
+rpg-k8s-data       StatefulSet   redis            1          1       -
+rpg-k8s-data       StatefulSet   postgres-meta    1          1       -
+rpg-k8s-data       StatefulSet   postgres-game    1          1       -
+```
+
+Plus the Agones Fleet `map-servers-dotnet-k8s`, also at 1, for a reason of its own (ADR-2:
+every replica carries the same `GAMESERVER_MAP_ID`, so a second replica is a second live
+server for `map_01`).
+
+| Component | Owns | Loss of it |
+|---|---|---|
+| `gateway` (`app/40-gateway.yaml`) | Nothing durable — sessions and the registry live in Redis, so any replica could serve any client | No `MsgAuth`, no `MsgEnterWorld`. In-progress sessions untouched |
+| `nakama` (`data/nakama.yaml`) | Accounts, economy, leaderboards, and the `gateway_token` RPC that is the flow's first hop | No new `gateway_token`. JWTs already minted stay valid until expiry |
+| `redis` (`data/redis.yaml`, `data/redis.conf`) | Sessions (TTL), server registry `servers:*`, event stream `events:*`; `maxmemory-policy noeviction` set explicitly (ADR-4) | Joins fail. Gameplay does not: `RegistrationService` wraps every registry call, logs and retries off the tick loop, and **every heartbeat is also a repair**, so a wiped Redis self-heals within one heartbeat interval |
+| `postgres-game` (`data/postgres-game.yaml`) | `player_states` — authoritative position/HP, written only by the game server (ADR-1) | Gameplay continues; `AsyncSaver.SaveAllAsync` catches per-player, increments `gameserver.player.saves{status="error"}` and carries on, so the loss is **silent to the player and visible only in metrics** |
+| `postgres-meta` (`data/postgres-meta.yaml`) | Nakama's own database; migrated by `nakama migrate up`, never by us (ADR-1) | Nakama cannot authenticate |
+
+One PVC each, `ReadWriteOnce`, no standby, no replica.
+
+**Why `Recreate` is on the two `hostPort` workloads.** The gateway binds `hostPort: 7000`
+and Nakama binds `hostPort: 7001`, because k3d's serverlb publishes `7000-7100` onto the
+host and nothing in the default NodePort range `30000-32767` — a NodePort Service here is
+allocated, printed by `kubectl get svc`, and unreachable. A hostPort is a node-level
+resource, so under RollingUpdate on a single node the replacement pod cannot be scheduled
+until the outgoing one releases the port, while RollingUpdate will not terminate the
+outgoing one until the replacement is Ready: `kubectl rollout status` sits on
+`1 old replicas are pending termination` against a Pending pod whose event reads
+`node(s) didn't have free ports for the requested pod ports`. It passes the **first**
+deploy, when the old pod has no hostPort yet, and wedges every deploy after it.
+
+**Why in-progress gameplay survives a gateway restart.** Verified in code, not assumed.
+Under ADR-3 the gateway hands back `{ServerAddr, JoinToken}` and leaves the path; the
+client dials the game server directly. The game server verifies the join token itself —
+`JwtKeyring.Parse(options.JoinTokenSecret)`, then `Verify`, a server-id claim check and an
+in-process JTI replay tracker (`GameServer/Server/GameServer.cs`) — and makes no call to
+the gateway at any point in a session. The blast radius of a gateway restart is joins.
+
+### Decision
+
+**1. `Recreate` stays, and the outage it causes is accepted for dev.** It is the only
+strategy that terminates on a single node with a hostPort. Reversing it to RollingUpdate
+"because that is the default" reintroduces a deadlock that passes once and then blocks
+every subsequent deploy, including CD's.
+
+**2. The cost is stated where an operator will meet it, not left to be rediscovered.**
+Every gateway rollout drops the join path entirely; so does every Nakama rollout. A player
+whose connection drops during either window cannot reconnect, because a reconnect needs a
+fresh `gateway_token` **and** a fresh join token — join tokens are single-use and `sid`-pinned
+(ADR-16 decision 4). The prose lives in `backend/deploy/k8s/README.md` §Availability posture,
+next to the manifests it describes.
+
+**3. The window is not measured, and is not claimed to be small.** It is bounded below by
+the outgoing pod's termination and the incoming pod's readiness (`initialDelaySeconds: 2`,
+`periodSeconds: 5` on the gateway) and above by the default 30s termination grace period,
+plus an image pull when the tag is not already on the node. Under ADR-7's standing rule an
+unmeasured figure is not quoted as if measured, so no number is written down. Measure it by
+polling `127.0.0.1:7000` from the host across a `kubectl rollout restart`; not from
+`kubectl rollout status`, which reports the pod and not the port.
+
+**4. Nothing above dev inherits this shape by promotion.** Three questions must be answered
+before a tier that is not this one:
+
+- **The gateway's hostPort, before any multi-replica gateway.** The hostPort is what forced
+  `Recreate`, and it also pins the pod to a node, capping the Deployment at one replica per
+  node. The real-cluster answer is a LoadBalancer Service or an Ingress, at which point the
+  hostPort and `Recreate` both disappear. Removing it is **necessary and not sufficient**:
+  ADR-16 records that single-flight per `map_id` is per gateway instance, so two replicas
+  racing on a cold map allocate one GameServer each and Agones has no un-allocate. Answer
+  both, or the second gateway replica leaks a pod per cold map.
+- **Redis persistence and replication.** ADR-4 rules out treating this Redis as an evictable
+  cache, which also rules out the reflex answer of "add a read replica and let it lag": the
+  registry and the event stream are systems of record. The decision is which of ADR-4's
+  split path and a Sentinel/managed-Redis topology comes first, and it is a decision, not a
+  replica count.
+- **The two PostgreSQL instances.** One PVC each, no standby; recovery is restore-from-backup
+  at backup RPO (`backend/deploy/docs/DATABASE.md`, `DISASTER-RECOVERY.md`). Accepted for dev,
+  and the thing that most obviously does not survive contact with real accounts and economy,
+  which `postgres-meta` owns.
+
+**5. This ADR decides nothing about the deploy mode.** ADR-16's position stands: dev runs on
+k8s; staging and production remain `DEPLOY_MODE=containers` and reach none of this.
+
+### Consequences
+
+- **CD deploys are outages.** A push to `develop` with `vars.DEPLOY_MODE=k8s` runs `dev-up.sh`,
+  which restarts the gateway whenever the image pin changes. Any client-side or load
+  measurement running across a deploy will see connection refusals on the join path that are
+  not a defect.
+- **"Runs on k8s" cannot be cited as an availability property** of this project anywhere —
+  docs, issues, or a pitch. There is exactly one of everything.
+- **A rolling-update-shaped fix is not available while the hostPort is.** Anyone reaching for
+  `maxSurge`/`maxUnavailable` here is fixing the symptom of the port binding.
+- **The fleet's single replica is a separate constraint with a separate cause** (ADR-2, map
+  assignment is fleet-wide) and is not solved by anything in this ADR. It is load-bearing,
+  not a capacity dial: measured on k3d 2026-08-18, scaling `map-servers-dotnet-k8s` from 1 to
+  2 put the new GameServer in `Ready` at t=5.38s and **both** pods into `servers:map:map_01`
+  within a second of that, with no allocation involved, because the C# server self-registers
+  right after `ReadyAsync` rather than on allocation — and `FindServer` then hands clients the
+  least-loaded of the two, i.e. the second copy of the world. (5.38s is pod-start latency, not
+  a capacity figure.) So the answer to "when does the single replica stop being necessary" is
+  **#151** — gate self-registration on `Allocated` rather than `Ready` — not a larger fleet.
+  #151 unlocks `replicas > 1` **for one map only**: allocation targets a fleet and every pod
+  in it still carries the same `GAMESERVER_MAP_ID`, so a second *map* remains unserved
+  (`ErrFleetMapMismatch`) until map id is per-pod. Two separate unlocks, not one.
+  Absent a FleetAutoscaler, a cold map does **not** make the first player *wait*: with no
+  `Ready` pod the allocation fails in milliseconds (`registry.ErrNoCapacity`,
+  `gateway/registry/registry.go:559`) and the client is refused, never held
+  (`clientSafeAssignError`, `gateway/server/server.go:906`). The cost is a wrong-looking
+  refusal, not latency — #148's "~9s on the player's path" was the premise measurement
+  removed, and #152 was the refusal being terminal where it should be retryable.
+  **Amended 2026-08-18 (#157):** that refusal is now the *retryable*
+  `all servers busy, retry shortly` rather than the terminal
+  `no server available for map`, keyed on `ErrNoCapacity` alone so the pod leak stays
+  bounded — an `UnAllocated` answer proves no GameServer was handed out, while any other
+  allocation failure may have allocated one whose response was lost and keeps the terminal
+  message. This changes what the client is *told*, not what the deployment *does*: the
+  gateway still refuses in milliseconds and puts no wait on the join path, so the reasoning
+  above and ADR-18's conclusion are unaffected. ADR-18 decides the autoscaler question; this
+  ADR does not.
+- **Known-adjacent:** #143 — k3d's serverlb sits in the gameplay data path and
+  triples snapshot jitter, so local capacity numbers measure the proxy; #147 — a reported 54 Hz
+  tick against an advertised 60 Hz base rate, which that investigation reports as a
+  measurement artifact — the loop paces on `CLOCK_MONOTONIC` while the observer timed it
+  against a `CLOCK_REALTIME` running ~10% fast on the WSL2 host — rather than a code defect.
+  #147 is **closed** on that basis and the host clock itself is filed as #153; #148 — no
+  FleetAutoscaler and `replicas: 1`, premises corrected on the issue itself and the autoscaler
+  refused (ADR-18).
+
+### Follow-up work
+
+- **S** — Measure the gateway rollout outage window with a host-side poll across
+  `kubectl rollout restart`, and record the number next to the posture section. Until then it
+  stays explicitly unmeasured.
+- **S** — Alert on `gameserver.player.saves{status="error"}` (`AsyncSaver`), so a `postgres-game` outage is not
+  a silent one; it is the only failure in the table that a player cannot see and an operator
+  currently would not either.
+- **M** — Answer the gateway exposure question (LoadBalancer/Ingress vs hostPort) together
+  with cross-instance single-flight, as one decision. Either alone makes the deployment worse.
+- **L** — Decide the Redis topology for the first tier above dev, against ADR-4's split path
+  rather than by adding replicas.
+## ADR-18 — A buffer FleetAutoscaler and `replicas > 1` unlock at the same moment, and it is not this one
+
+**Status:** accepted 2026-08-18, **measured on k3d**. Constrained by ADR-2 (one live server
+per `map_id`) and ADR-1 (one writer per datum). Narrows ADR-14 decision 5, which prescribed a
+buffer autoscaler in general terms; refuses the specific request in issue #148. Does not
+touch ADR-3 or ADR-7.
+
+**The question.** The map fleet `map-servers-dotnet-k8s` is pinned at `replicas: 1` and has no
+`FleetAutoscaler`. Once its one pod is `Allocated` the fleet reports `ready=0`, which looks
+like a fleet running out of capacity, and the obvious remedy — Agones' own buffer model, "keep
+N Ready spare" — was proposed on exactly that reading. It is the wrong remedy, and the reason
+is not capacity.
+
+**Decision 1 — no `FleetAutoscaler` may target a fleet that pins one `GAMESERVER_MAP_ID` for
+every replica.** On such a fleet a spare `Ready` pod is not spare. The C# server self-registers
+into Redis at **startup**, immediately after `ReadyAsync()` and before any allocation, keyed by
+the map id it was given (`GameServer.RunAsync`). Every `Ready` replica is therefore a *live
+server* for the same map. Measured on `k3d-rpg-dev`, 2026-08-18, scaling `1 -> 2` with one pod
+already `Allocated`:
+
+```
+t=0.42s  new GameServer appears   state=Scheduled
+t=5.38s  new GameServer           state=Ready
+         SCARD servers:map:map_01 = 2
+```
+
+Two registrants for one `map_id`, **with no allocation involved**. `registry.FindServer` then
+returns the *least loaded* of the two — the unallocated spare — so live players are handed the
+pod Agones is free to delete on the next scale-down, and the two halves of `map_01` cannot see
+each other. The autoscaler would be the thing that broke ADR-2. The fleet was restored to
+`replicas: 1` immediately.
+
+**Decision 2 — `ready=0` on this fleet is the correct steady state, and tooling must say so.**
+The previous `cluster.fleet` WARN ("no spare capacity") described the invariant holding as
+though it were a deficiency, and a warning that fires on the correct state is an instruction to
+break it — which is how #148 came to be filed. `verify.sh` now passes on `ready=0` for a fleet
+that pins a fleet-wide map id, and reserves the warning for fleets where spare capacity is
+meaningful.
+
+**Decision 3 — the prohibition is enforced, not documented.** It was already documented, in
+three places, in capitals, and was proposed anyway. `verify.sh` check `cluster.autoscaler`
+**FAILS** when any `FleetAutoscaler` targets a fleet whose pod template carries a literal
+fleet-wide `GAMESERVER_MAP_ID`, and **stands down** for a fleet that does not — so it stops
+being an error at exactly the moment the real fix lands, rather than becoming the next thing
+someone has to argue past. Proven both ways on 2026-08-18: PASS with none present, FAIL with
+one created against this fleet, then deleted.
+
+**Decision 4 — the unlock is a per-pod map id, and it unlocks both things at once.** `replicas
+> 1` and a buffer autoscaler are the same decision wearing two hats: both are safe exactly when
+a `Ready` pod is not yet claiming a world. Two mechanisms would do it, and neither exists:
+
+1. **Per-pod map id** — the pod learns its map from something other than the fleet spec. This
+   is the one that also fixes the second half of #148 (a second map cannot be served at all
+   today), because allocation targets a *fleet*: every pod of this fleet answers `map_01`
+   whatever the replica count, so an allocation for `map_02` is refused with
+   `ErrFleetMapMismatch` with or without an autoscaler (per-pod map id is tracked as part of
+   #151's "what it does not unblock"). **An autoscaler does nothing for this
+   half of the problem** — that is worth stating, because the two symptoms were filed together
+   and only one of them is about spare pods at all.
+2. **Register on `Allocated`, not on `Ready`** — the server watches its own GameServer state
+   and registers only once Agones has handed it out. Buffer pods then hold no registry entry,
+   the buffer becomes real spare capacity, and the cold start leaves the join path. This is a
+   game-server behaviour change with its own tests, not a manifest change, and is tracked as
+   #151.
+
+   > **Landed 2026-08-18 as an opt-in, #151.** `GAMESERVER_REGISTER_ON_ALLOCATED=true`
+   > (Agones only; ignored with a warning otherwise) polls `GET /gameserver` and registers
+   > only on `Allocated`. An unreadable state is "keep waiting", never "assume allocated",
+   > and the wait runs off the start-up path so the health loop keeps pinging. **Default
+   > off**, so decisions 1-3 above still describe the fleet as it is deployed: the
+   > prohibition and the `verify.sh` `cluster.autoscaler` check stand down per decision 3
+   > only for a fleet actually running with the flag on, and `verify.sh` layer 3 and
+   > `refusal.split_world` must first learn that a `Ready`-and-unregistered pod is
+   > legitimate. `replicas > 1` for a *second map* is untouched — that is mechanism 1.
+
+**What this ADR does not claim.** It does not claim the ~9 s cold start is on the player's
+path. It is not: with no `Ready` pod, `AllocateServer` fails immediately and `FindServer`
+returns `ErrNoServerAvailable` (`gateway/registry/registry.go:559`), which
+`clientSafeAssignError` maps to the terminal `no server available for map`
+(`gateway/server/server.go:886`), so the client gets a refusal in milliseconds rather than a
+wait. (Cold `Ready` measures 5.38 s today, not the 8.97 s in #148 — the image is warm in
+containerd; both numbers are pod-start latency, and neither is a capacity figure. ADR-7 is
+untouched.)
+
+**And it is not a claim that `EnterWorld` never waits.** It does, on a different branch: when
+the allocation *succeeds*, `awaitRegistration` blocks up to `--allocation-wait-timeout` (15 s)
+for the pod's own registry entry, and the client is told `server is starting, retry shortly`
+(`ErrServerStarting`). That wait is correct and deliberate — it is single-flight per `map_id`,
+so a hundred clients at one unserved map produce one pod and one wait. The no-wait property
+above is scoped to the case #148 was actually about: **the fleet having no `Ready` pod to
+allocate at all**, where there is nothing to wait *for* and the refusal is immediate. Confusing
+the two branches is how "add a buffer so the first player stops waiting" became a plausible
+sentence; they are separate paths with separate client messages, tabulated in
+`deploy/k8s/README.md`.
+
+**Revisit when** either mechanism in decision 4 lands. At that point `cluster.autoscaler` stops
+firing by construction, `replicas > 1` becomes a capacity question rather than a correctness
+one, and ADR-14 decision 5's buffer policy becomes the right thing to write — against a fleet
+whose spare pods are spare.
+
+---
+
 ## Summary of decisions
 
 | # | Area | Decision |
@@ -1608,3 +2553,8 @@ it benefits, and it quadruples snapshot bandwidth, which the measured 45.9 KB/s 
 | 11 | Arch under NativeAOT | Arch publishes clean and then throws at runtime without per-component AOT hints; hints are **generated or guarded, never hand-written**; `CommandBuffer` is broken under AOT and is not used; the `publish` CI job must **run** the binary, not just build it |
 | 12 | ECS migration | Server goes to **real ECS with Arch**, staged one PR at a time, over the analysis's objection and by owner decision; `CommandBuffer` stays banned and structural ops stay deferred to one phase per tick; every new component gets its AOT hint line in the same commit; no query shape the hint guard cannot see; `Shared.GameLogic` and the wire are frozen throughout |
 | 13 | Simulation rates | Three responsibility-named groups (`Critical`/`World`/`Background`) at configurable Hz (`SIM_*_HZ`, default 60/15/5) on one derived integer base-tick timeline; rates that do not divide the base are rejected at startup; each group integrates with its own dt; group order Critical->World->Background is the cross-rate write-ownership rule; **replication stays at the world rate**; overload drops the backlog and counts it; the background group ships empty because nothing currently tolerates 200ms |
+| 14 | Agones | **Stages 1-4 shipped 2026-08-17 and are proven — see ADR-16.** The decisions below stand; the status claim does not. Originally: the C# server's Agones SDK is a no-op and `--agones` changes nothing; implement it over the **HTTP sidecar on `localhost:9358`**, not the gRPC C# SDK, to hold the module's NativeAOT/no-dependencies rule. Agones owns pod lifecycle, Redis owns the `map_id -> server` lookup, and the server registers **only after** reporting Ready — an ordering `GameServer.RunAsync` already implements, so what it needs is a test pinning it, not a change. Health stays `disabled: true` until a real SDK is wired; the autoscaler is buffer-based on server count because ADR-7's CCU ceiling is unknown. Whether the realtime tier moves off `DEPLOY_MODE=containers` to k8s is **not** decided here |
+| 15 | Realtime tier on k8s | **Proposed, not accepted — this one records an open question.** All three environments are `DEPLOY_MODE=containers`; there is no k3s (context is `docker-desktop`), no `deploy/k8s/`, and `cd.yml` applies no manifest. One thing *is* decided because it blocks either answer: with `portPolicy: Dynamic` the server cannot learn its own address, advertises `:9000` and the gateway hands that to clients verbatim — so the SDK must **read GameServer status from the sidecar**, not use static ports and not let the gateway write the registry entry (which would break ADR-1 and ADR-14's split). Six prerequisites — StatefulSets/PVCs, ConfigMaps, plugin packaging, Secrets, a registry, and allocation RBAC — sit outside `deploy/agones/` and outweigh ADR-14's stages 1-8, which they precede. ADR-3 is unchanged: allocation lives inside `MsgEnterWorld` and the gateway stays out of the gameplay path |
+| 16 | Agones on k3s | Realtime tier **proven** on Agones/k3d: a real client joined an Agones-managed server in strict-address mode. Docker Desktop k8s cannot host it (Kubernetes `hostPort` is never published to the host); k3d with a mapped port range can. The advertised address is **composed** — port from the Agones status read, host from `GAMESERVER_ADVERTISE_HOST` — because `status.address` is the node address and is not dialable. ADR-2 is now enforced in code (allocate only for a map with no live server); the join token is minted only after the pod self-registers. Allocated pods are never reclaimed; the map-fleet allocator policy stays open; the deploy path stays `DEPLOY_MODE=containers` |
+| 17 | Availability posture on k8s | **Statement of posture, not a manifest change.** Every workload in `deploy/k8s/` is **one replica** — gateway, Nakama, Redis, both PostgreSQL instances, and the map Fleet — so k8s provides scheduling and lifecycle here, **not redundancy**. `strategy: Recreate` on the two `hostPort` workloads (gateway 7000, Nakama 7001) is **required**: RollingUpdate deadlocks on a single node because the replacement cannot schedule until the outgoing pod frees the port. The accepted cost is that **every gateway or Nakama rollout drops the join path entirely**; in-progress sessions survive, because the game server verifies the join token itself and never calls the gateway (ADR-3). The window is **unmeasured** and not quoted. Before any tier above dev: answer the gateway hostPort exposure question *together with* cross-instance single-flight (ADR-16), and decide Redis persistence/replication against ADR-4 rather than by adding replicas |
+| 18 | Fleet autoscaling | **No `FleetAutoscaler` on a fleet that pins one `GAMESERVER_MAP_ID` for every replica.** The C# server self-registers at startup, not on allocation, so a "spare" Ready pod is a second live server for that map: measured on k3d 2026-08-18, scaling `1 -> 2` put two members into `servers:map:map_01` 5.4s later with no allocation involved, and `FindServer` returns the least-loaded — the spare. `ready=0` is therefore the correct steady state and tooling says so instead of warning. Enforced by `verify.sh` check `cluster.autoscaler` (FAIL), which stands down for a fleet with a per-pod map id. `replicas > 1` and a buffer autoscaler unlock together, on a per-pod map id or on registering at `Allocated` rather than `Ready` — an autoscaler does nothing for the "second map cannot be served" symptom, which is a fleet-targeted-allocation problem |

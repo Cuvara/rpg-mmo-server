@@ -89,10 +89,16 @@ internal sealed class EphemeralPostgres : IAsyncDisposable
 
     private async Task<bool> WaitReadyAsync(TimeSpan timeout, CancellationToken ct)
     {
-        var deadline = DateTime.UtcNow + timeout;
+        // Stopwatch, not DateTime.UtcNow: this host's CLOCK_REALTIME runs 10-17% fast and
+        // has been observed stepping backwards (#153, #175). A wall-clock readiness budget
+        // therefore is not the budget it claims to be, and shortening it under load turns a
+        // slow container start into a skipped test — the exact failure #175 documents for
+        // the redis fixture. Same defect, same fix, so it is corrected here too rather than
+        // left to be rediscovered.
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
         int consecutiveSuccesses = 0;
 
-        while (DateTime.UtcNow < deadline)
+        while (elapsed.Elapsed < timeout)
         {
             ct.ThrowIfCancellationRequested();
 

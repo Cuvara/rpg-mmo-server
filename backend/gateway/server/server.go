@@ -866,12 +866,63 @@ func (g *Gateway) handleDisconnect(cc *ClientConn) {
 // Client-facing messages for EnterWorld failures.
 const (
 	msgNoServerAvailable = "no server available for map"
-	msgNotImplemented    = "not implemented"
-	msgInternalError     = "internal error"
+	// msgServerStarting is a retryable EnterWorld failure: a game server was
+	// allocated for the map but has not finished booting and registering
+	// itself. The client must be able to tell this apart from
+	// msgNoServerAvailable ("this map is full" — do not retry) and retry
+	// shortly instead. It names no internal detail. It is not the only
+	// retryable failure — see msgFleetBusy, which is the other one and means
+	// something different: there, no server was allocated at all.
+	msgServerStarting = "server is starting, retry shortly"
+	// msgUnknownMap is the terminal EnterWorld failure: no fleet or server in
+	// this deployment hosts the requested map. It must not read like
+	// msgServerStarting — a client that retries this one drives the very
+	// allocation leak registry.rememberMismatch exists to bound — and it must not
+	// read like msgNoServerAvailable either, which means "this map exists but is
+	// full". It names no fleet, namespace or server id.
+	msgUnknownMap = "map is not available"
+	// msgFleetBusy is the second retryable EnterWorld failure: the map has no
+	// live server and the allocation API answered `UnAllocated` — every
+	// GameServer in the fleet is taken and none is Ready at this instant
+	// (registry.ErrNoCapacity). It is deliberately NOT msgNoServerAvailable:
+	// that one means "this map exists and is full", a stable condition ADR-2
+	// forbids growing out of, whereas this one routinely clears in seconds as
+	// the Fleet controller brings a replacement pod to Ready (measured 5.38s on
+	// k3d, ADR-18). It is also not msgServerStarting: nothing was allocated
+	// here, so there is no booting server of the client's to wait for.
+	//
+	// Retrying this one is safe in the way retrying the others is not. An
+	// `UnAllocated` answer is a decoded 2xx body stating that no GameServer was
+	// handed out, so a retry costs one allocation POST and leaks no pod — and
+	// the retry that finally succeeds usually costs not even that: pods
+	// self-register at startup before any allocation (ADR-18), so once the
+	// replacement is Ready the next EnterWorld resolves it straight from the
+	// registry with no allocator call at all. It names no fleet or namespace.
+	msgFleetBusy      = "all servers busy, retry shortly"
+	msgNotImplemented = "not implemented"
+	msgInternalError  = "internal error"
 )
 
 func clientSafeAssignError(err error) string {
 	switch {
+	// ErrServerStarting is checked first: it is the more specific condition and
+	// must not be flattened into the do-not-retry message.
+	case errors.Is(err, registry.ErrServerStarting):
+		return msgServerStarting
+	// A map the deployment cannot serve is terminal for this client: retrying
+	// cannot make a fleet host a different map, and every retry allocates.
+	case errors.Is(err, registry.ErrFleetMapMismatch):
+		return msgUnknownMap
+	// A momentarily exhausted fleet is checked before ErrNoServerAvailable and
+	// must stay ahead of it: allocateAndWait wraps both sentinels into one error
+	// (`"%w %s: allocate: %w"`), so the broader capacity sentinel would swallow
+	// this one and report a self-correcting condition as terminal. Narrow on
+	// purpose — only ErrNoCapacity, which proves nothing was allocated. Any
+	// other allocator failure (transport error, non-2xx, undecodable body) may
+	// have allocated a pod whose response was lost, and telling a client to
+	// retry that is exactly how un-reclaimable pods pile up.
+	case errors.Is(err, registry.ErrNoCapacity):
+		return msgFleetBusy
 	case errors.Is(err, registry.ErrNoServerAvailable):
 		return msgNoServerAvailable
 	case gameerrors.Is(err, gameerrors.ErrNotImplemented):

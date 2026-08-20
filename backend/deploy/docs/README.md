@@ -8,13 +8,13 @@ All open-source, $0 license: Docker, k3s, Agones, PostgreSQL, Redis, Grafana, Pr
 | Area | Files | Status |
 |------|-------|--------|
 | Local dev backing stack | `docker-compose.yml`, `nakama-plugin.Dockerfile`, `Makefile`, `.env.example` | ✅ Usable |
-| Agones game server fleets | `agones/fleet-map.yaml`, `agones/fleet-dungeon.yaml`, `agones/autoscaler.yaml`, `agones/allocation.yaml` | ✅ Manifests authored |
+| Agones game server fleet | `agones/fleet-map-dotnet-dev.yaml`, `agones/secret-example.yaml`, `agones/allocation-dev.yaml` | ✅ Authored + server-side dry-run clean. **Never deployed** — ADR-14 stage 4 is the first run |
 | Build automation | `scripts/build-all.sh` (repo root) | ✅ Usable |
 | CD pipeline | `.github/workflows/cd.yml`, `scripts/deploy-local.sh` | ✅ Two modes: host binaries or full-docker (`vars.DEPLOY_MODE`) |
 | VPS bootstrap | `scripts/bootstrap-vps.sh` | ✅ Docker + deploy user + Actions runner + ufw, idempotent, `--dry-run` |
 | Gateway / gameserver images | `docker/Dockerfile.gateway`, `docker/Dockerfile.gameserver-dotnet` | ✅ Built + smoke-tested |
 | k3s / Agones dev bootstrap | `k3s/setup-dev.sh`, `k3s/teardown-dev.sh`, `k3s/lib.sh`, `k3s/namespaces.yaml`, `k3s/validate-manifests.py` | ✅ Authored + manifests schema-validated (needs a live cluster) |
-| k8s base/overlays (Nakama, Gateway, Redis, Postgres) | — | Planned |
+| Full k8s dev stack (Nakama, gateway, Redis, both PostgreSQL, Agones fleet) | `k8s/data/`, `k8s/app/`, `k8s/dev-up.sh`, `k8s/rollback-to-compose.sh`, `k8s/verify/` | ✅ Dev runs on it. **One replica of everything and `Recreate` on the two `hostPort` workloads — see `k8s/README.md` §Availability posture and ADR-17** |
 | DB init + backup scripts, prod Redis config (Sentinel, eviction) | — | Planned |
 | Dev observability (Grafana + Prometheus + Loki + Tempo) | `docker-compose.yml` profile `monitoring`, `monitoring/` | ✅ Usable (`make monitoring-up`) |
 
@@ -32,8 +32,18 @@ Docs:
   Sentinel upgrade path.
 - `MONITORING.md` — `make monitoring-up` (one `grafana/otel-lgtm` container), scrape
   targets, the "RPG Gameplay" dashboard, metric contracts, Grafana Cloud / k3s paths.
+- `REALTIME-FLOW.md` — what happens hop by hop when a player enters a map: the
+  compose flow that runs today (deploy → `.env` → handshake → direct gameplay
+  connection), the Agones flow as it stands (fleets Ready, `ALLOCATED 0`, and the
+  address the gateway would hand out if they did), and what a working Agones path
+  would require. Also the one-command checks for telling which of the three you
+  are looking at.
 - `K3S.md` — dev cluster bootstrap (`k3s/setup-dev.sh`), Agones install + fleets,
   cluster options on WSL2, offline manifest validation, graduation to a real k3s VPS.
+- `../k8s/README.md` — the k8s dev stack that actually runs (namespaces `rpg-k8s-data`
+  and `rpg-k8s-realtime`): bring-up, ports, verification, rollback, and the
+  **availability posture** — one replica everywhere, why `Recreate` is required on the
+  `hostPort` workloads, and what a gateway rollout costs (ADR-17).
 
 ## Local dev backing stack
 
@@ -143,8 +153,15 @@ context is `backend/gameserver-dotnet/`.
 # local (WSL: use docker.exe and run from backend/deploy — absolute /mnt/* paths
 # do not survive the Windows CLI's path translation, cwd-relative ones do)
 cd backend/deploy
-docker build -f docker/Dockerfile.gateway            -t rpg-mmo/gateway:dev    ..
-docker build -f docker/Dockerfile.gameserver-dotnet  -t rpg-mmo/gameserver:dev ../gameserver-dotnet
+docker build -f docker/Dockerfile.gateway -t rpg-mmo/gateway:dev ..
+# Context is backend/ (`..`), NOT backend/gameserver-dotnet — the Dockerfile
+# COPYs gameserver-dotnet/... from it. The tag is gameserver-DOTNET; plain
+# rpg-mmo/gameserver:dev was the deleted Go server.
+# GIT_REVISION is stamped into org.opencontainers.image.revision so the tag's
+# contents can be checked later — see K3S.md.
+docker build -f docker/Dockerfile.gameserver-dotnet \
+  --build-arg GIT_REVISION="$(git rev-parse HEAD)" \
+  -t rpg-mmo/gameserver-dotnet:dev ..
 
 # or via the build script (auto-detects docker vs docker.exe)
 scripts/build-all.sh --images                        # -> rpg-mmo/{gateway,gameserver}:dev
@@ -173,9 +190,12 @@ artifact bundle.
 | `ghcr.io/cuvara/rpg-mmo-gateway` | `<short-sha>`, `latest` |
 | `ghcr.io/cuvara/rpg-mmo-gameserver` | `<short-sha>`, `latest` |
 
-`agones/fleet-map.yaml` and `agones/fleet-dungeon.yaml` both reference
-`ghcr.io/cuvara/rpg-mmo-gameserver:latest` — renaming the image in `cd.yml`
-means renaming it in both manifests too.
+No Agones manifest references a GHCR image any more: the prod fleets were
+deleted with the Go game server, and `agones/fleet-map-dotnet-dev.yaml` uses the
+local tag `rpg-mmo/gameserver-dotnet:dev`. See `K3S.md` — and note that a
+mutable local tag is a claim about content, which is why the Dockerfile now
+stamps `org.opencontainers.image.revision` from a `GIT_REVISION` build arg and
+`k3s/validate-manifests.py --check-image` can assert it.
 
 ### Compose parity testing (optional)
 
@@ -241,7 +261,7 @@ when sizing a deployment:
 
 | Setting | Default | Effect |
 |---|---|---|
-| `GAMESERVER_CAPACITY` | 100 | Join is refused with "Server is full". A **policy limit, not headroom against a measured ceiling** — there is no measured ceiling to have headroom against. Raise it deliberately once one exists. |
+| `GAMESERVER_CAPACITY` | 100, and **set explicitly in both map fleets** | Join is refused with "Server is full", and the refusal is now logged at Warning with the count and the limit — a full server and a broken one used to produce identical (empty) logs. A **policy limit, not headroom against a measured ceiling** — there is no measured ceiling to have headroom against. What 100 *is* justified by: 100 players observed running with tick p99 0.49 ms against a 66.67 ms budget and 0% of ticks over budget. Why it is not higher: the load generator shares the box (ADR-7) and k3d's `serverlb` sits in the gameplay data path (#143), so headroom at 100 says nothing about 150. Raise it when those two are cleared and a run brackets a real ceiling — #145. |
 | `GATEWAY_CONN_RATE_PER_MIN` | 10 per source IP | Fine for real clients (one connect each), but it blocks load testing and any NAT with many players behind one address. Raise it if a carrier NAT is expected. |
 
 | Tier | Cost/mo ⚠️ | Setup | CCU ⚠️ |

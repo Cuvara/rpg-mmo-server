@@ -102,6 +102,28 @@ public class SlowClientMovementTests
     /// whose packets clumped lost most of its travel at an unchanged average send rate:
     /// 2.75 units against 6.00 expected.</para>
     /// </summary>
+    /// <remarks>
+    /// <para><b><c>burst: 4</c> is load-bearing and must not be lowered.</b> The obvious
+    /// reading of this schedule is that it is dangerously tight: a burst of four at 15Hz
+    /// idles 264ms, and on the single-rate case below the server's banking cap is
+    /// <c>MaxBankedMovementTicks(15) = 4</c> ticks = 266.7ms — 2.7ms of design margin, so
+    /// lowering <c>burst</c> looks like free headroom. It is not. What bounds the measured
+    /// distance is not the cap but <b>where the last burst lands</b>: <c>MeasureAsync</c>
+    /// waits after packet <c>p</c> when <c>p % burst == 0</c>, so the final arrival is at
+    /// <c>floor((packets - 1) / burst) * burst * interval</c> — 1056ms at <c>burst: 4</c>
+    /// and at <c>burst: 2</c>, but only 990ms at <c>burst: 3</c>, while <c>expected</c> is
+    /// a full 1200ms either way. <c>burst: 3</c> therefore shifts the whole distribution
+    /// down by one 66.7ms tick and lands <i>under</i> the threshold.</para>
+    ///
+    /// <para>Measured, 42 runs of each under 8 spinner processes on 12 cores (#175 F1):
+    /// <c>burst: 4</c> min 0.930 / median 0.945 (multi-rate) and min 0.888 / median 0.945
+    /// (single-rate), <b>0 failures in 42</b>; <c>burst: 3</c> min 0.833 single-rate,
+    /// <b>3 failures in 42</b>. See <c>docs/rejected/README.md</c>.</para>
+    ///
+    /// <para>The 0.85 threshold is not tight either: with banking removed the same two
+    /// cases measure 0.278 and 0.388, so the assertion clears the defect it exists for by
+    /// 3.1x and 2.2x.</para>
+    /// </remarks>
     [Fact]
     public async Task AClientWhosePacketsArriveInBursts_TravelsTheSameDistance()
     {
@@ -121,6 +143,11 @@ public class SlowClientMovementTests
     /// the intended distance, against 46% under multi-rate, because the held-input model
     /// happened to cover part of the gap. What closes it is the elapsed-time step, not the
     /// rate configuration.</para>
+    ///
+    /// <para>This is the thinner of the two cases — the one whose banking cap sits 2.7ms
+    /// above the burst gap. <c>burst: 4</c> is still the right value and lowering it makes
+    /// this case fail; see the remarks on
+    /// <see cref="AClientWhosePacketsArriveInBursts_TravelsTheSameDistance"/>.</para>
     /// </summary>
     [Fact]
     public async Task AClientWhosePacketsArriveInBursts_AgainstASingleRateServer_TravelsTheSameDistance()
@@ -179,7 +206,7 @@ public class SlowClientMovementTests
     {
         var rates = Rates(critical, world, background);
 
-        (float largest, float speed, string diag) = await LargestSingleStepAsync(rates, pauseMs: 800);
+        (float largest, _, float speed, string diag) = await LargestSingleStepAsync(rates, pauseMs: 800);
 
         // Positions are read from SNAPSHOTS, which ship at the world rate, so one sample
         // interval already contains WorldEvery base steps. That, not the base step, is the
@@ -231,13 +258,14 @@ public class SlowClientMovementTests
     {
         var rates = Rates(critical, world, background);
 
-        (float largest, float speed, string diag) =
+        (_, float largest, float speed, string diag) =
             await LargestSingleStepAsync(rates, pauseMs: 800, stopExplicitly: true);
 
         // One snapshot interval, as above. A lost frame used to make two consecutive
         // mentions span two steps and land on exactly 2.00x — the same value this rejects —
         // so a busy CI runner reported a repaid pause on a server that had done nothing
-        // wrong. Those pairs are now discarded at the source.
+        // wrong. Those pairs are now discarded: LargestSingleStepAfterResume keeps only
+        // single-interval samples (#154).
         float normal = speed / rates.WorldHz;
 
         Assert.True(largest < normal * 2f,
@@ -306,6 +334,25 @@ public class SlowClientMovementTests
             return largest;
         }
 
+        /// <summary>
+        /// Largest sampled step at or after <see cref="ResumeTick"/>, considering
+        /// only single-interval pairs (#154). A pair spanning more than one world
+        /// interval is discarded rather than rescaled — it is a scheduling artifact,
+        /// not a measurement of a single step, and rescaling hides the repayment
+        /// that <c>ASilentClientsRepayment</c> exists to see.
+        /// </summary>
+        public float LargestSingleStepAfterResume(int worldEvery)
+        {
+            float largest = 0f;
+            foreach (var s in Samples)
+            {
+                if (s.Tick < ResumeTick) continue;
+                if (s.FrameGap > (ulong)worldEvery) continue; // skip multi-interval pairs
+                if (s.Distance > largest) largest = s.Distance;
+            }
+            return largest;
+        }
+
         public string Describe(float largest)
         {
             var top = new List<StepSample>(Samples);
@@ -328,7 +375,7 @@ public class SlowClientMovementTests
         }
     }
 
-    private static async Task<(float largest, float speed, string diag)> LargestSingleStepAsync(
+    private static async Task<(float largest, float largestSingleStep, float speed, string diag)> LargestSingleStepAsync(
         SimulationRates rates, int pauseMs, bool stopExplicitly = false)
     {
         string userId = $"lurch-{Guid.NewGuid():N}"[..16];
@@ -391,9 +438,10 @@ public class SlowClientMovementTests
 
             Assert.NotEmpty(log.Samples);
             float largest = log.LargestAfterResume();
+            float largestSingle = log.LargestSingleStepAfterResume(rates.WorldEvery);
             Assert.True(largest > 0f,
                 $"no movement was sampled after the restart{log.Describe(largest)}");
-            return (largest, speed, log.Describe(largest));
+            return (largest, largestSingle, speed, log.Describe(largest));
         }
         finally
         {

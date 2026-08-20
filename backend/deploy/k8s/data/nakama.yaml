@@ -1,0 +1,140 @@
+# Nakama — meta services (auth, economy, leaderboard) plus OUR Go runtime
+# plugin, which is what serves the `gateway_token` RPC the realtime flow starts
+# from. A Deployment, not a StatefulSet: Nakama keeps no local state, all of it
+# is in the meta PostgreSQL.
+#
+# ---------------------------------------------------------------------------
+# PLUGIN DELIVERY: baked into an image, not an initContainer. See README.md
+# §Why the plugin is baked in for the full argument. Short version: the plugin
+# is ABI-locked to the exact server binary it loads into, so the plugin and the
+# server must be versioned as ONE artifact, and an image is the only way to say
+# that. deploy/nakama-plugin.Dockerfile already builds exactly this image
+# (target `runtime`) — it existed for compose and needed no change.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: nakama
+  labels: { app.kubernetes.io/name: nakama }
+spec:
+  type: ClusterIP
+  selector: { app.kubernetes.io/name: nakama }
+  ports:
+    - { name: grpc,    port: 7349, targetPort: grpc }
+    - { name: http,    port: 7350, targetPort: http }
+    - { name: console, port: 7351, targetPort: console }
+    - { name: metrics, port: 9100, targetPort: metrics }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nakama
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: nakama }
+  strategy:
+    # Nakama and its migrations share one database; two versions running at once
+    # during a rollout is not something this stack has been shown to survive.
+    #
+    # It is now load-bearing for a SECOND reason: this pod binds hostPort 7001,
+    # and a hostPort is a node-level resource. Under RollingUpdate on a single
+    # node the replacement cannot schedule until the outgoing pod frees the
+    # port, and the outgoing pod is not terminated until the replacement is
+    # Ready -- a permanent deadlock. Do not "modernise" this to RollingUpdate.
+    type: Recreate
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: nakama }
+    spec:
+      initContainers:
+        # Replaces compose's shell entrypoint, which ran `migrate up` and then
+        # exec'd the server in one command. As an initContainer the migration
+        # gets its own exit status: a failed migration leaves the pod in Init
+        # and never starts a server against a half-migrated schema.
+        - name: migrate
+          image: rpg-mmo/nakama:3.40.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef: { name: postgres-meta }
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              # postgres-meta has its own readiness probe, but nothing
+              # sequences a Deployment behind a StatefulSet, so retry here
+              # rather than crash-loop the whole pod for the first half-minute
+              # of a cold start. The retry is on `migrate up` itself and not on
+              # a `nc`/`pg_isready` reachability check, because the nakama image
+              # ships neither and `migrate up` is idempotent anyway.
+              for i in $(seq 1 60); do
+                if /nakama/nakama migrate up \
+                     --database.address "${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-meta:5432/${POSTGRES_DB}"; then
+                  echo "migrate up: ok"; exit 0
+                fi
+                echo "migrate up failed, retrying ($i/60)"; sleep 2
+              done
+              echo "migrate up: giving up after 60 attempts"; exit 1
+      containers:
+        - name: nakama
+          image: rpg-mmo/nakama:3.40.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef: { name: postgres-meta }
+            - secretRef: { name: nakama }
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              exec /nakama/nakama \
+                --name rpg-nakama-k8s \
+                --database.address "${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-meta:5432/${POSTGRES_DB}" \
+                --logger.level INFO \
+                --session.token_expiry_sec 7200 \
+                --session.encryption_key "${JWT_SECRET}" \
+                --session.refresh_encryption_key "${JWT_SECRET}-refresh" \
+                --runtime.path /nakama/data/modules \
+                --console.username "${NAKAMA_CONSOLE_USER}" \
+                --console.password "${NAKAMA_CONSOLE_PASSWORD}" \
+                --socket.server_key "${NAKAMA_SERVER_KEY}" \
+                --runtime.http_key "${NAKAMA_HTTP_KEY}" \
+                --metrics.prometheus_port 9100
+          ports:
+            # hostPort on http ONLY. The client authenticates to Nakama before
+            # it ever reaches the gateway, so with no host route to Nakama the
+            # very first hop of the flow is impossible from outside the cluster
+            # -- a ClusterIP Service is reachable by the gateway and by nothing
+            # a player runs.
+            #
+            # 7001 comes out of the infrastructure half of k3d's published
+            # 7000-7100 range; the Agones controller runs with MIN_PORT=7010 so
+            # its allocator can never hand this port to a GameServer. See the
+            # long note in ../app/40-gateway.yaml.
+            #
+            # grpc/console/metrics stay cluster-internal on purpose: nothing a
+            # player runs needs them, and the console especially should not be
+            # on the host.
+            - { name: grpc,    containerPort: 7349 }
+            - { name: http,    containerPort: 7350, hostPort: 7001 }
+            - { name: console, containerPort: 7351 }
+            - { name: metrics, containerPort: 9100 }
+          # Compose runs `/nakama/nakama healthcheck`, which is an HTTP GET of
+          # /healthcheck against itself. Doing it as an httpGet probe is the same
+          # check without forking a second copy of a 200MB binary every 10s.
+          startupProbe:
+            httpGet: { path: /healthcheck, port: http }
+            periodSeconds: 5
+            failureThreshold: 24   # up to 2 min for migrate + plugin load
+          readinessProbe:
+            httpGet: { path: /healthcheck, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /healthcheck, port: http }
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 1Gi }

@@ -158,6 +158,15 @@ public sealed class GameMetrics : IDisposable
             "gameserver.entities",
             ObserveEntities,
             description: "Entities currently present in the world.");
+
+        _meter.CreateObservableGauge(
+            "gameserver.achieved_tick_hz",
+            ObserveAchievedTickHz,
+            description: "Measured base-tick rate over the last window, from the MONOTONIC " +
+                         "clock. Compare with the configured SIM_CRITICAL_HZ: a healthy " +
+                         "server has them equal. Deliberately not derived from wall time — " +
+                         "a wall-clock rate on a host with a fast CLOCK_REALTIME reports a " +
+                         "healthy loop as slow, which is issue #147. 0 = not measured yet.");
     }
 
     /// <summary>
@@ -165,6 +174,18 @@ public sealed class GameMetrics : IDisposable
     /// The callback runs on the scrape thread, never on the tick thread.
     /// </summary>
     public void SetEntityCountProvider(Func<int> provider) => _entityCountProvider = provider;
+
+    /// <summary>
+    /// Register the callback used by the <c>gameserver_achieved_tick_hz</c> gauge.
+    /// Runs on the scrape thread, never on the tick thread — the tick loop only ever writes
+    /// the value, it never formats or exports it.
+    /// </summary>
+    public void SetAchievedTickHzProvider(Func<double> provider) => _achievedTickHzProvider = provider;
+
+    private Func<double>? _achievedTickHzProvider;
+
+    private Measurement<double> ObserveAchievedTickHz()
+        => new(_achievedTickHzProvider?.Invoke() ?? 0d, _mapTags);
 
     /// <summary>Record the duration of one tick, in seconds.</summary>
     public void RecordTickDuration(double seconds) => _tickDuration.Record(seconds, _mapTags);

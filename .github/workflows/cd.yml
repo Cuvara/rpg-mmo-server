@@ -33,10 +33,17 @@ name: CD — Build & Deploy
 #   (*) build-images runs only for production / build_images=true and is not
 #       on the deploy path.
 #
-# The `deploy` job has two modes, chosen per environment by vars.DEPLOY_MODE:
+# The `deploy` job has three modes, chosen per environment by vars.DEPLOY_MODE:
 #   host       (default) — bundle binaries supervised by scripts/deploy-local.sh
 #   containers           — images built on the runner, brought up by the compose
 #                          `realtime` profile. See backend/deploy/docs/CICD.md.
+#   k8s                  — the WHOLE stack (data tier, Nakama, gateway, Agones
+#                          map fleet) as k3s workloads, applied by
+#                          backend/deploy/k8s/dev-up.sh. No compose container is
+#                          in the path and no service is addressed by
+#                          host.k3d.internal. Used by DEV ONLY; staging and
+#                          production stay on their compose/host modes, which
+#                          this mode does not touch.
 
 on:
   push:
@@ -180,6 +187,25 @@ jobs:
       artifact_name: bin-smoketest-${{ github.sha }}
       artifact_path: bin/smoketest
 
+  # The deployment verification suite's protocol probe
+  # (backend/deploy/k8s/verify/probe). It is built HERE, on ubuntu-latest, and
+  # travels in the deployment bundle for the same reason the smoketest binary
+  # does: the `deploy` job runs on a self-hosted runner whose job is to apply
+  # already-built artifacts to a cluster, and it has no Go toolchain on PATH.
+  # It used to build the probe and the smoketest on the deploy box, which
+  # failed with "go: command not found" and took data.nakama_plugin, flow.smoke
+  # and (by dependency) flow.stack_identity down with it.
+  build-verify-probe:
+    name: Build verification probe binary
+    needs: test-shared
+    uses: ./.github/workflows/_go-module.yml
+    with:
+      module_dir: backend/deploy/k8s/verify/probe
+      run_tests: false
+      run_build: go build -o ../../../../../bin/verify-probe .
+      artifact_name: bin-verify-probe-${{ github.sha }}
+      artifact_path: bin/verify-probe
+
   # ------------------------------------------------------------ nakama plugin
   # -buildmode=plugin is ABI-locked to the Nakama server image, so the .so is
   # built inside the matching container (see backend/deploy/nakama-plugin.Dockerfile).
@@ -277,7 +303,7 @@ jobs:
   # here — only artifacts + repo files are collected.
   bundle:
     name: Assemble deployment bundle
-    needs: [test-integration, build-gateway, build-smoketest, build-plugin]
+    needs: [test-integration, build-gateway, build-smoketest, build-verify-probe, build-plugin]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -317,6 +343,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist/bin dist/deploy dist/scripts
           cp backend/deploy/docker-compose.yml dist/deploy/
+          cp backend/deploy/docker-compose.agones.yml dist/deploy/
           cp backend/deploy/Makefile dist/deploy/
           cp backend/deploy/.env.example dist/deploy/
           # Everything docker-compose.yml bind-mounts must travel with it, or
@@ -328,7 +355,7 @@ jobs:
           cp -r backend/deploy/db         dist/deploy/db
           cp scripts/deploy-local.sh dist/scripts/
           echo "${GITHUB_SHA}" > dist/COMMIT
-          for f in bin/gateway bin/smoketest bin/gameserver-dotnet deploy/nakama.so \
+          for f in bin/gateway bin/smoketest bin/verify-probe bin/gameserver-dotnet deploy/nakama.so \
                    scripts/deploy-local.sh \
                    deploy/monitoring/prometheus.yaml \
                    deploy/monitoring/grafana-dashboards.yaml \
@@ -466,8 +493,8 @@ jobs:
         run: |
           set -euo pipefail
           case "${DEPLOY_MODE}" in
-            host|containers) ;;
-            *) echo "::error::vars.DEPLOY_MODE must be 'host' or 'containers' (got '${DEPLOY_MODE}')"; exit 1 ;;
+            host|containers|k8s) ;;
+            *) echo "::error::vars.DEPLOY_MODE must be 'host', 'containers' or 'k8s' (got '${DEPLOY_MODE}')"; exit 1 ;;
           esac
           echo "deploy_dir=${RPG_DEPLOY_DIR}" >> "$GITHUB_OUTPUT"
           echo "deploy_mode=${DEPLOY_MODE}"   >> "$GITHUB_OUTPUT"
@@ -478,6 +505,70 @@ jobs:
       # costs a few seconds.
       - name: Checkout
         uses: actions/checkout@v4
+
+      # FIRST thing after the checkout, and deliberately before the bundle sync:
+      # everything below this point writes to the deploy directory or claims a
+      # port, and neither is reversible once another environment's stack has
+      # been taken over. All three environments are stacks on ONE host, so a
+      # deploy that resolves to someone else's directory / compose project /
+      # container names / ports does not fail — it wins, silently. `staging`
+      # shipped with dev's values for all four.
+      #
+      # See backend/deploy/preflight-isolation.sh for exactly what this proves
+      # and, at the bottom of that file, what it cannot.
+      - name: Isolation preflight (refuse to deploy onto another environment)
+        env:
+          DEPLOY_ENVIRONMENT: ${{ needs.resolve.outputs.environment }}
+          RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
+          COMPOSE_PROJECT_NAME: ${{ vars.COMPOSE_PROJECT_NAME || 'rpg-mmo-meta' }}
+          COMPOSE_NAME_PREFIX: ${{ vars.COMPOSE_NAME_PREFIX || 'rpg' }}
+          MONITORING_ENABLED: ${{ vars.MONITORING_ENABLED || 'true' }}
+          # Every port this deploy will publish on the host. The defaults repeat
+          # docker-compose.yml's own, so an environment that overrides nothing is
+          # described accurately rather than under-claimed.
+          GATEWAY_ADDR: ${{ vars.GATEWAY_ADDR || ':8000' }}
+          GAMESERVER_ADDR: ${{ vars.GAMESERVER_ADDR || ':9000' }}
+          GATEWAY_CONTAINER_PORT: ${{ vars.GATEWAY_CONTAINER_PORT || '' }}
+          GAMESERVER_CONTAINER_PORT: ${{ vars.GAMESERVER_CONTAINER_PORT || '' }}
+          GATEWAY_METRICS_PORT: ${{ vars.GATEWAY_METRICS_PORT || '9102' }}
+          GAMESERVER_METRICS_PORT: ${{ vars.GAMESERVER_METRICS_PORT || '9101' }}
+          POSTGRES_PORT: ${{ vars.POSTGRES_PORT || '5432' }}
+          POSTGRES_GAME_PORT: ${{ vars.POSTGRES_GAME_PORT || '5433' }}
+          REDIS_PORT: ${{ vars.REDIS_PORT || '6379' }}
+          NAKAMA_GRPC_PORT: ${{ vars.NAKAMA_GRPC_PORT || '7349' }}
+          NAKAMA_HTTP_PORT: ${{ vars.NAKAMA_HTTP_PORT || '7350' }}
+          NAKAMA_CONSOLE_PORT: ${{ vars.NAKAMA_CONSOLE_PORT || '7351' }}
+          NAKAMA_METRICS_PORT: ${{ vars.NAKAMA_METRICS_PORT || '9100' }}
+          GRAFANA_PORT: ${{ vars.GRAFANA_PORT || '3000' }}
+          PROMETHEUS_PORT: ${{ vars.PROMETHEUS_PORT || '9090' }}
+          OTLP_GRPC_PORT: ${{ vars.OTLP_GRPC_PORT || '4317' }}
+          OTLP_HTTP_PORT: ${{ vars.OTLP_HTTP_PORT || '4318' }}
+        run: |
+          set -euo pipefail
+          # Same derivation the "Write environment file" step uses, so the ports
+          # claimed here are the ports that step will publish.
+          : "${GATEWAY_CONTAINER_PORT:=${GATEWAY_ADDR##*:}}"
+          : "${GAMESERVER_CONTAINER_PORT:=${GAMESERVER_ADDR##*:}}"
+          ports="gateway:${GATEWAY_CONTAINER_PORT}"
+          ports="${ports} gateway-metrics:${GATEWAY_METRICS_PORT}"
+          ports="${ports} gameserver:${GAMESERVER_CONTAINER_PORT}"
+          ports="${ports} gameserver-metrics:${GAMESERVER_METRICS_PORT}"
+          ports="${ports} postgres:${POSTGRES_PORT}"
+          ports="${ports} postgres-game:${POSTGRES_GAME_PORT}"
+          ports="${ports} redis:${REDIS_PORT}"
+          ports="${ports} nakama-grpc:${NAKAMA_GRPC_PORT}"
+          ports="${ports} nakama-http:${NAKAMA_HTTP_PORT}"
+          ports="${ports} nakama-console:${NAKAMA_CONSOLE_PORT}"
+          ports="${ports} nakama-metrics:${NAKAMA_METRICS_PORT}"
+          # The monitoring ports are only published when the profile is on.
+          if [ "${MONITORING_ENABLED}" != "false" ]; then
+            ports="${ports} grafana:${GRAFANA_PORT}"
+            ports="${ports} prometheus:${PROMETHEUS_PORT}"
+            ports="${ports} otlp-grpc:${OTLP_GRPC_PORT}"
+            ports="${ports} otlp-http:${OTLP_HTTP_PORT}"
+          fi
+          export ISOLATION_PORTS="${ports}"
+          bash backend/deploy/preflight-isolation.sh
 
       - name: Download deployment bundle
         uses: actions/download-artifact@v4
@@ -502,6 +593,7 @@ jobs:
           mkdir -p "$RPG_DEPLOY_DIR/deploy/modules"
           install -m 0644 dist/deploy/nakama.so          "$RPG_DEPLOY_DIR/deploy/modules/nakama.so"
           install -m 0644 dist/deploy/docker-compose.yml "$RPG_DEPLOY_DIR/deploy/docker-compose.yml"
+          install -m 0644 dist/deploy/docker-compose.agones.yml "$RPG_DEPLOY_DIR/deploy/docker-compose.agones.yml"
           install -m 0644 dist/deploy/Makefile           "$RPG_DEPLOY_DIR/deploy/Makefile"
           install -m 0644 dist/deploy/.env.example       "$RPG_DEPLOY_DIR/deploy/.env.example"
           # Compose bind-mount sources. Replaced wholesale so a file deleted in
@@ -560,6 +652,13 @@ jobs:
           GAME_DB_URL: ${{ vars.GAME_DB_URL || '' }}
           # --- containers mode (compose `realtime` profile) --------------------
           DEPLOY_MODE: ${{ steps.paths.outputs.deploy_mode }}
+          ALLOCATOR: ${{ vars.ALLOCATOR || 'none' }}
+          ALLOCATOR_NAMESPACE: ${{ vars.ALLOCATOR_NAMESPACE }}
+          ALLOCATOR_FLEET_MAP: ${{ vars.ALLOCATOR_FLEET_MAP }}
+          ALLOCATOR_TRANSPORT: ${{ vars.ALLOCATOR_TRANSPORT }}
+          ALLOCATOR_KUBECONFIG: ${{ vars.ALLOCATOR_KUBECONFIG }}
+          KUBECONFIG_HOST: ${{ vars.KUBECONFIG_HOST }}
+          K3D_NETWORK: ${{ vars.K3D_NETWORK }}
           # Published host ports for the realtime containers. Empty = derive them
           # from GATEWAY_ADDR / GAMESERVER_ADDR below, so the containers take
           # over exactly the ports every other component already expects.
@@ -596,6 +695,7 @@ jobs:
           # backend/gameserver-dotnet/docs/API.md.
           GAMESERVER_PUBLIC_ADDR: ${{ vars.GAMESERVER_PUBLIC_ADDR || '' }}
           DEPLOY_ENVIRONMENT: ${{ needs.resolve.outputs.environment }}
+          COMPOSE_PROJECT_NAME: ${{ vars.COMPOSE_PROJECT_NAME || 'rpg-mmo-meta' }}
           # --- monitoring (compose `monitoring` profile / grafana-otel-lgtm) ---
           MONITORING_ENABLED: ${{ vars.MONITORING_ENABLED || 'true' }}
           GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
@@ -694,6 +794,28 @@ jobs:
             echo "GAMESERVER_ID=gs-dotnet-${GAMESERVER_MAP_ID}"
             echo "GAME_DB_URL=${GAME_DB_URL}"
             echo "DEPLOY_MODE=${DEPLOY_MODE}"
+            # Ownership stamp. deploy/.env is regenerated WHOLESALE on every
+            # deploy, so a directory shared by two environments loses one of
+            # them silently. preflight-isolation.sh reads this line back on the
+            # next deploy and refuses when it names a different environment.
+            echo "DEPLOY_ENVIRONMENT=${DEPLOY_ENVIRONMENT}"
+            # Also written here, not only exported into the compose steps: a
+            # human running `docker compose ps` / `logs` / `down` from this
+            # directory otherwise gets the DEFAULT project (the compose file's
+            # own `name:`), i.e. someone else's stack. Process env still wins
+            # for CD's own steps, so this changes nothing about the deploy.
+            echo "COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME}"
+            # Agones allocation. Off unless the environment says otherwise, so a
+            # cluster outage cannot take down an environment that never used one.
+            # When on, the gateway allocates from the fleet and the deploy step
+            # adds docker-compose.agones.yml (kubeconfig mount + k3d network).
+            echo "ALLOCATOR=${ALLOCATOR:-none}"
+            echo "ALLOCATOR_NAMESPACE=${ALLOCATOR_NAMESPACE:-rpg-realtime}"
+            echo "ALLOCATOR_FLEET_MAP=${ALLOCATOR_FLEET_MAP:-map-servers-dotnet-dev}"
+            echo "ALLOCATOR_TRANSPORT=${ALLOCATOR_TRANSPORT:-tcp}"
+            echo "ALLOCATOR_KUBECONFIG=${ALLOCATOR_KUBECONFIG:-/etc/rpg/kubeconfig}"
+            echo "KUBECONFIG_HOST=${KUBECONFIG_HOST:-./kubeconfig.local}"
+            echo "K3D_NETWORK=${K3D_NETWORK:-k3d-rpg-dev}"
             echo "GATEWAY_CONTAINER_PORT=${GATEWAY_CONTAINER_PORT}"
             echo "GAMESERVER_CONTAINER_PORT=${GAMESERVER_CONTAINER_PORT}"
             echo "GATEWAY_METRICS_PORT=${GATEWAY_METRICS_PORT}"
@@ -731,7 +853,7 @@ jobs:
       # publish, so they have to go first. Safe when nothing is running:
       # deploy-local.sh stop just reports "not running" for a missing pidfile.
       - name: Stop host-mode realtime services
-        if: steps.paths.outputs.deploy_mode == 'containers'
+        if: steps.paths.outputs.deploy_mode != 'host'
         env:
           RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
         run: |
@@ -748,14 +870,55 @@ jobs:
       # backend/gameserver-dotnet/, so backend/ covers both. Paths are kept
       # cwd-relative — under WSL `docker` is a shim for docker.exe, which cannot
       # resolve absolute /mnt/* paths.
-      - name: Build realtime images on the runner
+      # A containers-mode deploy while the k8s realtime tier is serving does not
+      # replace it -- it brings the OLD compose stack up ALONGSIDE it. That is not
+      # hypothetical: on 2026-08-18 a deploy at DEPLOY_MODE=containers ran against
+      # a cluster already serving dev and left two gateways, two Redis instances
+      # and two registries up for an hour. The per-step `!= 'k8s'` conditions below
+      # protect k8s mode from compose; nothing protected the cluster from someone
+      # setting the variable back. This does.
+      - name: Refuse containers mode while k8s is serving this environment
         if: steps.paths.outputs.deploy_mode == 'containers'
+        env:
+          KUBE_CONTEXT: ${{ vars.KUBE_CONTEXT || 'k3d-rpg-dev' }}
+        run: |
+          set -uo pipefail
+          if ! command -v kubectl >/dev/null 2>&1; then
+            echo "kubectl not installed; nothing to check"
+            exit 0
+          fi
+          if ! kubectl --context "$KUBE_CONTEXT" get ns rpg-k8s-realtime >/dev/null 2>&1; then
+            echo "no rpg-k8s-realtime namespace on ${KUBE_CONTEXT}; containers mode is unambiguous"
+            exit 0
+          fi
+          live="$(kubectl --context "$KUBE_CONTEXT" get deploy gateway -n rpg-k8s-realtime \
+            -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)"
+          if [ "${live:-0}" -gt 0 ]; then
+            echo "::error::DEPLOY_MODE=containers, but the k8s realtime tier on ${KUBE_CONTEXT}" >&2
+            echo "  is serving this environment (${live} ready gateway replica(s) in rpg-k8s-realtime)." >&2
+            echo "  Deploying compose now would start a SECOND stack beside it -- two gateways," >&2
+            echo "  two registries, and clients split across them by which port they dial." >&2
+            echo "  Either set DEPLOY_MODE=k8s, or take the cluster down first with" >&2
+            echo "  backend/deploy/k8s/rollback-to-compose.sh, which retires it in the right order." >&2
+            exit 1
+          fi
+          echo "rpg-k8s-realtime exists but is not serving; containers mode is safe"
+
+      - name: Build realtime images on the runner
+        if: steps.paths.outputs.deploy_mode == 'containers' || steps.paths.outputs.deploy_mode == 'k8s'
         working-directory: backend
         run: |
           set -euo pipefail
+          # --build-arg GIT_REVISION stamps org.opencontainers.image.revision.
+          # Without it these images are built with the label defaulting to
+          # "unknown", and dev-up.sh's check that a pinned image really carries
+          # the commit being deployed silently skips -- the guard exists but
+          # never fires on anything CD produced.
           docker build -f deploy/docker/Dockerfile.gateway \
+            --build-arg "GIT_REVISION=${GITHUB_SHA}" \
             -t "rpg-mmo/gateway:${GITHUB_SHA}" -t rpg-mmo/gateway:dev .
           docker build -f deploy/docker/Dockerfile.gameserver-dotnet \
+            --build-arg "GIT_REVISION=${GITHUB_SHA}" \
             -t "rpg-mmo/gameserver-dotnet:${GITHUB_SHA}" -t rpg-mmo/gameserver-dotnet:dev .
           docker image ls --filter reference='rpg-mmo/*' \
             --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}'
@@ -770,6 +933,10 @@ jobs:
       # Bringing up the realtime profile is deliberately NOT part of this step: that is
       # what keeps "schema first, then the code that depends on it" true.
       - name: Start the data tier (postgres, redis, nakama)
+        # k8s mode owns its own data tier inside the cluster; these compose
+        # steps would bring the OLD dev stack back up alongside it, and both
+        # want the same host ports.
+        if: steps.paths.outputs.deploy_mode != 'k8s'
         env:
           RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
           MONITORING_ENABLED: ${{ vars.MONITORING_ENABLED || 'true' }}
@@ -800,6 +967,10 @@ jobs:
           done
 
       - name: Apply pending migrations
+        # k8s mode owns its own data tier inside the cluster; these compose
+        # steps would bring the OLD dev stack back up alongside it, and both
+        # want the same host ports.
+        if: steps.paths.outputs.deploy_mode != 'k8s'
         env:
           RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
           GAME_DB_URL: ${{ vars.GAME_DB_URL || '' }}
@@ -826,6 +997,10 @@ jobs:
       # The data services are already up from the step above; this adds the realtime
       # profile on top and is where --remove-orphans belongs.
       - name: Start / update the stack (docker compose)
+        # k8s mode owns its own data tier inside the cluster; these compose
+        # steps would bring the OLD dev stack back up alongside it, and both
+        # want the same host ports.
+        if: steps.paths.outputs.deploy_mode != 'k8s'
         env:
           RPG_DEPLOY_DIR: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
           MONITORING_ENABLED: ${{ vars.MONITORING_ENABLED || 'true' }}
@@ -842,6 +1017,14 @@ jobs:
           # sets nothing keeps the project it already had — renaming it would
           # orphan the running containers and the volumes holding their data.
           COMPOSE_PROJECT_NAME: ${{ vars.COMPOSE_PROJECT_NAME || 'rpg-mmo-meta' }}
+          # The script below addresses containers by name (the agones stop-check,
+          # the redis deregistration, the postgres-game wait). Those expressions
+          # were written as ${COMPOSE_NAME_PREFIX:-rpg} but the variable was never
+          # in this step's environment, so every one of them silently resolved to
+          # the DEV container regardless of which environment was deploying —
+          # production's deploy checked, and deregistered against, dev's stack.
+          COMPOSE_NAME_PREFIX: ${{ vars.COMPOSE_NAME_PREFIX || 'rpg' }}
+          GAMESERVER_MAP_ID: ${{ vars.GAMESERVER_MAP_ID || 'map_01' }}
         working-directory: ${{ vars.RPG_DEPLOY_DIR || '/opt/rpg-mmo' }}
         run: |
           set -euo pipefail
@@ -867,10 +1050,50 @@ jobs:
           else
             echo "realtime profile: disabled (DEPLOY_MODE=host)"
           fi
+          # Agones: when the environment opts in, the gateway needs the overlay —
+          # ALLOCATOR=agones, the kubeconfig mount and the k3d network. Without
+          # this the deploy silently reverts the switch: the gateway comes back up
+          # from the base file with ALLOCATOR=none, and nothing says so. Adding
+          # The bundle ships no docker-compose.override.yml (that file is local-dev
+          # only), so naming -f here loses nothing that was being loaded before.
+          file_args=()
+          if grep -qE '^ALLOCATOR=agones[[:space:]]*$' .env 2>/dev/null; then
+            file_args=(-f docker-compose.yml -f docker-compose.agones.yml)
+            echo "agones overlay: ENABLED (ALLOCATOR=agones in .env)"
+          else
+            echo "agones overlay: disabled (ALLOCATOR is not agones)"
+          fi
           # `pull` cannot fetch the locally built rpg-mmo/* tags — tolerated, the
           # images are already in the daemon's store.
-          docker compose "${profile_args[@]}" pull --quiet || true
-          docker compose "${profile_args[@]}" up -d --remove-orphans
+          docker compose "${file_args[@]}" "${profile_args[@]}" pull --quiet || true
+          docker compose "${file_args[@]}" "${profile_args[@]}" up -d --remove-orphans
+          # The fleet and the compose game server both register for map_01, and two
+          # live servers under one map_id is ADR-2's split world — two disconnected
+          # copies with no handoff. Compose merges `profiles` by union, so an overlay
+          # cannot take the service out of the realtime profile; stopping it here is
+          # explicit and reversible. map_02 is untouched: no fleet serves it.
+          if [ "${#file_args[@]}" -gt 0 ]; then
+            docker compose "${file_args[@]}" "${profile_args[@]}" stop gameserver-dotnet || true
+            # Verify, do not assert. The first version of this printed "stopped"
+            # unconditionally after a `|| true`, and the compose ps two lines later
+            # showed the container still Up — the log line was simply false. A stale
+            # second registrant for map_01 is ADR-2's split world, so this is worth
+            # failing the deploy over rather than reporting cheerfully.
+            if docker ps --format '{{.Names}}' | grep -qx "${COMPOSE_NAME_PREFIX:-rpg}-gameserver"; then
+              echo "::error::ALLOCATOR=agones but the compose game server is still running." \
+                   "It registers the same map_id as the fleet, which is two live servers for" \
+                   "one map — ADR-2's split world. Stop it before this deploy is trusted."
+              exit 1
+            fi
+            # Its registry entry outlives it by up to the 15s heartbeat TTL, and for
+            # that window the gateway can still hand a client the address of a server
+            # that is gone. Deregister explicitly rather than waiting the TTL out.
+            gs_id="${GAMESERVER_ID:-gs-dotnet-${GAMESERVER_MAP_ID:-map_01}}"
+            redis_cli() { docker exec "${COMPOSE_NAME_PREFIX:-rpg}-redis" redis-cli "$@"; }
+            redis_cli del "servers:id:${gs_id}" >/dev/null 2>&1 || true
+            redis_cli srem "servers:map:${GAMESERVER_MAP_ID:-map_01}" "${gs_id}" >/dev/null 2>&1 || true
+            echo "compose gameserver-dotnet is stopped and deregistered (${gs_id}); map_01 is served by the Agones fleet"
+          fi
           # `up -d` does NOT recreate a container whose bind-mounted files
           # changed — only its image/config/env are compared. Without this, a
           # new prometheus.yaml or dashboard sits on disk unread until someone
@@ -884,11 +1107,84 @@ jobs:
           # is not accepting connections yet, so wait for its healthcheck before
           # the restart step below.
           for _ in $(seq 1 60); do
-            state="$(docker inspect -f '{{.State.Health.Status}}' rpg-postgres-game 2>/dev/null || echo missing)"
+            state="$(docker inspect -f '{{.State.Health.Status}}' "${COMPOSE_NAME_PREFIX:-rpg}-postgres-game" 2>/dev/null || echo missing)"
             echo "postgres-game: ${state}"
             [ "${state}" = healthy ] && break
             sleep 2
           done
+
+      # --------------------------------------------------------- k8s mode only
+      # The whole dev stack as k3s workloads. dev-up.sh is the single entry
+      # point and is the SAME script an operator runs by hand, so CI and the
+      # box cannot drift apart. It is idempotent.
+      #
+      # GIT_SHA pins an IMMUTABLE image tag. The moving `:develop` tag is
+      # retagged by hand and silently lagged the branch here -- the cluster ran
+      # `develop-307f1e8` while develop was at b633aff, so the deployment under
+      # test was not the commit under test. `Build realtime images on the
+      # runner` above already tags ${GITHUB_SHA}; this consumes that tag and the
+      # verify step below asserts the running image carries it.
+      - name: Deploy to Kubernetes (k8s mode)
+        if: steps.paths.outputs.deploy_mode == 'k8s'
+        env:
+          KUBE_CONTEXT: ${{ vars.KUBE_CONTEXT || 'k3d-rpg-dev' }}
+          GIT_SHA: ${{ github.sha }}
+          RPG_K8S_RUN_DIR: ${{ vars.RPG_K8S_RUN_DIR || '/tmp/claude-1000/rpg-k8s-dev' }}
+        working-directory: backend/deploy/k8s
+        run: |
+          set -euo pipefail
+          chmod +x dev-up.sh rollback-to-compose.sh
+          ./dev-up.sh
+
+      # The verification suite IS the healthcheck for this mode -- it proves the
+      # cluster, the data tier, the ADR-2 registry invariant, the advertised
+      # address and the full client flow, rather than curling a metrics port.
+      # A FAIL here fails the deploy.
+      - name: Post-deploy verification (k8s mode)
+        if: steps.paths.outputs.deploy_mode == 'k8s'
+        env:
+          KUBE_CONTEXT: ${{ vars.KUBE_CONTEXT || 'k3d-rpg-dev' }}
+          GIT_SHA: ${{ github.sha }}
+        working-directory: backend/deploy/k8s
+        run: |
+          set -euo pipefail
+          K="kubectl --context ${KUBE_CONTEXT}"
+
+          # Prove the running image is the commit being deployed BEFORE trusting
+          # anything the suite says about behaviour.
+          want_gw="rpg-mmo/gateway:${GIT_SHA}"
+          got_gw="$($K get deploy gateway -n rpg-k8s-realtime \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')"
+          if [ "$got_gw" != "$want_gw" ]; then
+            echo "::error::gateway is running '${got_gw}', not the deployed commit '${want_gw}'"
+            exit 1
+          fi
+          echo "gateway image pinned to the deployed commit: ${got_gw}"
+
+          JWT_SECRET="$($K get secret rpg-app-secrets -n rpg-k8s-realtime \
+            -o jsonpath='{.data.jwt-secret}' | base64 -d)"
+          export JWT_SECRET
+
+          # This runner has no Go toolchain on PATH, and should not need one: it
+          # applies prebuilt artifacts to a cluster. Both binaries the suite
+          # would otherwise `go build` on the spot come out of the deployment
+          # bundle instead, built by build-smoketest / build-verify-probe on
+          # ubuntu-latest from this same commit.
+          #   verify/verify.sh    -> VERIFY_PROBE_BIN     (data.nakama_plugin)
+          #   lib/checks_flow.sh  -> VERIFY_SMOKETEST_BIN (flow.smoke)
+          # Both paths are asserted here rather than left to fail inside a
+          # check: a missing bundle binary is a pipeline defect, and it must not
+          # be reported as "the deployment is broken".
+          VERIFY_SMOKETEST_BIN="${GITHUB_WORKSPACE}/dist/bin/smoketest"
+          VERIFY_PROBE_BIN="${GITHUB_WORKSPACE}/dist/bin/verify-probe"
+          for b in "$VERIFY_SMOKETEST_BIN" "$VERIFY_PROBE_BIN"; do
+            [ -f "$b" ] || { echo "::error::deployment bundle is missing $b"; exit 1; }
+            chmod +x "$b"
+          done
+          export VERIFY_SMOKETEST_BIN VERIFY_PROBE_BIN
+
+          chmod +x verify/verify.sh
+          ./verify/verify.sh --target k8s-dev
 
       # ------------------------------------------------------- host mode only
       # deploy-local.sh both (re)starts the binaries AND writes the game
@@ -961,16 +1257,50 @@ jobs:
 
           rc=0
           probe gateway    "http://127.0.0.1:${GATEWAY_METRICS_PORT:-9102}/healthz" || rc=1
-          # No Host header: the C# metrics listener binds the wildcard, so a
-          # plain request from the host matches. If this ever 404s again, the
-          # wildcard bind has regressed — do NOT paper over it with a header.
-          probe gameserver "http://127.0.0.1:${GAMESERVER_METRICS_PORT:-9101}/healthz" || rc=1
           tcp   gateway    "${GATEWAY_CONTAINER_PORT:-8000}"                           || rc=1
-          tcp   gameserver "${GAMESERVER_CONTAINER_PORT:-9200}"                        || rc=1
-          docker ps --filter name=rpg- --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+          # Where the game server is depends on who runs it. Under ALLOCATOR=agones the
+          # compose service is deliberately stopped and the fleet serves the map, so
+          # probing the compose container would fail for the one reason that is correct.
+          # Probe what a client is actually handed instead: the address the server
+          # registered for its own map. That is the value the gateway returns verbatim,
+          # so a probe of anything else proves less.
+          # This step sources $RPG_DEPLOY_DIR/deploy/.env but does not cd there, so
+          # read the value it already has rather than grepping a file that is not in
+          # the working directory — the first version did, silently took the else
+          # branch, and probed the container it was written to stop probing.
+          if [ "${ALLOCATOR:-none}" = "agones" ]; then
+            gs_map="${GAMESERVER_MAP_ID:-map_01}"
+            gs_addr=""
+            for key in $(docker exec "${COMPOSE_NAME_PREFIX:-rpg}-redis" redis-cli --scan --pattern 'servers:id:*' 2>/dev/null); do
+              m=$(docker exec "${COMPOSE_NAME_PREFIX:-rpg}-redis" redis-cli hget "$key" map_id 2>/dev/null | tr -d '\r')
+              if [ "$m" = "$gs_map" ]; then
+                gs_addr=$(docker exec "${COMPOSE_NAME_PREFIX:-rpg}-redis" redis-cli hget "$key" addr 2>/dev/null | tr -d '\r')
+                break
+              fi
+            done
+            if [ -z "$gs_addr" ]; then
+              echo "::error::ALLOCATOR=agones but no game server is registered for map '${gs_map}'. The gateway will answer MsgEnterWorld with 'no server available for map'."
+              rc=1
+            else
+              echo "map '${gs_map}' is served from ${gs_addr} (Agones fleet)"
+              tcp gameserver "${gs_addr##*:}" || rc=1
+            fi
+          else
+            # No Host header: the C# metrics listener binds the wildcard, so a
+            # plain request from the host matches. If this ever 404s again, the
+            # wildcard bind has regressed — do NOT paper over it with a header.
+            probe gameserver "http://127.0.0.1:${GAMESERVER_METRICS_PORT:-9101}/healthz" || rc=1
+            tcp   gameserver "${GAMESERVER_CONTAINER_PORT:-9200}"                        || rc=1
+          fi
+          # Prefix comes from the sourced .env. A literal "rpg-" here is not just
+          # untidy: as a docker SUBSTRING filter it also matches rpg-prod-* and
+          # rpg-stg-*, so every environment's deploy listed every other
+          # environment's containers as if they were its own.
+          np="${COMPOSE_NAME_PREFIX:-rpg}"
+          docker ps --filter "name=^${np}-" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
           if [ "$rc" != 0 ]; then
-            echo "--- gateway logs ---";    docker logs --tail 50 rpg-gateway    2>&1 || true
-            echo "--- gameserver logs ---"; docker logs --tail 50 rpg-gameserver 2>&1 || true
+            echo "--- gateway logs ---";    docker logs --tail 50 "${np}-gateway"    2>&1 || true
+            echo "--- gameserver logs ---"; docker logs --tail 50 "${np}-gameserver" 2>&1 || true
           fi
           exit "$rc"
 
@@ -981,9 +1311,26 @@ jobs:
   # `deploy` (same labels) and reads env from the file the services read; values
   # are never echoed. Deliberately a separate job so a broken smoke test is
   # visibly distinct from a broken deploy.
+  #
+  # deploy/.env is written for the SERVICES, and the smoke test is a CLIENT, so
+  # sourcing it is not enough on its own: two of the addresses it needs are the
+  # ones the services listen on, not the ones a client on the host can dial.
+  # They only looked interchangeable because dev and staging leave every port at
+  # its default, which happens to equal the smoke test's own fallback — so this
+  # whole class of bug stays invisible until an environment moves off the
+  # defaults, as production is the first to do. The deploy job's healthcheck
+  # cannot catch it either: it probes the METRICS ports, which are already
+  # forwarded per-environment, so it goes green while the client-facing path is
+  # unreachable. Hence the overrides below, applied AFTER the file is sourced.
   post-deploy-smoke:
     name: Post-deploy smoke test
     needs: [resolve, deploy]
+    # In k8s mode this is not skipped coverage: the deploy job's
+    # `Post-deploy verification` runs the same smoketest binary, with
+    # --strict-addr and --require-db, as layer 4 of verify.sh. This job is
+    # skipped because it sources deploy/.env, which describes the COMPOSE stack
+    # and is not what k8s mode deployed.
+    if: needs.deploy.outputs.deploy_mode != 'k8s'
     runs-on: ${{ fromJSON(needs.resolve.outputs.runner_labels) }}
     steps:
       - name: Run smoketest
@@ -995,6 +1342,28 @@ jobs:
           # shellcheck disable=SC1091
           . "$RPG_DEPLOY_DIR/deploy/.env"
           set +a
+
+          # NAKAMA_URL is absent from deploy/.env by design — compose hands the
+          # game server the in-network http://nakama:7350 instead — so the smoke
+          # test was falling back to its own DefaultNakamaURL of :7350 and dialing
+          # a port nothing publishes. Derive it from the published port. Kept a
+          # step-local export rather than a line in deploy/.env: a host-mode game
+          # server inherits that file, where NAKAMA_URL unset is what DISABLES its
+          # Nakama S2S integration, and switching that on is not this fix's job.
+          export NAKAMA_URL="http://127.0.0.1:${NAKAMA_HTTP_PORT:-7350}"
+
+          # GATEWAY_ADDR in deploy/.env is the gateway's LISTEN address, and it
+          # must stay that: the container's command hardcodes --addr=:8000 and
+          # GATEWAY_CONTAINER_PORT is derived from it when an environment does not
+          # set one. The dialable address is the published port, which is exactly
+          # GATEWAY_CONTAINER_PORT — equal to the listen port in host mode, mapped
+          # onto it in containers mode, so one expression is right for both.
+          export GATEWAY_ADDR="127.0.0.1:${GATEWAY_CONTAINER_PORT:-8000}"
+
+          # The game server hop needs no equivalent: the smoke test dials whatever
+          # EnterWorldResponse.ServerAddr carries, i.e. GAMESERVER_PUBLIC_ADDR,
+          # which the "Write environment file" step already refuses to leave
+          # hostless or wrong for a published port.
           "$RPG_DEPLOY_DIR/bin/smoketest"
 
   # ----------------------------------------------------------------- summary

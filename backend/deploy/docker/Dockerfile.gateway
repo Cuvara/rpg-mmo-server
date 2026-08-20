@@ -49,6 +49,16 @@ FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 
 COPY --from=builder /out/gateway /usr/local/bin/gateway
 
+# Provenance. Declared AFTER the copy so a rebuild at a new revision does not
+# invalidate the build layers above it. Without this ARG the `--build-arg
+# GIT_REVISION=...` that every build script passes was silently discarded, and
+# a gateway image carried nothing tying its tag to a commit -- so a stale or
+# mis-tagged image was indistinguishable from a correct one by inspection.
+ARG GIT_REVISION=unknown
+LABEL org.opencontainers.image.revision="${GIT_REVISION}" \
+      org.opencontainers.image.title="rpg-mmo gateway" \
+      org.opencontainers.image.source="https://github.com/cuvara/rpg-mmo-server"
+
 # Client realtime TCP port (GATEWAY_ADDR / --addr default :8000).
 EXPOSE 8000
 

@@ -1,0 +1,81 @@
+# Redis — sessions (TTL), server registry (`servers:*`) and the cross-server
+# event stream (`events:*`). One instance, prefix-separated roles (ADR-4).
+#
+# THIS IS NOT A CACHE. `--maxmemory-policy noeviction` is load-bearing and is
+# set explicitly even though it is already the Redis default, so that anyone who
+# later adds a `--maxmemory` limit cannot silently turn the server registry into
+# an LRU cache. Evicting a registry hash removes a live game server from
+# matchmaking with no error anywhere; trimming a stream drops unacked
+# cross-server events. Sessions are the only expendable keys and they carry
+# their own TTL.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  labels: { app.kubernetes.io/name: redis }
+spec:
+  clusterIP: None
+  selector: { app.kubernetes.io/name: redis }
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+spec:
+  serviceName: redis
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: redis }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: redis }
+    spec:
+      # redis:7.4-alpine runs as uid/gid 999.
+      securityContext:
+        fsGroup: 999
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          imagePullPolicy: IfNotPresent
+          # Config comes from a file, not a wall of flags: it is the thing an
+          # operator will want to read, and a flags list is invisible from
+          # `kubectl get`.
+          command: ["redis-server", "/etc/redis/redis.conf"]
+          ports:
+            - { name: redis, containerPort: 6379 }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: config, mountPath: /etc/redis, readOnly: true }
+          # Compose's healthcheck greps for PONG; `redis-cli ping` exits 0 only
+          # on PONG, so the exit code carries the same meaning.
+          readinessProbe:
+            exec: { command: ["redis-cli", "ping"] }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            exec: { command: ["redis-cli", "ping"] }
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { memory: 256Mi }
+      volumes:
+        - name: config
+          configMap: { name: redis-config }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          # AOF + RDB of sessions/registry/streams. Small, but noeviction means
+          # a full disk is a write error rather than a silent trim, so leave room.
+          requests: { storage: 1Gi }

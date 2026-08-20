@@ -1,9 +1,24 @@
 # Dockerfile.gameserver-dotnet — Multi-stage NativeAOT build
 #
-# Build context: backend/   (same as Go gameserver)
-#   docker build -f deploy/docker/Dockerfile.gameserver-dotnet -t rpg-mmo/gameserver-dotnet:dev .
+# Build context: backend/
+#   docker build -f deploy/docker/Dockerfile.gameserver-dotnet \
+#     --build-arg GIT_REVISION="$(git rev-parse HEAD)" \
+#     -t rpg-mmo/gameserver-dotnet:dev .
 #
 # The resulting image is ~30-40 MB (Alpine + single static binary).
+#
+# PASS GIT_REVISION. A mutable tag like `:dev` says nothing about what is inside
+# it, and `imagePullPolicy: IfNotPresent` on a shared image store will happily
+# run last week's build while every manifest and ADR describes this week's code.
+# That is not hypothetical: the `:dev` in the local store on 2026-08-17 was built
+# 5.4 hours before the commit that added the real Agones SDK, so a fleet deployed
+# from it would have come up green running the no-op SDK. The label below turns
+# "is this image the code under test?" into a question a command can answer:
+#
+#   docker image inspect rpg-mmo/gameserver-dotnet:dev \
+#     --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+#
+# An image built without the arg reports "unknown", which is itself the answer.
 
 # ---------------------------------------------------------------------------
 # Stage 1: Build (SDK + native toolchain for AOT compilation)
@@ -45,6 +60,13 @@ RUN addgroup -g 65532 -S nonroot && \
 
 WORKDIR /app
 COPY --from=build /app .
+
+# Provenance. Declared AFTER the copy so a rebuild at a new revision does not
+# invalidate the expensive AOT layers above it.
+ARG GIT_REVISION=unknown
+LABEL org.opencontainers.image.revision="${GIT_REVISION}" \
+      org.opencontainers.image.title="rpg-mmo gameserver (.NET 10 NativeAOT)" \
+      org.opencontainers.image.source="https://github.com/cuvara/rpg-mmo-server"
 
 USER 65532:65532
 

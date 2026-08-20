@@ -6,6 +6,721 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **`SlowClientMovementTests` bursty-client margin (issue #175 F1) — measured, and the proposed
+  fix rejected.** F1 was the one family diagnosed by arithmetic rather than reproduction. The
+  arithmetic still holds against the current tree (`MaxBankedMovementMs = 250`,
+  `MaxBankedMovementTicks(15) = 4` ticks = 266.7ms against a 264ms burst gap), but the prescribed
+  remedy — `burst: 4` -> `burst: 3` — **makes the test fail more often, not less**: 3 failures in
+  42 loaded runs against 0 in 42 for the current value. What bounds the measured distance is not
+  the banking cap but where the last burst lands: `MeasureAsync` waits *after* packet `p` when
+  `p % burst == 0`, so the final arrival is at 1056ms for `burst: 4` and `burst: 2` but 990ms for
+  `burst: 3`, while `expected` is a full 1200ms regardless. No assertion, threshold or schedule
+  was changed. The measurement, the rejected patch and the reasoning are recorded in
+  `docs/rejected/2026-08-19-slow-client-burst-three.patch` and `docs/rejected/README.md`, and the
+  two test cases now carry a comment saying `burst: 4` is load-bearing — the arithmetic that
+  suggests lowering it is correct and the conclusion is still wrong, so the next reader would
+  otherwise re-derive it. Reproduction rate this round: **0 / 42** under load average 11-16 on 12
+  cores, on top of 0 / 32 in the original audit.
+
+### Fixed
+- **`EcsWorld` corrupted Arch's query state under concurrent reads — the reader/writer lock was
+  never sufficient** (issue #176). The reported symptom was
+  `NullReferenceException at Arch.Core.QueryArchetypeEnumerator.MoveNext()`, raised from
+  `ScanRangeLocked` *while holding the read lock*, twice followed by an `AccessViolationException`
+  that killed the test host in an unrelated later test.
+  - **Cause: Arch's read path is not a read.** Two mutations hide behind it, both against state
+    shared by every concurrent reader. `Arch.Core.World.Query(in QueryDescription)` memoises into
+    a plain `Dictionary<QueryDescription, Query>` and **inserts on a miss**; and the `Query` it
+    returns rebuilds its own matching-archetype list **lazily**, the first time it is used after a
+    *new archetype* appeared. The rebuild clears and refills a list other readers are enumerating.
+    Neither is documented, and ADR-11 had recorded Arch's AOT hazards but not this one.
+  - **Measured, not inferred** (Arch `2.1.0-beta`, direct probes with no `EcsWorld` involved):
+    8 threads iterating one shared `Query` with a stale memo and **no writer running at all**
+    faulted **20/200**, with the reported stack; the same 8 threads with the memo already
+    refreshed faulted **0/200**; 8 threads calling `World.Query()` with 8 distinct descriptions
+    on a cold cache faulted **61/400**, and one run left the cache `Dictionary` holding **9**
+    entries after 8 inserts — a torn `Dictionary` is the route from a managed NRE to an
+    `AccessViolationException` somewhere else entirely.
+  - **This was a production defect, not a test artifact.** `TickLoop` runs the AOI gather through
+    `EcsWorld.ReadAllParallel`, whose doc comment argued it was safe because
+    `WorldReader`'s operations are "both pure reads"; every worker was resolving and refreshing
+    the same shared query. `AsyncSaver.SaveAllAsync` calls `PlayerStates()` off the save timer
+    while the tick thread is gathering — a second concurrent-reader pair, on a *different*
+    query description, so it also raced on the cache insert.
+  - **Fix.** `EcsWorld` now owns the queries its read paths iterate (`_readQueries`, resolved in
+    the constructor) and refreshes them in a new `ExitWriteScope()`, which every write scope exits
+    through — the write lock being the only moment a rebuild can happen with no reader watching.
+    `ScanRangeLocked` and `PlayerStates` iterate those fields instead of calling `_arch.Query(...)`.
+    `CountWith<TTag>` takes the **write** lock, because the tag set is open so its query cannot be
+    pre-resolved; it serves a diagnostics gauge and the scaffolding spawner's `AliveCount`, not the
+    tick path. Code holding the write lock (`QueryWithLocked`, `VisitChunksLocked`,
+    `SingletonLocked`) is unchanged — it was already exclusive.
+  - **No measurable performance cost** (`BENCH_TICK=1 TickBreakdownBench`, `Stopwatch` only — this
+    host's `CLOCK_REALTIME` runs 10-17% fast, #153). Median `TickOnce`, with fix vs `develop`:
+    **24.2 vs 28.4 µs** at 50 viewers, **136.1 vs 131.2 µs** at 200, **763.6 vs 908.3 µs** at 500.
+    The per-round ranges overlap at every level (200 viewers: 125.3-149.3 vs 124.8-157.5) and the
+    sign of the difference flips with viewer count, so the honest reading is *no cost detectable at
+    this host's noise level* — **not** that the fix is faster. Single run per arm; a load generator
+    shares this box (ADR-7).
+  - **Why the fix has this shape.** Serialising readers was the
+    obvious alternative and was rejected on measurement: the AOI gather is 77-83% of a 200-viewer
+    tick, and a mutex there would make `ReadAllParallel` pointless. Because iteration of an
+    *up-to-date* query is a genuine pure read (the 0/200 row above), pre-refreshing keeps the
+    gather parallel. The refresh itself is a chunk-iterator construction per read query per write
+    scope — two queries, and no rebuild at all unless a new archetype appeared.
+  - **Reproducer, gated so CI is unaffected:** `GameServer.Tests/World/EcsWorldConcurrencyStress.cs`,
+    skipped unless `ECS_STRESS=1` (`ECS_STRESS_ROUNDS`, `ECS_STRESS_MS` tune it). Before the fix it
+    faulted in every run — 10-15/2000 rounds on the mixed reader/writer scenario and 19-38/2000 on
+    the parallel-gather scenario, across three runs. After the fix: **0/2000 on both, five
+    consecutive runs** (20,000 rounds, zero faults).
+  - **The host abort was reproduced on unmodified `develop` while checking this.** Ten full-suite
+    runs at `9ec22dc` with no product change produced one
+    `System.AccessViolationException: Attempted to read or write protected memory` that took the
+    test host down mid-run ("Test Run Aborted", 134 of 830 tests executed), plus a second truncated
+    run with the same shape. That is the #176 signature, observed directly rather than inferred
+    from the earlier batch.
+  - Docs updated in the same change: ADR-11 gains decision 5 and the probe table; `docs/DESIGN.md`
+    states the rule ("a read path may only iterate a query out of `_readQueries`") next to the lock
+    it qualifies.
+- **Four flaky-test families in `GameServer.Tests`, and 11 tests that silently vanished from green
+  runs** (issue #175). Only test infrastructure changed; no product code and no assertion was
+  weakened — every replacement below pins at least as much as the assertion it replaces.
+  - **Port collisions (`TestPorts.Lease` -> bind handoff).** `Lease` releases the port immediately
+    before the real bind, and the kernel will re-issue a port it has just taken back; with ~25
+    handoffs per run across collections xUnit runs in parallel, the race fired in **4 of 12**
+    baseline runs. `HttpListener` cannot avoid it — its prefixes need a literal port, it has no
+    ephemeral-bind mode, and it reports nothing about what it bound. New
+    `TestPorts.BindWithRetry` retries the whole lease-release-bind sequence on a **new** lease,
+    five attempts, then reproduces the original failure. Applied in `HttpAgonesSdkTests`,
+    `HttpAgonesSdkAddressTests` and `MetricsEndpointTests`. The last also retries on
+    `MetricsEndpoint.TryStart` returning `null`, because it swallows the bind error by design
+    (a metrics endpoint must not kill the game server) so the collision arrived as
+    `Assert.NotNull` rather than as an exception. A genuine bind regression fails all five
+    attempts and still fails the test.
+  - **11 Redis-gated tests skipped while reporting a cause that had not happened.**
+    `RedisFixture.Available` collapsed every failure into one message reading
+    `docker unavailable, no redis to test against`, including runs where docker was plainly
+    available (Postgres-gated tests ran alongside) and only the container readiness probe had
+    timed out. `EphemeralRedis.StartAsync` now returns the *outcome*, and the two states are
+    treated differently: **no docker daemon** is an absent dependency and still skips; **docker
+    answered but the container never became usable** now **fails**, naming the real cause. The
+    readiness deadline moved from `DateTime.UtcNow` to `Stopwatch` — this host's
+    `CLOCK_REALTIME` runs 10-17% fast and has been observed stepping backwards (#153), so the
+    "60s" budget was expiring after ~51s of real time and turning load into absent coverage.
+    Same wall-clock fix in `RegistrationServiceTests` (two deadlines) and in
+    `EphemeralPostgres.WaitReadyAsync`, which carried the identical defect. `docker run` also
+    retries on a fresh lease when the published port is taken, so the new hard-fail cannot be
+    triggered by the port race above.
+  - **Redis TTL assertions now read the level, not the decay.** `RedisServerRegistryTests`
+    compared two `PTTL` reads on the stated grounds that decay is "immune to clock steps
+    (see #161)". It is not, and the comment has been corrected: a run wrote a **15s** TTL and
+    Redis reported **17.23s** remaining, which is impossible under a monotonic clock — Redis
+    derives `PTTL` from its own wall clock, where a `Stopwatch` in this process cannot reach.
+    `Register_WritesTheExactHashShapeTheGatewayReads` now asserts
+    `InRange(ttl, 0, configured)` from a single self-consistent read, and
+    `Heartbeat_ReArmsTtl_AndReportsMissingEntry` asserts `InRange(after, ttl-1s, ttl)` instead
+    of `after > before` — pinning the value the product must write rather than only its
+    direction.
+  - **`Heartbeat_KeepsTheEntryAliveBeyondItsTtl` ran at half the margin its comment claimed.**
+    The comment said a 2s TTL gives a "~667ms" heartbeat interval; `RegistryDefaults
+    .HeartbeatInterval` is `Math.Max(1000, ttl/3)`, so it was 1000ms and the test had a 2x
+    margin, not production's 3x. TTL raised to 3s (the smallest the floor does not distort)
+    **and the wait raised 5s -> 8s with it**, so the entry still outlives more than two full
+    TTLs — raising the TTL alone would have left the wait shorter than one TTL, which a dead
+    heartbeat would also survive.
+  - **`ConnectionManagerTests` had a real data race, and a deadline that measured the box.**
+    `_tcpPairs` was a plain `List<T>` mutated from all four `Task.Run` bodies with no
+    synchronisation; it is now a `ConcurrentBag<T>`. A dropped entry there is a socket triple
+    `Dispose` never closes, leaking into the next test. `ConcurrentAccess_NoDeadlock` also
+    opened a real loopback listener, connect and accept **inside** its timed region — 400
+    handshakes and 1200 sockets against a 10s budget, median 5.21s under load — while its
+    named failure mode is structurally impossible (`ConnectionManager` is a
+    `ConcurrentDictionary` with no locks). The connections are now built up front and the
+    **10s deadline is kept**: with the sockets hoisted out it is a real liveness assertion
+    again and still fails immediately if a lock is introduced.
+- **`sgl-release-reminder` reported unreleased work that did not exist.** It counted commits between
+  the tag and HEAD touching `Shared.GameLogic/`. This repo squash-merges, so the squash commit on
+  `main` carries a new sha and no parent link to develop's individual commits, and the count
+  re-includes everything the squash already absorbed. On introduction it claimed **8 unreleased
+  commits** on `develop` — listing, among them, the release commit that created the tag — while
+  `sgl-v0.1.9`, `develop` and `main` all held the byte-identical tree `ae67c33c`. Acting on it would
+  have published a new version of an unchanged package.
+  It now compares `git rev-parse <ref>:<path>`, which is immune to how the merge was made — the same
+  reason `cleanup-branches.yml` compares trees rather than trusting `git branch --merged`. The
+  report also shows the file-level diff instead of a commit list, since commit topology is not a
+  reliable artefact across a squash merge.
+
+### Added
+- **`TickBreakdownBench`: the tick-breakdown harness issue #162 says is missing, committed and
+  re-runnable.** `BENCH_TICK=1 dotnet test -c Release --filter FullyQualifiedName~TickBreakdownBench`;
+  skipped by default. `Stopwatch.GetTimestamp()` only, never a wall clock (#153), stated in the
+  file's own doc comment so the next reader need not trust the commit message.
+  At **200 viewers `TickOnce` is ~121 µs, of which the AOI gather is 77–83% and the entire system
+  schedule is 0.5 µs**; at 500 viewers 897 µs with the gather at 78.8%. Scan cost is a consistent
+  2.5–3.9 ns per entity examined, O(viewers × entities). This settles where the tick budget goes:
+  the brute-force AOI scan, not simulation.
+  On the docs' "serialization is 4–6% of the tick": **obsolete rather than wrong.** Those figures
+  decompose a pre-stage-4 phase B; `Encode` and `ToByteArray` are no longer on the tick thread at
+  all, so the denominator no longer contains the numerator and a committed harness cannot express
+  the claim. Partially addresses #162 (the ADR-12/DESIGN.md stage-4 µs remain unverifiable).
+  Also measured: off-tick encoding is **not free to the tick** — the same 200-viewer tick costs
+  274 µs with every write task live against 149 µs idle, measured in both orders.
+- **`DESIGN.md`: "Where the tick budget goes, and when parallelism starts to pay".** Guidance for
+  whoever implements real gameplay later, written as thresholds to check rather than a narrative:
+  the measured tick breakdown, the crossover points (~70 000 entities for component work, ~500
+  viewers for a pooled AOI gather, **no reproducible gain at 200**, nothing at 50), what not to do
+  with the number attached (parallelising the schedule is one to two orders of magnitude slower), the testable
+  condition under which that changes (`ComponentAccess.IsDisjointFrom` over two non-structural
+  systems), how to re-measure, the clock rule, and the two measurement traps that produced wrong
+  numbers before being caught (a spinning barrier-parked pool inflating neighbouring arms; tier-0
+  JIT making the first configuration in a process read impossibly flat).
+  It closes by restating the `TEAM.md` boundary in operational terms: **synthetic load inside a
+  benchmark is fine; synthetic gameplay inside `GameServer/` is not** — if a performance change
+  only looks good against a workload invented to justify it, the measurement is what is wrong.
+
+- **`EcsWorld.SimWorkerPool`: the simulation workers are now parked and reused, not created per
+  region.** `UpdateComponentsParallel` used to `new Thread` per worker per region and join them,
+  which cost **165–225 µs per additional worker** before any work ran. The pool starts N dedicated
+  threads lazily, parks them on a per-worker generation counter (own cache line, `ManualResetEventSlim`
+  for the blocked case, interlocked countdown for the join), and wakes only the workers a region
+  actually uses.
+  Measured on this host, workers parked — which is what the live tick always meets, since regions are
+  66 ms apart: an empty region costs **32-35 / 52-54 / 94-95 µs at 2 / 4 / 8 workers**, i.e. **13–18 µs
+  per additional worker at w≥4**, against 178 / 474 / 1094 µs before. Break-even against a serial pass
+  over the same component work moved from **~70 000 entities to ~8 000**. Three overhead-floor runs and
+  three crossover sweeps; the ratios reproduce, the absolute p99s do not (3–10× the median on a shared
+  box).
+  Not a `Barrier`, deliberately: a barrier rendezvous measures 150 µs at 4 workers against 48 µs for a
+  semaphore-style one. Not thread-pool threads either — the two properties the per-region shape was
+  chosen for are preserved. Threads are owned by the world, and each sets `_workerSlot` **once at
+  start and never again**, so slot identity, and with it slot-ordered structural replay, is more
+  stable than before rather than less. `workerCount: 1` still starts no thread and runs inline.
+- **`EcsWorld.ReadAllParallel`: the AOI gather can now be split across those workers.** This is the
+  phase the pool was built for: at 200 viewers the gather is **77–83% of `TickOnce`** while the entire
+  system schedule is 0.5–1.9 µs. It carries **none** of the determinism machinery the write-side
+  region needs, and that is checked rather than assumed — `WorldReader` exposes only pure reads, so a
+  read region has no structural ops whose replay order could matter, and `PooledGatherEquivalenceTests`
+  compares the pooled gather against the serial one element-for-element at 2, 4 and 8 workers.
+  **Off by default** (`--gather-workers` / `GAMESERVER_GATHER_WORKERS`, default `1` = the previous
+  serial path exactly) and gated at 500 viewers, because the gain is conditional and two measurements
+  disagree in the middle: a loss at 50 viewers (0.51–1.05×), **disputed at 200** — 2.06–2.08× measured
+  on the phase across three runs within 1% of each other, but 0.96–1.27× measured through the whole
+  tick — and a gain at 500 on both (1.8–2.4× phase-level, 2.0–2.7× through the tick). Turning it on by
+  default would be quoting the phase number for the tick.
+- **`AoiGatherBenchmark`** (`BENCH_PARALLEL=1`), measuring serial against pooled gather at 50 / 200 /
+  500 viewers with arms interleaved inside a run, plus `ParallelPrimitiveBenchmark.Bench1b_ParkedOverheadFloor`
+  for the dispatch cost with workers parked rather than hot.
+- **`docs/DESIGN.md`: "Where the tick budget goes, and when parallelism pays".** Written for whoever
+  starts gameplay work: the measured per-phase tick breakdown, the two thresholds to check a workload
+  against (~8 000 entities for component work, ~500 viewers for the gather, nothing at 50), the number
+  attached to what not to do (parallelising the schedule is a **118× regression** at the live
+  workload — the multiplier moved but the verdict did not; see the precision note in ADR-12),
+  how to check the condition that would change
+  the answer (`ComponentAccess.IsDisjointFrom`), and the five measurement rules — including the two
+  traps that produced wrong numbers here.
+
+### Fixed
+- **`ParallelPrimitiveBenchmark` measured tier-0 JIT code for its first configuration.** The first
+  arm in a process read impossibly flat — 500 entities slower than 2 000, and 30 entities at
+  103 ns/entity against 9.5 ns/entity for the same body at 10 000 — because per-arm warm-up rounds
+  supply neither the call count nor the wall time tier-1 promotion needs. `WarmUpJit` now exercises
+  the whole shape on a throwaway world first. The `Bench5` schedule ratio was wrong by ~10× because
+  of this.
+- **A spinning worker inflated whatever was measured after it, by up to 6×.** With a 25 µs
+  worker-side spin, a serial pass over 30 entities read 12.5 µs; with the spin off, 1.9 µs. Workers
+  now park immediately and only the region owner spins — which also matches the live tick, where
+  regions are 66 ms apart and the spin could only ever collect the cost.
+
+- **`ParallelPrimitiveBenchmark`: what `UpdateComponentsParallel` actually costs, committed and
+  re-runnable.** `BENCH_PARALLEL=1 dotnet test -c Release --filter ParallelPrimitiveBenchmark`;
+  skipped by default so CI is unaffected (810 passed / 7 skipped with it in place). `Stopwatch`
+  only — never a wall clock, per #153 — with arms interleaved round-robin inside one run so a load
+  spike hits all of them rather than one.
+  Headline numbers: **165–225 µs per additional worker** before any work runs; break-even against
+  serial at **~70 000 entities** while the live world holds 30; peak speedup **1.28×** at 100 000
+  entities with two workers, and `w=8` slower than serial even there. Parallelising the current
+  three-system schedule would be **one to two orders of magnitude slower** for zero overlap — measured
+  13×-824× across implementations and runs, since the serial arm is 1-11 µs and the ratio moves with
+  load while the direction does not.
+
+  three-system schedule stays **one to two orders of magnitude slower** for zero overlap; the serial
+  arm is 1-11 µs so the digits move with load while the direction does not.
+  Two results overturn the obvious assumptions. The read/write lock is **not** the constraint — the
+  write lock is taken once on the calling thread before the first `new Thread`, whole-region cost is
+  0.04 µs, and worker bodies differ by only 1.05–1.4×, the signature of no serialisation; the
+  ceiling is per-region thread creation, and the change that would make this pay off is a persistent
+  worker pool on a barrier. And slot-ordered replay is **cheaper** than a shared queue, so the
+  determinism guarantee costs nothing.
+  ADR-12's parallelism section now carries these figures, so "the schedule runs serially" is a
+  decision with a number behind it rather than an argument.
+- **ADR-12's count of the order-sensitive determinism tests corrected** from two to three, by
+  inspection: `WorkerCountDoesNotChangeTheResultingWorld` compares a slot-ordered 1-worker digest
+  against a 4-worker one and cannot survive arrival-order replay either. Also recorded that
+  `ASpawnInsideAParallelRegionIsNotVisibleUntilTheRegionEnds` is mislabelled — it claims to cover
+  "every worker" but runs `workerCount: 1`, which starts no thread.
+- **`sgl-release-reminder.yml`: catch the case where `publish-shared-gamelogic` goes green and
+  publishes nothing.** That workflow derives its tag from `Shared.GameLogic/package.json` and skips
+  both tag and release creation when the tag already exists — reporting success either way. So SGL
+  changes that land without a version bump produce a green run that released nothing, and nobody
+  investigates a green run.
+  The consequence is not a late release. The client consumes SGL as a UPM git package pinned to a
+  tag, so an unreleased commit is one it can never resolve, while `Packages/manifest.json` keeps
+  pointing at a tag that works and every build stays green. The golden vectors replay fixtures from
+  that pinned package, so the one cross-language check we have keeps validating the old behaviour
+  and keeps passing.
+  **Warns before the promotion, fails on `main`.** Batching several SGL commits and bumping once
+  before promoting is a legitimate way to work, so a pre-promotion warning must not block it; on
+  `main` the publish has already run and released nothing, which is a defect. Measured on
+  introduction: `main` was level with `sgl-v0.1.9` while `develop` already carried **8 commits
+  touching `Shared.GameLogic/`** under that same version.
+- **`sgl-notify-client.yml`: a new `sgl-v*` tag now tells the client repo it exists.** Nothing in
+  either repo knew the other did: the coupling is a UPM git URL in the client's `manifest.json`
+  plus a resolved commit in its `packages-lock.json`, both edited by a human who has to remember.
+  A release would land and the client would stay pinned to the old tag with no signal — and the
+  golden-vector tests, which replay fixtures from the *pinned* package, would keep passing against
+  the stale ones. The job dispatches the client's `sgl-pin-check` workflow, which reports whether
+  its manifest and lock agree and how far behind the pin now is. **It deliberately does not bump
+  anything** — moving to a new simulation version is a judgement call, and the two files must move
+  together or the bump is silently ignored.
+  This is the one thing `GITHUB_TOKEN` cannot do: it is scoped to the repository that minted it and
+  cannot reach another repo at all. It dispatches a *workflow* (`actions: write`) rather than a
+  `repository_dispatch` event, which would need `contents: write` — a permission the app
+  installation has not been granted. The token is minted for one repo and one permission rather
+  than the installation's full set.
+- **`docs/rejected/` — approaches that were written, evaluated and not taken.** First entry is
+  `2026-08-19-slow-client-rescale-and-skip.patch`: the #154 fix that rescaled multi-interval
+  snapshot samples (`StepLog.MovingIntervals`) instead of discarding them, and skipped the case via
+  `[SkippableTheory]` when every retry stalled. Worth keeping because it was not hypothetical —
+  3951c40 landed the rescaling on `develop` and dd316ca took it back out, so the next person to
+  reach for the same idea can find out it was already tried. A sample spanning a lost frame is not
+  a small measurement of one step, it is not a measurement of one step at all; dividing it down
+  produces a plausible-looking number and averages away the repayment `ASilentClientsRepayment`
+  exists to detect — the test keeps passing and loses the ability to fail. The patch is a record,
+  not a backlog: it does not apply to the current tree and is not meant to be applied.
+- **`--register-on-allocated` / `GAMESERVER_REGISTER_ON_ALLOCATED`: hold the registry entry
+  back until Agones reports this GameServer `Allocated` (#151).** Off by default — with the
+  flag unset the server registers immediately after `ReadyAsync()`, byte for byte the
+  behaviour that shipped, so an unmigrated fleet sees no change.
+
+  The problem it fixes was measured on k3d and recorded in ADR-18: every pod of the map
+  fleet carries the same fleet-wide `GAMESERVER_MAP_ID`, so a second `Ready` replica is a
+  second *live* server for that map with **no allocation involved** — scaling 1 → 2 put two
+  members into `servers:map:map_01` within a second of the new pod reaching Ready, and
+  `registry.FindServer` then hands live players the unallocated spare that Agones is free to
+  delete on the next scale-down. With the flag on, a `Ready`-but-unallocated pod holds no
+  registry entry and is genuinely spare, which is the unlock for `replicas > 1` and a buffer
+  `FleetAutoscaler`.
+
+  - `IAgonesSdk.GetStateAsync()` reads `status.state` from the same `GET /gameserver`
+    document the address read already parses; `HttpAgonesSdk` now shares one fetch between
+    the two so they cannot drift on what a non-2xx or an unparsable body means.
+  - `AgonesAllocationGate.WaitForAllocatedAsync` polls it every second. An **unreadable**
+    state is "keep waiting", never "assume allocated"; the wait has no timeout and never
+    fails the server. It runs on a background task so the health loop keeps pinging (a pod
+    that blocked on the wait would be killed for missing pings) and the listener keeps
+    accepting.
+  - **Ready still comes first.** This narrows ADR-14 decision 3 rather than reversing it —
+    Ready remains a precondition of being allocatable and has simply stopped being sufficient
+    for being registered. The Agones address read stays between Ready and registration
+    (ADR-15 decision 2), and shutdown still deregisters before Agones `Shutdown`.
+  - **Inert without Agones.** With `IsEnabled` false there is no GameServer object to reach
+    `Allocated`, so honouring the flag would mean never registering; the server logs that it
+    is ignoring it and registers at start-up. docker-compose, local runs and every test are
+    unaffected.
+  - **Deallocation and restart:** once registered, the entry stays for the life of the
+    process and is removed only by the existing shutdown path or by its TTL. The gate is not
+    re-armed and a state that stops reading `Allocated` does not deregister — Agones has no
+    un-allocate (an `Allocated` GameServer leaves that state by being shut down, which ends
+    the process anyway), and a second writer that could yank a live server out of the
+    registry on one transient read failure is the two-writers-one-datum hazard ADR-1 forbids.
+    A pod that restarts while `Allocated` re-registers at once, because the gate's first read
+    already says so.
+  - Shutdown settles an in-flight gate (bounded, 5s) before deregistering, so a registration
+    cannot land *after* the deregistration and leave the gateway handing out a black hole
+    until the 15s TTL reaped it.
+  - Tests: `AgonesAllocationGateTests` (gate opens only on an exact `Allocated`, keeps
+    waiting on every other state, on an unreadable one and on a throwing SDK, and returns
+    false on cancellation), `HttpAgonesSdkAddressTests` state cases against the fake sidecar,
+    and host-level cases pinning that a gated Ready pod writes nothing, that allocation
+    releases it with the Agones-assigned address, that an already-`Allocated` pod registers
+    immediately, that the flag is ignored without Agones, and that the default path never
+    reads the state at all.
+- **`/status` publishes `achieved_tick_hz` — a *measured* base-tick rate, from the monotonic
+  clock (#144, #153).** The endpoint exposed a configured rate, a tick counter and an uptime,
+  and no measured rate, so the obvious move for anyone checking whether the loop was healthy
+  was `current_tick / uptime_seconds`. That mixes clocks, and on this host it reports a
+  healthy 60 Hz loop as ~54 Hz: issue #147, filed against a server that was running at
+  exactly 60, propagated into an ADR and blamed for a client prediction defect before being
+  closed as not-a-defect. Fixing the field labels alone would have left that trap armed —
+  the gauge is what disarms it, because an observer that has to supply its own clock will
+  eventually supply a bad one and the result looks exactly like a server defect.
+
+  `AchievedRateMeter` samples once per base tick from `Stopwatch.GetTimestamp()` — the same
+  timestamps that pace the loop — over a 2 second sliding window. O(1) and allocation-free
+  per tick, so it does not perturb the budget it measures. There is deliberately **no**
+  overload accepting a `DateTime`: a wall-clock-derived achieved rate would reproduce #147
+  *inside* the server, carrying the server's authority, which is worse than the bug it
+  replaces. `0` means "no window completed yet", not "stalled"; `current_tick` distinguishes
+  those, and it is documented rather than signalled with a null that would break typed
+  readers.
+
+  **Base timeline only.** The world and background groups are exact integer divisors of the
+  base rate, so three measured rates would be one measurement plus two pieces of arithmetic —
+  three things that can drift instead of one. Per group,
+  `rate(gameserver_sim_group_runs_total[...])` is already the measurement.
+
+  Also exported as the Prometheus gauge `gameserver_achieved_tick_hz`.
+
+### Fixed
+- **A join refused for capacity was completely silent (#145).** The capacity check called
+  `SendError` and logged nothing, so `grep -c full` over a pod log during a 120-player run
+  that was cut off at 100 joins returned **0**. An operator could not tell a server correctly
+  turning players away from a server that was broken — the two produced identical logs.
+  The refusal now logs at Warning with the user, the current count, the limit, and the fact
+  that the limit is `GAMESERVER_CAPACITY` rather than a resource limit. Warning rather than
+  Information because the number being hit is a chosen admission limit, so hitting it is the
+  signal that the choice needs revisiting.
+
+  Covered by `CapacityRejectionTests`, including the negative case — a join that fits must
+  not log a capacity warning, or a line emitted on every join would satisfy the positive
+  test. These are the first tests in the suite to assert on log output; everything else runs
+  on `NullLoggerFactory`, which is precisely why a missing log line was invisible.
+
+- **`/status` reported a rate nobody had configured (#144).** The endpoint filled
+  `tick_rate` from the legacy `--tick-rate` / `GAMESERVER_TICK_RATE` scalar. No current
+  deployment sets that variable, so the field reported the compiled-in default of **15**
+  forever — on servers running the standard `SIM_CRITICAL_HZ=60` configuration, i.e. wrong
+  by 4x, and silently disagreeing with both the startup banner and the join response. The
+  Unity DOTS sample polls this endpoint and reads that field.
+
+  The root problem was the shape, not the number: the server runs three simulation groups
+  at three frequencies (ADR-13), so one unqualified rate cannot be right for every reader.
+  `/status` now publishes rates derived from the resolved `SimulationRates`, each field
+  named for its group:
+  - `tick_rate` — kept, and **defined as the critical/movement rate, identical to the wire
+    field `join_token_resp.tick_rate`** (normative definition in `docs/API.md`). It keeps
+    its name because clients already read it under that name from both surfaces; what was
+    wrong was its source, not its name. A contract test asserts the two surfaces cannot
+    diverge — both read `SimulationRates.MovementHz`.
+  - `sim_critical_hz`, `sim_world_hz`, `sim_background_hz` — the three configured group
+    rates, explicit. `sim_world_hz` is the one that matters for a client jitter buffer and
+    for bandwidth: snapshots broadcast on the world cadence, not the critical one.
+  - `capacity` — the admission limit the server enforces, previously unobservable.
+
+  The mapping now lives in a testable `ServerStatus.ApplyRates`; it was inline in
+  `Program.cs`, a top-level-statement file with no seam, which is why it could read an
+  unrelated variable for as long as it did without a test noticing.
+
+- **`/status` reported uptime on the wrong clock.** `uptime_seconds` came from
+  `DateTime.UtcNow` (`CLOCK_REALTIME`) while `current_tick` is advanced by a
+  `Stopwatch`-paced loop (`CLOCK_MONOTONIC`). `current_tick / uptime_seconds` is the obvious
+  way to derive an achieved tick rate, and on a host whose realtime clock runs 10-17% fast
+  — this one does (#153) — that quotient reports a 60 Hz loop as ~54 Hz. That is precisely
+  issue #147: a defect filed against a server that did not have one, because the observer
+  supplied the clock. Uptime is now monotonic, so both terms of the quotient share a source.
+
+  **This changes the meaning of a documented field, which this repo has been bitten by
+  before, so it is stated rather than slipped in:** `uptime_seconds` is now elapsed process
+  time, not a wall-clock difference. It therefore no longer follows a clock step — an NTP
+  correction, a suspend/resume — and can disagree with `date`-derived arithmetic on a
+  drifting host. That disagreement is the point: an elapsed interval should never have come
+  from a wall clock, and the previous behaviour was not a feature anyone relied on, it was
+  the bug. The alternative considered and rejected was adding a second field and leaving this
+  one wrong; that keeps a field whose only use is to mislead.
+
+- **`RedisServerRegistryTests` TTL assertion no longer breaks on hosts with clock steps
+  (#161).** The test asserted an absolute remaining TTL (`Assert.InRange(…, 1, 15)`) and read
+  16.87s against a 15s ceiling on a host whose `CLOCK_REALTIME` stepped backward during the
+  window. A relative `TimeSpan` expiry (`PEXPIRE`) cannot exceed its configured TTL by
+  construction — Redis computes the deadline on its own clock — so the reading was a backward
+  clock step inflating `deadline − now`. Replaced with a decay assertion: read the TTL twice
+  with a 500ms gap and assert the second is strictly less than the first. Monotonic regardless
+  of clock steps in either direction.
+- **`SlowClientMovementTests.AnExplicitStopIsNotTreatedAsLostTime` no longer flakes at
+  `critical:15` (#154).** A scheduling hiccup at the 66.7ms tick interval produced a snapshot
+  pair spanning two world ticks instead of one, with ~2x normal movement. The test read that
+  as a repaid pause and failed. Fixed by adding `LargestSingleStepAfterResume(worldEvery)`
+  which discards multi-interval pairs (`FrameGap > worldEvery`), keeping only single-tick
+  samples. The repayment test (`ASilentClientsRepayment_IsBoundedByTheCap`) still uses the
+  unfiltered `LargestAfterResume()` because multi-tick samples there are legitimate repayment
+  steps, not scheduling artifacts.
+
+### Documentation
+- **Distinguished clock *rate skew* from clock *steps* in `BENCHMARK.md`, with the sign table
+  that tells them apart (#153).** This host has both faults and they need different responses:
+  rate skew understates any measured rate and is fixed by never deriving a rate from the wall
+  clock; a step corrupts a single reading and is not fixed by that rule at all. Added because
+  matching on magnitude alone already produced one wrong attribution — a Redis TTL assertion
+  reading **16.87s against a 15s ceiling** looked like the 10-17% skew at +12.5%, but the
+  registry sets a *relative* expiry (`PEXPIRE`), so Redis computes the deadline on its own
+  clock and the remainder cannot exceed 15s by construction; and decisively, a fast clock makes
+  a TTL decay faster, so it reads **lower**, never higher. The observation ran the wrong way for
+  the mechanism it was blamed on. Recorded as a worked example with the rule it teaches —
+  **magnitude matching is not diagnosis, confirm the sign** — which is the same discipline #147
+  failed. The Redis flake itself is deliberately not fixed or filed here: it is out of scope,
+  the backward-step hypothesis is not reproducible on demand, and hardening a test against an
+  undemonstrated cause is how a flake acquires a wrong fix that hides it. Refs #153, #147.
+- **`BENCHMARK.md` and `K3S.md` now point at the measured `achieved_tick_hz` instead of warning
+  people off arithmetic (#153/#144).** The gauge landed with #144, so the docs give the answer
+  rather than only the prohibition: read **`achieved_tick_hz`** on `/status` or
+  **`gameserver_achieved_tick_hz`** on `/metrics`, and compare it against the configured
+  `sim_critical_hz` — a healthy server has the two equal to within rounding. Both are fed once
+  per base tick from `Stopwatch.GetTimestamp()`, over a 2s sliding window. Documented the one
+  way to misread it: **`achieved_tick_hz == 0` means "not measured yet"** (process younger than
+  ~2s, no completed window), not a stopped loop — `current_tick` distinguishes those, and a
+  freshly scheduled k3d pod will show `0` briefly. Also recorded that the gauge covers the
+  **base timeline only** — world and background are exact integer divisors, so three measured
+  rates would be one measurement plus two pieces of arithmetic; per-group measured rates come
+  from `rate(gameserver_sim_group_runs_total[...])`. The `current_tick / uptime_seconds`
+  quotient is documented as wrong in one of two ways depending on build: clock-skewed before
+  the #144 uptime fix (observed live at **54.10 Hz** on a loop genuinely running 60), and a
+  since-boot average that hides recent degradation after it. Notes the consequent behaviour
+  change — `uptime_seconds` is elapsed process time now, so it no longer follows a clock step
+  and can legitimately disagree with `date`-derived arithmetic. Links
+  `gameserver-dotnet/docs/METRICS.md` rather than restating it. Refs #153, #147, #144.
+- **Warned that the achieved tick rate must not be computed from `/status` (#153).** The
+  endpoint reports `tick_rate` (the *configured* rate), `current_tick` and `uptime_seconds`,
+  which invites `current_tick / uptime_seconds` — but `uptime_seconds` is derived from
+  `DateTime.UtcNow` (`GameServer/Program.cs`), i.e. `CLOCK_REALTIME`, which runs 10-17% fast
+  on this host. The quotient therefore reads **~51 Hz on a healthy 60 Hz loop** and **~12.9 Hz
+  on a healthy 15 Hz loop**, reproducing #147 from inside the server's own status endpoint
+  rather than from `date`. Documented in `BENCHMARK.md` and `K3S.md` with the safe
+  alternative (`gameserver_tick_duration_seconds` on `/metrics`, built from
+  `Stopwatch.GetTimestamp()`). **No code change made here** — `ServerStatus` and the missing
+  `Stopwatch`-derived achieved-rate field belong to #144 and were flagged to its owner rather
+  than changed under it. Refs #153, #147, #144.
+- **`BENCHMARK.md` records the k3d serverlb as a third local-measurement trap (#143).** On k3d
+  the Agones port range is published by an nginx TCP proxy, so a capacity sweep through an
+  Agones pod measures the proxy: snapshot interval p99 **211.9 ms** through the serverlb against
+  **72.7 ms** direct to a compose server, same binary and load. Nothing already in the document
+  was measured that way — Part I and Part II both ran against a directly-dialled server — but
+  the local Agones rig is the obvious next place someone would sweep, so the trap is recorded
+  next to the existing confounds with the rule to prefer the compose or direct-to-node path.
+  Refs #143, ADR-16.
+- **The host clock is a measurement hazard, and every BENCHMARK figure has now been audited
+  against it (#153).** `CLOCK_REALTIME` on this WSL2 box runs *fast* relative to
+  `CLOCK_MONOTONIC` — measured at **+11.1%, +16.7% and +16.65%** in three sessions on
+  different days — and the amount drifts, so it cannot be corrected with a constant, only
+  avoided. `backend/docs/BENCHMARK.md` gains the twenty-second reproduction, the rule
+  (**never derive a rate from a wall clock on this box**), and a figure-by-figure audit
+  traced to source. **Verdict: no figure in the document is affected.** Tick p50/p99/mean
+  come from `Stopwatch.GetTimestamp()`/`Stopwatch.Frequency`; every client-side rate,
+  latency and the achieved `ticks/s` come from Go `time.Time` subtraction, which uses the
+  monotonic reading Go embeds in `time.Now()`; peak RSS is a byte count with no interval in
+  it; and the Protobuf-vs-JSON savings and the 5:1 `still`-vs-`cluster` ratio are ratios
+  within one run, which would cancel a shared skew anyway. Corrected one piece of wording
+  that said otherwise — §2 described the snapshot interval as a "wall-clock gap", which
+  would have led a reader to discard a sound figure. Also recorded why the **14.7Hz** drift
+  is *not* this bug and the arithmetic that proves it: a 16.7% fast clock would have made
+  15Hz read as ~12.9, not 14.7, so timer granularity remains the live explanation. The
+  hazard is not hypothetical — it produced #147 ("the tick loop runs at 54 Hz while
+  advertising 60"), which was filed, propagated into an ADR in an open PR, and blamed for a
+  client prediction defect before being closed as not-a-defect; `TickLoop` paces on
+  `Stopwatch` and the observer timed it with `date`. Refs #153, #147, ADR-7.
+
+## [v1.5.2] — 2026-08-17
+
+### Fixed
+- **`SlowClientMovementTests` measured the transport and blamed the simulation.** Two of its
+  cases flaked on CI during one afternoon, each costing an investigation, and both readings
+  were wrong in the same direction: they reported a defect in a server that had behaved
+  correctly.
+  - `AnExplicitStopIsNotTreatedAsLostTime` judged **every** sampled step, including those
+    from the movement phase *before* the pause it is named for. Under load the server's own
+    tick loop runs late and the elapsed-time step then integrates two ticks into one — which
+    is #100 working as specified. That lands on exactly `2.00x`, the value the threshold
+    rejects. Observed at `0.6667@tick9` with the pause not ending until ~tick 21. It now
+    judges only samples at or after the restart, with the boundary taken from the snapshot
+    stream's own tick rather than from wall clock.
+  - Samples spanning a **lost** snapshot are discarded. The outbound channel drops the
+    oldest frame under load; when the dropped frame mentioned the player, the next mention
+    is two steps away and the raw difference again reads as exactly `2.00x`. Lost frames are
+    detected by tracking the tick of *every* snapshot, not only those carrying the player —
+    which is what distinguishes a dropped frame from an entity that legitimately did not
+    move and so was absent from a delta.
+  - `MeasureAsync` took "the newest position seen", which deltas and drops can leave several
+    ticks stale, reading as a short distance — again the failure shape. It now requests a
+    keyframe (`MsgResync`) and reads the position out of that, which carries every entity in
+    the AOI unconditionally.
+  - Failures now print the sample set: count, how many were before the restart, lost frames,
+    discarded pairs, and the three largest steps with their tick and gap. The first
+    occurrence after adding it identified the cause immediately, having previously been
+    misattributed twice.
+
+  **Rejected approach, recorded because it looked right.** Dividing each step by its tick gap
+  removes the drop artefact — and also removes the defect: banked repayment puts a whole
+  silent interval's travel into one tick and the previous mention is a whole interval
+  earlier, so the quotient comes back at exactly one normal step. Both banking tests then
+  measured the defect as *absent* while passing. Caught by running them; it would have
+  shipped two permanently green, permanently blind tests.
+
+## [v1.5.0] — 2026-08-17
+
+### Added
+- **`GAMESERVER_ADVERTISE_HOST` / `--advertise-host`** — host-only override for the address
+  composed from the Agones GameServer status. **Host** = this value if set, else
+  `status.address`; **port** = always the Agones-assigned `game` port, never configurable.
+  - **Measured, not theorised.** ADR-15 warned that `status.address` is the *node* address;
+    the consequence was not drawn until a live `portPolicy: Dynamic` GameServer on k3d
+    (k3d v5.8.3, k3s v1.31.5, Agones 1.59.0, ports 7000-7100 published by the serverlb)
+    reported `172.20.0.3:7008` and was probed: `127.0.0.1:7008` answers from WSL2 (`PONG`)
+    and from Windows, where the Unity client runs (`Test-NetConnection` True), while
+    `172.20.0.3:7008` is refused from WSL2 and unreachable from Windows. **The read gets the
+    port exactly right and the host wrong** — the port is the half only Agones can supply,
+    the host is a deployment fact the cluster cannot know.
+  - **The two address knobs do not overlap, on purpose.** `GAMESERVER_PUBLIC_ADDR` is a full
+    `host:port` used when Agones is **off**; `GAMESERVER_ADVERTISE_HOST` is host-only and used
+    when Agones is **on** and the status read succeeded. Setting the latter with Agones off
+    logs a warning and changes nothing; setting it to a full `host:port` by mistake logs a
+    warning, honours the host and discards the port.
+  - **Not applied when the status read fails.** With no Agones port to pair it with,
+    composing the override host with a *configured* port would invent an address that was
+    never assigned to anything — a plausible-looking value pointing nowhere, harder to
+    diagnose than the honestly-wrong configured one. That path falls back unchanged.
+  - IPv6 hosts are bracketed when composed (`[2001:db8::1]:7008`), since the gateway hands
+    the string to clients verbatim and a bare `::1:7008` does not parse as an endpoint.
+  - The composition logs which half came from where — `Advertising 127.0.0.1:7008 (host from
+    GAMESERVER_ADVERTISE_HOST, port 7008 from Agones status)` — because when this is wrong it
+    is wrong silently: the server runs, the registry looks healthy, and only the client knows.
+  - 24 further tests: override applied, override unset (pre-override behaviour pinned),
+    Agones disabled, failed read, hostname hosts, blank-as-unset, a value carrying a port, and
+    host normalisation including bare and bracketed IPv6.
+- **The server learns its own dialable address from Agones** (`GameServer/Agones/AgonesSdk.cs`,
+  `GameServer/Registry/RegistrationService.cs`, `GameServer/Server/GameServer.cs`) — ADR-15
+  decision 2, option (A). `IAgonesSdk` gains `GetAddressAsync()`; `HttpAgonesSdk` implements it
+  as `GET /gameserver` against the sidecar, taking `status.address` and the port whose **name**
+  is `game`, and the host advertises that pair into Redis instead of its configured address.
+  - **This is what has kept the Agones path from ever carrying a player**, and it is not the
+    health loop. `deploy/agones/fleet-map-dotnet-dev.yaml` uses `portPolicy: Dynamic`, so
+    Agones assigns the host port at scheduling time and no static value can be correct: the
+    manifest passes `--addr=:9000` and sets no `GAMESERVER_PUBLIC_ADDR`, so the server
+    registered the hostless `:9000`, the gateway copied it into `MsgEnterWorldResp.ServerAddr`
+    verbatim (`transfer/map_assign.go` → `server/server.go`), and the client dialled nothing.
+  - The port is chosen **by name, never by index** — matching `ports[].name` in the fleet
+    manifests and `gamePortName` in the gateway's `registry/agones_allocator.go`. `ports[0]`
+    works right up until a fleet declares a second container port, and then silently
+    advertises the wrong one.
+  - The read sits **between `ReadyAsync` and the registry write**, and both halves are
+    load-bearing: the address does not exist until the pod is scheduled, and the *first* value
+    written to Redis must already be correct — a value repaired one heartbeat later is a
+    15-second window in which the gateway hands clients a dead address.
+  - **Falls back to today's exact resolution on everything**: Agones disabled (the read is not
+    even attempted), sidecar unreachable, non-2xx, unparsable body, a status with no address,
+    or no port named `game`. Each logs a warning and none is fatal, for the same reason as the
+    rest of this class — a server nobody can reach still serves the players already on it.
+    Running outside a cluster is byte-for-byte unchanged.
+  - `RegistrationService` gains `PublicAddr` and `OverridePublicAddr(string)`. The override
+    throws after `StartAsync` rather than half-applying, since by then the wrong value is
+    already in Redis.
+  - The AOT rules are intact: one source-generated `JsonSerializerContext` for the three fields
+    read, no reflection-based serialization, no new package (`System.Net.Http` is in-box —
+    the official Agones C# SDK is gRPC, which is why ADR-14 decision 1 chose HTTP).
+  - Start-up logging: under Agones a hostless `--public-addr` is now reported as *expected*
+    rather than as "clients will fail to connect", because it is no longer the value that
+    gets registered.
+  - 28 tests (`GameServer.Tests/Agones/`, 46 in the directory total): the success shape, a
+    500, an absent sidecar, malformed JSON, a missing/empty address, an out-of-range port, a
+    missing `game` port, and port selection where `game` is **not** index 0; plus the wiring —
+    the assigned address is the first thing registered, the read lands after Ready and before
+    registration, a failed read registers the configured address, and with Agones disabled the
+    SDK is never asked and the configured address is registered unchanged.
+  - **The response shape is observed, not assumed.** The success fixture is a verbatim capture
+    from a live Agones **1.59.0** sidecar (`kubectl port-forward` to
+    `map-servers-dev-kl485-gsmrh` in `rpg-realtime`), which returned HTTP 200 and
+    `{"status":{"address":"192.168.65.3","ports":[{"name":"game","port":7691}], ...}}`. What
+    remains unproven is this server making that call from inside a pod.
+- **Real Agones SDK over the HTTP sidecar** (`GameServer/Agones/AgonesSdk.cs`) — ADR-14
+  stages 1-3. `HttpAgonesSdk` POSTs an empty JSON body to `/ready`, `/health`, `/allocate`
+  and `/shutdown` on `localhost:9358` (`AGONES_SDK_HTTP_PORT` overrides the port; an
+  unparsable value warns and falls back rather than refusing to boot, because a server that
+  will not start is a restart loop). HTTP and not the official C# SDK on purpose: that SDK is
+  gRPC and would pull `Grpc.Net.Client` into a module whose rules are NativeAOT-compatible and
+  no external dependencies — `System.Net.Http` is in-box and the body is a string literal, so
+  no serializer is involved at all.
+  - **No method throws.** A missing, slow or 500-ing sidecar is logged and swallowed: every
+    call site is start-up or a background loop, and an exception in either turns a sidecar
+    hiccup into a dead game server. Health failures are *counted* rather than silently
+    dropped — first failure warns, every fifth consecutive one logs an error naming the count,
+    a recovery logs the gap — because Agones restarts the pod when pings stop, so a swallowed
+    error would otherwise hide the cause of a real restart.
+  - `--agones` / `AGONES_ENABLED=true` now selects it; the start-up warning saying the flag
+    "has NO effect" is gone because it became false. Unset still means `NoopAgonesSdk`.
+  - `IAgonesSdk` gains `IsEnabled`. The health loop keys off it and no longer runs against the
+    no-op (ADR-14 decision 4): it used to log "health loop started" and then report nothing to
+    anybody, which reads in a log exactly like a working liveness contract. **This is the one
+    behaviour difference with Agones disabled** — no health-loop log lines.
+  - Health ping interval 2s against the fleet manifest's `periodSeconds: 5`, so two pings fit
+    one window and one dropped request is not a strike.
+  - `AllocateAsync` fires once, on the first player to join, off the join's critical path.
+    Nothing balances it on the way down: Agones has no un-allocate, and an Allocated
+    GameServer leaves that state by being shut down.
+  - Ordering per ADR-14 decision 3 — Ready before the Redis registry write, deregister before
+    Agones Shutdown — was already what `GameServerHost.RunAsync` did; it is now commented as a
+    contract and pinned by tests, because it is invisible in a log and silently reversible by
+    anyone reordering two awaits.
+  - 18 tests (`GameServer.Tests/Agones/`): the four paths against a real local `HttpListener`,
+    a 500 and an absent sidecar not throwing, port resolution including four bad values, the
+    Ready-before-register and deregister-before-Shutdown orderings, Allocate-once, and the
+    disabled build reporting nothing while still registering at the same point.
+
+> ⚠️ **Not proved against Agones.** No C# server in this project has ever reported Ready to a
+> real sidecar. The tests stand a local `HttpListener` in for it, which pins the HTTP shape and
+> the failure behaviour and nothing about Kubernetes. ADR-14 stage 4 — deploy the dotnet fleet
+> and watch for a restart loop — is where this first gets evidence; until then the fleet
+> manifest's health block stays `disabled: true`.
+
+### Documentation
+- **ADR-14's decision 3 asked for work that was already done.** It states that the server
+  must register into Redis only after reporting Ready, written as though that were pending.
+  `GameServer.RunAsync` already does it: the bind completes at
+  `GameServer/Server/GameServer.cs:349`, `ReadyAsync()` runs at 356, `_registration.StartAsync()`
+  at 364, and the descent deregisters at 443 before `ShutdownAsync()` at 450. What was actually
+  missing was decision 1 alone — `Program.cs:365` hardcoded `new NoopAgonesSdk()`, so a
+  correctly ordered sequence of calls all landed on the no-op.
+
+  The decision stands as the rule; it needs a test pinning the order against a future refactor,
+  not a restructure. Corrected in place with a dated note rather than edited away, because an
+  ADR that asks for finished work sends the next reader hunting for it — the same failure the
+  ADR-10 and nakama status corrections fixed earlier the same day.
+
+### Documentation
+- `docs/README.md`: new "Agones (`--agones`, `AGONES_SDK_HTTP_PORT`)" section — the four
+  endpoints, the lifecycle order, the health cadence, the never-throws rule and what is still
+  unproven. The flag table row no longer describes a stub, and `AGONES_SDK_HTTP_PORT` is listed.
+- `docs/README.md`: that section now also documents `GET /gameserver`, why the advertised
+  port comes from the GameServer status under `portPolicy: Dynamic`, the by-name port
+  selection, and the fallback list. The `status.address`-is-the-node-address limit is no
+  longer a caveat but a sub-section with the k3d reachability matrix that measured it, the
+  `GAMESERVER_ADVERTISE_HOST` resolution table, and a side-by-side of the two address knobs
+  so the wrong one is harder to reach for. The `--public-addr` and `--agones` flag rows say
+  Agones overrides the configured address, and `--advertise-host` is listed.
+- **ADR-14 — Agones owns the pod, Redis owns the lookup; the C# server's SDK is a stub and must
+  be written over the HTTP sidecar** (`backend/docs/ARCHITECTURE-DECISIONS.md`). Accepted
+  2026-08-17, **not yet implemented** — nothing in it has shipped, and it must not be cited as
+  evidence that Agones works for this server.
+  - Records what the startup log already admits: `GameServer/Agones/AgonesSdk.cs` is 58 lines
+    of interface plus `NoopAgonesSdk`, the only implementation in the solution, so `--agones` /
+    `AGONES_ENABLED` parses, logs a warning, and changes nothing. The gateway half is real and
+    tested (`gateway/registry/agones_allocator.go`), which is why the gap is one-sided.
+  - Four consequences named: an unserved map cannot be entered, a full map is refused because
+    ADR-2's allocation branch cannot produce a live server, a crashed server is dropped from
+    Redis by TTL but never replaced, and dungeon-per-party instancing cannot exist —
+    `--mode=dungeon` today only widens the disconnect hold window from 30s to 60s.
+  - Decides the SDK is implemented over the **Agones HTTP sidecar on `localhost:9358`**, not
+    the official C# SDK, which is gRPC and would pull `Grpc.Net.Client` against this module's
+    NativeAOT and minimal-dependency rules. The deleted Go server's `agones/sdk.go` (101 lines,
+    at `670a803^`) is the shape reference.
+  - Decides the ownership split ADR-1 requires: Agones owns pod lifecycle, Redis owns the
+    `map_id -> server` lookup, and the server registers into Redis **only after** reporting
+    Ready — deregistering before `ShutdownAsync` on the way out.
+  - Notes that `deploy/agones/fleet-map-dotnet-dev.yaml` sets a 5s health period and no
+    `disabled: true`, so deploying it today would restart-loop the pod; and that the cluster
+    still runs `map-servers-dev` / `dungeon-servers-dev` on `rpg-mmo/gameserver:dev`, the Go
+    server deleted in `670a803`. Retiring those is stage 8 of eight.
+  - Leaves explicitly open whether the realtime tier moves to Kubernetes at all — dev, staging
+    and production all run `DEPLOY_MODE=containers`, so Agones is a parallel path today.
+
 ### Fixed
 - **`SlowClientMovementTests` measured the transport and blamed the simulation.** Two of its
   cases flaked on CI during one afternoon, each costing an investigation, and both readings

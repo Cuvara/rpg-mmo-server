@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using Microsoft.Extensions.Logging;
@@ -8,7 +9,14 @@ namespace GameServer.Tests.Server;
 
 public class ConnectionManagerTests : IDisposable
 {
-    private readonly List<(TcpListener listener, TcpClient client, TcpClient serverSide)> _tcpPairs = new();
+    /// <summary>
+    /// Concurrent, because <see cref="CreateFakeConnection"/> is called from four threads at
+    /// once by <see cref="ConcurrentAccess_NoDeadlock"/>. This was a plain <c>List</c>: an
+    /// unsynchronised <c>Add</c> from four threads can corrupt the backing array, throw, or
+    /// silently drop entries — and a dropped entry is a socket triple <see cref="Dispose"/>
+    /// never closes, which leaks into whatever test runs next.
+    /// </summary>
+    private readonly ConcurrentBag<(TcpListener listener, TcpClient client, TcpClient serverSide)> _tcpPairs = new();
 
     /// <summary>
     /// Creates a real Connection backed by a loopback TCP pair.
@@ -137,21 +145,54 @@ public class ConnectionManagerTests : IDisposable
         Assert.Equal(0, mgr.Count);
     }
 
+    /// <summary>
+    /// Four threads hammering the same <see cref="ConnectionManager"/> must not deadlock.
+    ///
+    /// <para>
+    /// The connections are built UP FRONT, outside the timed region. They used to be created
+    /// inside the loop, which meant the 10s deadline was mostly measuring 400 loopback TCP
+    /// handshakes and 1200 sockets held open until Dispose — so the assertion could fail
+    /// because the box was busy, while the thing it names could not fail at all
+    /// (ConnectionManager is a ConcurrentDictionary with no locks anywhere, so a slow run
+    /// and a deadlocked one were indistinguishable). With the sockets hoisted out, the timed
+    /// region contains only the dictionary operations under test.
+    /// </para>
+    /// <para>
+    /// The deadline stays at 10s and is not relaxed. It is now a real liveness assertion
+    /// again: pure dictionary work across 4x100 iterations finishes in milliseconds, so 10s
+    /// still fails immediately if someone introduces a lock into ConnectionManager, and no
+    /// longer fails because the machine was loaded.
+    /// </para>
+    /// </summary>
     [Fact]
     public void ConcurrentAccess_NoDeadlock()
     {
-        var mgr = new ConnectionManager();
-        var tasks = new List<Task>();
+        const int threads = 4;
+        const int iterations = 100;
 
-        for (int t = 0; t < 4; t++)
+        var mgr = new ConnectionManager();
+
+        // Every socket this test needs, created before the clock starts.
+        var connections = new Connection[threads][];
+        for (int t = 0; t < threads; t++)
+        {
+            connections[t] = new Connection[iterations];
+            for (int i = 0; i < iterations; i++)
+            {
+                connections[t][i] = CreateFakeConnection($"t{t}_c{i}");
+            }
+        }
+
+        var tasks = new List<Task>();
+        for (int t = 0; t < threads; t++)
         {
             int threadId = t;
             tasks.Add(Task.Run(() =>
             {
-                for (int i = 0; i < 100; i++)
+                for (int i = 0; i < iterations; i++)
                 {
                     var id = $"t{threadId}_c{i}";
-                    mgr.Add(CreateFakeConnection(id));
+                    mgr.Add(connections[threadId][i]);
                     _ = mgr.Get(id);
                     _ = mgr.Count;
                     mgr.Remove(id);

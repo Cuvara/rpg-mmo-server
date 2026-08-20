@@ -67,8 +67,68 @@ public sealed class TickLoop
     /// </summary>
     private readonly Action<GameServer.World.WorldReader> _gatherViews;
 
+    /// <summary>Per-worker gather callback, allocated once. See <see cref="GatherViewsSlice"/>.</summary>
+    private readonly Action<GameServer.World.WorldReader, int> _gatherViewsSlice;
+
+    /// <summary>
+    /// Workers the AOI gather may use. <b>One means the serial path</b>, byte-for-byte the
+    /// behaviour that shipped before the pool existed, and it is the default.
+    /// </summary>
+    private readonly int _gatherWorkers;
+
+    /// <summary>
+    /// Viewer count below which the gather stays serial even when
+    /// <see cref="_gatherWorkers"/> is greater than one.
+    ///
+    /// <para><b>Measured, and set to the conservative end of two disagreeing
+    /// measurements.</b> Dispatching a parked pool costs ~15 microseconds per extra worker
+    /// on this host, so the phase has to be worth more than that before splitting it.</para>
+    ///
+    /// <list type="bullet">
+    /// <item><description><b>50 viewers: a loss, both measurements agree.</b>
+    /// <c>AoiGatherBenchmark</c> reads 1.04 / 1.05 / 0.99x at two workers and 0.51 / 0.60 /
+    /// 0.52x at eight, over three runs. The phase is smaller than the dispatch.</description></item>
+    /// <item><description><b>200 viewers: the two measurements disagree.</b> The gather
+    /// phase measured in isolation is 2.08 / 2.06 / 2.06x at four workers -- three runs
+    /// inside 1% of each other. Measured through the tick instead, the same change read
+    /// 1.27x and then 0.96x, i.e. a range containing 1.0. The phase-level gain is real; how
+    /// much of it survives the rest of the tick is not established.</description></item>
+    /// <item><description><b>500 viewers: a gain, both measurements agree.</b> 1.81 / 2.40 /
+    /// 2.29x at four workers here, 2.0-2.7x through the tick.</description></item>
+    /// </list>
+    ///
+    /// <para>The threshold sits at the count where the two agree, not at the lowest count
+    /// where a win appeared, because the disputed band is exactly where an over-eager
+    /// default would cost tick latency for nothing. Re-measure with
+    /// <c>BENCH_PARALLEL=1</c> (<c>AoiGatherBenchmark</c>) before moving it, and prefer a
+    /// through-the-tick measurement to a phase-level one when they conflict.</para>
+    /// </summary>
+    internal const int GatherParallelMinViewers = 500;
+
     /// <summary>Current simulation tick.</summary>
     public ulong CurrentTick => _currentTick;
+
+    /// <summary>
+    /// Measures the rate the base timeline is actually advancing at. Fed from the loop
+    /// below with the same <see cref="Stopwatch"/> timestamps that pace it, so the achieved
+    /// rate and the schedule it is measuring cannot disagree about what a second is.
+    ///
+    /// <para>Its window is a constructor parameter defaulting to
+    /// <see cref="AchievedRateMeter.DefaultWindowSeconds"/>, so production behaviour is
+    /// unchanged and a test can ask for a short one. That is not a cosmetic seam: without
+    /// it, the only way to prove the loop feeds the meter is to run a real loop for longer
+    /// than the default window, and a multi-second busy loop inside a parallel test suite
+    /// competes with every other test for the cores it is trying to measure.</para>
+    /// </summary>
+    private readonly AchievedRateMeter _rateMeter;
+
+    /// <summary>
+    /// The measured base-tick rate in Hz over the last completed window, or 0 for the first
+    /// window of process life. Published so that nobody has to derive a rate by dividing a
+    /// tick counter by an uptime — the arithmetic that produced #147. See
+    /// <see cref="AchievedRateMeter"/>.
+    /// </summary>
+    public double AchievedTickHz => _rateMeter.AchievedHz;
 
 
     /// <summary>
@@ -85,9 +145,12 @@ public sealed class TickLoop
         ILogger logger,
         GameMetrics? metrics = null,
         int keyframeInterval = GameConstants.DefaultKeyframeInterval,
-        ISimulationPhase? simulationPhase = null)
+        ISimulationPhase? simulationPhase = null,
+        double achievedRateWindowSeconds = AchievedRateMeter.DefaultWindowSeconds,
+        int gatherWorkers = 1)
         : this(world, handler, connections, SimulationRates.Uniform(tickRate), aoiRadius,
-               logger, metrics, keyframeInterval, simulationPhase)
+               logger, metrics, keyframeInterval, simulationPhase, achievedRateWindowSeconds,
+               gatherWorkers)
     {
     }
 
@@ -100,8 +163,11 @@ public sealed class TickLoop
         ILogger logger,
         GameMetrics? metrics = null,
         int keyframeInterval = GameConstants.DefaultKeyframeInterval,
-        ISimulationPhase? simulationPhase = null)
+        ISimulationPhase? simulationPhase = null,
+        double achievedRateWindowSeconds = AchievedRateMeter.DefaultWindowSeconds,
+        int gatherWorkers = 1)
     {
+        _rateMeter = new AchievedRateMeter(achievedRateWindowSeconds);
         _world = world;
         _handler = handler;
         _connections = connections;
@@ -112,6 +178,8 @@ public sealed class TickLoop
         _metrics = metrics;
         _keyframeInterval = keyframeInterval;
         _gatherViews = GatherViews;
+        _gatherViewsSlice = GatherViewsSlice;
+        _gatherWorkers = gatherWorkers < 1 ? 1 : gatherWorkers;
     }
 
     /// <summary>The rate configuration this loop runs.</summary>
@@ -130,6 +198,33 @@ public sealed class TickLoop
     private void GatherViews(GameServer.World.WorldReader reader)
     {
         for (int i = 0; i < _viewerCount; i++)
+        {
+            _viewers[i].GatherSnapshotView(reader, _aoiRadius, _currentTick, _keyframeInterval);
+        }
+    }
+
+    /// <summary>
+    /// One worker's contiguous share of the viewer list.
+    ///
+    /// <para><b>Why a plain slice and not a work queue.</b> Per-viewer cost is dominated by
+    /// the range scan, which is O(entities) and identical for every viewer -- 2.5-3.9 ns per
+    /// entity examined, with no spatial index -- so a static split is already balanced.
+    /// A shared cursor would add an interlocked op per viewer to fix an imbalance that is
+    /// not there.</para>
+    ///
+    /// <para><b>Why this needs no ordering.</b> Each viewer writes into buffers its own
+    /// connection owns, under that connection's own lock, and enqueues its own marker.
+    /// Nothing accumulates across viewers, so the staged output cannot depend on which
+    /// worker ran first. This is the read-side region precisely because there is nothing
+    /// to order -- see <see cref="EcsWorld.ReadAllParallel"/>.</para>
+    /// </summary>
+    private void GatherViewsSlice(GameServer.World.WorldReader reader, int slot)
+    {
+        int per = _viewerCount / _gatherWorkers;
+        int from = slot * per;
+        int to = slot == _gatherWorkers - 1 ? _viewerCount : from + per;
+
+        for (int i = from; i < to; i++)
         {
             _viewers[i].GatherSnapshotView(reader, _aoiRadius, _currentTick, _keyframeInterval);
         }
@@ -171,6 +266,10 @@ public sealed class TickLoop
             TickOnce();
 
             long now = Stopwatch.GetTimestamp();
+            // Monotonic in, monotonic out. `now` is the same clock that sets the deadline
+            // this loop is paced by, which is the entire point of measuring here rather
+            // than letting an observer time the loop from outside with its own.
+            _rateMeter.Sample(_currentTick, now);
             double elapsedMs = (now - tickStart) * 1000.0 / Stopwatch.Frequency;
 
             if (elapsedMs > periodMs)
@@ -361,7 +460,19 @@ public sealed class TickLoop
         if (_viewerCount > 0)
         {
             // Phase A — gather. One read lock for the whole broadcast.
-            _world.ReadAll(_gatherViews);
+            //
+            // Parallel only above a measured viewer count, and only when the server was
+            // configured with workers: below GatherParallelMinViewers the dispatch costs
+            // more than the gather, and at 200 viewers the measured speedup range still
+            // contains 1.0. See _gatherWorkers.
+            if (_gatherWorkers > 1 && _viewerCount >= GatherParallelMinViewers)
+            {
+                _world.ReadAllParallel(_gatherWorkers, _gatherViewsSlice);
+            }
+            else
+            {
+                _world.ReadAll(_gatherViews);
+            }
 
             // Phase B is gone from the tick. Gathering already staged each viewer's
             // snapshot on its own connection and signalled its write task, which encodes

@@ -929,10 +929,35 @@ Three things, none of which Arch provides:
    sites) and is deliberately **not** part of this change. Until it lands,
    `EntityIdRef` puts a managed reference in every chunk — the exact cost ADR-10 says
    the handle exists to remove.
-2. **The reader/writer lock.** Arch's `World` is not thread-safe, and network threads
-   spawn/despawn entities and push input while the tick loop reads. The lock discipline
-   is unchanged from `GameWorld`; it is now protecting something that genuinely
-   requires it.
+2. **The reader/writer lock, plus a rule the lock cannot express.** Arch's `World` is
+   not thread-safe, and network threads spawn/despawn entities and push input while the
+   tick loop reads. The lock discipline came over from `GameWorld` unchanged — and, as
+   issue #176 established, a reader/writer lock alone is **not sufficient**, because
+   Arch's read path performs two writes to state shared by every concurrent reader:
+   `World.Query(in QueryDescription)` inserts into a plain `Dictionary` on a cache miss,
+   and the `Query` it returns rebuilds its matching-archetype list lazily the first time
+   it is used after a **new archetype** appeared. Two readers hitting either at once
+   produced `NullReferenceException at Arch.Core.QueryArchetypeEnumerator.MoveNext()`
+   and, twice, heap corruption that killed the test host in an unrelated later test.
+
+   The rule that fixes it, and that anyone touching `EcsWorld` has to keep:
+
+   > **A read path may only iterate a query out of `_readQueries`. It must never call
+   > `_arch.Query(...)`.** Those queries are resolved in the constructor and refreshed
+   > by `ExitWriteScope()`, i.e. only ever while the write lock is held. Code that
+   > already holds the **write** lock may call `_arch.Query(...)` freely.
+
+   `CountWith<TTag>` takes the **write** lock rather than the read lock for exactly this
+   reason: the tag set is open, so its query only exists from its first call and cannot
+   be pre-resolved. It is a diagnostics/scaffolding call, not a tick-path one.
+
+   Measured, against Arch 2.1.0-beta: eight threads iterating one shared query with a
+   stale memo and **no writer at all** faulted in 20/200 attempts; the same eight
+   threads with the memo already refreshed faulted 0/200. That second row is why the
+   fix is a pre-refresh rather than a mutex — iteration of an up-to-date query is a
+   genuine pure read, so `ReadAllParallel` stays parallel, and the AOI gather (77-83%
+   of a 200-viewer tick) is not serialised. Reproducer:
+   `GameServer.Tests/World/EcsWorldConcurrencyStress.cs`, gated behind `ECS_STRESS=1`.
 3. **A deferred structural-change phase**, below.
 
 Everything else — lookup, mutation, range scan, player enumeration — goes through Arch
@@ -1560,3 +1585,133 @@ advance less than the elapsed clock, inputs in the dropped window are never appl
 whole world intervals vanish from the delta stream — but it is **visible, bounded and
 measurable**, which a spiral is not. Both counters and how to read them:
 `docs/METRICS.md`.
+
+## Where the tick budget goes, and when parallelism pays (2026-08-19)
+
+Read this **before** adding a system, and before reaching for a parallel anything. It is
+written for someone starting gameplay work who wants to know what a new system costs and
+whether it can be spread across threads. Every number below is measured on the 12-core
+developer box that also hosts the load generator (ADR-7); treat them as ratios and
+thresholds, not as absolutes for other hardware.
+
+### The budget is not where it looks like it is
+
+At 200 viewers, one `TickOnce`:
+
+| Phase | Cost | Share |
+|---|---|---|
+| AOI gather (`_world.ReadAll(_gatherViews)`) | ~95-110 µs | **77-83%** |
+| Input apply | ~15 µs | ~12% |
+| `ConnectionManager.CopyTo` | 3-9 µs | ~5% |
+| **`SimulationSchedule.RunDue` — every system, all of them** | **0.5-1.9 µs** | **<2%** |
+| Structural drain | 0.1 µs | ~0% |
+| **TickOnce total** | **121-135 µs** | |
+
+At 500 viewers `TickOnce` is ~897 µs and the gather is 79-88% of it.
+
+The consequence for anyone adding gameplay: **you are spending from the 0.5 µs line, not
+from the 121 µs one.** The entire current schedule — three enemy systems over at most
+`EnemyAiTuning.MaxEnemies` (30) entities — costs less than one percent of a tick. A new
+system has an enormous margin before it registers at all, and optimising the schedule
+before it does is optimising 2% of the tick.
+
+The gather is O(viewers × entities) with no spatial index, at a consistent **2.5-3.9 ns
+per entity examined**. A uniform grid was built and measured 2.8× *slower* at realistic
+density, because the cost is composing matches rather than testing distances
+(`backend/docs/BENCHMARK.md` Part V). Do not propose one again without reading that first.
+
+### Thresholds: check your workload against these before parallelising
+
+| Question | Threshold | Live workload today |
+|---|---|---|
+| Is component work worth `UpdateComponentsParallel`? | **~8 000 entities** at 4 workers | 30 enemies — 250× below |
+| Is the AOI gather worth `ReadAllParallel`? | **~500 viewers** | opt-in, off by default |
+| …at 200 viewers? | disputed — see below | |
+| …at 50 viewers? | **never** — the phase is 13-17 µs, dispatch is more | |
+
+Dispatching the parked worker pool costs **~13-18 µs per additional worker** (empty region:
+21 / 37 / 84 µs at 2 / 4 / 8 workers hot, 32-35 / 52-54 / 94-95 µs parked). Any phase you
+want to split has to be worth clearly more than that. Crossover sweep for component work,
+`w=4` against serial: 1.46× *slower* at 4 000 entities, parity at 8 000, 0.68× at 16 000,
+0.36-0.41× at 128 000-256 000.
+
+The AOI-gather figure at 200 viewers is **disputed between two measurements** and is
+recorded that way on purpose. The gather phase measured in isolation is 2.06-2.08× faster
+at four workers across three runs (inside 1% of each other); the same change measured
+through the whole tick read 1.27× and then 0.96×. At 500 viewers both agree on a gain
+(1.8-2.4× phase-level, 2.0-2.7× through the tick), which is why
+`TickLoop.GatherParallelMinViewers` is 500 rather than 200. If you move it, move it on a
+through-the-tick measurement.
+
+### What not to do: parallelising the system schedule
+
+**Do not.** At the live workload it is a **118× regression** — three enemy-sized passes
+over 30 entities cost 1.6 µs serial and 188 µs as three parallel regions. It was a
+782-824× regression before the worker pool; the pool improves the constant, not the verdict.
+Even at 1 000 entities it is still 5.5× slower. The schedule is 0.5-1.9 µs of a 121 µs
+tick; there is nothing there to win.
+
+### The condition under which that answer changes
+
+Two or more **non-structural** systems whose component sets are **disjoint**, over a
+workload past the ~8 000-entity threshold. Both halves are checkable rather than matters
+of judgement:
+
+- Disjointness: `Server.ComponentAccess.IsDisjointFrom`. Build the two systems' accesses
+  and assert it. It returns false for any structural system, which is why spawn and reap
+  can never be paired with anything.
+- Workload: the sweep in `ParallelPrimitiveBenchmark.Bench2b_CrossoverSweep`, re-run for
+  your body rather than the synthetic one.
+
+If either fails, the answer is still no.
+
+### How to measure your own change
+
+Two harnesses are committed. Neither runs in a normal `dotnet test`; both print their
+results rather than asserting them, because a timing assertion on a shared box is a flake
+generator (ADR-12 decision 7 wants a measurement, not a green check).
+
+```bash
+BENCH_PARALLEL=1 dotnet test -c Release --filter "FullyQualifiedName~ParallelPrimitiveBenchmark" -l "console;verbosity=detailed"
+BENCH_PARALLEL=1 dotnet test -c Release --filter "FullyQualifiedName~AoiGatherBenchmark"        -l "console;verbosity=detailed"
+BENCH_TICK=1     dotnet test -c Release --filter "FullyQualifiedName~TickBreakdownBench"        -l "console;verbosity=detailed"
+```
+
+The tick-breakdown figures in the table above come from `TickBreakdownBench`, which is on
+branch `bench/gameserver/tick-breakdown` and is **not merged yet** — the first two
+harnesses are on this branch, the third is not. Check before you rely on the command.
+
+Rules that are not optional, each one bought with a wrong number:
+
+1. **`Stopwatch`, never a wall clock.** This host's `CLOCK_REALTIME` runs 10-17% fast with
+   unstable skew (#153), so a `DateTime` figure is wrong by a double-digit percentage and
+   wrong by a *varying* amount.
+2. **Interleave the arms you are comparing, round-robin, within one run.** The 500-viewer
+   serial gather median moved 707 → 1244 µs between runs, a 76% swing — larger than most
+   of the deltas on this page. Quote ratios from same-run arms; never compare absolute
+   numbers across runs.
+3. **Warm the JIT before the first configuration.** The first configuration measured in a
+   process runs on tier-0 code and reads impossibly flat: one sweep timed 500 entities
+   slower than 2 000, and 30 entities at 103 ns/entity against 9.5 ns/entity for the same
+   body at 10 000. Per-arm warm-up rounds do not fix it. `ParallelPrimitiveBenchmark.WarmUpJit`
+   is the pattern — exercise the whole shape on a throwaway world, then sleep briefly so
+   the background tier-1 compiles land.
+4. **Beware a pool that spins between dispatches.** It inflates whatever is measured near
+   it. With a 25 µs worker-side spin, a serial pass over 30 entities measured 12.5 µs; with
+   the spin off, 1.9 µs — a 6× phantom. This is why `SimWorkerPool` parks its workers
+   immediately and only the region owner spins. A `Barrier`-based pool is worse again:
+   150 µs at 4 workers against 48 µs for a semaphore rendezvous.
+5. **Report median, p99, min and the run-to-run spread.** A median alone hides that the
+   p99 on this box is routinely 3-10× it.
+
+### This section describes core, not gameplay
+
+`backend/TEAM.md` holds the project to **core plumbing only, no gameplay content**,
+because gameplay written before the flows are proven has to be rewritten when a flow
+changes. The three enemy systems live under `Scaffolding/` and that directory name is the
+statement — they exist so the schedule has something to run, not as a design for enemies.
+
+The line to keep when you start real gameplay: **synthetic load inside a benchmark is
+fine; synthetic gameplay inside `GameServer/` is not.** If a performance change only looks
+good against a workload you invented to justify it, the measurement is the thing that is
+wrong.

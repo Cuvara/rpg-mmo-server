@@ -116,8 +116,12 @@ measurement of what serialization costs. No server-side change was needed.
 
 ### Measurement mechanics
 
-- Client-observed **snapshot interval** = wall-clock gap between consecutive
-  `MsgSnapshot` arrivals, per player, pooled across players.
+- Client-observed **snapshot interval** = **monotonic** gap between consecutive
+  `MsgSnapshot` arrivals, per player, pooled across players. Monotonic, not
+  wall-clock: the generator takes both endpoints from Go's `time.Now()` and
+  subtracts them with `Time.Sub`, which uses the monotonic reading Go embeds in
+  every `time.Time`. On this host that distinction is worth 10-17% — see
+  [the host clock](#the-host-clock-and-which-figures-it-touches).
 - Client-observed **ack latency** = time from an `MsgInput` leaving the socket to
   the first snapshot whose `ack_tick` covers that input's tick. Each input
   contributes exactly one sample.
@@ -258,6 +262,14 @@ a ~2% drift present at zero load, so it is timer granularity in the tick loop's
 sleep, not a load effect. Harmless now, but it means the effective budget is
 ~68ms and any future "we tick at exactly 15Hz" assumption is wrong.
 
+> **This is not the host-clock bug (#153), and the arithmetic is how you tell.**
+> Both figures are measured against `Stopwatch`/Go-monotonic, so the 10-17% fast
+> `CLOCK_REALTIME` never enters them; had it, 15Hz would have read as **~12.9**,
+> not 14.7. A reading near 54Hz on a 60Hz loop, or near 12.9 on a 15Hz one, is
+> the *instrument* — see
+> [the host clock](#the-host-clock-and-which-figures-it-touches). A reading of
+> 14.7 on a 15Hz loop is the *server*.
+
 ---
 
 ## 6. Ceilings that are config, not capacity
@@ -339,12 +351,294 @@ deflates the numbers in ways that are not quantified away:
 6. **Single map, single server, no Agones allocation, no gateway in the path.**
    Nothing here measures allocation latency, map transfer, or gateway login
    throughput; those are ADR-7 items 4 and 5 and remain unmeasured.
+7. **`CLOCK_REALTIME` on this host runs 10-17% fast** against `CLOCK_MONOTONIC`,
+   by an amount that drifts between sessions. Nothing in this document is
+   computed from it — every figure here is monotonic-derived, audited
+   figure-by-figure below — but any *new* measurement taken with `date`, a shell
+   `$SECONDS`, or a Prometheus `rate()` over server-assigned scrape timestamps
+   will be wrong by that much. See
+   [the host clock](#the-host-clock-and-which-figures-it-touches). Refs #153.
+8. **A measurement taken through the k3d serverlb measures the proxy.** Every
+   gameplay packet to an Agones pod on k3d crosses an nginx TCP proxy that does
+   not exist on a real node, and it triples snapshot jitter. Nothing in this
+   document was measured that way — Part I and Part II both ran against a
+   directly-dialled server — but the local Agones rig is the obvious place to
+   sweep capacity next. See
+   [the k3d serverlb](#the-k3d-serverlb-is-in-the-gameplay-data-path). Refs #143.
 
 **How to read the result:** treat 150 as a *floor* for a quiet dedicated VPS core
 and a *ceiling* for anything noisier. The bottleneck identification
 (serialization ≫ AOI, 5:1) is far more robust than the absolute number, because
 it is a ratio measured within the same run conditions and reproduced two
 independent ways.
+
+### The host clock, and which figures it touches
+
+**Rule: never derive a rate from a wall clock on this box.** Not `date`, not
+`$SECONDS`, not `time.time()`, not `DateTime.UtcNow`, not a Prometheus `rate()`
+that leans on server-assigned scrape timestamps.
+
+On this WSL2 host `CLOCK_REALTIME` runs *fast* relative to `CLOCK_MONOTONIC`, and
+**the amount is not stable** — measured at **+11.1%**, **+16.7%** and **+16.65%**
+in three sessions on different days. It cannot be corrected with a constant, only
+avoided. `timedatectl` has reported `System clock synchronized:` both `no` and
+`yes` at different moments; clocksource is `tsc` under Hyper-V. **k3d pods share
+this kernel**, so a measurement taken inside a pod carries the identical artifact.
+
+Reproduce it in twenty seconds:
+
+```bash
+python3 -c "
+import time
+m0=time.monotonic(); r0=time.time()
+time.sleep(20)
+print('monotonic', time.monotonic()-m0, 'realtime', time.time()-r0)"
+# monotonic 20.00009545798821 realtime 23.331291913986206   -> +16.65%
+```
+
+**This has already cost real work.** Issue #147 reported the game server ticking
+at **54 Hz** against an advertised 60, was filed, propagated into an ADR in an
+open PR, and was cited as the likely root cause of a client prediction defect.
+All of it was the instrument: `TickLoop` paces on `Stopwatch`
+(`CLOCK_MONOTONIC`), and the observer timed it with `date` (`CLOCK_REALTIME`).
+The same idle process, measured against both clocks at once, read 59.99 Hz and
+54.57 Hz simultaneously. #147 is closed as not-a-defect. Refs #153.
+
+#### Audit: every figure in this document, against its clock
+
+Traced to source, not assumed. **No figure in this document is known to be
+affected, and exactly one class could not be traced — it is named and marked in
+the table rather than quietly passed.** The load generator is Go, where
+`time.Now()` embeds a monotonic reading and `Time.Sub`/`time.Since` use it in
+preference to the wall clock; the server is C#, where the tick histogram and the
+loop pacing both come from `Stopwatch.GetTimestamp()`. Neither ever reads
+`CLOCK_REALTIME` for an interval.
+
+**The audit covers every Part, not only the loadtest sweeps.** Parts III, IV and
+VI report the same statistics as Part I from the same harness, so the first six
+rows below carry them. Parts covering in-process measurements (§23, Part V) do
+not go through the loadtest at all and are audited separately in the last three
+rows.
+
+| Figure | Interval comes from | Affected? |
+|---|---|---|
+| tick p50 / p99 / mean, % ticks over budget | C# `Stopwatch.GetTimestamp()` / `Stopwatch.Frequency` (`GameMetrics.RecordTickDuration`, `TickLoop`) | **No** |
+| achieved `ticks/s` | scrape-to-scrape `afterGS.At.Sub(beforeGS.At)`, both `At` set from Go `time.Now()` at scrape time, never round-tripped through a string | **No** |
+| snapshot interval p50 / p99 | Go `now.Sub(lastSnap)`, both endpoints from `time.Now()` | **No** |
+| ack latency p99 | Go `now.Sub(pi.sent)`, same | **No** |
+| join latency | Go `time.Since(start)` | **No** |
+| KB/s per client, MB/s total | byte counters ÷ `time.Since(windowStart).Seconds()` | **No** |
+| peak RSS (MiB) | a byte count — no interval in it at all | **No** |
+| `host.load_avg_1` / `_5` / `_15` ([§16](#16-reproduction-a-withdrawn-claim-and-a-run-that-lied-in-our-favour)) | read verbatim from `/proc/loadavg` (`loadtest/load/host.go:60`) — a kernel-computed figure, no interval taken in the harness | **No** |
+| allocation B/tick ([§23](#23-snapshot-allocation-what-pooling-and-buffer-reuse-actually-removed)) | `GC.GetAllocatedBytesForCurrentThread` — a byte count over a fixed 60-tick loop, no clock read at all. §23 states outright that **no wall-clock claim is made** | **No** |
+| brute-vs-indexed µs, Part V ([Part V](#part-v--the-spatial-index-that-lost-2026-08-14)) | ⚠️ **Not traceable.** The paired in-process A/B harness was never committed — `2e3e5db` carries `SpatialGrid`, `EcsWorld` and `AoiIndexDifferentialTests` and no benchmark file — so the clock behind the µs columns cannot be read back from the repo | ⚠️ **Ratios: no.** The 1.42–2.92× / 0.32–0.45× / 0.81–0.89× ratios are taken within one run, so a shared skew cancels and the *conclusion* of Part V stands. **Absolute µs: unverified** — see below |
+| Protobuf-vs-JSON savings %, the 5:1 `still`-vs-`cluster` ratio, run-to-run spread % | ratios of the rows above, taken within one run | **No** — and a ratio would cancel a shared skew even if there were one |
+
+**The one unverified figure, kept rather than deleted.** Part V's absolute
+microsecond columns (77–136 µs brute, 38–84 µs indexed, and the rest) are the
+only figures in this document whose clock cannot be traced to source, because the
+harness that produced them was not kept. They are **not** withdrawn and **not**
+removed: deleting them would destroy the record of a measurement that was
+actually taken, and the skew band on this host is 10-17%, far narrower than the
+2.8× effect Part V reports. Read them as **order-of-magnitude only** — they are
+there to show that the distance tests cost microseconds against a 66 ms budget, a
+claim three orders of magnitude clear of any clock artefact. What would replace
+them: re-run the A/B with a committed harness that states its clock, the way
+[§23](#23-snapshot-allocation-what-pooling-and-buffer-reuse-actually-removed)'s
+`SnapshotAllocationTests.cs` does. Until then, quote Part V's **ratios**, never
+its microseconds. Refs #153.
+
+**Scope of the audit: the gateway was swept too, and no figure here depends on
+it.** Nothing in this document is measured through the gateway — confound 6
+records that Part I and Part II both ran with no gateway in the path — but it was
+checked rather than assumed. The gateway derives **no rates at all**: every
+`rate` in it is a rate *limiter* (a configured policy), and `shared/ratelimit`
+refills from `now.Sub(b.last)` with both endpoints from `time.Now()`, so it is
+monotonic and correct. Session `CreatedAt`/`LastActivity` are wall-clock
+*stamps*, not intervals, and expiry is enforced by Redis' own TTL rather than by
+arithmetic in Go.
+
+The sweep did turn up one true wall-clock interval, which is a robustness matter
+rather than a measurement one and is recorded here only so the audit is closed
+rather than left open: `gateway/server/connection.go` compares
+`time.Since(time.UnixMilli(last)) > pongTimeout`. `time.UnixMilli` returns a
+`time.Time` with **no** monotonic reading — verified, not assumed: a
+monotonic-bearing `time.Time` renders a trailing `m=+…` and the rebuilt one does
+not — so `time.Since` falls back to wall-clock subtraction there. See
+[the gateway heartbeat](#the-gateway-heartbeat-is-the-one-true-wall-clock-interval).
+
+Two corollaries worth stating, because both are easy to get backwards:
+
+- **The 14.7Hz drift ([§5](#the-15hz-that-is-really-147hz)) is real and is *not*
+  this bug.** A 16.7% fast wall clock would have made 15Hz read as **~12.9**, not
+  14.7. The 2% shortfall is measured against `Stopwatch` and stands; confound 4
+  (Windows/WSL timer granularity) remains the live explanation.
+- **The re-check #153 asked for is done and it changed no number.** The issue was
+  right that the hazard is severe and right to demand the audit; the audit's
+  answer happens to be that every harness still in the repo was already
+  clock-correct. That is a property of the harnesses, not a reason to relax the
+  rule — the rule protects the *next* measurement, which may well be taken by
+  hand at a shell prompt. The audit did downgrade one figure class it could not
+  trace (Part V's absolute microseconds, above) from *verified* to
+  *order-of-magnitude only*, without changing its value or the conclusion it
+  supports.
+
+
+#### To check the tick rate, read `achieved_tick_hz`
+
+The server publishes its **measured** rate, so an observer never has to supply a
+clock:
+
+| Surface | Field |
+|---|---|
+| `/status` JSON | **`achieved_tick_hz`** |
+| `/metrics` | **`gameserver_achieved_tick_hz`** (gauge, labelled `map_id`) |
+
+Both come from an `AchievedRateMeter` fed once per base tick from
+`Stopwatch.GetTimestamp()` — the *same* timestamps that pace the loop, so the
+measurement and the schedule it measures cannot disagree about what a second is.
+It is a **2 second sliding window**, and there is deliberately no `DateTime`
+overload.
+
+Read it against the **configured** rate on the same endpoint: `sim_critical_hz`
+(with `tick_rate` the same number, and `sim_world_hz` / `sim_background_hz` for
+the other groups). A healthy server has `achieved_tick_hz ≈ sim_critical_hz`.
+Configured and measured are now distinct fields, which is the whole point.
+
+> **`achieved_tick_hz == 0` means "not measured yet"** — no window has completed,
+> i.e. the process is younger than ~2s. It does **not** mean the loop has
+> stopped; `current_tick` distinguishes those. This is the one way to misread the
+> field.
+
+**Do not compute the rate yourself from `current_tick / uptime_seconds`.** This
+is the arithmetic that produced #147, and it is wrong in one of two ways
+depending on which build you are on:
+
+- **Before the #144 fix**, `uptime_seconds` came from `DateTime.UtcNow` —
+  `CLOCK_REALTIME` — so on this host the quotient returned **~51 Hz on a healthy
+  60 Hz loop** and **~12.9 Hz on a healthy 15 Hz loop**. Reproduced live at
+  **54.10 Hz** (`38250 / 707`) on a loop genuinely running 60. That is #147 from
+  inside the server's own endpoint, with no `date` involved.
+- **After it**, `uptime_seconds` is `Stopwatch`-derived, so the quotient is no
+  longer clock-skewed — but it is a **since-boot average**, which hides a loop
+  that degraded recently. Merely worse, rather than wrong.
+
+Either way `achieved_tick_hz` is the answer. Note the behaviour change in the
+second case: `uptime_seconds` is now elapsed *process* time, so it no longer
+follows a clock step (NTP correction, suspend/resume) and can legitimately
+disagree with `date`-derived arithmetic on a drifting host. That disagreement is
+the intended outcome.
+
+Full treatment, including the two-clock account of the old arithmetic:
+[`gameserver-dotnet/docs/METRICS.md`](../gameserver-dotnet/docs/METRICS.md#do-not-compute-a-rate--read-achieved_tick_hz).
+
+**Scope:** the gauge measures the **base timeline only**. World and background are
+exact integer divisors of the base rate, so publishing three measured rates would
+be one measurement plus two pieces of arithmetic — three things that can drift
+instead of one. For per-group measured rates use
+`rate(gameserver_sim_group_runs_total[...])`.
+
+#### The gateway heartbeat is the one true wall-clock interval
+
+Found by the sweep above; **not** a figure in this document, and it changes no
+number here. Recorded because the audit named the gateway as unchecked and this
+is what checking it produced.
+
+`gateway/server/connection.go` enforces the heartbeat as:
+
+```go
+if time.Since(time.UnixMilli(last)) > pongTimeout {   // wall clock, not monotonic
+```
+
+`pingInterval` is 10s and `pongTimeout` 30s, so the code documents a margin of
+one full `pingInterval`: `MaxHandlerBlockingWait = pongTimeout - pingInterval` =
+**20s**. The gateway refuses to start with `--allocation-wait-timeout` above that
+value, precisely because the allocation wait blocks the read loop that records
+`MsgPong`.
+
+**The two sides of that margin run on different clocks.** The allocation wait is
+a Go timer/context deadline, which is monotonic; the pong timeout is wall-clock.
+On this host, where `CLOCK_REALTIME` runs ~16.65% fast, a nominal 30s pong budget
+elapses in about **25.7s** of real time, so the enforced margin is nearer **17.1s**
+than the 20s the constant asserts. The default 15s allocation wait still fits, so
+nothing is broken today — but the guard compares a monotonic duration against a
+wall-clock-enforced constant, and the safety margin it computes is not the one in
+force.
+
+This is not specific to this box. A wall clock can also be *stepped* by NTP, in
+either direction, on any host; that is the standard reason timeouts are taken
+from a monotonic source. The fix is to store the pong time as a
+`Stopwatch`-equivalent monotonic stamp — in Go, keep the `time.Time` from
+`time.Now()` (or `time.Since` a stored one) rather than round-tripping it through
+`UnixMilli`, which is exactly what strips the monotonic reading.
+
+**Left unfixed deliberately:** it is gateway runtime behaviour, not a document
+figure, and changing a heartbeat timeout wants its own change and tests.
+
+#### Rate skew and clock steps are different faults — check the sign
+
+This host has two distinct clock problems, and matching a discrepancy on
+*magnitude alone* attributes one to the other. Before blaming either, check which
+direction the error runs:
+
+| | Rate skew | Clock step |
+|---|---|---|
+| What it is | `CLOCK_REALTIME` advances ~10-17% too fast, continuously | The clock jumps, e.g. on an NTP resync (`timedatectl` here has flapped between `synchronized: no` and `yes`) |
+| Effect on a measured **duration** | inflated — a real 20s reads as ~23.3s | one-off offset, either direction |
+| Effect on a measured **rate** | **understated** — a real 60 Hz reads as ~51 Hz | one-off, either direction |
+| Effect on a **countdown/TTL** | decays faster, so remaining time reads **lower** | remaining time can read **higher** (backward step) or lower |
+| Does "never derive a rate from a wall clock" fix it? | Yes | **No** — a step corrupts a single reading, not a rate |
+
+**Worked example, because this caught a real wrong hypothesis.** A Redis TTL
+assertion failed reading **16.87s against a 15s ceiling**, and +12.5% sits neatly
+inside the 10-17% skew band — so it looked like this bug. It is not. The registry
+sets a **relative** expiry (`KeyExpireAsync(key, ttl)` → `PEXPIRE`), so Redis
+computes the deadline on its own clock and the remainder cannot exceed 15s by
+construction. And decisively, **a fast clock makes a TTL decay faster, so it
+reads lower, never higher.** The observation ran the wrong way for the mechanism
+it was attributed to. A backward *step* between the `PEXPIRE` and the read is the
+leading explanation — same unhealthy-clock family, different fault, and untouched
+by the rule above. (Leading hypothesis, not established: the flap is not
+reproducible on demand.)
+
+The general lesson is cheap to apply: **magnitude matching is not diagnosis.**
+Confirm the sign before attributing a discrepancy to a known clock fault — which
+is the same discipline #147 failed, in a different costume.
+
+If you add a measurement to this document, state the clock it came from.
+
+### The k3d serverlb is in the gameplay data path
+
+**Do not take capacity numbers through an Agones pod on k3d.** Use the compose
+path, or dial a node directly. Same binary, same load, same box — only the
+network path differs:
+
+| 50 players, 20s, proto | snapshot interval p99 | tick p99 | recv | verdict |
+|---|--:|--:|--:|---|
+| Agones pod via k3d serverlb (`127.0.0.1:7069`) | **211.9 ms** | — | — | DEGRADED — over 2x the 133.3ms budget |
+| compose server, direct (`127.0.0.1:9200`) | **72.7 ms** | 0.58 ms | 100% | healthy |
+
+At 80 players the compose path still reports tick p99 **3.06ms** and **0% of
+ticks over budget**, so the simulation is not the constraint in either row. The
+proxy is.
+
+**Cause.** On k3d the Agones dynamic port range (7000-7100) is published by the
+`k3d-<cluster>-serverlb` container, an nginx TCP proxy, so every gameplay packet
+to an Agones pod traverses it. On a real node the client dials the node directly
+and the hop does not exist. This is the same mechanism that makes k3d usable for
+us at all — Docker Desktop never publishes Kubernetes `hostPort`, k3d does
+([ADR-16](ARCHITECTURE-DECISIONS.md) decision 1) — so it is a property of the
+local rig, not a regression.
+
+**Why it is worth a section.** It runs in the opposite direction from the
+distortion people expect. ADR-7's confound depresses numbers through *CPU*
+contention; this one depresses them through the *network path*, and it does so
+by roughly 3x. Without it written down, the first person to sweep capacity on
+k3d reports a ceiling about a third of the truth and attributes it to the game
+server. That makes three local-measurement traps on this box, all of which make
+a healthy system look broken: the co-located load generator (ADR-7, confound 1),
+the host clock ([#153](#the-host-clock-and-which-figures-it-touches)), and this
+one. Refs #143.
 
 ---
 
@@ -1098,6 +1392,16 @@ The realistic-density ratio is 0.32–0.45 across five runs. That spread is far
 tighter than the host noise, so the loss is real and reproducible, not an
 artefact.
 
+> **Quote the ratios, not the microseconds.** The harness that produced this
+> table was never committed (`2e3e5db` carries `SpatialGrid`, `EcsWorld` and
+> `AoiIndexDifferentialTests`, no benchmark), so the clock behind the µs columns
+> cannot be traced — the one figure class in this document the #153 clock audit
+> could not close. The ratio columns are unaffected: both arms run back to back in
+> one process, so any skew is shared and cancels. The absolute µs are kept, not
+> deleted, because the record of the measurement matters and because a 10-17%
+> skew cannot touch a 2.8× result — but read them as order of magnitude. See
+> [the audit](#audit-every-figure-in-this-document-against-its-clock).
+
 ### Why it lost — the premise was wrong
 
 The case for an index was "40 000 distance tests per tick at 200 players, O(n²)".
@@ -1117,7 +1421,9 @@ saving only the near-free part.
 It wins in the sparse case for the same reason: at 2.8 matches per query there is
 almost nothing to compose, so what is left *is* the distance tests. That is also
 the case where the absolute cost is negligible — 77 µs to 38 µs on a 66 ms tick
-budget, 0.06%. **The index helps only where the cost does not matter.**
+budget, order 0.1%. (An order-of-magnitude reading, per the caveat above; a
+10-17% clock skew moves it nowhere near mattering.) **The index helps only where
+the cost does not matter.**
 
 ### The ordering constraint, which is a real cost
 
