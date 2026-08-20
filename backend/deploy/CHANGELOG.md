@@ -27,6 +27,24 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `<advertise-host>:<agones-port>` and the client dials that verbatim, so an offset there
   hands out an address that does not exist.
 
+- **`dev-up.sh`: three more dev-specific literals became variables**, all found by reading the
+  script against a second cluster rather than by a failing run.
+
+  - The **k3d node images are imported into** was `k3d-rpg-dev-server-0`, spelled out. On a
+    second cluster that is not a failed import, it is an import into the *wrong cluster*:
+    staging's images would land on dev's node, the presence check immediately below would find
+    them there and report success, and staging's pods would then sit in `ImagePullBackOff` for
+    a reason nothing in the log mentions. Dev's node would also quietly accumulate another
+    environment's images. Now derived from the context — k3d names the server node
+    `<context>-server-0`.
+  - **`COMPOSE_DEV_CONTAINERS`** already existed but defaulted to dev's container names. A
+    staging run left with the default stops nothing — dev's are already down — and leaves
+    *staging's* compose stack running beside the cluster that just replaced it. Two stacks
+    serving one environment is the exact state this move exists to end, and the loop only stops
+    names that are actually running, so the wrong value fails silently.
+  - **`COMPOSE_REDIS_CONTAINER`**, for the step that clears registry entries the compose
+    gateway left behind, was `rpg-redis` in four places.
+
 - **`dev-up.sh`: the published gateway/Nakama ports and the postgres-game forward are now
   variables** (`PUBLISHED_GATEWAY_PORT`, `PUBLISHED_NAKAMA_PORT`, `PG_GAME_LOCAL_PORT`),
   defaulting to dev's values so dev is unchanged.

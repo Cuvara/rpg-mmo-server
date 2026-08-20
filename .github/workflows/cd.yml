@@ -1159,6 +1159,14 @@ jobs:
           PUBLISHED_GATEWAY_PORT: ${{ vars.PUBLISHED_GATEWAY_PORT || '7000' }}
           PUBLISHED_NAKAMA_PORT: ${{ vars.PUBLISHED_NAKAMA_PORT || '7001' }}
           PG_GAME_LOCAL_PORT: ${{ vars.PG_GAME_LOCAL_PORT || '15433' }}
+          # The compose stack this cutover replaces, per environment. Defaults
+          # name dev's; a staging run left with them would stop nothing and leave
+          # STAGING's compose stack running beside the cluster replacing it.
+          COMPOSE_DEV_CONTAINERS: ${{ vars.COMPOSE_DEV_CONTAINERS || 'rpg-gateway rpg-nakama rpg-redis rpg-postgres rpg-postgres-game' }}
+          COMPOSE_REDIS_CONTAINER: ${{ vars.COMPOSE_REDIS_CONTAINER || 'rpg-redis' }}
+          # The k3d node images are imported into. Derived from the context by
+          # dev-up.sh; overridable only if a cluster breaks k3d's naming.
+          K3D_NODE: ${{ vars.K3D_NODE || '' }}
           # Floor of the Agones range. Published 1:1, never offset: the registry
           # records <advertise-host>:<agones-port> and the client dials it verbatim.
           AGONES_MIN_PORT: ${{ vars.AGONES_MIN_PORT || '7010' }}
