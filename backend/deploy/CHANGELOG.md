@@ -86,6 +86,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the cluster it had just deployed. Same trap, one level up.
 
 ### Fixed
+- **`verify/targets/k8s-*.env` hardcoded `VERIFY_NAKAMA_SERVER_KEY="defaultkey"`.** It now reads
+  the value from the cluster's `nakama` Secret, the same way `VERIFY_GATEWAY_IMAGE` already reads
+  the running image.
+
+  A literal is fine only while nothing rotates it. The moment the Secret moves, the target keeps
+  asserting the old value and every check that authenticates fails — naming Nakama, not this line.
+  Landed **before** the rotation it enables, so there is no window in which the two disagree:
+  with `defaultkey` still in the cluster, reading it yields `defaultkey` and the change is a no-op.
+
 - **`dev-up.sh` never imported the Nakama image, so a cluster it built could not start Nakama.**
 
   It imported `gateway` and `gameserver-dotnet` and stopped there. `rpg-mmo/nakama:<version>` is
