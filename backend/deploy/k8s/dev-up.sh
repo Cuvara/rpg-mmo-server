@@ -193,8 +193,11 @@ if [ "$IMPORT_IMAGES" = "1" ]; then
           fi
         else
           echo "WARNING: $NAKAMA_IMAGE is stamped with revision ${nk_rev}, which is not a commit"
-          echo "  in this repository -- squashed away, or built on a branch since deleted. The"
-          echo "  plugin it contains cannot be audited against the code being deployed."
+          echo "  in this repository. The likeliest cause is an image built before the Dockerfile"
+          echo "  stamped one: every label was then INHERITED from heroiclabs/nakama, so the"
+          echo "  revision reported was Heroic Labs' own release commit and had nothing to do"
+          echo "  with the plugin baked in. That was the state until 2026-08-20. Rebuild:"
+          echo "    make -C backend/deploy image      # or docker build --build-arg GIT_REVISION=..."
         fi
       else
         echo "WARNING: $NAKAMA_IMAGE carries no revision label; its plugin cannot be audited."

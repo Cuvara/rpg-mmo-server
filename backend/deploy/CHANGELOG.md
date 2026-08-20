@@ -6,6 +6,23 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **`NAKAMA_SERVER_KEY` rotated on both k8s clusters**, from `defaultkey` to 32 random hex
+  characters, a different value per cluster.
+
+  This is the one secret that is a **client-facing contract**, so it needed its consumers lined up
+  first. All but one already were — everything reads it from an env var or flag with `defaultkey`
+  merely as a default. The exception was `verify/targets/k8s-*.env`, fixed in a separate change
+  landed **before** this one so the file and the cluster never disagreed.
+
+  Verified in every direction on both clusters, with a baseline taken first so a later pass means
+  something: before, `defaultkey` authenticated **200** and a wrong key **401**; after, `defaultkey`
+  is **401**, each cluster's own key **200**, and each cluster's key against the other **401**.
+  Both CD runs were then re-run and returned `VERIFY=PASS` with 0 FAIL — the targets followed the
+  cluster without being edited, which is what the earlier change was for.
+
+  Running a client by hand now needs `--nakama-key`. Omitting it does not fail at launch: it
+  authenticates 401 and presents as a client that never reaches `IN WORLD`.
+
 - **`NAKAMA_CONSOLE_PASSWORD` rotated on both k8s clusters**, from the published placeholder
   `password` to 48 random hex characters, a different value per cluster. Documented in
   `k8s/data/README.md` §Secrets, including how to read it back — the cluster is the only copy.
@@ -86,6 +103,24 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the cluster it had just deployed. Same trap, one level up.
 
 ### Fixed
+- **The Nakama image reported Heroic Labs' commit as its own.** `nakama-plugin.Dockerfile`'s
+  runtime stage was `FROM heroiclabs/nakama:${NAKAMA_VERSION}` plus a single `COPY` of the plugin,
+  so **every** OCI label came from the base image — including
+  `org.opencontainers.image.revision`, which read `d4d92f93…`. That is a real commit, in
+  *heroiclabs/nakama* ("Prepare 3.40.0 release. (#2527)"), and it said nothing whatsoever about the
+  plugin baked in on the line above.
+
+  Worse than an unstamped image. An unstamped one reports `unknown` and any check skips it; this
+  reported a plausible 40-character sha that resolves nowhere in this repository — which reads as
+  "built from a branch since deleted" and sends you hunting a commit that never existed here. It
+  did exactly that earlier the same day.
+
+  The runtime stage now carries the same provenance block `docker/Dockerfile.gateway` already had,
+  and `make image` passes `GIT_REVISION` (defaulting to `git rev-parse HEAD`). Rebuilt and
+  redeployed to both clusters: the image now stamps `768ca78b`, the provenance check reports
+  *"carries the same nakama/shared trees as this commit"* instead of the warning, and `crictl
+  inspecti` on each node shows the running pod's `imageID` is the image carrying that label.
+
 - **`verify/targets/k8s-*.env` hardcoded `VERIFY_NAKAMA_SERVER_KEY="defaultkey"`.** It now reads
   the value from the cluster's `nakama` Secret, the same way `VERIFY_GATEWAY_IMAGE` already reads
   the running image.
@@ -116,9 +151,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **The Nakama image's provenance is now reported.** It cannot be rebuilt from here and a deploy
   that refused because the plugin is a few commits old would help nobody, so this warns, never
   fails. Three outcomes, each named: the plugin's `backend/nakama` / `backend/shared` trees match
-  this commit; they differ (with the rebuild command); or — as is true today — the stamped
-  revision **is not a commit in this repository at all**, squashed away or built on a deleted
-  branch, so the plugin cannot be audited against the code being deployed.
+  this commit; they differ (with the rebuild command); or the stamped revision is not a commit in
+  this repository at all.
+
+  **Correction, same day.** The third case was hit immediately and the guess printed with it —
+  "squashed away, or built on a branch since deleted" — was **wrong**. The image had never stamped
+  a revision: `nakama-plugin.Dockerfile`'s runtime stage was `FROM heroiclabs/nakama` plus one
+  `COPY`, so **every** label was inherited, and the revision reported was Heroic Labs' own release
+  commit `d4d92f93` ("Prepare 3.40.0 release. (#2527)") — verified against their repository. It
+  described the base image and said nothing about the plugin baked in on the line above. Fixed at
+  the source rather than in the message; the message now names this cause.
 
   `git rev-parse <sha>:<path>` is unusable for this and the code says so: on an unknown sha it
   exits 128 **and prints its own argument to stdout**, so the usual
