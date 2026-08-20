@@ -262,11 +262,44 @@ initContainer's. Nothing else is namespace-aware.
 
 ## Secrets
 
-`secrets.example.yaml` is a **template**. Its values are the same published dev
-placeholders `docker-compose.yml` defaults to (`localdev`,
-`dev-secret-change-me`, `defaultkey`, `defaulthttpkey`) — committed only so a
-laptop bring-up needs no secret-management story, and never to be used anywhere
-else. The same convention as `../../agones/secret-example.yaml`.
+`secrets.example.yaml` is a **template, and is no longer applied**. It carries the
+same published dev placeholders `docker-compose.yml` defaults to (`localdev`,
+`dev-secret-change-me`, `defaultkey`, `defaulthttpkey`), and it is committed as a
+shape to copy — never as values to run.
+
+It used to be listed in `kustomization.yaml` as a resource, so that a laptop
+bring-up needed no secret-management story. The cost of that convenience was not
+obvious: kustomize then **owned** those Secret objects, so every `apply -k data/`
+reset whatever the namespace already held. Dev ran on `dev-secret-change-me` from
+the day the cluster was built and nothing said so, because the app tier's
+`rpg-app-secrets` had been filled with the same placeholder and the two halves
+agreed. Staging, given a generated value, came up healthy and rejected every
+login with `local jwt verify: invalid signature`.
+
+So the data tier now follows the contract the app tier always had: **create the
+Secrets before the first deploy**. `dev-up.sh` applies `namespace.yaml` first so
+there is somewhere to put them, then fails with a named list if any of
+`postgres-meta`, `postgres-game`, `nakama` is absent — and fails again if
+`nakama`'s `JWT_SECRET` does not equal `rpg-app-secrets`' `jwt-secret`.
+
+A laptop bring-up is therefore one extra command, e.g.:
+
+```bash
+kubectl --context k3d-rpg-dev apply -f data/secrets.example.yaml   # laptop only
+```
+
+with the same caveat as before: those values are published, and belong on a
+laptop and nowhere else. For anything shared, generate them —
+
+```bash
+JWT=$(openssl rand -hex 32); JOIN=$(openssl rand -hex 32)   # JOIN must differ
+```
+
+— and set `nakama`'s `JWT_SECRET` and `rpg-app-secrets`' `jwt-secret` to the SAME
+value. **Dev's were rotated off the placeholder on 2026-08-20**; consumers must be
+restarted together (`nakama`, `gateway`, and a fleet drain, since a GameServer
+reads the secret once at start). The same convention as
+`../../agones/secret-example.yaml`.
 
 For a real environment, copy to `secret-*.local.yaml` and add that pattern to
 `../../.gitignore` (it currently ignores `agones/secret-*.local.yaml`; extend it

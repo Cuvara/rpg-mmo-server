@@ -6,6 +6,22 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **`data/README.md` §Secrets rewritten to match what the manifests now do.** It still described
+  `secrets.example.yaml` as applied "so a laptop bring-up needs no secret-management story" —
+  true until that file stopped being a kustomize resource, and the paragraph was left behind by
+  that change. It now states the contract the data tier actually has (create the Secrets before
+  the first deploy, `dev-up.sh` fails with a named list otherwise), gives the one extra command a
+  laptop bring-up needs, and records that **dev's JWT and join-token secrets were rotated off the
+  published placeholders on 2026-08-20**.
+
+  The rotation is operational, not code: `nakama`'s `JWT_SECRET` and `rpg-app-secrets`'
+  `jwt-secret` were set to the same fresh 32-byte value, `join-token-secret` to a different one,
+  and the three consumers restarted together — `nakama`, `gateway`, and a fleet drain, because a
+  GameServer reads the secret once at start and a rolling restart would leave it on the old value.
+  `NAKAMA_SERVER_KEY` was deliberately **not** rotated: it is a client-facing contract, hardcoded
+  in the verify targets and defaulted in the Unity client, so moving it is a coordinated change
+  rather than a server-side one.
+
 - **Staging moves from docker compose to k3s/Agones, in its own cluster `k3d-rpg-stg`.**
 
   A second environment on this path needs a second **cluster**, not a second namespace:
