@@ -56,6 +56,40 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the cluster it had just deployed. Same trap, one level up.
 
 ### Fixed
+- **`dev-up.sh` never imported the Nakama image, so a cluster it built could not start Nakama.**
+
+  It imported `gateway` and `gameserver-dotnet` and stopped there. `rpg-mmo/nakama:<version>` is
+  upstream Nakama with this repo's Go plugin baked in, built out-of-band by
+  `make -C backend/deploy image`, and k3d does not share the host's docker image store — so the
+  pod had nothing to pull. On dev this was invisible: the image had been imported by hand once and
+  stayed in the node. Building the staging cluster is what exposed it, as `Init:ErrImagePull` on a
+  pod whose image the deploy had never mentioned.
+
+  It is imported in its own block, **not** added to the existing loop. That loop refuses any image
+  whose stamped revision is not the commit being deployed, which is right for the two images CD
+  builds and wrong for this one: its tag is a Nakama version and its revision is whenever the
+  plugin was last built. In the loop it would have refused every deploy.
+
+  The tag is read from `data/nakama.yaml` rather than written out again, so it cannot drift from
+  the tag the pods actually request — that drift is the same fault as not importing it, and just
+  as quiet.
+
+- **The Nakama image's provenance is now reported.** It cannot be rebuilt from here and a deploy
+  that refused because the plugin is a few commits old would help nobody, so this warns, never
+  fails. Three outcomes, each named: the plugin's `backend/nakama` / `backend/shared` trees match
+  this commit; they differ (with the rebuild command); or — as is true today — the stamped
+  revision **is not a commit in this repository at all**, squashed away or built on a deleted
+  branch, so the plugin cannot be audited against the code being deployed.
+
+  `git rev-parse <sha>:<path>` is unusable for this and the code says so: on an unknown sha it
+  exits 128 **and prints its own argument to stdout**, so the usual
+  `$(git rev-parse … || echo missing)` captures the argument and compares a sha against a sha —
+  reporting drift when the truth is "that commit is not here". `git cat-file -e` is asked first.
+
+- **The Agones banner printed a hardcoded `MIN_PORT=7010`** while the logic used
+  `$AGONES_MIN_PORT`. On staging it announced 7010 and correctly left 7210 in place: the log said
+  one thing and the cluster held another.
+
 - **`apply -k data/` applied `secrets.example.yaml` as real configuration, overwriting whatever
   secrets the namespace already held — on every deploy.**
 

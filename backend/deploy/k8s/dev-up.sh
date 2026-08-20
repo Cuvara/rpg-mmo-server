@@ -23,6 +23,19 @@ IMPORT_IMAGES="${IMPORT_IMAGES:-1}"
 GIT_SHA="${GIT_SHA:-$(git -C "$HERE" rev-parse HEAD 2>/dev/null || echo develop)}"
 GATEWAY_IMAGE="${GATEWAY_IMAGE:-rpg-mmo/gateway:${GIT_SHA}}"
 GAMESERVER_IMAGE="${GAMESERVER_IMAGE:-rpg-mmo/gameserver-dotnet:${GIT_SHA}}"
+# Nakama's image is NOT built by CD and is NOT tagged with the deployed commit.
+# It is built out-of-band -- `make -C backend/deploy image` -- and tagged with the
+# NAKAMA VERSION, because it is upstream Nakama with our Go plugin baked in.
+#
+# It is read from the manifest rather than spelled out here so it cannot drift
+# from the tag the pods actually request: those two disagreeing is the same class
+# of fault as not importing it at all, and just as quiet.
+#
+# It was not imported at all until 2026-08-20. On dev that went unnoticed because
+# the image had been imported by hand once, years of deploys ago in cluster terms;
+# building the staging cluster is what exposed it, as Init:ErrImagePull on a pod
+# whose image the deploy had never mentioned.
+NAKAMA_IMAGE="${NAKAMA_IMAGE:-$(sed -n 's|^ *image: *\(rpg-mmo/nakama:[^ ]*\).*|\1|p' "$HERE/data/nakama.yaml" | head -1)}"
 # The compose stack this cutover REPLACES. Stopped, never removed: `docker start`
 # is the rollback.
 #
@@ -145,13 +158,66 @@ if [ "$IMPORT_IMAGES" = "1" ]; then
       exit 1
     fi
   done
+  # Nakama is imported separately, because the revision==GIT_SHA refusal above
+  # does NOT apply to it. Its tag is a Nakama version and its image is built
+  # out-of-band, so its stamped revision is whenever the plugin was last built --
+  # never this run's commit. Putting it in that loop would refuse every deploy.
+  if [ -n "$NAKAMA_IMAGE" ]; then
+    say "import the nakama image into the k3d node"
+    if docker image inspect "$NAKAMA_IMAGE" >/dev/null 2>&1; then
+      nk_rev=$(docker image inspect "$NAKAMA_IMAGE" \
+        --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null)
+      # Informational, never fatal: this script cannot rebuild the image, and a
+      # deploy that refuses because the plugin is a few commits old helps nobody.
+      # What it CAN do is say so, because nothing else will.
+      #
+      # `git rev-parse <sha>:<path>` is not usable for this. On an unknown sha it
+      # exits 128 AND prints its own argument to stdout, so the common
+      # `$(git rev-parse ... || echo missing)` captures the argument and compares
+      # a sha against a sha -- reporting a difference that is really "the commit
+      # is not here". Ask cat-file first.
+      if [ -n "$nk_rev" ] && [ "$nk_rev" != "unknown" ]; then
+        if git -C "$HERE" cat-file -e "${nk_rev}^{commit}" 2>/dev/null; then
+          nk_drift=""
+          for path in backend/nakama backend/shared; do
+            a=$(git -C "$HERE" rev-parse "${nk_rev}:${path}" 2>/dev/null)
+            b=$(git -C "$HERE" rev-parse "HEAD:${path}" 2>/dev/null)
+            [ -n "$a" ] && [ "$a" != "$b" ] && nk_drift="$nk_drift $path"
+          done
+          if [ -n "$nk_drift" ]; then
+            echo "WARNING: $NAKAMA_IMAGE was built from ${nk_rev}, whose$nk_drift differ(s)"
+            echo "  from this commit. The plugin in the cluster predates the code being deployed."
+            echo "  Rebuild with: make -C backend/deploy image"
+          else
+            echo "$NAKAMA_IMAGE carries the same nakama/shared trees as this commit"
+          fi
+        else
+          echo "WARNING: $NAKAMA_IMAGE is stamped with revision ${nk_rev}, which is not a commit"
+          echo "  in this repository -- squashed away, or built on a branch since deleted. The"
+          echo "  plugin it contains cannot be audited against the code being deployed."
+        fi
+      else
+        echo "WARNING: $NAKAMA_IMAGE carries no revision label; its plugin cannot be audited."
+      fi
+      echo "importing $NAKAMA_IMAGE (revision ${nk_rev:-unstamped})"
+      docker save "$NAKAMA_IMAGE" | docker exec -i "$K3D_NODE" ctr -n k8s.io images import -
+    elif docker exec "$K3D_NODE" ctr -n k8s.io images ls -q 2>/dev/null | grep -qx "docker.io/$NAKAMA_IMAGE"; then
+      echo "$NAKAMA_IMAGE already in the node; not re-importing"
+    else
+      echo "::error::$NAKAMA_IMAGE is in neither the local docker store nor the k3d node." >&2
+      echo "  The data tier pins this exact tag, so Nakama would sit in ImagePullBackOff and" >&2
+      echo "  the rollout would burn its timeout naming nothing. Build it:" >&2
+      echo "    make -C backend/deploy image" >&2
+      exit 1
+    fi
+  fi
 fi
 
 # The pin below happens whether or not we imported, so the presence check has to
 # happen whether or not we imported too -- with IMPORT_IMAGES=0 the loop above is
 # skipped entirely and a missing tag would again be discovered only as a rollout
 # timeout. Ask the node directly: it is the only authority on what can start.
-for img in "$GATEWAY_IMAGE" "$GAMESERVER_IMAGE"; do
+for img in "$GATEWAY_IMAGE" "$GAMESERVER_IMAGE" ${NAKAMA_IMAGE:+"$NAKAMA_IMAGE"}; do
   if ! docker exec "$K3D_NODE" ctr -n k8s.io images ls -q 2>/dev/null \
        | grep -qx "docker.io/$img"; then
     echo "::error::$img is not present in the k3d node, so pinning it would leave" >&2
@@ -318,7 +384,7 @@ echo "compose dev stack stopped (containers and volumes kept)"
 # ESTABLISHED here, not merely asserted: this is a property of the deployment,
 # so a fresh cluster (and therefore CD) must end up with it without a human
 # having run a kubectl command first. It is idempotent.
-say "reserve the infrastructure ports (Agones MIN_PORT=7010)"
+say "reserve the infrastructure ports (Agones MIN_PORT=$AGONES_MIN_PORT)"
 cur_min=$($K get deploy agones-controller -n agones-system \
   -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' 2>/dev/null \
   | sed -n 's/^MIN_PORT=//p')
