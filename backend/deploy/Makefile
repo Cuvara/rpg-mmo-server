@@ -21,6 +21,10 @@ CONTEXT := ..
 DOCKERFILE := nakama-plugin.Dockerfile
 NAKAMA_VERSION ?= 3.40.0
 IMAGE ?= rpg-mmo/nakama:$(NAKAMA_VERSION)
+# Stamped into org.opencontainers.image.revision so the image can be tied to the
+# commit whose plugin it carries. Until this existed the image inherited Heroic
+# Labs' revision from the base and reported THEIR sha as its own.
+GIT_REVISION ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 
 .DEFAULT_GOAL := help
 
@@ -45,6 +49,7 @@ image: ## Build a nakama image with the plugin baked in (for k3s/CI)
 	docker build \
 		-f $(DOCKERFILE) \
 		--build-arg NAKAMA_VERSION=$(NAKAMA_VERSION) \
+		--build-arg GIT_REVISION=$(GIT_REVISION) \
 		--target runtime \
 		-t $(IMAGE) \
 		$(CONTEXT)
