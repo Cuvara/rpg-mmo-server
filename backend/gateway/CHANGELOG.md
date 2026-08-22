@@ -5,6 +5,51 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **A map served by two game servers is no longer load-balanced across the
+  split** (#203). ADR-2 allows exactly one live server per `map_id`, and
+  `FindServer` already logged loudly when the registry returned more than one —
+  then fell straight through into least-loaded selection across all of them.
+  That is the worst available response to the fault. Least-loaded steers each new
+  joiner into whichever half is emptier, so the two copies of the world converge
+  on **equal** population: both stay occupied, neither ever drains, and the
+  accidental split becomes a permanent one in which players standing in the same
+  coordinates cannot see or fight each other. The gateway was, in effect,
+  treating a violated invariant as a capacity pool to exploit.
+
+  Selection with more than one server for a map is now **deterministic and
+  load-blind**: the lowest `ServerID` among those with spare capacity, with
+  `PlayerCount` not consulted at all. Every caller — every gateway instance,
+  every client retry — therefore lands on the same half, so the other half
+  drains as its players log out and the split converges out rather than widening.
+  This does not repair a split (nothing migrates the players already on the
+  losing half) and it is not meant to; it stops the gateway from feeding one
+  while an operator reacts to the warning that is still emitted. Selection when
+  exactly one server serves the map is unchanged, as are the wrong-map refusal
+  (`ErrFleetMapMismatch`), the all-servers-full refusal (`ErrNoServerAvailable`,
+  never an allocation) and the allocation path.
+
+  Two harder responses were considered and **rejected for now**: refusing the
+  lookup outright, and rejecting the second registration. Refusing at
+  registration is the only one that actually enforces the invariant, but it
+  breaks rolling replacement — a new pod self-registers before the old one's TTL
+  expires — while the health watcher is still unwired (#204), so it would trade a
+  split world for an unservable map. Deterministic selection is the containment
+  step that costs nothing and blocks nothing.
+
+  Consequence to know: which half a joiner reaches now depends on server id
+  ordering rather than load, so on a fleet scaled past `replicas: 1` (ADR-18) the
+  clients pile onto one pod and the spare looks idle. That is the intended
+  reading — the idle pod is the copy of the world that should not exist, not
+  spare capacity. Covered by new table-driven tests over both the memory and
+  Redis registries: the emptier-but-higher-id server losing, a three-way split,
+  the lowest id being full so the next-lowest wins, an all-full split still
+  refused, and a single server unchanged, plus an order-independence test that
+  rotates the store's return order across calls (a Redis set has no ordering
+  guarantee, and two gateways disagreeing on the pick would reintroduce the
+  split). `TestRegistryService_FindServer_PrefersLeastLoaded` was removed: it
+  asserted precisely the behaviour this change inverts.
+
 ### Changed
 - **A momentarily exhausted fleet no longer gets the terminal "do not retry"
   answer** (#152). `EnterWorld` collapsed two unlike conditions into one message:

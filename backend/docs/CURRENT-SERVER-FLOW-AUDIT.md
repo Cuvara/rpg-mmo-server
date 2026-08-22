@@ -436,7 +436,8 @@ Unity client
   ├─────────────────────────────────────────────────────────►│ Gateway  │
   │◄─── MsgAuthResp{OK,UserID}       session:{uid} SETEX 1h  │  (Go)    │──┐
   │ 4. MsgEnterWorld{MapID}                                  └──────────┘  │ Redis
-  │           FindServer(map) → least-loaded, cap-checked                  │ servers:{map}
+  │           FindServer(map) → cap-checked; least-loaded if one server,   │ servers:{map}
+  │           lowest ServerID if a map has several (#203)                  │
   │           mint join token (JOIN_TOKEN_SECRET, 30s, sid, jti)           │ session:{uid}
   │◄─── MsgEnterWorldResp{ServerAddr, JoinToken, Transport}                │ events:game (unfed)
   │                                                                        │

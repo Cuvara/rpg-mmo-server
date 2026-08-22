@@ -309,9 +309,14 @@ func (s *RegistryService) getServerWithRetry(ctx context.Context, serverID strin
 	return storage.ServerInfo{}, fmt.Errorf("all %d retries exhausted: %w", retryMaxAttempts, lastErr)
 }
 
-// FindServer locates the least-loaded live server for mapID that still has
-// capacity (PlayerCount < Capacity). Ties break on ServerID so the choice is
-// deterministic.
+// FindServer locates a live server for mapID that still has capacity
+// (PlayerCount < Capacity).
+//
+// With exactly one live server for the map — the only state ADR-2 allows — the
+// rule is least-loaded with a ServerID tie-break, which degenerates to "that
+// server, if it has room". With more than one, selection switches to the lowest
+// ServerID and ignores PlayerCount entirely; see the selection block below for
+// why (#203).
 //
 // MVP invariant: a map is served by exactly ONE live game server (ADR-2). Two
 // instances of one map are two disconnected copies of the world: players on
@@ -382,6 +387,27 @@ func (s *RegistryService) FindServer(ctx context.Context, mapID string) (storage
 			"map_id", mapID, "server_count", len(servers), "server_ids", ids)
 	}
 
+	// A map served by more than one live server is a violated invariant, not a
+	// bigger map (ADR-2), and how the gateway selects inside that state decides
+	// whether the state heals or entrenches.
+	//
+	// Least-loaded is the correct rule for capacity and the wrong rule for a
+	// fault: it steers every new joiner into whichever half is emptier, which is
+	// load-balancing across a split world. The two halves then converge on equal
+	// population, both stay occupied, and neither ever drains — the accidental
+	// split becomes a permanent one, with players who cannot see each other
+	// standing in the same place (#203).
+	//
+	// So when more than one server serves the map, PlayerCount is not a
+	// criterion at all: pick the lowest ServerID among those with spare
+	// capacity. Every caller — every gateway instance, every retry — then lands
+	// on the same half, so the other half drains as its players leave and the
+	// split converges out instead of widening. It is deliberately the rule that
+	// treats the split as a fault to escape rather than an arrangement to
+	// exploit. The multi-server case is still logged loudly above; this only
+	// stops the gateway from making it worse while an operator reacts.
+	multiServer := len(servers) > 1
+
 	var (
 		best  storage.ServerInfo
 		found bool
@@ -391,10 +417,16 @@ func (s *RegistryService) FindServer(ctx context.Context, mapID string) (storage
 			continue
 		}
 		switch {
-		case !found,
-			srv.PlayerCount < best.PlayerCount,
-			srv.PlayerCount == best.PlayerCount && srv.ServerID < best.ServerID:
+		case !found:
 			best, found = srv, true
+		case multiServer:
+			// Split world: deterministic, load-blind.
+			if srv.ServerID < best.ServerID {
+				best = srv
+			}
+		case srv.PlayerCount < best.PlayerCount,
+			srv.PlayerCount == best.PlayerCount && srv.ServerID < best.ServerID:
+			best = srv
 		}
 	}
 	if found {
