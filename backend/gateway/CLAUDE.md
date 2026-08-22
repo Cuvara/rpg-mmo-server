@@ -49,7 +49,6 @@ Custom Go binary — the **entry point** for Unity clients. Standalone process, 
 - If the map's live servers are all **full**: refuse with `no server available for
   map`. Never allocate a second server for a `map_id` — that splits the world
   (ADR-2)
-- Update player location in Redis: `player:{user_id}:location = server_id`
 
 ### 5. Event Relay — Redis Streams (Drawio Page 4)
 - Consume Redis Streams events and fan them out to relevant clients

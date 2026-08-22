@@ -144,6 +144,42 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   dropped the field entirely and the test would pass vacuously.
 
 
+### Removed
+- **`constants.PlayerLocationKey` (`"player:location:"`), which had neither a reader
+  nor a writer in either repository** ([#210](https://github.com/Cuvara/rpg-mmo-server/issues/210)).
+  A one-line deletion earns a changelog entry because this constant had already cost
+  a real verification run. It is the same shape as #204: something declared,
+  plausible, referenced in documentation, and never wired — and like #204 the
+  declaration was invisible to every test, because a constant with no users cannot
+  fail one. What made it findable was documentation: the client repo's multi-client
+  checklist told an operator to expect three `player:location:*` keys in Redis after
+  three clients join, and a live run against `k3d-rpg-dev` on 2026-08-22 found
+  **zero** while every other row of that checklist passed. The checklist manufactured
+  its own false negative, and an operator working it top to bottom had every reason
+  to call the run broken. That row is corrected separately in
+  Cuvara/IndieRPGMMOAdventure#38.
+
+  **Deleted rather than implemented**, which was the other legal ending. Cross-server
+  player lookup ("which server is this player on", for whispers, party join and admin
+  tooling) is a real need but is not planned work, and the game server already owns
+  per-player position inside its own world — nothing today has to ask Redis where a
+  player is. A declared key that no code path honours is a claim the codebase does
+  not keep, and the cost of the claim is not zero: it misled one verification run and
+  would have misled the next. Restoring it, if cross-server lookup is ever wanted, is
+  one commit — and it would then arrive with the writer on join/leave, the TTL
+  aligned to `SessionTTL`, and the reader that were always missing.
+
+  No code change accompanies the deletion because there was no code to change; the
+  rest of this change is documentation that still believed in the key.
+  `backend/docs/ARCHITECTURE-DECISIONS.md` (ADR-1's "also dead" note and its
+  follow-up item), `backend/docs/CORE_FLOW.md` (the unused-constants item),
+  `backend/gateway/docs/DESIGN.md` (which listed the tracking as a "stub", though
+  nothing was ever stubbed) and `backend/gateway/CLAUDE.md` (which instructed the
+  gateway to "update player location in Redis: `player:{user_id}:location =
+  server_id`", a step no gateway has ever performed) are all corrected here rather
+  than left for the next person to rediscover.
+
+
 ### Added
 - **`SnapshotState.Apply` now rejects a keyframe that carries a bare interned
   handle, instead of resolving it against the outgoing interval's table.**

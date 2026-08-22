@@ -54,9 +54,14 @@ Three findings the criticism is right about:
    C# server has its own reimplementation in `PostgresPlayerStore.cs`. The two
    schemas are kept byte-identical by a test, but nothing enforces that at build time.
 
-Also dead: `constants.PlayerLocationKey` (`shared/constants/keys.go:7`) has no
+~~Also dead: `constants.PlayerLocationKey` (`shared/constants/keys.go:7`) has no
 consumer anywhere — the `player:{user_id}:location` index described in
-`backend/gateway/CLAUDE.md:37` was never built.
+`backend/gateway/CLAUDE.md:37` was never built.~~ **Resolved 2026-08-22 by
+deleting the constant** (#210). The index was never built and is not planned:
+cross-server player lookup is not on the roadmap, and the game server owns
+per-player position inside its own world. The declaration had already cost
+something — it is what put a `player:location:*` row in the client repo's
+multi-client checklist, a row no code could ever satisfy.
 
 ### Decision
 
@@ -91,7 +96,9 @@ backed up. Live world state is not recoverable (ADR-6).
 
 ### Follow-up work
 
-- **S** — Delete `constants.PlayerLocationKey` or implement the location index.
+- ~~**S** — Delete `constants.PlayerLocationKey` or implement the location index.~~
+  **Done** (#210): deleted. Implementing it was the other legal ending and was
+  rejected — nothing needs cross-server player lookup today.
 - **S** — Delete the orphaned Go `shared/storage/pgstore/` package, or add a build-time
   assertion tying its schema to the C# one instead of relying on a test.
 - ~~**M** — Give the C# server a Redis client so it self-registers and heartbeats,
