@@ -88,10 +88,32 @@ internal sealed class EphemeralRedis : IAsyncDisposable
         // the port was taken in that gap. That retry is not cosmetic any more: with the
         // skip/fail split below, a lost port race would otherwise turn a transient
         // collision into a hard suite failure.
+        //
+        // The second recognised transient, added for #214: `docker run` itself failing on the
+        // WSL2 <-> Docker Desktop vsock bridge. That is neither a missing dependency nor a
+        // broken container — it is the host's docker transport timing out before the daemon
+        // was reached — and it fanned one fixture failure out across all 11 registry tests
+        // roughly one full-suite run in seven on this box.
+        //
+        // The retry is deliberately narrow and deliberately loud. Narrow, because
+        // DockerRunFailure.Classify recognises signatures positively and calls everything
+        // else Fatal, so a bad image or a name conflict still fails on the first attempt
+        // rather than being tried three times; a blanket "retry anything" would silently
+        // re-run genuine container faults, which is worse than the flake. Loud, because a
+        // retry nobody can see is indistinguishable from a flake that stopped happening — the
+        // count below is printed even when the retry SUCCEEDS, so if this box's docker
+        // degrades further, the green runs say so before the red ones do.
         int port = 0;
         (int ExitCode, string StdOut, string StdErr) run = (-1, "", "never attempted");
 
-        for (int attempt = 1; attempt <= 3; attempt++)
+        const int MaxAttempts = 3;
+
+        // Every attempt's stderr. A failure after a retry that showed only the last attempt
+        // would hide the reason the earlier ones were forgiven.
+        var attempts = new List<string>();
+        int transientRetries = 0;
+
+        for (int attempt = 1; attempt <= MaxAttempts; attempt++)
         {
             using (var lease = new TestPorts.Lease()) { port = lease.Port; }
 
@@ -99,20 +121,57 @@ internal sealed class EphemeralRedis : IAsyncDisposable
                 $"run -d --name {name} -p 127.0.0.1:{port}:6379 {Image}",
                 TimeSpan.FromMinutes(5));
 
-            if (run.ExitCode == 0) break;
+            if (run.ExitCode == 0)
+            {
+                if (transientRetries > 0)
+                {
+                    Console.WriteLine(
+                        $"[EphemeralRedis] `docker run` succeeded on attempt {attempt} after " +
+                        $"{transientRetries} recognised host-transport failure(s) (#214). The run " +
+                        "is green BECAUSE it was retried, not because nothing went wrong: this " +
+                        "line is the signal that the box's docker bridge is degrading.");
+                }
 
-            bool portTaken = run.StdErr.Contains("address already in use", StringComparison.OrdinalIgnoreCase)
-                || run.StdErr.Contains("port is already allocated", StringComparison.OrdinalIgnoreCase);
-            if (!portTaken || attempt == 3) break;
+                break;
+            }
+
+            attempts.Add($"attempt {attempt} (exit {run.ExitCode}): {run.StdErr.Trim()}");
+
+            var kind = DockerRunFailure.Classify(run.StdErr);
+            if (kind == DockerRunFailure.Kind.Fatal || attempt == MaxAttempts) break;
 
             Console.WriteLine(
-                $"[EphemeralRedis] port {port} was taken between the lease and `docker run`; retrying");
+                $"[EphemeralRedis] `docker run` attempt {attempt}/{MaxAttempts} failed and " +
+                $"{DockerRunFailure.Describe(kind)}; retrying. Original stderr: " +
+                $"{run.StdErr.Trim()}");
+
+            // Anything left behind is removed before the name is reused. On the vsock path
+            // nothing was created, so this is a no-op that costs one docker call and saves a
+            // name conflict on the attempt that follows a partial create.
             TestDocker.Exec(docker, $"rm -f {name}", TimeSpan.FromSeconds(60));
+
+            if (kind == DockerRunFailure.Kind.HostTransport)
+            {
+                // A short, growing pause: the bridge needs a moment, and hammering it
+                // immediately is what the first attempt already did. A port collision needs
+                // no pause at all — the next lease is a different number.
+                transientRetries++;
+                await Task.Delay(TimeSpan.FromSeconds(attempt), ct);
+            }
         }
 
         if (run.ExitCode != 0)
         {
+            // Unchanged prefix, on purpose: this is the message #214 was filed with, and the
+            // failure after an exhausted retry must read as the same event rather than as a
+            // new one. The earlier attempts are appended, not substituted.
             string why = $"`docker run` failed (exit {run.ExitCode}): {run.StdErr.Trim()}";
+            if (attempts.Count > 1)
+            {
+                why += $" [attempt {attempts.Count} of {MaxAttempts}; earlier: " +
+                       string.Join(" | ", attempts.Take(attempts.Count - 1)) + "]";
+            }
+
             Console.WriteLine($"[EphemeralRedis] {why}");
             return new StartOutcome(null, DockerUsable: true, Failure: why);
         }

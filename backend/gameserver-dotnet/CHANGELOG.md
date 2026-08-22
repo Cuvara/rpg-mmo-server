@@ -8,6 +8,86 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`docker run` itself was failing on the WSL2 vsock bridge, and one fixture failure was
+  fanning out across all 11 registry tests.** Roughly one full-suite run in seven locally,
+  every one of them carried the identical message —
+  `` `docker run` failed (exit 1): <3>WSL (90584 - ) ERROR: UtilAcceptVsock:271: accept4
+  failed 110. `` — where `110` is `ETIMEDOUT` on the transport between WSL2 and Docker
+  Desktop's VM. The container was never created. Nothing in this repository was at fault, and
+  it does not happen on GitHub's runners, which have a real dockerd rather than a bridge
+  (#214).
+  - **A third case underneath a distinction that already existed.** `EphemeralRedis` separates
+    **docker absent → skip** from **container unusable → fail**, which is #175's design and is
+    not up for renegotiation — that split is why this failure was loud and attributed instead
+    of vanishing into a green run over 11 unrun tests. Underneath both there is a state
+    neither describes: **the docker CLI invocation failed before the daemon was reached**.
+    That is not a missing dependency and it is not a broken container, and it is the only
+    thing being retried here.
+  - **The retry is scoped to a recognised signature, never to a non-zero exit.** New
+    `GameServer.Tests/Infrastructure/DockerRunFailure.cs` classifies a failed run as
+    `HostTransport`, `PortTaken` or `Fatal`, and **anything not positively recognised is
+    `Fatal`**. Written the other way round — retry unless it looks like a real fault — every
+    new docker error on this box would silently become a three-attempt loop against a
+    five-minute timeout. A bad image, a name conflict, a missing network and an occupied port
+    all still fail on the first attempt.
+  - **The transport signature requires two tokens, `accept4 failed` and `vsock`, and that is
+    what makes it safe.** `accept4` is a raw Linux syscall name emitted by the WSL utility
+    process itself and `vsock` names the transport it was accepting on; neither word appears
+    in anything the daemon says, because when the daemon has an opinion it answers in its own
+    format. Every genuine failure captured from docker 29.1.3 on this box is prefixed
+    `docker: Error response from daemon:` and then names a cause — `pull access denied`,
+    `Conflict. The container name ... is already in use`, `Bind for 127.0.0.1:6379 failed:
+    port is already allocated`, `network ... not found`. The vsock failure is the shape of a
+    message from *below* the daemon: the relay timed out, so there was never a daemon response
+    to format. The fixture also runs `docker run -d`, so the captured stderr belongs to the
+    CLI and the container's own output cannot reach the classifier to confuse it.
+  - **It is loud on success, not only on failure.** The retry count is printed when the retry
+    *works*: `` `docker run` succeeded on attempt 2 after 1 recognised host-transport
+    failure(s) (#214) ``. A retry nobody can see is indistinguishable from a flake that
+    stopped happening, and this box's docker bridge is now implicated in a third measurement
+    problem after #200 and #201 — so the count is the signal that says whether the machine is
+    getting worse, and it has to appear on the green runs to be that.
+  - **An exhausted retry fails exactly as before.** Same `InvalidOperationException` from
+    `SkipUnlessAvailable`, same `` `docker run` failed (exit N): `` prefix — the string #214
+    was filed with — with the earlier attempts' stderr *appended* rather than substituted, so
+    the failure reads as the same event and still shows what was forgiven on the way to it.
+  - **24 deterministic tests pin the decision, because the fault cannot be summoned.** A retry
+    proved by "the suite went green a few times" is not proved at all — that is
+    indistinguishable from the flake not firing. `DockerRunFailureTests` feeds the classifier
+    the stderr from the issue and the four genuine faults **captured verbatim by causing each
+    one against docker 29.1.3 on this box**, rather than paraphrasing what docker might say.
+    Four separate mutations of the classifier were checked to confirm the tests bite: widening
+    the match from AND to OR fails 4, deleting the transport branch fails 7, defaulting to
+    retry-anything fails 12, and over-fitting the token to the `110` errno fails 1.
+  - **The skip/fail contract was re-verified in both directions** and is unchanged: with the
+    daemon answering, the 11 registry tests report `Skipped: 0`; with no daemon answering they
+    report `Skipped: 11, Failed: 0` as real xUnit skips. The backoff is a `Task.Delay`, not a
+    deadline, and no wall clock was introduced — this host's `CLOCK_REALTIME` runs 10-17% fast
+    (#153).
+  - **One call site could not have named this failure, and now can.**
+    `RegistrationServiceTests.RedisOutage_DoesNotKillTheService_AndItReRegistersOnReconnect`
+    starts its own dedicated container through `EphemeralRedis.TryStartAsync`, which returns
+    the container and **throws the reason away** — so its assertion read only "a dedicated
+    redis container could not be started". It failed exactly that way once during this work,
+    and the run could not say whether the cause was the transient being retried here, a
+    genuine container fault, or something else. It now goes through `StartAsync` and quotes
+    `Failure`. A reason that was computed and discarded is the same defect as no reason at
+    all, and this is the one place in the registry tests where #214 could still recur
+    unattributed.
+  - **Where the retry is visible, stated precisely, because it is not everywhere.** The
+    fixture logs through `Console.WriteLine`, and that reaches neither the TRX nor the console
+    at `dotnet test -v q` — verified, including for the pre-existing failure line. On the
+    **failure** path this does not matter: the attempt history is appended to the exception
+    message, which is how #214's own stderr was captured. On the **success** path the console
+    is the only channel, so a retried-but-green run shows its retry count under
+    `-v normal` (and in CI, which does not run quiet) and not under `-v q`.
+  - **The original failure did not reproduce in the 10 full-suite runs** recorded after the
+    change, which is stated rather than dressed up: at ~1 run in 7 it is as likely as not to
+    sit out a batch that size, and 10 green runs cannot distinguish "absorbed" from "did not
+    happen". What is proved is the decision the retry rests on; what is observed is ten clean
+    runs. The environmental fault itself remains a fact about the machine, exactly as #214
+    describes it.
+
 - **`AchievedRateMeterTests.ARunningTickLoop_PublishesANonZeroAchievedRate` asserted on the
   test host's scheduler, not on the meter.** It failed roughly 1 run in 13 in the full
   parallel suite and never in isolation (#200), and the assertion message had never been
