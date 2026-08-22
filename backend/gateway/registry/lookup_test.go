@@ -25,7 +25,13 @@ func newStores(t *testing.T) map[string]storage.ServerRegistry {
 	}
 }
 
-func TestRegistryService_FindServerLeastLoaded(t *testing.T) {
+// TestRegistryService_FindServerSelection covers the capacity contract of
+// FindServer. It was named ...LeastLoaded until #203: least-loaded selection is
+// now reachable only when a map has exactly one live server, where it cannot
+// choose anything, because a map with several is a violated invariant that is
+// resolved by the lowest id instead (see
+// TestRegistryService_SplitMapPicksLowestServerID).
+func TestRegistryService_FindServerSelection(t *testing.T) {
 	tests := []struct {
 		name    string
 		servers []storage.ServerInfo
@@ -33,13 +39,15 @@ func TestRegistryService_FindServerLeastLoaded(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "picks lowest player count",
+			// PlayerCount is deliberately NOT the discriminator here: "b" is by
+			// far the emptiest and "a" is still the answer.
+			name: "several servers for one map: lowest id, not lowest player count",
 			servers: []storage.ServerInfo{
 				{ServerID: "a", MapID: "m", Addr: "a:9000", Capacity: 100, PlayerCount: 80},
 				{ServerID: "b", MapID: "m", Addr: "b:9000", Capacity: 100, PlayerCount: 5},
 				{ServerID: "c", MapID: "m", Addr: "c:9000", Capacity: 100, PlayerCount: 40},
 			},
-			want: "b",
+			want: "a",
 		},
 		{
 			name: "skips full servers",
@@ -630,4 +638,140 @@ func TestRegistryService_GetServer(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRegistryService_SplitMapPicksLowestServerID covers the state ADR-2 forbids
+// and nothing used to test: one map_id served by more than one live server.
+//
+// The rule under test is that selection there is deterministic and load-blind —
+// the lowest ServerID with spare capacity — so every joiner lands on the same
+// half and the split drains instead of widening (#203). The first case is the
+// one that fails on least-loaded selection: the emptier server has the HIGHER
+// id, so a load-based pick and an id-based pick disagree.
+func TestRegistryService_SplitMapPicksLowestServerID(t *testing.T) {
+	tests := []struct {
+		name    string
+		servers []storage.ServerInfo
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "emptier server has the higher id, lowest id still wins",
+			servers: []storage.ServerInfo{
+				{ServerID: "gs-a", MapID: "m", Addr: "a:9000", Capacity: 100, PlayerCount: 90},
+				{ServerID: "gs-b", MapID: "m", Addr: "b:9000", Capacity: 100, PlayerCount: 1},
+			},
+			want: "gs-a",
+		},
+		{
+			name: "three-way split, lowest id wins regardless of load",
+			servers: []storage.ServerInfo{
+				{ServerID: "gs-c", MapID: "m", Addr: "c:9000", Capacity: 100, PlayerCount: 0},
+				{ServerID: "gs-a", MapID: "m", Addr: "a:9000", Capacity: 100, PlayerCount: 99},
+				{ServerID: "gs-b", MapID: "m", Addr: "b:9000", Capacity: 100, PlayerCount: 50},
+			},
+			want: "gs-a",
+		},
+		{
+			name: "lowest id is full, next lowest with capacity wins",
+			servers: []storage.ServerInfo{
+				{ServerID: "gs-a", MapID: "m", Addr: "a:9000", Capacity: 10, PlayerCount: 10},
+				{ServerID: "gs-b", MapID: "m", Addr: "b:9000", Capacity: 10, PlayerCount: 9},
+				{ServerID: "gs-c", MapID: "m", Addr: "c:9000", Capacity: 10, PlayerCount: 0},
+			},
+			want: "gs-b",
+		},
+		{
+			name: "every server in the split is full, still refused",
+			servers: []storage.ServerInfo{
+				{ServerID: "gs-a", MapID: "m", Addr: "a:9000", Capacity: 10, PlayerCount: 10},
+				{ServerID: "gs-b", MapID: "m", Addr: "b:9000", Capacity: 10, PlayerCount: 10},
+			},
+			wantErr: true,
+		},
+		{
+			name: "single server is unaffected",
+			servers: []storage.ServerInfo{
+				{ServerID: "gs-z", MapID: "m", Addr: "z:9000", Capacity: 100, PlayerCount: 42},
+			},
+			want: "gs-z",
+		},
+	}
+
+	for storeName, store := range newStores(t) {
+		for _, tt := range tests {
+			t.Run(storeName+"/"+tt.name, func(t *testing.T) {
+				ctx := context.Background()
+				mapID := storeName + "-split-" + tt.name // isolate cases within one store
+				svc := NewRegistryService(store)
+				for _, s := range tt.servers {
+					s.MapID = mapID
+					if err := svc.RegisterServer(ctx, s); err != nil {
+						t.Fatalf("RegisterServer: %v", err)
+					}
+				}
+
+				got, err := svc.FindServer(ctx, mapID)
+				if tt.wantErr {
+					if !errors.Is(err, ErrNoServerAvailable) {
+						t.Fatalf("FindServer() = %+v, err = %v; want ErrNoServerAvailable", got, err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("FindServer() error: %v", err)
+				}
+				if got.ServerID != tt.want {
+					t.Errorf("ServerID = %q, want %q", got.ServerID, tt.want)
+				}
+			})
+		}
+	}
+}
+
+// TestRegistryService_SplitMapSelectionIsOrderIndependent proves the property
+// the fix actually depends on: the answer must not vary with the order the
+// store happens to list the split's members in, or two gateways reading the
+// same Redis set could still send joiners to opposite halves. Redis returns a
+// set, whose member order carries no guarantee at all.
+func TestRegistryService_SplitMapSelectionIsOrderIndependent(t *testing.T) {
+	ctx := context.Background()
+	servers := []storage.ServerInfo{
+		{ServerID: "gs-a", MapID: "map_01", Addr: "a:9000", Capacity: 100, PlayerCount: 99},
+		{ServerID: "gs-b", MapID: "map_01", Addr: "b:9000", Capacity: 100, PlayerCount: 3},
+		{ServerID: "gs-c", MapID: "map_01", Addr: "c:9000", Capacity: 100, PlayerCount: 0},
+		{ServerID: "gs-d", MapID: "map_01", Addr: "d:9000", Capacity: 100, PlayerCount: 50},
+	}
+	store := &rotatingRegistry{servers: servers}
+	svc := NewRegistryService(store)
+
+	// One full rotation per server, so every member gets to be first, plus a
+	// second lap to show the answer does not drift.
+	for i := 0; i < 2*len(servers); i++ {
+		got, err := svc.FindServer(ctx, "map_01")
+		if err != nil {
+			t.Fatalf("FindServer() call %d error: %v", i, err)
+		}
+		if got.ServerID != "gs-a" {
+			t.Fatalf("call %d: ServerID = %q, want %q (selection must not depend on store order)",
+				i, got.ServerID, "gs-a")
+		}
+	}
+}
+
+// rotatingRegistry serves one fixed set of servers but rotates the slice by one
+// on every lookup, standing in for a store that gives no ordering guarantee.
+type rotatingRegistry struct {
+	storage.ServerRegistry
+	servers []storage.ServerInfo
+	calls   int
+}
+
+func (r *rotatingRegistry) FindByMapID(_ context.Context, _ string) ([]storage.ServerInfo, error) {
+	out := make([]storage.ServerInfo, 0, len(r.servers))
+	for i := range r.servers {
+		out = append(out, r.servers[(i+r.calls)%len(r.servers)])
+	}
+	r.calls++
+	return out, nil
 }

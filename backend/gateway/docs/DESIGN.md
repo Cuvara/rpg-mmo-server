@@ -455,7 +455,11 @@ dispatch cannot happen before `Run` starts the relay.
 the store happened to list first. When nothing has capacity and an `Allocator` is configured,
 the registry allocates and registers the new instance. *(Superseded 2026-08-17: allocation
 now fires only when the map has **no** live server, and the registry no longer writes the
-allocated entry — see the entry at the top of this file.)* `StubAllocator` still returns
+allocated entry — see the entry at the top of this file. Superseded again 2026-08-22 (#203):
+least-loaded is the placement policy only while a map has exactly ONE live server. With more
+than one — a violated ADR-2 invariant — placement is the lowest `ServerID` with spare capacity
+and `PlayerCount` is ignored, because balancing across a split world is what keeps both halves
+populated.)* `StubAllocator` still returns
 `ErrNotImplemented`, so `cmd/gateway` wires the registry *without* an allocator: the honest
 "no available server" error beats a misleading "allocator not implemented".
 

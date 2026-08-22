@@ -119,9 +119,22 @@ Neither registry implementation enforces one server per map. `Register` is keyed
 - Redis: `redisstore/registry.go:69-86` (`HSET` + `SADD`), `FindByMapID` via
   `SMEMBERS` + `HGETALL` (`registry.go:135-163`), returns **all** matches.
 
-`FindByMapID` returns `[]ServerInfo`, and the gateway selects the least-loaded
-server with capacity (`gateway/registry/registry.go:55-94`) — **not** first-fit as
-CORE_FLOW.md:88 claims.
+`FindByMapID` returns `[]ServerInfo`, and the gateway selects a server with capacity
+(`gateway/registry/registry.go`, `FindServer`) — **not** first-fit as CORE_FLOW.md:88
+claims. The rule depends on how many servers came back, and since 2026-08-22 (#203) the
+two cases differ deliberately:
+
+- **one server** — least-loaded with a `ServerID` tie-break, which with a single
+  candidate just means "that server, if it has room".
+- **more than one** — the **lowest `ServerID`** among those with spare capacity;
+  `PlayerCount` is not a criterion at all. More than one server for a `map_id` is
+  this ADR's invariant being violated, and least-loaded selection there steers each
+  new joiner into whichever half is emptier — it load-balances players across a split
+  world, so both halves stay populated and the split never drains. Deterministic
+  selection sends every caller to the same half instead, so the accidental copy
+  empties as its players leave. It does not repair a split; it stops the gateway
+  widening one. Registration is deliberately **not** refused (that would break rolling
+  replacement while the health watcher is unwired, #204).
 
 The important finding: **the allocator deliberately creates a second server for a
 full map.** When no server has capacity and Agones is enabled,
@@ -2420,7 +2433,9 @@ k8s; staging and production remain `DEPLOY_MODE=containers` and reach none of th
   within a second of that, with no allocation involved, because the C# server self-registers
   right after `ReadyAsync` rather than on allocation — and `FindServer` then hands clients the
   least-loaded of the two, i.e. the second copy of the world. (5.38s is pod-start latency, not
-  a capacity figure.) So the answer to "when does the single replica stop being necessary" is
+  a capacity figure.) *Since #203 that last step reads differently — `FindServer` now returns the
+  lowest `ServerID` of the two rather than the least-loaded, so joiners pile onto one half instead
+  of being split between them. The hazard is unchanged: there are still two copies of the world.* So the answer to "when does the single replica stop being necessary" is
   **#151** — gate self-registration on `Allocated` rather than `Ready` — not a larger fleet.
   #151 unlocks `replicas > 1` **for one map only**: allocation targets a fleet and every pod
   in it still carries the same `GAMESERVER_MAP_ID`, so a second *map* remains unserved
@@ -2488,9 +2503,10 @@ t=5.38s  new GameServer           state=Ready
 ```
 
 Two registrants for one `map_id`, **with no allocation involved**. `registry.FindServer` then
-returns the *least loaded* of the two — the unallocated spare — so live players are handed the
+returned the *least loaded* of the two — the unallocated spare — so live players were handed the
 pod Agones is free to delete on the next scale-down, and the two halves of `map_01` cannot see
-each other. The autoscaler would be the thing that broke ADR-2. The fleet was restored to
+each other. (Since #203 it returns the lowest `ServerID` instead, which is no longer reliably the
+spare, but which of the two copies is served was never the problem — that there are two is.) The autoscaler would be the thing that broke ADR-2. The fleet was restored to
 `replicas: 1` immediately.
 
 **Decision 2 — `ready=0` on this fleet is the correct steady state, and tooling must say so.**
@@ -2667,5 +2683,5 @@ join-latency measurement.
 | 15 | Realtime tier on k8s | **Proposed, not accepted — this one records an open question.** All three environments are `DEPLOY_MODE=containers`; there is no k3s (context is `docker-desktop`), no `deploy/k8s/`, and `cd.yml` applies no manifest. One thing *is* decided because it blocks either answer: with `portPolicy: Dynamic` the server cannot learn its own address, advertises `:9000` and the gateway hands that to clients verbatim — so the SDK must **read GameServer status from the sidecar**, not use static ports and not let the gateway write the registry entry (which would break ADR-1 and ADR-14's split). Six prerequisites — StatefulSets/PVCs, ConfigMaps, plugin packaging, Secrets, a registry, and allocation RBAC — sit outside `deploy/agones/` and outweigh ADR-14's stages 1-8, which they precede. ADR-3 is unchanged: allocation lives inside `MsgEnterWorld` and the gateway stays out of the gameplay path |
 | 16 | Agones on k3s | Realtime tier **proven** on Agones/k3d: a real client joined an Agones-managed server in strict-address mode. Docker Desktop k8s cannot host it (Kubernetes `hostPort` is never published to the host); k3d with a mapped port range can. The advertised address is **composed** — port from the Agones status read, host from `GAMESERVER_ADVERTISE_HOST` — because `status.address` is the node address and is not dialable. ADR-2 is now enforced in code (allocate only for a map with no live server); the join token is minted only after the pod self-registers. Allocated pods are never reclaimed; the map-fleet allocator policy stays open; the deploy path stays `DEPLOY_MODE=containers` |
 | 17 | Availability posture on k8s | **Statement of posture, not a manifest change.** Every workload in `deploy/k8s/` is **one replica** — gateway, Nakama, Redis, both PostgreSQL instances, and the map Fleet — so k8s provides scheduling and lifecycle here, **not redundancy**. `strategy: Recreate` on the two `hostPort` workloads (gateway 7000, Nakama 7001) is **required**: RollingUpdate deadlocks on a single node because the replacement cannot schedule until the outgoing pod frees the port. The accepted cost is that **every gateway or Nakama rollout drops the join path entirely**; in-progress sessions survive, because the game server verifies the join token itself and never calls the gateway (ADR-3). The window is **unmeasured** and not quoted. Before any tier above dev: answer the gateway hostPort exposure question *together with* cross-instance single-flight (ADR-16), and decide Redis persistence/replication against ADR-4 rather than by adding replicas |
-| 18 | Fleet autoscaling | **No `FleetAutoscaler` on a fleet that pins one `GAMESERVER_MAP_ID` for every replica.** The C# server self-registers at startup, not on allocation, so a "spare" Ready pod is a second live server for that map: measured on k3d 2026-08-18, scaling `1 -> 2` put two members into `servers:map:map_01` 5.4s later with no allocation involved, and `FindServer` returns the least-loaded — the spare. `ready=0` is therefore the correct steady state and tooling says so instead of warning. Enforced by `verify.sh` check `cluster.autoscaler` (FAIL), which stands down for a fleet with a per-pod map id. `replicas > 1` and a buffer autoscaler unlock together, on a per-pod map id or on registering at `Allocated` rather than `Ready` — an autoscaler does nothing for the "second map cannot be served" symptom, which is a fleet-targeted-allocation problem |
+| 18 | Fleet autoscaling | **No `FleetAutoscaler` on a fleet that pins one `GAMESERVER_MAP_ID` for every replica.** The C# server self-registers at startup, not on allocation, so a "spare" Ready pod is a second live server for that map: measured on k3d 2026-08-18, scaling `1 -> 2` put two members into `servers:map:map_01` 5.4s later with no allocation involved, and `FindServer` hands clients one of them (the least-loaded then; the lowest `ServerID` since #203). `ready=0` is therefore the correct steady state and tooling says so instead of warning. Enforced by `verify.sh` check `cluster.autoscaler` (FAIL), which stands down for a fleet with a per-pod map id. `replicas > 1` and a buffer autoscaler unlock together, on a per-pod map id or on registering at `Allocated` rather than `Ready` — an autoscaler does nothing for the "second map cannot be served" symptom, which is a fleet-targeted-allocation problem |
 | 19 | Game content | **Content is JSON on disk in `backend/content/`, owned by the game server, served to clients over HTTP at `/content` and never carried by the `Shared.GameLogic` package.** The package is pinned by exact commit, so content in it costs a tag plus two file bumps per balance tweak — correct for simulation rules, fatal for content. The server loads and validates at boot and **refuses to start** on invalid content, reporting every fault in one pass. Clients send `?hash=` and get `304` once they hold the current set; the hash ships in both `ETag` and `X-Content-Hash` because `UnityWebRequest` and some proxies strip the former. The **schema and validator are shared** (`Shared.GameLogic/Content/`), the **parser is not** — Unity compiles the package as source and has no `System.Text.Json`, the server is NativeAOT and cannot reflect, so no single parser satisfies both; golden vectors cover the gap as in ADR-10. No hot reload: content changes need a restart, because rules changing under a running simulation makes every desync unreproducible |

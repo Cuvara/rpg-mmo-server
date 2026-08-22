@@ -249,7 +249,7 @@
         <mxCell id="m5" value="enter_world(3) { map_id: map_01 }" style="html=1;endArrow=block;strokeColor=#82b366;fontSize=10;verticalAlign=bottom;" edge="1" parent="s1">
           <mxGeometry relative="1" as="geometry"><mxPoint x="150" y="585" as="sourcePoint" /><mxPoint x="640" y="585" as="targetPoint" /></mxGeometry>
         </mxCell>
-        <mxCell id="m6" value="FindServer(map_01) — least loaded live server" style="html=1;endArrow=block;strokeColor=#b85450;fontSize=10;verticalAlign=bottom;" edge="1" parent="s1">
+        <mxCell id="m6" value="FindServer(map_01) — live server with capacity" style="html=1;endArrow=block;strokeColor=#b85450;fontSize=10;verticalAlign=bottom;" edge="1" parent="s1">
           <mxGeometry relative="1" as="geometry"><mxPoint x="640" y="620" as="sourcePoint" /><mxPoint x="880" y="620" as="targetPoint" /></mxGeometry>
         </mxCell>
 
