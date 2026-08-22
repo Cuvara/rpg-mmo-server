@@ -417,7 +417,10 @@ populated.)* `StubAllocator` still returns
 ### Still open
 
 - No `MsgEvent` on the wire → relay is log-only (blocked on `shared`).
-- Agones allocation, dungeon transfer, and `player:location:{user_id}` tracking remain stubs.
+- Agones allocation and dungeon transfer remain stubs. *(Updated 2026-08-22:
+  `player:location:{user_id}` tracking was listed here as a third stub, but it was
+  never a stub — no code ever wrote or read that key. The constant behind it is
+  deleted, #210.)*
 
 ## 2026-08-04 — Opt-in KCP listener + per-hop transport announcement
 

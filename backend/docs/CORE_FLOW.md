@@ -284,9 +284,10 @@ were resolved after this list was written** — re-verified 2026-08-05 against
    only logs because `shared/messages` has no `MsgEvent`. See ADR-5.
 8. 🟡 **PARTLY FIXED — unused constants/config.** `ServerHeartbeatTTL`,
    `EventStreamPrefix`, `RedisAddr`/`RedisPassword` and `GameStateDBURL` are now
-   wired. Still dead: `constants.PlayerLocationKey` (no consumer anywhere), and
-   `ServerRegistry.Heartbeat` exists but **has no caller**, so registry TTLs are
-   armed once and never refreshed (ADR-2).
+   wired. `constants.PlayerLocationKey` was the last dead one and is **deleted**
+   (#210, 2026-08-22) — no consumer ever existed and none is planned. Still dead
+   here: `ServerRegistry.Heartbeat` exists but **has no caller**, so registry TTLs
+   are armed once and never refreshed (ADR-2).
 9. 🟡 **Hardcoded values that CLAUDE.md presents as tunable:** AOI radius 50, save
    interval 30s, attack cooldown 500 ms, spawn stats. (Go paths below are dead; the
    C# equivalents are `Shared.GameLogic/Components/GameConstants.cs`,
