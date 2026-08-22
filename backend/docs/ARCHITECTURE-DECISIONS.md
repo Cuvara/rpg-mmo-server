@@ -1463,6 +1463,26 @@ showed the ratio the analysis cited does not reproduce: at 200 players the AOI g
 ~874–1177 µs/tick, `SnapshotDeltaState.Encode` is ~998–1272 µs/tick, and protobuf
 `ToByteArray` is **~79–144 µs/tick — 4–6% of the tick, not 80%**.
 
+> **⚠️ That attribution is UNVERIFIED, and it is a stronger claim than Part V's
+> microseconds (#162).** The harness that produced this split was never committed, so its
+> clock cannot be read back — and this box's `CLOCK_REALTIME` runs 10-17% fast with
+> unstable skew (#153).
+>
+> Part V survives the same doubt because it supports a **ratio**: both arms share whatever
+> clock the harness used, so a proportional skew cancels. This is an **attribution** — a µs
+> numerator over a tick-duration denominator — and if those came from different timelines
+> the percentage moves and the conclusion moves with it. A claim of the form *"X is not the
+> bottleneck, Y is"* is exactly the shape a skewed denominator can invert, and this one is
+> load-bearing: it is the stated reason stage 4 stopped optimizing serialization.
+>
+> Read the numbers as **order-of-magnitude only**. Kept rather than deleted, because
+> deleting destroys the record of a measurement that was taken. What replaces them:
+> re-run the split with `GameServer.Tests/Bench/TickBreakdownBench.cs`, which **is**
+> committed and states its clock — `Stopwatch.GetTimestamp` throughout, reading no
+> wall clock — gated behind `BENCH_TICK=1`. Do not re-run it on a host sharing load with
+> a generator; that is the condition that made these figures unverifiable in the first
+> place.
+
 That reframes what is left. The two dominant terms are:
 
 1. **The brute-force AOI scan**, O(viewers × entities), which the extension-seam table has
