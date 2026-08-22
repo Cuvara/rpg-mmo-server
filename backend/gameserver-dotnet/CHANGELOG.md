@@ -36,6 +36,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     make a defect in the server's writer present as a defect in the client's reader.
   - 20 tests, including one that loads the repository's own `items.json` — so breaking it
     fails CI rather than a server that will not boot.
+  - **`Shared.GameLogic` bumped to 0.2.0.** Minor, not patch: `Content/` is a new public
+    namespace the client will compile. Tag `sgl-v0.2.0` after this merges — the Unity client
+    cannot use the content schema until its `manifest.json` **and** `packages-lock.json` both
+    point at it, since the lock is what actually resolves.
 
 ### Documentation
 - **`Shared.GameLogic` was described as carrying far less than it does.**
