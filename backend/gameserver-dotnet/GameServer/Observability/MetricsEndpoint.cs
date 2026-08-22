@@ -29,20 +29,24 @@ public sealed class MetricsEndpoint : IAsyncDisposable
     private readonly MeterProvider _meterProvider;
     private readonly HttpListener _healthListener;
     private readonly HttpListener? _statusListener;
+    private readonly HttpListener? _contentListener;
     private readonly CancellationTokenSource _cts = new();
     private readonly ILogger _logger;
     private Task? _healthTask;
     private Task? _statusTask;
+    private Task? _contentTask;
+    private Func<(byte[] Bytes, string Hash)>? _contentProvider;
     private Func<ServerStatus>? _statusProvider;
 
     /// <summary>Prefix the Prometheus exporter is bound to (e.g. <c>http://+:9101/</c>).</summary>
     public string UriPrefix { get; }
 
-    private MetricsEndpoint(MeterProvider meterProvider, HttpListener healthListener, HttpListener? statusListener, string uriPrefix, ILogger logger)
+    private MetricsEndpoint(MeterProvider meterProvider, HttpListener healthListener, HttpListener? statusListener, HttpListener? contentListener, string uriPrefix, ILogger logger)
     {
         _meterProvider = meterProvider;
         _healthListener = healthListener;
         _statusListener = statusListener;
+        _contentListener = contentListener;
         _logger = logger;
         UriPrefix = uriPrefix;
     }
@@ -52,6 +56,17 @@ public sealed class MetricsEndpoint : IAsyncDisposable
     /// Must be called after the server is fully wired up (tick loop, spawner, stores).
     /// </summary>
     public void SetStatusProvider(Func<ServerStatus> provider) => _statusProvider = provider;
+
+    /// <summary>
+    /// Register the callback that supplies the content document served at <c>/content</c>.
+    /// </summary>
+    /// <remarks>
+    /// Returns the canonical bytes read from disk and their hash — deliberately not a
+    /// serialisable object. Re-serialising here would mean clients parse a document the
+    /// server never read, so a defect in this writer would surface as a defect in their
+    /// reader. Serving the original bytes keeps the hash a statement about a file.
+    /// </remarks>
+    public void SetContentProvider(Func<(byte[] Bytes, string Hash)> provider) => _contentProvider = provider;
 
     /// <summary>
     /// Start the metrics endpoint, or return <c>null</c> when disabled.
@@ -209,14 +224,33 @@ public sealed class MetricsEndpoint : IAsyncDisposable
                 status = null;
             }
 
-            var endpoint = new MetricsEndpoint(provider!, health, status, prefix, logger);
+            HttpListener? content = null;
+            try
+            {
+                content = new HttpListener();
+                content.Prefixes.Add(prefix + "content/");
+                content.Start();
+            }
+            catch (Exception ex3)
+            {
+                logger.LogWarning("Could not bind /content endpoint ({Reason}); /content disabled", ex3.Message);
+                try { content?.Close(); } catch { /* ignore */ }
+                content = null;
+            }
+
+            var endpoint = new MetricsEndpoint(provider!, health, status, content, prefix, logger);
             endpoint._healthTask = Task.Run(() => endpoint.HealthLoopAsync(endpoint._cts.Token));
             if (status != null)
             {
                 endpoint._statusTask = Task.Run(() => endpoint.StatusLoopAsync(endpoint._cts.Token));
             }
+            if (content != null)
+            {
+                endpoint._contentTask = Task.Run(() => endpoint.ContentLoopAsync(endpoint._cts.Token));
+            }
 
-            logger.LogInformation("Metrics endpoint listening on {Prefix} (/metrics, /healthz, /status)", prefix);
+            logger.LogInformation(
+                "Metrics endpoint listening on {Prefix} (/metrics, /healthz, /status, /content)", prefix);
             return endpoint;
         }
         catch (Exception ex)
@@ -265,6 +299,79 @@ public sealed class MetricsEndpoint : IAsyncDisposable
             catch (Exception ex)
             {
                 _logger.LogDebug(ex, "Status response failed");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Serves the content document at <c>/content</c>, honouring a client-supplied hash.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A client that already holds the current set sends <c>?hash=</c> and gets
+    /// <c>304 Not Modified</c> with no body. That is what keeps the content fetch off the
+    /// join path after the first time: content changes only when a server restarts, so the
+    /// steady-state answer is always 304 and costs one round trip of headers.
+    /// </para>
+    /// <para>
+    /// The hash is echoed in <c>ETag</c> and in <c>X-Content-Hash</c>. The second is not
+    /// redundant — Unity's <c>UnityWebRequest</c> and several proxies rewrite or strip
+    /// <c>ETag</c>, and a client that cannot read back the hash it just received has no way
+    /// to ask for 304 next time, silently turning every join into a full download.
+    /// </para>
+    /// </remarks>
+    private async Task ContentLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            HttpListenerContext ctx;
+            try
+            {
+                ctx = await _contentListener!.GetContextAsync();
+            }
+            catch (ObjectDisposedException) { break; }
+            catch (HttpListenerException) { break; }
+            catch (OperationCanceledException) { break; }
+
+            try
+            {
+                var provider = _contentProvider;
+                if (provider == null)
+                {
+                    // Reached only if a request lands between the listener starting and
+                    // boot registering the provider. 503 rather than an empty 200: an
+                    // empty content set is a legitimate answer, so it must never be the
+                    // one a client gets from a server that simply is not ready yet.
+                    ctx.Response.StatusCode = 503;
+                    ctx.Response.ContentLength64 = 0;
+                    ctx.Response.Close();
+                    continue;
+                }
+
+                var (bytes, hash) = provider();
+
+                ctx.Response.AddHeader("Access-Control-Allow-Origin", "*");
+                ctx.Response.AddHeader("X-Content-Hash", hash);
+                ctx.Response.AddHeader("ETag", "\"" + hash + "\"");
+
+                string? requested = ctx.Request.QueryString["hash"];
+                if (!string.IsNullOrEmpty(requested) && string.Equals(requested, hash, StringComparison.Ordinal))
+                {
+                    ctx.Response.StatusCode = 304;
+                    ctx.Response.ContentLength64 = 0;
+                    ctx.Response.Close();
+                    continue;
+                }
+
+                ctx.Response.StatusCode = 200;
+                ctx.Response.ContentType = "application/json; charset=utf-8";
+                ctx.Response.ContentLength64 = bytes.Length;
+                await ctx.Response.OutputStream.WriteAsync(bytes, ct);
+                ctx.Response.Close();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Content response failed");
             }
         }
     }
@@ -341,6 +448,7 @@ public sealed class MetricsEndpoint : IAsyncDisposable
         _cts.Cancel();
         try { _healthListener.Close(); } catch { /* ignore */ }
         try { _statusListener?.Close(); } catch { /* ignore */ }
+        try { _contentListener?.Close(); } catch { /* ignore */ }
 
         if (_healthTask != null)
         {
@@ -350,6 +458,11 @@ public sealed class MetricsEndpoint : IAsyncDisposable
         if (_statusTask != null)
         {
             try { await _statusTask.WaitAsync(TimeSpan.FromSeconds(2)); }
+            catch { /* ignore */ }
+        }
+        if (_contentTask != null)
+        {
+            try { await _contentTask.WaitAsync(TimeSpan.FromSeconds(2)); }
             catch { /* ignore */ }
         }
 

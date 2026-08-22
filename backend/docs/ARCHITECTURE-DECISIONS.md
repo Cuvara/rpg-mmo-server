@@ -2536,6 +2536,89 @@ whose spare pods are spare.
 
 ---
 
+## ADR-19 — Game content is data on disk, served over HTTP, and never travels through the shared-code package
+
+**Status:** accepted 2026-08-22, **implemented and proven end to end** on the first content
+type (items). Extends ADR-10 (the pure-logic boundary) by adding a *second* shared thing —
+a schema — and deliberately declining to share the third, a parser. Does not touch ADR-3;
+content is fetched from the game server, not the gateway.
+
+**The question.** Both repos were about to start on gameplay content, and there was no
+channel to carry it. `Shared.GameLogic` is the only thing the two repos share, and it is a
+C# assembly pinned in the client by exact commit through `packages-lock.json`. Putting item
+stats or loot tables in it means that adding one item costs: edit, commit to
+`rpg-mmo-server`, cut an `sgl-v` tag, bump **both** `manifest.json` and `packages-lock.json`
+in the Unity repo, and wait for Unity to re-resolve. A full cross-repo release cycle for one
+number.
+
+That loop is correct for simulation rules, which change monthly and *must* change on both
+sides at once or prediction diverges. It is fatal for content, which changes hourly and
+whose whole value is iteration speed. Nothing about the existing pipeline was wrong; it was
+being asked to carry a load it was never shaped for.
+
+**Decision 1 — content is JSON files on disk in `backend/content/`, and the game server is
+their only source of truth.** Not a database: content is authored, reviewed and diffed like
+code, and a schema migration for every balance tweak is the cost of putting it in Postgres.
+Not in the client repo: the server validates and enforces every rule, so content that the
+server has not seen cannot mean anything.
+
+**Decision 2 — the server loads and validates content at boot, and refuses to start when it
+does not validate.** Every problem in the file is reported in one pass, so one restart
+clears them all rather than one per typo. Measured on a deliberately broken file, the server
+exits 1 and prints all four faults with the item id and the field against each.
+
+This is fail-fast rather than fail-soft on purpose. A server running on half-parsed content
+serves an unknowable subset of the intended game, and each downstream symptom — a missing
+item, a wrong stat, a loot table pointing at nothing — gets attributed to whichever system
+noticed it first instead of to the file that was wrong.
+
+**Decision 3 — clients fetch content over HTTP from the game server, at `/content`, keyed by
+a hash.** The endpoint sits on the existing metrics listener beside `/metrics`, `/healthz`
+and `/status`, so it costs no new port, no new protocol message and no change to the wire
+schema. A client that already holds the current set sends `?hash=` and receives `304 Not
+Modified` with no body, which keeps the fetch off the join path after the first time:
+content changes only when a server restarts, so the steady-state answer is always 304.
+
+The hash is returned in both `ETag` and `X-Content-Hash`. The second is not redundant —
+`UnityWebRequest` and several proxies rewrite or strip `ETag`, and a client that cannot read
+back the hash it was given has no way to ask for a 304 next time, silently turning every
+join into a full download.
+
+**Decision 4 — the schema is shared, the parser is not.** `Shared.GameLogic/Content/` holds
+the definition types and the validation rules, compiled into both sides exactly as the
+simulation logic is. Parsing is per-side: the server uses `System.Text.Json` with source
+generators, the client uses its own reader.
+
+This is forced, not preferred. Unity compiles `Shared.GameLogic` **as source** and has no
+`System.Text.Json`; the server publishes NativeAOT and cannot use reflection. There is no
+single parser that satisfies both. Sharing the schema and the validator keeps the two sides
+agreeing on what content *means* and on what "valid" means, which is the part that matters;
+two readers of the same document is a smaller risk than one reader that cannot be compiled
+on one of the two runtimes.
+
+Golden vectors stand where a shared parser would have, exactly as ADR-10 already does for
+the wire format.
+
+**Decision 5 — the client validates what it downloads, and this grants it nothing.** A
+truncated or half-written response is indistinguishable from a valid one until something
+checks it, and without a check the client discovers the problem as a null reference several
+screens later. Validation answers "is this content coherent", never "may this player have
+this item". The server still owns every gameplay decision; a client that edits its own copy
+changes only what it draws.
+
+**What this costs.** Content changes require a **server restart** — there is no hot reload,
+and the `ContentDatabase` is immutable for the life of the process. That is deliberate: a
+world whose rules changed underneath a running simulation would make every desync
+unreproducible. The iteration loop is edit → restart → clients pull, with no rebuild, no
+tag, and no package bump, which was the whole point.
+
+**What is not decided here.** Whether later content types (abilities, loot tables, NPCs,
+maps) each get their own file or share one; whether content is ever signed; and whether the
+gateway should serve content too, so a client can prefetch before it has a game server. The
+first is a naming question, the second only matters once content is delivered over an
+untrusted path, and the third is worth revisiting if the first-join fetch ever shows up in a
+join-latency measurement.
+
 ## Summary of decisions
 
 | # | Area | Decision |
@@ -2558,3 +2641,4 @@ whose spare pods are spare.
 | 16 | Agones on k3s | Realtime tier **proven** on Agones/k3d: a real client joined an Agones-managed server in strict-address mode. Docker Desktop k8s cannot host it (Kubernetes `hostPort` is never published to the host); k3d with a mapped port range can. The advertised address is **composed** — port from the Agones status read, host from `GAMESERVER_ADVERTISE_HOST` — because `status.address` is the node address and is not dialable. ADR-2 is now enforced in code (allocate only for a map with no live server); the join token is minted only after the pod self-registers. Allocated pods are never reclaimed; the map-fleet allocator policy stays open; the deploy path stays `DEPLOY_MODE=containers` |
 | 17 | Availability posture on k8s | **Statement of posture, not a manifest change.** Every workload in `deploy/k8s/` is **one replica** — gateway, Nakama, Redis, both PostgreSQL instances, and the map Fleet — so k8s provides scheduling and lifecycle here, **not redundancy**. `strategy: Recreate` on the two `hostPort` workloads (gateway 7000, Nakama 7001) is **required**: RollingUpdate deadlocks on a single node because the replacement cannot schedule until the outgoing pod frees the port. The accepted cost is that **every gateway or Nakama rollout drops the join path entirely**; in-progress sessions survive, because the game server verifies the join token itself and never calls the gateway (ADR-3). The window is **unmeasured** and not quoted. Before any tier above dev: answer the gateway hostPort exposure question *together with* cross-instance single-flight (ADR-16), and decide Redis persistence/replication against ADR-4 rather than by adding replicas |
 | 18 | Fleet autoscaling | **No `FleetAutoscaler` on a fleet that pins one `GAMESERVER_MAP_ID` for every replica.** The C# server self-registers at startup, not on allocation, so a "spare" Ready pod is a second live server for that map: measured on k3d 2026-08-18, scaling `1 -> 2` put two members into `servers:map:map_01` 5.4s later with no allocation involved, and `FindServer` returns the least-loaded — the spare. `ready=0` is therefore the correct steady state and tooling says so instead of warning. Enforced by `verify.sh` check `cluster.autoscaler` (FAIL), which stands down for a fleet with a per-pod map id. `replicas > 1` and a buffer autoscaler unlock together, on a per-pod map id or on registering at `Allocated` rather than `Ready` — an autoscaler does nothing for the "second map cannot be served" symptom, which is a fleet-targeted-allocation problem |
+| 19 | Game content | **Content is JSON on disk in `backend/content/`, owned by the game server, served to clients over HTTP at `/content` and never carried by the `Shared.GameLogic` package.** The package is pinned by exact commit, so content in it costs a tag plus two file bumps per balance tweak — correct for simulation rules, fatal for content. The server loads and validates at boot and **refuses to start** on invalid content, reporting every fault in one pass. Clients send `?hash=` and get `304` once they hold the current set; the hash ships in both `ETag` and `X-Content-Hash` because `UnityWebRequest` and some proxies strip the former. The **schema and validator are shared** (`Shared.GameLogic/Content/`), the **parser is not** — Unity compiles the package as source and has no `System.Text.Json`, the server is NativeAOT and cannot reflect, so no single parser satisfies both; golden vectors cover the gap as in ADR-10. No hot reload: content changes need a restart, because rules changing under a running simulation makes every desync unreproducible |

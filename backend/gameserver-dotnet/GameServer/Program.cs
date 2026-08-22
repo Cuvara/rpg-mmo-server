@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging;
 using Shared.GameLogic.Components;
 using GameServer.Agones;
+using GameServer.Content;
 using GameServer.Events;
 using GameServer.Observability;
 using GameServer.Scaffolding;
@@ -340,6 +341,48 @@ logger.LogInformation("  JoinToken: JOIN_TOKEN_SECRET, {Count} key(s){Rotating}"
 using var metrics = new GameMetrics(mapId);
 await using var metricsEndpoint = MetricsEndpoint.TryStart(metricsAddr, metrics, serverId, logger);
 
+// ── Game content (items, and whatever content types follow) ──
+//
+// Loaded and validated BEFORE the listener opens. A server that cannot vouch for its
+// content refuses to start rather than serving an unknowable subset of the intended
+// game: every downstream symptom — a missing item, a wrong stat, a loot table pointing
+// at nothing — would otherwise be attributed to whichever system noticed first instead
+// of to the file that was wrong.
+//
+// When nothing is configured the directory is found by walking up from the BINARY, not
+// from the working directory. A relative default is resolved against the working
+// directory, which belongs to whoever launched the process rather than to the deployment:
+// it works under `dotnet run` from the module directory and fails everywhere else. It
+// failed every integration test on first contact, because those launch the server from
+// their own directory.
+string? contentDir = GetArg(args, "--content-dir") ?? Env("CONTENT_DIR")
+    ?? ContentLoader.ResolveDefaultDirectory();
+LoadedContent content;
+if (contentDir == null)
+{
+    logger.LogCritical(
+        "No content directory was configured and none was found by searching upward from {Base}. " +
+        "Set --content-dir or CONTENT_DIR to the directory holding {File}.",
+        AppContext.BaseDirectory, ContentLoader.ItemsFileName);
+    return 1;
+}
+
+try
+{
+    content = ContentLoader.Load(contentDir);
+    logger.LogInformation(
+        "Content loaded from {Dir}: {Items} items, hash {Hash}",
+        contentDir, content.Database.ItemCount, content.Hash);
+}
+catch (ContentLoadException ex)
+{
+    // The message already enumerates every problem found, so it is logged as-is rather
+    // than wrapped: re-describing it here would push the detail an author needs down
+    // below a summary that says less.
+    logger.LogCritical("{Message}", ex.Message);
+    return 1;
+}
+
 // ── Player store (postgres when GAME_DB_URL is set, otherwise in-memory) ──
 
 IPlayerStore playerStore = new MemoryPlayerStore();
@@ -501,6 +544,10 @@ var server = new GameServerHost(options);
 // non-defect (#147, diagnosed in #153). Both terms of that quotient now come from the same
 // clock. See ServerStatus.UptimeSeconds.
 var uptime = System.Diagnostics.Stopwatch.StartNew();
+
+// Serve the content set clients need. The canonical bytes are handed over verbatim —
+// see SetContentProvider for why this is not a re-serialisation.
+metricsEndpoint?.SetContentProvider(() => (content.CanonicalBytes, content.Hash));
 
 // Wire up the /status JSON endpoint with live server state.
 metricsEndpoint?.SetStatusProvider(() =>
