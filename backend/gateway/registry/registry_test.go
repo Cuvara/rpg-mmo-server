@@ -68,29 +68,11 @@ func TestRegistryService_FindServer_DeterministicTieBreak(t *testing.T) {
 	}
 }
 
-// Load still beats the id tiebreak.
-func TestRegistryService_FindServer_PrefersLeastLoaded(t *testing.T) {
-	reg := NewRegistryService(storage.NewMemoryServerRegistry())
-	ctx := context.Background()
-
-	servers := []storage.ServerInfo{
-		{ServerID: "srv-a", MapID: "map_forest", Addr: "a:9000", Capacity: 100, PlayerCount: 90},
-		{ServerID: "srv-z", MapID: "map_forest", Addr: "z:9000", Capacity: 100, PlayerCount: 5},
-	}
-	for _, s := range servers {
-		if err := reg.RegisterServer(ctx, s); err != nil {
-			t.Fatalf("RegisterServer(%s) error: %v", s.ServerID, err)
-		}
-	}
-
-	found, err := reg.FindServer(ctx, "map_forest")
-	if err != nil {
-		t.Fatalf("FindServer() error: %v", err)
-	}
-	if found.ServerID != "srv-z" {
-		t.Errorf("ServerID = %q, want %q (least loaded wins over id order)", found.ServerID, "srv-z")
-	}
-}
+// TestRegistryService_FindServer_PrefersLeastLoaded was removed in #203. It
+// asserted that load beats the id tiebreak when one map has two live servers —
+// which is exactly the behaviour that load-balanced players across a split
+// world. The inverted rule is covered by
+// TestRegistryService_SplitMapPicksLowestServerID in lookup_test.go.
 
 func TestRegistryService_FindNoCapacity(t *testing.T) {
 	reg := NewRegistryService(storage.NewMemoryServerRegistry())

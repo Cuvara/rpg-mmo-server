@@ -31,7 +31,7 @@ Unity Client --[TCP|KCP]--> Gateway          (auth, map assignment)
 |---------|-------------|--------|
 | TCP transport | Length-prefixed JSON envelopes; KCP planned | ✅ |
 | Session Manager | Local JWT verify, create / validate / refresh / destroy | ✅ |
-| Server Registry | Live servers per map, least-loaded pick with capacity check | ✅ |
+| Server Registry | Live servers per map, capacity-checked pick: least-loaded normally, **lowest `ServerID`** when a map has more than one live server (ADR-2 violated — #203) | ✅ |
 | Map Assignment | `MsgEnterWorld` → server addr + 30s join token | ✅ |
 | Event Relay | Consumes the cross-server event stream (log-only sink — see DESIGN.md) | 🟡 |
 | Allocator | Agones allocation when a map has **no** live server (a full map is refused, never given a second instance — ADR-2) | ⬜ stub |
