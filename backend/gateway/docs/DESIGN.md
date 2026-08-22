@@ -1,5 +1,61 @@
 # Gateway — Design Decisions
 
+## 2026-08-22 — The registry watcher is wired in, so a dead server leaves the gateway's view before its TTL
+
+### Context
+
+`registry.RegistryWatcher` polls the servers the gateway knows about, notices one
+that has disappeared from the registry and publishes a `server_down` event. It
+had four passing unit tests and **no caller outside them** (#204):
+`NewRegistryWatcher` was never invoked by `cmd/gateway`, so `Start` never ran in a
+real gateway. Server death was therefore observable only when the registry TTL
+expired, and until that moment the gateway kept handing clients the address of a
+server that would not answer — the window that produces the split-map fault fixed
+in #203.
+
+### Decision — wire it, and route every construction through one function
+
+Agones health checks cover **pod liveness**. The gateway's **registry view** is a
+separate thing, and an entry lingering there until TTL is exactly the state that
+misroutes clients. Prompt removal is what keeps that window small, so the watcher
+is kept and wired rather than deleted.
+
+`cmd/gateway.wireRegistry` is now the only place the binary constructs a
+`RegistryService`. It builds the watcher, attaches it with `registry.WithWatcher`
+and starts its poll loop on the process-wide context; shutdown cancels that
+context and then blocks on `watcher.Stop()` before the stores are closed. Making
+it the sole construction site is deliberate: the previous failure mode was wiring
+that could vanish without anything failing, and now removing the call breaks the
+build while removing the watcher inside it fails `TestWireRegistry_*`.
+
+### Decision — the tracked set comes from lookups, not only from registration
+
+`RegistryService.RegisterServer` / `DeregisterServer` track and untrack, but in
+production **the gateway never registers a server**: game servers self-register
+straight into Redis (ADR-2), and those two methods have no non-test callers. A
+watcher fed only by them would poll an empty set forever. So `FindServer` also
+tracks the server it returns — the moment the gateway learns a server exists is
+the moment it hands its address to a client, which is also the only server whose
+death the gateway has any reason to care about.
+
+### Poll interval against the heartbeat TTL
+
+`watchPollInterval` = **5s** against `constants.ServerHeartbeatTTL` = **15s**, a
+**3x** margin. The relationship, not the constants, is what matters: a poll at or
+above the TTL would always lose the race to expiry and the watcher would be a
+no-op that still costs a registry read per server per tick.
+`TestWatchPollInterval_ShorterThanHeartbeatTTL` pins it so it cannot silently
+invert when either value is retuned.
+
+### Consequences
+
+- `server_down` is published through the gateway's existing event stream
+  (`eventStreamPublisher`), not a second pub/sub client: Redis Streams on the
+  Redis backend, in-memory otherwise. No new dependency.
+- The event is currently consumed by the relay and logged/counted — the same MVP
+  limitation as every other event (no `MsgEvent` on the wire). The detection is
+  what this change buys; acting on it client-side stays blocked on `shared`.
+
 ## 2026-08-17 — Allocation only replaces an absent server, and the token is minted last
 
 ### Context
@@ -314,7 +370,9 @@ a bad kubeconfig is fatal at boot rather than a surprise on the first player.
   `transfer.StubDungeonTransfer` still does not call it.
 - No `Deallocate` / shutdown path: reclaiming is left to Agones idle handling.
 - The gateway does not read `status.state` changes afterwards — a GameServer that
-  dies after allocation is only noticed via the registry heartbeat TTL.
+  dies after allocation is noticed via the registry heartbeat TTL, or sooner by
+  the registry watcher (5s poll, wired in 2026-08-22 — see the entry at the top of
+  this file). `status.state` itself is still not read.
 
 ## 2026-08-04 — Selectable store backends, session lifecycle, event relay wiring
 
@@ -406,7 +464,11 @@ allocated entry — see the entry at the top of this file.)* `StubAllocator` sti
 - The gateway is genuinely stateless with the Redis backend: N instances share sessions,
   registry and the event consumer group (one group `gateway`, one consumer per instance).
 - Dead game servers disappear from lookups on their own (`redisstore.ServerRegistry`
-  heartbeat TTL); the gateway needs no liveness logic of its own.
+  heartbeat TTL). *(Superseded 2026-08-22: expiry alone leaves up to a full
+  `ServerHeartbeatTTL` in which the gateway still announces a dead server, so the
+  gateway now runs the registry watcher on top of it — see the entry at the top of
+  this file. TTL expiry remains the backstop; the watcher is what shortens the
+  window.)*
 - Tests run both backends: memory directly, Redis via `miniredis` (no external service, and
   `FastForward` makes TTL behavior assertable).
 

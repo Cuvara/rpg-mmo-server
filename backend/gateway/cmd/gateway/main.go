@@ -211,7 +211,14 @@ func main() {
 	// Allocator: with --allocator=agones the registry asks the Agones allocation
 	// API for a GameServer whenever no live server can serve a map. Without it
 	// an unserved map is simply an error (the pre-Agones behaviour).
-	reg := registry.NewRegistryService(serverRegistry, registry.WithMetrics(met), registry.WithLogger(log))
+	//
+	// alloc stays nil unless Agones is configured; regOpts collects the
+	// allocation-tuning options. Both are consumed by the single wireRegistry
+	// call below, which is the only place this binary builds a RegistryService.
+	var (
+		alloc   registry.Allocator
+		regOpts []registry.Option
+	)
 	allocMode, err := resolveAllocator(*allocatorMode)
 	if err != nil {
 		log.Error("invalid allocator", "err", err)
@@ -259,14 +266,14 @@ func main() {
 				"fix", "lower --allocation-wait-timeout / ALLOCATION_WAIT_TIMEOUT")
 			os.Exit(1)
 		}
-		alloc, aerr := registry.NewAgonesAllocator(agonesCfg)
+		agonesAlloc, aerr := registry.NewAgonesAllocator(agonesCfg)
 		if aerr != nil {
 			log.Error("agones allocator init failed", "err", aerr)
 			os.Exit(1)
 		}
 		mismatchTTL := resolveMismatchTTL(*allocMismatchTTL, log)
-		reg = registry.NewRegistryServiceWithAllocator(serverRegistry, alloc,
-			registry.WithMetrics(met), registry.WithLogger(log),
+		alloc = agonesAlloc
+		regOpts = append(regOpts,
 			registry.WithAllocationWait(waitTimeout, pollInterval),
 			registry.WithMapMismatchTTL(mismatchTTL))
 		log.Info("agones allocator enabled",
@@ -281,6 +288,11 @@ func main() {
 	} else {
 		log.Info("allocator disabled (unserved maps return an error)")
 	}
+
+	// Registry + liveness watcher. rootCtx bounds every background loop this
+	// binary owns; the shutdown handler below cancels it.
+	rootCtx, stopRoot := context.WithCancel(context.Background())
+	reg, watcher := wireRegistry(rootCtx, serverRegistry, eventStreamPublisher{stream: eventStream}, met, log, alloc, regOpts...)
 
 	// The stream owns the recovery count (it lives in shared/, which must not
 	// import the gateway's metrics package), so main samples it into the
@@ -324,6 +336,10 @@ func main() {
 		<-sigCh
 		log.Info("shutting down gateway")
 		gw.Shutdown()
+		// Cancel the background loops first, then wait for the watcher's poll
+		// loop to actually exit before the stores it reads are closed.
+		stopRoot()
+		watcher.Stop()
 		if serr := metricsSrv.Shutdown(); serr != nil {
 			log.Warn("stop metrics listener", "err", serr)
 		}
@@ -463,4 +479,64 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// wireRegistry builds the gateway's RegistryService together with the
+// RegistryWatcher that keeps its view of live game servers honest, and starts
+// the watcher's poll loop on ctx.
+//
+// It is the ONLY place this binary constructs a RegistryService, on purpose:
+// the watcher used to exist with no caller at all (issue #204), so server death
+// was noticed only when the registry TTL expired and until then the gateway
+// kept handing clients the address of a server that would not answer — the
+// split-map fault of #203. Routing every construction through one function
+// means the wiring cannot be dropped again without breaking the build, and
+// TestWireRegistry_* fails if the watcher stops being constructed or attached.
+//
+// Agones health checks cover pod liveness; this covers something else — the
+// gateway's own registry view — which is why both exist.
+func wireRegistry(
+	ctx context.Context,
+	serverRegistry storage.ServerRegistry,
+	pub registry.Publisher,
+	met *metrics.Metrics,
+	log *slog.Logger,
+	alloc registry.Allocator,
+	opts ...registry.Option,
+) (*registry.RegistryService, *registry.RegistryWatcher) {
+	watcher := registry.NewRegistryWatcher(serverRegistry, pub, log)
+
+	opts = append([]registry.Option{
+		registry.WithMetrics(met),
+		registry.WithLogger(log),
+		registry.WithWatcher(watcher),
+	}, opts...)
+
+	var svc *registry.RegistryService
+	if alloc != nil {
+		svc = registry.NewRegistryServiceWithAllocator(serverRegistry, alloc, opts...)
+	} else {
+		svc = registry.NewRegistryService(serverRegistry, opts...)
+	}
+
+	watcher.Start(ctx)
+	return svc, watcher
+}
+
+// eventStreamPublisher adapts the gateway's existing event stream to
+// registry.Publisher, so a server_down event travels the channel the gateway
+// already has instead of pulling in a second pub/sub dependency. On the Redis
+// backend that is Redis Streams (consumer-group ACK, ADR-5); in-memory
+// otherwise.
+type eventStreamPublisher struct {
+	stream storage.EventStream
+}
+
+// Publish forwards the watcher's payload as an event whose type is the
+// watcher's channel name.
+func (p eventStreamPublisher) Publish(ctx context.Context, channel string, message []byte) error {
+	if p.stream == nil {
+		return nil
+	}
+	return p.stream.Publish(ctx, events.DefaultStream, storage.Event{Type: channel, Payload: message})
 }

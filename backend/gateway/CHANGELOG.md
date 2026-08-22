@@ -62,6 +62,54 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   change wants its own commit and tests. Refs #153.
 
 ### Fixed
+- **The registry watcher had no caller, so a dead game server stayed in the
+  gateway's view for up to a full heartbeat TTL** (#204). `registry.RegistryWatcher`
+  polls the servers the gateway knows about, notices one that has vanished from
+  the registry and publishes `server_down` — and it had four passing unit tests
+  and **no construction site outside them**. `NewRegistryWatcher` was never called
+  by `cmd/gateway`, so `Start` never ran in a real gateway and the tests could not
+  fail: they build their own watcher. The consequence was that server death was
+  observable only when `constants.ServerHeartbeatTTL` (15s) expired, and for that
+  whole window `FindServer` kept handing clients the address of a server that
+  would not answer — the state that produces the split-map fault fixed in #203.
+  Agones health checks do not cover this: they watch **pod liveness**, while the
+  thing that misroutes a client is the gateway's **registry view**, and nothing
+  was shortening the gap between the two. The watcher is now constructed,
+  attached to the `RegistryService` (`registry.WithWatcher`) and started on the
+  process context in `cmd/gateway.wireRegistry`, with `watcher.Stop()` on the
+  existing SIGINT/SIGTERM path before the stores are closed. Poll interval **5s**
+  against the **15s** TTL — a **3x** margin, and the ratio is the point: a poll at
+  or above the TTL would always lose the race to expiry and the watcher would be a
+  no-op that still costs a registry read per server per tick.
+  `TestWatchPollInterval_ShorterThanHeartbeatTTL` pins that relationship so a
+  future retune of either constant cannot silently invert it.
+- **The watcher's tracked set now comes from lookups, not only from registration,
+  or it would have been empty in every real deployment.** The obvious hooks —
+  `RegistryService.RegisterServer` / `DeregisterServer` — are wired (track on
+  register, untrack on a graceful deregister, so a clean shutdown is never
+  reported as a fault), but in production the gateway **never registers a
+  server**: game servers self-register straight into Redis (ADR-2) and those two
+  methods have no non-test callers. A watcher fed only by them would have polled
+  an empty set forever — wiring that looks correct and detects nothing. So
+  `FindServer` tracks the server it returns: the moment the gateway learns a
+  server exists is the moment it hands its address to a client, which is also the
+  only server whose death the gateway has a reason to care about. `server_down` is
+  published through the gateway's existing event stream rather than a second
+  pub/sub client (Redis Streams on the Redis backend, in-memory otherwise), so no
+  new dependency enters the binary; it is consumed by the relay and logged like
+  every other event, since `shared` still has no client-facing `MsgEvent`.
+- **`cmd/gateway.wireRegistry` is now the single construction site for the
+  `RegistryService`, so this cannot rot back.** The failure this issue is made of
+  is wiring that can disappear without any test noticing, so the fix comes with a
+  test at the wiring level rather than more coverage of the watcher's logic:
+  `TestWireRegistry_StartsWatcher` (fails, on a 2s deadline, if `Start` is not
+  called — `Stop` blocks until the poll loop exits, and there is no poll loop to
+  exit), `TestWireRegistry_TracksRegisteredServer` and
+  `TestWireRegistry_TracksServerHandedToClient` (both fail if the watcher is not
+  constructed or not attached). All three were verified against a mutated
+  `wireRegistry` with the construction removed, and again with only `Start`
+  removed. Routing every construction through one function means deleting the
+  call from `main` breaks the build instead of silently disarming the watcher.
 - **A client was handed a game server for a map it did not ask for, and every
   layer reported success.** Reproduced on a live k3d Agones fleet: with
   `ALLOCATOR=agones` and a fleet serving `map_01`, `MsgEnterWorld{map_id:

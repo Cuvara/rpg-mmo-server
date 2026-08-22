@@ -12,6 +12,18 @@ import (
 
 const (
 	// watchPollInterval is how often the watcher checks known servers.
+	//
+	// It MUST stay meaningfully shorter than constants.ServerHeartbeatTTL (15s),
+	// the TTL after which the registry drops a server that stopped beating. The
+	// watcher exists to notice a dead server BEFORE that expiry propagates on its
+	// own; a poll slower than the TTL would always lose the race and the watcher
+	// would add nothing. 5s against a 15s TTL is a 3x margin, so a server that
+	// dies is published as server_down within at most one third of the window in
+	// which the gateway would otherwise keep handing clients its address (the
+	// split-map fault of #203).
+	//
+	// TestWatchPollInterval_ShorterThanHeartbeatTTL pins this relationship so it
+	// cannot silently invert.
 	watchPollInterval = 5 * time.Second
 
 	// ServerDownChannel is the Redis Pub/Sub channel for server-down events.
