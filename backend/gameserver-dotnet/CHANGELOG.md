@@ -8,6 +8,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`EphemeralRedis` readiness now speaks RESP on a bare socket instead of building a
+  `ConnectionMultiplexer`.** The block of 11 registry tests was failing roughly 2 runs in 10
+  with the container reporting `docker unavailable`-shaped timeouts after the full 60s
+  budget. The container was healthy every time: the diagnostics added alongside this change
+  capture the published port accepting a connection after ~1s and Redis's own log saying
+  `Ready to accept connections tcp`, while PING never landed. A multiplexer starts background
+  threads and, with `AbortOnConnectFail=false`, returns before it has connected — so under a
+  saturated thread pool its connect completion can be starved for the entire budget. The
+  probe was failing on the scheduling of its own client library, not on Redis. PING/+PONG
+  written straight to the socket is four bytes out and seven back, with no pool and no
+  background thread to starve. Readiness is now asked with the smallest machinery that can
+  ask it, so a negative answer means Redis is not serving rather than that the test host is
+  busy (#201).
+
 - **`Shared.GameLogic` bumped to 0.2.2.** Removing a file from the package is a change to
   the package, so the client needs a tag to pick it up — until then Unity keeps logging
   `check_metas.py has no meta file, but it's in an immutable folder` against whatever tag it
