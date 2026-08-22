@@ -96,6 +96,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     point at it, since the lock is what actually resolves.
 
 ### Documentation
+
+- **The stage-4 per-tick attribution is marked as unverified** (#162). ADR-12 and
+  `docs/DESIGN.md` both carry a hand-split of the old broadcast at 200 players ending in
+  *"serialization proper is 4–6% of the tick, not the 80% the original analysis assumed"* —
+  produced by a harness that was never committed, so its clock cannot be read back, on a
+  host whose `CLOCK_REALTIME` runs 10-17% fast with unstable skew (#153).
+  - Marked for a different reason than Part V's microseconds. Part V supports a **ratio**:
+    both arms share whatever clock the harness used, so a proportional skew cancels. This is
+    an **attribution** — a µs numerator over a tick-duration denominator — and if the two
+    came from different timelines the percentage moves. *"X is not the bottleneck, Y is"* is
+    exactly the shape a skewed denominator can invert, and it is the stated reason stage 4
+    stopped optimizing serialization.
+  - Kept rather than deleted, as Part V was: deleting destroys the record of a measurement
+    that was actually taken. Downgraded to order-of-magnitude.
+  - Both notes name `GameServer.Tests/Bench/TickBreakdownBench.cs` as the replacement — it
+    **is** committed and states its clock, `Stopwatch.GetTimestamp` throughout with no wall
+    clock read, behind `BENCH_TICK=1`. #162's first action was already satisfied; only the
+    marking was outstanding.
 - **`Shared.GameLogic` was described as carrying far less than it does.**
   `docs/CURRENT-SERVER-FLOW-AUDIT.md` §6 called it "one movement rule and one combat
   rule". It holds five systems across ~512 lines: `MovementSystem`, `CombatLogic`,
