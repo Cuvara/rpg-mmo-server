@@ -68,8 +68,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Every Unity-visible file has a .meta
-        run: python3 backend/gameserver-dotnet/Shared.GameLogic/check_metas.py \
-               backend/gameserver-dotnet/Shared.GameLogic
+        run: python3 .github/scripts/check_metas.py backend/gameserver-dotnet/Shared.GameLogic
 
   unreleased:
     name: Shared.GameLogic changes are covered by a version bump

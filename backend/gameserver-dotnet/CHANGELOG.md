@@ -8,6 +8,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`Shared.GameLogic` bumped to 0.2.2.** Removing a file from the package is a change to
+  the package, so the client needs a tag to pick it up — until then Unity keeps logging
+  `check_metas.py has no meta file, but it's in an immutable folder` against whatever tag it
+  has pinned. The version-bump gate reports this as a reminder rather than a failure off
+  `main`, so it does not stop a merge; the bump has to be deliberate.
+- **`check_metas.py` moved out of the package into `.github/scripts/`.** A `.py` file
+  inside a UPM package is an asset Unity tries to import, and one without a `.meta` in an
+  immutable package folder makes the Editor log
+  `has no meta file, but it's in an immutable folder. The asset will be ignored.` — so the
+  gate written to prevent meta errors was itself causing one. Giving it a `.meta` would have
+  silenced that, but CI tooling is not part of what this package ships to a Unity project.
+- **`check_metas.py` reported every `Samples~/` and `Documentation~/` folder as missing a
+  `.meta`.** A trailing `~` is the documented way to hide a folder from Unity's asset
+  database — it is exactly what makes a sample invisible until Package Manager copies it
+  into `Assets/` — so those folders must *not* have a `.meta`, and flagging them is a false
+  failure, not a finding. Same for dot-prefixed folders like `.github/`.
+  The gate passed on `Shared.GameLogic` only because that package happens to contain neither
+  kind, so the defect was invisible where it runs; it surfaced the moment the script was
+  pointed at `com.cuvara.netcode`, which has four `Samples~` and a `Documentation~`. A false
+  failure that loud is worse than no gate, because it gets the gate switched off. Verified
+  in both directions on both packages.
+
 - **`Shared.GameLogic/Content/` shipped with no `.meta` files, so Unity never imported
   it.** The package is consumed by the client as an immutable UPM git dependency, and a
   source file without a committed `.meta` is not imported at all — the types simply do not
