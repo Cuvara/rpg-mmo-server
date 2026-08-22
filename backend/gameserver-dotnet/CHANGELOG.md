@@ -36,6 +36,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     make a defect in the server's writer present as a defect in the client's reader.
   - 20 tests, including one that loads the repository's own `items.json` — so breaking it
     fails CI rather than a server that will not boot.
+  - **The content directory default is anchored to the binary, not the working directory.**
+    It started as the relative path `../../content`, which resolves against the working
+    directory — a property of whoever launched the process rather than of the deployment.
+    That worked under `dotnet run` from the module directory and broke **every integration
+    test** on the first CI run, because those launch the server from their own directory.
+    Resolution now walks up from `AppContext.BaseDirectory` looking for `content/items.json`,
+    which holds in all three layouts that exist: the repo tree, the test output tree, and the
+    container image. Pinned by a regression test that runs from the test binary's own output
+    directory.
+  - **`Dockerfile.gameserver-dotnet` copies `content/` into the image.** Without it the image
+    does not ship a degraded server, it ships one that will not start at all. Copied in the
+    runtime stage rather than the build stage: content changes far more often than code, so a
+    content-only rebuild touches one small layer instead of invalidating the NativeAOT
+    compile above it.
   - **`Shared.GameLogic` bumped to 0.2.0.** Minor, not patch: `Content/` is a new public
     namespace the client will compile. Tag `sgl-v0.2.0` after this merges — the Unity client
     cannot use the content schema until its `manifest.json` **and** `packages-lock.json` both

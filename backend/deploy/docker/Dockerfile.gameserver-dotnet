@@ -61,6 +61,19 @@ RUN addgroup -g 65532 -S nonroot && \
 WORKDIR /app
 COPY --from=build /app .
 
+# Game content (ADR-19). The server loads and validates this at boot and REFUSES TO START
+# without it, so an image built without this line does not ship a degraded server — it
+# ships one that will not come up at all.
+#
+# Landing at /app/content is what the default resolution expects: with no --content-dir or
+# CONTENT_DIR, the server walks up from its own binary looking for content/items.json, and
+# the binary is /app/GameServer.
+#
+# Copied in the runtime stage rather than the build stage on purpose. Content changes far
+# more often than code, and putting it here means a content-only change rebuilds one small
+# layer instead of invalidating the NativeAOT compile above it.
+COPY content/ ./content/
+
 # Provenance. Declared AFTER the copy so a rebuild at a new revision does not
 # invalidate the expensive AOT layers above it.
 ARG GIT_REVISION=unknown

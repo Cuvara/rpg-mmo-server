@@ -78,6 +78,35 @@ public sealed class ContentLoaderTests
         Assert.Equal(16, loaded.Hash.Length);
     }
 
+    /// <summary>
+    /// The default directory must be found from the <b>binary's</b> location, not the
+    /// working directory.
+    /// </summary>
+    /// <remarks>
+    /// This is a regression test with a specific failure behind it. The default started as
+    /// the relative path <c>../../content</c>, which resolves against the working directory
+    /// — a property of whoever launched the process, not of the deployment. It worked under
+    /// <c>dotnet run</c> from the module directory and broke every integration test on the
+    /// first CI run, because those launch the server from their own directory.
+    ///
+    /// <para>This test runs from the test binary's own output directory, several levels
+    /// away from the repository's content, so it fails if the resolution ever goes back to
+    /// being working-directory relative.</para>
+    /// </remarks>
+    [Fact]
+    public void DefaultDirectoryIsFoundFromTheBinaryNotTheWorkingDirectory()
+    {
+        string? resolved = ContentLoader.ResolveDefaultDirectory();
+
+        Assert.NotNull(resolved);
+        Assert.True(File.Exists(Path.Combine(resolved!, ContentLoader.ItemsFileName)),
+            $"ResolveDefaultDirectory returned '{resolved}', which holds no {ContentLoader.ItemsFileName}.");
+
+        // And it must actually load, not merely exist.
+        var loaded = ContentLoader.Load(resolved!);
+        Assert.True(loaded.Database.ItemCount > 0);
+    }
+
     [Fact]
     public void RejectsMalformedJsonNamingTheOrigin()
     {

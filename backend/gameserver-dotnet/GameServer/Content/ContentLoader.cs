@@ -41,6 +41,43 @@ public static class ContentLoader
     public const string ItemsFileName = "items.json";
 
     /// <summary>
+    /// Finds the content directory when none was configured, by walking up from the
+    /// <b>binary's</b> location looking for <c>content/items.json</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Anchored to <see cref="AppContext.BaseDirectory"/> rather than the working
+    /// directory, because the working directory is a property of whoever launched the
+    /// process and not of the deployment. A relative default resolved against it works
+    /// under <c>dotnet run</c> from the module directory and breaks everywhere else — it
+    /// broke every integration test on first contact, since those launch the server from
+    /// their own directory. The binary, by contrast, always sits at a known distance from
+    /// the content in every layout that exists: the repo tree, the test output tree, and
+    /// the container image.
+    /// </para>
+    /// <para>
+    /// Returns null when nothing is found, so the caller reports "not configured" against
+    /// the path it actually tried rather than against a guess.
+    /// </para>
+    /// </remarks>
+    public static string? ResolveDefaultDirectory()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null)
+        {
+            string candidate = Path.Combine(dir.FullName, "content");
+            if (File.Exists(Path.Combine(candidate, ItemsFileName)))
+            {
+                return candidate;
+            }
+
+            dir = dir.Parent;
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Loads and validates the content set in <paramref name="contentDirectory"/>.
     /// </summary>
     /// <exception cref="ContentLoadException">

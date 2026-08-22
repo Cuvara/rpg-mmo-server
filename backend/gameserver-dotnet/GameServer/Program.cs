@@ -349,10 +349,24 @@ await using var metricsEndpoint = MetricsEndpoint.TryStart(metricsAddr, metrics,
 // at nothing — would otherwise be attributed to whichever system noticed first instead
 // of to the file that was wrong.
 //
-// The directory default is relative so a `dotnet run` from the module directory works
-// with no flags; deployments set CONTENT_DIR to the path baked into the image.
-string contentDir = GetArg(args, "--content-dir") ?? Env("CONTENT_DIR") ?? "../../content";
+// When nothing is configured the directory is found by walking up from the BINARY, not
+// from the working directory. A relative default is resolved against the working
+// directory, which belongs to whoever launched the process rather than to the deployment:
+// it works under `dotnet run` from the module directory and fails everywhere else. It
+// failed every integration test on first contact, because those launch the server from
+// their own directory.
+string? contentDir = GetArg(args, "--content-dir") ?? Env("CONTENT_DIR")
+    ?? ContentLoader.ResolveDefaultDirectory();
 LoadedContent content;
+if (contentDir == null)
+{
+    logger.LogCritical(
+        "No content directory was configured and none was found by searching upward from {Base}. " +
+        "Set --content-dir or CONTENT_DIR to the directory holding {File}.",
+        AppContext.BaseDirectory, ContentLoader.ItemsFileName);
+    return 1;
+}
+
 try
 {
     content = ContentLoader.Load(contentDir);
