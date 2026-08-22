@@ -133,18 +133,29 @@ the only version that cannot drift.
 
 ---
 
-## Redis: `noeviction` is load-bearing
+## Redis: `noeviction` is load-bearing, and `maxmemory` is what makes it safe
 
-`redis.conf` carries `appendonly yes`, `appendfsync everysec`, `save 60 1000`
-and `maxmemory-policy noeviction`, mirroring the compose flags.
+`redis.conf` carries `appendonly yes`, `appendfsync everysec`, `save 60 1000`,
+`maxmemory-policy noeviction` and `maxmemory 128mb`, mirroring the compose flags.
 
 The last one is not tidiness. This Redis is a **system of record** for the server
 registry (`servers:*`) and the event stream (`events:*`), not a cache. Evicting a
 registry hash removes a live game server from matchmaking with no error emitted
 anywhere; trimming a stream drops unacked cross-server events. Sessions are the
 only genuinely expendable keys and they carry their own TTL. `noeviction` is
-already the Redis default — it is written down so that adding a `maxmemory`
-limit later cannot silently convert the registry into an LRU cache (ADR-4).
+already the Redis default — it is written down so that the `maxmemory` limit
+beside it cannot silently convert the registry into an LRU cache (ADR-4).
+
+`maxmemory 128mb` is the other half, and the policy is unsafe without it (#202).
+With no ceiling, growth is bounded only by the pod's `limits.memory: 256Mi`,
+which the kernel enforces by killing Redis whole — losing sessions, the registry
+and the stream in one go, the exact outcome `noeviction` exists to prevent. With
+the ceiling, Redis stays up, keeps answering reads, and refuses writes with
+`OOM command not allowed when used memory > 'maxmemory'`. **That error is a
+capacity signal, not a bug**: read `INFO memory` and `XLEN events:game`, then
+raise the pod limit and `maxmemory` together at the same 50% ratio. 128mb is half
+of 256Mi because Redis forks for AOF rewrite and RDB, and the gap has to cover
+allocator fragmentation plus copy-on-write — the arithmetic is in `redis.conf`.
 
 There is **no `requirepass`**, matching `backend/shared/config`'s default
 `REDIS_PASSWORD=""`. Adding auth means adding the directive to `redis.conf`

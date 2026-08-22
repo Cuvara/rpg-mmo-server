@@ -187,7 +187,7 @@ prefixed by `COMPOSE_NAME_PREFIX` (default `rpg`):
 |---|---|---|---|
 | `postgres` | — | `${POSTGRES_PORT:-5432}:5432` | Nakama meta DB, volume `postgres-data` (`:28-47`) |
 | `postgres-game` | — | `${POSTGRES_GAME_PORT:-5433}:5432` | game state, volume `postgres-game-data`, `init-gamestate.sql` mounted (`:54-77`) |
-| `redis` | — | `${REDIS_PORT:-6379}:6379` | registry + sessions + streams, `maxmemory-policy noeviction` per ADR-4 (`:126-163`) |
+| `redis` | — | `${REDIS_PORT:-6379}:6379` | registry + sessions + streams, `maxmemory-policy noeviction` + `maxmemory 128mb` per ADR-4 / #202 (`:126-163`) |
 | `nakama` | — | 7349/7350/7351/9100 | mounts `./modules` for `nakama.so` (`:79-124`) |
 | `gateway` | `realtime` | `${GATEWAY_CONTAINER_PORT:-8100}:8000` | `--addr=:8000 --backend=redis`, no allocator flag (`:184-209`) |
 | `gameserver-dotnet` | `realtime` | `${GAMESERVER_CONTAINER_PORT:-9200}:9000` | container name is `rpg-gameserver` (`:216-280`) |
