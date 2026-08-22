@@ -142,10 +142,17 @@ public class RegistrationServiceTests
         // SkipUnlessAvailable above already proved a docker daemon answers here, so a
         // dedicated container failing to start now is an infrastructure failure and must
         // not be laundered into a skip that reports green over unrun coverage (#175).
-        await using var redis = await EphemeralRedis.TryStartAsync();
+        // StartAsync, not TryStartAsync: the latter returns only the container and throws the
+        // reason away, so this assertion used to fail with nothing but "could not be started".
+        // It did exactly that during the #214 work — one run in ten — and the run could not
+        // say whether the cause was the vsock transient this fixture now retries, a genuine
+        // container fault, or something else. A reason that was computed and discarded is the
+        // same defect as no reason at all.
+        var started = await EphemeralRedis.StartAsync();
+        await using var redis = started.Container;
         Assert.True(redis is not null,
             "docker is available but a dedicated redis container could not be started — " +
-            "an infrastructure failure, not a missing dependency");
+            $"an infrastructure failure, not a missing dependency. Cause: {started.Failure}");
 
         var ttl = TimeSpan.FromSeconds(3);
         var mux = await ConnectionMultiplexer.ConnectAsync(
