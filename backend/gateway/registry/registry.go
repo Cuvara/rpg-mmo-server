@@ -81,6 +81,11 @@ type RegistryService struct {
 	// log is nil unless WithLogger was passed; every use must be nil-checked.
 	log logger
 
+	// watcher is nil unless WithWatcher was passed; every use must be
+	// nil-checked. When set, every server this service registers or hands to a
+	// client is tracked for liveness, and a deregistered one is untracked.
+	watcher *RegistryWatcher
+
 	// allocWaitTimeout / allocPollInterval bound the wait for a freshly
 	// allocated server's own registry entry. Zero means the default.
 	allocWaitTimeout  time.Duration
@@ -124,6 +129,14 @@ func WithMetrics(m *metrics.Metrics) Option {
 // more than one live game server (see the split-brain check in FindServer).
 func WithLogger(l logger) Option {
 	return func(s *RegistryService) { s.log = l }
+}
+
+// WithWatcher attaches a RegistryWatcher so the service keeps the watcher's
+// tracked set in sync with what the gateway actually knows about: a server is
+// tracked when it is registered or handed to a client, and untracked when it is
+// deregistered. Without this the watcher polls an empty set and never fires.
+func WithWatcher(w *RegistryWatcher) Option {
+	return func(s *RegistryService) { s.watcher = w }
 }
 
 // NewRegistryService creates a RegistryService backed by the given registry.
@@ -355,6 +368,20 @@ func (s *RegistryService) getServerWithRetry(ctx context.Context, serverID strin
 // retrying client from burning one GameServer per attempt on a map the fleet
 // cannot serve.
 func (s *RegistryService) FindServer(ctx context.Context, mapID string) (storage.ServerInfo, error) {
+	info, err := s.findServer(ctx, mapID)
+	if err != nil {
+		return storage.ServerInfo{}, err
+	}
+	// Every server the gateway hands to a client is a server whose death the
+	// gateway must notice quickly: until it does, it keeps announcing an address
+	// that will not answer. In production game servers self-register straight
+	// into Redis, so this — not RegisterServer — is where the gateway learns a
+	// server exists, and therefore where the watcher's tracked set comes from.
+	s.trackServer(info)
+	return info, nil
+}
+
+func (s *RegistryService) findServer(ctx context.Context, mapID string) (storage.ServerInfo, error) {
 	servers, err := s.findByMapIDWithRetry(ctx, mapID)
 	if err != nil {
 		return storage.ServerInfo{}, fmt.Errorf("find servers: %w", err)
@@ -674,10 +701,29 @@ func (s *RegistryService) GetServer(ctx context.Context, serverID string) (stora
 
 // RegisterServer registers a game server in the registry.
 func (s *RegistryService) RegisterServer(ctx context.Context, info storage.ServerInfo) error {
-	return s.reg.Register(ctx, info)
+	if err := s.reg.Register(ctx, info); err != nil {
+		return err
+	}
+	s.trackServer(info)
+	return nil
 }
 
 // DeregisterServer removes a game server from the registry.
 func (s *RegistryService) DeregisterServer(ctx context.Context, serverID string) error {
-	return s.reg.Deregister(ctx, serverID)
+	if err := s.reg.Deregister(ctx, serverID); err != nil {
+		return err
+	}
+	// A graceful deregister is not a fault, so the watcher must forget the
+	// server rather than report it down on its next poll.
+	if s.watcher != nil {
+		s.watcher.UntrackServer(serverID)
+	}
+	return nil
+}
+
+// trackServer adds a live server to the watcher's set, if one is attached.
+func (s *RegistryService) trackServer(info storage.ServerInfo) {
+	if s.watcher != nil && info.ServerID != "" {
+		s.watcher.TrackServer(info.ServerID, info.MapID)
+	}
 }

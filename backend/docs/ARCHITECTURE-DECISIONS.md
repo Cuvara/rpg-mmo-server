@@ -185,7 +185,14 @@ flow, or the game server — which never learns it is one shard among several.
   each dungeon instance is a distinct logical world by design.
 - The dead heartbeat means a crashed server's registry entry lingers until its TTL
   expires (1 hour in dev), and the gateway keeps handing out join tokens for a
-  server that is gone. Clients fail at the game-server dial step.
+  server that is gone. Clients fail at the game-server dial step. *(Updated
+  2026-08-22: the heartbeat is alive — the C# server re-arms a 15s TTL every 5s —
+  and the gateway no longer waits for expiry either. `gateway/registry`'s
+  `RegistryWatcher`, which had no caller until #204, is now constructed and
+  started by `cmd/gateway`; it polls the servers the gateway has handed to clients
+  every 5s and publishes `server_down`, so the window in which a dead server is
+  still announced is bounded by the poll, not by the TTL. TTL expiry stays the
+  backstop.)*
 
 ### Follow-up work
 
