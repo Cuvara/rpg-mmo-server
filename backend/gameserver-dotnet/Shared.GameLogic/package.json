@@ -1,6 +1,6 @@
 {
   "name": "com.rpgmmo.shared-gamelogic",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "displayName": "RPG MMO Shared Game Logic",
   "description": "Deterministic simulation logic and game-content schema shared by the .NET game server and the Unity client: movement, combat, validation, AOI, game constants, and the content definitions both sides load (ADR-19). Compiled from source on both sides so client prediction and the authoritative simulation agree, and so both agree on what content means. Ships golden vectors under GoldenVectors/ that both sides replay as a conformance gate (ADR-10).",
   "unity": "6000.3"

@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`Shared.GameLogic` bumped to 0.2.2.** Removing a file from the package is a change to
+  the package, so the client needs a tag to pick it up — until then Unity keeps logging
+  `check_metas.py has no meta file, but it's in an immutable folder` against whatever tag it
+  has pinned. The version-bump gate reports this as a reminder rather than a failure off
+  `main`, so it does not stop a merge; the bump has to be deliberate.
 - **`check_metas.py` moved out of the package into `.github/scripts/`.** A `.py` file
   inside a UPM package is an asset Unity tries to import, and one without a `.meta` in an
   immutable package folder makes the Editor log
