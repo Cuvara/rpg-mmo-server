@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Shared.GameLogic/Content/` shipped with no `.meta` files, so Unity never imported
+  it.** The package is consumed by the client as an immutable UPM git dependency, and a
+  source file without a committed `.meta` is not imported at all — the types simply do not
+  exist on the client. Nothing in CI noticed, because the .NET compiler does not read
+  `.meta` files: **0.2.0 passed all thirteen checks** and the client then failed with
+  `the namespace name 'Content' does not exist in the namespace 'Shared.GameLogic'`.
+  - Added `Content.meta` and a `.meta` for each of the three source files.
+  - Released as **0.2.1**. The published `sgl-v0.2.0` tag was left where it is: moving a
+    tag someone may already have pinned changes what their lock resolves to without
+    changing their lock, which is the silent kind of break.
+  - **New CI gate**, `Shared.GameLogic files all have .meta`, running
+    `Shared.GameLogic/check_metas.py`. It checks folders as well as files — a folder with
+    no `.meta` makes everything beneath it invisible even when each file has its own.
+    Verified in both directions: it fails when a `.meta` is removed and passes when it is
+    restored.
+
 ### Added
 
 - **Content pipeline: game data is JSON on disk, not compiled constants** (ADR-19).
