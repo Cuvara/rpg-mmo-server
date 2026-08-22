@@ -5,6 +5,66 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+- **Cross-gateway duplicate-login kick, which was declared at every layer and
+  constructed at none, is gone** ([#211](https://github.com/Cuvara/rpg-mmo-server/issues/211)).
+  `KickPublisher` and `KickSubscriber`, `noopKickPublisher`, the `kickPub` and
+  `kickSub` fields, `WithKickPublisher` and `WithKickSubscriber`,
+  `handleKickEvent`, its `SubscribeKick` call in `Run` and its `Close` call in
+  `Shutdown`, and the `PublishKick` branch in `handleAuth`. The matching
+  `GatewayKickChannel` constant goes with it; that half is in
+  `backend/shared/CHANGELOG.md`.
+
+  **Nothing was broken and nothing is fixed — what is fixed is a false claim.**
+  `cmd/gateway/main.go` has never called either option, so `kickPub` was the noop
+  from the first line of `New` to the last line of the process and `kickSub` was
+  nil, which is why `Run` never subscribed and `Shutdown` never closed anything.
+  The feature has therefore been a no-op for its entire life. It read as
+  finished, though, at every layer a reader would check: two interfaces, a noop
+  implementation, two functional options, a handler, a channel constant with a
+  paragraph of rationale, and a line in `CURRENT-SERVER-FLOW-AUDIT.md`
+  describing the behaviour as real. That is the defect — a reader planning a
+  multi-replica gateway would have concluded the problem was already solved.
+
+  **Deleted rather than implemented, and the reasoning is not "it was easier".**
+  Two reasons, and the second is the stronger one. First, ADR-17 pins the
+  deployment to one gateway replica, and `deploy/k8s/app/40-gateway.yaml` pins it
+  again for an independent reason — single-flight per `map_id` is per gateway
+  process (ADR-16), so two replicas racing on a cold map each allocate a
+  GameServer that Agones cannot un-allocate. With one replica there is no second
+  instance to publish to, so an implementation could be neither observed nor
+  tested end to end; it would be speculative work validated by nothing, which is
+  how the machinery being deleted came to exist. Second, and decisively: the
+  deleted code describes the **wrong transport**. The constant's own comment
+  argued for Redis Pub/Sub on the grounds that message loss is acceptable, and
+  ADR-5 — "Streams, not pub/sub" — decides against that model for cross-process
+  coordination. So this was not a head start on the eventual feature. It was a
+  shape that would have had to be thrown away, sitting in the tree looking like
+  progress.
+
+  **What replaces it is a written-down gap, not silence.** `handleAuth` keeps its
+  `duplicate login detected` log with `old_gateway` and `new_gateway` — the field
+  pair that makes the gap observable the moment a second replica exists — and
+  carries a comment stating that a session owned by another gateway is
+  deliberately left alone, why that is safe today, and that the fix is Streams
+  with consumer-group ACK per ADR-5. `docs/CURRENT-SERVER-FLOW-AUDIT.md` §2.2
+  gains a "What a second gateway replica would need" note describing the failure
+  precisely (a user authenticating against replica B keeps a live session on
+  replica A, indefinitely, with no error on either side), and ADR-17 now lists
+  this alongside the hostPort and single-flight questions that must be answered
+  before any second replica — because a consequence of the single-replica
+  decision belongs next to the decision.
+
+- **Local duplicate-login kick is untouched, deliberately and completely.**
+  `userConns`, `findUserConn`, `trackUser`, `kickLocalUser` and
+  `sendKickAndClose` are unchanged, as is the `MsgKick`-then-`MsgDisconnect`
+  ordering contract. It is the half that has always worked and is reached on
+  every login. Its four tests in `duplicate_login_test.go` are unchanged and
+  still pass; **no test was deleted by this change**, because no test ever
+  exercised the removed options — which is itself the point #211 makes about
+  this class of defect. A unit test constructs the thing it tests, so it proves
+  the component works and says nothing about whether production constructs it.
+
 ### Fixed
 - **A map served by two game servers is no longer load-balanced across the
   split** (#203). ADR-2 allows exactly one live server per `map_id`, and

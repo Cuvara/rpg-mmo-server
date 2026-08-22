@@ -5,6 +5,37 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+- **`GatewayKickChannel` (`"gateway:kick"`) is gone from `constants/keys.go`**
+  ([#211](https://github.com/Cuvara/rpg-mmo-server/issues/211)). It named a Redis
+  Pub/Sub channel for coordinating duplicate-login kicks between gateway
+  instances. Nothing in either module ever read it: `grep` across the whole
+  backend returned the declaration and nothing else — no publisher, no
+  subscriber, no test. The gateway-side machinery it was declared for
+  (`KickPublisher`/`KickSubscriber`, `handleKickEvent`, the two options) was
+  never constructed by `cmd/gateway/main.go` and is removed in the same change;
+  see `backend/gateway/CHANGELOG.md` for the full reasoning.
+
+  **The comment was the most expensive part of it, and is the reason this is a
+  removal rather than a tidy-up.** Six lines of rationale explained that message
+  loss is acceptable because the old session expires by TTL, and concluded that
+  "Pub/Sub rather than Streams is the right transport". That is a reasoned
+  architectural claim sitting in the constants file, it contradicts ADR-5
+  ("Streams, not pub/sub"), and it was attached to a constant no code used. A
+  future engineer building cross-instance kick would have found it, found it
+  persuasive, and built the wrong thing — with a plausible-looking precedent to
+  cite. Deleting the constant without deleting that argument would have kept the
+  trap; deleting both is the point.
+
+  **This does not remove a capability**, because there was none: with one gateway
+  replica (ADR-17) there is no second instance to coordinate with, and the
+  publisher that would have used this channel was a no-op in every build ever
+  shipped. When a second replica is planned, the transport is a Redis Stream with
+  a consumer group and explicit ACK per ADR-5, whose key would go through
+  `EventStreamPrefix` like every other stream in this file rather than being a
+  bare channel name. `SessionKeyPrefix`, `ServerRegistryKey`, `EventStreamPrefix`
+  and `GameEventStream` are unchanged; all four have live readers.
+
 ### Fixed
 - **`EventStream.Publish` now bounds `events:*` with `XADD ... MAXLEN ~ 30_000`,
   so an untrimmed stream can no longer be what gets Redis OOM-killed**

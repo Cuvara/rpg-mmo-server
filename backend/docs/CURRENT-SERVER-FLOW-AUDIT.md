@@ -16,7 +16,7 @@ named in §9.
 | Nakama | Go plugin on `heroiclabs/nakama:3.40.0` | `nakama/main.go` | 7349/7350/7351, metrics 9100 | Meta: device/email auth, `gateway_token` RPC, economy/leaderboard |
 | Gateway | Go | `gateway/cmd/gateway/main.go` | `:8000` (TCP default, KCP opt-in), metrics `:9102` | Auth + map assignment **only**. Redirector, never a data-path proxy |
 | Game server | C# .NET 10 (NativeAOT) | `gameserver-dotnet/GameServer/Program.cs` | `:9000` (TCP; KCP implemented), metrics `:9101` | Simulation, snapshots, persistence, self-registration |
-| Redis | 7.4-alpine | — | 6379 | Sessions, server registry, event stream, kick pub/sub |
+| Redis | 7.4-alpine | — | 6379 | Sessions, server registry, event stream |
 | Postgres (meta) | 16.4 | — | 5432 | Nakama-owned |
 | Postgres (game) | 16.4 | — | 5433 | `player_states`, written only by the game server |
 | LGTM (Grafana/Prom/Loki/Tempo) | — | — | 3000/4317/4318/9090 | `monitoring` compose profile |
@@ -67,20 +67,52 @@ intended path.
 - `handleAuth` (`server.go:600`):
   1. `VerifyClientJWTKeyring` against the `JWT_SECRET` keyring (every key
      verifies, first key signs). Local verification — **no Nakama roundtrip**.
-  2. **Duplicate-login detection** (`server.go:621-641`): if a session already
-     exists for the user, and it belongs to this gateway → kick the local socket
+  2. **Duplicate-login detection** (`handleAuth`): if a session already exists
+     for the user, and it belongs to **this** gateway → kick the local socket
      (`MsgKick` then `MsgDisconnect`, both `reason=duplicate_login`,
-     `sendKickAndClose:736`). If it belongs to another gateway → `PublishKick`
-     over the Redis pub/sub channel `gateway:kick`
-     (`shared/constants/keys.go`, `GatewayKickChannel`).
-     ⚠️ The kick publisher/subscriber are `Option`s (`WithKickPublisher` /
-     `WithKickSubscriber`) and **`cmd/gateway/main.go` never sets them** — the
-     cross-gateway path is dead code in the shipped binary; only the same-gateway
-     kick works today.
+     `sendKickAndClose`). The duplicate is always logged, with `old_gateway` and
+     `new_gateway`.
+     ⚠️ **If the session belongs to a different gateway, nothing happens.**
+     Cross-instance duplicate-login kick is **not implemented**. It was declared
+     at every layer — `KickPublisher`/`KickSubscriber`, a `noopKickPublisher`,
+     `WithKickPublisher`/`WithKickSubscriber`, `handleKickEvent`, and a
+     `GatewayKickChannel = "gateway:kick"` constant — and `cmd/gateway/main.go`
+     never constructed any of it, so the publisher was the noop for its entire
+     life. All of it was **removed** in #211 rather than left reading as
+     finished; see "What a second gateway replica would need" below.
   3. `CreateSession` writes `session:{user_id}` as JSON
      (`gateway/session/manager.go:51`) with `SessionTTL = 1h`
      (`shared/constants/ttl.go`).
   4. Replies `MsgAuthResp{OK, UserID}`.
+
+#### What a second gateway replica would need
+
+Recorded here because the gap is invisible at one replica and becomes a
+correctness bug at two, with no error on either side.
+
+**Why it does not matter today.** ADR-17 pins every workload in `deploy/k8s/` to
+one replica, and `app/40-gateway.yaml` pins the gateway again for an independent
+reason: single-flight per `map_id` is per gateway process (ADR-16), so two
+replicas racing on a cold map each allocate a GameServer and Agones has no
+un-allocate. There is therefore no second instance to publish a kick to, and no
+user is affected.
+
+**What breaks at two replicas.** A user already holding a session on replica A
+authenticates against replica B. B sees `existing.GatewayID != gwID`, logs the
+duplicate, and creates a new session — while A keeps the old socket open and
+serving. The user is logged in twice, indefinitely, and neither process reports
+an error. The only signal is the `duplicate login detected` line with
+`old_gateway` differing from `new_gateway`.
+
+**What the fix must be built on.** Not the machinery that was deleted. The
+removed constant and comment described a Redis **Pub/Sub** channel, and ADR-5
+("Streams, not pub/sub") decides against exactly that reliability model for
+cross-process coordination. A real implementation is a Redis **Stream with a
+consumer group and explicit ACK**, one consumer per gateway instance, plus a
+wiring-level test in `cmd/gateway` that fails when the construction is removed
+(the shape #204 landed for `RegistryWatcher`). It is deliberately not written
+until a second replica is actually planned, because with one replica it is
+neither observable nor end-to-end testable.
 
 Only three message types are accepted after auth: `MsgAuth`, `MsgEnterWorld`,
 `MsgDisconnect` (plus `MsgPing`/`MsgPong`, handled before the session check so a
@@ -270,7 +302,7 @@ Then `Program.cs`'s `finally`: `server.DisposeAsync()` → dispose Agones client
 dispose the Postgres pool, in that order (`:456-463`).
 
 **Gateway shutdown** (`main.go:287-299`): SIGINT/SIGTERM → `gw.Shutdown()` (close
-listener, close every conn, stop relay/kick subscriber) → stop metrics listener →
+listener, close every conn, stop relay) → stop metrics listener →
 close Redis stream + client.
 
 ---
@@ -336,7 +368,8 @@ close Redis stream + client.
   `ErrNotImplemented` (`gateway/transfer/dungeon.go:30`). No checkpointing, no
   allocate-per-party, no instance lifecycle.
 - **Client-facing events.** No `MsgEvent` type exists.
-- **Cross-gateway duplicate-login kick.** Implemented but not wired (§2.2).
+- **Cross-instance duplicate-login kick.** Not implemented, and no longer
+  declared either (#211). Harmless at one replica; see §2.2.
 - **Matchmaking / social** Nakama modules: not started.
 
 ---
@@ -415,9 +448,10 @@ What is **not** true today:
 
 Two further code-level observations, reported for the reviewer, not fixed:
 
-- `gateway/cmd/gateway/main.go` never calls `WithKickPublisher` /
-  `WithKickSubscriber`, so cross-gateway duplicate-login kick is unreachable in
-  the shipped binary despite being implemented and documented.
+- ~~`gateway/cmd/gateway/main.go` never calls `WithKickPublisher` /
+  `WithKickSubscriber`~~ — resolved in #211 by deleting the unwired machinery.
+  Cross-instance duplicate-login kick is now honestly absent rather than
+  falsely present; §2.2 and the section below say what closing the gap requires.
 - `GameServer.cs:988 ParseAddr` is dead code (the transport factory does its own
   parsing).
 
