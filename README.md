@@ -159,17 +159,24 @@ nc localhost 8000
 
 ## Test Results
 
-| Module | Tests | Status |
-|--------|-------|--------|
-| shared | 39 | ✅ |
-| gameserver-dotnet | 30 | ✅ |
-| gateway | 36 | ✅ |
-| nakama | 11 | ✅ |
-| integration (E2E) | 10 | ✅ |
-| **Total** | **126** | **All green** |
+Measured 2026-08-22. These drift, so the command that produces each number is
+given rather than a total to quote:
 
-Counts are top-level `go test` functions (most are table-driven with several
-subtests each).
+| Module | Count | How to reproduce |
+|--------|-------|------------------|
+| gameserver-dotnet | ~503 | `grep -rh '\[Fact\]\|\[Theory\]' backend/gameserver-dotnet --include=*.cs \| wc -l` |
+| gateway | ~126 | `grep -rh '^func Test' backend/gateway --include=*_test.go \| wc -l` |
+| shared | ~124 | `grep -rh '^func Test' backend/shared --include=*_test.go \| wc -l` |
+| nakama | ~15 | `grep -rh '^func Test' backend/nakama --include=*_test.go \| wc -l` |
+| integration (E2E) | 9 | requires `-tags integration`; see below |
+
+Go counts are top-level test functions, most table-driven with several subtests
+each; the C# figure counts xUnit attributes, so `[Theory]` cases inflate it
+relative to a Go function. Neither is a pass count — run the suites for that.
+
+**`integration_test/` needs its build tag.** Every file there carries
+`//go:build integration`, so `go test ./...` without `-tags integration` compiles
+zero tests and exits green. That is a passing run that verified nothing.
 
 ## Deployment Tiers
 
@@ -258,8 +265,8 @@ backend/
 │   ├── transfer/        # Join token, map assignment
 │   └── events/          # Event relay stub
 ├── integration_test/    # E2E tests
-├── nakama/              # Planned
-└── deploy/              # Planned
+├── nakama/              # Auth + economy modules (social/matchmaking not started)
+└── deploy/              # Agones, k8s, k3s, docker, monitoring
 ```
 
 ## License

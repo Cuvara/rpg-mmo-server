@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Documentation
+- **`Shared.GameLogic` was described as carrying far less than it does.**
+  `docs/CURRENT-SERVER-FLOW-AUDIT.md` §6 called it "one movement rule and one combat
+  rule". It holds five systems across ~512 lines: `MovementSystem`, `CombatLogic`,
+  `AoiLogic`, `SnapshotMerger`, `ValidationLogic`. The undercount mattered because two
+  of the three it omitted are the shared ones that carry the most weight — with
+  `AoiLogic` and `SnapshotMerger` in the shared assembly, client and server agree on
+  visibility and on how snapshots merge, not only on how a character moves. Anyone
+  sizing the client/server shared surface from that sentence would have got it wrong.
+  Corrected in place; the "deliberately absent" framing still holds for gameplay
+  *content* built on those rules.
 - **`SlowClientMovementTests` bursty-client margin (issue #175 F1) — measured, and the proposed
   fix rejected.** F1 was the one family diagnosed by arithmetic rather than reproduction. The
   arithmetic still holds against the current tree (`MaxBankedMovementMs = 250`,

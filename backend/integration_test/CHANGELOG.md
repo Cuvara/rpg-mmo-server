@@ -5,6 +5,27 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed — coverage that this file still describes as present
+
+`transport_flow_test.go` and `redis_flow_test.go` are documented as Added further
+down this file, and **neither exists in the tree.** The directory holds exactly two
+test files: `dotnet_interop_test.go` and `selfreg_flow_test.go`.
+
+Read against the code, those entries now overstate coverage. What went with the two
+files, and currently has **no automated coverage anywhere**:
+
+- the TCP/KCP transport matrix — `mock_client.go` is TCP-only, so no test exercises
+  KCP at all;
+- cross-server `sid` enforcement — a join token is refused by a server it was not
+  minted for, which is a security property no test currently asserts;
+- boss-kill event relay over Redis Streams end to end;
+- the Nakama-token compatibility path inside this module.
+
+Their historical entries are left intact below: they were accurate when written, and
+rewriting them would hide the regression rather than record it. Restore the files or
+delete their entries deliberately — do not leave this file claiming coverage the
+suite does not have.
+
 ### Added
 - **`TestFullFlow_SelfRegistration`** (`selfreg_flow_test.go`) — the whole client
   flow over the **deployed topology**, with nothing pre-registered.

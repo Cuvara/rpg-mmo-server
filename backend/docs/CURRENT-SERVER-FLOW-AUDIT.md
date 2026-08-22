@@ -324,8 +324,13 @@ close Redis stream + client.
 
 ## 6. What is deliberately absent
 
-- **Gameplay content.** `Shared.GameLogic` carries one movement rule and one
-  combat rule; enemy AI lives in a directory named `Scaffolding/`.
+- **Gameplay content.** `Shared.GameLogic` carries five systems — `MovementSystem`,
+  `CombatLogic`, `AoiLogic`, `SnapshotMerger`, `ValidationLogic` — across ~512 lines.
+  That is more than the "one movement rule and one combat rule" this section claimed
+  until 2026-08-22, and the difference matters: area-of-interest and snapshot merging
+  being *shared* means client and server agree on visibility and merge semantics, not
+  only on how a character moves. What is absent is gameplay *content* built on those
+  rules, not the rules themselves. Enemy AI lives in a directory named `Scaffolding/`.
 - **Dungeon instancing.** `--mode=dungeon` changes exactly one thing: the hold
   window, 60s instead of 30s (`Program.cs:369`). `StubDungeonTransfer` returns
   `ErrNotImplemented` (`gateway/transfer/dungeon.go:30`). No checkpointing, no
