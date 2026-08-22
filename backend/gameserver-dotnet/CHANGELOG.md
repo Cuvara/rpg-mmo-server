@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`check_metas.py` reported every `Samples~/` and `Documentation~/` folder as missing a
+  `.meta`.** A trailing `~` is the documented way to hide a folder from Unity's asset
+  database — it is exactly what makes a sample invisible until Package Manager copies it
+  into `Assets/` — so those folders must *not* have a `.meta`, and flagging them is a false
+  failure, not a finding. Same for dot-prefixed folders like `.github/`.
+  The gate passed on `Shared.GameLogic` only because that package happens to contain neither
+  kind, so the defect was invisible where it runs; it surfaced the moment the script was
+  pointed at `com.cuvara.netcode`, which has four `Samples~` and a `Documentation~`. A false
+  failure that loud is worse than no gate, because it gets the gate switched off. Verified
+  in both directions on both packages.
+
 - **`Shared.GameLogic/Content/` shipped with no `.meta` files, so Unity never imported
   it.** The package is consumed by the client as an immutable UPM git dependency, and a
   source file without a committed `.meta` is not imported at all — the types simply do not
