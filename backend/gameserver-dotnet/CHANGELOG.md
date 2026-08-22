@@ -8,6 +8,70 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`AchievedRateMeterTests.ARunningTickLoop_PublishesANonZeroAchievedRate` asserted on the
+  test host's scheduler, not on the meter.** It failed roughly 1 run in 13 in the full
+  parallel suite and never in isolation (#200), and the assertion message had never been
+  captured, so which of its three assertions fired was guesswork. Feeding the real
+  `AchievedRateMeter` a uniformly-late tick schedule settles it without needing to catch the
+  failure live, because the meter is deterministic once the timestamps are injected: with
+  the test's 30Hz loop, 0.2s window and fixed 600ms wait, a per-tick scheduling delay of
+  **201-305ms trips `Assert.InRange(achieved, 5d, 60d)`**, and anything past **~310ms**
+  leaves the gauge at 0 and trips the published-at-all assertion instead. Both bands were
+  reachable; the issue's hypothesis named only the second, and the first is the wider target.
+  - **The 5Hz lower bound was not a loose tolerance, it was a cliff.** The meter publishes
+    `tickDelta / elapsed` only once `elapsed >= WindowSeconds`, so a window containing a
+    single tick can never publish more than `1 / WindowSeconds` — which for a 0.2s window is
+    exactly 5.0, and is reached only if `elapsed` is precisely 200.000ms. The published
+    values are quantised with nothing at all between 5Hz and ~8.6Hz, so `>= 5` was really
+    asserting "this host scheduled at least two ticks into the final window". On a box whose
+    thread pool is saturated by eleven other test collections, it does not.
+  - **Widening the range was refused.** It would have bought nothing against the
+    published-at-all band and would have cost the upper bound's teeth, which is the only
+    direction that indicates a defect rather than a slow host — a reading above the
+    configured rate means double-counted ticks or a duration measured on a different clock
+    than the counter, which is #147 itself.
+  - **The test now waits for the condition instead of for a duration.** It polls the gauge
+    against a `Stopwatch` deadline until a window has actually published, with a 10s cap that
+    expires only if the loop is not running at all. On a healthy host it finishes sooner than
+    the old fixed 600ms sleep, so it also stops contributing six-tenths of a second of busy
+    tick loop to everyone else's contention; on a loaded host it waits longer rather than
+    failing.
+  - **It keeps the best window observed rather than reading the gauge once.** The meter is a
+    sliding window, so a single read returns whichever window happened to close last —
+    including one the loop was descheduled through. Asking whether *any* window measured the
+    loop correctly is the wiring claim this test exists to make; asking the host to schedule
+    the final 200ms fairly is not a claim any test can honestly make.
+  - **The lower bound is now relative to the run's own average** (`best >= average * 0.5`)
+    rather than a fixed Hz, so it still fails a meter that under-reports what the loop did —
+    the #147 direction — while making no claim about how fast this box is.
+  - **A short window can legitimately measure faster than the configured rate, which nobody
+    had written down.** When `TickLoop` falls behind it replays the lost ticks with no sleep
+    at all until it is caught up or `MaxLagTicks` behind, so a window straddling a recovery
+    holds up to `window / period + MaxLagTicks` ticks — 6 + 8 = 14 inside 200ms on a 30Hz
+    loop, or 70Hz. This was measured, not reasoned: a first attempt at this fix capped the
+    upper bound at 1.5x the configured rate and a contended full-suite run promptly published
+    **49.18Hz**, which is a truthful reading of a loop that really did advance that many ticks
+    in that window. **The original `InRange(achieved, 5d, 60d)` therefore had a second latent
+    failure mode at its top end as well as the cliff at its bottom** — 12 catch-up ticks in a
+    200ms window reach 60Hz — so the one assertion could fail from either direction for
+    reasons that were both about scheduling.
+  - **The upper bound is now the one statement that is exactly true regardless of
+    scheduling**: a window cannot contain more ticks than the whole run produced, so
+    `best <= CurrentTick / WindowSeconds`. That still catches a meter that counts ticks twice
+    or divides by a duration taken from a different clock than the counter — #147 in its
+    over-reporting direction — and it cannot flake, because it is bounded by the run's own
+    tick count rather than by an assumption about the host.
+  - **Added `AWindowContainingASingleTick_CannotPublishMoreThanTheReciprocalOfTheWindow`**,
+    a three-case theory on injected timestamps that pins the quantisation floor directly. It
+    costs nothing, cannot flake, and exists so the next person who reaches for an absolute
+    lower bound on a live-loop rate assertion finds the reason it does not work written down
+    as a failing condition rather than as a comment.
+  - **The original failure did not reproduce in any of the 14 baseline full-suite runs**, so
+    the diagnosis rests on the deterministic reproduction of the mechanism rather than on a
+    live capture of the old assertion; that is stated plainly rather than dressed up as a
+    confirmed repair. What the runs under added CPU load did capture is the 49.18Hz overshoot
+    above, which is why the upper bound is derived rather than guessed (#200).
+
 - **`EphemeralRedis` readiness now speaks RESP on a bare socket instead of building a
   `ConnectionMultiplexer`.** The block of 11 registry tests was failing roughly 2 runs in 10
   with the container reporting `docker unavailable`-shaped timeouts after the full 60s
