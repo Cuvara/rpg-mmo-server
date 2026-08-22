@@ -8,6 +8,73 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The Agones SDK tests timed a local HTTP listener they were not asserting on.**
+  `HttpAgonesSdkAddressTests.LiveSidecarShape_YieldsAddressAndGamePort` returned null once in
+  eight full-suite runs (#216) against a **correct body served by a listener in the same
+  process**. The three sibling tests reading the identical body passed in the same run, so
+  neither the parsing nor the fixture was in question: a fixed 700ms per-request budget
+  expired while the host was busy elsewhere, and `HttpAgonesSdk.GetAddressAsync` maps a
+  timeout onto exactly the same bare `null` it returns for an unreachable sidecar, a non-2xx,
+  an unparsable body and a status missing a field. The test asserted on a parsed address and
+  failed on a stopwatch.
+  - **The budget was removed from the assertion path rather than widened.** Every test in
+    both Agones SDK classes except the two pointing at a dead port now constructs the SDK
+    with `Timeout.InfiniteTimeSpan`. Raising 700ms to some larger round number would only
+    move the load at which the same thing happens and would leave the next reader believing
+    the number meant something; there is no network on this path, so a per-request deadline
+    is not a claim any of these tests is making. This is the same correction #200 applied to
+    `AchievedRateMeterTests` — stop asserting what the host scheduler decides.
+  - **What the tests still assert is unchanged, and in two places it is now stronger.** No
+    assertion was deleted or loosened: the live-shape test still pins address, port and the
+    `host:port` string that reaches Redis and `MsgEnterWorldResp.ServerAddr`, and every
+    negative test still requires null. What the negative tests gained is *why*: they now also
+    assert the reason the SDK logged — `has no port named`, `carries no address`,
+    `not a usable port`, `returned 500`, a `JsonException`. Before this, a 700ms timeout could
+    have satisfied `MissingGamePort_ReturnsNull` without the missing-port path ever running,
+    which is precisely the hazard this file's own opening remark warns about: *a fallback that
+    fires for the wrong reason looks exactly like one that fires for the right one*.
+  - **A hang is still bounded, and it is now the only thing a clock is used for here.** Reads
+    go through a helper that races the call against a 30s backstop and fails with the
+    subject's log attached. It is commented, at the constant and at the helper, as bounding a
+    hang and never asserting responsiveness — the distinction this issue exists to make. It
+    races the task rather than shortening the SDK's own timeout on purpose: a per-request
+    timeout makes the SDK return null, which is indistinguishable from the nulls under test,
+    whereas a race reports a stall as a stall. `Task.Delay` sits on the runtime's monotonic
+    timer queue, so no wall clock is involved; this host's `CLOCK_REALTIME` runs 10-17% fast
+    (#153) and the SDK's own timeout was already monotonic, so the fast clock was never the
+    cause here — the budget was.
+  - **The bare null is the defect underneath the defect, and it is fixed independently of the
+    timeout.** New `GameServer.Tests/Infrastructure/CapturingLogger.cs` records level, message
+    and — the discriminating field — the exception *type*, since a timeout, an absent listener
+    and an unreadable body all reach the same catch and log the same text. The suite was
+    passing `NullLogger.Instance` and throwing away the exact information it later needed a
+    TRX log to guess at. The failure this issue was filed for now reads
+    `GetAddressAsync returned null for the captured live sidecar body, which parses. What the
+    subject logged, in order: [Warning] Agones sidecar GET /gameserver failed —
+    TaskCanceledException: The request was canceled due to the configured HttpClient.Timeout
+    of 0.02 seconds elapsing.` — verified by forcing the condition, not predicted.
+  - **Two new tests pin the mechanism deterministically**, so the fix defends itself without
+    waiting for a 1-in-8 event: a 300ms sidecar behind a 50ms budget reads as the same null as
+    a corrupt one and surfaces a `TaskCanceledException`, and the same sidecar parses when no
+    budget is imposed. Both run in well under a second and cannot flake.
+  - **`HttpAgonesSdkTests` was corrected alongside it, pre-emptively.** It carried the same
+    700ms constant with the same exposure, and one of its tests was arguably worse placed:
+    a timed-out ping increments `ConsecutiveHealthFailures`, so
+    `HealthAsync_AfterRecovery_ResetsTheFailureCount` would have asserted `0` against a `1`
+    that nothing in its own body caused. Leaving an identical trap next door to a fixed one
+    is how #216 became the third fixed-deadline failure on this suite after #200 and #214.
+  - **No production code was changed.** `HttpAgonesSdk` already accepted an optional timeout
+    and `HttpClient.Timeout` already accepts `Timeout.InfiniteTimeSpan`, so the whole fix is
+    in the tests. The server's own default is untouched and still
+    `HttpAgonesSdk.DefaultTimeout` — 2 seconds, deliberately under the fleet's health
+    `periodSeconds`, which is a real production constraint and not something a test should
+    ever have been inheriting.
+  - **The original failure did not reproduce in the baseline runs** recorded for this change,
+    so the diagnosis rests on the deterministic reproduction of the mechanism rather than on
+    a live capture — stated plainly, as #200's entry states the same limitation. An
+    unreproduced flake is an open question; what is closed is that this test can no longer
+    fail for this reason, and that if it fails for another one it will say which.
+
 - **`AchievedRateMeterTests.ARunningTickLoop_PublishesANonZeroAchievedRate` asserted on the
   test host's scheduler, not on the meter.** It failed roughly 1 run in 13 in the full
   parallel suite and never in isolation (#200), and the assertion message had never been

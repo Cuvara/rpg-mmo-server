@@ -19,15 +19,33 @@ namespace GameServer.Tests.Agones;
 /// </summary>
 public class HttpAgonesSdkTests
 {
-    /// <summary>Short on purpose: the absent-sidecar test waits out a real timeout.</summary>
-    private static readonly TimeSpan TestTimeout = TimeSpan.FromMilliseconds(700);
+    /// <summary>
+    /// <b>No wall-clock budget for a sidecar in this process.</b> Same correction as
+    /// <see cref="HttpAgonesSdkAddressTests"/>, for the same reason and pre-emptively: these
+    /// tests assert on what was POSTed and on the failure counter, never on how quickly a
+    /// local <see cref="HttpListener"/> answered, and the shared 700ms budget they used to
+    /// carry was the mechanism that made the address read return null one run in eight
+    /// (#216). <c>EachCall_PostsEmptyJsonToItsOwnPath</c> and
+    /// <c>HealthAsync_AfterRecovery_ResetsTheFailureCount</c> have the same exposure — a
+    /// timed-out ping counts as a health failure, so the recovery test would have asserted
+    /// <c>0</c> against a <c>1</c> nothing in its own body caused.
+    /// </summary>
+    private static readonly TimeSpan NoDeadline = Timeout.InfiniteTimeSpan;
+
+    /// <summary>
+    /// Kept only where a timeout is the subject: the absent-sidecar test asserts that a
+    /// sidecar which never answers produces no exception, so the deadline is what it
+    /// exercises and a short one is what keeps it quick.
+    /// </summary>
+    private static readonly TimeSpan AbsentSidecarTimeout = TimeSpan.FromMilliseconds(700);
 
     /// <summary>Each of the four calls must POST an empty JSON object to its own path.</summary>
     [Fact]
     public async Task EachCall_PostsEmptyJsonToItsOwnPath()
     {
+        var log = new CapturingLogger();
         using var sidecar = new FakeSidecar();
-        using var sdk = new HttpAgonesSdk(NullLogger.Instance, sidecar.BaseAddress, TestTimeout);
+        using var sdk = new HttpAgonesSdk(log, sidecar.BaseAddress, NoDeadline);
 
         await sdk.ReadyAsync();
         await sdk.HealthAsync();
@@ -54,8 +72,9 @@ public class HttpAgonesSdkTests
     [Fact]
     public async Task SidecarReturningError_DoesNotThrow()
     {
+        var log = new CapturingLogger();
         using var sidecar = new FakeSidecar(statusCode: 500);
-        using var sdk = new HttpAgonesSdk(NullLogger.Instance, sidecar.BaseAddress, TestTimeout);
+        using var sdk = new HttpAgonesSdk(log, sidecar.BaseAddress, NoDeadline);
 
         Assert.Null(await Record.ExceptionAsync(() => sdk.ReadyAsync()));
         Assert.Null(await Record.ExceptionAsync(() => sdk.HealthAsync()));
@@ -78,8 +97,9 @@ public class HttpAgonesSdkTests
         int deadPort;
         using (var lease = new TestPorts.Lease()) { deadPort = lease.Port; }
 
+        var log = new CapturingLogger();
         using var sdk = new HttpAgonesSdk(
-            NullLogger.Instance, $"http://localhost:{deadPort}/", TestTimeout);
+            log, $"http://localhost:{deadPort}/", AbsentSidecarTimeout);
 
         Assert.Null(await Record.ExceptionAsync(() => sdk.ReadyAsync()));
         Assert.Null(await Record.ExceptionAsync(() => sdk.HealthAsync()));
@@ -92,8 +112,9 @@ public class HttpAgonesSdkTests
     [Fact]
     public async Task HealthAsync_AfterRecovery_ResetsTheFailureCount()
     {
+        var log = new CapturingLogger();
         using var sidecar = new FakeSidecar();
-        using var sdk = new HttpAgonesSdk(NullLogger.Instance, sidecar.BaseAddress, TestTimeout);
+        using var sdk = new HttpAgonesSdk(log, sidecar.BaseAddress, NoDeadline);
 
         sidecar.StatusCode = 500;
         await sdk.HealthAsync();
@@ -102,7 +123,9 @@ public class HttpAgonesSdkTests
 
         sidecar.StatusCode = 200;
         await sdk.HealthAsync();
-        Assert.Equal(0, sdk.ConsecutiveHealthFailures);
+        Assert.True(sdk.ConsecutiveHealthFailures == 0, log.Explain(
+            $"a successful health ping left the failure count at "
+            + $"{sdk.ConsecutiveHealthFailures} instead of clearing it."));
     }
 
     /// <summary>The default target is the sidecar's documented port.</summary>
@@ -117,7 +140,8 @@ public class HttpAgonesSdkTests
     public void NoopSdk_IsNotEnabled_AndHttpSdkIs()
     {
         Assert.False(new NoopAgonesSdk().IsEnabled);
-        using var http = new HttpAgonesSdk(NullLogger.Instance, "http://localhost:1/", TestTimeout);
+        using var http = new HttpAgonesSdk(
+            NullLogger.Instance, "http://localhost:1/", AbsentSidecarTimeout);
         Assert.True(http.IsEnabled);
     }
 
