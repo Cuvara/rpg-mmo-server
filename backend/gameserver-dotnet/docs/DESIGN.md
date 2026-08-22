@@ -1168,7 +1168,18 @@ encoded.
 **What this measured about the tick, which matters more than the change itself.** Splitting
 the old broadcast by hand at 200 players: AOI gather ~874–1177 µs/tick,
 `SnapshotDeltaState.Encode` ~998–1272 µs/tick, protobuf `ToByteArray` ~79–144 µs/tick.
-Serialization proper is 4–6% of the tick, not the 80% the original analysis assumed. The
+Serialization proper is 4–6% of the tick, not the 80% the original analysis assumed.
+
+> **⚠️ Unverified attribution — order-of-magnitude only (#162).** The harness that produced
+> this split was never committed, so its clock cannot be read back, and this host's
+> `CLOCK_REALTIME` runs 10-17% fast with unstable skew (#153). A percentage is a µs
+> numerator over a tick-duration denominator, so unlike an A/B ratio a clock skew does not
+> cancel — and "serialization is not the bottleneck" is precisely the shape of claim a
+> skewed denominator can invert. Replace it by re-running the split with
+> `GameServer.Tests/Bench/TickBreakdownBench.cs`, which is committed and measures with
+> `Stopwatch.GetTimestamp` only (`BENCH_TICK=1`).
+
+The
 two real terms are the brute-force AOI scan (a spatial index is the standing production
 item) and `Encode`'s 134 699 B/tick of `EntitySnapshot` objects, which is a pooling
 problem. Neither is an ECS problem.
