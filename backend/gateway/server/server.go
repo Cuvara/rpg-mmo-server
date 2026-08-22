@@ -23,24 +23,6 @@ import (
 	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
-// KickPublisher publishes duplicate-login kick requests to other gateway
-// instances. The in-memory implementation is a no-op (single process); the
-// Redis implementation publishes to the gateway:kick Pub/Sub channel.
-type KickPublisher interface {
-	PublishKick(ctx context.Context, userID string) error
-}
-
-// KickSubscriber receives kick requests from other gateway instances.
-type KickSubscriber interface {
-	SubscribeKick(ctx context.Context, handler func(userID string)) error
-	Close() error
-}
-
-// noopKickPublisher is used when no cross-gateway kick channel is configured.
-type noopKickPublisher struct{}
-
-func (noopKickPublisher) PublishKick(context.Context, string) error { return nil }
-
 // Gateway is the main TCP server that handles client authentication
 // and map assignment before redirecting to game servers.
 type Gateway struct {
@@ -63,12 +45,6 @@ type Gateway struct {
 
 	// transportKey is the pre-shared KCP encryption key ("" = plaintext).
 	transportKey string
-
-	// kickPub publishes kick requests to other gateway instances.
-	kickPub KickPublisher
-	// kickSub receives kick requests from other instances; nil when running
-	// single-process (in-memory backend).
-	kickSub KickSubscriber
 
 	relay      events.EventRelay
 	eventCount atomic.Int64
@@ -156,18 +132,6 @@ func WithMsgRateLimit(ratePerSec, burst float64) Option {
 	}
 }
 
-// WithKickPublisher sets the publisher used to send duplicate-login kick
-// requests to other gateway instances.
-func WithKickPublisher(pub KickPublisher) Option {
-	return func(g *Gateway) { g.kickPub = pub }
-}
-
-// WithKickSubscriber sets the subscriber for receiving kick requests from
-// other instances. The gateway starts listening in Run.
-func WithKickSubscriber(sub KickSubscriber) Option {
-	return func(g *Gateway) { g.kickSub = sub }
-}
-
 // New creates a new Gateway instance.
 //
 // jwtSecret is the client-auth secret and accepts a comma-separated rotation
@@ -192,7 +156,6 @@ func New(
 		jwtSecret:     jwtSecret,
 		authKeys:      authKeys,
 		joinKeys:      authKeys,
-		kickPub:       noopKickPublisher{},
 		logger:        logger,
 		conns:         make(map[*ClientConn]struct{}),
 		userConns:     make(map[string]*ClientConn),
@@ -292,14 +255,6 @@ func (g *Gateway) Run(addr string) error {
 		g.startRelayWithRetry()
 	}
 
-	// Start the kick subscriber so this gateway can receive cross-instance
-	// duplicate-login kick requests.
-	if g.kickSub != nil {
-		if err := g.kickSub.SubscribeKick(context.Background(), g.handleKickEvent); err != nil {
-			g.logger.Error("kick subscriber failed to start", "err", err)
-		}
-	}
-
 	ln, err := transport.Listen(g.transportKind, addr,
 		transport.WithKey(g.transportKey), transport.WithLogger(g.logger))
 	if err != nil {
@@ -367,11 +322,6 @@ func (g *Gateway) Shutdown() {
 	if g.relay != nil {
 		if err := g.relay.Stop(); err != nil {
 			g.logger.Error("stop event relay", "err", err)
-		}
-	}
-	if g.kickSub != nil {
-		if err := g.kickSub.Close(); err != nil {
-			g.logger.Error("stop kick subscriber", "err", err)
 		}
 	}
 }
@@ -621,16 +571,28 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 	existing, getErr := g.sessions.GetSession(ctx, userID)
 	if getErr == nil {
 		gwID := g.sessions.GatewayID()
+
+		// Same gateway: kick the old connection, but only if it is a different
+		// socket (re-auth on the same conn is not a duplicate).
+		//
+		// A session owned by a DIFFERENT gateway is deliberately left alone.
+		// Cross-instance duplicate-login kick is NOT implemented: the machinery
+		// that used to sit here — a KickPublisher/KickSubscriber pair and a
+		// gateway:kick channel constant — was never constructed by
+		// cmd/gateway/main.go, so it published into a noop for its whole life
+		// and was removed rather than left reading as finished (#211).
+		//
+		// It does not matter today because ADR-17 pins the deployment to one
+		// gateway replica, and 40-gateway.yaml pins it again for an independent
+		// reason (two replicas racing on a cold map each allocate a GameServer
+		// and Agones has no un-allocate). It starts mattering the moment a
+		// second replica is scheduled, and the log line below is what makes
+		// that visible: old_gateway != new_gateway means a session this process
+		// cannot reach. The fix then is Redis Streams with consumer-group ACK
+		// per ADR-5, not the Pub/Sub shape that was deleted.
 		if existing.GatewayID == gwID {
-			// Same gateway: kick the old connection, but only if it is a
-			// different socket (re-auth on the same conn is not a duplicate).
 			if old := g.findUserConn(userID); old != nil && old != cc {
 				g.kickLocalUser(userID)
-			}
-		} else {
-			// Different gateway: publish a kick request via Pub/Sub.
-			if perr := g.kickPub.PublishKick(ctx, userID); perr != nil {
-				g.logger.Warn("publish kick event", "conn", cc.ID(), "user", userID, "err", perr)
 			}
 		}
 		g.logger.Info("duplicate login detected",
@@ -757,13 +719,6 @@ func (g *Gateway) sendKickAndClose(cc *ClientConn, reason string) {
 	// SendAndClose on the *last* frame only: WriteLoop half-closes once the
 	// queue drains, so both frames are on the wire before the FIN.
 	cc.SendAndClose(disc)
-}
-
-// handleKickEvent processes a kick request received from another gateway
-// instance via the Pub/Sub channel.
-func (g *Gateway) handleKickEvent(userID string) {
-	g.logger.Info("received kick event", "user", userID)
-	g.kickLocalUser(userID)
 }
 
 func (g *Gateway) sendAuthError(cc *ClientConn, msg string) {
