@@ -5,6 +5,72 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`EventStream.Publish` now bounds `events:*` with `XADD ... MAXLEN ~ 30_000`,
+  so an untrimmed stream can no longer be what gets Redis OOM-killed**
+  ([#202](https://github.com/Cuvara/rpg-mmo-server/issues/202)). Redis here runs
+  `maxmemory-policy noeviction` deliberately — ADR-4 argues correctly that this
+  instance is a system of record and that evicting a `servers:*` hash removes a
+  live game server from matchmaking with no error anywhere. What was missing was
+  the ceiling that makes the policy *safe* rather than merely strict: `XAdd`
+  carried no `MaxLen`, no `maxmemory` was configured, and the Redis pod is capped
+  at `limits.memory: 256Mi`. The only ceiling that actually existed was the
+  kernel's, and the kernel does not refuse a write — it kills the process whole,
+  taking sessions, the registry and the stream together. That is precisely the
+  outcome `noeviction` was chosen to prevent, reached by a route the ADR did not
+  close. The deploy side of the pair (`maxmemory 128mb`, half the pod limit) is in
+  `backend/deploy/CHANGELOG.md`; this entry is the publisher-side half, which is
+  the one that runs on every write.
+
+  **The length is derived from consumer lag, not from a round number or a memory
+  figure.** The dominant event is `entity_killed`, one per mob death, from every
+  game server into the single shared `events:game` stream. Taking the 200
+  players-per-server figure `backend/docs/BENCHMARK.md` actually measures, and
+  assuming a kill roughly every 10s per player, that is ~20 events/s per server;
+  two live servers plus headroom for the smaller types (`boss_killed`,
+  `rare_drop`, `inventory_changed`) gives a planning rate of **50 events/s**. The
+  only consumer group is the gateway relay, and it falls behind only while it is
+  down — a CD deploy restarts the gateway (ADR-18 calls those outages) and
+  Kubernetes caps `CrashLoopBackOff` at 5 minutes, so **10 minutes** covers a
+  deploy, a backoff cycle and a manual restart. `50/s x 600s = 30_000 entries`.
+  The two assumptions in that chain (the kill rate and the outage window) are
+  stated in the constant's doc comment so the number can be re-derived rather
+  than guessed at when either changes.
+
+  Cross-checked against the ceiling it is meant to stay clear of: an
+  `entity_killed` entry is a short type string and a small JSON payload, under
+  256 bytes including stream node overhead, so the trimmed stream tops out near
+  **7.3MiB — about 6% of the 128mb `maxmemory`**. That relation is the point. The
+  stream is bounded by how far a consumer may fall behind, and is nowhere near
+  large enough to be what exhausts the instance; if Redis ever does refuse a
+  write, `XLEN events:game` is the thing to rule out first, not the thing to
+  blame.
+
+  **Consequence, stated plainly:** past that window entries are dropped rather
+  than delivered, so at-least-once delivery is now explicitly a promise to a
+  consumer that is *running*. A relay down for more than ten minutes at full rate
+  comes back to a gap, not a backlog — and it will not be told about the gap,
+  because a trimmed entry leaves no trace. That is the deliberate trade: these
+  events (world announcements, cross-map loot) are worth delivering because they
+  are timely, and a ten-minute-old `boss_killed` has already lost the property
+  that made it worth the write.
+
+  The approximate form (`~`) is used rather than exact: Redis trims whole
+  radix-tree nodes and stops at the first one it may not drop, so it removes
+  entries in cheap batches and may leave somewhat more than N. Exact trimming
+  would make every publish pay for entry-precise deletion in order to enforce a
+  number that is itself a rounded-off lag budget — real cost for false precision.
+
+  `SetMaxLen` is available for tests and for an operator who needs different
+  retention, and deliberately **cannot** be used as an off switch: a
+  non-positive value keeps the default instead of removing the bound, since an
+  unbounded stream against a `noeviction` Redis is the whole failure being fixed.
+  This lands *before* a real publisher exists — the C# side still publishes into
+  `NoopEventStream` (ADR-5), which is why the bug has not bitten. That was luck,
+  not design: the window between wiring the relay up and filling 256Mi is however
+  long it takes to fill 256Mi, and nobody wiring up an event relay expects to be
+  making a memory-exhaustion change.
+
 ### Added
 - **`JoinTokenResponse.TickRate` — the simulation tick rate on the wire
   (`wire.proto` field 4).** Closes

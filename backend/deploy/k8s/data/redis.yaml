@@ -1,13 +1,20 @@
 # Redis — sessions (TTL), server registry (`servers:*`) and the cross-server
 # event stream (`events:*`). One instance, prefix-separated roles (ADR-4).
 #
-# THIS IS NOT A CACHE. `--maxmemory-policy noeviction` is load-bearing and is
-# set explicitly even though it is already the Redis default, so that anyone who
-# later adds a `--maxmemory` limit cannot silently turn the server registry into
-# an LRU cache. Evicting a registry hash removes a live game server from
+# THIS IS NOT A CACHE. `maxmemory-policy noeviction` is load-bearing and is set
+# explicitly even though it is already the Redis default, so that the
+# `maxmemory` limit beside it cannot silently turn the server registry into an
+# LRU cache. Evicting a registry hash removes a live game server from
 # matchmaking with no error anywhere; trimming a stream drops unacked
 # cross-server events. Sessions are the only expendable keys and they carry
 # their own TTL.
+#
+# The policy needs a ceiling to be safe, and `redis.conf` now sets one:
+# `maxmemory 128mb`, half the `limits.memory: 256Mi` below, so Redis refuses
+# writes while alive instead of being OOM-killed whole (#202). The two numbers
+# are a pair — raising this limit without raising `maxmemory` buys nothing, and
+# raising `maxmemory` without raising this limit re-arms the kill. See the
+# arithmetic in redis.conf before touching either.
 apiVersion: v1
 kind: Service
 metadata:

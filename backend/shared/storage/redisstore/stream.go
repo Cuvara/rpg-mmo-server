@@ -25,6 +25,48 @@ const (
 // (bounded so Close() is responsive).
 const defaultStreamBlock = 500 * time.Millisecond
 
+// DefaultStreamMaxLen bounds `events:*` at publish time (XADD ... MAXLEN ~ N).
+//
+// Redis here runs `maxmemory-policy noeviction` on purpose (ADR-4): it is the
+// system of record for the server registry, so it must refuse writes rather
+// than silently drop a live game server. That policy makes an untrimmed stream
+// the one unbounded consumer of the instance's whole memory budget, and the
+// Redis pod is capped at 256Mi — so without a bound the kernel OOM-kills Redis
+// *whole*, taking sessions and the registry with it, which is the exact outcome
+// noeviction was chosen to prevent (#202). The bound belongs at the publisher
+// because that is the only place that runs on every write.
+//
+// The length is chosen from **consumer lag**, not from a memory figure:
+//
+//	events/s   the dominant event is entity_killed, one per mob death, from
+//	           every game server into the one shared events:game stream. Taking
+//	           the 200-player-per-server figure that BENCHMARK.md actually
+//	           measures, and ASSUMING a kill roughly every 10s per player, that
+//	           is ~20 events/s per server; two live servers and rounding up for
+//	           the smaller event types (boss_killed, rare_drop,
+//	           inventory_changed) gives a planning rate of 50 events/s.
+//	lag budget the only consumer group is the gateway relay, and it falls behind
+//	           only while it is down. A CD deploy restarts the gateway (ADR-18
+//	           calls those outages), and Kubernetes caps CrashLoopBackOff at 5
+//	           minutes, so 10 minutes covers a deploy, a backoff cycle and a
+//	           manual restart with room to spare.
+//
+//	50 events/s * 600s = 30_000 entries
+//
+// Beyond that window entries are dropped rather than delivered, which is the
+// deliberate trade: at-least-once delivery is a promise to a consumer that is
+// *running*, and a consumer down for ten minutes has already lost the timeliness
+// that made these events worth delivering.
+//
+// Memory cross-check, so the bound cannot itself be the thing that fills the
+// instance: an entity_killed entry is a short type string plus a small JSON
+// payload, well under 256 bytes including stream node overhead, so the trimmed
+// stream tops out around 30_000 * 256B ~= 7.3MiB — about 6% of the 128mb
+// maxmemory set in deploy/k8s/data/redis.conf. The stream is bounded by lag
+// tolerance and stays far away from the ceiling; that is the intended relation
+// between the two numbers.
+const DefaultStreamMaxLen int64 = 30_000
+
 // RedisEventStream implements EventStream over Redis Streams using a consumer
 // group: XADD to publish, XREADGROUP to consume, XACK after the handler runs
 // (at-least-once delivery; a crashed consumer leaves the entry pending for
@@ -34,6 +76,7 @@ type EventStream struct {
 	group    string
 	consumer string
 	block    time.Duration
+	maxLen   int64
 	owned    bool
 	logger   *slog.Logger
 
@@ -95,6 +138,7 @@ func newEventStream(client redis.UniversalClient, group, consumer string) *Event
 		group:    group,
 		consumer: consumer,
 		block:    defaultStreamBlock,
+		maxLen:   DefaultStreamMaxLen,
 		ctx:      ctx,
 		cancel:   cancel,
 	}
@@ -106,6 +150,26 @@ func (s *EventStream) SetBlockTimeout(d time.Duration) {
 	if d > 0 {
 		s.block = d
 	}
+}
+
+// SetMaxLen overrides the retained stream length used by Publish. A
+// non-positive value is ignored rather than treated as "unbounded": an
+// unbounded stream against a noeviction Redis is the failure this bound exists
+// to prevent (#202), so there is deliberately no way to switch it off through
+// this API. Must be called before Publish.
+func (s *EventStream) SetMaxLen(n int64) {
+	if n > 0 {
+		s.maxLen = n
+	}
+}
+
+// maxLenOrDefault guards against a zero-valued EventStream built by something
+// other than newEventStream.
+func (s *EventStream) maxLenOrDefault() int64 {
+	if s.maxLen > 0 {
+		return s.maxLen
+	}
+	return DefaultStreamMaxLen
 }
 
 // streamKey builds the Redis key for a logical stream name.
@@ -122,8 +186,17 @@ func (s *EventStream) Publish(ctx context.Context, stream string, event storage.
 		return fmt.Errorf("event stream closed")
 	}
 
+	// MaxLen + Approx is `MAXLEN ~ N`: Redis trims whole radix-tree nodes and
+	// stops at the first node it may not drop, so it removes entries in cheap
+	// batches and may leave somewhat more than N. Exact trimming (`MAXLEN N`)
+	// would make every publish pay for entry-precise deletion to enforce a
+	// number that is itself a rounded-off lag budget — real cost for false
+	// precision. Approximate is the right form here, and the resulting overshoot
+	// is bounded by one node, not by the stream's age.
 	err := s.client.XAdd(ctx, &redis.XAddArgs{
 		Stream: streamKey(stream),
+		MaxLen: s.maxLenOrDefault(),
+		Approx: true,
 		Values: map[string]any{
 			streamFieldType:    event.Type,
 			streamFieldPayload: event.Payload,

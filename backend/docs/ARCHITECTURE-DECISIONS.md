@@ -341,18 +341,36 @@ splitting is a change to that constructor block, not to any business logic.
   silently dropping data. That is the correct failure mode here — a failed
   registration is visible, an evicted one is not — but it means memory must be
   monitored, not left to self-manage.
-- Streams need explicit trimming (`XTRIM`/`MAXLEN`) once a real publisher exists,
-  or `events:game` grows without bound. Today nothing publishes (ADR-5), so this
-  is latent rather than live.
+- **`noeviction` without a `maxmemory` is not a weaker version of this decision,
+  it is the opposite one** (#202, fixed 2026-08-22). Nothing bounded growth, and
+  the ceiling that actually existed was the Redis pod's `limits.memory: 256Mi` —
+  enforced by the kernel, which kills the process *whole* and loses sessions, the
+  registry and the stream together. That is the outcome this ADR chose
+  `noeviction` to prevent, reached by a route the ADR did not close. Both halves
+  of the ceiling now exist: `maxmemory 128mb` in
+  `deploy/k8s/data/redis.conf` (and the mirrored compose flag), at half the pod
+  limit so the gap absorbs jemalloc fragmentation and copy-on-write during a
+  persistence fork; and `MAXLEN ~ 30_000` on every `XADD`
+  (`shared/storage/redisstore.DefaultStreamMaxLen`). Redis now refuses writes
+  with `OOM command not allowed` while still alive and serving reads.
+- Streams are trimmed at publish time — `XADD ... MAXLEN ~ 30_000`, sized from
+  the gateway relay's consumer-lag tolerance (~50 events/s x a 10-minute outage
+  window) rather than from a memory figure, and cross-checked at ~7MiB so the
+  stream cannot be the thing that fills the instance. Entries older than that
+  window are dropped rather than delivered: at-least-once is a promise to a
+  consumer that is running.
 - A Redis outage takes out login and map entry, but not sessions already in
   progress on game servers.
 
 ### Follow-up work
 
-- **S** — Set an explicit `maxmemory` and a Prometheus alert on Redis memory
-  utilisation and rejected writes, now that eviction cannot silently absorb growth.
-- **S** — Add `MAXLEN ~` trimming to `EventStream.Publish` before any real
-  publisher is wired.
+- ~~**S** — Set an explicit `maxmemory`~~ **done** (#202): `maxmemory 128mb`,
+  half the 256Mi pod limit. Still open: a Prometheus alert on Redis memory
+  utilisation and on `rejected_connections`/OOM write errors, now that eviction
+  cannot silently absorb growth and the refusal is the only signal.
+- ~~**S** — Add `MAXLEN ~` trimming to `EventStream.Publish` before any real
+  publisher is wired.~~ **done** (#202), and it landed before the publisher, as
+  this line asked.
 - **M** — Split `events:*` onto its own instance at the Soft Launch tier; the
   gateway constructor takes a second address.
 

@@ -139,8 +139,16 @@ services:
     # matchmaking, and trimming a stream drops unacked cross-server events.
     # Sessions are the only genuinely expendable keys and they carry their own
     # TTL. `noeviction` is already the Redis default, but it is set explicitly so
-    # that adding a `--maxmemory` limit later cannot silently turn this into an
-    # LRU cache. See backend/docs/ARCHITECTURE-DECISIONS.md, ADR-4.
+    # that a `--maxmemory` limit cannot silently turn this into an LRU cache.
+    # See backend/docs/ARCHITECTURE-DECISIONS.md, ADR-4.
+    #
+    # `--maxmemory 128mb` is the ceiling that makes `noeviction` safe rather than
+    # merely strict (#202): without it nothing bounds growth and the process is
+    # OOM-killed whole instead of refusing writes with `OOM command not allowed`.
+    # The value mirrors deploy/k8s/data/redis.conf, which carries the arithmetic
+    # against the cluster pod's 256Mi limit. Compose has no memory limit of its
+    # own, so here the flag exists to keep dev and cluster in step — a divergence
+    # is how "it worked locally" happens.
     command:
       - /bin/sh
       - -ec
@@ -150,6 +158,7 @@ services:
           --appendfsync everysec \
           --save 60 1000 \
           --maxmemory-policy noeviction \
+          --maxmemory 128mb \
           $${REDIS_PASSWORD:+--requirepass "$${REDIS_PASSWORD}"}
     ports:
       - "${REDIS_PORT:-6379}:6379"

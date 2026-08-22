@@ -5,6 +5,56 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Redis now has a `maxmemory`, so `noeviction` refuses writes instead of ending
+  in an OOM kill** ([#202](https://github.com/Cuvara/rpg-mmo-server/issues/202)).
+  `maxmemory-policy noeviction` was set explicitly and for good reasons (ADR-4:
+  this instance is the system of record for `servers:*`, and evicting a registry
+  hash drops a live game server out of matchmaking silently). But no `maxmemory`
+  was ever configured — the policy had nothing to enforce — while the pod carries
+  `limits.memory: 256Mi`. So the only ceiling in play was the cgroup's, enforced
+  by the kernel, and the kernel's enforcement is not a refused write: it is
+  `SIGKILL` on the whole process, losing sessions, the registry and the event
+  stream in one stroke. The strict policy bought nothing and the failure mode was
+  strictly worse than the one it was chosen to avoid.
+
+  **`maxmemory 128mb`** in `k8s/data/redis.conf`, mirrored as `--maxmemory 128mb`
+  in `docker-compose.yml` so dev and cluster do not drift. At the ceiling Redis
+  stays alive, keeps serving reads, and answers writes with `OOM command not
+  allowed when used memory > 'maxmemory'` — loud, survivable, and the registry
+  keeps working.
+
+  **Why half the limit and not 200Mi.** `maxmemory` governs the dataset
+  (`used_memory`); the cgroup limit governs RSS, and the gap must absorb
+  everything in between: `128Mi x 1.3` for jemalloc fragmentation at steady state
+  is ~166Mi, plus ~10Mi of process baseline and client/replication buffers is
+  ~176Mi, plus roughly 38Mi of copy-on-write during a `BGSAVE` or AOF-rewrite fork
+  is ~214Mi — leaving ~42Mi, about 16%, of headroom under 256Mi. The fork term is
+  the one that forces the ratio: `appendonly yes` and `save 60 1000` mean Redis
+  forks, and a fork's COW cost is not bounded by anything in the config file. 50%
+  is the standard figure for a Redis with persistence enabled; the arithmetic
+  above is why it is standard, and it is written into `redis.conf` so the next
+  person to touch the number sees the reasoning rather than a round figure.
+
+  **The two numbers are a pair.** Raising `limits.memory` alone buys nothing —
+  Redis still stops at 128mb. Raising `maxmemory` alone re-arms the kill by
+  eating the fork headroom. Both move together at the same ratio, and the config
+  comments say so in both files.
+
+  **When the OOM error appears, it is a capacity signal, not a bug**, and not
+  something to silence by raising the number. The runbook wording added to
+  `k8s/data/README.md` and `docs/DISASTER-RECOVERY.md` says to read `INFO memory`
+  (`used_memory`, `mem_fragmentation_ratio`) and `XLEN events:game` first — the
+  stream is bounded at ~7MiB by the `MAXLEN ~ 30_000` added in the same change
+  (`backend/shared/CHANGELOG.md`), so it is what you rule out, not what you blame;
+  growth in sessions or the registry is the realistic cause.
+
+  `verify.sh`'s `check_redis_noeviction` was extended rather than duplicated: it
+  now fails when `CONFIG GET maxmemory` returns `0`. A policy check that passes
+  on an unlimited instance was verifying the less important half of the pair, and
+  this regression is invisible from `kubectl get` — which is how it survived this
+  long.
+
 ### Changed
 - **`NAKAMA_SERVER_KEY` rotated on both k8s clusters**, from `defaultkey` to 32 random hex
   characters, a different value per cluster.
