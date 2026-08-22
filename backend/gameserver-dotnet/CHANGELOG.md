@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Content pipeline: game data is JSON on disk, not compiled constants** (ADR-19).
+  `backend/content/items.json` is now the source of truth for item definitions, and the
+  iteration loop is edit → restart → clients pull. No rebuild, no `sgl-v` tag, no
+  `packages-lock.json` bump — the cross-repo release cycle that made per-tweak content
+  iteration impractical is off the path entirely.
+  - `Shared.GameLogic/Content/` — `ItemDefinition`, `ContentDatabase`, `ContentValidation`.
+    The **schema and the validator are shared** with the client; the **parser is not**,
+    because Unity compiles this package as source and has no `System.Text.Json` while the
+    server is NativeAOT and cannot reflect. No single parser satisfies both.
+  - `GameServer/Content/ContentLoader.cs` — loads, validates, and computes a content hash.
+    Uses source-generated `System.Text.Json` (reflection-based deserialization trims away
+    under NativeAOT and fails at runtime on a build that compiled clean).
+  - **The server refuses to start on invalid content**, reporting every fault in one pass
+    with the item id and field against each. Measured on a deliberately broken file: exit 1,
+    all four problems named. Fail-soft was rejected — a server running on half-parsed
+    content serves an unknowable subset of the game, and each symptom downstream gets
+    blamed on whichever system noticed it first.
+  - `GET /content` on the existing metrics listener, beside `/metrics`, `/healthz` and
+    `/status`. No new port, no new wire message. `?hash=` returns `304 Not Modified` once a
+    client holds the current set, so the fetch leaves the join path after the first time.
+    The hash ships in **both** `ETag` and `X-Content-Hash`: `UnityWebRequest` and some
+    proxies strip the former, and a client that cannot read back its hash silently
+    re-downloads on every join.
+  - Canonical bytes are served **verbatim** rather than re-serialised from the parsed
+    objects, so clients parse exactly the document the server read. Re-serialising would
+    make a defect in the server's writer present as a defect in the client's reader.
+  - 20 tests, including one that loads the repository's own `items.json` — so breaking it
+    fails CI rather than a server that will not boot.
+
 ### Documentation
 - **`Shared.GameLogic` was described as carrying far less than it does.**
   `docs/CURRENT-SERVER-FLOW-AUDIT.md` §6 called it "one movement rule and one combat

@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging;
 using Shared.GameLogic.Components;
 using GameServer.Agones;
+using GameServer.Content;
 using GameServer.Events;
 using GameServer.Observability;
 using GameServer.Scaffolding;
@@ -340,6 +341,34 @@ logger.LogInformation("  JoinToken: JOIN_TOKEN_SECRET, {Count} key(s){Rotating}"
 using var metrics = new GameMetrics(mapId);
 await using var metricsEndpoint = MetricsEndpoint.TryStart(metricsAddr, metrics, serverId, logger);
 
+// ── Game content (items, and whatever content types follow) ──
+//
+// Loaded and validated BEFORE the listener opens. A server that cannot vouch for its
+// content refuses to start rather than serving an unknowable subset of the intended
+// game: every downstream symptom — a missing item, a wrong stat, a loot table pointing
+// at nothing — would otherwise be attributed to whichever system noticed first instead
+// of to the file that was wrong.
+//
+// The directory default is relative so a `dotnet run` from the module directory works
+// with no flags; deployments set CONTENT_DIR to the path baked into the image.
+string contentDir = GetArg(args, "--content-dir") ?? Env("CONTENT_DIR") ?? "../../content";
+LoadedContent content;
+try
+{
+    content = ContentLoader.Load(contentDir);
+    logger.LogInformation(
+        "Content loaded from {Dir}: {Items} items, hash {Hash}",
+        contentDir, content.Database.ItemCount, content.Hash);
+}
+catch (ContentLoadException ex)
+{
+    // The message already enumerates every problem found, so it is logged as-is rather
+    // than wrapped: re-describing it here would push the detail an author needs down
+    // below a summary that says less.
+    logger.LogCritical("{Message}", ex.Message);
+    return 1;
+}
+
 // ── Player store (postgres when GAME_DB_URL is set, otherwise in-memory) ──
 
 IPlayerStore playerStore = new MemoryPlayerStore();
@@ -501,6 +530,10 @@ var server = new GameServerHost(options);
 // non-defect (#147, diagnosed in #153). Both terms of that quotient now come from the same
 // clock. See ServerStatus.UptimeSeconds.
 var uptime = System.Diagnostics.Stopwatch.StartNew();
+
+// Serve the content set clients need. The canonical bytes are handed over verbatim —
+// see SetContentProvider for why this is not a re-serialisation.
+metricsEndpoint?.SetContentProvider(() => (content.CanonicalBytes, content.Hash));
 
 // Wire up the /status JSON endpoint with live server state.
 metricsEndpoint?.SetStatusProvider(() =>
