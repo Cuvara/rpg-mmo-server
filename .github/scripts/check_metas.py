@@ -11,7 +11,17 @@ and passed all thirteen CI checks; the client then failed to compile with
 "the namespace name 'Content' does not exist in the namespace 'Shared.GameLogic'",
 and the fix needed a new tag because a published one must not be moved.
 
-Run from the package directory, or with the package directory as argv[1].
+Lives in .github/scripts/ rather than inside the package, deliberately. A .py file
+inside a UPM package is an asset Unity tries to import, and one without a .meta in an
+immutable package folder produces:
+
+    Asset Packages/com.rpgmmo.shared-gamelogic/check_metas.py has no meta file,
+    but it's in an immutable folder. The asset will be ignored.
+
+Giving it a .meta would silence that, but the deeper point stands: CI tooling is not
+part of what this package ships to a Unity project.
+
+Pass the package directory as argv[1].
 """
 import os
 import sys

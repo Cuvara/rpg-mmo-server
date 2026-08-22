@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`check_metas.py` moved out of the package into `.github/scripts/`.** A `.py` file
+  inside a UPM package is an asset Unity tries to import, and one without a `.meta` in an
+  immutable package folder makes the Editor log
+  `has no meta file, but it's in an immutable folder. The asset will be ignored.` — so the
+  gate written to prevent meta errors was itself causing one. Giving it a `.meta` would have
+  silenced that, but CI tooling is not part of what this package ships to a Unity project.
 - **`check_metas.py` reported every `Samples~/` and `Documentation~/` folder as missing a
   `.meta`.** A trailing `~` is the documented way to hide a folder from Unity's asset
   database — it is exactly what makes a sample invisible until Package Manager copies it
