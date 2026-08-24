@@ -394,7 +394,9 @@ public sealed class TickLoop
                 _handler.ApplyHeldMovement(writer, _currentTick, _rates.WorldEvery);
             });
         }
-        else if (_rates.WorldEvery > 1)
+        // Not gated on WorldEvery any more: an entity can owe time at any rate, and the
+        // pass itself decides who is eligible.
+        else
         {
             // No packets arrived at all this tick — common at 60Hz base with clients
             // sending at 10-15Hz — but held directions still have to be integrated.

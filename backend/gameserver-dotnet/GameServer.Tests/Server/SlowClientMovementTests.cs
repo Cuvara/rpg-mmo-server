@@ -216,22 +216,34 @@ public class SlowClientMovementTests
         float normal = speed / rates.WorldHz;
 
         // A client that goes quiet WITHOUT saying so is the genuine lost-input case, and
-        // the time is still repaid in one step. That is bounded — by the cap, and by
-        // nothing else — and the bound is what this pins. Removing the residual entirely
-        // is #104, because both ways of doing it cost something a player would also feel.
-        float capUnits = speed * GameConstants.MaxBankedMovementMs / 1000f;
+        // the time is still repaid — but it is now CARRIED and paid down at a bounded rate
+        // rather than discharged in one step (#104). So the bound this pins is no longer the
+        // 250ms cap, which only ever said "not more than a quarter second of travel at
+        // once"; it is the catch-up rate, which says "no step is ever visibly a jump".
+        //
+        // That is strictly tighter. Against a live 60/15/5 server the old one-shot repayment
+        // produced a 1.36-unit step where a normal one is 0.083 — inside the cap and read by
+        // a player as the avatar jumping around. Under the rate bound the largest possible
+        // step is (1 + MaxCatchUpFraction) of a normal one, which is 1.5x rather than 16x.
+        float maxStep = normal * (1f + GameConstants.MaxCatchUpFraction);
 
-        Assert.True(largest <= capUnits + normal * 1.5f,
+        Assert.True(largest <= maxStep * 1.05f,
             $"largest sampled movement was {largest:F4}: repayment is not bounded by the " +
-            $"{capUnits:F2}-unit cap{diag}");
+            $"catch-up rate, which allows at most {maxStep:F4} " +
+            $"({1f + GameConstants.MaxCatchUpFraction:F2}x a normal {normal:F4} step){diag}");
 
         // The complement, and the reason it is asserted rather than assumed: silence the
         // server never heard about MUST still be repaid. Without this, the invariant above
-        // could be satisfied by deleting the elapsed-time step altogether — which would
-        // silently reinstate #100, and every summed-distance test would still pass because
-        // summed travel is not what the defect changes.
-        Assert.True(largest > normal * 1.5f,
-            $"largest sampled movement was {largest:F4}, no larger than a normal " +
+        // could be satisfied by deleting the repayment altogether — which would silently
+        // reinstate #100, and every summed-distance test would still pass because summed
+        // travel is not what that defect changes.
+        //
+        // The threshold is "faster than a normal step" rather than the old "half again as
+        // fast". Under a rate bound those are the same number, so the old form asserted that
+        // repayment ran at exactly its ceiling — which is true only while a debt is larger
+        // than one tick's allowance, and stops being true on the tick that clears it.
+        Assert.True(largest > normal * 1.01f,
+            $"largest sampled movement was {largest:F4}, no faster than a normal " +
             $"{normal:F4}: unheard silence is no longer being repaid at all (#100){diag}");
     }
 

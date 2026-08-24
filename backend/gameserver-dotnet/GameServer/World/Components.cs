@@ -140,6 +140,40 @@ public struct InputCursor
     /// </summary>
     public ulong HeldFromTick;
 
+    /// <summary>Base tick on which this entity's last input packet was accepted.</summary>
+    /// <remarks>
+    /// Paired with <see cref="LastInputTick"/> so the two clocks can be related: the client
+    /// tick says WHICH step an input is, this says WHEN it landed. The ratio between the two
+    /// deltas is how long one of that client's steps lasts in base ticks, which nothing else
+    /// on the server knows -- the input rate is the client's choice and is never sent.
+    /// </remarks>
+    public ulong LastInputBaseTick;
+
+    /// <summary>
+    /// Measured length of one of this client's input steps, in base ticks. Zero means "not
+    /// measured yet".
+    /// </summary>
+    public float TicksPerInput;
+
+    /// <summary>
+    /// Movement time this entity is owed, in base ticks, not yet paid out.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Accrued from the CLIENT's own input ticks, not from arrival timing. A gap in
+    /// <see cref="LastInputTick"/> states exactly how many of the client's steps were
+    /// coalesced away or lost; arrival timing cannot see them at all, because the packets
+    /// that carried them turned up in the same base tick as the one that survived.
+    /// </para>
+    /// <para>
+    /// Paid down at a bounded rate rather than discharged. Repaying in one step restores the
+    /// right distance and is wrong by every other measure: measured on a live server it
+    /// produced a 1.36-unit jump where a normal step is 0.083, which a player reads as the
+    /// avatar jumping around rather than lagging (#104).
+    /// </para>
+    /// </remarks>
+    public float OwedTicks;
+
     /// <summary>
     /// Base tick on which this entity's position was last advanced, by either path — a
     /// packet or a held step. Zero means "never moved".

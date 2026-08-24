@@ -75,8 +75,11 @@ public sealed class InputHandler
     /// <para>A first-ever move (<paramref name="lastMoveTick"/> of 0) is one tick, not the
     /// whole age of the server.</para>
     /// </summary>
-    private float StepDeltaTime(ulong baseTick, ulong lastMoveTick, ulong heldFromTick)
+    private float StepDeltaTime(ulong baseTick, ref InputCursor cursor)
     {
+        ulong lastMoveTick = cursor.LastMoveTick;
+        ulong heldFromTick = cursor.HeldFromTick;
+
         // Nothing held means the entity was STOPPED, not stalled: the last thing the client
         // said was "I am not moving", and a deadzone input clears the hold. Standing still
         // is not lost input, so a player who releases the stick, waits, and presses again is
@@ -86,9 +89,24 @@ public sealed class InputHandler
 
         if (lastMoveTick == 0 || baseTick <= lastMoveTick) return _deltaTime;
 
+        // Elapsed base ticks are owed too -- a stall is lost time exactly as a coalesced
+        // packet is -- but they are ACCRUED rather than paid here. Paying them in one step
+        // is what produced a 1.36-unit jump against a normal 0.083 step (#104).
         ulong elapsed = baseTick - lastMoveTick;
-        if (elapsed > (ulong)_maxBankedTicks) elapsed = (ulong)_maxBankedTicks;
-        return _deltaTime * elapsed;
+        if (elapsed > 1)
+        {
+            cursor.OwedTicks += elapsed - 1;
+            if (cursor.OwedTicks > _maxBankedTicks) cursor.OwedTicks = _maxBankedTicks;
+        }
+
+        float pay = 0f;
+        if (cursor.OwedTicks > 0f)
+        {
+            pay = MathF.Min(cursor.OwedTicks, GameConstants.MaxCatchUpFraction);
+            cursor.OwedTicks -= pay;
+        }
+
+        return _deltaTime * (1f + pay);
     }
 
     /// <summary>Attack cooldown length in simulation ticks at this handler's tick rate.</summary>
@@ -135,7 +153,12 @@ public sealed class InputHandler
     /// </param>
     public void ApplyHeldMovement(WorldWriter writer, ulong baseTick, int holdTicks)
     {
-        if (holdTicks <= 1) return;
+        // Single-rate servers (holdTicks <= 1) have no window to hold across, but they can
+        // still owe time: a burst of packets coalesces there exactly as it does anywhere
+        // else. The pass therefore runs, and the per-entity guard below lets only entities
+        // with a debt through -- so "one packet, one step" is unchanged for a client that
+        // is not owed anything, which is every client that is keeping up.
+        bool multiRate = holdTicks > 1;
 
         int count = writer.QueryWith<PlayerTag>(_playerHandles);
         if (count > _playerHandles.Length)
@@ -153,7 +176,21 @@ public sealed class InputHandler
             ref InputCursor cursor = ref writer.InputCursorOf(in handle);
             if (cursor.HeldFromTick == 0) continue;          // nothing held
             if (cursor.HeldFromTick == baseTick) continue;   // already stepped this tick
-            if (baseTick - cursor.HeldFromTick >= (ulong)holdTicks) continue; // expired
+            // The nominal window expires, but a DEBT keeps the entity moving until it is
+            // square. That is the whole point of carrying the debt rather than discharging
+            // it: the time is repaid by continuing to move at a bounded catch-up rate, and
+            // moving is the only thing that can repay it -- a stalled entity takes no steps,
+            // so a debt that only drained on steps would never drain at all.
+            //
+            // This does not become a coast after the player lets go. A deadzone input clears
+            // the held direction outright, and the client sends its vector unconditionally
+            // every input tick, so releasing produces an explicit zero the next tick and
+            // nothing here runs. What it does cover is the case the window was too small
+            // for: measured live, a 15Hz client's packets arrive 4.19 base ticks apart
+            // against a 4-tick window, so the average interval already overruns it.
+            bool windowExpired = !multiRate
+                                 || baseTick - cursor.HeldFromTick >= (ulong)holdTicks;
+            if (windowExpired && cursor.OwedTicks <= 0f) continue;
 
             if (writer.HealthOf(in handle).Dead) continue;
 
@@ -170,7 +207,7 @@ public sealed class InputHandler
             // model, one arithmetic, whichever path stepped the entity.
             MoveResult result = MovementSystem.TryMove(
                 in probe, cursor.HeldMoveX, cursor.HeldMoveY,
-                StepDeltaTime(baseTick, cursor.LastMoveTick, cursor.HeldFromTick), in _bounds,
+                StepDeltaTime(baseTick, ref cursor), in _bounds,
                 out Vec2 newPosition);
 
             if (result is MoveResult.Accepted or MoveResult.Clamped)
@@ -257,7 +294,41 @@ public sealed class InputHandler
         // Monotonic tick check
         ref InputCursor cursor = ref writer.InputCursorOf(self);
         if (input.Tick <= cursor.LastInputTick) return;
+
+        // Relate the two clocks, then charge for the steps that went missing.
+        //
+        // The client tick says WHICH of the client's steps this is; currentTick says when it
+        // landed. Their ratio is how long one of this client's steps lasts in base ticks --
+        // nothing else on the server knows it, because the input rate is the client's choice
+        // and never crosses the wire.
+        //
+        // A jump in the client tick is the only witness to coalesced input. Four packets
+        // arriving in one base tick become one movement step, and the three that lost are
+        // invisible to arrival timing -- they landed at the same instant as the one that
+        // won. Their client ticks say plainly that three steps happened.
+        if (cursor.LastInputTick != 0 && cursor.LastInputBaseTick != 0
+            && currentTick > cursor.LastInputBaseTick)
+        {
+            ulong clientSteps = input.Tick - cursor.LastInputTick;
+            if (clientSteps > 0)
+            {
+                float perStep = (float)(currentTick - cursor.LastInputBaseTick) / clientSteps;
+                cursor.TicksPerInput = cursor.TicksPerInput <= 0f
+                    ? perStep
+                    : (cursor.TicksPerInput * 0.8f) + (perStep * 0.2f);
+
+                // Only the steps BEYOND this one are owed: this input is about to be paid
+                // for in the normal way.
+                if (clientSteps > 1 && cursor.TicksPerInput > 0f)
+                {
+                    cursor.OwedTicks += (clientSteps - 1) * cursor.TicksPerInput;
+                    if (cursor.OwedTicks > _maxBankedTicks) cursor.OwedTicks = _maxBankedTicks;
+                }
+            }
+        }
+
         cursor.LastInputTick = input.Tick;
+        cursor.LastInputBaseTick = currentTick;
 
         // --- Movement ---
         // move_x/move_y are a DIRECTION, not a displacement: the server integrates
@@ -304,7 +375,7 @@ public sealed class InputHandler
 
             MoveResult moveResult = MovementSystem.TryMove(
                 in probe, input.MoveX, input.MoveY,
-                StepDeltaTime(currentTick, cursor.LastMoveTick, cursor.HeldFromTick), in _bounds, out Vec2 newPosition);
+                StepDeltaTime(currentTick, ref cursor), in _bounds, out Vec2 newPosition);
 
             if (moveResult is MoveResult.Accepted or MoveResult.Clamped)
             {

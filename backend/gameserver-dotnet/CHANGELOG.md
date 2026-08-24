@@ -8,6 +8,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Owed movement time is now carried and paid down at a bounded rate instead of being
+    discharged in one step (#104), and it is accrued from the client's own input ticks
+    rather than from arrival timing.** A player reported the avatar jumping around while
+    walking. The cause was the residual #104 describes: when input is coalesced or arrives
+    late the server owes the player time, and repaying it in a single step restores the
+    correct distance while being wrong by every other measure — measured against a live
+    server, a 1.36-unit step where a normal one is 0.083, sixteen times a normal step.
+    Two further measurements made this worth doing now rather than later. First, the debt
+    is not rare: against a live 60/15/5 server a 15Hz client's packets arrive **4.19 base
+    ticks apart** while the hold window was **4**, so the average interval already
+    overruns and the player stalls for the remainder of most of them — 4.500 u/s against a
+    5.000 u/s speed, a 10% shortfall that sits inside `SlowClientMovementTests`' ±20%
+    tolerance and so was invisible to the suite. Second, 10% is 0.5 units per second, which
+    is exactly `LocalMovePredictor.SmoothingThreshold`, so the predictor hard-snapped about
+    once a second, every second, while walking. The debt now accrues from gaps in the
+    client's input tick — the only witness to packets that were coalesced away, since those
+    arrived in the same base tick as the one that survived — and is paid at no more than
+    `GameConstants.MaxCatchUpFraction` of a normal step on top of each step, so distance is
+    preserved and no step is ever visibly a jump. A held direction also keeps integrating
+    while a debt remains, because moving is the only thing that can repay it. This does not
+    become a coast after the player releases: a deadzone input clears the held direction
+    outright and the client sends its vector unconditionally every input tick, which
+    `docs/API.md` already requires. `ASilentClientsRepayment_IsBoundedByTheCap` is
+    re-expressed against the catch-up rate rather than the 250ms cap — strictly tighter,
+    since the old bound admitted the 16x step this removes.
+
+### Fixed
+
 - **`docker run` itself was failing on the WSL2 vsock bridge, and one fixture failure was
   fanning out across all 11 registry tests.** Roughly one full-suite run in seven locally,
   every one of them carried the identical message —

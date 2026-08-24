@@ -69,6 +69,19 @@ namespace Shared.GameLogic.Components
         public const int MaxBankedMovementMs = 250;
 
         /// <summary>
+        /// The most a repaying step may add on top of its own movement, as a fraction of a
+        /// normal step.
+        /// </summary>
+        /// <remarks>
+        /// What turns owed time from a jump into a catch-up. At 0.5 a repaying player runs
+        /// at 1.5x their own speed until square, so the largest debt
+        /// <see cref="MaxBankedMovementMs"/> permits clears in half a second rather than in
+        /// one frame. Higher clears sooner and is more visible; lower is invisible but
+        /// leaves the predicted and authoritative positions disagreeing for longer.
+        /// </remarks>
+        public const float MaxCatchUpFraction = 0.5f;
+
+        /// <summary>
         /// <see cref="MaxBankedMovementMs"/> expressed in ticks at the given simulation
         /// rate, rounded up and never below 1.
         /// </summary>
