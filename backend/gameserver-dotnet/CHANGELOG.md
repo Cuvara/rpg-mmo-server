@@ -8,6 +8,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`SnapshotCadenceTests` — what a client actually receives, measured at a socket.** A Unity
+  client was measured decoding **13.6–13.8 snapshots per second** from a server whose own
+  counters said 15, and nothing in either repo could say which side had lost them:
+  `snapshots_sent_total` counts stagings, `snapshots_frames_written_total` counts socket
+  writes, and neither is a statement about what came out the other end.
+
+  The only way to settle it is a client that is not the client under suspicion. This is that
+  client — a plain socket, no Unity, no frame loop, reading in a tight loop — and it measures
+  **15.003/s, 60.01 base ticks/s, every tick gap exactly 4**, at one client and at two. That
+  exonerated the server and moved the investigation to the Unity read path, where the loss
+  actually is.
+
+  Kept as a test rather than deleted as a probe: the next person to see a client reporting a
+  low rate would otherwise repeat all of it, and this fails if the server ever stops emitting
+  on the world tick. It closes its own six-second window rather than reading until cancelled,
+  so it costs the suite six seconds and not the twenty-eight an unbounded probe took.
+
+
+### Added
+
 - **`gameserver_snapshots_coalesced_total`, and `snapshots.sent` now documents what it
   measures.** `snapshots_sent_total` counts snapshots **staged** on connections, not frames
   written to a socket: a gather that finds the previous one still unclaimed replaces it, and
