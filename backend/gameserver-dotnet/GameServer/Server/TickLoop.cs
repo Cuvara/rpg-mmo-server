@@ -35,6 +35,15 @@ public sealed class TickLoop
     private int _snapshotsThisTick;
 
     /// <summary>
+    /// Running total of coalesced stagings across the viewers seen on the last broadcast,
+    /// and what that broadcast added. Scratch: a viewer leaving makes the total fall, which
+    /// would read as a negative delta -- clamped at the recording site rather than here, so
+    /// the raw figure stays honest.
+    /// </summary>
+    private long _snapshotsCoalescedDelta;
+    private long _snapshotFramesWrittenDelta;
+
+    /// <summary>
     /// Scratch map (entity -> index of the newest input in this tick's drained batch).
     /// Reused across ticks so input coalescing allocates nothing in the hot path.
     /// <para>
@@ -391,15 +400,16 @@ public sealed class TickLoop
                 // Same scope: players who sent nothing this tick still advance on their
                 // held direction. Inside the input scope rather than in one of its own so
                 // the whole critical group is one write lock per base tick.
-                _handler.ApplyHeldMovement(writer, _currentTick, _rates.WorldEvery);
+                _handler.ApplyHeldMovement(writer, _currentTick);
             });
         }
-        else if (_rates.WorldEvery > 1)
+        // Runs at every rate: a client can miss a tick whatever the world rate is.
+        else
         {
             // No packets arrived at all this tick — common at 60Hz base with clients
             // sending at 10-15Hz — but held directions still have to be integrated.
             _world.UpdateComponents(writer =>
-                _handler.ApplyHeldMovement(writer, _currentTick, _rates.WorldEvery));
+                _handler.ApplyHeldMovement(writer, _currentTick));
         }
 
         // Enemy AI: spawn, move, reap — three systems in EnemyAiPhase order, sharing one
@@ -486,6 +496,17 @@ public sealed class TickLoop
             // snapshot actually sent.
             _snapshotsThisTick = _viewerCount;
 
+            // Each connection reports its own delta. Summing running totals over the
+            // tick's scratch viewers is not a delta -- see Connection.TakeSnapshotCounters.
+            _snapshotsCoalescedDelta = 0;
+            _snapshotFramesWrittenDelta = 0;
+            for (int i = 0; i < _viewerCount; i++)
+            {
+                _viewers[i].TakeSnapshotCounters(out long c, out long w);
+                _snapshotsCoalescedDelta += c;
+                _snapshotFramesWrittenDelta += w;
+            }
+
             // Released so a disconnected connection is not kept alive by the scratch
             // array until the next tick happens to overwrite that slot.
             Array.Clear(_viewers, 0, _viewerCount);
@@ -496,6 +517,8 @@ public sealed class TickLoop
         {
             _metrics.RecordProcessedInputs(inputs.Count);
             _metrics.RecordSnapshotsSent(_snapshotsThisTick);
+            _metrics.RecordSnapshotsCoalesced(_snapshotsCoalescedDelta);
+            _metrics.RecordSnapshotFramesWritten(_snapshotFramesWrittenDelta);
             _metrics.RecordTickDuration(startTimestamp, Stopwatch.GetTimestamp());
         }
     }

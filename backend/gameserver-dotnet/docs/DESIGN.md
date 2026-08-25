@@ -1516,10 +1516,23 @@ on how many input packets a client sends". That held only while the simulation r
 the client's send rate matched. At a 60 Hz base with a client sending at 10–15 Hz,
 integrating solely on packet arrival makes speed proportional to send rate. So
 `InputHandler.ApplyHeldMovement` integrates the newest held direction once per base tick
-for players who sent nothing that tick, bounded to `WorldEvery` base ticks — one world
-interval, 66 ms at 60/15 — after which the direction expires and the player coasts no
-further. With a single rate `WorldEvery` is 1, the pass returns immediately, and the old
-packet-driven model is reproduced exactly.
+for players who sent nothing that tick, bounded to `MaxBankedTicks` — 250 ms at every
+rate — after which the direction expires and the player coasts no further.
+
+The bound used to be `WorldEvery`, one world interval, and the pass was gated off entirely
+when every group ran at one rate. Both were wrong in the same way: they treated the expiry
+as a statement about the client's send rate. A 15 Hz client's packets were measured
+arriving 4.19 base ticks apart against a 4-tick window, so the average interval already
+overran it, and the single-rate configuration `staging` runs — where the pass did not run
+at all — was the worst case rather than the safe one. The expiry answers "has this client
+gone quiet", so its budget is a silence timeout.
+
+Every step is one tick, at both ends of the wire. That is what makes prediction hold: over
+any interval client and server each take one step per tick, so the distances are equal by
+construction. Recovering time lost to per-tick coalescing by growing a step — `dt =
+min(elapsed, cap)`, the shape this file specified until 2026-08-24 — restores the distance
+and destroys the agreement, because the client never took the oversized step and is snapped
+back by it.
 
 ### Replication is gated to the world rate, not the base rate
 

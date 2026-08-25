@@ -104,11 +104,19 @@ public class MultiRateSimulationTests
     }
 
     /// <summary>
-    /// The hold is bounded. A client that goes quiet coasts for at most one world interval
+    /// The hold is bounded. A client that goes quiet coasts for at most the silence timeout
     /// and then stops — it does not drift forever on a stale direction.
+    ///
+    /// <para>The bound used to be one world interval, i.e. the nominal spacing of a client
+    /// sending at the world rate. That is a guess about the client's send rate expressed as
+    /// a deadline, and it left no slack: a 15Hz client's packets were measured arriving 4.19
+    /// base ticks apart against a 4-tick window, so the average interval already overran it
+    /// and the player stalled for the remainder of most of them. What the expiry is for is
+    /// a client that stops talking without saying so, which is a question about silence, so
+    /// the budget is <see cref="GameConstants.MaxBankedMovementMs"/> of it.</para>
     /// </summary>
     [Fact]
-    public void AClientThatStopsSending_CoastsForAtMostOneWorldIntervalAndStops()
+    public void AClientThatStopsSending_CoastsForAtMostTheSilenceTimeoutAndStops()
     {
         SimulationRates rates = SimulationRates.Default;
         (TickLoop loop, EcsWorld ecs) = CreateLoop(rates);
@@ -121,8 +129,9 @@ public class MultiRateSimulationTests
 
         float travelled = ecs.GetEntity("p1")!.Value.Position.X;
 
-        // WorldEvery steps in total: the packet's own, plus the held ones up to the expiry.
-        float expected = speed * rates.WorldEvery / rates.CriticalHz;
+        // The packet's own step, plus one held step per tick out to the expiry inclusive.
+        int holdTicks = GameConstants.MaxBankedMovementTicks(rates.CriticalHz);
+        float expected = speed * (1 + holdTicks) / rates.CriticalHz;
         Assert.Equal(expected, travelled, precision: 4);
 
         // And emphatically not a whole second of travel.
@@ -154,13 +163,18 @@ public class MultiRateSimulationTests
     }
 
     /// <summary>
-    /// On a single-rate configuration the hold cannot fire at all, because a held direction
-    /// is by definition at least one tick old on any tick where it would be applied. That is
-    /// what makes this change a strict generalisation of the old model — and it is why the
-    /// byte-identity and characterization suites still pass untouched.
+    /// A single-rate server holds too. The pass used to be gated off entirely when every
+    /// group ran at one rate, on the reasoning that a client sending once per tick needs
+    /// nothing held — but a client that misses a tick needs it at any rate, and a client
+    /// whose packets clump into bursts misses several. Gating it off is what made the
+    /// single-rate configuration <c>staging</c> runs the worst case for #100 rather than
+    /// the safe one.
+    ///
+    /// <para>So the same rule applies at 15/15/5 as at 60/15/5: one step per tick out to the
+    /// silence timeout, then stop.</para>
     /// </summary>
     [Fact]
-    public void OnASingleRateServer_MovementIsStillExactlyOneStepPerPacket()
+    public void OnASingleRateServer_AHeldDirectionIsStillSteppedUntilItExpires()
     {
         (TickLoop loop, EcsWorld ecs) = CreateLoop(SimulationRates.Uniform(15));
         ecs.AddEntity(TestHelpers.CreatePlayer("p1", x: 0, y: 0));
@@ -170,7 +184,9 @@ public class MultiRateSimulationTests
         loop.TickOnce();
         for (int i = 0; i < 20; i++) loop.TickOnce(); // silence
 
-        Assert.Equal(speed / 15f, ecs.GetEntity("p1")!.Value.Position.X, precision: 5);
+        int holdTicks = GameConstants.MaxBankedMovementTicks(15);
+        Assert.Equal(speed * (1 + holdTicks) / 15f,
+            ecs.GetEntity("p1")!.Value.Position.X, precision: 5);
     }
 
     /// <summary>

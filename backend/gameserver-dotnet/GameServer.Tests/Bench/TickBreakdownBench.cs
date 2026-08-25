@@ -500,7 +500,7 @@ public sealed class TickBreakdownBench
                 bool applyMovement = rig.NewestInputIndex[pi.Handle] == i;
                 rig.Handler.ProcessInput(writer, in pi, tick, applyMovement);
             }
-            rig.Handler.ApplyHeldMovement(writer, tick, 1);
+            rig.Handler.ApplyHeldMovement(writer, tick);
         });
     }
 

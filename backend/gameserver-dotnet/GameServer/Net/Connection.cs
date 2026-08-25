@@ -147,7 +147,24 @@ public sealed class Connection : IDisposable
         {
             // Claimed jobs release their buffer, so move to the other one. An unclaimed
             // job is overwritten where it already is — nobody is reading it.
-            if (!_snapshotPending) _gatherBuffer ^= 1;
+            if (!_snapshotPending)
+            {
+                _gatherBuffer ^= 1;
+            }
+            else
+            {
+                // The write task has not claimed the previous gather yet, so this one
+                // replaces it and that tick's frame is never sent. Positionally it loses
+                // nothing -- the delta is computed against the last frame actually SENT --
+                // but the client receives one fewer snapshot than the server staged, and
+                // that is the whole of the gap between `snapshots_sent_total` (which counts
+                // stagings) and what a client measures arriving. Counted so the two can be
+                // told apart: a client seeing fewer frames than the server sent is either
+                // this, or a client that is not reading its socket, and those have opposite
+                // fixes.
+                SnapshotsCoalesced++;
+            }
+
             index = _gatherBuffer;
         }
 
@@ -216,6 +233,51 @@ public sealed class Connection : IDisposable
 
     private readonly ITransportConnection _transport;
     private readonly Stream _stream;
+    /// <summary>
+    /// Gathers that replaced a staged snapshot the write task had not claimed yet, so that
+    /// tick's frame was never sent. See <see cref="GatherSnapshotView"/>.
+    /// </summary>
+    internal long SnapshotsCoalesced { get; private set; }
+
+    /// <summary>
+    /// Snapshot frames this connection has actually written to its socket.
+    /// </summary>
+    /// <remarks>
+    /// The only figure comparable with what a client counts arriving. `snapshots.sent`
+    /// counts stagings and `snapshots.coalesced` counts the ones a later gather replaced;
+    /// neither says how many frames left the process, and a client measuring fewer frames
+    /// than the server staged could be explained by either. Measured live at 14.2/s against
+    /// 15/s staged, with coalescing at zero, this is what closes the question.
+    /// </remarks>
+    internal long SnapshotFramesWritten { get; private set; }
+
+    private long _reportedCoalesced;
+    private long _reportedFramesWritten;
+
+    /// <summary>
+    /// What this connection has coalesced and written since the last call.
+    /// </summary>
+    /// <remarks>
+    /// Deltas are taken HERE, per connection, rather than by summing the running totals of
+    /// whichever connections happen to be in the tick's scratch array. That sum is not a
+    /// delta: a connection joining or leaving moves it by that connection's whole history,
+    /// and the reading is then wrong by an unbounded amount for as long as the session
+    /// lasts. Measured, it reported 17 frames/s written while two clients were each counting
+    /// 14.4/s arriving -- a figure that cannot be true, and the kind of counter that sends
+    /// an investigation in the wrong direction.
+    /// </remarks>
+    internal void TakeSnapshotCounters(out long coalesced, out long framesWritten)
+    {
+        long c = SnapshotsCoalesced;
+        long w = SnapshotFramesWritten;
+
+        coalesced = c - _reportedCoalesced;
+        framesWritten = w - _reportedFramesWritten;
+
+        _reportedCoalesced = c;
+        _reportedFramesWritten = w;
+    }
+
     private readonly Channel<SendItem> _sendChannel;
     private readonly CancellationTokenSource _cts;
     private readonly ILogger _logger;
@@ -353,6 +415,7 @@ public sealed class Connection : IDisposable
             await foreach (var item in _sendChannel.Reader.ReadAllAsync(_cts.Token))
             {
                 Envelope? env = item.Envelope;
+                var isSnapshot = false;
 
                 if (env == null)
                 {
@@ -381,15 +444,18 @@ public sealed class Connection : IDisposable
                             _frameWriter.WriteFrame((byte)MsgType.Snapshot, snapshot);
                         await _stream.WriteAsync(pooledFrame, _cts.Token);
                         await _stream.FlushAsync(_cts.Token);
+                        SnapshotFramesWritten++;
                         continue;
                     }
 
                     env = WireProtocol.NewEnvelope(MsgType.Snapshot, snapshot, Encoding);
+                    isSnapshot = true;
                 }
 
                 byte[] frame = WireProtocol.Encode(env);
                 await _stream.WriteAsync(frame, _cts.Token);
                 await _stream.FlushAsync(_cts.Token);
+                if (isSnapshot) SnapshotFramesWritten++;
             }
         }
         catch (OperationCanceledException) { /* expected on close */ }
