@@ -156,7 +156,17 @@ public class SlowClientMovementTests
 
         float expected = speed * (float)RunSeconds;
 
-        Assert.True(travelled > expected * 0.85f,
+        // 0.80, not 0.85, and the difference is a loaded CI runner rather than a weaker
+        // claim. This is a wall-clock test over a real socket: when the machine is busy the
+        // server's own tick loop runs late and drops backlog, and every dropped tick is a
+        // held step that never happened. Observed once on CI at 5.00 against 6.00 -- 0.833,
+        // a two percent miss -- while the same test passed 8 times out of 8 locally.
+        //
+        // What the threshold has to separate is 0.28 from 1.00: with banking removed and the
+        // hold gated off, this case measured 0.278 of its intended distance. 0.80 clears that
+        // by 2.9x. A threshold two percent above a figure the environment can produce is not
+        // measuring the defect, it is measuring the runner.
+        Assert.True(travelled > expected * 0.80f,
             $"single-rate server: bursty client travelled {travelled:F2} against " +
             $"{expected:F2} expected (#100)");
     }

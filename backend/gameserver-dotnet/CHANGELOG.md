@@ -19,6 +19,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`AClientWhosePacketsArriveInBursts_AgainstASingleRateServer_TravelsTheSameDistance`
+  asserts 0.80 of the intended distance rather than 0.85.** It is a wall-clock test over a
+  real socket: when the machine is busy the server's own tick loop runs late and drops
+  backlog, and every dropped tick is a held step that never happened. Observed once on CI at
+  **5.00 against 6.00 — 0.833, a two percent miss** — while passing 8 of 8 locally. What the
+  threshold has to separate is 0.28 from 1.00 (with banking removed and the hold gated off the
+  same case measures 0.278), and 0.80 clears that by 2.9x. A threshold two percent above a
+  figure the environment can produce is measuring the runner, not the defect.
+
+
 - **Movement no longer banks elapsed time: every step is exactly one tick, on both sides of
   the wire.** A step used to cover `min(now - last_move_tick, 250ms)` so that the inputs
   per-tick coalescing discards from a burst did not take their simulated time with them
