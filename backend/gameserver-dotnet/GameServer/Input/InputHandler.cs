@@ -56,24 +56,38 @@ public sealed class InputHandler
     }
 
     /// <summary>
-    /// Ceiling on how many base ticks of elapsed time one movement step may cover, at this
-    /// handler's rate. See <see cref="GameConstants.MaxBankedMovementMs"/>.
+    /// How many base ticks a held direction keeps producing movement for after the last
+    /// packet that refreshed it, at this handler's rate.
+    ///
+    /// <para><b>The name is historical.</b> It used to be the ceiling on how much elapsed
+    /// time a single step could bank; no step banks anything now, so the same budget is
+    /// spent on the length of the coast instead. Both readings answer the one question
+    /// <see cref="GameConstants.MaxBankedMovementMs"/> exists to answer — how long may the
+    /// server keep moving a player on information it no longer has — which is why the
+    /// constant is unchanged at 250ms. Renaming it means releasing
+    /// <c>Shared.GameLogic</c> and bumping the client's manifest and lock, so it is a
+    /// separate change.</para>
     /// </summary>
     public int MaxBankedTicks => _maxBankedTicks;
 
     /// <summary>
-    /// The timestep for a movement step landing on <paramref name="baseTick"/> for an
-    /// entity that last moved on <paramref name="lastMoveTick"/>.
+    /// The timestep for a movement step landing on <paramref name="baseTick"/>. Always one
+    /// tick.
     ///
-    /// <para>This is the whole of #100's fix. A step covers the time since the entity last
-    /// moved rather than one fixed tick, so the three inputs that per-tick coalescing
-    /// discards from a burst no longer take their simulated time with them. It does not
-    /// weaken what coalescing defends: a client sending every tick always has
-    /// <c>lastMoveTick == baseTick - 1</c> and so earns exactly one tick per tick, and a
-    /// client that was silent is bounded by <see cref="MaxBankedTicks"/>.</para>
+    /// <para>It is a method rather than the constant it returns because the alternative is
+    /// what this replaced, and the difference is the whole movement model. #100 was fixed
+    /// by making a step cover the elapsed time since the entity last moved, so the inputs
+    /// per-tick coalescing discards from a burst did not take their simulated time with
+    /// them. That restored distance and broke smoothness: the recovered time arrived as one
+    /// oversized step — 1.36 units measured live where a normal step is 0.083 — which a
+    /// player reads as the avatar jumping, and which a correctly predicting client is
+    /// snapped back by, because it never took that step itself.</para>
     ///
-    /// <para>A first-ever move (<paramref name="lastMoveTick"/> of 0) is one tick, not the
-    /// whole age of the server.</para>
+    /// <para>The time is now recovered by <see cref="ApplyHeldMovement"/> stepping on every
+    /// tick of the gap instead, so there is nothing left to bank. Keeping the seam here
+    /// keeps the packet path and the held path calling one arithmetic, and keeps the
+    /// deliberate-stop case (<paramref name="heldFromTick"/> of 0) documented where it is
+    /// decided.</para>
     /// </summary>
     private float StepDeltaTime(ulong baseTick, ulong lastMoveTick, ulong heldFromTick)
     {
@@ -86,9 +100,21 @@ public sealed class InputHandler
 
         if (lastMoveTick == 0 || baseTick <= lastMoveTick) return _deltaTime;
 
-        ulong elapsed = baseTick - lastMoveTick;
-        if (elapsed > (ulong)_maxBankedTicks) elapsed = (ulong)_maxBankedTicks;
-        return _deltaTime * elapsed;
+        // ONE TICK, ALWAYS. The step never covers more than the tick it is taken on.
+        //
+        // This is the invariant the whole movement model now rests on: for any interval,
+        // both sides apply exactly one step per tick, so both travel speed x ticks and the
+        // distances are equal BY CONSTRUCTION rather than by two independent measurements
+        // of elapsed time agreeing. Network jitter shifts WHEN a step happens; it can no
+        // longer change HOW MANY there are, which is what prediction and reconciliation are
+        // built to absorb.
+        //
+        // Banking -- multiplying by the elapsed ticks to recover time that went missing --
+        // is what this replaces. It restored the right distance and was wrong by every other
+        // measure: measured on a live server, a 1.36-unit step where a normal one is 0.083,
+        // read by a player as the avatar jumping. There is nothing left to recover, because
+        // with a step on every tick nothing is missed in the first place.
+        return _deltaTime;
     }
 
     /// <summary>Attack cooldown length in simulation ticks at this handler's tick rate.</summary>
@@ -115,28 +141,22 @@ public sealed class InputHandler
     /// pass closes that gap: the newest direction is integrated once per critical tick.</para>
     ///
     /// <para><b>Why it is bounded.</b> A held direction expires
-    /// <paramref name="holdTicks"/> base ticks after it was accepted — one world interval.
-    /// A client that stops sending therefore coasts for at most that long (66ms at the
-    /// default 60/15) rather than drifting forever, and a client that sends an explicit
-    /// deadzone input stops immediately, because that clears the hold rather than
+    /// <see cref="MaxBankedTicks"/> base ticks after the last packet that refreshed it — a
+    /// silence timeout, 250ms at every rate. A client that stops sending therefore coasts
+    /// for at most that long rather than drifting forever, and a client that sends an
+    /// explicit deadzone input stops immediately, because that clears the hold rather than
     /// refreshing it.</para>
     ///
-    /// <para><b>Why it is a no-op on a single-rate server.</b> With one rate,
-    /// <paramref name="holdTicks"/> is 1, and a held direction is by definition at least one
-    /// tick old on any tick where it would be applied here — so the condition can never be
-    /// true and behaviour is exactly the pre-multi-rate model, packet for packet. That is
-    /// what lets the byte-identity and characterization tests stand unchanged.</para>
+    /// <para><b>Why it runs at every rate.</b> It used to be gated off when every group ran
+    /// at one rate, on the reasoning that a client sending once per tick needs nothing
+    /// held. A client that misses a tick needs it at any rate, and a client whose packets
+    /// clump into bursts misses several — which made the single-rate configuration
+    /// <c>staging</c> runs the worst case for #100 rather than the safe one.</para>
     /// </summary>
     /// <param name="writer">Open world write scope.</param>
     /// <param name="baseTick">The canonical base tick.</param>
-    /// <param name="holdTicks">
-    /// How many base ticks a direction stays valid for. One world interval; 1 disables the
-    /// pass entirely.
-    /// </param>
-    public void ApplyHeldMovement(WorldWriter writer, ulong baseTick, int holdTicks)
+    public void ApplyHeldMovement(WorldWriter writer, ulong baseTick)
     {
-        if (holdTicks <= 1) return;
-
         int count = writer.QueryWith<PlayerTag>(_playerHandles);
         if (count > _playerHandles.Length)
         {
@@ -153,7 +173,34 @@ public sealed class InputHandler
             ref InputCursor cursor = ref writer.InputCursorOf(in handle);
             if (cursor.HeldFromTick == 0) continue;          // nothing held
             if (cursor.HeldFromTick == baseTick) continue;   // already stepped this tick
-            if (baseTick - cursor.HeldFromTick >= (ulong)holdTicks) continue; // expired
+            // Expiry is a SILENCE TIMEOUT, not a send-rate window.
+            //
+            // The window used to be one world interval -- the nominal spacing of a client
+            // sending at the world rate -- which left no slack at all: measured live, a 15Hz
+            // client's packets arrive 4.19 base ticks apart against a 4-tick window, so the
+            // average interval already overran it and the player stalled for the remainder
+            // of most of them. Any fixed window has that problem, because it is a guess
+            // about the client's send rate expressed as a deadline.
+            //
+            // What the expiry is actually for is the case where a client stops talking
+            // without saying so, and that is a question about SILENCE, not about rate. The
+            // budget is therefore the same 250ms this handler already treats as the limit of
+            // tolerable silence.
+            //
+            // It does not become a coast after the player lets go: a deadzone input clears
+            // the held direction outright, and docs/API.md requires a client to send its
+            // vector on every input tick, so releasing produces an explicit zero the tick
+            // after. This timeout only covers packets that genuinely stopped arriving.
+            //
+            // The comparison is > rather than >=, and that boundary is load-bearing. The
+            // old banking step covered a gap of _maxBankedTicks ticks ENTIRELY, in one
+            // multiplied step; reproducing the same coverage one step at a time means
+            // stepping on gaps 1.._maxBankedTicks inclusive. With >= the last of them is
+            // dropped, and a client whose packets clump into bursts of four at 15Hz -- a
+            // 264ms idle against a 266.7ms budget -- stalls for one tick per burst and
+            // travels 5.00 units where 6.00 is owed. That is #100 reappearing at a smaller
+            // amplitude, so the bound has to be inclusive.
+            if (baseTick - cursor.HeldFromTick > (ulong)_maxBankedTicks) continue;
 
             if (writer.HealthOf(in handle).Dead) continue;
 
@@ -271,10 +318,11 @@ public sealed class InputHandler
         // never reaches the MoveResult.None branch below, HeldFromTick stays non-zero,
         // and StepDeltaTime repays the entire pause as a lurch on the first step.
         //
-        // In multi-rate mode the lurch is masked: ApplyHeldMovement integrates between
-        // packets and keeps LastMoveTick current, so the elapsed gap the resume sees is
-        // at most one tick. In single-rate mode ApplyHeldMovement is a no-op
-        // (holdTicks <= 1), so the full pause is visible and capped at MaxBankedTicks.
+        // The lurch it prevented is gone with banking, but the clear is not: HeldFromTick
+        // is what separates a player who released the stick from one whose packets stopped
+        // arriving, and only the second is coasted through. Leaving a stop unrecorded makes
+        // every deliberate pause coast for the silence timeout, which is the most common
+        // thing a player does.
         //
         // The deadzone check mirrors MovementSystem.ResolveDirection: same constant,
         // same squared-magnitude test, so the two cannot disagree on what counts as a

@@ -35,36 +35,46 @@ namespace Shared.GameLogic.Components
         public const float DisplacementTolerance = 1.05f;
 
         /// <summary>
-        /// Longest span of simulated time a single movement step may cover, in
-        /// milliseconds — the cap on how much elapsed time an input can "bank".
+        /// Longest a held movement direction keeps producing steps after the last input
+        /// that refreshed it, in milliseconds — the silence timeout.
         ///
-        /// <para>A movement step advances the entity by the time since it last moved, not
-        /// by one fixed tick, so that a burst of inputs arriving in one tick is not silently
-        /// reduced to a single tick's travel (#100). This constant bounds that: a client
-        /// that goes quiet and then sends can never claim more than this much movement in
-        /// one step, however long it was silent.</para>
+        /// <para><b>The name is historical and the value is not.</b> This used to bound how
+        /// much elapsed time one movement step could "bank": a step advanced the entity by
+        /// the time since it last moved, so that a burst of inputs coalesced into one tick
+        /// was not silently reduced to one tick of travel (#100). Banking is gone. Every
+        /// step is one tick now, and the time a burst loses is recovered by stepping on each
+        /// tick of the gap instead. The same 250ms budget therefore bounds the length of the
+        /// coast rather than the size of a step. Renaming the constant means releasing this
+        /// package and bumping the client's manifest and lock, so it is a separate
+        /// change.</para>
         ///
-        /// <para><b>Why 250ms.</b> It has to be at least one send interval of the slowest
-        /// client we support, or that client can never be made whole: a client sending at
-        /// the world rate (15Hz, so 66ms apart) whose packets clump into fours leaves a
-        /// 266ms gap between bursts, and a cap below that leaves part of every gap
-        /// permanently unpaid. Measured directly — at a 200ms cap a bursting 15Hz client
-        /// against a 15Hz server recovers to 72% of its intended distance rather than to
-        /// 100%.</para>
+        /// <para><b>Why banking went.</b> It restored the correct distance and was wrong by
+        /// every other measure. Measured against a live server it produced a 1.36-unit step
+        /// where a normal one is 0.083 — read by a player as the avatar jumping — and a
+        /// correctly predicting client was snapped back by it, because the client never took
+        /// that step itself. Distance was right and the frames were unplayable.</para>
+        ///
+        /// <para><b>Why 250ms.</b> It has to exceed the longest gap a supported client
+        /// leaves between packets, or that client stalls for the remainder of every gap: a
+        /// client sending at the world rate (15Hz, 66ms apart) whose packets clump into
+        /// fours leaves a 266ms gap between bursts, which <c>MaxBankedMovementTicks(15) = 4</c>
+        /// ticks of 66.7ms covers exactly. Measured directly — with the coast one tick
+        /// shorter than that, a bursting 15Hz client against a 15Hz server travels 5.00 units
+        /// where 6.00 is owed.</para>
         ///
         /// <para>It is deliberately close to, and slightly above, the ~200ms dead-reckoning
         /// limit the netcode model sets for bad mobile networks: both answer "how long may
-        /// the server move on information it no longer has". Banking is the safer of the
-        /// two, because the client demonstrably <i>did</i> send input covering the period —
-        /// the packets arrived, coalescing is what discarded them — whereas dead reckoning
-        /// extrapolates input that was never sent. That is the whole of the justification
-        /// for the gap between the two numbers, and it is why this one is not larger
-        /// still.</para>
+        /// the server move on information it no longer has". This one is the safer of the
+        /// two, because the client demonstrably <i>was</i> sending — the packets were
+        /// arriving until they stopped — whereas dead reckoning extrapolates input that was
+        /// never sent. That is the whole of the justification for the gap between the two
+        /// numbers, and it is why this one is not larger still.</para>
         ///
-        /// <para><b>A predicting client must apply the same cap</b>, because it is part of
-        /// the movement model rather than a server-side safety valve: a client that banks
-        /// unbounded time reconciles against a server that does not, on exactly the frames
-        /// where the network was worst.</para>
+        /// <para><b>Only lost packets are coasted through.</b> A deadzone input clears the
+        /// held direction outright, so a player who releases the stick does not drift for a
+        /// quarter second. A client must send its vector on every input tick, including the
+        /// zero on release; the server cannot otherwise tell "I stopped" from "my packets
+        /// stopped".</para>
         /// </summary>
         public const int MaxBankedMovementMs = 250;
 
