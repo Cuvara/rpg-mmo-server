@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Input ingest allocates 216 B/packet, down from a measured 768.** Every received frame
+  paid for a header array, a body array, its `Task`, and two `ParseFrom(byte[])` calls that
+  each route through a `CodedInputStream` object. Three measured steps (Release, per-op
+  deltas of `GC.GetAllocatedBytesForCurrentThread` over 20 000 frames):
+
+  | Step | B/packet |
+  |------|----------|
+  | Baseline (`DecodeAsync` + `GetPayload<InputMessage>`) | 768 |
+  | `GetPayload` parses payloads from a span | 600 |
+  | `DecodeBody` parses the outer envelope from a span | 432 |
+  | Per-connection `FrameReadBuffer` + pooled `ValueTask` read | **216** |
+
+  What remains is what must escape: the `Envelope`, its payload copy, and the
+  `InputMessage` itself. The payload copy is deliberate, not residue — envelopes outlive
+  their read-loop iteration (the transfer handler retains one in a fire-and-forget task),
+  so the payload can never point into a reused buffer. `FrameLifetimeTests` pins that
+  contract with a clobber-after-decode harness whose negative control proves it catches
+  the pooled-payload defect it exists to forbid.
+
+  Also settled while in there: the 185.3 B/tick "with inputs" residual from the previous
+  audit was the measurement harness, not the server — `TickOnce` bracketed alone with 50
+  inputs staged measures **0.0 B/tick**, and `PushInput` x50 plus drain with cached ids
+  measures 0.0 B/cycle. The tick thread allocates nothing on the input path.
+
 ### Fixed
 
 - **A connection's stream had two concurrent writers; now it has one at a time.**
@@ -44,10 +70,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   extension allocates its params array before the level check, which was ~40 B per attack
   input inside the world write lock with Debug off.
 
-  Still open, deliberately: the ingest path allocates a measured 768 B per input packet on
-  the network thread (`DecodeAsync` buffers + envelope + payload re-parse). The fix
-  (pooled read buffers) is estimated, not measured, so it is left for a change that
-  measures itself.
+  The ingest path's 768 B/packet, left open here because its fix was unmeasured, is
+  addressed by the ingest entry below — measured down to 216 B/packet.
 
 ### Added
 
