@@ -233,6 +233,23 @@ public sealed class Connection : IDisposable
 
     private readonly ITransportConnection _transport;
     private readonly Stream _stream;
+
+    /// <summary>
+    /// Serializes every writer of <see cref="_stream"/>. The write task is the normal
+    /// writer, but it is not the only one: <see cref="WriteOneAsync"/> carries the
+    /// transfer responses and the shutdown notice, and those are sent while the write
+    /// task is still live and mid-snapshot. A stream supports one concurrent writer,
+    /// not two — an interleave splices one frame into another and corrupts the
+    /// length-prefixed framing at exactly the moment a transfer or shutdown frame
+    /// goes out, which is when the client most needs a clean one.
+    /// </summary>
+    /// <remarks>
+    /// Never disposed: disposing a <see cref="SemaphoreSlim"/> with a pending
+    /// WaitAsync is undefined, teardown ordering between Close() and a parked write
+    /// task is not guaranteed, and an untouched AvailableWaitHandle means there is
+    /// no unmanaged state to free — the GC reclaims it with the connection.
+    /// </remarks>
+    private readonly SemaphoreSlim _streamWriteMutex = new(1, 1);
     /// <summary>
     /// Gathers that replaced a staged snapshot the write task had not claimed yet, so that
     /// tick's frame was never sent. See <see cref="GatherSnapshotView"/>.
@@ -442,8 +459,13 @@ public sealed class Connection : IDisposable
                         // encoding, and JsonWriter would need its own reuse story.
                         ReadOnlyMemory<byte> pooledFrame =
                             _frameWriter.WriteFrame((byte)MsgType.Snapshot, snapshot);
-                        await _stream.WriteAsync(pooledFrame, _cts.Token);
-                        await _stream.FlushAsync(_cts.Token);
+                        await _streamWriteMutex.WaitAsync(_cts.Token);
+                        try
+                        {
+                            await _stream.WriteAsync(pooledFrame, _cts.Token);
+                            await _stream.FlushAsync(_cts.Token);
+                        }
+                        finally { _streamWriteMutex.Release(); }
                         SnapshotFramesWritten++;
                         continue;
                     }
@@ -453,8 +475,13 @@ public sealed class Connection : IDisposable
                 }
 
                 byte[] frame = WireProtocol.Encode(env);
-                await _stream.WriteAsync(frame, _cts.Token);
-                await _stream.FlushAsync(_cts.Token);
+                await _streamWriteMutex.WaitAsync(_cts.Token);
+                try
+                {
+                    await _stream.WriteAsync(frame, _cts.Token);
+                    await _stream.FlushAsync(_cts.Token);
+                }
+                finally { _streamWriteMutex.Release(); }
                 if (isSnapshot) SnapshotFramesWritten++;
             }
         }
@@ -474,12 +501,22 @@ public sealed class Connection : IDisposable
         return env;
     }
 
-    /// <summary>Write a single envelope to the wire (used during handshake).</summary>
+    /// <summary>
+    /// Write a single envelope to the wire. Used during the handshake, and — the
+    /// reason it takes <see cref="_streamWriteMutex"/> — for the transfer responses
+    /// and the shutdown notice, which are written while the write task is live and
+    /// may be mid-frame on the same stream.
+    /// </summary>
     public async Task WriteOneAsync(Envelope env)
     {
         byte[] frame = WireProtocol.Encode(env);
-        await _stream.WriteAsync(frame, _cts.Token);
-        await _stream.FlushAsync(_cts.Token);
+        await _streamWriteMutex.WaitAsync(_cts.Token);
+        try
+        {
+            await _stream.WriteAsync(frame, _cts.Token);
+            await _stream.FlushAsync(_cts.Token);
+        }
+        finally { _streamWriteMutex.Release(); }
     }
 
     /// <summary>Record that a MsgPong was received, resetting the heartbeat timer.</summary>
