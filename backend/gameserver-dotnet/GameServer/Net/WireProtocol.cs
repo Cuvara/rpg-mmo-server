@@ -149,7 +149,23 @@ public static class WireProtocol
     /// Envelope carrying only field 2, leaving the type at 0. Rejecting type 0 is
     /// what turns that from a silent half-parse into an error.
     /// </remarks>
-    public static Envelope DecodeBody(byte[] body)
+    public static Envelope DecodeBody(byte[] body) => DecodeBody(body.AsSpan());
+
+    /// <inheritdoc cref="DecodeBody(byte[])"/>
+    /// <remarks>
+    /// The span form is what the read loop calls, so the frame bytes can live in a
+    /// reused buffer. <b>The returned envelope never aliases <paramref name="body"/>:</b>
+    /// both decoders copy the payload region into a fresh array before returning
+    /// (the Protobuf path via <c>ToByteArray</c>, the JSON path via <c>ToArray</c>).
+    /// That copy is required, not an oversight — the envelope escapes the read-loop
+    /// iteration (the transfer handler retains it in a fire-and-forget task), so its
+    /// payload cannot point into a buffer the next frame will overwrite.
+    /// <c>FrameLifetimeTests</c> pins this.
+    /// <para>Parsing is span-based here for the same measured reason as
+    /// <see cref="GetPayload{T}"/>: <c>ParseFrom(byte[])</c> allocates a
+    /// <c>CodedInputStream</c> — 272 vs 104 B per outer envelope, measured.</para>
+    /// </remarks>
+    public static Envelope DecodeBody(ReadOnlySpan<byte> body)
     {
         if (body.Length == 0)
             throw new IOException("Empty envelope body");
@@ -363,7 +379,7 @@ public static class WireProtocol
         return 1;
     }
 
-    private static Envelope DecodeJsonEnvelope(byte[] body)
+    private static Envelope DecodeJsonEnvelope(ReadOnlySpan<byte> body)
     {
         var reader = new Utf8JsonReader(body);
         byte type = 0;
@@ -397,7 +413,9 @@ public static class WireProtocol
                     long start = reader.TokenStartIndex;
                     reader.Skip();
                     long end = reader.BytesConsumed;
-                    payload = body.AsSpan((int)start, (int)(end - start)).ToArray();
+                    // ToArray, never a slice: the envelope may outlive the frame
+                    // buffer (see DecodeBody's span overload).
+                    payload = body.Slice((int)start, (int)(end - start)).ToArray();
                 }
             }
             else
