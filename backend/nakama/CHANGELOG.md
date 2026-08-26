@@ -5,6 +5,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **RUNBOOK: two silent leaderboard failure modes**, both found in one live
+  investigation where "the leaderboard is broken" was two deploy gaps and zero code
+  bugs: a stale `nakama.so` (module mtime predated the commit registering
+  `get_leaderboard`/`submit_kill`, so Nakama answered `RPC function not found` /
+  `Leaderboard not found` while every older RPC worked), and a game server launched
+  without `NAKAMA_URL` (it logs one `Nakama: disabled` line at startup and then skips
+  every kill submit with no further trace). The new troubleshooting rows carry the
+  exact symptoms, the mtime-vs-`git log` check, and the rebuild-with-container-stopped
+  sequence the bind-mount file lock forces on Windows/WSL hosts.
+
 ### Changed
 - **The repo-level `CLAUDE.md` listed this module as `Planned`** while `auth/` and
   `economy/` were both implemented and under test. That row is the first thing anyone
