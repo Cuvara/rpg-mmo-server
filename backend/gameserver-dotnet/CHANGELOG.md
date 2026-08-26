@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A fast rejoin no longer gets killed by its predecessor's teardown** (#229). Teardown
+  removed the user's connection by id with no identity check, so when a reconnect had
+  already replaced a half-dead connection (mobile blip; heartbeat takes up to 30s to
+  notice), the dying handler found the NEW connection under its user id, closed it, and
+  decremented `players_online` for it — the player was kicked milliseconds after a
+  successful rejoin and the gauge under-counted permanently.
+  `ConnectionManager.RemoveIfCurrent` now removes by reference identity; a superseded
+  teardown balances its own join counter and stops — no hold, no entity removal, no
+  touching the replacement. `FastRejoin_WhileOldConnectionStillOpen_KeepsTheNewConnectionAlive`
+  holds the stale socket open and proves the fresh one still answers; it fails on the
+  pre-fix code.
+
+- **A map transfer no longer tears the player down twice** (#230). The transfer handler
+  does the full teardown itself, then closing the connection ended the read loop and the
+  handler's `finally` ran the disconnect teardown again: a second `PlayerLeft` — invisible
+  with one player because the gauge clamps at zero, but with two it ate the survivor's
+  count — plus a 30s hold parked on an entity already out of the world. The connection now
+  carries a `Transferred` flag (volatile, set before `Close()` so the racing handler
+  cannot read a stale false), and the `finally` skips its teardown for a transferred
+  connection. `TransferMap_DecrementsTheGaugeOnce_AndSchedulesNoHold` pins it with a
+  second player; it fails on the pre-fix code.
+
 ### Added
 
 - **`/status` publishes attack-path counters** — `attacks_received` / `attacks_unresolved` /

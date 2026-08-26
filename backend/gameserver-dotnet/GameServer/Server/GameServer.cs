@@ -970,9 +970,16 @@ public sealed class GameServerHost : IAsyncDisposable
             // attached leaks it otherwise: nothing else ever removes an entity, so a
             // missed hold is permanent, and every leaked entity keeps being scanned by
             // AOI and diffed on every tick for the life of the process.
-            if (entityAttached)
+            // A transfer already did the whole teardown itself — entity removed,
+            // PlayerLeft recorded, connection unregistered. Running it again here is
+            // what double-decremented players_online and scheduled a hold for an
+            // entity that was no longer in the world (#230).
+            // conn can still be null here: the entity attaches a few lines before the
+            // Connection is constructed, and a throw in that gap must still tear down —
+            // that gap is exactly why this runs from the finally.
+            if (entityAttached && !(conn?.Transferred ?? false))
             {
-                OnPlayerDisconnected(userId, countedOnline);
+                OnPlayerDisconnected(userId, countedOnline, conn);
             }
             conn?.Dispose();
         }
@@ -1077,8 +1084,19 @@ public sealed class GameServerHost : IAsyncDisposable
                 holdCts.Cancel();
                 holdCts.Dispose();
             }
-            _connections.Remove(conn.UserId);
-            _world.RemoveEntity(conn.UserId);
+
+            // Marked BEFORE Close(): closing ends the read loop, which ends the
+            // connection handler, whose finally consults this flag. Set after, and the
+            // handler can race in and run the full disconnect teardown a second time —
+            // the double PlayerLeft and phantom hold of #230.
+            conn.MarkTransferred();
+
+            // By identity, not by user id: if a reconnect somehow replaced this
+            // connection mid-transfer, its registration must not be destroyed here.
+            if (_connections.RemoveIfCurrent(conn))
+            {
+                _world.RemoveEntity(conn.UserId);
+            }
             _metrics?.PlayerLeft();
             _registration?.NotifyPlayerCountChanged();
             conn.Close();
@@ -1103,14 +1121,36 @@ public sealed class GameServerHost : IAsyncDisposable
     /// An aborted join never incremented it, and decrementing anyway would corrupt the
     /// count for the players who really are online.
     /// </param>
-    private void OnPlayerDisconnected(string userId, bool countedOnline)
+    /// <param name="conn">
+    /// The connection this teardown belongs to, or null when the handler died before
+    /// constructing one. Removal is by IDENTITY, not by user id: when a reconnect has
+    /// already replaced this connection, removing by id would close the replacement —
+    /// the player got kicked milliseconds after a successful rejoin (#229).
+    /// </param>
+    private void OnPlayerDisconnected(string userId, bool countedOnline, Connection? conn)
     {
-        _connections.Remove(userId);
+        // Whether THIS connection was still the registered one. When it was not, a
+        // newer connection owns the user now: this teardown balances its own join
+        // counter and stops — no hold, no entity removal, and above all no touching
+        // the replacement's registration.
+        bool wasCurrent = conn is null
+            ? _connections.Get(userId) is null   // died pre-Connection: nothing registered for us
+            : _connections.RemoveIfCurrent(conn);
+
         if (countedOnline)
         {
+            // Balances this connection's own PlayerJoined. A superseding reconnect
+            // recorded its own join, so the gauge stays correct in both branches.
             _metrics?.PlayerLeft();
         }
         _registration?.NotifyPlayerCountChanged();
+
+        if (!wasCurrent)
+        {
+            _logger.LogInformation(
+                "Player {UserId} teardown skipped hold: superseded by a newer connection", userId);
+            return;
+        }
 
         var holdTtl = _options.Mode == "dungeon"
             ? TimeSpan.FromSeconds(60)
