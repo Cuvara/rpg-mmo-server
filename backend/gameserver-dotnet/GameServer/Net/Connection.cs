@@ -235,6 +235,14 @@ public sealed class Connection : IDisposable
     private readonly Stream _stream;
 
     /// <summary>
+    /// Reused frame scratch for every read on this connection. Safe because reads are
+    /// strictly sequential here: ReadOneAsync runs only during the handshake, before
+    /// the read loop starts, and the read loop is the single reader afterwards. The
+    /// decoded envelope never aliases it — see WireProtocol.DecodeBody's span overload.
+    /// </summary>
+    private readonly FrameReadBuffer _readScratch = new();
+
+    /// <summary>
     /// Serializes every writer of <see cref="_stream"/>. The write task is the normal
     /// writer, but it is not the only one: <see cref="WriteOneAsync"/> carries the
     /// transfer responses and the shutdown notice, and those are sent while the write
@@ -406,7 +414,7 @@ public sealed class Connection : IDisposable
         {
             while (!_cts.Token.IsCancellationRequested)
             {
-                var env = await WireProtocol.DecodeAsync(_stream, _cts.Token);
+                var env = await WireProtocol.DecodeAsync(_stream, _readScratch, _cts.Token);
                 if (env == null) break; // clean EOF
 
                 Encoding = env.Encoding;
@@ -496,7 +504,7 @@ public sealed class Connection : IDisposable
     /// <summary>Read a single envelope from the wire (used during handshake).</summary>
     public async Task<Envelope?> ReadOneAsync()
     {
-        var env = await WireProtocol.DecodeAsync(_stream, _cts.Token);
+        var env = await WireProtocol.DecodeAsync(_stream, _readScratch, _cts.Token);
         if (env != null) Encoding = env.Encoding;
         return env;
     }
