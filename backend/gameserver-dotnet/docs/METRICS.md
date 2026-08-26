@@ -46,6 +46,12 @@ human inspection and for the Unity DOTS sample, which polls it.
   "capacity": 100,
   "entities": 34,
   "enemies_alive": 22,
+  "attacks_received": 4210,
+  "attacks_unresolved": 12,
+  "attacks_rejected": 3980,
+  "attacks_accepted": 218,
+  "attack_kills": 61,
+  "last_attack_rejection": "target out of range: distance 7.41 exceeds 3.00",
   "redis": "connected",
   "postgres": "connected",
   "uptime_seconds": 12105
@@ -68,6 +74,8 @@ so it reported the compiled-in default of 15 on servers whose prediction rate wa
 | `sim_world_hz` | World-group Hz — AI, spawning, **and the snapshot broadcast cadence**. This, not `tick_rate`, is what a client's interpolation buffer is sized against and what governs bandwidth per client |
 | `sim_background_hz` | Background-group Hz |
 | `capacity` | The admission limit (`GAMESERVER_CAPACITY`) this server enforces and publishes into the registry |
+| `attacks_received` / `attacks_unresolved` / `attacks_rejected` / `attacks_accepted` / `attack_kills` | Attack-path counters since process start. Every input carrying an attack target lands in exactly one of *unresolved* (target id no longer resolves — despawned or bogus), *rejected* (refused by `CombatLogic.ValidateAttack`: range, cooldown, dead attacker or target), or *accepted* (dealt damage); `attack_kills` counts accepted attacks that killed. These exist because a rejected attack is dropped with a Debug-level log on servers running at Information — without the counters, a client attacking out of range is indistinguishable from a client not attacking at all, which is precisely the ambiguity that stalled a live zero-kills investigation |
+| `last_attack_rejection` | Verbatim reason of the most recent rejection (e.g. `target out of range: distance 7.41 exceeds 3.00`), `null` until something is rejected. One string, most-recent-wins — a breadcrumb naming *why* attacks are being refused, not a log |
 | `uptime_seconds` | Seconds since process start on a **monotonic** clock (`Stopwatch`), not wall time — see below |
 
 ### Do not compute a rate — read `achieved_tick_hz`

@@ -23,6 +23,49 @@ public sealed class InputHandler
     private readonly int _cooldownTicks;
     private readonly int _maxBankedTicks;
 
+    /// <summary>
+    /// Running counters for the attack path, exposed on <c>/status</c>.
+    ///
+    /// <para><b>Why these exist:</b> a rejected attack is dropped with a Debug-level log on a
+    /// server that runs at Information, so from the outside a client attacking out of range is
+    /// indistinguishable from a client not attacking at all. That exact ambiguity cost a live
+    /// investigation: zero leaderboard kills over minutes, with no way to tell whether attacks
+    /// were not arriving, arriving and failing to resolve, or arriving and being rejected.
+    /// The counters split those three cases without turning on Debug logging.</para>
+    ///
+    /// <para><b>Threading:</b> written only from the tick thread (input processing runs inside
+    /// the world write lock); read without synchronisation by the status endpoint. Reads are
+    /// diagnostics — a torn read on a 64-bit field cannot happen on the 64-bit targets this
+    /// server ships for, and staleness by a tick is irrelevant here.</para>
+    /// </summary>
+    public sealed class AttackTelemetry
+    {
+        /// <summary>Inputs that carried a non-empty attack target id.</summary>
+        public long Received;
+
+        /// <summary>Attacks whose target id did not resolve to a live entity (despawned, bogus, or already reaped).</summary>
+        public long Unresolved;
+
+        /// <summary>Attacks refused by <see cref="CombatLogic.ValidateAttack"/> (range, cooldown, dead attacker/target…).</summary>
+        public long Rejected;
+
+        /// <summary>Attacks that dealt damage.</summary>
+        public long Accepted;
+
+        /// <summary>Accepted attacks that killed their target.</summary>
+        public long Kills;
+
+        /// <summary>
+        /// The reason string of the most recent rejection, verbatim from
+        /// <see cref="CombatLogic.ValidateAttack"/>. The validator already allocated it to
+        /// return it, so keeping the reference costs nothing on the hot path.
+        /// </summary>
+        public string? LastRejection;
+    }
+
+    /// <summary>Attack-path counters. See <see cref="AttackTelemetry"/> for the contract.</summary>
+    public AttackTelemetry Attacks { get; } = new();
+
     /// <summary>Fixed simulation timestep in seconds used for movement integration.</summary>
     public float DeltaTime => _deltaTime;
 
@@ -399,8 +442,13 @@ public sealed class InputHandler
             {
                 _logger.LogDebug("Attack input from {UserId} targeting {TargetId}", userId, input.AttackTargetId);
             }
+            Attacks.Received++;
             EntityHandle target = writer.Resolve(input.AttackTargetId);
-            if (target.IsValid)
+            if (!target.IsValid)
+            {
+                Attacks.Unresolved++;
+            }
+            else
             {
                 // Composed after movement, so the range check sees this tick's position —
                 // the same ordering the get/set form had.
@@ -413,6 +461,7 @@ public sealed class InputHandler
                 string? attackErr = CombatLogic.ValidateAttack(in attacker, in t, currentTick);
                 if (attackErr == null)
                 {
+                    Attacks.Accepted++;
                     int damage = CombatLogic.CalculateDamage(in attacker, in t);
                     t.Hp -= damage;
 
@@ -422,6 +471,7 @@ public sealed class InputHandler
 
                     if (CombatLogic.HandleDeath(ref t))
                     {
+                        Attacks.Kills++;
                         _logger.LogInformation("Entity {VictimId} killed by {KillerId}",
                             t.Id, attacker.Id);
                         _onDeath?.Invoke(t, attacker);
@@ -443,6 +493,8 @@ public sealed class InputHandler
                 }
                 else
                 {
+                    Attacks.Rejected++;
+                    Attacks.LastRejection = attackErr;
                     // Guarded like the attack log above: no allocation with Debug off.
                     if (_logger.IsEnabled(LogLevel.Debug))
                     {

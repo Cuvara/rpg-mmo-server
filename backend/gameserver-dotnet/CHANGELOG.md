@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`/status` publishes attack-path counters** — `attacks_received` / `attacks_unresolved` /
+  `attacks_rejected` / `attacks_accepted` / `attack_kills`, plus `last_attack_rejection`
+  carrying the validator's verbatim reason for the most recent refusal. A rejected attack is
+  dropped with a Debug-level log on servers running at Information, so from the outside a
+  client attacking out of range was indistinguishable from a client not attacking at all —
+  the exact ambiguity that stalled a live zero-leaderboard-kills investigation, where nothing
+  could say whether attacks were not arriving, not resolving, or being refused, and the only
+  alternative was restarting the server at Debug. Counters are single-writer on the tick
+  thread and read unsynchronised by the status endpoint (torn 64-bit reads cannot occur on
+  the shipped targets); the rejection breadcrumb reuses the string `ValidateAttack` already
+  allocated, so the hot path pays nothing new. `AttackTelemetryTests` pins the
+  classification: every attack input lands in exactly one bucket, kills count only on death,
+  and a moving input with no target touches nothing. Documented in `docs/METRICS.md`.
+
 ### Changed
 
 - **Input ingest allocates 216 B/packet, down from a measured 768.** Every received frame

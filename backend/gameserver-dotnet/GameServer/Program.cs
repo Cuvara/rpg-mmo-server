@@ -568,6 +568,12 @@ metricsEndpoint?.SetStatusProvider(() =>
         Capacity = capacity,
         Entities = server.EntityCount,
         EnemiesAlive = server.EnemiesAlive,
+        AttacksReceived = server.AttackStats.Received,
+        AttacksUnresolved = server.AttackStats.Unresolved,
+        AttacksRejected = server.AttackStats.Rejected,
+        AttacksAccepted = server.AttackStats.Accepted,
+        AttackKills = server.AttackStats.Kills,
+        LastAttackRejection = server.AttackStats.LastRejection,
         Redis = serverRegistry != null ? "connected" : "disconnected",
         Postgres = postgresStore != null ? "connected" : "disconnected",
         UptimeSeconds = (long)uptime.Elapsed.TotalSeconds

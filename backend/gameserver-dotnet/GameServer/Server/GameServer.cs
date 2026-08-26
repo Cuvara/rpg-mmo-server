@@ -300,6 +300,12 @@ public sealed class GameServerHost : IAsyncDisposable
     /// </summary>
     public int EnemiesAlive => _options.StatusEntityCount?.Invoke(_world) ?? 0;
 
+    /// <summary>
+    /// Attack-path counters for <c>/status</c>. Single-writer (tick thread), read
+    /// without synchronisation — see <see cref="Input.InputHandler.AttackTelemetry"/>.
+    /// </summary>
+    public Input.InputHandler.AttackTelemetry AttackStats => _inputHandler.Attacks;
+
     public GameServerHost(ServerOptions options)
     {
         _options = options;
