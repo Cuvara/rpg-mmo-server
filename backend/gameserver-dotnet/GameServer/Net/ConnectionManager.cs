@@ -75,6 +75,34 @@ public sealed class ConnectionManager
         }
     }
 
+    /// <summary>
+    /// Remove and close <paramref name="conn"/> only if it is still the connection
+    /// registered for its user. Returns whether it was.
+    /// </summary>
+    /// <remarks>
+    /// The identity check is the whole point. Teardown used to remove by user id
+    /// alone, so when <see cref="Add"/> had already replaced a half-dead connection
+    /// with a fresh reconnect, the dying handler's teardown found the NEW connection
+    /// under its user id and closed it — the player was kicked milliseconds after a
+    /// successful rejoin, and <c>players_online</c> under-counted permanently (#229).
+    /// A teardown may only ever destroy the connection it belongs to.
+    /// </remarks>
+    public bool RemoveIfCurrent(Connection conn)
+    {
+        lock (_mutateLock)
+        {
+            if (!_connections.TryGetValue(conn.UserId, out var current) ||
+                !ReferenceEquals(current, conn))
+            {
+                return false;
+            }
+            _connections.TryRemove(conn.UserId, out _);
+            conn.Close();
+            RebuildSnapshotLocked();
+            return true;
+        }
+    }
+
     /// <summary>Look up a connection by user ID.</summary>
     public Connection? Get(string userId)
     {

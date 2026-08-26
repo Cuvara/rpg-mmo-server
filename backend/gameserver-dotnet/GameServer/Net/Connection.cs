@@ -50,6 +50,24 @@ public sealed class Connection : IDisposable
     public GameServer.Snapshot.SnapshotDeltaState DeltaState { get; }
 
     /// <summary>
+    /// Set by the map-transfer handler after it has done the full teardown itself
+    /// (entity removed, <c>PlayerLeft</c> recorded, connection unregistered). The
+    /// connection handler's <c>finally</c> checks this and skips its own teardown —
+    /// without the flag every successful transfer decremented <c>players_online</c>
+    /// twice and scheduled a 30s hold for an entity that was no longer in the world.
+    /// </summary>
+    /// <remarks>
+    /// <b>volatile</b> for the same reason as <see cref="Encoding"/>: written by the
+    /// transfer task, read by the connection-handler task after the read loop exits —
+    /// different threads, and a stale <c>false</c> re-creates the double teardown.
+    /// </remarks>
+    public bool Transferred => _transferred;
+    private volatile bool _transferred;
+
+    /// <summary>Mark this connection as torn down by a map transfer. One-way.</summary>
+    public void MarkTransferred() => _transferred = true;
+
+    /// <summary>
     /// Wire encoding this connection speaks, latched from the first frame decoded
     /// on it and used for every reply.
     /// </summary>
