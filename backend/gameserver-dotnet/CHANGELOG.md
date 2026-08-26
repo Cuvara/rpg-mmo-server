@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`SnapshotMerger.EntityMap` — the entity map as its concrete `Dictionary`, released as
+  `Shared.GameLogic` `sgl-v0.3.0`.** A `foreach` over the `IReadOnlyDictionary` interface
+  boxes the dictionary's struct enumerator — one 88-byte heap object per enumeration,
+  measured with `GC.GetAllocatedBytesForCurrentThread`. The Unity client's view binder
+  enumerates this map once per rendered frame, which at 300–1000 fps made it the **only
+  per-frame allocation left in that path** (~44 KB/s at 500 fps, into Unity's stop-the-world
+  GC); enumerating the concrete type measures 0 B and is ~20 % faster at 100 entities
+  (4,865 → 3,864 ns), the interface dispatch on `MoveNext`/`Current` going with the box.
+  Read-only by contract; only the merger writes it. Additive, so a minor version bump.
+
+
+### Added
+
 - **`SnapshotCadenceTests` — what a client actually receives, measured at a socket.** A Unity
   client was measured decoding **13.6–13.8 snapshots per second** from a server whose own
   counters said 15, and nothing in either repo could say which side had lost them:
