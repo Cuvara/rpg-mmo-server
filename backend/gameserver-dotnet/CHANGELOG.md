@@ -6,6 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A connection's stream had two concurrent writers; now it has one at a time.**
+  `WriteOneAsync` is not handshake-only — the transfer responses and the shutdown
+  `Disconnect` notice go through it while the connection's write task is live and possibly
+  mid-snapshot on the same stream. A stream supports one concurrent writer, so those writes
+  could interleave with a snapshot frame and corrupt the length-prefixed framing at exactly
+  the moment a transfer or shutdown frame must arrive intact. A per-connection
+  `SemaphoreSlim` now serializes every stream writer; the uncontended wait is a CAS, and the
+  snapshot path's allocation profile is unchanged (32 B/snapshot before and after).
+
+  For the record, the send channel was never the hazard for control frames: kick, transfer
+  and disconnect bypass it entirely, so `DropOldest` cannot drop them — only Ping/Pong ride
+  the channel besides snapshot markers.
+
+### Changed
+
+- **The tick thread now allocates zero bytes per tick; the AOI scan is ~2x faster.** An
+  allocation audit (per-tick deltas of `GC.GetAllocatedBytesForCurrentThread`, Release,
+  50 players, 15 Hz uniform so every tick broadcasts) found the tick thread allocating a
+  deterministic 160.0 B/tick against a module contract of zero, and the AOI compose paying
+  seven `GetSpan` lookups per matching entity. Three changes, each measured before and after
+  on the same rig:
+
+  | Path | Before | After |
+  |------|--------|-------|
+  | Tick thread, no inputs (closure + `CopyTo` enumerator) | 160.0 B/tick | **0.0 B/tick** |
+  | — `TickOnce` write-scope closures | ~104 B/tick | 0 (static lambdas via the `UpdateComponents` state overload) |
+  | — `ConnectionManager.CopyTo` (`ConcurrentDictionary` enumerator) | 64.0 B/call | 0 (copy-on-write snapshot array, rebuilt on join/leave) |
+  | AOI scan, 200 entities / 20 matches | 3.3–9.1 µs/scan | **1.65–3.68 µs/scan** (spans hoisted per chunk in `ScanRangeLocked`) |
+  | Snapshot encode + frame, 50 entities (unchanged, for reference) | 32.0 B/snapshot | 32.0 B/snapshot |
+
+  The scan win scales with viewers × entities — the gather is 77–83% of a 200-viewer tick —
+  so it is invisible at 2 players and largest where the tick binds. The debug logs in
+  `InputHandler.ProcessInput` are also behind `IsEnabled` guards now: the `LogDebug`
+  extension allocates its params array before the level check, which was ~40 B per attack
+  input inside the world write lock with Debug off.
+
+  Still open, deliberately: the ingest path allocates a measured 768 B per input packet on
+  the network thread (`DecodeAsync` buffers + envelope + payload re-parse). The fix
+  (pooled read buffers) is estimated, not measured, so it is left for a change that
+  measures itself.
+
 ### Added
 
 - **`SnapshotMerger.EntityMap` — the entity map as its concrete `Dictionary`, released as

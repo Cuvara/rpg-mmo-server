@@ -479,6 +479,19 @@ public sealed class EcsWorld : IDisposable
         foreach (ref var chunk in _allEntitiesQuery.GetChunkIterator())
         {
             var positions = chunk.GetSpan<Position>();
+            // Hoisted once per chunk rather than fetched per match. Composing through
+            // ComposeFromChunk did seven GetSpan lookups per matching entity, and the
+            // scan's cost is composing matches, not the distance tests (BENCHMARK.md
+            // Part V): an A/B at 200 entities / 20 matches measured the per-match form
+            // at 3.3-9.1 us/scan against 2.2-2.9 us/scan for this one — at least 1.5x,
+            // reproducibly. The gather is 77-83% of a 200-viewer tick, so the per-match
+            // lookups were the dominant cost of the tick's dominant phase.
+            var ids = chunk.GetSpan<EntityIdRef>();
+            var kinds = chunk.GetSpan<EntityKind>();
+            var healths = chunk.GetSpan<Health>();
+            var combats = chunk.GetSpan<Combat>();
+            var locomotions = chunk.GetSpan<Locomotion>();
+            var cursors = chunk.GetSpan<InputCursor>();
             int count = chunk.Count;
             for (int i = 0; i < count; i++)
             {
@@ -486,13 +499,24 @@ public sealed class EcsWorld : IDisposable
                 // client predicts with, not a second copy of it here.
                 if (Vec2.DistanceSq(center, positions[i].Value) > radiusSq) continue;
 
-                if (sink != null)
+                if (sink != null || matches < destination.Length)
                 {
-                    sink.Add(ComposeFromChunk(ref chunk, i));
-                }
-                else if (matches < destination.Length)
-                {
-                    destination[matches] = ComposeFromChunk(ref chunk, i);
+                    var composed = new EntityState
+                    {
+                        Id = ids[i].Value,
+                        Type = kinds[i].Value,
+                        Position = positions[i].Value,
+                        Hp = healths[i].Hp,
+                        MaxHp = healths[i].MaxHp,
+                        Dead = healths[i].Dead,
+                        Attack = combats[i].Attack,
+                        Defense = combats[i].Defense,
+                        CooldownUntilTick = combats[i].CooldownUntilTick,
+                        Speed = locomotions[i].Speed,
+                        LastInputTick = cursors[i].LastInputTick,
+                    };
+                    if (sink != null) sink.Add(composed);
+                    else destination[matches] = composed;
                 }
 
                 matches++;

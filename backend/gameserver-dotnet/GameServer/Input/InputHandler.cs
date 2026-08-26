@@ -378,15 +378,27 @@ public sealed class InputHandler
             else if (moveResult == MoveResult.Rejected)
             {
                 // Grossly invalid vector (NaN/inf/oversized): log and drop, never throw.
-                _logger.LogDebug("Dropped invalid move from {UserId}: ({MoveX}, {MoveY})",
-                    userId, input.MoveX, input.MoveY);
+                // Guarded like the attack log below: no allocation with Debug off.
+                if (_logger.IsEnabled(LogLevel.Debug))
+                {
+                    _logger.LogDebug("Dropped invalid move from {UserId}: ({MoveX}, {MoveY})",
+                        userId, input.MoveX, input.MoveY);
+                }
             }
         }
 
         // --- Attack ---
         if (!string.IsNullOrEmpty(input.AttackTargetId))
         {
-            _logger.LogDebug("Attack input from {UserId} targeting {TargetId}", userId, input.AttackTargetId);
+            // IsEnabled guard: the LogDebug extension allocates its params array
+            // before the level check, so an unguarded call here allocates once per
+            // attack input inside the world write lock even with Debug off. Input
+            // processing is a no-allocation hot path; the guard makes the disabled
+            // case free.
+            if (_logger.IsEnabled(LogLevel.Debug))
+            {
+                _logger.LogDebug("Attack input from {UserId} targeting {TargetId}", userId, input.AttackTargetId);
+            }
             EntityHandle target = writer.Resolve(input.AttackTargetId);
             if (target.IsValid)
             {
@@ -431,7 +443,11 @@ public sealed class InputHandler
                 }
                 else
                 {
-                    _logger.LogDebug("Invalid attack from {UserId}: {Error}", userId, attackErr);
+                    // Guarded like the attack log above: no allocation with Debug off.
+                    if (_logger.IsEnabled(LogLevel.Debug))
+                    {
+                        _logger.LogDebug("Invalid attack from {UserId}: {Error}", userId, attackErr);
+                    }
                 }
             }
         }
