@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Scaffolding enemies die in two hits (HP 30 → 16).** The demo combat loop could not
+  complete: a radial enemy at speed 2.5 crosses the 3.0 attack range in at most 2.4 s,
+  which at the 500 ms attack cooldown is 3-4 accepted hits — 24-32 damage against 30 HP,
+  so a kill required near-perfect radial alignment. The new `/status` counters measured
+  it live: **291 accepted hits in six minutes, zero kills.** 16 HP dies to two 8-damage
+  hits, which any pass through range produces; the kill → reward → leaderboard chain is
+  now exercised by ordinary play instead of by luck. The characterization test's
+  deliberately-duplicated constant was updated consciously with the same arithmetic.
+
 ### Fixed
 
 - **A fast rejoin no longer gets killed by its predecessor's teardown** (#229). Teardown
