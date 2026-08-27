@@ -109,10 +109,10 @@ public sealed class Connection : IDisposable
     /// task. The handover itself is the only shared state and is under
     /// <see cref="_snapshotLock"/>.</para>
     /// </summary>
-    private readonly Shared.GameLogic.Components.EntityState[][] _aoiBuffers =
+    private readonly GameServer.World.EntityView[][] _aoiBuffers =
     {
-        Array.Empty<Shared.GameLogic.Components.EntityState>(),
-        Array.Empty<Shared.GameLogic.Components.EntityState>(),
+        Array.Empty<GameServer.World.EntityView>(),
+        Array.Empty<GameServer.World.EntityView>(),
     };
 
     private readonly object _snapshotLock = new();
@@ -189,7 +189,7 @@ public sealed class Connection : IDisposable
         int count = reader.GetEntitiesInRange(anchor, radius, _aoiBuffers[index]);
         if (count > _aoiBuffers[index].Length)
         {
-            _aoiBuffers[index] = new Shared.GameLogic.Components.EntityState[count];
+            _aoiBuffers[index] = new GameServer.World.EntityView[count];
             count = reader.GetEntitiesInRange(anchor, radius, _aoiBuffers[index]);
         }
 
@@ -219,14 +219,14 @@ public sealed class Connection : IDisposable
     /// Returns false for a surplus marker, which is normal and harmless.
     /// </summary>
     private bool TakePendingSnapshot(
-        out Shared.GameLogic.Components.EntityState[] buffer, out int count,
+        out GameServer.World.EntityView[] buffer, out int count,
         out ulong tick, out ulong ackTick, out int keyframeInterval)
     {
         lock (_snapshotLock)
         {
             if (!_snapshotPending)
             {
-                buffer = Array.Empty<Shared.GameLogic.Components.EntityState>();
+                buffer = Array.Empty<GameServer.World.EntityView>();
                 count = 0; tick = 0; ackTick = 0; keyframeInterval = 0;
                 return false;
             }

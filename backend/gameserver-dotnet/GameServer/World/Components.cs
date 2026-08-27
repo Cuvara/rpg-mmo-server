@@ -39,7 +39,28 @@ public struct EntityIdRef
     /// <summary>Entity identifier; for players this is the user id.</summary>
     public string Value;
 
+    /// <summary>
+    /// World-stable integer key for <see cref="Value"/>, assigned by
+    /// <see cref="EcsWorld"/> the first time an id string enters the world and
+    /// <b>never reused or reassigned</b> — a despawn/respawn of the same id gets the
+    /// same key, so keying on it is semantically identical to keying on the string.
+    /// <para>
+    /// This is the first step of ADR-10's string→handle migration, taken at its
+    /// highest-leverage call site: <c>SnapshotDeltaState</c> keys its per-connection
+    /// delta maps on this instead of hashing the id string 2-3 times per visible
+    /// entity per viewer per tick (issue #237). It is server-side bookkeeping only;
+    /// nothing on the wire changes.
+    /// </para>
+    /// </summary>
+    public int Stable;
+
     public EntityIdRef(string value) => Value = value;
+
+    public EntityIdRef(string value, int stable)
+    {
+        Value = value;
+        Stable = stable;
+    }
 }
 
 /// <summary>

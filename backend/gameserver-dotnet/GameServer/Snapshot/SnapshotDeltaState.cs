@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using GameServer.Net;
+using GameServer.World;
 using Shared.GameLogic.Components;
 using RpgMmo.Wire.V1;
 
@@ -30,6 +31,13 @@ public sealed class SnapshotDeltaState
     /// <summary>Visible fields of one entity as last sent to this client.</summary>
     private readonly struct SentView : IEquatable<SentView>
     {
+        /// <summary>
+        /// The entity's id string. NOT part of equality — the map key (the stable int)
+        /// already fixes it. Carried so a delta can name the entity in its despawn
+        /// list after the entity has left the AOI and there is no view to read it from.
+        /// </summary>
+        public readonly string Id;
+
         public readonly string Type;
         public readonly float X;
         public readonly float Y;
@@ -37,8 +45,9 @@ public sealed class SnapshotDeltaState
         public readonly int MaxHp;
         public readonly float Speed;
 
-        public SentView(in EntityState e)
+        public SentView(in EntityView e)
         {
+            Id = e.Id;
             Type = e.Type;
             X = e.Position.X;
             Y = e.Position.Y;
@@ -69,7 +78,10 @@ public sealed class SnapshotDeltaState
     }
 
     /// <summary>
-    /// Entity id to the per-connection handle currently standing in for it.
+    /// Entity key (the world-stable int standing in for the id string — see
+    /// <see cref="EntityView.Key"/>) to the per-connection wire handle currently
+    /// standing in for it. The wire handle space is unchanged; only this map's key
+    /// type moved off strings (issue #237: ~1.2M string hashes/s at 200 players).
     /// </summary>
     /// <remarks>
     /// Reset at every keyframe, in lockstep with <see cref="_lastSent"/> — the
@@ -78,7 +90,7 @@ public sealed class SnapshotDeltaState
     /// a disagreement: whatever the client believes, a keyframe re-introduces
     /// every binding and repairs it within one interval.
     /// </remarks>
-    private readonly Dictionary<string, uint> _handles = new(StringComparer.Ordinal);
+    private readonly Dictionary<int, uint> _handles = new();
 
     /// <summary>
     /// Next handle to hand out. Starts at 1 because 0 means "not interned" on
@@ -118,8 +130,24 @@ public sealed class SnapshotDeltaState
     private readonly List<EntitySnapshot> _pool = new();
     private int _poolUsed;
 
-    private readonly Dictionary<string, SentView> _lastSent = new();
-    private readonly HashSet<string> _seen = new(StringComparer.Ordinal);
+    private readonly Dictionary<int, SentView> _lastSent = new();
+    private readonly HashSet<int> _seen = new();
+
+    /// <summary>Scratch for the keys a delta despawns, reused so removal allocates nothing.</summary>
+    private readonly List<int> _removedKeys = new();
+
+    /// <summary>
+    /// Per-connection key assignment for the legacy <see cref="EntityState"/> entry
+    /// points, which carry no world-stable key. Same id string, same key, never
+    /// reused — the exact property string keying had. Keys are negative so they can
+    /// never collide with the world's positive stable keys if both entry points are
+    /// ever used on one instance.
+    /// </summary>
+    private readonly Dictionary<string, int> _legacyKeys = new(StringComparer.Ordinal);
+    private int _nextLegacyKey;
+
+    /// <summary>Reused conversion buffer for the legacy entry points.</summary>
+    private EntityView[] _legacyViews = Array.Empty<EntityView>();
     private int _sinceKeyframe;
     private int _forceFull = 1; // first snapshot on a connection is always a keyframe
 
@@ -202,12 +230,41 @@ public sealed class SnapshotDeltaState
 
     /// <inheritdoc cref="Encode(ulong, ulong, List{EntityState}, int, bool)"/>
     /// <remarks>
-    /// The span form is what the tick loop calls: the AOI walk fills a buffer the
-    /// connection owns and reuses, so nothing here needs a list to exist. The list
-    /// overload above forwards to this one — one implementation, so the delta/keyframe
-    /// bookkeeping cannot diverge between the two entry points.
+    /// Legacy <see cref="EntityState"/> entry point, kept for callers (and tests)
+    /// that still gather full states. It adapts each state to an
+    /// <see cref="EntityView"/> — assigning per-connection negative keys, one string
+    /// hash per entity, exactly what the string-keyed maps used to pay — and forwards
+    /// to the view core below. One implementation, so the delta/keyframe bookkeeping
+    /// cannot diverge between the entry points.
     /// </remarks>
     public SnapshotMessage Encode(ulong tick, ulong ackTick, ReadOnlySpan<EntityState> nearby, int keyframeInterval,
+        bool intern = false)
+    {
+        if (_legacyViews.Length < nearby.Length) _legacyViews = new EntityView[nearby.Length];
+        for (int i = 0; i < nearby.Length; i++)
+        {
+            ref readonly EntityState e = ref nearby[i];
+            if (!_legacyKeys.TryGetValue(e.Id, out int key))
+            {
+                key = --_nextLegacyKey;
+                _legacyKeys[e.Id] = key;
+            }
+            _legacyViews[i] = new EntityView(key, e.Id, e.Type, e.Position, e.Hp, e.MaxHp, e.Speed);
+        }
+        return Encode(tick, ackTick, _legacyViews.AsSpan(0, nearby.Length), keyframeInterval, intern);
+    }
+
+    /// <inheritdoc cref="Encode(ulong, ulong, List{EntityState}, int, bool)"/>
+    /// <remarks>
+    /// The view form is what the write task calls (issue #237): the AOI walk fills a
+    /// connection-owned <see cref="EntityView"/> buffer — the trimmed 7-field compose —
+    /// and the delta maps key on <see cref="EntityView.Key"/> instead of hashing the
+    /// id string 2-3 times per visible entity. Wire output is byte-identical to the
+    /// string-keyed encoder (proved by <c>TrimmedGatherByteIdentityTests</c>): the
+    /// key never reaches the wire and key↔id is a bijection, so every branch taken
+    /// here is the branch the string-keyed code took.
+    /// </remarks>
+    public SnapshotMessage Encode(ulong tick, ulong ackTick, ReadOnlySpan<EntityView> nearby, int keyframeInterval,
         bool intern = false)
     {
         _intern = intern;
@@ -291,7 +348,7 @@ public sealed class SnapshotDeltaState
         return e;
     }
 
-    private SnapshotMessage EncodeFull(ulong tick, ulong ackTick, ReadOnlySpan<EntityState> nearby)
+    private SnapshotMessage EncodeFull(ulong tick, ulong ackTick, ReadOnlySpan<EntityView> nearby)
     {
         var msg = BeginMessage(tick, ackTick, full: true);
         _lastSent.Clear();
@@ -303,47 +360,58 @@ public sealed class SnapshotDeltaState
         // Indexed for-loop, no LINQ, no enumerator boxing: this runs once per client per tick.
         for (int i = 0; i < nearby.Length; i++)
         {
-            var e = nearby[i];
+            ref readonly EntityView e = ref nearby[i];
             msg.Entities.Add(ToMsg(in e));
-            _lastSent[e.Id] = new SentView(in e);
+            _lastSent[e.Key] = new SentView(in e);
         }
 
         return msg;
     }
 
-    private SnapshotMessage EncodeDelta(ulong tick, ulong ackTick, ReadOnlySpan<EntityState> nearby)
+    private SnapshotMessage EncodeDelta(ulong tick, ulong ackTick, ReadOnlySpan<EntityView> nearby)
     {
         _seen.Clear();
         var msg = BeginMessage(tick, ackTick, full: false);
 
         for (int i = 0; i < nearby.Length; i++)
         {
-            var e = nearby[i];
-            _seen.Add(e.Id);
+            ref readonly EntityView e = ref nearby[i];
+            _seen.Add(e.Key);
 
             var view = new SentView(in e);
-            if (_lastSent.TryGetValue(e.Id, out var prev) && prev.Equals(view))
+            if (_lastSent.TryGetValue(e.Key, out var prev) && prev.Equals(view))
                 continue; // unchanged since last send -> omit
 
             msg.Entities.Add(ToMsg(in e));
-            _lastSent[e.Id] = view;
+            _lastSent[e.Key] = view;
         }
 
         // Anything previously sent but no longer in AOI is an explicit despawn.
+        //
+        // Despawn ORDER is part of the wire contract this class must not move: it is
+        // _lastSent's enumeration order, and a Dictionary enumerates its entries array
+        // in slot order, which is a function of the insert/remove sequence and not of
+        // the key type — so switching the key from string to int leaves the order,
+        // and therefore the bytes, exactly where they were.
         if (_lastSent.Count != _seen.Count)
         {
-            foreach (var id in _lastSent.Keys)
+            foreach (var kv in _lastSent)
             {
-                if (!_seen.Contains(id)) msg.Removed.Add(id);
+                if (!_seen.Contains(kv.Key))
+                {
+                    msg.Removed.Add(kv.Value.Id);
+                    _removedKeys.Add(kv.Key);
+                }
             }
-            for (int i = 0; i < msg.Removed.Count; i++)
+            for (int i = 0; i < _removedKeys.Count; i++)
             {
-                _lastSent.Remove(msg.Removed[i]);
+                _lastSent.Remove(_removedKeys[i]);
                 // The handle is NOT returned to the pool: _nextHandle only ever
                 // advances within an interval. Freeing it would allow reuse, and
                 // reuse is the failure this design exists to avoid.
-                _handles.Remove(msg.Removed[i]);
+                _handles.Remove(_removedKeys[i]);
             }
+            _removedKeys.Clear();
         }
 
         return msg;
@@ -360,7 +428,7 @@ public sealed class SnapshotDeltaState
     /// despawn attribute an update to the wrong entity, which is wrong state
     /// rather than absent state and far harder to detect.
     /// </remarks>
-    private EntitySnapshot ToMsg(in EntityState e)
+    private EntitySnapshot ToMsg(in EntityView e)
     {
         var msg = Rent();
         msg.X = e.Position.X;
@@ -381,7 +449,7 @@ public sealed class SnapshotDeltaState
             return msg;
         }
 
-        if (_handles.TryGetValue(e.Id, out uint handle))
+        if (_handles.TryGetValue(e.Key, out uint handle))
         {
             // Already introduced this interval: handle alone.
             msg.Handle = handle;
@@ -390,7 +458,7 @@ public sealed class SnapshotDeltaState
         {
             // First mention: carry both, so the receiver learns the binding.
             handle = _nextHandle++;
-            _handles[e.Id] = handle;
+            _handles[e.Key] = handle;
             msg.Handle = handle;
             msg.Id = e.Id;
         }
