@@ -81,6 +81,13 @@ type ClientConn struct {
 	loggedAuthFail   bool
 	loggedUnexpected bool
 
+	// lastSessionRefresh is when a MsgPong last re-armed the session TTL, used
+	// to bound pong-driven store writes to one per sessionRefreshInterval. Zero
+	// means never, so the first pong on an authenticated connection refreshes.
+	// Read-loop goroutine only, like msgBucket above — every access is on
+	// handleMessage's call stack — so it needs no lock.
+	lastSessionRefresh time.Time
+
 	// enc is the wire encoding this connection speaks, latched from the first
 	// frame decoded on it and used for every reply.
 	//
@@ -126,6 +133,13 @@ const (
 	pingInterval = 10 * time.Second
 	pongTimeout  = 30 * time.Second
 )
+
+// sessionRefreshInterval bounds how often a heartbeat MsgPong re-arms the
+// session TTL in the store. Heartbeats arrive every pingInterval (10s), but the
+// session TTL is an hour — re-arming it on every pong would be one store write
+// per connection per 10s for no gain. Once a minute keeps the sliding window
+// accurate to well under 0.1% of the TTL at a sixth of the write rate.
+const sessionRefreshInterval = time.Minute
 
 // MaxHandlerBlockingWait is the longest a message handler may block before it
 // starves the heartbeat, and is exported so start-up can refuse a configuration
@@ -251,6 +265,17 @@ func (c *ClientConn) firstAuthFailure() bool {
 	first := !c.loggedAuthFail
 	c.loggedAuthFail = true
 	return first
+}
+
+// shouldRefreshSession reports whether at least sessionRefreshInterval has
+// passed since the last pong-driven session refresh, recording now as the new
+// mark when it has. ReadLoop goroutine only, like firstAuthFailure.
+func (c *ClientConn) shouldRefreshSession(now time.Time) bool {
+	if !c.lastSessionRefresh.IsZero() && now.Sub(c.lastSessionRefresh) < sessionRefreshInterval {
+		return false
+	}
+	c.lastSessionRefresh = now
+	return true
 }
 
 // firstUnexpectedMessage reports whether this is the first unroutable message

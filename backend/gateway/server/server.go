@@ -466,6 +466,7 @@ func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
 		return
 	case messages.MsgPong:
 		cc.RecordPong()
+		g.refreshSessionOnPong(cc)
 		return
 	}
 
@@ -491,6 +492,35 @@ func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
 		}
 		g.logger.Log(context.Background(), lvl, "unexpected message type",
 			"conn", cc.ID(), "user", cc.UserID(), "type", env.Type, "state", cc.State())
+	}
+}
+
+// refreshSessionOnPong re-arms the session TTL when a heartbeat MsgPong arrives
+// on an authenticated connection, so a client that holds the gateway socket
+// open sending only heartbeats keeps its session alive — the "refreshed by
+// activity" contract in gameserver-dotnet/docs/API.md (#231). Without this the
+// only refresh was checkSession on enter_world, so a player parked on one map
+// for over SessionTTL (1h) had the session expire under a live connection and
+// the next map transfer fail with "session expired".
+//
+// It is deliberately cheap and quiet:
+//   - it never sends anything and never closes the connection — a pong must
+//     stay side-effect-free from the client's point of view;
+//   - store writes are bounded to one per sessionRefreshInterval per
+//     connection, so a 10s heartbeat does not EXPIRE-spam the store;
+//   - store errors fail open, like checkSession: the refresh is skipped, the
+//     connection lives on, and a session actually gone is detected (and
+//     reported) by checkSession on the next real frame.
+func (g *Gateway) refreshSessionOnPong(cc *ClientConn) {
+	userID, state := cc.Identity()
+	if state == StateConnected || userID == "" {
+		return // unauthenticated: no session to keep alive
+	}
+	if !cc.shouldRefreshSession(time.Now()) {
+		return
+	}
+	if err := g.sessions.RefreshSession(context.Background(), session.SessionKey(userID)); err != nil {
+		g.logger.Warn("refresh session on pong", "conn", cc.ID(), "user", userID, "err", err)
 	}
 }
 

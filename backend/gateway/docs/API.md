@@ -53,7 +53,7 @@ to reach the gateway: the two are configured independently.
 | 3 | `MsgEnterWorld` | live session | Least-loaded live server for `MapID` with `PlayerCount < Capacity`; a map with **no** live server may be allocated (waited for), a map whose servers are all full is refused → 30s join token (`sid` claim = server id), minted last → `MsgEnterWorldResp` |
 | 9 | `MsgDisconnect` | live session | Destroy the session record, half-close the socket |
 | 11 | `MsgPing` | **none — handled before the session check** | Reply `MsgPong{Timestamp echoed, ServerTime}` |
-| 12 | `MsgPong` | **none — handled before the session check** | Refresh the connection's liveness timer |
+| 12 | `MsgPong` | **none — handled before the session check** | Refresh the connection's liveness timer; on an authenticated connection also re-arm the session TTL (at most once per minute, store errors fail open) |
 | other | — | live session | Logged and ignored |
 
 **Heartbeat frames bypass session enforcement on purpose.** They are dispatched
@@ -61,6 +61,16 @@ in `handleMessage` *before* `checkSession`: a `MsgPong` that keeps the connectio
 alive must not be rejected because a Redis blip made the session lookup fail, and
 a ping carries no session semantics at all. They are still subject to the inbound
 frame limiter, which runs first.
+
+**Heartbeats are session activity** (#231). A `MsgPong` on an authenticated
+connection re-arms the session TTL (`refreshSessionOnPong`), so a client that
+keeps the gateway socket open sending only heartbeats — the recommended shape —
+never has its session expire under the live connection. The refresh is bounded
+to once per `sessionRefreshInterval` (**1 min**) per connection so a 10 s
+heartbeat cadence does not translate into a store write per pong, and a store
+error fails open exactly like `checkSession`: the refresh is skipped, the
+connection is untouched, and nothing is sent — a pong never draws a reply. An
+unauthenticated pong refreshes nothing.
 
 The gateway pings on its own initiative every **10 s** (`pingInterval`) and closes
 any connection that has not produced a `MsgPong` within **30 s** (`pongTimeout`).

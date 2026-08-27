@@ -820,8 +820,10 @@ Three consequences the client must be built around:
   (`gateway/server/server.go`, `checkSession`). **Keeping the gateway connection
   open for the session's lifetime avoids a re-auth round trip on every
   transfer** and is the recommended shape. The Redis session (`session:<user>`,
-  1 h TTL, `shared/constants/ttl.go`) is refreshed by activity, so a live
-  gateway connection stays valid.
+  1 h TTL, `shared/constants/ttl.go`) is refreshed by activity — including the
+  heartbeat `MsgPong`s a parked connection sends
+  (`gateway/server/server.go`, `refreshSessionOnPong`, #231) — so a live
+  gateway connection stays valid no matter how long the player sits on one map.
 
 ### The old entity is reaped immediately — no hold
 

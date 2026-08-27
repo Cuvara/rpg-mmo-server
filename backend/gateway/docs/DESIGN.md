@@ -408,6 +408,11 @@ per-tick input stream, which goes client↔gameserver directly.
 
 Refresh-on-activity (sliding TTL) over a fixed 1h window: a player in a 3-hour raid must not
 be logged out mid-session, and an abandoned socket must not hold a record for an hour.
+Heartbeats count as activity (#231): `MsgPong` on an authenticated connection also re-arms
+the TTL — bounded to once per minute per connection, failing open on store errors — because
+the recommended client shape is to park the gateway socket sending only heartbeats between
+map transfers, and without this the session expired under the live connection after an hour
+on one map.
 
 A vanished record demotes the connection to `StateConnected` and returns `session expired`
 rather than closing the socket, so the client can re-`MsgAuth` on the same connection.

@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **docs/API.md: the "refreshed by activity" session promise is now precise** (#231).
+  The map-transfer section promised the gateway session "is refreshed by activity, so a
+  live gateway connection stays valid", but until the paired gateway fix the only
+  refresh happened on `enter_world` — a client parked on one map for over the 1 h TTL
+  expired under its live socket. The gateway now refreshes the session on heartbeat
+  `MsgPong` (`refreshSessionOnPong`, see `backend/gateway/CHANGELOG.md`), and the
+  wording here names that mechanism instead of implying it.
+
 - **Kill rewards are batched per killer: one Nakama call per flush instead of two HTTP
   RPCs per kill** (#233). `OnEntityDeath` used to fire `reward_kill` + `submit_kill`
   fire-and-forget per mob kill — 2 requests and 2 meta-Postgres transactions each,

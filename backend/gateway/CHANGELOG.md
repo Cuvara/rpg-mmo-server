@@ -5,6 +5,22 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Heartbeats now keep the gateway session alive**
+  ([#231](https://github.com/Cuvara/rpg-mmo-server/issues/231)). A `MsgPong` on
+  an authenticated connection re-arms the session TTL
+  (`refreshSessionOnPong`), so a client that holds the gateway socket open
+  sending only heartbeats — the recommended shape per
+  `gameserver-dotnet/docs/API.md` — no longer has its session expire under the
+  live connection after `SessionTTL` (1 h) on one map, which made the next map
+  transfer fail with `session expired` and forced exactly the re-auth the kept
+  connection exists to avoid. Store writes are bounded to one per
+  `sessionRefreshInterval` (1 min) per connection, so a 10 s heartbeat does not
+  EXPIRE-spam Redis; an unauthenticated pong refreshes nothing; and store
+  errors fail open (refresh skipped, connection untouched), matching
+  `checkSession`. Table-driven regression:
+  `TestGateway_PongRefreshesSessionTTL`, `TestShouldRefreshSession_RateLimited`.
+
 ### Removed
 - **Cross-gateway duplicate-login kick, which was declared at every layer and
   constructed at none, is gone** ([#211](https://github.com/Cuvara/rpg-mmo-server/issues/211)).
