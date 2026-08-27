@@ -62,6 +62,12 @@ type Gateway struct {
 	// ("tcp" or "kcp"); it is immutable after New, so Run reads it lock-free.
 	transportKind string
 
+	// enterWorldBudget caps how long one handleEnterWorld may block its
+	// connection's read loop; EnterWorldBudget by default, overridden only by
+	// tests that need the deadline to expire in milliseconds. Immutable after
+	// the gateway starts serving.
+	enterWorldBudget time.Duration
+
 	mu        sync.Mutex
 	listener  net.Listener
 	conns     map[*ClientConn]struct{}
@@ -151,16 +157,17 @@ func New(
 	// rejects every token instead of accepting tokens signed with "".
 	authKeys, _ := sharedjwt.ParseKeyring(jwtSecret)
 	g := &Gateway{
-		transportKind: transport.KindTCP,
-		sessions:      sessions,
-		registry:      reg,
-		jwtSecret:     jwtSecret,
-		authKeys:      authKeys,
-		joinKeys:      authKeys,
-		logger:        logger,
-		conns:         make(map[*ClientConn]struct{}),
-		userConns:     make(map[string]*ClientConn),
-		done:          make(chan struct{}),
+		transportKind:    transport.KindTCP,
+		sessions:         sessions,
+		registry:         reg,
+		jwtSecret:        jwtSecret,
+		authKeys:         authKeys,
+		joinKeys:         authKeys,
+		logger:           logger,
+		enterWorldBudget: EnterWorldBudget,
+		conns:            make(map[*ClientConn]struct{}),
+		userConns:        make(map[string]*ClientConn),
+		done:             make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(g)
@@ -833,7 +840,17 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 		return
 	}
 
-	ctx := context.Background()
+	// One deadline over the WHOLE assignment path. Each leg beneath it —
+	// registry lookup retries, the Agones allocation call, the wait for the
+	// allocated pod to self-register — carries its own timeout, and stacked
+	// worst-case they exceed MaxHandlerBlockingWait, which means the heartbeat
+	// would kill this connection mid-allocation (issue #235). The budget keeps
+	// the block strictly inside the heartbeat window with margin for the
+	// write-back below; on expiry the client gets the retryable "server is
+	// starting, retry shortly" while the allocation leader carries on detached
+	// (registry.allocateOnce), so a later retry finds the server ready.
+	ctx, cancel := context.WithTimeout(context.Background(), g.enterWorldBudget)
+	defer cancel()
 	result, err := transfer.AssignMapKeyring(ctx, userID, req.MapID, g.registry, g.joinKeys)
 	if err != nil {
 		g.metrics.EnterWorldResult(false)
@@ -858,8 +875,10 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 		"transport", result.Transport,
 		"dur_ms", time.Since(start).Milliseconds())
 
-	// Update session with server and map association (task 2c).
-	if uerr := g.sessions.UpdateSession(ctx, userID, func(sd *session.SessionData) {
+	// Update session with server and map association (task 2c). On its own
+	// context, not the budget one: an assignment that resolved near the
+	// deadline must still record where the client went.
+	if uerr := g.sessions.UpdateSession(context.Background(), userID, func(sd *session.SessionData) {
 		sd.ServerID = result.ServerID
 		sd.MapID = req.MapID
 	}); uerr != nil {

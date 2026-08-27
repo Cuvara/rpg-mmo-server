@@ -41,6 +41,32 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   consumer on purpose: with the old behaviour, one transient store error would
   have published a false `server_down` for every tracked server, and the new
   consumer would have evicted them all — turning a blip into an outage.
+- **A cold-map join can no longer be heartbeat-killed by its own stacked
+  timeouts** ([#235](https://github.com/Cuvara/rpg-mmo-server/issues/235)).
+  One `handleEnterWorld` could chain three sequential, individually-bounded
+  waits — registry lookup retries (`registry.RetryTotalTimeout`, 10s) + the
+  Agones allocation HTTP call (`registry.DefaultTimeout`, 10s) + the wait for
+  the allocated pod to self-register (`DefaultAllocationWaitTimeout`, 15s) —
+  ≈ 35s against `server.MaxHandlerBlockingWait` = 20s, so the gateway's own
+  heartbeat closed the connection mid-allocation. The whole assignment now runs
+  under one deadline, `server.EnterWorldBudget` = `MaxHandlerBlockingWait − 2s`
+  = 18s (the margin is reserved for the session write-back and response flush);
+  on expiry the client gets the existing retryable
+  `server is starting, retry shortly` and the connection stays up. To make the
+  deadline reach the caller that stacks everything, `registry.allocateOnce`'s
+  single-flight **leader now waits like a follower**: the detached work
+  (`context.WithoutCancel`, unchanged) runs in its own goroutine and completes
+  regardless, so the client's retry finds the freshly registered server without
+  a second allocation. A caller whose context ends while an allocation is in
+  flight now gets `ErrServerStarting` (retryable) instead of a bare context
+  error that surfaced as `internal error`. `registry.RetryTotalTimeout` is
+  exported so the new guard test
+  (`TestEnterWorldWorstCaseBudgetFitsHandlerWindow`) pins the stacked
+  worst-case sum — not just the 15s leg — against the same constants the code
+  runs on; `TestGateway_SlowAllocationYieldsRetryableAndLeaderCompletes` proves
+  the retryable answer, the surviving connection, and the detached leader's
+  completion end to end. The client half (EnterWorld inside the join-retry
+  loop, client timeout budget) is tracked in the client repo.
 
 ### Removed
 - **Cross-gateway duplicate-login kick, which was declared at every layer and

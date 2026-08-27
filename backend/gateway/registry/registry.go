@@ -20,9 +20,11 @@ const (
 	// retryInitialDelay is the backoff seed: 1s -> 2s -> 4s.
 	retryInitialDelay = 1 * time.Second
 
-	// retryTotalTimeout caps the total time spent retrying so a slow Redis does
-	// not hold a client connection open indefinitely.
-	retryTotalTimeout = 10 * time.Second
+	// RetryTotalTimeout caps the total time spent retrying so a slow Redis does
+	// not hold a client connection open indefinitely. Exported so the gateway's
+	// guard test can derive the worst-case stacked enter_world budget from the
+	// same constants the code runs on (issue #235).
+	RetryTotalTimeout = 10 * time.Second
 
 	// DefaultAllocationWaitTimeout bounds how long FindServer waits for a
 	// freshly allocated game server to publish its own registry entry.
@@ -31,7 +33,7 @@ const (
 	// bind its port, report Ready to the SDK sidecar, learn its own address and
 	// self-register into the registry before a client can reach it. That cold
 	// start is not measured yet, so the default is deliberately generous —
-	// larger than registry.retryTotalTimeout (10s, a Redis blip) because a pod
+	// larger than registry.RetryTotalTimeout (10s, a Redis blip) because a pod
 	// start is a much heavier event — while staying below
 	// constants.JoinTokenTTL (30s) so the wait can never be longer than the
 	// life of the token minted after it.
@@ -190,9 +192,11 @@ func newRegistryService(s *RegistryService, opts []Option) *RegistryService {
 // string comparison.
 var ErrNoServerAvailable = errors.New("no available server for map")
 
-// ErrServerStarting means a game server was allocated for the map but did not
-// publish its own registry entry inside the allocation wait window, so there is
-// no address a client could be sent to yet.
+// ErrServerStarting means an allocation is (or was) under way for the map but
+// there is no address a client could be sent to yet. Two paths produce it: the
+// allocated server did not publish its own registry entry inside the allocation
+// wait window, or the caller's own context ended (handler budget, disconnect)
+// while the single-flight allocation was still running detached.
 //
 // It is a *retryable* condition and deliberately distinct from
 // ErrNoServerAvailable: the map is not full or unserved, its server is booting.
@@ -239,7 +243,7 @@ func isRetriable(err error) bool {
 // findByMapIDWithRetry wraps FindByMapID with exponential backoff. Only
 // transient errors are retried; capacity / not-found errors return immediately.
 func (s *RegistryService) findByMapIDWithRetry(ctx context.Context, mapID string) ([]storage.ServerInfo, error) {
-	ctx, cancel := context.WithTimeout(ctx, retryTotalTimeout)
+	ctx, cancel := context.WithTimeout(ctx, RetryTotalTimeout)
 	defer cancel()
 
 	var lastErr error
@@ -282,7 +286,7 @@ func (s *RegistryService) findByMapIDWithRetry(ctx context.Context, mapID string
 // getServerWithRetry wraps GetServer with exponential backoff for transient
 // errors.
 func (s *RegistryService) getServerWithRetry(ctx context.Context, serverID string) (storage.ServerInfo, error) {
-	ctx, cancel := context.WithTimeout(ctx, retryTotalTimeout)
+	ctx, cancel := context.WithTimeout(ctx, RetryTotalTimeout)
 	defer cancel()
 
 	var lastErr error
@@ -582,9 +586,12 @@ func (s *RegistryService) allocateOnce(ctx context.Context, mapID string) (stora
 		case <-call.done:
 			return call.info, call.err
 		case <-ctx.Done():
-			// This caller gave up (client disconnected); the leader carries on
-			// for everyone else.
-			return storage.ServerInfo{}, fmt.Errorf("await allocation for map %s: %w", mapID, ctx.Err())
+			// This caller gave up — its handler budget expired or its client
+			// disconnected; the allocation carries on for everyone else. That
+			// makes ErrServerStarting the truthful answer: a server is on its
+			// way, ask again shortly.
+			return storage.ServerInfo{}, fmt.Errorf(
+				"%w: allocation for map %s still in flight: %w", ErrServerStarting, mapID, ctx.Err())
 		}
 	}
 	if s.allocInFlight == nil {
@@ -594,19 +601,38 @@ func (s *RegistryService) allocateOnce(ctx context.Context, mapID string) (stora
 	s.allocInFlight[mapID] = call
 	s.allocMu.Unlock()
 
-	// The leader's work is detached from its own caller's cancellation: the
-	// followers' outcome must not depend on which client happened to arrive
-	// first, and a leader that disconnects mid-allocation would otherwise abort
-	// an allocation the followers are still waiting on. The wait stays bounded
-	// by allocWaitTimeout, and the allocator call by its own timeout.
-	call.info, call.err = s.allocateAndWait(context.WithoutCancel(ctx), mapID)
+	// The leader's WORK is detached from its own caller's cancellation and
+	// deadline: the followers' outcome must not depend on which client happened
+	// to arrive first, and a leader whose client disconnects — or whose handler
+	// budget (server.EnterWorldBudget) expires — mid-allocation would otherwise
+	// abort an allocation the followers are still waiting on. The work stays
+	// bounded on its own terms: the allocator call by its own timeout, the
+	// registration wait by allocWaitTimeout.
+	//
+	// The leader's WAIT, by contrast, honours ctx exactly like a follower's:
+	// the work runs in its own goroutine and the leader selects on done vs
+	// ctx.Done. Before this split the leader blocked for the full detached
+	// call, so the very deadline the gateway put over its handler could not
+	// reach the one caller that stacks every timeout (issue #235).
+	detached := context.WithoutCancel(ctx)
+	go func() {
+		call.info, call.err = s.allocateAndWait(detached, mapID)
+		s.allocMu.Lock()
+		delete(s.allocInFlight, mapID)
+		s.allocMu.Unlock()
+		close(call.done)
+	}()
 
-	s.allocMu.Lock()
-	delete(s.allocInFlight, mapID)
-	s.allocMu.Unlock()
-	close(call.done)
-
-	return call.info, call.err
+	select {
+	case <-call.done:
+		return call.info, call.err
+	case <-ctx.Done():
+		// Same shape as the follower bail-out above: the allocation is still
+		// running detached and will publish its outcome, so the client-facing
+		// answer is the retryable one.
+		return storage.ServerInfo{}, fmt.Errorf(
+			"%w: allocation for map %s still in flight: %w", ErrServerStarting, mapID, ctx.Err())
+	}
 }
 
 // allocateAndWait requests one new instance for mapID and blocks until that

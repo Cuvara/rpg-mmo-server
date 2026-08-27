@@ -139,10 +139,10 @@ server's behalf: that would put two writers on one datum (ADR-1), and a
 gateway-written entry has nothing re-arming its 15s heartbeat TTL, so it would
 expire under a pod that is alive.
 
-Bounds: `--allocation-wait-timeout` (default **20s**) and
-`--allocation-poll-interval` (default **250ms**), flag → env → default. 20s is a
+Bounds: `--allocation-wait-timeout` (default **15s**) and
+`--allocation-poll-interval` (default **250ms**), flag → env → default. 15s is a
 deliberate compromise while pod cold start is unmeasured: longer than
-`retryTotalTimeout`'s 10s, because a pod start is much heavier than a Redis blip,
+`RetryTotalTimeout`'s 10s, because a pod start is much heavier than a Redis blip,
 but still under `JoinTokenTTL` so the wait can never outlast the token minted
 after it. Timing out yields `ErrServerStarting` → the client-facing
 `server is starting, retry shortly`, which is **retryable** and deliberately
@@ -288,6 +288,29 @@ exactly on a ceiling has no room for scheduling and poll-interval slop, and it i
 the value nobody is choosing deliberately. A test in `gateway/server` asserts
 `DefaultAllocationWaitTimeout < MaxHandlerBlockingWait`, which no start-up check
 would catch until someone ran it.
+
+**Capping one leg was not enough (issue #235).** The enter_world path stacks
+*sequential* waits, each individually legal: the registry lookup's transient
+retry window (`RetryTotalTimeout`, 10s) + the Agones allocation HTTP call
+(`DefaultTimeout`, 10s) + the registration wait (15s) ≈ **35s** against the 20s
+window — the heartbeat killed the connection mid-allocation with every per-leg
+check green. The fix is one deadline over the whole path:
+`server.EnterWorldBudget` = `MaxHandlerBlockingWait − 2s` = **18s**, the 2s
+slice reserved for the session write-back and the response flush after the
+assignment resolves. On expiry the client gets the retryable
+`server is starting, retry shortly` and the connection lives.
+
+Two things make the deadline safe to enforce. First, the single-flight
+allocation **leader now waits like a follower**: `allocateOnce` runs the
+detached work (`context.WithoutCancel`) in its own goroutine and the leader
+selects on completion vs its own context, so a handler deadline caps how long
+*any* caller blocks while the allocation itself runs to completion and
+publishes its outcome. Second, a caller whose context ends while the
+allocation is still in flight gets `ErrServerStarting` — truthful and
+retryable: a server is on its way, and the retry resolves it from the registry
+without allocating again. A guard test
+(`TestEnterWorldWorstCaseBudgetFitsHandlerWindow`) pins the stacked worst case
+against the same constants the code runs on, so it moves when they move.
 
 ### Decision 5 — the allocator's default fleet names the fleet that exists
 
