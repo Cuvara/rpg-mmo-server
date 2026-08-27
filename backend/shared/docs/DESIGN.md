@@ -101,6 +101,9 @@ behind an idempotency guard.
 **Scope kept minimal**: no `XAUTOCLAIM` reaper, no dead-letter stream, no `MAXLEN`
 trimming yet. Those are operational policy and belong with the deploy module once real
 retention numbers exist; the interface does not change when they land.
+*(Since superseded: `MAXLEN` trimming landed with #202, and the `XAUTOCLAIM`
+reclaim + delivery-cap dead-letter policy with #234 — see the 2026-08-27 entry
+below. The interface indeed did not change.)*
 
 **Blocking model**: `XREADGROUP` blocks for `SetBlockTimeout` (default 500ms) per call
 rather than indefinitely, so `Close()` — which cancels the consumer context and waits for
@@ -503,3 +506,42 @@ tick shows up as a number rather than as an inexplicably small bandwidth figure.
 client keys its reconstructed world by id, and interning them would mean the
 despawn path depends on the same table it is tearing down. Worth revisiting with
 a measurement, not before.
+
+## PEL reclaim and the delivery cap (2026-08-27, #234)
+
+ACK-after-handler was only half of at-least-once. The consumer only ever read
+`>` (new entries), and consumer names are pod names — so an entry delivered to a
+pod that crashed between handler and `XACK` sat in the Pending Entries List
+under a name no replacement pod would ever use, and even a same-name restart
+never re-read its own PEL. The type comment promised recovery via
+`XPENDING`/`XCLAIM`; no code performed it. Low impact while the only consumer
+logs, but `server_down` rides this channel and the C# publisher will too once
+ADR-5's noop is replaced.
+
+**Reclaim**: on Subscribe and every `reclaimInterval` (default **30s**) the
+consumer walks the group's PEL with `XAUTOCLAIM`, claiming entries idle longer
+than `reclaimMinIdle` (default **60s**) to itself and redelivering them to the
+handler. 60s is far above one read cycle (block 500ms + handler), so a claimed
+entry is genuinely stranded rather than in flight; and far below the ~10-minute
+lag budget that sizes `DefaultStreamMaxLen`, so the entry still exists when
+claimed. The pass runs in the consume goroutine — no second goroutine, no new
+shutdown edge, and reclaimed entries interleave with normal reads on the same
+single-threaded handler contract.
+
+**Delivery cap**: a poison entry — one whose handler crashes the consumer every
+time — would otherwise cycle through every pod in the group forever. After
+`maxDeliveries` (default **5**) deliveries, the entry is ACKed *unhandled*:
+logged loudly and counted (`DeadLetters`), mirroring the `GroupLosses` pattern
+for NOGROUP. Delivery counts come from `XPENDING` over the claimed page, which
+`XAUTOCLAIM` has already incremented, so the count includes the delivery being
+decided. If that `XPENDING` fails, everything claimed is redelivered rather than
+dropped — a poison entry surviving one extra round beats losing a healthy one.
+There is deliberately no way to disable the cap, for the same reason `SetMaxLen`
+has no off switch.
+
+**Batched acks**: while in the file, the per-message `XACK` (one RTT each)
+became one `XACK` per read batch (`Count` 16). A consumer dying mid-batch now
+re-receives the whole batch through the reclaim path — which the idempotent-
+handler discipline this stream has always required already covers. A failed
+batch ACK is logged and *not* retried: the entries stay pending and the reclaim
+pass redelivers them, degrading the failure to duplicate delivery, never loss.
