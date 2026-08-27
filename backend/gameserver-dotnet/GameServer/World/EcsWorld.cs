@@ -95,6 +95,18 @@ public sealed class EcsWorld : IDisposable
 {
     private readonly ArchWorld _arch = ArchWorld.Create();
     private readonly Dictionary<string, Entity> _index = new();
+
+    /// <summary>
+    /// Stable integer key per entity-id string — see <see cref="EntityIdRef.Stable"/>.
+    /// Entries are <b>never removed</b>: a despawn/respawn of the same id must get the
+    /// same key, or an int-keyed consumer would see a different entity where a
+    /// string-keyed one saw the same. Growth is bounded by distinct ids ever seen,
+    /// which the (string-keyed) delta states already paid for implicitly.
+    /// </summary>
+    private readonly Dictionary<string, int> _stableIds = new(StringComparer.Ordinal);
+
+    /// <summary>Next stable key. Starts at 1 so 0 stays "no key" in diagnostics.</summary>
+    private int _nextStableId = 1;
     private readonly List<PendingInput> _pendingInputs = new();
     private readonly ReaderWriterLockSlim _rwLock = new();
     private readonly object _inputLock = new();
@@ -524,6 +536,89 @@ public sealed class EcsWorld : IDisposable
         }
 
         return matches;
+    }
+
+    /// <summary>
+    /// The snapshot gather's AOI scan: same query, same iteration order and the same
+    /// distance predicate as <see cref="ScanRangeLocked"/>, composing the trimmed
+    /// <see cref="EntityView"/> per match instead of a full <see cref="EntityState"/>.
+    ///
+    /// <para><b>Why a second scan body exists.</b> The snapshot encoder consumes only
+    /// Id/Type/X/Y/Hp/MaxHp/Speed, so the full compose paid for the <c>Combat</c> and
+    /// <c>InputCursor</c> span fetches per chunk and five unread fields per match — on
+    /// the phase Part V measured as compose-bound and 77-83% of a 200-viewer tick
+    /// (issue #237). The predicate and iteration order are pinned to the full scan by
+    /// <c>TrimmedGatherByteIdentityTests</c>: if the two bodies ever diverge, the wire
+    /// digest moves and that test names the tick.</para>
+    ///
+    /// <para>Same count-don't-saturate overflow contract as
+    /// <see cref="GetEntitiesInRange(Vec2, float, Span{EntityState})"/>.</para>
+    /// </summary>
+    private int ScanRangeViewsLocked(Vec2 center, float radius, Span<EntityView> destination)
+    {
+        float radiusSq = radius * radius;
+        int matches = 0;
+
+        // _allEntitiesQuery, never _arch.Query(...): shared lock — see issue #176.
+        foreach (ref var chunk in _allEntitiesQuery.GetChunkIterator())
+        {
+            var positions = chunk.GetSpan<Position>();
+            var ids = chunk.GetSpan<EntityIdRef>();
+            var kinds = chunk.GetSpan<EntityKind>();
+            var healths = chunk.GetSpan<Health>();
+            var locomotions = chunk.GetSpan<Locomotion>();
+            // No Combat span, no InputCursor span: the two fetches the trimmed
+            // compose exists to drop. Nothing below reads them.
+            int count = chunk.Count;
+            for (int i = 0; i < count; i++)
+            {
+                // Identical predicate to ScanRangeLocked — Shared.GameLogic's, not a copy.
+                if (Vec2.DistanceSq(center, positions[i].Value) > radiusSq) continue;
+
+                if (matches < destination.Length)
+                {
+                    destination[matches] = new EntityView(
+                        ids[i].Stable,
+                        ids[i].Value,
+                        kinds[i].Value,
+                        positions[i].Value,
+                        healths[i].Hp,
+                        healths[i].MaxHp,
+                        locomotions[i].Speed);
+                }
+
+                matches++;
+            }
+        }
+
+        return matches;
+    }
+
+    /// <summary>
+    /// Snapshot-view AOI scan for <see cref="WorldReader"/>; the read lock is already
+    /// held. The form <see cref="Net.Connection"/>'s gather uses.
+    /// </summary>
+    internal int ScanRangeViewsLockedForReader(Vec2 center, float radius, Span<EntityView> destination) =>
+        ScanRangeViewsLocked(center, radius, destination);
+
+    /// <summary>
+    /// Fill <paramref name="destination"/> with the trimmed snapshot view of every
+    /// entity within <paramref name="radius"/> of <paramref name="center"/>. Same
+    /// overflow contract as the <see cref="EntityState"/> overload.
+    /// </summary>
+    public int GetEntitiesInRange(Vec2 center, float radius, Span<EntityView> destination)
+    {
+        _rwLock.EnterReadLock();
+        _iterationDepth++;
+        try
+        {
+            return ScanRangeViewsLocked(center, radius, destination);
+        }
+        finally
+        {
+            _iterationDepth--;
+            _rwLock.ExitReadLock();
+        }
     }
 
     /// <summary>
@@ -1504,9 +1599,16 @@ public sealed class EcsWorld : IDisposable
 
         bool isEnemy = (tags & EntityTags.EnemyAi) != 0;
 
+        // Assigned once per distinct id string, for the life of the world — see _stableIds.
+        if (!_stableIds.TryGetValue(state.Id, out int stable))
+        {
+            stable = _nextStableId++;
+            _stableIds[state.Id] = stable;
+        }
+
         Entity entity = isEnemy
             ? _arch.Create(
-                new EntityIdRef(state.Id),
+                new EntityIdRef(state.Id, stable),
                 new EntityKind(state.Type),
                 new Position(state.Position),
                 default(Health),
@@ -1516,7 +1618,7 @@ public sealed class EcsWorld : IDisposable
                 default(EnemyAi))
             : isPlayer
             ? _arch.Create(
-                new EntityIdRef(state.Id),
+                new EntityIdRef(state.Id, stable),
                 new EntityKind(state.Type),
                 new Position(state.Position),
                 default(Health),
@@ -1525,7 +1627,7 @@ public sealed class EcsWorld : IDisposable
                 new InputCursor(state.LastInputTick),
                 default(PlayerTag))
             : _arch.Create(
-                new EntityIdRef(state.Id),
+                new EntityIdRef(state.Id, stable),
                 new EntityKind(state.Type),
                 new Position(state.Position),
                 default(Health),

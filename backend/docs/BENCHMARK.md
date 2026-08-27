@@ -655,11 +655,13 @@ Ordered by measured impact:
    downstream and a 150 → 300 tick ceiling, but *less* than this entry assumed:
    the saving is ~55% not ~70%, because entity ID strings cost the same in both
    encodings, and bandwidth remains the binding constraint at ~93 players.
-3. **Move serialization off the tick.** `WireProtocol.NewEnvelope` serializes
-   inside the tick loop while `Connection.Send` only enqueues. Serializing in the
-   writer task instead would take the dominant term off the critical path without
-   changing the encoding. **Still outstanding** — Protobuf made this term
-   cheaper, it did not move it off the tick.
+3. ~~**Move serialization off the tick.**~~ ✅ **Done** — the tick thread now only
+   stages a gather and a marker (`Connection.GatherSnapshotView`); encoding and
+   protobuf serialization run on each connection's own write task
+   (`Connection.WriteLoopAsync`, `TickLoop`'s broadcast phase). An earlier
+   revision of this line still said "still outstanding"; the 2026-08 gameplay
+   perf audit found the code had done it (issue #237 notes the stale line).
+   `TickBreakdownBench` measures the tick with and without the write tasks live.
 4. **Stagger keyframe counters per connection** to kill the stampede.
 5. **Reduce what is sent, not how it is encoded** — AOI radius, distance-tiered
    update rates, interned entity IDs. Part II shows this is now the only lever
@@ -1557,3 +1559,40 @@ GAMESERVER_ENEMIES=false   (so the measurement is the player path, not wave timi
   budget four times too generous. It did not affect these runs — nothing came close to
   either budget — but it must be fixed before the harness is used to qualify a 60Hz
   configuration.
+
+---
+
+## Part VII — trimmed AOI compose and int-keyed delta state (2026-08-27, issue #237)
+
+**Result: both changes shipped.** The AOI gather now composes a 7-field
+`EntityView` (exactly what the snapshot encoder consumes, plus a world-stable
+integer key) instead of the full 11-field `EntityState`, dropping the `Combat`
+and `InputCursor` span fetches per chunk; and `SnapshotDeltaState` keys
+`_lastSent`/`_seen`/`_handles` on that integer key instead of hashing the
+entity-id string 2–3 times per visible entity per viewer per tick. Wire output
+is **byte-identical** — proved frame-for-frame by
+`TrimmedGatherByteIdentityTests` (old pipeline vs new pipeline over a 120-tick
+scenario with keyframes, deltas, despawns and a same-id respawn, both Protobuf
+and JSON), and the pre-change pinned digests in `SnapshotByteIdentityTests`
+still pass untouched.
+
+Paired in-process A/B (`GameServer.Tests/Bench/AoiComposeBench.cs`,
+`BENCH_TICK=1`): 200 entities, 200 viewers, radius 50, mean AOI occupancy 15.3,
+arms interleaved within each of 600 rounds, four independent runs. Medians are
+microseconds per 200-viewer pass; per Part V's discipline only the within-run
+ratios are quotable:
+
+| pair | old median | new median | ratio (4 runs) |
+|---|---|---|---|
+| gather: full compose → trimmed | 598–630 µs | 526–576 µs | **1.07–1.17× faster** |
+| encode: string-keyed → int-keyed | 1059–1186 µs | 998–1023 µs | **1.05–1.16× faster** |
+
+Modest but real and consistently positive in every run, on the two phases that
+matter: the gather runs on the tick thread (77–83% of a 200-viewer tick), the
+encode on the write pool that shares the same 2–4 vCPU budget. The string-keyed
+arm is a verbatim replica of the replaced encoder kept inside the bench file,
+so the A arm is the code that actually ran.
+
+**Part V's caveat now applies**: compose got cheaper, so the spatial index's
+losing margin has narrowed. Re-measure the index only against these numbers,
+not the pre-#237 ones — and only if AOI cost resurfaces as a bound.

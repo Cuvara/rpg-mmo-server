@@ -1117,9 +1117,20 @@ stage 1 had already removed its per-client list, so there was nothing left there
 tick. It could not be moved out while encoding was interleaved with locked world reads,
 because no point in the tick had a viewer's snapshot input standing free of the world.
 After phase A every connection holds a self-contained view — no world reference, no lock —
-so phase B can move to another thread without `EcsWorld` being involved. Whether to do
-that is BENCHMARK.md §9's outstanding item, and it is the one with a measured case behind
-it.
+so phase B can move to another thread without `EcsWorld` being involved. That move has
+since been made: encoding and serialization run on each connection's write task, and
+BENCHMARK.md §9 item 3 records it as done.
+
+What the gather composes has since been trimmed too (#237, BENCHMARK.md Part VII): the
+scan fills connection-owned `EntityView` buffers — the seven fields the snapshot encoder
+consumes plus a world-stable integer key (`EntityIdRef.Stable`, assigned once per id
+string, never reused) — instead of full 11-field `EntityState`s, and
+`SnapshotDeltaState` keys its per-connection delta maps on that integer instead of
+hashing the entity-id string per visible entity. Measured by paired A/B
+(`Bench/AoiComposeBench.cs`): gather 1.07–1.17× faster, delta encode 1.05–1.16× faster
+at 200 viewers/200 entities; wire bytes proven identical by
+`TrimmedGatherByteIdentityTests`. The `EntityState` scan and the string-input `Encode`
+overloads remain for cold paths.
 
 The trade: a join or leave arriving mid-broadcast waits for the whole gather rather than
 slipping between two viewers. The gather is position tests over chunk spans with no

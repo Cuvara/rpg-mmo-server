@@ -15,6 +15,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   expired under its live socket. The gateway now refreshes the session on heartbeat
   `MsgPong` (`refreshSessionOnPong`, see `backend/gateway/CHANGELOG.md`), and the
   wording here names that mechanism instead of implying it.
+- **AOI gather composes a trimmed 7-field view; the delta encoder keys on integers
+  instead of entity-id strings** (#237). The scan composed an 11-field `EntityState`
+  per AOI match — two string-bearing component fetches per chunk plus five fields
+  (`Attack`/`Defense`/`CooldownUntilTick`/`LastInputTick`/`Dead`) the snapshot
+  encoder never reads — on the phase that is 77-83% of a 200-viewer tick; and
+  `SnapshotDeltaState` hashed the id string 2-3 times per visible entity per viewer
+  per tick (~1.2M string hashes/s at 200 players). The gather now composes
+  `EntityView` (`Id`/`Type`/`X`/`Y`/`Hp`/`MaxHp`/`Speed` plus a world-stable int key
+  assigned once per id string in `EntityIdRef.Stable` — never reused, so a same-id
+  respawn keeps its key), and the delta maps key on that int. Wire output is
+  **byte-identical**: proved frame-for-frame by `TrimmedGatherByteIdentityTests`
+  (old vs new pipeline, Protobuf + JSON, keyframes/deltas/despawns/respawn), and the
+  pinned pre-change digests in `SnapshotByteIdentityTests` pass untouched. Measured
+  by paired in-process A/B (`Bench/AoiComposeBench.cs`, `BENCH_TICK=1`; 200
+  entities/200 viewers, occupancy 15.3, 600 interleaved rounds × 4 runs): gather
+  598-630 → 526-576 µs median per 200-viewer pass (**1.07-1.17× faster**), delta
+  encode 1059-1186 → 998-1023 µs (**1.05-1.16× faster**). The full `EntityState`
+  compose and the string-input `Encode` overloads remain for cold paths.
+  BENCHMARK.md Part VII records the measurement; §9 item 3 ("serialization off the
+  tick — still outstanding") corrected — the code had already done it.
 
 - **Kill rewards are batched per killer: one Nakama call per flush instead of two HTTP
   RPCs per kill** (#233). `OnEntityDeath` used to fire `reward_kill` + `submit_kill`
