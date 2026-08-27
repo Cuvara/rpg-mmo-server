@@ -1,5 +1,44 @@
 # Gateway — Design Decisions
 
+## 2026-08-27 — server_down is consumed: eviction, not just detection (#236)
+
+### Context
+
+The watcher (below) *published* `server_down`, but the only consumer —
+`Gateway.OnEvent` — logged and counted. Nothing pruned the assignment path, so
+`FindServer` kept returning the dead address until the registry key's 15s TTL
+expired; each burnt client cost a single-use join token plus up to 10s of
+connect timeout per attempt. Detection without consumption bought nothing.
+
+### Decision — evict on consumption, and fix the watcher's error split first
+
+`Gateway.OnEvent` now recognises `Type == registry.ServerDownChannel` and calls
+`RegistryService.Evict(ctx, serverID)`: untrack in the watcher, `Deregister`
+from the store (which removes the entry and its map-index membership), with a
+wrapped `storage.ErrNotFound` treated as success. Eviction is **idempotent** —
+duplicate events and multiple consuming gateway instances are harmless — and it
+is deliberately **not a deny-list**: a server that re-registers or resumes
+heartbeating afterwards is alive by definition and becomes assignable again
+through the normal Register/FindServer path. A failed eviction logs and falls
+back to TTL expiry, the pre-fix behaviour, so the event is degraded rather than
+lost. The registry write is bounded by `serverDownEvictTimeout` (5s) because
+`OnEvent` runs on the relay's consumer goroutine.
+
+**Order mattered.** The watcher used to treat *any* `GetServer` error as death.
+Unconsumed, that was only a noisy log line; consumed, one transient Redis blip
+would have published a false `server_down` for every tracked server and the new
+consumer would have evicted them all — a new outage mode. So the watcher now
+publishes (and untracks) only on `storage.ErrNotFound`; every other error is
+logged and the server stays tracked
+(`TestRegistryWatcher_TransientErrorKeepsTracking`).
+
+What is still true: detection is not *early* — `GetServer` only fails after the
+TTL has already expired in the store. What eviction buys is that every gateway
+instance's assignment path is pruned the moment the first watcher notices,
+instead of each instance independently waiting out its own view of the TTL, and
+that the watcher poll (5s) beats a client walking into the address in the
+remaining window.
+
 ## 2026-08-22 — The registry watcher is wired in, so a dead server leaves the gateway's view before its TTL
 
 ### Context
@@ -52,9 +91,10 @@ invert when either value is retuned.
 - `server_down` is published through the gateway's existing event stream
   (`eventStreamPublisher`), not a second pub/sub client: Redis Streams on the
   Redis backend, in-memory otherwise. No new dependency.
-- The event is currently consumed by the relay and logged/counted — the same MVP
-  limitation as every other event (no `MsgEvent` on the wire). The detection is
-  what this change buys; acting on it client-side stays blocked on `shared`.
+- ~~The event is currently consumed by the relay and logged/counted~~ — since
+  2026-08-27 (#236, entry above) the gateway acts on it: `OnEvent` evicts the
+  named server from the registry. Pushing events to *clients* stays blocked on
+  `shared` adding a `MsgEvent`.
 
 ## 2026-08-17 — Allocation only replaces an absent server, and the token is minted last
 

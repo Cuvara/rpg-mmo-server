@@ -721,6 +721,27 @@ func (s *RegistryService) DeregisterServer(ctx context.Context, serverID string)
 	return nil
 }
 
+// Evict removes a server the gateway has learned is dead (a consumed
+// server_down event) from the registry and from the watcher's tracked set, so
+// FindServer stops handing out its address immediately instead of waiting out
+// the registry TTL.
+//
+// It is idempotent: evicting a server that is already gone is a success, not an
+// error — the watcher that published the event has usually seen the entry
+// missing already, and several gateway instances consume the same event. It
+// deliberately does not deny-list the ServerID: a server that re-registers (or
+// resumes heartbeating) after an eviction is alive by definition and must
+// become assignable again through the normal Register/FindServer path.
+func (s *RegistryService) Evict(ctx context.Context, serverID string) error {
+	if s.watcher != nil {
+		s.watcher.UntrackServer(serverID)
+	}
+	if err := s.reg.Deregister(ctx, serverID); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		return fmt.Errorf("evict server %s: %w", serverID, err)
+	}
+	return nil
+}
+
 // trackServer adds a live server to the watcher's set, if one is attached.
 func (s *RegistryService) trackServer(info storage.ServerInfo) {
 	if s.watcher != nil && info.ServerID != "" {
