@@ -161,6 +161,34 @@ const sessionRefreshInterval = time.Minute
 // the cause.
 const MaxHandlerBlockingWait = pongTimeout - pingInterval
 
+// enterWorldWriteMargin is the slice of MaxHandlerBlockingWait reserved for
+// what handleEnterWorld does AFTER the assignment resolves: the session
+// update, the response encode, and the enqueue onto the send channel. Those are
+// cheap but not free — a Redis session store under load is the expensive one —
+// and a budget that spends the whole window on the assignment leaves the
+// write-back racing the heartbeat it was sized to protect.
+const enterWorldWriteMargin = 2 * time.Second
+
+// EnterWorldBudget is the single deadline handleEnterWorld puts over the whole
+// assignment path (registry lookup + retries, Agones allocation, wait for the
+// allocated pod to self-register).
+//
+// It exists because the legs of that path each carry their own timeout and,
+// stacked worst-case, exceed MaxHandlerBlockingWait — registry lookup retries
+// (registry.RetryTotalTimeout, 10s) + the Agones allocation call
+// (registry.DefaultTimeout, 10s) + the registration wait
+// (registry.DefaultAllocationWaitTimeout, 15s) ≈ 35s against a 20s window
+// (issue #235). No per-leg default can fix a sum, so the sum is capped here:
+// when the budget expires the client gets the retryable "server is starting,
+// retry shortly" while the allocation itself carries on detached
+// (registry.allocateOnce runs the leader on context.WithoutCancel), so the
+// client's retry finds the server ready instead of triggering a second
+// allocation.
+//
+// A guard test in enter_world_alloc_test.go pins the arithmetic against the
+// same constants.
+const EnterWorldBudget = MaxHandlerBlockingWait - enterWorldWriteMargin
+
 // halfCloser is the optional half-close capability of a net.Conn.
 // *net.TCPConn and *net.UnixConn implement it; kcp.UDPSession does not.
 type halfCloser interface{ CloseWrite() error }

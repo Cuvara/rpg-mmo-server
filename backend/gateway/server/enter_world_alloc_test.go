@@ -122,6 +122,151 @@ func TestAllocationWaitDefaultCannotStarveHeartbeat(t *testing.T) {
 	}
 }
 
+// TestEnterWorldWorstCaseBudgetFitsHandlerWindow pins the SUM, not one leg.
+//
+// One handleEnterWorld can stack three sequential waits: the registry lookup's
+// retry window (registry.RetryTotalTimeout), the Agones allocation HTTP call
+// (registry.DefaultTimeout), and the wait for the allocated pod to
+// self-register (registry.DefaultAllocationWaitTimeout). Each leg is bounded on
+// its own, but their sum used to exceed MaxHandlerBlockingWait, so the
+// gateway's heartbeat killed the connection mid-allocation (issue #235). The
+// fix caps the handler at EnterWorldBudget; this test derives the worst case
+// from the same constants the code runs on, so it moves when they move.
+func TestEnterWorldWorstCaseBudgetFitsHandlerWindow(t *testing.T) {
+	stacked := registry.RetryTotalTimeout + registry.DefaultTimeout + registry.DefaultAllocationWaitTimeout
+
+	// The handler runs under one deadline, so what it can actually block for
+	// is min(stacked legs, EnterWorldBudget).
+	worst := stacked
+	if EnterWorldBudget < worst {
+		worst = EnterWorldBudget
+	}
+	if worst >= MaxHandlerBlockingWait {
+		t.Fatalf("worst-case enter_world block = %s (stacked legs %s, budget %s), must be < MaxHandlerBlockingWait = %s",
+			worst, stacked, EnterWorldBudget, MaxHandlerBlockingWait)
+	}
+	if margin := MaxHandlerBlockingWait - worst; margin < time.Second {
+		t.Fatalf("worst-case enter_world block = %s leaves only %s of MaxHandlerBlockingWait = %s; need >= 1s for the session write-back and response flush",
+			worst, margin, MaxHandlerBlockingWait)
+	}
+
+	// The budget's own arithmetic: carved out of the handler window, never the
+	// other way round, with a real slice reserved for the write-back.
+	if EnterWorldBudget != MaxHandlerBlockingWait-enterWorldWriteMargin {
+		t.Errorf("EnterWorldBudget = %s, want MaxHandlerBlockingWait - enterWorldWriteMargin = %s",
+			EnterWorldBudget, MaxHandlerBlockingWait-enterWorldWriteMargin)
+	}
+	if enterWorldWriteMargin < time.Second {
+		t.Errorf("enterWorldWriteMargin = %s, want >= 1s", enterWorldWriteMargin)
+	}
+
+	// Document why the budget is load-bearing rather than slack: if a constants
+	// change ever brings the stacked legs inside the window, the deadline
+	// becomes belt-and-braces and this note should be revisited, not deleted.
+	if stacked <= MaxHandlerBlockingWait {
+		t.Logf("stacked legs = %s now fit inside MaxHandlerBlockingWait = %s; EnterWorldBudget is no longer the binding constraint", stacked, MaxHandlerBlockingWait)
+	}
+}
+
+// A cold-map allocation slower than the handler budget must yield the retryable
+// "server is starting" error instead of blocking until the heartbeat kills the
+// connection — and the single-flight leader must keep running detached, so the
+// same client's retry finds the server ready without a second allocation
+// (issue #235).
+func TestGateway_SlowAllocationYieldsRetryableAndLeaderCompletes(t *testing.T) {
+	allocated := storage.ServerInfo{
+		ServerID: "map-servers-dev-slow-1",
+		Addr:     "192.168.65.3:9000",
+		Capacity: 100,
+	}
+	serverRegistry := storage.NewMemoryServerRegistry()
+	alloc := &countingAllocator{
+		info:          allocated,
+		selfRegister:  serverRegistry,
+		registerAfter: 500 * time.Millisecond, // far past the handler budget below
+		selfAddr:      "192.168.65.3:7311",    // the port the pod really got
+	}
+
+	gw := New(
+		session.NewSessionManager(storage.NewMemorySessionStore()),
+		registry.NewRegistryServiceWithAllocator(serverRegistry, alloc,
+			// A registration wait longer than the handler budget: the budget,
+			// not this wait, must be what unblocks the handler.
+			registry.WithAllocationWait(2*time.Second, 5*time.Millisecond)),
+		testSecret,
+		logger.New("error"),
+	)
+	// Scaled-down budget so the test proves the deadline, not the wall clock;
+	// set before Run so the handler goroutines only ever read it.
+	gw.enterWorldBudget = 100 * time.Millisecond
+	go func() { _ = gw.Run("127.0.0.1:0") }()
+	for i := 0; i < 50 && gw.Addr() == ""; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if gw.Addr() == "" {
+		t.Fatal("gateway did not start in time")
+	}
+	t.Cleanup(gw.Shutdown)
+
+	conn := dialGateway(t, gw)
+	defer conn.Close()
+
+	token, _ := jwt.Sign("user1", testSecret, time.Hour)
+	authEnv, _ := messages.NewEnvelope(messages.MsgAuth, messages.AuthRequest{Token: token})
+	sendEnvelope(t, conn, authEnv)
+	readEnvelope(t, conn)
+
+	enterEnv, _ := messages.NewEnvelope(messages.MsgEnterWorld, messages.EnterWorldRequest{MapID: "map_desert"})
+	start := time.Now()
+	sendEnvelope(t, conn, enterEnv)
+
+	var resp messages.EnterWorldResponse
+	if err := readEnvelope(t, conn).UnmarshalPayload(&resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	blocked := time.Since(start)
+	if resp.Error != msgServerStarting {
+		t.Fatalf("Error = %q, want the retryable %q", resp.Error, msgServerStarting)
+	}
+	if resp.JoinToken != "" || resp.ServerAddr != "" {
+		t.Fatalf("timed-out assignment handed out token=%q addr=%q", resp.JoinToken, resp.ServerAddr)
+	}
+	// The answer must come from the budget, not from the 2s allocation wait.
+	if blocked >= time.Second {
+		t.Errorf("handler blocked %s, want ~the 100ms budget (deadline not applied)", blocked)
+	}
+
+	// The connection must have survived the timed-out assignment: a ping still
+	// round-trips on the same socket.
+	pingEnv, _ := messages.NewEnvelope(messages.MsgPing, messages.PingMessage{Timestamp: time.Now().UnixMilli()})
+	sendEnvelope(t, conn, pingEnv)
+	if env := readEnvelope(t, conn); env.Type != messages.MsgPong {
+		t.Fatalf("after timed-out enter_world, ping answered with %v, want MsgPong", env.Type)
+	}
+
+	// The detached leader keeps waiting: the pod registers at 500ms, and the
+	// SAME connection's retry then resolves it straight from the registry —
+	// exactly one allocation across both attempts.
+	time.Sleep(700 * time.Millisecond)
+	sendEnvelope(t, conn, enterEnv)
+	var retry messages.EnterWorldResponse
+	if err := readEnvelope(t, conn).UnmarshalPayload(&retry); err != nil {
+		t.Fatalf("retry unmarshal: %v", err)
+	}
+	if retry.Error != "" {
+		t.Fatalf("retry after the pod registered failed: %q", retry.Error)
+	}
+	if retry.ServerAddr != alloc.selfAddr {
+		t.Errorf("retry ServerAddr = %q, want the pod's self-reported %q", retry.ServerAddr, alloc.selfAddr)
+	}
+	if retry.JoinToken == "" {
+		t.Error("retry should mint a join token")
+	}
+	if got := alloc.hits.Load(); got != 1 {
+		t.Errorf("allocator hits = %d, want exactly 1 (retry must reuse the detached leader's allocation)", got)
+	}
+}
+
 // A client that keeps asking for a map no fleet serves must not keep draining
 // the fleet. The gateway's single-flight only merges CONCURRENT callers; a retry
 // loop is sequential, and every sequential attempt used to allocate another

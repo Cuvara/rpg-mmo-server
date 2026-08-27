@@ -248,14 +248,15 @@ func main() {
 		// bounded by these two knobs (flag wins, then env, then default).
 		waitTimeout := resolveDuration(*allocWaitTimeout, "ALLOCATION_WAIT_TIMEOUT", registry.DefaultAllocationWaitTimeout, log)
 		pollInterval := resolveDuration(*allocPollInterval, "ALLOCATION_POLL_INTERVAL", registry.DefaultAllocationPollInterval, log)
-		// Fail fast on a wait that would starve the heartbeat. handleEnterWorld
-		// blocks the connection's read loop for this long, and that same loop is
-		// what records the client's MsgPong — so a wait at or above
-		// MaxHandlerBlockingWait makes the gateway disconnect the very client it
-		// is waiting for, with a symptom that points nowhere near the cause.
-		// Same fail-fast precedent as a missing JOIN_TOKEN_SECRET: a
-		// misconfiguration that only bites the first player is worse than not
-		// starting.
+		// Fail fast on a wait that could never resolve inline. handleEnterWorld
+		// now runs under server.EnterWorldBudget (issue #235), so a large wait
+		// no longer starves the heartbeat — the handler answers the retryable
+		// "server is starting" at the budget while the allocation runs on
+		// detached. But a wait above MaxHandlerBlockingWait remains a
+		// misconfiguration worth refusing: it guarantees every cold-map join
+		// takes at least one retry, and the value was chosen against a ceiling
+		// that no longer applies. Same fail-fast precedent as a missing
+		// JOIN_TOKEN_SECRET.
 		if waitTimeout > server.MaxHandlerBlockingWait {
 			log.Error("allocation wait would starve the client heartbeat; refusing to start",
 				"allocation_wait_timeout", waitTimeout,
