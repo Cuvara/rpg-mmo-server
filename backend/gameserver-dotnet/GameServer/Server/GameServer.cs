@@ -208,6 +208,7 @@ public sealed class GameServerHost : IAsyncDisposable
     private readonly IAgonesSdk _agonesSdk;
     private readonly EventPublisher? _publisher;
     private readonly Nakama.NakamaClient? _nakamaClient;
+    private readonly Nakama.KillRewardBatcher? _killBatcher;
     private readonly GameMetrics? _metrics;
     private readonly ILogger _logger;
     /// <summary>Keyring join tokens are verified against (JOIN_TOKEN_SECRET).</summary>
@@ -341,6 +342,12 @@ public sealed class GameServerHost : IAsyncDisposable
                 options.NakamaUrl,
                 options.NakamaHttpKey,
                 _loggerFactory.CreateLogger<Nakama.NakamaClient>());
+            // One reward_kills call per killer per flush, instead of two HTTP RPCs and
+            // two meta-DB transactions per kill (#233).
+            _killBatcher = new Nakama.KillRewardBatcher(
+                _nakamaClient,
+                options.MapId,
+                _loggerFactory.CreateLogger<Nakama.KillRewardBatcher>());
         }
 
         var eventStream = options.EventStream ?? new NoopEventStream();
@@ -1262,11 +1269,13 @@ public sealed class GameServerHost : IAsyncDisposable
             _ = _publisher.PublishDeathAsync("entity_killed", payload);
         }
 
-        // Award gold + leaderboard score when a player kills a mob
-        if (_nakamaClient != null && killer.Type == "player" && victim.Type == "mob")
+        // Award gold + leaderboard score when a player kills a mob. Recorded, not sent:
+        // the batcher coalesces per killer and flushes on its own interval, so this is
+        // one dictionary increment on the tick thread — no task, no socket, no way for
+        // a stalled Nakama to pile work up here (#233).
+        if (_killBatcher != null && killer.Type == "player" && victim.Type == "mob")
         {
-            _ = _nakamaClient.RewardKillAsync(killer.Id, victim.Id, _options.MapId);
-            _ = _nakamaClient.SubmitKillAsync(killer.Id);
+            _killBatcher.RecordKill(killer.Id);
         }
     }
 
@@ -1295,6 +1304,11 @@ public sealed class GameServerHost : IAsyncDisposable
         if (_registration != null)
         {
             await _registration.DisposeAsync();
+        }
+        // Before the client: the batcher's final flush still needs the HttpClient.
+        if (_killBatcher != null)
+        {
+            await _killBatcher.DisposeAsync();
         }
         _nakamaClient?.Dispose();
         // Disposed only here, once the run loop is guaranteed done with it — disposing
