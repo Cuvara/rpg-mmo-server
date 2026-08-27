@@ -67,10 +67,48 @@ const defaultStreamBlock = 500 * time.Millisecond
 // between the two numbers.
 const DefaultStreamMaxLen int64 = 30_000
 
+// Reclaim policy (#234). ACK-after-handler is only half of at-least-once: an
+// entry delivered to a consumer that crashed before ACKing sits in the group's
+// Pending Entries List under that consumer's name forever unless someone claims
+// it. Consumer names are pod names, so a replacement pod is a *new* consumer
+// that XREADGROUP `>` will never hand old pending entries to — the reclaim pass
+// below is the other half.
+const (
+	// defaultReclaimMinIdle is how long an entry must sit unACKed before another
+	// consumer may claim it. It must be far above one read cycle (block 500ms +
+	// handler time), so an entry that idle is genuinely stranded and not merely
+	// in flight on a slow handler; and far below the ~10-minute lag budget that
+	// sizes DefaultStreamMaxLen, so reclaim happens while the entry still
+	// exists. 60s is roughly two crash-restart cycles of headroom.
+	defaultReclaimMinIdle = 60 * time.Second
+
+	// defaultReclaimInterval bounds redelivery latency: a stranded entry is
+	// picked up at most minIdle + interval after its delivery. A reclaim pass
+	// against an empty PEL is one cheap XAUTOCLAIM round trip, so 30s costs
+	// nothing in the healthy case.
+	defaultReclaimInterval = 30 * time.Second
+
+	// defaultMaxDeliveries caps redelivery of a poison entry — one whose handler
+	// crashes the consumer every time. Without a cap the entry would cycle
+	// through every pod in the group forever, taking each one down. After this
+	// many deliveries the entry is ACKed unhandled (dead-lettered): logged
+	// loudly and counted via DeadLetters, mirroring the GroupLosses pattern.
+	// 5 attempts distinguishes "pod happened to die mid-handler" (1-2) from
+	// "this entry kills whoever touches it".
+	defaultMaxDeliveries = 5
+
+	// reclaimBatch is the XAUTOCLAIM page size, matching the XREADGROUP Count so
+	// a reclaim pass and a normal read produce the same ACK batch shape.
+	reclaimBatch = 16
+)
+
 // RedisEventStream implements EventStream over Redis Streams using a consumer
-// group: XADD to publish, XREADGROUP to consume, XACK after the handler runs
-// (at-least-once delivery; a crashed consumer leaves the entry pending for
-// another member of the group).
+// group: XADD to publish, XREADGROUP to consume, XACK after the whole read
+// batch's handlers ran (at-least-once delivery). Entries left pending by a
+// crashed or replaced consumer are reclaimed: on Subscribe and every
+// reclaimInterval the consumer runs XAUTOCLAIM with reclaimMinIdle over the
+// group's PEL, redelivers what it claims, and dead-letters (ACKs unhandled,
+// loudly) entries past maxDeliveries — see DeadLetters.
 type EventStream struct {
 	client   redis.UniversalClient
 	group    string
@@ -80,10 +118,20 @@ type EventStream struct {
 	owned    bool
 	logger   *slog.Logger
 
+	reclaimMinIdle  time.Duration
+	reclaimInterval time.Duration
+	maxDeliveries   int64
+
 	// groupLosses counts NOGROUP recoveries. Exported through GroupLosses so
 	// the gateway can surface it as a metric and tests can assert the recovery
 	// actually happened rather than inferring it from timing.
 	groupLosses atomic.Int64
+
+	// deadLetters counts entries dropped by the poison-entry cap — same
+	// rationale as groupLosses: a metric for the gateway, an assertion handle
+	// for tests. Every increment is an event that was delivered maxDeliveries
+	// times and handled zero, i.e. real loss worth alerting on.
+	deadLetters atomic.Int64
 
 	mu     sync.Mutex
 	closed bool
@@ -99,6 +147,10 @@ func (s *EventStream) SetLogger(l *slog.Logger) { s.logger = l }
 // GroupLosses returns how many times the consumer group was found missing and
 // re-created since this stream was built.
 func (s *EventStream) GroupLosses() int64 { return s.groupLosses.Load() }
+
+// DeadLetters returns how many pending entries were dropped (ACKed unhandled)
+// by the poison-entry cap since this stream was built.
+func (s *EventStream) DeadLetters() int64 { return s.deadLetters.Load() }
 
 func (s *EventStream) recordGroupLoss() { s.groupLosses.Add(1) }
 
@@ -134,13 +186,16 @@ func NewEventStreamWithClient(client redis.UniversalClient, group, consumer stri
 func newEventStream(client redis.UniversalClient, group, consumer string) *EventStream {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &EventStream{
-		client:   client,
-		group:    group,
-		consumer: consumer,
-		block:    defaultStreamBlock,
-		maxLen:   DefaultStreamMaxLen,
-		ctx:      ctx,
-		cancel:   cancel,
+		client:          client,
+		group:           group,
+		consumer:        consumer,
+		block:           defaultStreamBlock,
+		maxLen:          DefaultStreamMaxLen,
+		reclaimMinIdle:  defaultReclaimMinIdle,
+		reclaimInterval: defaultReclaimInterval,
+		maxDeliveries:   defaultMaxDeliveries,
+		ctx:             ctx,
+		cancel:          cancel,
 	}
 }
 
@@ -149,6 +204,34 @@ func newEventStream(client redis.UniversalClient, group, consumer string) *Event
 func (s *EventStream) SetBlockTimeout(d time.Duration) {
 	if d > 0 {
 		s.block = d
+	}
+}
+
+// SetReclaimMinIdle overrides how long an entry must sit unACKed in the PEL
+// before another consumer may claim it. Must be called before Subscribe.
+func (s *EventStream) SetReclaimMinIdle(d time.Duration) {
+	if d > 0 {
+		s.reclaimMinIdle = d
+	}
+}
+
+// SetReclaimInterval overrides how often the consumer scans the PEL for
+// stranded entries. Must be called before Subscribe.
+func (s *EventStream) SetReclaimInterval(d time.Duration) {
+	if d > 0 {
+		s.reclaimInterval = d
+	}
+}
+
+// SetMaxDeliveries overrides the poison-entry cap: an entry that reaches this
+// many deliveries without an ACK is dropped (ACKed unhandled) on the next
+// reclaim instead of redelivered. Non-positive values are ignored — there is
+// deliberately no way to switch the cap off, for the same reason SetMaxLen has
+// no off switch: an uncapped poison entry cycles through every consumer in the
+// group forever. Must be called before Subscribe.
+func (s *EventStream) SetMaxDeliveries(n int64) {
+	if n > 0 {
+		s.maxDeliveries = n
 	}
 }
 
@@ -251,11 +334,18 @@ func (s *EventStream) ensureGroup(ctx context.Context, key string) error {
 	return nil
 }
 
-// consume loops XREADGROUP → handler → XACK until the stream is closed.
+// consume loops XREADGROUP → handlers → batched XACK until the stream is
+// closed, running a PEL reclaim pass immediately and every reclaimInterval.
 func (s *EventStream) consume(key string, handler func(storage.Event)) {
+	var lastReclaim time.Time // zero: first loop iteration reclaims immediately
 	for {
 		if s.ctx.Err() != nil {
 			return
+		}
+
+		if time.Since(lastReclaim) >= s.reclaimInterval {
+			s.reclaim(key, handler)
+			lastReclaim = time.Now()
 		}
 
 		res, err := s.client.XReadGroup(s.ctx, &redis.XReadGroupArgs{
@@ -301,13 +391,107 @@ func (s *EventStream) consume(key string, handler func(storage.Event)) {
 		}
 
 		for _, stream := range res {
+			// ACK only after the handlers returned: at-least-once. One XACK per
+			// read batch (Count above) rather than one RTT per message — a
+			// consumer that dies mid-batch re-receives the whole batch via the
+			// reclaim path, which idempotent handlers already tolerate.
+			acks := make([]string, 0, len(stream.Messages))
 			for _, msg := range stream.Messages {
 				handler(eventFromValues(msg.Values))
-				// ACK only after the handler returned: at-least-once.
-				_ = s.client.XAck(s.ctx, key, s.group, msg.ID).Err()
+				acks = append(acks, msg.ID)
 			}
+			s.ack(key, acks)
 		}
 	}
+}
+
+// ack batch-acknowledges ids in one round trip. A failed ACK is logged, not
+// retried: the entries stay pending and the reclaim pass redelivers them, so
+// the failure degrades to a duplicate delivery rather than a loss.
+func (s *EventStream) ack(key string, ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	if err := s.client.XAck(s.ctx, key, s.group, ids...).Err(); err != nil && s.ctx.Err() == nil {
+		s.logf("event stream: xack of %d entries on %q failed (will be redelivered): %v", len(ids), key, err)
+	}
+}
+
+// reclaim walks the group's PEL with XAUTOCLAIM, claiming entries idle longer
+// than reclaimMinIdle to this consumer. Claimed entries whose delivery count is
+// within maxDeliveries are redelivered to the handler; the rest are
+// dead-lettered — ACKed unhandled, logged loudly, and counted (DeadLetters) —
+// because an entry that failed that many deliveries is presumed to be the thing
+// crashing its consumers. Errors abort the pass; the next interval retries.
+func (s *EventStream) reclaim(key string, handler func(storage.Event)) {
+	start := "0-0"
+	for {
+		if s.ctx.Err() != nil {
+			return
+		}
+		msgs, next, err := s.client.XAutoClaim(s.ctx, &redis.XAutoClaimArgs{
+			Stream:   key,
+			Group:    s.group,
+			Consumer: s.consumer,
+			MinIdle:  s.reclaimMinIdle,
+			Start:    start,
+			Count:    reclaimBatch,
+		}).Result()
+		if err != nil {
+			// NOGROUP is handled (re-created, counted) by the XREADGROUP path;
+			// anything else is transient and the next interval retries.
+			if !isNoGroup(err) && s.ctx.Err() == nil {
+				s.logf("event stream: xautoclaim on %q failed: %v", key, err)
+			}
+			return
+		}
+		if len(msgs) > 0 {
+			s.redeliver(key, msgs, handler)
+		}
+		if next == "" || next == "0-0" {
+			return
+		}
+		start = next
+	}
+}
+
+// redeliver routes one page of claimed entries: handler + ACK for entries under
+// the delivery cap, dead-letter ACK for the rest. Delivery counts come from
+// XPENDING over the claimed range — XAUTOCLAIM has already incremented them, so
+// the count read here includes the delivery being decided.
+func (s *EventStream) redeliver(key string, msgs []redis.XMessage, handler func(storage.Event)) {
+	counts := map[string]int64{}
+	pend, err := s.client.XPendingExt(s.ctx, &redis.XPendingExtArgs{
+		Stream:   key,
+		Group:    s.group,
+		Consumer: s.consumer,
+		Start:    msgs[0].ID,
+		End:      msgs[len(msgs)-1].ID,
+		Count:    int64(len(msgs)),
+	}).Result()
+	if err != nil {
+		if s.ctx.Err() != nil {
+			return
+		}
+		// Counts unknown: redeliver everything rather than drop anything. A
+		// poison entry survives one extra round; a healthy entry is not lost.
+		s.logf("event stream: xpending on %q failed, redelivering claimed entries without a delivery-count check: %v", key, err)
+	}
+	for _, p := range pend {
+		counts[p.ID] = p.RetryCount
+	}
+
+	acks := make([]string, 0, len(msgs))
+	for _, msg := range msgs {
+		if counts[msg.ID] > s.maxDeliveries {
+			s.deadLetters.Add(1)
+			s.logf("event stream: entry %s on %q exceeded %d deliveries, dead-lettered (dropped unhandled)", msg.ID, key, s.maxDeliveries)
+		} else {
+			handler(eventFromValues(msg.Values))
+		}
+		acks = append(acks, msg.ID)
+	}
+	s.ack(key, acks)
 }
 
 // Close stops all consumers and waits for in-flight handlers to finish.

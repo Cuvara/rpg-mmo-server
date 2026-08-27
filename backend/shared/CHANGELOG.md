@@ -5,6 +5,29 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`redisstore.EventStream` now reclaims the Pending Entries List**
+  ([#234](https://github.com/Cuvara/rpg-mmo-server/issues/234)). The consumer
+  only ever read `>`, and consumer names are pod names, so an entry delivered
+  to a pod that crashed between handler and `XACK` stayed pending under a name
+  no replacement would ever use — the redelivery half of at-least-once was
+  missing, and the type comment described recovery no code performed. On
+  Subscribe and every 30s (`SetReclaimInterval`) the consumer now walks the
+  group's PEL with `XAUTOCLAIM`, claims entries idle longer than 60s
+  (`SetReclaimMinIdle`) to itself, and redelivers them to the handler. Entries
+  past 5 deliveries (`SetMaxDeliveries`) are dead-lettered: ACKed unhandled,
+  logged loudly, and counted via the new `DeadLetters()` — same pattern as
+  `GroupLosses` for NOGROUP. The cap has deliberately no off switch. Rationale
+  and failure-mode analysis: `docs/DESIGN.md`, "PEL reclaim and the delivery
+  cap".
+
+### Changed
+- **`EventStream` ACKs once per read batch instead of once per message** —
+  one `XACK` round trip per `XREADGROUP` batch (Count 16). A consumer dying
+  mid-batch re-receives the whole batch via the reclaim path, which the
+  required idempotent-handler discipline already covers; a failed batch ACK is
+  logged and left pending for reclaim (duplicate delivery, never loss).
+
 ### Removed
 - **`GatewayKickChannel` (`"gateway:kick"`) is gone from `constants/keys.go`**
   ([#211](https://github.com/Cuvara/rpg-mmo-server/issues/211)). It named a Redis
