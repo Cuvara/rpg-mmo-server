@@ -6,6 +6,21 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`reward_kills` RPC — gold and leaderboard score for a batch of kills in one call**
+  (rpg-mmo-server#233). The per-kill `reward_kill` + `submit_kill` pair cost 2 HTTP
+  requests and 2 separate meta-DB transactions per mob kill — ~133 commits/s at 200
+  players on the grindy end, the first thing to saturate a shared small-VPS Postgres.
+  Both operations are increments, so one call per killer per game-server flush is
+  semantically identical. The error contract is explicit and load-bearing: an error
+  means NOTHING was granted (safe to re-queue); once the wallet update succeeds the
+  call always reports success, surfacing a leaderboard failure in the response body
+  instead — an error there would invite a retry that grants the gold twice (ADR-6:
+  bounded score loss acceptable, double gold not). `kills` capped at 1000 per batch so
+  a corrupted payload cannot mint unbounded gold; `batch_id` recorded in wallet
+  metadata as the audit trail and future idempotency slot. Unit tests drive the core
+  through a two-method mock: single-call grant, all reject-before-grant shapes, and
+  both halves of the error contract.
+
 - **RUNBOOK: two silent leaderboard failure modes**, both found in one live
   investigation where "the leaderboard is broken" was two deploy gaps and zero code
   bugs: a stale `nakama.so` (module mtime predated the commit registering
@@ -17,6 +32,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   sequence the bind-mount file lock forces on Windows/WSL hosts.
 
 ### Changed
+- **`reward_kill`'s per-kill Info log demoted to Debug** — 20+ lines/s at 200 players,
+  part of the same per-kill amplification `reward_kills` removes. The RPC pair stays
+  registered for compatibility; `docs/API.md` documents all four economy RPCs and
+  marks the pair legacy.
+
 - **The repo-level `CLAUDE.md` listed this module as `Planned`** while `auth/` and
   `economy/` were both implemented and under test. That row is the first thing anyone
   reads when deciding where a piece of work belongs, so it was routing auth and economy

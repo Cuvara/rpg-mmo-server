@@ -41,6 +41,9 @@ func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runti
 	if err := initializer.RegisterRpc(economy.RPCRewardKill, economy.RewardKillRPC); err != nil {
 		return fmt.Errorf("register rpc %s: %w", economy.RPCRewardKill, err)
 	}
+	if err := initializer.RegisterRpc(economy.RPCRewardKills, economy.RewardKillsRPC); err != nil {
+		return fmt.Errorf("register rpc %s: %w", economy.RPCRewardKills, err)
+	}
 	if err := initializer.RegisterRpc(economy.RPCSubmitKill, economy.SubmitKillRPC); err != nil {
 		return fmt.Errorf("register rpc %s: %w", economy.RPCSubmitKill, err)
 	}

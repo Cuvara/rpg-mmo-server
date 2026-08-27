@@ -8,6 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Kill rewards are batched per killer: one Nakama call per flush instead of two HTTP
+  RPCs per kill** (#233). `OnEntityDeath` used to fire `reward_kill` + `submit_kill`
+  fire-and-forget per mob kill — 2 requests and 2 meta-Postgres transactions each,
+  ~133 commits/s at 200 grindy players (the first thing to saturate a shared small-VPS
+  Postgres), with unbounded in-flight tasks on a 100 s default HttpClient timeout when
+  Nakama stalled. `KillRewardBatcher` now coalesces kills into one `long` per killer
+  (memory bounded by players online, not by kill rate or outage length) and flushes
+  every 3 s to the new batched `reward_kills` RPC; the death callback is a single
+  dictionary increment. `NakamaClient` gets a 5 s timeout and a three-way outcome the
+  retry policy is built on: *NotGranted* (Nakama's error contract: nothing granted) →
+  re-queue; *Unknown* (timeout, outcome unknowable) → drop with a loud log and a
+  `DroppedKills` counter, because retrying an unknown outcome is the double-gold path
+  ADR-6 forbids — bounded loss is the accepted trade. Final flush on shutdown, before
+  the HttpClient is disposed. `KillRewardBatcherTests` pins coalescing, the re-queue
+  (with a fresh `batch_id` per attempt), the drop, and that kills recorded during a
+  failed send survive the re-queue.
+
 - **Scaffolding enemies die in two hits (HP 30 → 16).** The demo combat loop could not
   complete: a radial enemy at speed 2.5 crosses the 3.0 attack range in at most 2.4 s,
   which at the 500 ms attack cooldown is 3-4 accepted hits — 24-32 damage against 30 HP,
