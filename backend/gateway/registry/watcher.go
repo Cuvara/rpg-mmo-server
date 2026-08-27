@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -131,6 +132,19 @@ func (w *RegistryWatcher) checkServers(ctx context.Context) {
 	for serverID, mapID := range snapshot {
 		_, err := w.reg.GetServer(ctx, serverID)
 		if err == nil {
+			continue
+		}
+
+		// Only a definitive "the entry does not exist" (storage.ErrNotFound —
+		// heartbeat TTL expired or the server deregistered) is server death.
+		// Anything else is a store fault — a Redis blip, a network timeout — and
+		// says nothing about the server, so the watcher keeps tracking it and
+		// publishes nothing: a false server_down here would be consumed as an
+		// eviction and take a healthy server out of assignment for every tracked
+		// server at once, turning one transient store error into an outage.
+		if !errors.Is(err, storage.ErrNotFound) {
+			w.log.Warn("registry check failed with a transient error; keeping server tracked",
+				"server_id", serverID, "map_id", mapID, "error", err)
 			continue
 		}
 

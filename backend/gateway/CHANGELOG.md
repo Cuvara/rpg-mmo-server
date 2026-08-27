@@ -20,6 +20,27 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   errors fail open (refresh skipped, connection untouched), matching
   `checkSession`. Table-driven regression:
   `TestGateway_PongRefreshesSessionTTL`, `TestShouldRefreshSession_RateLimited`.
+- **`server_down` events are now consumed: the named server is evicted from the
+  registry immediately, instead of being handed to clients until its 15s TTL
+  expires** ([#236](https://github.com/Cuvara/rpg-mmo-server/issues/236)).
+  `Gateway.OnEvent` recognises the registry watcher's `server_down` event and
+  calls the new `RegistryService.Evict(ctx, serverID)`, which removes the
+  registry entry (and with it map-index membership) and untracks the server in
+  the watcher. Before this, the only consumer logged and counted, so `FindServer`
+  kept returning a dead address for up to a full heartbeat TTL — each burnt
+  client costing a single-use join token plus up to 10s of connect timeout.
+  Eviction is idempotent (duplicate events and multiple consuming gateways are
+  harmless) and is **not** a deny-list: a server that re-registers or resumes
+  heartbeating after eviction becomes assignable again through the normal path.
+  A failed eviction degrades to the pre-fix TTL-expiry behaviour and is logged.
+- **The registry watcher no longer treats every `GetServer` error as server
+  death** (same pass, [#236](https://github.com/Cuvara/rpg-mmo-server/issues/236)).
+  Only `storage.ErrNotFound` — heartbeat TTL expired or deregistered — publishes
+  `server_down` and untracks; any other error (a Redis blip, a network timeout)
+  is logged and the server stays tracked. This was fixed *before* wiring the
+  consumer on purpose: with the old behaviour, one transient store error would
+  have published a false `server_down` for every tracked server, and the new
+  consumer would have evicted them all — turning a blip into an outage.
 
 ### Removed
 - **Cross-gateway duplicate-login kick, which was declared at every layer and

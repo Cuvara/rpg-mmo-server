@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -223,10 +224,15 @@ func (g *Gateway) RelayUp() bool { return g.relayUp.Load() }
 // OnEvent implements events.Sink: it receives every cross-server event consumed
 // by the relay.
 //
+// One event type is acted on here: server_down (published by the registry
+// watcher) evicts the named server from the registry so FindServer stops
+// handing out a dead address immediately instead of waiting out the registry
+// TTL (#236).
+//
 // MVP limitation: shared/messages has no client-facing event message type, so
-// events are logged and counted instead of being pushed to connected clients.
-// Once agent-shared adds a MsgEvent, this method becomes the fan-out point
-// (iterate g.conns, cc.Send). See gateway/docs/DESIGN.md.
+// every other event is logged and counted instead of being pushed to connected
+// clients. Once agent-shared adds a MsgEvent, this method becomes the fan-out
+// point (iterate g.conns, cc.Send). See gateway/docs/DESIGN.md.
 func (g *Gateway) OnEvent(ev storage.Event) {
 	g.eventCount.Add(1)
 	g.metrics.RelayEvent()
@@ -235,6 +241,43 @@ func (g *Gateway) OnEvent(ev storage.Event) {
 		"bytes", len(ev.Payload),
 		"clients", g.ConnCount(),
 	)
+
+	if ev.Type == registry.ServerDownChannel {
+		g.handleServerDown(ev.Payload)
+	}
+}
+
+// serverDownEvictTimeout bounds the registry write an eviction performs. OnEvent
+// runs on the relay's consumer goroutine, so a hung store must not stall event
+// consumption indefinitely.
+const serverDownEvictTimeout = 5 * time.Second
+
+// handleServerDown consumes one server_down event: it evicts the named server
+// from the registry so the assignment path stops returning it. Eviction is
+// idempotent and a re-registering server becomes assignable again through the
+// normal path, so acting on a duplicate or stale event is harmless.
+func (g *Gateway) handleServerDown(payload []byte) {
+	var ev registry.ServerDownEvent
+	if err := json.Unmarshal(payload, &ev); err != nil {
+		g.logger.Warn("malformed server_down event", "err", err)
+		return
+	}
+	if ev.ServerID == "" {
+		g.logger.Warn("server_down event with empty server_id, ignoring")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), serverDownEvictTimeout)
+	defer cancel()
+	if err := g.registry.Evict(ctx, ev.ServerID); err != nil {
+		// The registry TTL remains the backstop: a failed eviction degrades to
+		// the pre-#236 behaviour instead of losing the event silently.
+		g.logger.Warn("failed to evict dead server from registry; its TTL is now the only removal path",
+			"server_id", ev.ServerID, "map_id", ev.MapID, "err", err)
+		return
+	}
+	g.logger.Info("evicted dead server from registry",
+		"server_id", ev.ServerID, "map_id", ev.MapID)
 }
 
 // EventCount returns how many events the relay has delivered so far.
