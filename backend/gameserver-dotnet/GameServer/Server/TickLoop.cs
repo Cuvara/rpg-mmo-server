@@ -252,8 +252,50 @@ public sealed class TickLoop
     /// </summary>
     private const int MaxLagTicks = 8;
 
-    /// <summary>Run the tick loop until cancellation.</summary>
-    public async Task RunAsync(CancellationToken ct)
+    /// <summary>
+    /// Run the tick loop until cancellation, on a dedicated thread.
+    /// </summary>
+    /// <remarks>
+    /// A dedicated thread, not an async loop: <c>await Task.Delay</c> resumed every tick
+    /// on the shared ThreadPool, where each connection contributes three long-lived work
+    /// items (read/write/heartbeat) plus a <c>Task.Run</c> per accept. At 200 players
+    /// that is ~600 competing items against a pool that grows by only a thread or two
+    /// per second under starvation, so a connection storm or a batch of blocking
+    /// continuations pushed tick resumption back by tens of milliseconds — jitter every
+    /// client sees in its snapshot cadence (#248). This is the same reasoning
+    /// <see cref="GameServer.World.EcsWorld"/> applies to its sim workers: borrowing
+    /// from the shared pool couples simulation latency to network load.
+    /// The returned task completes when the thread exits, so the caller's
+    /// <c>Task.WhenAny</c> shutdown contract is unchanged.
+    /// </remarks>
+    public Task RunAsync(CancellationToken ct)
+    {
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                RunOnDedicatedThread(ct);
+                done.TrySetResult();
+            }
+            catch (Exception ex)
+            {
+                done.TrySetException(ex);
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "tick-loop",
+            // Above normal so a saturated pool's normal-priority workers do not preempt
+            // the simulation. Not Highest: the OS scheduler must still run the network
+            // threads, or the loop would pace perfectly while nobody can send.
+            Priority = ThreadPriority.AboveNormal,
+        };
+        thread.Start();
+        return done.Task;
+    }
+
+    private void RunOnDedicatedThread(CancellationToken ct)
     {
         // Period in Stopwatch ticks, not integer milliseconds. 1000/60 truncates to 16ms,
         // which is a 4% fast clock — 2.4 extra ticks a second, and every duration expressed
@@ -295,12 +337,24 @@ public sealed class TickLoop
             long remaining = nextDeadline - now;
             if (remaining > 0)
             {
+                // Sleep almost to the deadline on the cancellation handle (wakes
+                // immediately on shutdown), then spin the last stretch: the OS timer's
+                // granularity is coarser than the 16.6 ms base period, and its lateness
+                // used to be inherited by every tick as jitter. SpinOnce yields once its
+                // internal threshold passes, so the busy window is bounded.
                 int delayMs = (int)(remaining * 1000 / Stopwatch.Frequency);
-                if (delayMs > 0)
+                if (delayMs > 1)
                 {
-                    try { await Task.Delay(delayMs, ct); }
-                    catch (OperationCanceledException) { break; }
+                    if (ct.WaitHandle.WaitOne(delayMs - 1)) break;
                 }
+
+                var spin = new SpinWait();
+                while (Stopwatch.GetTimestamp() < nextDeadline)
+                {
+                    if (ct.IsCancellationRequested) break;
+                    spin.SpinOnce();
+                }
+
                 nextDeadline += periodTicks;
                 continue;
             }

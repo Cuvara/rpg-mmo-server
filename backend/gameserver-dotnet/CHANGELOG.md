@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The tick loop runs on a dedicated above-normal-priority thread instead of the
+  shared ThreadPool** (#248). `RunAsync` paced with `await Task.Delay`, so every tick
+  resumed on the pool — the same pool holding three long-lived work items per
+  connection plus one `Task.Run` per accept. Under a connection storm or a batch of
+  blocking continuations, tick resumption queued behind them and the whole map's
+  snapshot cadence jittered by tens of milliseconds; `EcsWorld` already refuses to
+  borrow sim workers from that pool for exactly this reason. The loop now sleeps on
+  the cancellation handle to ~1 ms before the deadline and spins the last stretch, so
+  the OS timer's lateness is no longer inherited by every tick. The public
+  `Task RunAsync(CancellationToken)` shape is unchanged — the returned task completes
+  when the thread exits, so the server's `Task.WhenAny` shutdown contract holds.
+
 - **docs/API.md: the "refreshed by activity" session promise is now precise** (#231).
   The map-transfer section promised the gateway session "is refreshed by activity, so a
   live gateway connection stays valid", but until the paired gateway fix the only
