@@ -6,7 +6,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The write task can no longer claim an AOI buffer while the tick thread is
+  refilling it** (#247). `GatherSnapshotView`'s coalescing branch left
+  `_snapshotPending == true`, released `_snapshotLock`, and then rewrote the staged
+  buffer — a `TakePendingSnapshot` landing in that window handed the encoder the very
+  array being refilled, producing frames that mixed tick N and N+1 rows and advanced
+  `_lastSent` from the mixed view (an entity frozen or mis-positioned for up to a
+  keyframe interval). Triggered exactly when `SnapshotsCoalesced` was incrementing,
+  i.e. under the load where it hurt most. The coalescing branch now reclaims the job
+  (clears the flag) before releasing the lock; a claim inside the window misses via
+  the existing surplus-marker path and the second lock republishes. Pinned by
+  `SnapshotCoalesceRaceTests`, which drives a claim at the exact instruction boundary
+  through a test-only seam.
+
 ### Changed
+
+- **Tick-thread hot-path hygiene** (#249, part 1 — the parts that need no
+  `Shared.GameLogic` release):
+  - `OnEntityDeath` queues the death event into a bounded channel drained by the
+    publisher's own task instead of serializing JSON and starting the stream publish
+    on the tick thread inside the world write lock; the per-kill Information log is
+    now Debug behind an `IsEnabled` guard (kill counts remain on `/status`).
+  - `ApplyStructuralChanges()` early-returns on an `Interlocked`-maintained queued-op
+    count instead of taking the exclusive world lock at 60 Hz to discover an empty
+    queue — the acquisition drained in-flight readers, i.e. the network threads.
+  - Enemy-AI spawn/despawn `LogDebug` calls are guarded (the extension boxes its
+    float args before the level check).
+  - AOI/query scratch buffers grow with 25% headroom instead of to exact size, so a
+    population creeping up by one no longer reallocates and rescans on almost every
+    growth tick.
+  - `SnapshotsCoalesced` / `SnapshotFramesWritten` use `Interlocked` increments and
+    volatile reads — they are written on two different threads and read by the tick
+    thread's counter take, and plain increments could lose updates.
+
+  Deferred to a follow-up (needs a `Shared.GameLogic` version bump):
+  `CombatLogic.ValidateAttack`'s interpolated-string allocation on the normal
+  out-of-range rejection path.
+- **The tick loop runs on a dedicated above-normal-priority thread instead of the
+  shared ThreadPool** (#248). `RunAsync` paced with `await Task.Delay`, so every tick
+  resumed on the pool — the same pool holding three long-lived work items per
+  connection plus one `Task.Run` per accept. Under a connection storm or a batch of
+  blocking continuations, tick resumption queued behind them and the whole map's
+  snapshot cadence jittered by tens of milliseconds; `EcsWorld` already refuses to
+  borrow sim workers from that pool for exactly this reason. The loop now sleeps on
+  the cancellation handle to ~1 ms before the deadline and spins the last stretch, so
+  the OS timer's lateness is no longer inherited by every tick. The public
+  `Task RunAsync(CancellationToken)` shape is unchanged — the returned task completes
+  when the thread exits, so the server's `Task.WhenAny` shutdown contract holds.
 
 - **docs/API.md: the "refreshed by activity" session promise is now precise** (#231).
   The map-transfer section promised the gateway session "is refreshed by activity, so a

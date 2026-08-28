@@ -1264,9 +1264,12 @@ public sealed class GameServerHost : IAsyncDisposable
     {
         if (_publisher != null)
         {
+            // Queued, not published: OnEntityDeath runs on the tick thread with the
+            // world write lock held, and serialization + the publish's synchronous
+            // prefix belong on the publisher's drain task, not here (#249).
             var payload = new DeathPayload(
                 victim.Id, victim.Type, killer.Id, _options.MapId, _options.ServerId);
-            _ = _publisher.PublishDeathAsync("entity_killed", payload);
+            _publisher.QueueDeath("entity_killed", payload);
         }
 
         // Award gold + leaderboard score when a player kills a mob. Recorded, not sent:

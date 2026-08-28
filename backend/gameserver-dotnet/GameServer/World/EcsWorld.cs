@@ -228,6 +228,18 @@ public sealed class EcsWorld : IDisposable
     private readonly List<StructuralOp>[] _structuralSlots;
 
     /// <summary>
+    /// Number of ops queued across <see cref="_structuralSlots"/>, maintained with
+    /// <see cref="Interlocked"/> at the two enqueue sites and reset in the drain. Lets
+    /// <see cref="ApplyStructuralChanges"/> skip the exclusive lock in the normal case:
+    /// the queue is almost always empty, and taking a ReaderWriterLockSlim write lock
+    /// at 60 Hz blocks new readers and drains in-flight ones — the network threads,
+    /// which acquire the read lock on every inbound packet (#249). Workers that
+    /// enqueue do so inside a region the tick thread joins before draining, so the
+    /// count is never behind the slots when it is read here.
+    /// </summary>
+    private int _queuedStructuralOps;
+
+    /// <summary>
     /// Which structural slot THIS thread writes into. Zero — the slot the serial world
     /// uses — unless <see cref="UpdateComponentsParallel"/> assigned one.
     ///
@@ -1345,6 +1357,8 @@ public sealed class EcsWorld : IDisposable
     /// </summary>
     public void ApplyStructuralChanges()
     {
+        if (Volatile.Read(ref _queuedStructuralOps) == 0) return;
+
         _rwLock.EnterWriteLock();
         try { ApplyStructuralChangesLocked(); }
         finally { ExitWriteScope(); }
@@ -1546,6 +1560,7 @@ public sealed class EcsWorld : IDisposable
     {
         int total = 0;
         for (int s = 0; s < _structuralSlots.Length; s++) total += _structuralSlots[s].Count;
+        Volatile.Write(ref _queuedStructuralOps, 0);
         if (total == 0) return;
 
         // Copy and clear first: applying an op must not observe the queue it is draining.
@@ -1578,6 +1593,7 @@ public sealed class EcsWorld : IDisposable
         if (DeferStructural)
         {
             _structuralSlots[_workerSlot].Add(StructuralOp.Add(state, tags));
+            Interlocked.Increment(ref _queuedStructuralOps);
             return;
         }
 
@@ -1644,6 +1660,7 @@ public sealed class EcsWorld : IDisposable
         if (DeferStructural)
         {
             _structuralSlots[_workerSlot].Add(StructuralOp.Remove(id));
+            Interlocked.Increment(ref _queuedStructuralOps);
             return;
         }
 

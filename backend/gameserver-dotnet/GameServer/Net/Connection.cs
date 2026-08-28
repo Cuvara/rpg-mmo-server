@@ -132,6 +132,9 @@ public sealed class Connection : IDisposable
     /// <summary>Set while a staged snapshot is waiting to be encoded.</summary>
     private bool _snapshotPending;
 
+    /// <summary>See the call site in <see cref="GatherSnapshotView"/>. Tests only.</summary>
+    internal Action? BetweenGatherLocksForTest;
+
     private int _pendingCount;
     private ulong _pendingTick;
     private ulong _pendingAckTick;
@@ -164,13 +167,19 @@ public sealed class Connection : IDisposable
         lock (_snapshotLock)
         {
             // Claimed jobs release their buffer, so move to the other one. An unclaimed
-            // job is overwritten where it already is — nobody is reading it.
+            // job is overwritten where it already is — but it must be RECLAIMED first:
+            // "unclaimed" checked here without latching would be free to become claimed
+            // one instruction after this lock releases, handing the write task the very
+            // buffer the gather below is refilling. Clearing the flag makes a concurrent
+            // TakePendingSnapshot return false — the surplus-marker path it already
+            // handles — and the second lock republishes the job when the refill is done.
             if (!_snapshotPending)
             {
                 _gatherBuffer ^= 1;
             }
             else
             {
+                _snapshotPending = false;
                 // The write task has not claimed the previous gather yet, so this one
                 // replaces it and that tick's frame is never sent. Positionally it loses
                 // nothing -- the delta is computed against the last frame actually SENT --
@@ -180,16 +189,26 @@ public sealed class Connection : IDisposable
                 // told apart: a client seeing fewer frames than the server sent is either
                 // this, or a client that is not reading its socket, and those have opposite
                 // fixes.
-                SnapshotsCoalesced++;
+                Interlocked.Increment(ref _snapshotsCoalesced);
             }
 
             index = _gatherBuffer;
         }
 
+        // Test seam: the claim window this method must survive is exactly here — after
+        // the first lock released and before the refill below writes the buffer. Lets a
+        // test drive a TakePendingSnapshot at that instruction boundary. Null in
+        // production; the null check is one branch per gather.
+        BetweenGatherLocksForTest?.Invoke();
+
         int count = reader.GetEntitiesInRange(anchor, radius, _aoiBuffers[index]);
         if (count > _aoiBuffers[index].Length)
         {
-            _aoiBuffers[index] = new GameServer.World.EntityView[count];
+            // Headroom, not exact size: growing to exactly `count` reallocates and
+            // repeats the O(all entities) rescan again at count+1 — during ramps,
+            // which is exactly when the tick can least afford it (#249). Same policy
+            // as SnapshotFrameWriter.GrowingBufferWriter.
+            _aoiBuffers[index] = new GameServer.World.EntityView[count + (count >> 2)];
             count = reader.GetEntitiesInRange(anchor, radius, _aoiBuffers[index]);
         }
 
@@ -218,7 +237,7 @@ public sealed class Connection : IDisposable
     /// Claim the staged snapshot, if there is one. Called only by the write task.
     /// Returns false for a surplus marker, which is normal and harmless.
     /// </summary>
-    private bool TakePendingSnapshot(
+    internal bool TakePendingSnapshot(
         out GameServer.World.EntityView[] buffer, out int count,
         out ulong tick, out ulong ackTick, out int keyframeInterval)
     {
@@ -280,7 +299,16 @@ public sealed class Connection : IDisposable
     /// Gathers that replaced a staged snapshot the write task had not claimed yet, so that
     /// tick's frame was never sent. See <see cref="GatherSnapshotView"/>.
     /// </summary>
-    internal long SnapshotsCoalesced { get; private set; }
+    /// <remarks>
+    /// Backed by a field written with <see cref="Interlocked"/>: the tick thread writes
+    /// it, the write task's counter is its sibling below, and both are read cross-thread
+    /// by <see cref="TakeSnapshotCounters"/> — plain increments could lose updates and
+    /// under-report, and a bad reading of exactly these counters has already sent a live
+    /// investigation the wrong way (#249).
+    /// </remarks>
+    internal long SnapshotsCoalesced => Volatile.Read(ref _snapshotsCoalesced);
+
+    private long _snapshotsCoalesced;
 
     /// <summary>
     /// Snapshot frames this connection has actually written to its socket.
@@ -292,7 +320,9 @@ public sealed class Connection : IDisposable
     /// than the server staged could be explained by either. Measured live at 14.2/s against
     /// 15/s staged, with coalescing at zero, this is what closes the question.
     /// </remarks>
-    internal long SnapshotFramesWritten { get; private set; }
+    internal long SnapshotFramesWritten => Volatile.Read(ref _snapshotFramesWritten);
+
+    private long _snapshotFramesWritten;
 
     private long _reportedCoalesced;
     private long _reportedFramesWritten;
@@ -492,7 +522,7 @@ public sealed class Connection : IDisposable
                             await _stream.FlushAsync(_cts.Token);
                         }
                         finally { _streamWriteMutex.Release(); }
-                        SnapshotFramesWritten++;
+                        Interlocked.Increment(ref _snapshotFramesWritten);
                         continue;
                     }
 
@@ -508,7 +538,7 @@ public sealed class Connection : IDisposable
                     await _stream.FlushAsync(_cts.Token);
                 }
                 finally { _streamWriteMutex.Release(); }
-                if (isSnapshot) SnapshotFramesWritten++;
+                if (isSnapshot) Interlocked.Increment(ref _snapshotFramesWritten);
             }
         }
         catch (OperationCanceledException) { /* expected on close */ }
