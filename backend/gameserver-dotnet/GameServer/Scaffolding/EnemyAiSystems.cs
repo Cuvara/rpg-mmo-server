@@ -91,7 +91,13 @@ internal sealed class EnemySpawnSystem : IEcsSystem
                 },
                 EntityTags.EnemyAi);
 
-            _logger.LogDebug("Spawned enemy {Id} at ({X:F1}, {Y:F1})", id, x, y);
+            // Guarded: the extension builds its params array and boxes both floats
+            // BEFORE the level check, so an unguarded call allocates per spawned enemy
+            // even with Debug off — inside the world write scope (#249).
+            if (_logger.IsEnabled(LogLevel.Debug))
+            {
+                _logger.LogDebug("Spawned enemy {Id} at ({X:F1}, {Y:F1})", id, x, y);
+            }
         }
     }
 }
@@ -230,7 +236,8 @@ internal sealed class EnemyReapSystem : IEcsSystem
         int count = writer.QueryWith<EnemyAi>(_handles);
         if (count > _handles.Length)
         {
-            _handles = new EntityHandle[count];
+            // Headroom: exact-size growth re-queries again at count+1 (#249).
+            _handles = new EntityHandle[count + (count >> 2)];
             count = writer.QueryWith<EnemyAi>(_handles);
         }
 
@@ -249,7 +256,10 @@ internal sealed class EnemyReapSystem : IEcsSystem
             Vec2 p = writer.PositionOf(in handle).Value;
             if (p.X * p.X + p.Y * p.Y <= EnemyAiTuning.DespawnRadiusSq)
             {
-                _logger.LogDebug("Enemy despawned at center");
+                if (_logger.IsEnabled(LogLevel.Debug))
+                {
+                    _logger.LogDebug("Enemy despawned at center");
+                }
                 writer.Despawn(in handle);
             }
         }
