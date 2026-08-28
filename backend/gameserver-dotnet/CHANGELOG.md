@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The write task can no longer claim an AOI buffer while the tick thread is
+  refilling it** (#247). `GatherSnapshotView`'s coalescing branch left
+  `_snapshotPending == true`, released `_snapshotLock`, and then rewrote the staged
+  buffer — a `TakePendingSnapshot` landing in that window handed the encoder the very
+  array being refilled, producing frames that mixed tick N and N+1 rows and advanced
+  `_lastSent` from the mixed view (an entity frozen or mis-positioned for up to a
+  keyframe interval). Triggered exactly when `SnapshotsCoalesced` was incrementing,
+  i.e. under the load where it hurt most. The coalescing branch now reclaims the job
+  (clears the flag) before releasing the lock; a claim inside the window misses via
+  the existing surplus-marker path and the second lock republishes. Pinned by
+  `SnapshotCoalesceRaceTests`, which drives a claim at the exact instruction boundary
+  through a test-only seam.
+
 ### Changed
 
 - **docs/API.md: the "refreshed by activity" session promise is now precise** (#231).

@@ -132,6 +132,9 @@ public sealed class Connection : IDisposable
     /// <summary>Set while a staged snapshot is waiting to be encoded.</summary>
     private bool _snapshotPending;
 
+    /// <summary>See the call site in <see cref="GatherSnapshotView"/>. Tests only.</summary>
+    internal Action? BetweenGatherLocksForTest;
+
     private int _pendingCount;
     private ulong _pendingTick;
     private ulong _pendingAckTick;
@@ -164,13 +167,19 @@ public sealed class Connection : IDisposable
         lock (_snapshotLock)
         {
             // Claimed jobs release their buffer, so move to the other one. An unclaimed
-            // job is overwritten where it already is — nobody is reading it.
+            // job is overwritten where it already is — but it must be RECLAIMED first:
+            // "unclaimed" checked here without latching would be free to become claimed
+            // one instruction after this lock releases, handing the write task the very
+            // buffer the gather below is refilling. Clearing the flag makes a concurrent
+            // TakePendingSnapshot return false — the surplus-marker path it already
+            // handles — and the second lock republishes the job when the refill is done.
             if (!_snapshotPending)
             {
                 _gatherBuffer ^= 1;
             }
             else
             {
+                _snapshotPending = false;
                 // The write task has not claimed the previous gather yet, so this one
                 // replaces it and that tick's frame is never sent. Positionally it loses
                 // nothing -- the delta is computed against the last frame actually SENT --
@@ -185,6 +194,12 @@ public sealed class Connection : IDisposable
 
             index = _gatherBuffer;
         }
+
+        // Test seam: the claim window this method must survive is exactly here — after
+        // the first lock released and before the refill below writes the buffer. Lets a
+        // test drive a TakePendingSnapshot at that instruction boundary. Null in
+        // production; the null check is one branch per gather.
+        BetweenGatherLocksForTest?.Invoke();
 
         int count = reader.GetEntitiesInRange(anchor, radius, _aoiBuffers[index]);
         if (count > _aoiBuffers[index].Length)
@@ -218,7 +233,7 @@ public sealed class Connection : IDisposable
     /// Claim the staged snapshot, if there is one. Called only by the write task.
     /// Returns false for a surplus marker, which is normal and harmless.
     /// </summary>
-    private bool TakePendingSnapshot(
+    internal bool TakePendingSnapshot(
         out GameServer.World.EntityView[] buffer, out int count,
         out ulong tick, out ulong ackTick, out int keyframeInterval)
     {
