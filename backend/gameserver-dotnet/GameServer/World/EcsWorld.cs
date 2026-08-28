@@ -237,7 +237,7 @@ public sealed class EcsWorld : IDisposable
     /// enqueue do so inside a region the tick thread joins before draining, so the
     /// count is never behind the slots when it is read here.
     /// </summary>
-    private int _queuedStructuralOps;
+    private volatile int _queuedStructuralOps;
 
     /// <summary>
     /// Which structural slot THIS thread writes into. Zero — the slot the serial world
@@ -1578,6 +1578,8 @@ public sealed class EcsWorld : IDisposable
             for (int i = 0; i < slot.Count; i++) ops[n++] = slot[i];
             slot.Clear();
         }
+
+        _queuedStructuralOps = 0;
 
         foreach (var op in ops)
         {
