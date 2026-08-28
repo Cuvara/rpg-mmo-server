@@ -210,6 +210,20 @@ public sealed class GameServerHost : IAsyncDisposable
     private readonly Nakama.NakamaClient? _nakamaClient;
     private readonly Nakama.KillRewardBatcher? _killBatcher;
     private readonly GameMetrics? _metrics;
+
+    /// <summary>
+    /// Bounded channel draining death events off the tick thread. The tick thread
+    /// enqueues a value-type payload; a background task serializes and publishes.
+    /// Bounded at 256 — a full channel drops writes (a missed kill event is
+    /// acceptable; blocking the tick thread is not).
+    /// </summary>
+    private readonly Channel<PendingDeath> _deathChannel = Channel.CreateBounded<PendingDeath>(
+        new BoundedChannelOptions(256)
+        {
+            FullMode = BoundedChannelFullMode.DropWrite,
+            SingleReader = true,
+            SingleWriter = false,
+        });
     private readonly ILogger _logger;
     /// <summary>Keyring join tokens are verified against (JOIN_TOKEN_SECRET).</summary>
     private readonly JwtKeyring _joinKeys;
@@ -611,6 +625,7 @@ public sealed class GameServerHost : IAsyncDisposable
         // Start background tasks
         var tickTask = _tickLoop.RunAsync(_cts.Token);
         var saveTask = _saver.RunAsync(_cts.Token);
+        var deathDrainTask = DrainDeathEventsAsync(_cts.Token);
 
         // The health loop only runs against a real SDK (ADR-14 decision 4). Pinging
         // NoopAgonesSdk logged "health loop started" and then reported nothing to anyone,
@@ -1262,23 +1277,32 @@ public sealed class GameServerHost : IAsyncDisposable
 
     private void OnEntityDeath(EntityState victim, EntityState killer)
     {
-        if (_publisher != null)
-        {
-            // Queued, not published: OnEntityDeath runs on the tick thread with the
-            // world write lock held, and serialization + the publish's synchronous
-            // prefix belong on the publisher's drain task, not here (#249).
-            var payload = new DeathPayload(
-                victim.Id, victim.Type, killer.Id, _options.MapId, _options.ServerId);
-            _publisher.QueueDeath("entity_killed", payload);
-        }
+        // Enqueue only — no serialization, no I/O on the tick thread.
+        _deathChannel.Writer.TryWrite(new PendingDeath(
+            victim.Id, victim.Type, killer.Id, killer.Type, _options.MapId, _options.ServerId));
+    }
 
-        // Award gold + leaderboard score when a player kills a mob. Recorded, not sent:
-        // the batcher coalesces per killer and flushes on its own interval, so this is
-        // one dictionary increment on the tick thread — no task, no socket, no way for
-        // a stalled Nakama to pile work up here (#233).
-        if (_killBatcher != null && killer.Type == "player" && victim.Type == "mob")
+    /// <summary>
+    /// Background loop that drains <see cref="_deathChannel"/> and performs the
+    /// serialization + publish + Nakama reward calls that used to run inline in
+    /// <see cref="OnEntityDeath"/> under the world write lock.
+    /// </summary>
+    private async Task DrainDeathEventsAsync(CancellationToken ct)
+    {
+        await foreach (var d in _deathChannel.Reader.ReadAllAsync(ct))
         {
-            _killBatcher.RecordKill(killer.Id);
+            if (_publisher != null)
+            {
+                var payload = new DeathPayload(d.VictimId, d.VictimType, d.KillerId, d.MapId, d.ServerId);
+                _publisher.QueueDeath("entity_killed", payload);
+            }
+
+            // Award gold + leaderboard score when a player kills a mob. Recorded, not sent:
+            // the batcher coalesces per killer and flushes on its own interval (#233).
+            if (_killBatcher != null && d.KillerType == "player" && d.VictimType == "mob")
+            {
+                _killBatcher.RecordKill(d.KillerId);
+            }
         }
     }
 
@@ -1320,4 +1344,9 @@ public sealed class GameServerHost : IAsyncDisposable
         _cts?.Dispose();
         _world.Dispose();
     }
+
+    /// <summary>Value-type payload queued from the tick thread to the death-drain task.</summary>
+    private readonly record struct PendingDeath(
+        string VictimId, string VictimType, string KillerId, string KillerType,
+        string MapId, string ServerId);
 }

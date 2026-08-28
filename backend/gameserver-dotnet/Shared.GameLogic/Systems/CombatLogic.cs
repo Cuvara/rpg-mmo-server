@@ -46,7 +46,7 @@ namespace Shared.GameLogic.Systems
                 return "target is already dead";
 
             if (!InRange(attacker.Position, target.Position, GameConstants.AttackRange))
-                return $"target out of range: distance {Vec2.Distance(attacker.Position, target.Position):F2} exceeds {GameConstants.AttackRange:F2}";
+                return "target out of range";
 
             if (currentTick < attacker.CooldownUntilTick)
                 return "attack on cooldown";
