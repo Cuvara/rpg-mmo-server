@@ -88,10 +88,32 @@ internal sealed class EphemeralRedis : IAsyncDisposable
         // the port was taken in that gap. That retry is not cosmetic any more: with the
         // skip/fail split below, a lost port race would otherwise turn a transient
         // collision into a hard suite failure.
+        //
+        // The second recognised transient, added for #214: `docker run` itself failing on the
+        // WSL2 <-> Docker Desktop vsock bridge. That is neither a missing dependency nor a
+        // broken container — it is the host's docker transport timing out before the daemon
+        // was reached — and it fanned one fixture failure out across all 11 registry tests
+        // roughly one full-suite run in seven on this box.
+        //
+        // The retry is deliberately narrow and deliberately loud. Narrow, because
+        // DockerRunFailure.Classify recognises signatures positively and calls everything
+        // else Fatal, so a bad image or a name conflict still fails on the first attempt
+        // rather than being tried three times; a blanket "retry anything" would silently
+        // re-run genuine container faults, which is worse than the flake. Loud, because a
+        // retry nobody can see is indistinguishable from a flake that stopped happening — the
+        // count below is printed even when the retry SUCCEEDS, so if this box's docker
+        // degrades further, the green runs say so before the red ones do.
         int port = 0;
         (int ExitCode, string StdOut, string StdErr) run = (-1, "", "never attempted");
 
-        for (int attempt = 1; attempt <= 3; attempt++)
+        const int MaxAttempts = 3;
+
+        // Every attempt's stderr. A failure after a retry that showed only the last attempt
+        // would hide the reason the earlier ones were forgiven.
+        var attempts = new List<string>();
+        int transientRetries = 0;
+
+        for (int attempt = 1; attempt <= MaxAttempts; attempt++)
         {
             using (var lease = new TestPorts.Lease()) { port = lease.Port; }
 
@@ -99,20 +121,57 @@ internal sealed class EphemeralRedis : IAsyncDisposable
                 $"run -d --name {name} -p 127.0.0.1:{port}:6379 {Image}",
                 TimeSpan.FromMinutes(5));
 
-            if (run.ExitCode == 0) break;
+            if (run.ExitCode == 0)
+            {
+                if (transientRetries > 0)
+                {
+                    Console.WriteLine(
+                        $"[EphemeralRedis] `docker run` succeeded on attempt {attempt} after " +
+                        $"{transientRetries} recognised host-transport failure(s) (#214). The run " +
+                        "is green BECAUSE it was retried, not because nothing went wrong: this " +
+                        "line is the signal that the box's docker bridge is degrading.");
+                }
 
-            bool portTaken = run.StdErr.Contains("address already in use", StringComparison.OrdinalIgnoreCase)
-                || run.StdErr.Contains("port is already allocated", StringComparison.OrdinalIgnoreCase);
-            if (!portTaken || attempt == 3) break;
+                break;
+            }
+
+            attempts.Add($"attempt {attempt} (exit {run.ExitCode}): {run.StdErr.Trim()}");
+
+            var kind = DockerRunFailure.Classify(run.StdErr);
+            if (kind == DockerRunFailure.Kind.Fatal || attempt == MaxAttempts) break;
 
             Console.WriteLine(
-                $"[EphemeralRedis] port {port} was taken between the lease and `docker run`; retrying");
+                $"[EphemeralRedis] `docker run` attempt {attempt}/{MaxAttempts} failed and " +
+                $"{DockerRunFailure.Describe(kind)}; retrying. Original stderr: " +
+                $"{run.StdErr.Trim()}");
+
+            // Anything left behind is removed before the name is reused. On the vsock path
+            // nothing was created, so this is a no-op that costs one docker call and saves a
+            // name conflict on the attempt that follows a partial create.
             TestDocker.Exec(docker, $"rm -f {name}", TimeSpan.FromSeconds(60));
+
+            if (kind == DockerRunFailure.Kind.HostTransport)
+            {
+                // A short, growing pause: the bridge needs a moment, and hammering it
+                // immediately is what the first attempt already did. A port collision needs
+                // no pause at all — the next lease is a different number.
+                transientRetries++;
+                await Task.Delay(TimeSpan.FromSeconds(attempt), ct);
+            }
         }
 
         if (run.ExitCode != 0)
         {
+            // Unchanged prefix, on purpose: this is the message #214 was filed with, and the
+            // failure after an exhausted retry must read as the same event rather than as a
+            // new one. The earlier attempts are appended, not substituted.
             string why = $"`docker run` failed (exit {run.ExitCode}): {run.StdErr.Trim()}";
+            if (attempts.Count > 1)
+            {
+                why += $" [attempt {attempts.Count} of {MaxAttempts}; earlier: " +
+                       string.Join(" | ", attempts.Take(attempts.Count - 1)) + "]";
+            }
+
             Console.WriteLine($"[EphemeralRedis] {why}");
             return new StartOutcome(null, DockerUsable: true, Failure: why);
         }
@@ -120,9 +179,24 @@ internal sealed class EphemeralRedis : IAsyncDisposable
         var redis = new EphemeralRedis(docker, name, port);
         if (!await redis.WaitReadyAsync(TimeSpan.FromSeconds(60), ct))
         {
-            const string why =
-                "the container started but never answered PING within 60s";
+            // Capture the evidence BEFORE disposing. The old code disposed first and reported
+            // "the container started but never answered PING", which named neither the
+            // container nor what it had been doing — a failing run could be caught with full
+            // detailed logging and still not be diagnosable afterwards (#201).
+            string state = TestDocker.Exec(docker, $"inspect {name} --format {{{{.State.Status}}}}|{{{{.State.ExitCode}}}}|{{{{.State.OOMKilled}}}}",
+                TimeSpan.FromSeconds(30)).StdOut.Trim();
+            string logs = TestDocker.Exec(docker, $"logs --tail 20 {name}", TimeSpan.FromSeconds(30)).StdOut.Trim();
+
+            string why =
+                $"{redis.LastReadyFailure ?? "the container started but never became ready"}. " +
+                $"container={name} state={(string.IsNullOrWhiteSpace(state) ? "<none>" : state)}";
+
             Console.WriteLine($"[EphemeralRedis] {why}");
+            if (!string.IsNullOrWhiteSpace(logs))
+            {
+                Console.WriteLine($"[EphemeralRedis] docker logs {name}:\n{logs}");
+            }
+
             await redis.DisposeAsync();
             return new StartOutcome(null, DockerUsable: true, Failure: why);
         }
@@ -138,28 +212,138 @@ internal sealed class EphemeralRedis : IAsyncDisposable
         // That turned a slow container start under load into "docker unavailable" and
         // silently removed 11 registry tests from the run. Stopwatch is monotonic, so the
         // 60s below is 60 real seconds regardless of what the clock does.
+        // Two phases, because they answer different questions and the old single-phase
+        // loop could not tell them apart (#201).
+        //
+        // Phase 1 asks "is the socket accepting?" with a bare TCP connect. Measured on this
+        // host, a container reaches that point in ~0.8-1.4s even under a full parallel suite
+        // at load 9.66 — no slower than idle.
+        //
+        // Phase 2 asks "does Redis answer?" with ONE multiplexer, polled. The old loop built
+        // and disposed a ConnectionMultiplexer every 250ms, up to 240 times. That object is
+        // heavyweight and starts its own threads, and with AbortOnConnectFail=false it
+        // returns BEFORE it has connected, leaving IsConnected false while it retries in the
+        // background. Under a saturated thread pool that retry can be starved for the whole
+        // budget while the socket has been open since the first second — which is what a
+        // 60s "never answered PING" against a ~1s-ready container looks like.
         var elapsed = System.Diagnostics.Stopwatch.StartNew();
+
+        while (elapsed.Elapsed < timeout && !await SocketAcceptsAsync(ct))
+        {
+            ct.ThrowIfCancellationRequested();
+            await Task.Delay(100, ct);
+        }
+
+        if (elapsed.Elapsed >= timeout)
+        {
+            LastReadyFailure = $"the published port {Addr} never accepted a TCP connection " +
+                               $"within {timeout.TotalSeconds:F0}s";
+            return false;
+        }
+
+        TimeSpan socketOpenAt = elapsed.Elapsed;
+
+        // Phase 2 speaks RESP on a bare socket rather than using StackExchange.Redis.
+        //
+        // Measured, not assumed. With a ConnectionMultiplexer here the block of 11 registry
+        // tests failed ~2 runs in 10 with: port accepted a connection after ~1s, Redis's own
+        // log saying "Ready to accept connections tcp", and PING never landing inside 60s.
+        // The container was healthy every time. A multiplexer starts background threads and
+        // with AbortOnConnectFail=false returns before connecting, so under a saturated
+        // thread pool its connect completion can be starved for the whole budget while the
+        // socket has been open since the first second (#201).
+        //
+        // A readiness probe must not depend on the thing it is trying to schedule around.
+        // PING/+PONG over the socket is four bytes out and seven back, with no pool, no
+        // background thread and nothing to starve.
         while (elapsed.Elapsed < timeout)
         {
             ct.ThrowIfCancellationRequested();
-            try
+
+            if (await PingOverRawSocketAsync(ct))
             {
-                var options = ConfigurationOptions.Parse(Addr);
-                options.AbortOnConnectFail = false;
-                options.ConnectTimeout = 2000;
-                await using var mux = await ConnectionMultiplexer.ConnectAsync(options);
-                if (mux.IsConnected && (await mux.GetDatabase().PingAsync()) >= TimeSpan.Zero)
-                {
-                    return true;
-                }
+                return true;
             }
-            catch
-            {
-                // Not up yet.
-            }
+
             await Task.Delay(250, ct);
         }
+
+        LastReadyFailure =
+            $"the published port {Addr} accepted a connection after " +
+            $"{socketOpenAt.TotalMilliseconds:F0}ms, but never answered RESP PING within " +
+            $"{timeout.TotalSeconds:F0}s";
         return false;
+    }
+
+    /// <summary>
+    /// PING over a bare socket, spelled in RESP. Returns true on <c>+PONG</c>.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not a Redis client. The point is to ask the question with the smallest
+    /// machinery that can ask it, so a positive answer means Redis is serving and a negative
+    /// one cannot be an artefact of the client library's scheduling.
+    /// </remarks>
+    private async Task<bool> PingOverRawSocketAsync(CancellationToken ct)
+    {
+        var parts = Addr.Split(':');
+        if (parts.Length != 2 || !int.TryParse(parts[1], out int port))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var client = new System.Net.Sockets.TcpClient();
+            using var attempt = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            attempt.CancelAfter(TimeSpan.FromSeconds(2));
+
+            await client.ConnectAsync(parts[0], port, attempt.Token);
+            await using var stream = client.GetStream();
+
+            byte[] ping = System.Text.Encoding.ASCII.GetBytes("PING\r\n");
+            await stream.WriteAsync(ping, attempt.Token);
+            await stream.FlushAsync(attempt.Token);
+
+            var buffer = new byte[16];
+            int read = await stream.ReadAsync(buffer, attempt.Token);
+            return read >= 7 &&
+                   System.Text.Encoding.ASCII.GetString(buffer, 0, read)
+                         .StartsWith("+PONG", StringComparison.Ordinal);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Why the last <see cref="WaitReadyAsync"/> gave up. Null while it has not.</summary>
+    internal string? LastReadyFailure { get; private set; }
+
+    /// <summary>
+    /// A bare TCP connect to the published port. Deliberately not a Redis client: this asks
+    /// only whether docker has finished publishing the port, and answering it with a full
+    /// client conflates "the port is not up" with "the client could not get scheduled".
+    /// </summary>
+    private async Task<bool> SocketAcceptsAsync(CancellationToken ct)
+    {
+        var parts = Addr.Split(':');
+        if (parts.Length != 2 || !int.TryParse(parts[1], out int port))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var socket = new System.Net.Sockets.TcpClient();
+            using var attempt = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            attempt.CancelAfter(TimeSpan.FromSeconds(2));
+            await socket.ConnectAsync(parts[0], port, attempt.Token);
+            return socket.Connected;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>Stop the container without removing it — simulates a Redis outage.</summary>

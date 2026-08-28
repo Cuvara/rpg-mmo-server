@@ -61,7 +61,11 @@ func RewardKillRPC(ctx context.Context, logger runtime.Logger, db *sql.DB, nk ru
 		gold = v
 	}
 
-	logger.Info("Awarded %d gold to %s (kill %s on %s), balance: %d",
+	// Debug, not Info: this fires once per kill, and at 200 players it was 20+
+	// log lines per second of pure noise — part of the per-kill amplification
+	// the batched reward_kills RPC replaces (rpg-mmo-server#233). This RPC is
+	// kept for compatibility; new callers should use reward_kills.
+	logger.Debug("Awarded %d gold to %s (kill %s on %s), balance: %d",
 		GoldPerKill, req.UserID, req.VictimID, req.MapID, gold)
 
 	resp := RewardKillResponse{Gold: gold, Success: true}

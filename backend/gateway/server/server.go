@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -22,24 +23,6 @@ import (
 	"github.com/duycuong/rpg-mmo/shared/storage"
 	"github.com/duycuong/rpg-mmo/shared/transport"
 )
-
-// KickPublisher publishes duplicate-login kick requests to other gateway
-// instances. The in-memory implementation is a no-op (single process); the
-// Redis implementation publishes to the gateway:kick Pub/Sub channel.
-type KickPublisher interface {
-	PublishKick(ctx context.Context, userID string) error
-}
-
-// KickSubscriber receives kick requests from other gateway instances.
-type KickSubscriber interface {
-	SubscribeKick(ctx context.Context, handler func(userID string)) error
-	Close() error
-}
-
-// noopKickPublisher is used when no cross-gateway kick channel is configured.
-type noopKickPublisher struct{}
-
-func (noopKickPublisher) PublishKick(context.Context, string) error { return nil }
 
 // Gateway is the main TCP server that handles client authentication
 // and map assignment before redirecting to game servers.
@@ -64,12 +47,6 @@ type Gateway struct {
 	// transportKey is the pre-shared KCP encryption key ("" = plaintext).
 	transportKey string
 
-	// kickPub publishes kick requests to other gateway instances.
-	kickPub KickPublisher
-	// kickSub receives kick requests from other instances; nil when running
-	// single-process (in-memory backend).
-	kickSub KickSubscriber
-
 	relay      events.EventRelay
 	eventCount atomic.Int64
 	// relayUp tracks whether the relay is subscribed. It starts false and is
@@ -84,6 +61,12 @@ type Gateway struct {
 	// transportKind is the realtime transport the gateway listens with
 	// ("tcp" or "kcp"); it is immutable after New, so Run reads it lock-free.
 	transportKind string
+
+	// enterWorldBudget caps how long one handleEnterWorld may block its
+	// connection's read loop; EnterWorldBudget by default, overridden only by
+	// tests that need the deadline to expire in milliseconds. Immutable after
+	// the gateway starts serving.
+	enterWorldBudget time.Duration
 
 	mu        sync.Mutex
 	listener  net.Listener
@@ -156,18 +139,6 @@ func WithMsgRateLimit(ratePerSec, burst float64) Option {
 	}
 }
 
-// WithKickPublisher sets the publisher used to send duplicate-login kick
-// requests to other gateway instances.
-func WithKickPublisher(pub KickPublisher) Option {
-	return func(g *Gateway) { g.kickPub = pub }
-}
-
-// WithKickSubscriber sets the subscriber for receiving kick requests from
-// other instances. The gateway starts listening in Run.
-func WithKickSubscriber(sub KickSubscriber) Option {
-	return func(g *Gateway) { g.kickSub = sub }
-}
-
 // New creates a new Gateway instance.
 //
 // jwtSecret is the client-auth secret and accepts a comma-separated rotation
@@ -186,17 +157,17 @@ func New(
 	// rejects every token instead of accepting tokens signed with "".
 	authKeys, _ := sharedjwt.ParseKeyring(jwtSecret)
 	g := &Gateway{
-		transportKind: transport.KindTCP,
-		sessions:      sessions,
-		registry:      reg,
-		jwtSecret:     jwtSecret,
-		authKeys:      authKeys,
-		joinKeys:      authKeys,
-		kickPub:       noopKickPublisher{},
-		logger:        logger,
-		conns:         make(map[*ClientConn]struct{}),
-		userConns:     make(map[string]*ClientConn),
-		done:          make(chan struct{}),
+		transportKind:    transport.KindTCP,
+		sessions:         sessions,
+		registry:         reg,
+		jwtSecret:        jwtSecret,
+		authKeys:         authKeys,
+		joinKeys:         authKeys,
+		logger:           logger,
+		enterWorldBudget: EnterWorldBudget,
+		conns:            make(map[*ClientConn]struct{}),
+		userConns:        make(map[string]*ClientConn),
+		done:             make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(g)
@@ -260,10 +231,15 @@ func (g *Gateway) RelayUp() bool { return g.relayUp.Load() }
 // OnEvent implements events.Sink: it receives every cross-server event consumed
 // by the relay.
 //
+// One event type is acted on here: server_down (published by the registry
+// watcher) evicts the named server from the registry so FindServer stops
+// handing out a dead address immediately instead of waiting out the registry
+// TTL (#236).
+//
 // MVP limitation: shared/messages has no client-facing event message type, so
-// events are logged and counted instead of being pushed to connected clients.
-// Once agent-shared adds a MsgEvent, this method becomes the fan-out point
-// (iterate g.conns, cc.Send). See gateway/docs/DESIGN.md.
+// every other event is logged and counted instead of being pushed to connected
+// clients. Once agent-shared adds a MsgEvent, this method becomes the fan-out
+// point (iterate g.conns, cc.Send). See gateway/docs/DESIGN.md.
 func (g *Gateway) OnEvent(ev storage.Event) {
 	g.eventCount.Add(1)
 	g.metrics.RelayEvent()
@@ -272,6 +248,43 @@ func (g *Gateway) OnEvent(ev storage.Event) {
 		"bytes", len(ev.Payload),
 		"clients", g.ConnCount(),
 	)
+
+	if ev.Type == registry.ServerDownChannel {
+		g.handleServerDown(ev.Payload)
+	}
+}
+
+// serverDownEvictTimeout bounds the registry write an eviction performs. OnEvent
+// runs on the relay's consumer goroutine, so a hung store must not stall event
+// consumption indefinitely.
+const serverDownEvictTimeout = 5 * time.Second
+
+// handleServerDown consumes one server_down event: it evicts the named server
+// from the registry so the assignment path stops returning it. Eviction is
+// idempotent and a re-registering server becomes assignable again through the
+// normal path, so acting on a duplicate or stale event is harmless.
+func (g *Gateway) handleServerDown(payload []byte) {
+	var ev registry.ServerDownEvent
+	if err := json.Unmarshal(payload, &ev); err != nil {
+		g.logger.Warn("malformed server_down event", "err", err)
+		return
+	}
+	if ev.ServerID == "" {
+		g.logger.Warn("server_down event with empty server_id, ignoring")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), serverDownEvictTimeout)
+	defer cancel()
+	if err := g.registry.Evict(ctx, ev.ServerID); err != nil {
+		// The registry TTL remains the backstop: a failed eviction degrades to
+		// the pre-#236 behaviour instead of losing the event silently.
+		g.logger.Warn("failed to evict dead server from registry; its TTL is now the only removal path",
+			"server_id", ev.ServerID, "map_id", ev.MapID, "err", err)
+		return
+	}
+	g.logger.Info("evicted dead server from registry",
+		"server_id", ev.ServerID, "map_id", ev.MapID)
 }
 
 // EventCount returns how many events the relay has delivered so far.
@@ -290,14 +303,6 @@ func (g *Gateway) Run(addr string) error {
 	// The event relay is a degradable dependency, not a startup requirement.
 	if g.relay != nil {
 		g.startRelayWithRetry()
-	}
-
-	// Start the kick subscriber so this gateway can receive cross-instance
-	// duplicate-login kick requests.
-	if g.kickSub != nil {
-		if err := g.kickSub.SubscribeKick(context.Background(), g.handleKickEvent); err != nil {
-			g.logger.Error("kick subscriber failed to start", "err", err)
-		}
 	}
 
 	ln, err := transport.Listen(g.transportKind, addr,
@@ -367,11 +372,6 @@ func (g *Gateway) Shutdown() {
 	if g.relay != nil {
 		if err := g.relay.Stop(); err != nil {
 			g.logger.Error("stop event relay", "err", err)
-		}
-	}
-	if g.kickSub != nil {
-		if err := g.kickSub.Close(); err != nil {
-			g.logger.Error("stop kick subscriber", "err", err)
 		}
 	}
 }
@@ -516,6 +516,7 @@ func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
 		return
 	case messages.MsgPong:
 		cc.RecordPong()
+		g.refreshSessionOnPong(cc)
 		return
 	}
 
@@ -541,6 +542,35 @@ func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
 		}
 		g.logger.Log(context.Background(), lvl, "unexpected message type",
 			"conn", cc.ID(), "user", cc.UserID(), "type", env.Type, "state", cc.State())
+	}
+}
+
+// refreshSessionOnPong re-arms the session TTL when a heartbeat MsgPong arrives
+// on an authenticated connection, so a client that holds the gateway socket
+// open sending only heartbeats keeps its session alive — the "refreshed by
+// activity" contract in gameserver-dotnet/docs/API.md (#231). Without this the
+// only refresh was checkSession on enter_world, so a player parked on one map
+// for over SessionTTL (1h) had the session expire under a live connection and
+// the next map transfer fail with "session expired".
+//
+// It is deliberately cheap and quiet:
+//   - it never sends anything and never closes the connection — a pong must
+//     stay side-effect-free from the client's point of view;
+//   - store writes are bounded to one per sessionRefreshInterval per
+//     connection, so a 10s heartbeat does not EXPIRE-spam the store;
+//   - store errors fail open, like checkSession: the refresh is skipped, the
+//     connection lives on, and a session actually gone is detected (and
+//     reported) by checkSession on the next real frame.
+func (g *Gateway) refreshSessionOnPong(cc *ClientConn) {
+	userID, state := cc.Identity()
+	if state == StateConnected || userID == "" {
+		return // unauthenticated: no session to keep alive
+	}
+	if !cc.shouldRefreshSession(time.Now()) {
+		return
+	}
+	if err := g.sessions.RefreshSession(context.Background(), session.SessionKey(userID)); err != nil {
+		g.logger.Warn("refresh session on pong", "conn", cc.ID(), "user", userID, "err", err)
 	}
 }
 
@@ -621,16 +651,28 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 	existing, getErr := g.sessions.GetSession(ctx, userID)
 	if getErr == nil {
 		gwID := g.sessions.GatewayID()
+
+		// Same gateway: kick the old connection, but only if it is a different
+		// socket (re-auth on the same conn is not a duplicate).
+		//
+		// A session owned by a DIFFERENT gateway is deliberately left alone.
+		// Cross-instance duplicate-login kick is NOT implemented: the machinery
+		// that used to sit here — a KickPublisher/KickSubscriber pair and a
+		// gateway:kick channel constant — was never constructed by
+		// cmd/gateway/main.go, so it published into a noop for its whole life
+		// and was removed rather than left reading as finished (#211).
+		//
+		// It does not matter today because ADR-17 pins the deployment to one
+		// gateway replica, and 40-gateway.yaml pins it again for an independent
+		// reason (two replicas racing on a cold map each allocate a GameServer
+		// and Agones has no un-allocate). It starts mattering the moment a
+		// second replica is scheduled, and the log line below is what makes
+		// that visible: old_gateway != new_gateway means a session this process
+		// cannot reach. The fix then is Redis Streams with consumer-group ACK
+		// per ADR-5, not the Pub/Sub shape that was deleted.
 		if existing.GatewayID == gwID {
-			// Same gateway: kick the old connection, but only if it is a
-			// different socket (re-auth on the same conn is not a duplicate).
 			if old := g.findUserConn(userID); old != nil && old != cc {
 				g.kickLocalUser(userID)
-			}
-		} else {
-			// Different gateway: publish a kick request via Pub/Sub.
-			if perr := g.kickPub.PublishKick(ctx, userID); perr != nil {
-				g.logger.Warn("publish kick event", "conn", cc.ID(), "user", userID, "err", perr)
 			}
 		}
 		g.logger.Info("duplicate login detected",
@@ -759,13 +801,6 @@ func (g *Gateway) sendKickAndClose(cc *ClientConn, reason string) {
 	cc.SendAndClose(disc)
 }
 
-// handleKickEvent processes a kick request received from another gateway
-// instance via the Pub/Sub channel.
-func (g *Gateway) handleKickEvent(userID string) {
-	g.logger.Info("received kick event", "user", userID)
-	g.kickLocalUser(userID)
-}
-
 func (g *Gateway) sendAuthError(cc *ClientConn, msg string) {
 	resp, err := cc.Reply(messages.MsgAuthResp, messages.AuthResponse{
 		OK:    false,
@@ -805,7 +840,17 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 		return
 	}
 
-	ctx := context.Background()
+	// One deadline over the WHOLE assignment path. Each leg beneath it —
+	// registry lookup retries, the Agones allocation call, the wait for the
+	// allocated pod to self-register — carries its own timeout, and stacked
+	// worst-case they exceed MaxHandlerBlockingWait, which means the heartbeat
+	// would kill this connection mid-allocation (issue #235). The budget keeps
+	// the block strictly inside the heartbeat window with margin for the
+	// write-back below; on expiry the client gets the retryable "server is
+	// starting, retry shortly" while the allocation leader carries on detached
+	// (registry.allocateOnce), so a later retry finds the server ready.
+	ctx, cancel := context.WithTimeout(context.Background(), g.enterWorldBudget)
+	defer cancel()
 	result, err := transfer.AssignMapKeyring(ctx, userID, req.MapID, g.registry, g.joinKeys)
 	if err != nil {
 		g.metrics.EnterWorldResult(false)
@@ -830,8 +875,10 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 		"transport", result.Transport,
 		"dur_ms", time.Since(start).Milliseconds())
 
-	// Update session with server and map association (task 2c).
-	if uerr := g.sessions.UpdateSession(ctx, userID, func(sd *session.SessionData) {
+	// Update session with server and map association (task 2c). On its own
+	// context, not the budget one: an assignment that resolved near the
+	// deadline must still record where the client went.
+	if uerr := g.sessions.UpdateSession(context.Background(), userID, func(sd *session.SessionData) {
 		sd.ServerID = result.ServerID
 		sd.MapID = req.MapID
 	}); uerr != nil {

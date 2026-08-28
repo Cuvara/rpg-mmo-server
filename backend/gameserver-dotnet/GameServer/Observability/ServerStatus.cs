@@ -114,6 +114,34 @@ public sealed class ServerStatus
     [JsonPropertyName("enemies_alive")]
     public int EnemiesAlive { get; set; }
 
+    /// <summary>Inputs that carried an attack target id, since process start.</summary>
+    [JsonPropertyName("attacks_received")]
+    public long AttacksReceived { get; set; }
+
+    /// <summary>Attacks whose target id did not resolve to a live entity.</summary>
+    [JsonPropertyName("attacks_unresolved")]
+    public long AttacksUnresolved { get; set; }
+
+    /// <summary>Attacks refused by validation (range, cooldown, dead attacker or target).</summary>
+    [JsonPropertyName("attacks_rejected")]
+    public long AttacksRejected { get; set; }
+
+    /// <summary>Attacks that dealt damage.</summary>
+    [JsonPropertyName("attacks_accepted")]
+    public long AttacksAccepted { get; set; }
+
+    /// <summary>Accepted attacks that killed their target.</summary>
+    [JsonPropertyName("attack_kills")]
+    public long AttackKills { get; set; }
+
+    /// <summary>
+    /// Verbatim reason of the most recent rejection, or null if nothing has been rejected.
+    /// One string, most-recent-wins: this is a diagnostic breadcrumb ("target out of range:
+    /// distance 7.41 exceeds 3.00"), not a log.
+    /// </summary>
+    [JsonPropertyName("last_attack_rejection")]
+    public string? LastAttackRejection { get; set; }
+
     [JsonPropertyName("redis")]
     public string Redis { get; set; } = "disconnected";
 

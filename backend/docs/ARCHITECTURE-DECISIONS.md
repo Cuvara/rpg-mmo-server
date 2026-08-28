@@ -54,9 +54,14 @@ Three findings the criticism is right about:
    C# server has its own reimplementation in `PostgresPlayerStore.cs`. The two
    schemas are kept byte-identical by a test, but nothing enforces that at build time.
 
-Also dead: `constants.PlayerLocationKey` (`shared/constants/keys.go:7`) has no
+~~Also dead: `constants.PlayerLocationKey` (`shared/constants/keys.go:7`) has no
 consumer anywhere — the `player:{user_id}:location` index described in
-`backend/gateway/CLAUDE.md:37` was never built.
+`backend/gateway/CLAUDE.md:37` was never built.~~ **Resolved 2026-08-22 by
+deleting the constant** (#210). The index was never built and is not planned:
+cross-server player lookup is not on the roadmap, and the game server owns
+per-player position inside its own world. The declaration had already cost
+something — it is what put a `player:location:*` row in the client repo's
+multi-client checklist, a row no code could ever satisfy.
 
 ### Decision
 
@@ -91,7 +96,9 @@ backed up. Live world state is not recoverable (ADR-6).
 
 ### Follow-up work
 
-- **S** — Delete `constants.PlayerLocationKey` or implement the location index.
+- ~~**S** — Delete `constants.PlayerLocationKey` or implement the location index.~~
+  **Done** (#210): deleted. Implementing it was the other legal ending and was
+  rejected — nothing needs cross-server player lookup today.
 - **S** — Delete the orphaned Go `shared/storage/pgstore/` package, or add a build-time
   assertion tying its schema to the C# one instead of relying on a test.
 - ~~**M** — Give the C# server a Redis client so it self-registers and heartbeats,
@@ -119,9 +126,22 @@ Neither registry implementation enforces one server per map. `Register` is keyed
 - Redis: `redisstore/registry.go:69-86` (`HSET` + `SADD`), `FindByMapID` via
   `SMEMBERS` + `HGETALL` (`registry.go:135-163`), returns **all** matches.
 
-`FindByMapID` returns `[]ServerInfo`, and the gateway selects the least-loaded
-server with capacity (`gateway/registry/registry.go:55-94`) — **not** first-fit as
-CORE_FLOW.md:88 claims.
+`FindByMapID` returns `[]ServerInfo`, and the gateway selects a server with capacity
+(`gateway/registry/registry.go`, `FindServer`) — **not** first-fit as CORE_FLOW.md:88
+claims. The rule depends on how many servers came back, and since 2026-08-22 (#203) the
+two cases differ deliberately:
+
+- **one server** — least-loaded with a `ServerID` tie-break, which with a single
+  candidate just means "that server, if it has room".
+- **more than one** — the **lowest `ServerID`** among those with spare capacity;
+  `PlayerCount` is not a criterion at all. More than one server for a `map_id` is
+  this ADR's invariant being violated, and least-loaded selection there steers each
+  new joiner into whichever half is emptier — it load-balances players across a split
+  world, so both halves stay populated and the split never drains. Deterministic
+  selection sends every caller to the same half instead, so the accidental copy
+  empties as its players leave. It does not repair a split; it stops the gateway
+  widening one. Registration is deliberately **not** refused (that would break rolling
+  replacement while the health watcher is unwired, #204).
 
 The important finding: **the allocator deliberately creates a second server for a
 full map.** When no server has capacity and Agones is enabled,
@@ -172,7 +192,14 @@ flow, or the game server — which never learns it is one shard among several.
   each dungeon instance is a distinct logical world by design.
 - The dead heartbeat means a crashed server's registry entry lingers until its TTL
   expires (1 hour in dev), and the gateway keeps handing out join tokens for a
-  server that is gone. Clients fail at the game-server dial step.
+  server that is gone. Clients fail at the game-server dial step. *(Updated
+  2026-08-22: the heartbeat is alive — the C# server re-arms a 15s TTL every 5s —
+  and the gateway no longer waits for expiry either. `gateway/registry`'s
+  `RegistryWatcher`, which had no caller until #204, is now constructed and
+  started by `cmd/gateway`; it polls the servers the gateway has handed to clients
+  every 5s and publishes `server_down`, so the window in which a dead server is
+  still announced is bounded by the poll, not by the TTL. TTL expiry stays the
+  backstop.)*
 
 ### Follow-up work
 
@@ -321,18 +348,36 @@ splitting is a change to that constructor block, not to any business logic.
   silently dropping data. That is the correct failure mode here — a failed
   registration is visible, an evicted one is not — but it means memory must be
   monitored, not left to self-manage.
-- Streams need explicit trimming (`XTRIM`/`MAXLEN`) once a real publisher exists,
-  or `events:game` grows without bound. Today nothing publishes (ADR-5), so this
-  is latent rather than live.
+- **`noeviction` without a `maxmemory` is not a weaker version of this decision,
+  it is the opposite one** (#202, fixed 2026-08-22). Nothing bounded growth, and
+  the ceiling that actually existed was the Redis pod's `limits.memory: 256Mi` —
+  enforced by the kernel, which kills the process *whole* and loses sessions, the
+  registry and the stream together. That is the outcome this ADR chose
+  `noeviction` to prevent, reached by a route the ADR did not close. Both halves
+  of the ceiling now exist: `maxmemory 128mb` in
+  `deploy/k8s/data/redis.conf` (and the mirrored compose flag), at half the pod
+  limit so the gap absorbs jemalloc fragmentation and copy-on-write during a
+  persistence fork; and `MAXLEN ~ 30_000` on every `XADD`
+  (`shared/storage/redisstore.DefaultStreamMaxLen`). Redis now refuses writes
+  with `OOM command not allowed` while still alive and serving reads.
+- Streams are trimmed at publish time — `XADD ... MAXLEN ~ 30_000`, sized from
+  the gateway relay's consumer-lag tolerance (~50 events/s x a 10-minute outage
+  window) rather than from a memory figure, and cross-checked at ~7MiB so the
+  stream cannot be the thing that fills the instance. Entries older than that
+  window are dropped rather than delivered: at-least-once is a promise to a
+  consumer that is running.
 - A Redis outage takes out login and map entry, but not sessions already in
   progress on game servers.
 
 ### Follow-up work
 
-- **S** — Set an explicit `maxmemory` and a Prometheus alert on Redis memory
-  utilisation and rejected writes, now that eviction cannot silently absorb growth.
-- **S** — Add `MAXLEN ~` trimming to `EventStream.Publish` before any real
-  publisher is wired.
+- ~~**S** — Set an explicit `maxmemory`~~ **done** (#202): `maxmemory 128mb`,
+  half the 256Mi pod limit. Still open: a Prometheus alert on Redis memory
+  utilisation and on `rejected_connections`/OOM write errors, now that eviction
+  cannot silently absorb growth and the refusal is the only signal.
+- ~~**S** — Add `MAXLEN ~` trimming to `EventStream.Publish` before any real
+  publisher is wired.~~ **done** (#202), and it landed before the publisher, as
+  this line asked.
 - **M** — Split `events:*` onto its own instance at the Soft Launch tier; the
   gateway constructor takes a second address.
 
@@ -1463,6 +1508,26 @@ showed the ratio the analysis cited does not reproduce: at 200 players the AOI g
 ~874–1177 µs/tick, `SnapshotDeltaState.Encode` is ~998–1272 µs/tick, and protobuf
 `ToByteArray` is **~79–144 µs/tick — 4–6% of the tick, not 80%**.
 
+> **⚠️ That attribution is UNVERIFIED, and it is a stronger claim than Part V's
+> microseconds (#162).** The harness that produced this split was never committed, so its
+> clock cannot be read back — and this box's `CLOCK_REALTIME` runs 10-17% fast with
+> unstable skew (#153).
+>
+> Part V survives the same doubt because it supports a **ratio**: both arms share whatever
+> clock the harness used, so a proportional skew cancels. This is an **attribution** — a µs
+> numerator over a tick-duration denominator — and if those came from different timelines
+> the percentage moves and the conclusion moves with it. A claim of the form *"X is not the
+> bottleneck, Y is"* is exactly the shape a skewed denominator can invert, and this one is
+> load-bearing: it is the stated reason stage 4 stopped optimizing serialization.
+>
+> Read the numbers as **order-of-magnitude only**. Kept rather than deleted, because
+> deleting destroys the record of a measurement that was taken. What replaces them:
+> re-run the split with `GameServer.Tests/Bench/TickBreakdownBench.cs`, which **is**
+> committed and states its clock — `Stopwatch.GetTimestamp` throughout, reading no
+> wall clock — gated behind `BENCH_TICK=1`. Do not re-run it on a host sharing load with
+> a generator; that is the condition that made these figures unverifiable in the first
+> place.
+
 That reframes what is left. The two dominant terms are:
 
 1. **The brute-force AOI scan**, O(viewers × entities), which the extension-seam table has
@@ -2363,6 +2428,18 @@ before a tier that is not this one:
   ADR-16 records that single-flight per `map_id` is per gateway instance, so two replicas
   racing on a cold map allocate one GameServer each and Agones has no un-allocate. Answer
   both, or the second gateway replica leaks a pod per cold map.
+  **A third item joins these two: cross-instance duplicate-login kick does not exist.**
+  `handleAuth` kicks a duplicate only when the existing session belongs to the same
+  gateway; a session owned by another instance is left running. Machinery for the
+  cross-instance case was declared but never constructed by `cmd/gateway/main.go`, and was
+  deleted in #211 rather than left reading as finished — deleted specifically because at
+  one replica it is neither observable nor end-to-end testable, and because it described a
+  Pub/Sub channel that ADR-5 rules out. At two replicas a user logging in against replica
+  B keeps their session on replica A, silently, with no error on either side. Rebuilding it
+  means a Redis Stream with a consumer group and explicit ACK per ADR-5, plus a
+  wiring-level test in `cmd/gateway` that fails when the construction is removed (#204's
+  shape). This is a consequence of the single-replica posture, so it is recorded with the
+  posture rather than in a backlog.
 - **Redis persistence and replication.** ADR-4 rules out treating this Redis as an evictable
   cache, which also rules out the reflex answer of "add a read replica and let it lag": the
   registry and the event stream are systems of record. The decision is which of ADR-4's
@@ -2393,7 +2470,9 @@ k8s; staging and production remain `DEPLOY_MODE=containers` and reach none of th
   within a second of that, with no allocation involved, because the C# server self-registers
   right after `ReadyAsync` rather than on allocation — and `FindServer` then hands clients the
   least-loaded of the two, i.e. the second copy of the world. (5.38s is pod-start latency, not
-  a capacity figure.) So the answer to "when does the single replica stop being necessary" is
+  a capacity figure.) *Since #203 that last step reads differently — `FindServer` now returns the
+  lowest `ServerID` of the two rather than the least-loaded, so joiners pile onto one half instead
+  of being split between them. The hazard is unchanged: there are still two copies of the world.* So the answer to "when does the single replica stop being necessary" is
   **#151** — gate self-registration on `Allocated` rather than `Ready` — not a larger fleet.
   #151 unlocks `replicas > 1` **for one map only**: allocation targets a fleet and every pod
   in it still carries the same `GAMESERVER_MAP_ID`, so a second *map* remains unserved
@@ -2431,7 +2510,10 @@ k8s; staging and production remain `DEPLOY_MODE=containers` and reach none of th
   a silent one; it is the only failure in the table that a player cannot see and an operator
   currently would not either.
 - **M** — Answer the gateway exposure question (LoadBalancer/Ingress vs hostPort) together
-  with cross-instance single-flight, as one decision. Either alone makes the deployment worse.
+  with cross-instance single-flight **and cross-instance duplicate-login kick**, as one
+  decision. Any one alone makes the deployment worse: exposure without single-flight leaks
+  a GameServer per cold map, and either without the kick lets one user hold two live
+  sessions on two replicas with no error anywhere.
 - **L** — Decide the Redis topology for the first tier above dev, against ADR-4's split path
   rather than by adding replicas.
 ## ADR-18 — A buffer FleetAutoscaler and `replicas > 1` unlock at the same moment, and it is not this one
@@ -2461,9 +2543,10 @@ t=5.38s  new GameServer           state=Ready
 ```
 
 Two registrants for one `map_id`, **with no allocation involved**. `registry.FindServer` then
-returns the *least loaded* of the two — the unallocated spare — so live players are handed the
+returned the *least loaded* of the two — the unallocated spare — so live players were handed the
 pod Agones is free to delete on the next scale-down, and the two halves of `map_01` cannot see
-each other. The autoscaler would be the thing that broke ADR-2. The fleet was restored to
+each other. (Since #203 it returns the lowest `ServerID` instead, which is no longer reliably the
+spare, but which of the two copies is served was never the problem — that there are two is.) The autoscaler would be the thing that broke ADR-2. The fleet was restored to
 `replicas: 1` immediately.
 
 **Decision 2 — `ready=0` on this fleet is the correct steady state, and tooling must say so.**
@@ -2536,6 +2619,89 @@ whose spare pods are spare.
 
 ---
 
+## ADR-19 — Game content is data on disk, served over HTTP, and never travels through the shared-code package
+
+**Status:** accepted 2026-08-22, **implemented and proven end to end** on the first content
+type (items). Extends ADR-10 (the pure-logic boundary) by adding a *second* shared thing —
+a schema — and deliberately declining to share the third, a parser. Does not touch ADR-3;
+content is fetched from the game server, not the gateway.
+
+**The question.** Both repos were about to start on gameplay content, and there was no
+channel to carry it. `Shared.GameLogic` is the only thing the two repos share, and it is a
+C# assembly pinned in the client by exact commit through `packages-lock.json`. Putting item
+stats or loot tables in it means that adding one item costs: edit, commit to
+`rpg-mmo-server`, cut an `sgl-v` tag, bump **both** `manifest.json` and `packages-lock.json`
+in the Unity repo, and wait for Unity to re-resolve. A full cross-repo release cycle for one
+number.
+
+That loop is correct for simulation rules, which change monthly and *must* change on both
+sides at once or prediction diverges. It is fatal for content, which changes hourly and
+whose whole value is iteration speed. Nothing about the existing pipeline was wrong; it was
+being asked to carry a load it was never shaped for.
+
+**Decision 1 — content is JSON files on disk in `backend/content/`, and the game server is
+their only source of truth.** Not a database: content is authored, reviewed and diffed like
+code, and a schema migration for every balance tweak is the cost of putting it in Postgres.
+Not in the client repo: the server validates and enforces every rule, so content that the
+server has not seen cannot mean anything.
+
+**Decision 2 — the server loads and validates content at boot, and refuses to start when it
+does not validate.** Every problem in the file is reported in one pass, so one restart
+clears them all rather than one per typo. Measured on a deliberately broken file, the server
+exits 1 and prints all four faults with the item id and the field against each.
+
+This is fail-fast rather than fail-soft on purpose. A server running on half-parsed content
+serves an unknowable subset of the intended game, and each downstream symptom — a missing
+item, a wrong stat, a loot table pointing at nothing — gets attributed to whichever system
+noticed it first instead of to the file that was wrong.
+
+**Decision 3 — clients fetch content over HTTP from the game server, at `/content`, keyed by
+a hash.** The endpoint sits on the existing metrics listener beside `/metrics`, `/healthz`
+and `/status`, so it costs no new port, no new protocol message and no change to the wire
+schema. A client that already holds the current set sends `?hash=` and receives `304 Not
+Modified` with no body, which keeps the fetch off the join path after the first time:
+content changes only when a server restarts, so the steady-state answer is always 304.
+
+The hash is returned in both `ETag` and `X-Content-Hash`. The second is not redundant —
+`UnityWebRequest` and several proxies rewrite or strip `ETag`, and a client that cannot read
+back the hash it was given has no way to ask for a 304 next time, silently turning every
+join into a full download.
+
+**Decision 4 — the schema is shared, the parser is not.** `Shared.GameLogic/Content/` holds
+the definition types and the validation rules, compiled into both sides exactly as the
+simulation logic is. Parsing is per-side: the server uses `System.Text.Json` with source
+generators, the client uses its own reader.
+
+This is forced, not preferred. Unity compiles `Shared.GameLogic` **as source** and has no
+`System.Text.Json`; the server publishes NativeAOT and cannot use reflection. There is no
+single parser that satisfies both. Sharing the schema and the validator keeps the two sides
+agreeing on what content *means* and on what "valid" means, which is the part that matters;
+two readers of the same document is a smaller risk than one reader that cannot be compiled
+on one of the two runtimes.
+
+Golden vectors stand where a shared parser would have, exactly as ADR-10 already does for
+the wire format.
+
+**Decision 5 — the client validates what it downloads, and this grants it nothing.** A
+truncated or half-written response is indistinguishable from a valid one until something
+checks it, and without a check the client discovers the problem as a null reference several
+screens later. Validation answers "is this content coherent", never "may this player have
+this item". The server still owns every gameplay decision; a client that edits its own copy
+changes only what it draws.
+
+**What this costs.** Content changes require a **server restart** — there is no hot reload,
+and the `ContentDatabase` is immutable for the life of the process. That is deliberate: a
+world whose rules changed underneath a running simulation would make every desync
+unreproducible. The iteration loop is edit → restart → clients pull, with no rebuild, no
+tag, and no package bump, which was the whole point.
+
+**What is not decided here.** Whether later content types (abilities, loot tables, NPCs,
+maps) each get their own file or share one; whether content is ever signed; and whether the
+gateway should serve content too, so a client can prefetch before it has a game server. The
+first is a naming question, the second only matters once content is delivered over an
+untrusted path, and the third is worth revisiting if the first-join fetch ever shows up in a
+join-latency measurement.
+
 ## Summary of decisions
 
 | # | Area | Decision |
@@ -2556,5 +2722,6 @@ whose spare pods are spare.
 | 14 | Agones | **Stages 1-4 shipped 2026-08-17 and are proven — see ADR-16.** The decisions below stand; the status claim does not. Originally: the C# server's Agones SDK is a no-op and `--agones` changes nothing; implement it over the **HTTP sidecar on `localhost:9358`**, not the gRPC C# SDK, to hold the module's NativeAOT/no-dependencies rule. Agones owns pod lifecycle, Redis owns the `map_id -> server` lookup, and the server registers **only after** reporting Ready — an ordering `GameServer.RunAsync` already implements, so what it needs is a test pinning it, not a change. Health stays `disabled: true` until a real SDK is wired; the autoscaler is buffer-based on server count because ADR-7's CCU ceiling is unknown. Whether the realtime tier moves off `DEPLOY_MODE=containers` to k8s is **not** decided here |
 | 15 | Realtime tier on k8s | **Proposed, not accepted — this one records an open question.** All three environments are `DEPLOY_MODE=containers`; there is no k3s (context is `docker-desktop`), no `deploy/k8s/`, and `cd.yml` applies no manifest. One thing *is* decided because it blocks either answer: with `portPolicy: Dynamic` the server cannot learn its own address, advertises `:9000` and the gateway hands that to clients verbatim — so the SDK must **read GameServer status from the sidecar**, not use static ports and not let the gateway write the registry entry (which would break ADR-1 and ADR-14's split). Six prerequisites — StatefulSets/PVCs, ConfigMaps, plugin packaging, Secrets, a registry, and allocation RBAC — sit outside `deploy/agones/` and outweigh ADR-14's stages 1-8, which they precede. ADR-3 is unchanged: allocation lives inside `MsgEnterWorld` and the gateway stays out of the gameplay path |
 | 16 | Agones on k3s | Realtime tier **proven** on Agones/k3d: a real client joined an Agones-managed server in strict-address mode. Docker Desktop k8s cannot host it (Kubernetes `hostPort` is never published to the host); k3d with a mapped port range can. The advertised address is **composed** — port from the Agones status read, host from `GAMESERVER_ADVERTISE_HOST` — because `status.address` is the node address and is not dialable. ADR-2 is now enforced in code (allocate only for a map with no live server); the join token is minted only after the pod self-registers. Allocated pods are never reclaimed; the map-fleet allocator policy stays open; the deploy path stays `DEPLOY_MODE=containers` |
-| 17 | Availability posture on k8s | **Statement of posture, not a manifest change.** Every workload in `deploy/k8s/` is **one replica** — gateway, Nakama, Redis, both PostgreSQL instances, and the map Fleet — so k8s provides scheduling and lifecycle here, **not redundancy**. `strategy: Recreate` on the two `hostPort` workloads (gateway 7000, Nakama 7001) is **required**: RollingUpdate deadlocks on a single node because the replacement cannot schedule until the outgoing pod frees the port. The accepted cost is that **every gateway or Nakama rollout drops the join path entirely**; in-progress sessions survive, because the game server verifies the join token itself and never calls the gateway (ADR-3). The window is **unmeasured** and not quoted. Before any tier above dev: answer the gateway hostPort exposure question *together with* cross-instance single-flight (ADR-16), and decide Redis persistence/replication against ADR-4 rather than by adding replicas |
-| 18 | Fleet autoscaling | **No `FleetAutoscaler` on a fleet that pins one `GAMESERVER_MAP_ID` for every replica.** The C# server self-registers at startup, not on allocation, so a "spare" Ready pod is a second live server for that map: measured on k3d 2026-08-18, scaling `1 -> 2` put two members into `servers:map:map_01` 5.4s later with no allocation involved, and `FindServer` returns the least-loaded — the spare. `ready=0` is therefore the correct steady state and tooling says so instead of warning. Enforced by `verify.sh` check `cluster.autoscaler` (FAIL), which stands down for a fleet with a per-pod map id. `replicas > 1` and a buffer autoscaler unlock together, on a per-pod map id or on registering at `Allocated` rather than `Ready` — an autoscaler does nothing for the "second map cannot be served" symptom, which is a fleet-targeted-allocation problem |
+| 17 | Availability posture on k8s | **Statement of posture, not a manifest change.** Every workload in `deploy/k8s/` is **one replica** — gateway, Nakama, Redis, both PostgreSQL instances, and the map Fleet — so k8s provides scheduling and lifecycle here, **not redundancy**. `strategy: Recreate` on the two `hostPort` workloads (gateway 7000, Nakama 7001) is **required**: RollingUpdate deadlocks on a single node because the replacement cannot schedule until the outgoing pod frees the port. The accepted cost is that **every gateway or Nakama rollout drops the join path entirely**; in-progress sessions survive, because the game server verifies the join token itself and never calls the gateway (ADR-3). The window is **unmeasured** and not quoted. Before any tier above dev: answer the gateway hostPort exposure question *together with* cross-instance single-flight (ADR-16) **and cross-instance duplicate-login kick, which is not implemented** (declared-but-unwired machinery deleted in #211; rebuild on Streams per ADR-5, never Pub/Sub), and decide Redis persistence/replication against ADR-4 rather than by adding replicas |
+| 18 | Fleet autoscaling | **No `FleetAutoscaler` on a fleet that pins one `GAMESERVER_MAP_ID` for every replica.** The C# server self-registers at startup, not on allocation, so a "spare" Ready pod is a second live server for that map: measured on k3d 2026-08-18, scaling `1 -> 2` put two members into `servers:map:map_01` 5.4s later with no allocation involved, and `FindServer` hands clients one of them (the least-loaded then; the lowest `ServerID` since #203). `ready=0` is therefore the correct steady state and tooling says so instead of warning. Enforced by `verify.sh` check `cluster.autoscaler` (FAIL), which stands down for a fleet with a per-pod map id. `replicas > 1` and a buffer autoscaler unlock together, on a per-pod map id or on registering at `Allocated` rather than `Ready` — an autoscaler does nothing for the "second map cannot be served" symptom, which is a fleet-targeted-allocation problem |
+| 19 | Game content | **Content is JSON on disk in `backend/content/`, owned by the game server, served to clients over HTTP at `/content` and never carried by the `Shared.GameLogic` package.** The package is pinned by exact commit, so content in it costs a tag plus two file bumps per balance tweak — correct for simulation rules, fatal for content. The server loads and validates at boot and **refuses to start** on invalid content, reporting every fault in one pass. Clients send `?hash=` and get `304` once they hold the current set; the hash ships in both `ETag` and `X-Content-Hash` because `UnityWebRequest` and some proxies strip the former. The **schema and validator are shared** (`Shared.GameLogic/Content/`), the **parser is not** — Unity compiles the package as source and has no `System.Text.Json`, the server is NativeAOT and cannot reflect, so no single parser satisfies both; golden vectors cover the gap as in ADR-10. No hot reload: content changes need a restart, because rules changing under a running simulation makes every desync unreproducible |

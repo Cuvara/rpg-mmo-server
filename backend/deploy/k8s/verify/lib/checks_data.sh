@@ -101,7 +101,22 @@ check_redis_noeviction() {
       "the redis config/args in the compose file or the cluster ConfigMap; backend/docs/ARCHITECTURE-DECISIONS.md ADR-4"
     return
   fi
-  pass "maxmemory-policy=noeviction (ADR-4 satisfied)"
+  # `noeviction` with no ceiling is not the safe half of the pair: growth is then
+  # bounded only by the container limit, which the kernel enforces by killing
+  # Redis whole -- losing sessions, the registry and the stream at once, the very
+  # outcome noeviction was chosen to prevent (#202). A policy check that passes
+  # on `maxmemory 0` is therefore checking the less important of the two.
+  local mem_out maxmemory
+  mem_out=$($VERIFY_REDIS_EXEC redis-cli ${VERIFY_REDIS_AUTH:+-a "$VERIFY_REDIS_AUTH"} CONFIG GET maxmemory 2>&1 | tr -d '\r')
+  maxmemory=$(echo "$mem_out" | tail -1)
+  if [ "${maxmemory:-0}" = "0" ] || [ -z "${maxmemory:-}" ]; then
+    fail "Redis has no memory ceiling, so noeviction ends in an OOM kill" \
+      "maxmemory > 0, below the pod memory limit (#202)" \
+      "maxmemory = ${maxmemory:-<no answer>} (unlimited)" \
+      "backend/deploy/k8s/data/redis.conf and the --maxmemory flag in docker-compose.yml"
+    return
+  fi
+  pass "maxmemory-policy=noeviction, maxmemory=${maxmemory} (ADR-4 + #202 satisfied)"
 }
 
 # --- Nakama --------------------------------------------------------------

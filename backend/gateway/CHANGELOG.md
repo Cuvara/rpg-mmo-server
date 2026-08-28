@@ -5,6 +5,174 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Heartbeats now keep the gateway session alive**
+  ([#231](https://github.com/Cuvara/rpg-mmo-server/issues/231)). A `MsgPong` on
+  an authenticated connection re-arms the session TTL
+  (`refreshSessionOnPong`), so a client that holds the gateway socket open
+  sending only heartbeats — the recommended shape per
+  `gameserver-dotnet/docs/API.md` — no longer has its session expire under the
+  live connection after `SessionTTL` (1 h) on one map, which made the next map
+  transfer fail with `session expired` and forced exactly the re-auth the kept
+  connection exists to avoid. Store writes are bounded to one per
+  `sessionRefreshInterval` (1 min) per connection, so a 10 s heartbeat does not
+  EXPIRE-spam Redis; an unauthenticated pong refreshes nothing; and store
+  errors fail open (refresh skipped, connection untouched), matching
+  `checkSession`. Table-driven regression:
+  `TestGateway_PongRefreshesSessionTTL`, `TestShouldRefreshSession_RateLimited`.
+- **`server_down` events are now consumed: the named server is evicted from the
+  registry immediately, instead of being handed to clients until its 15s TTL
+  expires** ([#236](https://github.com/Cuvara/rpg-mmo-server/issues/236)).
+  `Gateway.OnEvent` recognises the registry watcher's `server_down` event and
+  calls the new `RegistryService.Evict(ctx, serverID)`, which removes the
+  registry entry (and with it map-index membership) and untracks the server in
+  the watcher. Before this, the only consumer logged and counted, so `FindServer`
+  kept returning a dead address for up to a full heartbeat TTL — each burnt
+  client costing a single-use join token plus up to 10s of connect timeout.
+  Eviction is idempotent (duplicate events and multiple consuming gateways are
+  harmless) and is **not** a deny-list: a server that re-registers or resumes
+  heartbeating after eviction becomes assignable again through the normal path.
+  A failed eviction degrades to the pre-fix TTL-expiry behaviour and is logged.
+- **The registry watcher no longer treats every `GetServer` error as server
+  death** (same pass, [#236](https://github.com/Cuvara/rpg-mmo-server/issues/236)).
+  Only `storage.ErrNotFound` — heartbeat TTL expired or deregistered — publishes
+  `server_down` and untracks; any other error (a Redis blip, a network timeout)
+  is logged and the server stays tracked. This was fixed *before* wiring the
+  consumer on purpose: with the old behaviour, one transient store error would
+  have published a false `server_down` for every tracked server, and the new
+  consumer would have evicted them all — turning a blip into an outage.
+- **A cold-map join can no longer be heartbeat-killed by its own stacked
+  timeouts** ([#235](https://github.com/Cuvara/rpg-mmo-server/issues/235)).
+  One `handleEnterWorld` could chain three sequential, individually-bounded
+  waits — registry lookup retries (`registry.RetryTotalTimeout`, 10s) + the
+  Agones allocation HTTP call (`registry.DefaultTimeout`, 10s) + the wait for
+  the allocated pod to self-register (`DefaultAllocationWaitTimeout`, 15s) —
+  ≈ 35s against `server.MaxHandlerBlockingWait` = 20s, so the gateway's own
+  heartbeat closed the connection mid-allocation. The whole assignment now runs
+  under one deadline, `server.EnterWorldBudget` = `MaxHandlerBlockingWait − 2s`
+  = 18s (the margin is reserved for the session write-back and response flush);
+  on expiry the client gets the existing retryable
+  `server is starting, retry shortly` and the connection stays up. To make the
+  deadline reach the caller that stacks everything, `registry.allocateOnce`'s
+  single-flight **leader now waits like a follower**: the detached work
+  (`context.WithoutCancel`, unchanged) runs in its own goroutine and completes
+  regardless, so the client's retry finds the freshly registered server without
+  a second allocation. A caller whose context ends while an allocation is in
+  flight now gets `ErrServerStarting` (retryable) instead of a bare context
+  error that surfaced as `internal error`. `registry.RetryTotalTimeout` is
+  exported so the new guard test
+  (`TestEnterWorldWorstCaseBudgetFitsHandlerWindow`) pins the stacked
+  worst-case sum — not just the 15s leg — against the same constants the code
+  runs on; `TestGateway_SlowAllocationYieldsRetryableAndLeaderCompletes` proves
+  the retryable answer, the surviving connection, and the detached leader's
+  completion end to end. The client half (EnterWorld inside the join-retry
+  loop, client timeout budget) is tracked in the client repo.
+
+### Removed
+- **Cross-gateway duplicate-login kick, which was declared at every layer and
+  constructed at none, is gone** ([#211](https://github.com/Cuvara/rpg-mmo-server/issues/211)).
+  `KickPublisher` and `KickSubscriber`, `noopKickPublisher`, the `kickPub` and
+  `kickSub` fields, `WithKickPublisher` and `WithKickSubscriber`,
+  `handleKickEvent`, its `SubscribeKick` call in `Run` and its `Close` call in
+  `Shutdown`, and the `PublishKick` branch in `handleAuth`. The matching
+  `GatewayKickChannel` constant goes with it; that half is in
+  `backend/shared/CHANGELOG.md`.
+
+  **Nothing was broken and nothing is fixed — what is fixed is a false claim.**
+  `cmd/gateway/main.go` has never called either option, so `kickPub` was the noop
+  from the first line of `New` to the last line of the process and `kickSub` was
+  nil, which is why `Run` never subscribed and `Shutdown` never closed anything.
+  The feature has therefore been a no-op for its entire life. It read as
+  finished, though, at every layer a reader would check: two interfaces, a noop
+  implementation, two functional options, a handler, a channel constant with a
+  paragraph of rationale, and a line in `CURRENT-SERVER-FLOW-AUDIT.md`
+  describing the behaviour as real. That is the defect — a reader planning a
+  multi-replica gateway would have concluded the problem was already solved.
+
+  **Deleted rather than implemented, and the reasoning is not "it was easier".**
+  Two reasons, and the second is the stronger one. First, ADR-17 pins the
+  deployment to one gateway replica, and `deploy/k8s/app/40-gateway.yaml` pins it
+  again for an independent reason — single-flight per `map_id` is per gateway
+  process (ADR-16), so two replicas racing on a cold map each allocate a
+  GameServer that Agones cannot un-allocate. With one replica there is no second
+  instance to publish to, so an implementation could be neither observed nor
+  tested end to end; it would be speculative work validated by nothing, which is
+  how the machinery being deleted came to exist. Second, and decisively: the
+  deleted code describes the **wrong transport**. The constant's own comment
+  argued for Redis Pub/Sub on the grounds that message loss is acceptable, and
+  ADR-5 — "Streams, not pub/sub" — decides against that model for cross-process
+  coordination. So this was not a head start on the eventual feature. It was a
+  shape that would have had to be thrown away, sitting in the tree looking like
+  progress.
+
+  **What replaces it is a written-down gap, not silence.** `handleAuth` keeps its
+  `duplicate login detected` log with `old_gateway` and `new_gateway` — the field
+  pair that makes the gap observable the moment a second replica exists — and
+  carries a comment stating that a session owned by another gateway is
+  deliberately left alone, why that is safe today, and that the fix is Streams
+  with consumer-group ACK per ADR-5. `docs/CURRENT-SERVER-FLOW-AUDIT.md` §2.2
+  gains a "What a second gateway replica would need" note describing the failure
+  precisely (a user authenticating against replica B keeps a live session on
+  replica A, indefinitely, with no error on either side), and ADR-17 now lists
+  this alongside the hostPort and single-flight questions that must be answered
+  before any second replica — because a consequence of the single-replica
+  decision belongs next to the decision.
+
+- **Local duplicate-login kick is untouched, deliberately and completely.**
+  `userConns`, `findUserConn`, `trackUser`, `kickLocalUser` and
+  `sendKickAndClose` are unchanged, as is the `MsgKick`-then-`MsgDisconnect`
+  ordering contract. It is the half that has always worked and is reached on
+  every login. Its four tests in `duplicate_login_test.go` are unchanged and
+  still pass; **no test was deleted by this change**, because no test ever
+  exercised the removed options — which is itself the point #211 makes about
+  this class of defect. A unit test constructs the thing it tests, so it proves
+  the component works and says nothing about whether production constructs it.
+
+### Fixed
+- **A map served by two game servers is no longer load-balanced across the
+  split** (#203). ADR-2 allows exactly one live server per `map_id`, and
+  `FindServer` already logged loudly when the registry returned more than one —
+  then fell straight through into least-loaded selection across all of them.
+  That is the worst available response to the fault. Least-loaded steers each new
+  joiner into whichever half is emptier, so the two copies of the world converge
+  on **equal** population: both stay occupied, neither ever drains, and the
+  accidental split becomes a permanent one in which players standing in the same
+  coordinates cannot see or fight each other. The gateway was, in effect,
+  treating a violated invariant as a capacity pool to exploit.
+
+  Selection with more than one server for a map is now **deterministic and
+  load-blind**: the lowest `ServerID` among those with spare capacity, with
+  `PlayerCount` not consulted at all. Every caller — every gateway instance,
+  every client retry — therefore lands on the same half, so the other half
+  drains as its players log out and the split converges out rather than widening.
+  This does not repair a split (nothing migrates the players already on the
+  losing half) and it is not meant to; it stops the gateway from feeding one
+  while an operator reacts to the warning that is still emitted. Selection when
+  exactly one server serves the map is unchanged, as are the wrong-map refusal
+  (`ErrFleetMapMismatch`), the all-servers-full refusal (`ErrNoServerAvailable`,
+  never an allocation) and the allocation path.
+
+  Two harder responses were considered and **rejected for now**: refusing the
+  lookup outright, and rejecting the second registration. Refusing at
+  registration is the only one that actually enforces the invariant, but it
+  breaks rolling replacement — a new pod self-registers before the old one's TTL
+  expires — while the health watcher is still unwired (#204), so it would trade a
+  split world for an unservable map. Deterministic selection is the containment
+  step that costs nothing and blocks nothing.
+
+  Consequence to know: which half a joiner reaches now depends on server id
+  ordering rather than load, so on a fleet scaled past `replicas: 1` (ADR-18) the
+  clients pile onto one pod and the spare looks idle. That is the intended
+  reading — the idle pod is the copy of the world that should not exist, not
+  spare capacity. Covered by new table-driven tests over both the memory and
+  Redis registries: the emptier-but-higher-id server losing, a three-way split,
+  the lowest id being full so the next-lowest wins, an all-full split still
+  refused, and a single server unchanged, plus an order-independence test that
+  rotates the store's return order across calls (a Redis set has no ordering
+  guarantee, and two gateways disagreeing on the pick would reintroduce the
+  split). `TestRegistryService_FindServer_PrefersLeastLoaded` was removed: it
+  asserted precisely the behaviour this change inverts.
+
 ### Changed
 - **A momentarily exhausted fleet no longer gets the terminal "do not retry"
   answer** (#152). `EnterWorld` collapsed two unlike conditions into one message:
@@ -62,6 +230,54 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   change wants its own commit and tests. Refs #153.
 
 ### Fixed
+- **The registry watcher had no caller, so a dead game server stayed in the
+  gateway's view for up to a full heartbeat TTL** (#204). `registry.RegistryWatcher`
+  polls the servers the gateway knows about, notices one that has vanished from
+  the registry and publishes `server_down` — and it had four passing unit tests
+  and **no construction site outside them**. `NewRegistryWatcher` was never called
+  by `cmd/gateway`, so `Start` never ran in a real gateway and the tests could not
+  fail: they build their own watcher. The consequence was that server death was
+  observable only when `constants.ServerHeartbeatTTL` (15s) expired, and for that
+  whole window `FindServer` kept handing clients the address of a server that
+  would not answer — the state that produces the split-map fault fixed in #203.
+  Agones health checks do not cover this: they watch **pod liveness**, while the
+  thing that misroutes a client is the gateway's **registry view**, and nothing
+  was shortening the gap between the two. The watcher is now constructed,
+  attached to the `RegistryService` (`registry.WithWatcher`) and started on the
+  process context in `cmd/gateway.wireRegistry`, with `watcher.Stop()` on the
+  existing SIGINT/SIGTERM path before the stores are closed. Poll interval **5s**
+  against the **15s** TTL — a **3x** margin, and the ratio is the point: a poll at
+  or above the TTL would always lose the race to expiry and the watcher would be a
+  no-op that still costs a registry read per server per tick.
+  `TestWatchPollInterval_ShorterThanHeartbeatTTL` pins that relationship so a
+  future retune of either constant cannot silently invert it.
+- **The watcher's tracked set now comes from lookups, not only from registration,
+  or it would have been empty in every real deployment.** The obvious hooks —
+  `RegistryService.RegisterServer` / `DeregisterServer` — are wired (track on
+  register, untrack on a graceful deregister, so a clean shutdown is never
+  reported as a fault), but in production the gateway **never registers a
+  server**: game servers self-register straight into Redis (ADR-2) and those two
+  methods have no non-test callers. A watcher fed only by them would have polled
+  an empty set forever — wiring that looks correct and detects nothing. So
+  `FindServer` tracks the server it returns: the moment the gateway learns a
+  server exists is the moment it hands its address to a client, which is also the
+  only server whose death the gateway has a reason to care about. `server_down` is
+  published through the gateway's existing event stream rather than a second
+  pub/sub client (Redis Streams on the Redis backend, in-memory otherwise), so no
+  new dependency enters the binary; it is consumed by the relay and logged like
+  every other event, since `shared` still has no client-facing `MsgEvent`.
+- **`cmd/gateway.wireRegistry` is now the single construction site for the
+  `RegistryService`, so this cannot rot back.** The failure this issue is made of
+  is wiring that can disappear without any test noticing, so the fix comes with a
+  test at the wiring level rather than more coverage of the watcher's logic:
+  `TestWireRegistry_StartsWatcher` (fails, on a 2s deadline, if `Start` is not
+  called — `Stop` blocks until the poll loop exits, and there is no poll loop to
+  exit), `TestWireRegistry_TracksRegisteredServer` and
+  `TestWireRegistry_TracksServerHandedToClient` (both fail if the watcher is not
+  constructed or not attached). All three were verified against a mutated
+  `wireRegistry` with the construction removed, and again with only `Start`
+  removed. Routing every construction through one function means deleting the
+  call from `main` breaks the build instead of silently disarming the watcher.
 - **A client was handed a game server for a map it did not ask for, and every
   layer reported success.** Reproduced on a live k3d Agones fleet: with
   `ALLOCATOR=agones` and a fleet serving `map_01`, `MsgEnterWorld{map_id:

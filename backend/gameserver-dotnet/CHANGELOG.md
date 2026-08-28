@@ -6,7 +6,642 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **docs/API.md: the "refreshed by activity" session promise is now precise** (#231).
+  The map-transfer section promised the gateway session "is refreshed by activity, so a
+  live gateway connection stays valid", but until the paired gateway fix the only
+  refresh happened on `enter_world` — a client parked on one map for over the 1 h TTL
+  expired under its live socket. The gateway now refreshes the session on heartbeat
+  `MsgPong` (`refreshSessionOnPong`, see `backend/gateway/CHANGELOG.md`), and the
+  wording here names that mechanism instead of implying it.
+- **AOI gather composes a trimmed 7-field view; the delta encoder keys on integers
+  instead of entity-id strings** (#237). The scan composed an 11-field `EntityState`
+  per AOI match — two string-bearing component fetches per chunk plus five fields
+  (`Attack`/`Defense`/`CooldownUntilTick`/`LastInputTick`/`Dead`) the snapshot
+  encoder never reads — on the phase that is 77-83% of a 200-viewer tick; and
+  `SnapshotDeltaState` hashed the id string 2-3 times per visible entity per viewer
+  per tick (~1.2M string hashes/s at 200 players). The gather now composes
+  `EntityView` (`Id`/`Type`/`X`/`Y`/`Hp`/`MaxHp`/`Speed` plus a world-stable int key
+  assigned once per id string in `EntityIdRef.Stable` — never reused, so a same-id
+  respawn keeps its key), and the delta maps key on that int. Wire output is
+  **byte-identical**: proved frame-for-frame by `TrimmedGatherByteIdentityTests`
+  (old vs new pipeline, Protobuf + JSON, keyframes/deltas/despawns/respawn), and the
+  pinned pre-change digests in `SnapshotByteIdentityTests` pass untouched. Measured
+  by paired in-process A/B (`Bench/AoiComposeBench.cs`, `BENCH_TICK=1`; 200
+  entities/200 viewers, occupancy 15.3, 600 interleaved rounds × 4 runs): gather
+  598-630 → 526-576 µs median per 200-viewer pass (**1.07-1.17× faster**), delta
+  encode 1059-1186 → 998-1023 µs (**1.05-1.16× faster**). The full `EntityState`
+  compose and the string-input `Encode` overloads remain for cold paths.
+  BENCHMARK.md Part VII records the measurement; §9 item 3 ("serialization off the
+  tick — still outstanding") corrected — the code had already done it.
+
+- **Kill rewards are batched per killer: one Nakama call per flush instead of two HTTP
+  RPCs per kill** (#233). `OnEntityDeath` used to fire `reward_kill` + `submit_kill`
+  fire-and-forget per mob kill — 2 requests and 2 meta-Postgres transactions each,
+  ~133 commits/s at 200 grindy players (the first thing to saturate a shared small-VPS
+  Postgres), with unbounded in-flight tasks on a 100 s default HttpClient timeout when
+  Nakama stalled. `KillRewardBatcher` now coalesces kills into one `long` per killer
+  (memory bounded by players online, not by kill rate or outage length) and flushes
+  every 3 s to the new batched `reward_kills` RPC; the death callback is a single
+  dictionary increment. `NakamaClient` gets a 5 s timeout and a three-way outcome the
+  retry policy is built on: *NotGranted* (Nakama's error contract: nothing granted) →
+  re-queue; *Unknown* (timeout, outcome unknowable) → drop with a loud log and a
+  `DroppedKills` counter, because retrying an unknown outcome is the double-gold path
+  ADR-6 forbids — bounded loss is the accepted trade. Final flush on shutdown, before
+  the HttpClient is disposed. `KillRewardBatcherTests` pins coalescing, the re-queue
+  (with a fresh `batch_id` per attempt), the drop, and that kills recorded during a
+  failed send survive the re-queue.
+
+- **Scaffolding enemies die in two hits (HP 30 → 16).** The demo combat loop could not
+  complete: a radial enemy at speed 2.5 crosses the 3.0 attack range in at most 2.4 s,
+  which at the 500 ms attack cooldown is 3-4 accepted hits — 24-32 damage against 30 HP,
+  so a kill required near-perfect radial alignment. The new `/status` counters measured
+  it live: **291 accepted hits in six minutes, zero kills.** 16 HP dies to two 8-damage
+  hits, which any pass through range produces; the kill → reward → leaderboard chain is
+  now exercised by ordinary play instead of by luck. The characterization test's
+  deliberately-duplicated constant was updated consciously with the same arithmetic.
+
+### Fixed
+
+- **A fast rejoin no longer gets killed by its predecessor's teardown** (#229). Teardown
+  removed the user's connection by id with no identity check, so when a reconnect had
+  already replaced a half-dead connection (mobile blip; heartbeat takes up to 30s to
+  notice), the dying handler found the NEW connection under its user id, closed it, and
+  decremented `players_online` for it — the player was kicked milliseconds after a
+  successful rejoin and the gauge under-counted permanently.
+  `ConnectionManager.RemoveIfCurrent` now removes by reference identity; a superseded
+  teardown balances its own join counter and stops — no hold, no entity removal, no
+  touching the replacement. `FastRejoin_WhileOldConnectionStillOpen_KeepsTheNewConnectionAlive`
+  holds the stale socket open and proves the fresh one still answers; it fails on the
+  pre-fix code.
+
+- **A map transfer no longer tears the player down twice** (#230). The transfer handler
+  does the full teardown itself, then closing the connection ended the read loop and the
+  handler's `finally` ran the disconnect teardown again: a second `PlayerLeft` — invisible
+  with one player because the gauge clamps at zero, but with two it ate the survivor's
+  count — plus a 30s hold parked on an entity already out of the world. The connection now
+  carries a `Transferred` flag (volatile, set before `Close()` so the racing handler
+  cannot read a stale false), and the `finally` skips its teardown for a transferred
+  connection. `TransferMap_DecrementsTheGaugeOnce_AndSchedulesNoHold` pins it with a
+  second player; it fails on the pre-fix code.
+
+### Added
+
+- **`/status` publishes attack-path counters** — `attacks_received` / `attacks_unresolved` /
+  `attacks_rejected` / `attacks_accepted` / `attack_kills`, plus `last_attack_rejection`
+  carrying the validator's verbatim reason for the most recent refusal. A rejected attack is
+  dropped with a Debug-level log on servers running at Information, so from the outside a
+  client attacking out of range was indistinguishable from a client not attacking at all —
+  the exact ambiguity that stalled a live zero-leaderboard-kills investigation, where nothing
+  could say whether attacks were not arriving, not resolving, or being refused, and the only
+  alternative was restarting the server at Debug. Counters are single-writer on the tick
+  thread and read unsynchronised by the status endpoint (torn 64-bit reads cannot occur on
+  the shipped targets); the rejection breadcrumb reuses the string `ValidateAttack` already
+  allocated, so the hot path pays nothing new. `AttackTelemetryTests` pins the
+  classification: every attack input lands in exactly one bucket, kills count only on death,
+  and a moving input with no target touches nothing. Documented in `docs/METRICS.md`.
+
+### Changed
+
+- **Input ingest allocates 216 B/packet, down from a measured 768.** Every received frame
+  paid for a header array, a body array, its `Task`, and two `ParseFrom(byte[])` calls that
+  each route through a `CodedInputStream` object. Three measured steps (Release, per-op
+  deltas of `GC.GetAllocatedBytesForCurrentThread` over 20 000 frames):
+
+  | Step | B/packet |
+  |------|----------|
+  | Baseline (`DecodeAsync` + `GetPayload<InputMessage>`) | 768 |
+  | `GetPayload` parses payloads from a span | 600 |
+  | `DecodeBody` parses the outer envelope from a span | 432 |
+  | Per-connection `FrameReadBuffer` + pooled `ValueTask` read | **216** |
+
+  What remains is what must escape: the `Envelope`, its payload copy, and the
+  `InputMessage` itself. The payload copy is deliberate, not residue — envelopes outlive
+  their read-loop iteration (the transfer handler retains one in a fire-and-forget task),
+  so the payload can never point into a reused buffer. `FrameLifetimeTests` pins that
+  contract with a clobber-after-decode harness whose negative control proves it catches
+  the pooled-payload defect it exists to forbid.
+
+  Also settled while in there: the 185.3 B/tick "with inputs" residual from the previous
+  audit was the measurement harness, not the server — `TickOnce` bracketed alone with 50
+  inputs staged measures **0.0 B/tick**, and `PushInput` x50 plus drain with cached ids
+  measures 0.0 B/cycle. The tick thread allocates nothing on the input path.
+
+### Fixed
+
+- **A connection's stream had two concurrent writers; now it has one at a time.**
+  `WriteOneAsync` is not handshake-only — the transfer responses and the shutdown
+  `Disconnect` notice go through it while the connection's write task is live and possibly
+  mid-snapshot on the same stream. A stream supports one concurrent writer, so those writes
+  could interleave with a snapshot frame and corrupt the length-prefixed framing at exactly
+  the moment a transfer or shutdown frame must arrive intact. A per-connection
+  `SemaphoreSlim` now serializes every stream writer; the uncontended wait is a CAS, and the
+  snapshot path's allocation profile is unchanged (32 B/snapshot before and after).
+
+  For the record, the send channel was never the hazard for control frames: kick, transfer
+  and disconnect bypass it entirely, so `DropOldest` cannot drop them — only Ping/Pong ride
+  the channel besides snapshot markers.
+
+### Changed
+
+- **The tick thread now allocates zero bytes per tick; the AOI scan is ~2x faster.** An
+  allocation audit (per-tick deltas of `GC.GetAllocatedBytesForCurrentThread`, Release,
+  50 players, 15 Hz uniform so every tick broadcasts) found the tick thread allocating a
+  deterministic 160.0 B/tick against a module contract of zero, and the AOI compose paying
+  seven `GetSpan` lookups per matching entity. Three changes, each measured before and after
+  on the same rig:
+
+  | Path | Before | After |
+  |------|--------|-------|
+  | Tick thread, no inputs (closure + `CopyTo` enumerator) | 160.0 B/tick | **0.0 B/tick** |
+  | — `TickOnce` write-scope closures | ~104 B/tick | 0 (static lambdas via the `UpdateComponents` state overload) |
+  | — `ConnectionManager.CopyTo` (`ConcurrentDictionary` enumerator) | 64.0 B/call | 0 (copy-on-write snapshot array, rebuilt on join/leave) |
+  | AOI scan, 200 entities / 20 matches | 3.3–9.1 µs/scan | **1.65–3.68 µs/scan** (spans hoisted per chunk in `ScanRangeLocked`) |
+  | Snapshot encode + frame, 50 entities (unchanged, for reference) | 32.0 B/snapshot | 32.0 B/snapshot |
+
+  The scan win scales with viewers × entities — the gather is 77–83% of a 200-viewer tick —
+  so it is invisible at 2 players and largest where the tick binds. The debug logs in
+  `InputHandler.ProcessInput` are also behind `IsEnabled` guards now: the `LogDebug`
+  extension allocates its params array before the level check, which was ~40 B per attack
+  input inside the world write lock with Debug off.
+
+  The ingest path's 768 B/packet, left open here because its fix was unmeasured, is
+  addressed by the ingest entry below — measured down to 216 B/packet.
+
+### Added
+
+- **`SnapshotMerger.EntityMap` — the entity map as its concrete `Dictionary`, released as
+  `Shared.GameLogic` `sgl-v0.3.0`.** A `foreach` over the `IReadOnlyDictionary` interface
+  boxes the dictionary's struct enumerator — one 88-byte heap object per enumeration,
+  measured with `GC.GetAllocatedBytesForCurrentThread`. The Unity client's view binder
+  enumerates this map once per rendered frame, which at 300–1000 fps made it the **only
+  per-frame allocation left in that path** (~44 KB/s at 500 fps, into Unity's stop-the-world
+  GC); enumerating the concrete type measures 0 B and is ~20 % faster at 100 entities
+  (4,865 → 3,864 ns), the interface dispatch on `MoveNext`/`Current` going with the box.
+  Read-only by contract; only the merger writes it. Additive, so a minor version bump.
+
+
+### Added
+
+- **`SnapshotCadenceTests` — what a client actually receives, measured at a socket.** A Unity
+  client was measured decoding **13.6–13.8 snapshots per second** from a server whose own
+  counters said 15, and nothing in either repo could say which side had lost them:
+  `snapshots_sent_total` counts stagings, `snapshots_frames_written_total` counts socket
+  writes, and neither is a statement about what came out the other end.
+
+  The only way to settle it is a client that is not the client under suspicion. This is that
+  client — a plain socket, no Unity, no frame loop, reading in a tight loop — and it measures
+  **15.003/s, 60.01 base ticks/s, every tick gap exactly 4**, at one client and at two. That
+  exonerated the server and moved the investigation to the Unity read path, where the loss
+  actually is.
+
+  Kept as a test rather than deleted as a probe: the next person to see a client reporting a
+  low rate would otherwise repeat all of it, and this fails if the server ever stops emitting
+  on the world tick. It closes its own six-second window rather than reading until cancelled,
+  so it costs the suite six seconds and not the twenty-eight an unbounded probe took.
+
+
+### Added
+
+- **`gameserver_snapshots_coalesced_total`, and `snapshots.sent` now documents what it
+  measures.** `snapshots_sent_total` counts snapshots **staged** on connections, not frames
+  written to a socket: a gather that finds the previous one still unclaimed replaces it, and
+  that tick's frame is never sent. The two were indistinguishable, which cost a full
+  investigation — a live client measured 14.2 snapshots/s arriving against a server reporting
+  15/s, with no counter able to say whether the server had dropped them or the client had.
+  (It had not: over a settled window the server stages 30/s for two clients and coalesces
+  none. The gap was on the client and is fixed in the netcode package.)
+
+### Changed
+
+- **`AClientWhosePacketsArriveInBursts_AgainstASingleRateServer_TravelsTheSameDistance`
+  asserts 0.80 of the intended distance rather than 0.85.** It is a wall-clock test over a
+  real socket: when the machine is busy the server's own tick loop runs late and drops
+  backlog, and every dropped tick is a held step that never happened. Observed once on CI at
+  **5.00 against 6.00 — 0.833, a two percent miss** — while passing 8 of 8 locally. What the
+  threshold has to separate is 0.28 from 1.00 (with banking removed and the hold gated off the
+  same case measures 0.278), and 0.80 clears that by 2.9x. A threshold two percent above a
+  figure the environment can produce is measuring the runner, not the defect.
+
+
+- **Movement no longer banks elapsed time: every step is exactly one tick, on both sides of
+  the wire.** A step used to cover `min(now - last_move_tick, 250ms)` so that the inputs
+  per-tick coalescing discards from a burst did not take their simulated time with them
+  (#100). That restored the right distance and was wrong by every other measure. Measured
+  against a live server it produced a **1.36-unit step where a normal one is 0.083** — read
+  by a player as the avatar jumping — and, worse, a client that predicted correctly was
+  *snapped back* by it: the client never took the oversized step, so every server
+  confirmation arrived as a correction. The reported symptom was a character that moves one
+  step, jerks back, and continues.
+
+  The lost time is now recovered by stepping on **every tick of the gap** instead
+  (`ApplyHeldMovement`), so there is nothing left to bank. The property this buys is
+  structural rather than measured: over any interval both sides take one step per tick, so
+  both travel `speed x ticks` and the distances are equal *by construction* rather than by
+  two independent measurements of elapsed time agreeing. Jitter can shift *when* a step
+  happens; it can no longer change *how many* there are, which is what reconciliation is
+  built to absorb.
+
+- **The held-direction expiry is a silence timeout, not a send-rate window, and it runs at
+  every rate configuration.** It was `WorldEvery` base ticks — the nominal spacing of a
+  client sending at the world rate — which left no slack at all: a 15Hz client's packets
+  were measured arriving **4.19 base ticks apart against a 4-tick window**, so the average
+  interval already overran it and the player stalled for the remainder of most of them. Any
+  fixed window sized to a guessed send rate has that problem. The budget is now
+  `GameConstants.MaxBankedMovementMs` (250ms) of *silence*, which is the question the expiry
+  actually answers.
+
+  The pass was also gated off entirely when every group ran at one rate, on the reasoning
+  that a client sending once per tick needs nothing held. A client that misses a tick needs
+  it at any rate, and a bursting client misses several — which made the single-rate
+  configuration **`staging` runs** the worst case rather than the safe one.
+  `ApplyHeldMovement` lost its `holdTicks` parameter accordingly; `TickLoop` no longer
+  passes `_rates.WorldEvery`.
+
+- **The expiry comparison is `>` rather than `>=`, and the boundary is load-bearing.** The
+  old banking step covered a gap of `MaxBankedTicks` ticks *entirely*, in one multiplied
+  step; reproducing that coverage one step at a time means stepping on gaps
+  `1..MaxBankedTicks` **inclusive**. With `>=` the last of them is dropped, and a client
+  whose packets clump into bursts of four at 15Hz — a 264ms idle against a 266.7ms budget —
+  stalls for one tick per burst and travels **5.00 units where 6.00 is owed**. That is #100
+  reappearing at a smaller amplitude, and it is what
+  `AClientWhosePacketsArriveInBursts_AgainstASingleRateServer_TravelsTheSameDistance`
+  caught.
+
+- **`GameConstants.MaxBankedMovementMs` keeps its name and its value (250ms) but not its
+  meaning**: it now bounds how long a held direction keeps producing steps, not how much
+  time one step may claim. Both readings answer the one question it exists for — how long
+  may the server keep moving a player on information it no longer has — so the number did
+  not move. Renaming it means releasing `Shared.GameLogic` and bumping the client's
+  `manifest.json` **and** `packages-lock.json`, so it is deliberately a separate change; the
+  doc comment on the constant says so at the definition.
+
+- **Three test contracts were rewritten rather than deleted, because they encoded the old
+  model and passed against it.** `ASilentClientsRepayment_IsBoundedByTheCap` asserted that
+  unheard silence *must* be repaid in one large step; it is now
+  `AfterUnheardSilence_NoStepIsLargerThanANormalOne` and asserts the exact opposite, with a
+  1.25x tolerance for tick-loop lateness. Its old complement — the guard against movement
+  being deleted outright rather than merely unbanked — is carried by the two burst tests,
+  which measure summed distance.
+  `AClientThatStopsSending_CoastsForAtMostOneWorldIntervalAndStops` and
+  `OnASingleRateServer_MovementIsStillExactlyOneStepPerPacket` became
+  `...CoastsForAtMostTheSilenceTimeoutAndStops` and
+  `OnASingleRateServer_AHeldDirectionIsStillSteppedUntilItExpires`. 866 tests pass.
+
+### Added
+
+- **`gameserver_snapshots_coalesced_total`, and `snapshots.sent` renamed in its own docs to
+  what it measures.** `snapshots_sent_total` counts snapshots **staged** on connections, not
+  frames written to a socket: a gather that finds the previous one still unclaimed replaces
+  it, and that tick's frame is never sent. The two were indistinguishable, which cost a full
+  investigation — a live client measured 14.2 snapshots/s arriving against a server reporting
+  15/s staged, with no counter able to say whether the server had dropped them or the client
+  had. (It had not: measured over a settled window the server stages 30/s for two clients and
+  coalesces none. The gap was on the client, and is fixed in the netcode package.)
+
+### Fixed
+
+- **`docker run` itself was failing on the WSL2 vsock bridge, and one fixture failure was
+  fanning out across all 11 registry tests.** Roughly one full-suite run in seven locally,
+  every one of them carried the identical message —
+  `` `docker run` failed (exit 1): <3>WSL (90584 - ) ERROR: UtilAcceptVsock:271: accept4
+  failed 110. `` — where `110` is `ETIMEDOUT` on the transport between WSL2 and Docker
+  Desktop's VM. The container was never created. Nothing in this repository was at fault, and
+  it does not happen on GitHub's runners, which have a real dockerd rather than a bridge
+  (#214).
+  - **A third case underneath a distinction that already existed.** `EphemeralRedis` separates
+    **docker absent → skip** from **container unusable → fail**, which is #175's design and is
+    not up for renegotiation — that split is why this failure was loud and attributed instead
+    of vanishing into a green run over 11 unrun tests. Underneath both there is a state
+    neither describes: **the docker CLI invocation failed before the daemon was reached**.
+    That is not a missing dependency and it is not a broken container, and it is the only
+    thing being retried here.
+  - **The retry is scoped to a recognised signature, never to a non-zero exit.** New
+    `GameServer.Tests/Infrastructure/DockerRunFailure.cs` classifies a failed run as
+    `HostTransport`, `PortTaken` or `Fatal`, and **anything not positively recognised is
+    `Fatal`**. Written the other way round — retry unless it looks like a real fault — every
+    new docker error on this box would silently become a three-attempt loop against a
+    five-minute timeout. A bad image, a name conflict, a missing network and an occupied port
+    all still fail on the first attempt.
+  - **The transport signature requires two tokens, `accept4 failed` and `vsock`, and that is
+    what makes it safe.** `accept4` is a raw Linux syscall name emitted by the WSL utility
+    process itself and `vsock` names the transport it was accepting on; neither word appears
+    in anything the daemon says, because when the daemon has an opinion it answers in its own
+    format. Every genuine failure captured from docker 29.1.3 on this box is prefixed
+    `docker: Error response from daemon:` and then names a cause — `pull access denied`,
+    `Conflict. The container name ... is already in use`, `Bind for 127.0.0.1:6379 failed:
+    port is already allocated`, `network ... not found`. The vsock failure is the shape of a
+    message from *below* the daemon: the relay timed out, so there was never a daemon response
+    to format. The fixture also runs `docker run -d`, so the captured stderr belongs to the
+    CLI and the container's own output cannot reach the classifier to confuse it.
+  - **It is loud on success, not only on failure.** The retry count is printed when the retry
+    *works*: `` `docker run` succeeded on attempt 2 after 1 recognised host-transport
+    failure(s) (#214) ``. A retry nobody can see is indistinguishable from a flake that
+    stopped happening, and this box's docker bridge is now implicated in a third measurement
+    problem after #200 and #201 — so the count is the signal that says whether the machine is
+    getting worse, and it has to appear on the green runs to be that.
+  - **An exhausted retry fails exactly as before.** Same `InvalidOperationException` from
+    `SkipUnlessAvailable`, same `` `docker run` failed (exit N): `` prefix — the string #214
+    was filed with — with the earlier attempts' stderr *appended* rather than substituted, so
+    the failure reads as the same event and still shows what was forgiven on the way to it.
+  - **24 deterministic tests pin the decision, because the fault cannot be summoned.** A retry
+    proved by "the suite went green a few times" is not proved at all — that is
+    indistinguishable from the flake not firing. `DockerRunFailureTests` feeds the classifier
+    the stderr from the issue and the four genuine faults **captured verbatim by causing each
+    one against docker 29.1.3 on this box**, rather than paraphrasing what docker might say.
+    Four separate mutations of the classifier were checked to confirm the tests bite: widening
+    the match from AND to OR fails 4, deleting the transport branch fails 7, defaulting to
+    retry-anything fails 12, and over-fitting the token to the `110` errno fails 1.
+  - **The skip/fail contract was re-verified in both directions** and is unchanged: with the
+    daemon answering, the 11 registry tests report `Skipped: 0`; with no daemon answering they
+    report `Skipped: 11, Failed: 0` as real xUnit skips. The backoff is a `Task.Delay`, not a
+    deadline, and no wall clock was introduced — this host's `CLOCK_REALTIME` runs 10-17% fast
+    (#153).
+  - **One call site could not have named this failure, and now can.**
+    `RegistrationServiceTests.RedisOutage_DoesNotKillTheService_AndItReRegistersOnReconnect`
+    starts its own dedicated container through `EphemeralRedis.TryStartAsync`, which returns
+    the container and **throws the reason away** — so its assertion read only "a dedicated
+    redis container could not be started". It failed exactly that way once during this work,
+    and the run could not say whether the cause was the transient being retried here, a
+    genuine container fault, or something else. It now goes through `StartAsync` and quotes
+    `Failure`. A reason that was computed and discarded is the same defect as no reason at
+    all, and this is the one place in the registry tests where #214 could still recur
+    unattributed.
+  - **Where the retry is visible, stated precisely, because it is not everywhere.** The
+    fixture logs through `Console.WriteLine`, and that reaches neither the TRX nor the console
+    at `dotnet test -v q` — verified, including for the pre-existing failure line. On the
+    **failure** path this does not matter: the attempt history is appended to the exception
+    message, which is how #214's own stderr was captured. On the **success** path the console
+    is the only channel, so a retried-but-green run shows its retry count under
+    `-v normal` (and in CI, which does not run quiet) and not under `-v q`.
+  - **The original failure did not reproduce in the 10 full-suite runs** recorded after the
+    change, which is stated rather than dressed up: at ~1 run in 7 it is as likely as not to
+    sit out a batch that size, and 10 green runs cannot distinguish "absorbed" from "did not
+    happen". What is proved is the decision the retry rests on; what is observed is ten clean
+    runs. The environmental fault itself remains a fact about the machine, exactly as #214
+    describes it.
+- **The Agones SDK tests timed a local HTTP listener they were not asserting on.**
+  `HttpAgonesSdkAddressTests.LiveSidecarShape_YieldsAddressAndGamePort` returned null once in
+  eight full-suite runs (#216) against a **correct body served by a listener in the same
+  process**. The three sibling tests reading the identical body passed in the same run, so
+  neither the parsing nor the fixture was in question: a fixed 700ms per-request budget
+  expired while the host was busy elsewhere, and `HttpAgonesSdk.GetAddressAsync` maps a
+  timeout onto exactly the same bare `null` it returns for an unreachable sidecar, a non-2xx,
+  an unparsable body and a status missing a field. The test asserted on a parsed address and
+  failed on a stopwatch.
+  - **The budget was removed from the assertion path rather than widened.** Every test in
+    both Agones SDK classes except the two pointing at a dead port now constructs the SDK
+    with `Timeout.InfiniteTimeSpan`. Raising 700ms to some larger round number would only
+    move the load at which the same thing happens and would leave the next reader believing
+    the number meant something; there is no network on this path, so a per-request deadline
+    is not a claim any of these tests is making. This is the same correction #200 applied to
+    `AchievedRateMeterTests` — stop asserting what the host scheduler decides.
+  - **What the tests still assert is unchanged, and in two places it is now stronger.** No
+    assertion was deleted or loosened: the live-shape test still pins address, port and the
+    `host:port` string that reaches Redis and `MsgEnterWorldResp.ServerAddr`, and every
+    negative test still requires null. What the negative tests gained is *why*: they now also
+    assert the reason the SDK logged — `has no port named`, `carries no address`,
+    `not a usable port`, `returned 500`, a `JsonException`. Before this, a 700ms timeout could
+    have satisfied `MissingGamePort_ReturnsNull` without the missing-port path ever running,
+    which is precisely the hazard this file's own opening remark warns about: *a fallback that
+    fires for the wrong reason looks exactly like one that fires for the right one*.
+  - **A hang is still bounded, and it is now the only thing a clock is used for here.** Reads
+    go through a helper that races the call against a 30s backstop and fails with the
+    subject's log attached. It is commented, at the constant and at the helper, as bounding a
+    hang and never asserting responsiveness — the distinction this issue exists to make. It
+    races the task rather than shortening the SDK's own timeout on purpose: a per-request
+    timeout makes the SDK return null, which is indistinguishable from the nulls under test,
+    whereas a race reports a stall as a stall. `Task.Delay` sits on the runtime's monotonic
+    timer queue, so no wall clock is involved; this host's `CLOCK_REALTIME` runs 10-17% fast
+    (#153) and the SDK's own timeout was already monotonic, so the fast clock was never the
+    cause here — the budget was.
+  - **The bare null is the defect underneath the defect, and it is fixed independently of the
+    timeout.** New `GameServer.Tests/Infrastructure/CapturingLogger.cs` records level, message
+    and — the discriminating field — the exception *type*, since a timeout, an absent listener
+    and an unreadable body all reach the same catch and log the same text. The suite was
+    passing `NullLogger.Instance` and throwing away the exact information it later needed a
+    TRX log to guess at. The failure this issue was filed for now reads
+    `GetAddressAsync returned null for the captured live sidecar body, which parses. What the
+    subject logged, in order: [Warning] Agones sidecar GET /gameserver failed —
+    TaskCanceledException: The request was canceled due to the configured HttpClient.Timeout
+    of 0.02 seconds elapsing.` — verified by forcing the condition, not predicted.
+  - **Two new tests pin the mechanism deterministically**, so the fix defends itself without
+    waiting for a 1-in-8 event: a 300ms sidecar behind a 50ms budget reads as the same null as
+    a corrupt one and surfaces a `TaskCanceledException`, and the same sidecar parses when no
+    budget is imposed. Both run in well under a second and cannot flake.
+  - **`HttpAgonesSdkTests` was corrected alongside it, pre-emptively.** It carried the same
+    700ms constant with the same exposure, and one of its tests was arguably worse placed:
+    a timed-out ping increments `ConsecutiveHealthFailures`, so
+    `HealthAsync_AfterRecovery_ResetsTheFailureCount` would have asserted `0` against a `1`
+    that nothing in its own body caused. Leaving an identical trap next door to a fixed one
+    is how #216 became the third fixed-deadline failure on this suite after #200 and #214.
+  - **No production code was changed.** `HttpAgonesSdk` already accepted an optional timeout
+    and `HttpClient.Timeout` already accepts `Timeout.InfiniteTimeSpan`, so the whole fix is
+    in the tests. The server's own default is untouched and still
+    `HttpAgonesSdk.DefaultTimeout` — 2 seconds, deliberately under the fleet's health
+    `periodSeconds`, which is a real production constraint and not something a test should
+    ever have been inheriting.
+  - **The original failure did not reproduce in the baseline runs** recorded for this change,
+    so the diagnosis rests on the deterministic reproduction of the mechanism rather than on
+    a live capture — stated plainly, as #200's entry states the same limitation. An
+    unreproduced flake is an open question; what is closed is that this test can no longer
+    fail for this reason, and that if it fails for another one it will say which.
+
+- **`AchievedRateMeterTests.ARunningTickLoop_PublishesANonZeroAchievedRate` asserted on the
+  test host's scheduler, not on the meter.** It failed roughly 1 run in 13 in the full
+  parallel suite and never in isolation (#200), and the assertion message had never been
+  captured, so which of its three assertions fired was guesswork. Feeding the real
+  `AchievedRateMeter` a uniformly-late tick schedule settles it without needing to catch the
+  failure live, because the meter is deterministic once the timestamps are injected: with
+  the test's 30Hz loop, 0.2s window and fixed 600ms wait, a per-tick scheduling delay of
+  **201-305ms trips `Assert.InRange(achieved, 5d, 60d)`**, and anything past **~310ms**
+  leaves the gauge at 0 and trips the published-at-all assertion instead. Both bands were
+  reachable; the issue's hypothesis named only the second, and the first is the wider target.
+  - **The 5Hz lower bound was not a loose tolerance, it was a cliff.** The meter publishes
+    `tickDelta / elapsed` only once `elapsed >= WindowSeconds`, so a window containing a
+    single tick can never publish more than `1 / WindowSeconds` — which for a 0.2s window is
+    exactly 5.0, and is reached only if `elapsed` is precisely 200.000ms. The published
+    values are quantised with nothing at all between 5Hz and ~8.6Hz, so `>= 5` was really
+    asserting "this host scheduled at least two ticks into the final window". On a box whose
+    thread pool is saturated by eleven other test collections, it does not.
+  - **Widening the range was refused.** It would have bought nothing against the
+    published-at-all band and would have cost the upper bound's teeth, which is the only
+    direction that indicates a defect rather than a slow host — a reading above the
+    configured rate means double-counted ticks or a duration measured on a different clock
+    than the counter, which is #147 itself.
+  - **The test now waits for the condition instead of for a duration.** It polls the gauge
+    against a `Stopwatch` deadline until a window has actually published, with a 10s cap that
+    expires only if the loop is not running at all. On a healthy host it finishes sooner than
+    the old fixed 600ms sleep, so it also stops contributing six-tenths of a second of busy
+    tick loop to everyone else's contention; on a loaded host it waits longer rather than
+    failing.
+  - **It keeps the best window observed rather than reading the gauge once.** The meter is a
+    sliding window, so a single read returns whichever window happened to close last —
+    including one the loop was descheduled through. Asking whether *any* window measured the
+    loop correctly is the wiring claim this test exists to make; asking the host to schedule
+    the final 200ms fairly is not a claim any test can honestly make.
+  - **The lower bound is now relative to the run's own average** (`best >= average * 0.5`)
+    rather than a fixed Hz, so it still fails a meter that under-reports what the loop did —
+    the #147 direction — while making no claim about how fast this box is.
+  - **A short window can legitimately measure faster than the configured rate, which nobody
+    had written down.** When `TickLoop` falls behind it replays the lost ticks with no sleep
+    at all until it is caught up or `MaxLagTicks` behind, so a window straddling a recovery
+    holds up to `window / period + MaxLagTicks` ticks — 6 + 8 = 14 inside 200ms on a 30Hz
+    loop, or 70Hz. This was measured, not reasoned: a first attempt at this fix capped the
+    upper bound at 1.5x the configured rate and a contended full-suite run promptly published
+    **49.18Hz**, which is a truthful reading of a loop that really did advance that many ticks
+    in that window. **The original `InRange(achieved, 5d, 60d)` therefore had a second latent
+    failure mode at its top end as well as the cliff at its bottom** — 12 catch-up ticks in a
+    200ms window reach 60Hz — so the one assertion could fail from either direction for
+    reasons that were both about scheduling.
+  - **The upper bound is now the one statement that is exactly true regardless of
+    scheduling**: a window cannot contain more ticks than the whole run produced, so
+    `best <= CurrentTick / WindowSeconds`. That still catches a meter that counts ticks twice
+    or divides by a duration taken from a different clock than the counter — #147 in its
+    over-reporting direction — and it cannot flake, because it is bounded by the run's own
+    tick count rather than by an assumption about the host.
+  - **Added `AWindowContainingASingleTick_CannotPublishMoreThanTheReciprocalOfTheWindow`**,
+    a three-case theory on injected timestamps that pins the quantisation floor directly. It
+    costs nothing, cannot flake, and exists so the next person who reaches for an absolute
+    lower bound on a live-loop rate assertion finds the reason it does not work written down
+    as a failing condition rather than as a comment.
+  - **The original failure did not reproduce in any of the 14 baseline full-suite runs**, so
+    the diagnosis rests on the deterministic reproduction of the mechanism rather than on a
+    live capture of the old assertion; that is stated plainly rather than dressed up as a
+    confirmed repair. What the runs under added CPU load did capture is the 49.18Hz overshoot
+    above, which is why the upper bound is derived rather than guessed (#200).
+
+- **`EphemeralRedis` readiness now speaks RESP on a bare socket instead of building a
+  `ConnectionMultiplexer`.** The block of 11 registry tests was failing roughly 2 runs in 10
+  with the container reporting `docker unavailable`-shaped timeouts after the full 60s
+  budget. The container was healthy every time: the diagnostics added alongside this change
+  capture the published port accepting a connection after ~1s and Redis's own log saying
+  `Ready to accept connections tcp`, while PING never landed. A multiplexer starts background
+  threads and, with `AbortOnConnectFail=false`, returns before it has connected — so under a
+  saturated thread pool its connect completion can be starved for the entire budget. The
+  probe was failing on the scheduling of its own client library, not on Redis. PING/+PONG
+  written straight to the socket is four bytes out and seven back, with no pool and no
+  background thread to starve. Readiness is now asked with the smallest machinery that can
+  ask it, so a negative answer means Redis is not serving rather than that the test host is
+  busy (#201).
+
+- **`Shared.GameLogic` bumped to 0.2.2.** Removing a file from the package is a change to
+  the package, so the client needs a tag to pick it up — until then Unity keeps logging
+  `check_metas.py has no meta file, but it's in an immutable folder` against whatever tag it
+  has pinned. The version-bump gate reports this as a reminder rather than a failure off
+  `main`, so it does not stop a merge; the bump has to be deliberate.
+- **`check_metas.py` moved out of the package into `.github/scripts/`.** A `.py` file
+  inside a UPM package is an asset Unity tries to import, and one without a `.meta` in an
+  immutable package folder makes the Editor log
+  `has no meta file, but it's in an immutable folder. The asset will be ignored.` — so the
+  gate written to prevent meta errors was itself causing one. Giving it a `.meta` would have
+  silenced that, but CI tooling is not part of what this package ships to a Unity project.
+- **`check_metas.py` reported every `Samples~/` and `Documentation~/` folder as missing a
+  `.meta`.** A trailing `~` is the documented way to hide a folder from Unity's asset
+  database — it is exactly what makes a sample invisible until Package Manager copies it
+  into `Assets/` — so those folders must *not* have a `.meta`, and flagging them is a false
+  failure, not a finding. Same for dot-prefixed folders like `.github/`.
+  The gate passed on `Shared.GameLogic` only because that package happens to contain neither
+  kind, so the defect was invisible where it runs; it surfaced the moment the script was
+  pointed at `com.cuvara.netcode`, which has four `Samples~` and a `Documentation~`. A false
+  failure that loud is worse than no gate, because it gets the gate switched off. Verified
+  in both directions on both packages.
+
+- **`Shared.GameLogic/Content/` shipped with no `.meta` files, so Unity never imported
+  it.** The package is consumed by the client as an immutable UPM git dependency, and a
+  source file without a committed `.meta` is not imported at all — the types simply do not
+  exist on the client. Nothing in CI noticed, because the .NET compiler does not read
+  `.meta` files: **0.2.0 passed all thirteen checks** and the client then failed with
+  `the namespace name 'Content' does not exist in the namespace 'Shared.GameLogic'`.
+  - Added `Content.meta` and a `.meta` for each of the three source files.
+  - Released as **0.2.1**. The published `sgl-v0.2.0` tag was left where it is: moving a
+    tag someone may already have pinned changes what their lock resolves to without
+    changing their lock, which is the silent kind of break.
+  - **New CI gate**, `Shared.GameLogic files all have .meta`, running
+    `Shared.GameLogic/check_metas.py`. It checks folders as well as files — a folder with
+    no `.meta` makes everything beneath it invisible even when each file has its own.
+    Verified in both directions: it fails when a `.meta` is removed and passes when it is
+    restored.
+
+### Added
+
+- **Content pipeline: game data is JSON on disk, not compiled constants** (ADR-19).
+  `backend/content/items.json` is now the source of truth for item definitions, and the
+  iteration loop is edit → restart → clients pull. No rebuild, no `sgl-v` tag, no
+  `packages-lock.json` bump — the cross-repo release cycle that made per-tweak content
+  iteration impractical is off the path entirely.
+  - `Shared.GameLogic/Content/` — `ItemDefinition`, `ContentDatabase`, `ContentValidation`.
+    The **schema and the validator are shared** with the client; the **parser is not**,
+    because Unity compiles this package as source and has no `System.Text.Json` while the
+    server is NativeAOT and cannot reflect. No single parser satisfies both.
+  - `GameServer/Content/ContentLoader.cs` — loads, validates, and computes a content hash.
+    Uses source-generated `System.Text.Json` (reflection-based deserialization trims away
+    under NativeAOT and fails at runtime on a build that compiled clean).
+  - **The server refuses to start on invalid content**, reporting every fault in one pass
+    with the item id and field against each. Measured on a deliberately broken file: exit 1,
+    all four problems named. Fail-soft was rejected — a server running on half-parsed
+    content serves an unknowable subset of the game, and each symptom downstream gets
+    blamed on whichever system noticed it first.
+  - `GET /content` on the existing metrics listener, beside `/metrics`, `/healthz` and
+    `/status`. No new port, no new wire message. `?hash=` returns `304 Not Modified` once a
+    client holds the current set, so the fetch leaves the join path after the first time.
+    The hash ships in **both** `ETag` and `X-Content-Hash`: `UnityWebRequest` and some
+    proxies strip the former, and a client that cannot read back its hash silently
+    re-downloads on every join.
+  - Canonical bytes are served **verbatim** rather than re-serialised from the parsed
+    objects, so clients parse exactly the document the server read. Re-serialising would
+    make a defect in the server's writer present as a defect in the client's reader.
+  - 20 tests, including one that loads the repository's own `items.json` — so breaking it
+    fails CI rather than a server that will not boot.
+  - **The content directory default is anchored to the binary, not the working directory.**
+    It started as the relative path `../../content`, which resolves against the working
+    directory — a property of whoever launched the process rather than of the deployment.
+    That worked under `dotnet run` from the module directory and broke **every integration
+    test** on the first CI run, because those launch the server from their own directory.
+    Resolution now walks up from `AppContext.BaseDirectory` looking for `content/items.json`,
+    which holds in all three layouts that exist: the repo tree, the test output tree, and the
+    container image. Pinned by a regression test that runs from the test binary's own output
+    directory.
+  - **`Dockerfile.gameserver-dotnet` copies `content/` into the image.** Without it the image
+    does not ship a degraded server, it ships one that will not start at all. Copied in the
+    runtime stage rather than the build stage: content changes far more often than code, so a
+    content-only rebuild touches one small layer instead of invalidating the NativeAOT
+    compile above it.
+  - **`Shared.GameLogic` bumped to 0.2.0.** Minor, not patch: `Content/` is a new public
+    namespace the client will compile. Tag `sgl-v0.2.0` after this merges — the Unity client
+    cannot use the content schema until its `manifest.json` **and** `packages-lock.json` both
+    point at it, since the lock is what actually resolves.
+
 ### Documentation
+
+- **The stage-4 per-tick attribution is marked as unverified** (#162). ADR-12 and
+  `docs/DESIGN.md` both carry a hand-split of the old broadcast at 200 players ending in
+  *"serialization proper is 4–6% of the tick, not the 80% the original analysis assumed"* —
+  produced by a harness that was never committed, so its clock cannot be read back, on a
+  host whose `CLOCK_REALTIME` runs 10-17% fast with unstable skew (#153).
+  - Marked for a different reason than Part V's microseconds. Part V supports a **ratio**:
+    both arms share whatever clock the harness used, so a proportional skew cancels. This is
+    an **attribution** — a µs numerator over a tick-duration denominator — and if the two
+    came from different timelines the percentage moves. *"X is not the bottleneck, Y is"* is
+    exactly the shape a skewed denominator can invert, and it is the stated reason stage 4
+    stopped optimizing serialization.
+  - Kept rather than deleted, as Part V was: deleting destroys the record of a measurement
+    that was actually taken. Downgraded to order-of-magnitude.
+  - Both notes name `GameServer.Tests/Bench/TickBreakdownBench.cs` as the replacement — it
+    **is** committed and states its clock, `Stopwatch.GetTimestamp` throughout with no wall
+    clock read, behind `BENCH_TICK=1`. #162's first action was already satisfied; only the
+    marking was outstanding.
+- **`Shared.GameLogic` was described as carrying far less than it does.**
+  `docs/CURRENT-SERVER-FLOW-AUDIT.md` §6 called it "one movement rule and one combat
+  rule". It holds five systems across ~512 lines: `MovementSystem`, `CombatLogic`,
+  `AoiLogic`, `SnapshotMerger`, `ValidationLogic`. The undercount mattered because two
+  of the three it omitted are the shared ones that carry the most weight — with
+  `AoiLogic` and `SnapshotMerger` in the shared assembly, client and server agree on
+  visibility and on how snapshots merge, not only on how a character moves. Anyone
+  sizing the client/server shared surface from that sentence would have got it wrong.
+  Corrected in place; the "deliberately absent" framing still holds for gameplay
+  *content* built on those rules.
 - **`SlowClientMovementTests` bursty-client margin (issue #175 F1) — measured, and the proposed
   fix rejected.** F1 was the one family diagnosed by arithmetic rather than reproduction. The
   arithmetic still holds against the current tree (`MaxBankedMovementMs = 250`,

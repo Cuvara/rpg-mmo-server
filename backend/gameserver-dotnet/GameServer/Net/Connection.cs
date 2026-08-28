@@ -50,6 +50,24 @@ public sealed class Connection : IDisposable
     public GameServer.Snapshot.SnapshotDeltaState DeltaState { get; }
 
     /// <summary>
+    /// Set by the map-transfer handler after it has done the full teardown itself
+    /// (entity removed, <c>PlayerLeft</c> recorded, connection unregistered). The
+    /// connection handler's <c>finally</c> checks this and skips its own teardown —
+    /// without the flag every successful transfer decremented <c>players_online</c>
+    /// twice and scheduled a 30s hold for an entity that was no longer in the world.
+    /// </summary>
+    /// <remarks>
+    /// <b>volatile</b> for the same reason as <see cref="Encoding"/>: written by the
+    /// transfer task, read by the connection-handler task after the read loop exits —
+    /// different threads, and a stale <c>false</c> re-creates the double teardown.
+    /// </remarks>
+    public bool Transferred => _transferred;
+    private volatile bool _transferred;
+
+    /// <summary>Mark this connection as torn down by a map transfer. One-way.</summary>
+    public void MarkTransferred() => _transferred = true;
+
+    /// <summary>
     /// Wire encoding this connection speaks, latched from the first frame decoded
     /// on it and used for every reply.
     /// </summary>
@@ -91,10 +109,10 @@ public sealed class Connection : IDisposable
     /// task. The handover itself is the only shared state and is under
     /// <see cref="_snapshotLock"/>.</para>
     /// </summary>
-    private readonly Shared.GameLogic.Components.EntityState[][] _aoiBuffers =
+    private readonly GameServer.World.EntityView[][] _aoiBuffers =
     {
-        Array.Empty<Shared.GameLogic.Components.EntityState>(),
-        Array.Empty<Shared.GameLogic.Components.EntityState>(),
+        Array.Empty<GameServer.World.EntityView>(),
+        Array.Empty<GameServer.World.EntityView>(),
     };
 
     private readonly object _snapshotLock = new();
@@ -147,14 +165,31 @@ public sealed class Connection : IDisposable
         {
             // Claimed jobs release their buffer, so move to the other one. An unclaimed
             // job is overwritten where it already is — nobody is reading it.
-            if (!_snapshotPending) _gatherBuffer ^= 1;
+            if (!_snapshotPending)
+            {
+                _gatherBuffer ^= 1;
+            }
+            else
+            {
+                // The write task has not claimed the previous gather yet, so this one
+                // replaces it and that tick's frame is never sent. Positionally it loses
+                // nothing -- the delta is computed against the last frame actually SENT --
+                // but the client receives one fewer snapshot than the server staged, and
+                // that is the whole of the gap between `snapshots_sent_total` (which counts
+                // stagings) and what a client measures arriving. Counted so the two can be
+                // told apart: a client seeing fewer frames than the server sent is either
+                // this, or a client that is not reading its socket, and those have opposite
+                // fixes.
+                SnapshotsCoalesced++;
+            }
+
             index = _gatherBuffer;
         }
 
         int count = reader.GetEntitiesInRange(anchor, radius, _aoiBuffers[index]);
         if (count > _aoiBuffers[index].Length)
         {
-            _aoiBuffers[index] = new Shared.GameLogic.Components.EntityState[count];
+            _aoiBuffers[index] = new GameServer.World.EntityView[count];
             count = reader.GetEntitiesInRange(anchor, radius, _aoiBuffers[index]);
         }
 
@@ -184,14 +219,14 @@ public sealed class Connection : IDisposable
     /// Returns false for a surplus marker, which is normal and harmless.
     /// </summary>
     private bool TakePendingSnapshot(
-        out Shared.GameLogic.Components.EntityState[] buffer, out int count,
+        out GameServer.World.EntityView[] buffer, out int count,
         out ulong tick, out ulong ackTick, out int keyframeInterval)
     {
         lock (_snapshotLock)
         {
             if (!_snapshotPending)
             {
-                buffer = Array.Empty<Shared.GameLogic.Components.EntityState>();
+                buffer = Array.Empty<GameServer.World.EntityView>();
                 count = 0; tick = 0; ackTick = 0; keyframeInterval = 0;
                 return false;
             }
@@ -216,6 +251,76 @@ public sealed class Connection : IDisposable
 
     private readonly ITransportConnection _transport;
     private readonly Stream _stream;
+
+    /// <summary>
+    /// Reused frame scratch for every read on this connection. Safe because reads are
+    /// strictly sequential here: ReadOneAsync runs only during the handshake, before
+    /// the read loop starts, and the read loop is the single reader afterwards. The
+    /// decoded envelope never aliases it — see WireProtocol.DecodeBody's span overload.
+    /// </summary>
+    private readonly FrameReadBuffer _readScratch = new();
+
+    /// <summary>
+    /// Serializes every writer of <see cref="_stream"/>. The write task is the normal
+    /// writer, but it is not the only one: <see cref="WriteOneAsync"/> carries the
+    /// transfer responses and the shutdown notice, and those are sent while the write
+    /// task is still live and mid-snapshot. A stream supports one concurrent writer,
+    /// not two — an interleave splices one frame into another and corrupts the
+    /// length-prefixed framing at exactly the moment a transfer or shutdown frame
+    /// goes out, which is when the client most needs a clean one.
+    /// </summary>
+    /// <remarks>
+    /// Never disposed: disposing a <see cref="SemaphoreSlim"/> with a pending
+    /// WaitAsync is undefined, teardown ordering between Close() and a parked write
+    /// task is not guaranteed, and an untouched AvailableWaitHandle means there is
+    /// no unmanaged state to free — the GC reclaims it with the connection.
+    /// </remarks>
+    private readonly SemaphoreSlim _streamWriteMutex = new(1, 1);
+    /// <summary>
+    /// Gathers that replaced a staged snapshot the write task had not claimed yet, so that
+    /// tick's frame was never sent. See <see cref="GatherSnapshotView"/>.
+    /// </summary>
+    internal long SnapshotsCoalesced { get; private set; }
+
+    /// <summary>
+    /// Snapshot frames this connection has actually written to its socket.
+    /// </summary>
+    /// <remarks>
+    /// The only figure comparable with what a client counts arriving. `snapshots.sent`
+    /// counts stagings and `snapshots.coalesced` counts the ones a later gather replaced;
+    /// neither says how many frames left the process, and a client measuring fewer frames
+    /// than the server staged could be explained by either. Measured live at 14.2/s against
+    /// 15/s staged, with coalescing at zero, this is what closes the question.
+    /// </remarks>
+    internal long SnapshotFramesWritten { get; private set; }
+
+    private long _reportedCoalesced;
+    private long _reportedFramesWritten;
+
+    /// <summary>
+    /// What this connection has coalesced and written since the last call.
+    /// </summary>
+    /// <remarks>
+    /// Deltas are taken HERE, per connection, rather than by summing the running totals of
+    /// whichever connections happen to be in the tick's scratch array. That sum is not a
+    /// delta: a connection joining or leaving moves it by that connection's whole history,
+    /// and the reading is then wrong by an unbounded amount for as long as the session
+    /// lasts. Measured, it reported 17 frames/s written while two clients were each counting
+    /// 14.4/s arriving -- a figure that cannot be true, and the kind of counter that sends
+    /// an investigation in the wrong direction.
+    /// </remarks>
+    internal void TakeSnapshotCounters(out long coalesced, out long framesWritten)
+    {
+        long c = SnapshotsCoalesced;
+        long w = SnapshotFramesWritten;
+
+        coalesced = c - _reportedCoalesced;
+        framesWritten = w - _reportedFramesWritten;
+
+        _reportedCoalesced = c;
+        _reportedFramesWritten = w;
+    }
+
     private readonly Channel<SendItem> _sendChannel;
     private readonly CancellationTokenSource _cts;
     private readonly ILogger _logger;
@@ -327,7 +432,7 @@ public sealed class Connection : IDisposable
         {
             while (!_cts.Token.IsCancellationRequested)
             {
-                var env = await WireProtocol.DecodeAsync(_stream, _cts.Token);
+                var env = await WireProtocol.DecodeAsync(_stream, _readScratch, _cts.Token);
                 if (env == null) break; // clean EOF
 
                 Encoding = env.Encoding;
@@ -353,6 +458,7 @@ public sealed class Connection : IDisposable
             await foreach (var item in _sendChannel.Reader.ReadAllAsync(_cts.Token))
             {
                 Envelope? env = item.Envelope;
+                var isSnapshot = false;
 
                 if (env == null)
                 {
@@ -379,17 +485,30 @@ public sealed class Connection : IDisposable
                         // encoding, and JsonWriter would need its own reuse story.
                         ReadOnlyMemory<byte> pooledFrame =
                             _frameWriter.WriteFrame((byte)MsgType.Snapshot, snapshot);
-                        await _stream.WriteAsync(pooledFrame, _cts.Token);
-                        await _stream.FlushAsync(_cts.Token);
+                        await _streamWriteMutex.WaitAsync(_cts.Token);
+                        try
+                        {
+                            await _stream.WriteAsync(pooledFrame, _cts.Token);
+                            await _stream.FlushAsync(_cts.Token);
+                        }
+                        finally { _streamWriteMutex.Release(); }
+                        SnapshotFramesWritten++;
                         continue;
                     }
 
                     env = WireProtocol.NewEnvelope(MsgType.Snapshot, snapshot, Encoding);
+                    isSnapshot = true;
                 }
 
                 byte[] frame = WireProtocol.Encode(env);
-                await _stream.WriteAsync(frame, _cts.Token);
-                await _stream.FlushAsync(_cts.Token);
+                await _streamWriteMutex.WaitAsync(_cts.Token);
+                try
+                {
+                    await _stream.WriteAsync(frame, _cts.Token);
+                    await _stream.FlushAsync(_cts.Token);
+                }
+                finally { _streamWriteMutex.Release(); }
+                if (isSnapshot) SnapshotFramesWritten++;
             }
         }
         catch (OperationCanceledException) { /* expected on close */ }
@@ -403,17 +522,27 @@ public sealed class Connection : IDisposable
     /// <summary>Read a single envelope from the wire (used during handshake).</summary>
     public async Task<Envelope?> ReadOneAsync()
     {
-        var env = await WireProtocol.DecodeAsync(_stream, _cts.Token);
+        var env = await WireProtocol.DecodeAsync(_stream, _readScratch, _cts.Token);
         if (env != null) Encoding = env.Encoding;
         return env;
     }
 
-    /// <summary>Write a single envelope to the wire (used during handshake).</summary>
+    /// <summary>
+    /// Write a single envelope to the wire. Used during the handshake, and — the
+    /// reason it takes <see cref="_streamWriteMutex"/> — for the transfer responses
+    /// and the shutdown notice, which are written while the write task is live and
+    /// may be mid-frame on the same stream.
+    /// </summary>
     public async Task WriteOneAsync(Envelope env)
     {
         byte[] frame = WireProtocol.Encode(env);
-        await _stream.WriteAsync(frame, _cts.Token);
-        await _stream.FlushAsync(_cts.Token);
+        await _streamWriteMutex.WaitAsync(_cts.Token);
+        try
+        {
+            await _stream.WriteAsync(frame, _cts.Token);
+            await _stream.FlushAsync(_cts.Token);
+        }
+        finally { _streamWriteMutex.Release(); }
     }
 
     /// <summary>Record that a MsgPong was received, resetting the heartbeat timer.</summary>

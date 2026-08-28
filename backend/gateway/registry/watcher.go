@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -12,6 +13,18 @@ import (
 
 const (
 	// watchPollInterval is how often the watcher checks known servers.
+	//
+	// It MUST stay meaningfully shorter than constants.ServerHeartbeatTTL (15s),
+	// the TTL after which the registry drops a server that stopped beating. The
+	// watcher exists to notice a dead server BEFORE that expiry propagates on its
+	// own; a poll slower than the TTL would always lose the race and the watcher
+	// would add nothing. 5s against a 15s TTL is a 3x margin, so a server that
+	// dies is published as server_down within at most one third of the window in
+	// which the gateway would otherwise keep handing clients its address (the
+	// split-map fault of #203).
+	//
+	// TestWatchPollInterval_ShorterThanHeartbeatTTL pins this relationship so it
+	// cannot silently invert.
 	watchPollInterval = 5 * time.Second
 
 	// ServerDownChannel is the Redis Pub/Sub channel for server-down events.
@@ -119,6 +132,19 @@ func (w *RegistryWatcher) checkServers(ctx context.Context) {
 	for serverID, mapID := range snapshot {
 		_, err := w.reg.GetServer(ctx, serverID)
 		if err == nil {
+			continue
+		}
+
+		// Only a definitive "the entry does not exist" (storage.ErrNotFound —
+		// heartbeat TTL expired or the server deregistered) is server death.
+		// Anything else is a store fault — a Redis blip, a network timeout — and
+		// says nothing about the server, so the watcher keeps tracking it and
+		// publishes nothing: a false server_down here would be consumed as an
+		// eviction and take a healthy server out of assignment for every tracked
+		// server at once, turning one transient store error into an outage.
+		if !errors.Is(err, storage.ErrNotFound) {
+			w.log.Warn("registry check failed with a transient error; keeping server tracked",
+				"server_id", serverID, "map_id", mapID, "error", err)
 			continue
 		}
 

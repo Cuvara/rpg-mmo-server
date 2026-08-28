@@ -15,6 +15,8 @@ namespace GameServer.Observability;
 /// gameserver.players.online           -> gameserver_players_online
 /// gameserver.entities                 -> gameserver_entities
 /// gameserver.snapshots.sent           -> gameserver_snapshots_sent_total
+/// gameserver.snapshots.coalesced      -> gameserver_snapshots_coalesced_total
+/// gameserver.snapshots.frames_written  -> gameserver_snapshots_frames_written_total
 /// gameserver.player.saves             -> gameserver_player_saves_total
 /// gameserver.events.published         -> gameserver_events_published_total
 /// gameserver.tick.processed_inputs    -> gameserver_tick_processed_inputs_total
@@ -47,6 +49,8 @@ public sealed class GameMetrics : IDisposable
     private readonly Counter<long> _tickOverruns;
     private readonly Counter<long> _backlogDropped;
     private readonly Counter<long> _snapshotsSent;
+    private readonly Counter<long> _snapshotsCoalesced;
+    private readonly Counter<long> _snapshotFramesWritten;
     private readonly Counter<long> _playerSaves;
     private readonly Counter<long> _eventsPublished;
     private readonly Counter<long> _processedInputs;
@@ -99,7 +103,19 @@ public sealed class GameMetrics : IDisposable
 
         _snapshotsSent = _meter.CreateCounter<long>(
             "gameserver.snapshots.sent",
-            description: "Snapshots enqueued to player connections.");
+            description: "Snapshots STAGED on player connections. A staged snapshot is not " +
+                         "necessarily a frame on a socket -- see snapshots.coalesced.");
+
+        _snapshotFramesWritten = _meter.CreateCounter<long>(
+            "gameserver.snapshots.frames_written",
+            description: "Snapshot frames written to client sockets. The only figure " +
+                         "comparable with what a client counts arriving.");
+
+        _snapshotsCoalesced = _meter.CreateCounter<long>(
+            "gameserver.snapshots.coalesced",
+            description: "Staged snapshots replaced before the write task claimed them, so " +
+                         "that tick's frame was never sent. The difference between this and " +
+                         "snapshots.sent is what a client actually receives.");
 
         _playerSaves = _meter.CreateCounter<long>(
             "gameserver.player.saves",
@@ -231,10 +247,38 @@ public sealed class GameMetrics : IDisposable
         if (count > 0) _processedInputs.Add(count, _mapTags);
     }
 
-    /// <summary>Record snapshots handed to connections during a tick.</summary>
+    /// <summary>
+    /// Record snapshots STAGED for connections during a tick.
+    /// </summary>
+    /// <remarks>
+    /// Staged, not written to a socket, and the difference is not academic: a gather that
+    /// finds the previous one still unclaimed replaces it, and that tick's frame is never
+    /// sent. Measured against a live client, the server staged 15/s while the client
+    /// measured 14.2/s arriving. Pair this with
+    /// <see cref="RecordSnapshotsCoalesced"/> before concluding a client is losing frames.
+    /// </remarks>
     public void RecordSnapshotsSent(int count)
     {
         if (count > 0) _snapshotsSent.Add(count, _mapTags);
+    }
+
+    /// <summary>
+    /// Record staged snapshots that were replaced before the write task claimed them.
+    /// </summary>
+    public void RecordSnapshotsCoalesced(long count)
+    {
+        if (count > 0) _snapshotsCoalesced.Add(count, _mapTags);
+    }
+
+    /// <summary>
+    /// Record snapshot frames actually written to sockets.
+    /// </summary>
+    /// <remarks>
+    /// The only server figure comparable with what a client counts arriving.
+    /// </remarks>
+    public void RecordSnapshotFramesWritten(long count)
+    {
+        if (count > 0) _snapshotFramesWritten.Add(count, _mapTags);
     }
 
     /// <summary>

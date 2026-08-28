@@ -1117,9 +1117,20 @@ stage 1 had already removed its per-client list, so there was nothing left there
 tick. It could not be moved out while encoding was interleaved with locked world reads,
 because no point in the tick had a viewer's snapshot input standing free of the world.
 After phase A every connection holds a self-contained view — no world reference, no lock —
-so phase B can move to another thread without `EcsWorld` being involved. Whether to do
-that is BENCHMARK.md §9's outstanding item, and it is the one with a measured case behind
-it.
+so phase B can move to another thread without `EcsWorld` being involved. That move has
+since been made: encoding and serialization run on each connection's write task, and
+BENCHMARK.md §9 item 3 records it as done.
+
+What the gather composes has since been trimmed too (#237, BENCHMARK.md Part VII): the
+scan fills connection-owned `EntityView` buffers — the seven fields the snapshot encoder
+consumes plus a world-stable integer key (`EntityIdRef.Stable`, assigned once per id
+string, never reused) — instead of full 11-field `EntityState`s, and
+`SnapshotDeltaState` keys its per-connection delta maps on that integer instead of
+hashing the entity-id string per visible entity. Measured by paired A/B
+(`Bench/AoiComposeBench.cs`): gather 1.07–1.17× faster, delta encode 1.05–1.16× faster
+at 200 viewers/200 entities; wire bytes proven identical by
+`TrimmedGatherByteIdentityTests`. The `EntityState` scan and the string-input `Encode`
+overloads remain for cold paths.
 
 The trade: a join or leave arriving mid-broadcast waits for the whole gather rather than
 slipping between two viewers. The gather is position tests over chunk spans with no
@@ -1168,7 +1179,18 @@ encoded.
 **What this measured about the tick, which matters more than the change itself.** Splitting
 the old broadcast by hand at 200 players: AOI gather ~874–1177 µs/tick,
 `SnapshotDeltaState.Encode` ~998–1272 µs/tick, protobuf `ToByteArray` ~79–144 µs/tick.
-Serialization proper is 4–6% of the tick, not the 80% the original analysis assumed. The
+Serialization proper is 4–6% of the tick, not the 80% the original analysis assumed.
+
+> **⚠️ Unverified attribution — order-of-magnitude only (#162).** The harness that produced
+> this split was never committed, so its clock cannot be read back, and this host's
+> `CLOCK_REALTIME` runs 10-17% fast with unstable skew (#153). A percentage is a µs
+> numerator over a tick-duration denominator, so unlike an A/B ratio a clock skew does not
+> cancel — and "serialization is not the bottleneck" is precisely the shape of claim a
+> skewed denominator can invert. Replace it by re-running the split with
+> `GameServer.Tests/Bench/TickBreakdownBench.cs`, which is committed and measures with
+> `Stopwatch.GetTimestamp` only (`BENCH_TICK=1`).
+
+The
 two real terms are the brute-force AOI scan (a spatial index is the standing production
 item) and `Encode`'s 134 699 B/tick of `EntitySnapshot` objects, which is a pooling
 problem. Neither is an ECS problem.
@@ -1505,10 +1527,23 @@ on how many input packets a client sends". That held only while the simulation r
 the client's send rate matched. At a 60 Hz base with a client sending at 10–15 Hz,
 integrating solely on packet arrival makes speed proportional to send rate. So
 `InputHandler.ApplyHeldMovement` integrates the newest held direction once per base tick
-for players who sent nothing that tick, bounded to `WorldEvery` base ticks — one world
-interval, 66 ms at 60/15 — after which the direction expires and the player coasts no
-further. With a single rate `WorldEvery` is 1, the pass returns immediately, and the old
-packet-driven model is reproduced exactly.
+for players who sent nothing that tick, bounded to `MaxBankedTicks` — 250 ms at every
+rate — after which the direction expires and the player coasts no further.
+
+The bound used to be `WorldEvery`, one world interval, and the pass was gated off entirely
+when every group ran at one rate. Both were wrong in the same way: they treated the expiry
+as a statement about the client's send rate. A 15 Hz client's packets were measured
+arriving 4.19 base ticks apart against a 4-tick window, so the average interval already
+overran it, and the single-rate configuration `staging` runs — where the pass did not run
+at all — was the worst case rather than the safe one. The expiry answers "has this client
+gone quiet", so its budget is a silence timeout.
+
+Every step is one tick, at both ends of the wire. That is what makes prediction hold: over
+any interval client and server each take one step per tick, so the distances are equal by
+construction. Recovering time lost to per-tick coalescing by growing a step — `dt =
+min(elapsed, cap)`, the shape this file specified until 2026-08-24 — restores the distance
+and destroys the agreement, because the client never took the oversized step and is snapped
+back by it.
 
 ### Replication is gated to the world rate, not the base rate
 

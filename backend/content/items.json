@@ -1,0 +1,100 @@
+{
+  "$comment": [
+    "Item definitions. This file is content, not code: editing it and restarting the",
+    "game server is the whole deployment. No rebuild, no sgl tag, no package bump.",
+    "",
+    "id is permanent. Inventories and loot tables store the id and nothing else, so",
+    "renaming an id silently repoints every saved copy of that item. Renaming 'name'",
+    "is always safe.",
+    "",
+    "Rules enforced at boot by Shared.GameLogic/Content/ContentValidation.cs — the",
+    "server refuses to start rather than run on content it cannot vouch for:",
+    "  - ids are lowercase letters, digits and underscore, unique, <= 64 chars",
+    "  - stackMax >= 1, and exactly 1 for anything with a slot",
+    "  - no negative stats",
+    "slot:   none | weapon | head | chest | legs | trinket",
+    "rarity: common | uncommon | rare | epic | legendary"
+  ],
+  "items": [
+    {
+      "id": "rusty_sword",
+      "name": "Rusty Sword",
+      "slot": "weapon",
+      "rarity": "common",
+      "stackMax": 1,
+      "attack": 3,
+      "defense": 0,
+      "levelRequirement": 1
+    },
+    {
+      "id": "iron_sword",
+      "name": "Iron Sword",
+      "slot": "weapon",
+      "rarity": "uncommon",
+      "stackMax": 1,
+      "attack": 7,
+      "defense": 0,
+      "levelRequirement": 5
+    },
+    {
+      "id": "leather_cap",
+      "name": "Leather Cap",
+      "slot": "head",
+      "rarity": "common",
+      "stackMax": 1,
+      "attack": 0,
+      "defense": 2,
+      "levelRequirement": 1
+    },
+    {
+      "id": "leather_vest",
+      "name": "Leather Vest",
+      "slot": "chest",
+      "rarity": "common",
+      "stackMax": 1,
+      "attack": 0,
+      "defense": 4,
+      "levelRequirement": 1
+    },
+    {
+      "id": "iron_greaves",
+      "name": "Iron Greaves",
+      "slot": "legs",
+      "rarity": "uncommon",
+      "stackMax": 1,
+      "attack": 0,
+      "defense": 6,
+      "levelRequirement": 5
+    },
+    {
+      "id": "band_of_focus",
+      "name": "Band of Focus",
+      "slot": "trinket",
+      "rarity": "rare",
+      "stackMax": 1,
+      "attack": 4,
+      "defense": 2,
+      "levelRequirement": 8
+    },
+    {
+      "id": "minor_health_potion",
+      "name": "Minor Health Potion",
+      "slot": "none",
+      "rarity": "common",
+      "stackMax": 20,
+      "attack": 0,
+      "defense": 0,
+      "levelRequirement": 0
+    },
+    {
+      "id": "wolf_pelt",
+      "name": "Wolf Pelt",
+      "slot": "none",
+      "rarity": "common",
+      "stackMax": 99,
+      "attack": 0,
+      "defense": 0,
+      "levelRequirement": 0
+    }
+  ]
+}

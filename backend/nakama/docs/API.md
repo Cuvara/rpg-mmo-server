@@ -52,6 +52,63 @@ Errors:
 | 3 | `invalid payload` | Payload is not valid JSON |
 | 13 | `internal error` | Signing or marshalling failure |
 
+### `reward_kills`
+
+Grants gold **and** leaderboard score for a batch of kills in one call. This is
+the RPC the game server uses; it replaced the per-kill `reward_kill` +
+`submit_kill` pair, which cost 2 HTTP requests and 2 separate meta-DB
+transactions per mob kill (rpg-mmo-server#233).
+
+- **Auth**: `runtime.http_key` (server-to-server); not meant for clients.
+- **Registered in**: `main.go` → `economy.RewardKillsRPC`
+
+Request payload:
+
+```json
+{ "user_id": "3f9c…", "kills": 3, "map_id": "map_01", "batch_id": "9c41…" }
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `user_id` | string | yes | Nakama user id of the killer |
+| `kills` | int | yes | 1..1000 (`MaxKillsPerBatch`); the cap exists so a corrupted payload cannot mint unbounded gold |
+| `map_id` | string | no | Recorded in the wallet metadata |
+| `batch_id` | string | no | Flush-attempt id, recorded in the wallet metadata as the audit trail for a suspected double grant and the key a future idempotency guard would use. Not deduplicated on today |
+
+Response payload:
+
+```json
+{ "success": true, "gold": 480, "score": 41, "rank": 2 }
+```
+
+**Error contract — load-bearing for the caller's retry policy.** An error
+(non-2xx) is returned **only when nothing was granted**: bad payload, or the
+wallet update itself failed. A caller receiving an error may therefore re-queue
+the batch without risking a double grant. Once the wallet update has succeeded
+the call always reports success — a leaderboard failure after it is logged and
+returned as `leaderboard_error` in the response, never as an error, because an
+error at that point would invite a retry that grants the gold twice. Bounded
+score loss is the accepted cost; double gold is not (ADR-6).
+
+| Code | Message | Cause |
+|------|---------|-------|
+| 3 | `invalid payload` / `user_id is required` / `kills must be in 1..1000` | Malformed request; nothing granted |
+| 13 | `wallet update failed: …` | Wallet write failed; nothing granted, safe to retry |
+
+### `reward_kill`, `submit_kill` (legacy per-kill pair)
+
+Still registered for compatibility; the game server no longer calls them. Each
+grants one kill's gold (`reward_kill`) or one leaderboard point (`submit_kill`)
+per HTTP call — the per-kill amplification `reward_kills` exists to remove. New
+callers should use `reward_kills`.
+
+### `get_leaderboard`
+
+Returns the top 10 of `kills_alltime` as
+`{ "leaderboard_id": …, "records": [{ "rank", "user_id", "username", "score" }] }`.
+Server-to-server (`http_key`); clients read the leaderboard through Nakama's own
+REST API instead.
+
 ## Hooks
 
 ### `BeforeAuthenticateEmail`

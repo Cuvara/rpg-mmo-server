@@ -208,6 +208,7 @@ public sealed class GameServerHost : IAsyncDisposable
     private readonly IAgonesSdk _agonesSdk;
     private readonly EventPublisher? _publisher;
     private readonly Nakama.NakamaClient? _nakamaClient;
+    private readonly Nakama.KillRewardBatcher? _killBatcher;
     private readonly GameMetrics? _metrics;
     private readonly ILogger _logger;
     /// <summary>Keyring join tokens are verified against (JOIN_TOKEN_SECRET).</summary>
@@ -300,6 +301,12 @@ public sealed class GameServerHost : IAsyncDisposable
     /// </summary>
     public int EnemiesAlive => _options.StatusEntityCount?.Invoke(_world) ?? 0;
 
+    /// <summary>
+    /// Attack-path counters for <c>/status</c>. Single-writer (tick thread), read
+    /// without synchronisation — see <see cref="Input.InputHandler.AttackTelemetry"/>.
+    /// </summary>
+    public Input.InputHandler.AttackTelemetry AttackStats => _inputHandler.Attacks;
+
     public GameServerHost(ServerOptions options)
     {
         _options = options;
@@ -335,6 +342,12 @@ public sealed class GameServerHost : IAsyncDisposable
                 options.NakamaUrl,
                 options.NakamaHttpKey,
                 _loggerFactory.CreateLogger<Nakama.NakamaClient>());
+            // One reward_kills call per killer per flush, instead of two HTTP RPCs and
+            // two meta-DB transactions per kill (#233).
+            _killBatcher = new Nakama.KillRewardBatcher(
+                _nakamaClient,
+                options.MapId,
+                _loggerFactory.CreateLogger<Nakama.KillRewardBatcher>());
         }
 
         var eventStream = options.EventStream ?? new NoopEventStream();
@@ -964,9 +977,16 @@ public sealed class GameServerHost : IAsyncDisposable
             // attached leaks it otherwise: nothing else ever removes an entity, so a
             // missed hold is permanent, and every leaked entity keeps being scanned by
             // AOI and diffed on every tick for the life of the process.
-            if (entityAttached)
+            // A transfer already did the whole teardown itself — entity removed,
+            // PlayerLeft recorded, connection unregistered. Running it again here is
+            // what double-decremented players_online and scheduled a hold for an
+            // entity that was no longer in the world (#230).
+            // conn can still be null here: the entity attaches a few lines before the
+            // Connection is constructed, and a throw in that gap must still tear down —
+            // that gap is exactly why this runs from the finally.
+            if (entityAttached && !(conn?.Transferred ?? false))
             {
-                OnPlayerDisconnected(userId, countedOnline);
+                OnPlayerDisconnected(userId, countedOnline, conn);
             }
             conn?.Dispose();
         }
@@ -1071,8 +1091,19 @@ public sealed class GameServerHost : IAsyncDisposable
                 holdCts.Cancel();
                 holdCts.Dispose();
             }
-            _connections.Remove(conn.UserId);
-            _world.RemoveEntity(conn.UserId);
+
+            // Marked BEFORE Close(): closing ends the read loop, which ends the
+            // connection handler, whose finally consults this flag. Set after, and the
+            // handler can race in and run the full disconnect teardown a second time —
+            // the double PlayerLeft and phantom hold of #230.
+            conn.MarkTransferred();
+
+            // By identity, not by user id: if a reconnect somehow replaced this
+            // connection mid-transfer, its registration must not be destroyed here.
+            if (_connections.RemoveIfCurrent(conn))
+            {
+                _world.RemoveEntity(conn.UserId);
+            }
             _metrics?.PlayerLeft();
             _registration?.NotifyPlayerCountChanged();
             conn.Close();
@@ -1097,14 +1128,36 @@ public sealed class GameServerHost : IAsyncDisposable
     /// An aborted join never incremented it, and decrementing anyway would corrupt the
     /// count for the players who really are online.
     /// </param>
-    private void OnPlayerDisconnected(string userId, bool countedOnline)
+    /// <param name="conn">
+    /// The connection this teardown belongs to, or null when the handler died before
+    /// constructing one. Removal is by IDENTITY, not by user id: when a reconnect has
+    /// already replaced this connection, removing by id would close the replacement —
+    /// the player got kicked milliseconds after a successful rejoin (#229).
+    /// </param>
+    private void OnPlayerDisconnected(string userId, bool countedOnline, Connection? conn)
     {
-        _connections.Remove(userId);
+        // Whether THIS connection was still the registered one. When it was not, a
+        // newer connection owns the user now: this teardown balances its own join
+        // counter and stops — no hold, no entity removal, and above all no touching
+        // the replacement's registration.
+        bool wasCurrent = conn is null
+            ? _connections.Get(userId) is null   // died pre-Connection: nothing registered for us
+            : _connections.RemoveIfCurrent(conn);
+
         if (countedOnline)
         {
+            // Balances this connection's own PlayerJoined. A superseding reconnect
+            // recorded its own join, so the gauge stays correct in both branches.
             _metrics?.PlayerLeft();
         }
         _registration?.NotifyPlayerCountChanged();
+
+        if (!wasCurrent)
+        {
+            _logger.LogInformation(
+                "Player {UserId} teardown skipped hold: superseded by a newer connection", userId);
+            return;
+        }
 
         var holdTtl = _options.Mode == "dungeon"
             ? TimeSpan.FromSeconds(60)
@@ -1216,11 +1269,13 @@ public sealed class GameServerHost : IAsyncDisposable
             _ = _publisher.PublishDeathAsync("entity_killed", payload);
         }
 
-        // Award gold + leaderboard score when a player kills a mob
-        if (_nakamaClient != null && killer.Type == "player" && victim.Type == "mob")
+        // Award gold + leaderboard score when a player kills a mob. Recorded, not sent:
+        // the batcher coalesces per killer and flushes on its own interval, so this is
+        // one dictionary increment on the tick thread — no task, no socket, no way for
+        // a stalled Nakama to pile work up here (#233).
+        if (_killBatcher != null && killer.Type == "player" && victim.Type == "mob")
         {
-            _ = _nakamaClient.RewardKillAsync(killer.Id, victim.Id, _options.MapId);
-            _ = _nakamaClient.SubmitKillAsync(killer.Id);
+            _killBatcher.RecordKill(killer.Id);
         }
     }
 
@@ -1249,6 +1304,11 @@ public sealed class GameServerHost : IAsyncDisposable
         if (_registration != null)
         {
             await _registration.DisposeAsync();
+        }
+        // Before the client: the batcher's final flush still needs the HttpClient.
+        if (_killBatcher != null)
+        {
+            await _killBatcher.DisposeAsync();
         }
         _nakamaClient?.Dispose();
         // Disposed only here, once the run loop is guaranteed done with it — disposing

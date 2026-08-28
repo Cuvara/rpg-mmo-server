@@ -5,6 +5,126 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`redisstore.EventStream` now reclaims the Pending Entries List**
+  ([#234](https://github.com/Cuvara/rpg-mmo-server/issues/234)). The consumer
+  only ever read `>`, and consumer names are pod names, so an entry delivered
+  to a pod that crashed between handler and `XACK` stayed pending under a name
+  no replacement would ever use — the redelivery half of at-least-once was
+  missing, and the type comment described recovery no code performed. On
+  Subscribe and every 30s (`SetReclaimInterval`) the consumer now walks the
+  group's PEL with `XAUTOCLAIM`, claims entries idle longer than 60s
+  (`SetReclaimMinIdle`) to itself, and redelivers them to the handler. Entries
+  past 5 deliveries (`SetMaxDeliveries`) are dead-lettered: ACKed unhandled,
+  logged loudly, and counted via the new `DeadLetters()` — same pattern as
+  `GroupLosses` for NOGROUP. The cap has deliberately no off switch. Rationale
+  and failure-mode analysis: `docs/DESIGN.md`, "PEL reclaim and the delivery
+  cap".
+
+### Changed
+- **`EventStream` ACKs once per read batch instead of once per message** —
+  one `XACK` round trip per `XREADGROUP` batch (Count 16). A consumer dying
+  mid-batch re-receives the whole batch via the reclaim path, which the
+  required idempotent-handler discipline already covers; a failed batch ACK is
+  logged and left pending for reclaim (duplicate delivery, never loss).
+
+### Removed
+- **`GatewayKickChannel` (`"gateway:kick"`) is gone from `constants/keys.go`**
+  ([#211](https://github.com/Cuvara/rpg-mmo-server/issues/211)). It named a Redis
+  Pub/Sub channel for coordinating duplicate-login kicks between gateway
+  instances. Nothing in either module ever read it: `grep` across the whole
+  backend returned the declaration and nothing else — no publisher, no
+  subscriber, no test. The gateway-side machinery it was declared for
+  (`KickPublisher`/`KickSubscriber`, `handleKickEvent`, the two options) was
+  never constructed by `cmd/gateway/main.go` and is removed in the same change;
+  see `backend/gateway/CHANGELOG.md` for the full reasoning.
+
+  **The comment was the most expensive part of it, and is the reason this is a
+  removal rather than a tidy-up.** Six lines of rationale explained that message
+  loss is acceptable because the old session expires by TTL, and concluded that
+  "Pub/Sub rather than Streams is the right transport". That is a reasoned
+  architectural claim sitting in the constants file, it contradicts ADR-5
+  ("Streams, not pub/sub"), and it was attached to a constant no code used. A
+  future engineer building cross-instance kick would have found it, found it
+  persuasive, and built the wrong thing — with a plausible-looking precedent to
+  cite. Deleting the constant without deleting that argument would have kept the
+  trap; deleting both is the point.
+
+  **This does not remove a capability**, because there was none: with one gateway
+  replica (ADR-17) there is no second instance to coordinate with, and the
+  publisher that would have used this channel was a no-op in every build ever
+  shipped. When a second replica is planned, the transport is a Redis Stream with
+  a consumer group and explicit ACK per ADR-5, whose key would go through
+  `EventStreamPrefix` like every other stream in this file rather than being a
+  bare channel name. `SessionKeyPrefix`, `ServerRegistryKey`, `EventStreamPrefix`
+  and `GameEventStream` are unchanged; all four have live readers.
+
+### Fixed
+- **`EventStream.Publish` now bounds `events:*` with `XADD ... MAXLEN ~ 30_000`,
+  so an untrimmed stream can no longer be what gets Redis OOM-killed**
+  ([#202](https://github.com/Cuvara/rpg-mmo-server/issues/202)). Redis here runs
+  `maxmemory-policy noeviction` deliberately — ADR-4 argues correctly that this
+  instance is a system of record and that evicting a `servers:*` hash removes a
+  live game server from matchmaking with no error anywhere. What was missing was
+  the ceiling that makes the policy *safe* rather than merely strict: `XAdd`
+  carried no `MaxLen`, no `maxmemory` was configured, and the Redis pod is capped
+  at `limits.memory: 256Mi`. The only ceiling that actually existed was the
+  kernel's, and the kernel does not refuse a write — it kills the process whole,
+  taking sessions, the registry and the stream together. That is precisely the
+  outcome `noeviction` was chosen to prevent, reached by a route the ADR did not
+  close. The deploy side of the pair (`maxmemory 128mb`, half the pod limit) is in
+  `backend/deploy/CHANGELOG.md`; this entry is the publisher-side half, which is
+  the one that runs on every write.
+
+  **The length is derived from consumer lag, not from a round number or a memory
+  figure.** The dominant event is `entity_killed`, one per mob death, from every
+  game server into the single shared `events:game` stream. Taking the 200
+  players-per-server figure `backend/docs/BENCHMARK.md` actually measures, and
+  assuming a kill roughly every 10s per player, that is ~20 events/s per server;
+  two live servers plus headroom for the smaller types (`boss_killed`,
+  `rare_drop`, `inventory_changed`) gives a planning rate of **50 events/s**. The
+  only consumer group is the gateway relay, and it falls behind only while it is
+  down — a CD deploy restarts the gateway (ADR-18 calls those outages) and
+  Kubernetes caps `CrashLoopBackOff` at 5 minutes, so **10 minutes** covers a
+  deploy, a backoff cycle and a manual restart. `50/s x 600s = 30_000 entries`.
+  The two assumptions in that chain (the kill rate and the outage window) are
+  stated in the constant's doc comment so the number can be re-derived rather
+  than guessed at when either changes.
+
+  Cross-checked against the ceiling it is meant to stay clear of: an
+  `entity_killed` entry is a short type string and a small JSON payload, under
+  256 bytes including stream node overhead, so the trimmed stream tops out near
+  **7.3MiB — about 6% of the 128mb `maxmemory`**. That relation is the point. The
+  stream is bounded by how far a consumer may fall behind, and is nowhere near
+  large enough to be what exhausts the instance; if Redis ever does refuse a
+  write, `XLEN events:game` is the thing to rule out first, not the thing to
+  blame.
+
+  **Consequence, stated plainly:** past that window entries are dropped rather
+  than delivered, so at-least-once delivery is now explicitly a promise to a
+  consumer that is *running*. A relay down for more than ten minutes at full rate
+  comes back to a gap, not a backlog — and it will not be told about the gap,
+  because a trimmed entry leaves no trace. That is the deliberate trade: these
+  events (world announcements, cross-map loot) are worth delivering because they
+  are timely, and a ten-minute-old `boss_killed` has already lost the property
+  that made it worth the write.
+
+  The approximate form (`~`) is used rather than exact: Redis trims whole
+  radix-tree nodes and stops at the first one it may not drop, so it removes
+  entries in cheap batches and may leave somewhat more than N. Exact trimming
+  would make every publish pay for entry-precise deletion in order to enforce a
+  number that is itself a rounded-off lag budget — real cost for false precision.
+
+  `SetMaxLen` is available for tests and for an operator who needs different
+  retention, and deliberately **cannot** be used as an off switch: a
+  non-positive value keeps the default instead of removing the bound, since an
+  unbounded stream against a `noeviction` Redis is the whole failure being fixed.
+  This lands *before* a real publisher exists — the C# side still publishes into
+  `NoopEventStream` (ADR-5), which is why the bug has not bitten. That was luck,
+  not design: the window between wiring the relay up and filling 256Mi is however
+  long it takes to fill 256Mi, and nobody wiring up an event relay expects to be
+  making a memory-exhaustion change.
+
 ### Added
 - **`JoinTokenResponse.TickRate` — the simulation tick rate on the wire
   (`wire.proto` field 4).** Closes
@@ -76,6 +196,42 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reader: both codecs skip unknown keys. The round-trip fixture now carries a
   non-zero speed, because a zero would round-trip identically through a codec that
   dropped the field entirely and the test would pass vacuously.
+
+
+### Removed
+- **`constants.PlayerLocationKey` (`"player:location:"`), which had neither a reader
+  nor a writer in either repository** ([#210](https://github.com/Cuvara/rpg-mmo-server/issues/210)).
+  A one-line deletion earns a changelog entry because this constant had already cost
+  a real verification run. It is the same shape as #204: something declared,
+  plausible, referenced in documentation, and never wired — and like #204 the
+  declaration was invisible to every test, because a constant with no users cannot
+  fail one. What made it findable was documentation: the client repo's multi-client
+  checklist told an operator to expect three `player:location:*` keys in Redis after
+  three clients join, and a live run against `k3d-rpg-dev` on 2026-08-22 found
+  **zero** while every other row of that checklist passed. The checklist manufactured
+  its own false negative, and an operator working it top to bottom had every reason
+  to call the run broken. That row is corrected separately in
+  Cuvara/IndieRPGMMOAdventure#38.
+
+  **Deleted rather than implemented**, which was the other legal ending. Cross-server
+  player lookup ("which server is this player on", for whispers, party join and admin
+  tooling) is a real need but is not planned work, and the game server already owns
+  per-player position inside its own world — nothing today has to ask Redis where a
+  player is. A declared key that no code path honours is a claim the codebase does
+  not keep, and the cost of the claim is not zero: it misled one verification run and
+  would have misled the next. Restoring it, if cross-server lookup is ever wanted, is
+  one commit — and it would then arrive with the writer on join/leave, the TTL
+  aligned to `SessionTTL`, and the reader that were always missing.
+
+  No code change accompanies the deletion because there was no code to change; the
+  rest of this change is documentation that still believed in the key.
+  `backend/docs/ARCHITECTURE-DECISIONS.md` (ADR-1's "also dead" note and its
+  follow-up item), `backend/docs/CORE_FLOW.md` (the unused-constants item),
+  `backend/gateway/docs/DESIGN.md` (which listed the tracking as a "stub", though
+  nothing was ever stubbed) and `backend/gateway/CLAUDE.md` (which instructed the
+  gateway to "update player location in Redis: `player:{user_id}:location =
+  server_id`", a step no gateway has ever performed) are all corrected here rather
+  than left for the next person to rediscover.
 
 
 ### Added

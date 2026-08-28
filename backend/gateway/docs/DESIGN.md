@@ -1,5 +1,101 @@
 # Gateway — Design Decisions
 
+## 2026-08-27 — server_down is consumed: eviction, not just detection (#236)
+
+### Context
+
+The watcher (below) *published* `server_down`, but the only consumer —
+`Gateway.OnEvent` — logged and counted. Nothing pruned the assignment path, so
+`FindServer` kept returning the dead address until the registry key's 15s TTL
+expired; each burnt client cost a single-use join token plus up to 10s of
+connect timeout per attempt. Detection without consumption bought nothing.
+
+### Decision — evict on consumption, and fix the watcher's error split first
+
+`Gateway.OnEvent` now recognises `Type == registry.ServerDownChannel` and calls
+`RegistryService.Evict(ctx, serverID)`: untrack in the watcher, `Deregister`
+from the store (which removes the entry and its map-index membership), with a
+wrapped `storage.ErrNotFound` treated as success. Eviction is **idempotent** —
+duplicate events and multiple consuming gateway instances are harmless — and it
+is deliberately **not a deny-list**: a server that re-registers or resumes
+heartbeating afterwards is alive by definition and becomes assignable again
+through the normal Register/FindServer path. A failed eviction logs and falls
+back to TTL expiry, the pre-fix behaviour, so the event is degraded rather than
+lost. The registry write is bounded by `serverDownEvictTimeout` (5s) because
+`OnEvent` runs on the relay's consumer goroutine.
+
+**Order mattered.** The watcher used to treat *any* `GetServer` error as death.
+Unconsumed, that was only a noisy log line; consumed, one transient Redis blip
+would have published a false `server_down` for every tracked server and the new
+consumer would have evicted them all — a new outage mode. So the watcher now
+publishes (and untracks) only on `storage.ErrNotFound`; every other error is
+logged and the server stays tracked
+(`TestRegistryWatcher_TransientErrorKeepsTracking`).
+
+What is still true: detection is not *early* — `GetServer` only fails after the
+TTL has already expired in the store. What eviction buys is that every gateway
+instance's assignment path is pruned the moment the first watcher notices,
+instead of each instance independently waiting out its own view of the TTL, and
+that the watcher poll (5s) beats a client walking into the address in the
+remaining window.
+
+## 2026-08-22 — The registry watcher is wired in, so a dead server leaves the gateway's view before its TTL
+
+### Context
+
+`registry.RegistryWatcher` polls the servers the gateway knows about, notices one
+that has disappeared from the registry and publishes a `server_down` event. It
+had four passing unit tests and **no caller outside them** (#204):
+`NewRegistryWatcher` was never invoked by `cmd/gateway`, so `Start` never ran in a
+real gateway. Server death was therefore observable only when the registry TTL
+expired, and until that moment the gateway kept handing clients the address of a
+server that would not answer — the window that produces the split-map fault fixed
+in #203.
+
+### Decision — wire it, and route every construction through one function
+
+Agones health checks cover **pod liveness**. The gateway's **registry view** is a
+separate thing, and an entry lingering there until TTL is exactly the state that
+misroutes clients. Prompt removal is what keeps that window small, so the watcher
+is kept and wired rather than deleted.
+
+`cmd/gateway.wireRegistry` is now the only place the binary constructs a
+`RegistryService`. It builds the watcher, attaches it with `registry.WithWatcher`
+and starts its poll loop on the process-wide context; shutdown cancels that
+context and then blocks on `watcher.Stop()` before the stores are closed. Making
+it the sole construction site is deliberate: the previous failure mode was wiring
+that could vanish without anything failing, and now removing the call breaks the
+build while removing the watcher inside it fails `TestWireRegistry_*`.
+
+### Decision — the tracked set comes from lookups, not only from registration
+
+`RegistryService.RegisterServer` / `DeregisterServer` track and untrack, but in
+production **the gateway never registers a server**: game servers self-register
+straight into Redis (ADR-2), and those two methods have no non-test callers. A
+watcher fed only by them would poll an empty set forever. So `FindServer` also
+tracks the server it returns — the moment the gateway learns a server exists is
+the moment it hands its address to a client, which is also the only server whose
+death the gateway has any reason to care about.
+
+### Poll interval against the heartbeat TTL
+
+`watchPollInterval` = **5s** against `constants.ServerHeartbeatTTL` = **15s**, a
+**3x** margin. The relationship, not the constants, is what matters: a poll at or
+above the TTL would always lose the race to expiry and the watcher would be a
+no-op that still costs a registry read per server per tick.
+`TestWatchPollInterval_ShorterThanHeartbeatTTL` pins it so it cannot silently
+invert when either value is retuned.
+
+### Consequences
+
+- `server_down` is published through the gateway's existing event stream
+  (`eventStreamPublisher`), not a second pub/sub client: Redis Streams on the
+  Redis backend, in-memory otherwise. No new dependency.
+- ~~The event is currently consumed by the relay and logged/counted~~ — since
+  2026-08-27 (#236, entry above) the gateway acts on it: `OnEvent` evicts the
+  named server from the registry. Pushing events to *clients* stays blocked on
+  `shared` adding a `MsgEvent`.
+
 ## 2026-08-17 — Allocation only replaces an absent server, and the token is minted last
 
 ### Context
@@ -43,10 +139,10 @@ server's behalf: that would put two writers on one datum (ADR-1), and a
 gateway-written entry has nothing re-arming its 15s heartbeat TTL, so it would
 expire under a pod that is alive.
 
-Bounds: `--allocation-wait-timeout` (default **20s**) and
-`--allocation-poll-interval` (default **250ms**), flag → env → default. 20s is a
+Bounds: `--allocation-wait-timeout` (default **15s**) and
+`--allocation-poll-interval` (default **250ms**), flag → env → default. 15s is a
 deliberate compromise while pod cold start is unmeasured: longer than
-`retryTotalTimeout`'s 10s, because a pod start is much heavier than a Redis blip,
+`RetryTotalTimeout`'s 10s, because a pod start is much heavier than a Redis blip,
 but still under `JoinTokenTTL` so the wait can never outlast the token minted
 after it. Timing out yields `ErrServerStarting` → the client-facing
 `server is starting, retry shortly`, which is **retryable** and deliberately
@@ -193,6 +289,29 @@ the value nobody is choosing deliberately. A test in `gateway/server` asserts
 `DefaultAllocationWaitTimeout < MaxHandlerBlockingWait`, which no start-up check
 would catch until someone ran it.
 
+**Capping one leg was not enough (issue #235).** The enter_world path stacks
+*sequential* waits, each individually legal: the registry lookup's transient
+retry window (`RetryTotalTimeout`, 10s) + the Agones allocation HTTP call
+(`DefaultTimeout`, 10s) + the registration wait (15s) ≈ **35s** against the 20s
+window — the heartbeat killed the connection mid-allocation with every per-leg
+check green. The fix is one deadline over the whole path:
+`server.EnterWorldBudget` = `MaxHandlerBlockingWait − 2s` = **18s**, the 2s
+slice reserved for the session write-back and the response flush after the
+assignment resolves. On expiry the client gets the retryable
+`server is starting, retry shortly` and the connection lives.
+
+Two things make the deadline safe to enforce. First, the single-flight
+allocation **leader now waits like a follower**: `allocateOnce` runs the
+detached work (`context.WithoutCancel`) in its own goroutine and the leader
+selects on completion vs its own context, so a handler deadline caps how long
+*any* caller blocks while the allocation itself runs to completion and
+publishes its outcome. Second, a caller whose context ends while the
+allocation is still in flight gets `ErrServerStarting` — truthful and
+retryable: a server is on its way, and the retry resolves it from the registry
+without allocating again. A guard test
+(`TestEnterWorldWorstCaseBudgetFitsHandlerWindow`) pins the stacked worst case
+against the same constants the code runs on, so it moves when they move.
+
 ### Decision 5 — the allocator's default fleet names the fleet that exists
 
 `DefaultFleetMap` was `map-servers-dev`, the retired **Go** fleet whose game
@@ -314,7 +433,9 @@ a bad kubeconfig is fatal at boot rather than a surprise on the first player.
   `transfer.StubDungeonTransfer` still does not call it.
 - No `Deallocate` / shutdown path: reclaiming is left to Agones idle handling.
 - The gateway does not read `status.state` changes afterwards — a GameServer that
-  dies after allocation is only noticed via the registry heartbeat TTL.
+  dies after allocation is noticed via the registry heartbeat TTL, or sooner by
+  the registry watcher (5s poll, wired in 2026-08-22 — see the entry at the top of
+  this file). `status.state` itself is still not read.
 
 ## 2026-08-04 — Selectable store backends, session lifecycle, event relay wiring
 
@@ -350,6 +471,11 @@ per-tick input stream, which goes client↔gameserver directly.
 
 Refresh-on-activity (sliding TTL) over a fixed 1h window: a player in a 3-hour raid must not
 be logged out mid-session, and an abandoned socket must not hold a record for an hour.
+Heartbeats count as activity (#231): `MsgPong` on an authenticated connection also re-arms
+the TTL — bounded to once per minute per connection, failing open on store errors — because
+the recommended client shape is to park the gateway socket sending only heartbeats between
+map transfers, and without this the session expired under the live connection after an hour
+on one map.
 
 A vanished record demotes the connection to `StateConnected` and returns `session expired`
 rather than closing the socket, so the client can re-`MsgAuth` on the same connection.
@@ -397,7 +523,11 @@ dispatch cannot happen before `Run` starts the relay.
 the store happened to list first. When nothing has capacity and an `Allocator` is configured,
 the registry allocates and registers the new instance. *(Superseded 2026-08-17: allocation
 now fires only when the map has **no** live server, and the registry no longer writes the
-allocated entry — see the entry at the top of this file.)* `StubAllocator` still returns
+allocated entry — see the entry at the top of this file. Superseded again 2026-08-22 (#203):
+least-loaded is the placement policy only while a map has exactly ONE live server. With more
+than one — a violated ADR-2 invariant — placement is the lowest `ServerID` with spare capacity
+and `PlayerCount` is ignored, because balancing across a split world is what keeps both halves
+populated.)* `StubAllocator` still returns
 `ErrNotImplemented`, so `cmd/gateway` wires the registry *without* an allocator: the honest
 "no available server" error beats a misleading "allocator not implemented".
 
@@ -406,14 +536,21 @@ allocated entry — see the entry at the top of this file.)* `StubAllocator` sti
 - The gateway is genuinely stateless with the Redis backend: N instances share sessions,
   registry and the event consumer group (one group `gateway`, one consumer per instance).
 - Dead game servers disappear from lookups on their own (`redisstore.ServerRegistry`
-  heartbeat TTL); the gateway needs no liveness logic of its own.
+  heartbeat TTL). *(Superseded 2026-08-22: expiry alone leaves up to a full
+  `ServerHeartbeatTTL` in which the gateway still announces a dead server, so the
+  gateway now runs the registry watcher on top of it — see the entry at the top of
+  this file. TTL expiry remains the backstop; the watcher is what shortens the
+  window.)*
 - Tests run both backends: memory directly, Redis via `miniredis` (no external service, and
   `FastForward` makes TTL behavior assertable).
 
 ### Still open
 
 - No `MsgEvent` on the wire → relay is log-only (blocked on `shared`).
-- Agones allocation, dungeon transfer, and `player:location:{user_id}` tracking remain stubs.
+- Agones allocation and dungeon transfer remain stubs. *(Updated 2026-08-22:
+  `player:location:{user_id}` tracking was listed here as a third stub, but it was
+  never a stub — no code ever wrote or read that key. The constant behind it is
+  deleted, #210.)*
 
 ## 2026-08-04 — Opt-in KCP listener + per-hop transport announcement
 

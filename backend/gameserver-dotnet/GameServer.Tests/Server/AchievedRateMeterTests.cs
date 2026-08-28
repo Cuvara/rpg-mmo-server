@@ -163,28 +163,89 @@ public class AchievedRateMeterTests
     }
 
     /// <summary>
-    /// End-to-end wiring: a <see cref="TickLoop"/> that has actually run for longer than one
-    /// window reports a rate near the one it was configured for. The unit tests above prove
-    /// the arithmetic; this proves the loop feeds it, which is the half a pure unit test
-    /// cannot cover and the half that was missing before.
+    /// The floor the end-to-end test below must not assert against, pinned with injected
+    /// timestamps so it costs nothing and cannot flake.
     ///
-    /// <para><b>It asks for a 200ms window rather than the 2s default, and so runs for well
-    /// under a second.</b> The first version ran a real loop for three seconds, which in a
-    /// parallel xUnit suite means three seconds of a busy tick loop competing with every
-    /// other test for the cores it is trying to measure — and this suite already has a
-    /// documented history of contention-sensitive failures. The window length is the thing
-    /// under test only in the unit tests above; here it is scaffolding, so it should be as
-    /// small as it can be while still completing.</para>
+    /// <para>The meter publishes <c>tickDelta / elapsed</c> and only when
+    /// <c>elapsed &gt;= WindowSeconds</c>, so a loop slow enough to land a single tick in a
+    /// window can never publish more than <c>1 / WindowSeconds</c> — and publishes exactly
+    /// that only if <c>elapsed</c> is precisely the window length, which no real schedule
+    /// hits. The published values are therefore quantised, with nothing between
+    /// <c>1 / WindowSeconds</c> and <c>2 / WindowSeconds</c>.</para>
     ///
-    /// <para>The tolerance is deliberately loose: a loaded host schedules the loop late and
-    /// the achieved rate then genuinely IS lower. The claim is that the value is populated
-    /// and in the right neighbourhood, not that this box hits 30 Hz exactly — asserting
-    /// tightly here would be asserting on the test host, which is the mistake this whole
-    /// issue is about.</para>
+    /// <para><b>This is why the wiring test below must not carry an absolute lower
+    /// bound.</b> It used to assert <c>InRange(achieved, 5d, 60d)</c> against a 0.2s window,
+    /// and 5.0 is exactly <c>1 / 0.2</c> — so that bound was not "loose", it sat precisely
+    /// on this cliff and was really asserting "the host scheduled at least two ticks into
+    /// the last completed window". On a contended box it does not, and the test failed for
+    /// a reason that has nothing to do with the meter (#200).</para>
+    /// </summary>
+    [Theory]
+    [InlineData(0.2)]
+    [InlineData(1.0)]
+    [InlineData(2.0)]
+    public void AWindowContainingASingleTick_CannotPublishMoreThanTheReciprocalOfTheWindow(
+        double windowSeconds)
+    {
+        var meter = new AchievedRateMeter(windowSeconds);
+
+        // Two samples, one tick apart, separated by a hair more than one window: the
+        // cheapest possible completed window, and the densest a single-tick window can be.
+        meter.Sample(0, 0);
+        meter.Sample(1, Ticks(windowSeconds * 1.001));
+
+        Assert.True(meter.AchievedHz > 0d, "a completed window must publish something");
+        Assert.True(meter.AchievedHz < 1.0 / windowSeconds,
+            $"a single-tick window over {windowSeconds}s published {meter.AchievedHz:F3}Hz; " +
+            $"the reciprocal of the window ({1.0 / windowSeconds:F3}Hz) is an unreachable " +
+            "ceiling for this case, so it is not a usable lower bound for a live-loop test");
+    }
+
+    /// <summary>
+    /// End-to-end wiring: a <see cref="TickLoop"/> that has actually run reports a rate it
+    /// measured rather than one it was configured with. The unit tests above prove the
+    /// arithmetic to within 1%; this proves the loop feeds the meter, which is the half a
+    /// pure unit test cannot cover.
+    ///
+    /// <para><b>What it must not do is time the test host.</b> This test failed roughly one
+    /// run in thirteen in the full parallel suite and never in isolation (#200). It waited a
+    /// fixed 600ms, then read the gauge once and required the reading to be at least 5Hz.
+    /// Both halves of that were claims about scheduling: with a 0.2s window the loop has to
+    /// land two ticks inside the final window to clear 5Hz, and it has to complete any
+    /// window at all inside 600ms to publish a non-zero value. Feeding the real meter a
+    /// uniformly-late schedule shows the two failure bands exactly — a per-tick delay of
+    /// 201-305ms trips the range check, and anything past ~310ms leaves the gauge at 0 and
+    /// trips the published-at-all check instead. A saturated thread pool delays a
+    /// <c>Task.Delay(33)</c> by that much, and the suite has a documented history of exactly
+    /// this kind of contention (#201, #153).</para>
+    ///
+    /// <para><b>So it waits for the condition rather than for a duration.</b> It polls until
+    /// a window has actually published, with a generous <see cref="Stopwatch"/> cap that
+    /// only expires if the loop is genuinely not running. On a healthy host that is quicker
+    /// than the old fixed sleep, so the test also stops contributing 600ms of busy loop to
+    /// everyone else's contention; on a loaded one it simply waits longer instead of
+    /// failing.</para>
+    ///
+    /// <para><b>And the assertions are relative, not absolute.</b> The upper bound is kept,
+    /// because a reading above the configured rate is the direction that means a defect —
+    /// double-counted ticks, or a duration measured on a different clock than the counter,
+    /// which is #147 itself. The lower bound is expressed against the run's own average
+    /// rather than a fixed Hz, so it still catches a meter that under-reports what the loop
+    /// did while making no claim about how fast this box happens to be.</para>
     /// </summary>
     [Fact]
     public async Task ARunningTickLoop_PublishesANonZeroAchievedRate()
     {
+        const int ConfiguredHz = 30;
+        const double WindowSeconds = 0.2;
+
+        // Long enough to see several windows on a healthy host.
+        const double MinimumRunMs = 600;
+
+        // Only trips if the loop is not running at all. Deliberately far above any
+        // plausible scheduling delay: the point is that a slow host waits, not fails.
+        const double CapMs = 10_000;
+
         // `using`: every other test in this suite disposes its world, and this one leaked
         // one. An EcsWorld owns a ReaderWriterLockSlim and an Arch world, and Arch tracks
         // worlds in process-global state — leaking them from a parallel suite is not a
@@ -192,23 +253,80 @@ public class AchievedRateMeterTests
         using var world = new GameServer.World.EcsWorld();
         var connections = new GameServer.Net.ConnectionManager();
         var logger = Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
-        var handler = new GameServer.Input.InputHandler(world, logger, null, 30, null);
+        var handler = new GameServer.Input.InputHandler(world, logger, null, ConfiguredHz, null);
         var loop = new TickLoop(
-            world, handler, connections, 30,
+            world, handler, connections, ConfiguredHz,
             global::Shared.GameLogic.Components.GameConstants.DefaultAoiRadius, logger,
-            achievedRateWindowSeconds: 0.2);
+            achievedRateWindowSeconds: WindowSeconds);
 
         using var cts = new CancellationTokenSource();
+
+        // Stopwatch, never DateTime: this host's CLOCK_REALTIME runs 10-17% fast and has
+        // been seen stepping backwards (#153), and a wall-clock deadline here would be the
+        // very mistake the gauge under test exists to remove.
+        var clock = Stopwatch.StartNew();
         var run = loop.RunAsync(cts.Token);
 
-        // One 200ms window plus margin for the loop to publish across it.
-        await Task.Delay(TimeSpan.FromMilliseconds(600));
+        // The meter is a SLIDING window, so reading it once reads whichever window happened
+        // to close last — and on a contended host that can be a window the loop was
+        // descheduled through. Keeping the best window observed asks "did any window measure
+        // the loop correctly", which is the wiring claim; it does not ask the host to
+        // schedule the final 200ms fairly, which is a claim no test can honestly make.
+        double best = 0d;
+        while (clock.Elapsed.TotalMilliseconds < CapMs)
+        {
+            await Task.Delay(20);
+
+            double observed = loop.AchievedTickHz;
+            if (observed > best) best = observed;
+
+            if (clock.Elapsed.TotalMilliseconds >= MinimumRunMs && best > 0d) break;
+        }
+
         cts.Cancel();
         try { await run; } catch (OperationCanceledException) { /* expected */ }
+        clock.Stop();
 
-        Assert.True(loop.CurrentTick > 0, "the loop did not tick at all");
-        Assert.True(loop.AchievedTickHz > 0d,
-            $"achieved rate was never published (current_tick={loop.CurrentTick})");
-        Assert.InRange(loop.AchievedTickHz, 5d, 60d);
+        double elapsedSeconds = clock.Elapsed.TotalSeconds;
+        ulong ticks = loop.CurrentTick;
+        double averageHz = elapsedSeconds > 0 ? ticks / elapsedSeconds : 0d;
+
+        Assert.True(ticks > 0, $"the loop did not tick at all in {elapsedSeconds * 1000:F0}ms");
+
+        Assert.True(best > 0d,
+            $"achieved rate was never published in {elapsedSeconds * 1000:F0}ms " +
+            $"(current_tick={ticks}, window={WindowSeconds}s). The loop completed " +
+            $"{ticks} ticks, so it was running; the gauge is not being fed.");
+
+        // Upper bound, and the arithmetic behind it matters because the obvious bound is
+        // wrong. A short window can legitimately measure FASTER than the configured rate:
+        // when TickLoop falls behind it replays the lost ticks with no sleep at all until it
+        // is caught up or MaxLagTicks behind (TickLoop.RunAsync), so a window straddling a
+        // recovery holds up to `window / period + MaxLagTicks` ticks — 6 + 8 = 14 inside
+        // 200ms on a 30Hz loop, or 70Hz. This was measured, not reasoned: an earlier version
+        // of this assertion capped at 1.5x and a contended run published 49.18Hz, which is a
+        // truthful reading of a loop that really did advance that many ticks in that window.
+        // The old `InRange(..., 5d, 60d)` had the same latent failure at its top end.
+        //
+        // So the bound is the one statement that is exactly true regardless of scheduling:
+        // a window cannot contain more ticks than the whole run produced. That still catches
+        // a meter that double-counts, or one that divides by a duration from a clock other
+        // than the one that paced the counter — the #147 defect in its over-reporting
+        // direction — while making no assumption about how this host scheduled anything.
+        double impossibleHz = ticks / WindowSeconds;
+        Assert.True(best <= impossibleHz,
+            $"achieved rate {best:F2}Hz needs more ticks inside one {WindowSeconds}s window " +
+            $"than the loop ran in the entire test ({ticks} ticks, so at most " +
+            $"{impossibleHz:F2}Hz). The meter is over-reporting: it is either counting ticks " +
+            "twice or dividing by a duration from a different clock than the counter.");
+
+        // Lower bound, relative to what this run actually managed rather than to a fixed Hz.
+        // Over a run spanning several windows at least one window must be as dense as the
+        // average, so half the average is generous — but it still fails a meter that reports
+        // far below what the loop did, which is the #147 direction.
+        Assert.True(best >= averageHz * 0.5,
+            $"best published window was {best:F2}Hz while the loop averaged {averageHz:F2}Hz " +
+            $"({ticks} ticks in {elapsedSeconds * 1000:F0}ms); no window measured what the " +
+            "loop was actually doing");
     }
 }

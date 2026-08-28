@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Net;
-using Microsoft.Extensions.Logging.Abstractions;
 using GameServer.Tests.Infrastructure;
 
 namespace GameServer.Tests.Agones;
@@ -23,8 +22,79 @@ namespace GameServer.Tests.Agones;
 /// </summary>
 public class HttpAgonesSdkAddressTests
 {
-    /// <summary>Short on purpose: the absent-sidecar test waits out a real timeout.</summary>
-    private static readonly TimeSpan TestTimeout = TimeSpan.FromMilliseconds(700);
+    /// <summary>
+    /// <b>No wall-clock budget at all for a sidecar that is in this process.</b>
+    ///
+    /// <para>Every test below except the two absent-sidecar ones talks to a
+    /// <see cref="FakeStatusSidecar"/> running in the same process. There is no network, no
+    /// scheduler outside this box and nothing to be slow about, so a per-request deadline
+    /// there is not a claim the test is making — it is incidental machinery that can only
+    /// ever turn a scheduling hiccup into a failure. It did:
+    /// <c>LiveSidecarShape_YieldsAddressAndGamePort</c> returned null once in eight
+    /// full-suite runs against the previous shared 700ms budget, because
+    /// <see cref="HttpAgonesSdk.GetAddressAsync"/> maps a timeout onto the same null it
+    /// returns for a body it could not read (#216).</para>
+    ///
+    /// <para><b>The fix is not a bigger number.</b> Widening a deadline that is not being
+    /// asserted on only moves the flake somewhere further out and leaves the next reader
+    /// believing 700ms — or 5s, or 30s — meant something. Removing it says what is true:
+    /// these tests assert on a parsed address, never on how quickly it arrived. That is the
+    /// same correction #200 made to <c>AchievedRateMeterTests</c>, which stopped asserting a
+    /// rate the host scheduler decides.</para>
+    ///
+    /// <para><b>A hang is still bounded</b>, by <see cref="HangBackstop"/> below, which is
+    /// the backstop's whole and only job.</para>
+    /// </summary>
+    private static readonly TimeSpan NoDeadline = Timeout.InfiniteTimeSpan;
+
+    /// <summary>
+    /// The only budget left, and only the two tests pointing at a dead port use it. There a
+    /// timeout is the <i>subject</i>: those tests assert that a sidecar which never answers
+    /// produces a null rather than an exception, so the deadline is what they are exercising
+    /// and keeping it short is what keeps them quick. On a platform where a closed local port
+    /// refuses immediately it never fires at all.
+    /// </summary>
+    private static readonly TimeSpan AbsentSidecarTimeout = TimeSpan.FromMilliseconds(700);
+
+    /// <summary>
+    /// How long an in-process HTTP exchange may take before the test calls it a hang.
+    ///
+    /// <para><b>This is not a responsiveness assertion and must never be read as one.</b> It
+    /// exists so a genuinely stuck exchange fails with a message instead of hanging the suite
+    /// until the CI job is killed. Nothing about a value between one millisecond and thirty
+    /// seconds is a defect these tests have an opinion on; only "never" is. Thirty seconds is
+    /// roughly forty times the budget that flaked, so if it ever fires, something is stuck
+    /// rather than slow — and <see cref="ReadAsync{T}"/> prints what the SDK logged so the
+    /// next reader knows which.</para>
+    /// </summary>
+    private static readonly TimeSpan HangBackstop = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Await a read with <see cref="HangBackstop"/> as the only bound, failing with the
+    /// subject's own log rather than with a bare timeout if it never finishes.
+    /// </summary>
+    /// <remarks>
+    /// Raced with <see cref="Task.WhenAny(Task, Task)"/> rather than passed a shorter
+    /// per-request timeout, because the two do different things: a per-request timeout makes
+    /// the SDK <i>return null</i>, which is indistinguishable from the nulls these tests are
+    /// about, while this leaves the null meaning what the SDK meant by it and reports a stall
+    /// as a stall. <see cref="Task.Delay(TimeSpan)"/> runs on the runtime timer queue, which
+    /// is monotonic — this host's <c>CLOCK_REALTIME</c> runs 10-17% fast (#153) and must not
+    /// be anywhere near a deadline.
+    /// </remarks>
+    private static async Task<T> ReadAsync<T>(Task<T> read, CapturingLogger log, string what)
+    {
+        var finished = await Task.WhenAny(read, Task.Delay(HangBackstop));
+        if (finished != read)
+        {
+            Assert.Fail(log.Explain(
+                $"{what} had still not completed after {HangBackstop.TotalSeconds:F0}s against " +
+                "a sidecar in this same process. That is a stall, not a slow host: there is no " +
+                "network on this path."));
+        }
+
+        return await read;
+    }
 
     /// <summary>Verbatim capture from Agones 1.59.0, trimmed of nothing that is read.</summary>
     private const string LiveBody = """
@@ -47,12 +117,17 @@ public class HttpAgonesSdkAddressTests
     [Fact]
     public async Task LiveSidecarShape_YieldsAddressAndGamePort()
     {
+        var log = new CapturingLogger();
         using var sidecar = new FakeStatusSidecar(LiveBody);
-        using var sdk = new HttpAgonesSdk(NullLogger.Instance, sidecar.BaseAddress, TestTimeout);
+        using var sdk = new HttpAgonesSdk(log, sidecar.BaseAddress, NoDeadline);
 
-        var addr = await sdk.GetAddressAsync();
+        var addr = await ReadAsync(sdk.GetAddressAsync(), log, "GetAddressAsync");
 
-        Assert.NotNull(addr);
+        // Not Assert.NotNull: it prints "Value is null" and nothing else, and the five
+        // reasons GetAddressAsync returns null are indistinguishable from that. This is what
+        // cost #216 eight runs to attribute.
+        Assert.True(addr != null, log.Explain(
+            "GetAddressAsync returned null for the captured live sidecar body, which parses."));
         Assert.Equal("192.168.65.3", addr!.Address);
         Assert.Equal(7691, addr.Port);
         // This string is what ends up in Redis and, through the gateway, in
@@ -64,10 +139,11 @@ public class HttpAgonesSdkAddressTests
     [Fact]
     public async Task Read_IsAGetOnGameserver()
     {
+        var log = new CapturingLogger();
         using var sidecar = new FakeStatusSidecar(LiveBody);
-        using var sdk = new HttpAgonesSdk(NullLogger.Instance, sidecar.BaseAddress, TestTimeout);
+        using var sdk = new HttpAgonesSdk(log, sidecar.BaseAddress, NoDeadline);
 
-        await sdk.GetAddressAsync();
+        await ReadAsync(sdk.GetAddressAsync(), log, "GetAddressAsync");
 
         var req = Assert.Single(sidecar.Requests);
         Assert.Equal("GET", req.Method);
@@ -87,12 +163,14 @@ public class HttpAgonesSdkAddressTests
                       {"name":"game","port":7691},
                       {"name":"debug","port":32222}]}}
             """;
+        var log = new CapturingLogger();
         using var sidecar = new FakeStatusSidecar(body);
-        using var sdk = new HttpAgonesSdk(NullLogger.Instance, sidecar.BaseAddress, TestTimeout);
+        using var sdk = new HttpAgonesSdk(log, sidecar.BaseAddress, NoDeadline);
 
-        var addr = await sdk.GetAddressAsync();
+        var addr = await ReadAsync(sdk.GetAddressAsync(), log, "GetAddressAsync");
 
-        Assert.NotNull(addr);
+        Assert.True(addr != null, log.Explain(
+            "GetAddressAsync returned null for a body that carries a port named 'game'."));
         Assert.Equal(7691, addr!.Port);
     }
 
@@ -103,10 +181,17 @@ public class HttpAgonesSdkAddressTests
         const string body = """
             {"status":{"address":"10.0.0.7","ports":[{"name":"metrics","port":31111}]}}
             """;
+        var log = new CapturingLogger();
         using var sidecar = new FakeStatusSidecar(body);
-        using var sdk = new HttpAgonesSdk(NullLogger.Instance, sidecar.BaseAddress, TestTimeout);
+        using var sdk = new HttpAgonesSdk(log, sidecar.BaseAddress, NoDeadline);
 
-        Assert.Null(await sdk.GetAddressAsync());
+        Assert.Null(await ReadAsync(sdk.GetAddressAsync(), log, "GetAddressAsync"));
+
+        // Null for the RIGHT reason. This class's own opening remark warns that "a fallback
+        // that fires for the wrong reason looks exactly like one that fires for the right
+        // one", and until the SDK's log was captured nothing here checked which.
+        Assert.True(log.Logged("has no port named"), log.Explain(
+            "the read was null, but not because the port was missing."));
     }
 
     /// <summary>An empty port array, and no ports key at all, are both null.</summary>
@@ -115,10 +200,13 @@ public class HttpAgonesSdkAddressTests
     [InlineData("""{"status":{"address":"10.0.0.7"}}""")]
     public async Task NoPorts_ReturnsNull(string body)
     {
+        var log = new CapturingLogger();
         using var sidecar = new FakeStatusSidecar(body);
-        using var sdk = new HttpAgonesSdk(NullLogger.Instance, sidecar.BaseAddress, TestTimeout);
+        using var sdk = new HttpAgonesSdk(log, sidecar.BaseAddress, NoDeadline);
 
-        Assert.Null(await sdk.GetAddressAsync());
+        Assert.Null(await ReadAsync(sdk.GetAddressAsync(), log, "GetAddressAsync"));
+        Assert.True(log.Logged("has no port named"), log.Explain(
+            "the read was null, but not because there was no game port."));
     }
 
     /// <summary>
@@ -134,10 +222,13 @@ public class HttpAgonesSdkAddressTests
     [InlineData("{}")]
     public async Task MissingAddress_ReturnsNull(string body)
     {
+        var log = new CapturingLogger();
         using var sidecar = new FakeStatusSidecar(body);
-        using var sdk = new HttpAgonesSdk(NullLogger.Instance, sidecar.BaseAddress, TestTimeout);
+        using var sdk = new HttpAgonesSdk(log, sidecar.BaseAddress, NoDeadline);
 
-        Assert.Null(await sdk.GetAddressAsync());
+        Assert.Null(await ReadAsync(sdk.GetAddressAsync(), log, "GetAddressAsync"));
+        Assert.True(log.Logged("carries no address"), log.Explain(
+            "the read was null, but not because the status carried no address."));
     }
 
     /// <summary>A port outside the valid range is refused rather than advertised.</summary>
@@ -149,22 +240,29 @@ public class HttpAgonesSdkAddressTests
     {
         string body =
             "{\"status\":{\"address\":\"10.0.0.7\",\"ports\":[{\"name\":\"game\",\"port\":" + port + "}]}}";
+        var log = new CapturingLogger();
         using var sidecar = new FakeStatusSidecar(body);
-        using var sdk = new HttpAgonesSdk(NullLogger.Instance, sidecar.BaseAddress, TestTimeout);
+        using var sdk = new HttpAgonesSdk(log, sidecar.BaseAddress, NoDeadline);
 
-        Assert.Null(await sdk.GetAddressAsync());
+        Assert.Null(await ReadAsync(sdk.GetAddressAsync(), log, "GetAddressAsync"));
+        Assert.True(log.Logged("which is not a usable port"), log.Explain(
+            $"the read was null, but not because port {port} was refused as unusable."));
     }
 
     /// <summary>A sidecar answering 500 is null and, above all, does not throw.</summary>
     [Fact]
     public async Task SidecarError_ReturnsNullWithoutThrowing()
     {
+        var log = new CapturingLogger();
         using var sidecar = new FakeStatusSidecar(LiveBody, statusCode: 500);
-        using var sdk = new HttpAgonesSdk(NullLogger.Instance, sidecar.BaseAddress, TestTimeout);
+        using var sdk = new HttpAgonesSdk(log, sidecar.BaseAddress, NoDeadline);
 
         AgonesGameServerAddress? addr = null;
-        Assert.Null(await Record.ExceptionAsync(async () => addr = await sdk.GetAddressAsync()));
+        Assert.Null(await Record.ExceptionAsync(async () =>
+            addr = await ReadAsync(sdk.GetAddressAsync(), log, "GetAddressAsync")));
         Assert.Null(addr);
+        Assert.True(log.Logged("returned 500"), log.Explain(
+            "the read was null, but not because the sidecar answered 500."));
     }
 
     /// <summary>An unparsable body is null, not a crash on the server's start-up path.</summary>
@@ -174,12 +272,19 @@ public class HttpAgonesSdkAddressTests
     [InlineData("[1,2,3]")]
     public async Task MalformedJson_ReturnsNullWithoutThrowing(string body)
     {
+        var log = new CapturingLogger();
         using var sidecar = new FakeStatusSidecar(body);
-        using var sdk = new HttpAgonesSdk(NullLogger.Instance, sidecar.BaseAddress, TestTimeout);
+        using var sdk = new HttpAgonesSdk(log, sidecar.BaseAddress, NoDeadline);
 
         AgonesGameServerAddress? addr = null;
-        Assert.Null(await Record.ExceptionAsync(async () => addr = await sdk.GetAddressAsync()));
+        Assert.Null(await Record.ExceptionAsync(async () =>
+            addr = await ReadAsync(sdk.GetAddressAsync(), log, "GetAddressAsync")));
         Assert.Null(addr);
+
+        // The exception type is the only thing separating "could not read the body" from
+        // "could not reach the sidecar": both reach the same catch and log the same text.
+        Assert.True(log.Threw("JsonException"), log.Explain(
+            "the read was null, but not because the body could not be parsed."));
     }
 
     /// <summary>No sidecar listening at all: null, no exception, one timeout.</summary>
@@ -189,12 +294,21 @@ public class HttpAgonesSdkAddressTests
         int deadPort;
         using (var lease = new TestPorts.Lease()) { deadPort = lease.Port; }
 
+        var log = new CapturingLogger();
         using var sdk = new HttpAgonesSdk(
-            NullLogger.Instance, $"http://localhost:{deadPort}/", TestTimeout);
+            log, $"http://localhost:{deadPort}/", AbsentSidecarTimeout);
 
         AgonesGameServerAddress? addr = null;
-        Assert.Null(await Record.ExceptionAsync(async () => addr = await sdk.GetAddressAsync()));
+        Assert.Null(await Record.ExceptionAsync(async () =>
+            addr = await ReadAsync(sdk.GetAddressAsync(), log, "GetAddressAsync")));
         Assert.Null(addr);
+
+        // Refused (HttpRequestException) where a closed local port refuses, timed out
+        // (TaskCanceledException) where it does not. Either is "no sidecar"; neither is a
+        // parse failure, and the point of asserting on both is that this test must not start
+        // passing because the SDK stopped talking to the port at all.
+        Assert.True(log.Threw("HttpRequestException") || log.Threw("TaskCanceledException"),
+            log.Explain("the read was null, but not because the sidecar was unreachable."));
     }
 
     /// <summary>The no-op SDK has no address to report and says so.</summary>
@@ -210,10 +324,15 @@ public class HttpAgonesSdkAddressTests
     [Fact]
     public async Task LiveSidecarShape_YieldsTheState()
     {
+        var log = new CapturingLogger();
         using var sidecar = new FakeStatusSidecar(LiveBody);
-        using var sdk = new HttpAgonesSdk(NullLogger.Instance, sidecar.BaseAddress, TestTimeout);
+        using var sdk = new HttpAgonesSdk(log, sidecar.BaseAddress, NoDeadline);
 
-        Assert.Equal("Ready", await sdk.GetStateAsync());
+        var state = await ReadAsync(sdk.GetStateAsync(), log, "GetStateAsync");
+
+        Assert.True(state != null, log.Explain(
+            "GetStateAsync returned null for the captured live sidecar body, which parses."));
+        Assert.Equal("Ready", state);
     }
 
     /// <summary>An allocated GameServer reads as exactly the constant the gate compares to.</summary>
@@ -224,10 +343,15 @@ public class HttpAgonesSdkAddressTests
             {"status":{"state":"Allocated","address":"10.0.0.7",
              "ports":[{"name":"game","port":7691}]}}
             """;
+        var log = new CapturingLogger();
         using var sidecar = new FakeStatusSidecar(body);
-        using var sdk = new HttpAgonesSdk(NullLogger.Instance, sidecar.BaseAddress, TestTimeout);
+        using var sdk = new HttpAgonesSdk(log, sidecar.BaseAddress, NoDeadline);
 
-        Assert.Equal(AgonesGameServerState.Allocated, await sdk.GetStateAsync());
+        var state = await ReadAsync(sdk.GetStateAsync(), log, "GetStateAsync");
+
+        Assert.True(state != null, log.Explain(
+            "GetStateAsync returned null for a body carrying state 'Allocated'."));
+        Assert.Equal(AgonesGameServerState.Allocated, state);
     }
 
     /// <summary>
@@ -242,10 +366,11 @@ public class HttpAgonesSdkAddressTests
     [InlineData("not json at all", 200)]
     public async Task UnreadableState_IsNull(string body, int status)
     {
+        var log = new CapturingLogger();
         using var sidecar = new FakeStatusSidecar(body, status);
-        using var sdk = new HttpAgonesSdk(NullLogger.Instance, sidecar.BaseAddress, TestTimeout);
+        using var sdk = new HttpAgonesSdk(log, sidecar.BaseAddress, NoDeadline);
 
-        Assert.Null(await sdk.GetStateAsync());
+        Assert.Null(await ReadAsync(sdk.GetStateAsync(), log, "GetStateAsync"));
     }
 
     /// <summary>No sidecar at all is a null and never an exception.</summary>
@@ -256,11 +381,15 @@ public class HttpAgonesSdkAddressTests
         var dead = $"http://localhost:{lease.Port}/";
         lease.Dispose();
 
-        using var sdk = new HttpAgonesSdk(NullLogger.Instance, dead, TestTimeout);
+        var log = new CapturingLogger();
+        using var sdk = new HttpAgonesSdk(log, dead, AbsentSidecarTimeout);
 
         string? state = "unset";
-        Assert.Null(await Record.ExceptionAsync(async () => state = await sdk.GetStateAsync()));
+        Assert.Null(await Record.ExceptionAsync(async () =>
+            state = await ReadAsync(sdk.GetStateAsync(), log, "GetStateAsync")));
         Assert.Null(state);
+        Assert.True(log.Threw("HttpRequestException") || log.Threw("TaskCanceledException"),
+            log.Explain("the read was null, but not because the sidecar was unreachable."));
     }
 
     /// <summary>The no-op SDK has no GameServer object, so it has no state.</summary>
@@ -279,6 +408,63 @@ public class HttpAgonesSdkAddressTests
         Assert.Equal("game", AgonesGameServerAddress.GamePortName);
     }
 
+    // ── the mechanism behind #216, pinned deterministically ──
+
+    /// <summary>
+    /// A sidecar that is <b>working and merely slow</b> reads as exactly the same null as a
+    /// sidecar that answered rubbish, once a per-request budget is imposed that it misses.
+    ///
+    /// <para>This is issue #216 reproduced on purpose rather than waited for. The failing run
+    /// was <c>LiveSidecarShape_YieldsAddressAndGamePort</c> returning null against a
+    /// <b>correct body from a listener in the same process</b>, one run in eight, because a
+    /// fixed 700ms budget expired while the host was busy elsewhere. Nothing about that is
+    /// specific to 700ms or to eight runs — any fixed budget on this path has a load at which
+    /// it does this — so the fix cannot be a larger budget, and this test is what says so.
+    /// A 50ms budget against a 300ms sidecar is the same fact at a speed that cannot
+    /// flake.</para>
+    ///
+    /// <para>Note what the SDK does <i>not</i> do, which is the reason the flake was
+    /// expensive: it does not distinguish. The address read returns null, the caller
+    /// advertises its configured address, and the only trace is a log line the suite used to
+    /// throw away.</para>
+    /// </summary>
+    [Fact]
+    public async Task ASidecarSlowerThanItsBudget_ReadsAsTheSameNullAsAnUnparsableOne()
+    {
+        var log = new CapturingLogger();
+        using var sidecar = new FakeStatusSidecar(
+            LiveBody, responseDelay: TimeSpan.FromMilliseconds(300));
+        using var sdk = new HttpAgonesSdk(
+            log, sidecar.BaseAddress, TimeSpan.FromMilliseconds(50));
+
+        var addr = await ReadAsync(sdk.GetAddressAsync(), log, "GetAddressAsync");
+
+        Assert.Null(addr);
+        Assert.True(log.Threw("TaskCanceledException"), log.Explain(
+            "a sidecar held past the per-request budget should have surfaced as a cancelled "
+            + "request; if it did not, this test is no longer reproducing #216's mechanism."));
+    }
+
+    /// <summary>
+    /// The same slow sidecar, with no budget imposed, parses. Which is the whole fix: the
+    /// tests in this class assert on a parsed address and never on how quickly it arrived, so
+    /// the budget was machinery that could only subtract.
+    /// </summary>
+    [Fact]
+    public async Task TheSameSlowSidecar_ParsesWhenNoBudgetIsImposed()
+    {
+        var log = new CapturingLogger();
+        using var sidecar = new FakeStatusSidecar(
+            LiveBody, responseDelay: TimeSpan.FromMilliseconds(300));
+        using var sdk = new HttpAgonesSdk(log, sidecar.BaseAddress, NoDeadline);
+
+        var addr = await ReadAsync(sdk.GetAddressAsync(), log, "GetAddressAsync");
+
+        Assert.True(addr != null, log.Explain(
+            "a slow but correct sidecar must still parse when nothing is timing it."));
+        Assert.Equal("192.168.65.3:7691", addr!.ToString());
+    }
+
     /// <summary>
     /// A fake sidecar that answers <c>GET /gameserver</c> with a fixed body and status, and
     /// records what it was asked.
@@ -289,15 +475,23 @@ public class HttpAgonesSdkAddressTests
         private readonly CancellationTokenSource _cts = new();
         private readonly string _body;
         private readonly int _statusCode;
+        private readonly TimeSpan _responseDelay;
 
         public readonly ConcurrentQueue<RecordedRequest> Requests = new();
 
         public string BaseAddress { get; }
 
-        public FakeStatusSidecar(string body, int statusCode = 200)
+        /// <param name="body">What <c>GET /gameserver</c> answers with.</param>
+        /// <param name="statusCode">Status to answer with.</param>
+        /// <param name="responseDelay">
+        /// Held before answering. Used only by the two tests that pin what a per-request
+        /// budget does to a sidecar that is working but slow — the mechanism behind #216.
+        /// </param>
+        public FakeStatusSidecar(string body, int statusCode = 200, TimeSpan responseDelay = default)
         {
             _body = body;
             _statusCode = statusCode;
+            _responseDelay = responseDelay;
 
             // HttpListener prefixes need a literal port and it cannot report an ephemeral
             // bind, so a lease is the right tool here (see TestPorts). The lease-to-bind
@@ -330,6 +524,11 @@ public class HttpAgonesSdkAddressTests
                 {
                     Requests.Enqueue(new RecordedRequest(
                         ctx.Request.Url?.AbsolutePath ?? "", ctx.Request.HttpMethod));
+
+                    if (_responseDelay > TimeSpan.Zero)
+                    {
+                        await Task.Delay(_responseDelay, _cts.Token);
+                    }
 
                     ctx.Response.StatusCode = _statusCode;
                     ctx.Response.ContentType = "application/json";

@@ -53,7 +53,7 @@ to reach the gateway: the two are configured independently.
 | 3 | `MsgEnterWorld` | live session | Least-loaded live server for `MapID` with `PlayerCount < Capacity`; a map with **no** live server may be allocated (waited for), a map whose servers are all full is refused → 30s join token (`sid` claim = server id), minted last → `MsgEnterWorldResp` |
 | 9 | `MsgDisconnect` | live session | Destroy the session record, half-close the socket |
 | 11 | `MsgPing` | **none — handled before the session check** | Reply `MsgPong{Timestamp echoed, ServerTime}` |
-| 12 | `MsgPong` | **none — handled before the session check** | Refresh the connection's liveness timer |
+| 12 | `MsgPong` | **none — handled before the session check** | Refresh the connection's liveness timer; on an authenticated connection also re-arm the session TTL (at most once per minute, store errors fail open) |
 | other | — | live session | Logged and ignored |
 
 **Heartbeat frames bypass session enforcement on purpose.** They are dispatched
@@ -61,6 +61,16 @@ in `handleMessage` *before* `checkSession`: a `MsgPong` that keeps the connectio
 alive must not be rejected because a Redis blip made the session lookup fail, and
 a ping carries no session semantics at all. They are still subject to the inbound
 frame limiter, which runs first.
+
+**Heartbeats are session activity** (#231). A `MsgPong` on an authenticated
+connection re-arms the session TTL (`refreshSessionOnPong`), so a client that
+keeps the gateway socket open sending only heartbeats — the recommended shape —
+never has its session expire under the live connection. The refresh is bounded
+to once per `sessionRefreshInterval` (**1 min**) per connection so a 10 s
+heartbeat cadence does not translate into a store write per pong, and a store
+error fails open exactly like `checkSession`: the refresh is skipped, the
+connection is untouched, and nothing is sent — a pong never draws a reply. An
+unauthenticated pong refreshes nothing.
 
 The gateway pings on its own initiative every **10 s** (`pingInterval`) and closes
 any connection that has not produced a `MsgPong` within **30 s** (`pongTimeout`).
@@ -155,7 +165,7 @@ classified below is reported as `internal error` and logged server-side.
 | `invalid enter world request` | `MsgEnterWorld` payload did not decode |
 | `no server available for map` | the map's live server(s) are full, or the map has no server and allocation failed for a reason other than an exhausted fleet. **Do not retry** — retrying cannot create capacity, and ADR-2 forbids adding a second server to a full map |
 | `all servers busy, retry shortly` | the map has no live server and the allocation API answered `UnAllocated`: every GameServer in the fleet is taken and none is `Ready` at this instant (`registry.ErrNoCapacity`). **Retryable** — retry after a few seconds. Distinct from `no server available for map`: nothing here is full, the fleet is momentarily empty and the Fleet controller is already bringing a replacement to `Ready` (5.38s measured on k3d, ADR-18) |
-| `server is starting, retry shortly` | a game server **was** allocated for this map but had not registered itself when the wait window expired. **Retryable** — retry after a few seconds. Distinct from `all servers busy, retry shortly`, where no server was allocated at all |
+| `server is starting, retry shortly` | an allocation is (or was) under way for this map but no address exists yet: the allocated pod had not registered itself when the wait window expired, or the handler's own `server.EnterWorldBudget` (18s) ran out while the allocation was still in flight — the allocation keeps running detached either way. **Retryable** — retry after a few seconds. Distinct from `all servers busy, retry shortly`, where no server was allocated at all |
 | `map is not available` | no fleet or server in this deployment hosts the requested `map_id`: the pod that answered the allocation serves a different map (its fleet's `GAMESERVER_MAP_ID`), or the registry index returned a server for another map. **Terminal — do not retry**: retrying cannot change which map a fleet serves, and every retry costs a GameServer Agones never un-allocates. Distinct from `no server available for map`, which means the map exists but is full |
 | `not implemented` | the requested transfer mode is unimplemented (e.g. dungeon) |
 | `internal error` | anything else — store failure, allocator failure, token signing failure |
@@ -351,6 +361,21 @@ the gateway disconnecting the client it is waiting for. The ceiling is
 gateway **refuses to start** with a larger `--allocation-wait-timeout`, and the
 15s default sits below it with a margin.
 
+**One deadline covers the whole path, because the legs stack.** Bounding each
+leg is not enough: a cold-map join can chain the registry lookup's retry window
+(`registry.RetryTotalTimeout`, 10s) + the allocation HTTP call
+(`registry.DefaultTimeout`, 10s) + the registration wait (15s) ≈ **35s** — well
+past the 20s heartbeat window even though every leg is individually legal
+(issue #235). `handleEnterWorld` therefore runs the entire assignment under one
+deadline, `server.EnterWorldBudget` = `MaxHandlerBlockingWait − 2s` = **18s**
+(the 2s slice is reserved for the session write-back and response flush). When
+the budget expires the client gets the retryable
+`server is starting, retry shortly` and the connection stays up — while the
+single-flight allocation leader keeps running **detached** to completion, so
+the client's retry resolves the freshly registered server from the registry
+without allocating again. A guard test pins the stacked worst case against the
+same constants.
+
 The already-registered path is unaffected: no allocation, no polling, no added
 latency.
 
@@ -392,7 +417,9 @@ start-up. For the two wait knobs a non-positive env value is also ignored; for
 | `registry.WithAllocationWait(timeout, interval)` | `gateway/registry` | Bounds the wait for an allocated server's own registry entry |
 | `registry.ErrKindNotConfigured` | `gateway/registry` | Sentinel: no Fleet configured for the requested allocation kind (the default state of `KindDungeon`) |
 | `server.MaxHandlerBlockingWait` | `gateway/server` | `pongTimeout - pingInterval`: the longest a handler may block the read loop before starving the heartbeat |
-| `registry.ErrServerStarting` | `gateway/registry` | Retryable sentinel: allocated server never registered inside the wait window |
+| `server.EnterWorldBudget` | `gateway/server` | `MaxHandlerBlockingWait - 2s`: the single deadline over the whole `MsgEnterWorld` assignment path, so its stacked legs (lookup retries + allocation call + registration wait ≈ 35s worst case) cannot outlive the heartbeat window (issue #235) |
+| `registry.RetryTotalTimeout` | `gateway/registry` | Total cap on transient-error retry loops (lookup/get); exported so the guard test derives the stacked enter_world worst case from the constants the code runs on |
+| `registry.ErrServerStarting` | `gateway/registry` | Retryable sentinel: allocated server never registered inside the wait window, or the caller's context ended while the single-flight allocation was still running detached |
 | `registry.NewAgonesAllocator(AgonesConfig) (*AgonesAllocator, error)` | `gateway/registry` | Allocator backed by the Agones `GameServerAllocation` API |
 | `registry.AllocationRequest` / `KindAllocator` | `gateway/registry` | Kind-aware allocation (`KindMap`, `KindDungeon`) |
 | `registry.ErrNoCapacity` | `gateway/registry` | Sentinel for `state: UnAllocated` (fleet exhausted). Matchable through `allocateAndWait`'s two-verb `%w` wrap, which is what lets the gateway answer `all servers busy, retry shortly` instead of the terminal message |

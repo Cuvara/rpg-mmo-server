@@ -241,35 +241,44 @@ or when** — the invariant `MovementSystem` is written around.
    stops a client travelling further by spamming.
 
 2. **A held direction keeps integrating between packets.** The newest accepted direction is
-   re-integrated on every simulation tick until a new input arrives or it expires one world
-   interval later (66 ms at the default 60/15 configuration). Without it, a client sending
-   at 15 Hz to a 60 Hz server would move at a quarter speed, because speed would become a
-   function of send rate. An input inside the deadzone — the stick released — clears the
-   hold immediately rather than refreshing it, so an explicit stop is instant.
+   re-integrated on every simulation tick until a new input arrives or it expires. Without
+   it, a client sending at 15 Hz to a 60 Hz server would move at a quarter speed, because
+   speed would become a function of send rate. An input inside the deadzone — the stick
+   released — clears the hold immediately rather than refreshing it, so an explicit stop is
+   instant. This applies at every rate configuration, single-rate included.
 
-3. **A step covers the time since that entity last moved, not one fixed tick.** `dt` is
-   `min(now − last_move_tick, cap) / tick_rate`, where the cap is
-   `GameConstants.MaxBankedMovementMs` (**250 ms**). This is what makes rule 1 safe: when
-   four packets clump into one tick — TCP batching, a client GC pause, a mobile radio
-   waking — the three that coalescing discards no longer take their simulated time with
-   them. It does not weaken rule 1, because a client sending every tick always has
-   `last_move_tick == now − 1` and so earns exactly one tick of movement per tick.
+3. **Every step is exactly one tick. No step ever covers more.** This is the invariant the
+   model rests on, and it is what makes prediction work: over any interval both sides take
+   one step per tick, so both travel `speed × ticks` and the two distances are equal *by
+   construction* rather than by two independent measurements of elapsed time agreeing.
+   Network jitter shifts *when* a step happens; it cannot change *how many* there are,
+   which is what reconciliation is built to absorb.
 
-   **Only a moving entity accrues that time.** A deadzone input clears the hold, and an
+   Time lost to rule 1 — four packets clumping into one tick under TCP batching, a client
+   GC pause, a mobile radio waking — is recovered by rule 2 stepping on each tick of the
+   gap, not by any step growing.
+
+   **A previous version of this document specified the opposite** (`dt =
+   min(now − last_move_tick, cap) / tick_rate`) and it is gone. Banking the elapsed time
+   into one step restored the right distance and broke everything else about it: measured
+   against a live server it produced a 1.36-unit step where a normal one is 0.083 — read by
+   a player as the avatar jumping — and a correctly predicting client was snapped back by
+   it, because the client never took that step itself. **A client must not implement it.**
+
+4. **A held direction expires 250 ms after the last packet that refreshed it**
+   (`GameConstants.MaxBankedMovementMs`; the name is historical — the budget now bounds the
+   length of the coast rather than the size of a step). Past that the player stops. This is
+   a *silence* timeout, not a guess about the client's send rate: a fixed window sized to
+   the nominal packet spacing left no slack at all, and a 15 Hz client whose packets were
+   measured arriving 4.19 base ticks apart against a 4-tick window stalled for the
+   remainder of most intervals.
+
+   **Only lost packets are coasted through.** A deadzone input clears the hold, and an
    entity with no held direction is *stopped*, not stalled — so a player who releases the
-   stick, waits, and presses again is owed nothing for the pause. This matters more than it
-   sounds: stopping and starting is the most common thing a player does, and repaying those
-   pauses put a quarter-second of travel into a single frame every time, which reads as
-   constant jerkiness rather than as an occasional glitch.
-
-   **A client that stops sending without a deadzone is a different case** and is still
-   repaid in one step, bounded by the cap. Sending an explicit zero vector on release is
-   therefore not optional politeness — it is how a client tells the server the difference
-   between "I stopped" and "my packets stopped", and the server cannot infer it.
-
-**The cap is part of the model, not a server-side safety valve.** A client that banks
-unbounded time reconciles against a server that does not, on precisely the frames where the
-network was worst — so a predicting client must apply the same 250 ms bound.
+   stick, waits, and presses again does not drift. Sending an explicit zero vector on
+   release is therefore not optional politeness: it is how a client tells the server the
+   difference between "I stopped" and "my packets stopped", and the server cannot infer
+   it.
 
 Together these mean a client sending at *any* rate, evenly or in bursts, covers the same
 ground per second. Verified over a real socket in
@@ -811,8 +820,10 @@ Three consequences the client must be built around:
   (`gateway/server/server.go`, `checkSession`). **Keeping the gateway connection
   open for the session's lifetime avoids a re-auth round trip on every
   transfer** and is the recommended shape. The Redis session (`session:<user>`,
-  1 h TTL, `shared/constants/ttl.go`) is refreshed by activity, so a live
-  gateway connection stays valid.
+  1 h TTL, `shared/constants/ttl.go`) is refreshed by activity — including the
+  heartbeat `MsgPong`s a parked connection sends
+  (`gateway/server/server.go`, `refreshSessionOnPong`, #231) — so a live
+  gateway connection stays valid no matter how long the player sits on one map.
 
 ### The old entity is reaped immediately — no hold
 

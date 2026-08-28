@@ -61,6 +61,44 @@ public class TransferMapTests
         Assert.Equal(0, metrics.PlayersOnline);
     }
 
+    /// <summary>
+    /// The #230 regression, made visible with a second player. The transfer handler does
+    /// its own teardown (entity out, PlayerLeft, connection closed) — and then the
+    /// connection handler's finally used to run the full disconnect teardown again: a
+    /// second PlayerLeft and a 30s hold for an entity no longer in the world. With one
+    /// player the gauge clamps at zero and the double decrement is invisible; with two,
+    /// the survivor's count is what gets eaten.
+    /// </summary>
+    [Fact]
+    public async Task TransferMap_DecrementsTheGaugeOnce_AndSchedulesNoHold()
+    {
+        using var metrics = new GameMetrics("map_transfer", $"test.{Guid.NewGuid():N}");
+        await using var h = await Harness.StartAsync(metrics);
+
+        using var stayer = await h.JoinAsync("user-stayer");
+        using var mover = await h.JoinAsync("user-mover");
+        Assert.Equal(2, metrics.PlayersOnline);
+
+        var stream = mover.GetStream();
+        var transferReq = WireProtocol.NewEnvelope(
+            MsgType.TransferMap,
+            new TransferMapRequest { MapId = "map_02" },
+            WireEncoding.Json);
+        await stream.WriteAsync(WireProtocol.Encode(transferReq));
+        await stream.FlushAsync();
+
+        var env = await ReadUntilAsync(stream, MsgType.TransferMapResp);
+        Assert.True(WireProtocol.GetPayload<TransferMapResponse>(env).Ok);
+
+        // The mover's entity leaves; the stayer's count must survive. Under the bug the
+        // finally ran a second PlayerLeft, so the gauge read 0 here — the stayer erased.
+        await h.WaitForAsync(() => h.Server.EntityCount == 1 && metrics.PlayersOnline == 1);
+
+        // And no phantom hold: the transfer is an intentional departure, not a
+        // disconnect. The bug parked a 30s hold for the already-removed entity.
+        Assert.Equal(0, h.Server.PendingHolds);
+    }
+
     /// <summary>Transfer to the same map is rejected.</summary>
     [Fact]
     public async Task TransferMap_SameMap_ReturnsError()

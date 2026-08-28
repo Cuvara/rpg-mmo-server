@@ -20,9 +20,11 @@ const (
 	// retryInitialDelay is the backoff seed: 1s -> 2s -> 4s.
 	retryInitialDelay = 1 * time.Second
 
-	// retryTotalTimeout caps the total time spent retrying so a slow Redis does
-	// not hold a client connection open indefinitely.
-	retryTotalTimeout = 10 * time.Second
+	// RetryTotalTimeout caps the total time spent retrying so a slow Redis does
+	// not hold a client connection open indefinitely. Exported so the gateway's
+	// guard test can derive the worst-case stacked enter_world budget from the
+	// same constants the code runs on (issue #235).
+	RetryTotalTimeout = 10 * time.Second
 
 	// DefaultAllocationWaitTimeout bounds how long FindServer waits for a
 	// freshly allocated game server to publish its own registry entry.
@@ -31,7 +33,7 @@ const (
 	// bind its port, report Ready to the SDK sidecar, learn its own address and
 	// self-register into the registry before a client can reach it. That cold
 	// start is not measured yet, so the default is deliberately generous —
-	// larger than registry.retryTotalTimeout (10s, a Redis blip) because a pod
+	// larger than registry.RetryTotalTimeout (10s, a Redis blip) because a pod
 	// start is a much heavier event — while staying below
 	// constants.JoinTokenTTL (30s) so the wait can never be longer than the
 	// life of the token minted after it.
@@ -81,6 +83,11 @@ type RegistryService struct {
 	// log is nil unless WithLogger was passed; every use must be nil-checked.
 	log logger
 
+	// watcher is nil unless WithWatcher was passed; every use must be
+	// nil-checked. When set, every server this service registers or hands to a
+	// client is tracked for liveness, and a deregistered one is untracked.
+	watcher *RegistryWatcher
+
 	// allocWaitTimeout / allocPollInterval bound the wait for a freshly
 	// allocated server's own registry entry. Zero means the default.
 	allocWaitTimeout  time.Duration
@@ -124,6 +131,14 @@ func WithMetrics(m *metrics.Metrics) Option {
 // more than one live game server (see the split-brain check in FindServer).
 func WithLogger(l logger) Option {
 	return func(s *RegistryService) { s.log = l }
+}
+
+// WithWatcher attaches a RegistryWatcher so the service keeps the watcher's
+// tracked set in sync with what the gateway actually knows about: a server is
+// tracked when it is registered or handed to a client, and untracked when it is
+// deregistered. Without this the watcher polls an empty set and never fires.
+func WithWatcher(w *RegistryWatcher) Option {
+	return func(s *RegistryService) { s.watcher = w }
 }
 
 // NewRegistryService creates a RegistryService backed by the given registry.
@@ -177,9 +192,11 @@ func newRegistryService(s *RegistryService, opts []Option) *RegistryService {
 // string comparison.
 var ErrNoServerAvailable = errors.New("no available server for map")
 
-// ErrServerStarting means a game server was allocated for the map but did not
-// publish its own registry entry inside the allocation wait window, so there is
-// no address a client could be sent to yet.
+// ErrServerStarting means an allocation is (or was) under way for the map but
+// there is no address a client could be sent to yet. Two paths produce it: the
+// allocated server did not publish its own registry entry inside the allocation
+// wait window, or the caller's own context ended (handler budget, disconnect)
+// while the single-flight allocation was still running detached.
 //
 // It is a *retryable* condition and deliberately distinct from
 // ErrNoServerAvailable: the map is not full or unserved, its server is booting.
@@ -226,7 +243,7 @@ func isRetriable(err error) bool {
 // findByMapIDWithRetry wraps FindByMapID with exponential backoff. Only
 // transient errors are retried; capacity / not-found errors return immediately.
 func (s *RegistryService) findByMapIDWithRetry(ctx context.Context, mapID string) ([]storage.ServerInfo, error) {
-	ctx, cancel := context.WithTimeout(ctx, retryTotalTimeout)
+	ctx, cancel := context.WithTimeout(ctx, RetryTotalTimeout)
 	defer cancel()
 
 	var lastErr error
@@ -269,7 +286,7 @@ func (s *RegistryService) findByMapIDWithRetry(ctx context.Context, mapID string
 // getServerWithRetry wraps GetServer with exponential backoff for transient
 // errors.
 func (s *RegistryService) getServerWithRetry(ctx context.Context, serverID string) (storage.ServerInfo, error) {
-	ctx, cancel := context.WithTimeout(ctx, retryTotalTimeout)
+	ctx, cancel := context.WithTimeout(ctx, RetryTotalTimeout)
 	defer cancel()
 
 	var lastErr error
@@ -309,9 +326,14 @@ func (s *RegistryService) getServerWithRetry(ctx context.Context, serverID strin
 	return storage.ServerInfo{}, fmt.Errorf("all %d retries exhausted: %w", retryMaxAttempts, lastErr)
 }
 
-// FindServer locates the least-loaded live server for mapID that still has
-// capacity (PlayerCount < Capacity). Ties break on ServerID so the choice is
-// deterministic.
+// FindServer locates a live server for mapID that still has capacity
+// (PlayerCount < Capacity).
+//
+// With exactly one live server for the map — the only state ADR-2 allows — the
+// rule is least-loaded with a ServerID tie-break, which degenerates to "that
+// server, if it has room". With more than one, selection switches to the lowest
+// ServerID and ignores PlayerCount entirely; see the selection block below for
+// why (#203).
 //
 // MVP invariant: a map is served by exactly ONE live game server (ADR-2). Two
 // instances of one map are two disconnected copies of the world: players on
@@ -350,6 +372,20 @@ func (s *RegistryService) getServerWithRetry(ctx context.Context, serverID strin
 // retrying client from burning one GameServer per attempt on a map the fleet
 // cannot serve.
 func (s *RegistryService) FindServer(ctx context.Context, mapID string) (storage.ServerInfo, error) {
+	info, err := s.findServer(ctx, mapID)
+	if err != nil {
+		return storage.ServerInfo{}, err
+	}
+	// Every server the gateway hands to a client is a server whose death the
+	// gateway must notice quickly: until it does, it keeps announcing an address
+	// that will not answer. In production game servers self-register straight
+	// into Redis, so this — not RegisterServer — is where the gateway learns a
+	// server exists, and therefore where the watcher's tracked set comes from.
+	s.trackServer(info)
+	return info, nil
+}
+
+func (s *RegistryService) findServer(ctx context.Context, mapID string) (storage.ServerInfo, error) {
 	servers, err := s.findByMapIDWithRetry(ctx, mapID)
 	if err != nil {
 		return storage.ServerInfo{}, fmt.Errorf("find servers: %w", err)
@@ -382,6 +418,27 @@ func (s *RegistryService) FindServer(ctx context.Context, mapID string) (storage
 			"map_id", mapID, "server_count", len(servers), "server_ids", ids)
 	}
 
+	// A map served by more than one live server is a violated invariant, not a
+	// bigger map (ADR-2), and how the gateway selects inside that state decides
+	// whether the state heals or entrenches.
+	//
+	// Least-loaded is the correct rule for capacity and the wrong rule for a
+	// fault: it steers every new joiner into whichever half is emptier, which is
+	// load-balancing across a split world. The two halves then converge on equal
+	// population, both stay occupied, and neither ever drains — the accidental
+	// split becomes a permanent one, with players who cannot see each other
+	// standing in the same place (#203).
+	//
+	// So when more than one server serves the map, PlayerCount is not a
+	// criterion at all: pick the lowest ServerID among those with spare
+	// capacity. Every caller — every gateway instance, every retry — then lands
+	// on the same half, so the other half drains as its players leave and the
+	// split converges out instead of widening. It is deliberately the rule that
+	// treats the split as a fault to escape rather than an arrangement to
+	// exploit. The multi-server case is still logged loudly above; this only
+	// stops the gateway from making it worse while an operator reacts.
+	multiServer := len(servers) > 1
+
 	var (
 		best  storage.ServerInfo
 		found bool
@@ -391,10 +448,16 @@ func (s *RegistryService) FindServer(ctx context.Context, mapID string) (storage
 			continue
 		}
 		switch {
-		case !found,
-			srv.PlayerCount < best.PlayerCount,
-			srv.PlayerCount == best.PlayerCount && srv.ServerID < best.ServerID:
+		case !found:
 			best, found = srv, true
+		case multiServer:
+			// Split world: deterministic, load-blind.
+			if srv.ServerID < best.ServerID {
+				best = srv
+			}
+		case srv.PlayerCount < best.PlayerCount,
+			srv.PlayerCount == best.PlayerCount && srv.ServerID < best.ServerID:
+			best = srv
 		}
 	}
 	if found {
@@ -523,9 +586,12 @@ func (s *RegistryService) allocateOnce(ctx context.Context, mapID string) (stora
 		case <-call.done:
 			return call.info, call.err
 		case <-ctx.Done():
-			// This caller gave up (client disconnected); the leader carries on
-			// for everyone else.
-			return storage.ServerInfo{}, fmt.Errorf("await allocation for map %s: %w", mapID, ctx.Err())
+			// This caller gave up — its handler budget expired or its client
+			// disconnected; the allocation carries on for everyone else. That
+			// makes ErrServerStarting the truthful answer: a server is on its
+			// way, ask again shortly.
+			return storage.ServerInfo{}, fmt.Errorf(
+				"%w: allocation for map %s still in flight: %w", ErrServerStarting, mapID, ctx.Err())
 		}
 	}
 	if s.allocInFlight == nil {
@@ -535,19 +601,38 @@ func (s *RegistryService) allocateOnce(ctx context.Context, mapID string) (stora
 	s.allocInFlight[mapID] = call
 	s.allocMu.Unlock()
 
-	// The leader's work is detached from its own caller's cancellation: the
-	// followers' outcome must not depend on which client happened to arrive
-	// first, and a leader that disconnects mid-allocation would otherwise abort
-	// an allocation the followers are still waiting on. The wait stays bounded
-	// by allocWaitTimeout, and the allocator call by its own timeout.
-	call.info, call.err = s.allocateAndWait(context.WithoutCancel(ctx), mapID)
+	// The leader's WORK is detached from its own caller's cancellation and
+	// deadline: the followers' outcome must not depend on which client happened
+	// to arrive first, and a leader whose client disconnects — or whose handler
+	// budget (server.EnterWorldBudget) expires — mid-allocation would otherwise
+	// abort an allocation the followers are still waiting on. The work stays
+	// bounded on its own terms: the allocator call by its own timeout, the
+	// registration wait by allocWaitTimeout.
+	//
+	// The leader's WAIT, by contrast, honours ctx exactly like a follower's:
+	// the work runs in its own goroutine and the leader selects on done vs
+	// ctx.Done. Before this split the leader blocked for the full detached
+	// call, so the very deadline the gateway put over its handler could not
+	// reach the one caller that stacks every timeout (issue #235).
+	detached := context.WithoutCancel(ctx)
+	go func() {
+		call.info, call.err = s.allocateAndWait(detached, mapID)
+		s.allocMu.Lock()
+		delete(s.allocInFlight, mapID)
+		s.allocMu.Unlock()
+		close(call.done)
+	}()
 
-	s.allocMu.Lock()
-	delete(s.allocInFlight, mapID)
-	s.allocMu.Unlock()
-	close(call.done)
-
-	return call.info, call.err
+	select {
+	case <-call.done:
+		return call.info, call.err
+	case <-ctx.Done():
+		// Same shape as the follower bail-out above: the allocation is still
+		// running detached and will publish its outcome, so the client-facing
+		// answer is the retryable one.
+		return storage.ServerInfo{}, fmt.Errorf(
+			"%w: allocation for map %s still in flight: %w", ErrServerStarting, mapID, ctx.Err())
+	}
 }
 
 // allocateAndWait requests one new instance for mapID and blocks until that
@@ -642,10 +727,50 @@ func (s *RegistryService) GetServer(ctx context.Context, serverID string) (stora
 
 // RegisterServer registers a game server in the registry.
 func (s *RegistryService) RegisterServer(ctx context.Context, info storage.ServerInfo) error {
-	return s.reg.Register(ctx, info)
+	if err := s.reg.Register(ctx, info); err != nil {
+		return err
+	}
+	s.trackServer(info)
+	return nil
 }
 
 // DeregisterServer removes a game server from the registry.
 func (s *RegistryService) DeregisterServer(ctx context.Context, serverID string) error {
-	return s.reg.Deregister(ctx, serverID)
+	if err := s.reg.Deregister(ctx, serverID); err != nil {
+		return err
+	}
+	// A graceful deregister is not a fault, so the watcher must forget the
+	// server rather than report it down on its next poll.
+	if s.watcher != nil {
+		s.watcher.UntrackServer(serverID)
+	}
+	return nil
+}
+
+// Evict removes a server the gateway has learned is dead (a consumed
+// server_down event) from the registry and from the watcher's tracked set, so
+// FindServer stops handing out its address immediately instead of waiting out
+// the registry TTL.
+//
+// It is idempotent: evicting a server that is already gone is a success, not an
+// error — the watcher that published the event has usually seen the entry
+// missing already, and several gateway instances consume the same event. It
+// deliberately does not deny-list the ServerID: a server that re-registers (or
+// resumes heartbeating) after an eviction is alive by definition and must
+// become assignable again through the normal Register/FindServer path.
+func (s *RegistryService) Evict(ctx context.Context, serverID string) error {
+	if s.watcher != nil {
+		s.watcher.UntrackServer(serverID)
+	}
+	if err := s.reg.Deregister(ctx, serverID); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		return fmt.Errorf("evict server %s: %w", serverID, err)
+	}
+	return nil
+}
+
+// trackServer adds a live server to the watcher's set, if one is attached.
+func (s *RegistryService) trackServer(info storage.ServerInfo) {
+	if s.watcher != nil && info.ServerID != "" {
+		s.watcher.TrackServer(info.ServerID, info.MapID)
+	}
 }

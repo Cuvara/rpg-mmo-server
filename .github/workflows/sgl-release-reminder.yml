@@ -52,6 +52,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Unity imports this package as an immutable UPM dependency, and a source file with
+  # no committed .meta is simply not imported — its types do not exist on the client.
+  # Nothing else in CI notices, because the .NET compiler does not read .meta files.
+  #
+  # 0.2.0 shipped Content/ with no .meta files and passed all thirteen checks. The
+  # client then failed with "the namespace name 'Content' does not exist in the
+  # namespace 'Shared.GameLogic'", and fixing it cost a new tag, because a published
+  # tag must not be moved out from under whoever already pinned it.
+  metas:
+    name: Shared.GameLogic files all have .meta
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Every Unity-visible file has a .meta
+        run: python3 .github/scripts/check_metas.py backend/gameserver-dotnet/Shared.GameLogic
+
   unreleased:
     name: Shared.GameLogic changes are covered by a version bump
     runs-on: ubuntu-latest
