@@ -203,7 +203,8 @@ public sealed class InputHandler
         int count = writer.QueryWith<PlayerTag>(_playerHandles);
         if (count > _playerHandles.Length)
         {
-            _playerHandles = new EntityHandle[count];
+            // Headroom: exact-size growth re-queries again at count+1 (#249).
+            _playerHandles = new EntityHandle[count + (count >> 2)];
             count = writer.QueryWith<PlayerTag>(_playerHandles);
         }
 
@@ -472,8 +473,16 @@ public sealed class InputHandler
                     if (CombatLogic.HandleDeath(ref t))
                     {
                         Attacks.Kills++;
-                        _logger.LogInformation("Entity {VictimId} killed by {KillerId}",
-                            t.Id, attacker.Id);
+                        // Debug, guarded: this fires per kill on the tick thread inside
+                        // the world write lock, and at Information the console sink
+                        // formats and writes synchronously — a wave of AoE kills wrote
+                        // N log lines while every network thread waited on the lock
+                        // (#249). Kill counts stay observable via /status attack_kills.
+                        if (_logger.IsEnabled(LogLevel.Debug))
+                        {
+                            _logger.LogDebug("Entity {VictimId} killed by {KillerId}",
+                                t.Id, attacker.Id);
+                        }
                         _onDeath?.Invoke(t, attacker);
                     }
 
