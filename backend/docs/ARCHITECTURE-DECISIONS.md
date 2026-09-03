@@ -34,7 +34,7 @@ Four stores are in play. Interfaces live in `backend/shared/storage/interfaces.g
 | `player_states` (position, HP, map) | Game-state PostgreSQL (`postgres-game` service) | **gameserver-dotnet only** | `GameServer/Persistence/AsyncSaver.cs:88-111` → `PostgresPlayerStore.cs:145-168`; schema `pgstore/schema.sql:12-23` |
 | `session:{user_id}` | Redis (TTL 1h) | **gateway only** | `gateway/session/manager.go:34-40,55-60,62-68` |
 | `servers:id:{id}`, `servers:map:{map}` | Redis (TTL 15s) | **gameserver-dotnet** (self-registration + heartbeat); the gateway also registers Agones-allocated servers | `GameServer/Registry/RedisServerRegistry.cs`, `GameServer/Registry/RegistrationService.cs`; `gateway/registry/registry.go:85,106,111-112` |
-| `events:game` | Redis Streams | nothing live (see ADR-5) | `gateway/events/relay.go:16` subscribes; no live publisher |
+| `events:game` | Redis Streams | **gameserver-dotnet** (`GameServer/Events/RedisEventStream.cs`, when `REDIS_ADDR` is set — see ADR-5) | `gateway/events/relay.go:16` subscribes; no live publisher |
 | Live world (entities, mobs, pending input) | C# process memory | gameserver-dotnet | `GameServer/World/GameWorld.cs:22-27` |
 
 Three findings the criticism is right about:
@@ -404,14 +404,25 @@ The gateway's relay is real and wired, contradicting CORE_FLOW.md:158-159 which
 calls it an unimplemented stub: `events.NewRelay(...)` at
 `gateway/cmd/gateway/main.go:159-160`, passed in via `server.WithEventRelay`.
 
-**But the pipeline is not connected end to end.** The C# game server generates a
-real `entity_killed` event (`GameServer/Server/GameServer.cs:367-376`) and
-publishes it into `NoopEventStream`, which discards it — because
-`Program.cs:111` unconditionally supplies the noop, and no Redis-backed
-`IEventStream` exists in C# at all (the project has no Redis dependency). On the
-other end, the gateway's sink only logs and counts; it does not fan out to clients,
-because `shared/messages` has no client-facing `MsgEvent` type
-(`gateway/server/server.go:91-106`). So both halves are built and neither is joined.
+**The producer half is now connected** (2026-09-03). At the time this ADR was
+written the C# game server generated a real `entity_killed` event
+(`GameServer/Server/GameServer.cs:367-376`) and published it into
+`NoopEventStream`, which discarded it — `Program.cs` unconditionally supplied the
+noop, and no Redis-backed `IEventStream` existed in C# at all (the project then
+had no Redis dependency; ADR-1's self-registration work later added
+StackExchange.Redis). That gap is closed: `GameServer/Events/RedisEventStream.cs`
+publishes to `events:game` whenever `REDIS_ADDR` is configured — the same selector
+as the registry — with the Go publisher's exact contract (`XADD`, fields
+`type`/`payload`, `MAXLEN ~ 30000`) and a bounded drop-oldest queue so a Redis
+outage can never stall or grow inside the tick path (loss is counted:
+`gameserver_events_dropped_total` / `gameserver_events_publish_failures_total`,
+see `gameserver-dotnet/docs/METRICS.md`). The same change fixed the logical stream
+name: the C# publisher used the literal `"game_events"`, which would have XADDed
+into `events:game_events` — a key nothing reads — instead of `events:game`
+(`constants.GameEventStream`); it was harmless only while the sink was the noop.
+**The consumer half is still not joined to clients**: the gateway's sink only logs
+and counts; it does not fan out, because `shared/messages` has no client-facing
+`MsgEvent` type (`gateway/server/server.go:91-106`).
 
 ### Decision
 
@@ -436,16 +447,19 @@ this rule correctly; it is now consistent everywhere else.
   delivery, so a crash between handling and ACK replays the event.
 - Consumer groups need a naming convention and pending-entry monitoring; a
   consumer that dies mid-handle leaves entries in the PEL until claimed.
-- Today no event crosses a process boundary, so none of the cross-server features
-  that depend on it (world announcements, cross-map loot notifications) work,
-  regardless of what the diagrams show.
+- ~~Today no event crosses a process boundary~~ (closed 2026-09-03:
+  `entity_killed` now crosses game server → Redis → gateway relay when
+  `REDIS_ADDR` is set). The cross-server features that depend on events reaching
+  *clients* (world announcements, cross-map loot notifications) still do not work
+  — the relay's sink logs and counts, and no `MsgEvent` exists on the wire.
 
 ### Follow-up work
 
-- **M** — Add a Redis `IEventStream` to the C# server so `entity_killed` actually
+- ~~**M** — Add a Redis `IEventStream` to the C# server so `entity_killed` actually
   publishes. Requires taking a Redis dependency in a project that currently has
   none — coordinate with the ADR-1 self-registration work, which needs the same
-  client.
+  client.~~ **Done** (2026-09-03): `RedisEventStream` over the StackExchange.Redis
+  dependency ADR-1 introduced, selected by `REDIS_ADDR` like the registry.
 - **M** — Add `MsgEvent` to `shared/messages` and turn the gateway's log-only sink
   into a real client fan-out with interest filtering.
 - **S** — Document the consumer-group naming convention and add a Prometheus alert

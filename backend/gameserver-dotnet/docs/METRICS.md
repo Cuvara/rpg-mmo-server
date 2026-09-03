@@ -53,6 +53,9 @@ human inspection and for the Unity DOTS sample, which polls it.
   "attack_kills": 61,
   "last_attack_rejection": "target out of range",
   "redis": "connected",
+  "event_stream": "redis",
+  "events_dropped": 0,
+  "event_publish_failures": 0,
   "postgres": "connected",
   "uptime_seconds": 12105
 }
@@ -76,6 +79,8 @@ so it reported the compiled-in default of 15 on servers whose prediction rate wa
 | `capacity` | The admission limit (`GAMESERVER_CAPACITY`) this server enforces and publishes into the registry |
 | `attacks_received` / `attacks_unresolved` / `attacks_rejected` / `attacks_accepted` / `attack_kills` | Attack-path counters since process start. Every input carrying an attack target lands in exactly one of *unresolved* (target id no longer resolves — despawned or bogus), *rejected* (refused by `CombatLogic.ValidateAttack`: range, cooldown, dead attacker or target), or *accepted* (dealt damage); `attack_kills` counts accepted attacks that killed. These exist because a rejected attack is dropped with a Debug-level log on servers running at Information — without the counters, a client attacking out of range is indistinguishable from a client not attacking at all, which is precisely the ambiguity that stalled a live zero-kills investigation |
 | `last_attack_rejection` | Verbatim reason of the most recent rejection (e.g. `target out of range` — an interned constant since #249; the measured distance moved to the Debug-guarded rejection log), `null` until something is rejected. One string, most-recent-wins — a breadcrumb naming *why* attacks are being refused, not a log |
+| `event_stream` | Which `IEventStream` backs cross-server events: `redis` (publishing into `events:game`, the stream the gateway relay consumes — ADR-5) or `noop` (`REDIS_ADDR` unset, or the connection could not be built at startup — events are discarded) |
+| `events_dropped` / `event_publish_failures` | Loss counters of the Redis event stream, since process start — the same values as `gameserver_events_dropped_total` / `gameserver_events_publish_failures_total` above. Always `0` under `"event_stream": "noop"` |
 | `uptime_seconds` | Seconds since process start on a **monotonic** clock (`Stopwatch`), not wall time — see below |
 
 ### Do not compute a rate — read `achieved_tick_hz`
@@ -136,7 +141,9 @@ The same value is exported as the Prometheus gauge `gameserver_achieved_tick_hz`
 | `gameserver_entities` | gauge | — | Entities in the world |
 | `gameserver_snapshots_sent_total` | counter | `map_id` | Snapshot messages sent |
 | `gameserver_player_saves_total` | counter | `status=ok\|error` | Persistence results from the async saver |
-| `gameserver_events_published_total` | counter | `type` | Cross-server events published |
+| `gameserver_events_published_total` | counter | `type` | Cross-server events handed to the event stream by `EventPublisher`. With the Redis backend this counts hand-offs into the publish queue, not confirmed `XADD`s — subtract the two counters below for what actually reached the stream |
+| `gameserver_events_dropped_total` | counter | — | Events dropped **oldest-first** because the Redis event stream's bounded publish queue (4096) was full — i.e. Redis was unreachable long enough to fill it — or the event was offered after shutdown. Zero forever on a healthy server; any non-zero rate means the gateway relay is missing events |
+| `gameserver_events_publish_failures_total` | counter | — | Events dropped after exhausting the `XADD` retry budget (3 attempts with short backoff). Distinct from `dropped`: these reached the head of the queue and still could not be written. Sustained increments alongside a flat `dropped` means Redis is up but refusing writes (e.g. OOM under `noeviction`) |
 | `gameserver_resyncs_total` | counter | `map_id` | Keyframes **requested by a client** — see below |
 
 Useful queries:

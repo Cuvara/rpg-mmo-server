@@ -226,11 +226,14 @@ is **fatal at startup** (`Program.cs:293-298`), it never degrades to memory.
 `--migrate-only` applies migrations and exits (`Program.cs:179`).
 
 **Cross-server events**: `OnEntityDeath` builds a `DeathPayload` and publishes to
-`IEventStream` — which is **always `NoopEventStream`** (`Program.cs:379`). The
-gateway's relay consumes `events:game` via Redis Streams consumer group + ACK
-(`gateway/events/relay.go`) but nothing feeds it, and even if it did the relay can
-only log/count: `shared/messages` has no client-facing `MsgEvent`
-(`server.go:267`). ADR-5.
+`IEventStream` — **`RedisEventStream` when `REDIS_ADDR` is set** (XADD into
+`events:game`, fields `type`/`payload`, `MAXLEN ~ 30000` — the Go publisher's
+contract; bounded drop-oldest queue + background drain so a Redis outage never
+touches the tick path), `NoopEventStream` otherwise
+(`GameServer/Events/RedisEventStream.cs`, wired in `Program.cs`). The gateway's
+relay consumes `events:game` via Redis Streams consumer group + ACK
+(`gateway/events/relay.go`), but the relay can still only log/count:
+`shared/messages` has no client-facing `MsgEvent` (`server.go:267`). ADR-5.
 
 **Nakama rewards**: on a player killing a mob, fire-and-forget
 `RewardKillAsync` + `SubmitKillAsync` over Nakama's HTTP API with
@@ -350,7 +353,7 @@ close Redis stream + client.
 | Postgres (game), boot | **Fatal** — refuses to start rather than silently using memory |
 | Nakama | Gateway has **no runtime dependency** on it (JWT verified locally). Game server reward calls are fire-and-forget |
 | Game server crash | Registry entry expires in ≤15s; nothing replaces it (no orchestration in the deploy path) |
-| Event stream | Nothing published (Noop); relay consumes an empty stream |
+| Event stream | Game server publishes fire-and-forget with a bounded drop-oldest queue: Redis down = events dropped and counted (`events_dropped` / `event_publish_failures` on `/status`), gameplay untouched. `REDIS_ADDR` unset = Noop, relay consumes an empty stream |
 
 ---
 
@@ -473,7 +476,7 @@ Unity client
   │           FindServer(map) → cap-checked; least-loaded if one server,   │ servers:{map}
   │           lowest ServerID if a map has several (#203)                  │
   │           mint join token (JOIN_TOKEN_SECRET, 30s, sid, jti)           │ session:{uid}
-  │◄─── MsgEnterWorldResp{ServerAddr, JoinToken, Transport}                │ events:game (unfed)
+  │◄─── MsgEnterWorldResp{ServerAddr, JoinToken, Transport}                │ events:game
   │                                                                        │
   │ 5. TCP/KCP :9000  MsgJoinToken{token}    ┌────────────────────┐        │
   ├─────────────────────────────────────────►│  Game server (C#)  │────────┘ self-register

@@ -100,7 +100,7 @@ merge algorithm: **`backend/gameserver-dotnet/docs/API.md`**.
 | Encoding | **Protobuf + entity-type enum + entity-id interning** (`shared/proto/wire.proto`, one schema -> Go + C#), **81% smaller than the original JSON**; legacy JSON still accepted and distinguished by the first body byte - ADR-9 | Protobuf only, once no pre-Protobuf client remains |
 | Player store | In-memory default; **PostgreSQL implemented** (C# `PostgresPlayerStore`, set `GAME_DB_URL`) | PostgreSQL everywhere |
 | Session/Registry stores | In-memory default; **Redis implemented** (gateway `--backend=redis`) | Redis everywhere |
-| Event stream | Go channels default; **Redis Streams implemented** (consumer group + ACK). C# side still publishes into a noop — ADR-5 | Redis Streams end to end |
+| Event stream | Go channels default; **Redis Streams implemented** (consumer group + ACK). C# side publishes into `events:game` when `REDIS_ADDR` is set, noop otherwise — ADR-5 | Redis Streams end to end |
 | AOI | Brute-force | **Still brute-force.** A uniform spatial grid was built, proved correct against it, and measured **2.8x slower** at realistic density — the scan's cost is composing matches, not the distance tests. See `backend/docs/BENCHMARK.md` Part V before proposing it again |
 | Orchestration | Manual | Agones on k3s (SDK already integrated in gameserver) |
 | GameServer language | C# .NET 10 | C# .NET 10 with NativeAOT — shared game logic with Unity client via `Shared.GameLogic` |
