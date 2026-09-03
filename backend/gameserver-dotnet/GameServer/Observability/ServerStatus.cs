@@ -136,8 +136,9 @@ public sealed class ServerStatus
 
     /// <summary>
     /// Verbatim reason of the most recent rejection, or null if nothing has been rejected.
-    /// One string, most-recent-wins: this is a diagnostic breadcrumb ("target out of range:
-    /// distance 7.41 exceeds 3.00"), not a log.
+    /// One string, most-recent-wins: this is a diagnostic breadcrumb ("target out of
+    /// range" — an interned constant since #249; the measured distance lives in the
+    /// Debug-guarded rejection log), not a log.
     /// </summary>
     [JsonPropertyName("last_attack_rejection")]
     public string? LastAttackRejection { get; set; }

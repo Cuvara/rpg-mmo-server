@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **The out-of-range attack rejection is now the named constant
+  `CombatLogic.OutOfRangeRejection`, and the measured distance is logged again —
+  behind the Debug guard** (#249 follow-up — `Shared.GameLogic` 0.3.1, tag
+  `sgl-v0.3.1`). #249 part 1 replaced the interpolated message (a `MathF.Sqrt`,
+  two float formats and a string allocation per rejection on the tick thread
+  inside the world write lock — and out-of-range is the *normal* answer to an
+  auto-attacking client closing distance) with a plain literal, which dropped the
+  distance detail entirely. This change names the constant as the contract and
+  restores the distance in `InputHandler`'s Debug-guarded rejection log, computed
+  only when the guard passes (recognised via `ReferenceEquals` with the
+  constant). `/status last_attack_rejection` reads `target out of range` with no
+  numbers. Golden vectors on both repos assert only that prefix, so no fixture
+  changed.
+
 ### Fixed
 
 - **The write task can no longer claim an AOI buffer while the tick thread is

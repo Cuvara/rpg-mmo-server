@@ -57,8 +57,10 @@ public sealed class InputHandler
 
         /// <summary>
         /// The reason string of the most recent rejection, verbatim from
-        /// <see cref="CombatLogic.ValidateAttack"/>. The validator already allocated it to
-        /// return it, so keeping the reference costs nothing on the hot path.
+        /// <see cref="CombatLogic.ValidateAttack"/>. Every reason the validator returns
+        /// is an interned constant (#249), so keeping the reference allocates nothing —
+        /// the old formatted out-of-range message allocated per rejection, and its
+        /// distance detail now lives in the Debug-guarded log at the rejection site.
         /// </summary>
         public string? LastRejection;
     }
@@ -505,9 +507,25 @@ public sealed class InputHandler
                     Attacks.Rejected++;
                     Attacks.LastRejection = attackErr;
                     // Guarded like the attack log above: no allocation with Debug off.
+                    // The distance detail the out-of-range message used to carry is
+                    // computed HERE, only under the guard: the validator returns an
+                    // interned constant so the normal rejection path allocates
+                    // nothing (#249). ReferenceEquals suffices — the constant is the
+                    // only source of that value.
                     if (_logger.IsEnabled(LogLevel.Debug))
                     {
-                        _logger.LogDebug("Invalid attack from {UserId}: {Error}", userId, attackErr);
+                        if (ReferenceEquals(attackErr, CombatLogic.OutOfRangeRejection))
+                        {
+                            _logger.LogDebug(
+                                "Invalid attack from {UserId}: {Error} (distance {Distance:F2} exceeds {Range:F2})",
+                                userId, attackErr,
+                                Vec2.Distance(attacker.Position, t.Position),
+                                GameConstants.AttackRange);
+                        }
+                        else
+                        {
+                            _logger.LogDebug("Invalid attack from {UserId}: {Error}", userId, attackErr);
+                        }
                     }
                 }
             }
