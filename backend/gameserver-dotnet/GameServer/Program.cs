@@ -181,6 +181,10 @@ logger.LogInformation("  Registry:  {Registry}",
     string.IsNullOrWhiteSpace(redisAddr)
         ? "disabled (REDIS_ADDR unset -- the gateway will NOT find this server)"
         : $"redis {redisAddr}, advertising '{publicAddr}' ({transport})");
+logger.LogInformation("  Events:    {Events}",
+    string.IsNullOrWhiteSpace(redisAddr)
+        ? "noop (REDIS_ADDR unset -- cross-server events are discarded)"
+        : $"redis streams {redisAddr} -> {RedisEventStream.KeyPrefix}{EventStreams.Game}");
 // A HOSTLESS advertised address (empty, 0.0.0.0, :: or [::] as the host part) is
 // not dialable by a client: the gateway hands the value back verbatim, so only
 // clients that rewrite it to loopback themselves will connect (a C# TcpClient
@@ -448,6 +452,34 @@ if (!string.IsNullOrWhiteSpace(redisAddr))
     }
 }
 
+// ── Event stream (cross-server events, ADR-5) ──
+//
+// Redis-backed when REDIS_ADDR is configured — the same selector as the registry above,
+// because it is the same Redis (deploy manifests pass one REDIS_ADDR/REDIS_PASSWORD pair
+// to the gameserver container). Noop otherwise. The stream holds its OWN multiplexer
+// rather than sharing the registry's: the registry deregisters during host drain while
+// the event stream flushes after it, and independent lifetimes cost one idle connection.
+// Like the registry, a failure here is deliberately non-fatal: events are telemetry/feed
+// (the authoritative reward path is the kill batcher), so the map must not stay offline
+// for want of them.
+
+RedisEventStream? redisEventStream = null;
+if (!string.IsNullOrWhiteSpace(redisAddr))
+{
+    try
+    {
+        redisEventStream = await RedisEventStream.ConnectAsync(
+            redisAddr, redisPassword,
+            loggerFactory.CreateLogger<RedisEventStream>(), metrics);
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex,
+            "Could not build the Redis event stream for {Addr}; falling back to Noop, " +
+            "so cross-server events from this server are DISCARDED", redisAddr);
+    }
+}
+
 // ── Agones SDK ──
 
 // ADR-14 decision 1: the real client speaks the sidecar's HTTP interface, not gRPC, so the
@@ -483,13 +515,11 @@ var options = new ServerOptions
     AgonesSdk = agonesSdk,
     AdvertiseHost = advertiseHost,
     RegisterOnAllocated = registerOnAllocated,
-    // Always Noop: no Redis-backed IEventStream implementation exists yet, so
-    // cross-server events are generated (entity_killed) and then discarded.
-    // NOT for want of a Redis client — this process has one and uses it to
-    // self-register (Registry/RedisServerRegistry.cs, StackExchange.Redis).
-    // What is missing is the producer side of the stream; the gateway's relay
-    // subscribes to `events:game` and no live publisher feeds it. See ADR-5.
-    EventStream = new NoopEventStream(),
+    // Redis Streams when REDIS_ADDR is configured (RedisEventStream XADDs into
+    // `events:game`, the stream the gateway's relay consumes — ADR-5); Noop
+    // otherwise, and cross-server events are generated (entity_killed) and then
+    // discarded.
+    EventStream = (IEventStream?)redisEventStream ?? new NoopEventStream(),
     LoggerFactory = loggerFactory,
     Metrics = metrics,
     ServerRegistry = serverRegistry,
@@ -575,6 +605,9 @@ metricsEndpoint?.SetStatusProvider(() =>
         AttackKills = server.AttackStats.Kills,
         LastAttackRejection = server.AttackStats.LastRejection,
         Redis = serverRegistry != null ? "connected" : "disconnected",
+        EventStream = redisEventStream != null ? "redis" : "noop",
+        EventsDropped = redisEventStream?.Dropped ?? 0,
+        EventPublishFailures = redisEventStream?.PublishFailures ?? 0,
         Postgres = postgresStore != null ? "connected" : "disconnected",
         UptimeSeconds = (long)uptime.Elapsed.TotalSeconds
     };
@@ -600,6 +633,9 @@ finally
     // Order matters: drain the server (final save) before closing the DB pool — and before
     // disposing the Agones client, whose HttpClient the drain's ShutdownAsync still needs.
     await server.DisposeAsync();
+    // After the server: its dispose drains EventPublisher's queue INTO the event
+    // stream's queue, and this flushes that queue to Redis (bounded window).
+    if (redisEventStream is not null) await redisEventStream.DisposeAsync();
     if (agonesSdk is IDisposable disposableAgones) disposableAgones.Dispose();
     if (postgresStore is not null) await postgresStore.DisposeAsync();
 }

@@ -5,6 +5,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **docs**: `docs/DESIGN.md` no longer says the C# game server publishes into a
+  noop — `gameserver-dotnet`'s `RedisEventStream` now feeds `events:game` with
+  this module's publisher contract whenever `REDIS_ADDR` is set (ADR-5
+  follow-up; see `backend/gameserver-dotnet/CHANGELOG.md`). No Go code changes.
+
 ### Fixed
 - **`redisstore.EventStream` now reclaims the Pending Entries List**
   ([#234](https://github.com/Cuvara/rpg-mmo-server/issues/234)). The consumer
