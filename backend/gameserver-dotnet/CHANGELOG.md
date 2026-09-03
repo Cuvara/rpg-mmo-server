@@ -6,6 +6,61 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`RedisEventStream` — cross-server events are finally published** (ADR-5
+  follow-up). A Redis Streams-backed `IEventStream`
+  (`GameServer/Events/RedisEventStream.cs`) that XADDs into `events:game` with
+  the Go publisher's exact contract (`backend/shared/storage/redisstore/stream.go`):
+  key = `events:` prefix + logical name `game`, exactly two entry fields
+  `type`/`payload`, and `MAXLEN ~ 30000` approximate trimming (Go's
+  `DefaultStreamMaxLen` — both sides publish into the same stream, so they must
+  trim to the same bound). Selected in `Program.cs` by `REDIS_ADDR`, the same
+  switch as the server registry, over the same connection semantics
+  (`RedisServerRegistry.BuildOptions`: `AbortOnConnectFail=false`, multiplexer
+  reconnects by itself) but on its OWN multiplexer, so registry drain and event
+  flush keep independent shutdown lifetimes. `REDIS_ADDR` unset keeps the Noop.
+
+  The publisher can never stall or throw into the game loop: `PublishAsync` is
+  one bounded-channel write (4096, the #249 shape) and a background drain task
+  does the I/O — retrying each XADD up to 3 attempts with short backoff, then
+  dropping. A full queue drops OLDEST first. Every loss is counted, never
+  silent: `gameserver_events_dropped_total` and
+  `gameserver_events_publish_failures_total` on `/metrics`, plus
+  `event_stream` / `events_dropped` / `event_publish_failures` on `/status`
+  (docs/METRICS.md). Tests: queue bounding, drop-oldest ordering + counting,
+  never-throw on a dead sink, retry-on-blip, dispose-flush (no Redis needed);
+  wire contract, consumer-group read-back and MAXLEN trimming against a real
+  Redis via `RedisFixture` (`[SkippableFact]` — skip only when docker is
+  genuinely absent).
+
+### Fixed
+
+- **`EventPublisher` published to the wrong logical stream name.** The literal
+  was `"game_events"`, which the storage-layer prefix would have turned into the
+  Redis key `events:game_events` — a stream nothing consumes. The Go contract
+  (`constants.GameEventStream`) is `game`, i.e. key `events:game`, the stream
+  the gateway's relay subscribes to. Harmless only while the sink was the noop;
+  it became load-bearing the moment a real publisher existed, so the name is now
+  the constant `EventStreams.Game` and the Redis round-trip test asserts
+  `events:game_events` does not reappear.
+
+### Changed
+
+- **The out-of-range attack rejection is now the named constant
+  `CombatLogic.OutOfRangeRejection`, and the measured distance is logged again —
+  behind the Debug guard** (#249 follow-up — `Shared.GameLogic` 0.3.1, tag
+  `sgl-v0.3.1`). #249 part 1 replaced the interpolated message (a `MathF.Sqrt`,
+  two float formats and a string allocation per rejection on the tick thread
+  inside the world write lock — and out-of-range is the *normal* answer to an
+  auto-attacking client closing distance) with a plain literal, which dropped the
+  distance detail entirely. This change names the constant as the contract and
+  restores the distance in `InputHandler`'s Debug-guarded rejection log, computed
+  only when the guard passes (recognised via `ReferenceEquals` with the
+  constant). `/status last_attack_rejection` reads `target out of range` with no
+  numbers. Golden vectors on both repos assert only that prefix, so no fixture
+  changed.
+
 ### Fixed
 
 - **The write task can no longer claim an AOI buffer while the tick thread is

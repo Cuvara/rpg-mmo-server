@@ -19,6 +19,21 @@ public record GameEvent(
     [property: JsonPropertyName("type")] string Type,
     [property: JsonPropertyName("payload")] byte[] Payload);
 
+/// <summary>
+/// Logical stream names. A stream name here is the part AFTER the <c>events:</c> key
+/// prefix — the storage layer adds the prefix, exactly like Go's <c>streamKey()</c>.
+/// </summary>
+public static class EventStreams
+{
+    /// <summary>
+    /// The cross-server gameplay event stream — Go's <c>constants.GameEventStream</c>
+    /// (<c>backend/shared/constants/keys.go</c>). The gateway's relay consumes the Redis
+    /// key <c>events:game</c>; this used to be the literal <c>"game_events"</c>, which
+    /// would have produced the key <c>events:game_events</c> — a stream nothing reads.
+    /// </summary>
+    public const string Game = "game";
+}
+
 /// <summary>Abstraction for event streaming (Redis Streams in production).</summary>
 public interface IEventStream
 {
@@ -90,7 +105,7 @@ public sealed class EventPublisher : IDisposable
         {
             byte[] data = JsonSerializer.SerializeToUtf8Bytes(payload, EventJsonContext.Default.DeathPayload);
             var evt = new GameEvent(eventType, data);
-            var task = _stream.PublishAsync("game_events", evt, CancellationToken.None);
+            var task = _stream.PublishAsync(EventStreams.Game, evt, CancellationToken.None);
             _metrics?.RecordEventPublished(eventType);
             return task;
         }

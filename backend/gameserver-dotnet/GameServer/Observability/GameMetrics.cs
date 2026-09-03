@@ -19,6 +19,8 @@ namespace GameServer.Observability;
 /// gameserver.snapshots.frames_written  -> gameserver_snapshots_frames_written_total
 /// gameserver.player.saves             -> gameserver_player_saves_total
 /// gameserver.events.published         -> gameserver_events_published_total
+/// gameserver.events.dropped           -> gameserver_events_dropped_total
+/// gameserver.events.publish_failures  -> gameserver_events_publish_failures_total
 /// gameserver.tick.processed_inputs    -> gameserver_tick_processed_inputs_total
 /// </code>
 ///
@@ -53,6 +55,8 @@ public sealed class GameMetrics : IDisposable
     private readonly Counter<long> _snapshotFramesWritten;
     private readonly Counter<long> _playerSaves;
     private readonly Counter<long> _eventsPublished;
+    private readonly Counter<long> _eventsDropped;
+    private readonly Counter<long> _eventPublishFailures;
     private readonly Counter<long> _processedInputs;
     private readonly Counter<long> _resyncsRequested;
 
@@ -124,6 +128,16 @@ public sealed class GameMetrics : IDisposable
         _eventsPublished = _meter.CreateCounter<long>(
             "gameserver.events.published",
             description: "Game events published to the event stream, labelled by type.");
+
+        _eventsDropped = _meter.CreateCounter<long>(
+            "gameserver.events.dropped",
+            description: "Events dropped oldest-first because the publish queue was full " +
+                         "(Redis down long enough to fill the bound) or already shut down.");
+
+        _eventPublishFailures = _meter.CreateCounter<long>(
+            "gameserver.events.publish_failures",
+            description: "Events dropped after exhausting the XADD retry budget. Each is " +
+                         "one event that never reached the gateway's relay.");
 
         _processedInputs = _meter.CreateCounter<long>(
             "gameserver.tick.processed_inputs",
@@ -302,6 +316,12 @@ public sealed class GameMetrics : IDisposable
     /// <summary>Record a published game event of the given type.</summary>
     public void RecordEventPublished(string type)
         => _eventsPublished.Add(1, new KeyValuePair<string, object?>("type", type));
+
+    /// <summary>Record an event dropped by the bounded publish queue (oldest-first).</summary>
+    public void RecordEventDropped() => _eventsDropped.Add(1);
+
+    /// <summary>Record an event dropped after exhausting the publish retry budget.</summary>
+    public void RecordEventPublishFailure() => _eventPublishFailures.Add(1);
 
     /// <summary>Increment the connected-player gauge.</summary>
     public void PlayerJoined() => Interlocked.Increment(ref _playersOnline);

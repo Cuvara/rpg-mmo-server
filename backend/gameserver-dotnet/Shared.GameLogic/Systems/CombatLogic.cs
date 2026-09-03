@@ -9,6 +9,22 @@ namespace Shared.GameLogic.Systems
     public static class CombatLogic
     {
         /// <summary>
+        /// Rejection reason for an out-of-range attack, as one interned constant.
+        /// </summary>
+        /// <remarks>
+        /// This used to be an interpolated string carrying the measured distance —
+        /// which cost a <c>MathF.Sqrt</c>, two <c>float.ToString</c>s and a string
+        /// allocation per rejection, on the server's tick thread inside its world
+        /// write lock. Out-of-range is not an error path: it is what an
+        /// auto-attacking client does continuously while closing distance, so the
+        /// allocation ran per attack input per player per tick. Consumers that want
+        /// the distance compute it at the call site behind their own debug guard;
+        /// golden vectors on both repos assert only this prefix, so the constant is
+        /// the whole contract (rpg-mmo-server#249).
+        /// </remarks>
+        public const string OutOfRangeRejection = "target out of range";
+
+        /// <summary>
         /// Calculate damage dealt by attacker to defender.
         /// Formula: attacker.Attack - defender.Defense, minimum <see cref="GameConstants.MinDamage"/>.
         /// </summary>
@@ -46,7 +62,7 @@ namespace Shared.GameLogic.Systems
                 return "target is already dead";
 
             if (!InRange(attacker.Position, target.Position, GameConstants.AttackRange))
-                return "target out of range";
+                return OutOfRangeRejection;
 
             if (currentTick < attacker.CooldownUntilTick)
                 return "attack on cooldown";

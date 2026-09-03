@@ -152,7 +152,7 @@ nc localhost 8000
 | Player Store | In-memory default; PostgreSQL implemented (`GAME_DB_URL`) | PostgreSQL |
 | Session Store | In-memory default; Redis implemented (`--backend=redis`) | Redis |
 | Server Registry | In-memory default; Redis implemented (`--backend=redis`) | Redis hash |
-| Event Stream | Go channels default; Redis Streams implemented (+ACK). C# publishes into a noop | Redis Streams end to end |
+| Event Stream | Go channels default; Redis Streams implemented (+ACK). C# publishes into `events:game` when `REDIS_ADDR` is set, noop otherwise (ADR-5) | Redis Streams end to end |
 | JWT | Custom HS256 | `golang-jwt/jwt/v5` |
 | AOI | Brute-force | Spatial grid / quadtree |
 | Orchestration | Manual | Agones on k3s |

@@ -515,8 +515,11 @@ pod that crashed between handler and `XACK` sat in the Pending Entries List
 under a name no replacement pod would ever use, and even a same-name restart
 never re-read its own PEL. The type comment promised recovery via
 `XPENDING`/`XCLAIM`; no code performed it. Low impact while the only consumer
-logs, but `server_down` rides this channel and the C# publisher will too once
-ADR-5's noop is replaced.
+logs, but `server_down` rides this channel — and, since 2026-09-03, so does the
+C# game server's `entity_killed`: ADR-5's noop is replaced by
+`gameserver-dotnet/GameServer/Events/RedisEventStream.cs`, which publishes into
+`events:game` with this file's exact publisher contract whenever `REDIS_ADDR` is
+set.
 
 **Reclaim**: on Subscribe and every `reclaimInterval` (default **30s**) the
 consumer walks the group's PEL with `XAUTOCLAIM`, claiming entries idle longer

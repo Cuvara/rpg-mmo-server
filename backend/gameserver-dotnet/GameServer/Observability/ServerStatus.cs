@@ -136,14 +136,38 @@ public sealed class ServerStatus
 
     /// <summary>
     /// Verbatim reason of the most recent rejection, or null if nothing has been rejected.
-    /// One string, most-recent-wins: this is a diagnostic breadcrumb ("target out of range:
-    /// distance 7.41 exceeds 3.00"), not a log.
+    /// One string, most-recent-wins: this is a diagnostic breadcrumb ("target out of
+    /// range" — an interned constant since #249; the measured distance lives in the
+    /// Debug-guarded rejection log), not a log.
     /// </summary>
     [JsonPropertyName("last_attack_rejection")]
     public string? LastAttackRejection { get; set; }
 
     [JsonPropertyName("redis")]
     public string Redis { get; set; } = "disconnected";
+
+    /// <summary>
+    /// Which <c>IEventStream</c> backs cross-server events: <c>"redis"</c> (publishing to
+    /// the <c>events:game</c> stream, ADR-5) or <c>"noop"</c> (events discarded —
+    /// <c>REDIS_ADDR</c> unset, or the Redis connection could not be built at startup).
+    /// </summary>
+    [JsonPropertyName("event_stream")]
+    public string EventStream { get; set; } = "noop";
+
+    /// <summary>
+    /// Events dropped oldest-first by the bounded publish queue (or offered after
+    /// shutdown), since process start. Non-zero means Redis was unreachable long enough
+    /// to fill the bound. Same value as <c>gameserver_events_dropped_total</c>.
+    /// </summary>
+    [JsonPropertyName("events_dropped")]
+    public long EventsDropped { get; set; }
+
+    /// <summary>
+    /// Events dropped after exhausting the XADD retry budget, since process start. Same
+    /// value as <c>gameserver_events_publish_failures_total</c>.
+    /// </summary>
+    [JsonPropertyName("event_publish_failures")]
+    public long EventPublishFailures { get; set; }
 
     [JsonPropertyName("postgres")]
     public string Postgres { get; set; } = "disconnected";
