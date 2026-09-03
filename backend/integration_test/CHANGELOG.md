@@ -5,6 +5,19 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`redis_event_e2e_test.go`** — live end-to-end proof for the Redis-backed
+  `IEventStream` (rpg-mmo-server#255): a real client joins the real C# game
+  server through the real gateway handshake, hunts and kills a scaffolding mob,
+  and the test asserts the `entity_killed` event arrives through the production
+  consumer path — `redisstore.EventStream` (consumer-group ACK) wrapped in
+  `gateway/events.Relay` on the default `events:game` stream — with the
+  documented JSON payload (`victim_id`/`victim_type`/`killer_id`/`map_id`).
+  Redis is miniredis in-process, same rationale as the self-registration flow
+  test: the whole chain runs in the default integration suite with nothing
+  mocked but the Redis process.
+
 ### Removed — coverage that this file still describes as present
 
 `transport_flow_test.go` and `redis_flow_test.go` are documented as Added further
