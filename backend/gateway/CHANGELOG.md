@@ -6,6 +6,27 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Multi-gateway duplicate-login kick (ADR-17).** When a user logs in on gateway
+  B while their old session lives on gateway A, gateway B now publishes a
+  `gateway_superseded` event on the `events:gateway_kick` Redis Stream
+  (`constants.GatewayKickStream`). Every gateway instance consumes this stream
+  through its own consumer group (`gw:{gateway_id}`) and closes the old user's
+  socket when `old_gateway_id` matches itself. Same stream-per-broadcast /
+  group-per-instance pattern as the game-server kick stream, same ACK-after-
+  handle discipline, same idempotency through the jti guard.
+
+  New files: `server/kick_consumer.go` (consumer goroutine + `ConnectionCloser`
+  callback), `server/kick_consumer_test.go` (table-driven: match, mismatch,
+  wrong type, malformed). `server/kick.go` gained `publishGatewayKick` which
+  fires alongside the existing `publishSupersede` for cross-gateway sessions
+  only (same-gateway sessions are already handled locally by `kickLocalUser`).
+  `server/server.go` gained `FindAndCloseConnection(userID)` -- the callback the
+  consumer uses -- and `WithKickConsumer` option. `cmd/gateway/main.go` constructs
+  and wires the consumer on the same event stream the relay uses.
+  `shared/constants/keys.go` gained `GatewayKickStream` and
+  `EventGatewaySuperseded`. `kick_publish_test.go` extended with two new cases
+  verifying the gateway_kick event is published for cross-gateway sessions and
+  suppressed for same-gateway ones.
 - **Duplicate login now evicts the old GAME-SERVER connection, not just the old
   gateway socket** (ADR-20 — the Streams rebuild of what #211 deleted as
   declared-but-unwired). `handleAuth` publishes a `session_superseded` event on

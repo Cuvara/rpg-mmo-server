@@ -318,6 +318,17 @@ func main() {
 	var gw *server.Gateway
 	relay := events.NewRelay(eventStream, events.DefaultStream,
 		events.SinkFunc(func(ev storage.Event) { gw.OnEvent(ev) }), log)
+	// The kick consumer subscribes to the same event stream the gateway
+	// publishes gateway_kick events on. Different logical stream name
+	// (constants.GatewayKickStream vs constants.KickEventStream), same
+	// backend. On Redis these are different stream keys on the same client;
+	// on the memory backend MemoryEventStream dispatches by stream name.
+	kickConsumer := server.NewKickConsumer(
+		eventStream, gatewayID,
+		func(userID string) { gw.FindAndCloseConnection(userID) },
+		log,
+	)
+
 	gw = server.New(sessions, reg, cfg.JWTSecret, log,
 		server.WithEventRelay(relay), server.WithTransport(listenTransport),
 		server.WithMetrics(met),
@@ -327,6 +338,7 @@ func main() {
 		// has no cross-process consumer, which matches the memory backend's
 		// single-process scope; on Redis the C# game servers consume it.
 		server.WithKickStream(eventStream),
+		server.WithKickConsumer(kickConsumer),
 		server.WithTransportKey(tKey),
 		server.WithJoinTokenSecret(joinSecret),
 		// The per-IP limiter is configured per minute (the natural unit for a
