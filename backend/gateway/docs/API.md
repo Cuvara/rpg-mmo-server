@@ -102,7 +102,7 @@ therefore part of the contract, not an implementation detail.
 
 | Reason | Emitted when |
 |---|---|
-| `duplicate_login` | the same user authenticated on another connection (same gateway, or another gateway via the kick Pub/Sub channel) |
+| `duplicate_login` | the same user authenticated on another connection. The gateway evicts the old **gateway socket** it holds itself (same gateway only), and additionally publishes a `session_superseded` event on the `events:kick` Redis Stream so the **game server** evicts the old gameplay connection with the same two-frame pair and the same reason — the client sees one vocabulary no matter which hop evicted it (ADR-20) |
 
 `wire.proto` names further reasons (`server_shutdown`, `session_expired`,
 `rate_limited`) as an intended vocabulary. **The gateway does not emit them

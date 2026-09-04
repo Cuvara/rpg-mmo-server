@@ -68,6 +68,33 @@ public sealed class Connection : IDisposable
     public void MarkTransferred() => _transferred = true;
 
     /// <summary>
+    /// Set by the duplicate-login kick after it has done the full teardown itself —
+    /// the same contract (and the same <c>finally</c>-skip) as <see cref="Transferred"/>.
+    /// A kicked connection must schedule NO reconnect hold: its join token is spent
+    /// and a newer login owns the user, so there is nothing legitimate to reconnect.
+    /// </summary>
+    /// <remarks>
+    /// <b>volatile</b> like <see cref="Transferred"/>: written by the kick-consumer
+    /// task, read by the connection-handler task after the read loop exits.
+    /// </remarks>
+    public bool Kicked => _kicked;
+    private volatile bool _kicked;
+
+    /// <summary>Mark this connection as torn down by a duplicate-login kick. One-way.</summary>
+    public void MarkKicked() => _kicked = true;
+
+    /// <summary>
+    /// The <c>jti</c> claim of the join token this connection authenticated with.
+    /// This is the duplicate-login kick's discriminator: a
+    /// <c>session_superseded</c> event names the OLD session's jti, and only the
+    /// connection whose <see cref="JoinJti"/> equals it is kicked — so a late
+    /// event can never hit the newer login's connection (which joined with a
+    /// different, freshly minted jti). Immutable after the handshake; empty only
+    /// on the throwaway pre-handshake connection.
+    /// </summary>
+    public string JoinJti { get; init; } = "";
+
+    /// <summary>
     /// Wire encoding this connection speaks, latched from the first frame decoded
     /// on it and used for every reply.
     /// </summary>

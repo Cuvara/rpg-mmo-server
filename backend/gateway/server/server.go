@@ -47,6 +47,12 @@ type Gateway struct {
 	// transportKey is the pre-shared KCP encryption key ("" = plaintext).
 	transportKey string
 
+	// kickStream publishes duplicate-login supersede events for game servers
+	// to consume (events:kick, ADR-5 Streams). Nil only when the option was
+	// not passed; main.go always passes it, and publishSupersede logs loudly
+	// if it is missing so an unwired publisher cannot be silent again (#211).
+	kickStream storage.EventStream
+
 	relay      events.EventRelay
 	eventCount atomic.Int64
 	// relayUp tracks whether the relay is subscribed. It starts false and is
@@ -96,6 +102,20 @@ func WithMetrics(m *metrics.Metrics) Option {
 func WithEventRelay(relay events.EventRelay) Option {
 	return func(g *Gateway) { g.relay = relay }
 }
+
+// WithKickStream sets the event stream the gateway publishes duplicate-login
+// supersede events to (logical stream constants.KickEventStream). The gateway
+// only publishes; game servers consume. Without it, a duplicate login still
+// evicts the local gateway socket but the old game-server connection stays —
+// and handleAuth logs a warning saying exactly that.
+func WithKickStream(stream storage.EventStream) Option {
+	return func(g *Gateway) { g.kickStream = stream }
+}
+
+// KickStreamConfigured reports whether a kick stream was wired in — the
+// wiring-level assertion handle (#204's shape): a test can prove the binary's
+// construction path passes WithKickStream without simulating a duplicate login.
+func (g *Gateway) KickStreamConfigured() bool { return g.kickStream != nil }
 
 // WithJoinTokenSecret sets the secret (or comma-separated rotation list) used
 // to sign gateway -> game server join tokens. Without it the gateway falls back
@@ -652,29 +672,35 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 	if getErr == nil {
 		gwID := g.sessions.GatewayID()
 
-		// Same gateway: kick the old connection, but only if it is a different
-		// socket (re-auth on the same conn is not a duplicate).
-		//
-		// A session owned by a DIFFERENT gateway is deliberately left alone.
-		// Cross-instance duplicate-login kick is NOT implemented: the machinery
-		// that used to sit here — a KickPublisher/KickSubscriber pair and a
-		// gateway:kick channel constant — was never constructed by
-		// cmd/gateway/main.go, so it published into a noop for its whole life
-		// and was removed rather than left reading as finished (#211).
-		//
-		// It does not matter today because ADR-17 pins the deployment to one
-		// gateway replica, and 40-gateway.yaml pins it again for an independent
-		// reason (two replicas racing on a cold map each allocate a GameServer
-		// and Agones has no un-allocate). It starts mattering the moment a
-		// second replica is scheduled, and the log line below is what makes
-		// that visible: old_gateway != new_gateway means a session this process
-		// cannot reach. The fix then is Redis Streams with consumer-group ACK
-		// per ADR-5, not the Pub/Sub shape that was deleted.
+		// Re-auth on the same socket is not a duplicate: nothing to kick,
+		// locally or remotely.
+		sameConn := g.findUserConn(userID) == cc
+
+		// Same gateway: kick the old gateway socket (MsgKick + MsgDisconnect,
+		// reason duplicate_login). A gateway socket owned by a DIFFERENT
+		// replica cannot be reached from here and is still left alone (the
+		// remaining ADR-17 item; harmless at one replica).
 		if existing.GatewayID == gwID {
 			if old := g.findUserConn(userID); old != nil && old != cc {
 				g.kickLocalUser(userID)
 			}
 		}
+
+		// The GAME-SERVER half of the eviction, which the local kick above
+		// cannot do: the client talks to the game server directly (ADR-3), so
+		// closing the gateway socket leaves the old gameplay connection alive.
+		// Publish a supersede event on the events:kick stream (Streams with
+		// consumer-group ACK per ADR-5 — the shape #211 said a rebuild must
+		// take, and deliberately NOT the Pub/Sub shape #211 deleted). The
+		// event names the old session's join-token jti, so the game server
+		// kicks exactly that connection and never the newer login's — newest
+		// login wins even when the event is delivered late. Published for
+		// sessions owned by ANY gateway instance: the stream, unlike the
+		// socket, is reachable regardless of which replica owns the session.
+		if !sameConn {
+			g.publishSupersede(userID, existing)
+		}
+
 		g.logger.Info("duplicate login detected",
 			"conn", cc.ID(),
 			"user", userID,
@@ -881,6 +907,12 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 	if uerr := g.sessions.UpdateSession(context.Background(), userID, func(sd *session.SessionData) {
 		sd.ServerID = result.ServerID
 		sd.MapID = req.MapID
+		// The jti of the token minted above. This is what a later duplicate
+		// login publishes in its supersede event, so the game server can kick
+		// exactly the connection this assignment produced (kick.go). Updated
+		// on every assignment — a map transfer re-enters this path, so the
+		// session always names the CURRENT game-server connection's jti.
+		sd.JoinTokenJTI = result.JTI
 	}); uerr != nil {
 		g.logger.Warn("update session server association",
 			"user", userID, "server", result.ServerID, "map", req.MapID, "err", uerr)

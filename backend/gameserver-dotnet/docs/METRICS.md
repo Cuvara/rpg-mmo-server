@@ -56,6 +56,8 @@ human inspection and for the Unity DOTS sample, which polls it.
   "event_stream": "redis",
   "events_dropped": 0,
   "event_publish_failures": 0,
+  "kick_consumer": "redis",
+  "players_kicked": 0,
   "postgres": "connected",
   "uptime_seconds": 12105
 }
@@ -81,6 +83,8 @@ so it reported the compiled-in default of 15 on servers whose prediction rate wa
 | `last_attack_rejection` | Verbatim reason of the most recent rejection (e.g. `target out of range` — an interned constant since #249; the measured distance moved to the Debug-guarded rejection log), `null` until something is rejected. One string, most-recent-wins — a breadcrumb naming *why* attacks are being refused, not a log |
 | `event_stream` | Which `IEventStream` backs cross-server events: `redis` (publishing into `events:game`, the stream the gateway relay consumes — ADR-5) or `noop` (`REDIS_ADDR` unset, or the connection could not be built at startup — events are discarded) |
 | `events_dropped` / `event_publish_failures` | Loss counters of the Redis event stream, since process start — the same values as `gameserver_events_dropped_total` / `gameserver_events_publish_failures_total` above. Always `0` under `"event_stream": "noop"` |
+| `kick_consumer` | State of the duplicate-login kick consumer on `events:kick` (ADR-20): `redis` (consuming as group `gs:{server_id}`) or `disabled` (`REDIS_ADDR` unset, or the consumer failed to start — supersede events for this server are then never acted on, so a re-logging-in user keeps their old connection here) |
+| `players_kicked` | Duplicate-login kicks executed since process start — connections force-closed because a `session_superseded` event named their join-token jti. Same value as `gameserver_players_kicked_total`. Always `0` under `"kick_consumer": "disabled"` |
 | `uptime_seconds` | Seconds since process start on a **monotonic** clock (`Stopwatch`), not wall time — see below |
 
 ### Do not compute a rate — read `achieved_tick_hz`
@@ -145,6 +149,7 @@ The same value is exported as the Prometheus gauge `gameserver_achieved_tick_hz`
 | `gameserver_events_dropped_total` | counter | — | Events dropped **oldest-first** because the Redis event stream's bounded publish queue (4096) was full — i.e. Redis was unreachable long enough to fill it — or the event was offered after shutdown. Zero forever on a healthy server; any non-zero rate means the gateway relay is missing events |
 | `gameserver_events_publish_failures_total` | counter | — | Events dropped after exhausting the `XADD` retry budget (3 attempts with short backoff). Distinct from `dropped`: these reached the head of the queue and still could not be written. Sustained increments alongside a flat `dropped` means Redis is up but refusing writes (e.g. OOM under `noeviction`) |
 | `gameserver_resyncs_total` | counter | `map_id` | Keyframes **requested by a client** — see below |
+| `gameserver_players_kicked_total` | counter | `map_id` | Duplicate-login kicks (ADR-20): connections force-closed because a `session_superseded` event on `events:kick` named their join-token jti. Entity released immediately, no reconnect hold. Pair with the gateway's `gateway_kick_publish_total`: publishes without matching kicks means events are being lost or mis-addressed |
 
 Useful queries:
 

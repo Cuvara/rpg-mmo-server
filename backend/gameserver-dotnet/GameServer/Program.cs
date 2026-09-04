@@ -185,6 +185,10 @@ logger.LogInformation("  Events:    {Events}",
     string.IsNullOrWhiteSpace(redisAddr)
         ? "noop (REDIS_ADDR unset -- cross-server events are discarded)"
         : $"redis streams {redisAddr} -> {RedisEventStream.KeyPrefix}{EventStreams.Game}");
+logger.LogInformation("  Kicks:     {Kicks}",
+    string.IsNullOrWhiteSpace(redisAddr)
+        ? "disabled (REDIS_ADDR unset -- duplicate-login supersede events are never acted on)"
+        : $"consuming {RedisKickConsumer.StreamKey} as group {RedisKickConsumer.GroupPrefix}{serverId}");
 // A HOSTLESS advertised address (empty, 0.0.0.0, :: or [::] as the host part) is
 // not dialable by a client: the gateway hands the value back verbatim, so only
 // clients that rewrite it to loopback themselves will connect (a C# TcpClient
@@ -567,6 +571,32 @@ using var sigTerm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, RequestS
 // ── Run ──
 
 var server = new GameServerHost(options);
+
+// ── Duplicate-login kick consumer (events:kick, ADR-5) ──
+//
+// The other half of the gateway's supersede publish: without it a user who logs in
+// again keeps their old game connection alive here forever. Same REDIS_ADDR selector
+// and same non-fatal failure policy as the registry and event stream above — a map
+// must not stay offline for want of the kick path, but the failure is loud because
+// running without it silently re-opens the two-live-logins gap.
+RedisKickConsumer? kickConsumer = null;
+if (!string.IsNullOrWhiteSpace(redisAddr))
+{
+    try
+    {
+        kickConsumer = await RedisKickConsumer.ConnectAsync(
+            redisAddr, redisPassword, serverId,
+            p => server.KickPlayerAsync(p.UserId, p.Jti),
+            loggerFactory.CreateLogger<RedisKickConsumer>());
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex,
+            "Could not start the duplicate-login kick consumer for {Addr}; supersede " +
+            "events for this server will NOT be acted on (a re-logging-in user keeps " +
+            "their old connection here)", redisAddr);
+    }
+}
 // Monotonic, not DateTime.UtcNow. `current_tick / uptime_seconds` is how an observer
 // derives an achieved tick rate, and the tick loop is paced by Stopwatch (CLOCK_MONOTONIC);
 // dividing it by a wall-clock duration measures the host's clock drift as well as the
@@ -608,6 +638,8 @@ metricsEndpoint?.SetStatusProvider(() =>
         EventStream = redisEventStream != null ? "redis" : "noop",
         EventsDropped = redisEventStream?.Dropped ?? 0,
         EventPublishFailures = redisEventStream?.PublishFailures ?? 0,
+        KickConsumer = kickConsumer != null ? "redis" : "disabled",
+        PlayersKicked = metrics.PlayersKicked,
         Postgres = postgresStore != null ? "connected" : "disconnected",
         UptimeSeconds = (long)uptime.Elapsed.TotalSeconds
     };
@@ -630,6 +662,10 @@ catch (Exception ex)
 }
 finally
 {
+    // The kick consumer first: its handler calls into the server, so no supersede
+    // event may land mid-teardown. Graceful dispose also destroys this server's
+    // consumer group in Redis (see RedisKickConsumer).
+    if (kickConsumer is not null) await kickConsumer.DisposeAsync();
     // Order matters: drain the server (final save) before closing the DB pool — and before
     // disposing the Agones client, whose HttpClient the drain's ShutdownAsync still needs.
     await server.DisposeAsync();

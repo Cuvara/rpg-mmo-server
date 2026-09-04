@@ -7,6 +7,18 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`duplicate_login_kick_e2e_test.go`** — live end-to-end proof of the
+  cross-instance duplicate-login kick (ADR-20; the gap #211 left recorded in
+  ADR-17), miniredis in-process like `redis_event_e2e_test.go`: client A joins
+  the real C# game server through the real gateway handshake; client B
+  authenticates as the same user; the gateway publishes `session_superseded`
+  (with A's join-token jti) into `events:kick`; the C# consumer evicts A with
+  `MsgKick` + `MsgDisconnect` (both `reason=duplicate_login`, asserted equal)
+  and closes the socket; `/status` shows `players_kicked=1` and
+  `kick_consumer=redis` (the game server runs with a real `--metrics-addr`
+  for this test); then B enters the world and joins cleanly, receiving a fresh
+  keyframe containing its own entity — newest login wins.
+
 - **`redis_event_e2e_test.go`** — live end-to-end proof for the Redis-backed
   `IEventStream` (rpg-mmo-server#255): a real client joins the real C# game
   server through the real gateway handshake, hunts and kills a scaffolding mob,
