@@ -115,6 +115,25 @@ public class GoldenVectorTests
                 break;
             }
 
+            case "simultaneous_kill":
+            {
+                var attacker = GoldenVectorGenerator.Entity("a", 0f, 0f, attack: c.attackerAttack, defense: c.attackerDefense);
+                attacker.Hp = c.attackerHp;
+                var target = GoldenVectorGenerator.Entity("b", 1f, 0f, attack: c.targetAttack, defense: c.defenderDefense);
+                target.Hp = c.targetHp;
+                int dmgToTarget = CombatLogic.CalculateDamage(attacker, target);
+                target.Hp -= dmgToTarget;
+                CombatLogic.HandleDeath(ref target);
+                int dmgToAttacker = CombatLogic.CalculateDamage(target, attacker);
+                attacker.Hp -= dmgToAttacker;
+                CombatLogic.HandleDeath(ref attacker);
+                Assert.Equal(c.expectedAttackerHp, attacker.Hp);
+                Assert.Equal(c.expectedTargetHp, target.Hp);
+                Assert.Equal(c.expectedAttackerDead, attacker.Dead);
+                Assert.Equal(c.expectedTargetDead, target.Dead);
+                break;
+            }
+
             case "validate_attack":
             {
                 var attacker = GoldenVectorGenerator.Entity(
