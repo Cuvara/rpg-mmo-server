@@ -47,6 +47,22 @@ public class KcpInteropTests
         Assert.Equal(goDerived, csDerived);
     }
 
+    [SkippableFact]
+    public void GoMintedSessionKey_DecryptsOnCSharpSide()
+    {
+        var go = GoProbe.Require();
+        byte[] rawKey = KcpCrypto.DeriveKey(TestKeyHex);
+        using var fromRaw = KcpCrypto.TryCreateFromRawKey(rawKey)!;
+        using var fromHex = KcpCrypto.TryCreate(TestKeyHex)!;
+        var payload = System.Text.Encoding.UTF8.GetBytes("session-key-interop");
+        var packet = new byte[KcpCrypto.HeaderSize + payload.Length];
+        payload.CopyTo(packet.AsSpan(KcpCrypto.HeaderSize));
+        fromRaw.Seal(packet);
+        var opened = fromHex.Open(packet);
+        Assert.Equal(payload, opened.ToArray());
+    }
+
+
     [SkippableTheory]
     [InlineData("")]            // plaintext
     [InlineData(TestKeyHex)]    // AES-256, hex key
