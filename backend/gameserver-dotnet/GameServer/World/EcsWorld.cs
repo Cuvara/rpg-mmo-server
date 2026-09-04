@@ -194,6 +194,7 @@ public sealed class EcsWorld : IDisposable
         _readQueries.Add(_allEntitiesQuery);
         _readQueries.Add(_playersQuery);
 
+        _regionFailures = new Exception?[maxWorkerSlots];
         _structuralSlots = new List<StructuralOp>[maxWorkerSlots];
         for (int i = 0; i < maxWorkerSlots; i++) _structuralSlots[i] = new List<StructuralOp>();
 
@@ -205,6 +206,20 @@ public sealed class EcsWorld : IDisposable
 
     /// <summary>The world's parked simulation workers. See <see cref="SimWorkerPool"/>.</summary>
     private readonly SimWorkerPool _pool;
+
+    /// <summary>
+    /// Per-worker failure cells for the parallel regions, allocated once at the world's
+    /// slot capacity and cleared (over the slots a region uses) before each dispatch.
+    ///
+    /// <para>Allocating this per region read 72 B on the tick thread per
+    /// <see cref="ReadAllParallel"/> call — a per-tick allocation in exactly the
+    /// configuration (500+ viewers, <c>--gather-workers</c>) the parallel gather exists
+    /// for, measured by <c>TickAllocationBench.ParallelRegionAllocationMicro</c>. Sharing
+    /// one array is safe for the same reason the pool's own <c>_failures</c> field is:
+    /// regions are dispatched by one thread at a time — the write lock serialises write
+    /// regions, and the only read-region dispatcher is the tick thread.</para>
+    /// </summary>
+    private readonly Exception?[] _regionFailures;
 
     /// <summary>
     /// Queued structural changes, drained by <see cref="ApplyStructuralChanges"/>, one
@@ -751,11 +766,12 @@ public sealed class EcsWorld : IDisposable
         _rwLock.EnterReadLock();
         try
         {
-            var failures = new Exception?[workerCount];
+            Exception?[] failures = _regionFailures;
+            Array.Clear(failures, 0, workerCount);
             _pool.RunReadRegion(workerCount, body, failures);
 
             List<Exception>? thrown = null;
-            for (int i = 0; i < failures.Length; i++)
+            for (int i = 0; i < workerCount; i++)
             {
                 if (failures[i] is { } ex) (thrown ??= new List<Exception>()).Add(ex);
             }
@@ -862,7 +878,8 @@ public sealed class EcsWorld : IDisposable
         _parallelRegion = true;
         try
         {
-            var failures = new Exception?[workerCount];
+            Exception?[] failures = _regionFailures;
+            Array.Clear(failures, 0, workerCount);
 
             if (workerCount == 1)
             {
@@ -887,7 +904,7 @@ public sealed class EcsWorld : IDisposable
             // while the write lock unwinds would let it touch the world outside the
             // region, which is worse than the original fault.
             List<Exception>? thrown = null;
-            for (int i = 0; i < failures.Length; i++)
+            for (int i = 0; i < workerCount; i++)
             {
                 if (failures[i] is { } ex) (thrown ??= new List<Exception>()).Add(ex);
             }
@@ -1121,19 +1138,36 @@ public sealed class EcsWorld : IDisposable
 
                 for (int slot = 1; slot < workerCount; slot++)
                 {
-                    if (_threads[slot] is not null) continue;
-
-                    _wake[slot] = new ManualResetEventSlim(false, 0);
-                    int captured = slot;
-                    var t = new Thread(() => WorkerLoop(captured))
-                    {
-                        IsBackground = true,
-                        Name = $"sim-worker-{slot}",
-                    };
-                    _threads[slot] = t;
-                    t.Start();
+                    if (_threads[slot] is null) StartWorker(slot);
                 }
             }
+        }
+
+        /// <summary>
+        /// Start the worker for <paramref name="slot"/>. Caller holds <see cref="_startLock"/>.
+        ///
+        /// <para><b>Why this is a separate method and must stay one.</b> The lambda below
+        /// captures <paramref name="slot"/>, and the C# compiler allocates a closure's
+        /// display class at the entry of the <i>scope</i> that declares the captured
+        /// variable, not at the lambda expression. Written inline in
+        /// <see cref="EnsureStarted"/>'s loop, that scope was the loop body, so every
+        /// dispatch allocated a 32-byte display class per slot it checked and then
+        /// <c>continue</c>d past — a steady per-tick allocation on the tick thread in the
+        /// parallel-gather configuration, and the only one the dispatch had (measured by
+        /// <c>TickAllocationBench.ParallelRegionAllocationMicro</c>: 32 B/region before,
+        /// 0 after). Here the capturing scope is entered only when a thread is genuinely
+        /// being started, which happens once per slot per world.</para>
+        /// </summary>
+        private void StartWorker(int slot)
+        {
+            _wake[slot] = new ManualResetEventSlim(false, 0);
+            var t = new Thread(() => WorkerLoop(slot))
+            {
+                IsBackground = true,
+                Name = $"sim-worker-{slot}",
+            };
+            _threads[slot] = t;
+            t.Start();
         }
 
         private void WorkerLoop(int slot)
