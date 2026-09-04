@@ -6,6 +6,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Per-session KCP encryption key minting (ADR-8).** Gateway mints
+  32-byte session keys for KCP sessions via `transfer.GenerateSessionKey()`.
 - **Duplicate login now evicts the old GAME-SERVER connection, not just the old
   gateway socket** (ADR-20 — the Streams rebuild of what #211 deleted as
   declared-but-unwired). `handleAuth` publishes a `session_superseded` event on

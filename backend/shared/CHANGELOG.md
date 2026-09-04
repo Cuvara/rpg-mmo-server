@@ -6,6 +6,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Per-session KCP encryption (ADR-8).** `EnterWorldResponse.session_key`
+  field added to proto schema and Go/C# bindings.
 - **`constants.KickEventStream` (`"kick"`) and `constants.EventSessionSuperseded`
   (`"session_superseded"`)** — the gateway → game-server duplicate-login kick
   channel (ADR-20), the Streams rebuild of what #211 deleted. One shared stream
