@@ -50,6 +50,7 @@ public static class ArchAotHints
         // here because the hint list is one place by design — the guard finds them by
         // [EcsComponent] wherever they are declared.
         new GameServer.Scaffolding.EnemySpawnState[1],
+        new GameServer.Scaffolding.LoadTestState[1],
 
         // Arch stores the chunk's entity handles in an Entity[] alongside the
         // component arrays, allocated the same Type-driven way.

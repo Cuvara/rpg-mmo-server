@@ -70,6 +70,8 @@ float mapHeight = float.TryParse(GetArg(args, "--map-height") ?? Env("GAMESERVER
     ? mh : GameConstants.DefaultMapHeight;
 bool useAgones = HasFlag(args, "--agones") || Env("AGONES_ENABLED") == "true";
 bool enableEnemySpawner = Env("GAMESERVER_ENEMIES") != "false"; // on by default, opt out with GAMESERVER_ENEMIES=false
+int loadTestEntities = int.TryParse(
+    GetArg(args, "--loadtest-entities") ?? Env("LOADTEST_ENTITIES"), out var lte) ? lte : 0;
 // Nakama integration: server-to-server RPC for economy + leaderboard
 string? nakamaUrl = Env("NAKAMA_URL"); // e.g. http://rpg-nakama:7350
 string nakamaHttpKey = Env("NAKAMA_HTTP_KEY") ?? "defaulthttpkey";
@@ -530,13 +532,15 @@ var options = new ServerOptions
     Registration = registrationOptions,
     // The composition root decides what the game is. The core host only knows it has
     // a phase to tick; see ISimulationPhase.
-    SimulationPhaseFactory = enableEnemySpawner
-        ? (world, loggerFactory, onGroupRan) => new EnemySpawner(world, simulationRates, loggerFactory.CreateLogger<EnemySpawner>(), onGroupRan)
-        : null,
+    SimulationPhaseFactory = loadTestEntities > 0
+        ? (world, loggerFactory, onGroupRan) => new GameServer.Scaffolding.LoadTestSpawner(world, simulationRates, loadTestEntities, loggerFactory.CreateLogger<GameServer.Scaffolding.LoadTestSpawner>(), onGroupRan)
+        : enableEnemySpawner
+            ? (world, loggerFactory, onGroupRan) => new EnemySpawner(world, simulationRates, loggerFactory.CreateLogger<EnemySpawner>(), onGroupRan)
+            : null,
     // The composition root is the one place allowed to know what the game is, so it is
     // where the status endpoint's entity count comes from. The JSON field stays
     // `enemies_alive` — the Unity DOTS sample polls /status and reads it.
-    StatusEntityCount = enableEnemySpawner
+    StatusEntityCount = (loadTestEntities > 0 || enableEnemySpawner)
         ? static world => world.CountWith<GameServer.World.Components.EnemyAi>()
         : null,
     NakamaUrl = nakamaUrl,
