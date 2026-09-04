@@ -935,7 +935,13 @@ public sealed class GameServerHost : IAsyncDisposable
 
             // Create the real connection with the verified user ID, reusing the same
             // accepted transport connection (no reconnect, no second handshake).
-            conn = new Connection(userId, accepted, connLogger, tempConn.Encoding);
+            // JoinJti tags the connection with the join token that produced it —
+            // the discriminator a session_superseded event (duplicate-login kick)
+            // matches on, so a kick can only ever hit the login it names.
+            conn = new Connection(userId, accepted, connLogger, tempConn.Encoding)
+            {
+                JoinJti = claims.Jti
+            };
 
             // Register connection
             _connections.Add(conn);
@@ -999,7 +1005,11 @@ public sealed class GameServerHost : IAsyncDisposable
             // conn can still be null here: the entity attaches a few lines before the
             // Connection is constructed, and a throw in that gap must still tear down —
             // that gap is exactly why this runs from the finally.
-            if (entityAttached && !(conn?.Transferred ?? false))
+            // Kicked is the duplicate-login analogue of Transferred: KickPlayerAsync
+            // already removed the entity, balanced PlayerLeft and unregistered the
+            // connection, and a kicked login must get NO reconnect hold — a newer
+            // login owns the user and this one's join token is spent.
+            if (entityAttached && !(conn?.Transferred ?? false) && !(conn?.Kicked ?? false))
             {
                 OnPlayerDisconnected(userId, countedOnline, conn);
             }
@@ -1129,6 +1139,103 @@ public sealed class GameServerHost : IAsyncDisposable
             try { await SendTransferError(conn, "internal error"); }
             catch { /* connection may already be dead */ }
         }
+    }
+
+    /// <summary>
+    /// Force-close the connection a <c>session_superseded</c> event names: a newer
+    /// login for <paramref name="userId"/> has superseded the one that joined with
+    /// join-token <paramref name="jti"/>. Returns true when a connection was
+    /// actually kicked.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The jti match is the safety property.</b> The event carries the OLD
+    /// session's join-token jti; only a connection holding exactly that jti is
+    /// touched. The newer login's connection joined with a different, freshly
+    /// minted jti, so a late or redelivered event matches nothing — newest login
+    /// wins, and at-least-once delivery is idempotent without any dedup state.</para>
+    ///
+    /// <para><b>Full teardown, no reconnect hold</b> — the transfer handler's shape
+    /// (#230): save, notify the client (MsgKick then MsgDisconnect, both
+    /// <c>reason=duplicate_login</c> — the same two-frame ordering contract the
+    /// gateway's local kick honours), mark the connection so the handler's
+    /// <c>finally</c> skips its own teardown, remove entity + balance the gauge,
+    /// close. No hold is scheduled: the kicked login's token is spent and the user
+    /// belongs to the newer login, which loads whatever state the save persisted.</para>
+    ///
+    /// <para>A user with NO live connection here is left entirely alone — including
+    /// a pending reconnect hold. The hold may belong to a newer login that joined
+    /// and dropped after this event was published; the jti on the event names a
+    /// connection, and with the connection gone there is nothing it can safely
+    /// claim. A held entity the same user reattaches later is that user's own
+    /// state, not a security concern.</para>
+    /// </remarks>
+    public async Task<bool> KickPlayerAsync(string userId, string jti)
+    {
+        var conn = _connections.Get(userId);
+        if (conn is null || string.IsNullOrEmpty(jti) || conn.JoinJti != jti)
+        {
+            _logger.LogInformation(
+                "Supersede for {UserId} matched no connection (conn={HasConn}, jti match={Match}); no-op",
+                userId, conn is not null, conn is not null && conn.JoinJti == jti);
+            return false;
+        }
+
+        try
+        {
+            // Persist before the entity leaves the world — same reason as the hold
+            // path: after removal the periodic saver can no longer see it.
+            await _saver.SavePlayerAsync(userId);
+        }
+        catch (Exception ex)
+        {
+            // The kick must proceed: two live logins for one user is the state
+            // this exists to end, and ADR-6 accepts a bounded position/HP loss.
+            _logger.LogWarning(ex, "Save before duplicate-login kick failed for {UserId}", userId);
+        }
+
+        // Best-effort notification, MsgKick then MsgDisconnect — the frames must
+        // never disagree about why (the gateway's eviction contract).
+        try
+        {
+            var kick = WireProtocol.NewEnvelope(MsgType.Kick,
+                new RpgMmo.Wire.V1.KickMessage { Reason = Events.KickEvents.ReasonDuplicateLogin },
+                conn.Encoding);
+            var disc = WireProtocol.NewEnvelope(MsgType.Disconnect,
+                new RpgMmo.Wire.V1.DisconnectMessage { Reason = Events.KickEvents.ReasonDuplicateLogin },
+                conn.Encoding);
+            await conn.WriteOneAsync(kick);
+            await conn.WriteOneAsync(disc);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Kick notification to {UserId} failed (peer already gone?)", userId);
+        }
+
+        // Marked BEFORE Close(), like MarkTransferred: closing ends the read loop,
+        // whose finally consults the flag — set after, and the handler races in
+        // with a second teardown plus the 30s hold this kick exists to prevent.
+        conn.MarkKicked();
+
+        // By identity: if a newer connection somehow replaced this one between the
+        // jti check and here, its registration (and entity) must not be destroyed.
+        if (_connections.RemoveIfCurrent(conn))
+        {
+            if (_holds.TryRemove(userId, out var holdCts))
+            {
+                holdCts.Cancel();
+                holdCts.Dispose();
+            }
+            _world.RemoveEntity(userId);
+            _metrics?.PlayerLeft();
+            _registration?.NotifyPlayerCountChanged();
+        }
+        conn.Close();
+
+        _metrics?.RecordPlayerKicked();
+        _logger.LogInformation(
+            "Player {UserId} kicked: session superseded by a newer login (reason={Reason})",
+            userId, Events.KickEvents.ReasonDuplicateLogin);
+        return true;
     }
 
     private async Task SendTransferError(Connection conn, string error)

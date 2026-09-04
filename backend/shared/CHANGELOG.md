@@ -5,6 +5,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`constants.KickEventStream` (`"kick"`) and `constants.EventSessionSuperseded`
+  (`"session_superseded"`)** — the gateway → game-server duplicate-login kick
+  channel (ADR-20), the Streams rebuild of what #211 deleted. One shared stream
+  (`events:kick`) rather than a key per server, because server ids churn and
+  this Redis runs `noeviction` (ADR-4); every game server consumes it through
+  its own consumer group with explicit ACK (ADR-5 — never the Pub/Sub shape the
+  removed `GatewayKickChannel` described). The C# consumer mirrors both
+  literals (`GameServer/Events/KickEvents.cs`); payload contract in
+  `gameserver-dotnet/docs/API.md`.
+
 ### Changed
 - **docs**: `docs/DESIGN.md` no longer says the C# game server publishes into a
   noop — `gameserver-dotnet`'s `RedisEventStream` now feeds `events:game` with

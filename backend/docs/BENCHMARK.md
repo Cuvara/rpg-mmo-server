@@ -1596,3 +1596,122 @@ so the A arm is the code that actually ran.
 **Part V's caveat now applies**: compose got cheaper, so the spatial index's
 losing margin has narrowed. Re-measure the index only against these numbers,
 not the pre-#237 ones — and only if AOI cost resurfaces as a bound.
+
+## Part VIII — allocated bytes on the tick path (2026-09-04)
+
+**Result: the steady-state tick thread allocates zero bytes per tick, and the
+harness that proves it is now committed.** One real per-tick allocation was
+found and removed — 72 B per parallel-gather dispatch, in the configuration
+that exists to protect the tick budget — and the write path's remaining
+32 B/frame is identified, attributed, and deliberately kept. Full test suite
+after the change: 892 passed / 20 skipped / 0 failed.
+
+**Why bytes are the metric.** Every duration measured on this host is a lower
+bound of unknown tightness — tick p99 swings 3.3× with co-tenant load (ADR-7,
+Part VI) — so a timing benchmark cannot prove an allocation fix did anything.
+Allocated bytes are deterministic: `GC.GetAllocatedBytesForCurrentThread()`
+counts exactly what the measuring thread allocated, and the same code over the
+same world allocates the same bytes on a quiet box and a thrashing one. This
+is the same reasoning that made bandwidth the quotable number in Parts II–IV.
+The module's `CLAUDE.md` has required "no allocations in hot paths" since the
+beginning; this is the first committed instrument for the rule.
+
+**The harness** (`GameServer.Tests/Bench/TickAllocationBench.cs`, gated on
+`BENCH_TICK=1` like the other benches, never runs in CI):
+
+```
+BENCH_TICK=1 dotnet test -c Release --filter FullyQualifiedName~TickAllocationBench \
+  --logger "console;verbosity=detailed"
+```
+
+Same rig and entry points as `TickBreakdownBench` (50/200/500 viewers on the
+disc placement, 15 Hz uniform, AOI radius 50), with two differences: every
+fourth viewer also sends an attack input per tick, so the combat branch — the
+path #249's interned rejection constant lives on — is measured rather than
+assumed; and each arm is wrapped in a per-iteration allocation delta, so the
+report separates mean bytes, zero-allocation iteration count, and the largest
+single iteration. `BENCH_ALLOC_WARMUP=<ticks>` overrides the warm-up, which is
+the tool that separates ramp allocation from steady-state allocation.
+
+**Steady state (warm-up 10 000 ticks, 2 000 measured iterations per arm):**
+
+| phase | 50 viewers | 200 viewers | 500 viewers |
+|---|---|---|---|
+| TickOnce (whole) | 8.6 B/tick | 6.2 B/tick | 6.2 B/tick |
+| AOI gather (serial) | 0 | 0 | 0 |
+| Input drain | 0 | 0 | 0 |
+| Input apply (movement + combat, write scope) | 0 | 0 | 0 |
+| Enemy AI (RunDue) | 8.6 B/tick | 6.2 B/tick | 6.2 B/tick |
+| ApplyStructuralChanges | 0 | 0 | 0 |
+| ConnectionManager.CopyTo | 0 | 0 | 0 |
+| Encode+frame, run inline (write-task path) | 32 B/frame | 32 B/frame | 32 B/frame |
+
+The whole-tick residue is entirely the enemy AI's wave spawn: 96–144 B on
+exactly 134 of 2 000 iterations — one per wave, every 22.5 ticks at 15 Hz —
+and zero on the other 1 866. That is the two `enemy-N` id strings a spawn
+mints, which is content creation, not tick overhead: a new entity needs a new
+identity, and the cost is event-driven, bounded by the wave cadence, and
+independent of viewer count.
+
+**Ramp vs steady state.** With the default 600-tick warm-up the whole-tick arm
+reads 1 209 B/tick at 200 viewers (max 33 048), all of it in spikes clustered
+where the enemy population and player drift push AOI occupancy past each
+connection's high-water mark: the per-connection `EntityView[]` regrows (with
+the 25 % headroom policy from #249) and never shrinks, so the cost decays to
+the zero above as high-waters are reached. That is ramp allocation — paid
+during population growth, exactly when #249's headroom already bounds the
+re-scans — not a steady-state leak. The two runs are distinguishable only
+because the harness lets the warm-up be varied; a single-number benchmark
+would have reported either figure as "the" allocation rate.
+
+**The fix: 72 B → 0 B per parallel region.** In the parallel-gather
+configuration (`--gather-workers`, engaged at 500+ viewers), every
+`ReadAllParallel` — once per broadcast tick — allocated 72 B on the tick
+thread, measured by the `ParallelRegionAllocationMicro` arm and bisected to
+two sources:
+
+1. **40 B** — `new Exception?[workerCount]` per region for worker-failure
+   cells. Now one array per world, allocated at slot capacity and cleared over
+   the slots a region uses. Safe to share for the same reason the pool's own
+   `_failures` field already is: regions are dispatched by one thread at a
+   time.
+2. **32 B** — a closure display class allocated by `EnsureStarted`'s loop *on
+   the `continue` path*. The C# compiler allocates a closure's display class
+   at the entry of the scope declaring the captured variable, not at the
+   lambda expression — so the `new Thread(() => WorkerLoop(captured))` that
+   runs once per world charged every dispatch that merely checked the slot
+   was already started. Thread creation now lives in its own method
+   (`StartWorker`), entered only when a thread genuinely starts. The XML doc
+   on that method says why it must stay one.
+
+`UpdateComponentsParallel` had both allocations too and is fixed by the same
+two changes. After: 0 B/region on both, 2 000 regions per arm. Wire output is
+untouched by construction — nothing here is on an encode path — and the
+byte-identity suites (`SnapshotByteIdentityTests`,
+`TrimmedGatherByteIdentityTests`), the golden vectors, and the full suite all
+pass unchanged.
+
+**The remainder that is kept: 32 B/frame on the write path.** The
+`EncodeFramePathMicro` arm attributes it exactly: `SnapshotDeltaState.Encode`
+is 0 B/call in every mode (delta-unchanged, delta-all-changed, keyframe — the
+pools from the stage-4 work hold), and `SnapshotFrameWriter.WriteFrame` is a
+flat 32 B/call: the `ByteString` wrapper `UnsafeByteOperations.UnsafeWrap`
+creates so the envelope can reference the payload buffer without copying it.
+Removing it means hand-writing the envelope's tags and varints, which
+`SnapshotFrameWriter`'s own doc rejects as the variant of this optimisation
+that puts the wire at risk — and the stake is small: at 200 players × 15 Hz
+the write pool produces ~94 KB/s of gen-0 garbage from this, against the
+44 280 B/tick (~650 KB/s) the frame writer already removed. The keyframe
+figures in the aggregate arm read higher (43–176 B/frame) only while world
+density is still shifting — per-connection dictionary growth chasing rising
+AOI occupancy — and are ramp, not floor, by the same warm-up test as above.
+
+**Caveats.** The counter is thread-local, so work production runs on other
+threads (write tasks, the death drain, Redis publish) is seen only where an
+arm runs it inline deliberately — the encode arm exists for exactly that
+reason. `metrics` is null, matching `TickBreakdownBench`; `GameMetrics`
+records through pre-built `TagList`s and is designed alloc-free, but that is
+asserted, not measured here. The JSON snapshot path is not measured — it is
+not the production encoding and keeps its allocating serializer by documented
+choice. And per Part V's rule: these are allocation figures, not time — they
+say nothing about the tick ceiling, which remains blocked on ADR-7.

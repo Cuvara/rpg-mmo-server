@@ -8,6 +8,71 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`LoadTestSpawner` — server-synced entity load testing** (`LOADTEST_ENTITIES=N`).
+  Bulk-spawns N entities at startup in a uniform disc within AOI radius 40, orbits
+  them every tick so every connected client receives position deltas on every
+  snapshot. Mutually exclusive with `EnemySpawner` — the composition root picks one.
+  Entities use the existing `EnemyAi` tag and `writer.Spawn` API, so the snapshot
+  encoder, delta encoder and client renderer handle them with zero protocol changes.
+  `LoadTestBulkSpawnSystem` runs once (guarded by `LoadTestState.Spawned` singleton),
+  `LoadTestOrbitSystem` runs every world tick via chunk-visiting `OrbitBody` struct.
+  Measured: 1000 entities spawn in 2ms, server holds 60Hz tick, 3 clients receive
+  all 1000 entities at 674 FPS via 14 snapshots/s.
+- **Duplicate-login kick — the consumer half of ADR-20.** A user who logs in
+  again is no longer left with a live gameplay connection here (the gap ADR-17
+  recorded after #211): `RedisKickConsumer` reads `session_superseded` events
+  from the shared `events:kick` stream through this server's OWN consumer group
+  (`gs:{server_id}`, ACK after handling, created at `$`, destroyed on graceful
+  dispose so retired server ids leave nothing behind in a `noeviction` Redis),
+  filters by `server_id`, and hands matches to
+  `GameServerHost.KickPlayerAsync`. The kick is **jti-matched**: each
+  connection remembers the join-token jti it authenticated with
+  (`Connection.JoinJti`), and only the connection holding the event's jti is
+  touched — a late or redelivered event can never kick the newer login.
+  Teardown is the transfer shape (#230): save, `MsgKick` +
+  `MsgDisconnect` (both `reason=duplicate_login`, the gateway's two-frame
+  contract), entity removed, gauge balanced once, connection closed — and **no
+  reconnect hold**, because the kicked login's token is spent
+  (`Connection.Kicked` makes the handler's `finally` skip its teardown, like
+  `Transferred`). A user with no live connection is left alone, holds included.
+  Wired in `Program.cs` when `REDIS_ADDR` is set; failure to start is loud and
+  non-fatal.
+- **The consumer pins RESP2.** SE.Redis v3 negotiates RESP3, and miniredis (the
+  E2E suite's in-process Redis) accepts `HELLO 3` but answers `XREADGROUP` in
+  RESP2 array shape — which SE.Redis under RESP3 silently parses as an EMPTY
+  result: the consumer polls forever and every kick is lost with zero errors.
+  XREADGROUP parsing is the one thing this connection's correctness rides on,
+  and RESP3 buys it nothing here.
+- **Observability**: `gameserver_players_kicked_total` counter (also mirrored
+  as a plain property for tests), `/status` fields `players_kicked` and
+  `kick_consumer`, a startup `Kicks:` config line, and one info line per kick —
+  documented in `docs/METRICS.md`; the `session_superseded` payload contract in
+  `docs/API.md`. Tests: `DuplicateLoginKickTests` (jti match, idempotent
+  redelivery, stale-event-vs-new-login, no hold),
+  `KickEventParseTests` (malformed payloads never throw),
+  `KickConsumerRedisTests` (SkippableFact against the ephemeral Redis
+  container: dispatch/filter/ACK, `$` start, crash-restart PEL drain, group
+  destroyed on dispose).
+- **`TickAllocationBench` — allocated bytes as the tick-path proof metric**
+  (`GameServer.Tests/Bench/TickAllocationBench.cs`, gated on `BENCH_TICK=1`
+  like the other benches). The module has carried "no allocations in hot
+  paths" since its first `CLAUDE.md`; this is the first committed instrument
+  for the rule, chosen because it is the one hot-path metric this host can
+  measure deterministically — tick p99 swings 3.3× with co-tenant load
+  (ADR-7), allocated bytes do not. Three facts: a per-phase breakdown of
+  `TickOnce` (same rig and entry points as `TickBreakdownBench`, plus attack
+  inputs so the combat branch is measured), an isolation of the write task's
+  encode path, and a micro for the parallel-region dispatch.
+  `BENCH_ALLOC_WARMUP` varies the warm-up, which is what separates ramp
+  allocation (buffer high-water growth, decays to zero) from steady-state
+  allocation. Measured verdict, now in `docs/BENCHMARK.md` Part VIII: the
+  steady-state tick thread allocates **0 B/tick** in every phase; the only
+  whole-tick residue is 96–144 B once per enemy wave (the two id strings a
+  spawn mints — content creation, not tick overhead), and the write path's
+  floor is the 32 B/frame `ByteString` wrapper in `SnapshotFrameWriter`,
+  attributed exactly and deliberately kept (removing it means hand-rolling
+  envelope tags, which that file's own doc rejects as wire risk).
+
 - **`RedisEventStream` — cross-server events are finally published** (ADR-5
   follow-up). A Redis Streams-backed `IEventStream`
   (`GameServer/Events/RedisEventStream.cs`) that XADDs into `events:game` with
@@ -35,6 +100,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   genuinely absent).
 
 ### Fixed
+
+- **72 B/tick allocated on the tick thread in the parallel-gather
+  configuration, now 0** (`GameServer/World/EcsWorld.cs`; measured before and
+  after by `TickAllocationBench.ParallelRegionAllocationMicro`). With
+  `--gather-workers` engaged (500+ viewers), every `ReadAllParallel` dispatch
+  allocated twice: a fresh `Exception?[]` of failure cells per region (40 B) —
+  replaced by one array per world at slot capacity, cleared per region, shared
+  under the same single-dispatcher assumption the pool's own fields already
+  rely on — and, less obviously, a 32 B closure display class charged by
+  `EnsureStarted`'s loop *on the `continue` path*: the compiler allocates a
+  closure's display class at the entry of the scope declaring the captured
+  variable, so the once-per-world `new Thread(() => WorkerLoop(...))` cost
+  every dispatch that merely verified the thread was already running. Thread
+  creation moved to its own `StartWorker` method, entered only when a worker
+  genuinely starts; its doc comment explains why it must stay a separate
+  method. `UpdateComponentsParallel` shared both allocations and both fixes.
+  No behaviour change: failure aggregation, rethrow order and wire output are
+  identical, and the byte-identity suites, golden vectors and full test suite
+  (892 passed / 20 skipped) pass unchanged.
 
 - **`EventPublisher` published to the wrong logical stream name.** The literal
   was `"game_events"`, which the storage-layer prefix would have turned into the

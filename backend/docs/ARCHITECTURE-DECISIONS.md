@@ -2454,6 +2454,14 @@ before a tier that is not this one:
   wiring-level test in `cmd/gateway` that fails when the construction is removed (#204's
   shape). This is a consequence of the single-replica posture, so it is recorded with the
   posture rather than in a backlog.
+  **Update 2026-09-04 (ADR-20):** the gateway→gameserver half of that kick is now built —
+  duplicate login publishes `session_superseded` on the `events:kick` Stream and the game
+  server evicts the old gameplay connection, for sessions owned by ANY gateway instance.
+  That half was observable and testable at one replica (the game-server connection was
+  never evicted before, even same-gateway), which is why it did not wait for a second
+  replica. What this item still tracks is only the gateway→gateway direction: the old
+  gateway *socket* on another replica is not evicted, and that part keeps the
+  one-replica reasoning above.
 - **Redis persistence and replication.** ADR-4 rules out treating this Redis as an evictable
   cache, which also rules out the reflex answer of "add a read replica and let it lag": the
   registry and the event stream are systems of record. The decision is which of ADR-4's
@@ -2524,10 +2532,11 @@ k8s; staging and production remain `DEPLOY_MODE=containers` and reach none of th
   a silent one; it is the only failure in the table that a player cannot see and an operator
   currently would not either.
 - **M** — Answer the gateway exposure question (LoadBalancer/Ingress vs hostPort) together
-  with cross-instance single-flight **and cross-instance duplicate-login kick**, as one
-  decision. Any one alone makes the deployment worse: exposure without single-flight leaks
-  a GameServer per cold map, and either without the kick lets one user hold two live
-  sessions on two replicas with no error anywhere.
+  with cross-instance single-flight **and the gateway→gateway half of the duplicate-login
+  kick**, as one decision. Any one alone makes the deployment worse: exposure without
+  single-flight leaks a GameServer per cold map, and without the gateway-socket eviction a
+  superseded user keeps a live *gateway* socket on the other replica (the gameplay
+  connection is already evicted everywhere — ADR-20).
 - **L** — Decide the Redis topology for the first tier above dev, against ADR-4's split path
   rather than by adding replicas.
 ## ADR-18 — A buffer FleetAutoscaler and `replicas > 1` unlock at the same moment, and it is not this one
@@ -2716,6 +2725,67 @@ first is a naming question, the second only matters once content is delivered ov
 untrusted path, and the third is worth revisiting if the first-join fetch ever shows up in a
 join-latency measurement.
 
+## ADR-20 — Duplicate-login kick reaches the game server over one shared Stream, keyed by join-token jti
+
+**Status:** accepted 2026-09-04, **implemented and proven end to end**
+(`integration_test/duplicate_login_kick_e2e_test.go`). Closes the gap #211 left
+recorded in ADR-17: a user already *playing* was never evicted on a new login —
+the gateway's local kick closes only the gateway socket, and the client talks to
+the game server directly (ADR-3), so the old gameplay connection lived on. This
+was true even at one gateway replica, which is why this half did not wait for
+the multi-replica decision the way the gateway→gateway half does.
+
+**The mechanism.** On duplicate login (an existing session for the user, not a
+re-auth on the same socket), `handleAuth` publishes a `session_superseded` event
+onto the `events:kick` Redis Stream (`gateway/server/kick.go`), carrying the old
+session's **join-token jti** — recorded on the session at EnterWorld
+(`SessionData.JoinTokenJTI`). Every game server consumes the stream through its
+**own consumer group** (`gs:{server_id}`, consumer = server id, ACK after
+handling — ADR-5's shape, never the Pub/Sub shape #211 deleted), keeps the
+events whose `server_id` names it, and calls `KickPlayerAsync`: save, `MsgKick`
++ `MsgDisconnect` (both `reason=duplicate_login`, the gateway's two-frame
+eviction contract), remove the entity, close — and **no reconnect hold**,
+because the kicked login's token is spent and a newer login owns the user.
+
+**Why the jti is the key.** The event is published at auth time; the new login
+joins the game server later, possibly before the event is consumed. Any
+"kick user X" signal without a discriminator loses that race and kicks the NEW
+login. The jti names exactly one accepted connection (join tokens are single-use
+via JTI replay protection), so a late or redelivered event matches nothing once
+the old connection is gone — newest login wins by construction, and
+at-least-once delivery is idempotent with zero dedup state.
+
+**Why one shared stream, not a stream per server.** Server ids churn (dungeon
+instances, pod restarts) and this Redis runs `noeviction` (ADR-4): per-server
+keys would accumulate without bound, while one `events:kick` stays trimmed by
+the publisher's `MAXLEN ~`. A server that is down never ACKs — that strands only
+its own group's PEL, which stops growing when the process stops reading; the
+group starts at `$` (a kick for a connection that died with the old process is
+a no-op by definition, so history is worthless) and is destroyed on graceful
+shutdown, so retired ids leave nothing behind. A crash leaves the group; the
+next boot with the same id drains the stale PEL into jti-guarded no-ops.
+
+**Observability.** Gateway: `gateway_kick_publish_total{result}` + the
+`published session supersede` log line. Game server:
+`gameserver_players_kicked_total`, `/status` fields `players_kicked` and
+`kick_consumer`, and one info line per kick. A publish failure is loud (the old
+connection will NOT be kicked) but never fails the new login.
+
+**One implementation note that cost a day of debugging in miniature:** the C#
+consumer pins **RESP2** on its connection. SE.Redis v3 negotiates RESP3, and
+miniredis (the in-process Redis the E2E suite uses) accepts `HELLO 3` but
+answers `XREADGROUP` in the RESP2 array shape — which SE.Redis under RESP3
+silently parses as an *empty* result: the consumer polls forever, every kick is
+lost, and nothing errors. XREADGROUP reply parsing is the one thing this
+connection's correctness rides on, and RESP3 buys it nothing.
+
+**What this ADR does not decide.** The gateway→gateway eviction (a gateway
+socket held by another replica) stays with ADR-17's multi-replica bundle, and
+the client-visible vocabulary is unchanged — a kicked client sees exactly the
+frames the same-gateway eviction already defined.
+
+---
+
 ## Summary of decisions
 
 | # | Area | Decision |
@@ -2736,6 +2806,7 @@ join-latency measurement.
 | 14 | Agones | **Stages 1-4 shipped 2026-08-17 and are proven — see ADR-16.** The decisions below stand; the status claim does not. Originally: the C# server's Agones SDK is a no-op and `--agones` changes nothing; implement it over the **HTTP sidecar on `localhost:9358`**, not the gRPC C# SDK, to hold the module's NativeAOT/no-dependencies rule. Agones owns pod lifecycle, Redis owns the `map_id -> server` lookup, and the server registers **only after** reporting Ready — an ordering `GameServer.RunAsync` already implements, so what it needs is a test pinning it, not a change. Health stays `disabled: true` until a real SDK is wired; the autoscaler is buffer-based on server count because ADR-7's CCU ceiling is unknown. Whether the realtime tier moves off `DEPLOY_MODE=containers` to k8s is **not** decided here |
 | 15 | Realtime tier on k8s | **Proposed, not accepted — this one records an open question.** All three environments are `DEPLOY_MODE=containers`; there is no k3s (context is `docker-desktop`), no `deploy/k8s/`, and `cd.yml` applies no manifest. One thing *is* decided because it blocks either answer: with `portPolicy: Dynamic` the server cannot learn its own address, advertises `:9000` and the gateway hands that to clients verbatim — so the SDK must **read GameServer status from the sidecar**, not use static ports and not let the gateway write the registry entry (which would break ADR-1 and ADR-14's split). Six prerequisites — StatefulSets/PVCs, ConfigMaps, plugin packaging, Secrets, a registry, and allocation RBAC — sit outside `deploy/agones/` and outweigh ADR-14's stages 1-8, which they precede. ADR-3 is unchanged: allocation lives inside `MsgEnterWorld` and the gateway stays out of the gameplay path |
 | 16 | Agones on k3s | Realtime tier **proven** on Agones/k3d: a real client joined an Agones-managed server in strict-address mode. Docker Desktop k8s cannot host it (Kubernetes `hostPort` is never published to the host); k3d with a mapped port range can. The advertised address is **composed** — port from the Agones status read, host from `GAMESERVER_ADVERTISE_HOST` — because `status.address` is the node address and is not dialable. ADR-2 is now enforced in code (allocate only for a map with no live server); the join token is minted only after the pod self-registers. Allocated pods are never reclaimed; the map-fleet allocator policy stays open; the deploy path stays `DEPLOY_MODE=containers` |
-| 17 | Availability posture on k8s | **Statement of posture, not a manifest change.** Every workload in `deploy/k8s/` is **one replica** — gateway, Nakama, Redis, both PostgreSQL instances, and the map Fleet — so k8s provides scheduling and lifecycle here, **not redundancy**. `strategy: Recreate` on the two `hostPort` workloads (gateway 7000, Nakama 7001) is **required**: RollingUpdate deadlocks on a single node because the replacement cannot schedule until the outgoing pod frees the port. The accepted cost is that **every gateway or Nakama rollout drops the join path entirely**; in-progress sessions survive, because the game server verifies the join token itself and never calls the gateway (ADR-3). The window is **unmeasured** and not quoted. Before any tier above dev: answer the gateway hostPort exposure question *together with* cross-instance single-flight (ADR-16) **and cross-instance duplicate-login kick, which is not implemented** (declared-but-unwired machinery deleted in #211; rebuild on Streams per ADR-5, never Pub/Sub), and decide Redis persistence/replication against ADR-4 rather than by adding replicas |
+| 17 | Availability posture on k8s | **Statement of posture, not a manifest change.** Every workload in `deploy/k8s/` is **one replica** — gateway, Nakama, Redis, both PostgreSQL instances, and the map Fleet — so k8s provides scheduling and lifecycle here, **not redundancy**. `strategy: Recreate` on the two `hostPort` workloads (gateway 7000, Nakama 7001) is **required**: RollingUpdate deadlocks on a single node because the replacement cannot schedule until the outgoing pod frees the port. The accepted cost is that **every gateway or Nakama rollout drops the join path entirely**; in-progress sessions survive, because the game server verifies the join token itself and never calls the gateway (ADR-3). The window is **unmeasured** and not quoted. Before any tier above dev: answer the gateway hostPort exposure question *together with* cross-instance single-flight (ADR-16) **and the gateway→gateway half of the duplicate-login kick** (the gateway→gameserver half shipped as ADR-20 on Streams; what remains unbuilt is evicting a gateway socket held by another replica — #211's history), and decide Redis persistence/replication against ADR-4 rather than by adding replicas |
 | 18 | Fleet autoscaling | **No `FleetAutoscaler` on a fleet that pins one `GAMESERVER_MAP_ID` for every replica.** The C# server self-registers at startup, not on allocation, so a "spare" Ready pod is a second live server for that map: measured on k3d 2026-08-18, scaling `1 -> 2` put two members into `servers:map:map_01` 5.4s later with no allocation involved, and `FindServer` hands clients one of them (the least-loaded then; the lowest `ServerID` since #203). `ready=0` is therefore the correct steady state and tooling says so instead of warning. Enforced by `verify.sh` check `cluster.autoscaler` (FAIL), which stands down for a fleet with a per-pod map id. `replicas > 1` and a buffer autoscaler unlock together, on a per-pod map id or on registering at `Allocated` rather than `Ready` — an autoscaler does nothing for the "second map cannot be served" symptom, which is a fleet-targeted-allocation problem |
 | 19 | Game content | **Content is JSON on disk in `backend/content/`, owned by the game server, served to clients over HTTP at `/content` and never carried by the `Shared.GameLogic` package.** The package is pinned by exact commit, so content in it costs a tag plus two file bumps per balance tweak — correct for simulation rules, fatal for content. The server loads and validates at boot and **refuses to start** on invalid content, reporting every fault in one pass. Clients send `?hash=` and get `304` once they hold the current set; the hash ships in both `ETag` and `X-Content-Hash` because `UnityWebRequest` and some proxies strip the former. The **schema and validator are shared** (`Shared.GameLogic/Content/`), the **parser is not** — Unity compiles the package as source and has no `System.Text.Json`, the server is NativeAOT and cannot reflect, so no single parser satisfies both; golden vectors cover the gap as in ADR-10. No hot reload: content changes need a restart, because rules changing under a running simulation makes every desync unreproducible |
+| 20 | Duplicate-login kick | **Gateway→gameserver eviction over one shared `events:kick` Stream, keyed by join-token jti** (ADR-5 consumer-group ACK, never Pub/Sub). On duplicate login the gateway publishes `session_superseded` with the old session's jti; each game server consumes via its own group (`gs:{server_id}`, created at `$`, destroyed on graceful shutdown), kicks only the connection holding that jti (newest login wins, redelivery idempotent), releases the entity with **no reconnect hold**, and sends the standard `MsgKick`+`MsgDisconnect` pair. One shared stream because server ids churn under a noeviction Redis (ADR-4). Counters: `gateway_kick_publish_total`, `gameserver_players_kicked_total`. The gateway→gateway socket eviction stays with ADR-17 |

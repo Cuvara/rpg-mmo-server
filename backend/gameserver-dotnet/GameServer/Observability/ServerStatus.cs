@@ -169,6 +169,23 @@ public sealed class ServerStatus
     [JsonPropertyName("event_publish_failures")]
     public long EventPublishFailures { get; set; }
 
+    /// <summary>
+    /// State of the duplicate-login kick consumer on <c>events:kick</c>:
+    /// <c>"redis"</c> (consuming) or <c>"disabled"</c> (<c>REDIS_ADDR</c> unset, or the
+    /// consumer could not start — supersede events for this server are then never acted
+    /// on, so a user can hold two live game connections here).
+    /// </summary>
+    [JsonPropertyName("kick_consumer")]
+    public string KickConsumer { get; set; } = "disabled";
+
+    /// <summary>
+    /// Duplicate-login kicks executed since process start: connections force-closed
+    /// because a <c>session_superseded</c> event named their join-token jti. Same value
+    /// as <c>gameserver_players_kicked_total</c>.
+    /// </summary>
+    [JsonPropertyName("players_kicked")]
+    public long PlayersKicked { get; set; }
+
     [JsonPropertyName("postgres")]
     public string Postgres { get; set; } = "disconnected";
 

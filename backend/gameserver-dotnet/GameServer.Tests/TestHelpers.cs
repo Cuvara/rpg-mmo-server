@@ -44,14 +44,17 @@ internal static class TestHelpers
     /// <summary>
     /// Create a valid HS256 JWT for testing, including a unique JTI claim.
     /// </summary>
-    public static string CreateTestJwt(string userId, string serverId, string secret, long? exp = null)
+    public static string CreateTestJwt(string userId, string serverId, string secret, long? exp = null,
+        string? jti = null)
     {
         var header = new { alg = "HS256", typ = "JWT" };
         var payload = new Dictionary<string, object>
         {
             ["sub"] = userId,
             ["sid"] = serverId,
-            ["jti"] = Guid.NewGuid().ToString("N"),
+            // Callers that need to know the jti (the duplicate-login kick tests
+            // match on it) pass one explicitly; everyone else gets a fresh one.
+            ["jti"] = jti ?? Guid.NewGuid().ToString("N"),
             ["iat"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
         };
 

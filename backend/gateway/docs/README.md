@@ -181,7 +181,7 @@ including the debug lines.
 | `auth failed` | warn (error for `reason=session_store`) | **first per connection**, then debug |
 | `enter world assigned` | info | once per session |
 | `enter world failed` | warn / error | once per attempt |
-| `duplicate login detected`, `client evicted` | info | once per eviction |
+| `duplicate login detected`, `client evicted`, `published session supersede` | info | once per eviction |
 | `session expired` | info | once per session (the identity is cleared with it) |
 | `client disconnect` / `client disconnected` | info when the connection had a session, else debug | once per session |
 | `unexpected message type` | warn | **first per connection**, then debug |
@@ -237,6 +237,12 @@ curl localhost:9102/readyz      # 200 "ready", or 503 "not ready: redis"
 | `gateway_relay_up` | gauge | — |
 | `gateway_session_checks_total` | counter | `result=ok\|expired\|store_error` |
 | `gateway_stream_group_loss_total` | counter | — |
+| `gateway_kick_publish_total` | counter | `result=ok\|fail` |
+
+`gateway_kick_publish_total` counts duplicate-login supersede events published to
+the `events:kick` stream (ADR-20). A `fail` is a duplicate login whose old
+game-server connection will NOT be kicked — the new login proceeds regardless —
+so `rate(gateway_kick_publish_total{result="fail"}[5m]) > 0` is alert-worthy.
 
 ### Liveness vs readiness
 

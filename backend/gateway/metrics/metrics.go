@@ -78,6 +78,12 @@ type Metrics struct {
 	// StreamGroupLossTotal counts consumer-group disappearances the relay had
 	// to recover from (NOGROUP after a Redis wipe/restore).
 	StreamGroupLossTotal prometheus.Counter
+
+	// KickPublishTotal counts session-supersede events published to the
+	// events:kick stream on duplicate login, labelled ok/fail. A fail is a
+	// duplicate login whose OLD game-server connection will NOT be kicked
+	// (the new login proceeds regardless), so it is worth alerting on.
+	KickPublishTotal *prometheus.CounterVec
 }
 
 // Reason label values for gateway_rate_limited_total.
@@ -146,6 +152,10 @@ func New(reg prometheus.Registerer) *Metrics {
 			Name: "gateway_stream_group_loss_total",
 			Help: "Event-stream consumer groups found missing and re-created.",
 		}),
+		KickPublishTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gateway_kick_publish_total",
+			Help: "Duplicate-login supersede events published to events:kick, by result.",
+		}, []string{"result"}),
 	}
 	if reg != nil {
 		reg.MustRegister(
@@ -159,6 +169,7 @@ func New(reg prometheus.Registerer) *Metrics {
 			m.RelayUp,
 			m.SessionChecksTotal,
 			m.StreamGroupLossTotal,
+			m.KickPublishTotal,
 		)
 		for _, v := range []string{SessionCheckOK, SessionCheckExpired, SessionCheckStoreError} {
 			m.SessionChecksTotal.WithLabelValues(v)
@@ -170,7 +181,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		// Pre-create both label values so a freshly started gateway exports
 		// `...{result="fail"} 0` instead of nothing — rate() over a series that
 		// only appears on the first failure produces misleading graphs.
-		for _, cv := range []*prometheus.CounterVec{m.AuthTotal, m.EnterWorldTotal, m.AllocationsTotal} {
+		for _, cv := range []*prometheus.CounterVec{m.AuthTotal, m.EnterWorldTotal, m.AllocationsTotal, m.KickPublishTotal} {
 			cv.WithLabelValues(ResultOK)
 			cv.WithLabelValues(ResultFail)
 		}
@@ -211,6 +222,14 @@ func (m *Metrics) AuthResult(ok bool) {
 		return
 	}
 	m.AuthTotal.WithLabelValues(result(ok)).Inc()
+}
+
+// KickPublishResult records one duplicate-login supersede publish outcome.
+func (m *Metrics) KickPublishResult(ok bool) {
+	if m == nil {
+		return
+	}
+	m.KickPublishTotal.WithLabelValues(result(ok)).Inc()
 }
 
 // EnterWorldResult records one map-assignment outcome.
