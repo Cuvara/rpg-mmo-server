@@ -47,6 +47,10 @@ spec:
     metadata:
       labels: { app.kubernetes.io/name: nakama }
     spec:
+      # Pull from a private registry when registry-creds exists in this
+      # namespace. Silently ignored when absent (k3d import, no registry).
+      imagePullSecrets:
+        - name: registry-creds
       initContainers:
         # Replaces compose's shell entrypoint, which ran `migrate up` and then
         # exec'd the server in one command. As an initContainer the migration

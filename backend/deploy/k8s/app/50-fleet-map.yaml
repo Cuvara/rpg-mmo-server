@@ -75,6 +75,10 @@ spec:
         failureThreshold: 3
       template:
         spec:
+          # Pull from a private registry when registry-creds exists in this
+          # namespace. Silently ignored when absent (k3d import, no registry).
+          imagePullSecrets:
+            - name: registry-creds
           containers:
             - name: gameserver
               image: rpg-mmo/gameserver-dotnet:develop
