@@ -60,6 +60,11 @@ type Gateway struct {
 	// startRelayWithRetry), so readiness can reflect a degraded gateway.
 	relayUp atomic.Bool
 
+	// kickConsumer consumes gateway_superseded events from other gateway
+	// instances and closes the local socket for the superseded user.
+	// Nil when no kick stream is configured.
+	kickConsumer *KickConsumer
+
 	// metrics is nil when the gateway runs without instrumentation; every
 	// recording helper is nil-safe.
 	metrics *metrics.Metrics
@@ -116,6 +121,15 @@ func WithKickStream(stream storage.EventStream) Option {
 // wiring-level assertion handle (#204's shape): a test can prove the binary's
 // construction path passes WithKickStream without simulating a duplicate login.
 func (g *Gateway) KickStreamConfigured() bool { return g.kickStream != nil }
+
+// WithKickConsumer attaches a cross-gateway kick consumer. The gateway starts
+// it in Run and stops it in Shutdown.
+func WithKickConsumer(kc *KickConsumer) Option {
+	return func(g *Gateway) { g.kickConsumer = kc }
+}
+
+// KickConsumerConfigured reports whether a kick consumer was wired in.
+func (g *Gateway) KickConsumerConfigured() bool { return g.kickConsumer != nil }
 
 // WithJoinTokenSecret sets the secret (or comma-separated rotation list) used
 // to sign gateway -> game server join tokens. Without it the gateway falls back
@@ -325,6 +339,16 @@ func (g *Gateway) Run(addr string) error {
 		g.startRelayWithRetry()
 	}
 
+	// The kick consumer is started alongside the relay. It is also degradable:
+	// a gateway that cannot consume kick events still serves traffic -- the
+	// worst case is an old socket lingering until the player notices.
+	if g.kickConsumer != nil {
+		if err := g.kickConsumer.Start(context.Background()); err != nil {
+			g.logger.Error("kick consumer failed to start, cross-gateway kicks will not work",
+				"err", err)
+		}
+	}
+
 	ln, err := transport.Listen(g.transportKind, addr,
 		transport.WithKey(g.transportKey), transport.WithLogger(g.logger))
 	if err != nil {
@@ -394,6 +418,11 @@ func (g *Gateway) Shutdown() {
 			g.logger.Error("stop event relay", "err", err)
 		}
 	}
+	if g.kickConsumer != nil {
+		if err := g.kickConsumer.Stop(); err != nil {
+			g.logger.Error("stop kick consumer", "err", err)
+		}
+	}
 }
 
 // Addr returns the listener address, or empty string if not running.
@@ -446,6 +475,20 @@ func (g *Gateway) findUserConn(userID string) *ClientConn {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.userConns[userID]
+}
+
+// FindAndCloseConnection locates a user's local connection and evicts it with
+// MsgKick + MsgDisconnect (duplicate_login), then cleans up its session
+// tracking. This is the callback the KickConsumer uses when it receives a
+// gateway_superseded event from another gateway instance.
+func (g *Gateway) FindAndCloseConnection(userID string) {
+	cc := g.findUserConn(userID)
+	if cc == nil {
+		return
+	}
+	g.sendKickAndClose(cc, KickReasonDuplicateLogin)
+	cc.ClearIdentity()
+	g.untrackUser(userID, cc)
 }
 
 // authTimeout is how long an unauthenticated connection may idle before the

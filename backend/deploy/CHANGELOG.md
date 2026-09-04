@@ -5,6 +5,34 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **ADR-15 prerequisite 2: ConfigMap init-gamestate manifests.**
+  `k8s/data/configmap-init-gamestate.yaml` documents the ConfigMap shape that
+  `apply.sh` generates from `db/init-gamestate.sql`. `k8s/data/job-init-gamestate.yaml`
+  is a one-shot Job for applying the schema to an existing postgres-game instance
+  that missed the first-boot initdb (adopted PVC, bare-metal restore). The Job
+  uses the same `postgres:16.4-alpine` image as the StatefulSet, waits for
+  postgres-game readiness, and runs `psql -v ON_ERROR_STOP=1`. The SQL is
+  idempotent (`CREATE TABLE IF NOT EXISTS`), so running it against an already-
+  initialised database is safe.
+
+- **ADR-15 prerequisite 3: Nakama plugin Dockerfile.**
+  `docker/Dockerfile.nakama` — multi-stage build (pluginbuilder -> export ->
+  runtime) that bakes the Go plugin into the Nakama server image. Mirrors the
+  existing `nakama-plugin.Dockerfile` at the deploy root but follows the
+  `docker/Dockerfile.*` naming convention used by gateway and gameserver-dotnet.
+  Build context is `backend/`. The plugin and server are ABI-locked and must be
+  versioned as one artifact.
+
+- **ADR-15 prerequisite 5: Container registry support.**
+  `k8s/registry/push.sh` — tags and pushes all three project images (gateway,
+  gameserver-dotnet, nakama) to a configurable registry (`REGISTRY` and `TAG`
+  env vars, `--dry-run` flag). `k8s/registry/README.md` documents the full
+  workflow: push, create `imagePullSecret`, override image tags at deploy time.
+  All workload manifests (gateway, nakama, fleet) now carry `imagePullSecrets:
+  [{name: registry-creds}]` — silently ignored when the Secret does not exist
+  (k3d import path), used for authenticated pulls when it does.
+
 ### Fixed
 - **Redis now has a `maxmemory`, so `noeviction` refuses writes instead of ending
   in an OOM kill** ([#202](https://github.com/Cuvara/rpg-mmo-server/issues/202)).
