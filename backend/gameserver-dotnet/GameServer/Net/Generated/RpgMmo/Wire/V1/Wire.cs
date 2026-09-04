@@ -1156,7 +1156,6 @@ namespace RpgMmo.Wire.V1 {
       joinToken_ = other.joinToken_;
       transport_ = other.transport_;
       error_ = other.error_;
-      sessionKey_ = other.sessionKey_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -1214,17 +1213,6 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
-    public const int SessionKeyFieldNumber = 5;
-    private pb::ByteString sessionKey_ = pb::ByteString.Empty;
-    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
-    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
-    public pb::ByteString SessionKey {
-      get { return sessionKey_; }
-      set {
-        sessionKey_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
-      }
-    }
-
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -1244,7 +1232,6 @@ namespace RpgMmo.Wire.V1 {
       if (JoinToken != other.JoinToken) return false;
       if (Transport != other.Transport) return false;
       if (Error != other.Error) return false;
-      if (SessionKey != other.SessionKey) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -1256,7 +1243,6 @@ namespace RpgMmo.Wire.V1 {
       if (JoinToken.Length != 0) hash ^= JoinToken.GetHashCode();
       if (Transport.Length != 0) hash ^= Transport.GetHashCode();
       if (Error.Length != 0) hash ^= Error.GetHashCode();
-      if (SessionKey.Length != 0) hash ^= SessionKey.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -1291,10 +1277,6 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(34);
         output.WriteString(Error);
       }
-      if (SessionKey.Length != 0) {
-        output.WriteRawTag(42);
-        output.WriteBytes(SessionKey);
-      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -1321,10 +1303,6 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(34);
         output.WriteString(Error);
       }
-      if (SessionKey.Length != 0) {
-        output.WriteRawTag(42);
-        output.WriteBytes(SessionKey);
-      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -1346,9 +1324,6 @@ namespace RpgMmo.Wire.V1 {
       }
       if (Error.Length != 0) {
         size += 1 + pb::CodedOutputStream.ComputeStringSize(Error);
-      }
-      if (SessionKey.Length != 0) {
-        size += 1 + pb::CodedOutputStream.ComputeBytesSize(SessionKey);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -1373,9 +1348,6 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.Error.Length != 0) {
         Error = other.Error;
-      }
-      if (other.SessionKey.Length != 0) {
-        SessionKey = other.SessionKey;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -1412,10 +1384,6 @@ namespace RpgMmo.Wire.V1 {
             Error = input.ReadString();
             break;
           }
-          case 42: {
-            SessionKey = input.ReadBytes();
-            break;
-          }
         }
       }
     #endif
@@ -1449,10 +1417,6 @@ namespace RpgMmo.Wire.V1 {
           }
           case 34: {
             Error = input.ReadString();
-            break;
-          }
-          case 42: {
-            SessionKey = input.ReadBytes();
             break;
           }
         }

@@ -77,7 +77,7 @@ func AssignMapKeyring(ctx context.Context, userID, mapID string, reg *registry.R
 	if srv.Transport == "kcp" {
 		sk, err := GenerateSessionKey()
 		if err != nil {
-			return AssignResult{}, fmt.Errorf("assign map: %%w", err)
+			return AssignResult{}, fmt.Errorf("assign map: %w", err)
 		}
 		result.SessionKey = sk
 	}
