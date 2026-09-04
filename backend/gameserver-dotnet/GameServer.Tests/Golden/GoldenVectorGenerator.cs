@@ -227,11 +227,8 @@ public class GoldenVectorGenerator
             ("damage_defense_exceeds_attack_floors_to_min", 5, 50),
             ("damage_zero_defense", 7, 0),
             ("damage_one_above_defense", 11, 10),
-            // Edge: zero raw damage (0 - 0) floors to MinDamage
             ("damage_zero_raw_floors_to_min", 0, 0),
-            // Edge: large negative raw damage floors to MinDamage
             ("damage_negative_raw_floors_to_min", 1, 100),
-            // Edge: max stat overflow protection
             ("damage_max_attack_zero_defense", int.MaxValue, 0),
             ("damage_zero_attack_max_defense", 0, int.MaxValue),
             ("damage_max_attack_max_defense", int.MaxValue, int.MaxValue),
@@ -257,7 +254,6 @@ public class GoldenVectorGenerator
             ("death_hp_negative_dies_and_clamps", -25, false),
             ("death_hp_positive_survives", 1, false),
             ("death_already_dead_is_not_reported_twice", 0, true),
-            // Edge: int.MinValue HP still clamps to 0 on death
             ("death_hp_min_int_clamps_to_zero", int.MinValue, false),
         };
         foreach (var d in death)
@@ -291,15 +287,12 @@ public class GoldenVectorGenerator
             attacker.Hp = s.aHp;
             var target = Entity("b", 1f, 0f, attack: s.tAtk, defense: s.tDef);
             target.Hp = s.tHp;
-
             int dmgToTarget = CombatLogic.CalculateDamage(attacker, target);
             target.Hp -= dmgToTarget;
             CombatLogic.HandleDeath(ref target);
-
             int dmgToAttacker = CombatLogic.CalculateDamage(target, attacker);
             attacker.Hp -= dmgToAttacker;
             CombatLogic.HandleDeath(ref attacker);
-
             cases.Add(new CombatCase
             {
                 name = s.name,
@@ -329,11 +322,8 @@ public class GoldenVectorGenerator
             ("attack_on_cooldown",                0f, 0f, 1f, 0f,      false, 5, 8),
             ("attack_cooldown_expires_this_tick", 0f, 0f, 1f, 0f,      false, 8, 8),
             ("attack_diagonal_within_range",      0f, 0f, 2f, 2f,      false, 100, 0),
-            // Edge: tightest out-of-range
             ("attack_range_plus_epsilon",         0f, 0f, range + 0.001f, 0f, false, 100, 0),
-            // Edge: one tick before cooldown expires
             ("attack_one_tick_before_cooldown_expires", 0f, 0f, 1f, 0f, false, 7, 8),
-            // Edge: tick 0 boundary
             ("attack_tick_zero_no_cooldown",      0f, 0f, 1f, 0f,      false, 0, 0),
             ("attack_tick_zero_with_cooldown",    0f, 0f, 1f, 0f,      false, 0, 1),
         };
