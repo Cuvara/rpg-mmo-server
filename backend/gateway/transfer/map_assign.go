@@ -23,6 +23,7 @@ type AssignResult struct {
 	// uses it to name exactly which game-server connection a supersede event
 	// targets (session.SessionData.JoinTokenJTI).
 	JTI string
+	SessionKey []byte
 }
 
 // AssignMap finds an available server for the given map and generates a join
@@ -66,11 +67,19 @@ func AssignMapKeyring(ctx context.Context, userID, mapID string, reg *registry.R
 		return AssignResult{}, fmt.Errorf("assign map: read back jti: %w", err)
 	}
 
-	return AssignResult{
+	result := AssignResult{
 		ServerID:   srv.ServerID,
 		ServerAddr: srv.Addr,
 		JoinToken:  token,
 		Transport:  srv.Transport,
 		JTI:        claims.Jti,
-	}, nil
+	}
+	if srv.Transport == "kcp" {
+		sk, err := GenerateSessionKey()
+		if err != nil {
+			return AssignResult{}, fmt.Errorf("assign map: %%w", err)
+		}
+		result.SessionKey = sk
+	}
+	return result, nil
 }

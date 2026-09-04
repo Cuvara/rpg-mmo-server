@@ -922,6 +922,7 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 		ServerAddr: result.ServerAddr,
 		JoinToken:  result.JoinToken,
 		Transport:  result.Transport,
+		SessionKey: result.SessionKey,
 	})
 	if err != nil {
 		g.logger.Error("marshal enter world response", "err", err)

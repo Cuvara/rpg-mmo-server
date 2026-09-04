@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Per-session KCP encryption support (ADR-8).**
+  `KcpCrypto.TryCreateFromRawKey(byte[])` accepts a raw 32-byte AES-256 key
+  (no HKDF derivation) for per-session encryption. The generated
+  `EnterWorldResponse` C# class gained `SessionKey` (proto field 5, bytes).
+  Tests: `KcpTransportTests` (raw key, cross-verify, rekey);
+  `KcpInteropTests` (Go-minted session key decrypts on C# side).
 - **`LoadTestSpawner` — server-synced entity load testing** (`LOADTEST_ENTITIES=N`).
   Bulk-spawns N entities at startup in a uniform disc within AOI radius 40, orbits
   them every tick so every connected client receives position deltas on every

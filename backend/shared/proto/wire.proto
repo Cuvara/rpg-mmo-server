@@ -89,6 +89,8 @@ message EnterWorldResponse {
   string join_token = 2;
   string transport = 3;
   string error = 4;
+  // Per-session AES-256 key for KCP transport encryption (ADR-8).
+  bytes session_key = 5;
 }
 
 // --- Game server handshake ---

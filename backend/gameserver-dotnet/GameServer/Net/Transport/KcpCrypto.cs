@@ -78,6 +78,15 @@ public sealed class KcpCrypto : IDisposable
         return new KcpCrypto(DeriveKey(key));
     }
 
+    public static KcpCrypto? TryCreateFromRawKey(byte[]? key)
+    {
+        if (key == null || key.Length == 0) return null;
+        if (key.Length != KeySize)
+            throw new ArgumentException(
+                $"Per-session key must be exactly {KeySize} bytes, got {key.Length}", nameof(key));
+        return new KcpCrypto(key);
+    }
+
     /// <summary>
     /// Turns an operator-supplied <c>TRANSPORT_KEY</c> into the 32-byte AES-256 key,
     /// using the same two accepted forms as the Go side:

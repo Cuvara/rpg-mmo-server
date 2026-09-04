@@ -422,6 +422,7 @@ type EnterWorldResponse struct {
 	JoinToken     string                 `protobuf:"bytes,2,opt,name=join_token,json=joinToken,proto3" json:"join_token,omitempty"`
 	Transport     string                 `protobuf:"bytes,3,opt,name=transport,proto3" json:"transport,omitempty"`
 	Error         string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	SessionKey    []byte                 `protobuf:"bytes,5,opt,name=session_key,json=sessionKey,proto3" json:"session_key,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -482,6 +483,13 @@ func (x *EnterWorldResponse) GetError() string {
 		return x.Error
 	}
 	return ""
+}
+
+func (x *EnterWorldResponse) GetSessionKey() []byte {
+	if x != nil {
+		return x.SessionKey
+	}
+	return nil
 }
 
 // JoinTokenRequest is sent by the client to authenticate with a game server.

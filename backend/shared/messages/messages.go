@@ -185,6 +185,7 @@ type EnterWorldResponse struct {
 	JoinToken  string `json:"join_token,omitempty"`
 	Transport  string `json:"transport,omitempty"`
 	Error      string `json:"error,omitempty"`
+	SessionKey []byte `json:"session_key,omitempty"`
 }
 
 // JoinTokenRequest is sent by the client to authenticate with a game server.

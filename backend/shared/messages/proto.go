@@ -147,6 +147,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 		}
 		t.ServerAddr, t.JoinToken = pb.ServerAddr, pb.JoinToken
 		t.Transport, t.Error = pb.Transport, pb.Error
+		t.SessionKey = pb.SessionKey
 
 	case *JoinTokenRequest:
 		var pb wirepb.JoinTokenRequest
@@ -265,6 +266,7 @@ func enterWorldRespPB(t EnterWorldResponse) *wirepb.EnterWorldResponse {
 		JoinToken:  t.JoinToken,
 		Transport:  t.Transport,
 		Error:      t.Error,
+		SessionKey: t.SessionKey,
 	}
 }
 
