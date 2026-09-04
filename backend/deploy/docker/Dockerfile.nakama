@@ -1,0 +1,70 @@
+# Nakama server image with the Go runtime plugin baked in.
+#
+# This is the PRODUCTION Dockerfile for Nakama. It mirrors
+# deploy/nakama-plugin.Dockerfile (which predates it and is kept for compose
+# compatibility) but follows the docker/ naming convention used by
+# Dockerfile.gateway and Dockerfile.gameserver-dotnet.
+#
+# IMPORTANT: the build context must be `backend/` — NOT `backend/nakama/` and
+# NOT the repo root. The nakama module has `replace github.com/duycuong/rpg-mmo/shared
+# => ../shared`, so both `nakama/` and `shared/` must be visible to the build.
+#
+# Build:
+#   cd backend
+#   docker build -f deploy/docker/Dockerfile.nakama \
+#     --build-arg GIT_REVISION=$(git rev-parse HEAD) \
+#     -t rpg-mmo/nakama:3.40.0 .
+#
+# The pluginbuilder tag MUST equal the nakama server tag. Go plugins are
+# ABI-locked to the exact Go toolchain + nakama-common version used by the
+# server binary; a mismatch fails at load with
+# "plugin was built with a different version of package ...".
+ARG NAKAMA_VERSION=3.40.0
+
+# ---------------------------------------------------------------------------
+# Stage 1: build the Go plugin
+# ---------------------------------------------------------------------------
+FROM heroiclabs/nakama-pluginbuilder:${NAKAMA_VERSION} AS builder
+
+ENV CGO_ENABLED=1
+ENV GOOS=linux
+
+WORKDIR /backend
+
+# Copy go.mod/go.sum first for layer caching.
+COPY shared/go.mod shared/go.sum ./shared/
+COPY nakama/go.mod nakama/go.sum ./nakama/
+
+WORKDIR /backend/nakama
+RUN go mod download
+
+# Copy source.
+WORKDIR /backend
+COPY shared/ shared/
+COPY nakama/ nakama/
+
+WORKDIR /backend/nakama
+RUN go build --trimpath --buildmode=plugin -o /out/nakama.so .
+
+# ---------------------------------------------------------------------------
+# Stage 2: export target — writes nakama.so to the host via --output
+# ---------------------------------------------------------------------------
+FROM scratch AS export
+COPY --from=builder /out/nakama.so /nakama.so
+
+# ---------------------------------------------------------------------------
+# Stage 3: runtime — nakama server with the plugin baked in
+# ---------------------------------------------------------------------------
+FROM heroiclabs/nakama:${NAKAMA_VERSION} AS runtime
+COPY --from=builder /out/nakama.so /nakama/data/modules/nakama.so
+
+# Provenance labels. Declared AFTER the copy so a rebuild at a new revision
+# does not invalidate the layer above it.
+#
+# WITHOUT THIS, THE IMAGE LIES ABOUT ITSELF: every OCI label is inherited
+# from heroiclabs/nakama, including org.opencontainers.image.revision, which
+# points at a heroiclabs commit and says nothing about the plugin baked in.
+ARG GIT_REVISION=unknown
+LABEL org.opencontainers.image.revision="${GIT_REVISION}" \
+      org.opencontainers.image.title="rpg-mmo nakama (plugin baked in)" \
+      org.opencontainers.image.source="https://github.com/cuvara/rpg-mmo-server"

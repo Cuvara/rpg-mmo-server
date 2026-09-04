@@ -52,6 +52,10 @@ spec:
       # it matters, in a code path no unit test covers because out of cluster
       # it allocates as the developer.
       serviceAccountName: rpg-gateway
+      # Pull from a private registry when registry-creds exists in this
+      # namespace. Silently ignored when absent (k3d import, no registry).
+      imagePullSecrets:
+        - name: registry-creds
       securityContext:
         runAsNonRoot: true
         # 65532 IS THE DISTROLESS `nonroot` UID, and it has to be spelled out.
