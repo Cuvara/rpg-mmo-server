@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`LoadTestSpawner` — server-synced entity load testing** (`LOADTEST_ENTITIES=N`).
+  Bulk-spawns N entities at startup in a uniform disc within AOI radius 40, orbits
+  them every tick so every connected client receives position deltas on every
+  snapshot. Mutually exclusive with `EnemySpawner` — the composition root picks one.
+  Entities use the existing `EnemyAi` tag and `writer.Spawn` API, so the snapshot
+  encoder, delta encoder and client renderer handle them with zero protocol changes.
+  `LoadTestBulkSpawnSystem` runs once (guarded by `LoadTestState.Spawned` singleton),
+  `LoadTestOrbitSystem` runs every world tick via chunk-visiting `OrbitBody` struct.
+  Measured: 1000 entities spawn in 2ms, server holds 60Hz tick, 3 clients receive
+  all 1000 entities at 674 FPS via 14 snapshots/s.
 - **Duplicate-login kick — the consumer half of ADR-20.** A user who logs in
   again is no longer left with a live gameplay connection here (the gap ADR-17
   recorded after #211): `RedisKickConsumer` reads `session_superseded` events
