@@ -8,6 +8,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Duplicate-login kick — the consumer half of ADR-20.** A user who logs in
+  again is no longer left with a live gameplay connection here (the gap ADR-17
+  recorded after #211): `RedisKickConsumer` reads `session_superseded` events
+  from the shared `events:kick` stream through this server's OWN consumer group
+  (`gs:{server_id}`, ACK after handling, created at `$`, destroyed on graceful
+  dispose so retired server ids leave nothing behind in a `noeviction` Redis),
+  filters by `server_id`, and hands matches to
+  `GameServerHost.KickPlayerAsync`. The kick is **jti-matched**: each
+  connection remembers the join-token jti it authenticated with
+  (`Connection.JoinJti`), and only the connection holding the event's jti is
+  touched — a late or redelivered event can never kick the newer login.
+  Teardown is the transfer shape (#230): save, `MsgKick` +
+  `MsgDisconnect` (both `reason=duplicate_login`, the gateway's two-frame
+  contract), entity removed, gauge balanced once, connection closed — and **no
+  reconnect hold**, because the kicked login's token is spent
+  (`Connection.Kicked` makes the handler's `finally` skip its teardown, like
+  `Transferred`). A user with no live connection is left alone, holds included.
+  Wired in `Program.cs` when `REDIS_ADDR` is set; failure to start is loud and
+  non-fatal.
+- **The consumer pins RESP2.** SE.Redis v3 negotiates RESP3, and miniredis (the
+  E2E suite's in-process Redis) accepts `HELLO 3` but answers `XREADGROUP` in
+  RESP2 array shape — which SE.Redis under RESP3 silently parses as an EMPTY
+  result: the consumer polls forever and every kick is lost with zero errors.
+  XREADGROUP parsing is the one thing this connection's correctness rides on,
+  and RESP3 buys it nothing here.
+- **Observability**: `gameserver_players_kicked_total` counter (also mirrored
+  as a plain property for tests), `/status` fields `players_kicked` and
+  `kick_consumer`, a startup `Kicks:` config line, and one info line per kick —
+  documented in `docs/METRICS.md`; the `session_superseded` payload contract in
+  `docs/API.md`. Tests: `DuplicateLoginKickTests` (jti match, idempotent
+  redelivery, stale-event-vs-new-login, no hold),
+  `KickEventParseTests` (malformed payloads never throw),
+  `KickConsumerRedisTests` (SkippableFact against the ephemeral Redis
+  container: dispatch/filter/ACK, `$` start, crash-restart PEL drain, group
+  destroyed on dispose).
 - **`TickAllocationBench` — allocated bytes as the tick-path proof metric**
   (`GameServer.Tests/Bench/TickAllocationBench.cs`, gated on `BENCH_TICK=1`
   like the other benches). The module has carried "no allocations in hot

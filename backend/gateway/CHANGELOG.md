@@ -5,6 +5,31 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Duplicate login now evicts the old GAME-SERVER connection, not just the old
+  gateway socket** (ADR-20 — the Streams rebuild of what #211 deleted as
+  declared-but-unwired). `handleAuth` publishes a `session_superseded` event on
+  the `events:kick` Redis Stream (`server/kick.go`) whenever a duplicate login
+  supersedes a session that completed a map assignment — for sessions owned by
+  ANY gateway instance, since the stream is reachable where a remote socket is
+  not. The event carries the old session's **join-token jti**
+  (`SessionData.JoinTokenJTI`, recorded at EnterWorld from the new
+  `transfer.AssignResult.JTI`), so the C# consumer kicks exactly the superseded
+  connection and can never hit the newer login — newest login wins even when
+  the event is delivered after the new join, and at-least-once redelivery is
+  idempotent with no dedup state. Re-auth on the same socket publishes nothing,
+  mirroring the semantics `duplicate_login_test.go` pins for the local kick.
+- **`WithKickStream` option + `gateway_kick_publish_total{result=ok|fail}`**.
+  `cmd/gateway/main.go` passes the option unconditionally (the same event-store
+  backend the relay consumes); `publishSupersede` warns loudly when the stream
+  is missing, so #211's silent-noop failure mode cannot recur unnoticed. A
+  publish failure is logged + counted but never fails the new login: the cost
+  is the old connection lingering, not a correctness violation on the new
+  session. Table-driven coverage in `server/kick_publish_test.go`; the live
+  chain is proven in `integration_test/duplicate_login_kick_e2e_test.go`.
+- **Docs**: `docs/API.md` no longer claims a "kick Pub/Sub channel" (stale
+  since #211); `docs/README.md` gains the new counter and log line.
+
 ### Fixed
 - **Heartbeats now keep the gateway session alive**
   ([#231](https://github.com/Cuvara/rpg-mmo-server/issues/231)). A `MsgPong` on

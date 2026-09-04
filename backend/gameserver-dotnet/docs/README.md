@@ -98,7 +98,7 @@ set. Flags are **space-separated** (`--addr :9000`).
 | `--public-addr` | `GAMESERVER_PUBLIC_ADDR` | *(listen addr)* | Full `host:port` advertised to clients through the registry. Used **only when Agones is off** — with Agones on and the status read working, the port comes from Agones and the host from `GAMESERVER_ADVERTISE_HOST`; see the Agones section |
 | `--advertise-host` | `GAMESERVER_ADVERTISE_HOST` | *(unset → Agones `status.address`)* | **Host only, no port.** Replaces the host of the address read from the Agones GameServer status; the port always stays the Agones-assigned one. Ignored (with a warning) when Agones is off or the status read fails. Needed because `status.address` is the *node* address, which a client outside the cluster network cannot dial |
 | `--register-on-allocated` | `GAMESERVER_REGISTER_ON_ALLOCATED=true` | off | Hold the registry entry back until Agones reports this GameServer **Allocated**, instead of publishing it right after Ready. Agones-only; ignored (with a warning) when Agones is off — see below |
-| `--redis` | `REDIS_ADDR` | *(unset)* | Registry Redis; unset disables self-registration |
+| `--redis` | `REDIS_ADDR` | *(unset)* | Registry Redis; unset disables self-registration, the `events:game` publisher, and the duplicate-login kick consumer on `events:kick` (ADR-20) |
 | `--redis-password` | `REDIS_PASSWORD` | *(unset)* | Registry Redis password |
 
 #### Realtime transport (`--transport`, `TRANSPORT_KEY`)

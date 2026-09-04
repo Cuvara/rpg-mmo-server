@@ -13,9 +13,19 @@ import (
 // SessionData is the JSON object stored for each active session in the session
 // store. It replaces the plain user_id string that was stored previously.
 type SessionData struct {
-	GatewayID    string `json:"gateway_id"`
-	ServerID     string `json:"server_id"`
-	MapID        string `json:"map_id"`
+	GatewayID string `json:"gateway_id"`
+	ServerID  string `json:"server_id"`
+	MapID     string `json:"map_id"`
+	// JoinTokenJTI is the jti claim of the join token minted for this session's
+	// most recent map assignment. It is the discriminator the duplicate-login
+	// kick is keyed on: the game server tags each connection with the jti it
+	// joined with, and a SessionSupersededEvent kicks only the connection whose
+	// jti matches — so a supersede event that arrives AFTER the newer login has
+	// already joined can never kick the newer connection (newest login wins).
+	// Empty until EnterWorld, and for sessions written before this field
+	// existed (both mean: nothing joined a game server under this session, so
+	// there is nothing to kick).
+	JoinTokenJTI string `json:"join_token_jti,omitempty"`
 	CreatedAt    int64  `json:"created_at"`
 	LastActivity int64  `json:"last_activity"`
 }

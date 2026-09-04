@@ -70,16 +70,19 @@ intended path.
   2. **Duplicate-login detection** (`handleAuth`): if a session already exists
      for the user, and it belongs to **this** gateway → kick the local socket
      (`MsgKick` then `MsgDisconnect`, both `reason=duplicate_login`,
-     `sendKickAndClose`). The duplicate is always logged, with `old_gateway` and
-     `new_gateway`.
-     ⚠️ **If the session belongs to a different gateway, nothing happens.**
-     Cross-instance duplicate-login kick is **not implemented**. It was declared
-     at every layer — `KickPublisher`/`KickSubscriber`, a `noopKickPublisher`,
-     `WithKickPublisher`/`WithKickSubscriber`, `handleKickEvent`, and a
-     `GatewayKickChannel = "gateway:kick"` constant — and `cmd/gateway/main.go`
-     never constructed any of it, so the publisher was the noop for its entire
-     life. All of it was **removed** in #211 rather than left reading as
-     finished; see "What a second gateway replica would need" below.
+     `sendKickAndClose`). Additionally — for a session owned by ANY gateway
+     instance, provided it recorded a map assignment — publish a
+     `session_superseded` event on the `events:kick` Redis Stream, carrying the
+     old session's join-token jti; the C# game server consumes it and evicts
+     the old **gameplay** connection with the same frame pair and reason, with
+     no reconnect hold (ADR-20, `gateway/server/kick.go`). The duplicate is
+     always logged, with `old_gateway` and `new_gateway`.
+     ⚠️ What remains open cross-replica is only the old **gateway socket** on
+     the other replica (auth/enter-world only, unreachable from this process);
+     the gateway→gateway direction is still unbuilt and recorded in ADR-17.
+     The gateway→gameserver machinery that was declared-but-unwired and removed
+     in #211 has been **rebuilt on Streams** — see "What a second gateway
+     replica would need" below for history and what is still missing.
   3. `CreateSession` writes `session:{user_id}` as JSON
      (`gateway/session/manager.go:51`) with `SessionTTL = 1h`
      (`shared/constants/ttl.go`).
@@ -113,6 +116,17 @@ wiring-level test in `cmd/gateway` that fails when the construction is removed
 (the shape #204 landed for `RegistryWatcher`). It is deliberately not written
 until a second replica is actually planned, because with one replica it is
 neither observable nor end-to-end testable.
+
+**Update (2026-09-04, ADR-20).** The half of the eviction that WAS observable
+at one replica — the game-server connection, which even a same-gateway
+duplicate login never touched, because the client talks to the game server
+directly (ADR-3) — is now built, on exactly the shape prescribed above:
+`events:kick` Stream, per-server consumer groups with explicit ACK, jti-keyed
+so the newest login always wins, proven end to end in
+`integration_test/duplicate_login_kick_e2e_test.go`. What this section
+describes as missing is now ONLY the gateway→gateway direction (evicting a
+gateway socket held by another replica), which stays unbuilt for the same
+one-replica reasons.
 
 Only three message types are accepted after auth: `MsgAuth`, `MsgEnterWorld`,
 `MsgDisconnect` (plus `MsgPing`/`MsgPong`, handled before the session check so a
@@ -371,8 +385,12 @@ close Redis stream + client.
   `ErrNotImplemented` (`gateway/transfer/dungeon.go:30`). No checkpointing, no
   allocate-per-party, no instance lifecycle.
 - **Client-facing events.** No `MsgEvent` type exists.
-- **Cross-instance duplicate-login kick.** Not implemented, and no longer
-  declared either (#211). Harmless at one replica; see §2.2.
+- **Cross-instance duplicate-login kick.** The gateway→gameserver half is
+  **implemented** (ADR-20, 2026-09-04): a duplicate login publishes
+  `session_superseded` on the `events:kick` Stream and the game server evicts
+  the old gameplay connection, jti-matched, no reconnect hold. Still open:
+  the gateway→gateway half — a gateway socket held by another replica is not
+  evicted. Harmless at one replica; see §2.2.
 - **Matchmaking / social** Nakama modules: not started.
 
 ---
@@ -452,9 +470,12 @@ What is **not** true today:
 Two further code-level observations, reported for the reviewer, not fixed:
 
 - ~~`gateway/cmd/gateway/main.go` never calls `WithKickPublisher` /
-  `WithKickSubscriber`~~ — resolved in #211 by deleting the unwired machinery.
-  Cross-instance duplicate-login kick is now honestly absent rather than
-  falsely present; §2.2 and the section below say what closing the gap requires.
+  `WithKickSubscriber`~~ — resolved in #211 by deleting the unwired machinery,
+  then rebuilt on Streams as ADR-20 (2026-09-04): `main.go` passes
+  `server.WithKickStream(eventStream)` unconditionally, and `publishSupersede`
+  logs a loud warning if a future construction path drops the option, so the
+  #211 defect (declared-but-unwired reading as finished) cannot recur silently.
+  §2.2 describes what still remains for a second gateway replica.
 - `GameServer.cs:988 ParseAddr` is dead code (the transport factory does its own
   parsing).
 

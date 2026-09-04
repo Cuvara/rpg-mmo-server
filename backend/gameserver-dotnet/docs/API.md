@@ -80,7 +80,30 @@ both encodings; the JSON column shows the legacy field names, which match the
 | 12 | `pong` | either | `{ timestamp, server_time }` — reply to `ping` |
 | 13 | `transfer_map` | client → gameserver | `{ map_id }` — request a move to another map, see below |
 | 14 | `transfer_map_resp` | gameserver → client | `{ ok, error }` |
-| 15 | `kick` | gameserver → client | `{ reason }` — forced disconnect; `reason` is a machine-readable string, not user-facing text |
+| 15 | `kick` | gameserver → client | `{ reason }` — forced disconnect; `reason` is a machine-readable string, not user-facing text. Emitted today with `reason=duplicate_login` (a newer login superseded this one — ADR-20), always followed by a `disconnect` frame carrying the **same** reason, mirroring the gateway's eviction contract |
+
+### Server-internal: the `events:kick` stream (`session_superseded`)
+
+Not a client-facing message — recorded here because this file is the normative
+wire reference and both sides implement the shape independently
+(Go publisher `gateway/server/kick.go`, C# consumer
+`GameServer/Events/KickEvents.cs`; mechanism and rationale in ADR-20).
+
+Entry fields on the Redis Stream `events:kick` are the standard event pair
+`type` = `session_superseded` and `payload` = UTF-8 JSON:
+
+```json
+{ "user_id": "u-42", "server_id": "gs-1", "jti": "a1b2…", "old_gateway": "gw-a", "new_gateway": "gw-b" }
+```
+
+`user_id`, `server_id` and `jti` are mandatory (a consumer MUST treat a payload
+missing any of them as malformed: count it, ACK it, act on nothing);
+`old_gateway`/`new_gateway` are diagnostic. `jti` is the join-token jti of the
+superseded session's map assignment — the consumer kicks only the connection
+that authenticated with exactly that jti, which is what makes late delivery and
+at-least-once redelivery safe (newest login wins). Consumer groups are
+`gs:{server_id}`, one per game server, created at `$` and destroyed on graceful
+shutdown; events whose `server_id` names another server are ACKed and skipped.
 
 ### `join_token_resp` (6) — `tick_rate` is the client's prediction rate
 

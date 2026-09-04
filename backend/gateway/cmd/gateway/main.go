@@ -321,6 +321,12 @@ func main() {
 	gw = server.New(sessions, reg, cfg.JWTSecret, log,
 		server.WithEventRelay(relay), server.WithTransport(listenTransport),
 		server.WithMetrics(met),
+		// Duplicate-login supersede events publish into the SAME event stream
+		// backend the relay consumes from (events:kick vs events:game are
+		// different keys on the same store). On the memory backend the stream
+		// has no cross-process consumer, which matches the memory backend's
+		// single-process scope; on Redis the C# game servers consume it.
+		server.WithKickStream(eventStream),
 		server.WithTransportKey(tKey),
 		server.WithJoinTokenSecret(joinSecret),
 		// The per-IP limiter is configured per minute (the natural unit for a

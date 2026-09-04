@@ -59,6 +59,7 @@ public sealed class GameMetrics : IDisposable
     private readonly Counter<long> _eventPublishFailures;
     private readonly Counter<long> _processedInputs;
     private readonly Counter<long> _resyncsRequested;
+    private readonly Counter<long> _playersKicked;
 
     // Pre-built tag sets — never allocate per record call.
     private readonly TagList _mapTags;
@@ -151,6 +152,12 @@ public sealed class GameMetrics : IDisposable
             "gameserver.resyncs",
             description: "Keyframes requested by a client (MsgResync), i.e. a client that " +
                          "could not reconstruct state from the delta stream.");
+
+        _playersKicked = _meter.CreateCounter<long>(
+            "gameserver.players.kicked",
+            description: "Connections force-closed by a session_superseded event " +
+                         "(duplicate login: a newer login for the same user superseded this one). " +
+                         "Entity released immediately, no reconnect hold.");
 
         // Per-group instruments. One instrument with a `group` label rather than three
         // named instruments: the groups are configuration (SIM_*_HZ), so a metric name that
@@ -306,6 +313,23 @@ public sealed class GameMetrics : IDisposable
     /// how to read a rising rate.
     /// </remarks>
     public void RecordResyncRequested() => _resyncsRequested.Add(1, _mapTags);
+
+    /// <summary>
+    /// Record one duplicate-login kick. Also mirrored into
+    /// <see cref="PlayersKicked"/> so <c>/status</c> and tests can read the count
+    /// without a metrics scrape — the same dual-surface pattern as
+    /// <c>RedisEventStream.Dropped</c>.
+    /// </summary>
+    public void RecordPlayerKicked()
+    {
+        Interlocked.Increment(ref _playersKickedCount);
+        _playersKicked.Add(1, _mapTags);
+    }
+
+    private long _playersKickedCount;
+
+    /// <summary>Duplicate-login kicks executed since start (see <see cref="RecordPlayerKicked"/>).</summary>
+    public long PlayersKicked => Interlocked.Read(ref _playersKickedCount);
 
     /// <summary>Record a successful player save.</summary>
     public void RecordPlayerSaveOk() => _playerSaves.Add(1, _saveOkTags);
