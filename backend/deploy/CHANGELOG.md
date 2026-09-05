@@ -5,6 +5,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-05
+
 ### Added
 - **ADR-15 prerequisite 2: ConfigMap init-gamestate manifests.**
   `k8s/data/configmap-init-gamestate.yaml` documents the ConfigMap shape that

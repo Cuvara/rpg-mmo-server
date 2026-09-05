@@ -5,6 +5,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-05
+
 ### Added
 - **`constants.KickEventStream` (`"kick"`) and `constants.EventSessionSuperseded`
   (`"session_superseded"`)** — the gateway → game-server duplicate-login kick

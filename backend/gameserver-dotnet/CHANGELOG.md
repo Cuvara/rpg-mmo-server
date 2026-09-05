@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-05
+
 ### Added
 
 - **Golden vectors for AOI and SnapshotMerger** (ADR-10, #263). Two new fixture

@@ -5,6 +5,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-05
+
 ### Added
 - **`reward_kills` RPC — gold and leaderboard score for a batch of kills in one call**
   (rpg-mmo-server#233). The per-kill `reward_kill` + `submit_kill` pair cost 2 HTTP
