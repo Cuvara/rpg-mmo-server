@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Golden vectors for AOI and SnapshotMerger** (ADR-10, #263). Two new fixture
+  files (`Shared.GameLogic/GoldenVectors/aoi.json` — 13 cases, `snapshot_merger.json`
+  — 11 cases) and their xUnit test runners. AOI vectors cover inside/outside/boundary,
+  diagonal distance, negative coords, zero radius, and buffer overflow counting.
+  Merger vectors cover keyframe replace, delta upsert/add/remove, tick monotonicity,
+  reset, and multi-step accumulation. Total golden vectors: 91 → 115.
+
 - **`LoadTestSpawner` — server-synced entity load testing** (`LOADTEST_ENTITIES=N`).
   Bulk-spawns N entities at startup in a uniform disc within AOI radius 40, orbits
   them every tick so every connected client receives position deltas on every

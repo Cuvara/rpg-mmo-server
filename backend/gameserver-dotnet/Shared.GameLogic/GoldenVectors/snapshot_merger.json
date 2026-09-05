@@ -1,0 +1,323 @@
+{
+  "cases": [
+    {
+      "name": "keyframe_replaces_all",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41A00000", "hp": 100, "maxHp": 100},
+            {"id": "m1", "type": "mob", "x": "0x42480000", "y": "0x42480000", "hp": 50, "maxHp": 50}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 10,
+      "expectedAckTick": 0,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 0,
+      "expectedEntityIds": ["m1", "p1"],
+      "expectedCount": 2
+    },
+    {
+      "name": "delta_upserts_entity",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 11,
+          "ackTick": 5,
+          "full": false,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41A00000", "y": "0x41A00000", "hp": 90, "maxHp": 100}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 11,
+      "expectedAckTick": 5,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 1,
+      "expectedEntityIds": ["p1"],
+      "expectedCount": 1,
+      "expectedEntityState": {"id": "p1", "hp": 90, "x": "0x41A00000", "y": "0x41A00000"}
+    },
+    {
+      "name": "delta_adds_new_entity",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 11,
+          "ackTick": 0,
+          "full": false,
+          "entities": [
+            {"id": "m1", "type": "mob", "x": "0x42480000", "y": "0x42480000", "hp": 50, "maxHp": 50}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 11,
+      "expectedAckTick": 0,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 1,
+      "expectedEntityIds": ["m1", "p1"],
+      "expectedCount": 2
+    },
+    {
+      "name": "delta_removes_entity",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100},
+            {"id": "m1", "type": "mob", "x": "0x42480000", "y": "0x42480000", "hp": 50, "maxHp": 50}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 11,
+          "ackTick": 0,
+          "full": false,
+          "entities": [],
+          "removed": ["m1"]
+        }
+      ],
+      "expectedTick": 11,
+      "expectedAckTick": 0,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 1,
+      "expectedEntityIds": ["p1"],
+      "expectedCount": 1
+    },
+    {
+      "name": "second_keyframe_clears_previous",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100},
+            {"id": "m1", "type": "mob", "x": "0x42480000", "y": "0x42480000", "hp": 50, "maxHp": 50}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 20,
+          "ackTick": 10,
+          "full": true,
+          "entities": [
+            {"id": "p2", "type": "player", "x": "0x00000000", "y": "0x00000000", "hp": 80, "maxHp": 100}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 20,
+      "expectedAckTick": 10,
+      "expectedKeyframes": 2,
+      "expectedDeltas": 0,
+      "expectedEntityIds": ["p2"],
+      "expectedCount": 1
+    },
+    {
+      "name": "tick_never_moves_backwards",
+      "steps": [
+        {
+          "tick": 20,
+          "ackTick": 10,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 15,
+          "ackTick": 5,
+          "full": false,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41A00000", "y": "0x41A00000", "hp": 90, "maxHp": 100}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 20,
+      "expectedAckTick": 10,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 1,
+      "expectedEntityIds": ["p1"],
+      "expectedCount": 1
+    },
+    {
+      "name": "remove_nonexistent_entity_is_noop",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 11,
+          "ackTick": 0,
+          "full": false,
+          "entities": [],
+          "removed": ["ghost"]
+        }
+      ],
+      "expectedTick": 11,
+      "expectedAckTick": 0,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 1,
+      "expectedEntityIds": ["p1"],
+      "expectedCount": 1
+    },
+    {
+      "name": "upsert_and_remove_in_same_delta",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100},
+            {"id": "m1", "type": "mob", "x": "0x42480000", "y": "0x42480000", "hp": 50, "maxHp": 50}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 11,
+          "ackTick": 3,
+          "full": false,
+          "entities": [
+            {"id": "m2", "type": "mob", "x": "0x42C80000", "y": "0x42C80000", "hp": 30, "maxHp": 50}
+          ],
+          "removed": ["m1"]
+        }
+      ],
+      "expectedTick": 11,
+      "expectedAckTick": 3,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 1,
+      "expectedEntityIds": ["m2", "p1"],
+      "expectedCount": 2
+    },
+    {
+      "name": "reset_clears_everything",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 5,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100}
+          ],
+          "removed": []
+        }
+      ],
+      "resetAfterSteps": true,
+      "expectedTick": 0,
+      "expectedAckTick": 0,
+      "expectedKeyframes": 0,
+      "expectedDeltas": 0,
+      "expectedEntityIds": [],
+      "expectedCount": 0
+    },
+    {
+      "name": "empty_keyframe_clears_all",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 20,
+          "ackTick": 0,
+          "full": true,
+          "entities": [],
+          "removed": []
+        }
+      ],
+      "expectedTick": 20,
+      "expectedAckTick": 0,
+      "expectedKeyframes": 2,
+      "expectedDeltas": 0,
+      "expectedEntityIds": [],
+      "expectedCount": 0
+    },
+    {
+      "name": "three_deltas_accumulate",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x00000000", "y": "0x00000000", "hp": 100, "maxHp": 100}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 11,
+          "ackTick": 1,
+          "full": false,
+          "entities": [
+            {"id": "m1", "type": "mob", "x": "0x41200000", "y": "0x00000000", "hp": 50, "maxHp": 50}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 12,
+          "ackTick": 2,
+          "full": false,
+          "entities": [
+            {"id": "m2", "type": "mob", "x": "0x41A00000", "y": "0x00000000", "hp": 40, "maxHp": 50}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 13,
+          "ackTick": 3,
+          "full": false,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 95, "maxHp": 100}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 13,
+      "expectedAckTick": 3,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 3,
+      "expectedEntityIds": ["m1", "m2", "p1"],
+      "expectedCount": 3
+    }
+  ]
+}
