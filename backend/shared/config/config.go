@@ -36,7 +36,7 @@ type Config struct {
 	// GameDBURL is the DSN of the game-state PostgreSQL instance actually used
 	// at runtime. Empty (the default) means "no PostgreSQL configured" and
 	// services fall back to their in-memory stores — set GAME_DB_URL to switch
-	// the gameserver to pgstore.PostgresPlayerStore.
+	// the C# gameserver to PostgresPlayerStore.
 	// Example: postgres://game:localdev@localhost:5433/gamestate?sslmode=disable
 	GameDBURL string
 

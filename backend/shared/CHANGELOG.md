@@ -16,6 +16,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   literals (`GameServer/Events/KickEvents.cs`); payload contract in
   `gameserver-dotnet/docs/API.md`.
 
+### Removed
+- **`storage/pgstore/` package deleted** (ADR-1 follow-up). No Go binary imported
+  it — the C# game server has its own `PostgresPlayerStore`. The `pgx/v5`
+  dependency is also removed from `go.mod`.
+
 ### Changed
 - **docs**: `docs/DESIGN.md` no longer says the C# game server publishes into a
   noop — `gameserver-dotnet`'s `RedisEventStream` now feeds `events:game` with
