@@ -47,9 +47,9 @@ deploy (depends on all above — build artifacts)
 ### Communication Channels
 - **Nakama <-> Gateway**: JWT shared secret for local verification (no roundtrip)
 - **Nakama <-> GameServer**: Internal RPC (signed) for reward granting
-- **Gateway (Go) <-> GameServer (C# .NET 10)**: no runtime connection. The gateway never talks to a game server; it issues a join token and the *client* dials the server directly (ADR-3). Both speak the same wire protocol (4-byte BE length prefix + JSON, `snake_case`), joined by an HS256 join token whose `sid` names the target server
+- **Gateway (Go) <-> GameServer (C# .NET 10)**: no runtime connection. The gateway never talks to a game server; it issues a join token and the *client* dials the server directly (ADR-3). Both speak the same wire protocol (4-byte BE length prefix + Protobuf, legacy JSON still accepted — ADR-9), joined by an HS256 join token whose `sid` names the target server
 - **Gateway <-> Redis**: Session store (TTL), server registry, event-stream consumer
-- **GameServer <-> Redis**: ⬜ **not implemented** — the C# server has no Redis client. It cannot self-register or heartbeat (a deploy script does it) and its events go to a noop stream (ADR-1, ADR-5)
+- **GameServer <-> Redis**: ✅ **implemented** — `GameServer/Registry/RedisServerRegistry.cs` (self-registration + 5s heartbeat against 15s TTL), `GameServer/Events/RedisEventStream.cs` (event publishing via StackExchange.Redis), `GameServer/Events/RedisKickConsumer.cs` (duplicate-login kick consumer). Enabled when `REDIS_ADDR` is set; noop fallback otherwise
 - **GameServer <-> PostgreSQL**: Async batch save every 30s + save on entity removal. No checkpoint-on-transfer yet (ADR-6)
 
 ### Shared Definitions (owned by agent-shared, Go)
