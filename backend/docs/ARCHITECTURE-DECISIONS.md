@@ -255,9 +255,11 @@ token TTL is 30s (`constants.JoinTokenTTL`).
    token is what authorizes the direct connection, so bypassing the gateway gains
    an attacker nothing — they still need a signed token naming that exact server.
 
-Note the `sid` check is currently conditional: it is skipped when either the
+~~Note the `sid` check is currently conditional: it is skipped when either the
 server's configured id or the token's claim is empty (`GameServer.cs:225-228`).
-That is a soft spot worth closing.
+That is a soft spot worth closing.~~ **Resolved**: the check is now unconditional
+(`GameServer.cs:847`) and the server always generates a non-empty id
+(`Program.cs:19`).
 
 **Proxy mode is a documented future option, not a plan.** It becomes attractive
 only if we need client IP hiding / DDoS shielding of game-server pods, or strict
@@ -279,8 +281,10 @@ becoming a gameplay SPOF.
 
 ### Follow-up work
 
-- **S** — Make the `sid` check unconditional: refuse a token with no `sid`, and
-  refuse to start a server with no id, instead of skipping the comparison.
+- ~~**S** — Make the `sid` check unconditional: refuse a token with no `sid`, and
+  refuse to start a server with no id, instead of skipping the comparison.~~
+  **Done.** `GameServer.cs:847` rejects empty and mismatched `sid`
+  unconditionally; `Program.cs:19` always generates a non-empty server id.
 - **S** — Update the drawio diagram labels (pages 1, 2, 3, 8/9) to "Gateway
   (auth + redirect)". Page 4 is already correct — it has no gateway lifeline.
 - **M** — If pod exposure becomes a problem, prototype KCP proxy mode behind the
@@ -797,9 +801,11 @@ A tier's CCU claim is only publishable once a run at that CCU holds every thresh
   serializes inline while `Connection.Send` merely enqueues; doing it in the
   writer task removes the dominant term from the critical path without changing
   the encoding.
-- **S** — Fix the entity leak on disconnect (BENCHMARK.md §7). Highest priority of
+- ~~**S** — Fix the entity leak on disconnect (BENCHMARK.md §7). Highest priority of
   all — it makes the O(n²) cost grow with cumulative joins rather than concurrent
-  players.
+  players.~~ **Done.** `entityAttached` flag + `finally` block in `GameServer.cs`
+  ensures every exit path calls `OnPlayerDisconnected`. BENCHMARK.md §16 re-ran
+  the sweep after this fix.
 - **S** — Stagger per-connection keyframe counters to stop the keyframe stampede.
 - **M** — Spatial-grid AOI. Measurement demotes this: it targets the ~20% term.
 - **⛔ BLOCKER** — Put the load generator on a **separate machine** from the
