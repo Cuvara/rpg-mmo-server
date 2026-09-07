@@ -31,8 +31,45 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   over auto-recreate because a start-up hook must not destroy player records on its
   own, and over log-and-continue because that keeps a P1 open unnoticed.
 
+### Fixed
+- **`reward_kills` is exactly-once per `batch_id`** (audit 2026-09-07 F06, P1). The
+  batch id was only metadata; a retry under a new id after a post-commit connection
+  failure granted twice, and the game server's answer to that — dropping any batch whose
+  outcome was unknown — lost gold instead. A receipt (storage collection
+  `reward_receipts`, key = `batch_id`, owner = user, read/write 0) is now written
+  **create-only** in the same `nk.MultiUpdate` transaction as the wallet update, so gold
+  and receipt commit or roll back together. A resent id is replayed from the receipt
+  (`replayed: true`, no wallet change); a duplicate racing past the lookup loses the
+  version check and its whole transaction rolls back. Chosen over a separately written
+  dedupe marker because only the one-transaction form closes the crash window between
+  marker and grant. `batch_id` is now **required** (code 3 when empty).
+- **Leaderboard failure after the grant is no longer a silent success.** The response
+  carries `status: "granted" | "partial"`; `partial` means gold committed, score not.
+  A replay of the same batch id retries **only** the leaderboard until it lands
+  (`leaderboard_done` in the receipt), so score converges without a second grant. The
+  residual double fault (score written, receipt update failed, batch replayed) is a
+  bounded score over-count, logged as `receipt update failed for batch …` (ADR-6).
+- **Over-cap batches are rejected with a machine-readable code** (F07). `kills` outside
+  1..1000 returns gRPC code 11 `OUT_OF_RANGE` (`economy.CodeKillsOutOfRange`) instead of
+  the generic 3, so the game server can split rather than treat it as malformed. Nothing
+  is granted, so the parts may take new ids.
+
 ### Added
 - `economy.ErrServerOnly`, `economy.LeaderboardMigrateEnv`.
+- `scripts/probe-economy.sh` — dependency-free (bash + curl + python3) live probe of
+  F01/F02/F06/F07 against a running Nakama: session calls → 403, `http_key` grant,
+  replay with unchanged wallet, code 11 over cap, missing `batch_id`, authoritative
+  board refusing client writes, server-side score = 3. Documented in `docs/RUNBOOK.md`
+  ("Live probe after deploy").
+- `economy.ReceiptCollection`, `CodeKillsOutOfRange`, `StatusGranted`, `StatusPartial`;
+  response fields `status`, `replayed`, `balance` (`gold` now means gold granted for the
+  batch, on original and replay alike).
+- Tests: same `batch_id` twice → one wallet update and one leaderboard write; racing
+  duplicate loses the create-only version check and is answered as a replay;
+  `MultiUpdate` failure leaves no receipt and the resend is granted fresh; receipt lookup
+  failure grants nothing; `partial` then replay converges the score with exactly one
+  grant; out-of-range kills → code 11 with zero calls; receipt write is create-only and
+  server-only.
 - Table-driven tests: guard accepts server (no-session) context and rejects user id /
   session id / session expiry; all three mutation RPCs reject a client session before
   parsing with zero granter calls; server caller still grants; `SetupLeaderboards`
@@ -41,7 +78,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 - `docs/API.md`, `docs/RUNBOOK.md`, `docs/DESIGN.md`, `docs/README.md` describe the
-  server-only contract, error code 7, and the leaderboard migration.
+  server-only contract, error code 7, the leaderboard migration, the exactly-once
+  receipt mechanics, `status`/`replayed`, code 11, receipt retention and how to audit
+  a disputed batch.
 
 ## [0.9.0] - 2026-09-05
 

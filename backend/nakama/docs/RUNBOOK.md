@@ -59,6 +59,40 @@ Either way the guarded RPCs (`reward_kills` etc.) keep working unchanged: they
 run inside the runtime, which is exactly the writer an authoritative board
 admits.
 
+## Live probe after deploy
+
+`scripts/probe-economy.sh` proves the economy boundary against a **running**
+Nakama, end to end, with nothing but bash, curl and python3. Run it after every
+plugin deploy that touches `economy/`; it takes a few seconds and exits non-zero
+on any failure.
+
+```bash
+NAKAMA_URL=http://localhost:7350 NAKAMA_SERVER_KEY=defaultkey NAKAMA_HTTP_KEY=defaulthttpkey \
+  backend/nakama/scripts/probe-economy.sh
+```
+
+| Env | Default | Meaning |
+|-----|---------|---------|
+| `NAKAMA_URL` | `http://localhost:7350` | Nakama HTTP API |
+| `NAKAMA_SERVER_KEY` | `defaultkey` | `--socket.server_key`; used to create the throwaway device account |
+| `NAKAMA_HTTP_KEY` | `defaulthttpkey` | `--runtime.http_key`; the server-to-server credential |
+| `NAKAMA_CONTAINER` | unset | Optional; if set and `docker` exists, tails the leaderboard start-up log lines |
+
+It creates one probe account and leaves it (and 30 gold) behind. What each
+`PASS` line proves:
+
+| PASS line | Proves |
+|-----------|--------|
+| `device auth` | Nakama is up and the server key is right |
+| `reward_kills / reward_kill / submit_kill via session -> 403` | F01: a client session cannot reach any mutation RPC (`server-only rpc`, code 7) |
+| `first grant status=granted replayed=false gold=30` | F06: the `http_key` path still grants, and the guard did not break the game server's call shape |
+| `replay same batch_id -> replayed=true gold=30` | F06: the receipt exists and a resend is answered from it |
+| `wallet unchanged by replay` | F06: the replay did not touch the wallet — exactly-once |
+| `kills=1001 rejected with code 11` | F07: the over-cap refusal is machine-readable (`OUT_OF_RANGE`), nothing granted |
+| `missing batch_id rejected` | F06: the idempotency key is mandatory |
+| `client record write rejected` | F02: `kills_alltime` is authoritative — Nakama refuses a client's own `WriteLeaderboardRecord` |
+| `server-side score for probe user = 3` | F02/F06: the server path did write the score, exactly once (3 kills, not 6 after the replay) |
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Action |
@@ -70,7 +104,9 @@ admits.
 | Game server logs `Nakama reward_kills failed … 403 … server-only rpc` | The game server reached Nakama with a client session token instead of `?http_key=` — misconfigured `NakamaClient` or a proxy rewriting the request | Verify `NAKAMA_HTTP_KEY` matches Nakama's `--runtime.http_key` and that the call goes to `/v2/rpc/reward_kills?http_key=…`; the guard rejects before anything is granted, so nothing to roll back |
 | A client gets `403 server-only rpc` from `reward_kill`/`reward_kills`/`submit_kill` | Working as intended — these RPCs are server-only | Clients never call them; rewards are granted by the game server |
 | Kills never reach the leaderboard, no errors anywhere | The game server logs `Nakama: disabled (NAKAMA_URL unset)` at startup and silently skips the kill-reward flush (`reward_kills`) | Set `NAKAMA_URL` in the game server's environment (compose files already set it; hand-rolled launch scripts are where it goes missing) |
-| Game server logs `Dropped N kill reward(s) … Nakama's answer never arrived` | The `reward_kills` call timed out (5s), so whether the grant landed is unknowable and a retry could double-grant | Investigate Nakama latency; the drop is deliberate, bounded loss (ADR-6 tolerates loss, not double grants). Wallet-metadata `batch_id` is the audit trail if a specific batch is disputed |
+| Game server logs `Nakama reward_kills timed out … will resend the same batch id` repeatedly, `gameserver` `PendingKills` climbing | Nakama slow or down; the game server holds the batches and resends them with backoff (3s doubling to 60s) under the same ids | Investigate Nakama latency/health. Nothing is lost while the game server stays up; the receipts make every resend exactly-once |
+| A player disputes a grant ("got gold twice" / "never got gold") | Every granted batch has a receipt | Look up storage collection `reward_receipts`, owner = the user, key = the `batch_id` from the game-server log line: present ⇒ granted exactly once (its `gold`, `kills`, `granted_at`, `leaderboard_done`); absent ⇒ never granted, the game server should still be resending it |
+| Nakama logs `receipt update failed for batch …: a replay may double-count the score` | Score committed but the receipt could not be flipped to `leaderboard_done` | Bounded score drift, accepted (ADR-6). If it recurs, check storage/DB health; gold is never affected |
 | Gateway rejects every realtime token (`invalid signature`) | `JWT_SECRET` mismatch between Nakama and Gateway | Align the env var in both deployments and restart |
 | Gateway rejects tokens with `token expired` | Client cached a token past `expires_in` (3600s), or clock skew | Have the client re-call `gateway_token`; check NTP on both hosts |
 | `gateway_token` returns code 16 | Client called the RPC without a Nakama session | Authenticate first (device/email) and send the session token |
