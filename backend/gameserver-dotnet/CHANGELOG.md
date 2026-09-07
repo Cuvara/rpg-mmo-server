@@ -6,6 +6,71 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Bounded, deadlined join handshake** (workspace audit F03). The accept loop now
+  takes a slot in a bounded pending-handshake pool before starting a handler
+  (`GAMESERVER_MAX_PENDING_HANDSHAKES`, default `256`; beyond it the socket is closed
+  at accept with no reply), and the handler reads the first frame under an absolute
+  deadline linked to host shutdown (`GAMESERVER_HANDSHAKE_TIMEOUT_MS`, default
+  `5000`). Idle sockets, partial length prefixes and partial bodies unwind at the
+  deadline; a first frame that is not a well-formed `MsgJoinToken` is refused
+  immediately; stopping the host cancels every pending read. The accepted transport is
+  disposed on every exit path — previously a throw before the session `Connection`
+  existed left it with no owner. New `HandshakeGate`; new flags
+  `--max-pending-handshakes`, `--handshake-timeout-ms`.
+- **Atomic capacity admission** (`AdmissionController`). A capacity slot is reserved
+  under one lock *before* the awaited player-store load and committed under the same
+  lock when the connection registers; the reservation is released on every failure
+  path. N concurrent joins against one free slot now admit exactly one — before, every
+  join in flight during the load saw the same slot. A user rejoining over their own
+  still-open connection **replaces** it and takes no second slot (previously refused
+  as `"Server is full"` at capacity); a user in the reconnect hold window is not an
+  occupant and rejoins on one slot.
+- **Bounded input ingestion** (workspace audit F04). Movement-only inputs coalesce
+  **at ingest**, in place, newest wins — a movement flood occupies one queue slot.
+  Inputs carrying an attack target stay distinct and in order, budgeted per
+  connection per tick drain (`GAMESERVER_MAX_INPUTS_PER_TICK`, default `32`) and by a
+  world-wide queue cap (`GAMESERVER_MAX_PENDING_INPUTS`, default `0` = capacity ×
+  budget). `EcsWorld.PushInput` gains an `InputIngress` overload returning
+  `InputIngestResult`; `Connection.Ingress` owns the per-connection state. New flags
+  `--max-inputs-per-tick`, `--max-pending-inputs`.
+- **One map transfer per connection.** A second `MsgTransferMap` while one is running
+  is answered `TransferMapResp{ok:false, error:"transfer already in progress"}` from the
+  send queue and counted. `Connection.TryBeginTransfer` / `EndTransfer`.
+- **Metrics and `/status`**: `gameserver_handshakes_pending` (gauge),
+  `gameserver_handshakes_rejected_total{reason=pool_full|timeout|malformed}`,
+  `gameserver_inputs_dropped_total{reason=connection_budget|queue_full}`,
+  `gameserver_inputs_coalesced_total`, `gameserver_transfers_rejected_total`; `/status`
+  fields `handshakes_pending`, `handshakes_rejected`, `inputs_dropped`,
+  `transfers_rejected`. All separate from `players_online`.
+- **Tests** (+26): `AdmissionControllerTests` (concurrent reservations, replacement,
+  release, commit refusal, `HandshakeGate`), `HandshakeHardeningTests` (idle, pool cap,
+  partial prefix, partial body, malformed, wrong first message, shutdown cancels),
+  `AtomicAdmissionTests` (12 concurrent joins vs capacity 3 admit exactly 3 with the
+  store seeing only 3 loads; fast-rejoin at capacity 1; rejoin during hold; aborted
+  join releases), `InputIngestionTests` (ingest rules on `EcsWorld`; live flood from one
+  connection stays inside the bound while a second connection's input is acked in the
+  snapshot stream; concurrent transfer rejected). Shared `HardeningHarness`.
+
+### Changed
+
+- `Connection.ReadOneAsync` / `WriteOneAsync` take an optional `CancellationToken`
+  linked with the connection's own — the handshake deadline rides it.
+- The accept loop's handler task is started with `CancellationToken.None`: started
+  with the host token, an accept racing shutdown could skip the handler and leak the
+  pool slot and the transport.
+- Capacity-refusal log line reports `{Occupancy}/{Capacity}` (connected + reserved)
+  instead of the raw connection count.
+
+### Docs
+
+- `docs/README.md` configuration table: four new rows, capacity row describes the
+  atomic/replacement semantics. `docs/METRICS.md`: new `/status` fields and
+  Prometheus series. `docs/API.md`: handshake deadline and pool on `join_token_resp`,
+  `"transfer already in progress"` in the transfer error table. `docs/DESIGN.md`:
+  "Admission hardening" section with the decisions (holds do not retain slots;
+  deadline excludes the store load; source-IP controls deliberately not done).
 ### Documentation
 
 - Add the 2026-09-07 workspace reliability and performance audit, covering backend,

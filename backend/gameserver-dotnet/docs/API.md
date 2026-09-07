@@ -111,6 +111,19 @@ shutdown; events whose `server_id` names another server are ACKed and skipped.
 { "ok": true, "user_id": "u-42", "tick_rate": 60 }
 ```
 
+**The handshake has a deadline.** `join_token` must arrive, complete and valid,
+within `GAMESERVER_HANDSHAKE_TIMEOUT_MS` (default 5000 ms) of the TCP/KCP accept,
+or the server closes the connection with no reply. A client that connects early
+and joins later must budget for that. A first frame that is not a `join_token`
+gets `{ "ok": false, "error": "Expected JoinToken message" }` and the close; a
+frame that does not decode at all gets the close alone. A server whose pending
+handshake pool is at `GAMESERVER_MAX_PENDING_HANDSHAKES` closes new connections
+at accept, before reading anything — retry through the gateway rather than
+hammering the game server. `"Server is full"` is an authenticated refusal on
+`GAMESERVER_CAPACITY` and is decided atomically: a user rejoining over their own
+still-open connection is admitted as a replacement, not refused as a second
+player. Details and metrics: `docs/DESIGN.md`, "Admission hardening".
+
 **Normative definition.** `tick_rate` is **the rate, in Hz, at which the
 authoritative simulation tick advances — which is also the rate at which player
 movement is integrated.** A client building a prediction loop MUST use
@@ -794,9 +807,10 @@ Used for map-to-map movement and for entering an instanced dungeon.
 
 > **Server-side maturity: implemented, thinly tested.** The handler is merged
 > into `develop` (`GameServer/Server/GameServer.cs`, `HandleTransferMapAsync`)
-> and covered by exactly **three** C# unit tests —
+> and covered by **four** C# unit tests —
 > `TransferMapTests.TransferMap_DifferentMap_SucceedsAndRemovesEntity`,
-> `_SameMap_ReturnsError`, `_EmptyMapId_ReturnsError`. There is **no
+> `_SameMap_ReturnsError`, `_EmptyMapId_ReturnsError`, and
+> `InputIngestionTests.SecondConcurrentTransfer_IsRejected`. There is **no
 > integration-test coverage at all**: nothing in `backend/integration_test/`
 > mentions transfer, so the full client → old server → gateway → new server
 > round trip has never been exercised end to end, in any language. The
@@ -872,6 +886,7 @@ destination server reads fresh state — position carries across the hop.
 |---|---|---|
 | `map_id` empty | `ok=false, error="map_id is required"` | Client bug; connection stays usable |
 | Already on that map | `ok=false, error="already on this map"` | No-op; connection stays usable |
+| A transfer is already running on this connection | `ok=false, error="transfer already in progress"` | Exactly one transfer may be in flight per connection; the reply is queued immediately, without waiting for the running transfer's save. The first transfer completes normally and closes the connection. Counted as `gameserver_transfers_rejected_total` |
 | Server-side exception | `ok=false, error="internal error"` | Stay put; the connection may or may not survive — treat as fatal for the transfer |
 | **Target map has no live server** | *Not* reported here. Step 2 succeeds and your connection closes; the failure surfaces at step 3 as `enter_world_resp.error` = "no available server for map …" | **This is the dangerous one — see below** |
 | Token/session expired mid-hop | `enter_world_resp.error` = `"not authenticated"` or `"session expired"` | Re-run `auth` with a fresh Nakama token, then retry `enter_world` |
