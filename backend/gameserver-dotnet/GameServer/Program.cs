@@ -18,6 +18,23 @@ string addr = GetArg(args, "--addr") ?? Env("GAMESERVER_ADDR") ?? ":9000";
 string mapId = GetArg(args, "--map-id") ?? Env("GAMESERVER_MAP_ID") ?? "map_01";
 string serverId = GetArg(args, "--server-id") ?? Env("GAMESERVER_ID") ?? Env("POD_NAME") ?? $"gs-{Guid.NewGuid():N}"[..12];
 int capacity = int.TryParse(GetArg(args, "--capacity") ?? Env("GAMESERVER_CAPACITY"), out var cap) ? cap : 100;
+// Pre-join bounds (workspace audit F03). Capacity counts authenticated players only; these
+// two bound the phase before that — how many accepted sockets may sit in the handshake at
+// once, and how long each may take to deliver a complete join frame.
+int maxPendingHandshakes = int.TryParse(
+    GetArg(args, "--max-pending-handshakes") ?? Env("GAMESERVER_MAX_PENDING_HANDSHAKES"), out var mph) && mph > 0
+    ? mph : ServerOptions.DefaultMaxPendingHandshakes;
+int handshakeTimeoutMs = int.TryParse(
+    GetArg(args, "--handshake-timeout-ms") ?? Env("GAMESERVER_HANDSHAKE_TIMEOUT_MS"), out var hto) && hto > 0
+    ? hto : (int)ServerOptions.DefaultHandshakeTimeout.TotalMilliseconds;
+// Ingestion bounds (workspace audit F04): inputs one connection may queue between two tick
+// drains, and the world-wide queue cap (0 = capacity x per-connection budget).
+int maxInputsPerTick = int.TryParse(
+    GetArg(args, "--max-inputs-per-tick") ?? Env("GAMESERVER_MAX_INPUTS_PER_TICK"), out var mipt) && mipt > 0
+    ? mipt : GameServer.World.EcsWorld.DefaultMaxInputsPerConnection;
+int maxPendingInputs = int.TryParse(
+    GetArg(args, "--max-pending-inputs") ?? Env("GAMESERVER_MAX_PENDING_INPUTS"), out var mpi) && mpi > 0
+    ? mpi : 0;
 // Falls back to the shared constant, not to a literal. The client derives its own
 // integration step from the same constant, and it is compiled into both sides, so a
 // literal here means bumping GameConstants.DefaultTickRate moves the client and leaves
@@ -154,6 +171,10 @@ logger.LogInformation("  Transport: {Transport}{Encryption}", transport,
 logger.LogInformation("  MapId:     {MapId}", mapId);
 logger.LogInformation("  ServerId:  {ServerId}", serverId);
 logger.LogInformation("  Capacity:  {Capacity}", capacity);
+logger.LogInformation("  Handshake: {Pending} pending max, {Timeout}ms deadline",
+    maxPendingHandshakes, handshakeTimeoutMs);
+logger.LogInformation("  Inputs:    {PerTick}/connection/tick, {Total} world-wide",
+    maxInputsPerTick, maxPendingInputs > 0 ? maxPendingInputs.ToString() : $"{capacity}x{maxInputsPerTick}");
 logger.LogInformation("  SimRates:  {Rates}", $"critical={criticalHz}Hz world={worldHz}Hz background={backgroundHz}Hz");
 logger.LogInformation("  Snapshots: {Mode}", keyframeInterval > 0
     ? $"delta, keyframe every {keyframeInterval} snapshots"
@@ -513,6 +534,10 @@ var options = new ServerOptions
     GatherWorkers = gatherWorkers,
     MapBounds = MapBounds.FromSize(mapWidth, mapHeight),
     Capacity = capacity,
+    MaxPendingHandshakes = maxPendingHandshakes,
+    HandshakeTimeout = TimeSpan.FromMilliseconds(handshakeTimeoutMs),
+    MaxInputsPerConnection = maxInputsPerTick,
+    MaxPendingInputs = maxPendingInputs,
     JwtSecret = jwtSecret,
     JoinTokenSecret = joinTokenSecret,
     HoldTtl = mode == "dungeon" ? TimeSpan.FromSeconds(60) : TimeSpan.FromSeconds(30),
@@ -644,6 +669,10 @@ metricsEndpoint?.SetStatusProvider(() =>
         EventPublishFailures = redisEventStream?.PublishFailures ?? 0,
         KickConsumer = kickConsumer != null ? "redis" : "disabled",
         PlayersKicked = metrics.PlayersKicked,
+        HandshakesPending = server.PendingHandshakes,
+        HandshakesRejected = metrics.HandshakesRejected,
+        InputsDropped = metrics.InputsDropped,
+        TransfersRejected = metrics.TransfersRejected,
         Postgres = postgresStore != null ? "connected" : "disconnected",
         UptimeSeconds = (long)uptime.Elapsed.TotalSeconds
     };

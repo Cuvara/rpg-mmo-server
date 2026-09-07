@@ -186,6 +186,39 @@ public sealed class ServerStatus
     [JsonPropertyName("players_kicked")]
     public long PlayersKicked { get; set; }
 
+    /// <summary>
+    /// Accepted transports that have not completed the join handshake right now. Outside
+    /// <see cref="PlayersOnline"/> and outside <see cref="Capacity"/>: bounded by
+    /// <c>GAMESERVER_MAX_PENDING_HANDSHAKES</c> instead. Same value as
+    /// <c>gameserver_handshakes_pending</c>.
+    /// </summary>
+    [JsonPropertyName("handshakes_pending")]
+    public int HandshakesPending { get; set; }
+
+    /// <summary>
+    /// Handshakes refused before authentication since process start, every reason (pool
+    /// full, deadline, malformed first frame). Same value as the sum over
+    /// <c>gameserver_handshakes_rejected_total</c>. A capacity refusal is not one of
+    /// these — that is an authenticated join, logged at Warning.
+    /// </summary>
+    [JsonPropertyName("handshakes_rejected")]
+    public long HandshakesRejected { get; set; }
+
+    /// <summary>
+    /// Client inputs discarded at ingest since process start, every reason (per-connection
+    /// budget, world-wide queue full). Same value as the sum over
+    /// <c>gameserver_inputs_dropped_total</c>. Movement coalesced in place is not a drop.
+    /// </summary>
+    [JsonPropertyName("inputs_dropped")]
+    public long InputsDropped { get; set; }
+
+    /// <summary>
+    /// <c>MsgTransferMap</c> requests refused because a transfer was already running on
+    /// that connection. Same value as <c>gameserver_transfers_rejected_total</c>.
+    /// </summary>
+    [JsonPropertyName("transfers_rejected")]
+    public long TransfersRejected { get; set; }
+
     [JsonPropertyName("postgres")]
     public string Postgres { get; set; } = "disconnected";
 

@@ -48,6 +48,53 @@ public readonly struct PendingInput
 }
 
 /// <summary>
+/// Outcome of <see cref="EcsWorld.PushInput(string, InputData, InputIngress?)"/>.
+/// </summary>
+public enum InputIngestResult
+{
+    /// <summary>Appended to the pending queue.</summary>
+    Enqueued,
+
+    /// <summary>
+    /// A movement-only input replaced this connection's previous movement-only input in
+    /// place: the queue did not grow, and the tick will integrate the newer direction.
+    /// </summary>
+    Coalesced,
+
+    /// <summary>Dropped: the connection had already queued its per-tick input budget.</summary>
+    DroppedConnectionBudget,
+
+    /// <summary>Dropped: the world-wide pending queue was full.</summary>
+    DroppedQueueFull,
+}
+
+/// <summary>
+/// Per-connection state for bounded input ingestion — owned by the connection, read and
+/// written only under the world's input lock.
+///
+/// <para>Every field is relative to a <i>drain epoch</i>: the queue is emptied once per
+/// base tick, and a counter that was not reset with it would throttle a client for the
+/// whole session after one burst. Stamping the epoch on the ingress state instead of
+/// clearing a dictionary of them per tick keeps the reset O(1) per connection and keeps
+/// the world free of a per-user map on the input path (workspace audit F04).</para>
+/// </summary>
+public sealed class InputIngress
+{
+    /// <summary>Drain epoch the counters below belong to.</summary>
+    internal long Epoch = -1;
+
+    /// <summary>Inputs this connection has in the queue since the last drain.</summary>
+    internal int Pending;
+
+    /// <summary>
+    /// Index in the queue of this connection's newest entry, when that entry is
+    /// movement-only and therefore replaceable; -1 otherwise (nothing queued, or the
+    /// newest entry carries an edge-triggered action that must stay distinct).
+    /// </summary>
+    internal int ReplaceableIndex = -1;
+}
+
+/// <summary>
 /// The server's entity store, backed by <see href="https://github.com/genaray/Arch">Arch</see>
 /// (ADR-10). Replaces the hand-rolled <c>GameWorld</c> dictionary: Arch owns entity
 /// identity, component storage, queries and iteration order. Nothing else stores
@@ -110,6 +157,51 @@ public sealed class EcsWorld : IDisposable
     private readonly List<PendingInput> _pendingInputs = new();
     private readonly ReaderWriterLockSlim _rwLock = new();
     private readonly object _inputLock = new();
+
+    /// <summary>Incremented on every drain; see <see cref="InputIngress"/>.</summary>
+    private long _drainEpoch;
+
+    /// <summary>Default for <see cref="MaxInputsPerConnection"/> (<c>GAMESERVER_MAX_INPUTS_PER_TICK</c>).</summary>
+    public const int DefaultMaxInputsPerConnection = 32;
+
+    /// <summary>
+    /// Most inputs one connection may have queued between two drains. A client that plays
+    /// by the rules sends one input per critical tick, so a handful per drain; the budget
+    /// is headroom for a burst of edge-triggered actions, not a rate a client should reach.
+    /// Movement-only inputs coalesce in place and never count against it more than once.
+    /// </summary>
+    public int MaxInputsPerConnection { get; private set; } = DefaultMaxInputsPerConnection;
+
+    /// <summary>
+    /// Most inputs the whole queue may hold between two drains, across every connection
+    /// (<c>GAMESERVER_MAX_PENDING_INPUTS</c>). The world-wide backstop for the per-connection
+    /// budget: what bounds the tick's drain and the memory behind it when many connections
+    /// all spend their budget at once.
+    /// </summary>
+    public int MaxPendingInputs { get; private set; } = int.MaxValue;
+
+    /// <summary>Inputs queued and not yet drained. Diagnostics and tests.</summary>
+    public int PendingInputCount
+    {
+        get { lock (_inputLock) return _pendingInputs.Count; }
+    }
+
+    /// <summary>
+    /// Set the ingestion bounds. Values below 1 fall back to the defaults (per-connection)
+    /// or to "unbounded" (world-wide), which is what a caller that does not configure them
+    /// gets — unit tests and benches push inputs straight into the queue and are not the
+    /// flood this guards against.
+    /// </summary>
+    public void ConfigureInputBounds(int maxInputsPerConnection, int maxPendingInputs)
+    {
+        lock (_inputLock)
+        {
+            MaxInputsPerConnection = maxInputsPerConnection < 1
+                ? DefaultMaxInputsPerConnection
+                : maxInputsPerConnection;
+            MaxPendingInputs = maxPendingInputs < 1 ? int.MaxValue : maxPendingInputs;
+        }
+    }
 
     /// <summary>
     /// The component-level write scope handed to <see cref="UpdateComponents"/>.
@@ -1288,16 +1380,80 @@ public sealed class EcsWorld : IDisposable
     /// the tick loop's own structural/update phase, so the cost is a barrier, not a
     /// wait for the simulation.
     /// </remarks>
-    public void PushInput(string userId, InputData input)
+    public void PushInput(string userId, InputData input) => PushInput(userId, input, null);
+
+    /// <summary>
+    /// Queue an input under the ingestion bounds, coalescing movement before the queue
+    /// grows.
+    /// </summary>
+    /// <remarks>
+    /// <para>The tick loop already coalesces movement to the newest input per player — but
+    /// it does so <i>after</i> every packet has been decoded, allocated and appended, so a
+    /// client sending thousands of inputs per tick grew the queue by thousands before the
+    /// tick threw all but one away (workspace audit F04). The coalescing now happens here,
+    /// at ingest, under the same lock: a movement-only input <b>replaces</b> this
+    /// connection's newest queued entry when that entry is also movement-only, so a
+    /// movement flood occupies one slot however fast it arrives.</para>
+    ///
+    /// <para><b>Edge-triggered actions stay distinct.</b> An input carrying an attack target
+    /// is never replaced and never replaces: it is appended, and it also ends the run of
+    /// replaceable movement behind it, so ordering — which the handler's monotonic tick
+    /// check depends on — is exactly what the client sent. Those are bounded instead by
+    /// <see cref="MaxInputsPerConnection"/> per drain, and the queue as a whole by
+    /// <see cref="MaxPendingInputs"/>; anything beyond is dropped and reported through the
+    /// return value so the caller can count it.</para>
+    ///
+    /// <para>Passing a null <paramref name="ingress"/> is the unbounded path: no
+    /// per-connection budget, no coalescing, only the world-wide bound — for callers that
+    /// have no connection (tests, benches, scaffolding).</para>
+    /// </remarks>
+    public InputIngestResult PushInput(string userId, InputData input, InputIngress? ingress)
     {
         EntityHandle handle;
         _rwLock.EnterReadLock();
         try { handle = ResolveLocked(userId); }
         finally { _rwLock.ExitReadLock(); }
 
+        var pending = new PendingInput(userId, handle, input);
+        bool movementOnly = string.IsNullOrEmpty(input.AttackTargetId);
+
         lock (_inputLock)
         {
-            _pendingInputs.Add(new PendingInput(userId, handle, input));
+            if (ingress == null)
+            {
+                if (_pendingInputs.Count >= MaxPendingInputs) return InputIngestResult.DroppedQueueFull;
+                _pendingInputs.Add(pending);
+                return InputIngestResult.Enqueued;
+            }
+
+            if (ingress.Epoch != _drainEpoch)
+            {
+                ingress.Epoch = _drainEpoch;
+                ingress.Pending = 0;
+                ingress.ReplaceableIndex = -1;
+            }
+
+            if (movementOnly && ingress.ReplaceableIndex >= 0)
+            {
+                // Newest wins, as the tick would decide anyway. An older tick arriving
+                // after a newer one (impossible on an ordered stream, but cheap to
+                // honour) is simply absorbed: the handler would reject it as
+                // non-monotonic if it were queued.
+                int i = ingress.ReplaceableIndex;
+                if (input.Tick >= _pendingInputs[i].Input.Tick)
+                {
+                    _pendingInputs[i] = pending;
+                }
+                return InputIngestResult.Coalesced;
+            }
+
+            if (ingress.Pending >= MaxInputsPerConnection) return InputIngestResult.DroppedConnectionBudget;
+            if (_pendingInputs.Count >= MaxPendingInputs) return InputIngestResult.DroppedQueueFull;
+
+            _pendingInputs.Add(pending);
+            ingress.Pending++;
+            ingress.ReplaceableIndex = movementOnly ? _pendingInputs.Count - 1 : -1;
+            return InputIngestResult.Enqueued;
         }
     }
 
@@ -1320,6 +1476,9 @@ public sealed class EcsWorld : IDisposable
         {
             destination.AddRange(_pendingInputs);
             _pendingInputs.Clear();
+            // Every connection's per-drain budget and coalescing cursor is now stale;
+            // the next PushInput on each resets it against this value.
+            _drainEpoch++;
         }
     }
 

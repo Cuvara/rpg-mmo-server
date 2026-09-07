@@ -577,9 +577,24 @@ public sealed class Connection : IDisposable
     }
 
     /// <summary>Read a single envelope from the wire (used during handshake).</summary>
-    public async Task<Envelope?> ReadOneAsync()
+    /// <param name="ct">
+    /// Additional cancellation, linked with the connection's own. The handshake passes
+    /// its deadline here so an idle or half-sent join frame unwinds at
+    /// <c>GAMESERVER_HANDSHAKE_TIMEOUT_MS</c> instead of holding the socket for ever,
+    /// and host shutdown cancels the same token so a pending read never outlives it.
+    /// </param>
+    public async Task<Envelope?> ReadOneAsync(CancellationToken ct = default)
     {
-        var env = await WireProtocol.DecodeAsync(_stream, _readScratch, _cts.Token);
+        Envelope? env;
+        if (ct.CanBeCanceled)
+        {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, ct);
+            env = await WireProtocol.DecodeAsync(_stream, _readScratch, linked.Token);
+        }
+        else
+        {
+            env = await WireProtocol.DecodeAsync(_stream, _readScratch, _cts.Token);
+        }
         if (env != null) Encoding = env.Encoding;
         return env;
     }
@@ -590,17 +605,57 @@ public sealed class Connection : IDisposable
     /// and the shutdown notice, which are written while the write task is live and
     /// may be mid-frame on the same stream.
     /// </summary>
-    public async Task WriteOneAsync(Envelope env)
+    /// <param name="ct">
+    /// Additional cancellation, linked with the connection's own — the handshake deadline,
+    /// for the replies sent on a rejected join.
+    /// </param>
+    public async Task WriteOneAsync(Envelope env, CancellationToken ct = default)
     {
         byte[] frame = WireProtocol.Encode(env);
-        await _streamWriteMutex.WaitAsync(_cts.Token);
+        if (ct.CanBeCanceled)
+        {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, ct);
+            await WriteFrameAsync(frame, linked.Token);
+        }
+        else
+        {
+            await WriteFrameAsync(frame, _cts.Token);
+        }
+    }
+
+    private async Task WriteFrameAsync(byte[] frame, CancellationToken ct)
+    {
+        await _streamWriteMutex.WaitAsync(ct);
         try
         {
-            await _stream.WriteAsync(frame, _cts.Token);
-            await _stream.FlushAsync(_cts.Token);
+            await _stream.WriteAsync(frame, ct);
+            await _stream.FlushAsync(ct);
         }
         finally { _streamWriteMutex.Release(); }
     }
+
+    /// <summary>
+    /// Per-connection input ingestion state — the per-tick budget counter and the
+    /// movement-coalescing cursor <see cref="GameServer.World.EcsWorld.PushInput"/> keeps
+    /// for this connection. Owned here so the world needs no per-user dictionary.
+    /// </summary>
+    public GameServer.World.InputIngress Ingress { get; } = new();
+
+    /// <summary>0 when no map transfer is running on this connection, 1 while one is.</summary>
+    private int _transferInFlight;
+
+    /// <summary>True while a map transfer is running on this connection.</summary>
+    public bool TransferInFlight => Volatile.Read(ref _transferInFlight) != 0;
+
+    /// <summary>
+    /// Claim the single transfer slot this connection has. Returns false when a transfer
+    /// is already running — the caller must refuse the second request rather than start a
+    /// second save-and-teardown against the same entity (workspace audit F04).
+    /// </summary>
+    public bool TryBeginTransfer() => Interlocked.CompareExchange(ref _transferInFlight, 1, 0) == 0;
+
+    /// <summary>Release the transfer slot after a transfer that did not close the connection.</summary>
+    public void EndTransfer() => Volatile.Write(ref _transferInFlight, 0);
 
     /// <summary>Record that a MsgPong was received, resetting the heartbeat timer.</summary>
     public void RecordPong() =>
