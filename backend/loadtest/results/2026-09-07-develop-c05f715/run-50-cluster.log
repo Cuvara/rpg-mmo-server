@@ -1,0 +1,23 @@
+[loadtest] run 0a531c09: ramping 50 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 2.478s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] players=50 DEGRADED: INVALID: 40/50 players failed, so this level did not run at 50 players — rerun this level
+
+--- loadtest results (tick budget 66.67ms @ 15Hz) ---
+players  joined  move     tick p50  tick p99  tick mean  over budget  ticks/s  snap p50  snap p99  ack p50  ack p99  rx B/s/p  tx B/s/p  recv%    fail  verdict
+---------------------------------------------------------------------------------------------------------------------------------------------------------------
+50       10      cluster  0.25ms    0.50ms    0.08ms     0%           60.01    66.7ms    91.2ms    44.9ms   83.9ms   15317     885       100.00%  40    INVALID
+
+  players=50    INVALID: 40/50 players failed, so this level did not run at 50 players — rerun this level
+
+HIGHEST PASSING LEVEL: none — every level degraded
+1 level(s) were INVALID and excluded — the sweep above is incomplete, rerun them.
+
+--- capacity (0 valid run(s) per level) ---
+players  pass   invalid  p99 median  tick p99 min..max      tick mean min..max     KB/s/client
+50       0/0    1        0.0ms       0.0..0.0ms             0.0..0.0ms             0.0
+
+CEILING: undetermined — no level produced a usable verdict
+  ⚠ One run per level: this ceiling is NOT reproducible. Use -repeat 3 or more.
+
+[loadtest] JSON written to results/2026-09-07-develop-c05f715/run-50-cluster.json

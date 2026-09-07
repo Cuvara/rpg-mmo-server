@@ -1,0 +1,23 @@
+[loadtest] run 3c58ccb2: ramping 10 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 457ms; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] players=10 DEGRADED: INVALID: server reported 14 entities for a 10-player level; it was not empty when the level started — rerun this level
+
+--- loadtest results (tick budget 66.67ms @ 15Hz) ---
+players  joined  move     tick p50  tick p99  tick mean  over budget  ticks/s  snap p50  snap p99  ack p50  ack p99  rx B/s/p  tx B/s/p  recv%    fail  verdict
+---------------------------------------------------------------------------------------------------------------------------------------------------------------
+10       10      cluster  0.25ms    0.50ms    0.07ms     0%           59.99    66.7ms    103.2ms   38.5ms   103.6ms  15715     883       102.47%  0     INVALID
+
+  players=10    INVALID: server reported 14 entities for a 10-player level; it was not empty when the level started — rerun this level
+
+HIGHEST PASSING LEVEL: none — every level degraded
+1 level(s) were INVALID and excluded — the sweep above is incomplete, rerun them.
+
+--- capacity (0 valid run(s) per level) ---
+players  pass   invalid  p99 median  tick p99 min..max      tick mean min..max     KB/s/client
+10       0/0    1        0.0ms       0.0..0.0ms             0.0..0.0ms             0.0
+
+CEILING: undetermined — no level produced a usable verdict
+  ⚠ One run per level: this ceiling is NOT reproducible. Use -repeat 3 or more.
+
+[loadtest] JSON written to results/2026-09-07-develop-c05f715/run-10-cluster.json
