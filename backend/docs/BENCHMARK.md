@@ -690,23 +690,51 @@ Ordered by measured impact:
 cd backend/loadtest
 go build -o loadtest ./cmd/loadtest
 
-# Single level against the stock dev stack, full gateway path.
-JWT_SECRET=dev-secret-change-me ./loadtest -players 10 -duration 60s
+# Secrets: read them from deploy/.env, which is what the stack was started with.
+export JWT_SECRET=$(grep '^JWT_SECRET=' ../deploy/.env | cut -d= -f2-)
+export JOIN_TOKEN_SECRET=$(grep '^JOIN_TOKEN_SECRET=' ../deploy/.env | cut -d= -f2-)
 
-# The capacity sweep as run here: dedicated server, direct join.
+# Single level against the stock dev stack, full gateway path. The stock map
+# server spawns 6 enemies, so declare them or every level is INVALID as
+# "not empty when the level started". Stay at or below 10 players here: the
+# gateway admits 10 connections/min per source IP (GATEWAY_CONN_RATE_PER_MIN),
+# and a 50-player level through it joins 10 and fails 40.
+./loadtest -players 10 -duration 60s -baseline-entities 6
+
+# The capacity sweep as run here: dedicated server, direct join, no spawner.
 docker run -d --name rpg-gs-bench --network rpg-mmo-meta_default \
   -p 9300:9000 -p 9301:9101 \
-  -e JWT_SECRET=dev-secret-change-me -e GAMESERVER_ADDR=:9000 \
+  -e JWT_SECRET="$JWT_SECRET" -e JOIN_TOKEN_SECRET="$JOIN_TOKEN_SECRET" \
+  -e GAMESERVER_ADDR=:9000 \
   -e GAMESERVER_MAP_ID=map_bench -e GAMESERVER_ID=gs-bench \
   -e GAMESERVER_CAPACITY=2000 -e METRICS_ADDR=:9101 \
+  -e GAMESERVER_ENEMIES=false \
   rpg-mmo/gameserver-dotnet:dev
 
-JWT_SECRET=dev-secret-change-me ./loadtest \
+./loadtest \
   -join direct -gameserver-addr 127.0.0.1:9300 -server-id gs-bench \
+  -join-token-secret "$JOIN_TOKEN_SECRET" \
   -gameserver-metrics http://localhost:9301/metrics -gateway-metrics "" \
-  -sweep 50,100,150,200 -duration 35s -warmup 8s -movement cluster \
+  -sweep 50,100,150,200 -repeat 3 -duration 35s -warmup 8s -movement cluster \
   -json sweep.json
 ```
+
+Three things in that recipe changed after the runs in this document and bit the
+2026-09-07 re-run, so they are stated rather than left to be rediscovered:
+
+- **`JOIN_TOKEN_SECRET` is mandatory.** The server refuses to start without a
+  dedicated one (`JOIN_TOKEN_SECRET is required but not set -- refusing to
+  start`); the old recipe let it fall back to `JWT_SECRET`, and the generator
+  still does (`-join-token-secret` defaults to the JWT secret), so pass it on
+  both sides or the join tokens will not verify.
+- **`GAMESERVER_ENEMIES=false`** on the bench server, or `-baseline-entities 6`
+  on the generator. The spawner is on by default and its 6 entities trip the
+  not-empty-at-start validity check on every level.
+- **`-encoding` defaults to `proto` now**, matching the client. The 2026-09-07
+  first pass ran under the old `json` default and read 274 KB/s per client at
+  200 — the JSON arm's number, not a regression against the 45.9 KB/s Protobuf
+  figure. The summary header now names the arm, so the mistake is visible on
+  the page rather than in the flag list.
 
 Restart the container and wait for `gameserver_entities` to read 0 between
 levels, or the leak in §7 will contaminate the results.

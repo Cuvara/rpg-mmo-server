@@ -127,6 +127,15 @@ type Config struct {
 	// stays controlled instead of spanning two builds.
 	Encoding messages.Encoding
 
+	// BaselineEntities is how many entities the server holds with zero players
+	// in it — the enemy spawner's population on a stock map server, for one.
+	// The validity gate rejects a level whose server reports more entities than
+	// players, because that is the signature of a dirty server; without this
+	// knob a server that spawns enemies by design fails that gate on every
+	// level and the sweep produces nothing. It is a declared expectation, not a
+	// measurement: the run still records what the server actually reported.
+	BaselineEntities int
+
 	// --- plumbing ---
 	Timeout      time.Duration
 	HoldGateway  bool // keep the gateway socket open for the whole run
@@ -168,18 +177,22 @@ const TickBudget = time.Second / DefaultTickRate
 // getenv is injected for testability (pass os.Getenv in production).
 func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	cfg := Config{
-		NakamaURL:       envOr(getenv, "NAKAMA_URL", DefaultNakamaURL),
-		ServerKey:       envOr(getenv, "NAKAMA_SERVER_KEY", DefaultServerKey),
-		GatewayAddr:     envOr(getenv, "GATEWAY_ADDR", DefaultGatewayAddr),
-		Transport:       envOr(getenv, "TRANSPORT", DefaultTransport),
-		JWTSecret:       getenv("JWT_SECRET"),
-		MapID:           envOr(getenv, "LOADTEST_MAP_ID", DefaultMapID),
-		Players:         10,
-		RampRate:        20,
-		Duration:        DefaultDuration,
-		TickRate:        DefaultTickRate,
-		AuthMode:        AuthPresigned,
-		Movement:        MovementCluster,
+		NakamaURL:   envOr(getenv, "NAKAMA_URL", DefaultNakamaURL),
+		ServerKey:   envOr(getenv, "NAKAMA_SERVER_KEY", DefaultServerKey),
+		GatewayAddr: envOr(getenv, "GATEWAY_ADDR", DefaultGatewayAddr),
+		Transport:   envOr(getenv, "TRANSPORT", DefaultTransport),
+		JWTSecret:   getenv("JWT_SECRET"),
+		MapID:       envOr(getenv, "LOADTEST_MAP_ID", DefaultMapID),
+		Players:     10,
+		RampRate:    20,
+		Duration:    DefaultDuration,
+		TickRate:    DefaultTickRate,
+		AuthMode:    AuthPresigned,
+		Movement:    MovementCluster,
+		// Protobuf is what the Unity client speaks (ADR-9); JSON is the legacy
+		// arm. A sweep that does not say which encoding it drove measures the
+		// wrong wire by default — and did, for one sweep, before this default.
+		Encoding:        messages.EncodingProto,
 		JoinMode:        JoinGateway,
 		GameServerAddr:  envOr(getenv, "GAMESERVER_PUBLIC_ADDR", DefaultGameServerAddr),
 		ServerID:        envOr(getenv, "GAMESERVER_ID", DefaultServerID),
@@ -211,7 +224,8 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	fs.IntVar(&cfg.TickRate, "tick-rate", cfg.TickRate, "Client input sends per second")
 	fs.StringVar(&authMode, "auth", authMode, "Auth path: presigned (default, benchmarks the game path) or nakama (adds real login cost)")
 	fs.StringVar(&cfg.Movement, "movement", cfg.Movement, "Input pattern: cluster, still or spread")
-	fs.StringVar(&encoding, "encoding", encoding, "Wire encoding: json (legacy) or proto")
+	fs.StringVar(&encoding, "encoding", encoding, "Wire encoding: proto (default — what the client speaks, ADR-9) or json (legacy arm)")
+	fs.IntVar(&cfg.BaselineEntities, "baseline-entities", cfg.BaselineEntities, "Entities the server holds with no players (e.g. its enemy spawner); tolerated by the not-empty-at-start validity check")
 	fs.DurationVar(&cfg.Timeout, "timeout", cfg.Timeout, "Per-operation network timeout")
 	fs.BoolVar(&cfg.HoldGateway, "hold-gateway", cfg.HoldGateway, "Keep the gateway socket open for the whole run (as a real client does)")
 	fs.StringVar(&cfg.GSMetricsURL, "gameserver-metrics", cfg.GSMetricsURL, "Game server /metrics URL ('' to skip)")
@@ -241,6 +255,9 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 func (c Config) Validate() error {
 	if c.JWTSecret == "" {
 		return fmt.Errorf("JWT_SECRET is required (env or -jwt-secret)")
+	}
+	if c.BaselineEntities < 0 {
+		return fmt.Errorf("-baseline-entities must be >= 0, got %d", c.BaselineEntities)
 	}
 	if c.Players <= 0 {
 		return fmt.Errorf("players must be > 0, got %d", c.Players)

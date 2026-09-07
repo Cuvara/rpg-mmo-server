@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **`-encoding` now defaults to `proto`, the wire the Unity client speaks (ADR-9); `json` stays
+  reachable as the legacy A/B arm.** The 2026-09-07 sweep against `develop@c05f715` ran under the
+  old `json` default and reported 274 KB/s per client at 200 players — the JSON arm's figure,
+  alongside 45.9 KB/s Protobuf in `BENCHMARK.md`, so for an hour it read as a 6x bandwidth
+  regression. It was the tool measuring the wrong wire. The summary header now carries
+  `encoding=<proto|json|mixed>` so a table says which arm produced it. `scripts/encoding-sweep.sh`
+  passes `-encoding` explicitly and is unaffected.
+
+### Added
+- **`-baseline-entities N`**, tolerated by the not-empty-at-start validity check and recorded as
+  `config.baseline_entities`. The stock map server spawns 6 enemies, so against the dev stack every
+  level tripped "server reported 14 entities for a 10-player level" and the sweep produced nothing.
+  Players get no allowance — an extra player online is still a dirty server — and the strict
+  message now names the flag, because the symptom does not. Tests cover both edges and the
+  player exclusion.
+
+### Documentation
+- `BENCHMARK.md` §10 recipe brought up to date with what the server requires now: a dedicated
+  `JOIN_TOKEN_SECRET` (the server refuses to start without one), `GAMESERVER_ENEMIES=false` on the
+  bench container, and the gateway's 10 conn/min/IP admission rate as the reason the stock-stack
+  example stops at 10 players and the sweep joins direct.
+
 ### Documentation
 - **Closed the last gap in the #153 clock audit: `BENCHMARK.md` claimed to cover "every figure
   in this document" and its table covered only the loadtest-derived ones.** Three figure

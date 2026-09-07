@@ -161,6 +161,8 @@ it is evidence that capacity is higher.
 | `-auth presigned\|nakama` | `presigned` | **Pre-signed is the default on purpose.** See below. |
 | `-join gateway\|direct` | `gateway` | `direct` skips the gateway. See below. |
 | `-movement cluster\|still\|spread` | `cluster` | The bottleneck experiment control. See below. |
+| `-encoding proto\|json` | `proto` | **Protobuf is the default because it is the wire the client speaks (ADR-9).** `json` is the legacy arm, kept for A/B sweeps (`scripts/encoding-sweep.sh`). The two differ ~5x in bytes per client from identical load, so the summary header always names the arm it drove. Until 2026-09-07 the default was `json`, and one full sweep measured the wrong wire before the header said so. |
+| `-baseline-entities N` | 0 | Entities the server holds with **no** players — its enemy spawner, 6 on a stock map server. The validity gate marks a level INVALID when the server reports more entities than players (a dirty server); this declares how many are there by design. Players never get an allowance. Recorded in the JSON as `config.baseline_entities`. Or start the bench server with `GAMESERVER_ENEMIES=false` and leave this at 0. |
 | `-tick-rate` | 15 | Client input rate. Matches the server; sending faster gains nothing (the tick loop coalesces to the newest input per player per tick). |
 | `-json`, `-label` | — | Machine-readable output. |
 | `-fail-on-degraded` | off | Exit 1 on a degraded level, for CI. |

@@ -37,11 +37,15 @@ type ResultConfig struct {
 	// Encoding is the wire encoding the virtual players spoke ("json" or
 	// "proto"). Recorded so a result file is self-describing: the two encodings
 	// produce very different bandwidth numbers from identical load parameters.
-	Encoding      string  `json:"encoding"`
-	MapID         string  `json:"map_id"`
-	Transport     string  `json:"transport"`
-	HoldGateway   bool    `json:"hold_gateway"`
-	TickBudgetSec float64 `json:"tick_budget_sec"`
+	Encoding string `json:"encoding"`
+	// BaselineEntities is the entity count the run was told to expect from an
+	// empty server (-baseline-entities). Recorded because it loosens the
+	// validity gate, and a loosened gate must be visible in the result.
+	BaselineEntities int     `json:"baseline_entities"`
+	MapID            string  `json:"map_id"`
+	Transport        string  `json:"transport"`
+	HoldGateway      bool    `json:"hold_gateway"`
+	TickBudgetSec    float64 `json:"tick_budget_sec"`
 }
 
 // ClientStats is everything the virtual clients observed themselves.
