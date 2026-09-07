@@ -1750,3 +1750,110 @@ The line to keep when you start real gameplay: **synthetic load inside a benchma
 fine; synthetic gameplay inside `GameServer/` is not.** If a performance change only looks
 good against a workload you invented to justify it, the measurement is the thing that is
 wrong.
+
+## Admission hardening: pre-join bounds, atomic capacity, bounded ingestion (2026-09-07)
+
+Three findings from the 2026-09-07 workspace audit (F03, F04 and "make capacity
+admission atomic"), fixed together because they are the same shape: work a peer
+could make the server do with no bound and no owner.
+
+### What it replaced
+
+- **Pre-join connections had no deadline and no bound.** The accept loop spawned a
+  handler per socket and awaited the first frame on the connection's own token, which
+  nothing ever cancelled. A peer that connected and sent nothing — or two bytes of a
+  length prefix, or a body cut off half-way — held a socket and a task indefinitely,
+  outside `GAMESERVER_CAPACITY` (authenticated players only) and outside the heartbeat
+  (started only after the join). The handler's `finally` disposed `conn`, which was still
+  null on every early failure, so a malformed frame that threw left the transport with
+  no owner at all.
+- **Capacity admission was read-then-await-then-add.** The handshake compared
+  `ConnectionManager.Count` to the limit, awaited the player-store load, then `Add`ed
+  the connection. Every join in flight during the load observed the same free slot, so
+  N concurrent joins against one remaining slot admitted N players. A user rejoining
+  over their own still-open connection (the #229 fast-rejoin case) was the opposite
+  failure: refused as a second player at a full server, when they were replacing one.
+- **Input and transfer work was unbounded.** Every decoded `MsgInput` was appended to
+  `EcsWorld._pendingInputs`; the tick coalesced movement to the newest input *after*
+  the whole burst had been decoded, allocated and queued. Every `MsgTransferMap`
+  started its own task, so two in a row ran two save-and-teardowns against one entity.
+
+### What it is now
+
+**Pre-join pool and deadline** (`HandshakeGate`, `GameServerHost.HandleConnectionAsync`).
+The accept loop takes a slot in a bounded pool (`GAMESERVER_MAX_PENDING_HANDSHAKES`,
+default 256) before starting the handler; beyond it the socket is closed on the spot
+with no reply and counted as `pool_full`. The handler reads the first frame under a
+deadline (`GAMESERVER_HANDSHAKE_TIMEOUT_MS`, default 5000) **linked to host shutdown**:
+an idle peer, a partial prefix and a partial body all unwind at the deadline
+(`timeout`); a complete frame that is not a well-formed `MsgJoinToken` is refused at
+once (`malformed`); and stopping the host cancels every pending read. The deadline
+covers what the peer controls — delivering the join frame and reading a rejection —
+and deliberately not the player-store load after verification, which is server-side
+work: a slow database is not the peer's fault, and cancelling it would tear down a
+player who had already been admitted. The `finally` disposes the accepted transport on
+every exit path, whether or not a `Connection` was ever constructed. The pool slot is
+released when the join commits (the socket is a player then, counted under capacity)
+or when the handler exits.
+
+**Atomic capacity** (`AdmissionController`). A slot is *reserved* under one lock before
+the awaited load and *committed* under the same lock when the connection is
+registered; the reservation is released on every failure path in between. Occupancy is
+the number of distinct users that are connected or hold a slot-consuming reservation.
+Two semantics were decided here and are worth stating:
+
+- A user who already holds a live connection is **replacing** it (the fast-rejoin
+  case): the reservation costs no slot and the commit swaps the connection out. The
+  one way that can fail is the connection being replaced disconnecting *during* the
+  join while another user takes the freed slot; the commit then refuses rather than
+  exceed the limit, and the entity goes to the ordinary reconnect hold.
+- A user inside the reconnect hold window is **not an occupant**. The hold keeps their
+  entity, not their slot — their rejoin is admitted like any other and takes exactly
+  one slot. The alternative (holds retain slots) was rejected because it would make
+  admission disagree with the `players_online` the registry publishes: a server that
+  lost fifty players to a network blip would advertise fifty free slots and refuse
+  every one of them for thirty seconds.
+
+**Bounded ingestion** (`EcsWorld.PushInput` with `InputIngress`). Coalescing moved from
+the tick to ingest, under the same input lock: a movement-only input **replaces** the
+sender's newest queued entry in place when that entry is also movement-only, so a
+movement flood occupies one slot however fast it arrives. Inputs carrying an attack
+target are never replaced and never replace — they are appended and they end the run
+of replaceable movement behind them, so the queue keeps the client's order, which the
+handler's monotonic tick check depends on. Those are budgeted per connection per
+drain (`GAMESERVER_MAX_INPUTS_PER_TICK`, default 32) and the queue as a whole is capped
+(`GAMESERVER_MAX_PENDING_INPUTS`, default capacity × budget). The per-connection state
+lives on the `Connection` and is stamped with a drain epoch rather than cleared per
+tick, so the world carries no per-user map on the input path. The tick's own
+coalescing stays as the backstop for the unbounded (no-ingress) path used by tests
+and scaffolding.
+
+**One transfer per connection.** `Connection.TryBeginTransfer` is a CAS; a second
+`MsgTransferMap` while one is running gets `TransferMapResp{ok:false, error:"transfer
+already in progress"}` from the send queue — never awaited on the read loop — and is
+counted.
+
+**Control messages cannot be starved by input.** Each connection's read loop is its
+own task and dispatches `Ping`/`Pong`/`Resync`/`TransferMap` inline; nothing they need
+passes through the input queue, and the input path itself neither awaits nor allocates
+beyond the decode, so a flood on one connection costs that connection's read task and
+a bounded slice of the shared queue, not the tick or anyone else's acknowledgements.
+`InputIngestionTests.InputFlood_FromOneConnection_StaysBounded_AndOthersStillAcked`
+is the live-path proof, per the rule in `backend/TEAM.md`.
+
+### Observability
+
+`gameserver_handshakes_pending` (gauge), `gameserver_handshakes_rejected_total{reason}`,
+`gameserver_inputs_dropped_total{reason}`, `gameserver_inputs_coalesced_total`,
+`gameserver_transfers_rejected_total`, and the `/status` fields `handshakes_pending`,
+`handshakes_rejected`, `inputs_dropped`, `transfers_rejected` — see `docs/METRICS.md`.
+All are separate from `players_online`, which was the point: the pre-join phase was
+invisible precisely because the only gauge counted authenticated players.
+
+### Not done here
+
+Source-IP controls with NAT allowance (also named in F03) are deliberately left out:
+the game server sits behind a gateway that already carries per-IP limiting, and a
+per-IP table here would need a design for shared NATs before it stops being a way to
+lock a whole campus out. The bounds above make a flood cost the flooder a bounded
+number of sockets for a bounded time, which is what the finding asked for.

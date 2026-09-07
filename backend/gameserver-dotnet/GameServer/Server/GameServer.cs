@@ -50,6 +50,44 @@ public class ServerOptions
     public SimulationRates? SimulationRates { get; set; }
 
     public int Capacity { get; set; } = 100;
+
+    /// <summary>Default for <see cref="MaxPendingHandshakes"/>.</summary>
+    public const int DefaultMaxPendingHandshakes = 256;
+
+    /// <summary>Default for <see cref="HandshakeTimeout"/>.</summary>
+    public static readonly TimeSpan DefaultHandshakeTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Most accepted transports allowed to sit in the join handshake at once
+    /// (<c>GAMESERVER_MAX_PENDING_HANDSHAKES</c>). An accept beyond it is closed on the
+    /// spot and counted. Separate from <see cref="Capacity"/>, which counts only
+    /// authenticated players: the pre-join phase used to have no bound at all.
+    /// </summary>
+    public int MaxPendingHandshakes { get; set; } = DefaultMaxPendingHandshakes;
+
+    /// <summary>
+    /// Absolute deadline for the whole join handshake — from accept to the join reply
+    /// (<c>GAMESERVER_HANDSHAKE_TIMEOUT_MS</c>). A peer that has not delivered a complete,
+    /// valid <c>MsgJoinToken</c> by then is closed and counted. Linked to host shutdown,
+    /// so a pending read never outlives the server.
+    /// </summary>
+    public TimeSpan HandshakeTimeout { get; set; } = DefaultHandshakeTimeout;
+
+    /// <summary>
+    /// Most inputs one connection may queue between two tick drains
+    /// (<c>GAMESERVER_MAX_INPUTS_PER_TICK</c>). Movement coalesces in place and costs one
+    /// slot however often it is sent; the budget bounds edge-triggered actions. Values
+    /// below 1 select <see cref="EcsWorld.DefaultMaxInputsPerConnection"/>.
+    /// </summary>
+    public int MaxInputsPerConnection { get; set; } = EcsWorld.DefaultMaxInputsPerConnection;
+
+    /// <summary>
+    /// Most inputs the whole pending queue may hold between two drains
+    /// (<c>GAMESERVER_MAX_PENDING_INPUTS</c>). 0 (the default) derives it as
+    /// <see cref="Capacity"/> × <see cref="MaxInputsPerConnection"/>: every admitted
+    /// player spending their full budget at once still fits.
+    /// </summary>
+    public int MaxPendingInputs { get; set; }
     /// <summary>
     /// HS256 secret (or comma-separated rotation list) for the Nakama-issued
     /// client auth token. The game server itself never sees that token; this is
@@ -201,6 +239,12 @@ public sealed class GameServerHost : IAsyncDisposable
     /// <summary>Resolved <see cref="ServerOptions.GatherWorkers"/>; 1 means serial.</summary>
     private readonly int _gatherWorkers;
     private readonly ConnectionManager _connections;
+
+    /// <summary>Atomic capacity reservation for the join path; see <see cref="AdmissionController"/>.</summary>
+    private readonly AdmissionController _admission;
+
+    /// <summary>Bounded pool of accepted-but-not-joined transports; see <see cref="HandshakeGate"/>.</summary>
+    private readonly HandshakeGate _handshakes;
     private readonly TickLoop _tickLoop;
     private readonly AsyncSaver _saver;
     private readonly InputHandler _inputHandler;
@@ -289,6 +333,18 @@ public sealed class GameServerHost : IAsyncDisposable
     /// <summary>Reconnect holds currently pending. Diagnostics and tests.</summary>
     public int PendingHolds => _holds.Count;
 
+    /// <summary>
+    /// Accepted transports currently inside the join handshake — the value the
+    /// <c>gameserver_handshakes_pending</c> gauge and <c>/status</c> publish.
+    /// </summary>
+    public int PendingHandshakes => _handshakes.Pending;
+
+    /// <summary>Capacity reservations taken and not yet committed or released. Diagnostics and tests.</summary>
+    public int PendingReservations => _admission.PendingReservations;
+
+    /// <summary>Inputs queued for the next tick. Diagnostics and tests.</summary>
+    public int PendingInputCount => _world.PendingInputCount;
+
     /// <summary>Current simulation tick number.</summary>
     public ulong CurrentTick => _tickLoop.CurrentTick;
 
@@ -347,6 +403,21 @@ public sealed class GameServerHost : IAsyncDisposable
         _world = new EcsWorld(_gatherWorkers);
         _metrics?.SetEntityCountProvider(() => _world.EntityCount);
         _connections = new ConnectionManager();
+        _admission = new AdmissionController(_connections, options.Capacity);
+        _handshakes = new HandshakeGate(options.MaxPendingHandshakes);
+        _metrics?.SetPendingHandshakesProvider(() => _handshakes.Pending);
+
+        // Ingestion bounds (F04). The world-wide bound defaults to "every admitted player
+        // spending their whole per-tick budget at once", which is the largest drain a
+        // rule-abiding population can produce; anything above it is a flood.
+        int perConnection = options.MaxInputsPerConnection < 1
+            ? EcsWorld.DefaultMaxInputsPerConnection
+            : options.MaxInputsPerConnection;
+        int worldWide = options.MaxPendingInputs > 0
+            ? options.MaxPendingInputs
+            : (int)Math.Min(int.MaxValue, (long)Math.Max(1, options.Capacity) * perConnection);
+        _world.ConfigureInputBounds(perConnection, worldWide);
+
         _playerStore = options.PlayerStore ?? new MemoryPlayerStore();
         _agonesSdk = options.AgonesSdk ?? new NoopAgonesSdk();
 
@@ -800,14 +871,31 @@ public sealed class GameServerHost : IAsyncDisposable
                 continue;
             }
 
-            // Handle connection on a background task (fire-and-forget)
-            _ = Task.Run(() => HandleConnectionAsync(accepted, ct), ct);
+            // Bounded pending pool (F03): beyond GAMESERVER_MAX_PENDING_HANDSHAKES the
+            // socket is closed here, synchronously, with no reply — a peer that has not
+            // authenticated is owed nothing, and a reply would be one more write a flood
+            // could make us pay for. Counted so an operator can see it happening.
+            if (!_handshakes.TryEnter())
+            {
+                _metrics?.RecordHandshakeRejected(HandshakeRejectReason.PoolFull);
+                _logger.LogWarning(
+                    "Handshake from {Remote} refused: pending-handshake pool full ({Max}). " +
+                    "This is the configured pre-join bound (GAMESERVER_MAX_PENDING_HANDSHAKES)",
+                    accepted.RemoteEndPoint, _handshakes.Max);
+                try { accepted.Dispose(); } catch { /* ignore */ }
+                continue;
+            }
+
+            // Handle connection on a background task (fire-and-forget). The gate slot is
+            // owned by the handler from here and released in its finally.
+            _ = Task.Run(() => HandleConnectionAsync(accepted, ct), CancellationToken.None);
         }
     }
 
     private async Task HandleConnectionAsync(ITransportConnection accepted, CancellationToken ct)
     {
         Connection? conn = null;
+        Connection? tempConn = null;
         // The world holds an entity for this user and the reconnect hold owes it a
         // removal. Set once the entity is created or reattached; never cleared.
         bool entityAttached = false;
@@ -815,39 +903,101 @@ public sealed class GameServerHost : IAsyncDisposable
         // it — and must NOT be called otherwise, or an aborted join would decrement
         // another player's count.
         bool countedOnline = false;
+        // The HandshakeGate slot taken by the accept loop is ours until the join commits
+        // (or fails); the finally releases it if we never got that far.
+        bool inHandshake = true;
+        // A capacity reservation is held and not yet committed. Released by the finally
+        // on every failure path between TryReserve and Commit.
+        bool reserved = false;
         // userId is needed by the finally block, so it lives outside the try.
         string userId = "";
+
+        // The handshake deadline (F03): absolute, from accept, and LINKED to host shutdown
+        // so a read parked on a silent peer unwinds on stop as well as on timeout. It
+        // covers everything the peer controls — delivering a complete, valid join frame
+        // and reading the reply to a rejected one. The player-store load and the join
+        // reply after a successful verification are server-side work and run on the host
+        // token alone: a slow database is not the peer's fault, and cancelling it would
+        // tear down a player who had already been admitted.
+        using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        handshakeCts.CancelAfter(_options.HandshakeTimeout);
+        var handshakeToken = handshakeCts.Token;
         try
         {
             // Use a temporary logger-only connection for the handshake
             var connLogger = _loggerFactory.CreateLogger<Connection>();
-            var tempConn = new Connection("pending", accepted, connLogger);
+            tempConn = new Connection("pending", accepted, connLogger);
 
-            // Step 1: Read MsgJoinToken
-            var env = await tempConn.ReadOneAsync();
-            if (env == null || (MsgType)env.Type != MsgType.JoinToken)
+            // Step 1: Read MsgJoinToken. Every way this can fail is classified and
+            // counted: the peer went silent (timeout), the host is stopping (not a
+            // rejection), or the bytes were not a frame — a short length prefix, a body
+            // cut off mid-way, an impossible length, an undecodable envelope (malformed).
+            Envelope? env;
+            try
             {
-                await SendError(tempConn, "Expected JoinToken message");
-                tempConn.Close();
+                env = await tempConn.ReadOneAsync(handshakeToken);
+            }
+            catch (Exception ex)
+            {
+                if (ct.IsCancellationRequested)
+                {
+                    return;
+                }
+                if (handshakeToken.IsCancellationRequested)
+                {
+                    _metrics?.RecordHandshakeRejected(HandshakeRejectReason.Timeout);
+                    _logger.LogDebug(
+                        "Handshake from {Remote} timed out: no complete join frame within {Timeout}ms " +
+                        "(GAMESERVER_HANDSHAKE_TIMEOUT_MS)",
+                        accepted.RemoteEndPoint, _options.HandshakeTimeout.TotalMilliseconds);
+                    return;
+                }
+                _metrics?.RecordHandshakeRejected(HandshakeRejectReason.Malformed);
+                _logger.LogDebug(ex, "Handshake from {Remote} refused: malformed first frame",
+                    accepted.RemoteEndPoint);
                 return;
             }
 
-            var joinReq = WireProtocol.GetPayload<JoinTokenRequest>(env);
+            if (env == null)
+            {
+                // Clean EOF before any frame: the peer hung up. Not a rejection — nothing
+                // was refused — but the transport is still ours to dispose (finally).
+                return;
+            }
+
+            if ((MsgType)env.Type != MsgType.JoinToken)
+            {
+                _metrics?.RecordHandshakeRejected(HandshakeRejectReason.Malformed);
+                await SendError(tempConn, "Expected JoinToken message", handshakeToken);
+                return;
+            }
+
+            JoinTokenRequest joinReq;
+            try
+            {
+                joinReq = WireProtocol.GetPayload<JoinTokenRequest>(env);
+            }
+            catch (Exception ex)
+            {
+                _metrics?.RecordHandshakeRejected(HandshakeRejectReason.Malformed);
+                _logger.LogDebug(ex, "Handshake from {Remote} refused: undecodable JoinToken payload",
+                    accepted.RemoteEndPoint);
+                await SendError(tempConn, "Malformed JoinToken message", handshakeToken);
+                return;
+            }
 
             // Step 2: Verify JWT
             var claims = _joinKeys.Verify(joinReq.Token);
             if (claims == null)
             {
-                await SendError(tempConn, "Invalid or expired token");
-                tempConn.Close();
+                await SendError(tempConn, "Invalid or expired token", handshakeToken);
                 return;
             }
 
             // Step 3: Check server ID claim — mandatory, no empty bypass
             if (string.IsNullOrEmpty(claims.ServerId) || claims.ServerId != _options.ServerId)
             {
-                await SendError(tempConn, "Token is for a different server");
-                tempConn.Close();
+                await SendError(tempConn, "Token is for a different server", handshakeToken);
                 return;
             }
 
@@ -855,12 +1005,19 @@ public sealed class GameServerHost : IAsyncDisposable
             // Step 3b: JTI replay protection
             if (string.IsNullOrEmpty(claims.Jti) || !_jtiTracker.TryConsume(claims.Jti))
             {
-                await SendError(tempConn, "Token already used");
-                tempConn.Close();
+                await SendError(tempConn, "Token already used", handshakeToken);
                 return;
             }
-            // Step 4: Check capacity
-            if (_connections.Count >= _options.Capacity)
+
+            userId = claims.UserId;
+
+            // Step 4: Reserve a capacity slot — ATOMICALLY, before the awaited player load
+            // below. The check used to read Count here and Add after the load, so every
+            // join in flight during that await saw the same free slot and all of them got
+            // in. The reservation holds the slot across the await and is released on every
+            // failure path (finally); a user rejoining over a live connection replaces it
+            // and takes no second slot. See AdmissionController.
+            if (!_admission.TryReserve(userId, out int occupancy))
             {
                 // LOG IT. This refusal used to be silent: SendError told the client and
                 // nothing told the operator, so a server turning players away and a server
@@ -874,15 +1031,13 @@ public sealed class GameServerHost : IAsyncDisposable
                 // sees as "this server is full, skip it" when it reads PlayerCount and
                 // Capacity out of the registry.
                 _logger.LogWarning(
-                    "Join rejected for {UserId}: server at capacity {Connections}/{Capacity}. " +
+                    "Join rejected for {UserId}: server at capacity {Occupancy}/{Capacity}. " +
                     "This is the configured admission limit (GAMESERVER_CAPACITY), not a resource limit",
-                    claims.UserId, _connections.Count, _options.Capacity);
-                await SendError(tempConn, "Server is full");
-                tempConn.Close();
+                    userId, occupancy, _options.Capacity);
+                await SendError(tempConn, "Server is full", handshakeToken);
                 return;
             }
-
-            userId = claims.UserId;
+            reserved = true;
 
             // Cancel any pending entity hold for this user (reconnect)
             if (_holds.TryRemove(userId, out var holdCts))
@@ -943,8 +1098,31 @@ public sealed class GameServerHost : IAsyncDisposable
                 JoinJti = claims.Jti
             };
 
-            // Register connection
-            _connections.Add(conn);
+            // Register connection, retiring the reservation under the same lock it was
+            // taken under. The one way this fails: the reservation was a replacement of a
+            // live connection, that connection was torn down during the load above, and
+            // another user has since taken the freed slot. Refuse rather than exceed the
+            // limit. conn is nulled so the finally tears the entity down as a pre-Connection
+            // failure (hold scheduled) rather than treating it as superseded.
+            if (!_admission.Commit(conn))
+            {
+                reserved = false;
+                _logger.LogWarning(
+                    "Join rejected for {UserId}: server at capacity {Occupancy}/{Capacity} " +
+                    "after the connection being replaced disconnected mid-join " +
+                    "(GAMESERVER_CAPACITY)",
+                    userId, _admission.Occupancy, _options.Capacity);
+                await SendError(tempConn, "Server is full", handshakeToken);
+                conn.Dispose();
+                conn = null;
+                return;
+            }
+            reserved = false;
+
+            // The handshake is over: this transport is a player now, counted under
+            // GAMESERVER_CAPACITY rather than the pending pool.
+            inHandshake = false;
+            _handshakes.Exit();
 
             // Record the join BEFORE sending the response: the TCP stack may
             // deliver the frame to the client before our FlushAsync Task
@@ -1009,11 +1187,31 @@ public sealed class GameServerHost : IAsyncDisposable
             // already removed the entity, balanced PlayerLeft and unregistered the
             // connection, and a kicked login must get NO reconnect hold — a newer
             // login owns the user and this one's join token is spent.
+            if (reserved)
+            {
+                // A reservation that never committed must not keep its slot: an aborted
+                // join is not a player.
+                _admission.Release(userId);
+            }
+
             if (entityAttached && !(conn?.Transferred ?? false) && !(conn?.Kicked ?? false))
             {
                 OnPlayerDisconnected(userId, countedOnline, conn);
             }
             conn?.Dispose();
+
+            // Guaranteed transport disposal on EVERY exit path (F03). Before this, only the
+            // paths that remembered to call tempConn.Close() closed the socket, and a throw
+            // between accept and the session Connection — an undecodable frame, a write to
+            // a peer that had already gone — left the accepted transport open with nothing
+            // owning it. Both Close paths are idempotent, so closing twice is free.
+            tempConn?.Dispose();
+            try { accepted.Dispose(); } catch { /* ignore */ }
+
+            if (inHandshake)
+            {
+                _handshakes.Exit();
+            }
         }
     }
 
@@ -1022,12 +1220,26 @@ public sealed class GameServerHost : IAsyncDisposable
         switch ((MsgType)env.Type)
         {
             case MsgType.Input:
+                // Bounded ingest (F04): movement coalesces in place, edge-triggered
+                // actions are budgeted per connection per drain, and the queue as a whole
+                // is capped. Nothing here awaits or allocates beyond the decode, so a
+                // flood on this connection costs this read task and nothing shared.
                 var input = WireProtocol.GetPayload<InputMessage>(env);
-                _world.PushInput(conn.UserId, new InputData(
+                var ingest = _world.PushInput(conn.UserId, new InputData(
                     input.Tick,
                     input.MoveX,
                     input.MoveY,
-                    input.AttackTargetId));
+                    input.AttackTargetId), conn.Ingress);
+                switch (ingest)
+                {
+                    case InputIngestResult.Coalesced:
+                        _metrics?.RecordInputCoalesced();
+                        break;
+                    case InputIngestResult.DroppedConnectionBudget:
+                    case InputIngestResult.DroppedQueueFull:
+                        _metrics?.RecordInputDropped(ingest);
+                        break;
+                }
                 break;
 
             case MsgType.Resync:
@@ -1038,6 +1250,18 @@ public sealed class GameServerHost : IAsyncDisposable
                 break;
 
             case MsgType.TransferMap:
+                // Exactly one transfer in flight per connection (F04). A second request
+                // while the first is still saving used to start a second save-and-teardown
+                // against the same entity. Refused on the send queue, never awaited: the
+                // read loop must not block on a reply.
+                if (!conn.TryBeginTransfer())
+                {
+                    _metrics?.RecordTransferRejected();
+                    conn.Send(WireProtocol.NewEnvelope(MsgType.TransferMapResp,
+                        new TransferMapResponse { Ok = false, Error = "transfer already in progress" },
+                        conn.Encoding));
+                    break;
+                }
                 // Fire-and-forget: the transfer handler is async (save + respond),
                 // but the read loop must not block on it.
                 _ = HandleTransferMapAsync(conn, env);
@@ -1138,6 +1362,13 @@ public sealed class GameServerHost : IAsyncDisposable
             _logger.LogWarning(ex, "Transfer map failed for {UserId}", conn.UserId);
             try { await SendTransferError(conn, "internal error"); }
             catch { /* connection may already be dead */ }
+        }
+        finally
+        {
+            // Release the connection's single transfer slot. On the success path the
+            // connection is closed and nothing can use the slot again; on every refusal
+            // and failure the player is still here and may retry.
+            conn.EndTransfer();
         }
     }
 
@@ -1413,11 +1644,15 @@ public sealed class GameServerHost : IAsyncDisposable
         }
     }
 
-    private static async Task SendError(Connection conn, string error)
+    /// <param name="ct">
+    /// The handshake deadline: a rejected peer that will not read its reply must not hold
+    /// the handler past <c>GAMESERVER_HANDSHAKE_TIMEOUT_MS</c> either.
+    /// </param>
+    private static async Task SendError(Connection conn, string error, CancellationToken ct = default)
     {
         var resp = WireProtocol.NewEnvelope(MsgType.JoinTokenResp,
             new JoinTokenResponse { Ok = false, Error = error }, conn.Encoding);
-        await conn.WriteOneAsync(resp);
+        await conn.WriteOneAsync(resp, ct);
     }
 
     private static (string host, int port) ParseAddr(string addr)

@@ -58,6 +58,10 @@ human inspection and for the Unity DOTS sample, which polls it.
   "event_publish_failures": 0,
   "kick_consumer": "redis",
   "players_kicked": 0,
+  "handshakes_pending": 0,
+  "handshakes_rejected": 0,
+  "inputs_dropped": 0,
+  "transfers_rejected": 0,
   "postgres": "connected",
   "uptime_seconds": 12105
 }
@@ -85,6 +89,10 @@ so it reported the compiled-in default of 15 on servers whose prediction rate wa
 | `events_dropped` / `event_publish_failures` | Loss counters of the Redis event stream, since process start — the same values as `gameserver_events_dropped_total` / `gameserver_events_publish_failures_total` above. Always `0` under `"event_stream": "noop"` |
 | `kick_consumer` | State of the duplicate-login kick consumer on `events:kick` (ADR-20): `redis` (consuming as group `gs:{server_id}`) or `disabled` (`REDIS_ADDR` unset, or the consumer failed to start — supersede events for this server are then never acted on, so a re-logging-in user keeps their old connection here) |
 | `players_kicked` | Duplicate-login kicks executed since process start — connections force-closed because a `session_superseded` event named their join-token jti. Same value as `gameserver_players_kicked_total`. Always `0` under `"kick_consumer": "disabled"` |
+| `handshakes_pending` | Accepted sockets currently inside the join handshake — **not** in `players_online` and **not** under `capacity`; bounded by `GAMESERVER_MAX_PENDING_HANDSHAKES` instead. Same value as `gameserver_handshakes_pending`. A number that sits at the bound is a pre-join flood (or a client fleet that connects and never joins) |
+| `handshakes_rejected` | Handshakes refused **before authentication** since process start, every reason summed: pool full at accept, no complete join frame by `GAMESERVER_HANDSHAKE_TIMEOUT_MS`, or a first frame that was not a well-formed `MsgJoinToken`. Same value as `sum(gameserver_handshakes_rejected_total)`. A capacity refusal is not one of these — that is an authenticated join, logged at Warning |
+| `inputs_dropped` | Client inputs discarded at ingest since process start (per-connection budget or world-wide queue cap, summed). Same value as `sum(gameserver_inputs_dropped_total)`. Movement coalesced in place is **not** a drop and not counted here |
+| `transfers_rejected` | `MsgTransferMap` requests refused because a transfer was already running on that connection. Same value as `gameserver_transfers_rejected_total` |
 | `uptime_seconds` | Seconds since process start on a **monotonic** clock (`Stopwatch`), not wall time — see below |
 
 ### Do not compute a rate — read `achieved_tick_hz`
@@ -150,6 +158,11 @@ The same value is exported as the Prometheus gauge `gameserver_achieved_tick_hz`
 | `gameserver_events_publish_failures_total` | counter | — | Events dropped after exhausting the `XADD` retry budget (3 attempts with short backoff). Distinct from `dropped`: these reached the head of the queue and still could not be written. Sustained increments alongside a flat `dropped` means Redis is up but refusing writes (e.g. OOM under `noeviction`) |
 | `gameserver_resyncs_total` | counter | `map_id` | Keyframes **requested by a client** — see below |
 | `gameserver_players_kicked_total` | counter | `map_id` | Duplicate-login kicks (ADR-20): connections force-closed because a `session_superseded` event on `events:kick` named their join-token jti. Entity released immediately, no reconnect hold. Pair with the gateway's `gateway_kick_publish_total`: publishes without matching kicks means events are being lost or mis-addressed |
+| `gameserver_handshakes_pending` | gauge | `map_id` | Accepted sockets inside the join handshake right now. Outside `players_online` and outside `capacity`; bounded by `GAMESERVER_MAX_PENDING_HANDSHAKES` |
+| `gameserver_handshakes_rejected_total` | counter | `map_id`, `reason` | Handshakes refused before authentication: `pool_full` (closed at accept, pending pool at its bound), `timeout` (no complete join frame within `GAMESERVER_HANDSHAKE_TIMEOUT_MS` — idle socket, partial prefix or partial body), `malformed` (first frame was not a well-formed `MsgJoinToken`). Not a capacity refusal |
+| `gameserver_inputs_dropped_total` | counter | `map_id`, `reason` | Inputs discarded at ingest: `connection_budget` (one connection exceeded `GAMESERVER_MAX_INPUTS_PER_TICK` between two drains) or `queue_full` (the world-wide queue hit `GAMESERVER_MAX_PENDING_INPUTS`). A rising `connection_budget` from one map with flat `processed_inputs` is one client flooding; a rising `queue_full` is the population as a whole |
+| `gameserver_inputs_coalesced_total` | counter | `map_id` | Movement-only inputs that replaced the sender's previous queued movement in place. **Not a loss** — the tick integrates one direction per player per tick regardless — but the rate says how far above the tick rate clients are sending |
+| `gameserver_transfers_rejected_total` | counter | `map_id` | `MsgTransferMap` refused because one was already in flight on that connection |
 
 Useful queries:
 

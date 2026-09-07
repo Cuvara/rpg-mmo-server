@@ -22,6 +22,11 @@ namespace GameServer.Observability;
 /// gameserver.events.dropped           -> gameserver_events_dropped_total
 /// gameserver.events.publish_failures  -> gameserver_events_publish_failures_total
 /// gameserver.tick.processed_inputs    -> gameserver_tick_processed_inputs_total
+/// gameserver.handshakes.pending       -> gameserver_handshakes_pending
+/// gameserver.handshakes.rejected      -> gameserver_handshakes_rejected_total{reason}
+/// gameserver.inputs.dropped           -> gameserver_inputs_dropped_total{reason}
+/// gameserver.inputs.coalesced         -> gameserver_inputs_coalesced_total
+/// gameserver.transfers.rejected       -> gameserver_transfers_rejected_total
 /// </code>
 ///
 /// All record paths are allocation-free: tag sets are pre-built once in the
@@ -60,9 +65,18 @@ public sealed class GameMetrics : IDisposable
     private readonly Counter<long> _processedInputs;
     private readonly Counter<long> _resyncsRequested;
     private readonly Counter<long> _playersKicked;
+    private readonly Counter<long> _handshakesRejected;
+    private readonly Counter<long> _inputsDropped;
+    private readonly Counter<long> _inputsCoalesced;
+    private readonly Counter<long> _transfersRejected;
 
     // Pre-built tag sets — never allocate per record call.
     private readonly TagList _mapTags;
+    private readonly TagList _handshakePoolFullTags;
+    private readonly TagList _handshakeTimeoutTags;
+    private readonly TagList _handshakeMalformedTags;
+    private readonly TagList _inputBudgetTags;
+    private readonly TagList _inputQueueFullTags;
     private readonly TagList _saveOkTags;
     private readonly TagList _criticalTags;
     private readonly TagList _worldTags;
@@ -100,6 +114,12 @@ public sealed class GameMetrics : IDisposable
         _criticalTags = new TagList { { "map_id", mapId }, { "group", "critical" } };
         _worldTags = new TagList { { "map_id", mapId }, { "group", "world" } };
         _backgroundTags = new TagList { { "map_id", mapId }, { "group", "background" } };
+
+        _handshakePoolFullTags = new TagList { { "map_id", mapId }, { "reason", "pool_full" } };
+        _handshakeTimeoutTags = new TagList { { "map_id", mapId }, { "reason", "timeout" } };
+        _handshakeMalformedTags = new TagList { { "map_id", mapId }, { "reason", "malformed" } };
+        _inputBudgetTags = new TagList { { "map_id", mapId }, { "reason", "connection_budget" } };
+        _inputQueueFullTags = new TagList { { "map_id", mapId }, { "reason", "queue_full" } };
 
         _tickDuration = _meter.CreateHistogram<double>(
             TickDurationInstrument,
@@ -158,6 +178,40 @@ public sealed class GameMetrics : IDisposable
             description: "Connections force-closed by a session_superseded event " +
                          "(duplicate login: a newer login for the same user superseded this one). " +
                          "Entity released immediately, no reconnect hold.");
+
+        _handshakesRejected = _meter.CreateCounter<long>(
+            "gameserver.handshakes.rejected",
+            description: "Accepted transports refused before authentication, labelled by " +
+                         "reason: pool_full (GAMESERVER_MAX_PENDING_HANDSHAKES reached, closed " +
+                         "on accept), timeout (no complete join frame within " +
+                         "GAMESERVER_HANDSHAKE_TIMEOUT_MS), malformed (first frame was not a " +
+                         "well-formed MsgJoinToken). Not a capacity refusal: those are " +
+                         "authenticated and logged separately.");
+
+        _inputsDropped = _meter.CreateCounter<long>(
+            "gameserver.inputs.dropped",
+            description: "Client inputs discarded at ingest, labelled by reason: " +
+                         "connection_budget (one connection exceeded " +
+                         "GAMESERVER_MAX_INPUTS_PER_TICK between two drains) or queue_full " +
+                         "(the world-wide pending queue reached GAMESERVER_MAX_PENDING_INPUTS).");
+
+        _inputsCoalesced = _meter.CreateCounter<long>(
+            "gameserver.inputs.coalesced",
+            description: "Movement-only inputs that replaced the sender's previous queued " +
+                         "movement in place instead of growing the queue. Not a loss: the " +
+                         "tick integrates one direction per player per tick regardless.");
+
+        _transfersRejected = _meter.CreateCounter<long>(
+            "gameserver.transfers.rejected",
+            description: "MsgTransferMap requests refused because a transfer was already " +
+                         "running on that connection.");
+
+        _meter.CreateObservableGauge(
+            "gameserver.handshakes.pending",
+            ObservePendingHandshakes,
+            description: "Accepted transports that have not completed the join handshake. " +
+                         "Bounded by GAMESERVER_MAX_PENDING_HANDSHAKES and outside " +
+                         "players_online, which counts only authenticated connections.");
 
         // Per-group instruments. One instrument with a `group` label rather than three
         // named instruments: the groups are configuration (SIM_*_HZ), so a metric name that
@@ -347,6 +401,112 @@ public sealed class GameMetrics : IDisposable
     /// <summary>Record an event dropped after exhausting the publish retry budget.</summary>
     public void RecordEventPublishFailure() => _eventPublishFailures.Add(1);
 
+    // ── Pre-join admission (workspace audit F03) ─────────────────────────────
+
+    private Func<int>? _pendingHandshakesProvider;
+    private long _handshakesRejectedPoolFull;
+    private long _handshakesRejectedTimeout;
+    private long _handshakesRejectedMalformed;
+
+    /// <summary>
+    /// Register the callback used by the <c>gameserver_handshakes_pending</c> gauge:
+    /// accepted transports that have not completed the join handshake. Separate from
+    /// <c>players_online</c> on purpose — these are sockets outside the capacity limit,
+    /// which is exactly why they need their own number.
+    /// </summary>
+    public void SetPendingHandshakesProvider(Func<int> provider) => _pendingHandshakesProvider = provider;
+
+    private Measurement<int> ObservePendingHandshakes()
+        => new(_pendingHandshakesProvider?.Invoke() ?? 0, _mapTags);
+
+    /// <summary>
+    /// Record a handshake refused before authentication. Mirrored into the
+    /// <c>HandshakesRejected*</c> properties so <c>/status</c> and tests can read the
+    /// counts without a metrics scrape.
+    /// </summary>
+    public void RecordHandshakeRejected(HandshakeRejectReason reason)
+    {
+        switch (reason)
+        {
+            case HandshakeRejectReason.PoolFull:
+                Interlocked.Increment(ref _handshakesRejectedPoolFull);
+                _handshakesRejected.Add(1, _handshakePoolFullTags);
+                break;
+            case HandshakeRejectReason.Timeout:
+                Interlocked.Increment(ref _handshakesRejectedTimeout);
+                _handshakesRejected.Add(1, _handshakeTimeoutTags);
+                break;
+            default:
+                Interlocked.Increment(ref _handshakesRejectedMalformed);
+                _handshakesRejected.Add(1, _handshakeMalformedTags);
+                break;
+        }
+    }
+
+    /// <summary>Accepted transports closed because the pending-handshake pool was full.</summary>
+    public long HandshakesRejectedPoolFull => Interlocked.Read(ref _handshakesRejectedPoolFull);
+
+    /// <summary>Handshakes that did not deliver a complete join frame before the deadline.</summary>
+    public long HandshakesRejectedTimeout => Interlocked.Read(ref _handshakesRejectedTimeout);
+
+    /// <summary>Handshakes whose first frame was not a well-formed <c>MsgJoinToken</c>.</summary>
+    public long HandshakesRejectedMalformed => Interlocked.Read(ref _handshakesRejectedMalformed);
+
+    /// <summary>All pre-authentication handshake rejections, every reason.</summary>
+    public long HandshakesRejected
+        => HandshakesRejectedPoolFull + HandshakesRejectedTimeout + HandshakesRejectedMalformed;
+
+    // ── Bounded ingestion (workspace audit F04) ──────────────────────────────
+
+    private long _inputsDroppedConnectionBudget;
+    private long _inputsDroppedQueueFull;
+    private long _inputsCoalescedCount;
+    private long _transfersRejectedCount;
+
+    /// <summary>Record one input dropped at ingest for <paramref name="reason"/>.</summary>
+    public void RecordInputDropped(GameServer.World.InputIngestResult reason)
+    {
+        if (reason == GameServer.World.InputIngestResult.DroppedQueueFull)
+        {
+            Interlocked.Increment(ref _inputsDroppedQueueFull);
+            _inputsDropped.Add(1, _inputQueueFullTags);
+        }
+        else
+        {
+            Interlocked.Increment(ref _inputsDroppedConnectionBudget);
+            _inputsDropped.Add(1, _inputBudgetTags);
+        }
+    }
+
+    /// <summary>Record one movement input coalesced in place at ingest (queue did not grow).</summary>
+    public void RecordInputCoalesced()
+    {
+        Interlocked.Increment(ref _inputsCoalescedCount);
+        _inputsCoalesced.Add(1, _mapTags);
+    }
+
+    /// <summary>Inputs dropped because one connection exhausted its per-tick budget.</summary>
+    public long InputsDroppedConnectionBudget => Interlocked.Read(ref _inputsDroppedConnectionBudget);
+
+    /// <summary>Inputs dropped because the world-wide pending queue was full.</summary>
+    public long InputsDroppedQueueFull => Interlocked.Read(ref _inputsDroppedQueueFull);
+
+    /// <summary>All inputs dropped at ingest, every reason.</summary>
+    public long InputsDropped => InputsDroppedConnectionBudget + InputsDroppedQueueFull;
+
+    /// <summary>Movement inputs coalesced at ingest, since start.</summary>
+    public long InputsCoalesced => Interlocked.Read(ref _inputsCoalescedCount);
+
+    /// <summary>Record a <c>MsgTransferMap</c> refused because one was already running on that connection.</summary>
+    public void RecordTransferRejected()
+    {
+        Interlocked.Increment(ref _transfersRejectedCount);
+        _transfersRejected.Add(1, _mapTags);
+    }
+
+    /// <summary>Transfer requests refused as concurrent, since start.</summary>
+    public long TransfersRejected => Interlocked.Read(ref _transfersRejectedCount);
+
     /// <summary>Increment the connected-player gauge.</summary>
     public void PlayerJoined() => Interlocked.Increment(ref _playersOnline);
 
@@ -368,4 +528,17 @@ public sealed class GameMetrics : IDisposable
     }
 
     public void Dispose() => _meter.Dispose();
+}
+
+/// <summary>Why a handshake was refused before authentication — the <c>reason</c> label of <c>gameserver_handshakes_rejected_total</c>.</summary>
+public enum HandshakeRejectReason
+{
+    /// <summary>The pending-handshake pool (<c>GAMESERVER_MAX_PENDING_HANDSHAKES</c>) was full at accept.</summary>
+    PoolFull,
+
+    /// <summary>No complete join frame arrived within <c>GAMESERVER_HANDSHAKE_TIMEOUT_MS</c>.</summary>
+    Timeout,
+
+    /// <summary>The first frame was not a well-formed <c>MsgJoinToken</c> (wrong type, bad length prefix, undecodable body, or EOF mid-frame).</summary>
+    Malformed,
 }
