@@ -31,8 +31,19 @@ type RewardKillResponse struct {
 }
 
 // RewardKillRPC awards gold to a player who killed an enemy.
-// Called by the game server via HTTP with runtime.http_key auth.
+// Called by the game server via HTTP with runtime.http_key auth; client
+// sessions are rejected with code 7 before the payload is read (see
+// requireServerCaller).
 func RewardKillRPC(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
+	return rewardKillCore(ctx, logger, nk, payload)
+}
+
+// rewardKillCore is RewardKillRPC against the narrow interface so tests can
+// drive it with the same mock as reward_kills.
+func rewardKillCore(ctx context.Context, logger runtime.Logger, nk killGranter, payload string) (string, error) {
+	if err := requireServerCaller(ctx); err != nil {
+		return "", err
+	}
 	var req RewardKillRequest
 	if err := json.Unmarshal([]byte(payload), &req); err != nil {
 		return "", runtime.NewError("invalid payload", 3) // INVALID_ARGUMENT

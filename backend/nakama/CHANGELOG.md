@@ -5,6 +5,44 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- **Economy mutation RPCs are server-only** (audit 2026-09-07 F01, P0). `reward_kill`,
+  `reward_kills` and `submit_kill` take the beneficiary `user_id` from the payload, and
+  Nakama exposes every registered RPC to authenticated clients as well as to
+  `runtime.http_key` callers — so any logged-in client could grant itself (or anyone)
+  gold and score. A shared guard, `economy.requireServerCaller`, now rejects any
+  invocation whose context carries a client-session marker (`RUNTIME_CTX_USER_ID`,
+  `RUNTIME_CTX_SESSION_ID` or `RUNTIME_CTX_USER_SESSION_EXP`) with gRPC code 7
+  (`PERMISSION_DENIED`, HTTP 403, message `server-only rpc`) **before the payload is
+  parsed** and before any `WalletUpdate`/`LeaderboardRecordWrite`. `runtime.http_key`
+  calls carry none of those markers, so the game server's `NakamaClient`
+  (`/v2/rpc/<id>?http_key=…`) is unaffected. `get_leaderboard` (read) and
+  `gateway_token` (client RPC by design) are unchanged.
+- **`kills_alltime` leaderboard is authoritative** (F02, P1). It was created with
+  `authoritative=false`, letting clients write their own scores through Nakama's public
+  `WriteLeaderboardRecord` regardless of the RPC guard. Because `LeaderboardCreate` is
+  idempotent and never alters an existing board, `SetupLeaderboards` now looks the
+  board up first (`LeaderboardsGetId`); an existing non-authoritative board makes
+  **InitModule fail** with the fix in the error message rather than deleting data or
+  silently leaving the hole open. Data-preserving migration is one SQL update plus a
+  Nakama restart (`UPDATE leaderboard SET authoritative = true WHERE id =
+  'kills_alltime'`, see `docs/RUNBOOK.md`); `LEADERBOARD_MIGRATE=recreate` in the
+  runtime env opts into delete-and-recreate for disposable dev/staging boards. Chosen
+  over auto-recreate because a start-up hook must not destroy player records on its
+  own, and over log-and-continue because that keeps a P1 open unnoticed.
+
+### Added
+- `economy.ErrServerOnly`, `economy.LeaderboardMigrateEnv`.
+- Table-driven tests: guard accepts server (no-session) context and rejects user id /
+  session id / session expiry; all three mutation RPCs reject a client session before
+  parsing with zero granter calls; server caller still grants; `SetupLeaderboards`
+  creates `authoritative=true`, leaves an authoritative board alone, fails on a legacy
+  board by default, and deletes+recreates only on opt-in.
+
+### Changed
+- `docs/API.md`, `docs/RUNBOOK.md`, `docs/DESIGN.md`, `docs/README.md` describe the
+  server-only contract, error code 7, and the leaderboard migration.
+
 ## [0.9.0] - 2026-09-05
 
 ### Added

@@ -128,3 +128,56 @@ run a single Nakama instance up to Soft Launch. The production upgrade is a
 Redis-backed counter (`INCR` + `EXPIRE` on
 `ratelimit:gateway_token:{user_id}`), against the Redis the gateway already
 depends on. Tracked in ADR-8.
+
+## 2026-09-07 — Economy RPCs are server-only; kills leaderboard is authoritative
+
+### The boundary a comment did not enforce
+
+`reward_kill`, `reward_kills` and `submit_kill` take the *beneficiary* user id
+from the payload, because the game server grants on a player's behalf. Nakama
+registers every RPC for both authenticated client sessions and
+`runtime.http_key` callers, so until now any logged-in client could call
+`reward_kills` with `{"user_id": "<anyone>", "kills": 1000}` — the "internal
+RPC" note in `CLAUDE.md` was documentation, not enforcement (audit F01, P0).
+
+The two caller kinds are distinguishable only through the request context: a
+client session carries `RUNTIME_CTX_USER_ID`, `RUNTIME_CTX_SESSION_ID` and
+`RUNTIME_CTX_USER_SESSION_EXP`; an `http_key` call carries none of them
+([Nakama runtime introduction](https://heroiclabs.com/docs/nakama/server-framework/introduction/)).
+`economy.requireServerCaller(ctx)` rejects if **any** of the three is set —
+not just the user id — so a future Nakama that populates them differently
+still fails closed. It runs before `json.Unmarshal`, so a client learns nothing
+about the schema and no `WalletUpdate`/`LeaderboardRecordWrite` can be reached;
+the tests assert zero mock calls after rejection. The error is gRPC code 7
+(`PERMISSION_DENIED` → HTTP 403), distinct from the 16 the auth RPCs use for
+"you need a session": here having a session is the problem.
+
+`get_leaderboard` is a read and stays unguarded. `gateway_token` is the
+opposite case (client-only, requires a session) and is untouched. The auth
+hooks (`AfterAuthenticate*`) write storage but are hooks, not RPCs — Nakama
+invokes them, clients cannot — so they need no guard.
+
+Why not check `http_key` itself: the runtime never exposes it to the handler,
+and Nakama already verified it before dispatch. Absence of a session *is* the
+server credential path.
+
+### Authoritative leaderboard, and why the migration is explicit
+
+`kills_alltime` was created with `authoritative=false`, a second score path
+that bypasses the RPCs entirely via Nakama's public `WriteLeaderboardRecord`
+(audit F02, P1). It is now `true`. Nakama's `LeaderboardCreate` is idempotent
+and leaves an existing board's flags untouched, so flipping the argument
+migrates nothing on a running deployment. `SetupLeaderboards` therefore looks
+the board up first (`LeaderboardsGetId`) and handles the legacy case
+deliberately:
+
+- default: **fail InitModule** with the exact fix in the error. Deleting a
+  board destroys its records, and a start-up hook must not decide that on its
+  own; silently continuing would leave a P1 hole open with a log line nobody
+  reads. The data-preserving fix is a one-row SQL update plus restart
+  (`docs/RUNBOOK.md`), because Nakama offers no in-place flag change through
+  the runtime or Console.
+- `LEADERBOARD_MIGRATE=recreate`: delete + recreate, opt-in, for environments
+  whose scores are disposable.
+
+Rollback to an older plugin build is safe against an authoritative board.

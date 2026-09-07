@@ -64,6 +64,9 @@ type killGranter interface {
 
 // RewardKillsRPC grants gold and leaderboard score for a batch of kills.
 //
+// Callable only via runtime.http_key: a client session is rejected with code 7
+// before the payload is parsed (see requireServerCaller).
+//
 // Error contract, load-bearing for the game server's retry policy: an error is
 // returned ONLY when nothing was granted (bad payload, or the wallet update
 // itself failed), so a caller that receives an error may safely re-queue the
@@ -79,6 +82,9 @@ func RewardKillsRPC(ctx context.Context, logger runtime.Logger, db *sql.DB, nk r
 // rewardKillsCore is RewardKillsRPC against the narrow interface; the split
 // exists so tests can drive it with a two-method mock.
 func rewardKillsCore(ctx context.Context, logger runtime.Logger, nk killGranter, payload string) (string, error) {
+	if err := requireServerCaller(ctx); err != nil {
+		return "", err
+	}
 	var req RewardKillsRequest
 	if err := json.Unmarshal([]byte(payload), &req); err != nil {
 		return "", runtime.NewError("invalid payload", 3) // INVALID_ARGUMENT

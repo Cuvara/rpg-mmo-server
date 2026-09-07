@@ -5,6 +5,19 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **`docker-compose.yml` nakama service sets `LEADERBOARD_MIGRATE=recreate` (dev only).**
+  The nakama plugin now creates `kills_alltime` authoritative and refuses to load when an
+  existing board is not (`backend/nakama` Unreleased, audit F02). Every existing local
+  stack holds the old non-authoritative board, so without this the next `stack.sh up`
+  would fail closed for every developer. The variable makes the plugin delete and
+  recreate the board on start-up, discarding its records — acceptable for a local stack.
+  It is passed as a plain container env var because the plugin falls back from
+  `--runtime.env` to the process env, same as `JWT_SECRET` here. `k8s/data/nakama.yaml`
+  and `k8s/README.md` carry the opposite instruction: staging/prod must use RUNBOOK
+  path A (SQL flip of the `leaderboard.authoritative` row + restart) and must not set
+  `recreate`.
+
 ## [0.9.0] - 2026-09-05
 
 ### Added

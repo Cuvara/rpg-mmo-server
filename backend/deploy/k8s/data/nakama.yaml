@@ -86,6 +86,10 @@ spec:
           envFrom:
             - secretRef: { name: postgres-meta }
             - secretRef: { name: nakama }
+          # Do NOT set LEADERBOARD_MIGRATE=recreate here: it deletes every
+          # kills_alltime record. If the plugin refuses to load with
+          # "leaderboard kills_alltime exists with authoritative=false", use
+          # RUNBOOK path A (SQL flip + restart) — backend/nakama/docs/RUNBOOK.md.
           command:
             - /bin/sh
             - -ec
