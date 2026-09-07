@@ -89,6 +89,14 @@ services:
       # Nakama signs client session tokens with session.encryption_key, so the
       # gateway can verify them locally with no roundtrip.
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      # DEV ONLY. The nakama plugin now creates the kills_alltime leaderboard
+      # authoritative and refuses to load if an existing board is not (audit
+      # F02). Stacks created before that hold the old board; this makes the
+      # plugin delete and recreate it on start-up, DISCARDING its records —
+      # fine for a local stack, never for staging/prod, which flip the row with
+      # SQL instead (backend/nakama/docs/RUNBOOK.md, "Migrate a
+      # non-authoritative kills_alltime leaderboard", path A).
+      LEADERBOARD_MIGRATE: recreate
     entrypoint:
       - /bin/sh
       - -ec
