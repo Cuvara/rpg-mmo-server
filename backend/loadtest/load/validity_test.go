@@ -84,6 +84,48 @@ func TestEvaluateRejectsRunsThatDidNotMeasureAnything(t *testing.T) {
 	}
 }
 
+// A server that populates its own map (the enemy spawner, 6 on a stock map
+// server) reports more entities than players on every level, and the strict
+// gate marks all of them INVALID — which is exactly what happened to the first
+// sweep against the dev stack. A declared baseline is tolerated; anything past
+// it is still a dirty server.
+func TestBaselineEntitiesLoosensOnlyTheEntityCheck(t *testing.T) {
+	res := healthyResult()
+	res.Config.BaselineEntities = 6
+	res.Server.Entities = float64(res.Client.PlayersRequested + 6)
+	if v := Evaluate(res); v.Invalid {
+		t.Errorf("entities == players + baseline must be valid; got %q", v.Reason)
+	}
+
+	res.Server.Entities = float64(res.Client.PlayersRequested + 7)
+	v := Evaluate(res)
+	if !v.Invalid {
+		t.Fatal("one entity past the baseline must still be INVALID")
+	}
+	if !strings.Contains(v.Reason, "6-entity baseline") {
+		t.Errorf("Reason = %q, want it to state the baseline it was judged against", v.Reason)
+	}
+
+	// The baseline is about entities the server puts there itself. Players are
+	// never part of it: one extra player online is a client from somewhere else.
+	res.Server.Entities = float64(res.Client.PlayersRequested)
+	res.Server.PlayersOnline = float64(res.Client.PlayersRequested + 1)
+	if v := Evaluate(res); !v.Invalid {
+		t.Error("a baseline must not excuse an extra player online")
+	}
+}
+
+// Without a baseline the strict message must point at the knob, because the
+// symptom (every level INVALID against a healthy server) does not.
+func TestStrictEntityCheckNamesTheBaselineFlag(t *testing.T) {
+	res := healthyResult()
+	res.Server.Entities = float64(res.Client.PlayersRequested + 6)
+	v := Evaluate(res)
+	if !v.Invalid || !strings.Contains(v.Reason, "-baseline-entities") {
+		t.Errorf("Reason = %q, want INVALID naming -baseline-entities", v.Reason)
+	}
+}
+
 // A healthy run must not be swept up by the validity checks — otherwise the gate
 // would simply reject everything and look like it was working.
 func TestEvaluateAcceptsAHealthyRun(t *testing.T) {

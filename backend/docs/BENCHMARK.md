@@ -690,23 +690,51 @@ Ordered by measured impact:
 cd backend/loadtest
 go build -o loadtest ./cmd/loadtest
 
-# Single level against the stock dev stack, full gateway path.
-JWT_SECRET=dev-secret-change-me ./loadtest -players 10 -duration 60s
+# Secrets: read them from deploy/.env, which is what the stack was started with.
+export JWT_SECRET=$(grep '^JWT_SECRET=' ../deploy/.env | cut -d= -f2-)
+export JOIN_TOKEN_SECRET=$(grep '^JOIN_TOKEN_SECRET=' ../deploy/.env | cut -d= -f2-)
 
-# The capacity sweep as run here: dedicated server, direct join.
+# Single level against the stock dev stack, full gateway path. The stock map
+# server spawns 6 enemies, so declare them or every level is INVALID as
+# "not empty when the level started". Stay at or below 10 players here: the
+# gateway admits 10 connections/min per source IP (GATEWAY_CONN_RATE_PER_MIN),
+# and a 50-player level through it joins 10 and fails 40.
+./loadtest -players 10 -duration 60s -baseline-entities 6
+
+# The capacity sweep as run here: dedicated server, direct join, no spawner.
 docker run -d --name rpg-gs-bench --network rpg-mmo-meta_default \
   -p 9300:9000 -p 9301:9101 \
-  -e JWT_SECRET=dev-secret-change-me -e GAMESERVER_ADDR=:9000 \
+  -e JWT_SECRET="$JWT_SECRET" -e JOIN_TOKEN_SECRET="$JOIN_TOKEN_SECRET" \
+  -e GAMESERVER_ADDR=:9000 \
   -e GAMESERVER_MAP_ID=map_bench -e GAMESERVER_ID=gs-bench \
   -e GAMESERVER_CAPACITY=2000 -e METRICS_ADDR=:9101 \
+  -e GAMESERVER_ENEMIES=false \
   rpg-mmo/gameserver-dotnet:dev
 
-JWT_SECRET=dev-secret-change-me ./loadtest \
+./loadtest \
   -join direct -gameserver-addr 127.0.0.1:9300 -server-id gs-bench \
+  -join-token-secret "$JOIN_TOKEN_SECRET" \
   -gameserver-metrics http://localhost:9301/metrics -gateway-metrics "" \
-  -sweep 50,100,150,200 -duration 35s -warmup 8s -movement cluster \
+  -sweep 50,100,150,200 -repeat 3 -duration 35s -warmup 8s -movement cluster \
   -json sweep.json
 ```
+
+Three things in that recipe changed after the runs in this document and bit the
+2026-09-07 re-run, so they are stated rather than left to be rediscovered:
+
+- **`JOIN_TOKEN_SECRET` is mandatory.** The server refuses to start without a
+  dedicated one (`JOIN_TOKEN_SECRET is required but not set -- refusing to
+  start`); the old recipe let it fall back to `JWT_SECRET`, and the generator
+  still does (`-join-token-secret` defaults to the JWT secret), so pass it on
+  both sides or the join tokens will not verify.
+- **`GAMESERVER_ENEMIES=false`** on the bench server, or `-baseline-entities 6`
+  on the generator. The spawner is on by default and its 6 entities trip the
+  not-empty-at-start validity check on every level.
+- **`-encoding` defaults to `proto` now**, matching the client. The 2026-09-07
+  first pass ran under the old `json` default and read 274 KB/s per client at
+  200 — the JSON arm's number, not a regression against the 45.9 KB/s Protobuf
+  figure. The summary header now names the arm, so the mistake is visible on
+  the page rather than in the flag list.
 
 Restart the container and wait for `gameserver_entities` to read 0 between
 levels, or the leak in §7 will contaminate the results.
@@ -1715,3 +1743,78 @@ asserted, not measured here. The JSON snapshot path is not measured — it is
 not the production encoding and keeps its allocating serializer by documented
 choice. And per Part V's rule: these are allocation figures, not time — they
 say nothing about the tick ceiling, which remains blocked on ADR-7.
+
+## Part IX — end-to-end re-run on `develop@c05f715` (2026-09-07)
+
+A full re-run of the Part I/IV sweep against the current head, taken as the
+baseline before the 2026-09-07 audit work starts. Same generator, same shape:
+dedicated bench server (`GAMESERVER_ENEMIES=false`, capacity 2000, no registry,
+TCP), direct join, `cluster` movement, 35 s measure after 8 s settle, ramp 20/s,
+**three repeats per level**, levels 50/100/150/200. Host: the same WSL2 developer
+workstation as every other part, with Docker Desktop, two k3d clusters, the
+compose dev stack and three AI agents building C# alongside — read
+[Confounds](#confounds-read-this-before-quoting-any-number) before quoting
+anything from the tick columns. Raw results:
+[`results/2026-09-07-develop-c05f715/`](../loadtest/results/2026-09-07-develop-c05f715/)
+(`proto/` is the run that matters; the top-level files are the JSON arm, see §26).
+
+### 24. Measured (Protobuf, the wire the client speaks)
+
+| players | pass | tick p99 median | tick p99 min..max | tick mean | snap p99 | ack p99 | **KB/s/client** | server CPU / RSS |
+|---|---|---|---|---|---|---|---|---|
+| 50 | 3/3 | 0.5 ms | 0.5..0.5 ms | 0.06 ms | 69 ms | 68 ms | **15.3** | — |
+| 100 | 3/3 | 0.7 ms | 0.7..0.8 ms | 0.11 ms | 71 ms | 69 ms | **30.4** | — |
+| 150 | 3/3 | 2.1 ms | 1.9..2.2 ms | 0.20 ms | 72 ms | 70 ms | **45.9** | — |
+| 200 | 3/3 | 3.2 ms | 2.8..3.5 ms | 0.35 ms | 76 ms | 73 ms | **61.7** | ~38 % / 48 MiB |
+
+Every level joined all of its players, 0 % of ticks over the 66.67 ms budget,
+`achieved_tick_hz` 59.99–60.03 on the 60 Hz critical loop, snapshot cadence a
+clean 15 Hz (`snap p50` 66.7 ms at every level). The generator's verdict is
+**"CEILING: at least 200 — no level swept failed consistently, sweep higher"**.
+Tick is nowhere near binding: p99 at 200 is 5 % of the budget.
+
+### 25. Bandwidth per client is up 34 % since Part IV, and crosses ADR-7's line earlier
+
+Part IV measured **45.9 KB/s per client at 200** on `develop@cb31656`
+(2026-08-07). This run reads **61.7 KB/s at 200**, and hits 45.9 at **150**.
+Per entity per snapshot that is 21.0 bytes now against 15.7 then — about
++5 bytes per entity — from an identical generator configuration
+(`config` blocks of `intern-200.json` and `proto/sweep-direct-proto.json[3]`
+differ in nothing but `baseline_entities`, which is new and 0).
+
+The suspect is on the wire schema's own log: `009c31f feat(shared)!: carry
+per-entity speed on the snapshot wire` added a `float` per entity
+(`wire.proto:202`) after Part IV; a 4-byte float plus its tag is the whole
+gap. **This is a correlation from the commit log, not an isolated
+measurement** — the honest test is a two-arm run of `cb31656` against
+`c05f715` from the same generator, and it has not been run. What is measured
+is the consequence: ADR-7's `< 50 KB/s` mobile threshold, which Part IV placed
+"above 200 and not yet bracketed", now sits at roughly **160 players on a
+worst-case cluster**. Bandwidth remains the binding constraint, and it bit
+earlier than the documented number says.
+
+Two things this does not mean. It is not the KCP encryption from ADR-8 — this
+run is TCP, plaintext, and the arm is identical to Part IV's. And it is not
+tick regression: mean tick at 200 is 0.35 ms against Part IV's 0.3–0.7 ms.
+
+### 26. The first pass measured the wrong wire, and the tool now says which
+
+The first sweep of the day was run without `-encoding` and produced
+**274 KB/s per client at 200** — read for an hour as a 6x regression against
+Part IV. It was the JSON arm: the generator's default was still `json`, kept
+from the days when JSON was the wire. Those results are retained at the top
+level of the results directory as the JSON control (compare 248 KB/s at 200 in
+Part I's JSON run — consistent, given the extra float), and the generator
+now defaults to `proto` and prints `encoding=<arm>` in the summary header.
+That run also produced one straddling level — 200 players, 2/3 pass, the
+failing run at snapshot p99 425 ms / ack p99 1.2 s with the box under a deploy
+— which the median rule correctly kept at 200 and which the Protobuf run did
+not reproduce (3/3, snap p99 ≤ 77 ms).
+
+Before that, the very first attempt through the gateway against the stock dev
+stack produced no valid level at all, for two reasons that are now in §10's
+recipe: the stock map server's 6 spawned enemies trip the not-empty-at-start
+validity gate (`-baseline-entities` now declares them), and the gateway admits
+10 connections per minute per source IP, so a 50-player level joined 10 and
+failed 40. Neither is a server fault; both were the harness meeting a server
+that had moved on since the recipe was written.

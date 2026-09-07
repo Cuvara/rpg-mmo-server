@@ -3,6 +3,8 @@ package load
 import (
 	"testing"
 	"time"
+
+	"github.com/duycuong/rpg-mmo/shared/messages"
 )
 
 func env(m map[string]string) func(string) string {
@@ -23,6 +25,14 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	if cfg.TickRate != DefaultTickRate {
 		t.Errorf("TickRate = %d, want %d", cfg.TickRate, DefaultTickRate)
+	}
+	// Protobuf is the wire the client speaks (ADR-9). A JSON default measured
+	// the legacy arm for a whole sweep before anyone noticed the ~5x gap.
+	if cfg.Encoding != messages.EncodingProto {
+		t.Errorf("Encoding = %q, want proto: the default must measure the wire the client actually uses", cfg.Encoding)
+	}
+	if cfg.BaselineEntities != 0 {
+		t.Errorf("BaselineEntities = %d, want 0 (the validity gate is strict unless told otherwise)", cfg.BaselineEntities)
 	}
 	// An unset JOIN_TOKEN_SECRET must fall back to JWT_SECRET, mirroring the
 	// game server's own fallback.
@@ -59,6 +69,23 @@ func TestLoadConfigFlags(t *testing.T) {
 	}
 	if cfg.RampDuration() != 10*time.Second {
 		t.Errorf("RampDuration = %s, want 10s (50 players at 5/s)", cfg.RampDuration())
+	}
+}
+
+func TestLoadConfigEncodingAndBaselineFlags(t *testing.T) {
+	cfg, err := LoadConfig(env(map[string]string{"JWT_SECRET": "s"}),
+		[]string{"-encoding", "json", "-baseline-entities", "6"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Encoding != messages.EncodingJSON {
+		t.Errorf("Encoding = %q, want json (the legacy arm must stay reachable for A/B sweeps)", cfg.Encoding)
+	}
+	if cfg.BaselineEntities != 6 {
+		t.Errorf("BaselineEntities = %d, want 6", cfg.BaselineEntities)
+	}
+	if _, err := LoadConfig(env(map[string]string{"JWT_SECRET": "s"}), []string{"-baseline-entities", "-1"}); err == nil {
+		t.Error("a negative baseline must be rejected; it would tighten the gate below zero players")
 	}
 }
 
