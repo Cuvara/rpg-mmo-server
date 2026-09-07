@@ -13,7 +13,51 @@
 ## Rollback
 
 Restore the previous `.so` from the modules volume backup and restart Nakama.
-The plugin is stateless; no migration is involved for the auth scope.
+The plugin is stateless; no migration is involved for the auth scope. Rolling
+back *past* the authoritative-leaderboard change is safe: an older build will
+happily use an authoritative board, it just stops enforcing the caller guard.
+
+## Migrate a non-authoritative `kills_alltime` leaderboard
+
+Builds before this change created `kills_alltime` with `authoritative=false`,
+which lets any client post its own score through Nakama's public
+`WriteLeaderboardRecord`. The board is now created authoritative, but Nakama's
+`LeaderboardCreate` is idempotent and **never alters an existing board**, so an
+existing deployment keeps the old flag until it is migrated. On start-up the
+module looks the board up (`nk.LeaderboardsGetId`) and, if it finds it
+non-authoritative, **refuses to load** with:
+
+```
+setup leaderboards: leaderboard kills_alltime exists with authoritative=false, so clients can write their own scores; fix: …
+```
+
+Pick one:
+
+**A. Keep the records (production).** Nakama has no runtime or Console call
+that flips the flag in place, so change the row directly and restart — Nakama
+caches leaderboards in memory at start-up, the restart is what makes it take
+effect:
+
+```bash
+docker compose exec postgres psql -U "${POSTGRES_USER:-nakama}" -d "${POSTGRES_DB:-nakama}" \
+  -c "UPDATE leaderboard SET authoritative = true WHERE id = 'kills_alltime';"
+docker compose restart nakama
+```
+
+Verify: `SELECT id, authoritative FROM leaderboard WHERE id = 'kills_alltime';`
+shows `t`, and the Nakama log reads `Leaderboard kills_alltime ready (authoritative, …)`.
+
+**B. Discard the records (dev / staging).** Set `LEADERBOARD_MIGRATE=recreate`
+in Nakama's runtime env (`--runtime.env LEADERBOARD_MIGRATE=recreate`, or the
+process env) and restart once. The module calls `nk.LeaderboardDelete` then
+`nk.LeaderboardCreate(…, authoritative=true, …)`, logs a WARN, and every
+existing `kills_alltime` record is gone. Remove the variable afterwards; it is
+a one-shot switch, not a setting. Equivalent by hand: delete the leaderboard in
+the Nakama Console (Leaderboards → `kills_alltime` → Delete) and restart.
+
+Either way the guarded RPCs (`reward_kills` etc.) keep working unchanged: they
+run inside the runtime, which is exactly the writer an authoritative board
+admits.
 
 ## Troubleshooting
 
@@ -22,6 +66,9 @@ The plugin is stateless; no migration is involved for the auth scope.
 | Nakama fails to start: `plugin was built with a different version of package …` | Plugin built with a toolchain/dep set different from the server binary | Rebuild with the `nakama-pluginbuilder` tag matching the server version |
 | Nakama starts but no hooks fire | `.so` not in the modules path, or `InitModule` symbol missing | Verify the volume mount and that the plugin is `package main` |
 | An RPC returns `RPC function not found`, or a leaderboard returns `Leaderboard not found`, while older RPCs work | The mounted `nakama.so` predates the code that registers it — nothing rebuilds the module automatically | Compare the `.so` mtime against `git log -- backend/nakama/`; rebuild with `./scripts/build-all.sh --skip-tests --plugin` **with the Nakama container stopped** (the bind mount holds a file lock and the build fails with `rename … Access is denied`), then restart and look for `rpg-mmo nakama module loaded` in the log |
+| Nakama fails to start: `setup leaderboards: leaderboard kills_alltime exists with authoritative=false` | Board created by a pre-authoritative build | Follow *Migrate a non-authoritative `kills_alltime` leaderboard* above |
+| Game server logs `Nakama reward_kills failed … 403 … server-only rpc` | The game server reached Nakama with a client session token instead of `?http_key=` — misconfigured `NakamaClient` or a proxy rewriting the request | Verify `NAKAMA_HTTP_KEY` matches Nakama's `--runtime.http_key` and that the call goes to `/v2/rpc/reward_kills?http_key=…`; the guard rejects before anything is granted, so nothing to roll back |
+| A client gets `403 server-only rpc` from `reward_kill`/`reward_kills`/`submit_kill` | Working as intended — these RPCs are server-only | Clients never call them; rewards are granted by the game server |
 | Kills never reach the leaderboard, no errors anywhere | The game server logs `Nakama: disabled (NAKAMA_URL unset)` at startup and silently skips the kill-reward flush (`reward_kills`) | Set `NAKAMA_URL` in the game server's environment (compose files already set it; hand-rolled launch scripts are where it goes missing) |
 | Game server logs `Dropped N kill reward(s) … Nakama's answer never arrived` | The `reward_kills` call timed out (5s), so whether the grant landed is unknowable and a retry could double-grant | Investigate Nakama latency; the drop is deliberate, bounded loss (ADR-6 tolerates loss, not double grants). Wallet-metadata `batch_id` is the audit trail if a specific batch is disputed |
 | Gateway rejects every realtime token (`invalid signature`) | `JWT_SECRET` mismatch between Nakama and Gateway | Align the env var in both deployments and restart |

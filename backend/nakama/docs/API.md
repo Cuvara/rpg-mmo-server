@@ -59,7 +59,12 @@ the RPC the game server uses; it replaced the per-kill `reward_kill` +
 `submit_kill` pair, which cost 2 HTTP requests and 2 separate meta-DB
 transactions per mob kill (rpg-mmo-server#233).
 
-- **Auth**: `runtime.http_key` (server-to-server); not meant for clients.
+- **Auth**: **server-only** — `runtime.http_key` (server-to-server). A call
+  carrying a Nakama client session (user id / session id / session expiry in
+  the request context) is rejected with code `7` (`PERMISSION_DENIED`, HTTP
+  403) **before the payload is parsed** and before any wallet or leaderboard
+  write. Enforced by `economy.requireServerCaller`, shared by all three
+  mutation RPCs.
 - **Registered in**: `main.go` → `economy.RewardKillsRPC`
 
 Request payload:
@@ -92,6 +97,7 @@ score loss is the accepted cost; double gold is not (ADR-6).
 
 | Code | Message | Cause |
 |------|---------|-------|
+| 7 | `server-only rpc` | Caller is a client session, not `runtime.http_key`; nothing granted, do not retry |
 | 3 | `invalid payload` / `user_id is required` / `kills must be in 1..1000` | Malformed request; nothing granted |
 | 13 | `wallet update failed: …` | Wallet write failed; nothing granted, safe to retry |
 
@@ -102,12 +108,18 @@ grants one kill's gold (`reward_kill`) or one leaderboard point (`submit_kill`)
 per HTTP call — the per-kill amplification `reward_kills` exists to remove. New
 callers should use `reward_kills`.
 
+Both are **server-only** under the same guard as `reward_kills`: a client
+session gets code `7` `server-only rpc` before the payload is read.
+
 ### `get_leaderboard`
 
 Returns the top 10 of `kills_alltime` as
 `{ "leaderboard_id": …, "records": [{ "rank", "user_id", "username", "score" }] }`.
-Server-to-server (`http_key`); clients read the leaderboard through Nakama's own
-REST API instead.
+Read-only, so it carries no caller guard: callable with `http_key` or by a
+client session. The `kills_alltime` board is **authoritative** — records can be
+written only by the runtime (the server-only RPCs above); a client's own
+`WriteLeaderboardRecord` against it is refused by Nakama. Clients may still
+*read* it through Nakama's own REST API.
 
 ## Hooks
 
@@ -168,6 +180,11 @@ to `Player-<first 8 chars of user id>`.
 | `auth.ErrUnauthenticated`, `ErrInvalidPayload`, `ErrInternal`, `ErrInvalidEmail`, `ErrWeakPassword`, `ErrRateLimited` | Client-facing runtime errors |
 | `auth.ProfileCollection`, `ProfileKey`, `StartingLevel`, `DefaultMinPasswordLength` | Constants |
 | `auth.TokenRatePerSec`, `TokenBurst`, `TokenIdleTTL` | `gateway_token` rate-limit constants |
+| `economy.RPCRewardKill`, `RPCRewardKills`, `RPCSubmitKill`, `RPCGetLeaderboard` | RPC id constants |
+| `economy.RewardKillRPC`, `RewardKillsRPC`, `SubmitKillRPC`, `GetLeaderboardRPC` | RPC handlers |
+| `economy.ErrServerOnly` | Code `7` error returned to client sessions by the mutation RPCs |
+| `economy.SetupLeaderboards(ctx, logger, nk)` | Creates `kills_alltime` (authoritative) or fails init if an existing board is not |
+| `economy.LeaderboardKillsAllTime`, `LeaderboardMigrateEnv`, `GoldPerKill`, `MaxKillsPerBatch` | Constants |
 
 ### `gateway_token` rate limit
 
