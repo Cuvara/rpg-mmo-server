@@ -27,6 +27,7 @@ import base64
 import hashlib
 import hmac
 import json
+import select
 import socket
 import struct
 import sys
@@ -190,21 +191,24 @@ def check_pool(a):
     n = a.max_pending
     socks = [connect(a.host, a.port) for _ in range(n + 1)]
     try:
-        # The pool holds n; at least one of n+1 must be closed at accept, well before the deadline.
-        rejected_fast = 0
-        for s in socks:
-            s.settimeout(0.05)
-            try:
-                if s.recv(1) == b"":
-                    rejected_fast += 1
-            except (socket.timeout, TimeoutError):
-                pass
-            except OSError:
-                rejected_fast += 1
+        # Read the gauge FIRST, right after the connects: with the production
+        # defaults (256 slots, 5 s deadline) a sequential per-socket EOF scan takes
+        # longer than the deadline, so the accepted sockets had already timed out
+        # and the gauge read 0 by the time it was sampled (2026-09-07, first run
+        # against the merged develop). The scan below only has to find the
+        # surplus that was closed at accept, and does it with select() in one go.
         time.sleep(0.3)
         after = scrape(a.metrics)
         pending = metric(after, "gameserver_handshakes_pending")
         pool_after = metric(after, "gameserver_handshakes_rejected_total", 'reason="pool_full"')
+        rejected_fast = 0
+        readable, _, _ = select.select(socks, [], [], 0.5)
+        for s in readable:
+            try:
+                if s.recv(1) == b"":
+                    rejected_fast += 1
+            except OSError:
+                rejected_fast += 1
         ok = rejected_fast >= 1 and pending == n and pool_after - pool_before >= 1
         report("pool", ok,
                f"{n + 1} idle conns: {rejected_fast} closed at accept, pending gauge={pending:.0f} "
