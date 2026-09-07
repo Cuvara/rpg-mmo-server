@@ -59,6 +59,40 @@ Either way the guarded RPCs (`reward_kills` etc.) keep working unchanged: they
 run inside the runtime, which is exactly the writer an authoritative board
 admits.
 
+## Live probe after deploy
+
+`scripts/probe-economy.sh` proves the economy boundary against a **running**
+Nakama, end to end, with nothing but bash, curl and python3. Run it after every
+plugin deploy that touches `economy/`; it takes a few seconds and exits non-zero
+on any failure.
+
+```bash
+NAKAMA_URL=http://localhost:7350 NAKAMA_SERVER_KEY=defaultkey NAKAMA_HTTP_KEY=defaulthttpkey \
+  backend/nakama/scripts/probe-economy.sh
+```
+
+| Env | Default | Meaning |
+|-----|---------|---------|
+| `NAKAMA_URL` | `http://localhost:7350` | Nakama HTTP API |
+| `NAKAMA_SERVER_KEY` | `defaultkey` | `--socket.server_key`; used to create the throwaway device account |
+| `NAKAMA_HTTP_KEY` | `defaulthttpkey` | `--runtime.http_key`; the server-to-server credential |
+| `NAKAMA_CONTAINER` | unset | Optional; if set and `docker` exists, tails the leaderboard start-up log lines |
+
+It creates one probe account and leaves it (and 30 gold) behind. What each
+`PASS` line proves:
+
+| PASS line | Proves |
+|-----------|--------|
+| `device auth` | Nakama is up and the server key is right |
+| `reward_kills / reward_kill / submit_kill via session -> 403` | F01: a client session cannot reach any mutation RPC (`server-only rpc`, code 7) |
+| `first grant status=granted replayed=false gold=30` | F06: the `http_key` path still grants, and the guard did not break the game server's call shape |
+| `replay same batch_id -> replayed=true gold=30` | F06: the receipt exists and a resend is answered from it |
+| `wallet unchanged by replay` | F06: the replay did not touch the wallet — exactly-once |
+| `kills=1001 rejected with code 11` | F07: the over-cap refusal is machine-readable (`OUT_OF_RANGE`), nothing granted |
+| `missing batch_id rejected` | F06: the idempotency key is mandatory |
+| `client record write rejected` | F02: `kills_alltime` is authoritative — Nakama refuses a client's own `WriteLeaderboardRecord` |
+| `server-side score for probe user = 3` | F02/F06: the server path did write the score, exactly once (3 kills, not 6 after the replay) |
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Action |

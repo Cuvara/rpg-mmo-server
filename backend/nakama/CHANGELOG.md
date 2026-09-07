@@ -56,6 +56,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 - `economy.ErrServerOnly`, `economy.LeaderboardMigrateEnv`.
+- `scripts/probe-economy.sh` — dependency-free (bash + curl + python3) live probe of
+  F01/F02/F06/F07 against a running Nakama: session calls → 403, `http_key` grant,
+  replay with unchanged wallet, code 11 over cap, missing `batch_id`, authoritative
+  board refusing client writes, server-side score = 3. Documented in `docs/RUNBOOK.md`
+  ("Live probe after deploy").
 - `economy.ReceiptCollection`, `CodeKillsOutOfRange`, `StatusGranted`, `StatusPartial`;
   response fields `status`, `replayed`, `balance` (`gold` now means gold granted for the
   batch, on original and replay alike).
