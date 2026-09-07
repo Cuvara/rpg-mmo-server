@@ -53,6 +53,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   connection stays inside the bound while a second connection's input is acked in the
   snapshot stream; concurrent transfer rejected). Shared `HardeningHarness`.
 
+- **Live probe** `scripts/admission-probe.py` (python3 stdlib, no deps): against a
+  running server, checks idle close at the deadline, pool cap (`N+1` idle sockets),
+  partial/malformed frame handling with the pending gauge returning to baseline, and
+  an input flood from one authenticated player while a second player's input is
+  still acked — PASS/FAIL per check, non-zero exit on failure. Documented, with
+  reference output from a live run, in the new `docs/RUNBOOK.md`.
+
 ### Changed
 
 - `Connection.ReadOneAsync` / `WriteOneAsync` take an optional `CancellationToken`
