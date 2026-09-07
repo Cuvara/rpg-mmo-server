@@ -57,7 +57,9 @@ var mutationRPCs = []struct {
 	payload string
 }{
 	{RPCRewardKill, rewardKillCore, `{"user_id":"u1","victim_id":"m1","map_id":"map_01"}`},
-	{RPCRewardKills, rewardKillsCore, `{"user_id":"u1","kills":3,"map_id":"map_01","batch_id":"b-1"}`},
+	{RPCRewardKills, func(ctx context.Context, l runtime.Logger, nk killGranter, p string) (string, error) {
+		return rewardKillsCore(ctx, l, nk, p, fixedNow)
+	}, `{"user_id":"u1","kills":3,"map_id":"map_01","batch_id":"b-1"}`},
 	{RPCSubmitKill, submitKillCore, `{"user_id":"u1"}`},
 }
 
@@ -71,8 +73,8 @@ func TestMutationRPCs_RejectClientSession_BeforeAnyGrant(t *testing.T) {
 			if !errors.Is(err, ErrServerOnly) {
 				t.Fatalf("err = %v (out %q), want ErrServerOnly", err, out)
 			}
-			if g.walletCalls != 0 || g.lbCalls != 0 {
-				t.Fatalf("rejected caller must grant nothing, got wallet=%d lb=%d", g.walletCalls, g.lbCalls)
+			if g.walletCalls != 0 || g.lbCalls != 0 || g.multiCalls != 0 {
+				t.Fatalf("rejected caller must grant nothing, got wallet=%d lb=%d multi=%d", g.walletCalls, g.lbCalls, g.multiCalls)
 			}
 		})
 	}
@@ -99,7 +101,7 @@ func TestMutationRPCs_ServerCaller_Grants(t *testing.T) {
 			if _, err := m.rpc(serverCtx(), noopLogger{}, g, m.payload); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if g.walletCalls+g.lbCalls == 0 {
+			if g.walletCalls+g.lbCalls+g.multiCalls == 0 {
 				t.Fatal("server caller must grant something")
 			}
 		})
