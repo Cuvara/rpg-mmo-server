@@ -1857,3 +1857,63 @@ the game server sits behind a gateway that already carries per-IP limiting, and 
 per-IP table here would need a design for shared NATs before it stops being a way to
 lock a whole campus out. The bounds above make a flood cost the flooder a bounded
 number of sockets for a bounded time, which is what the finding asked for.
+
+## Kill rewards are exactly-once per batch id (2026-09-07)
+
+`KillRewardBatcher` (`GameServer/Nakama/`) coalesces kills per killer and sends
+one `reward_kills` RPC per batch per flush (#233). Until audit F06/F07 it
+minted a new GUID on every send and **dropped** a batch whose answer never
+arrived, because Nakama did not deduplicate and retrying an unknown outcome was
+the double-gold path. That traded double gold for lost gold and, once a
+backlog passed Nakama's 1000-kill cap during an outage, for a backlog that
+could never be sent.
+
+### Where the guarantee lives
+
+Not here. Nakama's `reward_kills` now writes a receipt keyed by `batch_id` in
+the same transaction as the wallet update and replays a resent id from that
+receipt (`backend/nakama/docs/DESIGN.md`, same date). The game server's whole
+job is therefore to **never send two different ids for the same kills**:
+
+- a batch gets its id when it is cut from the per-killer pending count, and
+  keeps it for every retry;
+- kills that arrive while a batch is outstanding go into a *new* batch — they
+  are never merged into an id that may already be filed at Nakama with the
+  smaller count;
+- the only thing that mints new ids besides cutting is a `TooLarge` (code 11)
+  answer, which Nakama gives before touching the wallet.
+
+With that, every non-`Granted` outcome — `NotGranted`, `Unknown` (timeout or
+transport failure), `Partial` (gold landed, leaderboard did not) — is simply
+re-sent with per-killer exponential backoff, flush interval doubling to 60s.
+Nothing is dropped; `DroppedKills` no longer exists, `PendingKills` and
+`RequeuedBatches` are the diagnostics.
+
+### Splitting
+
+The pending count is cut into batches of at most `DefaultMaxKillsPerBatch`
+(1000, Nakama's `MaxKillsPerBatch`). 1001 kills become two batches, each with
+its own stable id; a partially delivered split (first batch granted, second
+timed out) retries only the second. Pending memory during an outage is one
+`long` per killer with unsent kills plus ⌈backlog/1000⌉ small records per
+killer with outstanding batches — bounded by *distinct killers since the
+outage began*, not by the current online count, as the old comment implied.
+
+### The crash window, stated honestly
+
+Pending counts and cut batches live in memory. If the game server process
+dies, whatever Nakama has not yet acknowledged is gone: at most one flush
+interval (3s) of kills per killer in steady state, plus everything backed off
+during a concurrent Nakama outage. That is gold and leaderboard score only —
+no position, HP or inventory — and it is the same class of loss as kills that
+land between the last save sweep and a crash.
+
+A durable sender-side pending record was considered and not built.
+`IPlayerStore` is a fixed `PlayerState(UserId, X, Y, Hp, MaxHp, MapId)` record
+over a migrated Postgres schema (`Persistence/Migrator.cs`); a pending-rewards
+table would mean a new migration, a new store method, a write per flush and a
+recovery read on boot, to close a window that is already bounded and gold-only.
+If that trade ever flips (real-money economy, or kill rewards that gate
+progression), the shape is: persist `(killerId, batchId, kills)` when a batch
+is cut, delete on `Granted`, replay the table on start-up — the receipts on
+Nakama's side already make that replay safe.

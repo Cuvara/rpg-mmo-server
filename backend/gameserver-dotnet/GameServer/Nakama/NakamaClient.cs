@@ -85,14 +85,23 @@ public sealed class NakamaClient : IDisposable
     /// (the <c>reward_kills</c> RPC). Replaces the per-kill reward_kill + submit_kill
     /// pair, which cost 2 HTTP requests and 2 meta-DB transactions per mob kill (#233).
     /// </summary>
+    /// <param name="batchId">
+    /// Idempotency key. Must be the SAME value on every retry of the same batch: Nakama
+    /// files a receipt under it in the transaction that grants the gold, and a re-sent
+    /// id is replayed from the receipt without a second grant. A fresh id per attempt
+    /// is the double-gold path.
+    /// </param>
     /// <returns>
-    /// The outcome the batcher's retry policy is built on. <see cref="KillRewardOutcome.Granted"/>:
-    /// Nakama answered 2xx — done. <see cref="KillRewardOutcome.NotGranted"/>: Nakama answered
-    /// non-2xx, and the RPC's contract is that an error response means NOTHING was granted,
-    /// so re-queueing the kills cannot double-grant. <see cref="KillRewardOutcome.Unknown"/>:
-    /// no answer arrived (timeout / transport failure after send) — whether the grant
-    /// happened is unknowable, so the batch must be DROPPED rather than retried; a retry
-    /// here is the double-gold path.
+    /// The outcome the batcher's retry policy is built on.
+    /// <see cref="KillRewardOutcome.Granted"/>: gold and score committed — done.
+    /// <see cref="KillRewardOutcome.Partial"/>: gold committed, leaderboard write failed —
+    /// resend the same id; the replay retries only the leaderboard.
+    /// <see cref="KillRewardOutcome.NotGranted"/>: Nakama answered an error, and its
+    /// contract is that an error means NOTHING was granted — resend the same id.
+    /// <see cref="KillRewardOutcome.TooLarge"/>: rejected before any grant because
+    /// <c>kills</c> exceeds Nakama's per-batch cap — split into smaller batches with new ids.
+    /// <see cref="KillRewardOutcome.Unknown"/>: no answer arrived — the grant may or may not
+    /// have committed, which is exactly the case the receipt exists for: resend the same id.
     /// </returns>
     public async Task<KillRewardOutcome> RewardKillsAsync(string userId, long kills, string mapId, string batchId)
     {
@@ -109,32 +118,77 @@ public sealed class NakamaClient : IDisposable
         }
         catch (HttpRequestException ex)
         {
-            // Connect refused / DNS / reset before a response: with no request delivered
-            // there is nothing granted, so this is safely retryable. A reset AFTER
-            // delivery is indistinguishable, but HttpRequestException on POST here is
-            // overwhelmingly connection establishment — the ambiguous shape is the
-            // timeout below, which is classified Unknown.
-            _logger.LogWarning(ex, "Nakama reward_kills transport failure for {UserId} ({Kills} kills)", userId, kills);
-            return KillRewardOutcome.NotGranted;
+            // Connect refused / DNS / reset: usually before delivery, occasionally after.
+            // Both are safe to retry under the same batch id thanks to the receipt.
+            _logger.LogWarning(ex, "Nakama reward_kills transport failure for {UserId} ({Kills} kills, batch {BatchId})",
+                userId, kills, batchId);
+            return KillRewardOutcome.Unknown;
         }
         catch (TaskCanceledException)
         {
             _logger.LogWarning(
                 "Nakama reward_kills timed out for {UserId} ({Kills} kills, batch {BatchId}) — " +
-                "outcome unknown, batch dropped to avoid a double grant", userId, kills, batchId);
+                "outcome unknown, will resend the same batch id", userId, kills, batchId);
             return KillRewardOutcome.Unknown;
         }
 
         using (response)
         {
+            string body = await response.Content.ReadAsStringAsync();
             if (response.IsSuccessStatusCode)
+            {
+                return ParseSuccessBody(body, userId, batchId);
+            }
+
+            int code = ParseErrorCode(body);
+            _logger.LogWarning("Nakama reward_kills failed for {UserId} (batch {BatchId}): {Status} code={Code} {Body}",
+                userId, batchId, response.StatusCode, code, body);
+            return code == RpcCodeKillsOutOfRange ? KillRewardOutcome.TooLarge : KillRewardOutcome.NotGranted;
+        }
+    }
+
+    /// <summary>gRPC OUT_OF_RANGE — the plugin's <c>CodeKillsOutOfRange</c> for a batch over its cap.</summary>
+    internal const int RpcCodeKillsOutOfRange = 11;
+
+    private KillRewardOutcome ParseSuccessBody(string body, string userId, string batchId)
+    {
+        try
+        {
+            // Nakama envelope: {"payload":"<json string>"}; the inner document is the RPC response.
+            var envelope = JsonSerializer.Deserialize(body, NakamaJsonContext.Default.RpcEnvelope);
+            if (string.IsNullOrEmpty(envelope?.Payload))
             {
                 return KillRewardOutcome.Granted;
             }
-            string body = await response.Content.ReadAsStringAsync();
-            _logger.LogWarning("Nakama reward_kills failed for {UserId}: {Status} {Body}",
-                userId, response.StatusCode, body);
-            return KillRewardOutcome.NotGranted;
+            var resp = JsonSerializer.Deserialize(envelope.Payload, NakamaJsonContext.Default.RewardKillsResponse);
+            if (resp is not null && string.Equals(resp.Status, "partial", StringComparison.Ordinal))
+            {
+                _logger.LogWarning(
+                    "Nakama reward_kills partial for {UserId} (batch {BatchId}): gold granted, leaderboard failed ({Error}); will resend",
+                    userId, batchId, resp.LeaderboardError);
+                return KillRewardOutcome.Partial;
+            }
+            return KillRewardOutcome.Granted;
+        }
+        catch (JsonException ex)
+        {
+            // 2xx with an unparseable body: the grant happened (Nakama only answers 2xx
+            // after commit); treat as granted rather than resend forever.
+            _logger.LogWarning(ex, "Nakama reward_kills 2xx with unparseable body for {UserId} (batch {BatchId})", userId, batchId);
+            return KillRewardOutcome.Granted;
+        }
+    }
+
+    private static int ParseErrorCode(string body)
+    {
+        try
+        {
+            var err = JsonSerializer.Deserialize(body, NakamaJsonContext.Default.RpcError);
+            return err?.Code ?? -1;
+        }
+        catch (JsonException)
+        {
+            return -1;
         }
     }
 
@@ -167,14 +221,39 @@ public sealed class NakamaClient : IDisposable
 /// <summary>Outcome of a batched kill-reward call. See <see cref="NakamaClient.RewardKillsAsync"/>.</summary>
 public enum KillRewardOutcome
 {
-    /// <summary>Nakama confirmed the grant.</summary>
+    /// <summary>Nakama confirmed gold and score. Done.</summary>
     Granted,
 
-    /// <summary>Nakama answered with an error, which its contract defines as "nothing granted" — safe to re-queue.</summary>
+    /// <summary>Gold committed, leaderboard write failed. Resend the SAME batch id; only the leaderboard is retried.</summary>
+    Partial,
+
+    /// <summary>Nakama answered with an error, which its contract defines as "nothing granted". Resend the same id.</summary>
     NotGranted,
 
-    /// <summary>No answer arrived; the grant may or may not have happened. Drop, never retry.</summary>
+    /// <summary>Rejected before any grant: kills exceeds Nakama's per-batch cap. Split into smaller batches with new ids.</summary>
+    TooLarge,
+
+    /// <summary>No answer arrived; the grant may or may not have committed. Resend the SAME batch id — the receipt dedupes.</summary>
     Unknown,
+}
+
+internal sealed class RpcEnvelope
+{
+    [JsonPropertyName("payload")] public string? Payload { get; set; }
+}
+
+internal sealed class RpcError
+{
+    [JsonPropertyName("code")] public int? Code { get; set; }
+    [JsonPropertyName("message")] public string? Message { get; set; }
+}
+
+internal sealed class RewardKillsResponse
+{
+    [JsonPropertyName("success")] public bool Success { get; set; }
+    [JsonPropertyName("status")] public string? Status { get; set; }
+    [JsonPropertyName("replayed")] public bool Replayed { get; set; }
+    [JsonPropertyName("leaderboard_error")] public string? LeaderboardError { get; set; }
 }
 
 internal sealed class RewardKillsRequest
@@ -201,5 +280,8 @@ internal sealed class SubmitKillRequest
 [JsonSerializable(typeof(RewardKillRequest))]
 [JsonSerializable(typeof(RewardKillsRequest))]
 [JsonSerializable(typeof(SubmitKillRequest))]
+[JsonSerializable(typeof(RpcEnvelope))]
+[JsonSerializable(typeof(RpcError))]
+[JsonSerializable(typeof(RewardKillsResponse))]
 [JsonSerializable(typeof(string))]
 internal sealed partial class NakamaJsonContext : JsonSerializerContext;
