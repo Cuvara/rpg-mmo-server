@@ -137,9 +137,26 @@ do_up() {
 	if [ "$NO_BUILD" -eq 0 ]; then
 		# Nakama runtime plugin (gateway_token RPC). Built into ./modules,
 		# which the nakama service bind-mounts.
+		# Rebuild when the .so is missing OR older than any Go source it is built
+		# from (nakama/ and the shared module it replaces into). "Present, skip"
+		# was the rule until 2026-09-07, and it let a mainline checkout run an
+		# 11-day-old plugin through every `stack.sh up` while the worktree next
+		# to it — where the file did not exist yet — got a fresh one. A live
+		# probe then read the OLD behaviour on a develop that had just merged
+		# the fix. Nakama loads the .so at start, so the service is restarted
+		# below only if a rebuild happened.
+		plugin_stale=0
 		if [ ! -f modules/nakama.so ]; then
-			echo "==> building nakama plugin (modules/nakama.so)"
+			plugin_stale=1
+		elif [ -n "$(find ../nakama ../shared -name '*.go' -newer modules/nakama.so -print -quit 2>/dev/null)" ] \
+			|| [ nakama-plugin.Dockerfile -nt modules/nakama.so ]; then
+			plugin_stale=1
+		fi
+		if [ "$plugin_stale" -eq 1 ]; then
+			echo "==> building nakama plugin (modules/nakama.so — missing or older than its sources)"
 			mkdir -p modules
+			# A running nakama holds the file open on Windows-backed mounts; stop it first.
+			$COMPOSE -p "$PROJECT" --env-file "$ENV_FILE" stop nakama >/dev/null 2>&1 || true
 			DOCKER_BUILDKIT=1 docker build \
 				-f nakama-plugin.Dockerfile \
 				--build-arg "NAKAMA_VERSION=${NAKAMA_VERSION:-3.40.0}" \
@@ -147,7 +164,7 @@ do_up() {
 				--output type=local,dest=modules \
 				..
 		else
-			echo "==> modules/nakama.so present — skipping plugin build"
+			echo "==> modules/nakama.so up to date with nakama/ and shared/ sources — skipping plugin build"
 		fi
 
 		echo "==> building gateway image"

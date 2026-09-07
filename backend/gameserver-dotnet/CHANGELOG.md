@@ -7,6 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- `scripts/admission-probe.py` pool check read the pending-handshake gauge **after** a
+  sequential per-socket EOF scan; with the production defaults (256 slots, 5 s deadline) the scan
+  outlived the deadline, the accepted sockets had already timed out, and the check reported
+  `pending gauge=0 (want 256)` against a correct server. The gauge is now sampled right after the
+  connects and the surplus is found with one `select()` pass. Verified against the merged develop:
+  `257 idle conns: 1 closed at accept, pending gauge=256, pool_full +1`.
+
+### Fixed
 - **Kill rewards are retried under a stable batch id and never dropped** (audit
   2026-09-07 F06, P1). `KillRewardBatcher` minted a fresh GUID per send and dropped any
   batch whose answer never arrived, because without server-side deduplication a retry

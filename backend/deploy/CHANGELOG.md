@@ -5,6 +5,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`stack.sh up` rebuilds `modules/nakama.so` when it is older than any `nakama/` or `shared/`
+  Go source (or the plugin Dockerfile), not only when the file is missing.** The old
+  "present — skipping plugin build" rule let a mainline checkout run an 11-day-old plugin
+  through every `up` while a fresh worktree beside it — where the file did not exist yet — got a
+  current one; on 2026-09-07 the live economy probe read the *old* RPC behaviour on a develop
+  that had just merged the fix. Nakama is stopped before the rebuild because a running
+  container holds the file open on Windows-backed mounts. `--no-build` still skips everything.
+
 ### Changed
 - **`docker-compose.yml` nakama service sets `LEADERBOARD_MIGRATE=recreate` (dev only).**
   The nakama plugin now creates `kills_alltime` authoritative and refuses to load when an
