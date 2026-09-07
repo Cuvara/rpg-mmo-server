@@ -6,6 +6,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Kill rewards are retried under a stable batch id and never dropped** (audit
+  2026-09-07 F06, P1). `KillRewardBatcher` minted a fresh GUID per send and dropped any
+  batch whose answer never arrived, because without server-side deduplication a retry
+  could double-grant. Nakama's `reward_kills` now files a receipt per `batch_id` in the
+  transaction that grants the gold (`backend/nakama` Unreleased), so the batcher cuts
+  each batch **once** — id assigned when it is cut from the pending count, kept for
+  every retry — and re-sends on `NotGranted`, `Unknown` (timeout / transport failure)
+  and the new `Partial` outcome alike, with per-killer exponential backoff (flush
+  interval doubling to 60s). Kills that arrive while a batch is outstanding form a new
+  batch and are never merged into an id that may already be filed at Nakama with the
+  smaller count. `DroppedKills` is gone (nothing is dropped); `PendingKills` and
+  `RequeuedBatches` replace it.
+- **Backlogs above Nakama's 1000-kill cap are split** (F07). A killer's pending count
+  is cut into batches of ≤ `DefaultMaxKillsPerBatch` (1000), each with its own stable
+  id, so a backlog accumulated during an outage is always sendable once Nakama is
+  back. If Nakama nevertheless answers code 11 (`OUT_OF_RANGE`, nothing granted) the
+  batch is halved under new ids.
+- `NakamaClient.RewardKillsAsync` now reads the response body: `status: partial`
+  (gold granted, leaderboard failed) maps to `KillRewardOutcome.Partial`, a non-2xx
+  with error code 11 to `TooLarge`; a 2xx without a `status` field (older plugin) is
+  still `Granted`. `HttpRequestException` is now `Unknown` rather than `NotGranted` —
+  the distinction no longer changes the retry decision, and a reset after delivery is
+  indistinguishable from one before it.
+
+### Changed
+- **Sender-side durability was considered and not built.** Kills recorded (or cut into
+  batches) that Nakama has not yet acknowledged live only in memory: a game-server crash
+  loses at most the last flush interval of kills per killer plus whatever is backed off
+  during a Nakama outage. `IPlayerStore` is a fixed `PlayerState` record over a
+  migrated Postgres schema, so a durable pending record would be a new table,
+  migration and store method for a loss window that is already bounded and
+  gold-only. Documented in `docs/DESIGN.md` ("Kill rewards are exactly-once per batch
+  id") rather than papered over.
+- `KillRewardBatcher` gains a constructor overload with `maxKillsPerBatch` and a
+  `TimeProvider` (test seams); the production call in `GameServer.cs` is unchanged.
+
+### Tests
+- `KillRewardBatcherTests` rewritten around the new contract (15 tests): same batch id
+  across retries for NotGranted / timeout / partial; timeouts never dropped across
+  repeated retries; backoff holds a batch until its slot; 999/1000/1001/2500 kills →
+  1/1/2/3 batches under the cap with distinct ids; split batches keep their own ids
+  across retries; kills arriving during a flush form a new batch; code 11 splits under
+  new ids; one killer's failure does not hold back another; legacy body without
+  `status` is granted.
+
 ## [0.9.0] - 2026-09-05
 
 ### Added
