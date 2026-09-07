@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+
+- Add the 2026-09-07 workspace reliability and performance audit, covering backend,
+  Unity integration and resolved Cuvara packages, with prioritized findings,
+  implementation stages and explicit validation limitations. Prioritize built-in
+  Nakama APIs, including evaluating conditional storage plus MultiUpdate for
+  reward deduplication, before custom infrastructure. No runtime changes.
+
 ## [0.9.0] - 2026-09-05
 
 ### Added
