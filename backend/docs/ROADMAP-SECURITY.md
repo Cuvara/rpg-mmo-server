@@ -104,7 +104,54 @@ extracted from one client binary is worthless because there is no key in the bin
 This is the single highest-leverage decision in §2 and it should be settled before any
 library is chosen.
 
-### 2.2 Library options, with concrete trade-offs
+### 2.2 MEASURED: what the Unity client's runtime actually provides
+
+**Run before choosing, because it eliminated the original recommendation.** Probe executed
+2026-09-09 in Unity 6000.3.9f1, batchmode, `Mono 6.13.0`:
+
+```
+AesGcm                 : THREW PlatformNotSupportedException
+ChaCha20Poly1305       : TYPE DOES NOT EXIST in this Unity BCL profile
+Aes (raw block)        : OK   (this is what KcpCrypto already uses)
+HMACSHA256             : OK
+HKDF (RFC5869)         : TYPE ABSENT (derive manually from HMACSHA256)
+AES-CTR+HMAC throughput: 155 us per 1200B packet (6k packets/s)
+```
+
+`AesGcm` **compiles and then throws at runtime** — the type is in the reference assembly and
+the implementation is not there. It also carries the older .NET Standard 2.1 shape: no
+`IsSupported`, no two-argument constructor. That is the worst failure mode available, because
+it type-checks: an implementation written against it passes review, passes compilation, and
+fails on a player's device.
+
+**This kills the original recommendation.** The plan below is rewritten around the
+measurement rather than around what the BCL is supposed to offer.
+
+Caveat, stated rather than hidden: this is **Mono in the Editor**. IL2CPP player builds share
+the same managed class libraries, so the same failure is expected, but it has NOT been
+confirmed by a player build. Confirm before committing engineering time — the cost of being
+wrong is one build, the cost of assuming is a rewrite.
+
+The 155 us figure is a deliberately naive implementation (per-block `TransformBlock`, a fresh
+`ComputeHash` allocation per packet) measured on a loaded machine. Treat it as an upper bound,
+not a benchmark.
+
+### 2.3 What the measurement means for the choice
+
+The asymmetry that decides this: **a client handles very few packets and the server handles
+many.**
+
+- A client sends input at ~13-20 Hz and receives snapshots at 15 Hz — call it 35 packets/s.
+  At the measured 155 us that is **5.4 ms per second, about 0.5% of one core.** Software
+  crypto on the client is affordable even at the naive figure.
+- A server at 200 players x 15 Hz is ~3000 packets/s outbound. That is where hardware
+  acceleration matters — and the server is .NET 10 and Go, where `AesGcm` and
+  `ChaCha20Poly1305` are real, hardware-accelerated and stdlib.
+
+So the constraint is not performance. **It is that both ends must speak the same
+construction**, and the client's runtime is the one with no AEAD.
+
+### 2.4 Library options, re-ranked against the measurement
 
 The constraint that eliminates most candidates: the client is Unity (IL2CPP), targeting
 Android, Windows and Linux at minimum, and **a UPM package cannot declare a scoped
@@ -127,8 +174,11 @@ Unity uses the same BCL types.
   wire compatibility, so the Go and C# sides must move together. **`AesGcm` availability
   under IL2CPP on every target platform MUST be verified before committing** — this is the
   one claim in this section that is not established, and it is the go/no-go.
-- **Verdict.** Best performance, least dependency risk, given §2.1. Verify the IL2CPP
-  question first.
+- **MEASURED VERDICT: unavailable on the client.** `AesGcm` throws
+  `PlatformNotSupportedException` under Unity's Mono and `ChaCha20Poly1305` does not exist at
+  all. **Still correct for the SERVER side** (.NET 10 and Go both have it, accelerated), but
+  the server cannot use a construction the client cannot answer, so this cannot be the wire
+  format on its own.
 
 #### Option B — libsodium (XChaCha20-Poly1305) via a vendored native plugin
 
@@ -150,8 +200,32 @@ Unity uses the same BCL types.
 - **Weaknesses.** **No hardware acceleration** — this is a per-packet cost at 60 Hz on
   mobile, the worst place to pay it. Large assembly to vendor. Adds a substantial dependency
   surface to a package that currently has almost none.
-- **Verdict.** Reject for the per-packet path. Reconsider only if a standards-compliant DTLS
-  handshake becomes a requirement.
+- **Re-ranked UP by the measurement.** With the built-in AEAD unavailable on the client, pure
+  managed is no longer a compromise, it is one of only three ways to get an AEAD there at all.
+  The performance objection is also weaker than it looked: at ~35 packets/s a client can
+  afford software crypto. Still carries a large vendored assembly.
+
+
+#### Option E — AES-CTR + HMAC-SHA256, encrypt-then-MAC, from primitives that are present
+
+Not a new dependency and not a new primitive: `Aes` and `HMACSHA256` are both **measured
+working** in Unity, and both are stdlib in Go and .NET. Encrypt-then-MAC is a standard,
+well-specified composition; this is assembling two standard pieces in the standard order, not
+inventing a cipher.
+
+- **Strengths.** **Zero dependencies on every side** — decisive given a UPM package cannot
+  declare a scoped registry, and given the measurement above. Available on every platform
+  Unity targets, because it uses only what `KcpCrypto` already relies on. Authenticated, which
+  is the actual defect being fixed. Affordable at client packet rates (§2.3).
+- **Weaknesses.** **More code to get exactly right than calling an AEAD**, and the details are
+  the kind that fail silently: MAC over ciphertext *and* nonce, constant-time comparison,
+  encrypt-then-MAC ordering, no key reuse between the cipher and the MAC. A test vector suite
+  shared with the Go side is mandatory, not optional. Slower than hardware AEAD, which matters
+  on the server — though the server can keep a fast path only if both ends agree, so in
+  practice the server pays software cost too.
+- **Verdict.** **The leading candidate**, on the strength of having no dependency and being
+  confirmed available. Choose it if a review of the construction is affordable; choose
+  Option B if it is not, because misimplementing this is worse than a native plugin matrix.
 
 #### Option D — terminate TLS at the infrastructure edge
 
@@ -170,12 +244,17 @@ Unity uses the same BCL types.
    whether a key is in force. **This does not depend on any decision above and should be
    done first**, because today a deployment that believes it is encrypted and is not has
    nothing telling it so — the exact silent-failure class this repo keeps recording.
-2. **Verify `AesGcm` under IL2CPP on every shipping target.** A throwaway build, not a
-   reasoning exercise. This is the go/no-go between Option A and Option B.
+2. **DONE, and it changed the answer.** `AesGcm` throws under Unity's Mono and
+   `ChaCha20Poly1305` is absent (§2.2). Remaining verification is one IL2CPP player build to
+   confirm the same holds there, which is expected but unproven.
 3. **Settle per-session keys (§2.1)** — a gateway change and a game-server change, no
    crypto yet.
-4. **Swap CFB+CRC32 for the chosen AEAD**, Go and C# together, with cross-implementation
-   test vectors in both directions. Keep the fail-closed behaviour the current code has.
+4. **Swap CFB+CRC32 for the chosen construction** — Option E unless review capacity is
+   short, then Option B. Go and C# together, with cross-implementation test vectors in both
+   directions, generated by each side and verified by the other. Keep the fail-closed
+   behaviour the current code has. For Option E the vectors are the deliverable, not an
+   afterthought: an encrypt-then-MAC composition that is subtly wrong still round-trips
+   against itself.
 5. **Make it default-on**, or refuse to start unencrypted outside localhost. Until this
    step the previous four buy nothing in production.
 6. Only then revisit Option D, against whatever the hosting shape has become.
