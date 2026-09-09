@@ -421,24 +421,24 @@ internal sealed class SpatialGrid
     }
 
     /// <summary>
-    /// A/B switch for the ordering strategy, for <c>AoiClusteredGateBench</c> only.
-    /// Production always uses the permutation sort; this exists so the cost of the
-    /// alternative is a measurement rather than an assertion.
-    /// </summary>
-    internal static bool SortStructsInsteadOfPermutation;
-
-    /// <summary>
     /// Restore brute-force scan order and copy out what fits. The sort is over match
     /// count, not entity count — typically a couple of dozen keys, but a crowd makes it
     /// hundreds.
     ///
     /// <para><b>Sorts a permutation of indices, not the views themselves.</b>
     /// <see cref="EntityView"/> is a wide struct — two object references plus seven value
-    /// fields — and sorting an array of them makes every swap copy the whole thing. Sorting
-    /// <c>int</c> slots and gathering afterwards moves 4 bytes per swap instead, and touches
-    /// each view exactly once at the end. This is the index's dominant per-match cost, and
-    /// per-match cost is exactly what the brute-force scan does not pay, so it decides
-    /// whether the index wins at all on a crowded map.</para>
+    /// fields — so sorting an array of them makes every swap copy the whole thing, with a
+    /// write barrier for each reference. Sorting <c>int</c> slots and gathering once at the
+    /// end moves 4 bytes per swap and touches each view exactly once.</para>
+    ///
+    /// <para><b>This is the index's dominant per-match cost, and per-match cost is exactly
+    /// what the brute-force scan does not pay.</b> Sort cost grows with matches per query,
+    /// and matches per query is what a crowd raises — so the earlier struct sort landed its
+    /// cost precisely where the population is densest, and made the index 1.3-2.3x
+    /// <i>slower</i> than the scan on clustered maps while the occupancy gate admitted it.
+    /// BENCHMARK.md Part XI has the measurement; <c>AoiClusteredGateBench</c> keeps a
+    /// verbatim replica of the struct-sorting version so the comparison stays
+    /// re-runnable.</para>
     /// </summary>
     private static int Emit(
         int matches,
@@ -447,23 +447,13 @@ internal sealed class SpatialGrid
         Span<EntityView> scratchViews,
         Span<int> scratchSlots)
     {
-        int emitted = Math.Min(matches, destination.Length);
-
-        if (SortStructsInsteadOfPermutation)
-        {
-            Span<int> k = scratchOrdinals[..matches];
-            Span<EntityView> v = scratchViews[..matches];
-            k.Sort(v);
-            v[..emitted].CopyTo(destination[..emitted]);
-            return matches;
-        }
-
         Span<int> keys = scratchOrdinals[..matches];
         Span<int> slots = scratchSlots[..matches];
         for (int i = 0; i < matches; i++) slots[i] = i;
 
         keys.Sort(slots);
 
+        int emitted = Math.Min(matches, destination.Length);
         for (int i = 0; i < emitted; i++)
         {
             destination[i] = scratchViews[slots[i]];

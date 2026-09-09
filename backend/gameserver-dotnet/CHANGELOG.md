@@ -25,9 +25,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   precisely where the population is densest.
 
   `SpatialGrid.Emit` now sorts an **`int` permutation** and gathers once at the end: 4 bytes
-  per swap, each view touched exactly once. Crowded layouts improve **2.2-3.1x**, sparse
-  ones 1.1-1.3x. Every layout the gate admits now runs at **0.98x or better** (up to 2.5x),
-  and every layout it refuses would indeed have lost.
+  per swap, each view touched exactly once. Admitted layouts move from **0.41-0.63x to
+  0.85-2.25x**, and every layout the gate refuses would indeed have lost.
+
+  **One residual loss is admitted and recorded rather than tuned away**: `4 loose crowds`
+  (118 cells, 19.6 matches/query) reads 0.85-0.89x across three runs, with two more
+  clustered layouts at parity within noise. Occupancy cannot fix it by moving the threshold,
+  because it orders those rows wrongly — 105 cells reads 0.92-1.00x while 118 cells reads
+  0.85-0.89x, so the lower occupancy is the better layout. `EstimateCandidateFraction` does
+  separate them (the loss sits at 0.108, every winner at 0.086 or below), which is the case
+  for revisiting the statistic when there is telemetry to calibrate against.
 
   Wire output is unaffected — the emitted order is identical, which is what
   `AoiIndexDifferentialTests` asserts. `backend/docs/BENCHMARK.md` **Part XI** has the
@@ -57,7 +64,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `AoiClusteredGateBench` — hotspot layouts (crowd count, tightness, roaming fraction) on
   the stock 1000x1000 map, with uniform layouts measured in the **same** harness so the two
   families are comparable without crossing harnesses. Runs the index with the gate forced
-  open, so what the gate gives up is visible, and measures both ordering strategies.
+  open, so what the gate gives up is visible.
+
+  The pre-fix arm is a **verbatim replica inside the bench**, following Part VII's
+  `LegacyStringKeyedDeltaState` precedent, so production carries no benchmark-only switch;
+  the bench asserts the replica returns what the scan returns, in the same order, on every
+  layout before taking a timing. The two pairs (scan vs shipped, scan vs replica) are
+  measured **separately**: interleaving all three arms in one round moved the
+  uniform-full-map ratio from 1.76-1.91x to 1.12x, because three working sets evict each
+  other where two do not.
 
 - `SpatialGrid.EstimateCandidateFraction` — the mean fraction of the population a query must
   examine, from the cell histogram. Implemented and measured as a candidate replacement for

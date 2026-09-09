@@ -2011,11 +2011,18 @@ tick, but no tick figure from this host bounds anything.
 
 **Result: the gate statistic was not the defect. The index's per-match ordering
 cost was.** As merged, the 96-cell occupancy gate admitted the index on realistic
-clustered layouts where it ran **1.7-2.3x slower** — a live regression on exactly
-the population shape an MMO produces. Sorting an index permutation instead of an
-array of `EntityView` structs removes it: every layout the gate admits then runs at
-**0.98-2.5x**, every layout it refuses would indeed have lost, and the threshold of
-**96 needs no change**.
+clustered layouts where it ran **2.0-2.4x slower** than the scan it replaced — a
+live regression on exactly the population shape an MMO produces. Sorting an index
+permutation instead of an array of `EntityView` structs removes the regression:
+admitted layouts move from **0.41-0.63x to 0.85-2.25x**, and every layout the gate
+refuses would indeed have lost.
+
+**One residual loss survives and is not hidden here.** `4 loose crowds` (118 cells,
+19.6 matches per query) reads **0.85-0.89x across three runs** — a reproducible ~14%
+loss that the gate still admits, and two neighbouring clustered layouts sit at parity
+within noise. That is an order of magnitude better than the 0.41-0.45x it read before
+the fix, but it is not the clean "never slower" this Part's first draft claimed, and
+the claim has been corrected rather than the number buried.
 
 ### What was asked, and why both hypotheses were wrong
 
@@ -2050,36 +2057,64 @@ measured region, alternating arm order, `Stopwatch` only, 100 rounds after 20
 warmup, three repetitions, ratios quotable. The indexed arm runs with the gate
 **forced open**, because the question is what the gate gives up.
 
+**The pre-fix arm is a verbatim replica living in the bench**, following Part VII's
+precedent — its `LegacyStringKeyedDeltaState` is the encoder it replaced, kept in the
+bench file so the A arm is the code that actually ran and production carries nothing
+that exists only for a benchmark. An earlier revision of this work flipped a mutable
+static inside `SpatialGrid` instead; that is gone, and the grid now has exactly one
+ordering strategy. The replica copies the cell maths, the counting sort, the
+neighbourhood walk, the full-sweep fallback and the inclusive predicate unchanged, and
+**the bench asserts it returns what the scan returns, in the same order, on every
+layout before taking a single timing** — an arm that is fast because it is wrong would
+invalidate the whole comparison. It rebuilds from a pre-composed array rather than
+from chunk spans, so it does slightly *less* work than the code it stands in for and
+the penalty it reports is a **lower bound**.
+
+**The two pairs are measured separately, and that is a result in itself.** Running all
+three arms interleaved in one round changed both ratios materially — the
+uniform-full-map row read 1.76-1.91x as a pair and **1.12x** with a third arm added,
+because three working sets evict each other where two do not and the index arms carry
+more state than the scan. Each pair therefore runs on its own. Anyone extending this
+bench with a fourth arm should expect the same distortion and re-pair rather than
+add.
+
 ### The measurement, both ordering strategies
 
 `GameServer.Tests/Bench/AoiClusteredGateBench.cs`, `BENCH_AOI=1`.
 
-| layout | cells | gate | match/q | cand. frac | struct sort | **permutation sort** |
+| layout | cells | gate | match/q | cand. frac | struct sort (replica) | **permutation (shipped)** |
 |---|---|---|---|---|---|---|
-| 2 tight crowds (400) | 44 | OFF | 110.3 | 0.395 | 0.13-0.15x | 0.40-0.95x* |
-| 2 tight crowds (800) | 61 | OFF | 229.2 | 0.402 | 0.14-0.15x | 0.42-0.43x |
-| 4 tight crowds | 60 | OFF | 55.3 | 0.201 | 0.19-0.23x | 0.51-0.53x |
-| 8 tight crowds | 67 | OFF | 38.6 | 0.169 | 0.26-0.27x | 0.64-0.65x |
-| uniform, spread 250 | 36 | OFF | 43.7 | 0.262 | 0.24-0.27x | 0.57-0.63x |
-| uniform, spread 350 | 62 | OFF | 23.7 | 0.148 | 0.37-0.39x | 0.81-0.88x |
-| 16 tight crowds | 105 | ON | 18.9 | 0.078 | **0.47-0.49x** | 1.03-1.04x |
-| 4 loose crowds | 118 | ON | 19.6 | 0.108 | **0.43-0.45x** | 0.93-1.01x |
-| 8 loose crowds | 133 | ON | 14.7 | 0.086 | **0.56-0.59x** | 1.10-1.22x |
-| 4 crowds + 30% roaming | 157 | ON | 15.6 | 0.081 | **0.50-0.54x** | 1.10-1.14x |
-| 8 crowds + 30% roaming | 169 | ON | 14.1 | 0.075 | **0.55-0.61x** | 1.09-1.17x |
-| 8 crowds + 50% roaming | 196 | ON | 10.5 | 0.055 | **0.69-0.77x** | 1.26-1.32x |
-| 8 very loose crowds | 209 | ON | 6.4 | 0.039 | 1.18-1.24x | 1.61-1.82x |
-| uniform, spread 500 | 99 | ON | 12.6 | 0.081 | **0.64-0.65x** | 1.25-1.30x |
-| uniform, spread 700 | 170 | ON | 7.1 | 0.044 | 1.15-1.18x | 1.50-1.57x |
-| uniform, full map (400) | 262 | ON | 4.0 | 0.024 | 1.61-1.62x | 1.76-1.91x |
-| uniform, full map (200) | 160 | ON | 2.5 | 0.026 | 1.65-1.77x | 2.04-2.31x |
-| uniform, full map (800) | 340 | ON | 7.0 | 0.023 | 1.86-1.88x | 2.46-2.51x |
+| 2 tight crowds (400) | 44 | OFF | 110.3 | 0.395 | 0.13-0.15x | 0.36-0.38x* |
+| 2 tight crowds (800) | 61 | OFF | 229.2 | 0.402 | 0.14x | 0.40x |
+| 4 tight crowds | 60 | OFF | 55.3 | 0.201 | 0.19-0.21x | 0.50-0.56x |
+| 8 tight crowds | 67 | OFF | 38.6 | 0.169 | 0.25-0.26x | 0.61-0.65x |
+| uniform, spread 250 | 36 | OFF | 43.7 | 0.262 | 0.23-0.24x | 0.54-0.58x |
+| uniform, spread 350 | 62 | OFF | 23.7 | 0.148 | 0.35-0.38x | 0.75-0.81x |
+| 16 tight crowds | 105 | ON | 18.9 | 0.078 | **0.44-0.49x** | 0.92-1.00x |
+| 4 loose crowds | 118 | ON | 19.6 | 0.108 | **0.41-0.45x** | **0.85-0.89x** |
+| 8 loose crowds | 133 | ON | 14.7 | 0.086 | **0.52-0.55x** | 1.01-1.15x |
+| 4 crowds + 30% roaming | 157 | ON | 15.6 | 0.081 | **0.47-0.51x** | 0.92-1.01x |
+| 8 crowds + 30% roaming | 169 | ON | 14.1 | 0.075 | **0.51-0.54x** | 0.99-1.07x |
+| 8 crowds + 50% roaming | 196 | ON | 10.5 | 0.055 | **0.65-0.68x** | 1.13-1.25x |
+| 8 very loose crowds | 209 | ON | 6.4 | 0.039 | 1.04-1.11x | 1.45-1.52x |
+| uniform, spread 500 | 99 | ON | 12.6 | 0.081 | **0.60-0.63x** | 1.07-1.24x |
+| uniform, spread 700 | 170 | ON | 7.1 | 0.044 | 0.96-0.99x | 1.27-1.31x |
+| uniform, full map (400) | 262 | ON | 4.0 | 0.024 | 1.37-1.51x | 1.52-1.75x |
+| uniform, full map (200) | 160 | ON | 2.5 | 0.026 | 1.34-1.45x | 1.74-1.98x |
+| uniform, full map (800) | 340 | ON | 7.0 | 0.023 | 1.69-1.70x | 2.20-2.25x |
 
-Bold marks the defect: **six gate-ON layouts where the shipped index was 1.3-2.3x
-slower than the scan it replaced**, five of them clustered and one uniform.
+Bold in the struct-sort column marks the defect: **six gate-ON layouts where the
+merged index was 1.5-2.4x slower than the scan it replaced**, five of them clustered
+and one uniform. Bold in the shipped column marks the one that is still, mildly,
+below parity.
 
-\* the first repetition of that row read 0.95x against 0.43/0.40 in the other two.
-Host noise (§8); the row is a clear loss either way and is refused by the gate.
+Figures are the range over three independent runs of the whole bench, not three
+repetitions inside one run, because the run-to-run spread turned out to be wider than
+the within-run spread on the near-parity rows — 4 loose crowds read 0.86-0.89 in one
+run and 0.85-0.86 in another, and `8 loose crowds` moved 1.01-1.15.
+
+\* one repetition of that row read 0.84x against 0.36/0.38 in the other two. Host
+noise (§8); the row is a clear loss either way and is refused by the gate.
 
 ### What the sort was costing
 
@@ -2137,23 +2172,43 @@ configuration genuinely loses under the struct sort, and the re-run reads
 
 ### The recommendation, and what stays
 
-**Keep `MinOccupiedCellsToQuery = 96`, and ship the permutation sort.** With the
-sort fixed the threshold is right where it should be on clustered layouts too: every
-admitted layout runs at 0.98x or better, every refused one would have lost, and the
-crossover sits between 62 cells (0.81-0.88x, refused) and 99 cells (1.25-1.30x,
-admitted).
+**Ship the permutation sort. Keep `MinOccupiedCellsToQuery = 96` — with one honest
+caveat that the first draft of this Part did not have.**
+
+The refusals are right: 62 cells reads 0.75-0.81x and is refused, 99 cells reads
+1.07-1.24x and is admitted, so the crossover does sit near the threshold. But the gate
+still admits **one reproducible small loss** — `4 loose crowds`, 118 cells, at
+0.85-0.89x — and two more layouts at parity within noise (`16 tight crowds` 105 cells,
+`4 crowds + 30% roaming` 157 cells). The claim "every admitted layout wins" was made
+before the run-to-run spread was characterised and **is not supported**.
+
+Two things follow, and both are the owner's call rather than settled here:
+
+- **Occupancy cannot fix this by moving the threshold**, because it orders these rows
+  wrongly. 105 cells reads 0.92-1.00x while 118 cells reads 0.85-0.89x — the *lower*
+  occupancy is the *better* layout, so no threshold separates them. Excluding the loss
+  means raising the gate to ~128, which also excludes two layouts that are fine.
+- **`EstimateCandidateFraction` does separate them**: the loss sits at 0.108, the
+  highest of any admitted layout, while everything that wins is at 0.086 or below. A
+  threshold of ~0.09 would admit exactly the winners.
+
+The residual is ~14% on one modelled layout, against the 2.0-2.4x regression this Part
+removes, so it does not block the fix. It is recorded rather than tuned away because
+tuning a threshold against three modelled layouts is how a gate ends up calibrated on
+the wrong distribution — which is the mistake this Part exists to correct.
 
 **Occupancy stays the gate statistic.** A replacement was implemented and measured —
 `SpatialGrid.EstimateCandidateFraction`, the mean fraction of the population a query
 must examine, from the cell histogram — and it is the better predictor on paper:
 monotone across both layout families, where occupancy is not (160 cells wins at
 2.04-2.31x while 157 cells wins at only 1.10-1.14x, and under the struct sort
-occupancy could not separate the families at all). It is **not** adopted, for two
-reasons. Once the sort is fixed occupancy makes no wrong call on any layout measured
-here, and the statistic costs nine dictionary probes per occupied cell per rebuild to
-compute — real work on the tick thread to replace a decision that is no longer
-getting anything wrong. It stays in the code as a benchmark diagnostic, so the next
-person to suspect the gate can measure instead of arguing.
+occupancy could not separate the families at all). It is **not adopted here**, on cost:
+computing it takes nine dictionary probes per occupied cell per rebuild, which is real
+work on the tick thread, and the decision it would improve is worth ~14% on one
+modelled layout. That trade could reasonably go the other way once there is telemetry
+to calibrate against — it is the one statistic measured that gets every row in this
+Part right. It stays in the code as a benchmark diagnostic so the next person to
+suspect the gate can measure instead of arguing.
 
 ### What was not done
 
