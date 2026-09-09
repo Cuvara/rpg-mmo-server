@@ -5,6 +5,33 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The gateway reported `encrypted: true` while sending cleartext.** The startup log
+  computed that field as `transportKey != ""`, which is true whenever a key is configured —
+  including on TCP, where there is no packet-crypt layer and the key is silently ignored. A
+  gateway deployed as `transport=tcp` with `TRANSPORT_KEY` set therefore announced itself as
+  encrypted on every boot while putting every auth frame and join token on the wire in
+  clear. **A security signal that is confidently wrong is worse than one that is missing**,
+  because nobody looks behind it.
+  - Now derived from `transport.Posture` (shared module) and reported as `encrypted`,
+    `authenticated` and `cipher`, plus a `transport posture` line — **at Warning whenever
+    traffic is in cleartext**, Information when it is not. Before this the only cleartext
+    case that warned was KCP-without-a-key, so plain TCP — the default, and the case with no
+    encryption at all — was silent.
+  - Demonstrated live rather than argued: the pre-change image logs
+    `"encrypted":true` for `transport=tcp` with a key set, with no posture line and no
+    transport gauges; the new image logs `"encrypted":false` and a WARN for the same
+    configuration.
+
+### Added
+
+- **`gateway_transport_encrypted` and `gateway_transport_authenticated`**, labelled by
+  transport and cipher, set once at listen time. **Gauges, not counters**: a counter that
+  never increments is absent from `/metrics` entirely, and "is this gateway encrypted" must
+  never be answered by a missing field. Asserted by a test that gathers the registry and
+  requires both families to be present while reporting 0.
+
 ### Added
 - **The gateway refuses a version-mismatched client with a named reason
   (`protocol_version_mismatch`) instead of admitting it.** `handleAuth` now

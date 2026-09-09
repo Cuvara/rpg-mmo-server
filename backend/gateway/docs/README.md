@@ -233,6 +233,8 @@ curl localhost:9102/readyz      # 200 "ready", or 503 "not ready: redis"
 | `gateway_allocations_total` | counter | `result=ok\|fail` |
 | `gateway_relay_events_total` | counter | — |
 | `gateway_rate_limited_total` | counter | `reason=connection\|message` |
+| `gateway_transport_encrypted` | gauge | `transport`, `cipher` | 1 when packets leave the gateway as ciphertext, 0 when cleartext. **0 is the default** (`tcp` has no packet encryption; `TRANSPORT_KEY` defaults to empty). A gauge, not a counter, so it is present when it reads 0 — a security question must never be answered by a missing field |
+| `gateway_transport_authenticated` | gauge | `transport`, `cipher` | 1 when tampering with a packet in flight is detectable. **Currently 0 on every supported configuration**: the KCP path is AES-CFB with a CRC32, which is linear, not a MAC. Separate from `transport_encrypted` so encryption cannot be read as integrity |
 | `gateway_redis_up` | gauge | — |
 | `gateway_relay_up` | gauge | — |
 | `gateway_session_checks_total` | counter | `result=ok\|expired\|store_error` |

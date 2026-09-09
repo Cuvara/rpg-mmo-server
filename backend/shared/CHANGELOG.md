@@ -6,6 +6,28 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+
+- **`transport.Posture(kind, key, addr)`** — the confidentiality posture of a listener as
+  one computed fact: transport, whether a key is configured, whether packets are actually
+  ciphertext, whether they are authenticated, the cipher in force, whether the bind is
+  beyond loopback, and a one-line summary. Mirrors the C# `TransportPosture` field for
+  field so both halves of the backend describe themselves the same way.
+  - Exists because encryption is off by default **twice** — the transport defaults to
+    `tcp`, which has no packet-crypt layer, and the key defaults to empty — so no single
+    value answers "is this encrypted", and the combination that answers "no" most
+    emphatically is the default one.
+  - `Encrypted` and `Authenticated` are separate fields, and `Authenticated` is hard-coded
+    `false` with the reason stated: the KCP path is AES-256-CFB with a CRC32, and a CRC32
+    is linear, not a MAC, so a modified datagram is not detectable. One "secure" boolean
+    would let a reader take confidentiality for integrity.
+  - `KeyIgnored()` names the configuration most easily mistaken for working encryption: a
+    key set on TCP, where it is accepted and then does nothing.
+  - Bind classification is deliberately pessimistic — wildcard binds (`:8000`,
+    `0.0.0.0:8000`, `[::]:8000`) and anything unparseable count as beyond loopback, because
+    wildcard is the container shape and exempting it would exempt exactly the deployments
+    this reporting is for.
+
+### Added
 - **`EntitySnapshot.facing_brad` (field 10) and `EntitySnapshot.action` (field 11).**
   The snapshot carried `id, type_name, x, y, hp, max_hp, type, handle, speed` and
   nothing else — no facing, no rotation, no action state. A character could not be

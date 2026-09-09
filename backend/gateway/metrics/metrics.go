@@ -27,6 +27,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
 // DefaultAddr is the metrics listener address used when neither
@@ -75,6 +77,20 @@ type Metrics struct {
 	// protocol version this gateway cannot serve. A non-zero rate here after a
 	// deploy is a rollout skew, not an attack.
 	ProtocolVersionRefusedTotal prometheus.Counter
+
+	// TransportEncrypted is 1 when packets leave this gateway as ciphertext.
+	//
+	// A GaugeVec labelled by transport and cipher, set once at listen time. It
+	// replaces a log field that was actively wrong: the gateway used to report
+	// `encrypted` as `transportKey != ""`, which reads true on TCP where the key
+	// is ignored and the traffic is cleartext.
+	TransportEncrypted *prometheus.GaugeVec
+
+	// TransportAuthenticated is 1 when tampering with a packet in flight is
+	// detectable. Currently 0 on every supported configuration: the KCP path is
+	// AES-CFB with a CRC32, and a CRC32 is linear, not a MAC. Kept separate from
+	// TransportEncrypted so that encryption cannot be read as integrity.
+	TransportAuthenticated *prometheus.GaugeVec
 
 	// RedisUp is 1 when the last dependency probe reached Redis, 0 otherwise.
 	// A gauge rather than a counter because alerting wants "is it down right
@@ -161,6 +177,18 @@ func New(reg prometheus.Registerer) *Metrics {
 			Name: "gateway_protocol_version_refused_total",
 			Help: "Clients refused for an unsupported wire protocol version.",
 		}),
+		// Gauges, not counters, and deliberately so: a counter that never
+		// increments is absent from /metrics entirely, and "is this gateway
+		// encrypted" must never be answered by a missing field. A gauge is
+		// present the moment it is set, including when it reads 0.
+		TransportEncrypted: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "gateway_transport_encrypted",
+			Help: "1 when packets leave this gateway as ciphertext, 0 when cleartext. 0 is the DEFAULT (transport=tcp has no packet encryption and TRANSPORT_KEY defaults to empty).",
+		}, []string{"transport", "cipher"}),
+		TransportAuthenticated: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "gateway_transport_authenticated",
+			Help: "1 when tampering with a packet in flight is detectable. Currently 0 on every supported configuration: the KCP path is AES-CFB with a CRC32, which is linear and not a MAC.",
+		}, []string{"transport", "cipher"}),
 		RedisUp: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "gateway_redis_up",
 			Help: "1 when the last Redis dependency probe succeeded, 0 otherwise.",
@@ -184,6 +212,8 @@ func New(reg prometheus.Registerer) *Metrics {
 	}
 	if reg != nil {
 		reg.MustRegister(
+			m.TransportEncrypted,
+			m.TransportAuthenticated,
 			m.ConnectionsActive,
 			m.AuthTotal,
 			m.EnterWorldTotal,
@@ -433,6 +463,28 @@ func (r *Readiness) snapshot() map[string]DependencyChecker {
 		out[k] = v
 	}
 	return out
+}
+
+// SetTransportPosture publishes the listener's confidentiality posture.
+//
+// Called once, at listen time, from the composition root: the posture is
+// configuration, not something the gateway discovers. Both gauges are set even
+// when they are 0 — that is the entire reason they are gauges rather than
+// counters, since a counter that never increments is absent from /metrics and a
+// security question must never be answered by a missing field.
+func (m *Metrics) SetTransportPosture(p transport.TransportPosture) {
+	if m == nil {
+		return
+	}
+	encrypted, authenticated := 0.0, 0.0
+	if p.Encrypted {
+		encrypted = 1
+	}
+	if p.Authenticated {
+		authenticated = 1
+	}
+	m.TransportEncrypted.WithLabelValues(p.Transport, p.Cipher).Set(encrypted)
+	m.TransportAuthenticated.WithLabelValues(p.Transport, p.Cipher).Set(authenticated)
 }
 
 // Handler builds the metrics mux with no dependency checks: /readyz then

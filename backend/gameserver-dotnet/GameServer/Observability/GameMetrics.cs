@@ -21,6 +21,8 @@ namespace GameServer.Observability;
 /// gameserver.snapshots.entities_shed  -> gameserver_snapshots_entities_shed_total
 /// gameserver.snapshots.removals_deferred -> gameserver_snapshots_removals_deferred_total
 /// gameserver.snapshots.max_shed_age   -> gameserver_snapshots_max_shed_age
+/// gameserver.transport.encrypted      -> gameserver_transport_encrypted{transport,cipher}
+/// gameserver.transport.authenticated  -> gameserver_transport_authenticated{transport,cipher}
 /// gameserver.player.saves             -> gameserver_player_saves_total
 /// gameserver.events.published         -> gameserver_events_published_total
 /// gameserver.events.dropped           -> gameserver_events_dropped_total
@@ -62,6 +64,7 @@ public sealed class GameMetrics : IDisposable
     private readonly Counter<long> _snapshotsSent;
     private readonly Counter<long> _snapshotsCoalesced;
     private readonly Counter<long> _snapshotFramesWritten;
+    private readonly string _mapId;
     private readonly Counter<long> _snapshotBytes;
     private readonly Counter<long> _snapshotEntitiesShed;
     private readonly Counter<long> _snapshotRemovalsDeferred;
@@ -116,6 +119,7 @@ public sealed class GameMetrics : IDisposable
         _meter = new Meter(MeterName);
 
         _mapTagArray = [new KeyValuePair<string, object?>("map_id", mapId)];
+        _mapId = mapId;
         _mapTags = new TagList { { "map_id", mapId } };
         _saveOkTags = new TagList { { "status", "ok" } };
         _saveErrorTags = new TagList { { "status", "error" } };
@@ -285,6 +289,26 @@ public sealed class GameMetrics : IDisposable
             description: "Base ticks discarded because the loop fell too far behind wall " +
                          "clock to recover. Simulation time is behind real time by this much.");
 
+        // Gauges, not counters, and that choice is the point: a counter that never
+        // increments is ABSENT from /metrics, and "is this server encrypted" must never
+        // answer by being missing. An observable gauge's callback runs on every scrape, so
+        // these two always report — including, and especially, when they report 0.
+        _meter.CreateObservableGauge(
+            "gameserver.transport.encrypted",
+            ObserveTransportEncrypted,
+            description: "1 when packets leave this server as ciphertext, 0 when they are in " +
+                         "cleartext. 0 is the DEFAULT (transport=tcp has no packet encryption, " +
+                         "and TRANSPORT_KEY defaults to empty) -- alert on it rather than " +
+                         "assuming it. Labelled with the transport and cipher in force.");
+
+        _meter.CreateObservableGauge(
+            "gameserver.transport.authenticated",
+            ObserveTransportAuthenticated,
+            description: "1 when tampering with a packet in flight is detectable. Currently 0 on " +
+                         "every supported configuration: the KCP path is AES-CFB with a CRC32, " +
+                         "and a CRC32 is linear, not a MAC. Deliberately separate from " +
+                         "transport.encrypted so encryption cannot be read as integrity.");
+
         _meter.CreateObservableGauge(
             "gameserver.snapshots.max_shed_age",
             ObserveMaxShedAge,
@@ -450,6 +474,37 @@ public sealed class GameMetrics : IDisposable
     public int MaxShedAge => Volatile.Read(ref _maxShedAge);
 
     private Measurement<int> ObserveMaxShedAge() => new(Volatile.Read(ref _maxShedAge), _mapTags);
+
+    private TagList _transportTags;
+    private volatile bool _transportEncrypted;
+    private volatile bool _transportAuthenticated;
+
+    /// <summary>
+    /// Publish the transport confidentiality posture, once, at startup.
+    /// </summary>
+    /// <remarks>
+    /// Called from the composition root because the posture is configuration, not something
+    /// the server discovers. The tag set is built here rather than in the constructor
+    /// because the transport and cipher are not known until it is called; both are constant
+    /// for the process lifetime, so cardinality is one series each.
+    /// </remarks>
+    public void SetTransportPosture(string transport, string cipher, bool encrypted, bool authenticated)
+    {
+        _transportTags = new TagList
+        {
+            { "map_id", _mapId },
+            { "transport", transport },
+            { "cipher", cipher },
+        };
+        _transportEncrypted = encrypted;
+        _transportAuthenticated = authenticated;
+    }
+
+    private Measurement<int> ObserveTransportEncrypted()
+        => new(_transportEncrypted ? 1 : 0, _transportTags);
+
+    private Measurement<int> ObserveTransportAuthenticated()
+        => new(_transportAuthenticated ? 1 : 0, _transportTags);
 
     /// <summary>
     /// Record snapshot frames actually written to sockets.
