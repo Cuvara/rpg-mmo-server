@@ -267,6 +267,206 @@ public class AoiIndexDifferentialTests
         AssertIdentical(world, new Vec2(0, 0), Radius, "boundary ring");
     }
 
+    // ── Exact boundary: DistanceSq == radiusSq, by construction ──────────────
+
+    /// <summary>
+    /// Positions whose squared distance from the origin is <b>exactly</b>
+    /// <c>radius * radius</c> in float arithmetic — Pythagorean triples scaled by
+    /// <paramref name="scale"/>, plus the four axis-aligned points.
+    /// </summary>
+    /// <remarks>
+    /// <b>Why this exists rather than a ring of cos/sin points.</b> A ring computed with
+    /// trigonometry lands <i>near</i> the boundary, never on it: the set of floats where
+    /// <c>DistanceSq == radiusSq</c> holds exactly is measure-zero, so such a ring cannot
+    /// tell <c>&gt;</c> from <c>&gt;=</c> and a test built on one silently fails to
+    /// discriminate the inclusive boundary at all. These coordinates are small integers,
+    /// so every product and sum below is exact in <c>float</c> (well inside 2^24) and the
+    /// comparison is genuinely on the knife edge. Each test asserts that premise about
+    /// itself before asserting anything about the index.
+    /// </remarks>
+    private static IEnumerable<(string Id, float X, float Y)> ExactBoundaryPoints(int scale)
+    {
+        // 3-4-5 and 5-12-13 in every reflection, plus the axes.
+        (int X, int Y)[] triples =
+        {
+            (3, 4), (4, 3), (-3, 4), (-4, 3), (3, -4), (4, -3), (-3, -4), (-4, -3),
+        };
+
+        foreach ((int x, int y) in triples)
+        {
+            yield return ($"tri{x}_{y}", x * scale, y * scale);
+        }
+
+        yield return ("axisE", 5 * scale, 0);
+        yield return ("axisW", -5 * scale, 0);
+        yield return ("axisN", 0, 5 * scale);
+        yield return ("axisS", 0, -5 * scale);
+    }
+
+    /// <summary>
+    /// Filler placed far from the observer, purely to push the grid's occupancy over
+    /// <c>SpatialGrid.MinOccupiedCellsToQuery</c> so the gather actually queries through
+    /// the index. Without it the gate would send these tests down the brute-force path and
+    /// they would pass while testing nothing about the index at all.
+    /// </summary>
+    private static void AddOccupancyFiller(EcsWorld world, int cellsWanted = 100)
+    {
+        int side = (int)Math.Ceiling(Math.Sqrt(cellsWanted));
+        for (int i = 0; i < side; i++)
+        {
+            for (int j = 0; j < side; j++)
+            {
+                // 100 units apart with a 50-unit cell size, so every filler entity claims
+                // its own cell, and 10 000 away from the origin so none of them can fall
+                // inside any radius these tests use.
+                world.AddEntity(TestHelpers.CreatePlayer($"filler{i}_{j}", 10_000f + i * 100f, 10_000f + j * 100f));
+            }
+        }
+    }
+
+    /// <summary>
+    /// An entity at <b>exactly</b> the radius is inside — the predicate is
+    /// <c>DistanceSq &lt;= radiusSq</c> — and this pins that on the index's
+    /// <b>cell-walking</b> path specifically.
+    ///
+    /// <para>The radius is small relative to the 50-unit cell size, so the query's covering
+    /// neighbourhood is a handful of cells and stays well under the entity count, which is
+    /// what keeps it out of the full-sweep fallback. The companion test below covers that
+    /// other path, which carries a second copy of the same predicate.</para>
+    ///
+    /// <para><b>This is the test that a "360-degree boundary ring" built from cos/sin does
+    /// not give you.</b> Flipping this path's comparison to <c>&gt;=</c> leaves a ring test
+    /// entirely green, because no point on it sits exactly on the boundary. The failure it
+    /// would let through is an entity at exactly the AOI radius flickering in and out of
+    /// view — rare, silent, and it reads as a network problem.</para>
+    /// </summary>
+    [Fact]
+    public void ExactBoundary_OnTheIndexedCellWalk_IsInclusive()
+    {
+        const float radius = 5f;
+        using var world = new EcsWorld();
+        AddOccupancyFiller(world);
+
+        var expected = new List<string>();
+        foreach ((string id, float x, float y) in ExactBoundaryPoints(1))
+        {
+            world.AddEntity(TestHelpers.CreatePlayer(id, x, y));
+            expected.Add(id);
+        }
+
+        // Just outside, to prove the assertion below discriminates at all rather than
+        // simply accepting everything nearby.
+        world.AddEntity(TestHelpers.CreatePlayer("justOutside", radius + 0.01f, 0f));
+
+        var centre = new Vec2(0f, 0f);
+
+        // The premise: these really are exactly on the boundary, in float.
+        foreach ((string id, float x, float y) in ExactBoundaryPoints(1))
+        {
+            Assert.True(Vec2.DistanceSq(centre, new Vec2(x, y)) == radius * radius,
+                $"{id} is not exactly on the boundary — this test would not discriminate " +
+                "an inclusive predicate from an exclusive one.");
+        }
+
+        List<EntityView> got = Indexed(world, centre, radius);
+
+        Assert.True(world.AoiIndexOccupiedCells >= 96,
+            $"only {world.AoiIndexOccupiedCells} cells occupied — the gate would have sent " +
+            "this query down the brute-force scan, so it would not have tested the index.");
+
+        foreach (string id in expected)
+        {
+            Assert.True(got.Any(e => e.Id == id),
+                $"{id} sits exactly on the radius and must be INCLUDED. The AOI predicate is " +
+                "DistanceSq <= radiusSq; an exclusive comparison here drops entities at " +
+                "exactly the radius and they flicker at the edge of view.");
+        }
+
+        Assert.DoesNotContain(got, e => e.Id == "justOutside");
+        AssertIdentical(world, centre, radius, "exact boundary, indexed cell walk");
+    }
+
+    /// <summary>
+    /// The same inclusive-boundary guarantee on the index's <b>full-sweep fallback</b>,
+    /// which carries its own copy of the predicate and is therefore its own mutation
+    /// target.
+    ///
+    /// <para>The radius here is large enough that the covering neighbourhood spans more
+    /// cells than the index holds entities, which is exactly the condition that trips the
+    /// fallback — walking hundreds of mostly-empty cells would cost more than testing
+    /// everything.</para>
+    /// </summary>
+    [Fact]
+    public void ExactBoundary_OnTheFullSweepFallback_IsInclusive()
+    {
+        // 100x the small case: a 5-unit cell radius becomes 500, so the neighbourhood is
+        // 21x21 = 441 cells against ~113 entities and Query takes CollectAll.
+        const float radius = 500f;
+        using var world = new EcsWorld();
+        AddOccupancyFiller(world);
+
+        var expected = new List<string>();
+        foreach ((string id, float x, float y) in ExactBoundaryPoints(100))
+        {
+            world.AddEntity(TestHelpers.CreatePlayer(id, x, y));
+            expected.Add(id);
+        }
+
+        world.AddEntity(TestHelpers.CreatePlayer("justOutside", radius + 1f, 0f));
+
+        var centre = new Vec2(0f, 0f);
+
+        foreach ((string id, float x, float y) in ExactBoundaryPoints(100))
+        {
+            Assert.True(Vec2.DistanceSq(centre, new Vec2(x, y)) == radius * radius,
+                $"{id} is not exactly on the boundary — this test would not discriminate.");
+        }
+
+        List<EntityView> got = Indexed(world, centre, radius);
+
+        Assert.True(world.AoiIndexOccupiedCells >= 96,
+            $"only {world.AoiIndexOccupiedCells} cells occupied — the gate would have sent " +
+            "this query down the brute-force scan.");
+
+        foreach (string id in expected)
+        {
+            Assert.True(got.Any(e => e.Id == id),
+                $"{id} sits exactly on the radius and must be INCLUDED on the full-sweep " +
+                "fallback path too.");
+        }
+
+        Assert.DoesNotContain(got, e => e.Id == "justOutside");
+        AssertIdentical(world, centre, radius, "exact boundary, full-sweep fallback");
+    }
+
+    /// <summary>
+    /// The same guarantee on the plain brute-force scan, so all three implementations of
+    /// the predicate are pinned by construction rather than two of them being pinned and
+    /// the third assumed.
+    /// </summary>
+    [Fact]
+    public void ExactBoundary_OnTheBruteForceScan_IsInclusive()
+    {
+        const float radius = 5f;
+        using var world = new EcsWorld { AoiIndexEnabled = false };
+
+        foreach ((string id, float x, float y) in ExactBoundaryPoints(1))
+        {
+            world.AddEntity(TestHelpers.CreatePlayer(id, x, y));
+        }
+        world.AddEntity(TestHelpers.CreatePlayer("justOutside", radius + 0.01f, 0f));
+
+        var centre = new Vec2(0f, 0f);
+        List<EntityView> got = BruteForce(world, centre, radius);
+
+        foreach ((string id, float _, float _2) in ExactBoundaryPoints(1))
+        {
+            Assert.True(got.Any(e => e.Id == id), $"{id} sits exactly on the radius and must be INCLUDED.");
+        }
+
+        Assert.DoesNotContain(got, e => e.Id == "justOutside");
+    }
+
     /// <summary>
     /// Diagonal neighbours: an entity in the corner cell is within the radius even though
     /// the cell centre is not. A grid that visits only the four orthogonal neighbours

@@ -1839,8 +1839,32 @@ that had moved on since the recipe was written.
 1600 entities**, and — the part that matters given Part V — **never slower**,
 because the gather takes the plain scan whenever the population is too clustered
 for the index to pay. Part V is not withdrawn: it was right about the index it
-measured, and it named the exact condition under which the answer would change.
-That condition has since been met.
+measured, and it named the conditions under which the answer would change. The one
+governing the *implementation* has since been met; the one governing whether the
+work was warranted has not — read the next section before quoting anything here.
+
+### Why this was rebuilt, which is not the same as why it was justified
+
+**State this before the numbers, because the numbers are persuasive and the provenance
+is not.** Part VII's caveat has two clauses: re-measure the index against post-#237
+numbers, *"and only if AOI cost resurfaces as a bound."* **The first clause is satisfied
+by this Part. The second is not, and has not been.** Nobody measured AOI cost resurfacing
+as a bound. This index was rebuilt because the work was assigned, and it was assigned on
+the strength of a Big-O argument — which is precisely the reasoning
+[Part V](#part-v--the-spatial-index-that-lost-2026-08-14) exists to stop. Four changes in
+this sequence have now been commissioned against a term that turned out not to be the
+expensive one, and a reader arriving at the 2x figures below should not infer that a
+measurement asked for this one.
+
+What makes it safe to ship anyway is not the win, it is **the gate**: below 96 occupied
+cells the gather takes the plain scan and builds nothing, so on the densities where the
+index does not pay the change is inert rather than negative. An unconditional index would
+not have been shippable on this evidence, and the naive version of the gate — measured at
+0.82-0.91x, below — was not either.
+
+The honest summary is that this is a scale-readiness change with a measured upside on the
+stock map and a measured floor of parity everywhere else, not a response to a bottleneck
+anyone observed.
 
 ### Why the answer changed
 

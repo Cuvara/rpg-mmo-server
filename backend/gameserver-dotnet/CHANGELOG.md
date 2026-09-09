@@ -116,6 +116,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   instead of once per match per viewer — at 200 viewers averaging 15 matches, 3 000
   composes replaced by 200.
 
+  **Provenance, stated because the numbers are persuasive and the provenance is not.**
+  Part VII's caveat has two clauses — re-measure against post-#237 numbers, "and only if
+  AOI cost resurfaces as a bound". The first is satisfied; **the second is not and has not
+  been**. Nobody measured AOI cost resurfacing as a bound; this was rebuilt because the
+  work was assigned, on a Big-O argument, which is the reasoning Part V exists to stop.
+  What makes it safe to ship regardless is the gate: below the threshold the change is
+  inert rather than negative. It is a scale-readiness change with a measured floor of
+  parity, not a response to an observed bottleneck.
+
   The gate is on **occupied cells, not entity count**: a query visits at most a 3x3
   neighbourhood, so spread predicts the win and count does not — Part V's dense-400 row
   loses while its sparse-200 row wins. It is a performance decision only; both paths return
@@ -137,6 +146,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `AoiIndexBench` — the committed A/B harness behind Part X, stating its clock
   (`Stopwatch`). Part V's harness was never committed, which is what made its absolute
   microseconds the one figure class the #153 clock audit could not trace.
+
+- **Exact-boundary tests, on all three copies of the AOI predicate** — the indexed cell
+  walk, the index's full-sweep fallback, and the brute-force scan. Entities are placed
+  where `DistanceSq == radiusSq` holds **exactly** in float (Pythagorean triples and
+  axis-aligned points at integer coordinates), and each test asserts that premise about
+  itself before asserting inclusion.
+
+  This closes a real gap rather than adding coverage for its own sake. The previous
+  360-degree "boundary ring" was built from `cos`/`sin`, so its points landed *near* the
+  radius and never on it — the set of floats satisfying the equality exactly is
+  measure-zero. Flipping the indexed path's comparison from `>` to `>=` therefore left the
+  entire suite green. Verified by mutation: `>=` at the cell walk now fails exactly
+  `ExactBoundary_OnTheIndexedCellWalk_IsInclusive`, `>=` at the fallback fails exactly
+  `ExactBoundary_OnTheFullSweepFallback_IsInclusive`, and each leaves the other passing —
+  which also confirms the two tests reach the two branches they claim to. The bug this
+  would have shipped is an entity at exactly the AOI radius flickering at the edge of
+  view, which presents as a network fault and gets debugged in the wrong layer.
 
 ### Changed
 
