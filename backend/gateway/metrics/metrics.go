@@ -59,6 +59,23 @@ type Metrics struct {
 	// with which limiter fired (see the RateLimitReason* constants).
 	RateLimitedTotal *prometheus.CounterVec
 
+	// UnversionedHandshakesTotal counts clients admitted on MsgAuth without
+	// advertising a wire protocol version.
+	//
+	// This is the migration instrument, not a health metric. Admitting an
+	// unversioned client is admission on trust: the gateway cannot tell a
+	// pre-versioning build from a non-conforming one. Raising
+	// --min-protocol-version to 1 refuses both, so this counter going flat at
+	// zero across a deploy window is the evidence that the flip will not lock
+	// out real players. An admission nobody can see is the silent fallback the
+	// tick_rate rule in gameserver-dotnet/docs/API.md forbids.
+	UnversionedHandshakesTotal prometheus.Counter
+
+	// ProtocolVersionRefusedTotal counts clients refused for speaking a wire
+	// protocol version this gateway cannot serve. A non-zero rate here after a
+	// deploy is a rollout skew, not an attack.
+	ProtocolVersionRefusedTotal prometheus.Counter
+
 	// RedisUp is 1 when the last dependency probe reached Redis, 0 otherwise.
 	// A gauge rather than a counter because alerting wants "is it down right
 	// now", and because it is the series that explains a spike in
@@ -136,6 +153,14 @@ func New(reg prometheus.Registerer) *Metrics {
 			Name: "gateway_rate_limited_total",
 			Help: "Requests rejected by a rate limiter, by reason.",
 		}, []string{"reason"}),
+		UnversionedHandshakesTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "gateway_unversioned_handshakes_total",
+			Help: "Clients admitted without advertising a wire protocol version.",
+		}),
+		ProtocolVersionRefusedTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "gateway_protocol_version_refused_total",
+			Help: "Clients refused for an unsupported wire protocol version.",
+		}),
 		RedisUp: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "gateway_redis_up",
 			Help: "1 when the last Redis dependency probe succeeded, 0 otherwise.",
@@ -165,6 +190,8 @@ func New(reg prometheus.Registerer) *Metrics {
 			m.AllocationsTotal,
 			m.RelayEventsTotal,
 			m.RateLimitedTotal,
+			m.UnversionedHandshakesTotal,
+			m.ProtocolVersionRefusedTotal,
 			m.RedisUp,
 			m.RelayUp,
 			m.SessionChecksTotal,
@@ -287,6 +314,24 @@ func boolGauge(b bool) float64 {
 		return 1
 	}
 	return 0
+}
+
+// UnversionedHandshake records one client admitted without advertising a wire
+// protocol version.
+func (m *Metrics) UnversionedHandshake() {
+	if m == nil {
+		return
+	}
+	m.UnversionedHandshakesTotal.Inc()
+}
+
+// ProtocolVersionRefused records one client refused for an unsupported wire
+// protocol version.
+func (m *Metrics) ProtocolVersionRefused() {
+	if m == nil {
+		return
+	}
+	m.ProtocolVersionRefusedTotal.Inc()
 }
 
 // RateLimited records one request rejected by a rate limiter. reason must be

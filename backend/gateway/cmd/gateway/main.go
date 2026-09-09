@@ -17,6 +17,7 @@ import (
 	"github.com/duycuong/rpg-mmo/gateway/session"
 	"github.com/duycuong/rpg-mmo/shared/config"
 	"github.com/duycuong/rpg-mmo/shared/logger"
+	"github.com/duycuong/rpg-mmo/shared/messages"
 	"github.com/duycuong/rpg-mmo/shared/storage"
 	"github.com/duycuong/rpg-mmo/shared/storage/redisstore"
 	"github.com/duycuong/rpg-mmo/shared/transport"
@@ -58,6 +59,7 @@ func main() {
 	joinTokenSecret := flag.String("join-token-secret", "", "HS256 secret (comma-separated list to rotate) for gateway->gameserver join tokens (overrides JOIN_TOKEN_SECRET; REQUIRED)")
 	connRate := flag.Float64("conn-rate-per-min", -1, "Max accepted connections per minute per source IP (overrides GATEWAY_CONN_RATE_PER_MIN; 0 disables)")
 	msgRate := flag.Float64("msg-rate-per-sec", -1, "Max inbound messages per second per connection (overrides GATEWAY_MSG_RATE_PER_SEC; 0 disables)")
+	minProtoVersion := flag.Uint("min-protocol-version", 0, "Lowest wire protocol version a client may advertise on MsgAuth (default 0, which also admits clients advertising nothing). Set to 1 once every client advertises: an unversioned client is then refused with reason \"protocol_version_mismatch\" instead of being admitted on trust. Watch gateway_unversioned_handshakes_total go flat at zero before flipping it -- flipping while it still moves locks out real players")
 	flag.Parse()
 
 	cfg := config.Load()
@@ -345,6 +347,7 @@ func main() {
 		// login rate) but the bucket refills per second.
 		server.WithConnRateLimit(connRatePerMin/60, connBurst),
 		server.WithMsgRateLimit(msgRatePerSec, msgBurst),
+		server.WithMinProtocolVersion(uint32(*minProtoVersion)),
 	)
 
 	// Graceful shutdown on SIGINT/SIGTERM.
@@ -375,7 +378,9 @@ func main() {
 		slog.String("transport", transport.Normalize(listenTransport)),
 		slog.Bool("transport_encrypted", tKey != ""),
 		slog.Float64("conn_rate_per_min", connRatePerMin),
-		slog.Float64("msg_rate_per_sec", msgRatePerSec))
+		slog.Float64("msg_rate_per_sec", msgRatePerSec),
+		slog.Uint64("wire_protocol_version", uint64(messages.WireProtocolVersion)),
+		slog.Uint64("min_protocol_version", uint64(*minProtoVersion)))
 	if err := gw.Run(listenAddr); err != nil {
 		log.Error("gateway exited with error", "err", err)
 		os.Exit(1)

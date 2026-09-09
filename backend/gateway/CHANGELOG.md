@@ -5,6 +5,29 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **The gateway refuses a version-mismatched client with a named reason
+  (`protocol_version_mismatch`) instead of admitting it.** `handleAuth` now
+  checks `AuthRequest.ProtocolVersion` via `messages.CheckProtocolVersion` and
+  answers `AuthResponse{OK:false, Error:"protocol_version_mismatch"}`, then
+  closes with `SendAndClose` so the frame is flushed rather than RST away. The
+  check runs BEFORE JWT verification: a peer that cannot speak the schema is
+  refused whether or not its credential is good, and reporting `invalid token`
+  for what is really a stale build sends the operator to the wrong layer.
+- **`--min-protocol-version`** (default 0). Zero also admits a client that
+  advertises nothing, which is every client on the day this ships. Set it to 1
+  once `gateway_unversioned_handshakes_total` has gone flat across a deploy
+  window; an unversioned client is then refused through the same named path as a
+  mismatched one.
+- **Metrics `gateway_unversioned_handshakes_total` and
+  `gateway_protocol_version_refused_total`.** The first is the migration
+  instrument, not a health metric: admitting an unversioned client is admission
+  on trust, and an admission nobody can see is behaviourally identical to having
+  no check.
+- **Every `AuthResponse` echoes the gateway's own version**, including rejections.
+  It is the only way a new client detects an OLD gateway, which replies with 0
+  because it never knew the field.
+
 ## [0.9.0] - 2026-09-05
 
 ### Added

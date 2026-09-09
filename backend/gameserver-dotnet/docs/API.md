@@ -35,8 +35,13 @@ identical for both, so the transport layer is unaffected.
 
 `type` is always `>= 1`, so proto3 never elides field 1 and a Protobuf envelope
 *always* starts with `0x08`. `{` and `0x08` cannot collide, so **a peer
-identifies the encoding from the first body byte** — there is no version field,
-no negotiation and no extra round trip.
+identifies the encoding from the first body byte** — there is no encoding
+negotiation and no extra round trip.
+
+That answers *how these bytes are framed*. It does **not** answer whether the two
+sides agree on what the fields **mean** — see
+[Protocol version](#protocol-version--protocol_version) below, which does, and
+which is carried in the handshake rather than in every envelope.
 
 **Rules for a client:**
 
@@ -66,12 +71,12 @@ both encodings; the JSON column shows the legacy field names, which match the
 
 | # | Name | Direction | Payload |
 |---|------|-----------|---------|
-| 1 | `auth` | client → gateway | `{ token }` |
-| 2 | `auth_resp` | gateway → client | `{ ok, user_id?, error? }` |
+| 1 | `auth` | client → gateway | `{ token, protocol_version? }` |
+| 2 | `auth_resp` | gateway → client | `{ ok, user_id?, error?, protocol_version? }` |
 | 3 | `enter_world` | client → gateway | `{ map_id }` |
 | 4 | `enter_world_resp` | gateway → client | `{ server_addr?, join_token?, transport?, error? }` |
-| 5 | `join_token` | client → gameserver | `{ token }` |
-| 6 | `join_token_resp` | gameserver → client | `{ ok, user_id?, error?, tick_rate? }` — see below |
+| 5 | `join_token` | client → gameserver | `{ token, protocol_version? }` |
+| 6 | `join_token_resp` | gameserver → client | `{ ok, user_id?, error?, tick_rate?, protocol_version? }` — see below |
 | 7 | `input` | client → gameserver | `{ tick, move_x, move_y, attack_target_id? }` |
 | 8 | `snapshot` | gameserver → client | see below |
 | 9 | `disconnect` | either | `{}` |
@@ -225,6 +230,164 @@ client's, provided the fallback in (3) is not silent.
 
 A **rejected** join (`ok: false`) carries no `tick_rate`. There is no session to
 predict in, and the caller has not proved it is entitled to the server's tuning.
+
+### Protocol version — `protocol_version`
+
+**Normative.** `protocol_version` is a single monotonically increasing integer
+naming the **semantics** of `wire.proto` — what the fields mean. It is not the
+shape (proto3 already skips unknown fields) and not the encoding (already sniffed
+from byte 0).
+
+What neither of those catches is two peers that parse every byte successfully and
+then disagree about what a field *means*. That is the failure this number exists
+to make loud: it compiles, it connects, and the numbers are consistent about the
+wrong thing. Before this field, client and server agreed by convention alone.
+
+**Current version: `1`.**
+
+| Version | Introduced | What it covers |
+|---|---|---|
+| `1` | 2026-09-09 | The schema as of `wire.proto` at the introduction of this field, including `facing_brad` and `action` on `EntitySnapshot`. |
+
+#### Where it rides, and why on both hops
+
+It travels on the two **handshake requests**, and is echoed on their responses:
+
+| Hop | Request | Response |
+|---|---|---|
+| client → gateway | `auth` (1) | `auth_resp` (2) |
+| client → game server | `join_token` (5) | `join_token_resp` (6) |
+
+**Deliberately not on `Envelope`.** An envelope field is paid on every snapshot
+of every tick, forever, to re-state a number that cannot change within a
+connection. This protocol rejects that trade elsewhere for the same reason (the
+entity-type enum exists because a string type was ~19% of a keyframe).
+
+**Both hops check independently, and that is not redundant.** Under
+[ADR-3](../../docs/ARCHITECTURE-DECISIONS.md) these are two connections to two
+separately deployed processes. The gateway is a redirector that hands back
+`{ServerAddr, JoinToken}` and never carries a snapshot, so it cannot vouch for a
+client's ability to read one; the gateway and the game server are also upgraded
+independently. It is the game-server hop that a version disagreement actually
+corrupts, because the snapshot stream is where a misparse turns into a wrong
+world.
+
+**The responses echo the server's own version.** That is the only way a *new*
+client detects an *old* server: an old server does not know the field, ignores
+the client's version, and replies without one. A client that sees `0` come back
+knows its version was never checked. Nothing else on the wire reveals that.
+
+Unlike `tick_rate`, `protocol_version` **is** sent on a rejection. A client
+refused for a mismatch has to be told which version it failed against, or the
+refusal is as opaque as the parse error it replaces.
+
+#### When it must be bumped
+
+A rule nobody knows how to apply is worse than no rule. Bump for any change that
+would let a conforming peer of the previous version **misinterpret** a conforming
+peer of the new one:
+
+1. **Reusing or renumbering a field number**, or removing a field a receiver acts
+   on.
+2. **Changing the meaning, units, range or reference frame of an existing
+   field** — e.g. `speed` switching from units/second to units/tick. This is the
+   dangerous class: the bytes are identical and only the interpretation moves, so
+   nothing anywhere errors.
+3. **Changing the snapshot state machine** — handle lifecycle, keyframe reset
+   points, the delta "what counts as changed" rule, or the client merge algorithm
+   below.
+4. **Adding a message or field a receiver MUST act on to stay correct** — one
+   where ignoring it silently *diverges* rather than *degrades*.
+
+**Do not bump** for a purely additive optional field whose absence is covered by
+a documented "zero means not sent" rule and whose omission degrades visibly
+rather than diverging silently. An old peer ignoring it is then a supported
+configuration, which is the entire point of writing that rule down.
+
+> **Worked example — why `facing_brad` and `action` did not bump it.** Both were
+> added to `EntitySnapshot` in the same change that introduced this field, and
+> both left it at `1`. An old server never sends them, and the receiver's
+> documented fallback (keep the last facing, or derive one from movement) is
+> visibly approximate rather than silently wrong. A new server sends them and an
+> old client skips two unknown fields. Neither direction diverges. A rule that
+> fired on every change would be a build counter, not a compatibility contract.
+
+#### When it is absent or zero
+
+**`protocol_version` absent or `0` means "this peer does not advertise a
+version"** — a peer predating the field. proto3 elides a zero `uint32`, so absent
+and an explicit `0` are the same bytes. Real versions therefore **start at 1**,
+and `0` is permanently reserved for "unknown" — exactly as
+`ENTITY_TYPE_UNSPECIFIED` reserves `0`. **Never read `0` as "version zero".**
+
+A server **admits** an unversioned peer by default, and **counts** it. The
+counters are `gateway_unversioned_handshakes_total` and
+`gameserver_handshakes_unversioned_total`.
+
+That default is a deployment choice, not a property of the protocol. On the day
+this field ships, every client in existence sends `0`; refusing them all would
+close a hypothetical by breaking everything real. The admission is on **trust** —
+a pre-versioning build and a non-conforming one are indistinguishable — so it
+must be visible, which is what the counter is for. An admission nobody can see is
+behaviourally identical to having no check at all, and is the silent fallback the
+`tick_rate` rule above forbids.
+
+**The migration** is one flag. Set `--min-protocol-version=1` (gateway) or
+`GAMESERVER_MIN_PROTOCOL_VERSION=1` (game server) once the unversioned counter
+has gone flat at zero across a deploy window, and an unversioned peer is then
+refused through the *same named path* as a mismatched one — not a second
+convention. Flipping while the counter still moves locks out real players.
+
+#### Who refuses, and how
+
+**The server side of each hop refuses; the client never does.** The refusal is a
+named reason, never a parse error and never a silent close:
+
+| Hop | Frame | Field | Value |
+|---|---|---|---|
+| gateway | `auth_resp` (2) | `error` | `protocol_version_mismatch` |
+| game server | `join_token_resp` (6) | `error` | `protocol_version_mismatch` |
+
+The token follows the existing machine-readable reason convention
+(`duplicate_login`, `server_shutdown`, `session_expired`, `rate_limited`): a bare
+string a client branches on. The version numbers go in the server's log and
+metrics, not in the token — a reason that embeds numbers is one a client parses
+with a regex, or more likely not at all.
+
+The gateway **closes the connection** after the refusal. Unlike a bad token this
+is not retryable on the same connection: nothing the client can do without a new
+build changes the answer, so holding the socket open would only invite a retry
+loop into the same wall. A client MUST treat this reason as **permanent** and not
+spend its reconnect budget on it.
+
+**The check runs before credential verification** on both hops. A peer that
+cannot speak this schema is refused whether or not its token is good: the refusal
+is about the connection being unusable, not about who is on the far end. Reporting
+`invalid token` to a client whose real problem is that it is a build behind sends
+the operator to the wrong layer, which is precisely the wasted chase this field
+exists to prevent.
+
+#### The matching rule is exact
+
+A peer one version **ahead** is refused just as firmly as one behind. This build
+cannot know what a later version changed, so admitting it would be a guess made at
+exactly the moment the protocol said not to guess. A real compatibility window
+would have to be a min/max pair negotiated on the wire — a deliberate schema
+change, not an accident of a `>=`.
+
+#### Where the constant lives
+
+The number is mirrored by hand in three places, because no language can be
+authoritative for the other two:
+
+| Side | Constant |
+|---|---|
+| Go | `shared/messages.WireProtocolVersion` |
+| C# server | `GameServer/Net/WireProtocol.ProtocolVersion` |
+| Unity client | `Runtime/Protocol/WireProtocolVersion.Current` |
+
+Each side asserts its own value by test. A bump is a three-file edit plus a new
+row in the version table above.
 
 ### Heartbeat (`ping` / `pong`) — MANDATORY
 

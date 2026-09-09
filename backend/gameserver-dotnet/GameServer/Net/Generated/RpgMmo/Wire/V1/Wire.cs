@@ -25,53 +25,56 @@ namespace RpgMmo.Wire.V1 {
       byte[] descriptorData = global::System.Convert.FromBase64String(
           string.Concat(
             "Cgp3aXJlLnByb3RvEg5ycGdtbW8ud2lyZS52MSIpCghFbnZlbG9wZRIMCgR0",
-            "eXBlGAEgASgNEg8KB3BheWxvYWQYAiABKAwiHAoLQXV0aFJlcXVlc3QSDQoF",
-            "dG9rZW4YASABKAkiOgoMQXV0aFJlc3BvbnNlEgoKAm9rGAEgASgIEg8KB3Vz",
-            "ZXJfaWQYAiABKAkSDQoFZXJyb3IYAyABKAkiIwoRRW50ZXJXb3JsZFJlcXVl",
-            "c3QSDgoGbWFwX2lkGAEgASgJIl8KEkVudGVyV29ybGRSZXNwb25zZRITCgtz",
-            "ZXJ2ZXJfYWRkchgBIAEoCRISCgpqb2luX3Rva2VuGAIgASgJEhEKCXRyYW5z",
-            "cG9ydBgDIAEoCRINCgVlcnJvchgEIAEoCSIhChBKb2luVG9rZW5SZXF1ZXN0",
-            "Eg0KBXRva2VuGAEgASgJIlIKEUpvaW5Ub2tlblJlc3BvbnNlEgoKAm9rGAEg",
-            "ASgIEg8KB3VzZXJfaWQYAiABKAkSDQoFZXJyb3IYAyABKAkSEQoJdGlja19y",
-            "YXRlGAQgASgNIlYKDElucHV0TWVzc2FnZRIMCgR0aWNrGAEgASgEEg4KBm1v",
-            "dmVfeBgCIAEoAhIOCgZtb3ZlX3kYAyABKAISGAoQYXR0YWNrX3RhcmdldF9p",
-            "ZBgEIAEoCSKqAQoORW50aXR5U25hcHNob3QSCgoCaWQYASABKAkSEQoJdHlw",
-            "ZV9uYW1lGAIgASgJEgkKAXgYAyABKAISCQoBeRgEIAEoAhIKCgJocBgFIAEo",
-            "BRIOCgZtYXhfaHAYBiABKAUSKAoEdHlwZRgHIAEoDjIaLnJwZ21tby53aXJl",
-            "LnYxLkVudGl0eVR5cGUSDgoGaGFuZGxlGAggASgNEg0KBXNwZWVkGAkgASgC",
-            "IoIBCg9TbmFwc2hvdE1lc3NhZ2USDAoEdGljaxgBIAEoBBIQCghhY2tfdGlj",
-            "axgCIAEoBBIMCgRmdWxsGAMgASgIEjAKCGVudGl0aWVzGAQgAygLMh4ucnBn",
-            "bW1vLndpcmUudjEuRW50aXR5U25hcHNob3QSDwoHcmVtb3ZlZBgFIAMoCSIj",
-            "ChFEaXNjb25uZWN0TWVzc2FnZRIOCgZyZWFzb24YASABKAkiDwoNUmVzeW5j",
-            "UmVxdWVzdCIkChJUcmFuc2Zlck1hcFJlcXVlc3QSDgoGbWFwX2lkGAEgASgJ",
-            "IjAKE1RyYW5zZmVyTWFwUmVzcG9uc2USCgoCb2sYASABKAgSDQoFZXJyb3IY",
-            "AiABKAkiIAoLUGluZ01lc3NhZ2USEQoJdGltZXN0YW1wGAEgASgDIjUKC1Bv",
-            "bmdNZXNzYWdlEhEKCXRpbWVzdGFtcBgBIAEoAxITCgtzZXJ2ZXJfdGltZRgC",
-            "IAEoAyIdCgtLaWNrTWVzc2FnZRIOCgZyZWFzb24YASABKAkqiwMKB01zZ1R5",
-            "cGUSGAoUTVNHX1RZUEVfVU5TUEVDSUZJRUQQABIRCg1NU0dfVFlQRV9BVVRI",
-            "EAESFgoSTVNHX1RZUEVfQVVUSF9SRVNQEAISGAoUTVNHX1RZUEVfRU5URVJf",
-            "V09STEQQAxIdChlNU0dfVFlQRV9FTlRFUl9XT1JMRF9SRVNQEAQSFwoTTVNH",
-            "X1RZUEVfSk9JTl9UT0tFThAFEhwKGE1TR19UWVBFX0pPSU5fVE9LRU5fUkVT",
-            "UBAGEhIKDk1TR19UWVBFX0lOUFVUEAcSFQoRTVNHX1RZUEVfU05BUFNIT1QQ",
-            "CBIXChNNU0dfVFlQRV9ESVNDT05ORUNUEAkSEwoPTVNHX1RZUEVfUkVTWU5D",
-            "EAoSGQoVTVNHX1RZUEVfVFJBTlNGRVJfTUFQEA0SHgoaTVNHX1RZUEVfVFJB",
-            "TlNGRVJfTUFQX1JFU1AQDhIRCg1NU0dfVFlQRV9QSU5HEAsSEQoNTVNHX1RZ",
-            "UEVfUE9ORxAMEhEKDU1TR19UWVBFX0tJQ0sQDyqdAQoKRW50aXR5VHlwZRIb",
-            "ChdFTlRJVFlfVFlQRV9VTlNQRUNJRklFRBAAEhYKEkVOVElUWV9UWVBFX1BM",
-            "QVlFUhABEhMKD0VOVElUWV9UWVBFX01PQhACEhMKD0VOVElUWV9UWVBFX05Q",
-            "QxADEhQKEEVOVElUWV9UWVBFX0lURU0QBBIaChZFTlRJVFlfVFlQRV9QUk9K",
-            "RUNUSUxFEAVCRlozZ2l0aHViLmNvbS9kdXljdW9uZy9ycGctbW1vL3NoYXJl",
-            "ZC9wcm90by9nZW47d2lyZXBiqgIOUnBnTW1vLldpcmUuVjFiBnByb3RvMw=="));
+            "eXBlGAEgASgNEg8KB3BheWxvYWQYAiABKAwiNgoLQXV0aFJlcXVlc3QSDQoF",
+            "dG9rZW4YASABKAkSGAoQcHJvdG9jb2xfdmVyc2lvbhgCIAEoDSJUCgxBdXRo",
+            "UmVzcG9uc2USCgoCb2sYASABKAgSDwoHdXNlcl9pZBgCIAEoCRINCgVlcnJv",
+            "chgDIAEoCRIYChBwcm90b2NvbF92ZXJzaW9uGAQgASgNIiMKEUVudGVyV29y",
+            "bGRSZXF1ZXN0Eg4KBm1hcF9pZBgBIAEoCSJfChJFbnRlcldvcmxkUmVzcG9u",
+            "c2USEwoLc2VydmVyX2FkZHIYASABKAkSEgoKam9pbl90b2tlbhgCIAEoCRIR",
+            "Cgl0cmFuc3BvcnQYAyABKAkSDQoFZXJyb3IYBCABKAkiOwoQSm9pblRva2Vu",
+            "UmVxdWVzdBINCgV0b2tlbhgBIAEoCRIYChBwcm90b2NvbF92ZXJzaW9uGAIg",
+            "ASgNImwKEUpvaW5Ub2tlblJlc3BvbnNlEgoKAm9rGAEgASgIEg8KB3VzZXJf",
+            "aWQYAiABKAkSDQoFZXJyb3IYAyABKAkSEQoJdGlja19yYXRlGAQgASgNEhgK",
+            "EHByb3RvY29sX3ZlcnNpb24YBSABKA0iVgoMSW5wdXRNZXNzYWdlEgwKBHRp",
+            "Y2sYASABKAQSDgoGbW92ZV94GAIgASgCEg4KBm1vdmVfeRgDIAEoAhIYChBh",
+            "dHRhY2tfdGFyZ2V0X2lkGAQgASgJIqoBCg5FbnRpdHlTbmFwc2hvdBIKCgJp",
+            "ZBgBIAEoCRIRCgl0eXBlX25hbWUYAiABKAkSCQoBeBgDIAEoAhIJCgF5GAQg",
+            "ASgCEgoKAmhwGAUgASgFEg4KBm1heF9ocBgGIAEoBRIoCgR0eXBlGAcgASgO",
+            "MhoucnBnbW1vLndpcmUudjEuRW50aXR5VHlwZRIOCgZoYW5kbGUYCCABKA0S",
+            "DQoFc3BlZWQYCSABKAIiggEKD1NuYXBzaG90TWVzc2FnZRIMCgR0aWNrGAEg",
+            "ASgEEhAKCGFja190aWNrGAIgASgEEgwKBGZ1bGwYAyABKAgSMAoIZW50aXRp",
+            "ZXMYBCADKAsyHi5ycGdtbW8ud2lyZS52MS5FbnRpdHlTbmFwc2hvdBIPCgdy",
+            "ZW1vdmVkGAUgAygJIiMKEURpc2Nvbm5lY3RNZXNzYWdlEg4KBnJlYXNvbhgB",
+            "IAEoCSIPCg1SZXN5bmNSZXF1ZXN0IiQKElRyYW5zZmVyTWFwUmVxdWVzdBIO",
+            "CgZtYXBfaWQYASABKAkiMAoTVHJhbnNmZXJNYXBSZXNwb25zZRIKCgJvaxgB",
+            "IAEoCBINCgVlcnJvchgCIAEoCSIgCgtQaW5nTWVzc2FnZRIRCgl0aW1lc3Rh",
+            "bXAYASABKAMiNQoLUG9uZ01lc3NhZ2USEQoJdGltZXN0YW1wGAEgASgDEhMK",
+            "C3NlcnZlcl90aW1lGAIgASgDIh0KC0tpY2tNZXNzYWdlEg4KBnJlYXNvbhgB",
+            "IAEoCSqLAwoHTXNnVHlwZRIYChRNU0dfVFlQRV9VTlNQRUNJRklFRBAAEhEK",
+            "DU1TR19UWVBFX0FVVEgQARIWChJNU0dfVFlQRV9BVVRIX1JFU1AQAhIYChRN",
+            "U0dfVFlQRV9FTlRFUl9XT1JMRBADEh0KGU1TR19UWVBFX0VOVEVSX1dPUkxE",
+            "X1JFU1AQBBIXChNNU0dfVFlQRV9KT0lOX1RPS0VOEAUSHAoYTVNHX1RZUEVf",
+            "Sk9JTl9UT0tFTl9SRVNQEAYSEgoOTVNHX1RZUEVfSU5QVVQQBxIVChFNU0df",
+            "VFlQRV9TTkFQU0hPVBAIEhcKE01TR19UWVBFX0RJU0NPTk5FQ1QQCRITCg9N",
+            "U0dfVFlQRV9SRVNZTkMQChIZChVNU0dfVFlQRV9UUkFOU0ZFUl9NQVAQDRIe",
+            "ChpNU0dfVFlQRV9UUkFOU0ZFUl9NQVBfUkVTUBAOEhEKDU1TR19UWVBFX1BJ",
+            "TkcQCxIRCg1NU0dfVFlQRV9QT05HEAwSEQoNTVNHX1RZUEVfS0lDSxAPKp0B",
+            "CgpFbnRpdHlUeXBlEhsKF0VOVElUWV9UWVBFX1VOU1BFQ0lGSUVEEAASFgoS",
+            "RU5USVRZX1RZUEVfUExBWUVSEAESEwoPRU5USVRZX1RZUEVfTU9CEAISEwoP",
+            "RU5USVRZX1RZUEVfTlBDEAMSFAoQRU5USVRZX1RZUEVfSVRFTRAEEhoKFkVO",
+            "VElUWV9UWVBFX1BST0pFQ1RJTEUQBUJGWjNnaXRodWIuY29tL2R1eWN1b25n",
+            "L3JwZy1tbW8vc2hhcmVkL3Byb3RvL2dlbjt3aXJlcGKqAg5ScGdNbW8uV2ly",
+            "ZS5WMWIGcHJvdG8z"));
       descriptor = pbr::FileDescriptor.FromGeneratedCode(descriptorData,
           new pbr::FileDescriptor[] { },
           new pbr::GeneratedClrTypeInfo(new[] {typeof(global::RpgMmo.Wire.V1.MsgType), typeof(global::RpgMmo.Wire.V1.EntityType), }, null, new pbr::GeneratedClrTypeInfo[] {
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.Envelope), global::RpgMmo.Wire.V1.Envelope.Parser, new[]{ "Type", "Payload" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.AuthRequest), global::RpgMmo.Wire.V1.AuthRequest.Parser, new[]{ "Token" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.AuthResponse), global::RpgMmo.Wire.V1.AuthResponse.Parser, new[]{ "Ok", "UserId", "Error" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.AuthRequest), global::RpgMmo.Wire.V1.AuthRequest.Parser, new[]{ "Token", "ProtocolVersion" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.AuthResponse), global::RpgMmo.Wire.V1.AuthResponse.Parser, new[]{ "Ok", "UserId", "Error", "ProtocolVersion" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EnterWorldRequest), global::RpgMmo.Wire.V1.EnterWorldRequest.Parser, new[]{ "MapId" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EnterWorldResponse), global::RpgMmo.Wire.V1.EnterWorldResponse.Parser, new[]{ "ServerAddr", "JoinToken", "Transport", "Error" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenRequest), global::RpgMmo.Wire.V1.JoinTokenRequest.Parser, new[]{ "Token" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenResponse), global::RpgMmo.Wire.V1.JoinTokenResponse.Parser, new[]{ "Ok", "UserId", "Error", "TickRate" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenRequest), global::RpgMmo.Wire.V1.JoinTokenRequest.Parser, new[]{ "Token", "ProtocolVersion" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenResponse), global::RpgMmo.Wire.V1.JoinTokenResponse.Parser, new[]{ "Ok", "UserId", "Error", "TickRate", "ProtocolVersion" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.InputMessage), global::RpgMmo.Wire.V1.InputMessage.Parser, new[]{ "Tick", "MoveX", "MoveY", "AttackTargetId" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EntitySnapshot), global::RpgMmo.Wire.V1.EntitySnapshot.Parser, new[]{ "Id", "TypeName", "X", "Y", "Hp", "MaxHp", "Type", "Handle", "Speed" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.SnapshotMessage), global::RpgMmo.Wire.V1.SnapshotMessage.Parser, new[]{ "Tick", "AckTick", "Full", "Entities", "Removed" }, null, null, null, null),
@@ -192,8 +195,15 @@ namespace RpgMmo.Wire.V1 {
   /// `type` is field 1 and is always >= 1 for any real message, so proto3 never
   /// elides it and an encoded Envelope ALWAYS begins with tag byte 0x08. A JSON
   /// envelope always begins with '{' (0x7B). Those cannot collide, which is what
-  /// lets a peer identify the encoding from the first body byte alone — no version
-  /// negotiation and no extra handshake round trip. See docs/DESIGN.md.
+  /// lets a peer identify the ENCODING from the first body byte alone — no
+  /// encoding negotiation and no extra handshake round trip. See docs/DESIGN.md.
+  ///
+  /// That sniffing answers "how are these bytes framed", NOT "do the two sides
+  /// agree on what the fields mean". The latter is `protocol_version`, carried on
+  /// the two handshake requests (AuthRequest, JoinTokenRequest) and echoed on their
+  /// responses. It costs nothing per message — deliberately NOT a field here,
+  /// because an Envelope field is paid on every snapshot of every tick forever to
+  /// re-state a number that cannot change within a connection.
   ///
   /// `payload` stays opaque bytes rather than becoming a oneof so that routing and
   /// payload decoding remain separable, exactly as in the JSON encoding: a proxy or
@@ -473,6 +483,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public AuthRequest(AuthRequest other) : this() {
       token_ = other.token_;
+      protocolVersion_ = other.protocolVersion_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -494,6 +505,23 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "protocol_version" field.</summary>
+    public const int ProtocolVersionFieldNumber = 2;
+    private uint protocolVersion_;
+    /// <summary>
+    /// Wire protocol version this client implements. See "Protocol version" above.
+    /// Zero means "not advertised" (a client predating the field), which is
+    /// admitted or refused according to the gateway's --min-protocol-version.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint ProtocolVersion {
+      get { return protocolVersion_; }
+      set {
+        protocolVersion_ = value;
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -510,6 +538,7 @@ namespace RpgMmo.Wire.V1 {
         return true;
       }
       if (Token != other.Token) return false;
+      if (ProtocolVersion != other.ProtocolVersion) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -518,6 +547,7 @@ namespace RpgMmo.Wire.V1 {
     public override int GetHashCode() {
       int hash = 1;
       if (Token.Length != 0) hash ^= Token.GetHashCode();
+      if (ProtocolVersion != 0) hash ^= ProtocolVersion.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -540,6 +570,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(10);
         output.WriteString(Token);
       }
+      if (ProtocolVersion != 0) {
+        output.WriteRawTag(16);
+        output.WriteUInt32(ProtocolVersion);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -554,6 +588,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(10);
         output.WriteString(Token);
       }
+      if (ProtocolVersion != 0) {
+        output.WriteRawTag(16);
+        output.WriteUInt32(ProtocolVersion);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -566,6 +604,9 @@ namespace RpgMmo.Wire.V1 {
       int size = 0;
       if (Token.Length != 0) {
         size += 1 + pb::CodedOutputStream.ComputeStringSize(Token);
+      }
+      if (ProtocolVersion != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(ProtocolVersion);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -581,6 +622,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.Token.Length != 0) {
         Token = other.Token;
+      }
+      if (other.ProtocolVersion != 0) {
+        ProtocolVersion = other.ProtocolVersion;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -605,6 +649,10 @@ namespace RpgMmo.Wire.V1 {
             Token = input.ReadString();
             break;
           }
+          case 16: {
+            ProtocolVersion = input.ReadUInt32();
+            break;
+          }
         }
       }
     #endif
@@ -626,6 +674,10 @@ namespace RpgMmo.Wire.V1 {
             break;
           case 10: {
             Token = input.ReadString();
+            break;
+          }
+          case 16: {
+            ProtocolVersion = input.ReadUInt32();
             break;
           }
         }
@@ -676,6 +728,7 @@ namespace RpgMmo.Wire.V1 {
       ok_ = other.ok_;
       userId_ = other.userId_;
       error_ = other.error_;
+      protocolVersion_ = other.protocolVersion_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -721,6 +774,25 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "protocol_version" field.</summary>
+    public const int ProtocolVersionFieldNumber = 4;
+    private uint protocolVersion_;
+    /// <summary>
+    /// The gateway's own wire protocol version, echoed so a new client can detect
+    /// an OLD gateway: a gateway predating this field replies with 0 here, and 0 is
+    /// the client's only signal that its version was never checked. Sent on
+    /// rejection too — unlike tick_rate, this is not privileged tuning, and a
+    /// client refused for a version mismatch needs to know which version to be.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint ProtocolVersion {
+      get { return protocolVersion_; }
+      set {
+        protocolVersion_ = value;
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -739,6 +811,7 @@ namespace RpgMmo.Wire.V1 {
       if (Ok != other.Ok) return false;
       if (UserId != other.UserId) return false;
       if (Error != other.Error) return false;
+      if (ProtocolVersion != other.ProtocolVersion) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -749,6 +822,7 @@ namespace RpgMmo.Wire.V1 {
       if (Ok != false) hash ^= Ok.GetHashCode();
       if (UserId.Length != 0) hash ^= UserId.GetHashCode();
       if (Error.Length != 0) hash ^= Error.GetHashCode();
+      if (ProtocolVersion != 0) hash ^= ProtocolVersion.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -779,6 +853,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(26);
         output.WriteString(Error);
       }
+      if (ProtocolVersion != 0) {
+        output.WriteRawTag(32);
+        output.WriteUInt32(ProtocolVersion);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -801,6 +879,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(26);
         output.WriteString(Error);
       }
+      if (ProtocolVersion != 0) {
+        output.WriteRawTag(32);
+        output.WriteUInt32(ProtocolVersion);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -819,6 +901,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (Error.Length != 0) {
         size += 1 + pb::CodedOutputStream.ComputeStringSize(Error);
+      }
+      if (ProtocolVersion != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(ProtocolVersion);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -840,6 +925,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.Error.Length != 0) {
         Error = other.Error;
+      }
+      if (other.ProtocolVersion != 0) {
+        ProtocolVersion = other.ProtocolVersion;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -872,6 +960,10 @@ namespace RpgMmo.Wire.V1 {
             Error = input.ReadString();
             break;
           }
+          case 32: {
+            ProtocolVersion = input.ReadUInt32();
+            break;
+          }
         }
       }
     #endif
@@ -901,6 +993,10 @@ namespace RpgMmo.Wire.V1 {
           }
           case 26: {
             Error = input.ReadString();
+            break;
+          }
+          case 32: {
+            ProtocolVersion = input.ReadUInt32();
             break;
           }
         }
@@ -1465,6 +1561,7 @@ namespace RpgMmo.Wire.V1 {
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public JoinTokenRequest(JoinTokenRequest other) : this() {
       token_ = other.token_;
+      protocolVersion_ = other.protocolVersion_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -1486,6 +1583,32 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "protocol_version" field.</summary>
+    public const int ProtocolVersionFieldNumber = 2;
+    private uint protocolVersion_;
+    /// <summary>
+    /// Wire protocol version this client implements. See "Protocol version" above.
+    ///
+    /// Checked here INDEPENDENTLY of the gateway's check on AuthRequest, and that
+    /// duplication is deliberate rather than redundant. Under ADR-3 these are two
+    /// separate connections to two separate processes: the gateway is a redirector
+    /// that hands back {ServerAddr, JoinToken} and never carries a snapshot, so it
+    /// cannot vouch for a client's ability to read one. The gateway and the game
+    /// server are also deployed and upgraded independently, so "the gateway
+    /// accepted it" says nothing about the schema the game server encodes with —
+    /// and it is the game server, not the gateway, that a version disagreement
+    /// actually corrupts, because the snapshot stream is where a misparse turns
+    /// into a wrong world.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint ProtocolVersion {
+      get { return protocolVersion_; }
+      set {
+        protocolVersion_ = value;
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -1502,6 +1625,7 @@ namespace RpgMmo.Wire.V1 {
         return true;
       }
       if (Token != other.Token) return false;
+      if (ProtocolVersion != other.ProtocolVersion) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -1510,6 +1634,7 @@ namespace RpgMmo.Wire.V1 {
     public override int GetHashCode() {
       int hash = 1;
       if (Token.Length != 0) hash ^= Token.GetHashCode();
+      if (ProtocolVersion != 0) hash ^= ProtocolVersion.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -1532,6 +1657,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(10);
         output.WriteString(Token);
       }
+      if (ProtocolVersion != 0) {
+        output.WriteRawTag(16);
+        output.WriteUInt32(ProtocolVersion);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -1546,6 +1675,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(10);
         output.WriteString(Token);
       }
+      if (ProtocolVersion != 0) {
+        output.WriteRawTag(16);
+        output.WriteUInt32(ProtocolVersion);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -1558,6 +1691,9 @@ namespace RpgMmo.Wire.V1 {
       int size = 0;
       if (Token.Length != 0) {
         size += 1 + pb::CodedOutputStream.ComputeStringSize(Token);
+      }
+      if (ProtocolVersion != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(ProtocolVersion);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -1573,6 +1709,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.Token.Length != 0) {
         Token = other.Token;
+      }
+      if (other.ProtocolVersion != 0) {
+        ProtocolVersion = other.ProtocolVersion;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -1597,6 +1736,10 @@ namespace RpgMmo.Wire.V1 {
             Token = input.ReadString();
             break;
           }
+          case 16: {
+            ProtocolVersion = input.ReadUInt32();
+            break;
+          }
         }
       }
     #endif
@@ -1618,6 +1761,10 @@ namespace RpgMmo.Wire.V1 {
             break;
           case 10: {
             Token = input.ReadString();
+            break;
+          }
+          case 16: {
+            ProtocolVersion = input.ReadUInt32();
             break;
           }
         }
@@ -1669,6 +1816,7 @@ namespace RpgMmo.Wire.V1 {
       userId_ = other.userId_;
       error_ = other.error_;
       tickRate_ = other.tickRate_;
+      protocolVersion_ = other.protocolVersion_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -1735,6 +1883,28 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "protocol_version" field.</summary>
+    public const int ProtocolVersionFieldNumber = 5;
+    private uint protocolVersion_;
+    /// <summary>
+    /// The game server's own wire protocol version, echoed so a new client can
+    /// detect an OLD game server. See "Protocol version" above.
+    ///
+    /// Unlike `tick_rate`, this IS sent on a rejected join (`ok = false`). A
+    /// rejected client is told nothing about the server's tuning because it has not
+    /// proved it is entitled to it — but a client refused for a version mismatch
+    /// has to be told which version it failed against, or the refusal is as opaque
+    /// as the parse error it replaces and the operator learns nothing from it.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint ProtocolVersion {
+      get { return protocolVersion_; }
+      set {
+        protocolVersion_ = value;
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -1754,6 +1924,7 @@ namespace RpgMmo.Wire.V1 {
       if (UserId != other.UserId) return false;
       if (Error != other.Error) return false;
       if (TickRate != other.TickRate) return false;
+      if (ProtocolVersion != other.ProtocolVersion) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -1765,6 +1936,7 @@ namespace RpgMmo.Wire.V1 {
       if (UserId.Length != 0) hash ^= UserId.GetHashCode();
       if (Error.Length != 0) hash ^= Error.GetHashCode();
       if (TickRate != 0) hash ^= TickRate.GetHashCode();
+      if (ProtocolVersion != 0) hash ^= ProtocolVersion.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -1799,6 +1971,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(32);
         output.WriteUInt32(TickRate);
       }
+      if (ProtocolVersion != 0) {
+        output.WriteRawTag(40);
+        output.WriteUInt32(ProtocolVersion);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -1825,6 +2001,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(32);
         output.WriteUInt32(TickRate);
       }
+      if (ProtocolVersion != 0) {
+        output.WriteRawTag(40);
+        output.WriteUInt32(ProtocolVersion);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -1846,6 +2026,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (TickRate != 0) {
         size += 1 + pb::CodedOutputStream.ComputeUInt32Size(TickRate);
+      }
+      if (ProtocolVersion != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(ProtocolVersion);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -1870,6 +2053,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.TickRate != 0) {
         TickRate = other.TickRate;
+      }
+      if (other.ProtocolVersion != 0) {
+        ProtocolVersion = other.ProtocolVersion;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -1906,6 +2092,10 @@ namespace RpgMmo.Wire.V1 {
             TickRate = input.ReadUInt32();
             break;
           }
+          case 40: {
+            ProtocolVersion = input.ReadUInt32();
+            break;
+          }
         }
       }
     #endif
@@ -1939,6 +2129,10 @@ namespace RpgMmo.Wire.V1 {
           }
           case 32: {
             TickRate = input.ReadUInt32();
+            break;
+          }
+          case 40: {
+            ProtocolVersion = input.ReadUInt32();
             break;
           }
         }

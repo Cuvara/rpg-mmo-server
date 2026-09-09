@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **The game server refuses a version-mismatched client with
+  `protocol_version_mismatch`.** The join handshake now checks
+  `JoinTokenRequest.ProtocolVersion` (`WireProtocol.CheckProtocolVersion`) before
+  verifying the JWT, and answers `JoinTokenResponse{Ok:false,
+  Error:"protocol_version_mismatch"}`. Checked INDEPENDENTLY of the gateway's
+  check on `MsgAuth`: under ADR-3 these are two connections to two separately
+  deployed processes, the gateway never carries a snapshot, and it is this hop a
+  version disagreement actually corrupts.
+- **`WireProtocol.ProtocolVersion` (currently 1)**, `ProtocolVersionUnversioned`,
+  `ReasonProtocolVersionMismatch` and `CheckProtocolVersion`, mirroring
+  `shared/messages` in Go and `Runtime/Protocol/WireProtocolVersion` in the Unity
+  client. No language can be authoritative for the other two, so each pins the
+  value and asserts it by test.
+- **`GAMESERVER_MIN_PROTOCOL_VERSION` / `--min-protocol-version`** (default 0,
+  which also admits a client advertising nothing) and
+  `ServerOptions.MinProtocolVersion`.
+- **`HandshakeRejectReason.ProtocolVersion`** and the counter
+  `gameserver.handshakes.unversioned`. The new reject reason is deliberately
+  distinct from `malformed`: the frame parsed perfectly, and telling the two apart
+  is the difference between "a client is broken" and "a rollout is skewed".
+- **`JoinTokenResponse` echoes the server version on rejections too**, unlike
+  `tick_rate` — a client refused for a mismatch has to be told which version it
+  failed against, or the refusal is as opaque as the parse error it replaces.
+
 ### Fixed
 - **Kill rewards are retried under a stable batch id and never dropped** (audit
   2026-09-07 F06, P1). `KillRewardBatcher` minted a fresh GUID per send and dropped any

@@ -81,6 +81,14 @@ type ClientConn struct {
 	loggedAuthFail   bool
 	loggedUnexpected bool
 
+	// loggedUnversioned latches the once-per-connection notice that this peer
+	// advertised no protocol version. It is a THIRD latch rather than a reuse of
+	// loggedAuthFail because the two events are unrelated: sharing one would let
+	// an admitted-but-unversioned client spend the auth-failure budget and
+	// silently suppress the line for a genuine auth rejection later on the same
+	// connection. Read-loop goroutine only, like the two above.
+	loggedUnversioned bool
+
 	// lastSessionRefresh is when a MsgPong last re-armed the session TTL, used
 	// to bound pong-driven store writes to one per sessionRefreshInterval. Zero
 	// means never, so the first pong on an authenticated connection refreshes.
@@ -292,6 +300,20 @@ func (c *ClientConn) allowMessage() bool { return c.msgBucket.Allow() }
 func (c *ClientConn) firstAuthFailure() bool {
 	first := !c.loggedAuthFail
 	c.loggedAuthFail = true
+	return first
+}
+
+// firstUnversionedNotice reports whether this is the first time this connection
+// has been seen to advertise no protocol version, latching for subsequent
+// calls. ReadLoop goroutine only.
+//
+// Deliberately a SEPARATE latch from firstAuthFailure. Sharing that one would
+// let an admitted-but-unversioned client consume the auth-failure budget and
+// silently suppress the log line for a genuine auth rejection later on the same
+// connection — two unrelated events competing for one "log this once" token.
+func (c *ClientConn) firstUnversionedNotice() bool {
+	first := !c.loggedUnversioned
+	c.loggedUnversioned = true
 	return first
 }
 

@@ -5,6 +5,31 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Wire protocol version negotiation (`protocol_version`).** `wire.proto` had no
+  version field of any kind: client and server agreed on the meaning of the wire
+  by convention, and a version-skewed build was not refused — it connected,
+  parsed every byte and was confidently wrong. Adds `protocol_version` to
+  `AuthRequest`/`AuthResponse` (fields 2/4) and
+  `JoinTokenRequest`/`JoinTokenResponse` (fields 2/5), the constant
+  `messages.WireProtocolVersion` (currently **1**), `ProtocolVersionUnversioned`,
+  the reason token `ReasonProtocolVersionMismatch`
+  (`"protocol_version_mismatch"`), and `messages.CheckProtocolVersion` — the one
+  decision function both Go peers share.
+- **Semantics.** The number names what the schema MEANS, not its shape (proto3
+  already skips unknown fields) nor its encoding (already sniffed from byte 0).
+  It rides the two handshake requests, never `Envelope` — an envelope field would
+  be paid on every snapshot of every tick to restate a per-connection constant.
+  Matching is EXACT: a peer one version ahead is refused as firmly as one behind,
+  because a single integer carries no compatibility range.
+- **Zero means "did not advertise", and is admitted by default.** proto3 elides a
+  zero `uint32`, so a pre-versioning peer is indistinguishable from one sending
+  0 — the trap already documented on `EntitySnapshot.speed`. Versions start at 1
+  and 0 is reserved. Unversioned peers are admitted **on trust** and counted, so
+  the trust is visible; the migration is one flag once that counter goes flat.
+  Rationale and the rejected alternatives: `docs/DESIGN.md`, "Wire protocol
+  version".
+
 ## [0.9.0] - 2026-09-05
 
 ### Added

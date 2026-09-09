@@ -32,9 +32,9 @@ func marshalProtoPayload(v any) ([]byte, error) {
 		return nil, nil
 
 	case AuthRequest:
-		m = &wirepb.AuthRequest{Token: t.Token}
+		m = authReqPB(t)
 	case *AuthRequest:
-		m = &wirepb.AuthRequest{Token: t.Token}
+		m = authReqPB(*t)
 
 	case AuthResponse:
 		m = authRespPB(t)
@@ -52,9 +52,9 @@ func marshalProtoPayload(v any) ([]byte, error) {
 		m = enterWorldRespPB(*t)
 
 	case JoinTokenRequest:
-		m = &wirepb.JoinTokenRequest{Token: t.Token}
+		m = joinTokenReqPB(t)
 	case *JoinTokenRequest:
-		m = &wirepb.JoinTokenRequest{Token: t.Token}
+		m = joinTokenReqPB(*t)
 
 	case JoinTokenResponse:
 		m = joinTokenRespPB(t)
@@ -125,6 +125,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 			return wrapUnmarshal(v, err)
 		}
 		t.Token = pb.Token
+		t.ProtocolVersion = pb.ProtocolVersion
 
 	case *AuthResponse:
 		var pb wirepb.AuthResponse
@@ -132,6 +133,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 			return wrapUnmarshal(v, err)
 		}
 		t.OK, t.UserID, t.Error = pb.Ok, pb.UserId, pb.Error
+		t.ProtocolVersion = pb.ProtocolVersion
 
 	case *EnterWorldRequest:
 		var pb wirepb.EnterWorldRequest
@@ -154,6 +156,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 			return wrapUnmarshal(v, err)
 		}
 		t.Token = pb.Token
+		t.ProtocolVersion = pb.ProtocolVersion
 
 	case *JoinTokenResponse:
 		var pb wirepb.JoinTokenResponse
@@ -162,6 +165,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 		}
 		t.OK, t.UserID, t.Error = pb.Ok, pb.UserId, pb.Error
 		t.TickRate = pb.TickRate
+		t.ProtocolVersion = pb.ProtocolVersion
 
 	case *InputMessage:
 		var pb wirepb.InputMessage
@@ -255,8 +259,17 @@ func wrapUnmarshal(v any, err error) error {
 	return fmt.Errorf("unmarshal proto payload %T: %w", v, err)
 }
 
+func authReqPB(t AuthRequest) *wirepb.AuthRequest {
+	return &wirepb.AuthRequest{Token: t.Token, ProtocolVersion: t.ProtocolVersion}
+}
+
 func authRespPB(t AuthResponse) *wirepb.AuthResponse {
-	return &wirepb.AuthResponse{Ok: t.OK, UserId: t.UserID, Error: t.Error}
+	return &wirepb.AuthResponse{
+		Ok:              t.OK,
+		UserId:          t.UserID,
+		Error:           t.Error,
+		ProtocolVersion: t.ProtocolVersion,
+	}
 }
 
 func enterWorldRespPB(t EnterWorldResponse) *wirepb.EnterWorldResponse {
@@ -268,8 +281,18 @@ func enterWorldRespPB(t EnterWorldResponse) *wirepb.EnterWorldResponse {
 	}
 }
 
+func joinTokenReqPB(t JoinTokenRequest) *wirepb.JoinTokenRequest {
+	return &wirepb.JoinTokenRequest{Token: t.Token, ProtocolVersion: t.ProtocolVersion}
+}
+
 func joinTokenRespPB(t JoinTokenResponse) *wirepb.JoinTokenResponse {
-	return &wirepb.JoinTokenResponse{Ok: t.OK, UserId: t.UserID, Error: t.Error, TickRate: t.TickRate}
+	return &wirepb.JoinTokenResponse{
+		Ok:              t.OK,
+		UserId:          t.UserID,
+		Error:           t.Error,
+		TickRate:        t.TickRate,
+		ProtocolVersion: t.ProtocolVersion,
+	}
 }
 
 func transferMapRespPB(t TransferMapResponse) *wirepb.TransferMapResponse {

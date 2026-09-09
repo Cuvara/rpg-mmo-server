@@ -50,8 +50,15 @@ enum MsgType {
 // `type` is field 1 and is always >= 1 for any real message, so proto3 never
 // elides it and an encoded Envelope ALWAYS begins with tag byte 0x08. A JSON
 // envelope always begins with '{' (0x7B). Those cannot collide, which is what
-// lets a peer identify the encoding from the first body byte alone — no version
-// negotiation and no extra handshake round trip. See docs/DESIGN.md.
+// lets a peer identify the ENCODING from the first body byte alone — no
+// encoding negotiation and no extra handshake round trip. See docs/DESIGN.md.
+//
+// That sniffing answers "how are these bytes framed", NOT "do the two sides
+// agree on what the fields mean". The latter is `protocol_version`, carried on
+// the two handshake requests (AuthRequest, JoinTokenRequest) and echoed on their
+// responses. It costs nothing per message — deliberately NOT a field here,
+// because an Envelope field is paid on every snapshot of every tick forever to
+// re-state a number that cannot change within a connection.
 //
 // `payload` stays opaque bytes rather than becoming a oneof so that routing and
 // payload decoding remain separable, exactly as in the JSON encoding: a proxy or
@@ -61,11 +68,87 @@ message Envelope {
   bytes payload = 2;
 }
 
+// --- Protocol version ---
+//
+// THE CONTRACT. `protocol_version` is a single monotonically increasing integer
+// naming the SEMANTICS of this schema — not its shape, and not the encoding.
+// Shape is already self-describing (proto3 skips unknown fields) and encoding is
+// already sniffed from byte 0. What neither of those catches is two peers that
+// parse every byte successfully and disagree about what a field MEANS. That is
+// the failure this number exists to make loud: it compiles, it connects, and the
+// numbers are consistent about the wrong thing.
+//
+// The current version is defined ONCE, in Go, at
+// `shared/messages.WireProtocolVersion`; C# mirrors it in
+// `GameServer/Net/WireProtocol.cs` and the Unity client in
+// `Runtime/Protocol/WireProtocolVersion.cs`. All three are asserted equal by
+// test on their own side; there is no way to make one file authoritative across
+// three languages, so each pins the constant and a golden vector ties them.
+//
+// WHEN TO BUMP IT. Bump for any change that would let a conforming peer of the
+// previous version misinterpret a conforming peer of the new one:
+//
+//   1. Reusing or renumbering a field number, or removing a field that a
+//      receiver acts on.
+//   2. Changing the MEANING, units, range or reference frame of an existing
+//      field (e.g. speed switching from units/second to units/tick). This is the
+//      dangerous class: the bytes stay identical and only the interpretation
+//      moves, so nothing anywhere errors.
+//   3. Changing the snapshot state machine — handle lifecycle, keyframe reset
+//      points, the delta "what counts as changed" rule, or the normative merge
+//      algorithm in gameserver-dotnet/docs/API.md.
+//   4. Adding a message or field that a receiver MUST act on to stay correct —
+//      i.e. one where ignoring it silently diverges rather than degrades.
+//
+// DO NOT bump for a purely additive optional field whose absence is covered by a
+// documented "zero means not sent" rule and whose omission degrades visibly
+// rather than diverging silently. An old peer ignoring it is then a supported
+// configuration, which is the whole point of writing that rule down. `facing`
+// and `action` (EntitySnapshot, version 1) are exactly this case and did NOT
+// bump the number — a rule that fired on every change would be a build counter,
+// not a compatibility contract.
+//
+// ZERO MEANS "NOT SENT", AND IS NOT REFUSED BY DEFAULT. proto3 elides a zero
+// uint32, so a peer predating this field is indistinguishable on the wire from
+// one sending 0 — the same trap documented at length on EntitySnapshot.speed.
+// Version numbering therefore starts at 1, never 0, and 0 is reserved to mean
+// "this peer does not advertise a version".
+//
+// A receiver ADMITS an unversioned peer by default and counts it
+// (`*_unversioned_handshakes_total`), because on the day this field ships every
+// client in existence sends 0 and refusing them all is a flag day that closes a
+// hypothetical by breaking everything real. The admission is a configured
+// default, not a property of the protocol: set the gateway's
+// `--min-protocol-version` or the game server's `GAMESERVER_MIN_PROTOCOL_VERSION`
+// to 1 once the fleet advertises, and an unversioned peer is refused through the
+// same named path as a mismatched one. That flip is the migration, and until it
+// happens the counter is what tells you whether it is safe.
+//
+// WHO REFUSES AND HOW. The server side of each hop refuses, never the client,
+// and it refuses with a NAMED REASON rather than a parse failure or a silent
+// close: `protocol_version_mismatch`, in the `error` field of AuthResponse or
+// JoinTokenResponse, matching the existing reason-string convention
+// (`server_shutdown`, `session_expired`, `rate_limited`). Both hops check
+// independently — passing the gateway does NOT vouch for the client at the game
+// server, because under ADR-3 the gateway is a redirector that never sees a
+// snapshot, and a client can hold a valid join token while disagreeing with the
+// game server about the schema the join token gives it access to.
+//
+// The responses ECHO the server's own version. That is the only way a NEW client
+// detects an OLD server: an old server does not know the field, ignores it, and
+// replies without one, so a client that sees 0 coming back knows it is talking
+// to a peer that never checked. Nothing else on the wire reveals that.
+
 // --- Gateway handshake ---
 
 // AuthRequest is sent by the client to authenticate with the gateway.
 message AuthRequest {
   string token = 1;
+
+  // Wire protocol version this client implements. See "Protocol version" above.
+  // Zero means "not advertised" (a client predating the field), which is
+  // admitted or refused according to the gateway's --min-protocol-version.
+  uint32 protocol_version = 2;
 }
 
 // AuthResponse is the gateway's reply to an auth request.
@@ -73,6 +156,13 @@ message AuthResponse {
   bool ok = 1;
   string user_id = 2;
   string error = 3;
+
+  // The gateway's own wire protocol version, echoed so a new client can detect
+  // an OLD gateway: a gateway predating this field replies with 0 here, and 0 is
+  // the client's only signal that its version was never checked. Sent on
+  // rejection too — unlike tick_rate, this is not privileged tuning, and a
+  // client refused for a version mismatch needs to know which version to be.
+  uint32 protocol_version = 4;
 }
 
 // EnterWorldRequest asks the gateway to assign a map server.
@@ -96,6 +186,20 @@ message EnterWorldResponse {
 // JoinTokenRequest is sent by the client to authenticate with a game server.
 message JoinTokenRequest {
   string token = 1;
+
+  // Wire protocol version this client implements. See "Protocol version" above.
+  //
+  // Checked here INDEPENDENTLY of the gateway's check on AuthRequest, and that
+  // duplication is deliberate rather than redundant. Under ADR-3 these are two
+  // separate connections to two separate processes: the gateway is a redirector
+  // that hands back {ServerAddr, JoinToken} and never carries a snapshot, so it
+  // cannot vouch for a client's ability to read one. The gateway and the game
+  // server are also deployed and upgraded independently, so "the gateway
+  // accepted it" says nothing about the schema the game server encodes with —
+  // and it is the game server, not the gateway, that a version disagreement
+  // actually corrupts, because the snapshot stream is where a misparse turns
+  // into a wrong world.
+  uint32 protocol_version = 2;
 }
 
 // JoinTokenResponse confirms whether the join was accepted.
@@ -111,6 +215,16 @@ message JoinTokenResponse {
   // that sees 0 must REFUSE to predict rather than assume 15: assuming is exactly
   // the silent desync this field closes (#93).
   uint32 tick_rate = 4;
+
+  // The game server's own wire protocol version, echoed so a new client can
+  // detect an OLD game server. See "Protocol version" above.
+  //
+  // Unlike `tick_rate`, this IS sent on a rejected join (`ok = false`). A
+  // rejected client is told nothing about the server's tuning because it has not
+  // proved it is entitled to it — but a client refused for a version mismatch
+  // has to be told which version it failed against, or the refusal is as opaque
+  // as the parse error it replaces and the operator learns nothing from it.
+  uint32 protocol_version = 5;
 }
 
 // --- Gameplay ---

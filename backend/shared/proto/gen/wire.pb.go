@@ -203,8 +203,15 @@ func (EntityType) EnumDescriptor() ([]byte, []int) {
 // `type` is field 1 and is always >= 1 for any real message, so proto3 never
 // elides it and an encoded Envelope ALWAYS begins with tag byte 0x08. A JSON
 // envelope always begins with '{' (0x7B). Those cannot collide, which is what
-// lets a peer identify the encoding from the first body byte alone — no version
-// negotiation and no extra handshake round trip. See docs/DESIGN.md.
+// lets a peer identify the ENCODING from the first body byte alone — no
+// encoding negotiation and no extra handshake round trip. See docs/DESIGN.md.
+//
+// That sniffing answers "how are these bytes framed", NOT "do the two sides
+// agree on what the fields mean". The latter is `protocol_version`, carried on
+// the two handshake requests (AuthRequest, JoinTokenRequest) and echoed on their
+// responses. It costs nothing per message — deliberately NOT a field here,
+// because an Envelope field is paid on every snapshot of every tick forever to
+// re-state a number that cannot change within a connection.
 //
 // `payload` stays opaque bytes rather than becoming a oneof so that routing and
 // payload decoding remain separable, exactly as in the JSON encoding: a proxy or
@@ -263,10 +270,14 @@ func (x *Envelope) GetPayload() []byte {
 
 // AuthRequest is sent by the client to authenticate with the gateway.
 type AuthRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Token         string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Token string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	// Wire protocol version this client implements. See "Protocol version" above.
+	// Zero means "not advertised" (a client predating the field), which is
+	// admitted or refused according to the gateway's --min-protocol-version.
+	ProtocolVersion uint32 `protobuf:"varint,2,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *AuthRequest) Reset() {
@@ -306,14 +317,27 @@ func (x *AuthRequest) GetToken() string {
 	return ""
 }
 
+func (x *AuthRequest) GetProtocolVersion() uint32 {
+	if x != nil {
+		return x.ProtocolVersion
+	}
+	return 0
+}
+
 // AuthResponse is the gateway's reply to an auth request.
 type AuthResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Ok            bool                   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	UserId        string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
-	Error         string                 `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Ok     bool                   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	UserId string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Error  string                 `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
+	// The gateway's own wire protocol version, echoed so a new client can detect
+	// an OLD gateway: a gateway predating this field replies with 0 here, and 0 is
+	// the client's only signal that its version was never checked. Sent on
+	// rejection too — unlike tick_rate, this is not privileged tuning, and a
+	// client refused for a version mismatch needs to know which version to be.
+	ProtocolVersion uint32 `protobuf:"varint,4,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *AuthResponse) Reset() {
@@ -365,6 +389,13 @@ func (x *AuthResponse) GetError() string {
 		return x.Error
 	}
 	return ""
+}
+
+func (x *AuthResponse) GetProtocolVersion() uint32 {
+	if x != nil {
+		return x.ProtocolVersion
+	}
+	return 0
 }
 
 // EnterWorldRequest asks the gateway to assign a map server.
@@ -486,10 +517,23 @@ func (x *EnterWorldResponse) GetError() string {
 
 // JoinTokenRequest is sent by the client to authenticate with a game server.
 type JoinTokenRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Token         string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Token string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	// Wire protocol version this client implements. See "Protocol version" above.
+	//
+	// Checked here INDEPENDENTLY of the gateway's check on AuthRequest, and that
+	// duplication is deliberate rather than redundant. Under ADR-3 these are two
+	// separate connections to two separate processes: the gateway is a redirector
+	// that hands back {ServerAddr, JoinToken} and never carries a snapshot, so it
+	// cannot vouch for a client's ability to read one. The gateway and the game
+	// server are also deployed and upgraded independently, so "the gateway
+	// accepted it" says nothing about the schema the game server encodes with —
+	// and it is the game server, not the gateway, that a version disagreement
+	// actually corrupts, because the snapshot stream is where a misparse turns
+	// into a wrong world.
+	ProtocolVersion uint32 `protobuf:"varint,2,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *JoinTokenRequest) Reset() {
@@ -529,6 +573,13 @@ func (x *JoinTokenRequest) GetToken() string {
 	return ""
 }
 
+func (x *JoinTokenRequest) GetProtocolVersion() uint32 {
+	if x != nil {
+		return x.ProtocolVersion
+	}
+	return 0
+}
+
 // JoinTokenResponse confirms whether the join was accepted.
 type JoinTokenResponse struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
@@ -542,9 +593,18 @@ type JoinTokenResponse struct {
 	// 0 means "not supplied" (a pre-0.x server that predates this field). A client
 	// that sees 0 must REFUSE to predict rather than assume 15: assuming is exactly
 	// the silent desync this field closes (#93).
-	TickRate      uint32 `protobuf:"varint,4,opt,name=tick_rate,json=tickRate,proto3" json:"tick_rate,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	TickRate uint32 `protobuf:"varint,4,opt,name=tick_rate,json=tickRate,proto3" json:"tick_rate,omitempty"`
+	// The game server's own wire protocol version, echoed so a new client can
+	// detect an OLD game server. See "Protocol version" above.
+	//
+	// Unlike `tick_rate`, this IS sent on a rejected join (`ok = false`). A
+	// rejected client is told nothing about the server's tuning because it has not
+	// proved it is entitled to it — but a client refused for a version mismatch
+	// has to be told which version it failed against, or the refusal is as opaque
+	// as the parse error it replaces and the operator learns nothing from it.
+	ProtocolVersion uint32 `protobuf:"varint,5,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *JoinTokenResponse) Reset() {
@@ -601,6 +661,13 @@ func (x *JoinTokenResponse) GetError() string {
 func (x *JoinTokenResponse) GetTickRate() uint32 {
 	if x != nil {
 		return x.TickRate
+	}
+	return 0
+}
+
+func (x *JoinTokenResponse) GetProtocolVersion() uint32 {
+	if x != nil {
+		return x.ProtocolVersion
 	}
 	return 0
 }
@@ -1277,13 +1344,15 @@ const file_wire_proto_rawDesc = "" +
 	"wire.proto\x12\x0erpgmmo.wire.v1\"8\n" +
 	"\bEnvelope\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\rR\x04type\x12\x18\n" +
-	"\apayload\x18\x02 \x01(\fR\apayload\"#\n" +
+	"\apayload\x18\x02 \x01(\fR\apayload\"N\n" +
 	"\vAuthRequest\x12\x14\n" +
-	"\x05token\x18\x01 \x01(\tR\x05token\"M\n" +
+	"\x05token\x18\x01 \x01(\tR\x05token\x12)\n" +
+	"\x10protocol_version\x18\x02 \x01(\rR\x0fprotocolVersion\"x\n" +
 	"\fAuthResponse\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x14\n" +
-	"\x05error\x18\x03 \x01(\tR\x05error\"*\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error\x12)\n" +
+	"\x10protocol_version\x18\x04 \x01(\rR\x0fprotocolVersion\"*\n" +
 	"\x11EnterWorldRequest\x12\x15\n" +
 	"\x06map_id\x18\x01 \x01(\tR\x05mapId\"\x88\x01\n" +
 	"\x12EnterWorldResponse\x12\x1f\n" +
@@ -1292,14 +1361,16 @@ const file_wire_proto_rawDesc = "" +
 	"\n" +
 	"join_token\x18\x02 \x01(\tR\tjoinToken\x12\x1c\n" +
 	"\ttransport\x18\x03 \x01(\tR\ttransport\x12\x14\n" +
-	"\x05error\x18\x04 \x01(\tR\x05error\"(\n" +
+	"\x05error\x18\x04 \x01(\tR\x05error\"S\n" +
 	"\x10JoinTokenRequest\x12\x14\n" +
-	"\x05token\x18\x01 \x01(\tR\x05token\"o\n" +
+	"\x05token\x18\x01 \x01(\tR\x05token\x12)\n" +
+	"\x10protocol_version\x18\x02 \x01(\rR\x0fprotocolVersion\"\x9a\x01\n" +
 	"\x11JoinTokenResponse\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x14\n" +
 	"\x05error\x18\x03 \x01(\tR\x05error\x12\x1b\n" +
-	"\ttick_rate\x18\x04 \x01(\rR\btickRate\"z\n" +
+	"\ttick_rate\x18\x04 \x01(\rR\btickRate\x12)\n" +
+	"\x10protocol_version\x18\x05 \x01(\rR\x0fprotocolVersion\"z\n" +
 	"\fInputMessage\x12\x12\n" +
 	"\x04tick\x18\x01 \x01(\x04R\x04tick\x12\x15\n" +
 	"\x06move_x\x18\x02 \x01(\x02R\x05moveX\x12\x15\n" +

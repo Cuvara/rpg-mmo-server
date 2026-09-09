@@ -42,6 +42,12 @@ internal static class JsonWriter
             // encodings carry the same information: absent means "not supplied", and a
             // client must refuse to predict rather than assume a rate (#93).
             if (m.TickRate > 0) w.WriteNumber("tick_rate"u8, m.TickRate);
+            // Omitted when 0 for the same reason as tick_rate: absent must mean
+            // "this server does not advertise a version", and a client reading 0
+            // must not conclude "version zero". Unlike tick_rate this IS written
+            // on a rejection, because a client refused for a version mismatch has
+            // to be told which version it failed against.
+            if (m.ProtocolVersion > 0) w.WriteNumber("protocol_version"u8, m.ProtocolVersion);
             w.WriteEndObject();
         }
         return buffer.WrittenSpan.ToArray();
@@ -112,6 +118,7 @@ internal static class JsonWriter
         {
             w.WriteStartObject();
             w.WriteString("token"u8, m.Token);
+            if (m.ProtocolVersion > 0) w.WriteNumber("protocol_version"u8, m.ProtocolVersion);
             w.WriteEndObject();
         }
         return buffer.WrittenSpan.ToArray();
@@ -210,8 +217,13 @@ internal static class JsonReader
         while (r.Read() && r.TokenType != JsonTokenType.EndObject)
         {
             bool token = r.ValueTextEquals("token"u8);
+            bool protocolVersion = r.ValueTextEquals("protocol_version"u8);
             if (!r.Read()) break;
             if (token) m.Token = r.GetString() ?? "";
+            // Absent leaves the Protobuf default 0, which the version check
+            // reads as "did not advertise" — the same meaning as an elided
+            // proto3 field, so both encodings agree without a second rule.
+            else if (protocolVersion) m.ProtocolVersion = r.GetUInt32();
             else r.Skip();
         }
         return m;
@@ -228,11 +240,13 @@ internal static class JsonReader
             bool userId = r.ValueTextEquals("user_id"u8);
             bool error = r.ValueTextEquals("error"u8);
             bool tickRate = r.ValueTextEquals("tick_rate"u8);
+            bool protocolVersion = r.ValueTextEquals("protocol_version"u8);
             if (!r.Read()) break;
             if (ok) m.Ok = r.TokenType == JsonTokenType.True;
             else if (userId) m.UserId = r.GetString() ?? "";
             else if (error) m.Error = r.GetString() ?? "";
             else if (tickRate) m.TickRate = r.GetUInt32();
+            else if (protocolVersion) m.ProtocolVersion = r.GetUInt32();
             else r.Skip();
         }
         return m;

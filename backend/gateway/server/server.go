@@ -79,6 +79,18 @@ type Gateway struct {
 	// the gateway starts serving.
 	enterWorldBudget time.Duration
 
+	// minProtocolVersion is the lowest wire protocol version this gateway will
+	// admit on MsgAuth. Zero — the shipping default — also admits a client that
+	// advertises nothing, because proto3 elides a zero and every client built
+	// before the field is indistinguishable from one sending 0.
+	//
+	// Set it to messages.WireProtocolVersion once the fleet advertises and an
+	// unversioned client is refused through the same named path as a mismatched
+	// one. The gateway_unversioned_handshakes_total counter is what says that
+	// flip is safe; flipping it while the counter is still moving locks out real
+	// players. Immutable after the gateway starts serving.
+	minProtocolVersion uint32
+
 	mu        sync.Mutex
 	listener  net.Listener
 	conns     map[*ClientConn]struct{}
@@ -170,6 +182,15 @@ func WithMsgRateLimit(ratePerSec, burst float64) Option {
 	return func(g *Gateway) {
 		g.msgRate = ratePerSec
 		g.msgBurst = burst
+	}
+}
+
+// WithMinProtocolVersion sets the lowest wire protocol version the gateway
+// admits. Zero (the default) additionally admits clients that advertise no
+// version at all; see Gateway.minProtocolVersion.
+func WithMinProtocolVersion(v uint32) Option {
+	return func(g *Gateway) {
+		g.minProtocolVersion = v
 	}
 }
 
@@ -559,8 +580,9 @@ func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
 		g.logger.Warn("message rate limited",
 			"conn", cc.ID(), "ip", cc.RemoteIP(), "user", cc.UserID(), "type", env.Type)
 		resp, err := cc.Reply(messages.MsgAuthResp, messages.AuthResponse{
-			OK:    false,
-			Error: "rate limited",
+			OK:              false,
+			Error:           "rate limited",
+			ProtocolVersion: messages.WireProtocolVersion,
 		})
 		if err != nil {
 			cc.Close()
@@ -700,6 +722,45 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 		return
 	}
 
+	// The version check runs BEFORE the token is verified, deliberately. A peer
+	// that cannot speak this schema is refused whether or not its credential is
+	// good: the refusal is about the connection being unusable, not about who is
+	// on the far end, and answering "protocol_version_mismatch" to a valid token
+	// is more useful to an operator than answering "invalid token" to a client
+	// whose real problem is that it is a version behind. It also declines to
+	// spend an HMAC verification on a connection that is already refused.
+	switch messages.CheckProtocolVersion(req.ProtocolVersion, g.minProtocolVersion) {
+	case messages.VersionAccepted:
+		// Nothing to record: this is the expected path.
+
+	case messages.VersionAcceptedUnversioned:
+		// Admitted on trust. Counted, and logged once per connection, because an
+		// invisible fallback is behaviourally identical to having no check.
+		g.metrics.UnversionedHandshake()
+		// Debug, not Info: a healthy session has a documented per-session log
+		// budget (TestSessionVolumeIsBoundedPerSession) and this notice is not
+		// worth a line of it on every login during the whole migration window.
+		// gateway_unversioned_handshakes_total is the instrument that matters;
+		// this line only helps when someone is already looking at one connection.
+		if cc.firstUnversionedNotice() {
+			g.logger.Debug("client advertised no protocol version",
+				"conn", cc.ID(), "ip", cc.RemoteIP(),
+				"gateway_version", messages.WireProtocolVersion)
+		}
+
+	case messages.VersionRefused:
+		g.metrics.AuthResult(false)
+		g.metrics.ProtocolVersionRefused()
+		g.logAuthFailure(cc, slog.LevelWarn, "", messages.ReasonProtocolVersionMismatch,
+			messages.ProtocolVersionMismatchError(req.ProtocolVersion, g.minProtocolVersion))
+		// SendAndClose, not Send: unlike a bad token, this is not retryable on
+		// the same connection. Nothing the client can do without a new build
+		// will change the answer, so holding the socket open would only let it
+		// retry into the same refusal.
+		g.sendAuthRefusalAndClose(cc, messages.ReasonProtocolVersionMismatch)
+		return
+	}
+
 	userID, err := session.VerifyClientJWTKeyring(req.Token, g.authKeys)
 	if err != nil {
 		g.metrics.AuthResult(false)
@@ -777,8 +838,9 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 	}
 
 	resp, err := cc.Reply(messages.MsgAuthResp, messages.AuthResponse{
-		OK:     true,
-		UserID: userID,
+		OK:              true,
+		UserID:          userID,
+		ProtocolVersion: messages.WireProtocolVersion,
 	})
 	if err != nil {
 		g.logger.Error("marshal auth response", "err", err)
@@ -874,11 +936,35 @@ func (g *Gateway) sendAuthError(cc *ClientConn, msg string) {
 	resp, err := cc.Reply(messages.MsgAuthResp, messages.AuthResponse{
 		OK:    false,
 		Error: msg,
+		// Echoed on every failure, not only a version refusal: a client that
+		// cannot parse this frame's OTHER fields still learns which schema the
+		// gateway speaks, which is the one thing that tells it whether the
+		// failure is its credential or its build.
+		ProtocolVersion: messages.WireProtocolVersion,
 	})
 	if err != nil {
 		return
 	}
 	cc.Send(resp)
+}
+
+// sendAuthRefusalAndClose answers a version-refused client and hangs up.
+//
+// Send + Close would race: Close can RST the socket before the kernel has
+// flushed the frame, and the client would see a bare disconnect instead of the
+// named reason — which is precisely the failure this whole mechanism exists to
+// remove. SendAndClose flushes first.
+func (g *Gateway) sendAuthRefusalAndClose(cc *ClientConn, reason string) {
+	resp, err := cc.Reply(messages.MsgAuthResp, messages.AuthResponse{
+		OK:              false,
+		Error:           reason,
+		ProtocolVersion: messages.WireProtocolVersion,
+	})
+	if err != nil {
+		cc.Close()
+		return
+	}
+	cc.SendAndClose(resp)
 }
 
 // handleEnterWorld assigns a game server for the requested map and mints the

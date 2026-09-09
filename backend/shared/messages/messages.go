@@ -158,9 +158,56 @@ func (e Envelope) UnmarshalPayload(v any) error {
 // encodings. shared/messages/proto.go converts them to and from the generated
 // types; that conversion is the only place the two representations meet.
 
+// WireProtocolVersion is the version of the wire schema this build implements.
+//
+// It names the SEMANTICS of shared/proto/wire.proto — what the fields mean — not
+// its shape and not its encoding. Shape is self-describing (proto3 skips unknown
+// fields) and encoding is sniffed from byte 0; neither catches two peers that
+// parse every byte and disagree about what a field means, which is the failure
+// this number exists to make loud.
+//
+// Bump it for: reusing or renumbering a field, removing a field a receiver acts
+// on, changing the meaning/units/reference frame of an existing field, changing
+// the snapshot state machine (handle lifecycle, keyframe reset, the delta
+// "changed" rule, the normative merge algorithm), or adding something a receiver
+// MUST act on to stay correct. Do NOT bump for a purely additive optional field
+// covered by a documented "zero means not sent" rule — an old peer ignoring it
+// is a supported configuration, which is the point of writing that rule down.
+//
+// The full contract, including the migration path for unversioned peers, is in
+// shared/proto/wire.proto under "Protocol version", and normatively in
+// gameserver-dotnet/docs/API.md. C# mirrors this constant in
+// GameServer/Net/WireProtocol.cs and the Unity client in
+// Runtime/Protocol/WireProtocolVersion.cs; no language can be authoritative for
+// the other two, so each pins the value and tests assert it here.
+const WireProtocolVersion uint32 = 1
+
+// ProtocolVersionUnversioned is the wire value meaning "this peer does not
+// advertise a version" — a peer built before the field existed.
+//
+// proto3 elides a zero uint32, so an absent field and an explicit 0 are the same
+// bytes. Real versions therefore start at 1 and 0 is permanently reserved for
+// "unknown", exactly as ENTITY_TYPE_UNSPECIFIED reserves 0 in the entity-type
+// enum. A receiver must not read 0 as "version zero".
+const ProtocolVersionUnversioned uint32 = 0
+
+// ReasonProtocolVersionMismatch is the named reason a peer is refused for
+// speaking a different wire protocol version.
+//
+// It travels in the `error` field of AuthResponse or JoinTokenResponse and
+// follows the existing machine-readable reason convention ("duplicate_login",
+// "server_shutdown", "session_expired", "rate_limited"). The point of the whole
+// version handshake is that this string appears instead of a parse error, a
+// silent close, or — worst — a successful connection that is confidently wrong.
+const ReasonProtocolVersionMismatch = "protocol_version_mismatch"
+
 // AuthRequest is sent by the client to authenticate with the gateway.
 type AuthRequest struct {
 	Token string `json:"token"`
+	// ProtocolVersion is the wire schema version this client implements.
+	// 0 means "not advertised" (a client predating the field); the gateway
+	// admits or refuses that according to --min-protocol-version.
+	ProtocolVersion uint32 `json:"protocol_version,omitempty"`
 }
 
 // AuthResponse is the gateway's reply to an auth request.
@@ -168,6 +215,12 @@ type AuthResponse struct {
 	OK     bool   `json:"ok"`
 	UserID string `json:"user_id,omitempty"`
 	Error  string `json:"error,omitempty"`
+	// ProtocolVersion is the gateway's own wire schema version, echoed so a new
+	// client can detect an OLD gateway: one predating this field replies with 0,
+	// and that 0 is the client's only signal that its version was never checked.
+	// Sent on rejection too — a client refused for a mismatch has to be told
+	// which version it failed against.
+	ProtocolVersion uint32 `json:"protocol_version,omitempty"`
 }
 
 // EnterWorldRequest asks the gateway to assign a map server.
@@ -190,6 +243,14 @@ type EnterWorldResponse struct {
 // JoinTokenRequest is sent by the client to authenticate with a game server.
 type JoinTokenRequest struct {
 	Token string `json:"token"`
+	// ProtocolVersion is the wire schema version this client implements.
+	//
+	// Checked by the game server INDEPENDENTLY of the gateway's check on
+	// AuthRequest. Under ADR-3 these are two connections to two separately
+	// deployed processes, and the gateway never carries a snapshot — so "the
+	// gateway accepted it" says nothing about whether this client can read what
+	// this game server encodes.
+	ProtocolVersion uint32 `json:"protocol_version,omitempty"`
 }
 
 // JoinTokenResponse confirms whether the join was accepted.
@@ -203,6 +264,12 @@ type JoinTokenResponse struct {
 	// at. 0 means "not supplied" (a pre-0.x server); a client seeing 0 must refuse
 	// to predict rather than assume 15, which is the silent desync #93 closes.
 	TickRate uint32 `json:"tick_rate,omitempty"`
+	// ProtocolVersion is the game server's own wire schema version, echoed so a
+	// new client can detect an OLD game server. Unlike TickRate this is sent on
+	// a rejected join too: a client refused for a version mismatch must be told
+	// which version it failed against, or the refusal is as opaque as the parse
+	// error it replaces.
+	ProtocolVersion uint32 `json:"protocol_version,omitempty"`
 }
 
 // InputMessage carries player input for one tick.

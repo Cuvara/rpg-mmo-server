@@ -548,3 +548,105 @@ re-receives the whole batch through the reclaim path — which the idempotent-
 handler discipline this stream has always required already covers. A failed
 batch ACK is logged and *not* retried: the entries stay pending and the reclaim
 pass redelivers them, degrading the failure to duplicate delivery, never loss.
+
+## Wire protocol version: one integer, handshake-only, exact match (2026-09-09)
+
+`wire.proto` had no version field of any kind. Client and server agreed on the
+meaning of the wire by convention alone, and a version-skewed build was not
+refused — it connected, parsed every byte, and was confidently wrong. That is the
+failure mode this repository keeps meeting: it compiles, it connects, and the
+numbers are consistent about the wrong thing.
+
+### What the number is, and is not
+
+`protocol_version` names the **semantics** of the schema. It deliberately does
+not name:
+
+- **Shape.** proto3 already skips unknown fields, so an added field needs no
+  version to be safe.
+- **Encoding.** Already sniffed from byte 0 (`0x08` vs `{`), and that stays as it
+  is. The sniffing comment used to say "no version negotiation"; it now says no
+  *encoding* negotiation, because the two questions are genuinely different and
+  conflating them is what left the second one unanswered for so long.
+
+What is left is the case neither covers: both peers parse successfully and
+disagree about what a field *means*. Only an explicit number catches that.
+
+### Where it rides
+
+On the two handshake **requests** (`AuthRequest`, `JoinTokenRequest`), echoed on
+their responses. **Not** on `Envelope`: an envelope field is paid on every
+snapshot of every tick to re-state a number that cannot change within a
+connection, and this protocol rejects that trade elsewhere for the same reason
+(the entity-type enum exists because a string type was ~19% of a keyframe).
+
+Both hops check independently. Under ADR-3 the gateway is a redirector that never
+carries a snapshot and is deployed separately from the game server, so "the
+gateway accepted it" says nothing about whether the client can read what the game
+server encodes — and it is the game-server hop that a disagreement corrupts.
+
+The responses echo the server's version because that is the **only** way a new
+client detects an old server: an old server does not know the field, ignores what
+the client sent, and answers without one. A `0` coming back is the client's sole
+signal that nobody checked.
+
+### Zero means "did not advertise", and is admitted by default
+
+proto3 elides a zero `uint32`, so a peer predating the field is indistinguishable
+from one sending `0` — the same trap documented at length on
+`EntitySnapshot.speed`. Versions therefore start at **1** and `0` is reserved,
+exactly as `ENTITY_TYPE_UNSPECIFIED` reserves `0`.
+
+**Decision: admit unversioned peers by default, count them, and gate the change
+behind a flag.**
+
+Considered and rejected: *refuse unversioned peers immediately.* It is the
+stricter reading of the goal, and it is wrong on the day it ships — every client
+in existence sends `0`, so it closes a hypothetical by breaking everything real.
+In this repository that is not abstract: roughly thirty call sites across
+`integration_test/`, `smoketest/` and `loadtest/` construct `AuthRequest{Token:…}`
+and `JoinTokenRequest{Token:…}` with no version at all.
+
+The admission is on **trust**, not evidence: a pre-versioning build and a merely
+non-conforming client look identical. So it is counted
+(`gateway_unversioned_handshakes_total`,
+`gameserver_handshakes_unversioned_total`). An admission nobody can see is
+behaviourally identical to having no check, and is precisely the silent fallback
+the `tick_rate` rule in `gameserver-dotnet/docs/API.md` forbids.
+
+The migration is one flag — `--min-protocol-version` /
+`GAMESERVER_MIN_PROTOCOL_VERSION` — set to 1 once the counter has gone flat. An
+unversioned peer is then refused through the *same* named path as a mismatched
+one, rather than a second convention for a second flavour of wrong.
+
+### Exact match, not `>=`
+
+A peer one version ahead is refused as firmly as one behind. A single integer
+carries no compatibility range, so `>=` would be admitting a peer whose changes
+this build cannot know — a guess at exactly the point the mechanism exists to
+stop guessing. A real window has to be a min/max pair negotiated on the wire, and
+that is a deliberate schema change, not a comparison operator.
+
+### The reason is a bare token
+
+`protocol_version_mismatch`, in `error` on `AuthResponse` / `JoinTokenResponse`,
+following `duplicate_login` / `server_shutdown` / `session_expired` /
+`rate_limited`. Versions go to logs and metrics, never into the token: a reason
+that embeds numbers is one a client parses with a regex, or not at all.
+
+The check runs **before** credential verification on both hops. Answering
+`invalid token` to a client whose real problem is its build sends the operator to
+the wrong layer — the same wasted chase the field exists to prevent — and it
+declines to spend an HMAC on a connection already refused.
+
+### Three constants, no single source
+
+`shared/messages.WireProtocolVersion` (Go),
+`GameServer/Net/WireProtocol.ProtocolVersion` (C#) and
+`Runtime/Protocol/WireProtocolVersion.Current` (Unity). No language can be
+authoritative for the other two, so each pins the value and asserts it by test; a
+bump is a three-file edit plus a row in the API.md version table. This is a real
+cost and is accepted: the alternative is generating the constant from the proto,
+which would put a build step between three repos that currently share only
+committed artefacts.
+
