@@ -279,7 +279,14 @@ public class GoldenVectorGenerator
         {
             ("simkill_both_die_hp1", 10, 0, 1, 10, 0, 1),
             ("simkill_both_die_asymmetric", 50, 5, 10, 20, 40, 5),
-            ("simkill_target_survives_high_defense", 10, 0, 1, 10, 0, 2),
+            // The target's defence is what makes it survive, which is what the name says
+            // and what the previous values did NOT do: they were attack 10 against defence
+            // 0 on a 2 HP target, so the target died and the case was a duplicate of
+            // simkill_both_die_hp1 under a name that promised the opposite. Nothing covered
+            // the asymmetric outcome, while a reader scanning names would believe it did.
+            // Now: 10 - 9 = 1 damage (exactly MinDamage, not clamped) against 5 HP, so the
+            // target lives at 4 and swings back for 10 into a 1 HP attacker.
+            ("simkill_target_survives_high_defense", 10, 0, 1, 10, 9, 5),
         };
         foreach (var s in simultaneous)
         {
