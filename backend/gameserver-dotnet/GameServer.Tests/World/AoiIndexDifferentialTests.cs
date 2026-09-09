@@ -1,3 +1,6 @@
+using System;
+using System.Linq;
+using System.Reflection;
 using GameServer.World;
 using Shared.GameLogic.Components;
 using Shared.GameLogic.Systems;
@@ -109,6 +112,15 @@ public class AoiIndexDifferentialTests
             Assert.Equal(expected[i].Hp, actual[i].Hp);
             Assert.Equal(expected[i].MaxHp, actual[i].MaxHp);
             Assert.Equal(expected[i].Speed, actual[i].Speed);
+
+            // Facing and action compose from the same Locomotion span as everything
+            // above, but through a DIFFERENT code path: the scan composes per match,
+            // the index composes once per entity at rebuild. So they are exactly the
+            // kind of field that can be right on one arm and default on the other
+            // while every id, position and hp still agrees — an entity in view,
+            // correctly placed, facing due east regardless of where it is walking.
+            Assert.Equal(expected[i].FacingBrad, actual[i].FacingBrad);
+            Assert.Equal(expected[i].Action, actual[i].Action);
         }
 
         // Third opinion: the shared rule the client predicts with. Only for finite radii —
@@ -758,4 +770,94 @@ public class AoiIndexDifferentialTests
                 (float)(rng.NextDouble() * 300 - 150)), Radius, $"index disabled, query {q}");
         }
     }
+
+    /// <summary>
+    /// The comparison in <see cref="AssertIdentical"/> enumerates fields by hand, and an
+    /// enumerated comparison goes stale exactly when the struct grows — which is not
+    /// hypothetical: facing and action were added to <see cref="EntityView"/> and this
+    /// comparison kept passing while the index dropped both, because it simply did not
+    /// look at them. Nothing failed; the two arms disagreed and every assertion agreed.
+    ///
+    /// This pins the field set. Adding a field to EntityView turns it red, and the fix
+    /// is to compare the new field above rather than to update the number here.
+    /// </summary>
+    [Fact]
+    public void EntityView_HasNoFieldTheDifferentialComparisonIgnores()
+    {
+        var compared = new[]
+        {
+            nameof(EntityView.Id), nameof(EntityView.Key), nameof(EntityView.Type),
+            nameof(EntityView.Position), nameof(EntityView.Hp), nameof(EntityView.MaxHp),
+            nameof(EntityView.Speed), nameof(EntityView.FacingBrad), nameof(EntityView.Action),
+        };
+
+        var actual = typeof(EntityView)
+            .GetFields(BindingFlags.Public | BindingFlags.Instance)
+            .Select(f => f.Name)
+            .Concat(typeof(EntityView)
+                .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                .Where(p => p.GetIndexParameters().Length == 0)
+                .Select(p => p.Name))
+            .Distinct()
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(compared.OrderBy(n => n, StringComparer.Ordinal).ToArray(), actual);
+    }
+
+
+    /// <summary>
+    /// Facing and action must survive the index, and this test exists because the
+    /// obvious version of it does not work. Adding
+    /// <c>Assert.Equal(expected[i].FacingBrad, actual[i].FacingBrad)</c> to the shared
+    /// comparison catches nothing on its own: every other fixture here spawns players
+    /// through <c>TestHelpers.CreatePlayer</c>, which leaves facing at 0 and action at
+    /// Unspecified, so both arms read the default and agree trivially. Verified by
+    /// mutation — the index was made to drop both fields and all 32 tests still passed.
+    ///
+    /// So the values have to be DISTINCT PER ENTITY and non-default, which is what this
+    /// does. The same shape of mistake as a boundary ring generated with cos/sin: an
+    /// assertion that describes the property without being able to discriminate it.
+    /// </summary>
+    [Fact]
+    public void FacingAndAction_SurviveTheIndex_WhenTheyAreNotAllDefault()
+    {
+        using var world = new EcsWorld();
+
+        // Occupancy filler far away, so the gate engages and the query really goes
+        // through the index rather than falling back to the scan.
+        for (int i = 0; i < 100; i++)
+        {
+            world.AddEntity(TestHelpers.CreatePlayer($"far{i}", 10000 + i * 60f, 10000f));
+        }
+
+        var actions = new[]
+        {
+            EntityAction.Idle, EntityAction.Moving, EntityAction.Attacking, EntityAction.Dead,
+        };
+
+        for (int i = 0; i < 40; i++)
+        {
+            var e = TestHelpers.CreatePlayer($"near{i}", (i % 8) * 7f - 28f, (i / 8) * 7f - 14f);
+
+            // Distinct, non-default, and never the reserved zero: a facing that happened
+            // to be 0 would be indistinguishable from "the index dropped it".
+            e.FacingBrad = (uint)(1 + i * 1601);
+            e.Action = actions[i % actions.Length];
+            world.AddEntity(e);
+        }
+
+        AssertIdentical(world, new Vec2(0, 0), 60f,
+            "facing and action must compose identically on both arms");
+
+        // Guard the guard: if the fixture ever stops producing varied values, this test
+        // silently becomes the useless version described above.
+        var seen = Indexed(world, new Vec2(0, 0), 60f);
+        Assert.True(seen.Select(v => v.FacingBrad).Distinct().Count() > 1,
+            "fixture produced a single facing value, so this test cannot discriminate");
+        Assert.True(seen.Select(v => v.Action).Distinct().Count() > 1,
+            "fixture produced a single action value, so this test cannot discriminate");
+        Assert.DoesNotContain(seen, v => v.FacingBrad == 0);
+    }
+
 }

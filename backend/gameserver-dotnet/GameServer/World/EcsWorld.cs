@@ -936,7 +936,16 @@ public sealed class EcsWorld : IDisposable
                     positions[i].Value,
                     healths[i].Hp,
                     healths[i].MaxHp,
-                    locomotions[i].Speed));
+                    locomotions[i].Speed,
+                    // Same Locomotion span the scan arm reads, and it MUST be read here
+                    // too: the index composes once per entity at rebuild and a query then
+                    // copies the finished struct, so anything omitted here is omitted for
+                    // every viewer that goes through the index — and only for those. The
+                    // scan arm would still be right, so the two arms would disagree while
+                    // both looked healthy, which the differential tests catch by comparing
+                    // whole views rather than positions.
+                    locomotions[i].FacingBrad,
+                    locomotions[i].Action));
             }
         }
 
