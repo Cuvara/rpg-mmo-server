@@ -232,6 +232,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `gameserver_snapshots_removals_deferred_total` (should stay flat at zero) and the
   `gameserver_snapshots_max_shed_age` gauge, plus `max_snapshot_bytes` on `/status` so
   the others can be read against the cap that produced them.
+### Documentation
+- **`backend/docs/ROADMAP-SECURITY.md` plans the work ADR-21 deferred, and separates it
+  from anti-cheat, which is a different problem.** The roadmap was commissioned as "the
+  security task, because it is anti-cheat"; those are two problems and conflating them
+  spends the budget in the wrong place. **A cheater is a legitimate player** who holds the
+  client, the session and any key shipped inside the client, so transport encryption stops
+  sniffing, tampering and third-party replay — and stops no speed hack, teleport, cooldown
+  bypass or modified client, because every one of those is produced by the endpoint that
+  holds the key.
+
+  Records what already defends the game, because it makes the remaining work narrow rather
+  than foundational: `MovementSystem` integrates `direction * speed * dt` from the server's
+  own speed stat and *"never on how many input packets a client sends"*, `ResolveDirection`
+  normalises the input vector, `ValidationLogic` rejects dead-entity and malformed input and
+  defers attacks to `CombatLogic.ValidateAttack`, and `MaxInputsPerConnection` bounds the
+  uplink. Server authority on movement is the single most important anti-cheat property and
+  it is already true.
+
+  Ranks six anti-cheat gaps, recommending **rejected-input telemetry and a per-account
+  anomaly budget first** — days of pure server-side work, no protocol change, and nothing
+  later can be tuned without them. Client-side anti-cheat is explicitly ranked last: high
+  effort, defeated once and then defeated for everyone.
+
+  For transport confidentiality it records the design insight that removes the expensive
+  part: **the gateway is already a trusted key distribution point** (ADR-3), so it can mint a
+  per-session key alongside the JoinToken — no Diffie-Hellman, no certificates, no extra
+  round trip, and no key in the client binary to extract. Four library options are compared
+  with concrete trade-offs; the recommendation is the **built-in .NET/Go AEAD**, because it
+  adds no dependency (decisive, since a UPM package cannot declare a scoped registry) and is
+  hardware-accelerated. Its go/no-go is stated as an open question rather than an assumption:
+  **`AesGcm` availability under IL2CPP must be verified by a real build**, with libsodium as
+  the fallback and BouncyCastle rejected for the per-packet path on performance.
+
+  Sequenced so that step 1 — reporting which transport is in use and whether a key is in
+  force — depends on none of the decisions above and can ship immediately.
 
 ### Fixed
 - **Kill rewards are retried under a stable batch id and never dropped** (audit
