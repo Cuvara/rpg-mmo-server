@@ -6,6 +6,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-09-09
+
+Released as `sgl-v0.4.1`. Patch, but it changes a golden vector, so it changes what a
+consumer is held to — a client pinned at `sgl-v0.4.0` is checked against the old, wrongly
+named case and will disagree with this one.
+
 ### Fixed
 
 - **`simkill_target_survives_high_defense` did neither: the target did not survive and there
