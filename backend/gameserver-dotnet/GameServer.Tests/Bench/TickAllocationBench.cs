@@ -557,7 +557,7 @@ public sealed class TickAllocationBench
         {
             Connection conn = rig.Conns[i];
             if (!conn.TakePendingSnapshot(out var buffer, out int count, out ulong tick,
-                                          out ulong ackTick, out int keyframeInterval))
+                                          out ulong ackTick, out int keyframeInterval, out _))
             {
                 continue;
             }

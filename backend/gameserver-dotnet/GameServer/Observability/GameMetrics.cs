@@ -17,6 +17,10 @@ namespace GameServer.Observability;
 /// gameserver.snapshots.sent           -> gameserver_snapshots_sent_total
 /// gameserver.snapshots.coalesced      -> gameserver_snapshots_coalesced_total
 /// gameserver.snapshots.frames_written  -> gameserver_snapshots_frames_written_total
+/// gameserver.snapshots.bytes          -> gameserver_snapshots_bytes_total
+/// gameserver.snapshots.entities_shed  -> gameserver_snapshots_entities_shed_total
+/// gameserver.snapshots.removals_deferred -> gameserver_snapshots_removals_deferred_total
+/// gameserver.snapshots.max_shed_age   -> gameserver_snapshots_max_shed_age
 /// gameserver.player.saves             -> gameserver_player_saves_total
 /// gameserver.events.published         -> gameserver_events_published_total
 /// gameserver.events.dropped           -> gameserver_events_dropped_total
@@ -58,6 +62,9 @@ public sealed class GameMetrics : IDisposable
     private readonly Counter<long> _snapshotsSent;
     private readonly Counter<long> _snapshotsCoalesced;
     private readonly Counter<long> _snapshotFramesWritten;
+    private readonly Counter<long> _snapshotBytes;
+    private readonly Counter<long> _snapshotEntitiesShed;
+    private readonly Counter<long> _snapshotRemovalsDeferred;
     private readonly Counter<long> _playerSaves;
     private readonly Counter<long> _eventsPublished;
     private readonly Counter<long> _eventsDropped;
@@ -138,6 +145,31 @@ public sealed class GameMetrics : IDisposable
             "gameserver.snapshots.frames_written",
             description: "Snapshot frames written to client sockets. The only figure " +
                          "comparable with what a client counts arriving.");
+
+        _snapshotBytes = _meter.CreateCounter<long>(
+            "gameserver.snapshots.bytes",
+            unit: "By",
+            description: "Bytes of snapshot frames written to client sockets, envelope and " +
+                         "length prefix included. Divide by players_online and by the scrape " +
+                         "interval for per-client downlink KB/s, the figure ADR-7's < 50 KB/s " +
+                         "mobile threshold is about.");
+
+        _snapshotEntitiesShed = _meter.CreateCounter<long>(
+            "gameserver.snapshots.entities_shed",
+            description: "Entity updates DEFERRED by the per-connection downlink budget " +
+                         "(GAMESERVER_MAX_SNAPSHOT_BYTES). Deferred, not dropped: the entity " +
+                         "stays dirty and is re-offered on the next snapshot. A non-zero rate " +
+                         "means clients are seeing stale entities, and the pair to read it " +
+                         "with is max_shed_age -- a high rate with a low age is the budget " +
+                         "working, a high age is a client falling behind.");
+
+        _snapshotRemovalsDeferred = _meter.CreateCounter<long>(
+            "gameserver.snapshots.removals_deferred",
+            description: "Despawn notifications deferred by the downlink budget. Worse than a " +
+                         "deferred update -- the client renders an entity that no longer " +
+                         "exists -- so this should be flat at zero; despawns outrank every " +
+                         "non-self update and only a budget too small for the despawn list " +
+                         "itself can make it move.");
 
         _snapshotsCoalesced = _meter.CreateCounter<long>(
             "gameserver.snapshots.coalesced",
@@ -254,6 +286,16 @@ public sealed class GameMetrics : IDisposable
                          "clock to recover. Simulation time is behind real time by this much.");
 
         _meter.CreateObservableGauge(
+            "gameserver.snapshots.max_shed_age",
+            ObserveMaxShedAge,
+            description: "Longest deferral, in snapshots, any entity on any live connection " +
+                         "has reached since that connection was opened. High-water mark, so " +
+                         "it never falls while a connection lives. The budget schedules " +
+                         "strictly oldest-first, so this is bounded by the number of dirty " +
+                         "entities in one observer's AOI, not by session length -- a value " +
+                         "that keeps climbing means the budget is too small for the crowd.");
+
+        _meter.CreateObservableGauge(
             "gameserver.players.online",
             ObservePlayersOnline,
             description: "Players currently connected to this server.");
@@ -357,6 +399,57 @@ public sealed class GameMetrics : IDisposable
     {
         if (count > 0) _snapshotsCoalesced.Add(count, _mapTags);
     }
+
+    /// <summary>
+    /// Record one tick's downlink-budget activity: bytes on the wire, entity updates and
+    /// despawns the budget deferred, and the longest deferral seen so far.
+    /// </summary>
+    /// <remarks>
+    /// One call, not four, because these are read together or not at all. Bytes without
+    /// shedding is a link that is fine; shedding without bytes is meaningless; and the
+    /// deferral age is what separates "the cap is doing its job" from "a client is falling
+    /// permanently behind". The lesson this codebase keeps relearning is that a check
+    /// nobody reads is not a check -- so these also surface on <c>/status</c>, not only in
+    /// a Prometheus scrape.
+    /// </remarks>
+    public void RecordSnapshotBudget(long bytes, long entitiesShed, long removalsDeferred, int maxShedAge)
+    {
+        if (bytes > 0)
+        {
+            _snapshotBytes.Add(bytes, _mapTags);
+            Interlocked.Add(ref _snapshotBytesTotal, bytes);
+        }
+        if (entitiesShed > 0)
+        {
+            _snapshotEntitiesShed.Add(entitiesShed, _mapTags);
+            Interlocked.Add(ref _snapshotEntitiesShedTotal, entitiesShed);
+        }
+        if (removalsDeferred > 0)
+        {
+            _snapshotRemovalsDeferred.Add(removalsDeferred, _mapTags);
+            Interlocked.Add(ref _snapshotRemovalsDeferredTotal, removalsDeferred);
+        }
+        if (maxShedAge > Volatile.Read(ref _maxShedAge)) Volatile.Write(ref _maxShedAge, maxShedAge);
+    }
+
+    private int _maxShedAge;
+    private long _snapshotBytesTotal;
+    private long _snapshotEntitiesShedTotal;
+    private long _snapshotRemovalsDeferredTotal;
+
+    /// <summary>Snapshot bytes written to sockets since start. Mirrors the counter for <c>/status</c>.</summary>
+    public long SnapshotBytes => Interlocked.Read(ref _snapshotBytesTotal);
+
+    /// <summary>Entity updates deferred by the downlink budget since start.</summary>
+    public long SnapshotEntitiesShed => Interlocked.Read(ref _snapshotEntitiesShedTotal);
+
+    /// <summary>Despawn notifications deferred by the downlink budget since start.</summary>
+    public long SnapshotRemovalsDeferred => Interlocked.Read(ref _snapshotRemovalsDeferredTotal);
+
+    /// <summary>Longest snapshot deferral observed on this server (see <see cref="RecordSnapshotBudget"/>).</summary>
+    public int MaxShedAge => Volatile.Read(ref _maxShedAge);
+
+    private Measurement<int> ObserveMaxShedAge() => new(Volatile.Read(ref _maxShedAge), _mapTags);
 
     /// <summary>
     /// Record snapshot frames actually written to sockets.

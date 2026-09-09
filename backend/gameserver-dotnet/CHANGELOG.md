@@ -183,6 +183,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   observer and nothing to amortise a per-tick index build against, so an index there would
   be cost with no benefit. Client and server still agree on visibility because they run the
   same predicate — the index only chooses which entities to test.
+- **Per-connection downlink budget on the snapshot send path**
+  (`--max-snapshot-bytes` / `GAMESERVER_MAX_SNAPSHOT_BYTES`, default `8192`, `0`
+  disables). The AOI radius was the only thing bounding a snapshot, and a radius
+  bounds *area*, not population: a crowd inside one observer's circle produced a frame
+  as large as the crowd, per client, per tick. There was an input-side flood guard
+  (`GAMESERVER_MAX_INPUTS_PER_TICK`) and nothing on the downlink.
+  - Enforced **inside** `SnapshotDeltaState`, not in front of it. A filter that
+    decided what to send after the encoder decided what the client knows would drop an
+    entity from the wire while `_lastSent` recorded it as delivered — the client wrong
+    about it until the next keyframe, with nothing reporting an error. Instead
+    `_lastSent` and `_handles` are written only after the bytes are appended, so a
+    deferred entity leaves both untouched: it stays dirty and is re-offered, and it is
+    never given a handle, so no handle can reach the wire without its binding.
+    Despawns follow the same rule — a key leaves `_lastSent` only if its id was
+    actually written into `removed`.
+  - **Priority**: the observer's own entity (the reconciliation anchor, never
+    deferred) → despawns (a ghost is wrong state, not stale state) → longest deferral
+    first → nearest first → AOI index. Strict oldest-first plus a floor that always
+    emits the top candidate bounds the longest deferral by the number of dirty
+    entities in the observer's AOI, independent of session length.
+  - **Byte-identical when it does not bite**: `0` runs the pre-budget encoder
+    unchanged, and a configured-but-unexceeded budget emits in AOI order with the same
+    bytes — asserted tick by tick. Re-ordering happens only on a snapshot that sheds.
+  - Applies to **Protobuf connections only**; every byte figure in the encoder is a
+    protobuf size and a JSON frame is several times larger, so a JSON stream stays
+    bounded only by the AOI radius (stated limitation — ADR-9 legacy encoding).
+  - The deferral bound is stated precisely, because testing it corrected it: the
+    "longest wait is the size of the dirty set" claim holds only while the budget is
+    spent on entity updates alone. The floor guarantees one candidate per snapshot and
+    the observer's own entity is priority 1, so under a despawn backlog that slot goes
+    to self every tick and other dirty entities additionally wait for the backlog to
+    drain — measured at 63 ticks against a dirty set of 6. Still finite and still
+    independent of session length (the high-water mark stops moving once the backlog
+    drains, asserted), but not the dirty-set figure, and `max_shed_age` will show the
+    larger one during heavy AOI churn.
+  - Deferral records are pruned against the visible set each snapshot. Without that,
+    an entity that is new, is deferred before it is ever sent, and then leaves the AOI
+    never becomes a despawn and its record survives for the life of the connection —
+    a slow per-connection leak on any map whose spawns churn at the edge of a circle.
+  - `Shared.GameLogic` and `wire.proto` are untouched: deferral is invisible in the
+    protocol and an existing client needs no change. `docs/API.md` gains a normative
+    "Downlink budget" section saying so.
+- **Counters for the budget**, in Prometheus and on `/status`:
+  `gameserver_snapshots_bytes_total` (real socket bytes, envelope included — the
+  figure ADR-7's `< 50 KB/s` per-client threshold is about),
+  `gameserver_snapshots_entities_shed_total`,
+  `gameserver_snapshots_removals_deferred_total` (should stay flat at zero) and the
+  `gameserver_snapshots_max_shed_age` gauge, plus `max_snapshot_bytes` on `/status` so
+  the others can be read against the cap that produced them.
 
 ### Fixed
 - **Kill rewards are retried under a stable batch id and never dropped** (audit

@@ -1045,6 +1045,40 @@ Delta correctness assumes an ordered, reliable transport (TCP today): the server
 treats "last sent" as "last received". The periodic keyframe is the recovery path
 for anything that breaks that assumption.
 
+### Downlink budget — a snapshot may omit visible entities (normative)
+
+The server applies a **per-connection byte budget** to every snapshot
+(`GAMESERVER_MAX_SNAPSHOT_BYTES`, default 8192 bytes of payload; `0` disables it;
+Protobuf connections only). When the entities that need sending do not fit, the
+server **defers** the lowest-priority ones to a later snapshot.
+
+What a client must understand about this:
+
+- **A delta that omits an entity still means "unchanged" — nothing changes for the
+  client.** Deferral is invisible in the protocol: a deferred entity is simply not
+  carried, exactly like an entity that did not change, and the server has *not*
+  recorded it as delivered. It reappears in a later snapshot carrying its current
+  state. There is no new field, no flag, and nothing to acknowledge.
+- **A keyframe that omits an entity means the entity is gone**, per the existing
+  keyframe rule ("anything absent must be dropped") — the client must keep applying
+  that rule unchanged. A deferred entity is re-introduced by a following delta, id
+  and fresh handle included, so the merge algorithm needs no special case. The
+  visible effect is a brief disappearance at the edge of the AOI, not wrong state.
+- **The interning contract is unaffected.** A handle is allocated only on the
+  message that carries its id, so a deferred entity never produces a handle without
+  a binding. `resync` remains the correct and only response to a handle you cannot
+  resolve.
+- **The observer's own entity is never deferred**, so reconciliation is never
+  starved of its anchor.
+- **No entity is deferred indefinitely.** Deferral is scheduled strictly
+  oldest-first, so the longest a visible, changed entity can go unsent is bounded by
+  the number of changed entities in its observer's AOI — not by how long the session
+  runs. Servers publish the observed high-water mark as
+  `gameserver_snapshots_max_shed_age`.
+
+A client that already implements the merge algorithm above needs **no change** to
+work against a server with the budget enabled.
+
 ### Reconciliation
 
 `ack_tick` is per-connection and derives only from the receiving player's own

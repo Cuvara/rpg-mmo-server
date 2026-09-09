@@ -41,6 +41,15 @@ int maxInputsPerTick = int.TryParse(
 int maxPendingInputs = int.TryParse(
     GetArg(args, "--max-pending-inputs") ?? Env("GAMESERVER_MAX_PENDING_INPUTS"), out var mpi) && mpi > 0
     ? mpi : 0;
+// Downlink bound: bytes of snapshot payload one connection may be sent per snapshot.
+// The counterpart to --max-inputs-per-tick, on the other direction of the wire, and the
+// only thing bounding a snapshot's size other than the AOI radius — which bounds area,
+// not how many entities stand inside it. Explicit 0 disables it; a negative or unparsable
+// value falls back to the default rather than being treated as "off", because "off" must
+// be something an operator asked for.
+int maxSnapshotBytes = int.TryParse(
+    GetArg(args, "--max-snapshot-bytes") ?? Env("GAMESERVER_MAX_SNAPSHOT_BYTES"), out var msb) && msb >= 0
+    ? msb : GameServer.Snapshot.SnapshotDeltaState.DefaultMaxSnapshotBytes;
 // Falls back to the shared constant, not to a literal. The client derives its own
 // integration step from the same constant, and it is compiled into both sides, so a
 // literal here means bumping GameConstants.DefaultTickRate moves the client and leaves
@@ -545,6 +554,7 @@ var options = new ServerOptions
     HandshakeTimeout = TimeSpan.FromMilliseconds(handshakeTimeoutMs),
     MaxInputsPerConnection = maxInputsPerTick,
     MaxPendingInputs = maxPendingInputs,
+    MaxSnapshotBytes = maxSnapshotBytes,
     JwtSecret = jwtSecret,
     JoinTokenSecret = joinTokenSecret,
     HoldTtl = mode == "dungeon" ? TimeSpan.FromSeconds(60) : TimeSpan.FromSeconds(30),
@@ -679,6 +689,11 @@ metricsEndpoint?.SetStatusProvider(() =>
         HandshakesPending = server.PendingHandshakes,
         HandshakesRejected = metrics.HandshakesRejected,
         InputsDropped = metrics.InputsDropped,
+        MaxSnapshotBytes = maxSnapshotBytes,
+        SnapshotBytes = metrics.SnapshotBytes,
+        SnapshotEntitiesShed = metrics.SnapshotEntitiesShed,
+        SnapshotRemovalsDeferred = metrics.SnapshotRemovalsDeferred,
+        SnapshotMaxShedAge = metrics.MaxShedAge,
         TransfersRejected = metrics.TransfersRejected,
         Postgres = postgresStore != null ? "connected" : "disconnected",
         UptimeSeconds = (long)uptime.Elapsed.TotalSeconds

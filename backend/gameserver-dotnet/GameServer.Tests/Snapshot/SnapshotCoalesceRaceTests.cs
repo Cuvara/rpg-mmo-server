@@ -49,7 +49,7 @@ public class SnapshotCoalesceRaceTests
         {
             sawWindow = true;
             claimedInWindow = conn.TakePendingSnapshot(
-                out _, out _, out _, out _, out _);
+                out _, out _, out _, out _, out _, out _);
         };
         world.ReadAll(reader =>
             conn.GatherSnapshotView(reader, radius: 50f, tick: 2, keyframeInterval: 30));
@@ -60,7 +60,7 @@ public class SnapshotCoalesceRaceTests
             "a claim inside the reclaim window took the buffer the gather was refilling");
 
         // The republish after the refill must hand out the coalesced job normally.
-        Assert.True(conn.TakePendingSnapshot(out _, out _, out ulong tick, out _, out _));
+        Assert.True(conn.TakePendingSnapshot(out _, out _, out ulong tick, out _, out _, out _));
         Assert.Equal(2UL, tick);
         Assert.Equal(1L, conn.SnapshotsCoalesced);
     }

@@ -42,6 +42,10 @@ public sealed class TickLoop
     /// </summary>
     private long _snapshotsCoalescedDelta;
     private long _snapshotFramesWrittenDelta;
+    private long _snapshotBytesDelta;
+    private long _snapshotEntitiesShedDelta;
+    private long _snapshotRemovalsDeferredDelta;
+    private int _snapshotMaxShedAge;
 
     /// <summary>
     /// Scratch map (entity -> index of the newest input in this tick's drained batch).
@@ -572,11 +576,24 @@ public sealed class TickLoop
             // tick's scratch viewers is not a delta -- see Connection.TakeSnapshotCounters.
             _snapshotsCoalescedDelta = 0;
             _snapshotFramesWrittenDelta = 0;
+            _snapshotBytesDelta = 0;
+            _snapshotEntitiesShedDelta = 0;
+            _snapshotRemovalsDeferredDelta = 0;
+            _snapshotMaxShedAge = 0;
             for (int i = 0; i < _viewerCount; i++)
             {
-                _viewers[i].TakeSnapshotCounters(out long c, out long w);
+                _viewers[i].TakeSnapshotCounters(
+                    out long c, out long w, out long b,
+                    out long shed, out long deferred, out int shedAge);
                 _snapshotsCoalescedDelta += c;
                 _snapshotFramesWrittenDelta += w;
+                _snapshotBytesDelta += b;
+                _snapshotEntitiesShedDelta += shed;
+                _snapshotRemovalsDeferredDelta += deferred;
+                // Max, not sum: the deferral bound is a per-entity property, and summing
+                // high-water marks across connections would produce a number that is not
+                // any entity's deferral and grows with the player count.
+                if (shedAge > _snapshotMaxShedAge) _snapshotMaxShedAge = shedAge;
             }
 
             // Released so a disconnected connection is not kept alive by the scratch
@@ -591,6 +608,9 @@ public sealed class TickLoop
             _metrics.RecordSnapshotsSent(_snapshotsThisTick);
             _metrics.RecordSnapshotsCoalesced(_snapshotsCoalescedDelta);
             _metrics.RecordSnapshotFramesWritten(_snapshotFramesWrittenDelta);
+            _metrics.RecordSnapshotBudget(
+                _snapshotBytesDelta, _snapshotEntitiesShedDelta,
+                _snapshotRemovalsDeferredDelta, _snapshotMaxShedAge);
             _metrics.RecordTickDuration(startTimestamp, Stopwatch.GetTimestamp());
         }
     }
