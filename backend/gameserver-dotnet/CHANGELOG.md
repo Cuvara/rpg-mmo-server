@@ -76,6 +76,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `pending gauge=0 (want 256)` against a correct server. The gauge is now sampled right after the
   connects and the surplus is found with one `select()` pass. Verified against the merged develop:
   `257 idle conns: 1 closed at accept, pending gauge=256, pool_full +1`.
+### Documentation
+- **ADR-21 records the transport-confidentiality posture, and corrects a survey finding that
+  said the game link is unencrypted.** It is not. `Net/Transport/KcpCrypto.cs` implements
+  AES-256-CFB packet encryption compatible with `github.com/xtaci/kcp-go/v5`'s
+  `NewAESBlockCrypt`, symmetric with `backend/shared/transport/crypto.go` down to a shared
+  HKDF domain string, fail-closed on a wrong key. The accurate finding is narrower: it is
+  **off by default twice** — the transport default is `tcp`, which has no encryption path at
+  all, and the key variable defaults to empty, which means plaintext — and a **pre-shared key
+  is not a session key**. Every client holds the same static secret, so it resists a passive
+  network observer and not a player, and rotating it is a simultaneous redeploy of both sides
+  rather than a rollout. CFB with a linear CRC32 is confidentiality, not authentication; the
+  CRC is not a MAC, which matters to anyone reasoning about an active attacker rather than an
+  eavesdropper.
+
+  Deferred rather than fixed: every current environment is localhost or LAN, and the hosting
+  shape above dev is unsettled (ADR-15/16), so choosing an AEAD and a key exchange now means
+  choosing them twice. This is also the one gap where a plausible-but-weak implementation is
+  **worse** than the honest plaintext default, because it moves the system from known
+  unprotected to believed protected.
+
+  **No code changes.** One prerequisite in that ADR does not wait on the deferred decision and
+  is not done here: the server does not report which transport it speaks or whether a key is
+  in force, so a deployment that believes it is encrypted and is not has nothing telling it so.
 
 ### Fixed
 - **Kill rewards are retried under a stable batch id and never dropped** (audit

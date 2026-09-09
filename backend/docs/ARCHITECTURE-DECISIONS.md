@@ -2792,6 +2792,41 @@ frames the same-gateway eviction already defined.
 
 ---
 
+## ADR-21 — Transport confidentiality: what exists is a pre-shared key on the non-default transport, and it is not a session key
+
+**Status:** **proposed 2026-09-09, NOT accepted.** Records the measured posture and the options; decides nothing. Raised because a survey of the remaining infrastructure gaps first reported "the game link is not encrypted", and that was **wrong** — encryption exists. The accurate finding is narrower and more specific, and it is written here so the next survey does not repeat the error in either direction.
+
+### What is actually there, verified 2026-09-09
+
+`GameServer/Net/Transport/KcpCrypto.cs` implements packet encryption compatible with `github.com/xtaci/kcp-go/v5`'s `NewAESBlockCrypt`, matching `backend/shared/transport/crypto.go` byte for byte, down to a shared HKDF domain-separation string (`rpg-mmo/transport/kcp/aes-256`). AES-256, CFB mode, kcp-go's fixed IV, a 16-byte random per-packet nonce ahead of the plaintext to make the first ciphertext block differ, and a CRC32 inside the encryption. The key comes from one environment variable, used verbatim at 64 hex chars and stretched with HKDF-SHA256 otherwise. A peer with the wrong key decrypts to noise, fails the CRC, and never forms a session — fail-closed, asserted by tests on both sides.
+
+That is real, it is symmetric across the Go and C# implementations, and it should not be described as absent.
+
+### The four things it is not
+
+1. **It is off by default, twice over.** The transport default is `tcp`, not `kcp` (`GameServer/Program.cs`, `--transport`), and TCP has no encryption path at all. Independently, the key variable defaults to `""`, and empty means plaintext. So the shipped default configuration carries gameplay traffic in the clear on both counts, and nothing reports that it is doing so.
+2. **A pre-shared key is not a session key.** Every client shares one static key, so it is a secret that ships inside the game binary. It resists a passive observer on the network path. It does not resist a *player*, who has the key by construction. There is no per-session key exchange, no forward secrecy, and no rotation story: changing the key is a simultaneous redeploy of every server and every client.
+3. **There is no negotiation and no key id.** The class says so itself. That is a deliberate and defensible choice — it removes the downgrade attack that negotiation invites — but it means a key rotation is a hard cutover, not a rollout, and it interacts directly with the protocol-versioning gap being closed separately.
+4. **CFB with a CRC32 is confidentiality, not authentication.** CFB is malleable and CRC32 is linear. The construction is inherited from kcp-go and compatibility with it is the reason to keep it; it is not a modern AEAD and should not be described as one. Anyone reasoning about an *active* attacker, as opposed to an eavesdropper, must not treat the CRC as a MAC.
+
+### Why this is deferred rather than fixed
+
+Every environment this system currently runs in is localhost or LAN: dev on the box, staging on `k3d-rpg-stg`. There is no public hop to protect yet, and ADR-15/16 record that the hosting shape above dev is not settled. Choosing an AEAD, a key-exchange, and a rotation story before knowing the deployment shape means choosing them twice.
+
+Deferral is also cheap to reverse *and* expensive to get wrong: this is the one gap on the list where a plausible-looking implementation that is subtly weak is worse than the honest plaintext default, because it moves the system from "known unprotected" to "believed protected".
+
+### What must happen before it is accepted, in order
+
+1. **A threat model, written down.** Passive network observer, active on-path attacker, and a malicious *player* are three different adversaries and the current design answers only the first. The third is the one a game actually faces, and no transport encryption addresses it — that is server-authority's job, which ADR-10 already assigns.
+2. **Stop defaulting to silence.** Independent of any crypto decision, the server should report its transport and whether a key is in force, at startup and in metrics. A deployment that believes it is encrypted and is not is the failure this repository keeps documenting under a different name. **This step is worth doing on its own merits and does not wait for the rest of this ADR.**
+3. **Then** choose the construction, against the deployment shape ADR-15/16 settle — and prefer a vetted implementation over anything hand-rolled. Note the constraint from the client side: a UPM package cannot declare a scoped registry, so any library must be source-only or a vendored assembly that survives Unity IL2CPP as well as NativeAOT on the server.
+
+### Decision
+
+None. This ADR is a record, not a change. Nothing in the code moves on it.
+
+---
+
 ## Summary of decisions
 
 | # | Area | Decision |
@@ -2816,3 +2851,4 @@ frames the same-gateway eviction already defined.
 | 18 | Fleet autoscaling | **No `FleetAutoscaler` on a fleet that pins one `GAMESERVER_MAP_ID` for every replica.** The C# server self-registers at startup, not on allocation, so a "spare" Ready pod is a second live server for that map: measured on k3d 2026-08-18, scaling `1 -> 2` put two members into `servers:map:map_01` 5.4s later with no allocation involved, and `FindServer` hands clients one of them (the least-loaded then; the lowest `ServerID` since #203). `ready=0` is therefore the correct steady state and tooling says so instead of warning. Enforced by `verify.sh` check `cluster.autoscaler` (FAIL), which stands down for a fleet with a per-pod map id. `replicas > 1` and a buffer autoscaler unlock together, on a per-pod map id or on registering at `Allocated` rather than `Ready` — an autoscaler does nothing for the "second map cannot be served" symptom, which is a fleet-targeted-allocation problem |
 | 19 | Game content | **Content is JSON on disk in `backend/content/`, owned by the game server, served to clients over HTTP at `/content` and never carried by the `Shared.GameLogic` package.** The package is pinned by exact commit, so content in it costs a tag plus two file bumps per balance tweak — correct for simulation rules, fatal for content. The server loads and validates at boot and **refuses to start** on invalid content, reporting every fault in one pass. Clients send `?hash=` and get `304` once they hold the current set; the hash ships in both `ETag` and `X-Content-Hash` because `UnityWebRequest` and some proxies strip the former. The **schema and validator are shared** (`Shared.GameLogic/Content/`), the **parser is not** — Unity compiles the package as source and has no `System.Text.Json`, the server is NativeAOT and cannot reflect, so no single parser satisfies both; golden vectors cover the gap as in ADR-10. No hot reload: content changes need a restart, because rules changing under a running simulation makes every desync unreproducible |
 | 20 | Duplicate-login kick | **Gateway→gameserver eviction over one shared `events:kick` Stream, keyed by join-token jti** (ADR-5 consumer-group ACK, never Pub/Sub). On duplicate login the gateway publishes `session_superseded` with the old session's jti; each game server consumes via its own group (`gs:{server_id}`, created at `$`, destroyed on graceful shutdown), kicks only the connection holding that jti (newest login wins, redelivery idempotent), releases the entity with **no reconnect hold**, and sends the standard `MsgKick`+`MsgDisconnect` pair. One shared stream because server ids churn under a noeviction Redis (ADR-4). Counters: `gateway_kick_publish_total`, `gameserver_players_kicked_total`. The gateway→gateway socket eviction stays with ADR-17 |
+| 21 | Transport confidentiality | **Proposed, not accepted — a record of posture only.** KCP has real AES-256-CFB packet encryption, kcp-go-compatible and symmetric across Go and C# (`KcpCrypto.cs` / `shared/transport/crypto.go`), fail-closed on a wrong key. But it is **off by default twice** — the transport default is `tcp`, which has no encryption path, and the key variable defaults to empty, which means plaintext — and a **pre-shared key is not a session key**: every client shares one static secret that ships in the binary, so it resists a passive observer and not a player. No negotiation, no key id, no rotation without a hard cutover; CFB plus a linear CRC32 is confidentiality, not authentication, and the CRC is not a MAC. Deferred because every current environment is localhost/LAN and the hosting shape above dev is unsettled (ADR-15/16) — choosing an AEAD and a key exchange now means choosing them twice. **Reporting the transport and whether a key is in force does not wait for that decision.** Do not describe this link as "unencrypted"; describe it as unencrypted by default and unauthenticated when on |
