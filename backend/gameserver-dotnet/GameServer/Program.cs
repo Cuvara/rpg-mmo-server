@@ -24,6 +24,12 @@ int capacity = int.TryParse(GetArg(args, "--capacity") ?? Env("GAMESERVER_CAPACI
 int maxPendingHandshakes = int.TryParse(
     GetArg(args, "--max-pending-handshakes") ?? Env("GAMESERVER_MAX_PENDING_HANDSHAKES"), out var mph) && mph > 0
     ? mph : ServerOptions.DefaultMaxPendingHandshakes;
+// Wire protocol version floor. 0 (default) also admits a client that advertises no
+// version at all -- see ServerOptions.MinProtocolVersion for why that is the shipping
+// default and what has to be true before raising it.
+uint minProtocolVersion = uint.TryParse(
+    GetArg(args, "--min-protocol-version") ?? Env("GAMESERVER_MIN_PROTOCOL_VERSION"), out var mpv)
+    ? mpv : 0u;
 int handshakeTimeoutMs = int.TryParse(
     GetArg(args, "--handshake-timeout-ms") ?? Env("GAMESERVER_HANDSHAKE_TIMEOUT_MS"), out var hto) && hto > 0
     ? hto : (int)ServerOptions.DefaultHandshakeTimeout.TotalMilliseconds;
@@ -535,6 +541,7 @@ var options = new ServerOptions
     MapBounds = MapBounds.FromSize(mapWidth, mapHeight),
     Capacity = capacity,
     MaxPendingHandshakes = maxPendingHandshakes,
+    MinProtocolVersion = minProtocolVersion,
     HandshakeTimeout = TimeSpan.FromMilliseconds(handshakeTimeoutMs),
     MaxInputsPerConnection = maxInputsPerTick,
     MaxPendingInputs = maxPendingInputs,

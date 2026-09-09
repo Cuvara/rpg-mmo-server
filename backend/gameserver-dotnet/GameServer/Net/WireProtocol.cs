@@ -74,6 +74,105 @@ public static class WireProtocol
     /// <summary>Maximum message size (1 MB).</summary>
     public const int MaxMessageSize = 1 << 20;
 
+    /// <summary>
+    /// Version of the wire schema this build implements. Mirrors
+    /// <c>shared/messages.WireProtocolVersion</c> (Go) and
+    /// <c>Runtime/Protocol/WireProtocolVersion.cs</c> (Unity client).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// It names the SEMANTICS of <c>shared/proto/wire.proto</c> — what the fields
+    /// mean — not its shape and not its encoding. Shape is self-describing
+    /// (proto3 skips unknown fields) and encoding is sniffed from byte 0; neither
+    /// catches two peers that parse every byte and then disagree about what a
+    /// field means. That is the failure this number makes loud.
+    /// </para>
+    /// <para>
+    /// <b>Bump it</b> for: reusing or renumbering a field, removing a field a
+    /// receiver acts on, changing the meaning/units/reference frame of an
+    /// existing field, changing the snapshot state machine (handle lifecycle,
+    /// keyframe reset, the delta "changed" rule, the merge algorithm), or adding
+    /// something a receiver MUST act on to stay correct. Do NOT bump for a purely
+    /// additive optional field covered by a documented "zero means not sent"
+    /// rule. Full contract: <c>wire.proto</c> under "Protocol version", and
+    /// normatively <c>docs/API.md</c>.
+    /// </para>
+    /// <para>
+    /// No language can be authoritative for the other two, so each pins the value
+    /// and tests assert it on its own side.
+    /// </para>
+    /// </remarks>
+    public const uint ProtocolVersion = 1;
+
+    /// <summary>
+    /// Wire value meaning "this peer does not advertise a version" — a peer built
+    /// before the field existed.
+    /// </summary>
+    /// <remarks>
+    /// proto3 elides a zero uint32, so an absent field and an explicit 0 are the
+    /// same bytes. Real versions therefore start at 1 and 0 is permanently
+    /// reserved for "unknown", exactly as <c>ENTITY_TYPE_UNSPECIFIED</c> reserves
+    /// 0. A receiver must not read 0 as "version zero".
+    /// </remarks>
+    public const uint ProtocolVersionUnversioned = 0;
+
+    /// <summary>
+    /// The named reason a peer is refused for speaking a different wire protocol
+    /// version. Travels in <c>JoinTokenResponse.Error</c>.
+    /// </summary>
+    /// <remarks>
+    /// Follows the existing machine-readable reason convention
+    /// (<c>duplicate_login</c>, <c>server_shutdown</c>). The point of the version
+    /// handshake is that this string appears instead of a parse error, a silent
+    /// close, or a successful connection that is confidently wrong.
+    /// </remarks>
+    public const string ReasonProtocolVersionMismatch = "protocol_version_mismatch";
+
+    /// <summary>Outcome of checking a peer's advertised protocol version.</summary>
+    public enum VersionVerdict
+    {
+        /// <summary>The peer advertised exactly this build's version.</summary>
+        Accepted,
+
+        /// <summary>
+        /// The peer advertised nothing and the configured minimum still tolerates
+        /// that. Admission on trust — callers MUST count it separately, because
+        /// the counter reaching zero is the only evidence that raising the
+        /// minimum will not lock out real players.
+        /// </summary>
+        AcceptedUnversioned,
+
+        /// <summary>The peer's version is one this build cannot serve.</summary>
+        Refused,
+    }
+
+    /// <summary>
+    /// Decide whether a peer advertising <paramref name="peerVersion"/> may be
+    /// admitted by a receiver whose configured floor is
+    /// <paramref name="minVersion"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The rule is EXACT MATCH against <see cref="ProtocolVersion"/>, with one
+    /// configured exemption for the unversioned case. Exact match, rather than
+    /// "peer >= min", is the honest rule for a single integer carrying no
+    /// compatibility range: a peer one version AHEAD is refused just as firmly as
+    /// one behind, because this build cannot know what a later version changed
+    /// and admitting it would be the guess the mechanism exists to prevent.
+    /// </para>
+    /// <para>
+    /// Mirrors <c>shared/messages.CheckProtocolVersion</c> in Go; the two are
+    /// asserted to agree by the interop tests.
+    /// </para>
+    /// </remarks>
+    public static VersionVerdict CheckProtocolVersion(uint peerVersion, uint minVersion)
+    {
+        if (peerVersion == ProtocolVersion) return VersionVerdict.Accepted;
+        if (peerVersion == ProtocolVersionUnversioned && minVersion == ProtocolVersionUnversioned)
+            return VersionVerdict.AcceptedUnversioned;
+        return VersionVerdict.Refused;
+    }
+
     /// <summary>First byte of a JSON body.</summary>
     private const byte JsonPrefix = (byte)'{';
 

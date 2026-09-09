@@ -13,8 +13,21 @@ public class SnapshotMergerGoldenVectorTests
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
-    private record SnapEntity(string Id, string Type, string X, string Y, int Hp, int MaxHp);
-    private record ExpectedEntity(string Id, int Hp, string X, string Y);
+    // speed/facingBrad/action are optional so every pre-existing case in the fixture
+    // keeps parsing unchanged. All three defaults are also default(T), so it does not
+    // matter whether System.Text.Json honours the declared default or substitutes the
+    // type's — they agree.
+    //
+    // `speed` is a hex bit pattern like x/y (it is a float and decimal text does not
+    // round-trip identically through two serializers); facingBrad and action are plain
+    // integers, which are already exact.
+    private record SnapEntity(
+        string Id, string Type, string X, string Y, int Hp, int MaxHp,
+        string? Speed = null, uint FacingBrad = 0, int Action = 0);
+
+    private record ExpectedEntity(
+        string Id, int Hp, string X, string Y,
+        string? Speed = null, uint? FacingBrad = null, int? Action = null);
 
     private sealed class SnapStep
     {
@@ -72,7 +85,10 @@ public class SnapshotMergerGoldenVectorTests
                 entities[i] = new EntitySnapshotData(
                     e.Id, e.Type,
                     GoldenVectors.Float(e.X), GoldenVectors.Float(e.Y),
-                    e.Hp, e.MaxHp);
+                    e.Hp, e.MaxHp,
+                    e.Speed == null ? 0f : GoldenVectors.Float(e.Speed),
+                    e.FacingBrad,
+                    (EntityAction)e.Action);
             }
 
             var snapshot = new SnapshotData(
@@ -106,6 +122,25 @@ public class SnapshotMergerGoldenVectorTests
                 name + "." + c.expectedEntityState.Id + ".x");
             GoldenVectors.AssertBitEqual(c.expectedEntityState.Y, entity.Y,
                 name + "." + c.expectedEntityState.Id + ".y");
+
+            // Only asserted when the fixture states them, so the pre-existing cases —
+            // written before these fields existed — stay silent about them rather than
+            // being retro-fitted with expectations nobody computed.
+            if (c.expectedEntityState.Speed != null)
+            {
+                GoldenVectors.AssertBitEqual(c.expectedEntityState.Speed, entity.Speed,
+                    name + "." + c.expectedEntityState.Id + ".speed");
+            }
+
+            if (c.expectedEntityState.FacingBrad != null)
+            {
+                Assert.Equal(c.expectedEntityState.FacingBrad.Value, entity.FacingBrad);
+            }
+
+            if (c.expectedEntityState.Action != null)
+            {
+                Assert.Equal((EntityAction)c.expectedEntityState.Action.Value, entity.Action);
+            }
         }
     }
 }

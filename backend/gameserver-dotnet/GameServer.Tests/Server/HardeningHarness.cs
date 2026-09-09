@@ -39,7 +39,8 @@ internal sealed class HardeningHarness : IAsyncDisposable
         TimeSpan? hold = null,
         IPlayerStore? playerStore = null,
         int maxInputsPerConnection = 0,
-        int maxPendingInputs = 0)
+        int maxPendingInputs = 0,
+        uint minProtocolVersion = 0)
     {
         var options = new ServerOptions
         {
@@ -51,6 +52,7 @@ internal sealed class HardeningHarness : IAsyncDisposable
             TickRate = 20,
             Capacity = capacity,
             MaxPendingHandshakes = maxPendingHandshakes,
+            MinProtocolVersion = minProtocolVersion,
             HandshakeTimeout = handshakeTimeout ?? ServerOptions.DefaultHandshakeTimeout,
             MaxInputsPerConnection = maxInputsPerConnection,
             MaxPendingInputs = maxPendingInputs,
@@ -91,13 +93,46 @@ internal sealed class HardeningHarness : IAsyncDisposable
     }
 
     /// <summary>Send a join for <paramref name="userId"/> on an already-open connection and return the reply.</summary>
+    /// <remarks>
+    /// <paramref name="protocolVersion"/> defaults to this build's version, so every
+    /// existing caller exercises the conforming path. Pass
+    /// <c>WireProtocol.ProtocolVersionUnversioned</c> to imitate a client built before
+    /// the field existed, or any other value to imitate a skewed rollout.
+    /// </remarks>
     public static async Task<JoinTokenResponse> SendJoinAsync(
-        TcpClient client, string userId, TimeSpan? timeout = null)
+        TcpClient client, string userId, TimeSpan? timeout = null,
+        uint protocolVersion = WireProtocol.ProtocolVersion,
+        WireEncoding encoding = WireEncoding.Json)
     {
         var stream = client.GetStream();
         var join = WireProtocol.NewEnvelope(
             MsgType.JoinToken,
-            new JoinTokenRequest { Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret) },
+            new JoinTokenRequest
+            {
+                Token = TestHelpers.CreateTestJwt(userId, ServerId, JwtSecret),
+                ProtocolVersion = protocolVersion,
+            },
+            encoding);
+        await stream.WriteAsync(WireProtocol.Encode(join));
+        await stream.FlushAsync();
+
+        using var cts = new CancellationTokenSource(timeout ?? TimeSpan.FromSeconds(15));
+        var env = await WireProtocol.DecodeAsync(stream, cts.Token);
+        Assert.NotNull(env);
+        Assert.Equal((uint)MsgType.JoinTokenResp, env!.Type);
+        return WireProtocol.GetPayload<JoinTokenResponse>(env);
+    }
+
+    /// <summary>
+    /// Send a join carrying a deliberately invalid token, to prove which check fires first.
+    /// </summary>
+    public static async Task<JoinTokenResponse> SendJoinBadTokenAsync(
+        TcpClient client, uint protocolVersion, TimeSpan? timeout = null)
+    {
+        var stream = client.GetStream();
+        var join = WireProtocol.NewEnvelope(
+            MsgType.JoinToken,
+            new JoinTokenRequest { Token = "not-a-jwt", ProtocolVersion = protocolVersion },
             WireEncoding.Json);
         await stream.WriteAsync(WireProtocol.Encode(join));
         await stream.FlushAsync();

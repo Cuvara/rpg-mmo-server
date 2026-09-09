@@ -51,6 +51,28 @@ public class ServerOptions
 
     public int Capacity { get; set; } = 100;
 
+    /// <summary>
+    /// Lowest wire protocol version a joining client may advertise
+    /// (<c>GAMESERVER_MIN_PROTOCOL_VERSION</c>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Zero — the shipping default — also admits a client that advertises
+    /// nothing, because proto3 elides a zero and every client built before the
+    /// field is indistinguishable on the wire from one sending 0. Refusing them
+    /// all on the day the field ships would close a hypothetical by breaking
+    /// everything real.
+    /// </para>
+    /// <para>
+    /// Set it to <see cref="WireProtocol.ProtocolVersion"/> once the fleet
+    /// advertises; an unversioned client is then refused through the same named
+    /// path as a mismatched one. <c>gameserver_unversioned_handshakes_total</c>
+    /// going flat at zero is what says the flip is safe — flipping it while that
+    /// counter still moves locks out real players.
+    /// </para>
+    /// </remarks>
+    public uint MinProtocolVersion { get; set; }
+
     /// <summary>Default for <see cref="MaxPendingHandshakes"/>.</summary>
     public const int DefaultMaxPendingHandshakes = 256;
 
@@ -986,6 +1008,45 @@ public sealed class GameServerHost : IAsyncDisposable
                 return;
             }
 
+            // Step 1b: Check the wire protocol version.
+            //
+            // Before the JWT, deliberately. A peer that cannot speak this schema is
+            // refused whether or not its join token is good: the refusal is about the
+            // connection being unusable, not about who is on the far end. Answering
+            // "protocol_version_mismatch" to a valid token is far more useful to an
+            // operator than answering "Invalid or expired token" to a client whose real
+            // problem is that it is a build behind — and it declines to spend an HMAC
+            // verification on a connection that is already refused.
+            //
+            // This check is INDEPENDENT of the gateway's check on MsgAuth, and that
+            // duplication is deliberate. Under ADR-3 these are two connections to two
+            // separately deployed processes; the gateway never carries a snapshot, so it
+            // cannot vouch for a client's ability to read one. It is this hop, not the
+            // gateway's, that a version disagreement actually corrupts.
+            switch (WireProtocol.CheckProtocolVersion(joinReq.ProtocolVersion, _options.MinProtocolVersion))
+            {
+                case WireProtocol.VersionVerdict.Accepted:
+                    break;
+
+                case WireProtocol.VersionVerdict.AcceptedUnversioned:
+                    // Admitted on trust, and counted: an admission nobody can see is
+                    // behaviourally identical to having no check at all.
+                    _metrics?.RecordUnversionedHandshake();
+                    _logger.LogDebug(
+                        "Handshake from {Remote} advertised no protocol version (this server speaks {Version})",
+                        accepted.RemoteEndPoint, WireProtocol.ProtocolVersion);
+                    break;
+
+                default:
+                    _metrics?.RecordHandshakeRejected(HandshakeRejectReason.ProtocolVersion);
+                    _logger.LogWarning(
+                        "Handshake from {Remote} refused: client speaks protocol version {ClientVersion}, this server speaks {ServerVersion} (minimum {MinVersion})",
+                        accepted.RemoteEndPoint, joinReq.ProtocolVersion,
+                        WireProtocol.ProtocolVersion, _options.MinProtocolVersion);
+                    await SendError(tempConn, WireProtocol.ReasonProtocolVersionMismatch, handshakeToken);
+                    return;
+            }
+
             // Step 2: Verify JWT
             var claims = _joinKeys.Verify(joinReq.Token);
             if (claims == null)
@@ -1154,7 +1215,13 @@ public sealed class GameServerHost : IAsyncDisposable
             // giving away tuning data for nothing. Absent means 0, which the schema
             // defines as "refuse to predict" — the correct answer to a failed join.
             var resp = WireProtocol.NewEnvelope(MsgType.JoinTokenResp,
-                new JoinTokenResponse { Ok = true, UserId = userId, TickRate = (uint)_rates.MovementHz },
+                new JoinTokenResponse
+            {
+                Ok = true,
+                UserId = userId,
+                TickRate = (uint)_rates.MovementHz,
+                ProtocolVersion = WireProtocol.ProtocolVersion,
+            },
                 conn.Encoding);
             await conn.WriteOneAsync(resp);
 
@@ -1650,8 +1717,18 @@ public sealed class GameServerHost : IAsyncDisposable
     /// </param>
     private static async Task SendError(Connection conn, string error, CancellationToken ct = default)
     {
+        // ProtocolVersion is echoed on EVERY rejection, not only a version refusal.
+        // Unlike TickRate this is not privileged tuning, and it is the only way a
+        // client learns whether its failure is its credential or its build. A refusal
+        // that does not say which version it failed against is as opaque as the parse
+        // error this whole mechanism replaces.
         var resp = WireProtocol.NewEnvelope(MsgType.JoinTokenResp,
-            new JoinTokenResponse { Ok = false, Error = error }, conn.Encoding);
+            new JoinTokenResponse
+            {
+                Ok = false,
+                Error = error,
+                ProtocolVersion = WireProtocol.ProtocolVersion,
+            }, conn.Encoding);
         await conn.WriteOneAsync(resp, ct);
     }
 

@@ -471,7 +471,12 @@ public sealed class TickAllocationBench
             for (int i = 0; i < Entities; i++)
             {
                 views[i] = new GameServer.World.EntityView(
-                    i + 1, ids[i], "player", new Vec2(i * 10f + dx, 0f), 100, 100, 4f);
+                    i + 1, ids[i], "player", new Vec2(i * 10f + dx, 0f), 100, 100, 4f,
+                    // A real facing and action: this benchmark asserts the encode path
+                    // allocates nothing, and the fields that are always written are the
+                    // ones that could introduce a boxing conversion.
+                    GameServer.Net.FacingCodec.FromRadians(0.5f),
+                    global::Shared.GameLogic.Components.EntityAction.Moving);
             }
         }
 

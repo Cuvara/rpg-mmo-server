@@ -66,6 +66,7 @@ public sealed class GameMetrics : IDisposable
     private readonly Counter<long> _resyncsRequested;
     private readonly Counter<long> _playersKicked;
     private readonly Counter<long> _handshakesRejected;
+    private readonly Counter<long> _unversionedHandshakes;
     private readonly Counter<long> _inputsDropped;
     private readonly Counter<long> _inputsCoalesced;
     private readonly Counter<long> _transfersRejected;
@@ -75,6 +76,7 @@ public sealed class GameMetrics : IDisposable
     private readonly TagList _handshakePoolFullTags;
     private readonly TagList _handshakeTimeoutTags;
     private readonly TagList _handshakeMalformedTags;
+    private readonly TagList _handshakeProtocolVersionTags;
     private readonly TagList _inputBudgetTags;
     private readonly TagList _inputQueueFullTags;
     private readonly TagList _saveOkTags;
@@ -118,6 +120,7 @@ public sealed class GameMetrics : IDisposable
         _handshakePoolFullTags = new TagList { { "map_id", mapId }, { "reason", "pool_full" } };
         _handshakeTimeoutTags = new TagList { { "map_id", mapId }, { "reason", "timeout" } };
         _handshakeMalformedTags = new TagList { { "map_id", mapId }, { "reason", "malformed" } };
+        _handshakeProtocolVersionTags = new TagList { { "map_id", mapId }, { "reason", "protocol_version" } };
         _inputBudgetTags = new TagList { { "map_id", mapId }, { "reason", "connection_budget" } };
         _inputQueueFullTags = new TagList { { "map_id", mapId }, { "reason", "queue_full" } };
 
@@ -185,8 +188,18 @@ public sealed class GameMetrics : IDisposable
                          "reason: pool_full (GAMESERVER_MAX_PENDING_HANDSHAKES reached, closed " +
                          "on accept), timeout (no complete join frame within " +
                          "GAMESERVER_HANDSHAKE_TIMEOUT_MS), malformed (first frame was not a " +
-                         "well-formed MsgJoinToken). Not a capacity refusal: those are " +
-                         "authenticated and logged separately.");
+                         "well-formed MsgJoinToken), protocol_version (the client advertised a " +
+                         "wire protocol version this build cannot serve, or advertised none while " +
+                         "GAMESERVER_MIN_PROTOCOL_VERSION required one). Not a capacity refusal: " +
+                         "those are authenticated and logged separately.");
+
+        _unversionedHandshakes = _meter.CreateCounter<long>(
+            "gameserver.handshakes.unversioned",
+            description: "Clients admitted without advertising a wire protocol version. This is a " +
+                         "migration instrument, not a health metric: admitting one is admission on " +
+                         "trust, since a pre-versioning build is indistinguishable from a " +
+                         "non-conforming one. This going flat at zero is the evidence that raising " +
+                         "GAMESERVER_MIN_PROTOCOL_VERSION will not lock out real players.");
 
         _inputsDropped = _meter.CreateCounter<long>(
             "gameserver.inputs.dropped",
@@ -407,6 +420,8 @@ public sealed class GameMetrics : IDisposable
     private long _handshakesRejectedPoolFull;
     private long _handshakesRejectedTimeout;
     private long _handshakesRejectedMalformed;
+    private long _handshakesRejectedProtocolVersion;
+    private long _unversionedHandshakeCount;
 
     /// <summary>
     /// Register the callback used by the <c>gameserver_handshakes_pending</c> gauge:
@@ -436,6 +451,10 @@ public sealed class GameMetrics : IDisposable
                 Interlocked.Increment(ref _handshakesRejectedTimeout);
                 _handshakesRejected.Add(1, _handshakeTimeoutTags);
                 break;
+            case HandshakeRejectReason.ProtocolVersion:
+                Interlocked.Increment(ref _handshakesRejectedProtocolVersion);
+                _handshakesRejected.Add(1, _handshakeProtocolVersionTags);
+                break;
             default:
                 Interlocked.Increment(ref _handshakesRejectedMalformed);
                 _handshakesRejected.Add(1, _handshakeMalformedTags);
@@ -452,9 +471,25 @@ public sealed class GameMetrics : IDisposable
     /// <summary>Handshakes whose first frame was not a well-formed <c>MsgJoinToken</c>.</summary>
     public long HandshakesRejectedMalformed => Interlocked.Read(ref _handshakesRejectedMalformed);
 
+    /// <summary>Handshakes refused for an unsupported wire protocol version.</summary>
+    public long HandshakesRejectedProtocolVersion => Interlocked.Read(ref _handshakesRejectedProtocolVersion);
+
+    /// <summary>Clients admitted without advertising a wire protocol version.</summary>
+    public long UnversionedHandshakes => Interlocked.Read(ref _unversionedHandshakeCount);
+
+    /// <summary>
+    /// Record one client admitted without advertising a wire protocol version.
+    /// </summary>
+    public void RecordUnversionedHandshake()
+    {
+        Interlocked.Increment(ref _unversionedHandshakeCount);
+        _unversionedHandshakes.Add(1, _mapTags);
+    }
+
     /// <summary>All pre-authentication handshake rejections, every reason.</summary>
     public long HandshakesRejected
-        => HandshakesRejectedPoolFull + HandshakesRejectedTimeout + HandshakesRejectedMalformed;
+        => HandshakesRejectedPoolFull + HandshakesRejectedTimeout + HandshakesRejectedMalformed
+           + HandshakesRejectedProtocolVersion;
 
     // ── Bounded ingestion (workspace audit F04) ──────────────────────────────
 
@@ -541,4 +576,13 @@ public enum HandshakeRejectReason
 
     /// <summary>The first frame was not a well-formed <c>MsgJoinToken</c> (wrong type, bad length prefix, undecodable body, or EOF mid-frame).</summary>
     Malformed,
+
+    /// <summary>
+    /// The client advertised a wire protocol version this build cannot serve, or
+    /// advertised none while <c>GAMESERVER_MIN_PROTOCOL_VERSION</c> required one.
+    /// Distinct from <see cref="Malformed"/> on purpose: the frame parsed perfectly,
+    /// and telling the two apart is the difference between "a client is broken" and
+    /// "a rollout is skewed".
+    /// </summary>
+    ProtocolVersion,
 }

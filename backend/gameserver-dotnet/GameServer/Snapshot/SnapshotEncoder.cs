@@ -25,7 +25,9 @@ public static class SnapshotEncoder
                 Y = e.Position.Y,
                 Hp = e.Hp,
                 MaxHp = e.MaxHp,
-                Speed = e.Speed
+                Speed = e.Speed,
+                FacingBrad = e.FacingBrad,
+                Action = (RpgMmo.Wire.V1.EntityAction)e.Action
             };
             EntityTypes.SetType(ent, e.Type);
             msg.Entities.Add(ent);

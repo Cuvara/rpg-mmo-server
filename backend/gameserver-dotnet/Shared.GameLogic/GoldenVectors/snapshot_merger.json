@@ -318,6 +318,66 @@
       "expectedDeltas": 3,
       "expectedEntityIds": ["m1", "m2", "p1"],
       "expectedCount": 3
+    },
+    {
+      "name": "delta_carries_facing_and_action",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41A00000", "hp": 100, "maxHp": 100, "speed": "0x40A00000", "facingBrad": 1, "action": 1}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 11,
+          "ackTick": 5,
+          "full": false,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41A00000", "hp": 100, "maxHp": 100, "speed": "0x40A00000", "facingBrad": 16385, "action": 2}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 11,
+      "expectedAckTick": 5,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 1,
+      "expectedEntityIds": ["p1"],
+      "expectedCount": 1,
+      "expectedEntityState": {"id": "p1", "hp": 100, "x": "0x41200000", "y": "0x41A00000", "speed": "0x40A00000", "facingBrad": 16385, "action": 2}
+    },
+    {
+      "name": "delta_omitting_facing_and_action_zeroes_them",
+      "steps": [
+        {
+          "tick": 20,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x3F800000", "y": "0x40000000", "hp": 100, "maxHp": 100, "speed": "0x40A00000", "facingBrad": 16385, "action": 3}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 21,
+          "ackTick": 0,
+          "full": false,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x3F800000", "y": "0x40000000", "hp": 100, "maxHp": 100, "speed": "0x40A00000"}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 21,
+      "expectedAckTick": 0,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 1,
+      "expectedEntityIds": ["p1"],
+      "expectedCount": 1,
+      "expectedEntityState": {"id": "p1", "hp": 100, "x": "0x3F800000", "y": "0x40000000", "speed": "0x40A00000", "facingBrad": 0, "action": 0}
     }
   ]
 }

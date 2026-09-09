@@ -2,6 +2,12 @@ using System.Runtime.InteropServices;
 using GameServer.Net;
 using GameServer.World;
 using Shared.GameLogic.Components;
+// Both layers legitimately have an EntityAction: the generated wire enum and the shared
+// simulation one, which mirror each other by design. Aliased rather than resolved by
+// import order so every use below says which layer it means - this file is where the two
+// meet, and that is exactly where an implicit choice would be a bug waiting to happen.
+using SimAction = Shared.GameLogic.Components.EntityAction;
+using WireAction = RpgMmo.Wire.V1.EntityAction;
 using RpgMmo.Wire.V1;
 
 namespace GameServer.Snapshot;
@@ -44,6 +50,8 @@ public sealed class SnapshotDeltaState
         public readonly int Hp;
         public readonly int MaxHp;
         public readonly float Speed;
+        public readonly uint FacingBrad;
+        public readonly SimAction Action;
 
         public SentView(in EntityView e)
         {
@@ -54,6 +62,8 @@ public sealed class SnapshotDeltaState
             Hp = e.Hp;
             MaxHp = e.MaxHp;
             Speed = e.Speed;
+            FacingBrad = e.FacingBrad;
+            Action = e.Action;
         }
 
         public bool Equals(SentView other) =>
@@ -71,10 +81,22 @@ public sealed class SnapshotDeltaState
             // client predicting at the old speed until the next keyframe — up to
             // 30 ticks of divergence that no test of the keyframe path can see.
             Speed.Equals(other.Speed) &&
+            // Facing and action belong here for exactly the reason Speed does, and the
+            // failure is more visible: an entity that turns on the spot changes nothing
+            // else, and an entity that starts attacking without moving changes nothing
+            // else either. Omitting them would compare such an entity equal, skip it,
+            // and leave the client showing the old facing and the old animation until
+            // the next keyframe - up to 30 ticks of a character looking the wrong way,
+            // with no error on either side and no test of the keyframe path able to see
+            // it. This struct is the ONLY thing deciding whether a delta resends an
+            // entity.
+            FacingBrad == other.FacingBrad &&
+            Action == other.Action &&
             string.Equals(Type, other.Type, StringComparison.Ordinal);
 
         public override bool Equals(object? obj) => obj is SentView v && Equals(v);
-        public override int GetHashCode() => HashCode.Combine(Type, X, Y, Hp, MaxHp, Speed);
+        public override int GetHashCode() =>
+            HashCode.Combine(Type, X, Y, Hp, MaxHp, Speed, FacingBrad, Action);
     }
 
     /// <summary>
@@ -249,7 +271,7 @@ public sealed class SnapshotDeltaState
                 key = --_nextLegacyKey;
                 _legacyKeys[e.Id] = key;
             }
-            _legacyViews[i] = new EntityView(key, e.Id, e.Type, e.Position, e.Hp, e.MaxHp, e.Speed);
+            _legacyViews[i] = new EntityView(key, e.Id, e.Type, e.Position, e.Hp, e.MaxHp, e.Speed, e.FacingBrad, e.Action);
         }
         return Encode(tick, ackTick, _legacyViews.AsSpan(0, nearby.Length), keyframeInterval, intern);
     }
@@ -345,6 +367,11 @@ public sealed class SnapshotDeltaState
         e.Hp = 0;
         e.MaxHp = 0;
         e.Speed = 0f;
+        // Reset like every other field: a pooled message that kept a previous entity's
+        // facing would attach it to whichever entity rents the object next, which is a
+        // wrong value rather than a missing one - far harder to notice.
+        e.FacingBrad = 0;
+        e.Action = WireAction.Unspecified;
         return e;
     }
 
@@ -440,6 +467,13 @@ public sealed class SnapshotDeltaState
         // speed only when the id is introduced would leave it correct once per
         // keyframe interval and stale in between.
         msg.Speed = e.Speed;
+        // Written on every mention, including handle-only ones, for the same reason as
+        // Speed: a client that resolves a handle expects complete state, and sending
+        // these only alongside the id would leave them correct once per keyframe
+        // interval and stale in between. Both are already in the wire's biased/reserved
+        // form, so there is no conversion on this path.
+        msg.FacingBrad = e.FacingBrad;
+        msg.Action = (WireAction)e.Action;
         EntityTypes.SetType(msg, e.Type);
 
         if (!_intern)
