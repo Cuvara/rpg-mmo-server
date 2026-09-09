@@ -209,6 +209,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Applies to **Protobuf connections only**; every byte figure in the encoder is a
     protobuf size and a JSON frame is several times larger, so a JSON stream stays
     bounded only by the AOI radius (stated limitation — ADR-9 legacy encoding).
+  - Deferral records are pruned against the visible set each snapshot. Without that,
+    an entity that is new, is deferred before it is ever sent, and then leaves the AOI
+    never becomes a despawn and its record survives for the life of the connection —
+    a slow per-connection leak on any map whose spawns churn at the edge of a circle.
   - `Shared.GameLogic` and `wire.proto` are untouched: deferral is invisible in the
     protocol and an existing client needs no change. `docs/API.md` gains a normative
     "Downlink budget" section saying so.

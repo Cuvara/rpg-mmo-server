@@ -407,6 +407,38 @@ public class SnapshotBudgetTests
         AssertMergerMatches(world, client.Merger);
     }
 
+    /// <summary>
+    /// An entity that is new, is deferred before it is ever sent, and then leaves the AOI
+    /// never becomes a despawn — nothing was ever sent about it — so the only thing that
+    /// can clear its deferral record is the prune pass. Without one, a map whose spawns
+    /// churn at the edge of an observer's circle leaks a dictionary entry per entity for
+    /// the life of the connection.
+    /// </summary>
+    [Fact]
+    public void DeferralRecords_DoNotAccumulateForEntitiesThatLeaveBeforeBeingSent()
+    {
+        var state = new SnapshotDeltaState { MaxSnapshotBytes = 64, SelfId = "self" };
+
+        // A steady population of four, plus a churning cohort of newcomers that appears for
+        // exactly one tick each. The budget is far too small to carry the newcomers, so each
+        // one is deferred once and then gone.
+        for (ulong tick = 1; tick <= 400; tick++)
+        {
+            List<EntityState> world = Crowd(4, 0f, selfId: "self");
+            for (int i = 0; i < 20; i++)
+            {
+                world.Add(TestHelpers.CreatePlayer($"transient-{tick}-{i}", 30f + i, 30f));
+            }
+            state.Encode(tick, tick, world, NoKeyframes, intern: true);
+        }
+
+        // 400 ticks x 20 newcomers = 8000 entities that came and went. If deferral records
+        // survived them, this is where the leak would be.
+        Assert.True(state.DeferralRecords <= 64,
+            $"{state.DeferralRecords} deferral records survive for entities that are long " +
+            "gone — the prune pass is not running");
+    }
+
     // ── The cap itself ────────────────────────────────────────────────────────────
 
     /// <summary>

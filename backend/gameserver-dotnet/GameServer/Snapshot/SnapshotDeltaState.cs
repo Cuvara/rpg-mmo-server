@@ -312,6 +312,12 @@ public sealed class SnapshotDeltaState
     /// </summary>
     public int MaxShedAge => Volatile.Read(ref _maxShedAge);
 
+    /// <summary>
+    /// Entities with an outstanding deferral right now. Bounded by the visible set; a value
+    /// that grows without bound is the prune pass having stopped working. Diagnostics/tests.
+    /// </summary>
+    public int DeferralRecords => _shedAge.Count;
+
     /// <summary>Payload bytes of the most recent encode. Diagnostics/tests.</summary>
     public int LastPayloadBytes { get; private set; }
 
@@ -641,7 +647,14 @@ public sealed class SnapshotDeltaState
         // The nearest entities are the ones that survive, so the pop happens at the edge
         // of the observer's circle where it is least noticeable.
         _candidates.Clear();
-        for (int i = 0; i < nearby.Length; i++) _candidates.Add(i);
+        _seen.Clear();
+        for (int i = 0; i < nearby.Length; i++)
+        {
+            _candidates.Add(i);
+            // Filled on the keyframe path too, purely so the deferral bookkeeping can be
+            // pruned against it below — a keyframe has no use for _seen otherwise.
+            _seen.Add(nearby[i].Key);
+        }
         _pendingRemovals.Clear(); // a keyframe carries no despawn list by definition
 
         return EncodeBudgeted(msg, nearby, HeaderBytes(tick, ackTick, full: true));
@@ -792,11 +805,39 @@ public sealed class SnapshotDeltaState
                 EmitEntity(msg, in e);
             }
             CommitRemovals(msg, _pendingRemovals.Count);
+            PruneDeferrals();
             LastPayloadBytes = total;
             return msg;
         }
 
-        return EmitBudgeted(msg, nearby, headerBytes);
+        SnapshotMessage shedded = EmitBudgeted(msg, nearby, headerBytes);
+        PruneDeferrals();
+        return shedded;
+    }
+
+    /// <summary>
+    /// Drop deferral records for entities that are no longer visible.
+    /// </summary>
+    /// <remarks>
+    /// Needed for one case that no other path covers: an entity which is <b>new</b> to this
+    /// connection, is deferred before it is ever sent, and then leaves the AOI. It never
+    /// entered <see cref="_lastSent"/>, so it never becomes a despawn and
+    /// <see cref="CommitRemovals"/> never erases it — its <see cref="_shedAge"/> entry
+    /// would simply stay. One entry is nothing; the accumulation over a session of a map
+    /// whose spawns churn at the edge of an observer's circle is a slow leak in a
+    /// per-connection dictionary, which is the kind of growth that is invisible until a
+    /// long-lived server is the thing being debugged.
+    /// </remarks>
+    private void PruneDeferrals()
+    {
+        if (_shedAge.Count == 0) return;
+
+        foreach (var kv in _shedAge)
+        {
+            if (!_seen.Contains(kv.Key)) _removedKeys.Add(kv.Key);
+        }
+        for (int i = 0; i < _removedKeys.Count; i++) _shedAge.Remove(_removedKeys[i]);
+        _removedKeys.Clear();
     }
 
     /// <summary>
