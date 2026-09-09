@@ -6,6 +6,82 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The AOI index was 1.3-2.3x SLOWER than the scan on clustered maps, and the gate was
+  waving it through.** The occupancy gate was audited against populations shaped like play
+  — hotspot crowds with a roaming tail — rather than the uniform-random layouts it was
+  calibrated on. Six layouts the gate admitted ran slower than the brute-force scan it
+  replaced, five of them clustered: `4 loose crowds` 0.43-0.45x, `4 crowds + 30% roaming`
+  0.50-0.54x, `8 crowds + 30% roaming` 0.55-0.61x, `16 tight crowds` 0.47-0.49x, and
+  `uniform spread 500` 0.64-0.65x. Part X's claim that the index is "never slower" was
+  false as merged.
+
+  **The cause was not the gate statistic.** The index discovers matches cell-major and must
+  emit them scan-major, so it sorts each query's matches back into scan order — and that
+  sort was over an array of `EntityView`, a wide struct carrying two object references, so
+  every swap copied the whole thing with write barriers. Sort cost grows with matches per
+  query, and matches per query is exactly what clustering raises, so the cost landed
+  precisely where the population is densest.
+
+  `SpatialGrid.Emit` now sorts an **`int` permutation** and gathers once at the end: 4 bytes
+  per swap, each view touched exactly once. Admitted layouts move from **0.41-0.63x to
+  0.85-2.25x**, and every layout the gate refuses would indeed have lost.
+
+  **One residual loss is admitted and recorded rather than tuned away**: `4 loose crowds`
+  (118 cells, 19.6 matches/query) reads 0.85-0.89x across three runs, with two more
+  clustered layouts at parity within noise. Occupancy cannot fix it by moving the threshold,
+  because it orders those rows wrongly — 105 cells reads 0.92-1.00x while 118 cells reads
+  0.85-0.89x, so the lower occupancy is the better layout. `EstimateCandidateFraction` does
+  separate them (the loss sits at 0.108, every winner at 0.086 or below), which is the case
+  for revisiting the statistic when there is telemetry to calibrate against.
+
+  Wire output is unaffected — the emitted order is identical, which is what
+  `AoiIndexDifferentialTests` asserts. `backend/docs/BENCHMARK.md` **Part XI** has the
+  layouts, both ordering strategies side by side, and the recommendation.
+
+- **Part X's published ratios no longer reproduce and are marked superseded.** Re-running
+  its own harness unchanged on develop gives 0.39-0.63x where it published 1.07-1.22x.
+  Between the two measurements `29aa8d9` added `FacingBrad` and `Action` to `EntityView`,
+  widening by 8 bytes the struct the sort was moving — a direct mechanism for a sort-bound
+  cost to grow, strongly supported but not isolated (no A/B across that commit is possible,
+  because the harness postdates it). The permutation sort makes the sort insensitive to the
+  struct's width and recovers the original margins. Part X now carries a pointer saying so
+  rather than being silently left to mislead.
+
+  This also settles a loose end Part X flagged as host noise: its `realistic, 400` row read
+  `0.63x 1.19x 1.22x` and the 0.63 was dismissed. It was the true value.
+
+### Changed
+
+- **`MinOccupiedCellsToQuery` stays at 96.** With the sort fixed the threshold is correct on
+  clustered layouts too — the crossover sits between 62 cells (0.81-0.88x, refused) and 99
+  cells (1.25-1.30x, admitted). The audit's own hypothesis, that tight crowds would be
+  *refused* a win they deserved, does not occur: not one gate-OFF layout wins.
+
+### Added
+
+- `AoiClusteredGateBench` — hotspot layouts (crowd count, tightness, roaming fraction) on
+  the stock 1000x1000 map, with uniform layouts measured in the **same** harness so the two
+  families are comparable without crossing harnesses. Runs the index with the gate forced
+  open, so what the gate gives up is visible.
+
+  The pre-fix arm is a **verbatim replica inside the bench**, following Part VII's
+  `LegacyStringKeyedDeltaState` precedent, so production carries no benchmark-only switch;
+  the bench asserts the replica returns what the scan returns, in the same order, on every
+  layout before taking a timing. The two pairs (scan vs shipped, scan vs replica) are
+  measured **separately**: interleaving all three arms in one round moved the
+  uniform-full-map ratio from 1.76-1.91x to 1.12x, because three working sets evict each
+  other where two do not.
+
+- `SpatialGrid.EstimateCandidateFraction` — the mean fraction of the population a query must
+  examine, from the cell histogram. Implemented and measured as a candidate replacement for
+  occupancy, and **deliberately not adopted**: it is the better predictor (monotone across
+  both layout families, where occupancy is not), but once the sort is fixed occupancy makes
+  no wrong call on any layout measured, and this costs nine dictionary probes per occupied
+  cell per rebuild. Kept as a benchmark diagnostic so the next person to suspect the gate can
+  measure rather than argue.
+
 ### Added
 - **The server produces and ships per-entity facing and action state**
   (`wire.proto` fields 10 and 11). `Locomotion` gains `FacingBrad` and `Action`;

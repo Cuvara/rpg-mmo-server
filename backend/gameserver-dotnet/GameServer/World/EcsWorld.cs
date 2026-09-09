@@ -309,6 +309,12 @@ public sealed class EcsWorld : IDisposable
     [ThreadStatic] private static EntityView[]? _aoiScratchViews;
 
     /// <summary>
+    /// Index permutation the match sort orders, so the sort swaps 4-byte slots rather than
+    /// whole <see cref="EntityView"/> structs. See <c>SpatialGrid.Emit</c>.
+    /// </summary>
+    [ThreadStatic] private static int[]? _aoiScratchSlots;
+
+    /// <summary>
     /// Escape hatch for the differential test and the A/B benchmark: when false, gather
     /// scopes do not build or consult the index and every AOI query takes the full scan.
     /// Not a production switch — the two paths are required to agree, and
@@ -321,6 +327,21 @@ public sealed class EcsWorld : IDisposable
     /// usefulness gate. Diagnostics only.
     /// </summary>
     internal int AoiIndexOccupiedCells => _grid.OccupiedCells;
+
+    /// <summary>
+    /// Occupancy threshold the gate compares against, overridable so the benchmark can
+    /// force the index on for populations the shipped gate rejects — which is the only way
+    /// to measure what the gate is giving up. Defaults to the shipped value; production
+    /// never sets it.
+    /// </summary>
+    internal int AoiIndexGateThreshold { get; set; } = SpatialGrid.MinOccupiedCellsToQuery;
+
+    /// <summary>
+    /// Mean fraction of the population a query has to examine, estimated from the cell
+    /// histogram — the benchmark's instrument for testing whether occupancy is the right
+    /// gate statistic on clustered populations. Diagnostics only.
+    /// </summary>
+    internal double AoiIndexCandidateFraction => _grid.EstimateCandidateFraction();
 
     private readonly List<Query> _readQueries = new();
 
@@ -807,8 +828,8 @@ public sealed class EcsWorld : IDisposable
     {
         if (!_gridFresh) return ScanRangeViewsLocked(center, radius, destination);
 
-        RentAoiScratch(_grid.Count, out Span<int> ordinals, out Span<EntityView> views);
-        return _grid.Query(in center, radius, destination, ordinals, views);
+        RentAoiScratch(_grid.Count, out Span<int> ordinals, out Span<EntityView> views, out Span<int> slots);
+        return _grid.Query(in center, radius, destination, ordinals, views, slots);
     }
 
     /// <summary>
@@ -956,7 +977,7 @@ public sealed class EcsWorld : IDisposable
         // the record of exactly that — so the gather takes the scan whenever the population
         // is too clustered for a 3x3 neighbourhood to narrow anything. Purely a performance
         // decision: both paths return identical results.
-        _gridUseful = _grid.IsWorthQuerying;
+        _gridUseful = _grid.OccupiedCells >= AoiIndexGateThreshold;
         _gridFresh = _gridUseful;
     }
 
@@ -964,17 +985,20 @@ public sealed class EcsWorld : IDisposable
     /// Borrow this thread's AOI query scratch, grown to hold <paramref name="needed"/>
     /// matches. Amortises to no allocation once the population has stabilised.
     /// </summary>
-    private static void RentAoiScratch(int needed, out Span<int> ordinals, out Span<EntityView> views)
+    private static void RentAoiScratch(
+        int needed, out Span<int> ordinals, out Span<EntityView> views, out Span<int> slots)
     {
         if (_aoiScratchOrdinals is null || _aoiScratchOrdinals.Length < needed)
         {
             int capacity = Math.Max(needed, (_aoiScratchOrdinals?.Length ?? 0) * 2);
             _aoiScratchOrdinals = new int[capacity];
             _aoiScratchViews = new EntityView[capacity];
+            _aoiScratchSlots = new int[capacity];
         }
 
         ordinals = _aoiScratchOrdinals;
         views = _aoiScratchViews!;
+        slots = _aoiScratchSlots!;
     }
 
     /// <summary>
