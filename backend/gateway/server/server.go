@@ -379,12 +379,38 @@ func (g *Gateway) Run(addr string) error {
 	g.listener = ln
 	g.mu.Unlock()
 	g.connLimiter.StartCleanup(time.Minute)
+
+	// Transport confidentiality posture, reported on every boot.
+	//
+	// The field this replaces was WRONG, not merely incomplete: it logged
+	// `encrypted` as `g.transportKey != ""`, so a gateway on TCP with a key set
+	// reported encrypted=true while putting every auth frame and join token on
+	// the wire in cleartext — TCP has no packet-crypt layer and the key is
+	// ignored. A security field that is confidently false is worse than one that
+	// is missing, because nobody goes looking behind it.
+	posture := transport.Posture(g.transportKind, g.transportKey, addr)
+	if g.metrics != nil {
+		g.metrics.SetTransportPosture(posture)
+	}
+
 	g.logger.Info("gateway listening",
 		"addr", ln.Addr().String(),
-		"transport", transport.Normalize(g.transportKind),
-		"encrypted", g.transportKey != "",
+		"transport", posture.Transport,
+		"encrypted", posture.Encrypted,
+		"authenticated", posture.Authenticated,
+		"cipher", posture.Cipher,
 		"conn_limit", g.connLimiter.Enabled(),
 		"msg_limit", g.msgRate > 0)
+
+	if posture.Encrypted {
+		g.logger.Info("transport posture", "summary", posture.Summary)
+	} else {
+		// Warn, every boot, including for the default configuration. Before this
+		// the only cleartext case that warned was KCP-without-a-key, so plain TCP
+		// -- the default, and the one with no encryption at all -- was silent.
+		g.logger.Warn("transport posture", "summary", posture.Summary,
+			"remedy", "set "+transport.KeyEnvVar+" (32-byte hex) and --transport kcp, or terminate TLS in front of this listener")
+	}
 
 	for {
 		conn, err := ln.Accept()
