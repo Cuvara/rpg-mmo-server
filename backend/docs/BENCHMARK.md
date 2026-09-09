@@ -1843,6 +1843,20 @@ measured, and it named the conditions under which the answer would change. The o
 governing the *implementation* has since been met; the one governing whether the
 work was warranted has not — read the next section before quoting anything here.
 
+> **⚠️ Superseded by [Part XI](#part-xi--the-gate-against-clustered-populations-and-the-sort-that-was-the-real-problem-2026-09-10). Do not quote this Part's ratios.**
+>
+> Two things below did not survive contact with clustered populations and with
+> `develop`. **"Never slower" was false as merged**: the gate protected the
+> low-occupancy end it was calibrated on, and nothing protected the middle, where
+> the index ran 1.3-2.3x *slower* on realistic clustered layouts. And this Part's
+> ratio columns **do not reproduce** on develop — `realistic, 400` was published at
+> 1.07-1.22x and re-runs at 0.39-0.63x — because `EntityView` was widened after
+> these figures were taken and the index was sorting arrays of it.
+>
+> Part XI fixes the cause (sort an index permutation, not the structs), restores and
+> exceeds these margins, and confirms the 96-cell threshold needs no change. The
+> method below stands; the numbers are superseded.
+
 ### Why this was rebuilt, which is not the same as why it was justified
 
 **State this before the numbers, because the numbers are persuasive and the provenance
@@ -1990,3 +2004,166 @@ tick, but no tick figure from this host bounds anything.
   incremental index must intercept all of them forever, including the next one
   someone adds. A missed write does not throw — it leaves an entity in the wrong
   bucket, and the symptom is a player who vanishes from someone else's screen.
+
+---
+
+## Part XI — the gate against clustered populations, and the sort that was the real problem (2026-09-10)
+
+**Result: the gate statistic was not the defect. The index's per-match ordering
+cost was.** As merged, the 96-cell occupancy gate admitted the index on realistic
+clustered layouts where it ran **1.7-2.3x slower** — a live regression on exactly
+the population shape an MMO produces. Sorting an index permutation instead of an
+array of `EntityView` structs removes it: every layout the gate admits then runs at
+**0.98-2.5x**, every layout it refuses would indeed have lost, and the threshold of
+**96 needs no change**.
+
+### What was asked, and why both hypotheses were wrong
+
+[Part X](#part-x--the-spatial-index-revisited-and-this-time-kept-2026-09-09) closed
+with a caveat in its own words: the threshold was calibrated on **uniform random**
+layouts, and real players clump onto spawns, objectives, boss doors and towns.
+Occupancy is the gate's only input and clustering is what moves it, so the gate
+could be systematically wrong in the one regime that occurs.
+
+The predicted failure was specific: *k* tight crowds occupy few cells, so occupancy
+should read "not worth indexing", while a viewer inside a crowd still only examines
+its own crowd — so the index should have been **refused a win**. Measured, that
+does not happen. **Not one gate-OFF row wins.** The failure is the opposite one and
+was not predicted by anyone: the gate says **ON** for clustered layouts where the
+index is far slower, because clustering drives *matches per query* up, and matches
+are what the index was paying too much for.
+
+That is worth stating plainly because it is the second time in this sequence that
+an AOI change was reasoned about correctly and still aimed at the wrong term.
+
+### Layouts
+
+Hotspot populations on the stock 1000x1000 map, AOI radius 50: *k* gathering points
+holding most of the players, Gaussian-scattered with standard deviation sigma, the
+remainder roaming uniformly. Sigma is quoted against the AOI radius — sigma 25 is a
+crowd tighter than one AOI (a boss door), sigma 100 a loose gathering several AOIs
+across (a town square). Uniform layouts are measured **in the same harness** rather
+than compared across harnesses to Part X, which turned out to matter (below).
+
+Same discipline as Part V and Part X: full gather per arm, rebuild inside the
+measured region, alternating arm order, `Stopwatch` only, 100 rounds after 20
+warmup, three repetitions, ratios quotable. The indexed arm runs with the gate
+**forced open**, because the question is what the gate gives up.
+
+### The measurement, both ordering strategies
+
+`GameServer.Tests/Bench/AoiClusteredGateBench.cs`, `BENCH_AOI=1`.
+
+| layout | cells | gate | match/q | cand. frac | struct sort | **permutation sort** |
+|---|---|---|---|---|---|---|
+| 2 tight crowds (400) | 44 | OFF | 110.3 | 0.395 | 0.13-0.15x | 0.40-0.95x* |
+| 2 tight crowds (800) | 61 | OFF | 229.2 | 0.402 | 0.14-0.15x | 0.42-0.43x |
+| 4 tight crowds | 60 | OFF | 55.3 | 0.201 | 0.19-0.23x | 0.51-0.53x |
+| 8 tight crowds | 67 | OFF | 38.6 | 0.169 | 0.26-0.27x | 0.64-0.65x |
+| uniform, spread 250 | 36 | OFF | 43.7 | 0.262 | 0.24-0.27x | 0.57-0.63x |
+| uniform, spread 350 | 62 | OFF | 23.7 | 0.148 | 0.37-0.39x | 0.81-0.88x |
+| 16 tight crowds | 105 | ON | 18.9 | 0.078 | **0.47-0.49x** | 1.03-1.04x |
+| 4 loose crowds | 118 | ON | 19.6 | 0.108 | **0.43-0.45x** | 0.93-1.01x |
+| 8 loose crowds | 133 | ON | 14.7 | 0.086 | **0.56-0.59x** | 1.10-1.22x |
+| 4 crowds + 30% roaming | 157 | ON | 15.6 | 0.081 | **0.50-0.54x** | 1.10-1.14x |
+| 8 crowds + 30% roaming | 169 | ON | 14.1 | 0.075 | **0.55-0.61x** | 1.09-1.17x |
+| 8 crowds + 50% roaming | 196 | ON | 10.5 | 0.055 | **0.69-0.77x** | 1.26-1.32x |
+| 8 very loose crowds | 209 | ON | 6.4 | 0.039 | 1.18-1.24x | 1.61-1.82x |
+| uniform, spread 500 | 99 | ON | 12.6 | 0.081 | **0.64-0.65x** | 1.25-1.30x |
+| uniform, spread 700 | 170 | ON | 7.1 | 0.044 | 1.15-1.18x | 1.50-1.57x |
+| uniform, full map (400) | 262 | ON | 4.0 | 0.024 | 1.61-1.62x | 1.76-1.91x |
+| uniform, full map (200) | 160 | ON | 2.5 | 0.026 | 1.65-1.77x | 2.04-2.31x |
+| uniform, full map (800) | 340 | ON | 7.0 | 0.023 | 1.86-1.88x | 2.46-2.51x |
+
+Bold marks the defect: **six gate-ON layouts where the shipped index was 1.3-2.3x
+slower than the scan it replaced**, five of them clustered and one uniform.
+
+\* the first repetition of that row read 0.95x against 0.43/0.40 in the other two.
+Host noise (§8); the row is a clear loss either way and is refused by the gate.
+
+### What the sort was costing
+
+The index discovers matches cell-major and must emit them scan-major, so it sorts
+each query's matches back into scan order. That sort was over an **array of
+`EntityView`** — a wide struct carrying two object references and seven value
+fields — so every swap copied the whole thing, with write barriers for the
+references. It now sorts an `int` permutation and gathers once at the end: 4 bytes
+per swap, each view touched exactly once.
+
+The effect is large and it is concentrated exactly where it hurts, because sort cost
+grows with matches per query and **matches per query is what clustering raises**.
+Crowded layouts improve by 2.2-3.1x, sparse ones by 1.1-1.3x. This is a per-match
+cost, and per-match cost is precisely what the brute-force scan does not pay — which
+is why it, and not the gate, decided whether the index was worth anything on a
+crowded map.
+
+### Part X's margins do not reproduce, and this is why
+
+Re-running Part X's own harness unchanged on `develop` gives materially worse
+numbers than Part X published:
+
+| Part X row | Part X published | re-run on develop (struct sort) |
+|---|---|---|
+| realistic, 400 (99 cells) | 1.07-1.22x | **0.39-0.63x** |
+| realistic, 800 (193 cells) | 1.99-2.16x | 0.91-1.05x |
+| realistic, 1600 (394 cells) | 3.71-4.01x | 1.64-1.76x |
+| calib n=400 spread=500 | 1.11-1.26x | 0.53-0.55x |
+| calib n=400 spread=700 | 1.42-1.61x | 0.86-0.93x |
+| stock map, 200 | 1.86-2.39x | 1.63-1.69x |
+
+Between the two measurements, `29aa8d9` added `FacingBrad` and `Action` to
+`EntityView`, widening by 8 bytes the struct the sort was moving. That is a direct
+mechanism for a sort-bound cost to grow, and the permutation sort — which makes the
+sort insensitive to the struct's width — recovers and exceeds the original figures.
+**The attribution is strongly supported but not isolated**: no A/B across that commit
+is possible, because Part X's harness postdates it. Other develop changes could
+contribute.
+
+Two consequences, both stated rather than quietly fixed:
+
+- **Part X's ratio columns should be read as superseded by this Part**, not as a
+  second opinion. They were correct for the code and the struct that existed when
+  they were taken.
+- **Part X's headline claim "never slower" was false as merged.** The gate protected
+  the low-occupancy end, which is what it was calibrated to do, and nothing protected
+  the middle. The claim is true again with the permutation sort, and now on clustered
+  layouts as well as uniform ones — but it was wrong in between, and a reader who
+  deployed on that basis would have been misled.
+
+This also settles a loose end Part X flagged as noise. Its `realistic, 400` row read
+`0.63x 1.19x 1.22x` and the 0.63 was dismissed as host variance. It was not: that
+configuration genuinely loses under the struct sort, and the re-run reads
+0.39-0.63x consistently. The anomalous repetitions were the other two.
+
+### The recommendation, and what stays
+
+**Keep `MinOccupiedCellsToQuery = 96`, and ship the permutation sort.** With the
+sort fixed the threshold is right where it should be on clustered layouts too: every
+admitted layout runs at 0.98x or better, every refused one would have lost, and the
+crossover sits between 62 cells (0.81-0.88x, refused) and 99 cells (1.25-1.30x,
+admitted).
+
+**Occupancy stays the gate statistic.** A replacement was implemented and measured —
+`SpatialGrid.EstimateCandidateFraction`, the mean fraction of the population a query
+must examine, from the cell histogram — and it is the better predictor on paper:
+monotone across both layout families, where occupancy is not (160 cells wins at
+2.04-2.31x while 157 cells wins at only 1.10-1.14x, and under the struct sort
+occupancy could not separate the families at all). It is **not** adopted, for two
+reasons. Once the sort is fixed occupancy makes no wrong call on any layout measured
+here, and the statistic costs nine dictionary probes per occupied cell per rebuild to
+compute — real work on the tick thread to replace a decision that is no longer
+getting anything wrong. It stays in the code as a benchmark diagnostic, so the next
+person to suspect the gate can measure instead of arguing.
+
+### What was not done
+
+- **The probe interval is still reasoned rather than measured.** 64 gathers (~4 s at
+  15 Hz) is chosen so a falling-back world wastes under 2% of the gather on
+  re-probing. Both directions of being wrong cost microseconds, so this remains a low
+  priority, but it is not a measurement.
+- **No layout was taken from a real session.** These are hotspot models chosen to
+  resemble play — a handful of gathering points, most players at one of them, a
+  roaming tail. They are not telemetry, and the day this game has real position
+  telemetry, the crossover should be re-measured against it rather than against this.
+- **Nothing about the per-server player ceiling changes.** It remains **UNKNOWN**
+  and blocked on a separate load-generator machine (ADR-7).

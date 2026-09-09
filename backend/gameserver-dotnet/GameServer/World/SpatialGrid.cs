@@ -249,6 +249,57 @@ internal sealed class SpatialGrid
         Array.Copy(_bucketed, _entries, _entryCount);
     }
 
+    /// <summary>
+    /// Estimate the mean fraction of the population a query must examine, from the cell
+    /// histogram alone.
+    ///
+    /// <para>For a viewer in cell <c>c</c> the index examines everything in <c>c</c>'s 3x3
+    /// neighbourhood, so the expected candidate count over a uniformly chosen viewer is
+    /// <c>sum_c m_c * N_c / n</c>, where <c>m_c</c> is the cell's population and
+    /// <c>N_c</c> the neighbourhood's. Dividing by <c>n</c> again gives the fraction of the
+    /// world a query looks at, which is exactly the quantity the index reduces and the scan
+    /// does not.</para>
+    ///
+    /// <para><b>Why this exists.</b> Occupied-cell count is a proxy for the same thing that
+    /// is exact only when the population is spread evenly — a uniform world examines
+    /// <c>9 / OccupiedCells</c> of itself. Clustering breaks that identity in both
+    /// directions at once: tight clusters occupy few cells (so occupancy reads "not worth
+    /// it") while a viewer inside one still only examines its own cluster (so the real
+    /// saving is large). This function is the instrument for finding out whether that
+    /// matters in practice. Diagnostics for the benchmark; nothing in the gather calls
+    /// it.</para>
+    /// </summary>
+    public double EstimateCandidateFraction()
+    {
+        if (_entryCount == 0) return 0.0;
+
+        // Cell population by ordinal is already in _cellCount; the keys live in
+        // _cellOrdinals, so one pass over it gives every occupied cell's coordinates.
+        double weighted = 0.0;
+        foreach (KeyValuePair<long, int> kv in _cellOrdinals)
+        {
+            int cx = (int)(kv.Key >> 32);
+            int cy = (int)(uint)kv.Key;
+            int mine = _cellCount[kv.Value];
+
+            int neighbourhood = 0;
+            for (int dx = -1; dx <= 1; dx++)
+            {
+                for (int dy = -1; dy <= 1; dy++)
+                {
+                    if (_cellOrdinals.TryGetValue(Pack(cx + dx, cy + dy), out int o))
+                    {
+                        neighbourhood += _cellCount[o];
+                    }
+                }
+            }
+
+            weighted += (double)mine * neighbourhood;
+        }
+
+        return weighted / ((double)_entryCount * _entryCount);
+    }
+
     // ── Query ────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -275,7 +326,8 @@ internal sealed class SpatialGrid
         float radius,
         Span<EntityView> destination,
         Span<int> scratchOrdinals,
-        Span<EntityView> scratchViews)
+        Span<EntityView> scratchViews,
+        Span<int> scratchSlots)
     {
         if (_entryCount == 0) return 0;
 
@@ -289,7 +341,7 @@ internal sealed class SpatialGrid
             // every comparison, so this yields zero matches — which is what the scan's
             // `> radiusSq` continue also yields.
             matches = CollectAll(in center, radiusSq, scratchOrdinals, scratchViews);
-            return Emit(matches, destination, scratchOrdinals, scratchViews);
+            return Emit(matches, destination, scratchOrdinals, scratchViews, scratchSlots);
         }
 
         // The covering cell range. Correctness rests on one property: CellCoord is
@@ -321,7 +373,7 @@ internal sealed class SpatialGrid
             // spend longer walking empty cells than testing everything. Keeps a huge
             // radius from being slower than the scan it replaced.
             matches = CollectAll(in center, radiusSq, scratchOrdinals, scratchViews);
-            return Emit(matches, destination, scratchOrdinals, scratchViews);
+            return Emit(matches, destination, scratchOrdinals, scratchViews, scratchSlots);
         }
 
         for (int cx = minX; cx <= maxX; cx++)
@@ -347,7 +399,7 @@ internal sealed class SpatialGrid
             }
         }
 
-        return Emit(matches, destination, scratchOrdinals, scratchViews);
+        return Emit(matches, destination, scratchOrdinals, scratchViews, scratchSlots);
     }
 
     /// <summary>Exact predicate over every entry, for the two fallback cases.</summary>
@@ -369,18 +421,54 @@ internal sealed class SpatialGrid
     }
 
     /// <summary>
+    /// A/B switch for the ordering strategy, for <c>AoiClusteredGateBench</c> only.
+    /// Production always uses the permutation sort; this exists so the cost of the
+    /// alternative is a measurement rather than an assertion.
+    /// </summary>
+    internal static bool SortStructsInsteadOfPermutation;
+
+    /// <summary>
     /// Restore brute-force scan order and copy out what fits. The sort is over match
-    /// count, not entity count — typically a couple of dozen keys.
+    /// count, not entity count — typically a couple of dozen keys, but a crowd makes it
+    /// hundreds.
+    ///
+    /// <para><b>Sorts a permutation of indices, not the views themselves.</b>
+    /// <see cref="EntityView"/> is a wide struct — two object references plus seven value
+    /// fields — and sorting an array of them makes every swap copy the whole thing. Sorting
+    /// <c>int</c> slots and gathering afterwards moves 4 bytes per swap instead, and touches
+    /// each view exactly once at the end. This is the index's dominant per-match cost, and
+    /// per-match cost is exactly what the brute-force scan does not pay, so it decides
+    /// whether the index wins at all on a crowded map.</para>
     /// </summary>
     private static int Emit(
-        int matches, Span<EntityView> destination, Span<int> scratchOrdinals, Span<EntityView> scratchViews)
+        int matches,
+        Span<EntityView> destination,
+        Span<int> scratchOrdinals,
+        Span<EntityView> scratchViews,
+        Span<int> scratchSlots)
     {
-        Span<int> keys = scratchOrdinals[..matches];
-        Span<EntityView> values = scratchViews[..matches];
-        keys.Sort(values);
-
         int emitted = Math.Min(matches, destination.Length);
-        values[..emitted].CopyTo(destination[..emitted]);
+
+        if (SortStructsInsteadOfPermutation)
+        {
+            Span<int> k = scratchOrdinals[..matches];
+            Span<EntityView> v = scratchViews[..matches];
+            k.Sort(v);
+            v[..emitted].CopyTo(destination[..emitted]);
+            return matches;
+        }
+
+        Span<int> keys = scratchOrdinals[..matches];
+        Span<int> slots = scratchSlots[..matches];
+        for (int i = 0; i < matches; i++) slots[i] = i;
+
+        keys.Sort(slots);
+
+        for (int i = 0; i < emitted; i++)
+        {
+            destination[i] = scratchViews[slots[i]];
+        }
+
         return matches;
     }
 
