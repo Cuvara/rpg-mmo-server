@@ -518,6 +518,13 @@ public class SnapshotBudgetTests
             nameof(EntitySnapshot.Type),
             nameof(EntitySnapshot.Handle),
             nameof(EntitySnapshot.Speed),
+            // Added by the wire's facing/action change. This test caught that change
+            // the first time the two branches met, which is the whole point of it:
+            // Fill had not learned the new fields, and taking the other side of the
+            // merge cleanly would have dropped facing and action from every snapshot
+            // with nothing else failing. They are written in Fill now.
+            nameof(EntitySnapshot.FacingBrad),
+            nameof(EntitySnapshot.Action),
         };
 
         string[] actual = typeof(EntitySnapshot)
