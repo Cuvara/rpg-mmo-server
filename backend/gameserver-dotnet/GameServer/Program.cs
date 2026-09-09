@@ -405,6 +405,12 @@ metrics.SetTransportPosture(
     transportPosture.Encrypted, transportPosture.Authenticated);
 await using var metricsEndpoint = MetricsEndpoint.TryStart(metricsAddr, metrics, serverId, logger);
 
+// AFTER TryStart, never before: TryStart is what builds the MeterProvider, and a
+// measurement recorded with nothing subscribed to the meter is silently dropped. Priming
+// in the GameMetrics constructor looked right, passed its tests, and produced no series at
+// all on a live scrape. See GameMetrics.PrimeCounters.
+metrics.PrimeCounters();
+
 // ── Game content (items, and whatever content types follow) ──
 //
 // Loaded and validated BEFORE the listener opens. A server that cannot vouch for its

@@ -256,15 +256,9 @@ public sealed class GameMetrics : IDisposable
                          "with a bad connection; invalid_direction is the exception, being " +
                          "something the shipped client cannot emit. See docs/METRICS.md.");
 
-        // PRIMED AT ZERO, one series per reason. The OTel Prometheus exporter emits an
-        // instrument only once it has recorded a value, so an alarm counter that has never
-        // fired is ABSENT rather than zero -- indistinguishable from a broken scrape or a
-        // build without the feature (docs/METRICS.md). These are exactly that kind of
-        // counter: absence is the healthy reading. Recording an explicit 0 for every
-        // reason at construction makes "no rejections" visibly zero on the scrape.
-        //
-        // This is only possible because InputRejectionReason is a BOUNDED enum. It is the
-        // concrete payoff of not labelling with the free-form reason strings.
+        // One pre-built TagList per reason, allocated once. The zero-priming that makes
+        // these series VISIBLE at zero is not done here -- see PrimeCounters, which must
+        // run after the MeterProvider exists.
         _inputRejectionTags = new TagList[GameServer.Input.InputRejection.All.Length];
         foreach (var reason in GameServer.Input.InputRejection.All)
         {
@@ -274,7 +268,6 @@ public sealed class GameMetrics : IDisposable
                 { "reason", GameServer.Input.InputRejection.Label(reason) },
             };
             _inputRejectionTags[(int)reason] = tags;
-            _inputsRejected.Add(0, tags);
         }
 
         _anomalyAlerts = _meter.CreateCounter<long>(
@@ -284,10 +277,6 @@ public sealed class GameMetrics : IDisposable
                          "The threshold is not yet tuned against a measured honest-player " +
                          "baseline, so treat a non-zero rate as a prompt to look, not as a " +
                          "verdict -- see docs/METRICS.md.");
-        // Primed at zero for the same reason as the rejection counters: this is an alarm
-        // counter whose healthy reading is no rate at all, and an absent series is
-        // indistinguishable from a broken scrape.
-        _anomalyAlerts.Add(0, _mapTags);
 
         _inputsCoalesced = _meter.CreateCounter<long>(
             "gameserver.inputs.coalesced",
@@ -721,6 +710,40 @@ public sealed class GameMetrics : IDisposable
 
     /// <summary>Inputs dropped because the world-wide pending queue was full.</summary>
     public long InputsDroppedQueueFull => Interlocked.Read(ref _inputsDroppedQueueFull);
+
+    /// <summary>
+    /// Emit an explicit zero for every alarm counter, so each series exists on the scrape
+    /// before anything has gone wrong.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Must be called AFTER the MeterProvider is built, and that is the whole point of
+    /// this being a separate method.</b> The OTel Prometheus exporter emits an instrument
+    /// only once it has recorded a value, so a counter that has never fired is ABSENT
+    /// rather than zero — indistinguishable from a broken scrape or a build without the
+    /// feature (docs/METRICS.md). These are exactly that kind of counter: absence is the
+    /// healthy reading.
+    /// </para>
+    /// <para>
+    /// The first version primed inside the constructor and <b>silently did nothing</b>.
+    /// <c>GameMetrics</c> is constructed one line before <c>MetricsEndpoint.TryStart</c>
+    /// builds the provider, so those measurements were recorded with nothing subscribed to
+    /// the meter and were dropped. It looked correct, it passed its unit tests — which read
+    /// the mirrored <c>long</c> fields, not the scrape — and a live <c>/metrics</c> showed
+    /// no series at all. Ordering is the entire mechanism here.
+    /// </para>
+    /// <para>
+    /// Only possible because the reason set is a BOUNDED enum: the concrete payoff of not
+    /// labelling with the validator's free-form strings.
+    /// </para>
+    /// </remarks>
+    public void PrimeCounters()
+    {
+        foreach (var reason in GameServer.Input.InputRejection.All)
+            _inputsRejected.Add(0, _inputRejectionTags[(int)reason]);
+
+        _anomalyAlerts.Add(0, _mapTags);
+    }
 
     /// <summary>
     /// Record one client input refused by validation.

@@ -197,15 +197,30 @@ public sealed class InputAnomalyTracker
     /// that is a deliberate narrowing, not an oversight.
     /// </para>
     /// <para>
-    /// The first version of this gave latency-explicable reasons a small weight, on the
+    /// The first version of this gave latency-explicable reasons a weight of 0.1, on the
     /// reasoning that an extraordinary rate of them should eventually register. Its own
-    /// test disproved it: at that weight a player producing an out-of-range attack on
-    /// every input crossed the threshold at 200 rejections, and the test asserting they
-    /// would NOT passed only by floating-point luck (200 x 0.1 sums to 19.999... rather
-    /// than 20). A weight small enough to be safe and large enough to matter cannot be
-    /// chosen without knowing the honest baseline, and <b>that baseline has never been
-    /// measured</b> — every figure this repository has is from loopback, where the latency
-    /// producing those rejections does not exist.
+    /// test disproved it, and the measured reason is worth recording exactly, because the
+    /// obvious explanation is the wrong one:
+    /// </para>
+    /// <para>
+    /// At that weight, a player producing an out-of-range attack on every one of 200
+    /// inputs lands <i>within a rounding artefact</i> of the default threshold of 20.
+    /// A plain sum of 0.1 two hundred times is <c>20.000000000000014</c> — it
+    /// <b>overshoots</b>, and on its own would have alerted. What put the real score under
+    /// the line is that <see cref="Decay"/> runs before every addition, so the running
+    /// total is shaved continuously and never quite reaches <c>200 x weight</c>: measured
+    /// on this machine, <c>19.999998878470578</c>, short by <c>1.1e-06</c>.
+    /// </para>
+    /// <para>
+    /// That shortfall is a function of <b>how fast the machine ran the loop</b> — slower
+    /// hardware decays more between records and falls further short; faster hardware
+    /// converges on the plain sum, which is over the line. So whether a maximally laggy
+    /// player was flagged depended on the host's speed. That is not a threshold, it is a
+    /// coin flip, and it is the concrete demonstration of the general point: a weight
+    /// small enough to be safe and large enough to matter cannot be chosen without knowing
+    /// the honest baseline, and <b>that baseline has never been measured</b> — every
+    /// figure this repository has is from loopback, where the latency producing those
+    /// rejections does not exist.
     /// </para>
     /// <para>
     /// So the score answers one question it can answer honestly: <i>how much input is this

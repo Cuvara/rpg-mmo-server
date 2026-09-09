@@ -63,12 +63,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   **finite** — `encoding/json` cannot represent NaN or Inf, so a non-finite vector would
   fail to encode client-side on the legacy json arm and never reach the server.
 
+### Fixed
+- **The zero-priming was in the wrong place and silently did nothing.** It ran in the
+  `GameMetrics` constructor, one line before `MetricsEndpoint.TryStart` builds the
+  MeterProvider — so the measurements had nothing subscribed to the meter and were
+  dropped. Every unit test passed (they read the mirrored `long` fields, not the scrape)
+  and a live `/metrics` showed **no series at all**. Now `GameMetrics.PrimeCounters()`,
+  called after `TryStart`, with `AlarmCountersAreVisibleAtZeroOnlyAfterPriming` guarding
+  the ordering. Caught by live acceptance, not by the suite.
+
 ### Changed
 - **The anomaly score counts only `invalid_direction`, and that is a deliberate
   narrowing.** The first version weighted latency-explicable reasons lightly; its own test
   disproved it — at that weight a player producing an out-of-range attack on every input
-  crossed the threshold at 200 rejections, and the test asserting they would not passed
-  only by floating-point luck (200 x 0.1 sums to 19.999..., not 20). **No honest baseline
+  crossed the threshold at 200 rejections, and the test asserting they would not passed by
+  a hair. The measured cause is not the obvious one: a plain sum of `0.1` x200 is
+  `20.000000000000014` and **overshoots**; what put the real score under the line is the
+  decay running before every addition, measured at `19.999998878470578` — short by
+  `1.1e-06`, a margin that scales with how fast the machine ran the loop. **No honest baseline
   has ever been measured** — every figure here is from loopback, where the latency that
   produces those rejections does not exist — so a safe-but-meaningful weight cannot be
   chosen. The score answers the one question it can answer honestly: how much input is
