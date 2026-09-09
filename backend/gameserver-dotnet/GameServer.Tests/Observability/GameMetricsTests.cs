@@ -310,4 +310,53 @@ public class GameMetricsTests
         Assert.NotNull(metric);
         Assert.Equal(3, SumLong(metric, ("map_id", "map_01")));
     }
+
+    /// <summary>
+    /// The alarm counters must be VISIBLE at zero on a scrape, and that depends entirely
+    /// on when they are primed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is a regression guard for a bug that shipped and was caught only by a live
+    /// scrape. Priming was originally done in the <see cref="GameMetrics"/> constructor and
+    /// silently did nothing: production builds <c>GameMetrics</c> one line before
+    /// <c>MetricsEndpoint.TryStart</c> creates the MeterProvider, so those measurements had
+    /// nothing subscribed to the meter and were dropped. Every unit test still passed —
+    /// they read the mirrored <c>long</c> fields, not the scrape — and a live
+    /// <c>/metrics</c> showed no series at all.
+    /// </para>
+    /// <para>
+    /// The harness reproduces that ordering exactly (metrics first, provider second), so
+    /// the first assertion below fails if anyone moves priming back into the constructor.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AlarmCountersAreVisibleAtZeroOnlyAfterPriming()
+    {
+        using var h = new Harness(nameof(AlarmCountersAreVisibleAtZeroOnlyAfterPriming));
+
+        // The provider was built AFTER GameMetrics, as in production. Anything the
+        // constructor recorded went nowhere.
+        Assert.DoesNotContain(h.Collect(), m => m.Name == "gameserver.inputs.rejected");
+
+        h.Metrics.PrimeCounters();
+
+        Metric? rejected = h.Collect().FirstOrDefault(m => m.Name == "gameserver.inputs.rejected");
+        Assert.NotNull(rejected);
+
+        var seen = new List<string>();
+        foreach (ref readonly var point in rejected!.GetMetricPoints())
+        {
+            foreach (var tag in point.Tags)
+                if (tag.Key == "reason") seen.Add((string)tag.Value!);
+
+            Assert.Equal(0, point.GetSumLong());
+        }
+
+        // Every reason, not merely some: a missing one is a series that stays absent until
+        // it fires, which is the whole failure mode being prevented.
+        Assert.Equal(
+            GameServer.Input.InputRejection.All.Select(GameServer.Input.InputRejection.Label).OrderBy(x => x),
+            seen.OrderBy(x => x));
+    }
 }

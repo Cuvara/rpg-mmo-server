@@ -77,6 +77,9 @@ public sealed class GameMetrics : IDisposable
     private readonly Counter<long> _playersKicked;
     private readonly Counter<long> _handshakesRejected;
     private readonly Counter<long> _unversionedHandshakes;
+    private readonly Counter<long> _inputsRejected;
+    private readonly Counter<long> _anomalyAlerts;
+    private readonly TagList[] _inputRejectionTags;
     private readonly Counter<long> _inputsDropped;
     private readonly Counter<long> _inputsCoalesced;
     private readonly Counter<long> _transfersRejected;
@@ -243,6 +246,37 @@ public sealed class GameMetrics : IDisposable
                          "connection_budget (one connection exceeded " +
                          "GAMESERVER_MAX_INPUTS_PER_TICK between two drains) or queue_full " +
                          "(the world-wide pending queue reached GAMESERVER_MAX_PENDING_INPUTS).");
+
+        _inputsRejected = _meter.CreateCounter<long>(
+            "gameserver.inputs.rejected",
+            description: "Client inputs REFUSED by validation, labelled by reason. Not the " +
+                         "same as gameserver.inputs.dropped, which is ingest backpressure: " +
+                         "these reached the tick and the server declined to act on them. " +
+                         "Most reasons are latency-explicable and rise on an honest client " +
+                         "with a bad connection; invalid_direction is the exception, being " +
+                         "something the shipped client cannot emit. See docs/METRICS.md.");
+
+        // One pre-built TagList per reason, allocated once. The zero-priming that makes
+        // these series VISIBLE at zero is not done here -- see PrimeCounters, which must
+        // run after the MeterProvider exists.
+        _inputRejectionTags = new TagList[GameServer.Input.InputRejection.All.Length];
+        foreach (var reason in GameServer.Input.InputRejection.All)
+        {
+            var tags = new TagList
+            {
+                { "map_id", mapId },
+                { "reason", GameServer.Input.InputRejection.Label(reason) },
+            };
+            _inputRejectionTags[(int)reason] = tags;
+        }
+
+        _anomalyAlerts = _meter.CreateCounter<long>(
+            "gameserver.input.anomaly.alerts",
+            description: "Times an account's decaying input-anomaly score first crossed the " +
+                         "alert threshold. OBSERVATION ONLY: nothing is done to the player. " +
+                         "The threshold is not yet tuned against a measured honest-player " +
+                         "baseline, so treat a non-zero rate as a prompt to look, not as a " +
+                         "verdict -- see docs/METRICS.md.");
 
         _inputsCoalesced = _meter.CreateCounter<long>(
             "gameserver.inputs.coalesced",
@@ -644,6 +678,9 @@ public sealed class GameMetrics : IDisposable
     private long _inputsDroppedConnectionBudget;
     private long _inputsDroppedQueueFull;
     private long _inputsCoalescedCount;
+    private long _anomalyAlertCount;
+    private readonly long[] _inputsRejectedByReason =
+        new long[GameServer.Input.InputRejection.All.Length];
     private long _transfersRejectedCount;
 
     /// <summary>Record one input dropped at ingest for <paramref name="reason"/>.</summary>
@@ -673,6 +710,92 @@ public sealed class GameMetrics : IDisposable
 
     /// <summary>Inputs dropped because the world-wide pending queue was full.</summary>
     public long InputsDroppedQueueFull => Interlocked.Read(ref _inputsDroppedQueueFull);
+
+    /// <summary>
+    /// Emit an explicit zero for every alarm counter, so each series exists on the scrape
+    /// before anything has gone wrong.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Must be called AFTER the MeterProvider is built, and that is the whole point of
+    /// this being a separate method.</b> The OTel Prometheus exporter emits an instrument
+    /// only once it has recorded a value, so a counter that has never fired is ABSENT
+    /// rather than zero — indistinguishable from a broken scrape or a build without the
+    /// feature (docs/METRICS.md). These are exactly that kind of counter: absence is the
+    /// healthy reading.
+    /// </para>
+    /// <para>
+    /// The first version primed inside the constructor and <b>silently did nothing</b>.
+    /// <c>GameMetrics</c> is constructed one line before <c>MetricsEndpoint.TryStart</c>
+    /// builds the provider, so those measurements were recorded with nothing subscribed to
+    /// the meter and were dropped. It looked correct, it passed its unit tests — which read
+    /// the mirrored <c>long</c> fields, not the scrape — and a live <c>/metrics</c> showed
+    /// no series at all. Ordering is the entire mechanism here.
+    /// </para>
+    /// <para>
+    /// Only possible because the reason set is a BOUNDED enum: the concrete payoff of not
+    /// labelling with the validator's free-form strings.
+    /// </para>
+    /// </remarks>
+    public void PrimeCounters()
+    {
+        foreach (var reason in GameServer.Input.InputRejection.All)
+            _inputsRejected.Add(0, _inputRejectionTags[(int)reason]);
+
+        _anomalyAlerts.Add(0, _mapTags);
+    }
+
+    /// <summary>
+    /// Record one client input refused by validation.
+    /// </summary>
+    /// <remarks>
+    /// Mirrored into a plain array read by <c>/status</c>, the same dual-surface pattern as
+    /// the handshake reject counters -- and for a sharper reason here: these are alarm
+    /// counters whose healthy value is zero, and a Prometheus counter at zero is only
+    /// visible because of the priming in the constructor. <c>/status</c> publishes them as
+    /// plain zeros regardless.
+    /// </remarks>
+    public void RecordInputRejected(GameServer.Input.InputRejectionReason reason)
+    {
+        int i = (int)reason;
+        if ((uint)i >= (uint)_inputsRejectedByReason.Length) return;
+
+        Interlocked.Increment(ref _inputsRejectedByReason[i]);
+        _inputsRejected.Add(1, _inputRejectionTags[i]);
+    }
+
+    /// <summary>
+    /// Record one account crossing the input-anomaly alert threshold. Observation only.
+    /// </summary>
+    public void RecordAnomalyAlert()
+    {
+        Interlocked.Increment(ref _anomalyAlertCount);
+        _anomalyAlerts.Add(1, _mapTags);
+    }
+
+    /// <summary>Accounts that have crossed the anomaly alert threshold since start.</summary>
+    public long AnomalyAlerts => Interlocked.Read(ref _anomalyAlertCount);
+
+    /// <summary>Inputs refused by validation for one reason.</summary>
+    public long InputsRejected(GameServer.Input.InputRejectionReason reason)
+    {
+        int i = (int)reason;
+        return (uint)i < (uint)_inputsRejectedByReason.Length
+            ? Interlocked.Read(ref _inputsRejectedByReason[i])
+            : 0;
+    }
+
+    /// <summary>Inputs refused by validation, every reason.</summary>
+    public long InputsRejectedTotal
+    {
+        get
+        {
+            long total = 0;
+            for (int i = 0; i < _inputsRejectedByReason.Length; i++)
+                total += Interlocked.Read(ref _inputsRejectedByReason[i]);
+            return total;
+        }
+    }
 
     /// <summary>All inputs dropped at ingest, every reason.</summary>
     public long InputsDropped => InputsDroppedConnectionBudget + InputsDroppedQueueFull;

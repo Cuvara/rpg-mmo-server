@@ -294,6 +294,12 @@ public sealed class GameServerHost : IAsyncDisposable
     private readonly GameMetrics? _metrics;
 
     /// <summary>
+    /// Per-account refused-input tracking. Keyed by user id so it survives a reconnect —
+    /// the existing per-connection input budget does not, which is the gap this closes.
+    /// </summary>
+    private readonly Input.InputAnomalyTracker _anomalies = new();
+
+    /// <summary>
     /// Bounded channel draining death events off the tick thread. The tick thread
     /// enqueues a value-type payload; a background task serializes and publishes.
     /// Bounded at 256 — a full channel drops writes (a missed kill event is
@@ -415,6 +421,11 @@ public sealed class GameServerHost : IAsyncDisposable
     /// </summary>
     public Input.InputHandler.AttackTelemetry AttackStats => _inputHandler.Attacks;
 
+    /// <summary>
+    /// Per-account refused-input counts and anomaly scores. Observation only.
+    /// </summary>
+    public Input.InputAnomalyTracker Anomalies => _anomalies;
+
     public GameServerHost(ServerOptions options)
     {
         _options = options;
@@ -493,7 +504,28 @@ public sealed class GameServerHost : IAsyncDisposable
             // tick), so AttackCooldownTicks must be derived from the rate that advances it.
             // Passing the world rate here would make a 500ms cooldown last 2s.
             rates.MovementHz,
-            options.MapBounds);
+            options.MapBounds,
+            // Refused input feeds two places at once: the per-reason counters (both
+            // surfaces) and the per-account anomaly score. Wired here rather than inside
+            // InputHandler so that class keeps no dependency on the observability stack —
+            // a dozen tests construct it directly.
+            (userId, reason) =>
+            {
+                _metrics?.RecordInputRejected(reason);
+                if (_anomalies.Record(userId, reason))
+                {
+                    // First crossing of the threshold in this decay window. Logged at
+                    // Warning because it is the one moment an operator can act on; the
+                    // score itself is on /status for anyone looking. It does NOT act on
+                    // the player - see InputAnomalyTracker for why observation comes
+                    // before enforcement.
+                    _logger.LogWarning(
+                        "Input anomaly threshold crossed for {UserId} (latest reason {Reason}). " +
+                        "Observation only, no action taken.",
+                        userId, InputRejection.Label(reason));
+                    _metrics?.RecordAnomalyAlert();
+                }
+            });
 
         // The observer is handed to the phase at construction rather than set afterwards:
         // a phase must hold no mutable instance state (ADR-12), and a settable observer is

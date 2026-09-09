@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`-abuse` and `-abuse-players`: deliberately misbehaving clients.** The harness is
+  otherwise scrupulously well-behaved — it answers pings, sends normalised vectors and
+  disconnects politely — which is correct for a benchmark and useless for exercising the
+  server's new input-rejection telemetry. `direction` sends an oversized movement vector
+  (`invalid_direction`), `stale` replays one input tick for ever (`stale_tick`), `attack`
+  targets an id no entity has (`attack_target_unresolved`). Abusive players are selected by
+  index, the same mechanism `-movement spread` uses, so "2 of 50 players cheat" is
+  expressible and reproducible.
+- The oversized vector is large but **finite**. `encoding/json` cannot represent NaN or
+  Inf, so a non-finite vector would fail to encode client-side on the legacy json arm and
+  never reach the server at all; the server refuses both identically.
+- Nothing here attempts to gain an advantage — the server refuses all of it. The point is
+  to produce the signal so the counters can be tested rather than waited for.
+
 ### Fixed
 
 - **`-movement cluster` walks players out of any crowd that does not march with them,

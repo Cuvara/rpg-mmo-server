@@ -38,6 +38,60 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Verified on live containers in all four transport/key combinations plus a loopback
     bind, checking the startup log, `/status` and both gauges each time.
 
+- **Telemetry on refused input, per reason and per account (security roadmap A1/A2).**
+  `ValidationLogic` refused an input and the server dropped it; nothing counted
+  rejections, so a client probing the rules left no trace. It does now.
+  `gameserver_inputs_rejected_total{reason}` plus `/status`'s `inputs_rejected`,
+  `inputs_rejected_by_reason` and `anomaly_*` fields.
+- **Reasons are a BOUNDED enum (`InputRejectionReason`), not the validator's strings.**
+  Two of those strings embed attacker-controlled values — the rejected vector and the
+  target id — so as metric labels they are unbounded cardinality a client can mint on
+  demand, turning a detection signal into a denial of service against the thing detecting
+  it. Being bounded also lets every series be **primed to zero at startup**, so "no
+  rejections" reads as `0` rather than as an absent series; these are alarm counters,
+  where absence is the healthy reading and is otherwise indistinguishable from a broken
+  scrape (the `send-budget` finding in `docs/METRICS.md`).
+- **`InputAnomalyTracker` — a decaying per-ACCOUNT score.** Keyed on the join token's
+  user id, so it survives a reconnect; the existing per-connection input budget does not,
+  which is what made it a counter of how often someone reconnects. Exponential decay
+  rather than a fixed window, so a lag spike fades and only a sustained rate holds a
+  plateau.
+- **`loadtest -abuse direction|stale|attack` with `-abuse-players N`.** The harness was
+  scrupulously well-behaved, which is right for a benchmark and useless for testing a
+  detector; these make it generate each rejection pattern deliberately. Abusive players
+  are chosen by index so runs are reproducible. The oversized vector is large but
+  **finite** — `encoding/json` cannot represent NaN or Inf, so a non-finite vector would
+  fail to encode client-side on the legacy json arm and never reach the server.
+
+### Fixed
+- **The zero-priming was in the wrong place and silently did nothing.** It ran in the
+  `GameMetrics` constructor, one line before `MetricsEndpoint.TryStart` builds the
+  MeterProvider — so the measurements had nothing subscribed to the meter and were
+  dropped. Every unit test passed (they read the mirrored `long` fields, not the scrape)
+  and a live `/metrics` showed **no series at all**. Now `GameMetrics.PrimeCounters()`,
+  called after `TryStart`, with `AlarmCountersAreVisibleAtZeroOnlyAfterPriming` guarding
+  the ordering. Caught by live acceptance, not by the suite.
+
+### Changed
+- **The anomaly score counts only `invalid_direction`, and that is a deliberate
+  narrowing.** The first version weighted latency-explicable reasons lightly; its own test
+  disproved it — at that weight a player producing an out-of-range attack on every input
+  crossed the threshold at 200 rejections, and the test asserting they would not passed by
+  a hair. The measured cause is not the obvious one: a plain sum of `0.1` x200 is
+  `20.000000000000014` and **overshoots**; what put the real score under the line is the
+  decay running before every addition, measured at `19.999998878470578` — short by
+  `1.1e-06`, a margin that scales with how fast the machine ran the loop. **No honest baseline
+  has ever been measured** — every figure here is from loopback, where the latency that
+  produces those rejections does not exist — so a safe-but-meaningful weight cannot be
+  chosen. The score answers the one question it can answer honestly: how much input is
+  this account sending that the shipped client cannot produce. The rest are still counted
+  and published per account, just not treated as evidence.
+- **Nothing acts on a player.** A2 offered log / flag / rate-limit / kick; this
+  implements flag-and-record. A detector that kicks before anyone has seen its
+  false-positive curve gets switched off after the first bad night, and the telemetry goes
+  with it. `/status` orders accounts by score rather than by rejection count, because the
+  account with the most rejections is usually the worst-connected one.
+
 ### Fixed
 
 - **The AOI index was 1.3-2.3x SLOWER than the scan on clustered maps, and the gate was

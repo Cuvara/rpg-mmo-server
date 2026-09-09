@@ -311,6 +311,65 @@ public sealed class ServerStatus
     public string Postgres { get; set; } = "disconnected";
 
     /// <summary>
+    /// Client inputs refused by validation since start, all reasons.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Published here as a plain zero, always. The Prometheus counters are primed at zero
+    /// too, but this stays the surface an operator should read: it cannot be confused with
+    /// a broken scrape, and it carries the per-account detail that would be unbounded
+    /// cardinality as a metric label.
+    /// </para>
+    /// <para>
+    /// <b>Most of these are normal.</b> Attack rejections and dead-entity input rise with a
+    /// player's latency; only <c>invalid_direction</c> is something the shipped client
+    /// cannot produce. Read the breakdown, not the total.
+    /// </para>
+    /// </remarks>
+    [JsonPropertyName("inputs_rejected")]
+    public long InputsRejected { get; set; }
+
+    /// <summary>Refused inputs by reason, keyed by the metric label.</summary>
+    [JsonPropertyName("inputs_rejected_by_reason")]
+    public Dictionary<string, long> InputsRejectedByReason { get; set; } = new();
+
+    /// <summary>Accounts currently tracked for input anomalies.</summary>
+    [JsonPropertyName("anomaly_accounts_tracked")]
+    public int AnomalyAccountsTracked { get; set; }
+
+    /// <summary>
+    /// Accounts whose decaying anomaly score is at or above the alert threshold right now.
+    /// </summary>
+    [JsonPropertyName("anomaly_accounts_over_threshold")]
+    public int AnomalyAccountsOverThreshold { get; set; }
+
+    /// <summary>
+    /// Times any account has crossed the alert threshold since start.
+    /// <b>Observation only</b> — no player is ever acted on by this.
+    /// </summary>
+    [JsonPropertyName("anomaly_alerts")]
+    public long AnomalyAlerts { get; set; }
+
+    /// <summary>
+    /// Observations discarded because the tracker hit its account cap. Non-zero means the
+    /// numbers above describe only part of the population.
+    /// </summary>
+    [JsonPropertyName("anomaly_accounts_dropped")]
+    public long AnomalyAccountsDropped { get; set; }
+
+    /// <summary>
+    /// The most anomalous accounts, ordered by score.
+    /// </summary>
+    /// <remarks>
+    /// Ordered by SCORE, not by raw rejection count. The account with the most rejections
+    /// is usually the one with the worst connection, and presenting that player at the top
+    /// of a list an operator reads as "most suspicious" is how a latency problem gets
+    /// mistaken for cheating.
+    /// </remarks>
+    [JsonPropertyName("anomaly_top_accounts")]
+    public List<AnomalousAccount> AnomalyTopAccounts { get; set; } = new();
+
+    /// <summary>
     /// Seconds since the process started, measured on a <b>monotonic</b> clock
     /// (<see cref="System.Diagnostics.Stopwatch"/>), not on wall time.
     ///
@@ -342,6 +401,39 @@ public sealed class ServerStatus
         WorldHz = rates.WorldHz;
         BackgroundHz = rates.BackgroundHz;
     }
+}
+
+/// <summary>
+/// One account's refused-input record, for <c>/status</c>.
+/// </summary>
+/// <remarks>
+/// <b>This is not an accusation.</b> A high score means "worth looking at", and the most
+/// common cause of a high rejection count is a bad connection, not a modified client. The
+/// per-reason breakdown is included precisely so the two can be told apart: an account
+/// whose rejections are all attack-path is lagging; one producing
+/// <c>invalid_direction</c> is sending packets the shipped client cannot produce.
+/// </remarks>
+public sealed class AnomalousAccount
+{
+    /// <summary>Account id (the join token's <c>sub</c> claim).</summary>
+    [JsonPropertyName("user_id")]
+    public string UserId { get; set; } = "";
+
+    /// <summary>Total refused inputs recorded for this account.</summary>
+    [JsonPropertyName("rejections")]
+    public long Rejections { get; set; }
+
+    /// <summary>Current decaying anomaly score.</summary>
+    [JsonPropertyName("score")]
+    public double Score { get; set; }
+
+    /// <summary>Times this account has crossed the alert threshold.</summary>
+    [JsonPropertyName("alerts")]
+    public long Alerts { get; set; }
+
+    /// <summary>Refused inputs by reason, keyed by the metric label.</summary>
+    [JsonPropertyName("by_reason")]
+    public Dictionary<string, long> ByReason { get; set; } = new();
 }
 
 /// <summary>
