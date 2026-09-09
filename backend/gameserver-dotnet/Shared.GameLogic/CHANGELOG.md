@@ -6,6 +6,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`simkill_target_survives_high_defense` did neither: the target did not survive and there
+  was no high defence.** It was generated with attack 10 against defence **0** on a 2 HP
+  target, so the target died — making it a duplicate of `simkill_both_die_hp1` under a name
+  promising the opposite outcome. All three `simultaneous_kill` vectors were "both die", so
+  the asymmetric case was covered by **nothing**, while a reader scanning names would
+  reasonably believe it was covered.
+
+  Regenerated with defence 9 against attack 10, which is 1 damage (exactly `MinDamage`, so
+  not clamped) into 5 HP: the target lives at 4 and swings back for 10 into a 1 HP attacker.
+  The name is now what the case does, and the outcome one entity dead and one alive is
+  covered for the first time.
+
+  Found by the client-side runner when `sgl-v0.4.0` delivered these vectors to a client for
+  the first time — they had sat unreleased since `4eb0ba5`. The values are produced by
+  running `CombatLogic`, not written by hand, so the expectations are derived rather than
+  asserted.
+
 ## [0.4.0] — 2026-09-09
 
 Released as `sgl-v0.4.0`. The client pins this library by exact tag, so this

@@ -497,7 +497,7 @@
       "name": "simkill_target_survives_high_defense",
       "kind": "simultaneous_kill",
       "attackerAttack": 10,
-      "defenderDefense": 0,
+      "defenderDefense": 9,
       "expectedDamage": 0,
       "hp": 0,
       "alreadyDead": false,
@@ -514,13 +514,13 @@
       "expectedValid": false,
       "expectedErrorPrefix": "",
       "attackerHp": 1,
-      "targetHp": 2,
+      "targetHp": 5,
       "targetAttack": 10,
       "attackerDefense": 0,
       "expectedAttackerHp": 0,
-      "expectedTargetHp": 0,
+      "expectedTargetHp": 4,
       "expectedAttackerDead": true,
-      "expectedTargetDead": true
+      "expectedTargetDead": false
     },
     {
       "name": "attack_in_range_off_cooldown",
