@@ -179,6 +179,47 @@ message EnterWorldResponse {
   string join_token = 2;
   string transport = 3;
   string error = 4;
+
+  // Per-session key for encrypting the gameplay hop. 32 bytes, or empty when the
+  // gateway has no join-token secret configured to derive one from.
+  //
+  // WHAT IT REPLACES. Before this, transport encryption used ONE pre-shared key,
+  // the same value in every client binary and every server. Extracting it from a
+  // single client decrypted every player's traffic, for ever, and rotating it
+  // meant redeploying everything at once. This field makes the key per-join.
+  //
+  // THE SERVER NEVER RECEIVES THIS. It is not forwarded, not stored and not put
+  // in the join token. Both ends DERIVE it independently:
+  //
+  //   session_key = HKDF-SHA256(ikm  = JOIN_TOKEN_SECRET,
+  //                             salt = join token's `jti` claim,
+  //                             info = "cuvara/session-key/v1",
+  //                             L    = 32)
+  //
+  // The game server has the secret and reads `jti` out of the token it already
+  // verifies, so it computes the same value with nothing crossing the gameplay
+  // hop. The client cannot derive it — it has no secret — which is the whole
+  // reason this field exists.
+  //
+  // Rooting session keys in JOIN_TOKEN_SECRET adds no new class of failure:
+  // anyone holding that secret can already mint a join token for any user, which
+  // is total compromise. The HKDF `info` string is the domain separation that
+  // keeps derivation from interacting with signing.
+  //
+  // LIMITATION, AND IT IS NOT A FOOTNOTE. This field carries the key to the
+  // client in the clear, and the gateway hop is the SAME transport stack as the
+  // gameplay hop — plaintext TCP by default. So in the default configuration an
+  // eavesdropper positioned on the gateway hop reads this value and can decrypt
+  // that session. Per-session keys turn "compromise one binary, decrypt everyone
+  // for ever" into "eavesdrop the gateway hop, decrypt one session" — a real
+  // improvement, and NOT the end-to-end confidentiality the name suggests.
+  // Closing it requires the gateway hop to be encrypted too; see ADR-21 and
+  // docs/ROADMAP-SECURITY.md.
+  //
+  // A receiver MUST NOT log this, echo it in an error, or expose it on a status
+  // or metrics surface. Implementations wrap it in a type whose string form is
+  // redacted for exactly that reason.
+  bytes session_key = 5;
 }
 
 // --- Game server handshake ---
