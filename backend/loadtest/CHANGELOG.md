@@ -30,6 +30,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     enough to invalidate the warning.
 
 ## [Unreleased]
+### Documentation
+
+- **Audited every published figure in `backend/docs/BENCHMARK.md` against the
+  marching-crowd trap, and annotated the one live instance. No published number is
+  affected and none was changed.**
+
+  The trap: `cluster`, loadtest's **default** movement mode, drives every player +X for
+  ever at 5 u/s against a 50-unit AOI radius. Its comment calls this "the worst-case
+  dense-crowd shape", which is true of the players and false of any population that does
+  not march with them — so against stationary entities the run measures a nearly empty
+  AOI while reporting the population it started with. `spread` marches too (all headings
+  sit in the +X/+Y quadrant); only `still` holds position, so the trap is **not** specific
+  to `cluster`.
+
+  **Method:** rather than trusting the prose, every result file under
+  `loadtest/results/` was read for `movement`, `players`, `entities` and
+  `players_online`. A stationary population shows up as entities exceeding players.
+  Every published run reads **entities == players == online** — Parts I, II, III, IV
+  and IX, plus the six `tick-variance` runs. Two independent things kept it that way:
+  the capacity runs set `GAMESERVER_ENEMIES=false`, and BENCHMARK.md §2's protocol
+  restarts the container and waits for `gameserver_entities` to read 0 before every
+  level.
+
+  **What is affected is the recipe, not the results.** BENCHMARK.md §10's stock-dev-stack
+  command ran the default mode against the 6 spawned enemies and passed
+  `-baseline-entities 6` to stop the level being rejected as "not empty when the level
+  started" — so it is the one documented configuration that converts a contaminated run
+  into a **passing** one rather than an INVALID one. The validity gate was, by accident,
+  the guard; declaring the baseline defeats it. The recipe now passes `-movement still`
+  and carries a warning explaining why.
+
+  Three contaminated runs already exist in the tree
+  (`results/2026-09-07-develop-c05f715/run-{10,50,100}-cluster.json`: 14/16/16 entities
+  against 10 players online). They are the discarded through-the-gateway attempts
+  BENCHMARK.md §26 already records as producing no valid level, and no figure derives
+  from them.
+
+  **Direction, for any figure that ever is affected:** a contaminated run measures a
+  shrinking AOI, so per-client bandwidth and per-tick gather cost read **too low**, and
+  the error grows through the window; a ratio between two arms measured the same way is
+  largely preserved while both absolute numbers are wrong.
+
+  Annotations added: an audit note in §8 (the "read this before quoting any number"
+  section), the §10 recipe warning, a note on Part VI recording that its movement mode
+  was never written down (default `cluster`, cleared anyway because the spawner was off
+  and the entity leak had been fixed eight days earlier), and a note on Part X that it
+  and Part XI are in-process xUnit benches which never invoke loadtest — so the trap is
+  **not** an alternative explanation for Part X's ratios failing to reproduce.
 
 ### Changed
 - **`-encoding` now defaults to `proto`, the wire the Unity client speaks (ADR-9); `json` stays

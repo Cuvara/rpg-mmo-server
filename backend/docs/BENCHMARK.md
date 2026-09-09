@@ -319,6 +319,42 @@ reported, not fixed.
 
 ## 8. Confounds — read this before quoting any number
 
+> ### Audited 2026-09-10: the marching-crowd trap, and why no figure here fell into it
+>
+> `loadtest`'s **default** movement mode, `cluster`, drives every player +X for ever
+> at 5 u/s against a 50-unit AOI radius. Its comment claims this is "the worst-case
+> dense-crowd shape" — true of the players, who march together and stay mutually
+> in-AOI, and **false of any population that does not march with them**. Against a
+> stationary population (server-spawned enemies, `LOADTEST_ENTITIES`, a stock
+> spawner) the players walk out of AOI and the run measures a nearly empty view
+> while reporting the population it started with. Measured elsewhere at 1 player /
+> 300 stationary entities: snapshot bytes/s fell 113 -> 0.6 kB/s by t=24s, inside
+> the default 60 s window.
+>
+> **`spread` marches too** — its headings are all inside the +X/+Y quadrant — so
+> only **`still`** holds position. The trap is not specific to `cluster`.
+>
+> **Every published figure in this document was checked against the raw result
+> JSON, and none is affected.** The check is `entities` vs `players_online` at the
+> end of each level: a stationary population shows up as entities exceeding the
+> players. Every published run reads **entities == players == online** — the
+> sweeps behind Parts I, II, III, IV and IX, and the six `tick-variance` runs. Two
+> independent things kept it that way: the capacity runs set
+> `GAMESERVER_ENEMIES=false`, and [§2](#2-methodology)'s run protocol restarts the
+> container and waits for `gameserver_entities` to read **0** before every level.
+>
+> **What the audit did find is a live trap in the recipe, not in the results** —
+> see the warning in [§10](#10-reproducing). Three contaminated runs do exist in
+> the results tree (`results/2026-09-07-develop-c05f715/run-{10,50,100}-cluster.json`,
+> 14/16/16 entities against 10 players online); they are the discarded
+> through-the-gateway attempts of [§26](#26-the-first-pass-measured-the-wrong-wire-and-the-tool-now-says-which)
+> and no figure here comes from them.
+>
+> **Direction, if a figure ever is affected:** a contaminated run measures a
+> *shrinking* AOI, so per-client bandwidth and per-tick gather cost read **too
+> low**, and the error grows through the window. A ratio between two arms measured
+> the same way is largely preserved while both absolute numbers are wrong.
+
 **The machine:**
 
 | | |
@@ -699,7 +735,16 @@ export JOIN_TOKEN_SECRET=$(grep '^JOIN_TOKEN_SECRET=' ../deploy/.env | cut -d= -
 # "not empty when the level started". Stay at or below 10 players here: the
 # gateway admits 10 connections/min per source IP (GATEWAY_CONN_RATE_PER_MIN),
 # and a 50-player level through it joins 10 and fails 40.
-./loadtest -players 10 -duration 60s -baseline-entities 6
+#
+# ⚠️ PASS -movement still WHENEVER THE POPULATION IS STATIONARY — as it is here.
+# The default mode (cluster) marches every player +X for ever, so against the 6
+# stationary enemies the players leave them behind and the run measures an almost
+# empty AOI long before the 60s window closes, while still reporting 6 entities.
+# `-baseline-entities 6` declares them so the level counts as VALID, which means
+# this is the one configuration in this document that turns a contaminated run
+# into a passing one instead of an INVALID one. `spread` marches too; only `still`
+# holds position. See the audit note in §8.
+./loadtest -players 10 -duration 60s -baseline-entities 6 -movement still
 
 # The capacity sweep as run here: dedicated server, direct join, no spawner.
 docker run -d --name rpg-gs-bench --network rpg-mmo-meta_default \
@@ -1539,6 +1584,14 @@ loadtest -join direct -players 50 -duration 45s -warmup 5s -encoding proto
 GAMESERVER_ENEMIES=false   (so the measurement is the player path, not wave timing)
 ```
 
+> **Movement mode is not recorded here, so this ran on the default, `cluster`.**
+> The 2026-09-10 audit ([§8](#8-confounds--read-this-before-quoting-any-number))
+> clears it anyway: `GAMESERVER_ENEMIES=false` means there is no stationary
+> population for the marching players to leave behind, and the entity leak that
+> could have supplied one from a previous run was fixed on 2026-08-07, eight days
+> before this. The mode should have been written down regardless — every other
+> loadtest Part records it, and "cleared by a second fact" is weaker than "stated".
+
 `-join direct` bypasses the gateway: the gateway is not in the gameplay data path
 (ADR-3), and including it would only add join-time noise to a steady-state measurement.
 
@@ -1856,6 +1909,16 @@ work was warranted has not — read the next section before quoting anything her
 > Part XI fixes the cause (sort an index permutation, not the structs), restores and
 > exceeds these margins, and confirms the 96-cell threshold needs no change. The
 > method below stands; the numbers are superseded.
+
+> **Not affected by the marching-crowd trap
+> ([§8](#8-confounds--read-this-before-quoting-any-number)).** This Part and
+> Part XI are in-process xUnit benches — `AoiIndexBench`, `AoiClusteredGateBench` —
+> that build an `EcsWorld` in the test process and query fixed positions. They
+> never start `loadtest`, never open a socket, and have no movement mode at all.
+> The trap is therefore **not** an alternative explanation for this Part's ratios
+> failing to reproduce; that remains attributed to `EntityView` widening, strongly
+> supported and not isolated, as [Part XI](#part-xi--the-gate-against-clustered-populations-and-the-sort-that-was-the-real-problem-2026-09-10)
+> records.
 
 ### Why this was rebuilt, which is not the same as why it was justified
 
