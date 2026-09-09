@@ -1482,6 +1482,17 @@ The implementation and its differential test are on `feat/aoi-spatial-index` at
 `2e3e5db`, reverted by the following commit. It is correct and covered; it is
 simply not worth running.
 
+> **Superseded, on this Part's own terms — see
+> [Part X](#part-x--the-spatial-index-revisited-and-this-time-kept-2026-09-09).**
+> The second condition listed above ("a composition path the index can use as
+> cheaply as the scan does") was met by [Part VII](#part-vii--trimmed-aoi-compose-and-int-keyed-delta-state-2026-08-27-issue-237):
+> the gather's product became a 7-field `EntityView`, small enough to store *in*
+> the index, which moves composition from once-per-match-per-viewer to
+> once-per-entity-per-tick. A rebuilt index now ships, gated on population spread.
+> **Nothing in this Part is withdrawn** — it was right about the index it measured,
+> and its dense row is still why the new one refuses to engage on a clustered
+> population.
+
 ### What this leaves, now that §23 has landed
 
 This section originally closed by pointing at `EntityState` composition as the
@@ -1818,3 +1829,164 @@ validity gate (`-baseline-entities` now declares them), and the gateway admits
 10 connections per minute per source IP, so a 50-player level joined 10 and
 failed 40. Neither is a server fault; both were the harness meeting a server
 that had moved on since the recipe was written.
+
+---
+
+## Part X — the spatial index, revisited and this time kept (2026-09-09)
+
+**Result: a uniform spatial grid now ships, gated on population spread.** It is
+**1.9–2.4x faster on the stock 1000x1000 map at 200 players**, up to **3.1x at
+1600 entities**, and — the part that matters given Part V — **never slower**,
+because the gather takes the plain scan whenever the population is too clustered
+for the index to pay. Part V is not withdrawn: it was right about the index it
+measured, and it named the conditions under which the answer would change. The one
+governing the *implementation* has since been met; the one governing whether the
+work was warranted has not — read the next section before quoting anything here.
+
+### Why this was rebuilt, which is not the same as why it was justified
+
+**State this before the numbers, because the numbers are persuasive and the provenance
+is not.** Part VII's caveat has two clauses: re-measure the index against post-#237
+numbers, *"and only if AOI cost resurfaces as a bound."* **The first clause is satisfied
+by this Part. The second is not, and has not been.** Nobody measured AOI cost resurfacing
+as a bound. This index was rebuilt because the work was assigned, and it was assigned on
+the strength of a Big-O argument — which is precisely the reasoning
+[Part V](#part-v--the-spatial-index-that-lost-2026-08-14) exists to stop. Four changes in
+this sequence have now been commissioned against a term that turned out not to be the
+expensive one, and a reader arriving at the 2x figures below should not infer that a
+measurement asked for this one.
+
+What makes it safe to ship anyway is not the win, it is **the gate**: below 96 occupied
+cells the gather takes the plain scan and builds nothing, so on the densities where the
+index does not pay the change is inert rather than negative. An unconditional index would
+not have been shippable on this evidence, and the naive version of the gate — measured at
+0.82-0.91x, below — was not either.
+
+The honest summary is that this is a scale-readiness change with a measured upside on the
+stock map and a measured floor of parity everywhere else, not a response to a bottleneck
+anyone observed.
+
+### Why the answer changed
+
+Part V found the scan's cost was not the distance tests but **composing an entity
+struct per match**, and that the index made composition *worse*: it held only an
+`Entity` handle, so it composed through seven random-access component lookups per
+match against a scan that composed from the chunk it was already iterating. Its
+closing section listed what would have to be true to revisit, and the second item
+was *"a composition path the index can use as cheaply as the scan does"*.
+
+[Part VII](#part-vii--trimmed-aoi-compose-and-int-keyed-delta-state-2026-08-27-issue-237)
+(issue #237) supplied it. The gather's product is now `EntityView` — seven fields,
+exactly what the snapshot encoder consumes — and that struct is **small enough to
+store inside the index**. So the index no longer composes at query time at all: it
+composes once per entity during its O(n) rebuild, and a query copies the finished
+struct.
+
+The consequence is the one that decides the result. Composition stops being per
+match *per viewer* and becomes per entity *per tick*. At 200 viewers averaging 15
+matches each that is **3 000 composes replaced by 200** — and the redundancy
+across viewers is something the brute-force scan pays too and cannot stop paying.
+The first index paid more per match than the scan; this one pays less.
+
+### The measurement
+
+`GameServer.Tests/Bench/AoiIndexBench.cs`, `BENCH_AOI=1`. Both arms run a full
+gather — every viewer's AOI query for one tick, through `EcsWorld.ReadAll`, the
+path the tick loop takes — back to back inside every round, 120 rounds after 20
+warmup, three independent repetitions. **The indexed arm's rebuild is inside the
+measured region**: an index that only looks good with its build time excluded is
+not an index, it is an accounting error.
+
+Two methodological notes, both of which changed numbers:
+
+- **Arm order alternates per round.** With a fixed order the second arm read
+  ~5% faster on rows where *both arms take the same code path* — an ordering bias
+  indistinguishable from a small real win, and 5% is the size of several results
+  here.
+- **This harness is committed**, and states its clock (`Stopwatch`,
+  `Stopwatch.Frequency` 1 000 000 000 Hz, high-resolution true). Part V's was not,
+  which is what made its absolute microseconds the one figure class the #153 clock
+  audit could not trace. Per that audit's standing rule the **ratios** below are
+  the quotable figures.
+
+| cell | n | spread | avg matches/query | occupied cells | brute µs | indexed µs | ratio (3 runs) |
+|---|---|---|---|---|---|---|---|
+| **stock map 1000x1000** | 200 | 1000 | 2.5 | 163 | 152 | 82 | **1.86–2.39x faster** |
+| sparse (Part V row 1) | 200 | 1000 | 2.5 | 163 | 524 | 453 | 1.16–2.12x faster |
+| realistic (Part V row 2) | 200 | 250 | 21.8 | 33 | 186 | 196 | 0.95–1.00x (gate off) |
+| dense (Part V row 3) | 400 | 250 | 42.9 | 36 | 928 | 937 | 0.99–1.05x (gate off) |
+| house realistic (disc 175) | 200 | — | 15.4 | 49 | 200 | 203 | 0.96–1.00x (gate off) |
+| house realistic (disc 175) | 400 | — | 30.5 | 52 | 833 | 852 | 0.98–1.01x (gate off) |
+| realistic, 400 | 400 | 500 | 12.9 | 99 | 727 | 598 | 1.07–1.22x faster* |
+| realistic, 800 | 800 | 700 | 12.8 | 193 | 2880 | 1367 | 1.99–2.16x faster |
+| realistic, 1600 | 1600 | 1000 | 12.8 | 394 | 10029 | 2705 | **3.71–4.01x faster** |
+
+\* one repetition of this row read 0.63x while the identical configuration in the
+calibration sweep below read 1.11–1.26x three times running. That is host noise,
+not a property of the row — §8's ±50% swing, visible because this cell sits nearest
+the gate threshold. It is left in rather than dropped.
+
+### The gate, and why it is occupancy rather than entity count
+
+The obvious gate — "use the index above N entities" — gets this workload
+**backwards**, and Part V's own table is the proof: its dense-400 row loses while
+its sparse-200 row wins. Entity count does not predict the result.
+
+What does is how far the population is spread, because a query visits at most a 3x3
+neighbourhood and therefore examines roughly `9 / OccupiedCells` of the world. The
+calibration sweep varies spread at fixed n, and the crossover lands in the same
+place at both entity counts — confirming the count itself does not enter:
+
+| n | 16 cells | 36 | 59–64 | 86–99 | 123–167 | 163–250 |
+|---|---|---|---|---|---|---|
+| 200 | 1.01x | 1.00x | 1.03x | 1.00x | 1.38–1.50x | 1.88–2.10x |
+| 400 | 0.96–1.01x | 0.97–1.00x | 0.99–1.01x | 1.11–1.26x | 1.42–1.61x | 2.13–2.45x |
+
+`SpatialGrid.MinOccupiedCellsToQuery` is therefore **96**, the first round value
+clear of the crossover, and it is checked against the statistic the rebuild has
+already computed.
+
+**The gate is a performance decision and never a correctness one.** Both paths
+return the same entities in the same order — `AoiIndexDifferentialTests` asserts
+exactly that, unconditionally — so a wrong answer from the gate costs microseconds
+and cannot cost an entity.
+
+One refinement was needed to make the fallback free. Gating *after* a rebuild still
+paid for the rebuild, and measured **0.82–0.91x** on the rows that fall back — a
+regression at precisely the density the game runs at today. The decision is
+therefore carried from the last rebuild and re-probed every 64 gathers (~4 s at
+15 Hz), so a falling-back world builds nothing. Those rows now read 0.95–1.06x,
+i.e. parity within noise.
+
+### What this means for the server as it runs today
+
+It depends entirely on how far players spread, and both cases are handled:
+
+- **The stock map is 1000x1000 with an AOI radius of 50** (`GameConstants`), so
+  200 players spread over it occupy ~163 cells and the index is **on, at ~2x**.
+- **The in-house "realistic" density** every other bench in that folder uses — a
+  disc of radius 175, the `TickBreakdownBench` placement — occupies ~49 cells, and
+  the index is **off, at parity**. Part V's "realistic" 250x250 row is the same
+  regime.
+
+So this is not a change that makes the tick unconditionally cheaper; it is one that
+makes the AOI gather scale with *area covered* instead of with entity count, and
+declines to engage when there is no area to exploit. What it does **not** do is
+move the per-server player ceiling, which remains **UNKNOWN** and blocked on a
+separate load-generator machine (ADR-7) — the gather is 77–83% of a 200-viewer
+tick, but no tick figure from this host bounds anything.
+
+### What was not done
+
+- **`Shared.GameLogic` is untouched.** `AoiLogic.GetNearbyEntities` is still the
+  brute-force definition of visibility, and is now also the differential test's
+  oracle. That is deliberate: a client has exactly one observer and nothing to
+  amortise a per-tick index build against, so an index there is cost with no
+  benefit. Client and server continue to agree on visibility semantics because they
+  run the same predicate — the index only chooses which entities to test.
+- **No incremental maintenance.** The index is rebuilt whole each gather scope, for
+  the reason Part V's version gave and which has not changed: positions are written
+  from the input handler, the enemy move system and the spawn/reconnect path, and an
+  incremental index must intercept all of them forever, including the next one
+  someone adds. A missed write does not throw — it leaves an entity in the wrong
+  bucket, and the symptom is a player who vanishes from someone else's screen.

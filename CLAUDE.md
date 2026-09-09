@@ -101,7 +101,7 @@ merge algorithm: **`backend/gameserver-dotnet/docs/API.md`**.
 | Player store | In-memory default; **PostgreSQL implemented** (C# `PostgresPlayerStore`, set `GAME_DB_URL`) | PostgreSQL everywhere |
 | Session/Registry stores | In-memory default; **Redis implemented** (gateway `--backend=redis`) | Redis everywhere |
 | Event stream | Go channels default; **Redis Streams implemented** (consumer group + ACK). C# side publishes into `events:game` when `REDIS_ADDR` is set, noop otherwise — ADR-5 | Redis Streams end to end |
-| AOI | Brute-force | **Still brute-force.** A uniform spatial grid was built, proved correct against it, and measured **2.8x slower** at realistic density — the scan's cost is composing matches, not the distance tests. See `backend/docs/BENCHMARK.md` Part V before proposing it again |
+| AOI | **Uniform spatial grid, gated on population spread** — brute-force scan below the gate | **Both, and the gate picks.** The grid is rebuilt once per gather scope with the `EntityView` composed into it, so composition is once per entity per tick instead of once per match per viewer; queries take it only when the population occupies >= 96 cells. **1.9-2.4x on the stock 1000x1000 map at 200 players, up to 3.1x at 1600 entities, parity when clustered.** The first attempt at this lost 2.8x and was reverted (Part V); what changed is issue #237's trimmed compose. Read `backend/docs/BENCHMARK.md` **Part X**, and Part V before proposing any further AOI work |
 | Orchestration | Manual | Agones on k3s (SDK already integrated in gameserver) |
 | GameServer language | C# .NET 10 | C# .NET 10 with NativeAOT — shared game logic with Unity client via `Shared.GameLogic` |
 
