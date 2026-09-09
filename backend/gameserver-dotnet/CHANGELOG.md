@@ -209,6 +209,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Applies to **Protobuf connections only**; every byte figure in the encoder is a
     protobuf size and a JSON frame is several times larger, so a JSON stream stays
     bounded only by the AOI radius (stated limitation — ADR-9 legacy encoding).
+  - The deferral bound is stated precisely, because testing it corrected it: the
+    "longest wait is the size of the dirty set" claim holds only while the budget is
+    spent on entity updates alone. The floor guarantees one candidate per snapshot and
+    the observer's own entity is priority 1, so under a despawn backlog that slot goes
+    to self every tick and other dirty entities additionally wait for the backlog to
+    drain — measured at 63 ticks against a dirty set of 6. Still finite and still
+    independent of session length (the high-water mark stops moving once the backlog
+    drains, asserted), but not the dirty-set figure, and `max_shed_age` will show the
+    larger one during heavy AOI churn.
   - Deferral records are pruned against the visible set each snapshot. Without that,
     an entity that is new, is deferred before it is ever sent, and then leaves the AOI
     never becomes a despawn and its record survives for the life of the connection —

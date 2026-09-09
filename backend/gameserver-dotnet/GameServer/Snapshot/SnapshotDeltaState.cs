@@ -365,7 +365,19 @@ public sealed class SnapshotDeltaState
     /// entity that stays visible and dirty cannot be deferred more than once per other
     /// dirty entity ahead of it: <b>max deferral is bounded by the number of dirty
     /// entities in the observer's AOI</b>, and is not a function of how long the session
-    /// runs. That bound is what <c>BudgetStarvationTests</c> asserts.</para>
+    /// runs. <c>Starvation_IsBoundedByTheDirtySetNotBySessionLength</c> asserts it.
+    ///
+    /// <para><b>That bound holds only while the budget is spent on entity updates alone.</b>
+    /// The floor guarantees ONE candidate per snapshot, and priority 1 is the observer's own
+    /// entity — so when a non-entity cost competes for the budget (in practice: a large
+    /// despawn backlog), the guaranteed slot goes to self every tick and the other dirty
+    /// entities wait for the backlog to stop eating the remainder. Measured at 63 ticks
+    /// against a dirty set of 6 in
+    /// <c>UnderDespawnBacklog_AnEntityUpdateStillLandsEveryTick</c>. The wait is then the
+    /// dirty set PLUS the backlog's drain time — still finite, still independent of session
+    /// length, because the backlog is finite and draining; but it is not the dirty-set
+    /// figure, and an operator reading <c>max_shed_age</c> during heavy AOI churn should
+    /// expect the larger one.</para></para>
     ///
     /// <para><b>3. Nearest first.</b> Among equally-deferred entities, error is most
     /// visible closest to the camera — a 200ms-stale entity two metres away is obvious, at

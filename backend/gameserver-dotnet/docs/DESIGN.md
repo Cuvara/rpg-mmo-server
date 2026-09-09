@@ -1981,6 +1981,18 @@ against an encoder that drops entities and marks them sent.
    one entity admitted per snapshot — guaranteed, see the floor below — the longest
    any visible dirty entity waits is bounded by the number of dirty entities in that
    observer's AOI, and is **not** a function of session length.
+
+   **With one qualification, found by testing the floor rather than assuming it.** The
+   floor guarantees *one* candidate per snapshot, and priority 1 is the observer's own
+   entity — so when a non-entity cost competes for the budget, which in practice means
+   a large despawn backlog, that one slot goes to self every tick and everything else
+   waits for the backlog to stop eating the remainder. Measured at **63 ticks against a
+   dirty set of 6** in `UnderDespawnBacklog_AnEntityUpdateStillLandsEveryTick`. The wait
+   is then the dirty set *plus* the backlog's drain time. Still finite and still
+   independent of session length — the backlog is finite and draining, and the test
+   asserts the high-water mark stops moving once it has drained — but it is not the
+   dirty-set figure, and someone reading `max_shed_age` during heavy AOI churn should
+   expect the larger one.
 4. **Nearest first**, then AOI index as a deterministic tie-break.
 
 **The floor.** The top-priority candidate is emitted whatever it costs, before the
@@ -1988,6 +2000,13 @@ despawn list. That makes the cap soft in exactly one place, and it buys two thin
 an entity larger than the whole budget cannot be deferred for ever, and a steady
 stream of despawns cannot consume the budget every tick and starve updates — which is
 the premise the deferral bound rests on.
+
+A premise with no test is not a premise. Deleting the floor outright left all ten of
+the budget tests and all 1016 tests in the suite green, because every other test runs
+with an empty or trivial despawn list and so never makes the floor the thing that
+admitted an entity. `UnderDespawnBacklog_AnEntityUpdateStillLandsEveryTick` builds a
+despawn backlog many times the budget and requires an entity update to land on every
+snapshot regardless; it fails on the first budgeted tick with the floor removed.
 
 ### Two decisions that look arbitrary and are not
 

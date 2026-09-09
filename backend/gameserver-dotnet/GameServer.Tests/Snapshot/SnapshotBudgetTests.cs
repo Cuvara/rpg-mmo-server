@@ -1,3 +1,4 @@
+using System.Linq;
 using Google.Protobuf;
 using GameServer.Net;
 using GameServer.Snapshot;
@@ -376,6 +377,159 @@ public class SnapshotBudgetTests
         }
 
         AssertMergerMatches(remaining, client.Merger);
+    }
+
+    /// <summary>
+    /// <b>The floor, tested directly.</b> Under a despawn backlog that consumes the whole
+    /// budget on every tick, an entity update must still land — every snapshot, for as long
+    /// as the backlog lasts.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the premise every other claim about deferral rests on. The bound in
+    /// <c>CandidateComparer</c> — that the longest wait is the size of the dirty set and
+    /// not the length of the session — is an aging-round-robin argument, and an aging
+    /// round-robin that admits <i>nothing</i> on a tick does not drain, it stalls. The
+    /// mechanism that rules that out is the single unconditional emit at the top of
+    /// <c>EmitBudgeted</c>, before the despawn list is charged.
+    /// </para>
+    /// <para>
+    /// <b>Why the other tests cannot see it.</b> <c>Starvation_IsBoundedByTheDirtySet</c>
+    /// and <c>SelfEntity_IsNeverShed</c> both run with an empty or trivial despawn list, so
+    /// the budget is spent on entities either way and the floor is never the thing that
+    /// admitted one. Delete the floor and all ten of them still pass — verified. The
+    /// missing ingredient is <i>competition for the budget from a non-entity cost</i>, and
+    /// despawns are the only such cost there is.
+    /// </para>
+    /// <para>
+    /// The backlog is built first and then starved on purpose: 300 entities are sent under
+    /// no budget, almost all of them leave the AOI at once, and the budget is then set low
+    /// enough that only a handful of despawn ids fit per snapshot. That leaves tens of ticks
+    /// during which the owed despawn list alone is many times the budget — precisely the
+    /// "steady stream of despawns consuming the budget every tick" the floor exists for.
+    /// </para>
+    /// <para>
+    /// <b>What this test found, and what it therefore does NOT assert.</b> The floor
+    /// guarantees one candidate per snapshot, and the observer's own entity is priority
+    /// zero — so under despawn saturation the guaranteed slot goes to <i>self, every tick</i>,
+    /// and the other dirty entities get nothing until the despawn list stops eating the
+    /// budget. Measured here at <b>63 ticks</b> of deferral against a dirty set of 6. The
+    /// "longest wait is the size of the dirty set" claim is therefore only true while the
+    /// budget is spent on entity updates alone; when a non-entity cost competes, the wait is
+    /// the size of the dirty set <i>plus</i> the time the backlog takes to drain. That is
+    /// still bounded and still not a function of session length — which is the property
+    /// asserted below, by running the world quiet afterwards and requiring the high-water
+    /// mark to stop moving.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void UnderDespawnBacklog_AnEntityUpdateStillLandsEveryTick()
+    {
+        const int population = 300;
+        const int survivors = 5;
+
+        var state = new SnapshotDeltaState { SelfId = "self" };
+        var client = new FakeClient();
+
+        // Phase 1, unbudgeted: get all 300 into the encoder's model of what the client has,
+        // which is what makes them despawn-able.
+        List<EntityState> everyone = Crowd(population, 0f, selfId: "self");
+        client.Receive(state.Encode(1, 1, everyone, NoKeyframes, intern: true));
+        Assert.Equal(population + 1, client.Merger.Count);
+
+        // Phase 2: the crowd leaves, and the budget drops to a few despawn ids per snapshot.
+        // 295 owed despawns at ~6 bytes each is ~1770 bytes of debt against a 60-byte
+        // snapshot, so the despawn list saturates the budget for tens of ticks.
+        state.MaxSnapshotBytes = 60;
+
+        int ticksWithNoEntity = 0;
+        int backloggedTicks = 0;
+
+        for (ulong tick = 2; tick <= 80; tick++)
+        {
+            // The survivors keep moving, so there is always a dirty entity to starve. If
+            // nothing were dirty the test would pass vacuously.
+            List<EntityState> remaining = Crowd(survivors, tick * 0.25f, selfId: "self");
+            SnapshotMessage msg = state.Encode(tick, tick, remaining, NoKeyframes, intern: true,
+                observer: new Vec2(tick * 0.25f, tick * 0.25f));
+
+            bool backlogged = state.RemovalsDeferred > 0 || client.Merger.Count > survivors + 1;
+            if (backlogged) backloggedTicks++;
+
+            if (msg.Entities.Count == 0) ticksWithNoEntity++;
+
+            client.Receive(msg);
+            Assert.True(client.LastCarriedTick.TryGetValue("self", out ulong carried) && carried == tick,
+                $"tick {tick}: the despawn backlog consumed the whole budget and the observer's " +
+                "own entity was not sent. The floor in EmitBudgeted is what prevents this.");
+        }
+
+        Assert.True(backloggedTicks >= 30,
+            $"only {backloggedTicks} ticks carried a despawn backlog — the test is not applying " +
+            "the pressure it claims to, so it would pass with or without the floor");
+        Assert.Equal(0, ticksWithNoEntity);
+
+        // The deferral figure under despawn competition, recorded rather than bounded by the
+        // dirty set — see the remarks above for why the dirty-set bound does not apply here.
+        // Measured at 63 ticks for this configuration.
+        int ageAfterBacklog = state.MaxShedAge;
+        Assert.True(ageAfterBacklog > survivors + 1,
+            "the non-self entities were NOT starved by the despawn backlog, so this test is no " +
+            "longer exercising the regime it documents");
+
+        // The world goes quiet. The backlog drains, the deferred updates land, and — the
+        // point — the deferral high-water mark STOPS MOVING. That is what makes the wait
+        // bounded rather than merely long: it is a function of the backlog, which is finite
+        // and draining, not of how long the connection has been open.
+        for (ulong tick = 81; tick <= 400; tick++)
+        {
+            List<EntityState> remaining = Crowd(survivors, 80 * 0.25f, selfId: "self");
+            client.Receive(state.Encode(tick, tick, remaining, NoKeyframes, intern: true));
+        }
+
+        Assert.Equal(ageAfterBacklog, state.MaxShedAge);
+        Assert.Equal(0, state.DeferralRecords);
+        AssertMergerMatches(Crowd(survivors, 80 * 0.25f, selfId: "self"), client.Merger);
+    }
+
+    /// <summary>
+    /// <c>Fill</c> is the single writer of an <see cref="EntitySnapshot"/>, and that is the
+    /// only reason the budget's sizing pass and its emit path cannot disagree about how many
+    /// bytes an entity costs. The rule is structural and nothing enforces it, so this test
+    /// pins the schema: add a field to <c>EntitySnapshot</c> and this fails, which is the
+    /// prompt to go and write it in <c>Fill</c> rather than beside it.
+    /// </summary>
+    /// <remarks>
+    /// A drift here is not loud. Writing a new field in the emit path only would leave the
+    /// budget wrong by a few bytes per entity — invisible at four entities, a whole entity's
+    /// worth at eighty, and never an error anywhere.
+    /// </remarks>
+    [Fact]
+    public void EntitySnapshot_HasNoFieldFillDoesNotKnowAbout()
+    {
+        string[] expected =
+        {
+            nameof(EntitySnapshot.Id),
+            nameof(EntitySnapshot.TypeName),
+            nameof(EntitySnapshot.X),
+            nameof(EntitySnapshot.Y),
+            nameof(EntitySnapshot.Hp),
+            nameof(EntitySnapshot.MaxHp),
+            nameof(EntitySnapshot.Type),
+            nameof(EntitySnapshot.Handle),
+            nameof(EntitySnapshot.Speed),
+        };
+
+        string[] actual = typeof(EntitySnapshot)
+            .GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
+            .Where(p => p.CanWrite)
+            .Select(p => p.Name)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(
+            expected.OrderBy(n => n, StringComparer.Ordinal).ToArray(),
+            actual);
     }
 
     // ── Keyframes ─────────────────────────────────────────────────────────────────
