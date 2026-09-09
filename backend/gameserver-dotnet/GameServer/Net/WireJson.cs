@@ -80,6 +80,15 @@ internal static class JsonWriter
                 w.WriteNumber("hp"u8, e.Hp);
                 w.WriteNumber("max_hp"u8, e.MaxHp);
                 w.WriteNumber("speed"u8, e.Speed);
+                // Omitted when zero, unlike speed. Zero is the reserved "not sent" value
+                // for both of these (facing is biased by one precisely so that no real
+                // angle is zero), so omitting a zero is not lossy here - it is the SAME
+                // statement the Protobuf encoding makes by eliding the field. Writing an
+                // explicit 0 would instead assert "the sender has a facing, and it is the
+                // reserved value", which is not a thing.
+                if (e.FacingBrad > 0) w.WriteNumber("facing_brad"u8, e.FacingBrad);
+                if (e.Action != RpgMmo.Wire.V1.EntityAction.Unspecified)
+                    w.WriteNumber("action"u8, (int)e.Action);
                 w.WriteEndObject();
             }
             w.WriteEndArray();
@@ -312,6 +321,8 @@ internal static class JsonReader
                 bool hp = r.ValueTextEquals("hp"u8);
                 bool maxHp = r.ValueTextEquals("max_hp"u8);
                 bool speed = r.ValueTextEquals("speed"u8);
+                bool facingBrad = r.ValueTextEquals("facing_brad"u8);
+                bool action = r.ValueTextEquals("action"u8);
                 if (!r.Read()) break;
                 if (id) e.Id = r.GetString() ?? "";
                 else if (type) EntityTypes.SetType(e, r.GetString());
@@ -320,6 +331,10 @@ internal static class JsonReader
                 else if (hp) e.Hp = r.GetInt32();
                 else if (maxHp) e.MaxHp = r.GetInt32();
                 else if (speed) e.Speed = r.GetSingle();
+                // Absent leaves the Protobuf default 0, which both fields define as
+                // "not sent" - so the two encodings agree without a second rule.
+                else if (facingBrad) e.FacingBrad = r.GetUInt32();
+                else if (action) e.Action = (RpgMmo.Wire.V1.EntityAction)r.GetInt32();
                 else r.Skip();
             }
             m.Entities.Add(e);

@@ -650,3 +650,122 @@ cost and is accepted: the alternative is generating the constant from the proto,
 which would put a build step between three repos that currently share only
 committed artefacts.
 
+## Entity facing and action state on the wire (2026-09-09)
+
+### The gap
+
+`EntitySnapshot` carried `id, type_name, x, y, hp, max_hp, type, handle, speed`
+and nothing else. There was no facing, no rotation, no velocity and no action or
+animation state — and nothing resembling any of them existed in the ECS either
+(`grep -iE 'facing|rotation|velocity|action_state'` over `GameServer/` and
+`Shared.GameLogic/` returned only "operator-facing" prose and JWT key
+*rotation*).
+
+The consequence is larger than a missing field. **A character cannot be made to
+face the direction it is walking, and an attack cannot be animated**, without a
+schema change across both repositories — so "the core plumbing is closed" was not
+true of the one thing every renderer needs first. This closes it with the
+smallest field set that does, and deliberately not more.
+
+### What was added
+
+Two fields on `EntitySnapshot`:
+
+| Field | # | Type | Cost |
+|---|---|---|---|
+| `facing_brad` | 10 | `uint32`, 16-bit binary radians, biased +1 | 1–3 bytes |
+| `action` | 11 | `EntityAction` enum | 0–2 bytes |
+
+### Facing is a biased integer, not a float — and that is the whole point
+
+The obvious encoding is `float facing` in radians. It was rejected, because it
+walks straight into the trap this protocol has already been bitten by twice:
+**proto3 elides a zero, and 0.0 radians is a perfectly ordinary facing** (due
+east, +X). A sender that means "facing east" and a sender that predates the field
+would be byte-identical, and there is no receiver rule that can separate them.
+
+`speed` has that ambiguity and has to document its way around it, because
+`speed = 0` is genuinely meaningful and the natural encoding is a float. Facing
+has no such excuse: the ambiguity can be **designed out** rather than documented
+around, and it was.
+
+```
+wire value 0        -> NOT SENT (no facing known)
+wire value v ∈ [1, 65536] -> angle = (v - 1) * 2π / 65536 radians,
+                             counter-clockwise from +X
+```
+
+Reserving zero costs one addition on each side and buys:
+
+- **No ambiguity by construction.** Every representable angle has a non-zero wire
+  value, so an elided field means exactly one thing. Compare the paragraph-long
+  receiver rule `speed` needs.
+- **Smaller.** 1–3 bytes of varint against a float's fixed 5. On the hottest
+  message in the protocol — one per entity in the AOI, every tick — that is the
+  same class of saving as the entity-type enum (which exists to save 6 bytes) and
+  id interning (~15).
+- **Enough resolution.** 360°/65536 ≈ 0.0055°, far below anything a player can
+  perceive or a renderer needs.
+
+Rejected alternatives, for the record:
+
+- **`optional float facing` (proto3 field presence).** Idiomatic, self-describing,
+  gives real `HasFacing`. Rejected on two counts: it is 5 bytes rather than ~2 on
+  the hottest message, and this schema's hand-written JSON codecs (Go struct tags,
+  C# `Utf8JsonWriter`/`Utf8JsonReader`) have no presence concept, so the legacy
+  encoding would need a parallel convention anyway — two rules for one idea.
+- **`float facing` + `bool has_facing`.** 7 bytes, and two fields that must be
+  kept in sync is a worse contract than one that cannot disagree with itself.
+- **A direction vector `(fx, fy)`.** 10 bytes for one degree of freedom, and it
+  can be non-normalised, which is a second invariant to police.
+
+### Action is an enum with zero reserved, following `EntityType`
+
+```
+ENTITY_ACTION_UNSPECIFIED = 0   // not sent / unknown
+ENTITY_ACTION_IDLE        = 1
+ENTITY_ACTION_MOVING      = 2
+ENTITY_ACTION_ATTACKING   = 3
+ENTITY_ACTION_DEAD        = 4
+```
+
+Idle is **1, not 0**, for exactly the reason above: zero has to keep meaning "not
+sent". This is the same trick `EntityType` already uses
+(`ENTITY_TYPE_UNSPECIFIED = 0` means "see `type_name`"), so it is the file's
+established idiom rather than a new one, and enum zero-elision costs nothing.
+
+### What was deliberately left out
+
+- **Velocity.** Not needed for either goal: facing travels explicitly, the local
+  player is predicted, and remote entities are interpolated between snapshots. It
+  would add 8–10 bytes per entity per tick to the hottest message to serve
+  dead-reckoning, which is not implemented. Revisit it when dead reckoning is,
+  and revisit it with a measurement.
+- **An action sequence number.** A renderer that wants to retrigger the *same*
+  action twice in a row (attack, attack) needs an edge, and a level-triggered
+  enum cannot give one. That is an animation-system concern; the goal here is
+  that a game can render facing and a discrete state, not that it has a full
+  animation pipeline. Named here so the limitation is known rather than
+  discovered.
+- **Pitch / 3D orientation.** The simulation is 2D (`Vec2` throughout).
+
+### It did NOT bump `protocol_version`
+
+Both fields are additive and optional, both have a documented "zero means not
+sent" rule, and an old peer ignoring either degrades **visibly** (no facing, no
+action) rather than diverging silently. By the bump rules recorded in the section
+above, that is explicitly a non-bump. Worth stating plainly because it is the
+first change made after the version field shipped, and a versioning rule that
+fired on its very next change would be a build counter rather than a
+compatibility contract.
+
+### The delta encoder is where this could have gone silently wrong
+
+`SnapshotDeltaState.SentView` is the **only** thing deciding whether a delta
+resends an entity, and it compares a fixed field list. A new field that the
+comparison ignores produces stale state that never updates until the next
+keyframe — up to 30 ticks of a character facing the wrong way, with no error on
+either side and no test of the keyframe path able to see it. The `Speed` field
+already carries a comment saying exactly this. Both new fields are therefore in
+`SentView`'s field list, its constructor, its `Equals` and its `GetHashCode`, and
+in `Rent()`'s reset.

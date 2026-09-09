@@ -198,6 +198,81 @@ func (EntityType) EnumDescriptor() ([]byte, []int) {
 	return file_wire_proto_rawDescGZIP(), []int{1}
 }
 
+// EntityAction is a coarse, level-triggered description of what an entity is
+// doing right now, for a renderer to pick an animation from.
+//
+// Numbers are FROZEN once shipped. Append only; never renumber.
+//
+// ZERO IS RESERVED and means "not sent" — a sender that predates this field, or
+// one that has nothing to say. IDLE is deliberately 1, NOT 0: proto3 elides a
+// zero enum, so making idle the zero value would make "this entity is standing
+// still" and "this server does not know about actions" the same bytes. That is
+// the exact ambiguity documented at length on `speed` below, and here it is
+// avoidable for free, so it is avoided. `EntityType` already reserves 0 the same
+// way (ENTITY_TYPE_UNSPECIFIED means "see type_name"), so this is the file's
+// established idiom rather than a new rule.
+//
+// This is LEVEL-triggered, not edge-triggered: it says what state the entity is
+// in, not that a state was entered. A renderer that needs to retrigger the same
+// action twice in a row (attack, attack) cannot get that edge from this field
+// alone — that needs a sequence number, which is an animation-system concern and
+// is deliberately not here. See shared/docs/DESIGN.md, "Entity facing and action
+// state on the wire", for what was left out and why.
+type EntityAction int32
+
+const (
+	EntityAction_ENTITY_ACTION_UNSPECIFIED EntityAction = 0 // not sent / unknown — never "idle"
+	EntityAction_ENTITY_ACTION_IDLE        EntityAction = 1
+	EntityAction_ENTITY_ACTION_MOVING      EntityAction = 2
+	EntityAction_ENTITY_ACTION_ATTACKING   EntityAction = 3
+	EntityAction_ENTITY_ACTION_DEAD        EntityAction = 4
+)
+
+// Enum value maps for EntityAction.
+var (
+	EntityAction_name = map[int32]string{
+		0: "ENTITY_ACTION_UNSPECIFIED",
+		1: "ENTITY_ACTION_IDLE",
+		2: "ENTITY_ACTION_MOVING",
+		3: "ENTITY_ACTION_ATTACKING",
+		4: "ENTITY_ACTION_DEAD",
+	}
+	EntityAction_value = map[string]int32{
+		"ENTITY_ACTION_UNSPECIFIED": 0,
+		"ENTITY_ACTION_IDLE":        1,
+		"ENTITY_ACTION_MOVING":      2,
+		"ENTITY_ACTION_ATTACKING":   3,
+		"ENTITY_ACTION_DEAD":        4,
+	}
+)
+
+func (x EntityAction) Enum() *EntityAction {
+	p := new(EntityAction)
+	*p = x
+	return p
+}
+
+func (x EntityAction) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (EntityAction) Descriptor() protoreflect.EnumDescriptor {
+	return file_wire_proto_enumTypes[2].Descriptor()
+}
+
+func (EntityAction) Type() protoreflect.EnumType {
+	return &file_wire_proto_enumTypes[2]
+}
+
+func (x EntityAction) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use EntityAction.Descriptor instead.
+func (EntityAction) EnumDescriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{2}
+}
+
 // Envelope is the top-level wire message.
 //
 // `type` is field 1 and is always >= 1 for any real message, so proto3 never
@@ -818,7 +893,49 @@ type EntitySnapshot struct {
 	// ~5 bytes and inherit the whole handle-lifecycle contract above; speed is a
 	// plain value with no identity, and the delta encoder already suppresses
 	// entities whose state has not changed at all.
-	Speed         float32 `protobuf:"fixed32,9,opt,name=speed,proto3" json:"speed,omitempty"`
+	Speed float32 `protobuf:"fixed32,9,opt,name=speed,proto3" json:"speed,omitempty"`
+	// Facing direction, as 16-bit BINARY RADIANS BIASED BY ONE.
+	//
+	//	wire 0                -> NOT SENT: this sender has no facing to report.
+	//	wire v in [1, 65536]  -> angle = (v - 1) * 2*PI / 65536 radians,
+	//	                         counter-clockwise from +X (due east).
+	//
+	// WHY THE BIAS, AND WHY NOT A FLOAT. `float facing` is the obvious encoding and
+	// it is wrong here, because proto3 elides a zero float and 0.0 radians is a
+	// perfectly ordinary facing — due east. A server meaning "facing east" and a
+	// server predating this field would put IDENTICAL BYTES on the wire, and no
+	// receiver rule can separate them.
+	//
+	// `speed` below has exactly that ambiguity and has to document its way around
+	// it, because a speed of zero is genuinely meaningful and float is the natural
+	// type. Facing has no such excuse: reserving zero costs one addition on each
+	// side and removes the ambiguity BY CONSTRUCTION rather than by asking every
+	// implementer to remember a rule. Every representable angle has a non-zero wire
+	// value, so an absent field means one thing only.
+	//
+	// It is also smaller: 1-3 bytes of varint against a float's fixed 5, on the
+	// hottest message in the protocol. That is the same class of saving as the
+	// entity-type enum (which exists to save 6 bytes per entity) and id interning
+	// (~15). Resolution is 360/65536 = 0.0055 degrees, far below anything a player
+	// can see.
+	//
+	// RECEIVER RULE. Zero means "no value" — NOT "facing east". A receiver MUST
+	// keep the entity's last known facing, or derive one from its movement, rather
+	// than snapping it to east. Trusting a zero unconditionally means every entity
+	// from an old server points the same way, which reads as a content bug and gets
+	// debugged as one.
+	//
+	// Sent on every mention of an entity, never interned, for the same reason as
+	// `speed`: a receiver that resolves a handle expects complete state.
+	FacingBrad uint32 `protobuf:"varint,10,opt,name=facing_brad,json=facingBrad,proto3" json:"facing_brad,omitempty"`
+	// What the entity is doing, for animation selection. See EntityAction above.
+	//
+	// ENTITY_ACTION_UNSPECIFIED (0) means "not sent", never "idle" — idle is 1.
+	// A receiver MUST treat 0 as "no value" and keep whatever it was showing, not
+	// fall back to idle: an old server would otherwise freeze every entity in the
+	// world into an idle pose, which looks like a broken animator rather than a
+	// missing field.
+	Action        EntityAction `protobuf:"varint,11,opt,name=action,proto3,enum=rpgmmo.wire.v1.EntityAction" json:"action,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -914,6 +1031,20 @@ func (x *EntitySnapshot) GetSpeed() float32 {
 		return x.Speed
 	}
 	return 0
+}
+
+func (x *EntitySnapshot) GetFacingBrad() uint32 {
+	if x != nil {
+		return x.FacingBrad
+	}
+	return 0
+}
+
+func (x *EntitySnapshot) GetAction() EntityAction {
+	if x != nil {
+		return x.Action
+	}
+	return EntityAction_ENTITY_ACTION_UNSPECIFIED
 }
 
 // SnapshotMessage is a world state update sent to the client.
@@ -1375,7 +1506,7 @@ const file_wire_proto_rawDesc = "" +
 	"\x04tick\x18\x01 \x01(\x04R\x04tick\x12\x15\n" +
 	"\x06move_x\x18\x02 \x01(\x02R\x05moveX\x12\x15\n" +
 	"\x06move_y\x18\x03 \x01(\x02R\x05moveY\x12(\n" +
-	"\x10attack_target_id\x18\x04 \x01(\tR\x0eattackTargetId\"\xde\x01\n" +
+	"\x10attack_target_id\x18\x04 \x01(\tR\x0eattackTargetId\"\xb5\x02\n" +
 	"\x0eEntitySnapshot\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\ttype_name\x18\x02 \x01(\tR\btypeName\x12\f\n" +
@@ -1385,7 +1516,11 @@ const file_wire_proto_rawDesc = "" +
 	"\x06max_hp\x18\x06 \x01(\x05R\x05maxHp\x12.\n" +
 	"\x04type\x18\a \x01(\x0e2\x1a.rpgmmo.wire.v1.EntityTypeR\x04type\x12\x16\n" +
 	"\x06handle\x18\b \x01(\rR\x06handle\x12\x14\n" +
-	"\x05speed\x18\t \x01(\x02R\x05speed\"\xaa\x01\n" +
+	"\x05speed\x18\t \x01(\x02R\x05speed\x12\x1f\n" +
+	"\vfacing_brad\x18\n" +
+	" \x01(\rR\n" +
+	"facingBrad\x124\n" +
+	"\x06action\x18\v \x01(\x0e2\x1c.rpgmmo.wire.v1.EntityActionR\x06action\"\xaa\x01\n" +
 	"\x0fSnapshotMessage\x12\x12\n" +
 	"\x04tick\x18\x01 \x01(\x04R\x04tick\x12\x19\n" +
 	"\back_tick\x18\x02 \x01(\x04R\aackTick\x12\x12\n" +
@@ -1433,7 +1568,13 @@ const file_wire_proto_rawDesc = "" +
 	"\x0fENTITY_TYPE_MOB\x10\x02\x12\x13\n" +
 	"\x0fENTITY_TYPE_NPC\x10\x03\x12\x14\n" +
 	"\x10ENTITY_TYPE_ITEM\x10\x04\x12\x1a\n" +
-	"\x16ENTITY_TYPE_PROJECTILE\x10\x05BFZ3github.com/duycuong/rpg-mmo/shared/proto/gen;wirepb\xaa\x02\x0eRpgMmo.Wire.V1b\x06proto3"
+	"\x16ENTITY_TYPE_PROJECTILE\x10\x05*\x94\x01\n" +
+	"\fEntityAction\x12\x1d\n" +
+	"\x19ENTITY_ACTION_UNSPECIFIED\x10\x00\x12\x16\n" +
+	"\x12ENTITY_ACTION_IDLE\x10\x01\x12\x18\n" +
+	"\x14ENTITY_ACTION_MOVING\x10\x02\x12\x1b\n" +
+	"\x17ENTITY_ACTION_ATTACKING\x10\x03\x12\x16\n" +
+	"\x12ENTITY_ACTION_DEAD\x10\x04BFZ3github.com/duycuong/rpg-mmo/shared/proto/gen;wirepb\xaa\x02\x0eRpgMmo.Wire.V1b\x06proto3"
 
 var (
 	file_wire_proto_rawDescOnce sync.Once
@@ -1447,37 +1588,39 @@ func file_wire_proto_rawDescGZIP() []byte {
 	return file_wire_proto_rawDescData
 }
 
-var file_wire_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_wire_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
 var file_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_wire_proto_goTypes = []any{
 	(MsgType)(0),                // 0: rpgmmo.wire.v1.MsgType
 	(EntityType)(0),             // 1: rpgmmo.wire.v1.EntityType
-	(*Envelope)(nil),            // 2: rpgmmo.wire.v1.Envelope
-	(*AuthRequest)(nil),         // 3: rpgmmo.wire.v1.AuthRequest
-	(*AuthResponse)(nil),        // 4: rpgmmo.wire.v1.AuthResponse
-	(*EnterWorldRequest)(nil),   // 5: rpgmmo.wire.v1.EnterWorldRequest
-	(*EnterWorldResponse)(nil),  // 6: rpgmmo.wire.v1.EnterWorldResponse
-	(*JoinTokenRequest)(nil),    // 7: rpgmmo.wire.v1.JoinTokenRequest
-	(*JoinTokenResponse)(nil),   // 8: rpgmmo.wire.v1.JoinTokenResponse
-	(*InputMessage)(nil),        // 9: rpgmmo.wire.v1.InputMessage
-	(*EntitySnapshot)(nil),      // 10: rpgmmo.wire.v1.EntitySnapshot
-	(*SnapshotMessage)(nil),     // 11: rpgmmo.wire.v1.SnapshotMessage
-	(*DisconnectMessage)(nil),   // 12: rpgmmo.wire.v1.DisconnectMessage
-	(*ResyncRequest)(nil),       // 13: rpgmmo.wire.v1.ResyncRequest
-	(*TransferMapRequest)(nil),  // 14: rpgmmo.wire.v1.TransferMapRequest
-	(*TransferMapResponse)(nil), // 15: rpgmmo.wire.v1.TransferMapResponse
-	(*PingMessage)(nil),         // 16: rpgmmo.wire.v1.PingMessage
-	(*PongMessage)(nil),         // 17: rpgmmo.wire.v1.PongMessage
-	(*KickMessage)(nil),         // 18: rpgmmo.wire.v1.KickMessage
+	(EntityAction)(0),           // 2: rpgmmo.wire.v1.EntityAction
+	(*Envelope)(nil),            // 3: rpgmmo.wire.v1.Envelope
+	(*AuthRequest)(nil),         // 4: rpgmmo.wire.v1.AuthRequest
+	(*AuthResponse)(nil),        // 5: rpgmmo.wire.v1.AuthResponse
+	(*EnterWorldRequest)(nil),   // 6: rpgmmo.wire.v1.EnterWorldRequest
+	(*EnterWorldResponse)(nil),  // 7: rpgmmo.wire.v1.EnterWorldResponse
+	(*JoinTokenRequest)(nil),    // 8: rpgmmo.wire.v1.JoinTokenRequest
+	(*JoinTokenResponse)(nil),   // 9: rpgmmo.wire.v1.JoinTokenResponse
+	(*InputMessage)(nil),        // 10: rpgmmo.wire.v1.InputMessage
+	(*EntitySnapshot)(nil),      // 11: rpgmmo.wire.v1.EntitySnapshot
+	(*SnapshotMessage)(nil),     // 12: rpgmmo.wire.v1.SnapshotMessage
+	(*DisconnectMessage)(nil),   // 13: rpgmmo.wire.v1.DisconnectMessage
+	(*ResyncRequest)(nil),       // 14: rpgmmo.wire.v1.ResyncRequest
+	(*TransferMapRequest)(nil),  // 15: rpgmmo.wire.v1.TransferMapRequest
+	(*TransferMapResponse)(nil), // 16: rpgmmo.wire.v1.TransferMapResponse
+	(*PingMessage)(nil),         // 17: rpgmmo.wire.v1.PingMessage
+	(*PongMessage)(nil),         // 18: rpgmmo.wire.v1.PongMessage
+	(*KickMessage)(nil),         // 19: rpgmmo.wire.v1.KickMessage
 }
 var file_wire_proto_depIdxs = []int32{
 	1,  // 0: rpgmmo.wire.v1.EntitySnapshot.type:type_name -> rpgmmo.wire.v1.EntityType
-	10, // 1: rpgmmo.wire.v1.SnapshotMessage.entities:type_name -> rpgmmo.wire.v1.EntitySnapshot
-	2,  // [2:2] is the sub-list for method output_type
-	2,  // [2:2] is the sub-list for method input_type
-	2,  // [2:2] is the sub-list for extension type_name
-	2,  // [2:2] is the sub-list for extension extendee
-	0,  // [0:2] is the sub-list for field type_name
+	2,  // 1: rpgmmo.wire.v1.EntitySnapshot.action:type_name -> rpgmmo.wire.v1.EntityAction
+	11, // 2: rpgmmo.wire.v1.SnapshotMessage.entities:type_name -> rpgmmo.wire.v1.EntitySnapshot
+	3,  // [3:3] is the sub-list for method output_type
+	3,  // [3:3] is the sub-list for method input_type
+	3,  // [3:3] is the sub-list for extension type_name
+	3,  // [3:3] is the sub-list for extension extendee
+	0,  // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_wire_proto_init() }
@@ -1490,7 +1633,7 @@ func file_wire_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_wire_proto_rawDesc), len(file_wire_proto_rawDesc)),
-			NumEnums:      2,
+			NumEnums:      3,
 			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   0,

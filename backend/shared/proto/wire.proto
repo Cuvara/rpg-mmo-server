@@ -256,6 +256,34 @@ enum EntityType {
   ENTITY_TYPE_PROJECTILE = 5;
 }
 
+// EntityAction is a coarse, level-triggered description of what an entity is
+// doing right now, for a renderer to pick an animation from.
+//
+// Numbers are FROZEN once shipped. Append only; never renumber.
+//
+// ZERO IS RESERVED and means "not sent" — a sender that predates this field, or
+// one that has nothing to say. IDLE is deliberately 1, NOT 0: proto3 elides a
+// zero enum, so making idle the zero value would make "this entity is standing
+// still" and "this server does not know about actions" the same bytes. That is
+// the exact ambiguity documented at length on `speed` below, and here it is
+// avoidable for free, so it is avoided. `EntityType` already reserves 0 the same
+// way (ENTITY_TYPE_UNSPECIFIED means "see type_name"), so this is the file's
+// established idiom rather than a new rule.
+//
+// This is LEVEL-triggered, not edge-triggered: it says what state the entity is
+// in, not that a state was entered. A renderer that needs to retrigger the same
+// action twice in a row (attack, attack) cannot get that edge from this field
+// alone — that needs a sequence number, which is an animation-system concern and
+// is deliberately not here. See shared/docs/DESIGN.md, "Entity facing and action
+// state on the wire", for what was left out and why.
+enum EntityAction {
+  ENTITY_ACTION_UNSPECIFIED = 0; // not sent / unknown — never "idle"
+  ENTITY_ACTION_IDLE = 1;
+  ENTITY_ACTION_MOVING = 2;
+  ENTITY_ACTION_ATTACKING = 3;
+  ENTITY_ACTION_DEAD = 4;
+}
+
 // EntitySnapshot is a single entity's visible state.
 //
 // This is the hottest message in the protocol: a snapshot carries one per entity
@@ -338,6 +366,50 @@ message EntitySnapshot {
   // plain value with no identity, and the delta encoder already suppresses
   // entities whose state has not changed at all.
   float speed = 9;
+
+  // Facing direction, as 16-bit BINARY RADIANS BIASED BY ONE.
+  //
+  //   wire 0                -> NOT SENT: this sender has no facing to report.
+  //   wire v in [1, 65536]  -> angle = (v - 1) * 2*PI / 65536 radians,
+  //                            counter-clockwise from +X (due east).
+  //
+  // WHY THE BIAS, AND WHY NOT A FLOAT. `float facing` is the obvious encoding and
+  // it is wrong here, because proto3 elides a zero float and 0.0 radians is a
+  // perfectly ordinary facing — due east. A server meaning "facing east" and a
+  // server predating this field would put IDENTICAL BYTES on the wire, and no
+  // receiver rule can separate them.
+  //
+  // `speed` below has exactly that ambiguity and has to document its way around
+  // it, because a speed of zero is genuinely meaningful and float is the natural
+  // type. Facing has no such excuse: reserving zero costs one addition on each
+  // side and removes the ambiguity BY CONSTRUCTION rather than by asking every
+  // implementer to remember a rule. Every representable angle has a non-zero wire
+  // value, so an absent field means one thing only.
+  //
+  // It is also smaller: 1-3 bytes of varint against a float's fixed 5, on the
+  // hottest message in the protocol. That is the same class of saving as the
+  // entity-type enum (which exists to save 6 bytes per entity) and id interning
+  // (~15). Resolution is 360/65536 = 0.0055 degrees, far below anything a player
+  // can see.
+  //
+  // RECEIVER RULE. Zero means "no value" — NOT "facing east". A receiver MUST
+  // keep the entity's last known facing, or derive one from its movement, rather
+  // than snapping it to east. Trusting a zero unconditionally means every entity
+  // from an old server points the same way, which reads as a content bug and gets
+  // debugged as one.
+  //
+  // Sent on every mention of an entity, never interned, for the same reason as
+  // `speed`: a receiver that resolves a handle expects complete state.
+  uint32 facing_brad = 10;
+
+  // What the entity is doing, for animation selection. See EntityAction above.
+  //
+  // ENTITY_ACTION_UNSPECIFIED (0) means "not sent", never "idle" — idle is 1.
+  // A receiver MUST treat 0 as "no value" and keep whatever it was showing, not
+  // fall back to idle: an old server would otherwise freeze every entity in the
+  // world into an idle pose, which looks like a broken animator rather than a
+  // missing field.
+  EntityAction action = 11;
 }
 
 // SnapshotMessage is a world state update sent to the client.

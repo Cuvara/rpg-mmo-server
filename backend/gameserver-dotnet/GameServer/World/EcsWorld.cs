@@ -644,6 +644,8 @@ public sealed class EcsWorld : IDisposable
                         Defense = combats[i].Defense,
                         CooldownUntilTick = combats[i].CooldownUntilTick,
                         Speed = locomotions[i].Speed,
+                        FacingBrad = locomotions[i].FacingBrad,
+                        Action = locomotions[i].Action,
                         LastInputTick = cursors[i].LastInputTick,
                     };
                     if (sink != null) sink.Add(composed);
@@ -703,7 +705,12 @@ public sealed class EcsWorld : IDisposable
                         positions[i].Value,
                         healths[i].Hp,
                         healths[i].MaxHp,
-                        locomotions[i].Speed);
+                        locomotions[i].Speed,
+                        // Facing and action ride the Locomotion span that is already
+                        // fetched, which is exactly why they were put there rather than
+                        // in a component of their own — no extra GetSpan in this loop.
+                        locomotions[i].FacingBrad,
+                        locomotions[i].Action);
                 }
 
                 matches++;
@@ -1909,6 +1916,8 @@ public sealed class EcsWorld : IDisposable
             Defense = combat.Defense,
             CooldownUntilTick = combat.CooldownUntilTick,
             Speed = locomotion.Speed,
+            FacingBrad = locomotion.FacingBrad,
+            Action = locomotion.Action,
             LastInputTick = cursor.LastInputTick,
         };
     }
@@ -1935,6 +1944,8 @@ public sealed class EcsWorld : IDisposable
             Defense = combats[i].Defense,
             CooldownUntilTick = combats[i].CooldownUntilTick,
             Speed = locomotions[i].Speed,
+            FacingBrad = locomotions[i].FacingBrad,
+            Action = locomotions[i].Action,
             LastInputTick = cursors[i].LastInputTick,
         };
     }
@@ -1962,6 +1973,8 @@ public sealed class EcsWorld : IDisposable
 
         ref var locomotion = ref _arch.Get<Locomotion>(entity);
         locomotion.Speed = state.Speed;
+        locomotion.FacingBrad = state.FacingBrad;
+        locomotion.Action = state.Action;
 
         ref var cursor = ref _arch.Get<InputCursor>(entity);
         cursor.LastInputTick = state.LastInputTick;

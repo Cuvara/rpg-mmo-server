@@ -3,9 +3,9 @@ using Shared.GameLogic.Components;
 namespace GameServer.World;
 
 /// <summary>
-/// The trimmed per-match compose for the snapshot gather path: exactly the seven
+/// The trimmed per-match compose for the snapshot gather path: exactly the nine
 /// fields the wire encoder consumes (<c>Id</c>/<c>Type</c>/<c>X</c>/<c>Y</c>/<c>Hp</c>/
-/// <c>MaxHp</c>/<c>Speed</c>) plus the world-stable integer key the delta encoder
+/// <c>MaxHp</c>/<c>Speed</c>/<c>FacingBrad</c>/<c>Action</c>) plus the world-stable integer key the delta encoder
 /// keys its maps on.
 ///
 /// <para><b>Why this exists (issue #237).</b> The AOI scan used to compose a full
@@ -47,7 +47,21 @@ public readonly struct EntityView
     /// <summary>Movement speed in world units per second.</summary>
     public readonly float Speed;
 
-    public EntityView(int key, string id, string type, Vec2 position, int hp, int maxHp, float speed)
+    /// <summary>
+    /// Facing as biased 16-bit binary radians, in the wire's own form. 0 means
+    /// "unknown". See <see cref="Components.Locomotion.FacingBrad"/>.
+    /// </summary>
+    public readonly uint FacingBrad;
+
+    /// <summary>
+    /// What the entity is doing. <see cref="EntityAction.Unspecified"/> means
+    /// "unknown", never "idle".
+    /// </summary>
+    public readonly EntityAction Action;
+
+    public EntityView(
+        int key, string id, string type, Vec2 position, int hp, int maxHp, float speed,
+        uint facingBrad, EntityAction action)
     {
         Key = key;
         Id = id;
@@ -56,5 +70,7 @@ public readonly struct EntityView
         Hp = hp;
         MaxHp = maxHp;
         Speed = speed;
+        FacingBrad = facingBrad;
+        Action = action;
     }
 }

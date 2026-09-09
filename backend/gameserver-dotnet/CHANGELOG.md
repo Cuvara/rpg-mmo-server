@@ -7,6 +7,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **The server produces and ships per-entity facing and action state**
+  (`wire.proto` fields 10 and 11). `Locomotion` gains `FacingBrad` and `Action`;
+  they live there rather than in a new component because `Locomotion` is already
+  fetched by the AOI gather, so they cost no extra `GetSpan` in the hottest loop
+  in the server — the exact cost issue #237 removed by trimming that scan.
+- **Written wherever a position is advanced**: `InputHandler.ProcessInput` (packet),
+  `InputHandler.ApplyHeldMovement` (coasting — without it an entity would report
+  Idle on most ticks and the animation would stutter at the client's send rate),
+  and on attack and death. Facing is derived from the RAW input direction, not the
+  position delta: the delta is post-clamp, so a player walking into a map bound
+  would otherwise be reported as facing along the wall instead of into it. Facing
+  PERSISTS when an entity stops, so a character that halts keeps looking the way
+  it was going instead of snapping to east.
+- **Both fields are in `SnapshotDeltaState.SentView`'s change comparison**, which
+  is the only thing deciding whether a delta resends an entity. An entity that
+  turns on the spot, or starts attacking without moving, changes nothing else —
+  so omitting either would have produced a client rendering a stale facing and a
+  stale animation until the next keyframe, up to 30 ticks later, with no error on
+  either side. `FacingAndActionTests` pins both cases.
+- **`GameServer/Net/FacingCodec.cs`** — the biased binary-radian codec, mirroring
+  `shared/messages/facing.go`. Deliberately NOT in `Shared.GameLogic`: encoding a
+  direction needs `MathF.Atan2`, which ADR-10 forbids there as
+  implementation-defined across NativeAOT x64 and IL2CPP ARM64. The client only
+  ever needs the decode half, so no `Atan2` has to agree across runtimes.
+
+### Changed
+- **`SnapshotByteIdentityTests` digests rebaselined** for the two new fields, with
+  the previous values kept in comments per the existing convention. The scenario's
+  players move, so they now carry a facing and an action varint; entities that
+  never move carry neither, because both fields reserve zero and proto3 elides it.
+- **`snapshot_merger.json` gains two cases** — one where only facing and action
+  change across a delta (which every pre-existing case would have passed while
+  dropping both fields), and one pinning that an omitted field is ZEROED by the
+  whole-struct merge rather than preserved, since that is the behaviour every
+  consumer's "keep the last value" rule exists to compensate for. The fixture's
+  `SnapEntity` also gained `speed`, which these vectors had never covered at all.
+
+### Added
 - **The game server refuses a version-mismatched client with
   `protocol_version_mismatch`.** The join handshake now checks
   `JoinTokenRequest.ProtocolVersion` (`WireProtocol.CheckProtocolVersion`) before

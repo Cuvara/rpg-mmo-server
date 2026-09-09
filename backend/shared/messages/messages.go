@@ -328,6 +328,29 @@ type EntitySnapshot struct {
 	// entity. Receivers must fall back to a configured default rather than
 	// conclude the entity cannot move.
 	Speed float32 `json:"speed"`
+
+	// FacingBrad is the entity's facing as 16-bit binary radians BIASED BY ONE:
+	// 0 means "not sent", and a real facing is (brad-1)*2*Pi/65536 radians
+	// counter-clockwise from +X. Use FacingBradFromRadians /
+	// RadiansFromFacingBrad rather than doing the arithmetic at call sites.
+	//
+	// The bias exists because 0.0 radians is a legitimate facing (due east), so a
+	// plain float would make "east" and "not sent" the same bytes under proto3's
+	// zero elision. Unlike Speed, that ambiguity is avoidable here, so it is
+	// avoided rather than documented around. `omitempty` keeps an unset facing off
+	// the JSON wire too, so both encodings spell "not sent" the same way.
+	FacingBrad uint32 `json:"facing_brad,omitempty"`
+
+	// Action is what the entity is doing, for animation selection.
+	//
+	// Zero (ActionUnspecified) means "not sent", NEVER "idle" — idle is 1. A
+	// receiver must keep whatever it was showing rather than falling back to idle,
+	// or an old server freezes every entity into an idle pose.
+	//
+	// Carried as an integer in JSON as well as Protobuf. Unlike `type`, this field
+	// has no pre-enum string form to stay compatible with, so both encodings carry
+	// the same value and there is no second convention to remember.
+	Action EntityAction `json:"action,omitempty"`
 }
 
 // DisconnectMessage ends a session politely. Both encodings accept an empty

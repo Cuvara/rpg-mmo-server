@@ -6,6 +6,34 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`EntitySnapshot.facing_brad` (field 10) and `EntitySnapshot.action` (field 11).**
+  The snapshot carried `id, type_name, x, y, hp, max_hp, type, handle, speed` and
+  nothing else — no facing, no rotation, no action state. A character could not be
+  made to face the direction it was walking, and an attack could not be animated,
+  without a schema change across both repos, so the "core plumbing is closed"
+  claim was not true of the first thing any renderer needs.
+- **Facing is a BIASED 16-bit binary radian value, not a float, and that is the
+  point.** proto3 elides a zero and 0.0 radians is a perfectly ordinary facing
+  (due east), so a float would put "facing east" and "field not sent" on the wire
+  as identical bytes — the trap `speed` has to document its way around because
+  a zero speed is genuinely meaningful. Facing has no such excuse, so wire 0 is
+  reserved and a real angle is `(v-1) * 2*Pi / 65536`: every representable
+  direction has a non-zero encoding, by construction rather than by asking every
+  implementer to remember a rule. It is also 1-3 bytes against a float's 5, on
+  the hottest message in the protocol.
+- **`EntityAction` reserves 0 for "not sent" and numbers IDLE as 1**, for the same
+  reason and following `ENTITY_TYPE_UNSPECIFIED`'s precedent. A receiver that read
+  0 as "idle" would let an old server freeze every entity into an idle pose.
+- **`messages.FacingBradFromRadians` / `RadiansFromFacingBrad`** — the reference
+  codec the C# server and the Unity client mirror; `messages.EntityAction` mirrors
+  the enum. Neither field bumped `WireProtocolVersion`: both are additive with a
+  documented zero rule and degrade visibly rather than diverging silently, which
+  the bump rules explicitly call a non-bump. Rationale, the rejected encodings
+  (`optional float`, `float`+`bool`, a direction vector) and what was deliberately
+  left out (velocity, an action sequence number): `docs/DESIGN.md`, "Entity facing
+  and action state on the wire".
+
+### Added
 - **Wire protocol version negotiation (`protocol_version`).** `wire.proto` had no
   version field of any kind: client and server agreed on the meaning of the wire
   by convention, and a version-skewed build was not refused — it connected,

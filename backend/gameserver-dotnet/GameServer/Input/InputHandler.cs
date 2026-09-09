@@ -3,6 +3,10 @@ using Shared.GameLogic.Components;
 using Shared.GameLogic.Systems;
 using GameServer.World;
 using GameServer.World.Components;
+using GameServer.Net;
+// Disambiguated from the generated wire enum of the same name: the two mirror each
+// other by design, and this file means the simulation one.
+using SimAction = Shared.GameLogic.Components.EntityAction;
 
 namespace GameServer.Input;
 
@@ -270,6 +274,17 @@ public sealed class InputHandler
             {
                 position.Value = newPosition;
                 cursor.LastMoveTick = baseTick;
+
+                // The coasting path moves the entity too, so it owns the same facing and
+                // action it would have had from a packet. Without this an entity that
+                // keeps walking between input packets would report Idle on most ticks -
+                // the animation would stutter at the client's send rate rather than
+                // following the simulation, which is the same class of bug HeldMove
+                // itself exists to fix for position.
+                ref Locomotion locomotion = ref writer.LocomotionOf(in handle);
+                uint facing = FacingCodec.FromDirection(cursor.HeldMoveX, cursor.HeldMoveY);
+                if (facing != FacingCodec.NotSent) locomotion.FacingBrad = facing;
+                locomotion.Action = SimAction.Moving;
             }
         }
     }
@@ -404,6 +419,19 @@ public sealed class InputHandler
             {
                 position.Value = newPosition;
 
+                // Face the way we just moved, and say so on the wire.
+                //
+                // Derived from the RAW input direction rather than from the position
+                // delta: the delta is post-clamp, so a player walking into a map bound
+                // would be reported as facing along the wall instead of into it, which
+                // is visibly wrong at exactly the moment a player is pushing against
+                // something. FromDirection returns "not sent" for a zero vector, so a
+                // deadzone input cannot blank an established facing.
+                ref Locomotion locomotion = ref writer.LocomotionOf(self);
+                uint facing = FacingCodec.FromDirection(input.MoveX, input.MoveY);
+                if (facing != FacingCodec.NotSent) locomotion.FacingBrad = facing;
+                locomotion.Action = SimAction.Moving;
+
                 // Hold the direction so the critical group can keep integrating between
                 // packets (ApplyHeldMovement). Recorded after a successful step, so a
                 // rejected or deadzone input never becomes a held one.
@@ -420,6 +448,15 @@ public sealed class InputHandler
                 // above and ResolveDirection ever diverge, this is the backstop.
                 cursor.HeldFromTick = 0;
                 cursor.LastMoveTick = currentTick;
+
+                // An explicit stop is Idle, not Unspecified. Facing is deliberately NOT
+                // cleared: a character that halts keeps looking the way it was going,
+                // which is what a player expects and what avoids a visible snap to east
+                // every time someone releases the stick.
+                //
+                // No Dead check needed - this method returned above if the entity is
+                // dead, so reaching here means it is alive and genuinely standing still.
+                writer.LocomotionOf(self).Action = SimAction.Idle;
             }
             else if (moveResult == MoveResult.Rejected)
             {
@@ -470,6 +507,13 @@ public sealed class InputHandler
 
                     ulong cooldownUntil = currentTick + (ulong)_cooldownTicks;
                     writer.CombatOf(self).CooldownUntilTick = cooldownUntil;
+
+                // Attacking outranks moving for this tick: an attack is the thing a
+                // player is meant to see. It is level-triggered, so it lasts exactly one
+                // tick unless the next tick attacks again - a renderer that needs to
+                // retrigger the same attack twice needs an edge this field cannot give,
+                // which is documented on the enum.
+                writer.LocomotionOf(self).Action = SimAction.Attacking;
                     attacker.CooldownUntilTick = cooldownUntil; // the killer state the callback sees
 
                     if (CombatLogic.HandleDeath(ref t))
@@ -500,6 +544,17 @@ public sealed class InputHandler
                         ref Health targetHealth = ref writer.HealthOf(target);
                         targetHealth.Hp = t.Hp;
                         targetHealth.Dead = t.Dead;
+
+                        // Death is terminal for the action field: nothing else this
+                        // entity was doing matters any more, and a corpse reported as
+                        // Moving would keep playing a walk cycle.
+                        //
+                        // Nothing has to guard against a later writer clobbering this.
+                        // Both movement paths bail on a dead entity before they touch
+                        // Action - ApplyHeldMovement `continue`s on Health.Dead and
+                        // ProcessInput returns on it - so a dead entity is never reached
+                        // by the Moving or Attacking writers at all.
+                        if (t.Dead) writer.LocomotionOf(target).Action = SimAction.Dead;
                     }
                 }
                 else

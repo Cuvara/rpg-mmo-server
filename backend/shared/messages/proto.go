@@ -201,6 +201,12 @@ func unmarshalProtoPayload(data []byte, v any) error {
 					MaxHP:  int(e.MaxHp),
 					Handle: e.Handle,
 					Speed:  e.Speed,
+					// Unknown future action values are carried through as-is rather
+					// than clamped to a known one: a value this build does not
+					// recognise belongs to a newer peer, and mapping it onto "idle"
+					// would turn "I do not know" into a confident wrong answer.
+					FacingBrad: e.FacingBrad,
+					Action:     EntityAction(e.Action),
 				}
 			}
 			t.Entities = ents
@@ -360,6 +366,12 @@ func snapshotPB(t SnapshotMessage) *wirepb.SnapshotMessage {
 				MaxHp:  int32(e.MaxHP),
 				Handle: e.Handle,
 				Speed:  e.Speed,
+				// Both are plain pass-throughs: the "zero means not sent" contract
+				// lives in the encoding itself (facing is biased so no real angle is
+				// 0; action reserves 0) rather than in a translation here, which is
+				// exactly why those encodings were chosen.
+				FacingBrad: e.FacingBrad,
+				Action:     wirepb.EntityAction(e.Action),
 			}
 			// Enum when we can (2 bytes), name when we cannot (2 + len). Never
 			// both: the reader prefers the enum, so setting both would make the

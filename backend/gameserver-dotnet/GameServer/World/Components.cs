@@ -119,12 +119,53 @@ public struct Combat
     public ulong CooldownUntilTick;
 }
 
-/// <summary>Movement capability.</summary>
+/// <summary>Movement capability, and the presentation state derived from moving.</summary>
+/// <remarks>
+/// <para>
+/// <b>Why facing and action live here rather than in a component of their own.</b>
+/// This is the component the AOI gather already fetches
+/// (<c>EcsWorld.ScanRangeViewsLocked</c>), so adding two fields to it costs nothing
+/// per scanned entity. A separate <c>Pose</c> component would be tidier to name and
+/// would cost one extra <c>GetSpan</c> per chunk in the hottest loop in the server —
+/// which is precisely the cost issue #237 removed by trimming two component fetches
+/// out of that scan, and BENCHMARK.md Part V measured composing matches as the scan's
+/// dominant cost. Paying it back for a cosmetic boundary is the wrong trade.
+/// </para>
+/// <para>
+/// Facing is genuinely locomotion state. <see cref="Action"/> is the concession: it is
+/// not, strictly, but it is written at the same sites and read on the same span, and a
+/// component whose fields are all "state the snapshot gather needs" is a coherent thing
+/// even if its name is narrower than its contents.
+/// </para>
+/// </remarks>
 [EcsComponent]
 public struct Locomotion
 {
     /// <summary>Movement speed in world units per second.</summary>
     public float Speed;
+
+    /// <summary>
+    /// Facing as 16-bit binary radians BIASED BY ONE, in the wire's own form: 0 means
+    /// "unknown", a real facing is <c>(FacingBrad - 1) * 2*PI / 65536</c> radians
+    /// counter-clockwise from +X.
+    /// </summary>
+    /// <remarks>
+    /// Stored biased so the snapshot encoder converts nothing on the hot path, and so
+    /// that zero can mean "unknown" without colliding with due east — see
+    /// <c>GameServer/Net/FacingCodec.cs</c>. Written wherever a position is advanced:
+    /// <c>InputHandler.ProcessInput</c>, <c>InputHandler.ApplyHeldMovement</c> and
+    /// <c>EnemyMoveSystem</c>. It PERSISTS when the entity stops — a character that
+    /// halts keeps looking the way it was going, which is what a player expects.
+    /// </remarks>
+    public uint FacingBrad;
+
+    /// <summary>
+    /// What the entity is doing, for animation selection on a client.
+    /// <see cref="EntityAction.Unspecified"/> (0) means "unknown", never "idle" — idle
+    /// is 1, so that an entity whose action has never been set is distinguishable from
+    /// one that is genuinely standing still.
+    /// </summary>
+    public EntityAction Action;
 
     public Locomotion(float speed) => Speed = speed;
 }

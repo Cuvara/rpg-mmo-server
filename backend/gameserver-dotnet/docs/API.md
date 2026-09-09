@@ -492,7 +492,8 @@ the reason recorded in `backend/TEAM.md`.
   "ack_tick": 41,
   "full": true,
   "entities": [
-    { "id": "u1", "type": "player", "x": 12.5, "y": -3.0, "hp": 90, "max_hp": 100, "speed": 5.0 }
+    { "id": "u1", "type": "player", "x": 12.5, "y": -3.0, "hp": 90, "max_hp": 100,
+      "speed": 5.0, "facing_brad": 16385, "action": 2 }
   ],
   "removed": ["mob_7"]
 }
@@ -507,9 +508,10 @@ the reason recorded in `backend/TEAM.md`.
 | `removed` | string[] | omitted when empty | Delta only: entity IDs that left the AOI or the world. Never present on a keyframe. |
 
 `entities[]` element: `id` (string), `type` (a category string — see below),
-`x`, `y` (float32), `hp`, `max_hp` (int), `speed` (float32). Visible state is exactly
-these fields — a change in any of them puts the entity in the next delta; a change in a
-field the client cannot see (e.g. cooldown) does not.
+`x`, `y` (float32), `hp`, `max_hp` (int), `speed` (float32), `facing_brad` (uint32),
+`action` (enum). Visible state is exactly these fields — a change in any of them puts
+the entity in the next delta; a change in a field the client cannot see (e.g. cooldown)
+does not.
 
 **`speed`** is movement speed in world units per second, as the server is integrating it
 for that entity *right now* — not the spawn default. It exists so a client can predict
@@ -528,6 +530,112 @@ error on either side (it presents as rubber-banding, which reads as a network fa
 never interned: a client that resolves a handle expects complete state, and sending it
 only alongside the id would leave it correct once per keyframe interval and stale in
 between.
+
+### Facing and action — normative
+
+Two per-entity fields describe orientation and animation state. Both reserve **zero for
+"not sent"**, and both are omitted by both encodings when unset — including the JSON
+encoding, which is the one place JSON deliberately does *not* follow its usual
+"always write the field" rule (see the note at the end).
+
+| Field | Proto # | Type | Meaning |
+|---|---|---|---|
+| `facing_brad` | 10 | `uint32` | Facing, as 16-bit binary radians **biased by one** |
+| `action` | 11 | `EntityAction` | What the entity is doing |
+
+#### `facing_brad` is biased, and that is the whole design
+
+```
+wire 0                    -> NOT SENT. This sender has no facing to report.
+wire v in [1, 65536]      -> angle = (v - 1) * 2π / 65536 radians,
+                             counter-clockwise from +X (due east).
+```
+
+**Why not `float facing`?** Because proto3 elides a zero float and **0.0 radians is a
+perfectly ordinary facing** — due east. A server meaning "east" and a server predating
+the field would put *identical bytes* on the wire, and no receiver rule could separate
+them. `speed` has exactly that ambiguity and has to document its way around it, because
+a zero speed is genuinely meaningful and float is the natural type. Facing has no such
+excuse, so the ambiguity is removed **by construction**: every representable angle maps
+to a non-zero value.
+
+It is also 1–3 bytes of varint against a float's fixed 5, on the hottest message in the
+protocol — the same class of saving as the entity-type enum and id interning. Resolution
+is 360/65536 ≈ 0.0055°.
+
+**Encoding (senders).** `brad = round(normalise(θ) / 2π × 65536) mod 65536`, then send
+`brad + 1`. A non-finite angle, or a zero-length direction vector, sends `0` — "NaN" is
+not a direction, and an honestly absent value beats an unrenderable one.
+
+**Decoding (receivers), normative:**
+
+1. `facing_brad == 0` means **no value**. It does **not** mean east. A receiver MUST
+   keep the entity's last known facing, or derive one from its movement. Snapping to
+   east instead makes every entity from an old server point the same way, which reads as
+   a content bug and gets debugged as one.
+2. A value above `65536` is out of range and MUST be refused, not wrapped. A wrong
+   facing is much harder to notice than an absent one.
+3. Otherwise the angle is `(facing_brad − 1) × 2π / 65536` radians CCW from +X.
+
+**Facing persists when an entity stops.** The server writes it wherever it advances a
+position and does not clear it on an explicit stop, so a character that halts keeps
+looking the way it was going. It is derived from the *raw input direction*, not from the
+position delta, so a player walking into a map bound faces into the wall rather than
+along it.
+
+#### `action` reserves zero, and idle is 1
+
+| Value | # | Meaning |
+|---|---|---|
+| `ENTITY_ACTION_UNSPECIFIED` | 0 | **not sent / unknown — never "idle"** |
+| `ENTITY_ACTION_IDLE` | 1 | alive, not moving, not attacking |
+| `ENTITY_ACTION_MOVING` | 2 | position advanced this tick |
+| `ENTITY_ACTION_ATTACKING` | 3 | an attack landed this tick |
+| `ENTITY_ACTION_DEAD` | 4 | terminal |
+
+Idle is **1, not 0**, for exactly the reason `facing_brad` is biased: proto3 elides a
+zero enum, so idle-at-zero would make "standing still" and "this server does not know
+about actions" the same bytes. `EntityType` reserves zero the same way.
+
+A receiver MUST treat `0` as "no value" and keep whatever it was showing — **not** fall
+back to idle. An old server would otherwise freeze every entity in the world into an
+idle pose, which looks like a broken animator rather than a missing field.
+
+`ENTITY_ACTION_ATTACKING` outranks `MOVING` for the tick it occurs in, and
+`ENTITY_ACTION_DEAD` is terminal.
+
+**This field is level-triggered, not edge-triggered.** It reports the state an entity is
+in, not that a state was entered. A renderer that needs to retrigger the *same* action
+twice in a row (attack, attack) cannot get that edge from this field alone — that needs
+a sequence number, which is an animation-system concern and is deliberately not in the
+schema. This limitation is known, not overlooked.
+
+#### Both ride every mention, and both are in the delta comparison
+
+Like `speed`, they are written on **every** mention of an entity including handle-only
+ones: a client that resolves a handle expects complete state.
+
+They are also part of what makes an entity "changed" for delta purposes. This matters
+more than it looks: an entity that **turns on the spot**, or **starts attacking without
+moving**, changes nothing else at all. Had either field been left out of that
+comparison, such an entity would be silently omitted from every delta and the client
+would show a stale facing and a stale animation until the next keyframe — up to 30 ticks
+later, with no error on either side.
+
+#### The one place JSON does not write a zero
+
+JSON normally writes every entity field unconditionally (that is why `"speed":0` appears
+there where Protobuf omits it). These two are the exception: their zero is a *reserved*
+value rather than a legitimate reading, so writing `"facing_brad":0` would assert "there
+is a facing, and it is the reserved one", which is not a thing. Both encodings therefore
+spell "not sent" the same way — absence.
+
+#### Neither bumped `protocol_version`
+
+Both are additive, optional, and covered by a documented "zero means not sent" rule, and
+an old peer ignoring either degrades visibly rather than diverging silently. By the bump
+rules above that is explicitly a non-bump. See the worked example in
+[When it must be bumped](#when-it-must-be-bumped).
 
 ### Entity type: enum with a string fallback (Protobuf only) — normative
 
