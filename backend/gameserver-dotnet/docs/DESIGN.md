@@ -2025,23 +2025,60 @@ that wire, and a counter nobody can trust is worse than no counter. JSON is the
 legacy encoding (ADR-9) and is expected to disappear; until it does, a JSON client's
 downlink is bounded only by the AOI radius. Stated limitation, not an oversight.
 
-### The default, and what it is derived from
+### The default, and what it is derived from — corrected 2026-09-09 after a live run
 
-8192 bytes of payload. The only measured number available is
-`backend/docs/BENCHMARK.md` (2026-08-07): **45.9 KB/s downstream per client at 200
-players**, with snapshots broadcast on the world group at 15 Hz — a mean snapshot of
-~3.06 KB at that load. 8 KiB is ~2.7× that, which is the point: this is a **tail cap,
-not a traffic shaper**. It must not engage at a load the server is known to handle,
-because a budget that sheds during normal play would trade a measured-good bandwidth
-profile for permanent visual staleness; and it must stop a crowd from turning one
-observer's frame into an unbounded one. At 15 Hz it bounds a client's downlink at
-~123 KB/s, against ADR-7's `< 50 KB/s` mobile target for the steady state.
+8192 bytes of payload.
 
-This default is **not** a measured optimum. No load test has been run against a crowd
-dense enough to make it bite; the number that would justify a tighter cap is the same
-one ADR-7 is blocked on. Treat 8192 as "large enough not to lie about normal play,
-small enough to be a bound", and re-derive it when a load generator on separate
-hardware exists.
+> **The original derivation of this number was wrong, and the first live run found it.**
+> It read: 45.9 KB/s per client at 200 players over a 15 Hz broadcast is a ~3.06 KB mean
+> snapshot (`backend/docs/BENCHMARK.md`), so 8 KiB is ~2.7× the mean and "must not engage
+> at a load the server is known to handle". Both halves of that are unsound.
+>
+> **A cap binds on the peak, and the peak is the keyframe.** 3.06 KB is a *delta-weighted*
+> mean — 29 snapshots in 30 are deltas, and a delta names an entity by a one-or-two-byte
+> handle. A keyframe names it by its id string. Measured, with 13-character ids:
+> **25.9 B/entity on a delta, 40.9 B/entity on a keyframe** — the keyframe is 1.6× the
+> delta, so it crosses the cap at 1.6× fewer entities. Sizing a peak-bounding cap against
+> a mean was the error.
+>
+> **What the default therefore actually does**, measured on a real server (see below):
+> it starts shedding at **~200 entities in one observer's AOI** — on keyframes only — and
+> starts clipping the steady delta stream at **~317**. 200 entities in one AOI is not an
+> exotic load; it is the population BENCHMARK.md's own 200-player figure implies. So the
+> claim that the default "should never engage at a load the server is known to handle" was
+> false at exactly that load.
+>
+> `TheKeyframeCrossesTheDefaultBudgetBeforeTheDeltaDoes` derives both thresholds from the
+> encoder rather than restating them, so this cannot silently rot again.
+
+**The consequence, stated plainly.** A shed keyframe is not free: `SnapshotMerger` clears
+its entity set on a full snapshot, so entities omitted from a keyframe disappear
+client-side and are re-introduced by the following delta. Live, deferral age on the shed
+keyframes was **1 snapshot** — so at ~200+ entities a stock server drops its outermost
+entities for ~67 ms, once per keyframe interval (2 s by default). Correct, never wrong
+state, but a visible flicker at the edge of the circle that the original note said would
+not happen.
+
+**8192 is left unchanged for now**, deliberately: the mechanism is sound, the artefact is
+bounded and at the edge of vision, and changing a default is a product decision rather
+than a correctness one. What has changed is that its behaviour is now measured and stated
+instead of asserted. Anyone raising it should note that a cap sized to clear a keyframe at
+population N needs ≈ 41 × N bytes.
+
+Measured live, 10 players, 300 load-test entities in one AOI, `-movement still`
+(2026-09-09, develop @ `0bc02a3`, image built from that commit):
+
+| `GAMESERVER_MAX_SNAPSHOT_BYTES` | downlink B/s/client | entities shed | max deferral | despawns deferred | client resyncs |
+|---|---|---|---|---|---|
+| 0 (off) | 118 033 | 0 | 0 | 0 | 0 |
+| 8192 (default) | 115 923 | 24 308 | 1 | 0 | 0 |
+| 4096 | 61 469 | 714 989 | 3 | 0 | 0 |
+| 2048 | 30 634 | 1 107 870 | 6 | 0 | 0 |
+| 1024 | 15 264 | 1 310 048 | 12 | 0 | 0 |
+| 512 | 7 570 | 1 422 288 | 25 | 0 | 0 |
+
+The cap controls the wire as intended — halving it roughly halves the downlink — and the
+default costs 1.8% of bandwidth at this population, all of it keyframe clipping.
 
 ### Cost when it does not bite
 

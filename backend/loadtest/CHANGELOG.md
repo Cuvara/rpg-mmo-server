@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`-movement cluster` walks players out of any crowd that does not march with them,
+  and it is the default — documented, measured and pinned.** Its comment claimed players
+  "stay mutually in-AOI, so this is the worst-case dense-crowd shape". True of the players;
+  false of everything else. Players leave the origin along +X at 5 u/s against a 50-unit
+  AOI radius, so they clear an origin-centred population in ~10s and are ~300 units away by
+  the end of a default 60s window. Against server-side entities — `LOADTEST_ENTITIES`,
+  which orbit the origin, or a stock map's enemy spawner — the visible set **collapses
+  during the run** while the report still names the population it started with.
+  - Measured (1 player, 300 `LOADTEST_ENTITIES`, server-side snapshot bytes/s every 4s):
+    `still` held **117.6 kB/s flat**; `cluster` decayed **113 → 80 → 50 → 17 → 0.6 kB/s by
+    t=24s**. Any default-configuration run longer than ~25s against a stationary population
+    is therefore measuring a nearly empty AOI.
+  - Found while acceptance-testing the game server's downlink budget, where it silently
+    made a 60s run report a fifth of the bandwidth the population implied.
+  - **Behaviour is unchanged** — `cluster` is still correct for the player-vs-player density
+    it was built for, and changing its trajectory would change what every existing
+    BENCHMARK.md figure taken under it means. What changed is that the trap is written down
+    at the constant, in the README, and pinned by `TestClusterLeavesAStationaryCrowd`, which
+    fails if the speed, the AOI radius, the default window or the default mode move far
+    enough to invalidate the warning.
+
+## [Unreleased]
+
 ### Changed
 - **`-encoding` now defaults to `proto`, the wire the Unity client speaks (ADR-9); `json` stays
   reachable as the legacy A/B arm.** The 2026-09-07 sweep against `develop@c05f715` ran under the

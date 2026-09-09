@@ -168,6 +168,24 @@ The same value is exported as the Prometheus gauge `gameserver_achieved_tick_hz`
 | `gameserver_inputs_coalesced_total` | counter | `map_id` | Movement-only inputs that replaced the sender's previous queued movement in place. **Not a loss** — the tick integrates one direction per player per tick regardless — but the rate says how far above the tick rate clients are sending |
 | `gameserver_transfers_rejected_total` | counter | `map_id` | `MsgTransferMap` refused because one was already in flight on that connection |
 
+> **A counter that has never incremented is not in `/metrics` at all.** The OpenTelemetry
+> Prometheus exporter emits an instrument only once it has recorded a value, so on a
+> healthy server `gameserver_snapshots_entities_shed_total`,
+> `gameserver_snapshots_removals_deferred_total` and `gameserver_resyncs_total` are simply
+> **missing** rather than zero. Verified on a live server 2026-09-09: with
+> `GAMESERVER_MAX_SNAPSHOT_BYTES=0` the two shedding counters do not appear, while
+> `gameserver_snapshots_bytes_total` and the `..._max_shed_age` gauge do (a gauge's
+> callback always runs).
+>
+> This matters because those are the *alarm* counters: the ones that vanish are exactly
+> the ones whose absence means "everything is fine", and in a dashboard that reads
+> identically to "the scrape is broken" or "this build does not have the feature". When
+> you need to distinguish the two, read **`/status`**, which always publishes
+> `snapshot_entities_shed`, `snapshot_removals_deferred`, `snapshot_max_shed_age`,
+> `snapshot_bytes` and the `max_snapshot_bytes` that produced them — as plain zeros when
+> nothing has happened. Alert on the `/status` field or on `absent()`-tolerant PromQL, not
+> on a bare counter rate.
+
 Useful queries:
 
 ```promql

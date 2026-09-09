@@ -600,6 +600,90 @@ public class SnapshotBudgetTests
             "gone — the prune pass is not running");
     }
 
+    /// <summary>
+    /// <b>The keyframe is what the budget binds on, not the delta.</b> Pinned because the
+    /// default was originally derived from the wrong one of the two.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="SnapshotDeltaState.DefaultMaxSnapshotBytes"/> was justified as "~2.7x the
+    /// mean snapshot at the measured 200-player load" — 45.9 KB/s over a 15 Hz broadcast,
+    /// so ~3.06 KB. That mean is a <i>delta-weighted</i> mean: 29 snapshots in 30 are
+    /// deltas, and a delta mentions an entity by a one-or-two-byte handle. The keyframe
+    /// mentions it by its id string, which for a 13-character id is ~15 bytes more per
+    /// entity — so a keyframe is roughly 1.6x a delta, and it is the keyframe that crosses
+    /// the cap first. Sizing a peak-bounding cap against a mean is the error; this test is
+    /// the guard against it returning.
+    /// </para>
+    /// <para>
+    /// Measured live at 200 load-test entities in one AOI (13-character ids, `lt-%010d`):
+    /// delta 5191 B, keyframe over 8192 B, first shedding at exactly this population. The
+    /// numbers below reproduce that crossing in-process.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheKeyframeCrossesTheDefaultBudgetBeforeTheDeltaDoes()
+    {
+        // Per-entity cost, derived from two populations rather than assumed, so the
+        // constant-size parts of the message (tick, ack, full) cancel out.
+        (int keyframe, int delta) a = MeasureAt(100);
+        (int keyframe, int delta) b = MeasureAt(300);
+
+        double keyframePerEntity = (b.keyframe - a.keyframe) / 200.0;
+        double deltaPerEntity = (b.delta - a.delta) / 200.0;
+
+        Assert.True(keyframePerEntity > deltaPerEntity + 10,
+            $"keyframe {keyframePerEntity:F1} B/entity vs delta {deltaPerEntity:F1} B/entity. " +
+            "A keyframe names every entity by its id string and a delta names it by a handle, " +
+            "so with a 13-character id the gap should be ~15 bytes. If it has closed, the " +
+            "reasoning behind the default budget no longer holds.");
+
+        // The engagement thresholds the default budget actually implies. The keyframe one
+        // is the real one: it is the population at which a stock server starts shedding.
+        double keyframeThreshold = SnapshotDeltaState.DefaultMaxSnapshotBytes / keyframePerEntity;
+        double deltaThreshold = SnapshotDeltaState.DefaultMaxSnapshotBytes / deltaPerEntity;
+
+        Assert.True(keyframeThreshold < deltaThreshold,
+            "the keyframe must be the binding constraint; if the delta crosses first the " +
+            "budget is being reached by a different mechanism than documented");
+
+        // Measured live at 205 entities in one AOI (200 load-test entities + 5 players,
+        // 13-character ids): first shedding observed exactly there. Pinned as a band, not a
+        // point, because id length and field population move it a little.
+        Assert.InRange(keyframeThreshold, 180, 240);
+
+        // And the delta threshold, which is where the budget starts clipping the steady
+        // stream rather than just the keyframe. Measured live: 400 entities produced a
+        // clipped 8188 B snapshot against an unclipped ~10 300 B.
+        Assert.InRange(deltaThreshold, 280, 380);
+    }
+
+    /// <summary>Keyframe and delta payload sizes for a population of <paramref name="n"/>.</summary>
+    private static (int keyframe, int delta) MeasureAt(int n)
+    {
+        // Ids the length the load-test spawner emits (`lt-%010d`), because id length is
+        // most of the difference this measurement is about.
+        var world = new List<EntityState>(n);
+        for (int i = 0; i < n; i++)
+        {
+            world.Add(TestHelpers.CreatePlayer($"lt-{i:D10}", 5f + (i % 40), 3f + (i % 27)));
+        }
+
+        var state = new SnapshotDeltaState(); // budget off: measure the true sizes
+        int keyframe = state.Encode(1, 1, world, NoKeyframes, intern: true).CalculateSize();
+
+        // Move everything, so the delta carries every entity too and the only difference
+        // between the two measurements is how each entity is named on the wire.
+        var moved = new List<EntityState>(n);
+        for (int i = 0; i < n; i++)
+        {
+            moved.Add(TestHelpers.CreatePlayer($"lt-{i:D10}", 6f + (i % 40), 4f + (i % 27)));
+        }
+        int delta = state.Encode(2, 2, moved, NoKeyframes, intern: true).CalculateSize();
+
+        return (keyframe, delta);
+    }
+
     // ── The cap itself ────────────────────────────────────────────────────────────
 
     /// <summary>

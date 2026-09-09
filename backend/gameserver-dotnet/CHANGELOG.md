@@ -52,6 +52,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   This also settles a loose end Part X flagged as host noise: its `realistic, 400` row read
   `0.63x 1.19x 1.22x` and the 0.63 was dismissed. It was the true value.
 
+- **The downlink budget's default was derived from the wrong number, and the first live
+  run against a real server found it.** The stated derivation — "45.9 KB/s per client at
+  200 players over 15 Hz is a ~3.06 KB mean snapshot, so 8 KiB is ~2.7x the mean and will
+  never engage at a load the server is known to handle" — sized a **peak-bounding cap
+  against a delta-weighted mean**. 29 snapshots in 30 are deltas, which name an entity by
+  a handle; a keyframe names it by its id string. Measured with 13-character ids:
+  **25.9 B/entity on a delta, 40.9 B/entity on a keyframe**.
+  - What the default actually does, measured on a server built from `0bc02a3` and driven
+    by `loadtest`: it starts shedding at **~200 entities in one observer's AOI** (on
+    keyframes only) and starts clipping the steady delta stream at **~317**. 200 entities
+    in one AOI is the population BENCHMARK.md's own 200-player figure implies, so the
+    "never engages" claim was false at exactly the documented load.
+  - The consequence is now stated rather than denied: a shed keyframe makes
+    `SnapshotMerger` drop those entities (full snapshots replace the set) until the next
+    delta re-introduces them. Live deferral age on those keyframes was **1 snapshot**, so a
+    stock server at 200+ AOI entities drops its outermost entities for ~67 ms once per
+    keyframe interval — bounded, never wrong state, but a visible edge flicker.
+  - **8192 is unchanged.** The mechanism is sound and the artefact is bounded; changing a
+    default is a product decision, not a correctness one. What changed is that the number
+    is now measured and stated instead of asserted.
+  - `TheKeyframeCrossesTheDefaultBudgetBeforeTheDeltaDoes` derives both thresholds from the
+    encoder instead of restating them, so the derivation cannot silently rot again. Its
+    in-process figure (25.86 B/entity on a delta) matches the live server's 25.7–26.0.
+
 ### Changed
 
 - **`MinOccupiedCellsToQuery` stays at 96.** With the sort fixed the threshold is correct on
@@ -463,6 +487,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   an input flood from one authenticated player while a second player's input is
   still acked — PASS/FAIL per check, non-zero exit on failure. Documented, with
   reference output from a live run, in the new `docs/RUNBOOK.md`.
+
+- **Measured downlink-budget behaviour in `docs/DESIGN.md`** — a table of downlink
+  bytes/s per client, entities shed, max deferral, despawns deferred and client resyncs at
+  budgets from off down to 512 B, taken from a live server at 300 AOI entities and 10
+  players. Halving the cap roughly halves the downlink (118 033 → 7 570 B/s/client);
+  despawns deferred and client resyncs were **0 at every budget**, i.e. no client ever saw
+  an entity handle without a binding under sustained shedding.
+- **A note in `docs/METRICS.md` that a never-incremented counter is absent from
+  `/metrics` entirely**, not zero — so on a healthy server the two shedding counters and
+  `gameserver_resyncs_total` are missing, which in a dashboard is indistinguishable from a
+  broken scrape or a build without the feature. `/status` always publishes them as plain
+  zeros and is the surface to alert from. Verified live.
 
 ### Changed
 
