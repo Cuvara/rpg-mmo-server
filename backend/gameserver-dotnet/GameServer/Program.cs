@@ -713,6 +713,29 @@ metricsEndpoint?.SetStatusProvider(() =>
         TransportAuthenticated = transportPosture.Authenticated,
         TransportCipher = transportPosture.Cipher,
         TransportPostureSummary = transportPosture.Summary,
+        InputsRejected = metrics.InputsRejectedTotal,
+        // Every reason, always, including the ones at zero. That is the whole point of the
+        // bounded enum: the healthy reading for these is zero, and a missing key would be
+        // indistinguishable from a build without the feature.
+        InputsRejectedByReason = GameServer.Input.InputRejection.All.ToDictionary(
+            GameServer.Input.InputRejection.Label,
+            metrics.InputsRejected),
+        AnomalyAccountsTracked = server.Anomalies.TrackedAccounts,
+        AnomalyAccountsOverThreshold = server.Anomalies.AccountsOverThreshold(),
+        AnomalyAlerts = metrics.AnomalyAlerts,
+        AnomalyAccountsDropped = server.Anomalies.DroppedAccounts,
+        AnomalyTopAccounts = server.Anomalies.TopByScore(10)
+            .Select(a => new GameServer.Observability.AnomalousAccount
+            {
+                UserId = a.UserId,
+                Rejections = a.Total,
+                Score = a.Score,
+                Alerts = a.Alerts,
+                ByReason = GameServer.Input.InputRejection.All.ToDictionary(
+                    GameServer.Input.InputRejection.Label,
+                    r => a.ByReason[(int)r]),
+            })
+            .ToList(),
         MaxSnapshotBytes = maxSnapshotBytes,
         SnapshotBytes = metrics.SnapshotBytes,
         SnapshotEntitiesShed = metrics.SnapshotEntitiesShed,

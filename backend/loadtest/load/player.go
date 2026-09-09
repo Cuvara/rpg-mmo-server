@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -267,6 +268,8 @@ func (p *player) loop(ctx context.Context) error {
 	defer ticker.Stop()
 
 	moveX, moveY := p.movementVector()
+	abuseStale := p.abusive() && p.cfg.Abuse == AbuseStale
+	abuseAttack := p.abusive() && p.cfg.Abuse == AbuseAttack
 	var tick uint64
 	for {
 		select {
@@ -281,10 +284,21 @@ func (p *player) loop(ctx context.Context) error {
 			}
 			return nil
 		case <-ticker.C:
-			tick++
-			env, err := messages.NewEnvelopeAs(p.cfg.Encoding, messages.MsgInput, messages.InputMessage{
-				Tick: tick, MoveX: moveX, MoveY: moveY,
-			})
+			// A stale-tick abuser never advances its counter past the first input, so
+			// every later frame trips the server's monotonic check. Tick 1 is sent once
+			// legitimately, which is what makes the rest STALE rather than merely odd.
+			if !abuseStale || tick == 0 {
+				tick++
+			}
+
+			msg := messages.InputMessage{Tick: tick, MoveX: moveX, MoveY: moveY}
+			if abuseAttack {
+				// An id no entity will ever have. The server resolves it, fails, and
+				// records attack_target_unresolved.
+				msg.AttackTargetID = "no-such-entity-" + strconv.Itoa(p.idx)
+			}
+
+			env, err := messages.NewEnvelopeAs(p.cfg.Encoding, messages.MsgInput, msg)
 			if err != nil {
 				return fmt.Errorf("encode input: %w", err)
 			}
@@ -508,8 +522,30 @@ func drainPending(dst []pendingInput, ch <-chan pendingInput) []pendingInput {
 	}
 }
 
+// abusive reports whether THIS player is one of the misbehaving ones.
+//
+// Selected by index, the same mechanism MovementSpread uses, so a run is
+// reproducible and "2 of 50 players cheat" is expressible rather than
+// all-or-nothing.
+func (p *player) abusive() bool {
+	return p.cfg.AbusePlayers > 0 &&
+		p.cfg.Abuse != "" && p.cfg.Abuse != AbuseNone &&
+		p.idx < p.cfg.AbusePlayers
+}
+
 // movementVector returns the input direction this player drives every tick.
 func (p *player) movementVector() (float32, float32) {
+	if p.abusive() && p.cfg.Abuse == AbuseDirection {
+		// Far beyond GameConstants.MaxInputMagnitude, so ResolveDirection returns
+		// Rejected and the server records invalid_direction.
+		//
+		// A large FINITE value, not NaN or +Inf, deliberately: encoding/json cannot
+		// represent those and the loadtest still supports the legacy json arm, so a
+		// non-finite vector would fail to encode client-side and never reach the
+		// server at all. The server refuses both identically.
+		return 1e6, 1e6
+	}
+
 	switch p.cfg.Movement {
 	case MovementStill:
 		return 0, 0

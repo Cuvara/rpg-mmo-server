@@ -72,6 +72,48 @@ public sealed class InputHandler
     /// <summary>Attack-path counters. See <see cref="AttackTelemetry"/> for the contract.</summary>
     public AttackTelemetry Attacks { get; } = new();
 
+    /// <summary>
+    /// Called once per refused input with the account and the reason.
+    /// </summary>
+    /// <remarks>
+    /// A callback rather than a direct dependency on <c>GameMetrics</c> and the anomaly
+    /// tracker: this class is constructed directly by a dozen tests, and making it require
+    /// an observability stack would either force every one of them to build one or invite
+    /// a null-object that quietly does nothing. Optional and null by default keeps the
+    /// hot path free when nothing is observing.
+    /// </remarks>
+    private readonly Action<string, InputRejectionReason>? _onRejected;
+
+    /// <summary>Report a refused input. Cheap when nothing is listening.</summary>
+    private void Reject(string userId, InputRejectionReason reason) =>
+        _onRejected?.Invoke(userId, reason);
+
+    /// <summary>
+    /// Map a <see cref="CombatLogic.ValidateAttack"/> reason onto the bounded enum.
+    /// </summary>
+    /// <remarks>
+    /// <b>Reference comparison, not string equality.</b> Every reason that validator
+    /// returns is an interned constant (#249) — which is also why the rejection path
+    /// allocates nothing — so identity is exact and free, and the existing out-of-range
+    /// log below already relies on the same property. An unrecognised reason maps to
+    /// <see cref="InputRejectionReason.AttackTargetUnresolved"/>'s sibling rather than
+    /// being silently dropped: if a new reason is added to the validator without being
+    /// classified here, it lands in a real bucket and shows up, instead of vanishing.
+    /// </remarks>
+    private static InputRejectionReason ClassifyAttackRejection(string? attackErr)
+    {
+        if (ReferenceEquals(attackErr, CombatLogic.OutOfRangeRejection))
+            return InputRejectionReason.AttackOutOfRange;
+
+        // The other two are also constants, but private to the validator's source rather
+        // than exposed as named fields, so these compare by value. Cheap: it only runs on
+        // a rejection, and only for reasons that are not the interned out-of-range one.
+        if (attackErr == "attack on cooldown") return InputRejectionReason.AttackOnCooldown;
+        if (attackErr == "target is already dead") return InputRejectionReason.AttackTargetDead;
+
+        return InputRejectionReason.AttackOther;
+    }
+
     /// <summary>Fixed simulation timestep in seconds used for movement integration.</summary>
     public float DeltaTime => _deltaTime;
 
@@ -91,11 +133,13 @@ public sealed class InputHandler
         ILogger logger,
         DeathHandler? onDeath = null,
         int tickRate = GameConstants.DefaultTickRate,
-        MapBounds? bounds = null)
+        MapBounds? bounds = null,
+        Action<string, InputRejectionReason>? onRejected = null)
     {
         _world = world;
         _logger = logger;
         _onDeath = onDeath;
+        _onRejected = onRejected;
         _deltaTime = MovementSystem.DeltaTimeForTickRate(
             tickRate > 0 ? tickRate : GameConstants.DefaultTickRate);
         _bounds = bounds ?? MapBounds.Default;
@@ -357,14 +401,26 @@ public sealed class InputHandler
         // Revalidate: a handle resolved at ingest can be stale by the time the tick runs
         // if the entity was destroyed in between. TickLoop rebinds first, so this is the
         // backstop, not the mechanism.
-        if (!writer.IsAlive(in self)) return;
+        if (!writer.IsAlive(in self))
+        {
+            Reject(userId, InputRejectionReason.EntityGone);
+            return;
+        }
 
         // Skip if dead
-        if (writer.HealthOf(self).Dead) return;
+        if (writer.HealthOf(self).Dead)
+        {
+            Reject(userId, InputRejectionReason.DeadEntity);
+            return;
+        }
 
         // Monotonic tick check
         ref InputCursor cursor = ref writer.InputCursorOf(self);
-        if (input.Tick <= cursor.LastInputTick) return;
+        if (input.Tick <= cursor.LastInputTick)
+        {
+            Reject(userId, InputRejectionReason.StaleTick);
+            return;
+        }
         cursor.LastInputTick = input.Tick;
 
         // --- Movement ---
@@ -462,6 +518,8 @@ public sealed class InputHandler
             {
                 // Grossly invalid vector (NaN/inf/oversized): log and drop, never throw.
                 // Guarded like the attack log below: no allocation with Debug off.
+                Reject(userId, InputRejectionReason.InvalidDirection);
+
                 if (_logger.IsEnabled(LogLevel.Debug))
                 {
                     _logger.LogDebug("Dropped invalid move from {UserId}: ({MoveX}, {MoveY})",
@@ -487,6 +545,7 @@ public sealed class InputHandler
             if (!target.IsValid)
             {
                 Attacks.Unresolved++;
+                Reject(userId, InputRejectionReason.AttackTargetUnresolved);
             }
             else
             {
@@ -561,6 +620,7 @@ public sealed class InputHandler
                 {
                     Attacks.Rejected++;
                     Attacks.LastRejection = attackErr;
+                    Reject(userId, ClassifyAttackRejection(attackErr));
                     // Guarded like the attack log above: no allocation with Debug off.
                     // The distance detail the out-of-range message used to carry is
                     // computed HERE, only under the guard: the validator returns an

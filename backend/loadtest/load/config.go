@@ -120,6 +120,31 @@ const (
 	MovementSpread = "spread"
 )
 
+// Abuse modes make a share of the virtual players send input the server is
+// expected to REFUSE, so the rejection telemetry and the per-account anomaly
+// score can be exercised deliberately instead of waited for.
+//
+// The harness is otherwise scrupulously well-behaved — it answers pings, sends
+// normalised vectors and disconnects politely — which is correct for a benchmark
+// and useless for testing a detector. These modes are the opposite of that, and
+// only that: nothing here tries to gain an advantage, because the server already
+// refuses all of it. The point is to produce the SIGNAL.
+const (
+	// AbuseNone is the default: every player behaves.
+	AbuseNone = "none"
+	// AbuseDirection sends a grossly oversized movement vector, which
+	// MovementSystem.ResolveDirection refuses outright. Server-side reason:
+	// invalid_direction — the one reason the shipped client cannot produce, and
+	// so the only one that carries weight in the anomaly score.
+	AbuseDirection = "direction"
+	// AbuseStale replays the same input tick for ever. Server-side reason:
+	// stale_tick.
+	AbuseStale = "stale"
+	// AbuseAttack attacks an entity id that does not exist. Server-side reason:
+	// attack_target_unresolved.
+	AbuseAttack = "attack"
+)
+
 // Config holds every knob of a load run.
 type Config struct {
 	// --- topology ---
@@ -143,6 +168,13 @@ type Config struct {
 	TickRate int           // client input sends per second
 	AuthMode AuthMode
 	Movement string
+
+	// Abuse is the misbehaviour pattern used by the abusive share of players.
+	Abuse string
+
+	// AbusePlayers is how many players misbehave, selected by index so a run is
+	// reproducible. Zero means none, whatever Abuse is set to.
+	AbusePlayers int
 
 	// Encoding selects the wire encoding every virtual player speaks. The server
 	// answers in whatever encoding it is addressed in, so flipping this A/B-tests
@@ -247,6 +279,8 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	fs.IntVar(&cfg.TickRate, "tick-rate", cfg.TickRate, "Client input sends per second")
 	fs.StringVar(&authMode, "auth", authMode, "Auth path: presigned (default, benchmarks the game path) or nakama (adds real login cost)")
 	fs.StringVar(&cfg.Movement, "movement", cfg.Movement, "Input pattern: cluster, still or spread")
+	fs.StringVar(&cfg.Abuse, "abuse", cfg.Abuse, "Misbehaviour for the abusive share: none, direction (oversized move vector), stale (replayed input tick) or attack (nonexistent target). Exercises the server's input-rejection telemetry; the server refuses all of it, so nothing here gains an advantage")
+	fs.IntVar(&cfg.AbusePlayers, "abuse-players", cfg.AbusePlayers, "How many players misbehave, chosen by index (0 = none)")
 	fs.StringVar(&encoding, "encoding", encoding, "Wire encoding: proto (default — what the client speaks, ADR-9) or json (legacy arm)")
 	fs.IntVar(&cfg.BaselineEntities, "baseline-entities", cfg.BaselineEntities, "Entities the server holds with no players (e.g. its enemy spawner); tolerated by the not-empty-at-start validity check")
 	fs.DurationVar(&cfg.Timeout, "timeout", cfg.Timeout, "Per-operation network timeout")
@@ -306,6 +340,19 @@ func (c Config) Validate() error {
 	case MovementStill, MovementCluster, MovementSpread:
 	default:
 		return fmt.Errorf("movement must be one of still|cluster|spread, got %q", c.Movement)
+	}
+
+	switch c.Abuse {
+	case "", AbuseNone, AbuseDirection, AbuseStale, AbuseAttack:
+	default:
+		return fmt.Errorf("abuse must be one of none|direction|stale|attack, got %q", c.Abuse)
+	}
+
+	if c.AbusePlayers < 0 {
+		return fmt.Errorf("abuse-players must be >= 0, got %d", c.AbusePlayers)
+	}
+	if c.AbusePlayers > c.Players {
+		return fmt.Errorf("abuse-players (%d) exceeds players (%d)", c.AbusePlayers, c.Players)
 	}
 	switch c.JoinMode {
 	case JoinGateway:

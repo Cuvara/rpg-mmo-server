@@ -188,6 +188,91 @@ The same value is exported as the Prometheus gauge `gameserver_achieved_tick_hz`
 > nothing has happened. Alert on the `/status` field or on `absent()`-tolerant PromQL, not
 > on a bare counter rate.
 
+
+## Input rejection and the anomaly score (roadmap A1/A2)
+
+**What this is for.** Server authority already stops the cheats that matter — movement is
+integrated from the server's own speed stat, "never on how many input packets a client
+sends". The gap was that **nothing observed**: `ValidationLogic` refused an input and the
+server dropped it, so a client probing the rules left no trace. These counters are that
+trace. They change no enforcement.
+
+### The counters
+
+`gameserver_inputs_rejected_total{reason}` — inputs that reached the tick and were refused.
+Distinct from `gameserver_inputs_dropped_total`, which is ingest backpressure.
+
+| `reason` | Meaning | Honest cause? |
+|---|---|---|
+| `entity_gone` | Entity destroyed between ingest and tick | **Yes** — a benign race |
+| `dead_entity` | Input from a dead player | **Yes** — one round trip of it after every death |
+| `stale_tick` | `input.Tick <= LastInputTick` | **Ambiguous** — reordered UDP, or a reconnecting client whose tick counter restarts against a held entity |
+| `invalid_direction` | Vector NaN/inf/oversized | **No** — the shipped client normalises before sending |
+| `attack_target_unresolved` | Target id did not resolve | **Yes** — target despawned in flight |
+| `attack_target_dead` | Target already dead | **Yes** — someone else's blow landed first |
+| `attack_out_of_range` | Target outside attack range | **Yes** — target moved in flight; rises with RTT |
+| `attack_on_cooldown` | Cooldown had not expired | **Mostly** — client cooldown prediction drift |
+| `attack_other` | Validator reason this build does not classify | **N/A** — means the classifier is stale, i.e. a bug in `InputRejection` |
+
+**All nine series are primed to zero at startup**, so "no rejections" reads as `0` rather
+than as an absent series. That is deliberate and it is why the reasons are a bounded enum
+rather than the validator's free-form strings — which additionally embed
+attacker-controlled values (the rejected vector, the target id) and would be unbounded
+cardinality a client could mint on demand.
+
+`gameserver_input_anomaly_alerts_total` — times an account's decaying score first crossed
+the alert threshold. **Observation only; no player is ever acted on.**
+
+### `/status`
+
+`inputs_rejected`, `inputs_rejected_by_reason` (every reason, always, including zeros),
+`anomaly_accounts_tracked`, `anomaly_accounts_over_threshold`, `anomaly_alerts`,
+`anomaly_accounts_dropped`, and `anomaly_top_accounts` — the per-account breakdown, which
+cannot be a metric label without unbounded cardinality.
+
+`anomaly_top_accounts` is ordered **by score, not by rejection count**. The account with
+the most rejections is usually the one with the worst connection, and putting that player
+at the top of a list an operator reads as "most suspicious" is how a latency problem gets
+mistaken for cheating.
+
+### How to read it — and the limit on how far
+
+> **⚠️ There is no measured baseline for an honest player's rejection rate.** Every
+> figure this repository has is from loopback, where the latency that produces most
+> rejections does not exist. Until that baseline is measured against real players on real
+> networks, **no threshold here is tuned**, and the default alert score is a placeholder
+> chosen to flag sustained forged input and nothing else.
+
+That limit is why the score deliberately counts **only `invalid_direction`**. An earlier
+version gave the latency-explicable reasons a small weight; its own test disproved it — at
+that weight a player producing an out-of-range attack on every input crossed the threshold
+at 200 rejections, and the test asserting they would not passed only by floating-point
+luck. A weight small enough to be safe and large enough to matter cannot be chosen without
+the baseline, so the score answers the one question it can answer honestly: *how much
+input is this account sending that the shipped client cannot produce?* The other reasons
+are still counted and still published per account — they are just not treated as evidence.
+
+**Reading the breakdown matters more than the total.** An account whose rejections are all
+attack-path is lagging. One producing `invalid_direction` is sending packets the shipped
+client cannot produce — and note even that is a client that *tried*, not one that
+achieved: the server already ignores the value.
+
+### Exercising it
+
+`loadtest` can generate each pattern deliberately, so the counters are testable rather
+than only observable in production:
+
+```bash
+# 2 of 50 players send an oversized movement vector; the rest behave.
+go run ./cmd/loadtest -players 50 -abuse direction -abuse-players 2 -movement still ...
+```
+
+`-abuse` takes `none` (default), `direction` → `invalid_direction`, `stale` →
+`stale_tick`, `attack` → `attack_target_unresolved`. Abusive players are chosen by index,
+so a run is reproducible. Use **`-movement still`** for anything measured against a
+stationary population — `cluster` marches players out of the AOI within ~25s.
+
+
 Useful queries:
 
 ```promql
