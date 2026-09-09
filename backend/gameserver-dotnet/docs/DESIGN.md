@@ -1191,9 +1191,16 @@ Serialization proper is 4–6% of the tick, not the 80% the original analysis as
 > `Stopwatch.GetTimestamp` only (`BENCH_TICK=1`).
 
 The
-two real terms are the brute-force AOI scan (a spatial index is the standing production
-item) and `Encode`'s 134 699 B/tick of `EntitySnapshot` objects, which is a pooling
-problem. Neither is an ECS problem.
+two real terms are the AOI gather and `Encode`'s 134 699 B/tick of `EntitySnapshot`
+objects, which is a pooling problem. Neither is an ECS problem.
+
+The AOI term is no longer a plain scan. A uniform spatial grid is rebuilt once per gather
+scope with each entity's `EntityView` composed into it, and queries take it when the
+population is spread over at least 96 cells — 1.9-2.4x on the stock 1000x1000 map at 200
+players, parity when the population clumps, never slower. The first attempt at this index
+was 2.8x *slower* and was reverted; what changed is issue #237's trimmed compose, which
+made the composed view small enough to live inside the index. `backend/docs/BENCHMARK.md`
+Part X has the numbers and Part V has the history.
 
 ### Systems, the schedule, and where simulation state lives
 

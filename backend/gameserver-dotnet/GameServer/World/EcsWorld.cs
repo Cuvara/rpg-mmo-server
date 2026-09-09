@@ -249,6 +249,79 @@ public sealed class EcsWorld : IDisposable
     /// and keeps <see cref="ReadAllParallel"/> genuinely parallel, which a mutex over the
     /// AOI gather would not: the gather is 77-83% of a 200-viewer tick.</para>
     /// </summary>
+    /// <summary>
+    /// Spatial index over entity positions, rebuilt at the top of each gather scope and
+    /// queried once per viewer. See <see cref="SpatialGrid"/> for why this exists at all
+    /// given that BENCHMARK.md Part V reverted the first one, and what changed since.
+    ///
+    /// <para>Cell size is the default AOI radius: a query then covers at most a 3x3
+    /// neighbourhood, the smallest that can contain a circle of that radius. Smaller cells
+    /// mean more cell lookups per query for fewer candidates each; larger cells mean fewer
+    /// lookups over more candidates.</para>
+    /// </summary>
+    private readonly SpatialGrid _grid = new(GameConstants.DefaultAoiRadius);
+
+    /// <summary>
+    /// True when <see cref="_grid"/> was rebuilt inside the current read scope and may be
+    /// queried. Outside a gather scope the index is not maintained, so every other caller
+    /// takes the full scan — which is also what keeps the brute-force path live and
+    /// exercised rather than dead code behind a flag.
+    ///
+    /// <para>Written only by the scope owner, before any worker is dispatched and after
+    /// every worker has rendezvoused, so the parallel gather reads it without a race.</para>
+    /// </summary>
+    private volatile bool _gridFresh;
+
+    /// <summary>
+    /// Whether the last rebuild found the population spread out enough for the index to
+    /// beat the scan — see <see cref="SpatialGrid.IsWorthQuerying"/>. Starts true so a
+    /// fresh world probes on its first gather rather than waiting out an interval.
+    /// </summary>
+    private bool _gridUseful = true;
+
+    /// <summary>
+    /// Gathers since the last rebuild, while <see cref="_gridUseful"/> is false. Bounds how
+    /// long a world that has spread out keeps taking the scan.
+    /// </summary>
+    private int _gridProbeCountdown;
+
+    /// <summary>
+    /// How often to rebuild the index purely to re-measure occupancy while the gather is
+    /// taking the brute-force path. ~4 s at the 15 Hz simulation rate: long enough that the
+    /// wasted rebuild is under 2% of the gather, short enough that a map emptying out is
+    /// picked up well within a player's attention span. Being wrong for a few seconds costs
+    /// microseconds and never an entity.
+    /// </summary>
+    private const int ProbeIntervalTicks = 64;
+
+    /// <summary>
+    /// Per-thread query scratch: match ordinals and their views, before the sort that
+    /// restores brute-force order.
+    ///
+    /// <para><b>Thread-static, not instance fields.</b> The gather runs on several workers
+    /// inside one <see cref="ReadAllParallel"/> region and each issues its own queries;
+    /// instance scratch would be a straightforward data race. The grid itself is read-only
+    /// once rebuilt, so it needs no such treatment.</para>
+    /// </summary>
+    [ThreadStatic] private static int[]? _aoiScratchOrdinals;
+
+    /// <inheritdoc cref="_aoiScratchOrdinals"/>
+    [ThreadStatic] private static EntityView[]? _aoiScratchViews;
+
+    /// <summary>
+    /// Escape hatch for the differential test and the A/B benchmark: when false, gather
+    /// scopes do not build or consult the index and every AOI query takes the full scan.
+    /// Not a production switch — the two paths are required to agree, and
+    /// <c>AoiIndexDifferentialTests</c> is what enforces that.
+    /// </summary>
+    internal bool AoiIndexEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Occupied cell count from the last rebuild, for the benchmark's calibration of the
+    /// usefulness gate. Diagnostics only.
+    /// </summary>
+    internal int AoiIndexOccupiedCells => _grid.OccupiedCells;
+
     private readonly List<Query> _readQueries = new();
 
     /// <summary>The AOI scan's query. Read paths only; refreshed under the write lock.</summary>
@@ -724,8 +797,19 @@ public sealed class EcsWorld : IDisposable
     /// Snapshot-view AOI scan for <see cref="WorldReader"/>; the read lock is already
     /// held. The form <see cref="Net.Connection"/>'s gather uses.
     /// </summary>
-    internal int ScanRangeViewsLockedForReader(Vec2 center, float radius, Span<EntityView> destination) =>
-        ScanRangeViewsLocked(center, radius, destination);
+    /// <remarks>
+    /// Takes the spatial index when a gather scope has rebuilt it, and the full scan
+    /// otherwise — so a future caller reaching the reader outside a gather scope gets
+    /// correct results rather than empty ones. The two paths are required to return the
+    /// same entities in the same order; <c>AoiIndexDifferentialTests</c> enforces it.
+    /// </remarks>
+    internal int ScanRangeViewsLockedForReader(Vec2 center, float radius, Span<EntityView> destination)
+    {
+        if (!_gridFresh) return ScanRangeViewsLocked(center, radius, destination);
+
+        RentAoiScratch(_grid.Count, out Span<int> ordinals, out Span<EntityView> views);
+        return _grid.Query(in center, radius, destination, ordinals, views);
+    }
 
     /// <summary>
     /// Fill <paramref name="destination"/> with the trimmed snapshot view of every
@@ -786,12 +870,102 @@ public sealed class EcsWorld : IDisposable
     {
         _rwLock.EnterReadLock();
         _iterationDepth++;
-        try { action(_reader); }
+        try
+        {
+            RebuildSpatialIndexLocked();
+            action(_reader);
+        }
         finally
         {
+            _gridFresh = false;
             _iterationDepth--;
             _rwLock.ExitReadLock();
         }
+    }
+
+    /// <summary>
+    /// Rebuild the spatial index from current component storage: one linear pass, no
+    /// distance tests, immediately before the queries that read it — so the index cannot
+    /// be stale and no position write anywhere needs to know it exists.
+    ///
+    /// <para>The pass composes each entity's <see cref="EntityView"/> as it goes, from the
+    /// same chunk spans and in the same order <see cref="ScanRangeViewsLocked"/> would.
+    /// That is the point of the whole change: composition happens once per entity per tick
+    /// here, instead of once per match per viewer in each of N per-viewer scans.</para>
+    /// </summary>
+    private void RebuildSpatialIndexLocked()
+    {
+        if (!AoiIndexEnabled) return;
+
+        // Do not build an index this tick is not going to query. A rebuild composes every
+        // entity, so building one and then falling back to the scan costs the gather a
+        // measured 10-18% for nothing — which would make this change a regression at
+        // exactly the density the game runs at today.
+        //
+        // The decision is therefore carried from the last rebuild rather than taken from
+        // this one, and re-probed every ProbeIntervalTicks so a population that spreads out
+        // is picked up again. Both directions of being wrong cost only microseconds: the
+        // two paths return identical results, and geometry moves slowly — a player travels
+        // Speed/tick, so occupancy cannot change materially inside a ~4 s probe interval.
+        if (!_gridUseful && ++_gridProbeCountdown < ProbeIntervalTicks)
+        {
+            _gridFresh = false;
+            return;
+        }
+
+        _gridProbeCountdown = 0;
+        _grid.Begin(_index.Count);
+
+        // _allEntitiesQuery, never _arch.Query(...): shared lock — see issue #176. Same
+        // query and therefore the same chunk order as the brute-force scan, which is what
+        // makes the scan ordinals mean what the index claims they mean.
+        foreach (ref var chunk in _allEntitiesQuery.GetChunkIterator())
+        {
+            var positions = chunk.GetSpan<Position>();
+            var ids = chunk.GetSpan<EntityIdRef>();
+            var kinds = chunk.GetSpan<EntityKind>();
+            var healths = chunk.GetSpan<Health>();
+            var locomotions = chunk.GetSpan<Locomotion>();
+            int count = chunk.Count;
+            for (int i = 0; i < count; i++)
+            {
+                _grid.Add(new EntityView(
+                    ids[i].Stable,
+                    ids[i].Value,
+                    kinds[i].Value,
+                    positions[i].Value,
+                    healths[i].Hp,
+                    healths[i].MaxHp,
+                    locomotions[i].Speed));
+            }
+        }
+
+        _grid.Finish();
+
+        // The usefulness gate. An index that is slower than the scan at the density the
+        // game actually runs at is a regression with a nice name — BENCHMARK.md Part V is
+        // the record of exactly that — so the gather takes the scan whenever the population
+        // is too clustered for a 3x3 neighbourhood to narrow anything. Purely a performance
+        // decision: both paths return identical results.
+        _gridUseful = _grid.IsWorthQuerying;
+        _gridFresh = _gridUseful;
+    }
+
+    /// <summary>
+    /// Borrow this thread's AOI query scratch, grown to hold <paramref name="needed"/>
+    /// matches. Amortises to no allocation once the population has stabilised.
+    /// </summary>
+    private static void RentAoiScratch(int needed, out Span<int> ordinals, out Span<EntityView> views)
+    {
+        if (_aoiScratchOrdinals is null || _aoiScratchOrdinals.Length < needed)
+        {
+            int capacity = Math.Max(needed, (_aoiScratchOrdinals?.Length ?? 0) * 2);
+            _aoiScratchOrdinals = new int[capacity];
+            _aoiScratchViews = new EntityView[capacity];
+        }
+
+        ordinals = _aoiScratchOrdinals;
+        views = _aoiScratchViews!;
     }
 
     /// <summary>
@@ -853,9 +1027,14 @@ public sealed class EcsWorld : IDisposable
             // dispatched, so a one-worker read region costs what the serial one costs.
             _rwLock.EnterReadLock();
             _iterationDepth++;
-            try { body(_reader, 0); }
+            try
+            {
+                RebuildSpatialIndexLocked();
+                body(_reader, 0);
+            }
             finally
             {
+                _gridFresh = false;
                 _iterationDepth--;
                 _rwLock.ExitReadLock();
             }
@@ -865,6 +1044,12 @@ public sealed class EcsWorld : IDisposable
         _rwLock.EnterReadLock();
         try
         {
+            // Rebuilt by the owner before any worker is woken, and torn down only after
+            // every worker has rendezvoused, so the workers see a grid that is complete
+            // and never mutated for the whole region. Each worker's query scratch is
+            // thread-static, so the shared structure is strictly read-only.
+            RebuildSpatialIndexLocked();
+
             Exception?[] failures = _regionFailures;
             Array.Clear(failures, 0, workerCount);
             _pool.RunReadRegion(workerCount, body, failures);
@@ -882,7 +1067,11 @@ public sealed class EcsWorld : IDisposable
                     : new AggregateException("One or more gather workers failed.", thrown);
             }
         }
-        finally { _rwLock.ExitReadLock(); }
+        finally
+        {
+            _gridFresh = false;
+            _rwLock.ExitReadLock();
+        }
     }
 
     /// <summary>AOI scan for <see cref="WorldReader"/>; the read lock is already held.</summary>

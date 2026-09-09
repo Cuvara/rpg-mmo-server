@@ -100,6 +100,64 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   is not done here: the server does not report which transport it speaks or whether a key is
   in force, so a deployment that believes it is encrypted and is not has nothing telling it so.
 
+- **A uniform spatial index for the AOI gather, gated on population spread.**
+  `SpatialGrid` is rebuilt once per gather scope and queried once per viewer, and the
+  snapshot gather takes it when the population occupies at least 96 cells. Measured
+  **1.9-2.4x faster on the stock 1000x1000 map at 200 players** and **3.7-4.0x at 1600
+  entities**, at parity when the population is clustered, and never slower.
+  `backend/docs/BENCHMARK.md` **Part X** has the full sweep, the calibration behind the
+  threshold, and the two methodology fixes that changed numbers.
+
+  **This is the second attempt; the first one lost.** Part V measured a uniform grid at
+  2.8x *slower* and reverted it, because the scan's cost is composing a struct per match
+  and that index composed through seven random-access lookups per match. What changed is
+  issue #237: the gather's product is now the 7-field `EntityView`, small enough to store
+  **inside** the index, so composition happens once per entity during the O(n) rebuild
+  instead of once per match per viewer — at 200 viewers averaging 15 matches, 3 000
+  composes replaced by 200.
+
+  The gate is on **occupied cells, not entity count**: a query visits at most a 3x3
+  neighbourhood, so spread predicts the win and count does not — Part V's dense-400 row
+  loses while its sparse-200 row wins. It is a performance decision only; both paths return
+  identical entities in identical order. A falling-back world builds no index at all (the
+  decision is carried from the last rebuild and re-probed every 64 gathers), because gating
+  after the rebuild still paid for it and measured 0.82-0.91x on exactly the densities that
+  fall back.
+
+- `AoiIndexDifferentialTests` — the index against the brute-force scan over randomised
+  populations and every case that breaks a naive grid: radius-boundary entities (a full
+  360-degree ring), diagonal neighbour cells, cell edges from both sides, duplicate
+  positions, everything in one cell, negative coordinates (where truncation and flooring
+  disagree), far-out-of-bounds positions, zero and huge radii, an empty world, a single
+  entity, the overflow contract, and the parallel gather on four workers. Asserts identical
+  **order** as well as membership — order is wire-visible, because the delta encoder interns
+  entity ids in AOI arrival order — and cross-checks against `Shared.GameLogic`'s
+  `AoiLogic.GetNearbyEntities`, the rule the Unity client predicts with.
+
+- `AoiIndexBench` — the committed A/B harness behind Part X, stating its clock
+  (`Stopwatch`). Part V's harness was never committed, which is what made its absolute
+  microseconds the one figure class the #153 clock audit could not trace.
+
+### Changed
+
+- `EcsWorld.ReadAll` / `ReadAllParallel` rebuild the spatial index at the top of the scope
+  and tear it down on exit. The rebuild is whole rather than incremental, deliberately:
+  positions are written from the input handler, the enemy move system and the
+  spawn/reconnect path, and an incremental index would have to intercept all of them
+  forever. A missed write does not throw — it leaves an entity in the wrong bucket, and the
+  symptom is a player who vanishes from someone else's screen.
+
+  Under `ReadAllParallel` the index is built by the owner before any worker is woken and
+  released only after every worker has rendezvoused, so workers see a structure that is
+  complete and never mutated. Per-query scratch is thread-static rather than instance state,
+  which shared scratch would have made a data race.
+
+- `Shared.GameLogic` is **untouched**. `AoiLogic.GetNearbyEntities` remains the brute-force
+  definition of visibility and is now also the differential test's oracle: a client has one
+  observer and nothing to amortise a per-tick index build against, so an index there would
+  be cost with no benefit. Client and server still agree on visibility because they run the
+  same predicate — the index only chooses which entities to test.
+
 ### Fixed
 - **Kill rewards are retried under a stable batch id and never dropped** (audit
   2026-09-07 F06, P1). `KillRewardBatcher` minted a fresh GUID per send and dropped any
