@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **The server reports its transport confidentiality posture on every boot, and publishes
+  it.** Encryption on the gameplay hop is off by default *twice* — the transport defaults
+  to `tcp`, which has no packet-crypt layer, and `TRANSPORT_KEY` defaults to empty — so
+  "is this deployment encrypted" was not answerable from any single variable, and a
+  deployment that believed it was encrypted and was not had nothing telling it so.
+  - `GameServer/Net/Transport/TransportPosture.cs` derives the posture once from
+    configuration: transport, whether a key is configured, whether packets are actually
+    ciphertext, whether they are authenticated, the cipher in force, whether the listener
+    is bound beyond loopback, and a one-line summary.
+  - Logged at startup — **at Warning whenever traffic is in cleartext**, Information when
+    it is not — and published on `/status` as `transport`, `transport_key_configured`,
+    `transport_encrypted`, `transport_authenticated`, `transport_cipher` and
+    `transport_posture`.
+  - Mirrored as `gameserver_transport_encrypted` and `gameserver_transport_authenticated`.
+    **Gauges, not counters**, because a never-incremented counter is absent from
+    `/metrics` entirely and a security question must never be answered by a missing field.
+  - **What this replaced said nothing about the default.** It warned on exactly two of the
+    four combinations — KCP without a key, and a key set on TCP. Plain TCP with no key, the
+    stock configuration and the one with no encryption of any kind, produced no log line at
+    all. All four now report, and `transport_key_configured` is deliberately separate from
+    `transport_encrypted` so that "key set, silently ignored on TCP" is legible rather than
+    mistaken for working encryption.
+  - **`transport_authenticated` is published while permanently `false`.** The KCP path is
+    AES-CFB with a CRC32; a CRC32 is linear and is not a MAC, so a modified packet is not
+    detectable. Keeping it as its own field means "encrypted" cannot be read as "safe from
+    tampering", and means its becoming true will be a visible event rather than an
+    assumption. No cipher changed in this entry — this is reporting only.
+  - Verified on live containers in all four transport/key combinations plus a loopback
+    bind, checking the startup log, `/status` and both gauges each time.
+
 ### Fixed
 
 - **The AOI index was 1.3-2.3x SLOWER than the scan on clustered maps, and the gate was

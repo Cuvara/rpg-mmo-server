@@ -212,6 +212,50 @@ public sealed class ServerStatus
     [JsonPropertyName("inputs_dropped")]
     public long InputsDropped { get; set; }
 
+    // ── Transport confidentiality ────────────────────────────────────────────────
+    //
+    // Always present, never omitted, and deliberately more than one field. Encryption here
+    // is off by default twice (TCP has no packet-crypt layer; TRANSPORT_KEY defaults to
+    // empty), so the question an operator needs answered is not "is there a key" but "what
+    // is actually happening to these bytes". Published here rather than only as metrics
+    // because a never-incremented OpenTelemetry instrument is ABSENT from /metrics rather
+    // than zero — see the note in docs/METRICS.md — and "the field is missing" is exactly
+    // the wrong answer to a security question.
+
+    /// <summary>Transport this server listens with: <c>tcp</c> or <c>kcp</c>.</summary>
+    [JsonPropertyName("transport")]
+    public string Transport { get; set; } = "tcp";
+
+    /// <summary>
+    /// <c>TRANSPORT_KEY</c> holds a value. <b>Not the same as encryption being on</b>: on
+    /// TCP the key is ignored, which is the configuration most easily mistaken for working
+    /// encryption. Compare with <see cref="TransportEncrypted"/>.
+    /// </summary>
+    [JsonPropertyName("transport_key_configured")]
+    public bool TransportKeyConfigured { get; set; }
+
+    /// <summary>Packets leave this process as ciphertext.</summary>
+    [JsonPropertyName("transport_encrypted")]
+    public bool TransportEncrypted { get; set; }
+
+    /// <summary>
+    /// Tampering with a packet in flight is detectable. <b>False on every configuration
+    /// this server currently supports</b>: the KCP path is AES-CFB with a CRC32, and a
+    /// CRC32 is a linear checksum, not a MAC. Separate from
+    /// <see cref="TransportEncrypted"/> so that "encrypted" cannot be read as "safe from
+    /// tampering", and published while false so that its becoming true is a visible event.
+    /// </summary>
+    [JsonPropertyName("transport_authenticated")]
+    public bool TransportAuthenticated { get; set; }
+
+    /// <summary>Cipher actually in force, or <c>none</c>.</summary>
+    [JsonPropertyName("transport_cipher")]
+    public string TransportCipher { get; set; } = "none";
+
+    /// <summary>One line stating what is happening to the bytes, and what is not.</summary>
+    [JsonPropertyName("transport_posture")]
+    public string TransportPostureSummary { get; set; } = "";
+
     /// <summary>
     /// Configured per-connection downlink budget in bytes of snapshot payload
     /// (<c>GAMESERVER_MAX_SNAPSHOT_BYTES</c>); 0 means the budget is off and a snapshot is

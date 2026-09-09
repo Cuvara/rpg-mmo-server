@@ -108,6 +108,42 @@ set. Flags are **space-separated** (`--addr :9000`).
 
 #### Realtime transport (`--transport`, `TRANSPORT_KEY`)
 
+> **The server tells you what it is actually doing, on every boot.** Encryption here is
+> off by default *twice* — the transport defaults to TCP, which has no packet-crypt layer
+> at all, and `TRANSPORT_KEY` defaults to empty — so "is this deployment encrypted" is not
+> answerable from one variable. The posture is logged at startup (at **Warning** whenever
+> traffic is in cleartext, Information when it is not) and published on `/status`:
+>
+> | field | meaning |
+> |---|---|
+> | `transport` | `tcp` or `kcp` |
+> | `transport_key_configured` | `TRANSPORT_KEY` holds a value — **not** the same as encryption being on |
+> | `transport_encrypted` | packets leave as ciphertext |
+> | `transport_authenticated` | tampering is detectable — **`false` on every configuration this server supports today** |
+> | `transport_cipher` | `aes-256-cfb`, or `none` |
+> | `transport_posture` | one line stating what is happening and what is not |
+>
+> Mirrored as `gameserver_transport_encrypted` and `gameserver_transport_authenticated`,
+> which are **gauges** rather than counters precisely so they are present when they read
+> `0` (a never-incremented counter is absent from `/metrics` entirely — see
+> `docs/METRICS.md`).
+>
+> The four combinations, all reported:
+>
+> | transport | key | result |
+> |---|---|---|
+> | `tcp` (default) | unset | **plaintext** — the default, and it used to log nothing at all |
+> | `tcp` | set | **plaintext**, and the key is *ignored* — the configuration most easily mistaken for working encryption |
+> | `kcp` | unset | **plaintext** |
+> | `kcp` | set | **encrypted**, `aes-256-cfb`, and **not authenticated** |
+>
+> **Encrypted is not authenticated.** The KCP path is AES-CFB with a CRC32, and a CRC32 is
+> a linear checksum, not a MAC: an attacker who can modify datagrams can make controlled
+> changes to the plaintext and repair the checksum. That is why the two are separate
+> fields, and why `transport_authenticated` is published while false rather than omitted —
+> so that its becoming true is a visible event. See ADR-21 and
+> `docs/ROADMAP-SECURITY.md` §2.
+
 The gameplay hop (client ↔ this server) speaks **TCP** by default and **KCP over
 UDP** with `--transport kcp`. KCP is reliable and ordered like TCP, but its ARQ
 is tuned for latency instead of throughput: a lost packet recovers in roughly one

@@ -240,10 +240,28 @@ inventing a cipher.
 
 ### 2.3 Sequencing
 
-1. **Report the posture.** Make the server log and export which transport it speaks and
-   whether a key is in force. **This does not depend on any decision above and should be
-   done first**, because today a deployment that believes it is encrypted and is not has
-   nothing telling it so — the exact silent-failure class this repo keeps recording.
+1. **DONE (2026-09-09).** **Report the posture.** The game server now derives its posture
+   once at startup (`GameServer/Net/Transport/TransportPosture.cs`), logs it on every boot —
+   at Warning whenever traffic is in cleartext — and publishes it on `/status` as
+   `transport`, `transport_key_configured`, `transport_encrypted`,
+   `transport_authenticated`, `transport_cipher` and `transport_posture`, mirrored as the
+   `gameserver_transport_encrypted` / `gameserver_transport_authenticated` **gauges**.
+   Gauges rather than counters because a never-incremented counter is absent from
+   `/metrics`, and a security question must not be answered by a missing field.
+
+   What this replaced warned about exactly two of the four combinations — KCP without a
+   key, and a key set on TCP. **The default configuration, TCP with no key and no
+   encryption of any kind, logged nothing at all**: the configuration most likely to be
+   deployed by accident was the only one that produced no signal. Verified live on
+   containers in all four combinations plus a loopback bind.
+
+   `transport_authenticated` is published while permanently `false`, on purpose: AES-CFB
+   with a CRC32 is confidentiality without integrity, and folding the two into one
+   "secure" flag would let an operator read "encrypted" as "safe from tampering".
+
+   **Still open: the Go gateway has the same shape** — `shared/transport/transport.go`
+   warns only for KCP-without-a-key, so a gateway on plaintext TCP is as silent as the game
+   server used to be. Not fixed here to keep this step independently mergeable.
 2. **DONE, and it changed the answer.** `AesGcm` throws under Unity's Mono and
    `ChaCha20Poly1305` is absent (§2.2). Remaining verification is one IL2CPP player build to
    confirm the same holds there, which is expected but unproven.

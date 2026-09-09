@@ -336,21 +336,31 @@ if (!TransportKind.IsValid(transport))
     return 2;
 }
 
-// Mirror of the Go listener's warning (backend/shared/transport/transport.go): KCP
-// without a key puts the join token and every snapshot on the wire in cleartext UDP,
-// which is fine for local dev and not for anything reachable from the internet.
-if (transport == TransportKind.Kcp && string.IsNullOrWhiteSpace(transportKey))
+// Transport confidentiality posture, reported on EVERY boot rather than only on the two
+// combinations that used to warn.
+//
+// What this replaces logged nothing at all for the default configuration -- TCP with no
+// key, i.e. no encryption whatsoever -- because it only warned about KCP-without-a-key and
+// a key-set-on-TCP. The configuration most likely to be deployed by accident was the one
+// configuration that said nothing, which is exactly backwards. See TransportPosture.
+var transportPosture = TransportPosture.For(transport, transportKey, addr);
+
+if (transportPosture.Encrypted)
 {
-    logger.LogWarning(
-        "KCP listener is UNENCRYPTED -- join tokens and gameplay traffic are in cleartext; set {KeyVar} " +
-        "(32-byte hex) before exposing this port (addr={Addr}, transport={Transport})",
-        TransportKind.KeyEnvVar, addr, TransportKind.Kcp);
+    // Still not silent when it is working: "encrypted but not authenticated" is a real
+    // limitation an operator needs in front of them, not a footnote in a design doc.
+    logger.LogInformation(
+        "Transport posture: {Transport}, {Summary} (cipher={Cipher}, encrypted={Encrypted}, authenticated={Authenticated}, addr={Addr})",
+        transportPosture.Transport, transportPosture.Summary, transportPosture.Cipher,
+        transportPosture.Encrypted, transportPosture.Authenticated, addr);
 }
-if (transport == TransportKind.Tcp && !string.IsNullOrWhiteSpace(transportKey))
+else
 {
     logger.LogWarning(
-        "{KeyVar} is set but the transport is TCP, which has no packet encryption -- the key is IGNORED. " +
-        "Use --transport kcp, or terminate TLS in front of this listener.", TransportKind.KeyEnvVar);
+        "Transport posture: {Transport}, {Summary} (cipher={Cipher}, encrypted={Encrypted}, authenticated={Authenticated}, addr={Addr}). " +
+        "Set {KeyVar} (32-byte hex) and --transport kcp, or terminate TLS in front of this listener.",
+        transportPosture.Transport, transportPosture.Summary, transportPosture.Cipher,
+        transportPosture.Encrypted, transportPosture.Authenticated, addr, TransportKind.KeyEnvVar);
 }
 
 if (string.IsNullOrEmpty(jwtSecret))
@@ -385,6 +395,14 @@ logger.LogInformation("  JoinToken: JOIN_TOKEN_SECRET, {Count} key(s){Rotating}"
 // ── Metrics (OpenTelemetry -> Prometheus) ──
 
 using var metrics = new GameMetrics(mapId);
+
+// Published as gauges as well as on /status: a scrape must be able to answer "is this
+// server encrypted" without a human reading a log line from boot time. Registered here,
+// immediately after the meter exists, so no scrape can observe the default-constructed
+// (unlabelled) state.
+metrics.SetTransportPosture(
+    transportPosture.Transport, transportPosture.Cipher,
+    transportPosture.Encrypted, transportPosture.Authenticated);
 await using var metricsEndpoint = MetricsEndpoint.TryStart(metricsAddr, metrics, serverId, logger);
 
 // ── Game content (items, and whatever content types follow) ──
@@ -689,6 +707,12 @@ metricsEndpoint?.SetStatusProvider(() =>
         HandshakesPending = server.PendingHandshakes,
         HandshakesRejected = metrics.HandshakesRejected,
         InputsDropped = metrics.InputsDropped,
+        Transport = transportPosture.Transport,
+        TransportKeyConfigured = transportPosture.KeyConfigured,
+        TransportEncrypted = transportPosture.Encrypted,
+        TransportAuthenticated = transportPosture.Authenticated,
+        TransportCipher = transportPosture.Cipher,
+        TransportPostureSummary = transportPosture.Summary,
         MaxSnapshotBytes = maxSnapshotBytes,
         SnapshotBytes = metrics.SnapshotBytes,
         SnapshotEntitiesShed = metrics.SnapshotEntitiesShed,
