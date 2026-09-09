@@ -203,8 +203,30 @@ depends on whether entities moved:
 - `still` — zero-vector input. Ack still advances, positions do not, so deltas
   come out empty and the serialization term collapses. Scan and diff stay at full
   cost.
-- `cluster` — everyone moves every tick and everyone is in everyone's AOI. All
-  three terms at full cost.
+- `cluster` — every **player** moves every tick and stays in every other player's
+  AOI. All three terms at full cost, in the players.
+
+> **⚠ `cluster` walks the players out of any crowd that does not march with them,
+> and it is the default.** Players leave the origin along +X at 5 u/s against a
+> 50-unit AOI radius: clear of an origin-centred population in ~10s, ~300 units away
+> by the end of a default 60s window. Against **server-side** entities —
+> `LOADTEST_ENTITIES`, which orbit the origin, or a stock map's enemy spawner — the
+> visible set collapses *during* the run while the report still names the population
+> it started with.
+>
+> Measured 2026-09-09, 1 player, 300 `LOADTEST_ENTITIES`, server-side snapshot
+> bytes/s sampled every 4s:
+>
+> | movement | bytes/s over the run |
+> |---|---|
+> | `still` | 117.6 kB/s, flat for the whole run |
+> | `cluster` | 113 → 80 → 50 → 17 → **0.6** kB/s by t=24s |
+>
+> So a default-configuration run longer than ~25s against a stationary entity
+> population measures a nearly empty AOI. **Use `-movement still` whenever the
+> density under test comes from server-side entities rather than from the players
+> themselves.** `cluster` remains correct for player-vs-player density, which is what
+> it was built for. Pinned by `TestClusterLeavesAStationaryCrowd`.
 
 The difference at equal player count is a direct measurement of serialization
 cost, with no server-side change. This is how BENCHMARK.md attributes ~80% of

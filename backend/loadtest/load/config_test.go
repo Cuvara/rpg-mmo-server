@@ -157,3 +157,61 @@ func TestNormalizeDialAddr(t *testing.T) {
 		}
 	}
 }
+
+// TestClusterLeavesAStationaryCrowd pins the arithmetic behind the warning on
+// MovementCluster: a player marching +X clears an origin-centred AOI long before a
+// default run finishes, so the mode cannot be used to hold players inside a stationary
+// entity population.
+//
+// This is a guard on a documented claim, not on code that can regress on its own. It
+// exists because the claim it replaces — "they stay mutually in-AOI, so this is the
+// worst-case dense-crowd shape" — was true of the players and false of everything else,
+// and a run that believed it measured a nearly empty AOI while reporting the population
+// it started with. Measured live: server-side snapshot bytes fell from 113 kB/s to
+// 0.6 kB/s by t=24s under this mode, and stayed flat at 117.6 kB/s under MovementStill.
+func TestClusterLeavesAStationaryCrowd(t *testing.T) {
+	// Server-side constants this mode is measured against.
+	const (
+		playerSpeed = 5.0  // ServerDefaults.DefaultPlayerSpeed, world units/second
+		aoiRadius   = 50.0 // GameConstants.DefaultAoiRadius
+	)
+
+	secondsToClearAOI := aoiRadius / playerSpeed
+	if secondsToClearAOI > 15 {
+		t.Fatalf("a cluster player now takes %.1fs to clear the AOI; the warning on "+
+			"MovementCluster is calibrated for ~10s and should be re-derived", secondsToClearAOI)
+	}
+
+	// The default measurement window starts after the warmup and runs for Duration.
+	// If the player is already outside the AOI when measurement begins, the mode is
+	// measuring an empty AOI for the whole window, not merely part of it.
+	distanceAtWindowStart := playerSpeed * DefaultWarmup.Seconds()
+	if distanceAtWindowStart < aoiRadius {
+		t.Logf("player is %.0f units out when measurement starts (AOI %.0f): the collapse "+
+			"happens during the window", distanceAtWindowStart, aoiRadius)
+	}
+
+	distanceAtWindowEnd := playerSpeed * (DefaultWarmup + DefaultDuration).Seconds()
+	if distanceAtWindowEnd <= aoiRadius {
+		t.Fatalf("a default run now ends %.0f units from spawn, within the %.0f-unit AOI; "+
+			"MovementCluster no longer walks players out of a stationary crowd and its "+
+			"warning should be revisited", distanceAtWindowEnd, aoiRadius)
+	}
+
+	// And the mode really is the default, which is what makes the above a trap rather
+	// than an opt-in.
+	cfg, err := LoadConfig(func(k string) string {
+		if k == "JWT_SECRET" {
+			return "test-secret"
+		}
+		return ""
+	}, nil)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Movement != MovementCluster {
+		t.Fatalf("default movement = %q, want %q — if the default moved, the warning on "+
+			"MovementCluster overstates the risk and should be toned down",
+			cfg.Movement, MovementCluster)
+	}
+}

@@ -77,8 +77,11 @@ const (
 //
 //	MovementStill:   positions never change -> deltas are empty -> the JSON term
 //	                 collapses to ~0 while the scan and diff terms stay O(n^2).
-//	MovementCluster: every entity moves every tick, and every entity is inside
-//	                 every other entity's AOI -> the JSON term is fully O(n^2).
+//	MovementCluster: every PLAYER moves every tick and stays inside every other
+//	                 player's AOI -> the JSON term is fully O(n^2) in the players.
+//	                 It does NOT hold the players near server-side entities: see
+//	                 the MovementCluster comment below before using it with
+//	                 LOADTEST_ENTITIES or an enemy spawner.
 //
 // Running the same player count in both modes isolates serialization cost from
 // scan cost with no server-side change required.
@@ -86,8 +89,28 @@ const (
 	// MovementStill sends zero-vector input: ack still advances (LastInputTick is
 	// bumped before the deadzone check), but no position changes.
 	MovementStill = "still"
-	// MovementCluster moves every player along +X. They spawn at the origin and
-	// stay mutually in-AOI, so this is the worst-case dense-crowd shape.
+	// MovementCluster moves every player along +X, for ever, at PlayerSpeed. They
+	// spawn at the origin and stay mutually in-AOI, so for PLAYER-vs-PLAYER density
+	// this is the worst-case dense-crowd shape.
+	//
+	// IT IS NOT THAT for any population that does not march with them. Players leave
+	// the origin at 5 u/s against a 50-unit AOI radius, so they clear an
+	// origin-centred crowd in ~10s and are ~300 units away by the end of a default
+	// 60s window. Against server-side entities — LOADTEST_ENTITIES, which orbit the
+	// origin, or a stock map's enemy spawner — the visible set therefore COLLAPSES
+	// DURING THE RUN, and every per-client figure decays with it while the run still
+	// reports the population it started with.
+	//
+	// Measured 2026-09-09, 1 player, 300 LOADTEST_ENTITIES, server-side snapshot
+	// bytes/s sampled every 4s:
+	//
+	//	movement=still     117.6 kB/s flat for the whole run
+	//	movement=cluster   113 -> 80 -> 50 -> 17 -> 0.6 kB/s by t=24s
+	//
+	// This mode is the DEFAULT, so a default-configuration run longer than ~25s
+	// against a stationary entity population measures a nearly empty AOI. Use
+	// MovementStill whenever the density under test comes from server-side entities
+	// rather than from the players themselves; see TestClusterLeavesAStationaryCrowd.
 	MovementCluster = "cluster"
 	// MovementSpread gives each player a distinct heading in the +X/+Y quadrant.
 	// NOTE: at the default 5 u/s and a 50-unit AOI radius, a 60s run cannot
