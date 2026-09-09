@@ -1924,3 +1924,122 @@ If that trade ever flips (real-money economy, or kill rewards that gate
 progression), the shape is: persist `(killerId, batchId, kills)` when a batch
 is cut, delete on `Granted`, replay the table on start-up — the receipts on
 Nakama's side already make that replay safe.
+
+## Downlink budget: bounding a snapshot by bytes, not by radius (2026-09-09)
+
+Wire-visible behaviour: `docs/API.md`, "Downlink budget". This section is the *why*.
+
+### The gap
+
+The AOI radius was the only thing bounding a snapshot, and a radius bounds **area,
+not population**. A town square, a world boss, a raid stack or a load test all put an
+arbitrary number of entities inside one observer's circle, and the frame grew with
+them — linearly, per client, per tick. There was an input-side flood guard
+(`GAMESERVER_MAX_INPUTS_PER_TICK`) and nothing at all on the downlink, which is the
+direction that scales with the *world* rather than with one client's keyboard.
+
+### The shape of the fix
+
+A per-connection byte cap on the snapshot payload (`GAMESERVER_MAX_SNAPSHOT_BYTES`),
+applied inside `SnapshotDeltaState` — deliberately not in front of it.
+
+**Why inside the delta encoder and nowhere else.** The dangerous version of this
+feature is a filter that decides what to send *after* the encoder has decided what
+the client knows. Do that and an entity is dropped from the wire while `_lastSent`
+records it as delivered: the client is then wrong about that entity until the next
+keyframe, with nothing on either side reporting an error. That is the same
+silent-desync class as the `Speed`-in-`SentView` bug and the handle-reuse hazard.
+Putting the budget inside the encoder makes the shedding decision and the
+"what does this client have" bookkeeping the same pass over the same data, and the
+rule is mechanical: `_lastSent` and `_handles` are written **only** on the line after
+the bytes are appended to the message. A deferred entity touches neither, so:
+
+- its old `SentView` stays in `_lastSent`, the next delta still sees it as changed,
+  and it is re-offered — deferred, never lost;
+- it is never given a handle, so no handle reaches the wire without the binding that
+  introduces it, and the `resync`-on-unknown-handle contract holds by construction.
+
+Despawns follow the same rule: a key leaves `_lastSent`/`_handles` only if its id was
+actually written into `removed`. A deferred despawn is re-offered next tick because
+the key is still in `_lastSent` and still absent from `_seen`.
+
+`GameServer.Tests/Snapshot/SnapshotBudgetTests.cs` asserts this against a real
+`SnapshotMerger` driven through a handle resolver that fails on an unbound handle,
+with keyframes disabled — a convergence test that allowed a keyframe would pass
+against an encoder that drops entities and marks them sent.
+
+### Priority order
+
+1. **The observer's own entity.** Everything else on screen can be interpolated or
+   dead-reckoned for a few ticks without the player being able to name what changed.
+   Their own character cannot: it is the reconciliation anchor, and a stale one reads
+   as rubber-banding.
+2. **Despawns.** A deferred despawn leaves a ghost — *wrong* state, not stale state.
+3. **Longest deferral first.** This is what makes the scheduler fair rather than
+   merely reasonable: an entity deferred on tick N outranks everything that became
+   dirty on tick N+1, so the deferred set drains before the fresh set. With at least
+   one entity admitted per snapshot — guaranteed, see the floor below — the longest
+   any visible dirty entity waits is bounded by the number of dirty entities in that
+   observer's AOI, and is **not** a function of session length.
+4. **Nearest first**, then AOI index as a deterministic tie-break.
+
+**The floor.** The top-priority candidate is emitted whatever it costs, before the
+despawn list. That makes the cap soft in exactly one place, and it buys two things:
+an entity larger than the whole budget cannot be deferred for ever, and a steady
+stream of despawns cannot consume the budget every tick and starve updates — which is
+the premise the deferral bound rests on.
+
+### Two decisions that look arbitrary and are not
+
+**Keyframes are budgeted too.** Exempting them looks kinder — a keyframe repairs
+everything — but the crowd that makes a delta expensive makes the keyframe *more*
+expensive, so the exemption would leave the cap open on precisely the worst frame of
+the interval. The cost is honest and stated: `SnapshotMerger` clears its set on a
+full snapshot, so an entity omitted from a keyframe disappears client-side and is
+re-introduced by a following delta. Correct, never wrong state, but a visible pop —
+and because the order is nearest-first, it happens at the edge of the circle.
+
+**JSON connections are not budgeted.** Every byte figure in the encoder is a protobuf
+size, and a JSON frame for the same snapshot is several times larger. Enforcing a
+protobuf-derived cap on a JSON stream would report bytes that are not the bytes on
+that wire, and a counter nobody can trust is worse than no counter. JSON is the
+legacy encoding (ADR-9) and is expected to disappear; until it does, a JSON client's
+downlink is bounded only by the AOI radius. Stated limitation, not an oversight.
+
+### The default, and what it is derived from
+
+8192 bytes of payload. The only measured number available is
+`backend/docs/BENCHMARK.md` (2026-08-07): **45.9 KB/s downstream per client at 200
+players**, with snapshots broadcast on the world group at 15 Hz — a mean snapshot of
+~3.06 KB at that load. 8 KiB is ~2.7× that, which is the point: this is a **tail cap,
+not a traffic shaper**. It must not engage at a load the server is known to handle,
+because a budget that sheds during normal play would trade a measured-good bandwidth
+profile for permanent visual staleness; and it must stop a crowd from turning one
+observer's frame into an unbounded one. At 15 Hz it bounds a client's downlink at
+~123 KB/s, against ADR-7's `< 50 KB/s` mobile target for the steady state.
+
+This default is **not** a measured optimum. No load test has been run against a crowd
+dense enough to make it bite; the number that would justify a tighter cap is the same
+one ADR-7 is blocked on. Treat 8192 as "large enough not to lie about normal play,
+small enough to be a bound", and re-derive it when a load generator on separate
+hardware exists.
+
+### Cost when it does not bite
+
+Zero when `GAMESERVER_MAX_SNAPSHOT_BYTES=0`: that path is the pre-budget encoder,
+unchanged. With a budget configured and not exceeded, the encoder pays one extra
+`CalculateSize()` per changed entity (the sizing pass) and emits in AOI order — the
+bytes are identical to the unbudgeted encoder, which `SnapshotBudgetTests` asserts
+tick by tick. Re-ordering happens only on a snapshot that actually sheds. That
+property is what lets the budget ship on by default without invalidating
+`SnapshotByteIdentityTests` or the golden vectors.
+
+### Counters
+
+A check nobody reads is not a check, so these surface both in Prometheus and on
+`/status`: `snapshot_bytes` (real bytes on the socket, envelope included — divide by
+players and uptime for the ADR-7 comparison), `snapshot_entities_shed`,
+`snapshot_removals_deferred` (should stay flat at zero), `snapshot_max_shed_age` (the
+observed deferral high-water mark, the number that says whether the bound above is
+holding) and `max_snapshot_bytes` (the cap that produced them — the others say nothing
+without it).

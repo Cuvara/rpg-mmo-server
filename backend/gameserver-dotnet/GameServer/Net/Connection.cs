@@ -163,6 +163,13 @@ public sealed class Connection : IDisposable
     internal Action? BetweenGatherLocksForTest;
 
     private int _pendingCount;
+
+    /// <summary>
+    /// Observer position the staged gather was taken around. Staged with the buffer
+    /// rather than re-read at encode time: by then the tick has moved on and the encoder
+    /// would prioritise entities against a position the snapshot was not built for.
+    /// </summary>
+    private Shared.GameLogic.Components.Vec2 _pendingAnchor;
     private ulong _pendingTick;
     private ulong _pendingAckTick;
     private int _pendingKeyframeInterval;
@@ -243,6 +250,7 @@ public sealed class Connection : IDisposable
         {
             _pendingBuffer = index;
             _pendingCount = count;
+            _pendingAnchor = anchor;
             _pendingTick = tick;
             _pendingAckTick = ackTick;
             _pendingKeyframeInterval = keyframeInterval;
@@ -266,14 +274,15 @@ public sealed class Connection : IDisposable
     /// </summary>
     internal bool TakePendingSnapshot(
         out GameServer.World.EntityView[] buffer, out int count,
-        out ulong tick, out ulong ackTick, out int keyframeInterval)
+        out ulong tick, out ulong ackTick, out int keyframeInterval,
+        out Shared.GameLogic.Components.Vec2 anchor)
     {
         lock (_snapshotLock)
         {
             if (!_snapshotPending)
             {
                 buffer = Array.Empty<GameServer.World.EntityView>();
-                count = 0; tick = 0; ackTick = 0; keyframeInterval = 0;
+                count = 0; tick = 0; ackTick = 0; keyframeInterval = 0; anchor = default;
                 return false;
             }
 
@@ -282,6 +291,7 @@ public sealed class Connection : IDisposable
             tick = _pendingTick;
             ackTick = _pendingAckTick;
             keyframeInterval = _pendingKeyframeInterval;
+            anchor = _pendingAnchor;
 
             _snapshotPending = false;
             return true;
@@ -351,8 +361,24 @@ public sealed class Connection : IDisposable
 
     private long _snapshotFramesWritten;
 
+    /// <summary>
+    /// Bytes of snapshot frames this connection has written to its socket, including the
+    /// envelope and the 4-byte length prefix.
+    /// </summary>
+    /// <remarks>
+    /// Measured at the socket, not inside the encoder, and that is the point: the
+    /// downlink budget is expressed in snapshot PAYLOAD bytes, so a counter taken from
+    /// the encoder would report the thing the budget already controls and say nothing
+    /// about what the link actually carried. This is the number to divide by wall time
+    /// when comparing against ADR-7's &lt; 50 KB/s per-client mobile threshold.
+    /// </remarks>
+    internal long SnapshotBytesWritten => Volatile.Read(ref _snapshotBytesWritten);
+
+    private long _snapshotBytesWritten;
+
     private long _reportedCoalesced;
     private long _reportedFramesWritten;
+    private long _reportedBytesWritten;
 
     /// <summary>
     /// What this connection has coalesced and written since the last call.
@@ -366,16 +392,23 @@ public sealed class Connection : IDisposable
     /// 14.4/s arriving -- a figure that cannot be true, and the kind of counter that sends
     /// an investigation in the wrong direction.
     /// </remarks>
-    internal void TakeSnapshotCounters(out long coalesced, out long framesWritten)
+    internal void TakeSnapshotCounters(
+        out long coalesced, out long framesWritten, out long bytesWritten,
+        out long entitiesShed, out long removalsDeferred, out int maxShedAge)
     {
         long c = SnapshotsCoalesced;
         long w = SnapshotFramesWritten;
+        long b = SnapshotBytesWritten;
 
         coalesced = c - _reportedCoalesced;
         framesWritten = w - _reportedFramesWritten;
+        bytesWritten = b - _reportedBytesWritten;
 
         _reportedCoalesced = c;
         _reportedFramesWritten = w;
+        _reportedBytesWritten = b;
+
+        DeltaState.TakeBudgetCounters(out entitiesShed, out removalsDeferred, out maxShedAge);
     }
 
     private readonly Channel<SendItem> _sendChannel;
@@ -445,7 +478,13 @@ public sealed class Connection : IDisposable
         // Keyframe phase is derived from the user id, so it is stable across runs and
         // across reconnects of the same player.
         DeltaState = new GameServer.Snapshot.SnapshotDeltaState(
-            GameServer.Snapshot.SnapshotDeltaState.PhaseFor(userId));
+            GameServer.Snapshot.SnapshotDeltaState.PhaseFor(userId))
+        {
+            // The player's own entity carries the user id, so the delta encoder can
+            // recognise it and keep it out of the downlink budget's shedding — see
+            // SnapshotDeltaState.SelfId.
+            SelfId = userId,
+        };
         Encoding = encoding;
         _transport = transport;
         _stream = transport.Stream;
@@ -524,14 +563,15 @@ public sealed class Connection : IDisposable
                     // claims the newer one; if it was claimed by an earlier marker there
                     // is nothing to do and the marker is simply dropped.
                     if (!TakePendingSnapshot(out var buffer, out int count, out ulong tick,
-                                             out ulong ackTick, out int keyframeInterval))
+                                             out ulong ackTick, out int keyframeInterval,
+                                             out var anchor))
                     {
                         continue;
                     }
 
                     SnapshotMessage snapshot = DeltaState.Encode(
                         tick, ackTick, buffer.AsSpan(0, count), keyframeInterval,
-                        intern: Encoding == WireEncoding.Proto);
+                        intern: Encoding == WireEncoding.Proto, observer: anchor);
 
                     if (Encoding == WireEncoding.Proto)
                     {
@@ -550,6 +590,7 @@ public sealed class Connection : IDisposable
                         }
                         finally { _streamWriteMutex.Release(); }
                         Interlocked.Increment(ref _snapshotFramesWritten);
+                        Interlocked.Add(ref _snapshotBytesWritten, pooledFrame.Length);
                         continue;
                     }
 
@@ -565,7 +606,11 @@ public sealed class Connection : IDisposable
                     await _stream.FlushAsync(_cts.Token);
                 }
                 finally { _streamWriteMutex.Release(); }
-                if (isSnapshot) Interlocked.Increment(ref _snapshotFramesWritten);
+                if (isSnapshot)
+                {
+                    Interlocked.Increment(ref _snapshotFramesWritten);
+                    Interlocked.Add(ref _snapshotBytesWritten, frame.Length);
+                }
             }
         }
         catch (OperationCanceledException) { /* expected on close */ }

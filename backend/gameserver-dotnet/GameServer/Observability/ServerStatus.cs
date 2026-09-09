@@ -213,6 +213,50 @@ public sealed class ServerStatus
     public long InputsDropped { get; set; }
 
     /// <summary>
+    /// Configured per-connection downlink budget in bytes of snapshot payload
+    /// (<c>GAMESERVER_MAX_SNAPSHOT_BYTES</c>); 0 means the budget is off and a snapshot is
+    /// bounded only by the AOI radius. Published next to what it produced, because reading
+    /// <c>snapshot_entities_shed</c> without knowing the cap that caused it says nothing.
+    /// </summary>
+    [JsonPropertyName("max_snapshot_bytes")]
+    public int MaxSnapshotBytes { get; set; }
+
+    /// <summary>
+    /// Bytes of snapshot frames written to client sockets since process start, envelope
+    /// and length prefix included. With <see cref="UptimeSeconds"/> and
+    /// <see cref="PlayersOnline"/> this is the per-client downlink rate ADR-7's
+    /// &lt; 50 KB/s mobile threshold is about. Same value as
+    /// <c>gameserver_snapshots_bytes_total</c>.
+    /// </summary>
+    [JsonPropertyName("snapshot_bytes")]
+    public long SnapshotBytes { get; set; }
+
+    /// <summary>
+    /// Entity updates deferred by the downlink budget since start. Deferred, not dropped:
+    /// the entity stays dirty and is re-offered on the next snapshot. Read with
+    /// <see cref="SnapshotMaxShedAge"/>.
+    /// </summary>
+    [JsonPropertyName("snapshot_entities_shed")]
+    public long SnapshotEntitiesShed { get; set; }
+
+    /// <summary>
+    /// Despawn notifications deferred by the downlink budget since start. Should stay at
+    /// zero: despawns outrank every non-self update, so this moves only when the budget is
+    /// too small for the despawn list alone.
+    /// </summary>
+    [JsonPropertyName("snapshot_removals_deferred")]
+    public long SnapshotRemovalsDeferred { get; set; }
+
+    /// <summary>
+    /// Longest deferral, in snapshots, any entity has reached on any live connection.
+    /// High-water mark. Bounded by the number of dirty entities in one observer's AOI, not
+    /// by session length — a value that keeps climbing means the budget is too small for
+    /// the crowd rather than that an entity is stuck.
+    /// </summary>
+    [JsonPropertyName("snapshot_max_shed_age")]
+    public int SnapshotMaxShedAge { get; set; }
+
+    /// <summary>
     /// <c>MsgTransferMap</c> requests refused because a transfer was already running on
     /// that connection. Same value as <c>gameserver_transfers_rejected_total</c>.
     /// </summary>

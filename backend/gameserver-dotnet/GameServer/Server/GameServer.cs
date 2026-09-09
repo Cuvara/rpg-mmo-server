@@ -110,6 +110,22 @@ public class ServerOptions
     /// player spending their full budget at once still fits.
     /// </summary>
     public int MaxPendingInputs { get; set; }
+
+    /// <summary>
+    /// Most bytes of snapshot payload one connection may be sent per snapshot
+    /// (<c>GAMESERVER_MAX_SNAPSHOT_BYTES</c>). Values &lt;= 0 disable the downlink budget
+    /// and restore the pre-budget encoder exactly.
+    /// </summary>
+    /// <remarks>
+    /// The downlink counterpart to <see cref="MaxInputsPerConnection"/>, and the two are
+    /// not variations on one idea: that one bounds what a client may push at the
+    /// simulation, this one bounds what the simulation may push at a client. Before it,
+    /// the AOI radius was the only limit on a snapshot, and a radius bounds area rather
+    /// than population — a crowd inside one circle produced a frame as large as the crowd.
+    /// See <see cref="Snapshot.SnapshotDeltaState.MaxSnapshotBytes"/> for the shedding
+    /// order and why deferring an entity cannot desynchronise the delta stream.
+    /// </remarks>
+    public int MaxSnapshotBytes { get; set; } = Snapshot.SnapshotDeltaState.DefaultMaxSnapshotBytes;
     /// <summary>
     /// HS256 secret (or comma-separated rotation list) for the Nakama-issued
     /// client auth token. The game server itself never sees that token; this is
@@ -1158,6 +1174,7 @@ public sealed class GameServerHost : IAsyncDisposable
             {
                 JoinJti = claims.Jti
             };
+            conn.DeltaState.MaxSnapshotBytes = _options.MaxSnapshotBytes;
 
             // Register connection, retiring the reservation under the same lock it was
             // taken under. The one way this fails: the reservation was a replacement of a
