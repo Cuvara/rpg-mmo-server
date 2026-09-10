@@ -53,6 +53,12 @@ type Config struct {
 	// config rather than something a server advertised.
 	StrictAddr bool // SMOKE_STRICT_ADDR
 
+	// Sealed runs the sealed-session handshake on the gameplay hop and encrypts
+	// every frame after it. Must match the server's GAMESERVER_SEALED: this is
+	// configuration on BOTH ends, never a negotiation on the wire, because a
+	// negotiable encryption setting is a downgrade attack with a friendly name.
+	Sealed bool // SMOKE_SEALED    — run the sealed-session handshake
+
 	SkipDB          bool          // SMOKE_SKIP_DB    — skip every persistence check
 	RequireDB       bool          // SMOKE_REQUIRE_DB — a skipped persistence check fails the run
 	ExpectMigration int           // SMOKE_EXPECT_MIGRATION — required schema_migrations version
@@ -131,6 +137,7 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 		DeviceID:        getenv("SMOKE_DEVICE_ID"),
 		GameDBURL:       getenv("GAME_DB_URL"),
 		StrictAddr:      isTruthy(getenv("SMOKE_STRICT_ADDR")),
+		Sealed:          isTruthy(getenv("SMOKE_SEALED")),
 		SkipDB:          isTruthy(getenv("SMOKE_SKIP_DB")),
 		RequireDB:       isTruthy(getenv("SMOKE_REQUIRE_DB")),
 		ExpectMigration: DefaultExpectMigration,

@@ -7,6 +7,37 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`jwt.ParseUnverified`** — decodes a token's claims **without** checking its signature.
+  It answers "what does this token say", never "is this token genuine", and the doc comment
+  says so at length because every call site is a place a reviewer should look twice.
+  - It exists for one legitimate case: a **client** reading the `jti` out of its own join
+    token. The `jti` anchors the sealed handshake transcript, and a client cannot hold
+    `JOIN_TOKEN_SECRET` — putting that secret in a client binary is the pre-shared-key
+    mistake ADR-22 supersedes. The client decides nothing on these claims; it names the
+    session it is already in, and the server verifies the same token properly.
+
+### Added
+
+- **`sealed.RunClientHandshake`: the Go client half of the sealed exchange.** It mirrors
+  `SealedHandshakeServer` step for step and contains no transport — the caller supplies the
+  two frame callbacks — so the load generator, the smoke test and the integration suite can
+  share it despite framing bytes differently.
+  - **`BindingVerified` is on the result, not implied.** Verifying the server's binding
+    needs `JOIN_TOKEN_SECRET`, which a shipped client must not carry; passing an empty
+    secret is the correct configuration for one and yields confidentiality against a
+    passive eavesdropper and nothing against an active one. A harness that already holds
+    the secret should verify, and then it is true — those harnesses are currently the only
+    peers that can prove the man-in-the-middle defence end to end.
+  - Tested both ways round, including **a test asserting a non-verifying client accepts a
+    substituted ephemeral key**. That is today's exposure written down as an executable
+    fact, so it starts failing the day the pinned identity key removes it.
+  - The attacker model in those tests signs the binding over the REAL server's key and
+    announces a tampered one — an attacker who can rewrite the hello but cannot compute a
+    binding. Signing over the tampered key instead would model an attacker holding the
+    secret, against which there is nothing to defend, since it could mint its own tokens.
+
+### Added
+
 - **`SealedClientHello` / `SealedServerHello` (`MsgType` 16 and 17), gameplay hop only.**
   Both travel in the clear, immediately after `MsgJoinToken` — there is no key yet, which
   is what they exist to establish. 16/17 stay inside the one-byte varint range and leave

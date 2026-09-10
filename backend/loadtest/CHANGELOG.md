@@ -7,6 +7,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+
+- **`-sealed`: the load generator can speak a sealed session**, so the gameplay hop can be
+  exercised encrypted end to end rather than only in unit tests.
+  - Configured on **both** ends and never negotiated on the wire — this is the counterpart
+    to the server's `GAMESERVER_SEALED`. A wire-negotiated setting would be a downgrade
+    attack: an attacker strips the offer and both ends conclude the other could do no
+    better.
+  - Only the **game-server** socket is sealed. The gateway hop has its own trust model and
+    sealing it with these keys would be meaningless, since they derive from a join token
+    the gateway itself issues.
+  - The harness mints its own join tokens, so unlike a shipped client it **verifies the
+    server's binding** — reported as `sealed_binding_verified` alongside `sealed_players`,
+    both always present rather than `omitempty`, because "the field is absent" is the wrong
+    answer to "was this session encrypted" and the gap between the two numbers is the
+    difference between confidentiality and authenticity.
+
+  Measured, 4 players, 40 AOI entities, same image, `-movement still`:
+
+  | | server `off`, client plain | server `require`, client `-sealed` |
+  |---|---|---|
+  | readable player/entity ids in the capture | **1412** | **4** |
+  | sealed frames (`0xC1`) | 0 | 870 |
+  | downlink | 15 590 B/s/player | 15 979 B/s/player (**+2.5%**) |
+  | uplink | 157 B/s/player | 548 B/s/player |
+
+  The surviving 4 readable ids are the pre-handshake join responses, which are cleartext by
+  design. The uplink ratio looks alarming and is not: input frames are tiny, so the 26-byte
+  per-frame overhead dominates a figure whose absolute value is half a kilobyte a second.
+
+### Added
 - **`-run-id` fixes the run identifier user ids are derived from.** Default stays a random
   id per run so concurrent runs cannot collide; setting it explicitly is what makes a
   RECONNECT measurable — run, stop, run again with the same value, and the same accounts
