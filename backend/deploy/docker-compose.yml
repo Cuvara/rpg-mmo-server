@@ -306,11 +306,12 @@ services:
       #   GAMESERVER_SEALED=require ./stack.sh up
       #   GAMESERVER_SEALED=require ./stack.sh check
       #
-      # NOTE: `stack.sh check` cannot verify a sealed stack. The smoke test speaks
-      # JSON, and a JSON client can never seal, so a `require` server refuses it
-      # at the join (encoding_cannot_seal) — measured live, not inferred. Drive a
-      # sealed stack with the load generator instead:
-      #   cd ../loadtest && go run ./cmd/loadtest -sealed -encoding proto
+      # NOTE on verifying a sealed stack: the smoke test defaults to JSON, and a
+      # JSON client can never carry a sealed frame, so a `require` server refuses
+      # it at the join with `encoding_cannot_seal` -- measured live, not inferred.
+      # It CAN seal, over protobuf, and `stack.sh check` derives BOTH halves for
+      # you when the stack is sealed:
+      #   GAMESERVER_SEALED=require ./stack.sh check     (or: make flow-check-sealed)
       #
       # That is also why no ENVIRONMENT can be set to `require` yet: the deploy
       # verifier is the same JSON smoke test, so requiring encryption currently

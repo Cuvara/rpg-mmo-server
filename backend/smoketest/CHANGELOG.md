@@ -5,6 +5,31 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **A fifth `NewEnvelope` call site that `-encoding` did not reach.** `smoke/db.go`'s
+  disconnect at the end of the reload check was still hardcoded to JSON, so a
+  `-encoding proto` run against a `require` server would have had that one connection
+  refused. It survived because the change that introduced `-encoding` asserted "no
+  `NewEnvelope` call survived" against **`runner.go` only** — the file that happened to be
+  open — and the live run that proved the feature used `-skip-db`, which is the one mode
+  that never executes this path.
+
+  Found by `send-budget`, who did the same conversion independently and searched the whole
+  module. The scan is now module-wide and returns zero.
+
+### Added
+- **`-sealed` as a flag, and the impossible combination refused in the binary.**
+  `-sealed -encoding json` is rejected at startup rather than left to fail at the join,
+  where the symptom is a join that is *accepted* and a connection that then closes — so a
+  log reading "join accepted" is not evidence the client works.
+
+  It does not silently upgrade the encoding: someone who wrote that combination believes
+  one of the two things about their run, and choosing the other for them hides which. The
+  guard is in the binary and not only in `stack.sh`, because a wrapper can be bypassed and
+  the binary is what CD runs.
+
+  Both this and the documentation below are `send-budget`'s design, taken from #300.
+
 ### Added
 - **`-encoding` / `SMOKE_ENCODING`: the smoke test can send protobuf, so it can check a
   sealed stack.** Defaults to `json`, so every existing run is byte-identical and CD proves

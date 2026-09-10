@@ -460,3 +460,38 @@ func TestEncodingForNeverGuessesProto(t *testing.T) {
 		}
 	}
 }
+
+// TestSealedRequiresProto pins the refusal in the BINARY, not only in stack.sh.
+//
+// A wrapper can be bypassed and the binary is what CD runs. The failure this
+// prevents is nastier than it looks: the join is ACCEPTED and the connection is
+// then closed, so a log line reading "join accepted" is not evidence the client
+// works.
+func TestSealedRequiresProto(t *testing.T) {
+	base := Config{
+		JWTSecret: "s", Timeout: time.Second, Inputs: 1, MinSnapshots: 1,
+		ExpectMigration: DefaultExpectMigration,
+		DBPollTimeout:   DefaultDBPollTimeout,
+		DBPollInterval:  DefaultDBPollInterval,
+		HoldTTL:         DefaultHoldTTL,
+	}
+
+	for _, tc := range []struct {
+		sealed  bool
+		enc     string
+		wantErr bool
+	}{
+		{true, "proto", false},
+		{true, "json", true},
+		{true, "", true},       // unset means JSON, which cannot seal
+		{false, "json", false}, // not sealing: JSON is fine
+		{false, "", false},
+	} {
+		c := base
+		c.Sealed = tc.sealed
+		c.Encoding = tc.enc
+		if err := c.Validate(); (err != nil) != tc.wantErr {
+			t.Errorf("Sealed=%v Encoding=%q: err = %v, wantErr %v", tc.sealed, tc.enc, err, tc.wantErr)
+		}
+	}
+}
