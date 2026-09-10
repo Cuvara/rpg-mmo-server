@@ -5,6 +5,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **The `docker-compose.yml` note still said a sealed stack could not be verified.** It
+  can, as of the smoke test's `-encoding` flag, and `stack.sh check` derives both halves.
+  Replaced with `send-budget`'s wording from #300, adapted to the derivation that shipped.
+
 ### Documentation
 
 - **`docs/CICD.md` § 6b: "no checks reported" has four causes, not one.** The 2026-08-06

@@ -196,6 +196,7 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	fs.StringVar(&cfg.ServerKey, "server-key", cfg.ServerKey, "Nakama server key")
 	fs.StringVar(&cfg.GatewayAddr, "gateway-addr", cfg.GatewayAddr, "Gateway address")
 	fs.StringVar(&cfg.Transport, "transport", cfg.Transport, "Transport for the gateway hop: tcp or kcp")
+	fs.BoolVar(&cfg.Sealed, "sealed", cfg.Sealed, "Run the sealed-session handshake on the gameplay hop and encrypt every frame after it (requires -encoding proto; must match the server's GAMESERVER_SEALED)")
 	fs.StringVar(&cfg.Encoding, "encoding", cfg.Encoding, "Wire encoding for every frame sent: json (default, the legacy arm) or proto (what the shipped client speaks, and the only one a sealed session can use)")
 	fs.StringVar(&cfg.JWTSecret, "jwt-secret", cfg.JWTSecret, "Shared JWT secret for local verification")
 	fs.StringVar(&cfg.MapID, "map-id", cfg.MapID, "Map ID to enter")
@@ -243,6 +244,25 @@ func (c Config) Validate() error {
 		// refused at the join with `encoding_cannot_seal` -- which reads as a
 		// broken stack rather than as a misspelt flag.
 		return fmt.Errorf("encoding must be json or proto, got %q", c.Encoding)
+	}
+	// SEALING REQUIRES PROTOBUF, and the combination is refused rather than fixed.
+	//
+	// The JSON codec has no sealed frame, so a server with GAMESERVER_SEALED=require
+	// refuses a JSON client at the join with `encoding_cannot_seal` -- and the join
+	// is ACCEPTED first, so a log reading "join accepted" is not evidence the client
+	// works. Measured live, not inferred.
+	//
+	// This does not silently upgrade the encoding. Someone who wrote
+	// `-sealed -encoding json` believes one of those two things about the run, and
+	// choosing the other for them hides which -- the same reason the server has two
+	// sealing modes and not three.
+	//
+	// It lives here rather than only in stack.sh because a wrapper can be bypassed
+	// and the binary is what CD actually runs.
+	if c.Sealed && strings.ToLower(strings.TrimSpace(c.Encoding)) != "proto" {
+		return fmt.Errorf(
+			"sealed runs require -encoding proto, got %q: a JSON client cannot carry a sealed frame",
+			c.Encoding)
 	}
 	if err := transport.Validate(c.Transport); err != nil {
 		return fmt.Errorf("transport: %w", err)

@@ -563,7 +563,7 @@ func (r *Runner) stepGameStateReload() (string, error) {
 		return "", err
 	}
 
-	if env, err := messages.NewEnvelope(messages.MsgDisconnect, struct{}{}); err == nil {
+	if env, err := messages.NewEnvelopeAs(r.enc, messages.MsgDisconnect, struct{}{}); err == nil {
 		_ = r.send(conn, env)
 		time.Sleep(100 * time.Millisecond)
 	}
