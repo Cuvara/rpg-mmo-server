@@ -5,6 +5,63 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **CD now FAILS the deploy when either Nakama static key is unset or left at its published
+  default** (ADR-24). This closes a defect, not a hypothetical: `cd.yml` **never wrote
+  `NAKAMA_HTTP_KEY` at all**, and `deploy/.env` is regenerated wholesale, so the name was absent
+  from the file and compose's `${NAKAMA_HTTP_KEY:-defaulthttpkey}` resolved to the default **in
+  every environment CD deploys** — for the Nakama flag and for the game server's client env alike.
+
+  That key gates the **server-only** `reward_kill` / `submit_kill` RPCs. Measured against the live
+  stack rather than inferred: no key gives `401 "Auth token or HTTP key required"`, a wrong key
+  gives `401 "HTTP key invalid"`, and `defaulthttpkey` gives `400 "user_id is required"` — i.e. it
+  passed authentication and reached the handler. `defaultkey` likewise mints accounts and sessions
+  (`200` vs `401` for a wrong key). It failed **open and silently**: rewards flowed and nothing
+  warned.
+
+  `NAKAMA_SERVER_KEY`'s `:-defaultkey` fallback in the generator is also gone — the gate already
+  refuses empty and refuses the default, so a fallback could only reintroduce what it exists to
+  prevent.
+
+### Added
+
+- **`NAKAMA_TLS_CERT` / `NAKAMA_TLS_KEY` — Nakama terminates TLS on its own listener**, OFF by
+  default and pinned explicitly at `docker-compose.yml`, `docker-compose.override.yml`,
+  `k8s/data/nakama.yaml` (literal empty values, not omitted), `cd.yml` (written on both branches)
+  and `.env.example`. Exactly one set is a startup **and** deploy error, never a fall back to
+  plaintext.
+
+  **Measured scope, because the flag's name is narrower than "Nakama has TLS":** it covers the
+  socket listener `:7350` only — **including the `/ws` realtime socket**, TLS-only with plaintext
+  refused (`400`) — and does **not** cover the console `:7351` or metrics `:9100`, which in compose
+  publish on `0.0.0.0` and stay in the clear. Nakama itself logs
+  `WARNING: enabling direct SSL termination is not recommended`; taken anyway because on a
+  single-node box a proxy terminates on the same host it protects (ADR-23's argument).
+
+- **`NAKAMA_URL` follows the TLS decision** rather than being configured independently, in compose
+  and in CD. The C# game server is a **second consumer of this hop** — `NakamaClient.cs` POSTs
+  `/v2/rpc/reward_kills?http_key=…` — so two sources of truth for one hop is exactly how it ends up
+  speaking `http://` to an `https://` listener.
+
+### Fixed
+
+- **`stack.sh`: `NAKAMA_TLS_CERT`, `NAKAMA_TLS_KEY` and `NAKAMA_URL` added to `STACK_OVERRIDABLE`.**
+  `.env.example` now writes all three names, so without this a derived or CD-generated `.env` would
+  clobber an operator's command-line override — the documented silent no-op at `stack.sh:130`, in a
+  setting where the failure is "the operator believes the hop is encrypted".
+
+### Notes
+
+- The compose and k8s Nakama entrypoints build the SSL flags with `set --` rather than a string. An
+  **empty** `--socket.ssl_certificate` is not the same as an absent one (Nakama reads the empty path
+  and exits), and an unquoted string would word-split a certificate path containing a space — the
+  same distinction that made `cd.yml` trim these at the ends only. Both entrypoints were executed
+  against a stub across five inputs, not read.
+- Mounting certs from a `/tmp` WSL path makes Docker Desktop create an empty **directory** at the
+  mount point (`is a directory` at startup); `docker cp` resolves `/mnt/e/...` against `E:\`. Use a
+  named volume or a Windows path form. Recorded in `.env.example`.
+
 ### Fixed
 - **CD trimmed the TLS certificate paths with a keyword normaliser.** `tr -d '[:space:]'`
   is right for `GAMESERVER_SEALED` — a keyword, where internal whitespace is meaningless —

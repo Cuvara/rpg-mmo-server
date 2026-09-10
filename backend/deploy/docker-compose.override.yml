@@ -60,7 +60,12 @@ services:
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
       GAMESERVER_PUBLIC_ADDR: "127.0.0.1:9002"
-      NAKAMA_URL: http://nakama:7350
+      # Follows the meta-hop TLS decision (ADR-24) rather than being configured
+      # independently. The C# game server is a SECOND consumer of this hop --
+      # NakamaClient.cs POSTs /v2/rpc/reward_kills?http_key=... -- so if Nakama
+      # moves to TLS and this stays http://, the reward path breaks silently.
+      # Two sources of truth for one hop is exactly how that happens.
+      NAKAMA_URL: ${NAKAMA_URL:-http://nakama:7350}
       NAKAMA_HTTP_KEY: ${NAKAMA_HTTP_KEY:-defaulthttpkey}
       GAME_DB_URL: postgres://${POSTGRES_GAME_USER:-game}:${POSTGRES_GAME_PASSWORD:-localdev}@postgres-game:5432/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable
     ports:

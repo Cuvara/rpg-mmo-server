@@ -157,7 +157,14 @@ fi
 # and the stack would come up plaintext with nothing saying so: the same silent
 # no-op GAMESERVER_SEALED had, in a setting where the failure is "the operator
 # believes the hop is encrypted".
-STACK_OVERRIDABLE="GAMESERVER_SEALED SMOKE_SEALED SMOKE_ENCODING GATEWAY_TLS_CERT GATEWAY_TLS_KEY"
+# NAKAMA_TLS_* and NAKAMA_URL join the list for the same reason as the gateway
+# pair: .env.example writes all three names, so a derived or CD-generated .env
+# mentions them and would clobber an operator's command-line override with its
+# own value. NAKAMA_URL is here because it must be able to move to https://
+# alongside the certificate pair -- if the file pinned it to http:// while the
+# operator turned TLS on, the game server would speak plaintext to a listener
+# that no longer answers it, which is the silent half of this failure.
+STACK_OVERRIDABLE="GAMESERVER_SEALED SMOKE_SEALED SMOKE_ENCODING GATEWAY_TLS_CERT GATEWAY_TLS_KEY NAKAMA_TLS_CERT NAKAMA_TLS_KEY NAKAMA_URL"
 _stack_saved=""
 for _n in $STACK_OVERRIDABLE; do
 	eval "_set=\${$_n+yes}"

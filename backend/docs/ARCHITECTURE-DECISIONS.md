@@ -3081,6 +3081,130 @@ Reduce `constants.SessionTTL` and give the gateway auth token a `jti` consumed o
 
 ---
 
+## ADR-24 — The meta hop gets Nakama's own TLS, but the credential worth stealing there is a default-valued static key, not a token
+
+**Status:** accepted 2026-09-10. **Implemented behind a flag that defaults off** (`NAKAMA_TLS_CERT` / `NAKAMA_TLS_KEY`), plus a **CD gate on the two Nakama static keys**, which is the higher-value half and is the reason this ADR is not simply "ADR-23 again on another port".
+
+Follows [ADR-23](#adr-23--the-gateway-hop-gets-tls-not-a-second-sealed-handshake-and-the-credential-it-exposes-leaks-one-hop-earlier), which closed the gateway hop and named this hop as the blocking item.
+
+### 1. What actually crosses the meta hop
+
+The earlier measurement scanned two REST calls and found four credentials. A tap exercising **everything a client does on that port** — auth, RPCs, account reads, session refresh, and the realtime WebSocket — finds more. Measured 2026-09-10 against the live dev stack, `Accept-Encoding` suppressed *and* every gzip member inflated before scanning:
+
+| what | where | lifetime | notes |
+|---|---|---|---|
+| Nakama session token | response body, **and the WebSocket URL** | 7200 s | mints gateway auth tokens on demand |
+| Nakama refresh token | response body | 3600 s | mints new session tokens |
+| gateway auth token | response body | 3600 s | the ADR-23 credential |
+| re-issued session + refresh pair | session refresh response | 7200 s / 3600 s | **every refresh re-exposes both** |
+| `NAKAMA_SERVER_KEY` | `Authorization: Basic` | **never expires** | static, in every client build |
+| `runtime.http_key` | **URL query string** | **never expires** | static, server-only RPCs |
+
+**Two things here were not previously recorded.**
+
+**The realtime WebSocket.** Nakama serves `/ws` on the same port; it upgrades (`101 Switching Protocols`) and takes the session token **in the query string**. Everything Nakama-realtime — chat, presence, party, notifications — rides it. A query-string credential is worse than a header one *even after TLS*, because it lands in access logs, proxy logs and referrers; TLS protects the wire, not the log. Nothing in this repo opens one, but the Unity client is the consumer of exactly those features.
+
+**Session refresh re-exposes.** A refresh returns a fresh session *and* refresh token on the same plaintext hop, so the exposure repeats for as long as the client runs rather than being a single login-time window.
+
+*Instrument caveat, again.* The first run of this tap reported **three** distinct JWTs where five were predicted. That was not a clean result: Nakama's `exp` has second granularity, so a refresh issued in the same second returns a **byte-identical** token and the distinct-count silently under-reports. A 2 s sleep produced five, with lifetimes of `2h0m2s`/`1h0m2s` — the offset is the sleep, which is what confirms it. The count disagreeing with a written-down prediction is the only reason it was caught.
+
+### 2. The finding that outranks confidentiality
+
+**Both Nakama static keys are at their published defaults, and both authenticate.** Verified with wrong-key controls rather than inferred from a status code:
+
+```
+reward_kill, no key            -> 401 "Auth token or HTTP key required"
+reward_kill, WRONG http_key    -> 401 "HTTP key invalid"
+reward_kill, DEFAULT http_key  -> 400 "user_id is required"   <- PASSED AUTH
+device auth, server_key=defaultkey -> 200      device auth, wrong key -> 401
+```
+
+`defaulthttpkey` reaches the handler for `reward_kill` and `submit_kill` — the **server-only reward-granting and leaderboard-submission RPCs**. `defaultkey` mints accounts and sessions.
+
+**And it is not just the dev box: `cd.yml` never writes `NAKAMA_HTTP_KEY` at all.** It writes `NAKAMA_SERVER_KEY=${NAKAMA_SERVER_KEY:-defaultkey}` (from a secret, defaulting) and no `NAKAMA_HTTP_KEY` line. `deploy/.env` is regenerated **wholesale** on every deploy, so the name is absent from the file, and compose's `${NAKAMA_HTTP_KEY:-defaulthttpkey}` resolves to the default **in every environment CD deploys** — for the Nakama flag and for the game server's client env alike. It fails **open and silently**: rewards flow, nothing warns except a Nakama startup line nobody reads.
+
+**This is why the framing needed adjusting.** Encrypting this hop defends the *path*. It does nothing about an attacker who simply connects to the port — published on `0.0.0.0` in compose — and presents a key from the Nakama documentation. Shipping TLS alone here would close the window while the door stays unlocked, and would do it in a way that reads, in every dashboard and boot log, as "the meta hop is now secure".
+
+**So: the keys first, then TLS.** Both are in this change; the ordering matters only in that the key gate must not be described as a nice-to-have alongside it.
+
+### 3. There is a second hop on this port, and it is ours
+
+The tap covered client → Nakama. Checked, rather than scoped out:
+
+- **Gateway → Nakama: does not exist.** No HTTP client, no URL, no `NAKAMA_*` config anywhere in `backend/gateway/`. Its only tie is the shared HS256 secret, verified locally. `gateway/CLAUDE.md`'s claim is accurate.
+- **The `nakama.so` plugin makes no outbound calls at all.** Inbound handlers only.
+- **The C# game server → Nakama is real, and it is on this hop.** `GameServer/Nakama/NakamaClient.cs:112` and `:204` build `{_baseUrl}/v2/rpc/...?http_key={_httpKey}` and POST it. So the reward path puts a never-expiring static key in a URL over plain HTTP, on the same port and the same network as the session tokens. **It exists in compose only** — `k8s/app/50-fleet-map.yaml` sets no `NAKAMA_URL`, so under Agones the game server does not call Nakama and the reward path is silently inert there. That asymmetry is a separate problem and is recorded, not fixed here.
+
+**Consequence for this change:** turning Nakama TLS on *requires* `NAKAMA_URL` to become `https://` for the game server too, or the reward path breaks. The two move together, which is why the flag is one setting and not two.
+
+### 4. Nakama's own TLS: measured, including what it does NOT cover
+
+`--socket.ssl_certificate` / `--socket.ssl_private_key` on `heroiclabs/nakama:3.40.0`, measured from a helper container against every listener:
+
+| port | plaintext | TLS | covered? |
+|---|---|---|---|
+| 7350 client API **and `/ws`** | `400` (refused) | `200` | **yes, and TLS-only — no plaintext fallback** |
+| 7351 console | **`200`** | fails | **no** |
+| 9100 metrics | **`200`** | fails | **no** |
+
+`/ws` over `wss` reaches the auth layer (`401` on a bogus token); over `ws` it is refused. So the WebSocket **is** covered, which is the part that mattered most.
+
+**The flag's name is accurate and its scope is narrower than "Nakama now has TLS."** It is the *socket* listener only. In compose all four ports publish on `0.0.0.0`, so an operator who enables it gets a TLS client port and a **plaintext console on 0.0.0.0** — with a real password — plus plaintext metrics. Anyone reading "SSL mode enabled" as "Nakama is encrypted" would be wrong in the direction that matters.
+
+**Nakama upstream explicitly discourages this option**, and says so at startup:
+
+```
+WARNING: enabling direct SSL termination is not recommended,
+use an SSL-capable proxy or load balancer for production!
+INFO  SSL mode enabled
+```
+
+That warning is a real cost and is not dismissed below.
+
+### 5. Options
+
+#### Option A — Nakama's own TLS (`--socket.ssl_certificate`) — **taken**
+
+- **Buys:** the client port and the WebSocket, TLS-only with no plaintext fallback, which matches ADR-22 decision 3 without us having to enforce it. No new component. ADR-23's in-process argument applies unchanged: on a single-node box a terminator and Nakama are the same host, so an edge terminator would report itself encrypted while buying nothing.
+- **Does not buy:** the console or metrics ports; anything about the default keys; anything about credentials in URLs surviving into logs.
+- **Cost, named:** **upstream recommends against it.** The honest reading is that the recommendation targets production fleets where a proxy is terminating anyway and Nakama's TLS stack is less exercised than a proxy's — not a correctness claim. We take it *because the alternative buys nothing in the only shapes we currently run*, and this ADR records that the moment a real edge exists, Option B is correct and this flag should go off.
+
+#### Option B — a reverse proxy in front of Nakama
+
+- **Buys:** what upstream recommends; can cover console and metrics too; standard certificate tooling.
+- **Does not buy:** anything on a single-node box, where it terminates on the same host it protects — ADR-23's hidden cost, unchanged.
+- **Cost:** a new component in a deploy path that is `DEPLOY_MODE=containers` and has no edge. Correct later; premature now.
+
+#### Option C — rotate the keys and leave the hop plaintext
+
+- **Buys:** removes the actual authentication bypass, for the price of two environment variables. This is the cheapest security win available anywhere in the system right now.
+- **Does not buy:** confidentiality. Every token above stays readable.
+- **Verdict: not an alternative to A — a prerequisite.** Doing A without C ships a misleading posture; doing C without A leaves the measured exposure. Both.
+
+#### Option D — move credentials out of URLs
+
+Considered and **rejected as not ours to make.** Nakama's WebSocket takes the token as a query parameter and `runtime.http_key` is query-only; both are upstream API shapes. We cannot fix them without forking Nakama or proxying it. **Recorded so it is not re-proposed as an oversight**, and because it is the one exposure TLS genuinely does not close: after TLS, those credentials still land in Nakama's own access logs.
+
+### 6. Decisions
+
+1. **Nakama terminates TLS itself**, behind `NAKAMA_TLS_CERT` / `NAKAMA_TLS_KEY`, **defaulting off**, pinned explicitly at every deploy path. Setting exactly one is a deploy failure, not a fall back to plaintext.
+2. **`NAKAMA_URL` moves to `https://` in the same change** wherever the flag is on, because `NakamaClient.cs` is a second consumer of this hop and would otherwise break silently.
+3. **CD fails the deploy when either Nakama static key is missing or left at its documented default.** `NAKAMA_HTTP_KEY` is now written at all, which it was not. This is the part of this ADR with the largest effect per line.
+4. **No `InsecureSkipVerify`, on any side, in any environment — including dev.** A client that accepts any certificate has the passive-eavesdropper guarantee at the price of the authenticated one (ADR-23 on the gateway hop, unchanged). Dev therefore runs the flag **off** rather than running it on with a self-signed certificate and a disabled check. **A dev convenience that trains an `InsecureSkipVerify` into the client is a worse outcome than dev staying plaintext**, because the flag ships in a player and the plaintext does not.
+5. **The console and metrics ports are NOT covered and must not be described as covered.** They are separately exposed on `0.0.0.0` in compose. Tracked as a follow-up, named in `ROADMAP-SECURITY.md`; not fixed here, because binding them is a deploy-topology change with its own blast radius.
+6. **The static keys' presence in the client binary is out of scope, with a reason.** `NAKAMA_SERVER_KEY` is architecturally a client credential — Nakama requires every client to present it — so it cannot be secret, and rotating it is a client release. Its value is therefore *bounded by what a client may do*, which is why the key that actually matters is `runtime.http_key`: that one is server-only, grants reward and leaderboard writes, and has no business being guessable. Decision 3 is aimed at it.
+7. **Credentials in URLs survive TLS.** Stated in the posture text rather than left to be discovered.
+
+### What this ADR does not claim
+
+- It does not claim the meta hop is confidential today. The flag defaults off, and no deploy path sets it.
+- It does not make Nakama's console or metrics ports confidential.
+- It does not address the Nakama→Postgres hop, which specifies no `sslmode` in either deployment.
+- It does not fix the compose/k8s asymmetry that makes the reward path inert under Agones.
+- It does not reduce cheating. See ADR-22 and `ROADMAP-SECURITY.md` §0.
+
+---
+
 ## Summary of decisions
 
 | # | Area | Decision |
@@ -3108,3 +3232,4 @@ Reduce `constants.SessionTTL` and give the gateway auth token a `jti` consumed o
 | 21 | Transport confidentiality | **Proposed, not accepted — a record of posture only.** KCP has real AES-256-CFB packet encryption, kcp-go-compatible and symmetric across Go and C# (`KcpCrypto.cs` / `shared/transport/crypto.go`), fail-closed on a wrong key. But it is **off by default twice** — the transport default is `tcp`, which has no encryption path, and the key variable defaults to empty, which means plaintext — and a **pre-shared key is not a session key**: every client shares one static secret that ships in the binary, so it resists a passive observer and not a player. No negotiation, no key id, no rotation without a hard cutover; CFB plus a linear CRC32 is confidentiality, not authentication, and the CRC is not a MAC. Deferred because every current environment is localhost/LAN and the hosting shape above dev is unsettled (ADR-15/16) — choosing an AEAD and a key exchange now means choosing them twice. **Reporting the transport and whether a key is in force does not wait for that decision.** Do not describe this link as "unencrypted"; describe it as unencrypted by default and unauthenticated when on |
 | 22 | Transport crypto | **Accepted 2026-09-10 as the target model; NOT implemented.** ChaCha20-Poly1305 over an **authenticated** X25519 exchange, HKDF-SHA256 derivation, **nonce as the replay counter** (one mechanism removing both replay and nonce reuse). Supersedes #288's `HKDF(JOIN_TOKEN_SECRET, jti)` derivation, which has **no forward secrecy** — obtaining the long-term secret later decrypts every recorded past session. **The DH must prove possession of secret-derived material, not echo the join token**, which an eavesdropper can read and replay; unauthenticated DH on a plaintext hop is a clean MITM that produces confidence rather than security. Measured in a built IL2CPP player: `AesGcm` **compiles then throws**, `ChaCha20Poly1305`/`HKDF`/`ECDiffieHellman` **absent**, only `Aes`/`HMACSHA256`/`RandomNumberGenerator` work; and measured on .NET 10, **X25519 is absent there too** while ChaCha20-Poly1305 and HKDF are built in — so **X25519 must be vendored on two runtimes**, ideally by one pure-C# library serving both. GNS rejected (replaces the transport and deletes the Go loadtest harness), Hazel rejected (no Go, thin crypto). No negotiation, no fallback, standard implementations only, cross-implementation vectors as a deliverable, field 5 reserved not reused. **Library settled: BouncyCastle 2.7.0** — the only candidate supplying X25519; RFC vectors pass in a built IL2CPP player at **both Minimal and High stripping**, at a cost of 4.7 MB and 2 350 types. **Replay: strict counter, no sliding window** — zero inversions in 22 374 frames across both transports under hostile `tc netem`, and chosen because a wrong counter fails loudly while a wrong window accepts a replay silently; three conditions attach, including bounding the forward jump, since the ordering guarantee is inherited from a hand-ported KCP rather than owned. **Does not ship until the gateway hop is confidential** |
 | 23 | Gateway-hop confidentiality | **TLS terminated in the gateway process**, behind `GATEWAY_TLS_CERT`/`GATEWAY_TLS_KEY`, **defaulting off** and pinned explicitly at every deploy site. A second sealed handshake for this hop is **rejected**: the Go server half of the sealed protocol does not exist, the hop has no `jti` to anchor a transcript, and an unauthenticated exchange would make `BindingVerified` a field that is always false. Terminating **in the process, not at an edge**, because an edge terminator is confidential only to the edge and buys nothing on the single-node dev/staging boxes. **The measurement that motivated this was incomplete**: the auth token is minted over a plaintext HTTP hop to Nakama that also carries a 2-hour reusable Nakama session token, so the meta hop is the higher-value half and is NOT fixed here. No negotiation, no plaintext fallback. The client half (TLS on the gateway connection, `https://` for Nakama) is unwritten, so the flag is off everywhere |
+| 24 | Meta-hop (Nakama) confidentiality | **Nakama terminates TLS itself** (`--socket.ssl_certificate`), behind `NAKAMA_TLS_CERT`/`NAKAMA_TLS_KEY`, **defaulting off** and pinned at every deploy path; `NAKAMA_URL` moves to `https://` in the same change because the **C# game server is a second consumer of this hop** (`NakamaClient.cs`, compose only — absent under Agones). Measured: the flag covers port 7350 **including the `/ws` realtime socket**, TLS-only, and does **NOT** cover the console (7351) or metrics (9100), both published on `0.0.0.0` in compose; upstream explicitly warns against direct SSL termination and we take it anyway because an edge terminator buys nothing on a single-node box. **The larger finding is not confidentiality**: both Nakama static keys sit at their published defaults and both authenticate — `defaulthttpkey` reaches the server-only reward and leaderboard RPCs — and `cd.yml` never wrote `NAKAMA_HTTP_KEY` at all, so every deployed compose environment ran the default. CD now fails on a missing or default key. **No `InsecureSkipVerify` anywhere, including dev**: dev runs the flag off rather than on with a disabled check. Credentials in URLs (the `/ws` token, `http_key`) survive TLS into access logs and are an upstream API shape we cannot fix |

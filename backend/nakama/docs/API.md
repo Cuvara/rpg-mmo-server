@@ -67,6 +67,24 @@ requests and 2 separate meta-DB transactions per mob kill (rpg-mmo-server#233).
   mutation RPCs.
 - **Registered in**: `main.go` → `economy.RewardKillsRPC`
 
+> ⚠️ **`runtime.http_key` is a static, never-expiring bearer secret, and it travels
+> in the URL QUERY STRING** — `POST /v2/rpc/reward_kills?http_key=…`, both as Nakama
+> requires it and as `GameServer/Nakama/NakamaClient.cs` sends it.
+>
+> Two consequences worth stating rather than discovering (ADR-24):
+>
+> 1. **Left at Nakama's published default it authenticates.** Measured on the live
+>    stack: no key → `401 "Auth token or HTTP key required"`; a wrong key → `401
+>    "HTTP key invalid"`; `defaulthttpkey` → `400 "user_id is required"`, i.e. past
+>    auth and into the handler. Anyone who can reach `:7350` could grant rewards.
+>    CD now refuses to deploy an environment whose `NAKAMA_HTTP_KEY` is unset or
+>    default — it previously never wrote the variable at all, so every deployed
+>    environment ran the default.
+> 2. **A query-string credential survives TLS into logs.** Making the hop
+>    confidential (ADR-24) stops it being read off the wire; it does not stop it
+>    appearing in Nakama's own access logs or any future proxy's. That is an
+>    upstream API shape, not something this repo can change.
+
 Request payload:
 
 ```json

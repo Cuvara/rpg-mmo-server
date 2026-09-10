@@ -85,7 +85,26 @@ spec:
           imagePullPolicy: IfNotPresent
           envFrom:
             - secretRef: { name: postgres-meta }
+            # Carries NAKAMA_SERVER_KEY and NAKAMA_HTTP_KEY. Both are STATIC and
+            # never expire; NAKAMA_HTTP_KEY gates the server-only reward_kill /
+            # submit_kill RPCs, and Nakama's published default for it
+            # ('defaulthttpkey') was measured to pass authentication. Not
+            # `optional` — a missing key must fail container creation visibly.
+            # ADR-24.
             - secretRef: { name: nakama }
+          env:
+            # Meta-hop TLS (ADR-24) — OFF, pinned as literal empty strings rather
+            # than omitted, for the same reason GATEWAY_TLS_* is pinned in
+            # k8s/app/40-gateway.yaml: an absent variable is indistinguishable
+            # from an unconsidered one, and this is a security setting.
+            #
+            # To turn on: mount a PEM pair (a Secret volume) and point these at
+            # the in-container paths. NAKAMA_URL for any client of this hop must
+            # move to https:// in the same change.
+            - name: NAKAMA_TLS_CERT
+              value: ""
+            - name: NAKAMA_TLS_KEY
+              value: ""
           # Do NOT set LEADERBOARD_MIGRATE=recreate here: it deletes every
           # kills_alltime record. If the plugin refuses to load with
           # "leaderboard kills_alltime exists with authoritative=false", use
@@ -94,7 +113,28 @@ spec:
             - /bin/sh
             - -ec
             - |
-              exec /nakama/nakama \
+              # Meta-hop TLS (ADR-24). Built with `set --` so an absent pair adds
+              # NO flags at all: an EMPTY --socket.ssl_certificate is not the same
+              # as an absent one, Nakama tries to read the empty path and exits.
+              # Half-configured is refused rather than silently plaintext, and a
+              # certificate path containing a space survives because the arguments
+              # are positional rather than a word-split string.
+              #
+              # MEASURED SCOPE: :7350 only, INCLUDING /ws, TLS-only. The console
+              # :7351 and metrics :9100 stay PLAINTEXT — they are cluster-internal
+              # here (no hostPort), which is why that is tolerable in this manifest
+              # and is NOT in compose, where all four ports publish on 0.0.0.0.
+              set --
+              if [ -n "${NAKAMA_TLS_CERT:-}" ] || [ -n "${NAKAMA_TLS_KEY:-}" ]; then
+                if [ -z "${NAKAMA_TLS_CERT:-}" ] || [ -z "${NAKAMA_TLS_KEY:-}" ]; then
+                  echo "NAKAMA_TLS_CERT and NAKAMA_TLS_KEY must be set together or not at all" >&2
+                  exit 1
+                fi
+                set -- --socket.ssl_certificate "${NAKAMA_TLS_CERT}" \
+                       --socket.ssl_private_key "${NAKAMA_TLS_KEY}"
+                echo "nakama: TLS ON for :7350 (console/metrics stay plaintext — ADR-24)"
+              fi
+              exec /nakama/nakama "$@" \
                 --name rpg-nakama-k8s \
                 --database.address "${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-meta:5432/${POSTGRES_DB}" \
                 --logger.level INFO \
