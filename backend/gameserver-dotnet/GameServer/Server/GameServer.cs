@@ -126,6 +126,25 @@ public class ServerOptions
     /// order and why deferring an entity cannot desynchronise the delta stream.
     /// </remarks>
     public int MaxSnapshotBytes { get; set; } = Snapshot.SnapshotDeltaState.DefaultMaxSnapshotBytes;
+
+    /// <summary>
+    /// Whether the gameplay hop requires a sealed session
+    /// (<c>GAMESERVER_SEALED</c>: <c>off</c> or <c>require</c>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Two values, not three. A "preferred" mode is a downgrade attack with a friendly
+    /// name: an attacker who can modify the handshake removes the offer, both ends
+    /// conclude the other could do no better, and the session proceeds in the clear
+    /// looking entirely healthy.
+    /// </para>
+    /// <para>
+    /// Defaults to <see cref="Net.Sealed.SealedRequirement.Disabled"/>. Making it the
+    /// default is a separate, operational decision — it refuses every client that cannot
+    /// seal, including every JSON client — and is deliberately not taken here.
+    /// </para>
+    /// </remarks>
+    public Net.Sealed.SealedRequirement SealedTransport { get; set; } = Net.Sealed.SealedRequirement.Disabled;
     /// <summary>
     /// HS256 secret (or comma-separated rotation list) for the Nakama-issued
     /// client auth token. The game server itself never sees that token; this is
@@ -1323,6 +1342,42 @@ public sealed class GameServerHost : IAsyncDisposable
             },
                 conn.Encoding);
             await conn.WriteOneAsync(resp);
+
+            // Step 5b: the sealed-session handshake, when this listener requires one.
+            //
+            // Between the join reply and the loops on purpose: the client needs the join
+            // reply before it can know the session is real, and no frame may be written
+            // half-sealed. Every failure closes the connection — there is no cleartext
+            // fallback on any path, because a protocol that can be talked down to
+            // cleartext will be.
+            if (_options.SealedTransport == Net.Sealed.SealedRequirement.Required)
+            {
+                var peer = new Net.Sealed.SealedPeerCapabilities(
+                    SealedHandshakeCompleted: false,
+                    // The JSON encoding cannot carry a sealed frame at all, so a JSON
+                    // client is refused rather than served in the clear. That effectively
+                    // deprecates JSON for any deployment that requires encryption.
+                    EncodingCanSeal: conn.Encoding == WireEncoding.Proto);
+
+                Net.Sealed.SealedRefusal encodingCheck =
+                    Net.Sealed.SealedPolicy.RefusalFor(_options.SealedTransport, peer);
+                if (encodingCheck.Refused && encodingCheck.Reason == Net.Sealed.SealedRefusalReason.EncodingCannotSeal)
+                {
+                    _logger.LogWarning(
+                        "Refusing {UserId}: encryption is required and this client's encoding cannot seal ({Reason})",
+                        userId, encodingCheck.Reason);
+                    return;
+                }
+
+                var outcome = await Net.Sealed.SealedHandshakeServer.RunAsync(
+                    conn, _options.JoinTokenSecret, claims.Jti, _logger, handshakeToken);
+                if (outcome != Net.Sealed.SealedHandshakeServer.Outcome.Ok)
+                {
+                    _logger.LogWarning(
+                        "Refusing {UserId}: sealed handshake failed ({Outcome})", userId, outcome);
+                    return;
+                }
+            }
 
             // Step 6: Start read/write loops + heartbeat
             var writeTask = conn.WriteLoopAsync();

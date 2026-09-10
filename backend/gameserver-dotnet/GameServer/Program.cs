@@ -47,6 +47,12 @@ int maxPendingInputs = int.TryParse(
 // not how many entities stand inside it. Explicit 0 disables it; a negative or unparsable
 // value falls back to the default rather than being treated as "off", because "off" must
 // be something an operator asked for.
+// Sealed transport on the gameplay hop. Two values, not three: a "preferred" mode is a
+// downgrade attack with a friendly name. Defaults to off — turning it on refuses every
+// client that cannot seal, including every JSON client, and that is an operational
+// decision rather than a correctness one.
+string sealedMode = (GetArg(args, "--sealed") ?? Env("GAMESERVER_SEALED") ?? "off").Trim().ToLowerInvariant();
+
 int maxSnapshotBytes = int.TryParse(
     GetArg(args, "--max-snapshot-bytes") ?? Env("GAMESERVER_MAX_SNAPSHOT_BYTES"), out var msb) && msb >= 0
     ? msb : GameServer.Snapshot.SnapshotDeltaState.DefaultMaxSnapshotBytes;
@@ -329,6 +335,18 @@ if (!SimulationRates.TryCreate(criticalHz, worldHz, backgroundHz, out Simulation
 // compiler instead of asserting it at each use site.
 SimulationRates simulationRates = simRates!;
 
+if (sealedMode is not ("off" or "require"))
+{
+    logger.LogCritical(
+        "unknown GAMESERVER_SEALED value {Value} (want \"off\" or \"require\"). There is no " +
+        "\"preferred\" mode: a negotiable encryption setting is a downgrade attack with a " +
+        "friendly name.", sealedMode);
+    return 2;
+}
+var sealedRequirement = sealedMode == "require"
+    ? GameServer.Net.Sealed.SealedRequirement.Required
+    : GameServer.Net.Sealed.SealedRequirement.Disabled;
+
 if (!TransportKind.IsValid(transport))
 {
     logger.LogCritical("unknown transport {Transport} (want {Tcp} or {Kcp})",
@@ -579,6 +597,7 @@ var options = new ServerOptions
     MaxInputsPerConnection = maxInputsPerTick,
     MaxPendingInputs = maxPendingInputs,
     MaxSnapshotBytes = maxSnapshotBytes,
+    SealedTransport = sealedRequirement,
     JwtSecret = jwtSecret,
     JoinTokenSecret = joinTokenSecret,
     HoldTtl = mode == "dungeon" ? TimeSpan.FromSeconds(60) : TimeSpan.FromSeconds(30),

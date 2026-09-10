@@ -6,7 +6,6 @@ import (
 
 	"github.com/duycuong/rpg-mmo/gateway/registry"
 	"github.com/duycuong/rpg-mmo/shared/jwt"
-	"github.com/duycuong/rpg-mmo/shared/sessionkey"
 )
 
 // AssignResult holds the result of a map assignment.
@@ -24,12 +23,6 @@ type AssignResult struct {
 	// uses it to name exactly which game-server connection a supersede event
 	// targets (session.SessionData.JoinTokenJTI).
 	JTI string
-
-	// SessionKey is the per-session key for the gameplay hop, derived from the
-	// join-token signing secret and JTI. Returned to the client and never sent to
-	// the game server, which derives the same value itself — see
-	// shared/sessionkey.
-	SessionKey sessionkey.Key
 }
 
 // AssignMap finds an available server for the given map and generates a join
@@ -73,22 +66,11 @@ func AssignMapKeyring(ctx context.Context, userID, mapID string, reg *registry.R
 		return AssignResult{}, fmt.Errorf("assign map: read back jti: %w", err)
 	}
 
-	// Derived from the SIGNING key, not any older key in the ring: the game
-	// server derives from its own signing key too, so during a rotation both ends
-	// move together. Accepting an older key on either side would be a downgrade
-	// surface for no benefit, since the jti is fresh per join and there is never
-	// an old session key worth honouring.
-	key, err := sessionkey.Derive(joinKeys.Signing(), claims.Jti)
-	if err != nil {
-		return AssignResult{}, fmt.Errorf("assign map: derive session key: %w", err)
-	}
-
 	return AssignResult{
 		ServerID:   srv.ServerID,
 		ServerAddr: srv.Addr,
 		JoinToken:  token,
 		Transport:  srv.Transport,
 		JTI:        claims.Jti,
-		SessionKey: key,
 	}, nil
 }

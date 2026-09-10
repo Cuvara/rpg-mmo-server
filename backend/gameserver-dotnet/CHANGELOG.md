@@ -123,6 +123,89 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The sealed session is wired into the gameplay hop and proved on a live server.**
+  `GAMESERVER_SEALED` / `--sealed`, `off` (default) or `require`. Two values, not three: a
+  "preferred" mode is a downgrade attack with a friendly name.
+  - The handshake runs between the join reply and the read/write loops, so no frame is
+    ever written half-sealed. After it, every frame in both directions is sealed and there
+    is no per-message choice and no way back to cleartext.
+  - **Every failure closes the connection.** A JSON client is refused before the handshake
+    is attempted, because the sealed frame is a binary layout JSON has no room for — which
+    means requiring encryption effectively deprecates the JSON encoding.
+  - **Proved live, paired, on one image.** With `sealed=off`: 13 cleartext Envelope
+    frames, 0 sealed. With `sealed=require`: 6 cleartext (the pre-handshake join) and 11
+    sealed. A client that corrupted one byte of its send key after a correct handshake had
+    every frame refused and the session closed. A capture of ciphertext alone shows only
+    that bytes are unreadable; the pair shows this change made them so.
+  - **The join exchange is still readable, by design and now written down.** The handshake
+    runs after `MsgJoinToken`, so the token and its reply remain in the clear on that hop.
+    Short-lived and single-use, so the exposure is a seconds-long replay window rather than
+    a durable credential — but real, and not closed by this change.
+
+### Changed
+
+- **The three conditions on the replay rule now exist on the C# side too.** They were
+  implemented in Go first and the asymmetry would have rotted: the forward-jump bound, the
+  `RequiresOrderedTransport` assertion that makes a future unordered transport fail closed,
+  and rejection counters by cause.
+- **A rejected sealed frame is distinguishable in the log from an ordinary disconnect.**
+  It previously tore the connection down through the same `IOException` path as a peer
+  hanging up, so a security check firing looked exactly like normal traffic — the "a check
+  nobody reads is not a check" failure one layer down. It now raises
+  `SealedFrameRejectedException` and logs the per-cause counts. The peer still learns
+  nothing: the connection simply closes, as it would for any frame-level failure.
+
+### Added
+
+- **`GameServer/Net/Sealed` now carries the real primitives**, via
+  **BouncyCastle.Cryptography 2.7.0** — ChaCha20-Poly1305, X25519 and HKDF-SHA256, plus
+  HMAC-SHA256 for the handshake binding with `Arrays.FixedTimeEquals` for the comparison.
+  **Nothing here implements a cipher, a MAC or a curve.**
+  - **Why BouncyCastle for all three when .NET 10 has two.** .NET has `ChaCha20Poly1305`
+    and `HKDF` built in and both are measured working on 10.0.10, but it has **no X25519 at
+    all**, so BouncyCastle is required regardless. One library means the server and the
+    Unity client run the *same* implementation, which removes a class of interop question
+    rather than answering it three times. The cost is stated where it will be needed:
+    BouncyCastle's AEAD is managed code where .NET's is the platform's and
+    hardware-assisted, and swapping `SealedAead` alone is a contained change if it ever
+    shows up in a tick profile.
+  - **Published RFC vectors** (8439 §2.8.2, 7748 §6.1, 5869 A.1), tampering rejected in
+    ciphertext, tag, additional data and length, and low-order X25519 points refused.
+  - **A cross-implementation vector** asserting one complete handshake and one complete
+    sealed frame against the Go suite, value by value: C# opens the frame Go sealed, and
+    C# seals a byte-identical frame from the same inputs. A frame sealed for the other
+    direction is refused, which is what proves the two keys are distinct in use and not
+    merely in derivation.
+
+### Added
+
+- **`GameServer/Net/Sealed`: the C# half of the sealed wire format**, mirroring
+  `shared/sealed` byte for byte — frame layout, nonce construction, the two replay
+  validators behind one interface, the handshake transcript, and the refusal policy.
+  Normative spec: `backend/docs/SEALED-FRAMING.md`.
+  - **Cross-implementation golden vector** for the transcript, matching the Go test. Two
+    implementations that each round-trip against themselves can still disagree, and the
+    failure is silent: the handshake never completes and nothing names the cause.
+  - **`SealedSession` enforces the ordering rule by structure**, not by comment:
+    authenticate first, offer the sequence to the replay validator only once the tag has
+    proved the header was not forged. A test fails if a forged frame reaches the
+    validator, and it was checked against a deliberate mutation reversing the order.
+  - The refusal policy encodes the ADR-22 consequence explicitly: a JSON client cannot
+    carry a sealed session, so once encryption is required it is **refused**, not served in
+    the clear. That effectively deprecates the JSON encoding for any deployment that
+    requires encryption.
+
+### Changed
+
+- **`SessionKey` records its superseded purpose** — bytes and golden vector unchanged, but
+  the value is now the handshake binding key rather than an encryption key.
+
+> **Nothing here encrypts anything yet.** No cipher, MAC or curve is implemented, and none
+> is stubbed: an implementation that "worked" would let every test above it pass while
+> proving nothing about the bytes. ADR-22's library choice is still open.
+
+### Added
+
 - **The game server derives a per-session key on every join, and is never sent one.**
   `GameServer.Net.Security.SessionKey` computes
   `HKDF-SHA256(ikm = JOIN_TOKEN_SECRET, salt = jti, info = "cuvara/session-key/v1", L = 32)`

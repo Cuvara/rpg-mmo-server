@@ -1,3 +1,18 @@
+// # SUPERSEDED as an encryption key (ADR-22, 2026-09-10)
+//
+// This derivation no longer produces the key that encrypts the gameplay hop. That is now
+// an authenticated X25519 exchange, which gives forward secrecy this cannot: a derived key
+// is a pure function of a long-lived secret and a jti that travels in the clear, so anyone
+// who later obtains JOIN_TOKEN_SECRET can decrypt every recorded past session.
+//
+// What it is FOR now is the handshake binding — proving possession of
+// JOIN_TOKEN_SECRET-derived material so a man-in-the-middle cannot substitute its own
+// ephemeral key. See backend/docs/SEALED-FRAMING.md §5. The bytes are unchanged, so the
+// golden vector still holds; only the purpose moved.
+//
+// EnterWorldResponse.session_key (field 5) is reserved, not reused. The client still
+// cannot derive this value, so delivering the binding key to it is an open ADR-22 item.
+//
 // Package sessionkey derives and carries the per-session key that encrypts one
 // client's gameplay hop.
 //

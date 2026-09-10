@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-
-	"github.com/duycuong/rpg-mmo/shared/sessionkey"
 )
 
 // ErrInvalidMsgType marks an envelope whose type is 0.
@@ -52,7 +50,42 @@ const (
 	MsgPong            MsgType = 12       // either direction (heartbeat reply)
 	// 13 and 14 are reserved for MsgTransferMap/Resp.
 	MsgKick MsgType = 15 // server -> client (forced disconnect with reason)
+
+	// Sealed-session handshake, GAMEPLAY HOP ONLY. See
+	// backend/docs/SEALED-FRAMING.md. Both are sent in the clear, immediately
+	// after MsgJoinToken and before any sealed frame — there is no key yet,
+	// which is what they exist to establish.
+	//
+	// 16/17 stay inside the one-byte varint range, and 18-31 are left clear for
+	// the gateway hop's own handshake once ADR-22 settles it.
+	MsgSealedClientHello MsgType = 16 // client -> gameserver
+	MsgSealedServerHello MsgType = 17 // gameserver -> client
 )
+
+// SealedClientHello opens the sealed-session handshake on the gameplay hop.
+type SealedClientHello struct {
+	// PublicKey is a 32-byte ephemeral X25519 public key, fresh per connection.
+	// Reusing one across sessions forfeits forward secrecy, which is the whole
+	// reason this exchange exists rather than a derived key.
+	PublicKey []byte `json:"public_key,omitempty"`
+}
+
+// SealedServerHello answers it and proves the server holds this session's
+// join-token-derived material.
+type SealedServerHello struct {
+	// PublicKey is a 32-byte ephemeral X25519 public key, fresh per connection.
+	PublicKey []byte `json:"public_key,omitempty"`
+
+	// Binding is HMAC-SHA256 over the handshake transcript. Both ephemeral
+	// public keys are inside it, which is what stops a man in the middle:
+	// substituting a key changes the transcript, so a replayed binding no longer
+	// verifies. Compare it in constant time.
+	Binding []byte `json:"binding,omitempty"`
+
+	// Error is set when the server refuses. A client MUST NOT retry without
+	// encryption — there is no cleartext fallback by design.
+	Error string `json:"error,omitempty"`
+}
 
 // Encoding selects how an Envelope and its payload are serialized.
 //
@@ -240,39 +273,6 @@ type EnterWorldResponse struct {
 	JoinToken  string `json:"join_token,omitempty"`
 	Transport  string `json:"transport,omitempty"`
 	Error      string `json:"error,omitempty"`
-
-	// SessionKey is the per-session key for the gameplay hop, or empty when the
-	// gateway has no join-token secret to derive one from.
-	//
-	// The game server never receives this: it derives the same value from the
-	// secret it holds and the jti in the token it verifies (see
-	// shared/sessionkey). This field exists only because the CLIENT cannot
-	// derive it — it has no secret.
-	//
-	// It is sessionkey.Key rather than []byte on purpose: Key redacts itself
-	// through fmt, slog and %#v, so a struct that happens to be logged cannot
-	// leak the material.
-	//
-	// `json:"-"` IS PART OF THE DESIGN, NOT AN OVERSIGHT. The legacy JSON
-	// encoding therefore cannot carry a session key at all, and a JSON client
-	// gets none. Two reasons, and both matter more than serving that client:
-	//
-	//  1. Key marshals to a redacted string precisely so it cannot leak through
-	//     something that serialises a struct without knowing it holds a secret.
-	//     Exempting this one field would put the material back on exactly the
-	//     path the redaction exists to close, and JSON is the encoding a human
-	//     is most likely to paste into an issue.
-	//  2. JSON is the legacy encoding (ADR-9) and is expected to disappear.
-	//     Protobuf carries the key as bytes and is what the client speaks.
-	//
-	// The consequence is stateable: a JSON client cannot be encrypted. Under the
-	// no-fallback rule that means such a client must be refused rather than
-	// served in cleartext once encryption is required — a step 4 decision.
-	//
-	// LIMITATION: this travels to the client over the gateway hop, which is the
-	// same transport stack as the gameplay hop and is plaintext TCP by default.
-	// See the package comment on shared/sessionkey.
-	SessionKey sessionkey.Key `json:"-"`
 }
 
 // JoinTokenRequest is sent by the client to authenticate with a game server.

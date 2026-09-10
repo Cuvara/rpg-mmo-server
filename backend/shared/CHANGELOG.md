@@ -7,6 +7,118 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`SealedClientHello` / `SealedServerHello` (`MsgType` 16 and 17), gameplay hop only.**
+  Both travel in the clear, immediately after `MsgJoinToken` — there is no key yet, which
+  is what they exist to establish. 16/17 stay inside the one-byte varint range and leave
+  18-31 clear for the gateway hop's own handshake once ADR-22 settles it; recycling a
+  number is how two versions silently disagree about what a byte means.
+  - **Protobuf only.** The handshake is deliberately absent from the JSON message set so
+    key material can never be rendered into a human-readable payload — which is also why a
+    JSON client cannot be sealed and must be refused rather than served in the clear.
+
+### Added
+
+- **`shared/sealed` now carries the real primitives** — ChaCha20-Poly1305 (RFC 8439),
+  X25519 (RFC 7748) and HKDF-SHA256 (RFC 5869), all from `golang.org/x/crypto`, which was
+  already a dependency. **Nothing here implements a cipher, a MAC or a curve.**
+  - **Published RFC vectors, not only round-trips.** A round-trip proves an implementation
+    agrees with itself, which a subtly wrong one also does, silently. Tampering is
+    rejected in ciphertext, tag, additional data and length — the AAD case being the one
+    that can be wrong while every round-trip still passes.
+  - **Low-order X25519 points are refused.** Accepting one forces a shared secret the
+    attacker knows and both sides agree on: a complete break dressed as a successful
+    handshake.
+  - **Two direction keys, derived from the shared secret and salted by the transcript.**
+    Two, not one, is what makes the bare counter nonce safe — the client's sequence 7 and
+    the server's sequence 7 are encrypted under different keys. Salting with the
+    transcript binds the keys to the exact exchange, so two runs that agreed on a secret
+    but disagreed about anything else fail rather than proceeding half-agreed.
+  - **The handshake binding is HMAC-SHA256 under a key derived from `JOIN_TOKEN_SECRET`
+    and the jti**, verified with `hmac.Equal` — constant time, because a byte-by-byte
+    compare leaks the first mismatch position and that is enough to forge a tag one byte
+    at a time against a peer that keeps answering.
+  - **A cross-implementation vector** pins one complete handshake and one complete sealed
+    frame against the C# suite, value by value.
+
+### Changed
+
+- **The replay rule is settled and hardened.** `wire-contract` measured zero inversions
+  across 22 374 frames on both transports under hostile `tc netem`, so the strict counter
+  is correct and the window stays available but unused. Three conditions attach, because
+  the ordering is inherited rather than owned — TCP guarantees it, KCP gets it from a
+  hand-ported reassembly path:
+  - **Asserted, not assumed**: validators declare `RequiresOrderedTransport`, and a
+    session refuses to construct when a strict counter meets a transport that does not
+    promise ordering, so a future QUIC-datagram or raw-UDP path fails closed instead of
+    dropping legitimate frames and presenting as packet loss.
+  - **Rejections are counted by cause** — not authenticated, replayed, forward jump — and
+    returned identically. A validator that refuses silently is indistinguishable from one
+    that was never wired in, and under attack these counters are the only thing that
+    changes.
+  - **The forward jump is bounded.** Rejecting anything at or below the highest seen says
+    nothing about a leap *forward*, which burns nonce space and, with a strict counter, is
+    irreversible: every later legitimate frame carries a lower sequence and is refused for
+    ever, so the session dies quietly after authenticating perfectly well.
+
+### Added
+
+- **`shared/sealed`: the wire format, replay rule and refusal policy for realtime
+  confidentiality**, specified and tested without a cipher. Normative spec:
+  `backend/docs/SEALED-FRAMING.md`.
+  - **Sealing happens above the transport, around the Envelope**, not at the packet layer.
+    The KCP packet-crypt layer cannot be used: it is per-*listener* (kcp-go takes one
+    `BlockCrypt` for every datagram, with no per-remote key selection) so it cannot carry a
+    per-session key — and TCP, the default transport, has no such layer at all. Above the
+    transport, one implementation serves both.
+  - Frame: `[4B length][0xC1 marker][1B version][8B sequence][ciphertext][16B tag]`, with
+    the whole 10-byte header as additional authenticated data, so a frame cannot be
+    renumbered to replay it nor rolled back to an older format. `0xC1` cannot begin a
+    well-formed Envelope, so it cannot be confused with the `0x08`/`0x7B` encoding sniff.
+    Overhead is ~390 B/s per client at 15 Hz — 0.85% of the measured 45.9 KB/s.
+  - **Nonce is a bare counter, and that is safe only because each direction has its own
+    key.** Documented at the function, with the consequence stated: if one key ever serves
+    both directions, the nonce must grow a direction byte the same day or the scheme is
+    broken.
+  - **Two replay validators behind one interface** — strict-monotonic and a 64-frame
+    sliding window (the IPsec/DTLS rule) — because whether the ARQ can reorder at this
+    layer is still being measured. The finding lands as a one-line change at the call site
+    rather than a rewrite. Both refuse what they cannot judge.
+  - **Handshake transcript** `label || 0x00 || jti || 0x00 || client_pub || server_pub`,
+    with a golden vector shared with the C# implementation. The NUL separators stop two
+    different (jti, key) pairs producing identical bytes; including both ephemeral public
+    keys is what stops a replayed binding authenticating a man-in-the-middle's exchange.
+  - **The ordering rule is enforced by structure.** `sealed.Session` performs
+    authenticate-then-replay-check itself and exposes no way to do one without the other,
+    because the natural-looking implementation is backwards: the sequence is cleartext and
+    right there in the header, so reading it and checking the window before spending CPU
+    on the AEAD lets an attacker advance a peer's window with forged frames and lock out
+    the real sender. Verified against a deliberate mutation that reverses the order.
+  - **The gateway hop's anchor is decided**: a pinned gateway *public* identity key, which
+    dissolves the binding-key delivery problem rather than working around it. Recorded in
+    the spec with the distinction that matters — the old scheme shipped a *secret* in the
+    binary, this ships a *public* key whose extraction gains an attacker nothing — and with
+    the requirement to pin current **and** next, since rotation cannot be retrofitted
+    during the emergency that is the only time it is wanted.
+  - **Refusal has two states, not three.** A "preferred" mode is a downgrade attack with a
+    friendly name, so a peer that does not seal gets no session.
+
+### Changed
+
+- **`EnterWorldResponse.session_key` (field 5) is removed and the number reserved.** ADR-22
+  supersedes the derived session key with an authenticated X25519 exchange, which gives
+  forward secrecy the derivation could not. The number is reserved rather than reused: a
+  peer built against the old schema would read whatever replaced it as 32 bytes of key
+  material and fail in a way that looks like a key mismatch rather than a schema mismatch.
+- **`shared/sessionkey` records its superseded purpose.** The bytes and the golden vector
+  are unchanged; what moved is what the value is *for* — it is now the handshake binding
+  key, proving possession of `JOIN_TOKEN_SECRET`-derived material, not an encryption key.
+
+> **Nothing here encrypts anything yet.** No cipher, MAC or curve is implemented, and none
+> is stubbed: an implementation that "worked" would let every test above it pass while
+> proving nothing about the bytes. ADR-22's library choice is still open.
+
+### Added
+
 - **`shared/sessionkey`: per-session keys, derived rather than distributed.** Transport
   encryption used ONE pre-shared key — the same value in every client binary and every
   server — so extracting it from a single client decrypted every player's traffic for ever,
