@@ -80,6 +80,22 @@ flow-up: ## ONE COMMAND: build everything and run the whole backend
 
 .PHONY: flow-up-sealed
 flow-up-sealed: ## Same as flow-up, with the gameplay hop encrypted (GAMESERVER_SEALED=require)
+# ON WSL WITH DOCKER DESKTOP THIS TARGET SILENTLY DOES NOTHING, and the stack comes
+# up UNSEALED with no error anywhere.
+#
+# `docker` here is /home/<user>/bin/docker, a two-line shell script that does
+# `exec docker.exe "$@"`. Crossing WSL -> Windows drops every environment variable
+# not named in WSLENV, so compose interpolates `${GAMESERVER_SEALED:-off}` to its
+# default and reports success. The compose files are correct; the boundary is what
+# fails.
+#
+#   WSLENV=GAMESERVER_SEALED make flow-up-sealed
+#
+# Measured, and measured twice: the first measurement looked like a broken pin
+# until a control -- a throwaway compose file with `${PROBE_VAR:-fallback}` --
+# showed the CHANNEL was dropping variables, not the variable. Prove the channel
+# before concluding anything about the value; without that control this would have
+# been filed as a defect against correct code.
 	GAMESERVER_SEALED=require $(STACK) up $(STACK_FLAGS)
 
 .PHONY: flow-check-sealed

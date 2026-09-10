@@ -5,6 +5,18 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **`make flow-up-sealed` silently does nothing on WSL with Docker Desktop**, and the
+  Makefile now says so at the target. The WSL `docker` is `exec docker.exe "$@"`, and the
+  WSL→Windows boundary drops every variable not named in `WSLENV`, so compose interpolates
+  the `off` default and reports success. The compose files are correct; the boundary is
+  what fails. `WSLENV=GAMESERVER_SEALED make flow-up-sealed` works.
+
+  Recorded with how it was found, because the finding nearly went the other way: the first
+  measurement looked like a broken pin, and only a control — a throwaway compose file with
+  `${PROBE_VAR:-fallback}` — showed the channel was dropping variables rather than the
+  variable being wrong. Prove the channel before concluding anything about the value.
+
 ### Fixed
 - **The `docker-compose.yml` note still said a sealed stack could not be verified.** It
   can, as of the smoke test's `-encoding` flag, and `stack.sh check` derives both halves.
