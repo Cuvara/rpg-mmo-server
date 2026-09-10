@@ -1198,6 +1198,43 @@ public sealed class GameServerHost : IAsyncDisposable
                 };
                 _world.AddEntity(entity);
             }
+            else
+            {
+                // REATTACHING an existing entity to a NEW connection: clear the input
+                // cursor, because every field in it is per-SESSION client bookkeeping and
+                // this is a new session.
+                //
+                // Without this, a client that restarts its own input-tick counter has ALL
+                // of its input refused until it climbs back past the pre-disconnect value.
+                // Measured: a 5s session reached tick 88, and after reconnecting inside the
+                // hold window the next session had its first 88 frames rejected as
+                // stale_tick before anything moved again. The freeze lasts as long as the
+                // previous session did -- ten minutes of play means ten minutes of a player
+                // who cannot move. See docs/BENCHMARK.md Part XII.
+                //
+                // The shipped client only trips this when the bootstrap is recreated
+                // (process restart, scene reload) rather than on an in-process reconnect,
+                // where its counter keeps climbing -- i.e. exactly the "crashed and came
+                // straight back" case.
+                //
+                // Resetting opens no replay hole. The monotonic tick check exists to reject
+                // stale input WITHIN a session, and the session boundary is precisely what
+                // ends that scope: a new session needs a fresh single-use join token, input
+                // stays monotonic within it, and replaying one's own old movement gains
+                // nothing because the server integrates position from its own speed stat.
+                // This is the same rule ADR-22 settles for the crypto counter -- the
+                // counter's scope must follow the SESSION, not the entity.
+                //
+                // The whole cursor and not just LastInputTick: the held direction and
+                // LastMoveTick are also last-session state, and a stale LastMoveTick makes
+                // the first accepted input of the new session integrate a step sized from
+                // however long the player was away.
+                _world.UpdateComponents(userId, static (id, writer) =>
+                {
+                    EntityHandle handle = writer.Resolve(id);
+                    if (handle.IsValid) writer.InputCursorOf(in handle) = default;
+                });
+            }
 
             // From here the world holds an entity for this user, so teardown is
             // MANDATORY on every exit path — see the finally block. Before this flag
