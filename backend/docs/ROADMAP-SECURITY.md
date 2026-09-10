@@ -380,6 +380,41 @@ inventing a cipher.
      session. The residual named in step 3 — "step 5 must therefore cover the gateway hop
      as well" — is **not** closed by this step. The join token still crosses the gameplay
      hop in the clear before sealing begins.
+
+     **MEASURED, 2026-09-10, and the residual as written above understates it.** A byte tap
+     was placed on *both* hops of a fully sealed session — 26 sealed frames on the gameplay
+     hop, `SMOKE=PASS`, `sealed=true` — and every JWT crossing either hop in the clear was
+     decoded:
+
+     | hop | credential | lifetime | single-use |
+     |---|---|---|---|
+     | gateway | **auth token** | **3600 s** | **no** |
+     | gateway | join token | 30 s | yes |
+     | gameplay | join token | 30 s | yes |
+
+     Two consequences, and the first changes what step 5 should do:
+
+     1. **Sealing the join exchange on the gameplay hop alone would buy nothing.** The
+        *identical* join token — same `jti` — crosses the **gateway** hop in the clear
+        first. An observer positioned to read one hop reads the other: it is the same
+        client on the same path. Closing the gameplay-hop half leaves the value it was
+        protecting already spent.
+     2. **The exposure the residual names is the least valuable of the three.** The join
+        token is 30 seconds and single-use, so capturing it wins a race the real client is
+        already running. The **auth token** on the gateway hop is a **one-hour, reusable
+        bearer credential**, and it was not recorded anywhere until this measurement.
+
+     So the ordering is settled by evidence rather than preference: **the gateway hop is
+     the work**, and the join exchange is not a separate item — it is closed as a
+     side-effect of closing the gateway hop, and cannot usefully be closed before it.
+
+     **The reorder option, recorded so it is not re-proposed.** Sealing the join token on
+     the gameplay hop requires the client to send its hello first, carrying the `jti` in
+     the clear so the server can derive the binding key — from an unverified,
+     attacker-chosen value. That moves a full X25519 + HKDF + HMAC *ahead of any token
+     check*, where today an unauthenticated peer costs the server one failed HMAC. It is a
+     real amplification, it was considered, and it is not worth taking for a benefit that
+     (1) above shows to be zero while the gateway hop is plaintext.
    - **"Refuse to start unencrypted outside localhost" was not taken.** A server can still
      be started with `off` on any bind. That refusal was considered and rejected for this
      change: `TransportPosture.BindsBeyondLoopback` reads compose's `:9000` as beyond
