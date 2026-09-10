@@ -5,6 +5,36 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **CD trimmed the TLS certificate paths with a keyword normaliser.** `tr -d '[:space:]'`
+  is right for `GAMESERVER_SEALED` — a keyword, where internal whitespace is meaningless —
+  and wrong for a **path**, where it is data. It would have written `/mycerts/c.pem` for an
+  environment that set `/my certs/c.pem`, handing the gateway a path nobody configured.
+
+  It failed closed (the gateway exits 1 rather than starting plaintext), so this was
+  legibility rather than security. Fixed anyway: **reusing a keyword normaliser on a path
+  is a check that looks like it matches its consumer and does not**, which is the shape
+  this file has been bitten by twice.
+
+  Now trims the ends only, matching `strings.TrimSpace` in `LoadTLSConfig`. Verified by
+  running both against Go's own `strings.TrimSpace` across six inputs — leading/trailing
+  spaces, an internal space, an embedded newline, tabs, and empty — and requiring exact
+  agreement on all of them.
+
+  **The first attempt at this fix was worse than what it replaced.** A `sed`-based trim is
+  line-oriented, so it left an embedded newline in place — and a value pasted into a GitHub
+  Environment variable with a stray newline is the case that actually happens, not the edge
+  case. Caught by running it rather than reading it. The shipped form uses parameter
+  expansion.
+
+### Documentation
+- **Three notes recorded for the meta hop** (`ROADMAP-SECURITY.md`): the Nakama server key
+  is a static shared secret in every client build and crosses that hop as HTTP Basic; any
+  HTTP tap must suppress `Accept-Encoding` before reporting an absence, because the first
+  capture missed a gzipped token; and an `SslStream`/IL2CPP measurement must assert that a
+  **bad certificate is refused**, since degraded validation is indistinguishable from
+  working validation when only the positive case is tested.
+
 ### Added
 
 - **`GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY` pinned explicitly at every gateway deploy path**

@@ -445,6 +445,23 @@ inventing a cipher.
      the work**, and the join exchange is not a separate item — it is closed as a
      side-effect of closing the gateway hop, and cannot usefully be closed before it.
 
+     **For whoever takes the meta hop, from the tap that found it:**
+
+     - **The Nakama server key crosses that hop as HTTP Basic**, in the same capture as
+       the tokens. Unlike them it never expires — it is a **static shared secret present
+       in every client build**. Decide whether it is in or out of scope up front rather
+       than discovering it mid-task.
+     - **Any tap on an HTTP hop must suppress `Accept-Encoding` before reporting an
+       absence.** The first meta-hop capture found no auth token; it was there, gzipped,
+       and a byte scan cannot see through gzip. A "clean" result on that hop is not
+       believable until compression is ruled out. This trap is met first, not last.
+     - **When `SslStream` under IL2CPP is measured, assert the NEGATIVE case.** ADR-22
+       found `AesGcm` present in the reference assembly and throwing at runtime — it
+       type-checks and then fails. Certificate *validation* is more likely to be quietly
+       **degraded** than absent, and validation that silently accepts anything is
+       indistinguishable from validation that works. Assert that a connection to a
+       deliberately bad certificate is **REFUSED**, not only that a good one succeeds.
+
      **The reorder option, recorded so it is not re-proposed.** Sealing the join token on
      the gameplay hop requires the client to send its hello first, carrying the `jti` in
      the clear so the server can derive the binding key — from an unverified,
