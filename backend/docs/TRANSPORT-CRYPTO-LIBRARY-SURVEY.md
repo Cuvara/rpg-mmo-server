@@ -219,6 +219,7 @@ For the `High` run, `Assets/link.xml`:
     <type fullname="Org.BouncyCastle.Crypto.Generators.X25519KeyPairGenerator" preserve="all" />
     <type fullname="Org.BouncyCastle.Crypto.Generators.HkdfBytesGenerator" preserve="all" />
     <type fullname="Org.BouncyCastle.Crypto.Digests.Sha256Digest" preserve="all" />
+    <type fullname="Org.BouncyCastle.Crypto.Macs.HMac" preserve="all" />
     <type fullname="Org.BouncyCastle.Security.SecureRandom" preserve="all" />
   </assembly>
   <assembly fullname="NaCl.Core">
@@ -230,6 +231,29 @@ For the `High` run, `Assets/link.xml`:
 **A `link.xml` naming only the entry types is a guess about what the linker keeps
 transitively.** If the `High` run fails, widen to `<assembly fullname="BouncyCastle.Cryptography" preserve="all" />`
 and record the size cost rather than hunting types one at a time.
+
+### The list was incomplete, and the way it was incomplete generalises
+
+`Org.BouncyCastle.Crypto.Macs.HMac` was **missing** from the eight types above until
+2026-09-10. It was added when the implementation landed — `com.cuvara.netcode` needs it for
+`SealedTranscriptSigner`, the handshake binding.
+
+The omission was not carelessness. **The probe that produced this list never exercised the
+transcript binding**, so the list was complete for what the probe tested and incomplete for
+what the protocol shipped. That is the general trap, and it is worth stating outright
+because a `link.xml` that is wrong this way has no symptom until a device runs it:
+
+> **A preserved-types list is only as good as the code paths the probe walked.** It is not
+> evidence about anything the probe did not run. A missing entry compiles, passes every
+> Editor test, passes every `Minimal`-stripped build, and then fails at the first handshake
+> in a `High`-stripped player.
+
+So: do not treat this list as authoritative for a path you have not seen the probe execute.
+When adding a primitive, add its entry types in the same change as the code, and prefer
+widening to the whole assembly over trusting that transitive preservation happened to reach
+far enough.
+
+Credit where it belongs: found by the session implementing the server half, not by the probe.
 
 ### What would change the recommendation
 
