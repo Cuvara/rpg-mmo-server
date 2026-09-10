@@ -221,3 +221,172 @@ public class SealedTests
         Assert.Equal(SealedRefusalReason.EncodingCannotSeal, json.Reason);
     }
 }
+
+/// <summary>
+/// Tests for <see cref="SealedSession"/>, whose reason for existing is that the ordering
+/// rule — check the sequence only after the tag verifies — is enforced by structure
+/// rather than by a comment that does not survive an optimisation pass.
+/// </summary>
+public class SealedSessionTests
+{
+    /// <summary>
+    /// A TEST DOUBLE, not a cipher and not a stub of one. It performs no encryption
+    /// whatsoever: Seal copies the plaintext and appends 16 zero bytes, TryOpen strips
+    /// them. It exists solely so the ordering and plumbing can be tested without a real
+    /// primitive, and it cannot be mistaken for one — the "ciphertext" is the plaintext,
+    /// in the clear, and the "tag" is constant.
+    /// </summary>
+    private sealed class PassthroughAead : ISealedAead
+    {
+        public int OpenCalls { get; private set; }
+        public bool FailOpen { get; set; }
+
+        public int NonceSize => SealedFrame.NonceSize;
+        public int TagSize => SealedFrame.TagSize;
+
+        public int Seal(ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> plaintext, ReadOnlySpan<byte> aad, Span<byte> destination)
+        {
+            plaintext.CopyTo(destination);
+            destination.Slice(plaintext.Length, SealedFrame.TagSize).Clear();
+            return plaintext.Length + SealedFrame.TagSize;
+        }
+
+        public bool TryOpen(ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> ciphertext, ReadOnlySpan<byte> aad, Span<byte> destination, out int written)
+        {
+            OpenCalls++;
+            written = 0;
+            if (FailOpen || ciphertext.Length < SealedFrame.TagSize) return false;
+
+            int length = ciphertext.Length - SealedFrame.TagSize;
+            ciphertext[..length].CopyTo(destination);
+            written = length;
+            return true;
+        }
+    }
+
+    /// <summary>Records whether it was consulted — how the ordering is tested, not asserted.</summary>
+    private sealed class CountingValidator : ISequenceValidator
+    {
+        private readonly ISequenceValidator _inner = new StrictMonotonicSequence();
+        public int Calls { get; private set; }
+        public ulong Highest => _inner.Highest;
+
+        public bool Accept(ulong sequence)
+        {
+            Calls++;
+            return _inner.Accept(sequence);
+        }
+    }
+
+    [Fact]
+    public void Session_RoundTrips()
+    {
+        var send = new SealedSession(new PassthroughAead(), new StrictMonotonicSequence());
+        var recv = new SealedSession(new PassthroughAead(), new StrictMonotonicSequence());
+
+        for (int i = 0; i < 4; i++)
+        {
+            byte[] payload = { 0x08, (byte)i, (byte)'h', (byte)'i' };
+            byte[] frame = send.Seal(payload);
+
+            Assert.Equal(SealedFrame.Marker, frame[0]);
+            Assert.Equal(SealedOpenResult.Ok, recv.Open(frame, out byte[] got));
+            Assert.Equal(payload, got);
+        }
+    }
+
+    /// <summary>
+    /// <b>The ordering rule, tested structurally.</b> A frame whose tag does not verify
+    /// must never reach the replay validator. If it did, an attacker could replay a
+    /// captured header with garbage after it and advance the peer's window without holding
+    /// any key — locking out the real sender at no cost, and presenting as a connectivity
+    /// bug in the wrong layer.
+    /// </summary>
+    [Fact]
+    public void ForgedFrame_NeverReachesTheReplayWindow()
+    {
+        var send = new SealedSession(new PassthroughAead(), new StrictMonotonicSequence());
+        var aead = new PassthroughAead();
+        var validator = new CountingValidator();
+        var recv = new SealedSession(aead, validator);
+
+        byte[] frame = send.Seal("payload"u8);
+
+        aead.FailOpen = true;
+        Assert.Equal(SealedOpenResult.Rejected, recv.Open(frame, out _));
+
+        Assert.Equal(1, aead.OpenCalls);
+        Assert.True(validator.Calls == 0,
+            $"the replay validator was consulted {validator.Calls} times for a frame whose " +
+            "tag did not verify; the sequence must not be acted on until the AEAD succeeds");
+        Assert.Equal(0UL, recv.HighestReceived);
+
+        // The genuine frame must still be accepted: the forgery must not have consumed
+        // its sequence.
+        aead.FailOpen = false;
+        Assert.Equal(SealedOpenResult.Ok, recv.Open(frame, out _));
+    }
+
+    [Fact]
+    public void AuthenticatedReplay_IsRefused()
+    {
+        var send = new SealedSession(new PassthroughAead(), new StrictMonotonicSequence());
+        var recv = new SealedSession(new PassthroughAead(), new StrictMonotonicSequence());
+
+        byte[] frame = send.Seal("payload"u8);
+
+        Assert.Equal(SealedOpenResult.Ok, recv.Open(frame, out _));
+        Assert.Equal(SealedOpenResult.Rejected, recv.Open(frame, out _));
+    }
+
+    /// <summary>
+    /// The counter must advance even if a frame is never transmitted. A nonce reused after
+    /// a failed send is the same catastrophe as one reused on purpose.
+    /// </summary>
+    [Fact]
+    public void SendSequence_NeverRepeats()
+    {
+        var session = new SealedSession(new PassthroughAead(), new StrictMonotonicSequence());
+        var seen = new HashSet<ulong>();
+
+        for (int i = 0; i < 100; i++)
+        {
+            ulong before = session.NextSendSequence;
+            Assert.True(seen.Add(before), $"sequence {before} issued twice");
+            session.Seal("x"u8);
+            Assert.Equal(before + 1, session.NextSendSequence);
+        }
+    }
+
+    /// <summary>
+    /// A cleartext body is reported as NotSealed rather than Rejected, because the caller
+    /// distinguishes them: during a handshake it is expected, afterwards it ends the
+    /// session.
+    /// </summary>
+    [Fact]
+    public void CleartextBody_IsDistinguishable()
+    {
+        var recv = new SealedSession(new PassthroughAead(), new StrictMonotonicSequence());
+        Assert.Equal(SealedOpenResult.NotSealed, recv.Open(new byte[] { 0x08, 0x01, 0x02 }, out _));
+    }
+
+    /// <summary>
+    /// An AEAD whose geometry does not match the frame layout is refused at construction,
+    /// not discovered at the first frame.
+    /// </summary>
+    [Fact]
+    public void Session_RefusesAMismatchedAead()
+    {
+        Assert.Throws<ArgumentNullException>(() => new SealedSession(null!, new StrictMonotonicSequence()));
+        Assert.Throws<ArgumentNullException>(() => new SealedSession(new PassthroughAead(), null!));
+        Assert.Throws<ArgumentException>(() => new SealedSession(new WrongGeometryAead(), new StrictMonotonicSequence()));
+    }
+
+    private sealed class WrongGeometryAead : ISealedAead
+    {
+        public int NonceSize => 8;
+        public int TagSize => SealedFrame.TagSize;
+        public int Seal(ReadOnlySpan<byte> n, ReadOnlySpan<byte> p, ReadOnlySpan<byte> a, Span<byte> d) => 0;
+        public bool TryOpen(ReadOnlySpan<byte> n, ReadOnlySpan<byte> c, ReadOnlySpan<byte> a, Span<byte> d, out int w) { w = 0; return false; }
+    }
+}

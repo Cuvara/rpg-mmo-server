@@ -120,6 +120,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **Cross-implementation golden vector** for the transcript, matching the Go test. Two
     implementations that each round-trip against themselves can still disagree, and the
     failure is silent: the handshake never completes and nothing names the cause.
+  - **`SealedSession` enforces the ordering rule by structure**, not by comment:
+    authenticate first, offer the sequence to the replay validator only once the tag has
+    proved the header was not forged. A test fails if a forged frame reaches the
+    validator, and it was checked against a deliberate mutation reversing the order.
   - The refusal policy encodes the ADR-22 consequence explicitly: a JSON client cannot
     carry a sealed session, so once encryption is required it is **refused**, not served in
     the clear. That effectively deprecates the JSON encoding for any deployment that

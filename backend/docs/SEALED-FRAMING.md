@@ -78,7 +78,15 @@ rekey — not a wrap — is the correct response if it ever approaches the limit
 
 The sequence must be checked by a validator, **after the tag verifies and never before**.
 The sequence is cleartext, so acting on it first lets an attacker advance a peer's window
-with forged frames and lock out the real sender — denial of service that costs nothing.
+with forged frames and lock out the real sender — denial of service that costs nothing, and
+which would present as a connectivity bug in the wrong layer.
+
+**This ordering is enforced by structure, not by this paragraph.** `Session` (Go) and
+`SealedSession` (C#) perform both steps themselves, in the only correct order, and expose
+no way to do one without the other — there is no call site left that can reorder them. A
+comment does not survive an optimisation pass; a type with no reordering API does. Each
+side has a test that fails if the validator is consulted for a frame whose tag did not
+verify, and both were checked against a deliberate mutation that reverses the order.
 
 Two implementations exist behind one interface, because the choice depends on a transport
 property still being measured — whether the ARQ can reorder at this layer:
@@ -145,11 +153,45 @@ and on the gateway hop neither exists yet — the client has not been assigned a
 holds only a Nakama JWT, which is as readable as the join token and so cannot anchor a
 binding either.
 
-The gateway hop needs a different anchor. The obvious one, and the standard answer for game
-clients, is a **static gateway identity key**: a long-term X25519 public key pinned in the
-client build, with the same §2–§5 machinery and the binding replaced by a signature under
-the gateway's identity key. No PKI, no certificate chain, and rotation is a client update —
-which is the real cost and the reason it is a decision rather than an obvious win.
+The gateway hop needs a different anchor, and the adopted one is a **pinned gateway
+identity key**:
+
+```
+1. Client pins the gateway's PUBLIC identity key at build time.
+2. Client <-> gateway : X25519 authenticated by a signature under that key
+                        -> the gateway hop becomes authenticated AND confidential.
+3. Over that channel   : the gateway delivers the per-session binding key
+                        (HKDF from JOIN_TOKEN_SECRET and jti -- shared/sessionkey).
+4. Client <-> server   : X25519 bound by proof of possession of that key (§5).
+```
+
+**Solving the gateway hop dissolves the key-delivery problem rather than working around
+it.** There is no third mechanism and no new wire field on the game hop: once step 2 makes
+that channel confidential, step 3 is simply a value sent over it.
+
+### This is not the pre-shared-key mistake wearing a hat
+
+It will look like one, so state it plainly:
+
+- The **old** scheme shipped a **secret** in the binary. Extracting it decrypted everyone,
+  for ever.
+- This ships a **public** key. Extracting it gains an attacker **nothing** — it is public
+  by construction. It lets the client recognise the gateway; it does not let anyone
+  impersonate it.
+
+That difference is total, and a reviewer who misses it will reject the design for a
+right-sounding wrong reason.
+
+### Pin a set, not a key
+
+**Pin current *and* next**, from the first version. Rotation otherwise becomes a flag day
+on which every client that has not updated is locked out. The mechanism costs almost
+nothing to build now and **cannot be retrofitted during the emergency that is the only
+time it is wanted**.
+
+Residual, named rather than softened: **compromise of the gateway's private identity key
+is total for the gateway hop until clients update.** It is a genuine single point of
+failure, and pinning a set shortens the window rather than removing it.
 
 **This matters for sequencing.** ADR-22 decision 8 holds the model until the gateway hop is
 confidential, and §5's binding is why: the client cannot compute the binding key itself, so

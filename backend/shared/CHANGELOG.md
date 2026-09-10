@@ -32,6 +32,18 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     with a golden vector shared with the C# implementation. The NUL separators stop two
     different (jti, key) pairs producing identical bytes; including both ephemeral public
     keys is what stops a replayed binding authenticating a man-in-the-middle's exchange.
+  - **The ordering rule is enforced by structure.** `sealed.Session` performs
+    authenticate-then-replay-check itself and exposes no way to do one without the other,
+    because the natural-looking implementation is backwards: the sequence is cleartext and
+    right there in the header, so reading it and checking the window before spending CPU
+    on the AEAD lets an attacker advance a peer's window with forged frames and lock out
+    the real sender. Verified against a deliberate mutation that reverses the order.
+  - **The gateway hop's anchor is decided**: a pinned gateway *public* identity key, which
+    dissolves the binding-key delivery problem rather than working around it. Recorded in
+    the spec with the distinction that matters — the old scheme shipped a *secret* in the
+    binary, this ships a *public* key whose extraction gains an attacker nothing — and with
+    the requirement to pin current **and** next, since rotation cannot be retrofitted
+    during the emergency that is the only time it is wanted.
   - **Refusal has two states, not three.** A "preferred" mode is a downgrade attack with a
     friendly name, so a peer that does not seal gets no session.
 
