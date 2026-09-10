@@ -128,10 +128,43 @@ fi
 
 # Load the SAME file into this shell, so the script's own probes and the
 # smoketest use the ports and secrets the containers were actually started with.
+# CALLER OVERRIDES MUST SURVIVE THE ENV FILE, and without this they do not.
+#
+# `set -a; . file` ASSIGNS, so every name the file mentions clobbers whatever the
+# operator put on the command line. Since CD's generator started writing
+# GAMESERVER_SEALED into deploy/.env, that made
+#
+#   GAMESERVER_SEALED=require ./stack.sh up      (i.e. make flow-up-sealed)
+#
+# a SILENT NO-OP on any box with a CD-written .env: the file's `off` won, the
+# stack came up unsealed, and nothing said so. Measured on this project's own
+# deploy directory, where .env:17 reads `GAMESERVER_SEALED=off`.
+#
+# It is the SECOND way that target can silently do nothing -- the first is the
+# WSL/WSLENV boundary described above -- and the two are independent, so fixing
+# one leaves the other in place. Both fail by quietly doing the ordinary thing.
+#
+# Only names an operator would deliberately override are preserved. Ports and
+# secrets must keep coming from the file, because they describe the containers
+# that are actually running.
+STACK_OVERRIDABLE="GAMESERVER_SEALED SMOKE_SEALED SMOKE_ENCODING"
+_stack_saved=""
+for _n in $STACK_OVERRIDABLE; do
+	eval "_set=\${$_n+yes}"
+	if [ "${_set:-}" = yes ]; then
+		eval "_stack_save_$_n=\$$_n"
+		_stack_saved="$_stack_saved $_n"
+	fi
+done
+
 set -a
 # shellcheck disable=SC1090,SC1091
 . "./$ENV_FILE"
 set +a
+
+for _n in $_stack_saved; do
+	eval "export $_n=\$_stack_save_$_n"
+done
 
 GATEWAY_PORT=${GATEWAY_CONTAINER_PORT:-8100}
 GAME_PORT=${GAMESERVER_CONTAINER_PORT:-9200}
