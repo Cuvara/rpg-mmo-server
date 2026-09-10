@@ -802,18 +802,29 @@ jobs:
             # an environment can opt in, by setting GAMESERVER_SEALED as an
             # Environment variable. Same shape and same reason as ALLOCATOR below.
             #
-            # SMOKE_SEALED IS DELIBERATELY NOT DERIVED HERE, and must not be added
-            # as an "obvious" companion line. The smoketest speaks JSON, a JSON
-            # client can never carry a sealed frame, and a `require` server refuses
-            # it at the join with `encoding_cannot_seal` -- measured on a live stack.
+            # SMOKE_SEALED IS STILL NOT DERIVED HERE, and the reason has CHANGED.
+            #
+            # It used to be that it could not work: the smoketest sent JSON, and a
+            # JSON client can never carry a sealed frame, so a `require` server
+            # refused it at the join with `encoding_cannot_seal` -- measured on a
+            # live stack. That is fixed; the smoketest has an -encoding flag and a
+            # sealed protobuf run passes against a `require` server.
+            #
+            # What remains is that TWO variables must be derived together --
+            # SMOKE_SEALED=1 AND SMOKE_ENCODING=proto -- because a sealed run must
+            # be a protobuf run. Deriving only the first reproduces the original
+            # failure exactly. `backend/deploy/stack.sh` does derive both, and this
+            # generator should follow when an environment is first set to
+            # `require`; that change belongs with whoever does it, so the values
+            # are chosen and verified together rather than half-landed here.
             # There is no value of SMOKE_SEALED that makes post-deploy-smoke or
             # verify.sh layer 4 pass against a sealed server, so deriving one would
             # convert a check that cannot pass into a check that always fails.
             #
-            # Which means: setting GAMESERVER_SEALED=require on an environment TODAY
-            # produces a red deploy, by design and correctly. It becomes usable when
-            # the smoketest speaks protobuf. See backend/docs/ROADMAP-SECURITY.md
-            # step 5.
+            # Which means: setting GAMESERVER_SEALED=require on an environment today
+            # still produces a red deploy -- not because the check cannot pass any
+            # more, but because these two lines are missing. See
+            # backend/docs/ROADMAP-SECURITY.md step 5.
             echo "GAMESERVER_SEALED=${GAMESERVER_SEALED:-off}"
             echo "SIM_CRITICAL_HZ=${SIM_CRITICAL_HZ}"
             echo "SIM_WORLD_HZ=${SIM_WORLD_HZ}"

@@ -17,10 +17,23 @@ import (
 // Config holds every endpoint and knob the smoke test needs. All values can be
 // set via environment variables and overridden with CLI flags.
 type Config struct {
-	NakamaURL     string        // NAKAMA_URL      — Nakama HTTP base URL
-	ServerKey     string        // NAKAMA_SERVER_KEY — Nakama socket server key
-	GatewayAddr   string        // GATEWAY_ADDR    — gateway listen addr
-	Transport     string        // TRANSPORT       — gateway hop transport: tcp or kcp
+	NakamaURL   string // NAKAMA_URL      — Nakama HTTP base URL
+	ServerKey   string // NAKAMA_SERVER_KEY — Nakama socket server key
+	GatewayAddr string // GATEWAY_ADDR    — gateway listen addr
+	Transport   string // TRANSPORT       — gateway hop transport: tcp or kcp
+
+	// Encoding is the wire encoding every frame this run sends is marshaled in.
+	// Configuration on BOTH ends is not needed — the server answers in whatever
+	// encoding it is addressed in — but a `require` game server REFUSES a JSON
+	// client outright (`encoding_cannot_seal`), because a JSON payload cannot
+	// carry a sealed frame. So a sealed run must be a protobuf run.
+	//
+	// Defaults to JSON, which is what every deploy verifies with today. It is
+	// not the encoding a real client speaks (ADR-9: the client is protobuf), so
+	// a JSON run proves the legacy arm still works and NOT that the shipped
+	// client's path does.
+	Encoding string // SMOKE_ENCODING  — json (default) or proto
+
 	JWTSecret     string        // JWT_SECRET      — shared secret for local JWT verify
 	MapID         string        // SMOKE_MAP_ID    — map to enter
 	Timeout       time.Duration // SMOKE_TIMEOUT   — per network operation
@@ -72,6 +85,11 @@ const (
 	DefaultNakamaURL   = "http://localhost:7350"
 	DefaultServerKey   = "defaultkey"
 	DefaultGatewayAddr = ":8000"
+	// DefaultEncoding keeps every existing run byte-identical: JSON is what the
+	// smoke test has always sent and what every deploy currently verifies with.
+	// Changing this default silently changes what CD proves, so it is a flag.
+	DefaultEncoding = "json"
+
 	// DefaultTransport keeps the CD smoke test on TCP unless TRANSPORT says
 	// otherwise. The game server hop is not configured here: it always follows
 	// EnterWorldResponse.Transport.
@@ -127,6 +145,7 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 		ServerKey:     EnvOr(getenv, "NAKAMA_SERVER_KEY", DefaultServerKey),
 		GatewayAddr:   EnvOr(getenv, "GATEWAY_ADDR", DefaultGatewayAddr),
 		Transport:     EnvOr(getenv, "TRANSPORT", DefaultTransport),
+		Encoding:      EnvOr(getenv, "SMOKE_ENCODING", DefaultEncoding),
 		JWTSecret:     getenv("JWT_SECRET"),
 		MapID:         EnvOr(getenv, "SMOKE_MAP_ID", DefaultMapID),
 		Timeout:       DefaultTimeout,
@@ -177,6 +196,7 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	fs.StringVar(&cfg.ServerKey, "server-key", cfg.ServerKey, "Nakama server key")
 	fs.StringVar(&cfg.GatewayAddr, "gateway-addr", cfg.GatewayAddr, "Gateway address")
 	fs.StringVar(&cfg.Transport, "transport", cfg.Transport, "Transport for the gateway hop: tcp or kcp")
+	fs.StringVar(&cfg.Encoding, "encoding", cfg.Encoding, "Wire encoding for every frame sent: json (default, the legacy arm) or proto (what the shipped client speaks, and the only one a sealed session can use)")
 	fs.StringVar(&cfg.JWTSecret, "jwt-secret", cfg.JWTSecret, "Shared JWT secret for local verification")
 	fs.StringVar(&cfg.MapID, "map-id", cfg.MapID, "Map ID to enter")
 	fs.DurationVar(&cfg.Timeout, "timeout", cfg.Timeout, "Per-operation network timeout")
@@ -211,6 +231,18 @@ func (c Config) Validate() error {
 	}
 	if c.MinSnapshots <= 0 {
 		return fmt.Errorf("min-snapshots must be > 0, got %d", c.MinSnapshots)
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Encoding)) {
+	// Empty is UNSET, not wrong: a Config built in code rather than from the
+	// environment leaves it zero, and encodingFor maps that to JSON. A non-empty
+	// value that is neither is a typo, and those are different things.
+	case "", "json", "proto":
+	default:
+		// Refused rather than defaulted. A typo that silently becomes JSON is
+		// invisible against an `off` server and, against a `require` one, is
+		// refused at the join with `encoding_cannot_seal` -- which reads as a
+		// broken stack rather than as a misspelt flag.
+		return fmt.Errorf("encoding must be json or proto, got %q", c.Encoding)
 	}
 	if err := transport.Validate(c.Transport); err != nil {
 		return fmt.Errorf("transport: %w", err)

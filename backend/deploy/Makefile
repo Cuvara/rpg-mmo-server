@@ -8,9 +8,7 @@
 # Encrypted gameplay hop (off by default here — see docker-compose.yml):
 #   make flow-up-sealed     # same stack, GAMESERVER_SEALED=require
 #
-# There is no flow-check-sealed: the smoke test speaks JSON, and a JSON client
-# cannot seal, so a `require` server refuses it rather than being checked by it.
-# Drive a sealed stack with the load generator (`loadtest -sealed -encoding proto`).
+#   make flow-check-sealed  # verify that sealed stack, end to end
 #   make flow-down   # stop everything (keeps data volumes)
 #
 # Backing services only (gateway/gameserver run on the host with go run /
@@ -83,6 +81,10 @@ flow-up: ## ONE COMMAND: build everything and run the whole backend
 .PHONY: flow-up-sealed
 flow-up-sealed: ## Same as flow-up, with the gameplay hop encrypted (GAMESERVER_SEALED=require)
 	GAMESERVER_SEALED=require $(STACK) up $(STACK_FLAGS)
+
+.PHONY: flow-check-sealed
+flow-check-sealed: ## Verify a sealed stack (smoke test in protobuf, sealing enabled)
+	GAMESERVER_SEALED=require $(STACK) check
 
 .PHONY: flow-down
 flow-down: ## Stop the whole stack (keeps data volumes)

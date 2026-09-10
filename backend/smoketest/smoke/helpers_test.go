@@ -2,6 +2,8 @@ package smoke
 
 import (
 	"errors"
+
+	"github.com/duycuong/rpg-mmo/shared/messages"
 	"strings"
 	"testing"
 	"time"
@@ -398,5 +400,63 @@ func TestFinalLineAndSummary(t *testing.T) {
 				t.Errorf("summary missing %q:\n%s", tt.wantLine, sb.String())
 			}
 		})
+	}
+}
+
+// TestEncodingValidation pins the distinction between UNSET and WRONG.
+//
+// Empty is a legitimate zero value — a Config built in code rather than from the
+// environment leaves it so, and encodingFor maps that to JSON. A non-empty value
+// that is neither json nor proto is a typo. Collapsing the two would make a
+// misspelt flag silently send JSON, which is invisible against an `off` server
+// and, against a `require` one, is refused at the join in a way that reads as a
+// broken stack rather than as a bad flag.
+func TestEncodingValidation(t *testing.T) {
+	base := func() Config {
+		return Config{
+			JWTSecret: "s", Timeout: time.Second, Inputs: 1, MinSnapshots: 1,
+			ExpectMigration: DefaultExpectMigration,
+			DBPollTimeout:   DefaultDBPollTimeout,
+			DBPollInterval:  DefaultDBPollInterval,
+			HoldTTL:         DefaultHoldTTL,
+		}
+	}
+
+	for _, tc := range []struct {
+		enc     string
+		wantErr bool
+	}{
+		{"", false}, // unset
+		{"json", false},
+		{"proto", false},
+		{"PROTO", false}, // case and spacing are tolerated
+		{" proto ", false},
+		{"protobuf", true}, // the plausible typo
+		{"jsn", true},
+		{"kcp", true}, // wrong axis entirely
+	} {
+		c := base()
+		c.Encoding = tc.enc
+		err := c.Validate()
+		if (err != nil) != tc.wantErr {
+			t.Errorf("Encoding=%q: err = %v, wantErr %v", tc.enc, err, tc.wantErr)
+		}
+	}
+}
+
+// TestEncodingForNeverGuessesProto pins the direction of the fallback.
+//
+// encodingFor is only reachable with a value Validate already accepted, so this
+// is about which way an unreachable case fails: JSON is what this client has
+// always sent, and choosing protobuf here would turn a configuration mistake
+// into a silently different wire format.
+func TestEncodingForNeverGuessesProto(t *testing.T) {
+	if got := encodingFor("proto"); got != messages.EncodingProto {
+		t.Errorf(`encodingFor("proto") = %v, want proto`, got)
+	}
+	for _, in := range []string{"", "json", "protobuf", "nonsense"} {
+		if got := encodingFor(in); got != messages.EncodingJSON {
+			t.Errorf("encodingFor(%q) = %v, want json", in, got)
+		}
 	}
 }
