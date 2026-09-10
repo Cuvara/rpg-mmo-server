@@ -719,6 +719,11 @@ metricsEndpoint?.SetStatusProvider(() =>
         TransportAuthenticated = transportPosture.Authenticated,
         TransportCipher = transportPosture.Cipher,
         TransportPostureSummary = transportPosture.Summary,
+        FrameOrderObserved = server.FrameOrder.FramesObserved,
+        FrameOrderInversions = server.FrameOrder.Inversions,
+        FrameOrderDuplicates = server.FrameOrder.Duplicates,
+        FrameOrderLargestBackwardJump = server.FrameOrder.LargestBackwardJump,
+        FrameOrderForwardGaps = server.FrameOrder.ForwardGaps,
         InputsRejected = metrics.InputsRejectedTotal,
         // Every reason, always, including the ones at zero. That is the whole point of the
         // bounded enum: the healthy reading for these is zero, and a missing key would be

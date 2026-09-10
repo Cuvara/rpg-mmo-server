@@ -370,6 +370,38 @@ public sealed class ServerStatus
     public List<AnomalousAccount> AnomalyTopAccounts { get; set; } = new();
 
     /// <summary>
+    /// Input frames whose ARRIVAL order was inspected at the decode step (ADR-22).
+    /// </summary>
+    [JsonPropertyName("frame_order_observed")]
+    public long FrameOrderObserved { get; set; }
+
+    /// <summary>
+    /// Frames that arrived with a tick strictly below the highest already seen on their
+    /// connection — genuine reordering. <b>The number ADR-22's open question turns on:</b>
+    /// a nonce-as-sequence rule with no sliding window is safe only while this is zero.
+    /// </summary>
+    [JsonPropertyName("frame_order_inversions")]
+    public long FrameOrderInversions { get; set; }
+
+    /// <summary>Frames repeating the highest tick already seen on their connection.</summary>
+    [JsonPropertyName("frame_order_duplicates")]
+    public long FrameOrderDuplicates { get; set; }
+
+    /// <summary>
+    /// How far back the worst inversion reached, in ticks — the minimum width a sliding
+    /// window would need. Zero means nothing observed required one.
+    /// </summary>
+    [JsonPropertyName("frame_order_largest_backward_jump")]
+    public long FrameOrderLargestBackwardJump { get; set; }
+
+    /// <summary>
+    /// Frames arriving more than one tick above the previous highest: a gap left by a lost
+    /// or unsent frame. A strict monotonic rule must accept these.
+    /// </summary>
+    [JsonPropertyName("frame_order_forward_gaps")]
+    public long FrameOrderForwardGaps { get; set; }
+
+    /// <summary>
     /// Seconds since the process started, measured on a <b>monotonic</b> clock
     /// (<see cref="System.Diagnostics.Stopwatch"/>), not on wall time.
     ///

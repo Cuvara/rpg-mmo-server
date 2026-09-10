@@ -300,6 +300,12 @@ public sealed class GameServerHost : IAsyncDisposable
     private readonly Input.InputAnomalyTracker _anomalies = new();
 
     /// <summary>
+    /// Frame arrival-order measurement for ADR-22's open question on whether the
+    /// nonce-as-sequence rule needs a sliding window.
+    /// </summary>
+    private readonly Observability.FrameOrderProbe _frameOrder = new();
+
+    /// <summary>
     /// Bounded channel draining death events off the tick thread. The tick thread
     /// enqueues a value-type payload; a background task serializes and publishes.
     /// Bounded at 256 — a full channel drops writes (a missed kill event is
@@ -425,6 +431,9 @@ public sealed class GameServerHost : IAsyncDisposable
     /// Per-account refused-input counts and anomaly scores. Observation only.
     /// </summary>
     public Input.InputAnomalyTracker Anomalies => _anomalies;
+
+    /// <summary>Frame arrival-order measurement. See <see cref="Observability.FrameOrderProbe"/>.</summary>
+    public Observability.FrameOrderProbe FrameOrder => _frameOrder;
 
     public GameServerHost(ServerOptions options)
     {
@@ -1345,6 +1354,13 @@ public sealed class GameServerHost : IAsyncDisposable
                 // is capped. Nothing here awaits or allocates beyond the decode, so a
                 // flood on this connection costs this read task and nothing shared.
                 var input = WireProtocol.GetPayload<InputMessage>(env);
+
+                // ADR-22 measurement: does a frame ever reach this point out of order?
+                // Observed HERE, on the read loop's own stack, before the input is queued —
+                // the same position a decrypt's sequence check would occupy. Two long
+                // comparisons and no allocation.
+                _frameOrder.Observe(ref conn.HighestInputTickSeen, input.Tick);
+
                 var ingest = _world.PushInput(conn.UserId, new InputData(
                     input.Tick,
                     input.MoveX,

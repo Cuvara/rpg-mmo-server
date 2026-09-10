@@ -2285,3 +2285,124 @@ suspect the gate can measure instead of arguing.
   telemetry, the crossover should be re-measured against it rather than against this.
 - **Nothing about the per-server player ceiling changes.** It remains **UNKNOWN**
   and blocked on a separate load-generator machine (ADR-7).
+
+## Part XII — can a frame reach the decode step out of order? (2026-09-10, ADR-22)
+
+**Question.** ADR-22's transport-crypto model uses the AEAD nonce as a monotonic sequence
+number and rejects any nonce at or below the highest seen. That is replay protection and
+nonce-reuse prevention in one mechanism — but it is only safe if frames cannot legitimately
+arrive out of order. If they can, it needs a sliding window, and a window has its own bugs,
+every one of which is a security bug. The ADR left this open **to be measured rather than
+assumed**. This is the measurement.
+
+### Method
+
+A probe (`GameServer/Observability/FrameOrderProbe.cs`) records, per connection, whether
+each input frame's tick is greater than the highest already seen. It is driven from the
+input dispatch inside `Connection.ReadLoopAsync`'s handler, which is awaited inline — one
+frame is decoded, dispatched and completed before the next is read — so **the order it sees
+is the order bytes arrived on that connection's stream**, which is the order a decrypt step
+would see. Client input ticks are strictly increasing by construction, so any frame not
+greater than the highest seen arrived out of order, duplicated, or replayed.
+
+Impairment is real, not simulated: `tc netem` on loopback, **filtered to the game port
+only** (`prio` qdisc + a `u32 dport` filter) so the metrics endpoint stays clean — a
+whole-interface qdisc also delays `/status` and makes the harness unusable.
+
+> **It deliberately does not read the existing `stale_tick` counter.** That check
+> (`input.Tick <= cursor.LastInputTick`) runs in the tick loop, two queues downstream of the
+> socket: the per-connection ingest coalescer and the world-wide pending list. Worse, the
+> coalescer **silently absorbs** an out-of-order movement input (`EcsWorld.PushInput`
+> returns `Coalesced`) so it never reaches that check at all. `stale_tick` reports
+> post-queue order and cannot answer this question.
+
+### Results — 22,374 input frames, zero reordering
+
+| Condition | Transport | Impairment | Frames | Inversions | Duplicates | Fwd gaps |
+|---|---|---|---:|---:|---:|---:|
+| clean | TCP | none | 2032 | **0** | 0 | 0 |
+| clean | KCP | none | 1248 | **0** | 0 | 0 |
+| reorder | TCP | `delay 10ms reorder 30% 50%` | 1248 | **0** | 0 | 0 |
+| reorder | KCP | `delay 10ms reorder 30% 50%` | 1254 | **0** | 0 | 0 |
+| loss | TCP | `loss 10%` | 1254 | **0** | 0 | 0 |
+| loss | KCP | `loss 10%` | 1254 | **0** | 0 | 0 |
+| hostile | TCP | `delay 15ms reorder 25% 50% loss 8% duplicate 5%` | 1524 | **0** | 0 | 0 |
+| hostile | KCP | same | 1518 | **0** | 0 | 0 |
+| hostile, 20 players | KCP | same | 9850 | **0** | 0 | 0 |
+| reconnect | TCP | none | 1192 | **0** | 0 | 0 |
+
+**Zero inversions and zero duplicates in every condition, on both transports.** Note the
+`duplicate 5%` rows in particular: duplicated datagrams did not become duplicated frames,
+because both stacks discard them below the decode.
+
+Why, structurally: TCP is a bare `NetworkStream`, in-order by construction. KCP runs in
+**stream mode** on both sides (`tuneSession` in Go, `KcpTuning.Apply` in C#), and the C#
+side is a vendored port of kcp-go whose `Kcp.MoveRcvBufToQueue` releases a segment only when
+`seg.Sn == _rcvNxt`, with `ParseData` dropping duplicates and out-of-window segments. Above
+that, exactly one read loop owns each connection.
+
+### Reconnect: the crypto layer is unaffected, the simulation layer is not
+
+Same accounts reconnecting inside the 30s entity hold (`loadtest -run-id` fixes the ids so
+the same accounts come back):
+
+```
+after 1st session:  frames=596   inversions=0  |  stale_tick=0
+after RECONNECT  :  frames=1192  inversions=0  |  stale_tick=596
+```
+
+**Every one of the second session's 596 input frames was rejected as `stale_tick`**, while
+the frame-order probe stayed at zero. The two layers behave differently on purpose:
+
+- The **crypto counter would be per session**, and a reconnect is a brand-new `Connection`
+  with fresh read state — the counter resets together with the session key it belongs to.
+  A strict monotonic rule is therefore safe across reconnect.
+- The **simulation counter is per entity**, and the entity survives the hold with its
+  `LastInputTick` intact. A client that restarts its own input tick has *all* of its input
+  refused until it climbs past the pre-disconnect value.
+
+> ⚠️ **That second bullet is a live behaviour, not a hypothetical, and it is not a crypto
+> issue.** It is measured above: 596/596 refused. Whether a real player is affected depends
+> on whether the shipped client restarts its input tick on reconnect — `SendInput(long tick,
+> …)` takes the tick from its caller, so that is an integration question this measurement
+> did not settle. **It is worth settling.**
+
+### Conclusion for ADR-22 — quotable
+
+> **A sliding window is not required. Use the strict counter — and make the assumption it
+> rests on explicit and observable.**
+>
+> Measured across 22,374 input frames on both transports, including 30% packet reordering,
+> 10% loss and 5% duplication injected with `tc netem`: **zero out-of-order frames, zero
+> duplicates.** Neither transport can present a reordered frame to the decode step —
+> TCP by construction, KCP because both implementations run in stream mode and gate
+> delivery on the next expected sequence number — and exactly one read loop owns each
+> connection, so there is no concurrency at the decode layer to reintroduce it.
+>
+> The strict counter is also the **safer failure mode**, which is the argument that
+> survives even if the measurement is someday wrong. If a strict counter is wrong, the
+> session breaks loudly: a legitimate frame is refused and the client notices immediately.
+> If a window is wrong, it accepts a frame it should have refused, and that is a silent
+> replay. Given a choice between a mechanism that fails loudly and one that fails silently,
+> in a layer whose entire job is to refuse things, take the loud one.
+>
+> **Three conditions attach**, because the guarantee is inherited rather than owned:
+>
+> 1. **The ordering assumption must be asserted, not assumed.** `ITransportConnection`
+>    already documents "reliable, ordered byte stream"; the crypto layer must refuse to
+>    operate on a transport that does not declare it, so adding an unordered transport
+>    (QUIC datagrams, a raw-UDP fast path) fails closed instead of silently reusing nonces.
+> 2. **Rejections must be counted, not merely performed.** A counter that silently drops
+>    out-of-order frames turns a transport regression into an unexplained disconnect. The
+>    `frame_order_*` fields on `/status` exist for this and read zero today.
+> 3. **The stated rule is incomplete on the forward side.** "Reject nonce ≤ highest seen"
+>    says nothing about a *large forward jump*, which burns nonce space and forces an early
+>    rekey. The exposure is limited — a forged frame cannot advance the counter because it
+>    will not authenticate, so only the genuine peer can do this, and only to itself — but
+>    the rule should still bound the forward gap it accepts rather than leave it unstated.
+>
+> The KCP ordering guarantee this rests on is, on the C# side, **a hand-port rather than a
+> library**: roughly ten lines in `Kcp.MoveRcvBufToQueue`. That is correct today and is
+> covered by the measurement above, but it is a local invariant, not a third-party one,
+> which is precisely why conditions 1 and 2 are not optional.
+
