@@ -97,13 +97,56 @@ services:
       # SQL instead (backend/nakama/docs/RUNBOOK.md, "Migrate a
       # non-authoritative kills_alltime leaderboard", path A).
       LEADERBOARD_MIGRATE: recreate
+      # ---------------------------------------------------------------------
+      # Meta-hop TLS (ADR-24) — OFF, and pinned explicitly.
+      # ---------------------------------------------------------------------
+      # In-CONTAINER paths to a PEM pair. Both empty = plaintext, the default.
+      # When set, Nakama terminates TLS itself on :7350.
+      #
+      # MEASURED SCOPE, because the flag's name is narrower than "Nakama has
+      # TLS": it covers the SOCKET listener :7350 only — including the /ws
+      # realtime socket, TLS-only, plaintext refused — and does NOT cover the
+      # console :7351 or metrics :9100, both of which are published below on
+      # 0.0.0.0 and stay in the clear.
+      #
+      # Nakama itself warns that direct SSL termination is not recommended and
+      # prefers a proxy. We take it anyway on a single-node box, where a
+      # terminator and Nakama are the same host so a proxy would report itself
+      # encrypted while buying nothing (ADR-23's argument, unchanged). The
+      # moment a real edge exists, front Nakama and turn this off.
+      #
+      # Mount the PEMs in via the volumes block below. Note a bind mount from a
+      # /tmp WSL path silently creates an empty DIRECTORY at the mount point
+      # ("is a directory" at startup) — put certs on a Windows-visible path or
+      # use a named volume.
+      NAKAMA_TLS_CERT: ${NAKAMA_TLS_CERT:-}
+      NAKAMA_TLS_KEY: ${NAKAMA_TLS_KEY:-}
     entrypoint:
       - /bin/sh
       - -ec
       - |
         /nakama/nakama migrate up \
           --database.address "${POSTGRES_USER:-nakama}:${POSTGRES_PASSWORD:-localdev}@postgres:5432/${POSTGRES_DB:-nakama}"
-        exec /nakama/nakama \
+        # Meta-hop TLS (ADR-24). Built here rather than interpolated by compose
+        # because compose has no conditionals and an EMPTY --socket.ssl_certificate
+        # is not the same as an ABSENT one: Nakama reads the empty path, fails to
+        # load it and exits. Half-configured is refused rather than falling back to
+        # plaintext, matching the gateway pair and the CD gate.
+        #
+        # Built with `set --` rather than a string, because an unquoted string
+        # word-splits and a certificate path may legitimately contain a space —
+        # the same distinction that made cd.yml trim these at the ends only.
+        set --
+        if [ -n "$${NAKAMA_TLS_CERT}" ] || [ -n "$${NAKAMA_TLS_KEY}" ]; then
+          if [ -z "$${NAKAMA_TLS_CERT}" ] || [ -z "$${NAKAMA_TLS_KEY}" ]; then
+            echo "NAKAMA_TLS_CERT and NAKAMA_TLS_KEY must be set together or not at all" >&2
+            exit 1
+          fi
+          set -- --socket.ssl_certificate "$${NAKAMA_TLS_CERT}" \
+                 --socket.ssl_private_key "$${NAKAMA_TLS_KEY}"
+          echo "nakama: TLS ON for :7350 (console :7351 and metrics :9100 stay PLAINTEXT — ADR-24)"
+        fi
+        exec /nakama/nakama "$$@" \
           --name rpg-nakama-local \
           --database.address "${POSTGRES_USER:-nakama}:${POSTGRES_PASSWORD:-localdev}@postgres:5432/${POSTGRES_DB:-nakama}" \
           --logger.level DEBUG \
@@ -381,7 +424,12 @@ services:
       # NOTE: the default below is hostless, so it is only right for host mode.
       # Set GAMESERVER_PUBLIC_ADDR explicitly whenever ports are published.
       GAMESERVER_PUBLIC_ADDR: ${GAMESERVER_PUBLIC_ADDR:-:${GAMESERVER_CONTAINER_PORT:-9200}}
-      NAKAMA_URL: http://nakama:7350
+      # Follows the meta-hop TLS decision (ADR-24) rather than being configured
+      # independently. The C# game server is a SECOND consumer of this hop --
+      # NakamaClient.cs POSTs /v2/rpc/reward_kills?http_key=... -- so if Nakama
+      # moves to TLS and this stays http://, the reward path breaks silently.
+      # Two sources of truth for one hop is exactly how that happens.
+      NAKAMA_URL: ${NAKAMA_URL:-http://nakama:7350}
       NAKAMA_HTTP_KEY: ${NAKAMA_HTTP_KEY:-defaulthttpkey}
       GAME_DB_URL: postgres://${POSTGRES_GAME_USER:-game}:${POSTGRES_GAME_PASSWORD:-localdev}@postgres-game:5432/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable
     ports:

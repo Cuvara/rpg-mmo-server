@@ -491,12 +491,43 @@ inventing a cipher.
    `Cuvara/Netcode`:** TLS on the gateway connection, verified in an IL2CPP *player* build
    with certificate validation ON; and `https://` for the Nakama base URL.
 
-7. **THE BLOCKING ITEM IS NOW THE META HOP, not the gateway hop.** It carries a two-hour
-   reusable Nakama session token and the auth token itself, in the clear, in every
-   environment. It is an ops change — Nakama's own `--socket.ssl_certificate`, or a
-   terminator in front of it — and it is worth more than the gateway half. Turning the
-   gateway flag on while this is plaintext buys materially less than it appears to, which
-   is why the gateway's boot posture line says so out loud.
+7. **The meta hop is settled by [ADR-24](ARCHITECTURE-DECISIONS.md#adr-24--the-meta-hop-gets-nakamas-own-tls-but-the-credential-worth-stealing-there-is-a-default-valued-static-key-not-a-token)
+   (2026-09-10) — and the confidentiality half turned out not to be the important half.**
+
+   **Nakama terminates TLS itself**, behind `NAKAMA_TLS_CERT`/`NAKAMA_TLS_KEY`, defaulting
+   off and pinned at every deploy path, with `NAKAMA_URL` following the same decision
+   because the **C# game server is a second consumer of this hop**
+   (`GameServer/Nakama/NakamaClient.cs`). Measured coverage: `:7350` **including the `/ws`
+   realtime socket**, TLS-only; the console `:7351` and metrics `:9100` are **not covered**
+   and publish on `0.0.0.0` in compose.
+
+   **The larger finding is an authentication bypass, not an eavesdrop.** Both Nakama static
+   keys were at their published defaults and both authenticate — `defaulthttpkey` reaches
+   the handler for the **server-only** `reward_kill` / `submit_kill` RPCs — and `cd.yml`
+   **never wrote `NAKAMA_HTTP_KEY` at all**, so every deployed compose environment ran the
+   default. Encrypting this hop while that was true would have closed the window and left
+   the door unlocked, in a way that reads as "secure" in every log. CD now fails the deploy
+   on a missing or default key.
+
+   Two exposures TLS does **not** close, recorded rather than discovered later:
+
+   - **The realtime WebSocket puts the session token in the QUERY STRING**, and
+     `runtime.http_key` likewise. Both are upstream Nakama API shapes we cannot change
+     without forking or proxying it. TLS protects the wire; it does not protect the access
+     log.
+   - **Session refresh re-issues both tokens over the same hop**, so the exposure repeats
+     for the life of the client rather than being a login-time window.
+
+   Still open on this hop, in priority order: the console and metrics ports (plaintext, and
+   published on `0.0.0.0` in compose); the Nakama->Postgres DSN, which specifies no
+   `sslmode` in either deployment; and the compose/k8s asymmetry that makes the reward path
+   inert under Agones.
+
+   **A caution for the next tap on an HTTP hop, learned twice now.** The first meta capture
+   missed a gzipped token and would have reported the hop clean. The second under-reported
+   the distinct-JWT count because Nakama's `exp` has second granularity, so a refresh in the
+   same second returns a **byte-identical** token — a 2 s sleep produced the predicted five.
+   Both were caught only because a number was written down before it was measured.
 
 8. Only then revisit Option D, against whatever the hosting shape has become.
 

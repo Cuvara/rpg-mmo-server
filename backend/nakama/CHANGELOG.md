@@ -6,6 +6,22 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+
+- **`NAKAMA_HTTP_KEY` must now be set and non-default for any deployed environment** (ADR-24). It
+  authenticates `reward_kill`, `reward_kills` and `submit_kill` — the server-only RPCs
+  `economy/caller.go:requireServerCaller` guards — and it was running at Nakama's published default
+  everywhere, because CD never wrote the variable. See `backend/deploy/CHANGELOG.md` for the
+  measurement and the gate.
+
+### Documentation
+
+- **`backend/TEAM.md`'s "Nakama <-> GameServer: Internal RPC (signed) for reward granting" was
+  backwards on both counts and is corrected.** The plugin makes **no outbound network calls at
+  all**; the **C# game server calls Nakama** (`GameServer/Nakama/NakamaClient.cs`). And the call is
+  **not signed** — it authenticates with `runtime.http_key` in the **query string**, which is a
+  static bearer secret in a URL, so it lands in access logs even once the hop is TLS.
+
+### Security
 - **Economy mutation RPCs are server-only** (audit 2026-09-07 F01, P0). `reward_kill`,
   `reward_kills` and `submit_kill` take the beneficiary `user_id` from the payload, and
   Nakama exposes every registered RPC to authenticated clients as well as to

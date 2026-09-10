@@ -46,7 +46,14 @@ deploy (depends on all above — build artifacts)
 
 ### Communication Channels
 - **Nakama <-> Gateway**: JWT shared secret for local verification (no roundtrip)
-- **Nakama <-> GameServer**: Internal RPC (signed) for reward granting
+- **GameServer -> Nakama**: HTTP RPC for reward granting. **One direction only, and it is not
+  signed** — the previous wording here ("Nakama <-> GameServer: Internal RPC (signed)") was
+  backwards on both counts. The Nakama plugin makes **no outbound network calls at all**; the C#
+  game server calls Nakama (`GameServer/Nakama/NakamaClient.cs` -> `POST /v2/rpc/reward_kills`),
+  authenticating with `runtime.http_key` **in the query string** — a static, never-expiring bearer
+  secret in a URL, so it survives into access logs even once the hop is TLS (ADR-24). Present in
+  compose only: no `NAKAMA_URL` is set in `k8s/app/50-fleet-map.yaml`, so under Agones this call
+  does not happen and the reward path is silently inert
 - **Gateway (Go) <-> GameServer (C# .NET 10)**: no runtime connection. The gateway never talks to a game server; it issues a join token and the *client* dials the server directly (ADR-3). Both speak the same wire protocol (4-byte BE length prefix + Protobuf, legacy JSON still accepted — ADR-9), joined by an HS256 join token whose `sid` names the target server
 - **Gateway <-> Redis**: Session store (TTL), server registry, event-stream consumer
 - **GameServer <-> Redis**: ✅ **implemented** — `GameServer/Registry/RedisServerRegistry.cs` (self-registration + 5s heartbeat against 15s TTL), `GameServer/Events/RedisEventStream.cs` (event publishing via StackExchange.Redis), `GameServer/Events/RedisKickConsumer.cs` (duplicate-login kick consumer). Enabled when `REDIS_ADDR` is set; noop fallback otherwise
