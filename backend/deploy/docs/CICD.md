@@ -764,6 +764,37 @@ Two deliberate choices:
   That is correct fail-fast behaviour for a deploy, but it must never be what
   stands between a PR and a merge. PR gating is GitHub-hosted only.
 
+#### "no checks reported" has FOUR causes, and they look identical
+
+The bug above was fixed, and the symptom was not retired with it. `gh pr checks
+<n>` answering **`no checks reported on the ... branch`** is not one condition —
+it is the shared symptom of at least four, every one of which reads as *nothing
+is wrong*. All four were hit on a single day (2026-09-10), three of them on one
+PR, and two of them *while fixing another one of them*.
+
+| # | Cause | Tell | Fix |
+|---|---|---|---|
+| 1 | **The PR is `CONFLICTING`.** GitHub cannot compute a merge commit, so it runs nothing | `gh pr view <n> --json mergeStateStatus` → `CONFLICTING` (not `BLOCKED`) | rebase; CI starts on push |
+| 2 | **The base is not a listed branch.** A *stacked* PR — base is another feature branch — matches no `pull_request: branches:` entry | `gh pr view <n> --json baseRefName` is not one of `main`/`master`/`develop`/`staging` | merge the parent, then retarget — **and see 3** |
+| 3 | **The base was changed after opening.** Retargeting fires `pull_request: edited`, which is not in the default activity types, so **fixing cause 2 does not start CI** | base is correct, checks still empty, no new run appears | `gh workflow run <workflow> --ref <branch>` on **both** workflows, or push any commit |
+| 4 | **A `paths:` filter excluded the PR.** The original bug's shape | the workflow has a `paths:` filter on `pull_request` | none here by design — see the bullet above |
+
+Two rules follow, and they are the point of this table:
+
+- **Never read an empty check list as green.** "No checks" and "all checks
+  passed" are rendered almost identically and mean opposite things. Confirm with
+  `gh pr checks <n>` showing an actual count, not with the absence of red.
+- **Verify the fix started a run, not merely that the cause is gone.** Cause 3
+  exists entirely because someone fixed cause 2 and assumed CI would follow. The
+  check is `gh run list --branch <branch>`, and a new run must appear.
+
+`gh pr edit` is also a silent no-op on this repo — it fails on a deprecated
+GraphQL `projectCards` field. Use the REST API instead:
+
+```bash
+gh api -X PATCH repos/<owner>/<repo>/pulls/<n> -f base=develop
+```
+
 #### `Publish AOT` verifies its prerequisites, it does not install them
 
 The `Publish AOT` job in `ci-dotnet.yml` needs `clang` and the zlib development

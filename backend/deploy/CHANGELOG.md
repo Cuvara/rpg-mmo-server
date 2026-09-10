@@ -5,6 +5,23 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+
+- **`docs/CICD.md` § 6b: "no checks reported" has four causes, not one.** The 2026-08-06
+  entry fixed one of them (`ci.yml` not listing `develop` under `pull_request`) and the
+  symptom outlived the fix. All four were hit on 2026-09-10, three of them on a single PR,
+  and **two of them while fixing another one of them**:
+  1. the PR is `CONFLICTING`, so GitHub cannot compute a merge commit and runs nothing;
+  2. the base is a feature branch (a stacked PR), matching no `pull_request: branches:` entry;
+  3. the base was changed *after* opening — retargeting fires `pull_request: edited`, which
+     is not in the default activity types, so **fixing cause 2 does not start CI**;
+  4. a `paths:` filter excluded the PR — the original bug's shape.
+  Each reads as "nothing is wrong". The section carries a diagnostic table, the two rules
+  that follow from it (never read an empty check list as green; verify the fix *started a
+  run* rather than that the cause is gone), and the `gh workflow run --ref` recovery.
+- Also recorded there: `gh pr edit` is a silent no-op on this repo (deprecated GraphQL
+  `projectCards` field), so a base change needs the REST API.
+
 ### Changed
 
 - **Every deploy path pins `GAMESERVER_SEALED=off`, not just compose.** The game server
