@@ -22,6 +22,39 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   can, as of the smoke test's `-encoding` flag, and `stack.sh check` derives both halves.
   Replaced with `send-budget`'s wording from #300, adapted to the derivation that shipped.
 
+### Added
+
+- **`GAMESERVER_SEALED` now drives the deploy verifier too**, so setting it on an
+  environment is a working switch instead of a red deploy. It stays the single input; the
+  two variables the smoke test needs are derived from it in the two places that reach the
+  two invocation sites:
+  - **`cd.yml`'s `deploy/.env` generator** writes `SMOKE_SEALED` **and** `SMOKE_ENCODING`
+    together, on **both** branches. `SMOKE_ENCODING=json` is already the default and changes
+    nothing today; writing it anyway makes the pairing visible at the line, so a future
+    reader editing one sees the other beside it.
+  - **`checks_flow.sh`** gains `VERIFY_SEALED`, because the k8s path does **not** source
+    `deploy/.env` — that file describes the compose stack, which k8s mode did not deploy.
+    This was the caveat raised when a single source of truth was first proposed, and it is
+    now closed rather than carried.
+  - **Both are needed, never one.** A sealed run is necessarily a protobuf run: the JSON
+    codec has no sealed frame, so a `require` server refuses a JSON client at the join with
+    `encoding_cannot_seal`. Deriving `SMOKE_SEALED` alone reproduces that failure exactly.
+- **`flow.smoke` now names the hop mode in its pass, warn and fail lines.** A green line
+  that does not say whether it verified a sealed or a plaintext hop cannot tell you what was
+  covered — the same reason `db_mode` is already reported there.
+
+### Changed
+
+- **Replaced the comment at the `GAMESERVER_SEALED` line that said `SMOKE_SEALED` must NOT
+  be derived.** It was true when the smoke test could not seal in any configuration, and it
+  sat exactly where someone would look before adding these lines — a stale warning in the
+  one position where it would stop the correct change. Its replacement states the live
+  constraint instead: the two variables move together, and turning sealing on for an
+  environment is still a separate, deliberate act carrying a client rollout with it.
+
+> **This turns nothing on.** Every deploy path still pins `GAMESERVER_SEALED=off` and both
+> verify targets still default `VERIFY_SEALED=0`.
+
 ### Documentation
 
 - **`docs/CICD.md` § 6b: "no checks reported" has four causes, not one.** The 2026-08-06
