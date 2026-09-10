@@ -52,24 +52,28 @@ namespace RpgMmo.Wire.V1 {
             "Eg0KBWVycm9yGAIgASgJIiAKC1BpbmdNZXNzYWdlEhEKCXRpbWVzdGFtcBgB",
             "IAEoAyI1CgtQb25nTWVzc2FnZRIRCgl0aW1lc3RhbXAYASABKAMSEwoLc2Vy",
             "dmVyX3RpbWUYAiABKAMiHQoLS2lja01lc3NhZ2USDgoGcmVhc29uGAEgASgJ",
-            "KosDCgdNc2dUeXBlEhgKFE1TR19UWVBFX1VOU1BFQ0lGSUVEEAASEQoNTVNH",
-            "X1RZUEVfQVVUSBABEhYKEk1TR19UWVBFX0FVVEhfUkVTUBACEhgKFE1TR19U",
-            "WVBFX0VOVEVSX1dPUkxEEAMSHQoZTVNHX1RZUEVfRU5URVJfV09STERfUkVT",
-            "UBAEEhcKE01TR19UWVBFX0pPSU5fVE9LRU4QBRIcChhNU0dfVFlQRV9KT0lO",
-            "X1RPS0VOX1JFU1AQBhISCg5NU0dfVFlQRV9JTlBVVBAHEhUKEU1TR19UWVBF",
-            "X1NOQVBTSE9UEAgSFwoTTVNHX1RZUEVfRElTQ09OTkVDVBAJEhMKD01TR19U",
-            "WVBFX1JFU1lOQxAKEhkKFU1TR19UWVBFX1RSQU5TRkVSX01BUBANEh4KGk1T",
-            "R19UWVBFX1RSQU5TRkVSX01BUF9SRVNQEA4SEQoNTVNHX1RZUEVfUElORxAL",
-            "EhEKDU1TR19UWVBFX1BPTkcQDBIRCg1NU0dfVFlQRV9LSUNLEA8qnQEKCkVu",
-            "dGl0eVR5cGUSGwoXRU5USVRZX1RZUEVfVU5TUEVDSUZJRUQQABIWChJFTlRJ",
-            "VFlfVFlQRV9QTEFZRVIQARITCg9FTlRJVFlfVFlQRV9NT0IQAhITCg9FTlRJ",
-            "VFlfVFlQRV9OUEMQAxIUChBFTlRJVFlfVFlQRV9JVEVNEAQSGgoWRU5USVRZ",
-            "X1RZUEVfUFJPSkVDVElMRRAFKpQBCgxFbnRpdHlBY3Rpb24SHQoZRU5USVRZ",
-            "X0FDVElPTl9VTlNQRUNJRklFRBAAEhYKEkVOVElUWV9BQ1RJT05fSURMRRAB",
-            "EhgKFEVOVElUWV9BQ1RJT05fTU9WSU5HEAISGwoXRU5USVRZX0FDVElPTl9B",
-            "VFRBQ0tJTkcQAxIWChJFTlRJVFlfQUNUSU9OX0RFQUQQBEJGWjNnaXRodWIu",
-            "Y29tL2R1eWN1b25nL3JwZy1tbW8vc2hhcmVkL3Byb3RvL2dlbjt3aXJlcGKq",
-            "Ag5ScGdNbW8uV2lyZS5WMWIGcHJvdG8z"));
+            "IicKEVNlYWxlZENsaWVudEhlbGxvEhIKCnB1YmxpY19rZXkYASABKAwiRwoR",
+            "U2VhbGVkU2VydmVySGVsbG8SEgoKcHVibGljX2tleRgBIAEoDBIPCgdiaW5k",
+            "aW5nGAIgASgMEg0KBWVycm9yGAMgASgJKs8DCgdNc2dUeXBlEhgKFE1TR19U",
+            "WVBFX1VOU1BFQ0lGSUVEEAASEQoNTVNHX1RZUEVfQVVUSBABEhYKEk1TR19U",
+            "WVBFX0FVVEhfUkVTUBACEhgKFE1TR19UWVBFX0VOVEVSX1dPUkxEEAMSHQoZ",
+            "TVNHX1RZUEVfRU5URVJfV09STERfUkVTUBAEEhcKE01TR19UWVBFX0pPSU5f",
+            "VE9LRU4QBRIcChhNU0dfVFlQRV9KT0lOX1RPS0VOX1JFU1AQBhISCg5NU0df",
+            "VFlQRV9JTlBVVBAHEhUKEU1TR19UWVBFX1NOQVBTSE9UEAgSFwoTTVNHX1RZ",
+            "UEVfRElTQ09OTkVDVBAJEhMKD01TR19UWVBFX1JFU1lOQxAKEhkKFU1TR19U",
+            "WVBFX1RSQU5TRkVSX01BUBANEh4KGk1TR19UWVBFX1RSQU5TRkVSX01BUF9S",
+            "RVNQEA4SEQoNTVNHX1RZUEVfUElORxALEhEKDU1TR19UWVBFX1BPTkcQDBIR",
+            "Cg1NU0dfVFlQRV9LSUNLEA8SIAocTVNHX1RZUEVfU0VBTEVEX0NMSUVOVF9I",
+            "RUxMTxAQEiAKHE1TR19UWVBFX1NFQUxFRF9TRVJWRVJfSEVMTE8QESqdAQoK",
+            "RW50aXR5VHlwZRIbChdFTlRJVFlfVFlQRV9VTlNQRUNJRklFRBAAEhYKEkVO",
+            "VElUWV9UWVBFX1BMQVlFUhABEhMKD0VOVElUWV9UWVBFX01PQhACEhMKD0VO",
+            "VElUWV9UWVBFX05QQxADEhQKEEVOVElUWV9UWVBFX0lURU0QBBIaChZFTlRJ",
+            "VFlfVFlQRV9QUk9KRUNUSUxFEAUqlAEKDEVudGl0eUFjdGlvbhIdChlFTlRJ",
+            "VFlfQUNUSU9OX1VOU1BFQ0lGSUVEEAASFgoSRU5USVRZX0FDVElPTl9JRExF",
+            "EAESGAoURU5USVRZX0FDVElPTl9NT1ZJTkcQAhIbChdFTlRJVFlfQUNUSU9O",
+            "X0FUVEFDS0lORxADEhYKEkVOVElUWV9BQ1RJT05fREVBRBAEQkZaM2dpdGh1",
+            "Yi5jb20vZHV5Y3VvbmcvcnBnLW1tby9zaGFyZWQvcHJvdG8vZ2VuO3dpcmVw",
+            "YqoCDlJwZ01tby5XaXJlLlYxYgZwcm90bzM="));
       descriptor = pbr::FileDescriptor.FromGeneratedCode(descriptorData,
           new pbr::FileDescriptor[] { },
           new pbr::GeneratedClrTypeInfo(new[] {typeof(global::RpgMmo.Wire.V1.MsgType), typeof(global::RpgMmo.Wire.V1.EntityType), typeof(global::RpgMmo.Wire.V1.EntityAction), }, null, new pbr::GeneratedClrTypeInfo[] {
@@ -89,7 +93,9 @@ namespace RpgMmo.Wire.V1 {
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.TransferMapResponse), global::RpgMmo.Wire.V1.TransferMapResponse.Parser, new[]{ "Ok", "Error" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.PingMessage), global::RpgMmo.Wire.V1.PingMessage.Parser, new[]{ "Timestamp" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.PongMessage), global::RpgMmo.Wire.V1.PongMessage.Parser, new[]{ "Timestamp", "ServerTime" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.KickMessage), global::RpgMmo.Wire.V1.KickMessage.Parser, new[]{ "Reason" }, null, null, null, null)
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.KickMessage), global::RpgMmo.Wire.V1.KickMessage.Parser, new[]{ "Reason" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.SealedClientHello), global::RpgMmo.Wire.V1.SealedClientHello.Parser, new[]{ "PublicKey" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.SealedServerHello), global::RpgMmo.Wire.V1.SealedServerHello.Parser, new[]{ "PublicKey", "Binding", "Error" }, null, null, null, null)
           }));
     }
     #endregion
@@ -166,6 +172,23 @@ namespace RpgMmo.Wire.V1 {
     /// 13 and 14 are reserved for MsgTransferMap/Resp.
     /// </summary>
     [pbr::OriginalName("MSG_TYPE_KICK")] Kick = 15,
+    /// <summary>
+    /// Sealed-session handshake on the GAMEPLAY hop only. See
+    /// backend/docs/SEALED-FRAMING.md.
+    ///
+    /// 16 and 17 rather than the next free small numbers for a reason worth
+    /// stating: both stay inside the one-byte varint range (&lt;= 127), so the
+    /// envelope tag cost does not change, and leaving 18-31 clear keeps a
+    /// contiguous block for the gateway hop's own handshake when ADR-22 settles
+    /// it. Recycling a number is how two versions silently disagree about what a
+    /// byte means, which is why field 5 of EnterWorldResponse is reserved rather
+    /// than reused.
+    /// </summary>
+    [pbr::OriginalName("MSG_TYPE_SEALED_CLIENT_HELLO")] SealedClientHello = 16,
+    /// <summary>
+    /// gameserver -> client
+    /// </summary>
+    [pbr::OriginalName("MSG_TYPE_SEALED_SERVER_HELLO")] SealedServerHello = 17,
   }
 
   /// <summary>
@@ -4967,6 +4990,521 @@ namespace RpgMmo.Wire.V1 {
             break;
           case 10: {
             Reason = input.ReadString();
+            break;
+          }
+        }
+      }
+    }
+    #endif
+
+  }
+
+  /// <summary>
+  /// SealedClientHello opens the sealed-session handshake.
+  /// </summary>
+  [global::System.Diagnostics.DebuggerDisplayAttribute("{ToString(),nq}")]
+  public sealed partial class SealedClientHello : pb::IMessage<SealedClientHello>
+  #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      , pb::IBufferMessage
+  #endif
+  {
+    private static readonly pb::MessageParser<SealedClientHello> _parser = new pb::MessageParser<SealedClientHello>(() => new SealedClientHello());
+    private pb::UnknownFieldSet _unknownFields;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public static pb::MessageParser<SealedClientHello> Parser { get { return _parser; } }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public static pbr::MessageDescriptor Descriptor {
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[17]; }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    pbr::MessageDescriptor pb::IMessage.Descriptor {
+      get { return Descriptor; }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public SealedClientHello() {
+      OnConstruction();
+    }
+
+    partial void OnConstruction();
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public SealedClientHello(SealedClientHello other) : this() {
+      publicKey_ = other.publicKey_;
+      _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public SealedClientHello Clone() {
+      return new SealedClientHello(this);
+    }
+
+    /// <summary>Field number for the "public_key" field.</summary>
+    public const int PublicKeyFieldNumber = 1;
+    private pb::ByteString publicKey_ = pb::ByteString.Empty;
+    /// <summary>
+    /// Ephemeral X25519 public key, 32 bytes.
+    ///
+    /// EPHEMERAL PER CONNECTION. Reusing one across sessions forfeits the forward
+    /// secrecy that is the entire reason ADR-22 supersedes the earlier
+    /// derived-key scheme: with a fresh pair per connection, a long-lived secret
+    /// obtained later cannot decrypt traffic recorded earlier.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public pb::ByteString PublicKey {
+      get { return publicKey_; }
+      set {
+        publicKey_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override bool Equals(object other) {
+      return Equals(other as SealedClientHello);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public bool Equals(SealedClientHello other) {
+      if (ReferenceEquals(other, null)) {
+        return false;
+      }
+      if (ReferenceEquals(other, this)) {
+        return true;
+      }
+      if (PublicKey != other.PublicKey) return false;
+      return Equals(_unknownFields, other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override int GetHashCode() {
+      int hash = 1;
+      if (PublicKey.Length != 0) hash ^= PublicKey.GetHashCode();
+      if (_unknownFields != null) {
+        hash ^= _unknownFields.GetHashCode();
+      }
+      return hash;
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override string ToString() {
+      return pb::JsonFormatter.ToDiagnosticString(this);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void WriteTo(pb::CodedOutputStream output) {
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      output.WriteRawMessage(this);
+    #else
+      if (PublicKey.Length != 0) {
+        output.WriteRawTag(10);
+        output.WriteBytes(PublicKey);
+      }
+      if (_unknownFields != null) {
+        _unknownFields.WriteTo(output);
+      }
+    #endif
+    }
+
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    void pb::IBufferMessage.InternalWriteTo(ref pb::WriteContext output) {
+      if (PublicKey.Length != 0) {
+        output.WriteRawTag(10);
+        output.WriteBytes(PublicKey);
+      }
+      if (_unknownFields != null) {
+        _unknownFields.WriteTo(ref output);
+      }
+    }
+    #endif
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public int CalculateSize() {
+      int size = 0;
+      if (PublicKey.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeBytesSize(PublicKey);
+      }
+      if (_unknownFields != null) {
+        size += _unknownFields.CalculateSize();
+      }
+      return size;
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void MergeFrom(SealedClientHello other) {
+      if (other == null) {
+        return;
+      }
+      if (other.PublicKey.Length != 0) {
+        PublicKey = other.PublicKey;
+      }
+      _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void MergeFrom(pb::CodedInputStream input) {
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      input.ReadRawMessage(this);
+    #else
+      uint tag;
+      while ((tag = input.ReadTag()) != 0) {
+      if ((tag & 7) == 4) {
+        // Abort on any end group tag.
+        return;
+      }
+      switch(tag) {
+          default:
+            _unknownFields = pb::UnknownFieldSet.MergeFieldFrom(_unknownFields, input);
+            break;
+          case 10: {
+            PublicKey = input.ReadBytes();
+            break;
+          }
+        }
+      }
+    #endif
+    }
+
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    void pb::IBufferMessage.InternalMergeFrom(ref pb::ParseContext input) {
+      uint tag;
+      while ((tag = input.ReadTag()) != 0) {
+      if ((tag & 7) == 4) {
+        // Abort on any end group tag.
+        return;
+      }
+      switch(tag) {
+          default:
+            _unknownFields = pb::UnknownFieldSet.MergeFieldFrom(_unknownFields, ref input);
+            break;
+          case 10: {
+            PublicKey = input.ReadBytes();
+            break;
+          }
+        }
+      }
+    }
+    #endif
+
+  }
+
+  /// <summary>
+  /// SealedServerHello answers it and proves the server holds the session's
+  /// join-token-derived material.
+  /// </summary>
+  [global::System.Diagnostics.DebuggerDisplayAttribute("{ToString(),nq}")]
+  public sealed partial class SealedServerHello : pb::IMessage<SealedServerHello>
+  #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      , pb::IBufferMessage
+  #endif
+  {
+    private static readonly pb::MessageParser<SealedServerHello> _parser = new pb::MessageParser<SealedServerHello>(() => new SealedServerHello());
+    private pb::UnknownFieldSet _unknownFields;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public static pb::MessageParser<SealedServerHello> Parser { get { return _parser; } }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public static pbr::MessageDescriptor Descriptor {
+      get { return global::RpgMmo.Wire.V1.WireReflection.Descriptor.MessageTypes[18]; }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    pbr::MessageDescriptor pb::IMessage.Descriptor {
+      get { return Descriptor; }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public SealedServerHello() {
+      OnConstruction();
+    }
+
+    partial void OnConstruction();
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public SealedServerHello(SealedServerHello other) : this() {
+      publicKey_ = other.publicKey_;
+      binding_ = other.binding_;
+      error_ = other.error_;
+      _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public SealedServerHello Clone() {
+      return new SealedServerHello(this);
+    }
+
+    /// <summary>Field number for the "public_key" field.</summary>
+    public const int PublicKeyFieldNumber = 1;
+    private pb::ByteString publicKey_ = pb::ByteString.Empty;
+    /// <summary>
+    /// Ephemeral X25519 public key, 32 bytes. Ephemeral per connection, as above.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public pb::ByteString PublicKey {
+      get { return publicKey_; }
+      set {
+        publicKey_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
+    /// <summary>Field number for the "binding" field.</summary>
+    public const int BindingFieldNumber = 2;
+    private pb::ByteString binding_ = pb::ByteString.Empty;
+    /// <summary>
+    /// HMAC-SHA256 over the handshake transcript, 32 bytes:
+    ///
+    ///   "cuvara/sealed-handshake/v1" || 0x00 || jti || 0x00
+    ///     || client_public (32) || server_public (32)
+    ///
+    /// BOTH EPHEMERAL PUBLIC KEYS ARE IN THE TRANSCRIPT, and that is what stops a
+    /// man in the middle: an attacker who substitutes its own key changes the
+    /// transcript, so the binding it read off the wire no longer verifies. Without
+    /// them, a replayed binding would authenticate the attacker's exchange as
+    /// readily as the real one and the MITM would be clean and undetectable.
+    ///
+    /// The NUL separators are load-bearing too. Without them the transcript is a
+    /// concatenation whose pieces can be re-split, so a jti ending in one byte of
+    /// the next field yields the same bytes as a different (jti, key) pair and a
+    /// MAC over it authenticates both readings equally.
+    ///
+    /// A receiver MUST compare this in constant time. A byte-by-byte comparison
+    /// leaks the position of the first mismatch, which is enough to forge a tag one
+    /// byte at a time against a peer that keeps answering — and this peer answers
+    /// every handshake attempt.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public pb::ByteString Binding {
+      get { return binding_; }
+      set {
+        binding_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
+    /// <summary>Field number for the "error" field.</summary>
+    public const int ErrorFieldNumber = 3;
+    private string error_ = "";
+    /// <summary>
+    /// Set when the server refuses the handshake. The client MUST NOT retry
+    /// without encryption: there is no cleartext fallback by design, because a
+    /// protocol that can be talked down to cleartext will be.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public string Error {
+      get { return error_; }
+      set {
+        error_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override bool Equals(object other) {
+      return Equals(other as SealedServerHello);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public bool Equals(SealedServerHello other) {
+      if (ReferenceEquals(other, null)) {
+        return false;
+      }
+      if (ReferenceEquals(other, this)) {
+        return true;
+      }
+      if (PublicKey != other.PublicKey) return false;
+      if (Binding != other.Binding) return false;
+      if (Error != other.Error) return false;
+      return Equals(_unknownFields, other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override int GetHashCode() {
+      int hash = 1;
+      if (PublicKey.Length != 0) hash ^= PublicKey.GetHashCode();
+      if (Binding.Length != 0) hash ^= Binding.GetHashCode();
+      if (Error.Length != 0) hash ^= Error.GetHashCode();
+      if (_unknownFields != null) {
+        hash ^= _unknownFields.GetHashCode();
+      }
+      return hash;
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public override string ToString() {
+      return pb::JsonFormatter.ToDiagnosticString(this);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void WriteTo(pb::CodedOutputStream output) {
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      output.WriteRawMessage(this);
+    #else
+      if (PublicKey.Length != 0) {
+        output.WriteRawTag(10);
+        output.WriteBytes(PublicKey);
+      }
+      if (Binding.Length != 0) {
+        output.WriteRawTag(18);
+        output.WriteBytes(Binding);
+      }
+      if (Error.Length != 0) {
+        output.WriteRawTag(26);
+        output.WriteString(Error);
+      }
+      if (_unknownFields != null) {
+        _unknownFields.WriteTo(output);
+      }
+    #endif
+    }
+
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    void pb::IBufferMessage.InternalWriteTo(ref pb::WriteContext output) {
+      if (PublicKey.Length != 0) {
+        output.WriteRawTag(10);
+        output.WriteBytes(PublicKey);
+      }
+      if (Binding.Length != 0) {
+        output.WriteRawTag(18);
+        output.WriteBytes(Binding);
+      }
+      if (Error.Length != 0) {
+        output.WriteRawTag(26);
+        output.WriteString(Error);
+      }
+      if (_unknownFields != null) {
+        _unknownFields.WriteTo(ref output);
+      }
+    }
+    #endif
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public int CalculateSize() {
+      int size = 0;
+      if (PublicKey.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeBytesSize(PublicKey);
+      }
+      if (Binding.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeBytesSize(Binding);
+      }
+      if (Error.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeStringSize(Error);
+      }
+      if (_unknownFields != null) {
+        size += _unknownFields.CalculateSize();
+      }
+      return size;
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void MergeFrom(SealedServerHello other) {
+      if (other == null) {
+        return;
+      }
+      if (other.PublicKey.Length != 0) {
+        PublicKey = other.PublicKey;
+      }
+      if (other.Binding.Length != 0) {
+        Binding = other.Binding;
+      }
+      if (other.Error.Length != 0) {
+        Error = other.Error;
+      }
+      _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
+    }
+
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public void MergeFrom(pb::CodedInputStream input) {
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+      input.ReadRawMessage(this);
+    #else
+      uint tag;
+      while ((tag = input.ReadTag()) != 0) {
+      if ((tag & 7) == 4) {
+        // Abort on any end group tag.
+        return;
+      }
+      switch(tag) {
+          default:
+            _unknownFields = pb::UnknownFieldSet.MergeFieldFrom(_unknownFields, input);
+            break;
+          case 10: {
+            PublicKey = input.ReadBytes();
+            break;
+          }
+          case 18: {
+            Binding = input.ReadBytes();
+            break;
+          }
+          case 26: {
+            Error = input.ReadString();
+            break;
+          }
+        }
+      }
+    #endif
+    }
+
+    #if !GOOGLE_PROTOBUF_REFSTRUCT_COMPATIBILITY_MODE
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    void pb::IBufferMessage.InternalMergeFrom(ref pb::ParseContext input) {
+      uint tag;
+      while ((tag = input.ReadTag()) != 0) {
+      if ((tag & 7) == 4) {
+        // Abort on any end group tag.
+        return;
+      }
+      switch(tag) {
+          default:
+            _unknownFields = pb::UnknownFieldSet.MergeFieldFrom(_unknownFields, ref input);
+            break;
+          case 10: {
+            PublicKey = input.ReadBytes();
+            break;
+          }
+          case 18: {
+            Binding = input.ReadBytes();
+            break;
+          }
+          case 26: {
+            Error = input.ReadString();
             break;
           }
         }

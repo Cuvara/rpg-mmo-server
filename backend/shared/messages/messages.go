@@ -50,7 +50,42 @@ const (
 	MsgPong            MsgType = 12       // either direction (heartbeat reply)
 	// 13 and 14 are reserved for MsgTransferMap/Resp.
 	MsgKick MsgType = 15 // server -> client (forced disconnect with reason)
+
+	// Sealed-session handshake, GAMEPLAY HOP ONLY. See
+	// backend/docs/SEALED-FRAMING.md. Both are sent in the clear, immediately
+	// after MsgJoinToken and before any sealed frame — there is no key yet,
+	// which is what they exist to establish.
+	//
+	// 16/17 stay inside the one-byte varint range, and 18-31 are left clear for
+	// the gateway hop's own handshake once ADR-22 settles it.
+	MsgSealedClientHello MsgType = 16 // client -> gameserver
+	MsgSealedServerHello MsgType = 17 // gameserver -> client
 )
+
+// SealedClientHello opens the sealed-session handshake on the gameplay hop.
+type SealedClientHello struct {
+	// PublicKey is a 32-byte ephemeral X25519 public key, fresh per connection.
+	// Reusing one across sessions forfeits forward secrecy, which is the whole
+	// reason this exchange exists rather than a derived key.
+	PublicKey []byte `json:"public_key,omitempty"`
+}
+
+// SealedServerHello answers it and proves the server holds this session's
+// join-token-derived material.
+type SealedServerHello struct {
+	// PublicKey is a 32-byte ephemeral X25519 public key, fresh per connection.
+	PublicKey []byte `json:"public_key,omitempty"`
+
+	// Binding is HMAC-SHA256 over the handshake transcript. Both ephemeral
+	// public keys are inside it, which is what stops a man in the middle:
+	// substituting a key changes the transcript, so a replayed binding no longer
+	// verifies. Compare it in constant time.
+	Binding []byte `json:"binding,omitempty"`
+
+	// Error is set when the server refuses. A client MUST NOT retry without
+	// encryption — there is no cleartext fallback by design.
+	Error string `json:"error,omitempty"`
+}
 
 // Encoding selects how an Envelope and its payload are serialized.
 //

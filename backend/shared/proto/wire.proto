@@ -43,6 +43,19 @@ enum MsgType {
   MSG_TYPE_PONG = 12;            // either direction (heartbeat reply)
   // 13 and 14 are reserved for MsgTransferMap/Resp.
   MSG_TYPE_KICK = 15;            // server -> client (forced disconnect with reason)
+
+  // Sealed-session handshake on the GAMEPLAY hop only. See
+  // backend/docs/SEALED-FRAMING.md.
+  //
+  // 16 and 17 rather than the next free small numbers for a reason worth
+  // stating: both stay inside the one-byte varint range (<= 127), so the
+  // envelope tag cost does not change, and leaving 18-31 clear keeps a
+  // contiguous block for the gateway hop's own handshake when ADR-22 settles
+  // it. Recycling a number is how two versions silently disagree about what a
+  // byte means, which is why field 5 of EnterWorldResponse is reserved rather
+  // than reused.
+  MSG_TYPE_SEALED_CLIENT_HELLO = 16; // client -> gameserver
+  MSG_TYPE_SEALED_SERVER_HELLO = 17; // gameserver -> client
 }
 
 // Envelope is the top-level wire message.
@@ -495,4 +508,66 @@ message PongMessage {
 // "server_shutdown", "session_expired", "rate_limited").
 message KickMessage {
   string reason = 1;
+}
+
+// --- Sealed-session handshake (gameplay hop) ---
+//
+// Two messages, both sent IN THE CLEAR, immediately after MsgJoinToken and
+// before any sealed frame. There is no key yet, which is what they exist to
+// establish. Normative description: backend/docs/SEALED-FRAMING.md §5.
+//
+// The exchange is X25519, authenticated by a binding that proves possession of
+// material derived from JOIN_TOKEN_SECRET. The join token itself proves nothing
+// here — its claims are base64 and an eavesdropper simply replays what it read
+// — so the binding, not the token, is what defeats a man in the middle.
+//
+// GAMEPLAY HOP ONLY. The gateway hop needs a different anchor (a pinned gateway
+// identity key) because at that point the client holds no join token, and that
+// trust model is still ADR-gated. Do not reuse these two messages there without
+// that decision: the same bytes with a different anchor is precisely how a
+// protocol acquires a downgrade path nobody designed.
+
+// SealedClientHello opens the sealed-session handshake.
+message SealedClientHello {
+  // Ephemeral X25519 public key, 32 bytes.
+  //
+  // EPHEMERAL PER CONNECTION. Reusing one across sessions forfeits the forward
+  // secrecy that is the entire reason ADR-22 supersedes the earlier
+  // derived-key scheme: with a fresh pair per connection, a long-lived secret
+  // obtained later cannot decrypt traffic recorded earlier.
+  bytes public_key = 1;
+}
+
+// SealedServerHello answers it and proves the server holds the session's
+// join-token-derived material.
+message SealedServerHello {
+  // Ephemeral X25519 public key, 32 bytes. Ephemeral per connection, as above.
+  bytes public_key = 1;
+
+  // HMAC-SHA256 over the handshake transcript, 32 bytes:
+  //
+  //   "cuvara/sealed-handshake/v1" || 0x00 || jti || 0x00
+  //     || client_public (32) || server_public (32)
+  //
+  // BOTH EPHEMERAL PUBLIC KEYS ARE IN THE TRANSCRIPT, and that is what stops a
+  // man in the middle: an attacker who substitutes its own key changes the
+  // transcript, so the binding it read off the wire no longer verifies. Without
+  // them, a replayed binding would authenticate the attacker's exchange as
+  // readily as the real one and the MITM would be clean and undetectable.
+  //
+  // The NUL separators are load-bearing too. Without them the transcript is a
+  // concatenation whose pieces can be re-split, so a jti ending in one byte of
+  // the next field yields the same bytes as a different (jti, key) pair and a
+  // MAC over it authenticates both readings equally.
+  //
+  // A receiver MUST compare this in constant time. A byte-by-byte comparison
+  // leaks the position of the first mismatch, which is enough to forge a tag one
+  // byte at a time against a peer that keeps answering — and this peer answers
+  // every handshake attempt.
+  bytes binding = 2;
+
+  // Set when the server refuses the handshake. The client MUST NOT retry
+  // without encryption: there is no cleartext fallback by design, because a
+  // protocol that can be talked down to cleartext will be.
+  string error = 3;
 }

@@ -95,6 +95,16 @@ func marshalProtoPayload(v any) ([]byte, error) {
 	case *PongMessage:
 		m = &wirepb.PongMessage{Timestamp: t.Timestamp, ServerTime: t.ServerTime}
 
+	case SealedClientHello:
+		m = &wirepb.SealedClientHello{PublicKey: t.PublicKey}
+	case *SealedClientHello:
+		m = &wirepb.SealedClientHello{PublicKey: t.PublicKey}
+
+	case SealedServerHello:
+		m = &wirepb.SealedServerHello{PublicKey: t.PublicKey, Binding: t.Binding, Error: t.Error}
+	case *SealedServerHello:
+		m = &wirepb.SealedServerHello{PublicKey: t.PublicKey, Binding: t.Binding, Error: t.Error}
+
 	case KickMessage:
 		m = &wirepb.KickMessage{Reason: t.Reason}
 	case *KickMessage:
@@ -149,6 +159,20 @@ func unmarshalProtoPayload(data []byte, v any) error {
 		}
 		t.ServerAddr, t.JoinToken = pb.ServerAddr, pb.JoinToken
 		t.Transport, t.Error = pb.Transport, pb.Error
+
+	case *SealedClientHello:
+		var pb wirepb.SealedClientHello
+		if err := proto.Unmarshal(data, &pb); err != nil {
+			return wrapUnmarshal(v, err)
+		}
+		t.PublicKey = pb.PublicKey
+
+	case *SealedServerHello:
+		var pb wirepb.SealedServerHello
+		if err := proto.Unmarshal(data, &pb); err != nil {
+			return wrapUnmarshal(v, err)
+		}
+		t.PublicKey, t.Binding, t.Error = pb.PublicKey, pb.Binding, pb.Error
 
 	case *JoinTokenRequest:
 		var pb wirepb.JoinTokenRequest

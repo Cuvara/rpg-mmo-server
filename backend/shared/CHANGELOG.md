@@ -7,6 +7,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`SealedClientHello` / `SealedServerHello` (`MsgType` 16 and 17), gameplay hop only.**
+  Both travel in the clear, immediately after `MsgJoinToken` — there is no key yet, which
+  is what they exist to establish. 16/17 stay inside the one-byte varint range and leave
+  18-31 clear for the gateway hop's own handshake once ADR-22 settles it; recycling a
+  number is how two versions silently disagree about what a byte means.
+  - **Protobuf only.** The handshake is deliberately absent from the JSON message set so
+    key material can never be rendered into a human-readable payload — which is also why a
+    JSON client cannot be sealed and must be refused rather than served in the clear.
+
+### Added
+
 - **`shared/sealed` now carries the real primitives** — ChaCha20-Poly1305 (RFC 8439),
   X25519 (RFC 7748) and HKDF-SHA256 (RFC 5869), all from `golang.org/x/crypto`, which was
   already a dependency. **Nothing here implements a cipher, a MAC or a curve.**

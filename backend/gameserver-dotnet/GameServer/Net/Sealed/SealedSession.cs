@@ -78,11 +78,42 @@ public sealed class SealedSession
     private readonly ISequenceValidator _validator;
     private ulong _sendSequence;
 
-    /// <summary>Build a session around a one-direction AEAD and a replay validator.</summary>
-    public SealedSession(ISealedAead aead, ISequenceValidator validator)
+    /// <summary>Frames refused because the AEAD tag did not verify.</summary>
+    public ulong RejectedNotAuthenticated { get; private set; }
+
+    /// <summary>Authentic frames refused as replays.</summary>
+    public ulong RejectedReplayed { get; private set; }
+
+    /// <summary>Authentic frames refused for leaping past the forward-jump bound.</summary>
+    public ulong RejectedForwardJump { get; private set; }
+
+    /// <summary>Frames refused for not being sealed at all.</summary>
+    public ulong RejectedNotSealed { get; private set; }
+
+    /// <summary>Any rejection at all. Cheap check for the caller's logging path.</summary>
+    public ulong RejectedTotal =>
+        RejectedNotAuthenticated + RejectedReplayed + RejectedForwardJump + RejectedNotSealed;
+
+    /// <summary>
+    /// Build a session around a one-direction AEAD and a replay validator, over a
+    /// transport whose guarantees are stated rather than assumed.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="orderedDelivery"/> is CHECKED. The strict counter this protocol
+    /// uses is correct only over an ordered transport, and that ordering is inherited
+    /// rather than owned — TCP guarantees it, KCP gets it from a hand-ported reassembly
+    /// path. A future transport that forgets to say so is refused here, on day one,
+    /// instead of quietly dropping legitimate frames and presenting as packet loss.
+    /// </remarks>
+    public SealedSession(ISealedAead aead, ISequenceValidator validator, bool orderedDelivery = true)
     {
         ArgumentNullException.ThrowIfNull(aead);
         ArgumentNullException.ThrowIfNull(validator);
+
+        if (validator.RequiresOrderedTransport && !orderedDelivery)
+            throw new ArgumentException(
+                "this validator requires ordered delivery and the transport does not guarantee it",
+                nameof(orderedDelivery));
 
         if (aead.NonceSize != SealedFrame.NonceSize)
             throw new ArgumentException(
@@ -139,9 +170,13 @@ public sealed class SealedSession
 
         if (!SealedFrame.TryReadHeader(body, out ulong sequence, out SealedFrameError headerError))
         {
-            return headerError == SealedFrameError.NotSealed
-                ? SealedOpenResult.NotSealed
-                : SealedOpenResult.Rejected;
+            if (headerError == SealedFrameError.NotSealed)
+            {
+                RejectedNotSealed++;
+                return SealedOpenResult.NotSealed;
+            }
+            RejectedNotAuthenticated++;
+            return SealedOpenResult.Rejected;
         }
 
         ReadOnlySpan<byte> aad = body[..SealedFrame.HeaderSize];
@@ -155,11 +190,21 @@ public sealed class SealedSession
         // STEP 1: authenticate. Nothing below may act on anything the header claimed until
         // this succeeds.
         if (!_aead.TryOpen(nonce, ciphertext, aad, buffer, out int written))
+        {
+            RejectedNotAuthenticated++;
             return SealedOpenResult.Rejected;
+        }
 
         // STEP 2: only now is the sequence a fact rather than a claim.
-        if (!_validator.Accept(sequence))
+        SequenceResult sequenceResult = _validator.Accept(sequence);
+        if (sequenceResult != SequenceResult.Accepted)
+        {
+            // Counted separately, returned identically: the caller's response is the same
+            // and the peer must not learn which rule it hit.
+            if (sequenceResult == SequenceResult.ForwardJump) RejectedForwardJump++;
+            else RejectedReplayed++;
             return SealedOpenResult.Rejected;
+        }
 
         plaintext = written == buffer.Length ? buffer : buffer[..written];
         return SealedOpenResult.Ok;

@@ -115,6 +115,50 @@ public sealed class Connection : IDisposable
     /// </remarks>
     public GameServer.Net.Security.SessionKey SessionKey { get; init; }
 
+    private GameServer.Net.Sealed.SealedSession? _sealedInbound;
+    private GameServer.Net.Sealed.SealedSession? _sealedOutbound;
+
+    /// <summary>True once the sealed handshake has completed on this connection.</summary>
+    internal bool IsSealed => _sealedOutbound is not null;
+
+    /// <summary>
+    /// Install the two one-direction sealed sessions produced by the handshake.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Called exactly once, between the join reply and the start of the read/write loops,
+    /// so no frame is ever written half-sealed. Two sessions, not one: each direction has
+    /// its own key, which is what makes the counter nonce safe (see
+    /// <see cref="GameServer.Net.Sealed.SealedFrame.WriteNonce"/>).
+    /// </para>
+    /// <para>
+    /// From here on every frame in both directions is sealed. There is no per-message
+    /// choice and no way back to cleartext — a protocol that can be talked down to
+    /// cleartext will be.
+    /// </para>
+    /// </remarks>
+    internal void InstallSealedSession(
+        GameServer.Net.Sealed.SealedSession inbound, GameServer.Net.Sealed.SealedSession outbound)
+    {
+        _sealedInbound = inbound;
+        _sealedOutbound = outbound;
+    }
+
+    /// <summary>
+    /// Build the wire frame for an envelope, sealing it when a sealed session is in force.
+    /// </summary>
+    /// <remarks>
+    /// The sealed path allocates where the cleartext snapshot path reuses buffers. That is
+    /// a known cost, not an oversight: correctness first, and the reuse machinery is
+    /// reachable later by giving SealedSession a buffer-writing overload. It is recorded
+    /// here rather than discovered in a profile.
+    /// </remarks>
+    private byte[] EncodeFrame(Envelope env)
+    {
+        if (_sealedOutbound is null) return WireProtocol.Encode(env);
+        return WireProtocol.Frame(_sealedOutbound.Seal(WireProtocol.EncodeBody(env)));
+    }
+
     /// <summary>
     /// Wire encoding this connection speaks, latched from the first frame decoded
     /// on it and used for every reply.
@@ -561,7 +605,7 @@ public sealed class Connection : IDisposable
         {
             while (!_cts.Token.IsCancellationRequested)
             {
-                var env = await WireProtocol.DecodeAsync(_stream, _readScratch, _cts.Token);
+                var env = await WireProtocol.DecodeAsync(_stream, _readScratch, _sealedInbound, _cts.Token);
                 if (env == null) break; // clean EOF
 
                 Encoding = env.Encoding;
@@ -569,6 +613,21 @@ public sealed class Connection : IDisposable
             }
         }
         catch (OperationCanceledException) { /* expected on close */ }
+        catch (SealedFrameRejectedException)
+        {
+            // Named separately from a plain disconnect on purpose: a rejected sealed frame
+            // and a client closing its socket are the same teardown but very different
+            // events, and a security check that cannot be told from normal traffic is not
+            // one anyone will notice firing.
+            _logger.LogWarning(
+                "Sealed frame rejected for user {UserId}; closing. not_authenticated={NotAuth} " +
+                "replayed={Replayed} forward_jump={Jump} not_sealed={NotSealed}",
+                UserId,
+                _sealedInbound?.RejectedNotAuthenticated ?? 0,
+                _sealedInbound?.RejectedReplayed ?? 0,
+                _sealedInbound?.RejectedForwardJump ?? 0,
+                _sealedInbound?.RejectedNotSealed ?? 0);
+        }
         catch (IOException) { /* peer disconnect */ }
         catch (Exception ex)
         {
@@ -606,7 +665,7 @@ public sealed class Connection : IDisposable
                         tick, ackTick, buffer.AsSpan(0, count), keyframeInterval,
                         intern: Encoding == WireEncoding.Proto, observer: anchor);
 
-                    if (Encoding == WireEncoding.Proto)
+                    if (Encoding == WireEncoding.Proto && !IsSealed)
                     {
                         // Serialize straight into this connection's reused buffers. The
                         // frame is valid until the next WriteFrame call on this writer,
@@ -631,7 +690,7 @@ public sealed class Connection : IDisposable
                     isSnapshot = true;
                 }
 
-                byte[] frame = WireProtocol.Encode(env);
+                byte[] frame = EncodeFrame(env);
                 await _streamWriteMutex.WaitAsync(_cts.Token);
                 try
                 {
@@ -667,11 +726,11 @@ public sealed class Connection : IDisposable
         if (ct.CanBeCanceled)
         {
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, ct);
-            env = await WireProtocol.DecodeAsync(_stream, _readScratch, linked.Token);
+            env = await WireProtocol.DecodeAsync(_stream, _readScratch, _sealedInbound, linked.Token);
         }
         else
         {
-            env = await WireProtocol.DecodeAsync(_stream, _readScratch, _cts.Token);
+            env = await WireProtocol.DecodeAsync(_stream, _readScratch, _sealedInbound, _cts.Token);
         }
         if (env != null) Encoding = env.Encoding;
         return env;
@@ -689,7 +748,7 @@ public sealed class Connection : IDisposable
     /// </param>
     public async Task WriteOneAsync(Envelope env, CancellationToken ct = default)
     {
-        byte[] frame = WireProtocol.Encode(env);
+        byte[] frame = EncodeFrame(env);
         if (ct.CanBeCanceled)
         {
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, ct);

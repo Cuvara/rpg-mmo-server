@@ -88,8 +88,8 @@ public class SealedTests
     public void StrictMonotonic_RejectsAnythingNotIncreasing()
     {
         var v = new StrictMonotonicSequence();
-        foreach (ulong s in new ulong[] { 1, 2, 3, 10 }) Assert.True(v.Accept(s));
-        foreach (ulong s in new ulong[] { 10, 9, 1, 0 }) Assert.False(v.Accept(s));
+        foreach (ulong s in new ulong[] { 1, 2, 3, 10 }) Assert.Equal(SequenceResult.Accepted, v.Accept(s));
+        foreach (ulong s in new ulong[] { 10, 9, 1, 0 }) Assert.Equal(SequenceResult.Replayed, v.Accept(s));
         Assert.Equal(10UL, v.Highest);
     }
 
@@ -103,8 +103,8 @@ public class SealedTests
         foreach (ISequenceValidator v in new ISequenceValidator[]
                  { new StrictMonotonicSequence(), new SlidingWindowSequence() })
         {
-            Assert.True(v.Accept(0));
-            Assert.False(v.Accept(0));
+            Assert.Equal(SequenceResult.Accepted, v.Accept(0));
+            Assert.Equal(SequenceResult.Replayed, v.Accept(0));
         }
     }
 
@@ -112,10 +112,10 @@ public class SealedTests
     public void SlidingWindow_AcceptsReorderingButNotReplay()
     {
         var v = new SlidingWindowSequence();
-        foreach (ulong s in new ulong[] { 5, 3, 4, 8, 6 }) Assert.True(v.Accept(s));
-        foreach (ulong s in new ulong[] { 3, 4, 5, 6, 8 }) Assert.False(v.Accept(s));
+        foreach (ulong s in new ulong[] { 5, 3, 4, 8, 6 }) Assert.Equal(SequenceResult.Accepted, v.Accept(s));
+        foreach (ulong s in new ulong[] { 3, 4, 5, 6, 8 }) Assert.Equal(SequenceResult.Replayed, v.Accept(s));
         // A gap left behind is still acceptable, which is the whole point.
-        Assert.True(v.Accept(7));
+        Assert.Equal(SequenceResult.Accepted, v.Accept(7));
     }
 
     /// <summary>
@@ -126,20 +126,22 @@ public class SealedTests
     public void SlidingWindow_RefusesWhatItCannotJudge()
     {
         var v = new SlidingWindowSequence(8);
-        Assert.True(v.Accept(100));
-        Assert.False(v.Accept(92));  // exactly the width behind
-        Assert.False(v.Accept(1));   // ancient
-        Assert.True(v.Accept(99));   // inside the window
+        Assert.Equal(SequenceResult.Accepted, v.Accept(100));
+        Assert.Equal(SequenceResult.Replayed, v.Accept(92));  // exactly the width behind
+        Assert.Equal(SequenceResult.Replayed, v.Accept(1));   // ancient
+        Assert.Equal(SequenceResult.Accepted, v.Accept(99));  // inside the window
     }
 
     [Fact]
-    public void SlidingWindow_HandlesLargeJumps()
+    public void SlidingWindow_HandlesJumpsInsideTheBound()
     {
         var v = new SlidingWindowSequence();
-        Assert.True(v.Accept(1));
-        Assert.True(v.Accept(1_000_000));
-        Assert.True(v.Accept(999_999));
-        Assert.False(v.Accept(1_000_000));
+        // A jump inside the bound clears the window rather than shifting stale bits in.
+        Assert.Equal(SequenceResult.Accepted, v.Accept(1));
+        ulong far = 1 + SequenceValidators.MaxForwardJump;
+        Assert.Equal(SequenceResult.Accepted, v.Accept(far));
+        Assert.Equal(SequenceResult.Accepted, v.Accept(far - 1));
+        Assert.Equal(SequenceResult.Replayed, v.Accept(far));
     }
 
     // --- transcript ---
@@ -270,8 +272,9 @@ public class SealedSessionTests
         private readonly ISequenceValidator _inner = new StrictMonotonicSequence();
         public int Calls { get; private set; }
         public ulong Highest => _inner.Highest;
+        public bool RequiresOrderedTransport => _inner.RequiresOrderedTransport;
 
-        public bool Accept(ulong sequence)
+        public SequenceResult Accept(ulong sequence)
         {
             Calls++;
             return _inner.Accept(sequence);
@@ -388,5 +391,101 @@ public class SealedSessionTests
         public int TagSize => SealedFrame.TagSize;
         public int Seal(ReadOnlySpan<byte> n, ReadOnlySpan<byte> p, ReadOnlySpan<byte> a, Span<byte> d) => 0;
         public bool TryOpen(ReadOnlySpan<byte> n, ReadOnlySpan<byte> c, ReadOnlySpan<byte> a, Span<byte> d, out int w) { w = 0; return false; }
+    }
+}
+
+/// <summary>
+/// The three conditions attached to the strict-counter rule, mirroring the Go suite:
+/// the forward jump is bounded, the ordering requirement is asserted rather than assumed,
+/// and rejections are counted rather than merely performed.
+/// </summary>
+public class SealedRuleConditionTests
+{
+    private sealed class AlwaysFailAead : ISealedAead
+    {
+        public int NonceSize => SealedFrame.NonceSize;
+        public int TagSize => SealedFrame.TagSize;
+        public int Seal(ReadOnlySpan<byte> n, ReadOnlySpan<byte> p, ReadOnlySpan<byte> a, Span<byte> d)
+        {
+            p.CopyTo(d);
+            d.Slice(p.Length, SealedFrame.TagSize).Clear();
+            return p.Length + SealedFrame.TagSize;
+        }
+        public bool TryOpen(ReadOnlySpan<byte> n, ReadOnlySpan<byte> c, ReadOnlySpan<byte> a, Span<byte> d, out int w)
+        { w = 0; return false; }
+    }
+
+    /// <summary>
+    /// A leap past the bound is refused by both validators, and a refused jump must not
+    /// advance state — otherwise it does its damage anyway.
+    /// </summary>
+    [Fact]
+    public void ForwardJump_IsBoundedByBothValidators()
+    {
+        foreach (ISequenceValidator v in new ISequenceValidator[]
+                 { new StrictMonotonicSequence(), new SlidingWindowSequence() })
+        {
+            Assert.Equal(SequenceResult.Accepted, v.Accept(10));
+            Assert.Equal(SequenceResult.ForwardJump, v.Accept(10 + SequenceValidators.MaxForwardJump + 1));
+            Assert.Equal(10UL, v.Highest);
+            Assert.Equal(SequenceResult.Accepted, v.Accept(11));
+        }
+    }
+
+    /// <summary>Exactly at the bound is allowed; one past is not. An off-by-one here is
+    /// invisible until a session dies.</summary>
+    [Fact]
+    public void ForwardJump_BoundaryIsExact()
+    {
+        var atBound = new StrictMonotonicSequence();
+        Assert.Equal(SequenceResult.Accepted, atBound.Accept(1));
+        Assert.Equal(SequenceResult.Accepted, atBound.Accept(1 + SequenceValidators.MaxForwardJump));
+
+        var pastBound = new StrictMonotonicSequence();
+        Assert.Equal(SequenceResult.Accepted, pastBound.Accept(1));
+        Assert.Equal(SequenceResult.ForwardJump, pastBound.Accept(2 + SequenceValidators.MaxForwardJump));
+    }
+
+    [Fact]
+    public void Validators_DeclareTheirTransportRequirement()
+    {
+        Assert.True(new StrictMonotonicSequence().RequiresOrderedTransport);
+        Assert.False(new SlidingWindowSequence().RequiresOrderedTransport);
+    }
+
+    /// <summary>
+    /// A strict counter over a transport that does not promise ordering must fail closed
+    /// at construction, not degrade into dropping legitimate frames.
+    /// </summary>
+    [Fact]
+    public void Session_RefusesAnUnorderedTransport()
+    {
+        Assert.Throws<ArgumentException>(() =>
+            new SealedSession(new AlwaysFailAead(), new StrictMonotonicSequence(), orderedDelivery: false));
+
+        // A window tolerates reordering, so it is allowed there.
+        _ = new SealedSession(new AlwaysFailAead(), new SlidingWindowSequence(), orderedDelivery: false);
+    }
+
+    /// <summary>
+    /// A validator that refuses silently is indistinguishable from one that was never
+    /// wired in. Under attack these counters are the only thing that changes.
+    /// </summary>
+    [Fact]
+    public void Rejections_AreCountedByCause()
+    {
+        var session = new SealedSession(new AlwaysFailAead(), new StrictMonotonicSequence());
+
+        // Not sealed at all.
+        Assert.Equal(SealedOpenResult.NotSealed, session.Open(new byte[] { 0x08, 1, 2 }, out _));
+
+        // Sealed shape, tag never verifies.
+        var frame = new byte[SealedFrame.HeaderSize + SealedFrame.TagSize + 4];
+        SealedFrame.WriteHeader(frame, 1);
+        Assert.Equal(SealedOpenResult.Rejected, session.Open(frame, out _));
+
+        Assert.Equal(1UL, session.RejectedNotSealed);
+        Assert.Equal(1UL, session.RejectedNotAuthenticated);
+        Assert.Equal(2UL, session.RejectedTotal);
     }
 }

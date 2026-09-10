@@ -1,7 +1,7 @@
 # Sealed framing — normative wire format for realtime confidentiality
 
-Status: **primitives implemented and cross-verified; not yet wired into a live
-connection.** ADR-22's library question is closed — ChaCha20-Poly1305 (RFC 8439), X25519
+Status: **implemented, wired, and proved on a live server.** Off by default
+(`GAMESERVER_SEALED=off`); `require` turns it on for the gameplay hop. ADR-22's library question is closed — ChaCha20-Poly1305 (RFC 8439), X25519
 (RFC 7748) and HKDF-SHA256 (RFC 5869), from `golang.org/x/crypto` on the Go side and
 BouncyCastle.Cryptography 2.7.0 on the C# side. Published RFC vectors pass on both, and a
 shared cross-implementation vector pins the bytes between them.
@@ -286,13 +286,42 @@ exactly what the RFC vectors on both sides are for.
   attacker knows and both sides agree on: a complete break dressed as a successful
   handshake.
 
+### Proved live, on real containers
+
+Same image (`bf0ae5552b35`) both runs, one real client through the real gameplay hop, one
+`tcpdump` inside the server's network namespace. A capture of ciphertext alone would only
+show bytes are unreadable; the **pair** shows this change made them so.
+
+| | `GAMESERVER_SEALED=off` | `GAMESERVER_SEALED=require` |
+|---|---|---|
+| cleartext Envelope frames | **13** | **6** |
+| sealed frames (`0xC1`) | **0** | **11** |
+| `probe-player` readable in payload | **3** | **1** |
+
+The server logged `Sealed session established for probe-player (cipher=chacha20-poly1305)`,
+and the client verified the server's binding — proving the server holds
+`JOIN_TOKEN_SECRET`-derived material for that session.
+
+**Wrong key: no session.** A client that completed the handshake correctly and then
+corrupted one byte of its send key had every frame refused and the connection closed:
+`session ended as required (read length: EOF)`. Nothing was accepted in cleartext.
+
+> **The remaining readable bytes are the join exchange, and that is by design, not a
+> gap left open by accident.** The handshake runs *after* `MsgJoinToken`, so the join
+> token and the join response are still in the clear on the gameplay hop — which is the
+> `probe-player ×1` and the `eyJhbGci…` above. An eavesdropper on that hop can therefore
+> still capture the join token. It is short-lived and single-use (the jti tracker consumes
+> it), so the exposure is a replay window measured in seconds rather than a durable
+> credential — but it is real, it is not closed by this change, and sealing the join frame
+> itself would require the key to exist before the client has spoken, which is the
+> chicken-and-egg §5 exists to break.
+
 ### Still to do
 
-- **Wire the handshake into a live connection.** This needs two new wire messages
-  (`ClientHello`, `ServerHello`); the primitives and the session are ready for them.
-- **Live proof on real containers** that the traffic is actually ciphertext — a packet
-  capture, or a peer with the wrong key failing to form a session. **A green test is not
-  that**, and nothing above claims to be.
 - **A real Unity client in the loop**, and the **Android** IL2CPP question: the probe that
   passed was **Windows** IL2CPP, and the third-party CIL-Linker report was Android. Open,
   not blocking, and must not be described as confirmed.
+- **The netcode package needs the same two messages and BouncyCastle vendored** before a
+  Unity client can speak this.
+- **Default-on** is a separate operational decision: turning it on refuses every client
+  that cannot seal, which is every JSON client.

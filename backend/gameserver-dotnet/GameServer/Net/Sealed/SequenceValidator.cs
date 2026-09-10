@@ -1,5 +1,53 @@
 namespace GameServer.Net.Sealed;
 
+/// <summary>Why a sequence number was or was not accepted.</summary>
+public enum SequenceResult
+{
+    /// <summary>Fresh.</summary>
+    Accepted = 0,
+
+    /// <summary>Already seen, or too old to judge. One value for both, so a peer cannot
+    /// learn where the window edge is.</summary>
+    Replayed,
+
+    /// <summary>
+    /// Leapt further ahead than <see cref="SequenceValidators.MaxForwardJump"/> allows.
+    /// </summary>
+    ForwardJump,
+}
+
+/// <summary>Shared limits for the sequence validators.</summary>
+public static class SequenceValidators
+{
+    /// <summary>
+    /// How far a sequence may advance in a single frame.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why the backward half of the rule is not the whole rule.</b> "Reject anything at
+    /// or below the highest seen" stops replays and says nothing about a leap FORWARD. A
+    /// peer whose counter is corrupted — or is being steered by anything that can
+    /// influence it — can jump to near the top of the space in one frame. Two consequences
+    /// follow, and neither is a replay: it burns nonce space, forcing a rekey far earlier
+    /// than the traffic justifies; and with a strict counter it is <b>irreversible</b>,
+    /// because every legitimate frame after it carries a lower sequence and is refused for
+    /// ever. The session is then dead and the symptom is a connection that authenticated
+    /// fine and then went quiet.
+    /// </para>
+    /// <para>
+    /// The exposure is bounded to begin with — a forged frame cannot advance anything,
+    /// because it does not authenticate — so this defends against a confused or
+    /// compromised peer rather than an outsider. Worth having anyway: the bound costs
+    /// nothing and the failure without it is silent.
+    /// </para>
+    /// <para>
+    /// 1024 is slack, not a budget. On an ordered reliable transport the expected delta
+    /// between consecutive frames is exactly 1.
+    /// </para>
+    /// </remarks>
+    public const ulong MaxForwardJump = 1024;
+}
+
 /// <summary>
 /// Decides whether a frame's sequence number is fresh. Mirrors
 /// <c>backend/shared/sealed</c>.
@@ -22,14 +70,28 @@ namespace GameServer.Net.Sealed;
 public interface ISequenceValidator
 {
     /// <summary>
-    /// Record <paramref name="sequence"/> as seen and report whether it was fresh. False
-    /// means drop the frame and end the session: there is no benign replay on this
-    /// protocol.
+    /// Record <paramref name="sequence"/> as seen and report whether it was fresh.
+    /// Anything but <see cref="SequenceResult.Accepted"/> means drop the frame and end the
+    /// session: there is no benign replay on this protocol.
     /// </summary>
-    bool Accept(ulong sequence);
+    SequenceResult Accept(ulong sequence);
 
     /// <summary>Largest sequence accepted so far. Diagnostics only.</summary>
     ulong Highest { get; }
+
+    /// <summary>
+    /// Whether this validator is only correct when the transport below cannot reorder.
+    /// </summary>
+    /// <remarks>
+    /// It exists so the requirement is ASSERTED rather than assumed. The ordering this
+    /// design rests on is inherited, not owned: TCP guarantees it, and KCP gets it from a
+    /// hand-ported reassembly path of roughly ten lines. A future QUIC-datagram or raw-UDP
+    /// transport would quietly violate it, and with a strict counter the symptom is
+    /// dropped legitimate frames rather than an error naming the cause.
+    /// <see cref="SealedSession"/> refuses to construct in that case, so a new transport
+    /// fails closed on day one instead of degrading.
+    /// </remarks>
+    bool RequiresOrderedTransport { get; }
 }
 
 /// <summary>
@@ -46,12 +108,19 @@ public sealed class StrictMonotonicSequence : ISequenceValidator
     public ulong Highest => _highest;
 
     /// <inheritdoc />
-    public bool Accept(ulong sequence)
+    public bool RequiresOrderedTransport => true;
+
+    /// <inheritdoc />
+    public SequenceResult Accept(ulong sequence)
     {
-        if (_seen && sequence <= _highest) return false;
+        if (_seen)
+        {
+            if (sequence <= _highest) return SequenceResult.Replayed;
+            if (sequence - _highest > SequenceValidators.MaxForwardJump) return SequenceResult.ForwardJump;
+        }
         _highest = sequence;
         _seen = true;
-        return true;
+        return SequenceResult.Accepted;
     }
 }
 
@@ -90,15 +159,21 @@ public sealed class SlidingWindowSequence : ISequenceValidator
     public ulong Highest => _highest;
 
     /// <inheritdoc />
-    public bool Accept(ulong sequence)
+    public bool RequiresOrderedTransport => false;
+
+    /// <inheritdoc />
+    public SequenceResult Accept(ulong sequence)
     {
         if (!_seen)
         {
             _seen = true;
             _highest = sequence;
             _bitmap = 1;
-            return true;
+            return SequenceResult.Accepted;
         }
+
+        if (sequence > _highest && sequence - _highest > SequenceValidators.MaxForwardJump)
+            return SequenceResult.ForwardJump;
 
         if (sequence > _highest)
         {
@@ -109,20 +184,20 @@ public sealed class SlidingWindowSequence : ISequenceValidator
             _bitmap = shift >= (ulong)_width ? 0 : _bitmap << (int)shift;
             _bitmap |= 1;
             _highest = sequence;
-            return true;
+            return SequenceResult.Accepted;
         }
 
-        if (sequence == _highest) return false;
+        if (sequence == _highest) return SequenceResult.Replayed;
 
         ulong behind = _highest - sequence;
         // Too old to judge. Refused rather than accepted: a validator that cannot prove a
         // frame is fresh must not claim that it is.
-        if (behind >= (ulong)_width) return false;
+        if (behind >= (ulong)_width) return SequenceResult.Replayed;
 
         ulong mask = 1UL << (int)behind;
-        if ((_bitmap & mask) != 0) return false;
+        if ((_bitmap & mask) != 0) return SequenceResult.Replayed;
 
         _bitmap |= mask;
-        return true;
+        return SequenceResult.Accepted;
     }
 }

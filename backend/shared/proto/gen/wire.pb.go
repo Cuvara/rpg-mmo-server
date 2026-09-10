@@ -61,6 +61,18 @@ const (
 	MsgType_MSG_TYPE_PONG              MsgType = 12 // either direction (heartbeat reply)
 	// 13 and 14 are reserved for MsgTransferMap/Resp.
 	MsgType_MSG_TYPE_KICK MsgType = 15 // server -> client (forced disconnect with reason)
+	// Sealed-session handshake on the GAMEPLAY hop only. See
+	// backend/docs/SEALED-FRAMING.md.
+	//
+	// 16 and 17 rather than the next free small numbers for a reason worth
+	// stating: both stay inside the one-byte varint range (<= 127), so the
+	// envelope tag cost does not change, and leaving 18-31 clear keeps a
+	// contiguous block for the gateway hop's own handshake when ADR-22 settles
+	// it. Recycling a number is how two versions silently disagree about what a
+	// byte means, which is why field 5 of EnterWorldResponse is reserved rather
+	// than reused.
+	MsgType_MSG_TYPE_SEALED_CLIENT_HELLO MsgType = 16 // client -> gameserver
+	MsgType_MSG_TYPE_SEALED_SERVER_HELLO MsgType = 17 // gameserver -> client
 )
 
 // Enum value maps for MsgType.
@@ -82,24 +94,28 @@ var (
 		11: "MSG_TYPE_PING",
 		12: "MSG_TYPE_PONG",
 		15: "MSG_TYPE_KICK",
+		16: "MSG_TYPE_SEALED_CLIENT_HELLO",
+		17: "MSG_TYPE_SEALED_SERVER_HELLO",
 	}
 	MsgType_value = map[string]int32{
-		"MSG_TYPE_UNSPECIFIED":       0,
-		"MSG_TYPE_AUTH":              1,
-		"MSG_TYPE_AUTH_RESP":         2,
-		"MSG_TYPE_ENTER_WORLD":       3,
-		"MSG_TYPE_ENTER_WORLD_RESP":  4,
-		"MSG_TYPE_JOIN_TOKEN":        5,
-		"MSG_TYPE_JOIN_TOKEN_RESP":   6,
-		"MSG_TYPE_INPUT":             7,
-		"MSG_TYPE_SNAPSHOT":          8,
-		"MSG_TYPE_DISCONNECT":        9,
-		"MSG_TYPE_RESYNC":            10,
-		"MSG_TYPE_TRANSFER_MAP":      13,
-		"MSG_TYPE_TRANSFER_MAP_RESP": 14,
-		"MSG_TYPE_PING":              11,
-		"MSG_TYPE_PONG":              12,
-		"MSG_TYPE_KICK":              15,
+		"MSG_TYPE_UNSPECIFIED":         0,
+		"MSG_TYPE_AUTH":                1,
+		"MSG_TYPE_AUTH_RESP":           2,
+		"MSG_TYPE_ENTER_WORLD":         3,
+		"MSG_TYPE_ENTER_WORLD_RESP":    4,
+		"MSG_TYPE_JOIN_TOKEN":          5,
+		"MSG_TYPE_JOIN_TOKEN_RESP":     6,
+		"MSG_TYPE_INPUT":               7,
+		"MSG_TYPE_SNAPSHOT":            8,
+		"MSG_TYPE_DISCONNECT":          9,
+		"MSG_TYPE_RESYNC":              10,
+		"MSG_TYPE_TRANSFER_MAP":        13,
+		"MSG_TYPE_TRANSFER_MAP_RESP":   14,
+		"MSG_TYPE_PING":                11,
+		"MSG_TYPE_PONG":                12,
+		"MSG_TYPE_KICK":                15,
+		"MSG_TYPE_SEALED_CLIENT_HELLO": 16,
+		"MSG_TYPE_SEALED_SERVER_HELLO": 17,
 	}
 )
 
@@ -1467,6 +1483,143 @@ func (x *KickMessage) GetReason() string {
 	return ""
 }
 
+// SealedClientHello opens the sealed-session handshake.
+type SealedClientHello struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Ephemeral X25519 public key, 32 bytes.
+	//
+	// EPHEMERAL PER CONNECTION. Reusing one across sessions forfeits the forward
+	// secrecy that is the entire reason ADR-22 supersedes the earlier
+	// derived-key scheme: with a fresh pair per connection, a long-lived secret
+	// obtained later cannot decrypt traffic recorded earlier.
+	PublicKey     []byte `protobuf:"bytes,1,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SealedClientHello) Reset() {
+	*x = SealedClientHello{}
+	mi := &file_wire_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SealedClientHello) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SealedClientHello) ProtoMessage() {}
+
+func (x *SealedClientHello) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SealedClientHello.ProtoReflect.Descriptor instead.
+func (*SealedClientHello) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *SealedClientHello) GetPublicKey() []byte {
+	if x != nil {
+		return x.PublicKey
+	}
+	return nil
+}
+
+// SealedServerHello answers it and proves the server holds the session's
+// join-token-derived material.
+type SealedServerHello struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Ephemeral X25519 public key, 32 bytes. Ephemeral per connection, as above.
+	PublicKey []byte `protobuf:"bytes,1,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
+	// HMAC-SHA256 over the handshake transcript, 32 bytes:
+	//
+	//	"cuvara/sealed-handshake/v1" || 0x00 || jti || 0x00
+	//	  || client_public (32) || server_public (32)
+	//
+	// BOTH EPHEMERAL PUBLIC KEYS ARE IN THE TRANSCRIPT, and that is what stops a
+	// man in the middle: an attacker who substitutes its own key changes the
+	// transcript, so the binding it read off the wire no longer verifies. Without
+	// them, a replayed binding would authenticate the attacker's exchange as
+	// readily as the real one and the MITM would be clean and undetectable.
+	//
+	// The NUL separators are load-bearing too. Without them the transcript is a
+	// concatenation whose pieces can be re-split, so a jti ending in one byte of
+	// the next field yields the same bytes as a different (jti, key) pair and a
+	// MAC over it authenticates both readings equally.
+	//
+	// A receiver MUST compare this in constant time. A byte-by-byte comparison
+	// leaks the position of the first mismatch, which is enough to forge a tag one
+	// byte at a time against a peer that keeps answering — and this peer answers
+	// every handshake attempt.
+	Binding []byte `protobuf:"bytes,2,opt,name=binding,proto3" json:"binding,omitempty"`
+	// Set when the server refuses the handshake. The client MUST NOT retry
+	// without encryption: there is no cleartext fallback by design, because a
+	// protocol that can be talked down to cleartext will be.
+	Error         string `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SealedServerHello) Reset() {
+	*x = SealedServerHello{}
+	mi := &file_wire_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SealedServerHello) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SealedServerHello) ProtoMessage() {}
+
+func (x *SealedServerHello) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SealedServerHello.ProtoReflect.Descriptor instead.
+func (*SealedServerHello) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *SealedServerHello) GetPublicKey() []byte {
+	if x != nil {
+		return x.PublicKey
+	}
+	return nil
+}
+
+func (x *SealedServerHello) GetBinding() []byte {
+	if x != nil {
+		return x.Binding
+	}
+	return nil
+}
+
+func (x *SealedServerHello) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
 var File_wire_proto protoreflect.FileDescriptor
 
 const file_wire_proto_rawDesc = "" +
@@ -1542,7 +1695,15 @@ const file_wire_proto_rawDesc = "" +
 	"\vserver_time\x18\x02 \x01(\x03R\n" +
 	"serverTime\"%\n" +
 	"\vKickMessage\x12\x16\n" +
-	"\x06reason\x18\x01 \x01(\tR\x06reason*\x8b\x03\n" +
+	"\x06reason\x18\x01 \x01(\tR\x06reason\"2\n" +
+	"\x11SealedClientHello\x12\x1d\n" +
+	"\n" +
+	"public_key\x18\x01 \x01(\fR\tpublicKey\"b\n" +
+	"\x11SealedServerHello\x12\x1d\n" +
+	"\n" +
+	"public_key\x18\x01 \x01(\fR\tpublicKey\x12\x18\n" +
+	"\abinding\x18\x02 \x01(\fR\abinding\x12\x14\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error*\xcf\x03\n" +
 	"\aMsgType\x12\x18\n" +
 	"\x14MSG_TYPE_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rMSG_TYPE_AUTH\x10\x01\x12\x16\n" +
@@ -1560,7 +1721,9 @@ const file_wire_proto_rawDesc = "" +
 	"\x1aMSG_TYPE_TRANSFER_MAP_RESP\x10\x0e\x12\x11\n" +
 	"\rMSG_TYPE_PING\x10\v\x12\x11\n" +
 	"\rMSG_TYPE_PONG\x10\f\x12\x11\n" +
-	"\rMSG_TYPE_KICK\x10\x0f*\x9d\x01\n" +
+	"\rMSG_TYPE_KICK\x10\x0f\x12 \n" +
+	"\x1cMSG_TYPE_SEALED_CLIENT_HELLO\x10\x10\x12 \n" +
+	"\x1cMSG_TYPE_SEALED_SERVER_HELLO\x10\x11*\x9d\x01\n" +
 	"\n" +
 	"EntityType\x12\x1b\n" +
 	"\x17ENTITY_TYPE_UNSPECIFIED\x10\x00\x12\x16\n" +
@@ -1589,7 +1752,7 @@ func file_wire_proto_rawDescGZIP() []byte {
 }
 
 var file_wire_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_wire_proto_goTypes = []any{
 	(MsgType)(0),                // 0: rpgmmo.wire.v1.MsgType
 	(EntityType)(0),             // 1: rpgmmo.wire.v1.EntityType
@@ -1611,6 +1774,8 @@ var file_wire_proto_goTypes = []any{
 	(*PingMessage)(nil),         // 17: rpgmmo.wire.v1.PingMessage
 	(*PongMessage)(nil),         // 18: rpgmmo.wire.v1.PongMessage
 	(*KickMessage)(nil),         // 19: rpgmmo.wire.v1.KickMessage
+	(*SealedClientHello)(nil),   // 20: rpgmmo.wire.v1.SealedClientHello
+	(*SealedServerHello)(nil),   // 21: rpgmmo.wire.v1.SealedServerHello
 }
 var file_wire_proto_depIdxs = []int32{
 	1,  // 0: rpgmmo.wire.v1.EntitySnapshot.type:type_name -> rpgmmo.wire.v1.EntityType
@@ -1634,7 +1799,7 @@ func file_wire_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_wire_proto_rawDesc), len(file_wire_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   17,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

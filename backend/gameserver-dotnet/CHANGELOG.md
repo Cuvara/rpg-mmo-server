@@ -113,6 +113,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The sealed session is wired into the gameplay hop and proved on a live server.**
+  `GAMESERVER_SEALED` / `--sealed`, `off` (default) or `require`. Two values, not three: a
+  "preferred" mode is a downgrade attack with a friendly name.
+  - The handshake runs between the join reply and the read/write loops, so no frame is
+    ever written half-sealed. After it, every frame in both directions is sealed and there
+    is no per-message choice and no way back to cleartext.
+  - **Every failure closes the connection.** A JSON client is refused before the handshake
+    is attempted, because the sealed frame is a binary layout JSON has no room for — which
+    means requiring encryption effectively deprecates the JSON encoding.
+  - **Proved live, paired, on one image.** With `sealed=off`: 13 cleartext Envelope
+    frames, 0 sealed. With `sealed=require`: 6 cleartext (the pre-handshake join) and 11
+    sealed. A client that corrupted one byte of its send key after a correct handshake had
+    every frame refused and the session closed. A capture of ciphertext alone shows only
+    that bytes are unreadable; the pair shows this change made them so.
+  - **The join exchange is still readable, by design and now written down.** The handshake
+    runs after `MsgJoinToken`, so the token and its reply remain in the clear on that hop.
+    Short-lived and single-use, so the exposure is a seconds-long replay window rather than
+    a durable credential — but real, and not closed by this change.
+
+### Changed
+
+- **The three conditions on the replay rule now exist on the C# side too.** They were
+  implemented in Go first and the asymmetry would have rotted: the forward-jump bound, the
+  `RequiresOrderedTransport` assertion that makes a future unordered transport fail closed,
+  and rejection counters by cause.
+- **A rejected sealed frame is distinguishable in the log from an ordinary disconnect.**
+  It previously tore the connection down through the same `IOException` path as a peer
+  hanging up, so a security check firing looked exactly like normal traffic — the "a check
+  nobody reads is not a check" failure one layer down. It now raises
+  `SealedFrameRejectedException` and logs the per-cause counts. The peer still learns
+  nothing: the connection simply closes, as it would for any frame-level failure.
+
+### Added
+
 - **`GameServer/Net/Sealed` now carries the real primitives**, via
   **BouncyCastle.Cryptography 2.7.0** — ChaCha20-Poly1305, X25519 and HKDF-SHA256, plus
   HMAC-SHA256 for the handshake binding with `Arrays.FixedTimeEquals` for the comparison.

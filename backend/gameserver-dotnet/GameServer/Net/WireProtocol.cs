@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Text;
 using System.Text.Json;
 using Google.Protobuf;
+using GameServer.Net.Sealed;
 using RpgMmo.Wire.V1;
 
 namespace GameServer.Net;
@@ -208,6 +209,20 @@ public static class WireProtocol
         return frame;
     }
 
+    /// <summary>Add the 4-byte big-endian length prefix to an already-built body.</summary>
+    /// <remarks>
+    /// The prefix stays in the clear even when the body is sealed: it is what finds the
+    /// frame boundary, so a reader needs it before it can have a key. Its value leaks only
+    /// the frame's length, which traffic analysis already sees.
+    /// </remarks>
+    public static byte[] Frame(ReadOnlySpan<byte> body)
+    {
+        byte[] frame = new byte[4 + body.Length];
+        BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(0, 4), body.Length);
+        body.CopyTo(frame.AsSpan(4));
+        return frame;
+    }
+
     /// <summary>Encode an envelope body without the length prefix.</summary>
     public static byte[] EncodeBody(Envelope envelope)
     {
@@ -345,6 +360,53 @@ public static class WireProtocol
         return DecodeBody(scratch.Body.AsSpan(0, length));
     }
 
+    /// <summary>
+    /// Read one frame, unsealing it first when a sealed session is in force.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// When <paramref name="inbound"/> is null this is exactly the cleartext path. When it
+    /// is not, a frame that is NOT sealed is refused rather than parsed: after the
+    /// handshake, cleartext where a sealed frame is required is either a confused peer or
+    /// an attacker stripping the encryption, and there is no third reading. Accepting it
+    /// would be a downgrade the protocol deliberately has no room for.
+    /// </para>
+    /// <para>
+    /// <see cref="SealedSession.Open"/> is what enforces authenticate-before-replay-check,
+    /// so nothing here may look at the sequence number.
+    /// </para>
+    /// </remarks>
+    public static async ValueTask<Envelope?> DecodeAsync(
+        Stream stream, FrameReadBuffer scratch, SealedSession? inbound, CancellationToken ct)
+    {
+        if (inbound is null) return await DecodeAsync(stream, scratch, ct);
+
+        int read = await ReadExactAsync(stream, scratch.Header, 4, ct);
+        if (read == 0) return null; // clean EOF
+        if (read < 4) throw new IOException("Incomplete length header");
+
+        int length = BinaryPrimitives.ReadInt32BigEndian(scratch.Header);
+        if (length <= 0 || length > MaxMessageSize)
+            throw new IOException($"Invalid message length: {length}");
+
+        scratch.EnsureBody(length);
+        read = await ReadExactAsync(stream, scratch.Body, length, ct);
+        if (read < length) throw new IOException("Incomplete message body");
+
+        SealedOpenResult result = inbound.Open(scratch.Body.AsSpan(0, length), out byte[] plaintext);
+        if (result != SealedOpenResult.Ok)
+        {
+            // ONE message to the peer, but a distinguishable one to US. A rejected sealed
+            // frame closes the connection, and without this it is indistinguishable in the
+            // log from an ordinary disconnect — which is the "a check nobody reads is not
+            // a check" failure, one layer down. The counts on the session say which rule
+            // fired; this says that one did.
+            throw new SealedFrameRejectedException();
+        }
+
+        return DecodeBody(plaintext);
+    }
+
     // ─────────────────────── envelope construction ───────────────────────
 
     /// <summary>
@@ -356,6 +418,26 @@ public static class WireProtocol
     /// answers (see <c>Connection.Encoding</c>), never with a hard-coded one —
     /// that is what keeps a Protobuf server able to serve a JSON client.
     /// </remarks>
+    /// <summary>
+    /// Build a sealed-handshake reply. <b>Protobuf only</b>, deliberately: the handshake
+    /// fields are absent from the JSON message set so key material can never be rendered
+    /// into a human-readable payload, which is also why a JSON client cannot be encrypted
+    /// and must be refused rather than served in the clear.
+    /// </summary>
+    public static Envelope NewEnvelope(MsgType type, SealedServerHello payload, WireEncoding encoding)
+    {
+        if (encoding != WireEncoding.Proto)
+            throw new InvalidOperationException(
+                "the sealed handshake has no JSON encoding; a JSON client cannot be sealed");
+
+        return new Envelope
+        {
+            Type = RequireMsgType(type),
+            Payload = payload.ToByteArray(),
+            Encoding = WireEncoding.Proto,
+        };
+    }
+
     public static Envelope NewEnvelope(MsgType type, JoinTokenResponse payload, WireEncoding encoding) =>
         new()
         {
@@ -472,6 +554,12 @@ public static class WireProtocol
         ReadOnlySpan<byte> span = envelope.Payload;
         object? result = typeof(T) switch
         {
+            // Protobuf only. A JSON peer reaching here is a peer that cannot be
+            // sealed, and the refusal is the point rather than a gap.
+            var t when t == typeof(SealedClientHello) => proto
+                ? SealedClientHello.Parser.ParseFrom(span)
+                : throw new InvalidOperationException(
+                    "the sealed handshake has no JSON encoding; a JSON client cannot be sealed"),
             var t when t == typeof(JoinTokenRequest) => proto
                 ? JoinTokenRequest.Parser.ParseFrom(span)
                 : JsonReader.ReadJoinTokenRequest(envelope.Payload),
@@ -618,4 +706,20 @@ public sealed class FrameReadBuffer
         while (capacity < length) capacity *= 2;
         Body = new byte[capacity];
     }
+}
+
+/// <summary>
+/// A sealed frame did not authenticate, replayed, or arrived as cleartext where a sealed
+/// frame was required.
+/// </summary>
+/// <remarks>
+/// An <see cref="IOException"/> so the existing read-loop teardown handles it unchanged,
+/// but its own type so the log can say what happened. The peer learns nothing either way:
+/// the connection simply closes, exactly as it would for any other frame-level failure.
+/// </remarks>
+public sealed class SealedFrameRejectedException : IOException
+{
+    /// <summary>Build the exception.</summary>
+    public SealedFrameRejectedException()
+        : base("sealed frame rejected (not authenticated, replayed, or not sealed)") { }
 }
