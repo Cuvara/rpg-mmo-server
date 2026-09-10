@@ -193,7 +193,12 @@ public sealed class Il2cppTlsProbe : MonoBehaviour
                 using (TcpClient c = listener.AcceptTcpClient())
                 using (var ssl = new SslStream(c.GetStream(), false))
                 {
-                    ssl.AuthenticateAsServer(cert, false, SslProtocols.Tls12 | SslProtocols.Tls13, false);
+                    // SslProtocols.None means "the platform's default set". Pinning a list
+                    // here would measure the list rather than the platform -- and
+                    // SslProtocols.Tls13 does not exist in Unity's netstandard2.1 profile
+                    // at all, which this probe found by failing to compile. Leaving the
+                    // choice to the platform is also what a real client does.
+                    ssl.AuthenticateAsServer(cert, false, SslProtocols.None, false);
                     ssl.Write(new byte[] { 0x2A }, 0, 1);
                 }
             }

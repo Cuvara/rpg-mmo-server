@@ -48,10 +48,79 @@ would not be one.
 5. Repeat on **Android** if a device is available. Android is the open question, for the
    same reason ADR-22's BouncyCastle result is Windows-only.
 
+### Do not trust the exit code, and do not trust the .exe either
+
+Batchmode Unity returned **0** for a build it reported internally as `result=Failed`, and
+the output folder still held a `TlsProbe.exe` of plausible size. That .exe is a shell: the
+IL2CPP step had died with `fatal error C1085: ... No space left on device`, so
+`GameAssembly.dll` — the file that actually holds the compiled game — was never linked.
+Running it pops a modal `Fatal error / Failed to load il2cpp` dialog and writes a
+**zero-byte** log, which from a script is indistinguishable from a player that has not
+started yet.
+
+So assert three things, in this order:
+
+| check | what it catches |
+|---|---|
+| `BuildReport.summary.result == Succeeded` | the exit code lying |
+| `GameAssembly.dll` exists next to the .exe | a stale or half-linked .exe |
+| the probe's own log has a terminating line | a player that started and then died |
+
+A full IL2CPP build of this project needs roughly **25 GB** of scratch in `Library/Bee`.
+Check free space before starting; `Library/Bee` is regenerable, so deleting it is the
+cheapest way to get that space back.
+
+## The answer
+
+Run in a **real Windows IL2CPP player**, Unity `6000.3.9f1`, at both stripping levels.
+Not the Editor: IL2CPP and Mono use different class-library profiles, so an Editor pass
+would have answered a different question.
+
+| | Minimal stripping | High stripping |
+|---|---|---|
+| `GameAssembly.dll` | 105.1 MB | 69.1 MB |
+| 1. untrusted certificate **refused** | OK | OK |
+| 2. trusted certificate completes | OK | OK |
+| 3. validation callback invoked | OK | OK |
+| 4. callback sees a real `SslPolicyErrors` | OK — `RemoteCertificateChainErrors` | OK — `RemoteCertificateChainErrors` |
+
+```
+[tls-probe] runtime: WindowsPlayer  unity: 6000.3.9f1
+[tls-probe] [ OK ] default validation refuses an untrusted certificate
+                   (refused: AuthenticationException: Authentication failed, see inner exception.)
+[tls-probe] [ OK ] an explicitly trusted certificate completes  (Tls12 / None)
+[tls-probe] [ OK ] the validation callback reports a real error  (Tls12 / None)
+[tls-probe] [ OK ] callback saw: RemoteCertificateChainErrors
+[tls-probe] ALL PASS on WindowsPlayer
+```
+
+**Go** for ADR-23's gateway-hop TLS and for the client's `https://` Nakama hop, **on
+Windows**. High stripping changes nothing, so the linker keeps what TLS needs without a
+`link.xml` entry — the answer that was actually in doubt.
+
+Three details differ from the .NET 10 run and would break anyone who asserted on them:
+
+- It negotiates **Tls12**, not Tls13. `SslProtocols.None` asks for the platform default
+  and that is what Unity's stack chooses.
+- `SslStream.CipherAlgorithm` reports **`None`**. The obsolete property is simply not
+  populated here, so it says nothing about the cipher actually in use — do not gate on it.
+- The refusal message is the generic `Authentication failed, see inner exception.`, not
+  the .NET 10 text naming `UntrustedRoot`. Matching on that string would pass on .NET and
+  fail in a player.
+
+**Android remains unanswered**, for the same reason ADR-22's BouncyCastle result is
+Windows-only. Nothing here transfers to it.
+
 ## Verified before shipping
 
-Every API the probe calls was **executed on .NET 10 first**, so it cannot fail to compile
-or throw for a reason unrelated to the question. On .NET 10 all four assertions hold:
+Every API the probe calls was **executed on .NET 10 first**, so it does not throw for a
+reason unrelated to the question. That is not the same as compiling in Unity, and the
+first player build proved it: `SslProtocols.Tls13` does not exist in Unity's
+netstandard2.1 profile, so the probe failed to compile with `error CS0117` while Unity
+still exited 0. The pinned protocol list was the wrong thing to assert anyway — it
+measures the list, not the platform — so the probe now passes `SslProtocols.None` and
+lets the platform choose. Read the run below as "these assertions hold on .NET 10",
+never as "this file compiles everywhere". On .NET 10 all four assertions hold:
 
 ```
 [ OK ] default validation refuses an untrusted certificate

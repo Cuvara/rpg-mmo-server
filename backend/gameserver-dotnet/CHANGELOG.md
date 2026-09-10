@@ -7,6 +7,61 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **The IL2CPP TLS probe has been RUN, and the answer is GO on Windows.** A real Windows
+  IL2CPP player, Unity `6000.3.9f1`, at **both** `Minimal` and `High` stripping, passes all
+  four assertions — including the one that matters, that an untrusted certificate is
+  **refused**. High stripping changing nothing is the part that was in doubt: the linker
+  keeps what `SslStream` needs with no `link.xml` entry. This is the go/no-go for ADR-23's
+  gateway-hop TLS and for the client's `https://` Nakama hop; `backend/docs/tls-probe/`
+  and `ROADMAP-SECURITY.md` now carry the result instead of "not yet run in a player".
+
+  Three details differ from the .NET 10 run, and asserting on any of them would pass on
+  .NET and fail in a player: the player negotiates **Tls12**, not Tls13;
+  `SslStream.CipherAlgorithm` reports **`None`** (the obsolete property is not populated
+  under IL2CPP, so it says nothing about the cipher in use); and the refusal message is
+  the generic `Authentication failed, see inner exception.` rather than the .NET text
+  naming `UntrustedRoot`.
+
+  **Android is still unanswered** and nothing here transfers to it, for the same reason
+  ADR-22's BouncyCastle result is Windows-only.
+
+- **`backend/docs/tls-probe/harness/`** — the Editor build script and the self-quit
+  component used to produce that player, so the run is repeatable rather than a one-off.
+  It builds its scene programmatically (a committed `.unity` is GUIDs and YAML that can
+  drift from the component it instantiates), and it carries the two failures that cost the
+  most time: it asserts `GameAssembly.dll` alongside the build result, and it flushes the
+  scripting-backend restore with `AssetDatabase.SaveAssets()`.
+
+  That second one was not theory. A run logged `restored backend=Mono2x` and still left
+  `Standalone: 1` (IL2CPP) and `managedStrippingLevel: {Standalone: 4}` (High) on disk —
+  the build persists `ProjectSettings.asset`, the restore after it did not, and `-quit`
+  exits without flushing. The *next* run then read the leaked value as the one to
+  preserve, so it compounds. Verified by rebuilding with the flush in place and reading
+  the file back: `Standalone: 0` / `0`, Mono2x and Disabled.
+
+### Fixed
+- **The IL2CPP TLS probe did not compile in Unity**, which the "verified before shipping"
+  note in its README implied it must. `SslProtocols.Tls13` does not exist in Unity's
+  netstandard2.1 profile, so the first player build failed with
+  `error CS0117: 'SslProtocols' does not contain a definition for 'Tls13'` — while
+  batchmode Unity exited **0**. Executing every API on .NET 10 first rules out unrelated
+  runtime throws; it says nothing about a different class-library profile, and the README
+  now says so instead of claiming the file "cannot fail to compile".
+
+  The pinned protocol list was the wrong assertion regardless: it measures the list rather
+  than the platform. The probe now passes `SslProtocols.None` and lets the platform choose,
+  which is also what a real client does.
+
+  The README also gained the shape of the failure that cost the most time. The same build
+  later died at `fatal error C1085: ... No space left on device`, reported `result=Failed`,
+  exited 0 again, and **left a plausible 652 KB `TlsProbe.exe` behind** with no
+  `GameAssembly.dll` next to it. Running that shell pops a modal `Failed to load il2cpp`
+  and writes a zero-byte log — indistinguishable, from a script, from a player still
+  starting up. Asserting that the .exe exists is therefore not enough; the README now lists
+  the three checks that are (build result, `GameAssembly.dll`, a terminating log line) and
+  records that IL2CPP needs ~25 GB of scratch in the regenerable `Library/Bee`.
+
+### Added
 - **`backend/docs/tls-probe/` — the IL2CPP TLS probe**, the go/no-go for ADR-23's
   gateway-hop TLS and for the client's `https://` Nakama hop.
 
