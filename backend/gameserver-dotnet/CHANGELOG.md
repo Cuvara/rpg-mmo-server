@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **Measured what actually crosses each hop in the clear, and the recorded residual
+  understated it.** A byte tap on both hops of a fully sealed session (26 sealed frames,
+  `SMOKE=PASS`) decoded every JWT travelling in the clear:
+
+  | hop | credential | lifetime | single-use |
+  |---|---|---|---|
+  | gateway | **auth token** | **3600 s** | **no** |
+  | gateway | join token | 30 s | yes |
+  | gameplay | join token | 30 s | yes |
+
+  **Sealing the join exchange on the gameplay hop alone would buy nothing** — the identical
+  join token, same `jti`, crosses the gateway hop first, to the same observer on the same
+  path. And the exposure the residual named is the *least* valuable of the three: the
+  one-hour reusable auth token on the gateway hop was recorded nowhere.
+
+  Consequence: the gateway hop is the work; the join exchange closes as a side-effect and
+  cannot usefully be closed before it. The reorder option is recorded with its cost — it
+  moves an X25519 exchange ahead of any token check — so it is not re-proposed.
+
 ### Changed
 
 - **`GAMESERVER_SEALED` now defaults to `require`.** A stock game server encrypts the
