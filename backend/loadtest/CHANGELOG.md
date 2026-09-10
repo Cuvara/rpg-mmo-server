@@ -7,6 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`-run-id` fixes the run identifier user ids are derived from.** Default stays a random
+  id per run so concurrent runs cannot collide; setting it explicitly is what makes a
+  RECONNECT measurable — run, stop, run again with the same value, and the same accounts
+  come back to a server still holding their entities. That is the only way to exercise the
+  path where a client restarts its own input-tick counter against server state that
+  remembers the old one, and it is how `BENCHMARK.md` Part XII measured it.
+
+### Added
 - **`-abuse` and `-abuse-players`: deliberately misbehaving clients.** The harness is
   otherwise scrupulously well-behaved — it answers pings, sends normalised vectors and
   disconnects politely — which is correct for a benchmark and useless for exercising the

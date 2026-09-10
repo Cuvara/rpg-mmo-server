@@ -169,6 +169,17 @@ type Config struct {
 	AuthMode AuthMode
 	Movement string
 
+	// RunID fixes the run identifier that user ids are derived from
+	// ("lt-<runID>-<idx>"). Empty means a fresh random one per run, which is the
+	// default and what keeps concurrent runs from colliding.
+	//
+	// Setting it explicitly is what makes a RECONNECT measurable: run once, stop,
+	// run again with the same value, and the same accounts come back to a server
+	// that is still holding their entities. That is the only way to exercise the
+	// path where a client restarts its own input-tick counter against server-side
+	// state that remembers the old one.
+	RunID string
+
 	// Abuse is the misbehaviour pattern used by the abusive share of players.
 	Abuse string
 
@@ -279,6 +290,7 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	fs.IntVar(&cfg.TickRate, "tick-rate", cfg.TickRate, "Client input sends per second")
 	fs.StringVar(&authMode, "auth", authMode, "Auth path: presigned (default, benchmarks the game path) or nakama (adds real login cost)")
 	fs.StringVar(&cfg.Movement, "movement", cfg.Movement, "Input pattern: cluster, still or spread")
+	fs.StringVar(&cfg.RunID, "run-id", cfg.RunID, "Fix the run id user ids are derived from (default: random per run). Reusing one makes the same accounts reconnect, which is how the reconnect path is measured")
 	fs.StringVar(&cfg.Abuse, "abuse", cfg.Abuse, "Misbehaviour for the abusive share: none, direction (oversized move vector), stale (replayed input tick) or attack (nonexistent target). Exercises the server's input-rejection telemetry; the server refuses all of it, so nothing here gains an advantage")
 	fs.IntVar(&cfg.AbusePlayers, "abuse-players", cfg.AbusePlayers, "How many players misbehave, chosen by index (0 = none)")
 	fs.StringVar(&encoding, "encoding", encoding, "Wire encoding: proto (default — what the client speaks, ADR-9) or json (legacy arm)")

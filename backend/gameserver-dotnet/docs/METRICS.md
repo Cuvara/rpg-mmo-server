@@ -364,6 +364,41 @@ so a run is reproducible. Use **`-movement still`** for anything measured agains
 stationary population — `cluster` marches players out of the AOI within ~25s.
 
 
+
+## Frame arrival order (`frame_order_*`) — the ADR-22 measurement
+
+`/status` publishes five fields recording whether a frame can reach the per-connection
+decode step out of order. They exist to answer ADR-22's open question — whether the
+nonce-as-sequence replay rule needs a sliding window — **by measurement rather than
+assumption**, and to keep answering it.
+
+| Field | Meaning |
+|---|---|
+| `frame_order_observed` | Input frames whose arrival order was inspected |
+| `frame_order_inversions` | Frames with a tick **strictly below** the highest seen on that connection — genuine reordering or replay |
+| `frame_order_duplicates` | Frames repeating the highest tick seen |
+| `frame_order_largest_backward_jump` | How far back the worst inversion reached — the minimum width a sliding window would need |
+| `frame_order_forward_gaps` | Frames arriving more than one tick above the previous highest — a lost or unsent frame |
+
+**Expected value for `inversions` and `duplicates`: exactly zero, always.** Measured at
+zero across 22,374 frames on both transports under injected reordering, loss and
+duplication — `backend/docs/BENCHMARK.md` Part XII. A non-zero reading means the transport
+stopped delivering in order, which is a **security-relevant** change and not merely a
+performance one: it is the condition under which a strict monotonic replay counter would
+start refusing legitimate frames.
+
+`forward_gaps` is different and is **not** an alarm: a strict monotonic rule must accept
+gaps, because a genuinely lost frame leaves a hole in the counter and refusing to move past
+it would turn packet loss into a disconnect.
+
+> **This is not the same thing as `stale_tick`.** That counter lives in the tick loop, two
+> queues downstream — the per-connection ingest coalescer and the world-wide pending list —
+> and the coalescer silently absorbs an out-of-order movement input before it is ever
+> reached. `stale_tick` reports post-queue order; these fields report arrival order. Reading
+> one for the other answers neither question. The reconnect measurement in Part XII shows
+> them diverging completely: `stale_tick` at 596 while `frame_order_inversions` stayed at 0.
+
+
 Useful queries:
 
 ```promql

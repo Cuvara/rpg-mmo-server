@@ -35,7 +35,10 @@ func NewRunner(cfg Config, out io.Writer) *Runner {
 // when the run could not be executed at all; a run where every player failed to
 // connect is a valid Result with PlayersJoined == 0.
 func (r *Runner) Run(ctx context.Context) (*Result, error) {
-	runID := newRunID()
+	runID := r.cfg.RunID
+	if runID == "" {
+		runID = newRunID()
+	}
 	started := time.Now()
 
 	res := &Result{

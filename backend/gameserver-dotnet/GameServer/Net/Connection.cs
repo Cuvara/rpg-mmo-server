@@ -543,6 +543,18 @@ public sealed class Connection : IDisposable
     /// Read loop: continuously reads envelopes from the wire and dispatches them via the handler.
     /// Returns when the connection is closed or an error occurs.
     /// </summary>
+    /// <summary>
+    /// Highest client input tick observed ON ARRIVAL for this connection, used by
+    /// <see cref="GameServer.Observability.FrameOrderProbe"/> to detect reordering at the
+    /// decode step. Read-loop thread only — one read loop per connection — so it needs no
+    /// synchronisation, exactly like <see cref="Encoding"/>.
+    ///
+    /// <para>Deliberately separate from <c>InputCursor.LastInputTick</c>, which is the
+    /// simulation's cursor and is advanced in the tick loop AFTER ingest queueing. That one
+    /// reports post-queue order; this one reports arrival order.</para>
+    /// </summary>
+    internal ulong HighestInputTickSeen;
+
     public async Task ReadLoopAsync(Func<Connection, Envelope, Task> handler)
     {
         try

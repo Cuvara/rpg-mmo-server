@@ -7,6 +7,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`FrameOrderProbe` and the `frame_order_*` fields on `/status`** — the measurement
+  answering ADR-22's open question on whether the nonce-as-sequence replay rule needs a
+  sliding window. Records, per connection, whether an input frame's tick is greater than
+  the highest already seen, driven from the input dispatch inside
+  `Connection.ReadLoopAsync`'s handler — which is awaited inline, so the order it sees is
+  the order bytes arrived, which is the order a decrypt step would see.
+- **Deliberately not the existing `stale_tick` counter.** That check runs in the tick loop,
+  two queues downstream, and `EcsWorld.PushInput`'s coalescer **silently absorbs** an
+  out-of-order movement input before it is ever reached. `stale_tick` reports post-queue
+  order and cannot answer the question; the reconnect measurement shows the two diverging
+  completely (596 vs 0).
+- **Result: zero reordering across 22,374 frames**, on both transports, under 30% packet
+  reordering, 10% loss and 5% duplication injected with `tc netem`. Full method, matrix and
+  the quotable conclusion for ADR-22: `backend/docs/BENCHMARK.md` Part XII.
+
+### Added
 
 - **The game server derives a per-session key on every join, and is never sent one.**
   `GameServer.Net.Security.SessionKey` computes
