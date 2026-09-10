@@ -7,6 +7,50 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`shared/sealed` now carries the real primitives** — ChaCha20-Poly1305 (RFC 8439),
+  X25519 (RFC 7748) and HKDF-SHA256 (RFC 5869), all from `golang.org/x/crypto`, which was
+  already a dependency. **Nothing here implements a cipher, a MAC or a curve.**
+  - **Published RFC vectors, not only round-trips.** A round-trip proves an implementation
+    agrees with itself, which a subtly wrong one also does, silently. Tampering is
+    rejected in ciphertext, tag, additional data and length — the AAD case being the one
+    that can be wrong while every round-trip still passes.
+  - **Low-order X25519 points are refused.** Accepting one forces a shared secret the
+    attacker knows and both sides agree on: a complete break dressed as a successful
+    handshake.
+  - **Two direction keys, derived from the shared secret and salted by the transcript.**
+    Two, not one, is what makes the bare counter nonce safe — the client's sequence 7 and
+    the server's sequence 7 are encrypted under different keys. Salting with the
+    transcript binds the keys to the exact exchange, so two runs that agreed on a secret
+    but disagreed about anything else fail rather than proceeding half-agreed.
+  - **The handshake binding is HMAC-SHA256 under a key derived from `JOIN_TOKEN_SECRET`
+    and the jti**, verified with `hmac.Equal` — constant time, because a byte-by-byte
+    compare leaks the first mismatch position and that is enough to forge a tag one byte
+    at a time against a peer that keeps answering.
+  - **A cross-implementation vector** pins one complete handshake and one complete sealed
+    frame against the C# suite, value by value.
+
+### Changed
+
+- **The replay rule is settled and hardened.** `wire-contract` measured zero inversions
+  across 22 374 frames on both transports under hostile `tc netem`, so the strict counter
+  is correct and the window stays available but unused. Three conditions attach, because
+  the ordering is inherited rather than owned — TCP guarantees it, KCP gets it from a
+  hand-ported reassembly path:
+  - **Asserted, not assumed**: validators declare `RequiresOrderedTransport`, and a
+    session refuses to construct when a strict counter meets a transport that does not
+    promise ordering, so a future QUIC-datagram or raw-UDP path fails closed instead of
+    dropping legitimate frames and presenting as packet loss.
+  - **Rejections are counted by cause** — not authenticated, replayed, forward jump — and
+    returned identically. A validator that refuses silently is indistinguishable from one
+    that was never wired in, and under attack these counters are the only thing that
+    changes.
+  - **The forward jump is bounded.** Rejecting anything at or below the highest seen says
+    nothing about a leap *forward*, which burns nonce space and, with a strict counter, is
+    irreversible: every later legitimate frame carries a lower sequence and is refused for
+    ever, so the session dies quietly after authenticating perfectly well.
+
+### Added
+
 - **`shared/sealed`: the wire format, replay rule and refusal policy for realtime
   confidentiality**, specified and tested without a cipher. Normative spec:
   `backend/docs/SEALED-FRAMING.md`.

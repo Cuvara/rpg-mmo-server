@@ -7,6 +7,38 @@ import "errors"
 // WHICH of the two it hit tells an attacker where the window edge is.
 var ErrReplay = errors.New("sealed: replayed or out-of-window sequence")
 
+// ErrForwardJump reports a sequence that leaps too far ahead in one frame.
+var ErrForwardJump = errors.New("sealed: sequence jumped too far forward")
+
+// MaxForwardJump bounds how far a sequence may advance in a single frame.
+//
+// # Why the backward half of the rule is not the whole rule
+//
+// "Reject anything at or below the highest seen" stops replays and says nothing
+// about a leap FORWARD. A peer whose counter is corrupted — or is being steered
+// by anything that can influence it — can jump to near the top of the space in
+// one frame. Two consequences follow, and neither is a replay:
+//
+//   - it burns nonce space, forcing a rekey far earlier than the traffic
+//     justifies;
+//   - with a strict counter it is IRREVERSIBLE. Every legitimate frame after it
+//     carries a lower sequence and is refused for ever, so the session is dead
+//     and the symptom is a connection that authenticated fine and then went
+//     quiet.
+//
+// The exposure is bounded to start with — a forged frame cannot advance
+// anything, because it does not authenticate — so this defends against a
+// confused or compromised PEER rather than against an outsider. That is worth
+// having anyway: the cost of the bound is nothing and the failure without it is
+// silent.
+//
+// 1024 is slack, not a budget. On an ordered, reliable transport the expected
+// delta between consecutive frames is exactly 1: the ARQ repairs loss, so a gap
+// means something below has already gone wrong. 1024 leaves three orders of
+// magnitude of room before it can bite a healthy session, and still bounds the
+// damage to something a rekey can absorb.
+const MaxForwardJump = 1024
+
 // SequenceValidator decides whether a frame's sequence number is fresh.
 //
 // It exists as an interface because the answer depends on a transport property
@@ -31,6 +63,18 @@ type SequenceValidator interface {
 
 	// Highest returns the largest sequence accepted so far, for diagnostics.
 	Highest() uint64
+
+	// RequiresOrderedTransport reports that this validator is only correct when
+	// the transport below cannot reorder.
+	//
+	// It exists so the requirement is ASSERTED rather than assumed. The ordering
+	// this design rests on is inherited, not owned: TCP guarantees it, and KCP
+	// gets it from a hand-ported reassembly path of roughly ten lines. A future
+	// QUIC-datagram or raw-UDP transport would quietly violate it, and with a
+	// strict counter the symptom is dropped legitimate frames rather than an
+	// error that names the cause. Session refuses to construct in that case, so
+	// the new transport fails closed on day one instead of degrading.
+	RequiresOrderedTransport() bool
 }
 
 // StrictMonotonic accepts strictly increasing sequence numbers and nothing
@@ -47,8 +91,13 @@ func NewStrictMonotonic() *StrictMonotonic { return &StrictMonotonic{} }
 
 // Accept implements SequenceValidator.
 func (s *StrictMonotonic) Accept(sequence uint64) error {
-	if s.seen && sequence <= s.highest {
-		return ErrReplay
+	if s.seen {
+		if sequence <= s.highest {
+			return ErrReplay
+		}
+		if sequence-s.highest > MaxForwardJump {
+			return ErrForwardJump
+		}
 	}
 	s.highest = sequence
 	s.seen = true
@@ -57,6 +106,10 @@ func (s *StrictMonotonic) Accept(sequence uint64) error {
 
 // Highest implements SequenceValidator.
 func (s *StrictMonotonic) Highest() uint64 { return s.highest }
+
+// RequiresOrderedTransport implements SequenceValidator. A strict counter drops
+// any frame that arrives out of order, so it is only correct where none can.
+func (s *StrictMonotonic) RequiresOrderedTransport() bool { return true }
 
 // WindowSize is the default width of SlidingWindow, in frames.
 //
@@ -101,6 +154,10 @@ func (w *SlidingWindow) Accept(sequence uint64) error {
 		return nil
 	}
 
+	if sequence > w.highest && sequence-w.highest > MaxForwardJump {
+		return ErrForwardJump
+	}
+
 	switch {
 	case sequence > w.highest:
 		// Advance. Frames between the old and new high water are still
@@ -137,3 +194,7 @@ func (w *SlidingWindow) Accept(sequence uint64) error {
 
 // Highest implements SequenceValidator.
 func (w *SlidingWindow) Highest() uint64 { return w.highest }
+
+// RequiresOrderedTransport implements SequenceValidator. A window exists
+// precisely to tolerate reordering, so it imposes no such requirement.
+func (w *SlidingWindow) RequiresOrderedTransport() bool { return false }

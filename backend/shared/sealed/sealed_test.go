@@ -160,22 +160,82 @@ func TestSlidingWindowRefusesWhatItCannotJudge(t *testing.T) {
 	}
 }
 
-// A large jump forward must clear the window rather than shift stale bits into
-// it — otherwise frames far behind the new high water read as already seen and
-// legitimate traffic is dropped.
-func TestSlidingWindowHandlesLargeJumps(t *testing.T) {
+// A jump forward WITHIN the bound must clear the window rather than shift
+// stale bits into it — otherwise frames far behind the new high water read as
+// already seen and legitimate traffic is dropped.
+func TestSlidingWindowHandlesJumpsInsideTheBound(t *testing.T) {
 	v := NewSlidingWindow()
 	if err := v.Accept(1); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Accept(1_000_000); err != nil {
+	far := uint64(1 + MaxForwardJump)
+	if err := v.Accept(far); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Accept(1_000_000 - 1); err != nil {
+	if err := v.Accept(far - 1); err != nil {
 		t.Errorf("frame just behind the new high water rejected: %v", err)
 	}
-	if err := v.Accept(1_000_000); err != ErrReplay {
+	if err := v.Accept(far); err != ErrReplay {
 		t.Error("high-water frame accepted twice")
+	}
+}
+
+// A leap past the bound is refused by BOTH validators.
+//
+// The backward half of the rule stops replays and says nothing about a forward
+// leap, which burns nonce space and — with a strict counter — is irreversible:
+// every later legitimate frame carries a lower sequence and is refused for
+// ever, so the session dies quietly after authenticating perfectly well.
+func TestForwardJumpIsBounded(t *testing.T) {
+	for name, v := range map[string]SequenceValidator{
+		"strict": NewStrictMonotonic(),
+		"window": NewSlidingWindow(),
+	} {
+		if err := v.Accept(10); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if err := v.Accept(10 + MaxForwardJump + 1); err != ErrForwardJump {
+			t.Errorf("%s: a jump past the bound was accepted: %v", name, err)
+		}
+		// The bound must not have advanced the state, or a refused frame would
+		// still have done its damage.
+		if got := v.Highest(); got != 10 {
+			t.Errorf("%s: a refused jump advanced Highest to %d", name, got)
+		}
+		// And a normal frame still works afterwards.
+		if err := v.Accept(11); err != nil {
+			t.Errorf("%s: normal frame rejected after a refused jump: %v", name, err)
+		}
+	}
+}
+
+// Exactly at the bound is allowed; one past it is not. Pinned because an
+// off-by-one here is invisible until a session dies.
+func TestForwardJumpBoundaryIsExact(t *testing.T) {
+	v := NewStrictMonotonic()
+	if err := v.Accept(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Accept(1 + MaxForwardJump); err != nil {
+		t.Errorf("a jump of exactly MaxForwardJump was refused: %v", err)
+	}
+	v2 := NewStrictMonotonic()
+	if err := v2.Accept(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := v2.Accept(2 + MaxForwardJump); err != ErrForwardJump {
+		t.Errorf("a jump of MaxForwardJump+1 was accepted: %v", err)
+	}
+}
+
+// The ordering requirement each validator imposes must be stated by the
+// validator, so Session can assert it rather than assume it.
+func TestValidatorsDeclareTheirTransportRequirement(t *testing.T) {
+	if !NewStrictMonotonic().RequiresOrderedTransport() {
+		t.Error("a strict counter must require ordered delivery: it drops anything reordered")
+	}
+	if NewSlidingWindow().RequiresOrderedTransport() {
+		t.Error("a window exists to tolerate reordering and must not require ordering")
 	}
 }
 

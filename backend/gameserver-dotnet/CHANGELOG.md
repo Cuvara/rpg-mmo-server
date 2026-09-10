@@ -113,6 +113,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`GameServer/Net/Sealed` now carries the real primitives**, via
+  **BouncyCastle.Cryptography 2.7.0** — ChaCha20-Poly1305, X25519 and HKDF-SHA256, plus
+  HMAC-SHA256 for the handshake binding with `Arrays.FixedTimeEquals` for the comparison.
+  **Nothing here implements a cipher, a MAC or a curve.**
+  - **Why BouncyCastle for all three when .NET 10 has two.** .NET has `ChaCha20Poly1305`
+    and `HKDF` built in and both are measured working on 10.0.10, but it has **no X25519 at
+    all**, so BouncyCastle is required regardless. One library means the server and the
+    Unity client run the *same* implementation, which removes a class of interop question
+    rather than answering it three times. The cost is stated where it will be needed:
+    BouncyCastle's AEAD is managed code where .NET's is the platform's and
+    hardware-assisted, and swapping `SealedAead` alone is a contained change if it ever
+    shows up in a tick profile.
+  - **Published RFC vectors** (8439 §2.8.2, 7748 §6.1, 5869 A.1), tampering rejected in
+    ciphertext, tag, additional data and length, and low-order X25519 points refused.
+  - **A cross-implementation vector** asserting one complete handshake and one complete
+    sealed frame against the Go suite, value by value: C# opens the frame Go sealed, and
+    C# seals a byte-identical frame from the same inputs. A frame sealed for the other
+    direction is refused, which is what proves the two keys are distinct in use and not
+    merely in derivation.
+
+### Added
+
 - **`GameServer/Net/Sealed`: the C# half of the sealed wire format**, mirroring
   `shared/sealed` byte for byte — frame layout, nonce construction, the two replay
   validators behind one interface, the handshake transcript, and the refusal policy.

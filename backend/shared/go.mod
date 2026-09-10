@@ -6,6 +6,7 @@ require (
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/xtaci/kcp-go/v5 v5.6.72
+	golang.org/x/crypto v0.45.0
 	google.golang.org/protobuf v1.36.6
 )
 
@@ -18,7 +19,6 @@ require (
 	github.com/tjfoc/gmsm v1.4.1 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
-	golang.org/x/crypto v0.45.0 // indirect
 	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/time v0.14.0 // indirect

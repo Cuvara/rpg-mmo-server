@@ -1,8 +1,10 @@
 # Sealed framing — normative wire format for realtime confidentiality
 
-Status: **specification only.** No cipher, MAC or curve is implemented yet; ADR-22 has not
-settled the library. Everything here is the part of the design that does not depend on that
-choice, so that when the library lands the only new code is the primitive itself.
+Status: **primitives implemented and cross-verified; not yet wired into a live
+connection.** ADR-22's library question is closed — ChaCha20-Poly1305 (RFC 8439), X25519
+(RFC 7748) and HKDF-SHA256 (RFC 5869), from `golang.org/x/crypto` on the Go side and
+BouncyCastle.Cryptography 2.7.0 on the C# side. Published RFC vectors pass on both, and a
+shared cross-implementation vector pins the bytes between them.
 
 Implementations: `backend/shared/sealed` (Go), `GameServer/Net/Sealed` (C#). A Unity
 implementation follows. **All three must agree byte for byte** — the golden transcript
@@ -95,6 +97,31 @@ property still being measured — whether the ARQ can reorder at this layer:
 |---|---|---|
 | **StrictMonotonic** | accept only strictly increasing | transport cannot reorder (TCP; KCP in the reliable ordered mode configured here) |
 | **SlidingWindow(64)** | accept anything unseen within 64 of the high water — the IPsec/DTLS rule | transport can reorder |
+
+**Measured, and settled: strict counter, no window.** Zero inversions across 22 374 frames
+on both transports under hostile `tc netem`.
+
+Three conditions attach, because the ordering this rests on is **inherited, not owned** —
+TCP guarantees it, and KCP gets it from a hand-ported reassembly path of roughly ten lines:
+
+1. **The requirement is asserted, not assumed.** Each validator declares
+   `RequiresOrderedTransport`, and a session refuses to construct when a strict counter is
+   paired with a transport that does not promise ordering. A future QUIC-datagram or
+   raw-UDP path therefore **fails closed on day one** instead of quietly dropping
+   legitimate frames and presenting as packet loss.
+2. **Rejections are counted, not merely performed.** A validator that refuses silently is
+   indistinguishable from one that was never wired in, and under attack these counters are
+   the only thing in the system that changes. Counted by cause — not authenticated,
+   replayed, forward jump — and returned identically, so a peer learns nothing about which
+   rule it hit.
+3. **The forward jump is bounded** (`MaxForwardJump`, 1024). "Reject anything at or below
+   the highest seen" stops replays and says nothing about a leap *forward*, which burns
+   nonce space and, with a strict counter, is **irreversible**: every later legitimate
+   frame carries a lower sequence and is refused for ever, so the session dies quietly
+   after authenticating perfectly well. The exposure is bounded to begin with — a forged
+   frame cannot advance anything, because it does not authenticate — so this defends
+   against a confused or compromised peer rather than an outsider. On an ordered reliable
+   transport the expected delta is exactly 1, so 1024 is slack, not a budget.
 
 Both refuse what they cannot judge: a frame older than the window is rejected, because a
 validator that cannot prove freshness must not claim it. `wire-contract`'s measurement
@@ -223,15 +250,49 @@ into a human-readable payload. So once encryption is required, **a JSON client i
 not served in the clear** — which effectively deprecates the JSON encoding for any
 deployment that requires encryption. That is a consequence to state, not to discover.
 
-## 8. What is deliberately not here
+## 8. Libraries, and what is verified
 
-No cipher, no MAC, no curve, and no stub of any of them. An implementation that "worked"
-would let every test above it pass while proving nothing about the bytes — which is the
-failure this repository keeps recording in other forms. When the library lands, the
-deliverable is:
+| | Go | C# |
+|---|---|---|
+| AEAD | `x/crypto/chacha20poly1305` | BouncyCastle `ChaCha20Poly1305` |
+| Curve | `x/crypto/curve25519` | BouncyCastle `X25519Agreement` |
+| KDF | `x/crypto/hkdf` | BouncyCastle `HkdfBytesGenerator` |
+| MAC | `crypto/hmac` (+ `hmac.Equal`) | BouncyCastle `HMac` (+ `Arrays.FixedTimeEquals`) |
 
-- **cross-implementation vectors**, Go ↔ C# ↔ Unity in every direction, plus the published
-  RFC vectors. An implementation that is subtly wrong round-trips against itself and
-  reports nothing;
-- **live proof on real containers** that the traffic is actually ciphertext — a packet
-  capture, or a peer with the wrong key failing to form a session. A green test is not that.
+Nothing in this repository implements a cipher, a MAC or a curve.
+
+**Why BouncyCastle for all three on C# when .NET 10 has two of them.** .NET has
+`ChaCha20Poly1305` and `HKDF` built in and both are measured working on 10.0.10, but it has
+**no X25519 at all**, so BouncyCastle is required regardless. One library for all three
+means the server and the Unity client run the *same* implementation, which removes a class
+of interop question rather than answering it three times. The cost is real and worth
+knowing: BouncyCastle's AEAD is managed code while .NET's is the platform's and
+hardware-assisted. If the AEAD appears in a tick profile, swapping `SealedAead` alone is a
+contained change — the wire format does not care which library produced the bytes, which is
+exactly what the RFC vectors on both sides are for.
+
+### Verified
+
+- **Published RFC vectors on both sides**: RFC 8439 §2.8.2, RFC 7748 §6.1, RFC 5869 A.1.
+  A round-trip proves an implementation agrees with itself, which a subtly wrong one also
+  does — silently.
+- **A shared cross-implementation vector**: one complete handshake (both publics, shared
+  secret, transcript, both direction keys, binding tag) and one complete sealed frame,
+  asserted value-by-value in both suites. Go seals the frame the C# test opens; C# seals
+  the byte-identical frame the Go test opens.
+- **Tampering rejected** in ciphertext, tag, additional data and length — the AAD case
+  being the one an implementation can fail while every round-trip still passes.
+- **Low-order X25519 points refused**, since accepting one forces a shared secret the
+  attacker knows and both sides agree on: a complete break dressed as a successful
+  handshake.
+
+### Still to do
+
+- **Wire the handshake into a live connection.** This needs two new wire messages
+  (`ClientHello`, `ServerHello`); the primitives and the session are ready for them.
+- **Live proof on real containers** that the traffic is actually ciphertext — a packet
+  capture, or a peer with the wrong key failing to form a session. **A green test is not
+  that**, and nothing above claims to be.
+- **A real Unity client in the loop**, and the **Android** IL2CPP question: the probe that
+  passed was **Windows** IL2CPP, and the third-party CIL-Linker report was Android. Open,
+  not blocking, and must not be described as confirmed.

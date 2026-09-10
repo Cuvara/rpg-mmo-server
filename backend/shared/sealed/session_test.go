@@ -49,12 +49,15 @@ func (c *countingValidator) Accept(seq uint64) error {
 	return c.inner.Accept(seq)
 }
 func (c *countingValidator) Highest() uint64 { return c.inner.Highest() }
+func (c *countingValidator) RequiresOrderedTransport() bool {
+	return c.inner.RequiresOrderedTransport()
+}
 
 func newTestSession(t *testing.T) (*Session, *passthroughAEAD, *countingValidator) {
 	t.Helper()
 	aead := &passthroughAEAD{}
 	v := &countingValidator{inner: NewStrictMonotonic()}
-	s, err := NewSession(aead, v)
+	s, err := NewSession(aead, v, TransportGuarantees{OrderedDelivery: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,13 +184,13 @@ func TestCleartextBodyIsDistinguishable(t *testing.T) {
 // An AEAD whose geometry does not match the frame layout must be refused at
 // construction, not discovered at the first frame.
 func TestSessionRefusesAMismatchedAEAD(t *testing.T) {
-	if _, err := NewSession(nil, NewStrictMonotonic()); err == nil {
+	if _, err := NewSession(nil, NewStrictMonotonic(), TransportGuarantees{OrderedDelivery: true}); err == nil {
 		t.Error("nil AEAD accepted")
 	}
-	if _, err := NewSession(&passthroughAEAD{}, nil); err == nil {
+	if _, err := NewSession(&passthroughAEAD{}, nil, TransportGuarantees{OrderedDelivery: true}); err == nil {
 		t.Error("nil validator accepted")
 	}
-	if _, err := NewSession(&wrongGeometryAEAD{}, NewStrictMonotonic()); err == nil {
+	if _, err := NewSession(&wrongGeometryAEAD{}, NewStrictMonotonic(), TransportGuarantees{OrderedDelivery: true}); err == nil {
 		t.Error("an AEAD with the wrong nonce size was accepted")
 	}
 }
@@ -195,3 +198,71 @@ func TestSessionRefusesAMismatchedAEAD(t *testing.T) {
 type wrongGeometryAEAD struct{ passthroughAEAD }
 
 func (w *wrongGeometryAEAD) NonceSize() int { return 8 }
+
+// The ordering guarantee this protocol rests on is INHERITED, not owned: TCP
+// gives it by definition and KCP gets it from a hand-ported reassembly path. A
+// future transport that does not promise it must fail closed at construction,
+// not degrade into dropping legitimate frames and presenting as packet loss.
+func TestSessionRefusesAnUnorderedTransport(t *testing.T) {
+	_, err := NewSession(&passthroughAEAD{}, NewStrictMonotonic(),
+		TransportGuarantees{OrderedDelivery: false})
+	if !errors.Is(err, ErrUnorderedTransport) {
+		t.Fatalf("err = %v, want ErrUnorderedTransport — a strict counter over an "+
+			"unordered transport silently drops legitimate frames", err)
+	}
+
+	// A window tolerates reordering, so it is allowed there.
+	if _, err := NewSession(&passthroughAEAD{}, NewSlidingWindow(),
+		TransportGuarantees{OrderedDelivery: false}); err != nil {
+		t.Errorf("a sliding window was refused an unordered transport: %v", err)
+	}
+}
+
+// A validator that refuses silently is indistinguishable from one that was
+// never wired in — the same lesson as the counter-priming bug, one layer down.
+// Under attack these counters are the only thing in the system that changes.
+func TestRejectionsAreCounted(t *testing.T) {
+	send, _, _ := newTestSession(t)
+	recv, aead, _ := newTestSession(t)
+
+	frame, err := send.Seal([]byte("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	captured := append([]byte(nil), frame...)
+
+	// 1. A frame that does not authenticate.
+	aead.failOpen = true
+	if _, err := recv.Open(captured); !errors.Is(err, ErrSessionFailed) {
+		t.Fatal(err)
+	}
+	aead.failOpen = false
+
+	// 2. An authentic frame, then the same one replayed.
+	if _, err := recv.Open(captured); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recv.Open(captured); !errors.Is(err, ErrSessionFailed) {
+		t.Fatal(err)
+	}
+
+	// 3. An authentic frame that leaps past the bound.
+	jumped, err := (&Session{aead: &passthroughAEAD{}, sendSeq: MaxForwardJump + 99}).Seal([]byte("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recv.Open(jumped); !errors.Is(err, ErrSessionFailed) {
+		t.Fatal(err)
+	}
+
+	got := recv.Rejections()
+	if got.NotAuthenticated != 1 {
+		t.Errorf("NotAuthenticated = %d, want 1", got.NotAuthenticated)
+	}
+	if got.Replayed != 1 {
+		t.Errorf("Replayed = %d, want 1", got.Replayed)
+	}
+	if got.ForwardJump != 1 {
+		t.Errorf("ForwardJump = %d, want 1", got.ForwardJump)
+	}
+}
