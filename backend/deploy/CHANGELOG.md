@@ -6,6 +6,36 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`GAMESERVER_SEALED=REQUIRE` produced a sealed server and a JSON verifier.** The game
+  server parses the value with `.Trim().ToLowerInvariant()`; the CD generator compared the
+  raw string with `= "require"`. Two parsers, one input, different rules — so `REQUIRE`,
+  `Require` or `" require "` gave a server that **seals** and a smoke test configured for
+  **JSON**, which is a red deploy on a perfectly healthy stack with nothing pointing at the
+  capitalisation.
+
+  The generator now normalises once and writes the **normalised** value, so both halves
+  agree by construction. An unrecognised value **fails the deploy** rather than falling back
+  to `off`: a silent fallback is how the two halves disagreed in the first place, and
+  "encryption quietly disabled by a typo" is the wrong direction to fail in.
+
+  **Found by executing the generator rather than reading it** — the block is shell embedded
+  in a workflow, so nothing runs it until CD does. Executed across seven inputs:
+
+  ```
+  []            -> off      SMOKE_SEALED=0 SMOKE_ENCODING=json
+  [off]         -> off      SMOKE_SEALED=0 SMOKE_ENCODING=json
+  [require]     -> require  SMOKE_SEALED=1 SMOKE_ENCODING=proto
+  [REQUIRE]     -> require  SMOKE_SEALED=1 SMOKE_ENCODING=proto   <- was 0/json
+  [ require ]   -> require  SMOKE_SEALED=1 SMOKE_ENCODING=proto   <- was 0/json
+  [Require]     -> require  SMOKE_SEALED=1 SMOKE_ENCODING=proto   <- was 0/json
+  [preferred]   -> deploy refused
+  ```
+
+  Observed and deliberately not changed: `VERIFY_SEALED` on the k8s path is `!= "0"`, so
+  `VERIFY_SEALED=false` would read as ON. Surprising, but it has a single parser, so it
+  cannot produce the disagreement this entry is about.
+
+### Fixed
 - **`GAMESERVER_SEALED=require ./stack.sh …` was a silent no-op on any box with a
   CD-written `.env`.** `set -a; . "$ENV_FILE"` *assigns*, so every name the file mentions
   clobbers whatever the operator put on the command line. Once CD's generator started
