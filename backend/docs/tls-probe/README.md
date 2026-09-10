@@ -48,10 +48,38 @@ would not be one.
 5. Repeat on **Android** if a device is available. Android is the open question, for the
    same reason ADR-22's BouncyCastle result is Windows-only.
 
+### Do not trust the exit code, and do not trust the .exe either
+
+Batchmode Unity returned **0** for a build it reported internally as `result=Failed`, and
+the output folder still held a `TlsProbe.exe` of plausible size. That .exe is a shell: the
+IL2CPP step had died with `fatal error C1085: ... No space left on device`, so
+`GameAssembly.dll` — the file that actually holds the compiled game — was never linked.
+Running it pops a modal `Fatal error / Failed to load il2cpp` dialog and writes a
+**zero-byte** log, which from a script is indistinguishable from a player that has not
+started yet.
+
+So assert three things, in this order:
+
+| check | what it catches |
+|---|---|
+| `BuildReport.summary.result == Succeeded` | the exit code lying |
+| `GameAssembly.dll` exists next to the .exe | a stale or half-linked .exe |
+| the probe's own log has a terminating line | a player that started and then died |
+
+A full IL2CPP build of this project needs roughly **25 GB** of scratch in `Library/Bee`.
+Check free space before starting; `Library/Bee` is regenerable, so deleting it is the
+cheapest way to get that space back.
+
 ## Verified before shipping
 
-Every API the probe calls was **executed on .NET 10 first**, so it cannot fail to compile
-or throw for a reason unrelated to the question. On .NET 10 all four assertions hold:
+Every API the probe calls was **executed on .NET 10 first**, so it does not throw for a
+reason unrelated to the question. That is not the same as compiling in Unity, and the
+first player build proved it: `SslProtocols.Tls13` does not exist in Unity's
+netstandard2.1 profile, so the probe failed to compile with `error CS0117` while Unity
+still exited 0. The pinned protocol list was the wrong thing to assert anyway — it
+measures the list, not the platform — so the probe now passes `SslProtocols.None` and
+lets the platform choose. Read the run below as "these assertions hold on .NET 10",
+never as "this file compiles everywhere". On .NET 10 all four assertions hold:
 
 ```
 [ OK ] default validation refuses an untrusted certificate

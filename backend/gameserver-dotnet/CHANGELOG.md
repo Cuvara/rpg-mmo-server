@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **The IL2CPP TLS probe did not compile in Unity**, which the "verified before shipping"
+  note in its README implied it must. `SslProtocols.Tls13` does not exist in Unity's
+  netstandard2.1 profile, so the first player build failed with
+  `error CS0117: 'SslProtocols' does not contain a definition for 'Tls13'` — while
+  batchmode Unity exited **0**. Executing every API on .NET 10 first rules out unrelated
+  runtime throws; it says nothing about a different class-library profile, and the README
+  now says so instead of claiming the file "cannot fail to compile".
+
+  The pinned protocol list was the wrong assertion regardless: it measures the list rather
+  than the platform. The probe now passes `SslProtocols.None` and lets the platform choose,
+  which is also what a real client does.
+
+  The README also gained the shape of the failure that cost the most time. The same build
+  later died at `fatal error C1085: ... No space left on device`, reported `result=Failed`,
+  exited 0 again, and **left a plausible 652 KB `TlsProbe.exe` behind** with no
+  `GameAssembly.dll` next to it. Running that shell pops a modal `Failed to load il2cpp`
+  and writes a zero-byte log — indistinguishable, from a script, from a player still
+  starting up. Asserting that the .exe exists is therefore not enough; the README now lists
+  the three checks that are (build result, `GameAssembly.dll`, a terminating log line) and
+  records that IL2CPP needs ~25 GB of scratch in the regenerable `Library/Bee`.
+
 ### Added
 - **`backend/docs/tls-probe/` — the IL2CPP TLS probe**, the go/no-go for ADR-23's
   gateway-hop TLS and for the client's `https://` Nakama hop.
