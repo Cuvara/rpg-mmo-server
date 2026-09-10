@@ -5,6 +5,36 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **The ADR-24 Nakama key gate did not cover the environment `dev` actually deploys.** That
+  gate writes `deploy/.env` — the **compose** path. `dev` runs `DEPLOY_MODE=k8s`, where the
+  keys come from the out-of-band `nakama` Secret in `rpg-k8s-data` instead, so nothing
+  checked them. Measured on live `k3d-rpg-dev` *after* the gate shipped and CD went green:
+
+  ```
+  GET /v2/rpc/reward_kill?http_key=defaulthttpkey  ->  400 "user_id is required"
+  ```
+
+  400, not 401: the published default key had **passed authentication and reached the
+  handler**, on the deployed dev environment, gating the server-only `reward_kill` /
+  `submit_kill` RPCs. The Secret held `NAKAMA_HTTP_KEY = defaulthttpkey` literally.
+  (`NAKAMA_SERVER_KEY` there was already a real value, which is why only one of the two
+  showed.)
+
+  `dev-up.sh` now asserts both static keys the same way it already asserts `JWT_SECRET`
+  against the gateway's — present, and not at Nakama's published default — and refuses to
+  deploy otherwise. The assertion lives where the Secret is read, because that Secret is
+  applied out-of-band and nothing else looks at it.
+
+  `k8s/data/secrets.example.yaml` no longer ships `defaultkey` / `defaulthttpkey` as its
+  values. A copy that already contains a working default is a copy nobody edits; the
+  placeholders now name the command that produces a real one.
+
+  **Nothing consumed the rotated key**, which is worth recording rather than assuming: the
+  k8s game server logs `Nakama: disabled (NAKAMA_URL unset)`, so no reward RPC has ever been
+  issued from that deployment. Rewards not flowing in k8s `dev` is a separate gap, not
+  closed here.
+
 ### Security
 
 - **CD now FAILS the deploy when either Nakama static key is unset or left at its published

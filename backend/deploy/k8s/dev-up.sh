@@ -290,6 +290,37 @@ if [ -z "$nk_jwt" ] || [ "$nk_jwt" != "$gw_jwt" ]; then
   echo "  Nakama signs the gateway token; the gateway verifies it locally." >&2
   exit 1
 fi
+
+# The two STATIC Nakama keys, asserted for the same reason as the JWT above: this
+# Secret is applied out-of-band, so nothing else looks at it, and a value left at
+# Nakama's published default authenticates anyone who can reach the service.
+#
+# This is not hypothetical. cd.yml gained a gate for it in ADR-24, but that gate
+# writes deploy/.env -- the COMPOSE path. dev runs DEPLOY_MODE=k8s, where the keys
+# come from this Secret instead, so the gate never covered the environment dev
+# actually deploys. Measured on live k3d-rpg-dev after that gate shipped:
+# `?http_key=defaulthttpkey` still returned 400 "user_id is required", i.e. it had
+# passed authentication and reached the handler.
+#
+# runtime.http_key gates the server-only reward_kill / submit_kill RPCs.
+for _pair in "NAKAMA_SERVER_KEY:defaultkey" "NAKAMA_HTTP_KEY:defaulthttpkey"; do
+  _name=${_pair%%:*}
+  _bad=${_pair##*:}
+  _val=$($K get secret nakama -n rpg-k8s-data -o "jsonpath={.data.$_name}" 2>/dev/null | base64 -d 2>/dev/null || true)
+  if [ -z "$_val" ]; then
+    echo "ERROR: nakama Secret has no $_name." >&2
+    echo "  It is a static, never-expiring server credential. Absent means Nakama is" >&2
+    echo "  started with an empty key, which is not a safe default in either direction." >&2
+    echo "  Set it: openssl rand -hex 32" >&2
+    exit 1
+  fi
+  if [ "$_val" = "$_bad" ]; then
+    echo "ERROR: nakama Secret's $_name is Nakama's published default ('$_bad')." >&2
+    echo "  That value authenticates: measured, not inferred. Rotate it with" >&2
+    echo "  openssl rand -hex 32 and re-apply the Secret." >&2
+    exit 1
+  fi
+done
 $K apply -f "$HERE/app/40-gateway.yaml" -f "$HERE/app/50-fleet-map.yaml"
 
 # Pin the resolved images over whatever the manifests carry. The Fleet is
