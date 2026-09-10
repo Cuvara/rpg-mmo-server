@@ -139,9 +139,18 @@ public class ServerOptions
     /// looking entirely healthy.
     /// </para>
     /// <para>
-    /// Defaults to <see cref="Net.Sealed.SealedRequirement.Disabled"/>. Making it the
-    /// default is a separate, operational decision — it refuses every client that cannot
-    /// seal, including every JSON client — and is deliberately not taken here.
+    /// <b>This property's default is not the server's default.</b> It is
+    /// <see cref="Net.Sealed.SealedRequirement.Disabled"/> so that a unit test constructing
+    /// <see cref="ServerOptions"/> for some unrelated reason does not silently acquire a
+    /// handshake it never asked for. The value a real server runs with comes from
+    /// <c>Program.cs</c>, where <c>GAMESERVER_SEALED</c> defaults to <c>require</c>, and
+    /// <c>Program.cs</c> is the only production code that constructs this type.
+    /// </para>
+    /// <para>
+    /// So do not read the initialiser below as "the server defaults to off". If a second
+    /// production entry point is ever added, it must set this explicitly — an entry point
+    /// that forgets gets an unencrypted server with no error, which is exactly the
+    /// silent-default failure the <c>require</c> default exists to remove.
     /// </para>
     /// </remarks>
     public Net.Sealed.SealedRequirement SealedTransport { get; set; } = Net.Sealed.SealedRequirement.Disabled;

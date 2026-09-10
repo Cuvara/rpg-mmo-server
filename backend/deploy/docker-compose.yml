@@ -288,6 +288,29 @@ services:
       # service above, and NOT JWT_SECRET (see the comment there).
       JOIN_TOKEN_SECRET: ${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}
       GAMESERVER_ADDR: ":9000"
+      # PINNED OFF ON PURPOSE — this is a decision, not an oversight.
+      #
+      # A stock game server defaults to `require`: it encrypts the gameplay hop
+      # and refuses every client that cannot seal. This stack does NOT inherit
+      # that default yet, because six Unity sample scenes in the client repo
+      # (DOTSNetworkBridge, the three E2ECertification scenes, ReconnectPolicyDemo
+      # and WorldView) construct NetworkSettings and dial a live backend, and none
+      # of them sets RequireSealedSession. Those scenes are the package's
+      # acceptance path, not demos — inheriting the default here would break all
+      # six with a refusal, and the fix lives in the other repo on a package
+      # release cadence (netcode change -> tag -> manifest + lock bump).
+      #
+      # To run this stack sealed on purpose — which you should, before shipping
+      # anything that depends on it:
+      #
+      #   GAMESERVER_SEALED=require ./stack.sh up
+      #   GAMESERVER_SEALED=require ./stack.sh check
+      #
+      # stack.sh derives the smoke test's SMOKE_SEALED from this value, so both
+      # halves move together; setting only one of them is a refusal, not a
+      # warning. Once the samples set RequireSealedSession, delete the override
+      # below and let this inherit.
+      GAMESERVER_SEALED: ${GAMESERVER_SEALED:-off}
       GAMESERVER_MODE: map
       GAMESERVER_MAP_ID: ${GAMESERVER_MAP_ID:-map_01}
       GAMESERVER_ID: ${GAMESERVER_ID:-gs-dotnet-${GAMESERVER_MAP_ID:-map_01}}

@@ -8,6 +8,16 @@
 #
 #   ./stack.sh up        # build images + start everything (idempotent)
 #   ./stack.sh check     # drive the full client flow through it (smoketest)
+#
+# ENCRYPTION. The gameplay hop is unencrypted here: docker-compose.yml pins
+# GAMESERVER_SEALED=off, with the reason at the line. To run the stack sealed:
+#
+#   GAMESERVER_SEALED=require ./stack.sh up
+#   GAMESERVER_SEALED=require ./stack.sh check
+#
+# (or `make flow-up-sealed` / `make flow-check-sealed`, which are the same thing).
+# `check` derives SMOKE_SEALED from GAMESERVER_SEALED so the two halves cannot
+# drift apart; see do_check.
 #   ./stack.sh health    # probe every health endpoint + the server registry
 #   ./stack.sh logs      # tail gateway + gameserver
 #   ./stack.sh ps        # service status
@@ -245,6 +255,25 @@ do_check() {
 		echo "       The stack itself is running — only this check needs Go." >&2
 		echo "       Fix: export PATH=\$PATH:/path/to/go/bin, then re-run ./stack.sh check" >&2
 		return 1
+	fi
+
+	# One switch, not two. The game server reads GAMESERVER_SEALED; the smoke test
+	# reads SMOKE_SEALED. They are independent variables that MUST agree — a server
+	# requiring encryption and a client that cannot seal is a refused connection,
+	# so a stack started with GAMESERVER_SEALED=require and checked without
+	# SMOKE_SEALED would report a broken stack when the stack is fine.
+	#
+	# Deriving one from the other means `GAMESERVER_SEALED=require ./stack.sh check`
+	# does the right thing with no second thing to remember. An explicitly set
+	# SMOKE_SEALED still wins, which is what you want to reach for when the question
+	# is "does this server actually refuse a client that cannot seal": set
+	# GAMESERVER_SEALED=require and SMOKE_SEALED=0, and expect the check to FAIL.
+	#
+	# The variable is named for the server because the server is what decides; the
+	# client half has no say, by design (see backend/docs/SEALED-FRAMING.md §7).
+	if [ -z "${SMOKE_SEALED:-}" ] && [ "${GAMESERVER_SEALED:-off}" = "require" ]; then
+		export SMOKE_SEALED=1
+		echo "note: GAMESERVER_SEALED=require -> running the smoke test sealed (SMOKE_SEALED=1)"
 	fi
 
 	(

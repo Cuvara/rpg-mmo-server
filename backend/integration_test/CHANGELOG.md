@@ -7,6 +7,36 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`sealed_session_e2e_test.go` — end-to-end coverage of the sealed session**, against a
+  server spawned with **no `--sealed` argument**, so the new `require` default is what is
+  under test rather than the flag:
+  - `TestSealedSession_RequireServerAcceptsSealingClient` runs the Go client handshake,
+    asserts the binding was verified (this harness holds `JOIN_TOKEN_SECRET`, so unlike a
+    shipped Unity client it *can* check it), and then asserts every frame after the
+    handshake arrived **sealed** — a handshake that completed and silently fell back to
+    cleartext would pass every other assertion in the file.
+  - `TestSealedSession_RequireServerRefusesJSONClient` is the executable form of "requiring
+    encryption deprecates JSON": the join is accepted, then the connection is closed rather
+    than served in the clear.
+  - `TestSealedSession_RequireServerRefusesNonSealingProtoClient` covers the rollout hazard
+    the JSON case does not — a client that speaks protobuf perfectly well and has not
+    shipped the handshake yet, which is every existing client on flip day.
+
+### Changed
+
+- **`startDotnetGameServerWith` now pins `--sealed off`**, with the reason at the line.
+  Several tests in this suite deliberately speak JSON, which can never be sealed, so
+  against a stock server they would all be refused; the pin is what keeps them exercising
+  the unsealed wire, which the project still supports.
+- **`startDotnetGameServerSealedDefault` added** because that pin means no test reached
+  through the old helper can detect a change to the default. It spawns with no `--sealed`
+  argument at all and is used only by the sealed suite. Splitting the helper was the
+  correction to a first draft in which the new test passed `--sealed require` while its
+  comment claimed to be testing the default — it would have proved only that the flag is
+  wired.
+
+### Added
+
 - **`duplicate_login_kick_e2e_test.go`** — live end-to-end proof of the
   cross-instance duplicate-login kick (ADR-20; the gap #211 left recorded in
   ADR-17), miniredis in-process like `redis_event_e2e_test.go`: client A joins

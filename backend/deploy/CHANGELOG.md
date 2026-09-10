@@ -5,6 +5,28 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`docker-compose.yml` pins `GAMESERVER_SEALED=off` explicitly**, now that a stock game
+  server defaults to `require`. Pinned deliberately, with the reason at the line, so the
+  next reader knows it is a decision and not an oversight: six Unity sample scenes
+  (`DOTSNetworkBridge`, three `E2ECertification` scenes, `ReconnectPolicyDemo`, `WorldView`)
+  construct `NetworkSettings` and dial a live backend without setting
+  `RequireSealedSession`, and those scenes are the netcode package's acceptance path rather
+  than demos. Inheriting the default would break all six, and the fix lives in the client
+  repo on a package release cadence. The pin comes out when the samples set the flag.
+
+### Added
+
+- **`make flow-up-sealed` / `make flow-check-sealed`**, so the sealed path is exercisable
+  locally on purpose rather than only in CI. `GAMESERVER_SEALED=require ./stack.sh up|check`
+  is the same thing without make.
+- **`stack.sh check` derives `SMOKE_SEALED` from `GAMESERVER_SEALED`.** They are independent
+  variables that must agree — a `require` server and a smoke test that cannot seal is a
+  refused connection, which reports a broken stack when the stack is fine. An explicitly
+  set `SMOKE_SEALED` still wins, which is how you assert the refusal on purpose:
+  `GAMESERVER_SEALED=require SMOKE_SEALED=0` should FAIL.
+
 ### Fixed
 - **`stack.sh up` rebuilds `modules/nakama.so` when it is older than any `nakama/` or `shared/`
   Go source (or the plugin Dockerfile), not only when the file is missing.** The old
