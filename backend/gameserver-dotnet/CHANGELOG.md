@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`backend/docs/tls-probe/` — the IL2CPP TLS probe**, the go/no-go for ADR-23's
+  gateway-hop TLS and for the client's `https://` Nakama hop.
+
+  **It asserts a refusal, not a success.** ADR-22 caught `AesGcm` type-checking and then
+  throwing at runtime — a loud failure. Certificate validation is likelier to fail
+  *quietly*, and validation that silently accepts anything is indistinguishable from
+  validation that works if only a good certificate is ever tested. So assertion 1 is that
+  an **untrusted certificate is refused**; a probe showing only a good one connecting would
+  pass on a platform where TLS is worthless.
+
+  Three more: an explicitly trusted certificate completes (so a refusal in 1 cannot be
+  confused with "SslStream is broken"), the validation callback is invoked at all, and it
+  receives a **real** `SslPolicyErrors` rather than `None` — pinning code that trusts
+  `None` for an untrusted certificate accepts anything.
+
+  Self-contained: embedded self-signed certificate, loopback listener, no network and no
+  `badssl.com`, so an offline or locked-down device still answers and no one else's
+  certificate expiry can perturb the result.
+
+  **Verified before shipping**, to the standard the crypto probe set: every API executed on
+  .NET 10 first, all four assertions holding there (`UntrustedRoot` refusal, TLS 1.3 /
+  AES-256 on the trusted path, `RemoteCertificateChainErrors` at the callback), and
+  mutation-tested in both directions — degrading validation fails assertion 1, a `None`
+  callback fails assertion 4.
+
+  **Not yet run in a player.** That is exactly the gap it exists to close, and it is stated
+  rather than implied. The verdict line names the platform it actually ran on, because a
+  probe reporting "works under IL2CPP" from the Editor is the overclaim it exists to catch.
+
 ### Documentation
 - **Measured what actually crosses each hop in the clear, and the recorded residual
   understated it.** A byte tap on both hops of a fully sealed session (26 sealed frames,

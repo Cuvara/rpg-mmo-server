@@ -455,6 +455,14 @@ inventing a cipher.
        absence.** The first meta-hop capture found no auth token; it was there, gzipped,
        and a byte scan cannot see through gzip. A "clean" result on that hop is not
        believable until compression is ruled out. This trap is met first, not last.
+     - **The probe that measures this is written and verified:**
+       `backend/docs/tls-probe/`. It is self-contained — an embedded self-signed
+       certificate and a loopback listener, no network — and it asserts the **refusal**,
+       not the success. Every API was executed on .NET 10 first, and it was mutation-tested
+       in both directions: degrading validation fails assertion 1, and a callback receiving
+       `SslPolicyErrors.None` fails assertion 4. **Not yet run in a player** — that is the
+       remaining go/no-go for ADR-23.
+
      - **When `SslStream` under IL2CPP is measured, assert the NEGATIVE case.** ADR-22
        found `AesGcm` present in the reference assembly and throwing at runtime — it
        type-checks and then fails. Certificate *validation* is more likely to be quietly
