@@ -2827,6 +2827,101 @@ None. This ADR is a record, not a change. Nothing in the code moves on it.
 
 ---
 
+## ADR-22 — Transport crypto: ChaCha20-Poly1305 over an authenticated X25519 exchange, with the nonce as the replay counter
+
+**Status:** accepted 2026-09-10 as the target model. **Not implemented.** Supersedes the deferral in ADR-21 and supersedes the key-derivation scheme merged in #288, which is retained for the parts of it that carry forward.
+
+### The model
+
+```
+X25519 ephemeral exchange, authenticated by the join token
+        |
+        v
+HKDF-SHA256( ikm  = X25519(eph_priv, peer_pub) ‖ bind
+             salt = jti
+             info = "cuvara/session/v1" )
+        |
+        v
+ChaCha20-Poly1305 per frame, nonce = monotonic sequence number
+        |
+        v
+receiver rejects nonce <= highest seen  ->  replay protection
+```
+
+Where `bind` is material only a holder of `JOIN_TOKEN_SECRET` can produce.
+
+### Why each piece, and what it is not there for
+
+**None of this reduces cheating.** A cheater is a legitimate player holding the client, the session and any key inside it. This defends against a third party on the network path. The anti-cheat work is A1-A6 in `ROADMAP-SECURITY.md` §1. Anyone reading this ADR as an anti-cheat measure has misread it.
+
+**ChaCha20-Poly1305, not AES-GCM.** An AEAD rather than a cipher plus a MAC, so there is no encrypt-then-MAC ordering to get wrong, no "the MAC must cover the nonce" to forget, and no constant-time comparison to botch — the failure modes an earlier draft of the roadmap accepted when it recommended AES-CTR + HMAC. ChaCha20 is also designed to be fast **without** hardware AES, which is exactly the platform that lacks it (see the measurement below).
+
+**X25519, not derivation from a long-term secret.** #288 derived the session key as `HKDF(JOIN_TOKEN_SECRET, jti)`. That has no forward secrecy: the key is a pure function of a long-term secret and a `jti` that travels in the clear, so **anyone who later obtains `JOIN_TOKEN_SECRET` decrypts every recorded past session**. A DH exchange removes that, and removes the gateway-hop key delivery ADR-21 and #288 both had to record as a limitation.
+
+**The exchange MUST be authenticated, and echoing the token is not enough.** An unauthenticated X25519 on a plaintext hop is a clean man-in-the-middle: the attacker completes one exchange with each side and both ends see a perfectly healthy encrypted session, with nothing to observe. The binding must **prove possession of secret-derived material**, not merely present the token — an eavesdropper can read the token off the wire and replay it. This is the condition that makes the whole model safe; without it the model is worse than useless, because it produces confidence.
+
+**The nonce is the sequence number, and that is two problems solved by one mechanism.** ChaCha20-Poly1305 authenticates each frame but does **not** stop a valid frame being replayed. With a per-session key, using a monotonic counter as the nonce and rejecting any nonce at or below the highest seen gives replay protection for free — and simultaneously removes nonce reuse, which is the catastrophic failure mode of this AEAD. A sliding window is needed only if the layer below can reorder; KCP delivers reliably and in order, but **the crypto layer must not depend on that** and should enforce its own ordering.
+
+### What the client runtime actually provides — measured, not assumed
+
+Run in a **built IL2CPP player** (Windows, `ManagedStrippingLevel.Minimal`), not the Editor, because Mono and IL2CPP use different class-library profiles (`unityjit` vs `unityaot`) and the Editor's answer does not transfer:
+
+```
+platform : WindowsPlayer
+runtime  : Mono Unity IL2CPP
+
+AesGcm                     : THREW PlatformNotSupportedException
+ChaCha20Poly1305 (reflect) : TYPE ABSENT
+HKDF (reflect)             : TYPE ABSENT
+ECDiffieHellman (reflect)  : TYPE ABSENT
+Aes (raw block)            : OK
+HMACSHA256                 : OK
+RandomNumberGenerator      : OK
+```
+
+`AesGcm` **compiles and then throws** — the type is in the reference assembly and the implementation is not. That is the worst available failure mode: it type-checks, so an implementation written against it passes review, passes compilation, passes CI, and fails on a device.
+
+| | Go | .NET 10 | Unity (measured) |
+|---|---|---|---|
+| ChaCha20-Poly1305 | `x/crypto`, already a dependency in 5 modules | built in | **absent** |
+| X25519 | `x/crypto/curve25519`, same | **unverified — check before committing** | **absent** |
+| HKDF-SHA256 | built in | built in | **absent** — build from `HMACSHA256` |
+
+So the client needs **one** vendored pure-C# library covering ChaCha20-Poly1305 and X25519. Not two, and not a native plugin. A UPM package cannot declare a scoped registry, so it must be source or a vendored assembly, and it must be verified in an IL2CPP **player build** — AOT can break generics, `unsafe` and `Span` in ways the Editor never shows.
+
+### Alternatives rejected
+
+**GameNetworkingSockets (Valve).** Genuinely good and battle-tested, with real per-session crypto. Rejected because adopting it replaces the transport rather than adding crypto to it: ~950 lines of Go transport, ~3 700 of C#, ~2 000 of Unity netcode, plus the delta encoder, id interning, golden vectors and the protocol-version handshake that sit on top. It is C++, so it needs native bindings for three runtimes and has no official Go support — and `backend/loadtest` is Go and speaks the game protocol directly, so adopting GNS **deletes the harness that performed this project's live acceptance runs**. Revisit only if a measured need appears (NAT punching, relay, or transport cost shown to be a bottleneck); the migration cost will not have grown.
+
+**Hazel Networking.** C#-only, so no Go side at all, and its crypto story is thin — DTLS exists only in some forks. Strictly worse than GNS for the one thing being asked of it.
+
+**Terminate TLS at the edge (ADR-21 option D).** Still the right answer for the gateway hop eventually, and still blocked on the hosting shape ADR-15/16 leave unsettled.
+
+**Keeping AES-256-CFB and adding a MAC.** Rejected: CFB with a CRC32 is what exists today, the CRC is linear and is not a MAC, and bolting on an HMAC by hand reintroduces every composition error an AEAD removes.
+
+### Decisions
+
+1. **Target model is as above**: ChaCha20-Poly1305 over an authenticated X25519 exchange, HKDF-SHA256 for derivation, nonce-as-sequence for replay protection.
+2. **The DH exchange must be authenticated by proof of possession of `JOIN_TOKEN_SECRET`-derived material.** An implementation that merely echoes the join token is rejected at review.
+3. **No negotiation and no fallback.** "Client did not present a key" means *no session*, never *plaintext session*. A negotiable path is a downgrade attack. `KcpCrypto` already fails closed; match it.
+4. **Standard implementations only.** No hand-written cipher, MAC or curve on any side.
+5. **Cross-implementation test vectors are a deliverable, not an afterthought.** Each side generates, the other two decrypt and confirm. An implementation that is subtly wrong still round-trips against itself and reports no error anywhere.
+6. **`EnterWorldResponse.session_key` (field 5) is reserved, not reused**, once X25519 makes it dead weight. Reusing a field number is how two versions silently disagree about what a byte means.
+7. **The key is never printable**, enforced by a redacting type rather than by discipline — as shipped in #288 and to be carried forward. The realistic leak is a struct handed to a formatter by code that did not know it held a secret.
+8. **This does not ship until the gateway hop is also confidential.** Until then the model's guarantees are bounded by a plaintext hop, and saying otherwise would produce exactly the *believed protected* state ADR-21 was written to prevent.
+
+### What is carried forward from #288
+
+The redacting key type, the no-fallback rule, the shared cross-implementation vector and the `jti` plumbing all survive. What is superseded is only the derivation itself.
+
+### Open, and to be closed before implementation
+
+- **X25519 availability on .NET 10** is unverified. `ECDiffieHellman` exists with NIST curves; X25519 specifically must be confirmed by a build, not by documentation.
+- **Which pure-C# library** for the client, and whether it passes RFC 8439 and RFC 7748 vectors under IL2CPP in a player build.
+- **Whether KCP's ordering guarantee removes the need for a sliding window**, measured rather than assumed.
+
+---
+
 ## Summary of decisions
 
 | # | Area | Decision |
@@ -2852,3 +2947,4 @@ None. This ADR is a record, not a change. Nothing in the code moves on it.
 | 19 | Game content | **Content is JSON on disk in `backend/content/`, owned by the game server, served to clients over HTTP at `/content` and never carried by the `Shared.GameLogic` package.** The package is pinned by exact commit, so content in it costs a tag plus two file bumps per balance tweak — correct for simulation rules, fatal for content. The server loads and validates at boot and **refuses to start** on invalid content, reporting every fault in one pass. Clients send `?hash=` and get `304` once they hold the current set; the hash ships in both `ETag` and `X-Content-Hash` because `UnityWebRequest` and some proxies strip the former. The **schema and validator are shared** (`Shared.GameLogic/Content/`), the **parser is not** — Unity compiles the package as source and has no `System.Text.Json`, the server is NativeAOT and cannot reflect, so no single parser satisfies both; golden vectors cover the gap as in ADR-10. No hot reload: content changes need a restart, because rules changing under a running simulation makes every desync unreproducible |
 | 20 | Duplicate-login kick | **Gateway→gameserver eviction over one shared `events:kick` Stream, keyed by join-token jti** (ADR-5 consumer-group ACK, never Pub/Sub). On duplicate login the gateway publishes `session_superseded` with the old session's jti; each game server consumes via its own group (`gs:{server_id}`, created at `$`, destroyed on graceful shutdown), kicks only the connection holding that jti (newest login wins, redelivery idempotent), releases the entity with **no reconnect hold**, and sends the standard `MsgKick`+`MsgDisconnect` pair. One shared stream because server ids churn under a noeviction Redis (ADR-4). Counters: `gateway_kick_publish_total`, `gameserver_players_kicked_total`. The gateway→gateway socket eviction stays with ADR-17 |
 | 21 | Transport confidentiality | **Proposed, not accepted — a record of posture only.** KCP has real AES-256-CFB packet encryption, kcp-go-compatible and symmetric across Go and C# (`KcpCrypto.cs` / `shared/transport/crypto.go`), fail-closed on a wrong key. But it is **off by default twice** — the transport default is `tcp`, which has no encryption path, and the key variable defaults to empty, which means plaintext — and a **pre-shared key is not a session key**: every client shares one static secret that ships in the binary, so it resists a passive observer and not a player. No negotiation, no key id, no rotation without a hard cutover; CFB plus a linear CRC32 is confidentiality, not authentication, and the CRC is not a MAC. Deferred because every current environment is localhost/LAN and the hosting shape above dev is unsettled (ADR-15/16) — choosing an AEAD and a key exchange now means choosing them twice. **Reporting the transport and whether a key is in force does not wait for that decision.** Do not describe this link as "unencrypted"; describe it as unencrypted by default and unauthenticated when on |
+| 22 | Transport crypto | **Accepted 2026-09-10 as the target model; NOT implemented.** ChaCha20-Poly1305 over an **authenticated** X25519 exchange, HKDF-SHA256 derivation, **nonce as the replay counter** (one mechanism removing both replay and nonce reuse). Supersedes #288's `HKDF(JOIN_TOKEN_SECRET, jti)` derivation, which has **no forward secrecy** — obtaining the long-term secret later decrypts every recorded past session. **The DH must prove possession of secret-derived material, not echo the join token**, which an eavesdropper can read and replay; unauthenticated DH on a plaintext hop is a clean MITM that produces confidence rather than security. Measured in a built IL2CPP player: `AesGcm` **compiles then throws**, `ChaCha20Poly1305`/`HKDF`/`ECDiffieHellman` **absent**, only `Aes`/`HMACSHA256`/`RandomNumberGenerator` work — so the client needs one vendored pure-C# library. GNS rejected (replaces the transport and deletes the Go loadtest harness), Hazel rejected (no Go, thin crypto). No negotiation, no fallback, standard implementations only, cross-implementation vectors as a deliverable, field 5 reserved not reused. **Does not ship until the gateway hop is confidential** |

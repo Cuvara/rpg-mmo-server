@@ -80,6 +80,9 @@ system built before the telemetry exists is a system nobody can tune.
 
 ## 2. Transport confidentiality: the actual plan
 
+> **SUPERSEDED IN PART by [ADR-22](ARCHITECTURE-DECISIONS.md#adr-22--transport-crypto-chacha20-poly1305-over-an-authenticated-x25519-exchange-with-the-nonce-as-the-replay-counter) (2026-09-10).** The section below recommended **AES-CTR + HMAC-SHA256** and, before that, the built-in `AesGcm`. Both are wrong and the reasons are recorded rather than deleted: `AesGcm` **compiles and then throws** in a built IL2CPP player, and a hand-composed encrypt-then-MAC reintroduces every ordering and comparison error an AEAD removes. ADR-22 settles the model as **ChaCha20-Poly1305 over an authenticated X25519 exchange with the nonce as the replay counter**. The §2.1 insight that the gateway is already a trusted key-distribution point still holds, and shipped as #288 — but its derivation has **no forward secrecy** and is itself superseded. Read ADR-22 before implementing anything in this section.
+
+
 Read ADR-21 first for the current posture. Summary of what is wrong today: encryption
 exists (`KcpCrypto.cs`, AES-256-CFB, kcp-go compatible) but is **off by default twice**
 (transport defaults to `tcp` which has no encryption path; the key variable defaults to

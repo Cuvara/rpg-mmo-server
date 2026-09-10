@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **ADR-22 settles the transport crypto model, and supersedes two earlier recommendations of
+  this project's own — including one that shipped four days after it was written.** The model
+  is **ChaCha20-Poly1305 over an authenticated X25519 exchange**, HKDF-SHA256 derivation, and
+  **the nonce doubling as the replay counter** — one mechanism that removes both replay and
+  nonce reuse, the latter being this AEAD's catastrophic failure mode.
+
+  **What it supersedes, and why each was wrong.** `ROADMAP-SECURITY.md` first recommended the
+  built-in `AesGcm`; measured in a built IL2CPP player it **compiles and then throws
+  `PlatformNotSupportedException`** — the type is in the reference assembly and the
+  implementation is not, which is the worst available failure mode because it type-checks and
+  fails on a device. It then recommended AES-CTR + HMAC-SHA256, which reintroduces every
+  ordering and constant-time error an AEAD removes. And #288's `HKDF(JOIN_TOKEN_SECRET, jti)`
+  derivation has **no forward secrecy**: the key is a pure function of a long-term secret and
+  a `jti` that travels in the clear, so obtaining that secret later decrypts *every recorded
+  past session*.
+
+  **The condition that makes the model safe is stated as a decision, not a note.** An
+  unauthenticated X25519 on a plaintext hop is a clean man-in-the-middle in which both ends
+  see a perfectly healthy encrypted session. The binding must **prove possession of
+  secret-derived material, not echo the join token** — an eavesdropper can read the token off
+  the wire and replay it. An implementation that only echoes is rejected at review.
+
+  Client runtime capability is recorded as measured rather than assumed: in an IL2CPP player,
+  `ChaCha20Poly1305`, `HKDF` and `ECDiffieHellman` are **absent** and only `Aes`,
+  `HMACSHA256` and `RandomNumberGenerator` work — so the client needs **one** vendored
+  pure-C# library, not a native plugin. GameNetworkingSockets is rejected with reasons
+  (replacing the transport would delete the Go loadtest harness that ran this project's live
+  acceptance); Hazel is rejected for having no Go side.
+
+  **No code changes.** Also records that this must not ship until the gateway hop is
+  confidential, since until then the model's guarantees are bounded by a plaintext hop.
+
 ### Added
 
 - **The game server derives a per-session key on every join, and is never sent one.**
