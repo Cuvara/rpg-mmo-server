@@ -55,6 +55,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reordering, 10% loss and 5% duplication injected with `tc netem`. Full method, matrix and
   the quotable conclusion for ADR-22: `backend/docs/BENCHMARK.md` Part XII.
 
+- **Surveyed and verified the pure-C# crypto library for ADR-22, closing its second open
+  question on the .NET side.** `backend/docs/TRANSPORT-CRYPTO-LIBRARY-SURVEY.md`, with an
+  IL2CPP probe in `backend/docs/crypto-probe/`.
+
+  **Recommendation: `BouncyCastle.Cryptography` 2.7.0 — one library for both runtimes.**
+  MIT, **0 P/Invoke methods**, no package dependencies, and no reference to
+  `System.Runtime.Intrinsics`, `Unsafe`, `Numerics.Vector` or `Reflection.Emit` — all read
+  out of the assembly metadata rather than taken from a README. Verified on .NET 10 against
+  **published vectors**: RFC 8439 §2.8.2 (ChaCha20-Poly1305), RFC 7748 §6.1 (X25519, both
+  directions), RFC 5869 A.1 (HKDF-SHA256), plus tamper rejection — and cross-checked against
+  Go `x/crypto` v0.57.0 in **both directions over a real X25519 exchange with random keys**.
+  The cost is stated rather than buried: **4 771 KB and 2 350 public types**, plus a
+  third-party report of an Android IL2CPP CIL-Linker failure on BouncyCastle 2.x.
+
+  **It is the only candidate that provides X25519 at all.** `NaCl.Core` 2.2.0 is an
+  excellent AEAD — MIT, 33 KB, Wycheproof-tested, vectors pass — and has **no X25519**, so
+  the lightweight two-library route dies not on the cipher but on the curve. Rejected with
+  evidence: NSec/Sodium.Core/Geralt (libsodium, native); `Rebex.Elliptic.Curve25519`
+  (**fails RFC 7748 through its public API** — derived `d23c65b6…` where the RFC says
+  `8520f009…`, and the two sides did not agree with each other; the raw class is
+  `internal`); `NaCl.Net` (MPL-2.0, last released 2020-07-24); and six micro-packages with
+  378–40 000 downloads and no audit signal.
+
+  **Not claimed: IL2CPP.** Everything above is .NET 10. Per ADR-22's own lesson — `AesGcm`
+  compiled and then threw on a device — that is not sufficient, so the survey ships a probe
+  instead of a conclusion. `Il2cppCryptoProbe.cs` asserts the same published vectors in a
+  built player, reports a throw as a result rather than losing it, is written to Unity's
+  profile (C# 9, no `Convert.FromHexString`, which is .NET 5+ and absent from
+  `netstandard2.1`), and **every API call it makes was executed on .NET 10 first** so it
+  cannot fail to compile on an overload that does not exist. It must be run at
+  `ManagedStrippingLevel.Minimal` **and** `High` with the supplied `link.xml`, because only
+  the second answers the linker question the Android report raises.
+
+  If adopted, the .NET server takes **only X25519** from the library — .NET 10 already has
+  ChaCha20-Poly1305 and HKDF, re-confirmed here by having to disambiguate BouncyCastle's
+  `ChaCha20Poly1305` against `System.Security.Cryptography.ChaCha20Poly1305` to compile.
+
 ### Added
 
 - **The game server derives a per-session key on every join, and is never sent one.**
