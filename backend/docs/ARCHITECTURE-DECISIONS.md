@@ -2860,6 +2860,23 @@ Where `bind` is material only a holder of `JOIN_TOKEN_SECRET` can produce.
 
 **The exchange MUST be authenticated, and echoing the token is not enough.** An unauthenticated X25519 on a plaintext hop is a clean man-in-the-middle: the attacker completes one exchange with each side and both ends see a perfectly healthy encrypted session, with nothing to observe. The binding must **prove possession of secret-derived material**, not merely present the token — an eavesdropper can read the token off the wire and replay it. This is the condition that makes the whole model safe; without it the model is worse than useless, because it produces confidence.
 
+**The rule has a forward half, and stating only the backward half is incomplete.** "Reject any
+nonce at or below the highest seen" says nothing about a large forward *jump*, which burns nonce
+space and forces an early rekey. The exposure is bounded — a forged frame cannot advance the counter
+because it will not authenticate, so only the genuine peer can do this, and only to itself — but the
+rule must say so rather than leave it unstated. **Bound the forward jump.**
+
+**Three conditions attach to choosing a bare counter**, because the ordering guarantee is *inherited
+rather than owned*: the C# KCP is a hand-port and this rests on roughly ten lines of
+`MoveRcvBufToQueue`.
+
+1. **Assert the ordering contract, do not assume it.** Refuse to operate over a transport that does
+   not declare ordered delivery, so a future QUIC-datagram or raw-UDP path **fails closed** instead
+   of silently reusing nonces.
+2. **Count rejections, do not merely perform them.** A replay validator that refuses silently is
+   indistinguishable from one that is never exercised.
+3. **Bound the forward jump**, per the paragraph above.
+
 **The nonce is the sequence number, and that is two problems solved by one mechanism.** ChaCha20-Poly1305 authenticates each frame but does **not** stop a valid frame being replayed. With a per-session key, using a monotonic counter as the nonce and rejecting any nonce at or below the highest seen gives replay protection for free — and simultaneously removes nonce reuse, which is the catastrophic failure mode of this AEAD. A sliding window is needed only if the layer below can reorder; KCP delivers reliably and in order, but **the crypto layer must not depend on that** and should enforce its own ordering.
 
 ### What the client runtime actually provides — measured, not assumed
@@ -2928,8 +2945,41 @@ The redacting key type, the no-fallback rule, the shared cross-implementation ve
 ### Open, and to be closed before implementation
 
 - ~~X25519 availability on .NET 10~~ — **CLOSED, measured: absent.** `ECDiffieHellman` rejects `curve25519`, `X25519` and `Curve25519` as friendly names, and no X25519 type exists in `System.Security.Cryptography`. The server must vendor it too.
-- **Which pure-C# library** for the client, and whether it passes RFC 8439 and RFC 7748 vectors under IL2CPP in a player build.
-- **Whether KCP's ordering guarantee removes the need for a sliding window**, measured rather than assumed.
+- ~~Which pure-C# library~~ — **CLOSED: `BouncyCastle.Cryptography` 2.7.0**, and it is the only
+  candidate that provides X25519 at all. `NaCl.Core` 2.2.0 is an excellent AEAD in 33 KB and has
+  **no curve**, so the lightweight two-library route dies on X25519 rather than on the cipher.
+  Verified against RFC 8439 §2.8.2, RFC 7748 §6.1 in both directions, and RFC 5869 A.1, plus
+  cross-checked against Go `x/crypto` over a real exchange with random keys — and then run **in a
+  built Windows IL2CPP player at both `Minimal` and `High` stripping**:
+
+  ```
+  [PASS] ChaCha20-Poly1305 (RFC 8439 s2.8.2)   [PASS] rejects a tampered tag
+  [PASS] X25519 (RFC 7748 s6.1)                [PASS] HKDF-SHA256 (RFC 5869 A.1)
+  [PASS] key generation uses a working RNG
+  Minimal and High produced identical output.
+  ```
+
+  The `High` run is not ceremony: a third-party report describes an **Android** IL2CPP CIL-Linker
+  failure on BouncyCastle 2.x, and only a `High` build exercises the linker question at all. It did
+  not reproduce here with the `link.xml` in the survey. **That result is Windows; the Android report
+  is not disproved by it** and should be confirmed on a device before shipping to Android.
+
+  Cost, stated because it is real: **4.7 MB and 2 350 public types** in a package that has almost no
+  dependencies today, and IL2CPP converts to C++ every type the linker keeps.
+
+- ~~Whether KCP's ordering removes the need for a sliding window~~ — **CLOSED: it does. Use a strict
+  counter, no window**, subject to the three conditions below. Measured with real `tc netem`
+  impairment on **both** transports: **zero inversions and zero duplicate frames across 22 374
+  frames**, under clean, `reorder 30%`, `loss 10%`, and a hostile `reorder 25% + loss 8% +
+  duplicate 5%` mix, plus a 20-player run and a reconnect. Duplicated *datagrams* never became
+  duplicated *frames* — both stacks discard them below the decode — and `ReadLoopAsync` is strictly
+  serial per connection, so there is no concurrency at the decode layer to reintroduce disorder.
+
+  **The recommendation does not rest on the number.** Zero measured is not zero possible, and the
+  deciding argument is the failure mode: **a strict counter that is wrong breaks the session loudly
+  and the client notices immediately; a window that is wrong accepts a frame it should have refused
+  — a silent replay.** In a layer whose entire job is refusing things, take the mechanism that fails
+  loudly.
 
 ---
 
@@ -2958,4 +3008,4 @@ The redacting key type, the no-fallback rule, the shared cross-implementation ve
 | 19 | Game content | **Content is JSON on disk in `backend/content/`, owned by the game server, served to clients over HTTP at `/content` and never carried by the `Shared.GameLogic` package.** The package is pinned by exact commit, so content in it costs a tag plus two file bumps per balance tweak — correct for simulation rules, fatal for content. The server loads and validates at boot and **refuses to start** on invalid content, reporting every fault in one pass. Clients send `?hash=` and get `304` once they hold the current set; the hash ships in both `ETag` and `X-Content-Hash` because `UnityWebRequest` and some proxies strip the former. The **schema and validator are shared** (`Shared.GameLogic/Content/`), the **parser is not** — Unity compiles the package as source and has no `System.Text.Json`, the server is NativeAOT and cannot reflect, so no single parser satisfies both; golden vectors cover the gap as in ADR-10. No hot reload: content changes need a restart, because rules changing under a running simulation makes every desync unreproducible |
 | 20 | Duplicate-login kick | **Gateway→gameserver eviction over one shared `events:kick` Stream, keyed by join-token jti** (ADR-5 consumer-group ACK, never Pub/Sub). On duplicate login the gateway publishes `session_superseded` with the old session's jti; each game server consumes via its own group (`gs:{server_id}`, created at `$`, destroyed on graceful shutdown), kicks only the connection holding that jti (newest login wins, redelivery idempotent), releases the entity with **no reconnect hold**, and sends the standard `MsgKick`+`MsgDisconnect` pair. One shared stream because server ids churn under a noeviction Redis (ADR-4). Counters: `gateway_kick_publish_total`, `gameserver_players_kicked_total`. The gateway→gateway socket eviction stays with ADR-17 |
 | 21 | Transport confidentiality | **Proposed, not accepted — a record of posture only.** KCP has real AES-256-CFB packet encryption, kcp-go-compatible and symmetric across Go and C# (`KcpCrypto.cs` / `shared/transport/crypto.go`), fail-closed on a wrong key. But it is **off by default twice** — the transport default is `tcp`, which has no encryption path, and the key variable defaults to empty, which means plaintext — and a **pre-shared key is not a session key**: every client shares one static secret that ships in the binary, so it resists a passive observer and not a player. No negotiation, no key id, no rotation without a hard cutover; CFB plus a linear CRC32 is confidentiality, not authentication, and the CRC is not a MAC. Deferred because every current environment is localhost/LAN and the hosting shape above dev is unsettled (ADR-15/16) — choosing an AEAD and a key exchange now means choosing them twice. **Reporting the transport and whether a key is in force does not wait for that decision.** Do not describe this link as "unencrypted"; describe it as unencrypted by default and unauthenticated when on |
-| 22 | Transport crypto | **Accepted 2026-09-10 as the target model; NOT implemented.** ChaCha20-Poly1305 over an **authenticated** X25519 exchange, HKDF-SHA256 derivation, **nonce as the replay counter** (one mechanism removing both replay and nonce reuse). Supersedes #288's `HKDF(JOIN_TOKEN_SECRET, jti)` derivation, which has **no forward secrecy** — obtaining the long-term secret later decrypts every recorded past session. **The DH must prove possession of secret-derived material, not echo the join token**, which an eavesdropper can read and replay; unauthenticated DH on a plaintext hop is a clean MITM that produces confidence rather than security. Measured in a built IL2CPP player: `AesGcm` **compiles then throws**, `ChaCha20Poly1305`/`HKDF`/`ECDiffieHellman` **absent**, only `Aes`/`HMACSHA256`/`RandomNumberGenerator` work; and measured on .NET 10, **X25519 is absent there too** while ChaCha20-Poly1305 and HKDF are built in — so **X25519 must be vendored on two runtimes**, ideally by one pure-C# library serving both. GNS rejected (replaces the transport and deletes the Go loadtest harness), Hazel rejected (no Go, thin crypto). No negotiation, no fallback, standard implementations only, cross-implementation vectors as a deliverable, field 5 reserved not reused. **Does not ship until the gateway hop is confidential** |
+| 22 | Transport crypto | **Accepted 2026-09-10 as the target model; NOT implemented.** ChaCha20-Poly1305 over an **authenticated** X25519 exchange, HKDF-SHA256 derivation, **nonce as the replay counter** (one mechanism removing both replay and nonce reuse). Supersedes #288's `HKDF(JOIN_TOKEN_SECRET, jti)` derivation, which has **no forward secrecy** — obtaining the long-term secret later decrypts every recorded past session. **The DH must prove possession of secret-derived material, not echo the join token**, which an eavesdropper can read and replay; unauthenticated DH on a plaintext hop is a clean MITM that produces confidence rather than security. Measured in a built IL2CPP player: `AesGcm` **compiles then throws**, `ChaCha20Poly1305`/`HKDF`/`ECDiffieHellman` **absent**, only `Aes`/`HMACSHA256`/`RandomNumberGenerator` work; and measured on .NET 10, **X25519 is absent there too** while ChaCha20-Poly1305 and HKDF are built in — so **X25519 must be vendored on two runtimes**, ideally by one pure-C# library serving both. GNS rejected (replaces the transport and deletes the Go loadtest harness), Hazel rejected (no Go, thin crypto). No negotiation, no fallback, standard implementations only, cross-implementation vectors as a deliverable, field 5 reserved not reused. **Library settled: BouncyCastle 2.7.0** — the only candidate supplying X25519; RFC vectors pass in a built IL2CPP player at **both Minimal and High stripping**, at a cost of 4.7 MB and 2 350 types. **Replay: strict counter, no sliding window** — zero inversions in 22 374 frames across both transports under hostile `tc netem`, and chosen because a wrong counter fails loudly while a wrong window accepts a replay silently; three conditions attach, including bounding the forward jump, since the ordering guarantee is inherited from a hand-ported KCP rather than owned. **Does not ship until the gateway hop is confidential** |
