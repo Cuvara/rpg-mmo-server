@@ -2881,13 +2881,24 @@ RandomNumberGenerator      : OK
 
 `AesGcm` **compiles and then throws** — the type is in the reference assembly and the implementation is not. That is the worst available failure mode: it type-checks, so an implementation written against it passes review, passes compilation, passes CI, and fails on a device.
 
-| | Go | .NET 10 | Unity (measured) |
-|---|---|---|---|
-| ChaCha20-Poly1305 | `x/crypto`, already a dependency in 5 modules | built in | **absent** |
-| X25519 | `x/crypto/curve25519`, same | **unverified — check before committing** | **absent** |
-| HKDF-SHA256 | built in | built in | **absent** — build from `HMACSHA256` |
+Measured on .NET 10.0.10 as well, because assuming the server side was the mistake that produced two of the superseded recommendations:
 
-So the client needs **one** vendored pure-C# library covering ChaCha20-Poly1305 and X25519. Not two, and not a native plugin. A UPM package cannot declare a scoped registry, so it must be source or a vendored assembly, and it must be verified in an IL2CPP **player build** — AOT can break generics, `unsafe` and `Span` in ways the Editor never shows.
+```
+ChaCha20Poly1305           : OK -- round trip + rejects a tampered tag
+HKDF                       : OK
+X25519 via ECDiffieHellman : curve25519=no  X25519=no  Curve25519=no
+X25519 native type         : absent from System.Security.Cryptography
+```
+
+| | Go | .NET 10 (measured) | Unity IL2CPP (measured) |
+|---|---|---|---|
+| ChaCha20-Poly1305 | `x/crypto`, already a dependency in 5 modules | **built in** | **absent** |
+| X25519 | `x/crypto/curve25519`, same | **ABSENT** | **absent** |
+| HKDF-SHA256 | built in | **built in** | **absent** — build from `HMACSHA256` |
+
+**X25519 is missing from two of the three runtimes, not one.** That is worse than this ADR first assumed and it tightens the library requirement rather than loosening it: the client needs ChaCha20-Poly1305 **and** X25519, the .NET server needs X25519, and **the same pure-C# library should serve both** — solving two runtimes once. It must not be a native plugin, since a UPM package cannot declare a scoped registry and IL2CPP ships to platforms where a native binary is a per-platform build-matrix cost.
+
+Go needs nothing vendored on any of the three. A UPM package cannot declare a scoped registry, so it must be source or a vendored assembly, and it must be verified in an IL2CPP **player build** — AOT can break generics, `unsafe` and `Span` in ways the Editor never shows.
 
 ### Alternatives rejected
 
@@ -2916,7 +2927,7 @@ The redacting key type, the no-fallback rule, the shared cross-implementation ve
 
 ### Open, and to be closed before implementation
 
-- **X25519 availability on .NET 10** is unverified. `ECDiffieHellman` exists with NIST curves; X25519 specifically must be confirmed by a build, not by documentation.
+- ~~X25519 availability on .NET 10~~ — **CLOSED, measured: absent.** `ECDiffieHellman` rejects `curve25519`, `X25519` and `Curve25519` as friendly names, and no X25519 type exists in `System.Security.Cryptography`. The server must vendor it too.
 - **Which pure-C# library** for the client, and whether it passes RFC 8439 and RFC 7748 vectors under IL2CPP in a player build.
 - **Whether KCP's ordering guarantee removes the need for a sliding window**, measured rather than assumed.
 
@@ -2947,4 +2958,4 @@ The redacting key type, the no-fallback rule, the shared cross-implementation ve
 | 19 | Game content | **Content is JSON on disk in `backend/content/`, owned by the game server, served to clients over HTTP at `/content` and never carried by the `Shared.GameLogic` package.** The package is pinned by exact commit, so content in it costs a tag plus two file bumps per balance tweak — correct for simulation rules, fatal for content. The server loads and validates at boot and **refuses to start** on invalid content, reporting every fault in one pass. Clients send `?hash=` and get `304` once they hold the current set; the hash ships in both `ETag` and `X-Content-Hash` because `UnityWebRequest` and some proxies strip the former. The **schema and validator are shared** (`Shared.GameLogic/Content/`), the **parser is not** — Unity compiles the package as source and has no `System.Text.Json`, the server is NativeAOT and cannot reflect, so no single parser satisfies both; golden vectors cover the gap as in ADR-10. No hot reload: content changes need a restart, because rules changing under a running simulation makes every desync unreproducible |
 | 20 | Duplicate-login kick | **Gateway→gameserver eviction over one shared `events:kick` Stream, keyed by join-token jti** (ADR-5 consumer-group ACK, never Pub/Sub). On duplicate login the gateway publishes `session_superseded` with the old session's jti; each game server consumes via its own group (`gs:{server_id}`, created at `$`, destroyed on graceful shutdown), kicks only the connection holding that jti (newest login wins, redelivery idempotent), releases the entity with **no reconnect hold**, and sends the standard `MsgKick`+`MsgDisconnect` pair. One shared stream because server ids churn under a noeviction Redis (ADR-4). Counters: `gateway_kick_publish_total`, `gameserver_players_kicked_total`. The gateway→gateway socket eviction stays with ADR-17 |
 | 21 | Transport confidentiality | **Proposed, not accepted — a record of posture only.** KCP has real AES-256-CFB packet encryption, kcp-go-compatible and symmetric across Go and C# (`KcpCrypto.cs` / `shared/transport/crypto.go`), fail-closed on a wrong key. But it is **off by default twice** — the transport default is `tcp`, which has no encryption path, and the key variable defaults to empty, which means plaintext — and a **pre-shared key is not a session key**: every client shares one static secret that ships in the binary, so it resists a passive observer and not a player. No negotiation, no key id, no rotation without a hard cutover; CFB plus a linear CRC32 is confidentiality, not authentication, and the CRC is not a MAC. Deferred because every current environment is localhost/LAN and the hosting shape above dev is unsettled (ADR-15/16) — choosing an AEAD and a key exchange now means choosing them twice. **Reporting the transport and whether a key is in force does not wait for that decision.** Do not describe this link as "unencrypted"; describe it as unencrypted by default and unauthenticated when on |
-| 22 | Transport crypto | **Accepted 2026-09-10 as the target model; NOT implemented.** ChaCha20-Poly1305 over an **authenticated** X25519 exchange, HKDF-SHA256 derivation, **nonce as the replay counter** (one mechanism removing both replay and nonce reuse). Supersedes #288's `HKDF(JOIN_TOKEN_SECRET, jti)` derivation, which has **no forward secrecy** — obtaining the long-term secret later decrypts every recorded past session. **The DH must prove possession of secret-derived material, not echo the join token**, which an eavesdropper can read and replay; unauthenticated DH on a plaintext hop is a clean MITM that produces confidence rather than security. Measured in a built IL2CPP player: `AesGcm` **compiles then throws**, `ChaCha20Poly1305`/`HKDF`/`ECDiffieHellman` **absent**, only `Aes`/`HMACSHA256`/`RandomNumberGenerator` work — so the client needs one vendored pure-C# library. GNS rejected (replaces the transport and deletes the Go loadtest harness), Hazel rejected (no Go, thin crypto). No negotiation, no fallback, standard implementations only, cross-implementation vectors as a deliverable, field 5 reserved not reused. **Does not ship until the gateway hop is confidential** |
+| 22 | Transport crypto | **Accepted 2026-09-10 as the target model; NOT implemented.** ChaCha20-Poly1305 over an **authenticated** X25519 exchange, HKDF-SHA256 derivation, **nonce as the replay counter** (one mechanism removing both replay and nonce reuse). Supersedes #288's `HKDF(JOIN_TOKEN_SECRET, jti)` derivation, which has **no forward secrecy** — obtaining the long-term secret later decrypts every recorded past session. **The DH must prove possession of secret-derived material, not echo the join token**, which an eavesdropper can read and replay; unauthenticated DH on a plaintext hop is a clean MITM that produces confidence rather than security. Measured in a built IL2CPP player: `AesGcm` **compiles then throws**, `ChaCha20Poly1305`/`HKDF`/`ECDiffieHellman` **absent**, only `Aes`/`HMACSHA256`/`RandomNumberGenerator` work; and measured on .NET 10, **X25519 is absent there too** while ChaCha20-Poly1305 and HKDF are built in — so **X25519 must be vendored on two runtimes**, ideally by one pure-C# library serving both. GNS rejected (replaces the transport and deletes the Go loadtest harness), Hazel rejected (no Go, thin crypto). No negotiation, no fallback, standard implementations only, cross-implementation vectors as a deliverable, field 5 reserved not reused. **Does not ship until the gateway hop is confidential** |
