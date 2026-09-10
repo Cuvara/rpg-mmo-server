@@ -357,7 +357,7 @@ func (r *Runner) stepGameServerFlow() (string, error) {
 	// 5 u/s at 15Hz: N/3). The exact value depends on server config, so the assertion
 	// below only checks "moved forward, and not by a per-message teleport".
 	for i := 0; i < r.cfg.Inputs; i++ {
-		env, err := messages.NewEnvelope(messages.MsgInput, messages.InputMessage{
+		env, err := messages.NewEnvelopeAs(r.cfg.Encoding, messages.MsgInput, messages.InputMessage{
 			Tick:  uint64(i + 1),
 			MoveX: 1.0,
 			MoveY: 0.0,
@@ -431,7 +431,7 @@ drain:
 	// matters on KCP — UDP has no FIN, so without it the server only notices
 	// the client is gone when the reconnect hold expires. KCP flushes on its
 	// 10ms update tick and Close() does not drain, hence the short pause.
-	if env, err := messages.NewEnvelope(messages.MsgDisconnect, struct{}{}); err == nil {
+	if env, err := messages.NewEnvelopeAs(r.cfg.Encoding, messages.MsgDisconnect, struct{}{}); err == nil {
 		_ = r.send(conn, env)
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -566,7 +566,7 @@ func (r *Runner) sealSession(conn net.Conn) error {
 	result, err := sealed.RunClientHandshake(
 		sealed.ClientHandshakeConfig{JTI: claims.Jti},
 		func(pub []byte) error {
-			env, err := messages.NewEnvelope(messages.MsgSealedClientHello,
+			env, err := messages.NewEnvelopeAs(r.cfg.Encoding, messages.MsgSealedClientHello,
 				messages.SealedClientHello{PublicKey: pub})
 			if err != nil {
 				return err
@@ -603,7 +603,7 @@ func (r *Runner) sealSession(conn net.Conn) error {
 // snapshot) are skipped.
 func (r *Runner) roundTrip(conn net.Conn, reqType messages.MsgType, reqPayload any,
 	wantType messages.MsgType, out any) error {
-	env, err := messages.NewEnvelope(reqType, reqPayload)
+	env, err := messages.NewEnvelopeAs(r.cfg.Encoding, reqType, reqPayload)
 	if err != nil {
 		return fmt.Errorf("encode: %w", err)
 	}

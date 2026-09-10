@@ -106,6 +106,33 @@ All endpoints are overridable via env and/or flags (flags win):
 | `SMOKE_DB_POLL_INTERVAL` | `--db-poll-interval` | `1s` | Gap between polls |
 | `SMOKE_HOLD_TTL` | `--hold-ttl` | `30s` | Game server reconnect hold, waited out before the reload check |
 | `SMOKE_STRICT_ADDR` | `--strict-addr` | `false` | Fail instead of rewriting when the advertised **game server** address is listen-style |
+| `SMOKE_ENCODING` | `--encoding` | `json` | Wire encoding for every frame this client **sends**: `json` or `proto`. The server answers in the encoding the client spoke, so there is nothing to set on the read side. An unrecognised value fails the run rather than falling back |
+| `SMOKE_SEALED` | `--sealed` | `false` | Run the sealed-session handshake on the gameplay hop and encrypt every frame after it. **Requires `--encoding proto`** and refuses the combination otherwise (see below). Must match the server's `GAMESERVER_SEALED` — configuration on both ends, never a wire negotiation |
+
+### Sealing requires protobuf, and the combination is refused rather than fixed
+
+`--sealed --encoding json` is rejected at startup. The JSON codec has **no sealed
+frame**, so a server with `GAMESERVER_SEALED=require` refuses a JSON client at the
+join with `encoding_cannot_seal` — the join is *accepted*, then the connection
+closes, so a log reading "join accepted" is not evidence the client works.
+
+The smoke test does not upgrade the encoding for you. Someone who wrote
+`--sealed --encoding json` believes one of those two things about the run, and
+silently choosing the other hides which — the same reason the server has two
+sealing modes and not three.
+
+```bash
+# Drive a sealed stack
+JWT_SECRET=... go run ./cmd/smoketest --sealed --encoding proto
+```
+
+**The binding is not verified, and that is not a failure.** This client receives
+its join token through the real gateway rather than minting one, so it holds no
+`JOIN_TOKEN_SECRET` and cannot check the server's proof of possession — exactly
+like a shipped Unity client. It reports both facts (`sealed=true
+binding_verified=false`) so confidentiality is never read as authenticity. The
+load generator mints its own tokens and *does* verify; it is the only peer in the
+system that can demonstrate the man-in-the-middle defence end to end.
 
 The game server address is **not** configured — it comes from the
 `EnterWorldResponse`, exactly like a real client. Neither is the game server

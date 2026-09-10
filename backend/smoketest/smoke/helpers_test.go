@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/duycuong/rpg-mmo/shared/messages"
 )
 
 func fakeEnv(m map[string]string) func(string) string {
@@ -165,6 +167,81 @@ func TestLoadConfig_Transport(t *testing.T) {
 			}
 			if cfg.Transport != tt.want {
 				t.Errorf("Transport = %q, want %q", cfg.Transport, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_Encoding(t *testing.T) {
+	base := func(extra map[string]string) map[string]string {
+		env := map[string]string{"JWT_SECRET": "s"}
+		for k, v := range extra {
+			env[k] = v
+		}
+		return env
+	}
+	tests := []struct {
+		name    string
+		env     map[string]string
+		args    []string
+		want    messages.Encoding
+		wantErr bool
+	}{
+		{
+			// The default must stay JSON: every deployed smoke run today is JSON,
+			// and adding this knob must not change any of them.
+			name: "default is json",
+			env:  base(nil),
+			want: messages.EncodingJSON,
+		},
+		{name: "env proto", env: base(map[string]string{"SMOKE_ENCODING": "proto"}), want: messages.EncodingProto},
+		{
+			name: "flag overrides env",
+			env:  base(map[string]string{"SMOKE_ENCODING": "json"}),
+			args: []string{"--encoding=proto"},
+			want: messages.EncodingProto,
+		},
+		{
+			// The regression this test exists for. A first draft parsed the env
+			// eagerly and fell back to JSON when it did not recognise the value,
+			// so SMOKE_ENCODING=protobuf silently sent JSON -- which against a
+			// GAMESERVER_SEALED=require server is a refused connection reported as
+			// a broken stack. A typo must stop the run through EITHER channel.
+			name:    "typo in env is rejected, not defaulted",
+			env:     base(map[string]string{"SMOKE_ENCODING": "protobuff"}),
+			wantErr: true,
+		},
+		{
+			name:    "typo in flag is rejected",
+			env:     base(nil),
+			args:    []string{"--encoding=protobuff"},
+			wantErr: true,
+		},
+		{
+			// Refuse the contradiction rather than upgrading the encoding for the
+			// caller: they believe one of these two things about the run, and
+			// silently choosing the other hides which.
+			name:    "sealed with json is refused",
+			env:     base(map[string]string{"SMOKE_SEALED": "1"}),
+			wantErr: true,
+		},
+		{
+			name: "sealed with proto is accepted",
+			env:  base(map[string]string{"SMOKE_SEALED": "1", "SMOKE_ENCODING": "proto"}),
+			want: messages.EncodingProto,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := LoadConfig(fakeEnv(tt.env), tt.args)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("LoadConfig() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if cfg.Encoding != tt.want {
+				t.Errorf("Encoding = %v, want %v", cfg.Encoding, tt.want)
 			}
 		})
 	}

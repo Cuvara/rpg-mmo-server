@@ -306,15 +306,16 @@ services:
       #   GAMESERVER_SEALED=require ./stack.sh up
       #   GAMESERVER_SEALED=require ./stack.sh check
       #
-      # NOTE: `stack.sh check` cannot verify a sealed stack. The smoke test speaks
-      # JSON, and a JSON client can never seal, so a `require` server refuses it
-      # at the join (encoding_cannot_seal) — measured live, not inferred. Drive a
-      # sealed stack with the load generator instead:
-      #   cd ../loadtest && go run ./cmd/loadtest -sealed -encoding proto
+      # NOTE on verifying a sealed stack: the smoke test defaults to JSON, and a
+      # JSON client can never carry a sealed frame, so a `require` server refuses
+      # it at the join with `encoding_cannot_seal` — measured live, not inferred.
+      # It CAN seal, but only over protobuf, and it must be asked for both:
+      #   SMOKE_FLAGS='-sealed -encoding proto' ./stack.sh check
       #
-      # That is also why no ENVIRONMENT can be set to `require` yet: the deploy
-      # verifier is the same JSON smoke test, so requiring encryption currently
-      # deprecates the thing that gates every deploy.
+      # (An earlier version of this note said the smoke test hand-rolled JSON and
+      # could never speak protobuf. That was wrong: it calls
+      # messages.NewEnvelope, the convenience constructor that defaults to JSON,
+      # over the same shared codec the gateway and load generator use.)
       GAMESERVER_SEALED: ${GAMESERVER_SEALED:-off}
       GAMESERVER_MODE: map
       GAMESERVER_MAP_ID: ${GAMESERVER_MAP_ID:-map_01}

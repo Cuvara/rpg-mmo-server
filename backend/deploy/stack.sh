@@ -262,35 +262,29 @@ do_check() {
 		return 1
 	fi
 
-	# THE SMOKE TEST CANNOT CHECK A SEALED STACK, and it fails for a reason no
-	# environment variable reaches: it speaks JSON, and JSON can never carry a
-	# sealed frame. It hand-rolls encoding/json and has no encoding switch at all
-	# (`grep protobuf backend/smoketest` returns nothing), which is much of its
-	# value -- it is an INDEPENDENT second implementation of the wire, not a
-	# consumer of the same generated types the server uses.
+	# Sealing needs protobuf. A JSON client cannot carry a sealed frame at all, so a
+	# GAMESERVER_SEALED=require server refuses it at the join with
+	# `encoding_cannot_seal` -- measured on a live stack, not inferred.
 	#
-	# So against a `require` server it is refused at the join, with
-	# `encoding_cannot_seal` in the server log, before any sealing code runs. An
-	# earlier version of this function derived SMOKE_SEALED=1 from
-	# GAMESERVER_SEALED=require to keep the two halves in step; that would have
-	# turned a check that cannot pass into a check that runs and always fails, and
-	# it was measured failing on a live stack before it shipped.
+	# The smoke test defaults to JSON, so a sealed run must ask for both. The
+	# binary refuses `-sealed` without `-encoding proto` rather than upgrading the
+	# encoding silently, and this mirrors that: it does not quietly add flags on the
+	# caller's behalf.
 	#
-	# Refuse up front instead. A verifier that cannot verify must say so, not
-	# produce a red result that reads as a broken stack.
-	if [ "${GAMESERVER_SEALED:-off}" = "require" ] && [ "${SMOKE_SEALED:-0}" != "0" ]; then
-		echo "error: the smoke test cannot check a sealed stack." >&2
-		echo "       It speaks JSON, and a JSON client cannot seal -- a \`require\` server" >&2
-		echo "       refuses it at the join (encoding_cannot_seal). This is a property of the" >&2
-		echo "       smoke test, not a configuration you can fix here." >&2
-		echo "       To drive a sealed stack today, use the load generator, which speaks" >&2
-		echo "       protobuf:  cd ../loadtest && go run ./cmd/loadtest -sealed -encoding proto" >&2
-		return 1
-	fi
+	# An earlier version of this function derived SMOKE_SEALED=1 from
+	# GAMESERVER_SEALED=require. At the time the smoke test could not seal in any
+	# configuration, so that turned a check that cannot pass into a check that runs
+	# and always fails; it was measured failing on a live stack before it shipped.
 	if [ "${GAMESERVER_SEALED:-off}" = "require" ]; then
-		echo "warning: GAMESERVER_SEALED=require, and this check speaks JSON -- it WILL be" >&2
-		echo "         refused at the join. That is the server behaving correctly. See the" >&2
-		echo "         note in do_check; use the load generator to drive a sealed stack." >&2
+		case " ${SMOKE_FLAGS:-} " in
+			*" -sealed"*|*" --sealed"*) ;;
+			*)
+				echo "warning: GAMESERVER_SEALED=require, but SMOKE_FLAGS does not ask for a sealed" >&2
+				echo "         session -- this check speaks JSON by default and WILL be refused at the" >&2
+				echo "         join. That is the server behaving correctly. Use:" >&2
+				echo "           SMOKE_FLAGS='-sealed -encoding proto' ./stack.sh check" >&2
+				;;
+		esac
 	fi
 
 	(

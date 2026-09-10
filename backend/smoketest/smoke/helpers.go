@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/duycuong/rpg-mmo/shared/messages"
 	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
@@ -58,6 +59,21 @@ type Config struct {
 	// configuration on BOTH ends, never a negotiation on the wire, because a
 	// negotiable encryption setting is a downgrade attack with a friendly name.
 	Sealed bool // SMOKE_SEALED    — run the sealed-session handshake
+
+	// Encoding is the wire encoding for every frame this client sends, on both
+	// hops. DEFAULTS TO JSON, which is what every deploy uses today, so adding
+	// this knob changed no existing run.
+	//
+	// It exists because a JSON client CANNOT SEAL: the JSON codec has no sealed
+	// frame, so a server with GAMESERVER_SEALED=require refuses this client at
+	// the join with `encoding_cannot_seal`, before any handshake code runs. That
+	// made the sealed path unreachable and, because this binary is what
+	// post-deploy-smoke and verify.sh layer 4 run, it made `require` unusable on
+	// every environment.
+	//
+	// The server answers in the encoding the client spoke, so this is the only
+	// value that needs setting; there is nothing to configure on the read side.
+	Encoding messages.Encoding // SMOKE_ENCODING — json (default) or proto
 
 	SkipDB          bool          // SMOKE_SKIP_DB    — skip every persistence check
 	RequireDB       bool          // SMOKE_REQUIRE_DB — a skipped persistence check fails the run
@@ -186,6 +202,14 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	fs.StringVar(&cfg.DeviceID, "device-id", cfg.DeviceID, "Nakama device id to authenticate with (default: random per run)")
 	fs.StringVar(&cfg.GameDBURL, "game-db-url", cfg.GameDBURL, "Game-state PostgreSQL DSN; unset skips the game-state checks")
 	fs.BoolVar(&cfg.StrictAddr, "strict-addr", cfg.StrictAddr, "Fail when the gateway advertises a listen-style game server address instead of rewriting it to loopback")
+	fs.BoolVar(&cfg.Sealed, "sealed", cfg.Sealed, "Run the sealed-session handshake on the gameplay hop and encrypt every frame after it (requires -encoding proto; must match the server's GAMESERVER_SEALED)")
+	// The flag's default IS the raw SMOKE_ENCODING string, unparsed. That is what
+	// makes a typo fail the same way through either channel: SMOKE_ENCODING=protobuf
+	// and -encoding=protobuf both reach ParseEncoding and both stop the run. An
+	// earlier draft parsed the env eagerly and fell back to JSON on error, which
+	// would have sent JSON to a server that requires sealing and reported nothing.
+	encodingFlag := fs.String("encoding", getenv("SMOKE_ENCODING"),
+		"Wire encoding for frames this client sends: json (default) or proto (proto is required by -sealed)")
 	fs.BoolVar(&cfg.SkipDB, "skip-db", cfg.SkipDB, "Skip every persistence check (realtime flow only)")
 	fs.BoolVar(&cfg.RequireDB, "require-db", cfg.RequireDB, "Fail instead of skipping when a persistence check cannot run")
 	fs.IntVar(&cfg.ExpectMigration, "expect-migration-version", cfg.ExpectMigration, "Required schema_migrations version")
@@ -195,6 +219,11 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
+	enc, err := messages.ParseEncoding(*encodingFlag)
+	if err != nil {
+		return cfg, fmt.Errorf("encoding: %w", err)
+	}
+	cfg.Encoding = enc
 	return cfg, cfg.Validate()
 }
 
@@ -214,6 +243,17 @@ func (c Config) Validate() error {
 	}
 	if err := transport.Validate(c.Transport); err != nil {
 		return fmt.Errorf("transport: %w", err)
+	}
+	// Refuse the contradiction rather than quietly upgrading the encoding. A
+	// verifier that adapts to make itself runnable is a verifier that can pass
+	// against a stack it was not asked to check: someone who wrote
+	// `-sealed -encoding json` believes one of those two things about the run,
+	// and silently picking the other for them hides which.
+	if c.Sealed && c.Encoding != messages.EncodingProto {
+		return fmt.Errorf(
+			"sealed requires -encoding proto (got %s): the JSON codec has no sealed frame, "+
+				"so a GAMESERVER_SEALED=require server refuses a JSON client at the join "+
+				"with encoding_cannot_seal", c.Encoding)
 	}
 	if c.ExpectMigration <= 0 {
 		return fmt.Errorf("expect-migration-version must be > 0, got %d", c.ExpectMigration)
@@ -362,3 +402,4 @@ func WriteSummary(w io.Writer, results []StepResult) bool {
 	fmt.Fprintln(w, FinalLine(pass))
 	return pass
 }
+

@@ -43,13 +43,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **`make flow-up-sealed`**, so the sealed path is exercisable locally on purpose rather
   than only in CI. `GAMESERVER_SEALED=require ./stack.sh up` is the same thing without make.
-- **`stack.sh check` refuses up front when asked to check a sealed stack**, and warns when
-  the stack is sealed and it is about to be refused. **The smoke test cannot check a sealed
-  stack and no environment variable fixes that**: it speaks JSON, hand-rolled over
-  `encoding/json` with no encoding switch, and a JSON client can never carry a sealed
-  frame — so a `require` server refuses it at the join with `encoding_cannot_seal`, before
-  any sealing code runs. Its JSON-ness is load-bearing rather than incidental: it makes the
-  smoke test an *independent* second implementation of the wire.
+- **`stack.sh check` warns when the stack requires sealing and the check has not been asked
+  to seal.** A JSON client can never carry a sealed frame, so a `require` server refuses it
+  at the join with `encoding_cannot_seal` — measured live. The smoke test defaults to JSON,
+  so a sealed run must ask for both: `SMOKE_FLAGS='-sealed -encoding proto' ./stack.sh
+  check`. It warns rather than adding the flags itself, mirroring the binary, which refuses
+  `-sealed` without `-encoding proto` instead of upgrading the encoding silently.
+  - **Corrected:** an earlier version of this entry said the smoke test "hand-rolled JSON"
+    and could never speak protobuf, and that its JSON-ness was load-bearing. False, and
+    unchecked — it calls the shared codec's JSON-defaulting convenience constructor. See
+    `backend/smoketest/CHANGELOG.md`.
   - An earlier draft of this change derived `SMOKE_SEALED=1` from
     `GAMESERVER_SEALED=require` so the two halves could not drift. That would have turned a
     check that cannot pass into a check that runs and always fails. It was measured failing

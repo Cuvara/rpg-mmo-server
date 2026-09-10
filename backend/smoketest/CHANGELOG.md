@@ -7,6 +7,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`SMOKE_ENCODING` / `-encoding`: the smoke test can speak protobuf, so the sealed path
+  is reachable.** Defaults to `json`, which is what every deployed run uses today, so this
+  changed no existing run. `-sealed` now requires `-encoding proto` and **refuses the
+  combination rather than upgrading the encoding**: a caller who wrote `-sealed -encoding
+  json` believes one of those two things about the run, and silently choosing the other for
+  them hides which.
+  - The flag's default is the **raw** `SMOKE_ENCODING` string, unparsed, so a typo fails
+    identically through either channel. A first draft parsed the environment eagerly and
+    fell back to JSON on an unrecognised value — which against a `require` server is a
+    refused connection reported as a broken stack. Covered by a test that fails on that
+    exact mutation.
+  - Five call sites, not four: `runner.go` 360/434/569/606 **and `db.go:566`**, the
+    disconnect frame on the reload check, which is on a live path.
+
 - **`SMOKE_SEALED`: the smoke test can speak a sealed session — but the path is UNREACHABLE
   today, and this entry overstated it when it was written.**
 
@@ -23,10 +37,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the default flipping is what exposes that the smoke test cannot connect at all, and the
   real prerequisite is a smoke test that speaks protobuf.
 
-  That is a design decision rather than a chore: the smoke test's JSON-ness is much of its
-  value, because it makes it an *independent* second implementation of the wire rather than
-  a consumer of the same generated types the server uses. Vendoring the generated protobuf
-  types would cost that independence; hand-rolling protobuf is real work.
+  **Second correction, same day: the paragraph that stood here was also wrong.** It said the
+  smoke test's JSON-ness was load-bearing — an *independent* second implementation of the
+  wire — and that protobuf was "a design decision rather than a chore". Nobody had opened
+  the file. It calls `messages.NewEnvelope`, the convenience constructor in the shared codec
+  that defaults to JSON, over the same library the gateway and load generator use. There was
+  no hand-rolled encoder, no independence to lose, and the scope was one flag and five call
+  sites. See the `-encoding` entry above.
 
   **Consequence, and it is the binding one:** `post-deploy-smoke` and `verify.sh`'s
   `flow.smoke` both run this binary against the stack they just deployed, so **no

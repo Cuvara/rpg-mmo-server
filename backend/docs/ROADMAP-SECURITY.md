@@ -325,20 +325,31 @@ inventing a cipher.
    **What this does not yet buy, stated precisely**, because the sentence this replaces
    said the previous four steps "buy nothing in production" and that is still nearly true:
 
-   - **No environment can be set to `require` yet, and the blocker is not plumbing.**
-     `post-deploy-smoke` and `verify.sh`'s `flow.smoke` both run the Go smoketest against
-     the stack they just deployed — and **the smoketest speaks JSON**, hand-rolled over
-     `encoding/json` with no encoding switch. A JSON client can never carry a sealed frame,
-     so a `require` server refuses it at the join with `encoding_cannot_seal`. Measured
-     live, not inferred: the sealed arm fails with `read server hello: read length: EOF`
-     and the server names the cause in its own log.
+   - **No environment has `require` set yet.** `post-deploy-smoke` and `verify.sh`'s
+     `flow.smoke` both run the Go smoketest against the stack they just deployed, and the
+     smoketest **defaults to JSON**. A JSON client can never carry a sealed frame, so a
+     `require` server refuses it at the join with `encoding_cannot_seal` — measured live,
+     not inferred: the sealed arm failed with `read server hello: read length: EOF` and the
+     server named the cause in its own log.
 
-     Stated as the rule this roadmap already contains: **requiring encryption deprecates
-     JSON; the deploy verifier is a JSON client; therefore requiring encryption deprecates
-     the deploy verifier.** No environment variable or source-of-truth scheme reaches this.
-     The prerequisite is a smoketest that speaks protobuf, and that is a **decision, not a
-     chore** — its JSON-ness is much of its value, because it makes it an independent second
-     implementation of the wire rather than a consumer of the server's generated types.
+     The rule still holds — **requiring encryption deprecates JSON; the deploy verifier was
+     a JSON client** — but the fix turned out to be small. **`SMOKE_ENCODING` / `-encoding
+     proto` now exists**, so the verifier can speak protobuf and seal.
+
+     > **A correction worth keeping, because it was believed by two people at once.** This
+     > entry previously said the smoketest "hand-rolls `encoding/json` with no encoding
+     > switch", that its JSON-ness was load-bearing because it made it an *independent
+     > second implementation of the wire*, and that protobuf was therefore "a decision, not
+     > a chore". **All of that was false, and nobody had opened the file.** It calls
+     > `messages.NewEnvelope` — the convenience constructor in the shared codec that
+     > defaults to JSON — over the same library the gateway and load generator use. There
+     > was no independence to lose and no second implementation. The real scope was one flag
+     > and five call sites. One session asserted it, the other restated it in stronger
+     > words, and it became a premise in a sequencing decision before either checked.
+
+     What remains before an environment can be set to `require` is the CD plumbing: the
+     generated `deploy/.env` carries `GAMESERVER_SEALED`, but nothing sets `SMOKE_SEALED`
+     or `SMOKE_ENCODING` for the two smoketest invocation sites, and both must move with it.
 
      Every deploy path now pins `off` explicitly — compose and its override, the two Agones
      fleet manifests (**dev runs `DEPLOY_MODE=k8s`, so the compose pin covers none of it**),
