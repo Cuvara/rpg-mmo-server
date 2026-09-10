@@ -299,8 +299,28 @@ show bytes are unreadable; the **pair** shows this change made them so.
 | `probe-player` readable in payload | **3** | **1** |
 
 The server logged `Sealed session established for probe-player (cipher=chacha20-poly1305)`,
-and the client verified the server's binding — proving the server holds
+and the probe verified the server's binding — proving the server holds
 `JOIN_TOKEN_SECRET`-derived material for that session.
+
+> **The probe could do that; a shipped client cannot.** Verifying the binding needs
+> material derived from `JOIN_TOKEN_SECRET`, and the probe had it only because it ran
+> beside the server in a test harness. A real client must not carry that secret — putting
+> it in a binary is precisely the pre-shared-key mistake ADR-22 supersedes, where
+> extracting it once compromises everyone for ever.
+>
+> So until the pinned gateway identity key lands (§6), a shipped client completes the
+> exchange **without** verifying the binding. It gets confidentiality against a passive
+> eavesdropper — the X25519 exchange is what provides that, and it stands on its own — but
+> **not** man-in-the-middle protection, because nothing it holds can distinguish the real
+> server's ephemeral key from an attacker's.
+>
+> The Unity client therefore exposes this as `SealedClientExchange.WithoutBindingVerification`
+> with a `BindingVerified` flag on the result, and carries a test asserting that a
+> man in the middle **succeeds** against it. That test is what stops the gap being
+> forgotten: it starts failing the day the identity key makes it untrue.
+>
+> The server side is unaffected — it signs the binding regardless, so the protection is
+> already on the wire waiting for a client that can check it.
 
 **Wrong key: no session.** A client that completed the handshake correctly and then
 corrupted one byte of its send key had every frame refused and the connection closed:

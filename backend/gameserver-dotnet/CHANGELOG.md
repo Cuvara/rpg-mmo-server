@@ -18,6 +18,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   test, passes every `Minimal`-stripped build, and then fails at the first handshake in a
   `High`-stripped player. A preserved-types list is only evidence about the code paths the
   probe walked.
+- **Corrected an overclaim in my own sealed-session evidence.** `SEALED-FRAMING.md` said
+  "the client verified the server's binding" from the live run, and
+  `SealedHandshakeServer` said the binding is "what lets the client detect a man in the
+  middle". Both read as a shipped property. **The probe could verify it only because it
+  held `JOIN_TOKEN_SECRET`**; a real client must not carry that secret, since putting it
+  in a binary is precisely the pre-shared-key mistake ADR-22 supersedes.
+  - So until the pinned gateway identity key lands, a shipped client completes the
+    exchange **without** verifying the binding: it gets confidentiality against a passive
+    eavesdropper — X25519 provides that on its own — and **not** man-in-the-middle
+    protection.
+  - The server is unaffected and signs the binding regardless, so the protection is
+    already on the wire waiting for a client that can check it. The Unity side names the
+    gap (`WithoutBindingVerification`, a `BindingVerified` flag, and a test asserting a MITM
+    succeeds against it), which is what makes it start failing the day it becomes untrue.
+  - Documentation only; no behaviour change. Recorded because a document that claims a
+    protection the system does not have is the "believed protected" failure ADR-21 exists
+    to prevent — and this one was mine.
 
 ### Documentation
 - **ADR-22 settles the transport crypto model, and supersedes two earlier recommendations of

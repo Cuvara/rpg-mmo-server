@@ -47,11 +47,26 @@ public static class SealedHandshakeServer
     /// </para>
     /// <para>
     /// The server sends its binding, computed over a transcript containing BOTH ephemeral
-    /// public keys. That is what lets the client detect a man in the middle: an attacker
-    /// who substitutes its own key changes the transcript, so the binding it read off the
-    /// wire no longer verifies. The client cannot compute this key itself — it has no
-    /// <c>JOIN_TOKEN_SECRET</c> — which is the open delivery question ADR-22 answers with
-    /// the pinned gateway identity key.
+    /// public keys. That is what <i>will</i> let a client detect a man in the middle: an
+    /// attacker who substitutes its own key changes the transcript, so the binding it read
+    /// off the wire no longer verifies.
+    /// </para>
+    /// <para>
+    /// <b>No shipped client can check it yet, and that must not be read as if it could.</b>
+    /// Verifying the binding needs material derived from <c>JOIN_TOKEN_SECRET</c>, and a
+    /// client binary must not carry that secret — putting it there is exactly the
+    /// pre-shared-key mistake ADR-22 supersedes, where extracting it once compromises
+    /// everyone for ever. So until the pinned gateway identity key lands, a real client
+    /// completes this exchange without verifying the binding: it gets confidentiality
+    /// against a passive eavesdropper, which the X25519 exchange provides on its own, and
+    /// NOT man-in-the-middle protection.
+    /// </para>
+    /// <para>
+    /// The server signs the binding regardless, so the protection is already on the wire
+    /// waiting for a client that can check it. The Unity side names the gap explicitly —
+    /// <c>SealedClientExchange.WithoutBindingVerification</c>, a <c>BindingVerified</c>
+    /// flag, and a test asserting a man in the middle succeeds against it — so it starts
+    /// failing the day the identity key makes it untrue.
     /// </para>
     /// </remarks>
     public static async Task<Outcome> RunAsync(
