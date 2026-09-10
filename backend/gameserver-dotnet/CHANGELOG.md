@@ -6,6 +6,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`GAMESERVER_SEALED` now defaults to `require`.** A stock game server encrypts the
+  gameplay hop (authenticated X25519 -> ChaCha20-Poly1305, ADR-22) and refuses every
+  client that cannot seal. `off` restores the previous behaviour exactly and is now a
+  deliberate, reviewable choice rather than the value you get by saying nothing.
+  - **The rollout is two artefacts, not one.** A client must set
+    `NetworkSettings.RequireSealedSession` in the same rollout, and that value ships in a
+    built Unity player — there is no deployment variable for it.
+  - **A JSON client is refused and no setting fixes it.** The JSON codec has no sealed
+    frame, so the only fix is a client that speaks protobuf. The refusal has a shape worth
+    knowing: the join is *accepted* (the server must answer `MsgJoinTokenResp` before it
+    can refuse for anything else) and the connection is then closed, so a client log
+    reading "join accepted" is not evidence the client works.
+  - **A protobuf client that never sends `MsgSealedClientHello`** is closed at
+    `--handshake-timeout-ms`. That is every existing client on the day this lands.
+  - `--sealed` / `GAMESERVER_SEALED` is now in the flag table in `docs/README.md`, which
+    it had never been added to; the default it documents is the new one.
+
+### Documentation
+
+- **`ServerOptions.SealedTransport`'s initialiser is not the server's default**, and the
+  XML doc now says so at the property. It stays `Disabled` so a unit test constructing
+  `ServerOptions` for an unrelated reason does not acquire a handshake it never asked for;
+  the value a real server runs with comes from `Program.cs`, the only production
+  constructor. A second production entry point that forgets to set it would get an
+  unencrypted server with no error.
+- **`/status` gained `sealed_required` and `sealed_cipher`**, and the field table in
+  `docs/README.md` now leads with the trap: the `transport_*` fields describe the
+  TRANSPORT only, so on the default configuration (TCP, sealing required)
+  `transport_encrypted` reads `false` while every gameplay frame is encrypted and
+  authenticated above it. A dashboard or deploy check reading only those fields would
+  report an encrypting server as plaintext. Published while `none`/`false` for the same
+  reason the transport fields are: a missing field is the wrong answer to a security
+  question.
+- **ADR-22's status was stale** — it still read "Not implemented" after the implementation
+  merged in #294. It now records what shipped, and that it is on by default.
+
 ### Documentation
 - **The crypto survey's preserved-types list was incomplete, and the way it was incomplete
   generalises.** `Org.BouncyCastle.Crypto.Macs.HMac` was missing — needed by the handshake

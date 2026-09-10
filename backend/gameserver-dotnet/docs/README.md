@@ -87,6 +87,7 @@ set. Flags are **space-separated** (`--addr :9000`).
 | `--sim-world-hz` | `SIM_WORLD_HZ` | `15` | Frequency of the **world** group (AI, spawning, despawning) **and of the snapshot broadcast**. Must divide `SIM_CRITICAL_HZ` exactly and must not exceed it, or the server exits with code 2 |
 | `--sim-background-hz` | `SIM_BACKGROUND_HZ` | `5` | Frequency of the **background** group (work that tolerates a whole interval of delay). Must divide `SIM_CRITICAL_HZ` exactly and must not exceed `SIM_WORLD_HZ` |
 | `--tick-rate` | `GAMESERVER_TICK_RATE` | *(unset → `60/15/5`)* | **Legacy single-rate switch.** Sets *every* group to this one rate, i.e. base = world = background, snapshots every tick — the pre-multi-rate server exactly. Only applies when no `SIM_*_HZ` environment variable is set; any of them present wins and the tick rate is ignored |
+| `--sealed` | `GAMESERVER_SEALED` | `require` | **Sealed session on the gameplay hop.** `require` runs an authenticated X25519 exchange after the join reply and encrypts every frame after it with ChaCha20-Poly1305 (ADR-22; normative format in `backend/docs/SEALED-FRAMING.md`). `off` restores the pre-sealing server exactly. **Two values, not three** — there is no "preferred" mode, because a negotiable encryption setting is a downgrade attack with a friendly name; any other value exits with code 2 rather than guessing. A `require` server **refuses** every client that cannot seal: a JSON client is closed after the join reply and **no setting fixes it** (the JSON codec has no sealed frame), and a protobuf client that never sends `MsgSealedClientHello` is closed at `--handshake-timeout-ms`. A client must therefore set `NetworkSettings.RequireSealedSession` in the same rollout, and that ships in a built player, not in a deployment variable |
 | `--keyframe-interval` | `GAMESERVER_KEYFRAME_INTERVAL` | `30` | Delta snapshots between full keyframes; `0` disables delta encoding (see `docs/API.md`) |
 | `--gather-workers` | `GAMESERVER_GATHER_WORKERS` | `1` | Threads the AOI gather may use. `1` is serial. Above `1` it applies only from 500 viewers up — measured gain is 2.0-2.7x at 500 viewers / 4 workers, inside the noise at 200, a loss at 50 (see `docs/DESIGN.md`, "Where the tick budget goes") |
 | `--map-width` | `GAMESERVER_MAP_WIDTH` | `1000` | Map width in world units |
@@ -108,10 +109,13 @@ set. Flags are **space-separated** (`--addr :9000`).
 
 #### Realtime transport (`--transport`, `TRANSPORT_KEY`)
 
-> **The server tells you what it is actually doing, on every boot.** Encryption here is
-> off by default *twice* — the transport defaults to TCP, which has no packet-crypt layer
-> at all, and `TRANSPORT_KEY` defaults to empty — so "is this deployment encrypted" is not
-> answerable from one variable. The posture is logged at startup (at **Warning** whenever
+> **The server tells you what it is actually doing, on every boot.** "Is this deployment
+> encrypted" is not answerable from one variable, and — since `GAMESERVER_SEALED` began
+> defaulting to `require` — **not answerable from the `transport_*` fields at all**. Those
+> describe the transport only. On the default configuration the transport is TCP with no
+> packet-crypt layer, so `transport_encrypted` is `false`, while every gameplay frame is
+> encrypted and authenticated a layer above it by the sealed session. Read
+> `sealed_required` before concluding anything from `transport_encrypted`. The posture is logged at startup (at **Warning** whenever
 > traffic is in cleartext, Information when it is not) and published on `/status`:
 >
 > | field | meaning |
@@ -122,6 +126,8 @@ set. Flags are **space-separated** (`--addr :9000`).
 > | `transport_authenticated` | tampering is detectable — **`false` on every configuration this server supports today** |
 > | `transport_cipher` | `aes-256-cfb`, or `none` |
 > | `transport_posture` | one line stating what is happening and what is not |
+> | `sealed_required` | a sealed session is required on the gameplay hop (`GAMESERVER_SEALED=require`, the default). **This, not `transport_encrypted`, is what says gameplay frames are encrypted** |
+> | `sealed_cipher` | `chacha20-poly1305`, or `none` when sealing is off |
 >
 > Mirrored as `gameserver_transport_encrypted` and `gameserver_transport_authenticated`,
 > which are **gauges** rather than counters precisely so they are present when they read

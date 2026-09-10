@@ -7,8 +7,32 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- **`SMOKE_SEALED`: the smoke test can speak a sealed session.** Required before the game
-  server's default can flip, since otherwise a stock server would refuse it.
+- **`SMOKE_SEALED`: the smoke test can speak a sealed session — but the path is UNREACHABLE
+  today, and this entry overstated it when it was written.**
+
+  **Correction (2026-09-10).** Measured live against a `require` server: the sealed arm
+  fails at `gameserver_join` with `sealed handshake: read server hello: read length: EOF`,
+  and the server log gives the cause — `encryption is required and this client's encoding
+  cannot seal (encoding_cannot_seal)`. **The smoke test speaks JSON, and a JSON client can
+  never carry a sealed frame.** It hand-rolls `encoding/json` and has no encoding switch at
+  all, so it is refused at the join before any of the code below runs.
+
+  The sealing code is not wrong — `RunClientHandshake` is shared with the load generator,
+  which does drive it live over protobuf. It is unreachable. The original claim that this
+  was "required before the game server's default can flip" was **the wrong way round**:
+  the default flipping is what exposes that the smoke test cannot connect at all, and the
+  real prerequisite is a smoke test that speaks protobuf.
+
+  That is a design decision rather than a chore: the smoke test's JSON-ness is much of its
+  value, because it makes it an *independent* second implementation of the wire rather than
+  a consumer of the same generated types the server uses. Vendoring the generated protobuf
+  types would cost that independence; hand-rolling protobuf is real work.
+
+  **Consequence, and it is the binding one:** `post-deploy-smoke` and `verify.sh`'s
+  `flow.smoke` both run this binary against the stack they just deployed, so **no
+  environment can be set to `GAMESERVER_SEALED=require` until this is resolved** — requiring
+  encryption currently deprecates the deploy verifier. The original entry follows, unchanged
+  except for this note, because what it describes is what the code does once it can connect.
   - **It behaves like a shipped client, because it is the closest thing to one here.** It
     goes through the real gateway and therefore *receives* its join token rather than
     minting one, so it holds no `JOIN_TOKEN_SECRET` and **cannot verify the server's

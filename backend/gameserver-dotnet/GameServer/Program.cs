@@ -48,10 +48,19 @@ int maxPendingInputs = int.TryParse(
 // value falls back to the default rather than being treated as "off", because "off" must
 // be something an operator asked for.
 // Sealed transport on the gameplay hop. Two values, not three: a "preferred" mode is a
-// downgrade attack with a friendly name. Defaults to off — turning it on refuses every
-// client that cannot seal, including every JSON client, and that is an operational
-// decision rather than a correctness one.
-string sealedMode = (GetArg(args, "--sealed") ?? Env("GAMESERVER_SEALED") ?? "off").Trim().ToLowerInvariant();
+// downgrade attack with a friendly name.
+//
+// DEFAULTS TO `require`. A stock server encrypts the gameplay hop and refuses every client
+// that cannot seal — which is every JSON client, and every protobuf client that does not
+// run the ClientHello/ServerHello exchange. That refusal is the point: an unencrypted
+// default is a default nobody chose, and the transport posture line at boot said so on
+// every boot for as long as it was `off`.
+//
+// `off` restores the pre-sealing server exactly. It is a deliberate, reviewable choice —
+// the local compose stack and the JSON interop tests set it explicitly — never a fallback
+// this code reaches on its own. There is no value that means "seal if the client can":
+// see the refusal below.
+string sealedMode = (GetArg(args, "--sealed") ?? Env("GAMESERVER_SEALED") ?? "require").Trim().ToLowerInvariant();
 
 int maxSnapshotBytes = int.TryParse(
     GetArg(args, "--max-snapshot-bytes") ?? Env("GAMESERVER_MAX_SNAPSHOT_BYTES"), out var msb) && msb >= 0
@@ -372,6 +381,25 @@ if (transportPosture.Encrypted)
         transportPosture.Transport, transportPosture.Summary, transportPosture.Cipher,
         transportPosture.Encrypted, transportPosture.Authenticated, addr);
 }
+else if (sealedRequirement == GameServer.Net.Sealed.SealedRequirement.Required)
+{
+    // The transport IS plaintext and the summary above is accurate about it -- but
+    // "PLAINTEXT, set TRANSPORT_KEY" is the wrong thing to shout at an operator who has
+    // already solved gameplay confidentiality a layer up, and better: the sealed session
+    // is authenticated, which TRANSPORT_KEY's pre-shared key is not.
+    //
+    // Reported at Information rather than Warning for that reason, and it states what is
+    // still readable rather than implying nothing is. A boot line that said "encrypted"
+    // flat out would be the same overclaim as describing the client as verifying the
+    // server's binding.
+    logger.LogInformation(
+        "Transport posture: {Transport}, {Summary} (cipher={Cipher}, encrypted={Encrypted}, authenticated={Authenticated}, addr={Addr}) " +
+        "-- but a SEALED SESSION is required on the gameplay hop, so gameplay frames are encrypted and authenticated above this transport. " +
+        "Still readable on the wire: the join handshake before the sealed session exists (MsgJoinToken and its reply, and the sealed hello exchange), " +
+        "and the whole gateway hop.",
+        transportPosture.Transport, transportPosture.Summary, transportPosture.Cipher,
+        transportPosture.Encrypted, transportPosture.Authenticated, addr);
+}
 else
 {
     logger.LogWarning(
@@ -379,6 +407,24 @@ else
         "Set {KeyVar} (32-byte hex) and --transport kcp, or terminate TLS in front of this listener.",
         transportPosture.Transport, transportPosture.Summary, transportPosture.Cipher,
         transportPosture.Encrypted, transportPosture.Authenticated, addr, TransportKind.KeyEnvVar);
+}
+
+// The sealed posture is reported on EVERY boot, for the same reason the transport posture
+// is: the configuration most likely to be deployed by accident must not be the one that
+// says nothing. `off` is now a deliberate choice, so it gets a line saying what that
+// choice costs rather than silence.
+if (sealedRequirement == GameServer.Net.Sealed.SealedRequirement.Required)
+{
+    logger.LogInformation(
+        "Sealed session: REQUIRED (chacha20-poly1305 over authenticated X25519). Clients that cannot seal are refused: " +
+        "a JSON client is closed after the join reply and no setting fixes it, and a protobuf client that sends no " +
+        "sealed hello is closed at the handshake deadline. A Unity client must set NetworkSettings.RequireSealedSession.");
+}
+else
+{
+    logger.LogWarning(
+        "Sealed session: OFF -- gameplay frames travel in the clear on this listener. This is not the default " +
+        "(GAMESERVER_SEALED defaults to \"require\"); something set it to \"off\" for this process.");
 }
 
 if (string.IsNullOrEmpty(jwtSecret))
@@ -738,6 +784,10 @@ metricsEndpoint?.SetStatusProvider(() =>
         TransportAuthenticated = transportPosture.Authenticated,
         TransportCipher = transportPosture.Cipher,
         TransportPostureSummary = transportPosture.Summary,
+        SealedRequired = sealedRequirement == GameServer.Net.Sealed.SealedRequirement.Required,
+        SealedCipher = sealedRequirement == GameServer.Net.Sealed.SealedRequirement.Required
+            ? "chacha20-poly1305"
+            : "none",
         FrameOrderObserved = server.FrameOrder.FramesObserved,
         FrameOrderInversions = server.FrameOrder.Inversions,
         FrameOrderDuplicates = server.FrameOrder.Duplicates,

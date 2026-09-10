@@ -5,6 +5,59 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Every deploy path pins `GAMESERVER_SEALED=off`, not just compose.** The game server
+  binary now defaults to `require`, so a config site that says nothing takes encryption by
+  default — and **no deploy path can survive that yet**, because `verify.sh` layer 4 and
+  `post-deploy-smoke` both run the JSON smoketest against what was just deployed and a JSON
+  client can never seal. Pinning one file would have been worse than pinning none: it reads
+  as covered.
+  - `backend/deploy/docker-compose.override.yml` — the second map server. Unpinned it would
+    have produced the worst version of the mistake: `map_01` unsealed and `map_02` sealed on
+    the same stack, so a client transferring between maps works on one and is refused on the
+    other.
+  - `backend/deploy/agones/fleet-map-dotnet-dev.yaml` and
+    `backend/deploy/k8s/app/50-fleet-map.yaml` — **the k8s path, which is what dev actually
+    runs** (`DEPLOY_MODE=k8s` in the live `deploy/.env`). Agones-allocated game servers do
+    not read the compose file at all, so the compose pin covered none of dev.
+  - `scripts/deploy-local.sh` — host mode, exported so the spawned server inherits it.
+  - `.github/workflows/cd.yml` — writes `GAMESERVER_SEALED=${GAMESERVER_SEALED:-off}` into
+    the generated `deploy/.env`, so an environment has **one reviewable place to opt in**,
+    the same shape and reason as `ALLOCATOR=${ALLOCATOR:-none}`. `SMOKE_SEALED` is
+    deliberately **not** derived alongside it, with the reason at the line: no value of it
+    makes verification pass against a sealed server, so deriving one converts a check that
+    cannot pass into a check that always fails. Setting `GAMESERVER_SEALED=require` on an
+    environment today therefore produces a red deploy — correctly, and by design.
+
+- **`docker-compose.yml` pins `GAMESERVER_SEALED=off` explicitly**, now that a stock game
+  server defaults to `require`. Pinned deliberately, with the reason at the line, so the
+  next reader knows it is a decision and not an oversight: six Unity sample scenes
+  (`DOTSNetworkBridge`, three `E2ECertification` scenes, `ReconnectPolicyDemo`, `WorldView`)
+  construct `NetworkSettings` and dial a live backend without setting
+  `RequireSealedSession`, and those scenes are the netcode package's acceptance path rather
+  than demos. Inheriting the default would break all six, and the fix lives in the client
+  repo on a package release cadence. The pin comes out when the samples set the flag.
+
+### Added
+
+- **`make flow-up-sealed`**, so the sealed path is exercisable locally on purpose rather
+  than only in CI. `GAMESERVER_SEALED=require ./stack.sh up` is the same thing without make.
+- **`stack.sh check` refuses up front when asked to check a sealed stack**, and warns when
+  the stack is sealed and it is about to be refused. **The smoke test cannot check a sealed
+  stack and no environment variable fixes that**: it speaks JSON, hand-rolled over
+  `encoding/json` with no encoding switch, and a JSON client can never carry a sealed
+  frame — so a `require` server refuses it at the join with `encoding_cannot_seal`, before
+  any sealing code runs. Its JSON-ness is load-bearing rather than incidental: it makes the
+  smoke test an *independent* second implementation of the wire.
+  - An earlier draft of this change derived `SMOKE_SEALED=1` from
+    `GAMESERVER_SEALED=require` so the two halves could not drift. That would have turned a
+    check that cannot pass into a check that runs and always fails. It was measured failing
+    on a live stack before it shipped, which is the only reason it is not in this entry as
+    a feature.
+  - There is deliberately **no `flow-check-sealed`**. To drive a sealed stack, use the load
+    generator, which speaks protobuf: `loadtest -sealed -encoding proto`.
+
 ### Fixed
 - **`stack.sh up` rebuilds `modules/nakama.so` when it is older than any `nakama/` or `shared/`
   Go source (or the plugin Dockerfile), not only when the file is missing.** The old

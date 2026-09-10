@@ -115,6 +115,23 @@ spec:
                   value: "map_01"
                 - name: GAMESERVER_ADDR
                   value: ":9000"
+                # Sealed transport on the gameplay hop. PINNED OFF, and this is a
+                # decision rather than an oversight: the game server binary now
+                # defaults to `require`, so a manifest that says nothing takes
+                # encryption by default -- and this deployment cannot survive that
+                # yet. `verify.sh` layer 4 and `post-deploy-smoke` both run the Go
+                # smoketest against what was just deployed, the smoketest speaks
+                # JSON, and a JSON client can NEVER seal: a `require` server refuses
+                # it at the join with `encoding_cannot_seal`. Measured on a live
+                # stack, not inferred. There is no value of SMOKE_SEALED that makes
+                # that pass, so the only safe state for a deploy path today is off.
+                #
+                # Same shape as ALLOCATOR=${ALLOCATOR:-none} in cd.yml, for the same
+                # reason: off unless the environment opts in, so nothing can take
+                # down an environment that never asked for it. Flip this when the
+                # smoketest speaks protobuf.
+                - name: GAMESERVER_SEALED
+                  value: "off"
                 # GAMESERVER_PUBLIC_ADDR IS ABSENT ON PURPOSE. It replaces the
                 # WHOLE advertised address, so it cannot carry a port that is
                 # only known at scheduling time — and it is read only when

@@ -37,6 +37,16 @@ services:
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
       JOIN_TOKEN_SECRET: ${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}
       GAMESERVER_ADDR: ":9000"
+      # PINNED OFF ON PURPOSE, and it must stay in step with the map_01 service in
+      # docker-compose.yml -- see the long note there for why. In short: the binary
+      # now defaults to `require`, and a stack that requires encryption cannot be
+      # verified by the Go smoketest, which speaks JSON and can never seal.
+      #
+      # This file is the second map server, so leaving it unpinned would produce
+      # the worst version of the mistake: map_01 unsealed and map_02 sealed on the
+      # same stack, with a client that transfers between them working on one map
+      # and being refused on the other.
+      GAMESERVER_SEALED: ${GAMESERVER_SEALED:-off}
       GAMESERVER_MODE: map
       GAMESERVER_MAP_ID: map_02
       GAMESERVER_ID: gs-dotnet-map_02

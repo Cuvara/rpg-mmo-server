@@ -1,7 +1,10 @@
 # Sealed framing — normative wire format for realtime confidentiality
 
-Status: **implemented, wired, and proved on a live server.** Off by default
-(`GAMESERVER_SEALED=off`); `require` turns it on for the gameplay hop. ADR-22's library question is closed — ChaCha20-Poly1305 (RFC 8439), X25519
+Status: **implemented, wired, proved on a live server, and ON BY DEFAULT.**
+`GAMESERVER_SEALED` defaults to `require`: a stock game server encrypts the gameplay hop
+and refuses every client that cannot seal. `GAMESERVER_SEALED=off` restores the previous
+behaviour exactly, and is a deliberate choice a deployment makes — the local compose stack
+and the JSON interop tests both make it, each saying why at the line. ADR-22's library question is closed — ChaCha20-Poly1305 (RFC 8439), X25519
 (RFC 7748) and HKDF-SHA256 (RFC 5869), from `golang.org/x/crypto` on the Go side and
 BouncyCastle.Cryptography 2.7.0 on the C# side. Published RFC vectors pass on both, and a
 shared cross-implementation vector pins the bytes between them.
@@ -343,5 +346,16 @@ corrupted one byte of its send key had every frame refused and the connection cl
   not blocking, and must not be described as confirmed.
 - **The netcode package needs the same two messages and BouncyCastle vendored** before a
   Unity client can speak this.
-- **Default-on** is a separate operational decision: turning it on refuses every client
-  that cannot seal, which is every JSON client.
+- **The local compose stack does not run sealed yet.** It pins `GAMESERVER_SEALED=off`
+  because six Unity sample scenes dial a live backend without setting
+  `RequireSealedSession`, and those scenes are the package's acceptance path. Run it
+  sealed on purpose with `make flow-up-sealed` / `make flow-check-sealed`. The pin comes
+  out when the samples set the flag.
+
+### Done since
+
+- **Default-on landed.** `GAMESERVER_SEALED` now defaults to `require`. The rollout has
+  two artefacts, not one: a client must set `NetworkSettings.RequireSealedSession` in the
+  same rollout, and that value lives in a built player rather than in a deployment
+  variable. A JSON client is refused and **no setting fixes it** — the JSON codec has no
+  sealed frame, so the fix is a client that speaks protobuf.

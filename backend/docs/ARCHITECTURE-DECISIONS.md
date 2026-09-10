@@ -2829,7 +2829,9 @@ None. This ADR is a record, not a change. Nothing in the code moves on it.
 
 ## ADR-22 — Transport crypto: ChaCha20-Poly1305 over an authenticated X25519 exchange, with the nonce as the replay counter
 
-**Status:** accepted 2026-09-10 as the target model. **Not implemented.** Supersedes the deferral in ADR-21 and supersedes the key-derivation scheme merged in #288, which is retained for the parts of it that carry forward.
+**Status:** accepted 2026-09-10 as the target model, and **implemented on the server and in the Go clients** — the C# game server (`GameServer/Net/Sealed`), the Go implementation (`backend/shared/sealed`) and the Go load/smoke harnesses all speak it, with published RFC vectors and a shared cross-implementation vector pinning the bytes between them. **It is now the default**: `GAMESERVER_SEALED` defaults to `require`, so a stock server encrypts the gameplay hop and refuses every client that cannot seal. The Unity client half is written but not yet on the release cadence, which is why the local compose stack pins the flag off (see `backend/deploy/docker-compose.yml`). Normative wire format: `backend/docs/SEALED-FRAMING.md`.
+
+Supersedes the deferral in ADR-21 and supersedes the key-derivation scheme merged in #288, which is retained for the parts of it that carry forward.
 
 ### The model
 
