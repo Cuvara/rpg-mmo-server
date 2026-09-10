@@ -54,13 +54,30 @@ public enum InputRejectionReason
     /// input tick.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// <b>Ambiguous, and the most easily misread value here.</b> On the ordered TCP
     /// transport an honest client should not produce these at all, which makes a sustained
-    /// rate interesting. But two honest causes exist and both must be ruled out before
-    /// anyone treats it as evidence: an out-of-order UDP/KCP datagram, and a RECONNECT —
-    /// the entity is held for the reconnect window with its <c>LastInputTick</c> intact,
-    /// so a client that restarts its own tick counter on reconnect trips this on every
-    /// input until it catches up.
+    /// rate interesting. One honest cause remains: an out-of-order UDP/KCP datagram.
+    /// </para>
+    /// <para>
+    /// <b>A second one used to, and this remark is where the bug was written down without
+    /// being seen.</b> It read: <i>"a RECONNECT — the entity is held for the reconnect
+    /// window with its <c>LastInputTick</c> intact, so a client that restarts its own tick
+    /// counter on reconnect trips this on every input until it catches up."</i> That was
+    /// accurate, and it stopped one line short. Read as a caveat about interpreting a
+    /// counter it sounds minor; followed one step further it says <b>the player cannot
+    /// move for as long as their previous session lasted</b> — measured at 88 rejected
+    /// frames after a 5s session, and 596 of 596 across four players. A fact about
+    /// telemetry and a player-facing freeze were the same sentence, and only the first
+    /// reading was taken.
+    /// </para>
+    /// <para>
+    /// The server now clears the whole <c>InputCursor</c> when it reattaches an entity to a
+    /// new connection, so that cause is gone; a reconnect no longer produces these at all
+    /// beyond inputs from the old session already queued when the socket closed, which is
+    /// bounded by one drain window. Kept here rather than deleted because the sequence is
+    /// the point: the reason this value stays <see cref="RejectionWeight.LatencyExplicable"/>
+    /// is that its honest causes have twice been discovered after the fact.
     /// </remarks>
     StaleTick = 2,
 
@@ -212,9 +229,11 @@ public static class InputRejection
         InputRejectionReason.EntityGone => RejectionWeight.Benign,
         InputRejectionReason.DeadEntity => RejectionWeight.Benign,
 
-        // Ambiguous rather than forged: a reconnecting client whose tick counter restarts
-        // trips this honestly against a held entity. Treated as latency-explicable so a
-        // reconnect storm cannot manufacture suspicion.
+        // Ambiguous rather than forged. The reconnect cause this line used to name is
+        // fixed — the server clears the input cursor when it reattaches an entity — but
+        // the weight does not change, because an out-of-order KCP datagram still produces
+        // it honestly, and because the reconnect cause was itself found late. See the
+        // remarks on StaleTick.
         InputRejectionReason.StaleTick => RejectionWeight.LatencyExplicable,
 
         InputRejectionReason.AttackTargetUnresolved => RejectionWeight.LatencyExplicable,

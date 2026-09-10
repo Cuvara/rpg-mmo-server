@@ -57,6 +57,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Measured with the harness that found it — `stale_tick` 88→0 and 596→0.
   One residual is recorded in `docs/BENCHMARK.md` Part XII rather than hidden: inputs still
   queued when the old socket closes drain after the reset and can refuse a short burst.
+- The client side of the same fix was checked, not assumed: `LastInputTick` is `ack_tick` on
+  the wire, so the reset makes the first post-reattach snapshot ack **0**. The shipped
+  client already zeroes `AckTick` in `GameSessionClient.JoinAsync`, guards it monotonically
+  (*"a snapshot that omits ack_tick carries zero and must never lower it"*), uses `ack_tick`
+  only to retire pending inputs — the positional correction comes from the snapshot tick —
+  and holds a 128-entry ring, so the one extra round trip of pending inputs cannot overflow
+  it. No client change is needed. Detail in `docs/BENCHMARK.md` Part XII.
+- The `StaleTick` remark in `Input/InputRejection.cs` described this bug **as a caveat about
+  reading a counter** and never followed it to the player-facing freeze. Corrected in place
+  with the original text kept, because the sequence is the point.
 
 ### Added
 - **`FrameOrderProbe` and the `frame_order_*` fields on `/status`** — the measurement

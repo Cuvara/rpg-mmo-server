@@ -2403,6 +2403,38 @@ Same harness, before and after:
 > means purging a user's pending inputs on reattach, which touches the ingest hot path;
 > that is a separate decision and has not been made here.
 
+##### What the reset does to the client's reconciliation anchor
+
+`LastInputTick` is what the server puts on the wire as `ack_tick`, so clearing it means the
+first snapshot after a reattach acks **0** — until the new session's first input is accepted,
+one round trip later. That is the half of this fix that lives in the client, and it was
+checked in `com.cuvara.netcode` rather than assumed. Four independent reasons it is safe,
+all of them already in the shipped client:
+
+1. **The client zeroes its own anchor on every join.** `GameSessionClient.JoinAsync` sets
+   `AckTick = 0L` (and `ServerTick = 0L`, `_resolver.Reset()`) as part of joining. A server
+   that acks 0 at that moment is agreeing with the client, not contradicting it.
+2. **The client's anchor is monotonic, with a comment naming this exact hazard.**
+   `if (resolved.AckTick > AckTick)` — *"a snapshot that omits ack_tick carries zero and must
+   never lower it."* So even where the client's own counter kept climbing (an in-process
+   reconnect), an ack of 0 cannot drag the anchor backwards.
+3. **`ack_tick` does not move the player.** In `LocalMovePredictor.Reconcile` it is used only
+   by `DropAcknowledged`, which retires pending inputs with `Tick <= ackTick`; the positional
+   correction comes from the snapshot's own tick via the history buffer, not from `ack_tick`.
+   `DropAcknowledged(0)` therefore retires nothing and moves nothing — no snap, no
+   rubber-band. The cost is that up to one round trip of pending inputs is held one snapshot
+   longer than necessary, and the next ack retires all of them at once.
+4. **Holding them cannot overflow.** The pending ring is `Capacity = 128` — about 8.5s at
+   15Hz — and overflow is counted in `DroppedInputs` rather than absorbed. One extra round
+   trip is two orders of magnitude clear of it.
+
+Which path the predictor takes depends on the reconnect kind, and both are benign. A fresh
+process has an unseeded predictor, so its first `Reconcile` takes the `!_seeded` branch and
+adopts the authoritative position outright — the ordinary join path, unchanged by this fix.
+An in-process reconnect keeps a seeded predictor and its pending inputs; those survive the
+zero ack by (3) and are retired by the first real ack. `AckLatencyEstimator.RecordAck` early-
+returns on `ackTick <= 0`, so the latency estimate is not poisoned by the gap either.
+
 ### Conclusion for ADR-22 — quotable
 
 > **A sliding window is not required. Use the strict counter — and make the assumption it
