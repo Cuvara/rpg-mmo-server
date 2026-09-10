@@ -5,6 +5,24 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`TestNoJSONDefaultingEnvelopeConstructor` — a source-level guard against a sixth
+  JSON-defaulting call site.** `messages.NewEnvelope` hard-codes `EncodingJSON`; every
+  frame this binary sends must use `NewEnvelopeAs` with the resolved encoding. The test
+  scans the package's non-test sources and fails naming file and line.
+  - **Deliberately a source scan, not a behavioural test.** The fifth site (`db.go`, fixed
+    separately) was missed independently by two reviewers on the same day, and it was not
+    wrong behaviour — it was an **unvisited line**. It sends the disconnect frame on the
+    reload check, so a behavioural test would have to run against a sealed server with a
+    live `GAME_DB_URL` to reach it; the live run that gave confidence at the time used
+    `-skip-db`, which is the one mode that never executes that path. A source scan does not
+    care which steps ran, and needs no server, database or network.
+  - The guard **fails when it scans zero files**, because a guard that checks nothing passes
+    for the wrong reason — the same class of defect it exists to catch.
+  - Mutation-verified against the real source: reintroducing the `db.go` call alone fails it
+    with `db.go:566: if env, err := messages.NewEnvelope(...)`.
+
 ### Fixed
 - **A fifth `NewEnvelope` call site that `-encoding` did not reach.** `smoke/db.go`'s
   disconnect at the end of the reload check was still hardcoded to JSON, so a
