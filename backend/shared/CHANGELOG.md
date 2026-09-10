@@ -7,6 +7,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`jwt.ParseUnverified`** — decodes a token's claims **without** checking its signature.
+  It answers "what does this token say", never "is this token genuine", and the doc comment
+  says so at length because every call site is a place a reviewer should look twice.
+  - It exists for one legitimate case: a **client** reading the `jti` out of its own join
+    token. The `jti` anchors the sealed handshake transcript, and a client cannot hold
+    `JOIN_TOKEN_SECRET` — putting that secret in a client binary is the pre-shared-key
+    mistake ADR-22 supersedes. The client decides nothing on these claims; it names the
+    session it is already in, and the server verifies the same token properly.
+
+### Added
+
 - **`sealed.RunClientHandshake`: the Go client half of the sealed exchange.** It mirrors
   `SealedHandshakeServer` step for step and contains no transport — the caller supplies the
   two frame callbacks — so the load generator, the smoke test and the integration suite can

@@ -6,6 +6,22 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+
+- **`SMOKE_SEALED`: the smoke test can speak a sealed session.** Required before the game
+  server's default can flip, since otherwise a stock server would refuse it.
+  - **It behaves like a shipped client, because it is the closest thing to one here.** It
+    goes through the real gateway and therefore *receives* its join token rather than
+    minting one, so it holds no `JOIN_TOKEN_SECRET` and **cannot verify the server's
+    binding**. It reads the `jti` with `jwt.ParseUnverified` and completes the handshake
+    unverified — confidentiality against a passive eavesdropper, nothing against an active
+    one.
+  - The step reports **both** facts: `sealed=true binding_verified=false`. Reporting only
+    the first would let a reader take confidentiality for authenticity, which is precisely
+    the conflation ADR-21 was written about.
+  - Only the game-server socket is sealed; sealing the gateway hop with these keys would be
+    meaningless, since they derive from a join token the gateway itself issues.
+
+### Added
 - **Strict address mode (`SMOKE_STRICT_ADDR` / `--strict-addr`, default off).** The
   runner normalizes listen-style addresses (`:9000`, `0.0.0.0:9000`, `[::]:9200`)
   to loopback before dialing. That is right for host-mode deploys, but it silently
