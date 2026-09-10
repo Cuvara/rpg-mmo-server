@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **The IL2CPP TLS probe has been RUN, and the answer is GO on Windows.** A real Windows
+  IL2CPP player, Unity `6000.3.9f1`, at **both** `Minimal` and `High` stripping, passes all
+  four assertions — including the one that matters, that an untrusted certificate is
+  **refused**. High stripping changing nothing is the part that was in doubt: the linker
+  keeps what `SslStream` needs with no `link.xml` entry. This is the go/no-go for ADR-23's
+  gateway-hop TLS and for the client's `https://` Nakama hop; `backend/docs/tls-probe/`
+  and `ROADMAP-SECURITY.md` now carry the result instead of "not yet run in a player".
+
+  Three details differ from the .NET 10 run, and asserting on any of them would pass on
+  .NET and fail in a player: the player negotiates **Tls12**, not Tls13;
+  `SslStream.CipherAlgorithm` reports **`None`** (the obsolete property is not populated
+  under IL2CPP, so it says nothing about the cipher in use); and the refusal message is
+  the generic `Authentication failed, see inner exception.` rather than the .NET text
+  naming `UntrustedRoot`.
+
+  **Android is still unanswered** and nothing here transfers to it, for the same reason
+  ADR-22's BouncyCastle result is Windows-only.
+
+- **`backend/docs/tls-probe/harness/`** — the Editor build script and the self-quit
+  component used to produce that player, so the run is repeatable rather than a one-off.
+  It builds its scene programmatically (a committed `.unity` is GUIDs and YAML that can
+  drift from the component it instantiates), and it carries the two failures that cost the
+  most time: it asserts `GameAssembly.dll` alongside the build result, and it flushes the
+  scripting-backend restore with `AssetDatabase.SaveAssets()`.
+
+  That second one was not theory. A run logged `restored backend=Mono2x` and still left
+  `Standalone: 1` (IL2CPP) and `managedStrippingLevel: {Standalone: 4}` (High) on disk —
+  the build persists `ProjectSettings.asset`, the restore after it did not, and `-quit`
+  exits without flushing. The *next* run then read the leaked value as the one to
+  preserve, so it compounds. Verified by rebuilding with the flush in place and reading
+  the file back: `Standalone: 0` / `0`, Mono2x and Disabled.
+
 ### Fixed
 - **The IL2CPP TLS probe did not compile in Unity**, which the "verified before shipping"
   note in its README implied it must. `SslProtocols.Tls13` does not exist in Unity's

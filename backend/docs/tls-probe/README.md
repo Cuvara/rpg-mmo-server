@@ -70,6 +70,47 @@ A full IL2CPP build of this project needs roughly **25 GB** of scratch in `Libra
 Check free space before starting; `Library/Bee` is regenerable, so deleting it is the
 cheapest way to get that space back.
 
+## The answer
+
+Run in a **real Windows IL2CPP player**, Unity `6000.3.9f1`, at both stripping levels.
+Not the Editor: IL2CPP and Mono use different class-library profiles, so an Editor pass
+would have answered a different question.
+
+| | Minimal stripping | High stripping |
+|---|---|---|
+| `GameAssembly.dll` | 105.1 MB | 69.1 MB |
+| 1. untrusted certificate **refused** | OK | OK |
+| 2. trusted certificate completes | OK | OK |
+| 3. validation callback invoked | OK | OK |
+| 4. callback sees a real `SslPolicyErrors` | OK — `RemoteCertificateChainErrors` | OK — `RemoteCertificateChainErrors` |
+
+```
+[tls-probe] runtime: WindowsPlayer  unity: 6000.3.9f1
+[tls-probe] [ OK ] default validation refuses an untrusted certificate
+                   (refused: AuthenticationException: Authentication failed, see inner exception.)
+[tls-probe] [ OK ] an explicitly trusted certificate completes  (Tls12 / None)
+[tls-probe] [ OK ] the validation callback reports a real error  (Tls12 / None)
+[tls-probe] [ OK ] callback saw: RemoteCertificateChainErrors
+[tls-probe] ALL PASS on WindowsPlayer
+```
+
+**Go** for ADR-23's gateway-hop TLS and for the client's `https://` Nakama hop, **on
+Windows**. High stripping changes nothing, so the linker keeps what TLS needs without a
+`link.xml` entry — the answer that was actually in doubt.
+
+Three details differ from the .NET 10 run and would break anyone who asserted on them:
+
+- It negotiates **Tls12**, not Tls13. `SslProtocols.None` asks for the platform default
+  and that is what Unity's stack chooses.
+- `SslStream.CipherAlgorithm` reports **`None`**. The obsolete property is simply not
+  populated here, so it says nothing about the cipher actually in use — do not gate on it.
+- The refusal message is the generic `Authentication failed, see inner exception.`, not
+  the .NET 10 text naming `UntrustedRoot`. Matching on that string would pass on .NET and
+  fail in a player.
+
+**Android remains unanswered**, for the same reason ADR-22's BouncyCastle result is
+Windows-only. Nothing here transfers to it.
+
 ## Verified before shipping
 
 Every API the probe calls was **executed on .NET 10 first**, so it does not throw for a
