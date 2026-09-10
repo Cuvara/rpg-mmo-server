@@ -325,14 +325,28 @@ inventing a cipher.
    **What this does not yet buy, stated precisely**, because the sentence this replaces
    said the previous four steps "buy nothing in production" and that is still nearly true:
 
-   - **No environment sets it.** All three environments are compose stacks, and the local
-     compose file pins `off` (six Unity sample scenes dial a live backend without setting
-     `RequireSealedSession`, and those scenes are the netcode package's acceptance path).
-     Turning it on for an environment also needs CD work that does not exist: there is no
-     `GAMESERVER_SEALED` or `SMOKE_SEALED` plumbing anywhere in `.github/` or
-     `backend/deploy/`, and `post-deploy-smoke` plus `verify.sh`'s `flow.smoke` both run
-     the Go smoketest against the stack they just deployed — so an environment that sets
-     `require` without the matching `SMOKE_SEALED` fails its own deploy verification.
+   - **No environment can be set to `require` yet, and the blocker is not plumbing.**
+     `post-deploy-smoke` and `verify.sh`'s `flow.smoke` both run the Go smoketest against
+     the stack they just deployed — and **the smoketest speaks JSON**, hand-rolled over
+     `encoding/json` with no encoding switch. A JSON client can never carry a sealed frame,
+     so a `require` server refuses it at the join with `encoding_cannot_seal`. Measured
+     live, not inferred: the sealed arm fails with `read server hello: read length: EOF`
+     and the server names the cause in its own log.
+
+     Stated as the rule this roadmap already contains: **requiring encryption deprecates
+     JSON; the deploy verifier is a JSON client; therefore requiring encryption deprecates
+     the deploy verifier.** No environment variable or source-of-truth scheme reaches this.
+     The prerequisite is a smoketest that speaks protobuf, and that is a **decision, not a
+     chore** — its JSON-ness is much of its value, because it makes it an independent second
+     implementation of the wire rather than a consumer of the server's generated types.
+
+     Separately, there is also no `GAMESERVER_SEALED` or `SMOKE_SEALED` plumbing anywhere in
+     `.github/` or `backend/deploy/` (verified against the deployed `deploy/.env` as well as
+     the repo), so the config work is outstanding too — it is simply not what blocks.
+
+     The local compose file pins `off` for its own reason: the Unity sample scenes that dial
+     a live backend are the netcode package's acceptance path, and they gained a
+     `requireSealedSession` toggle only in Netcode #132.
    - **The rollout is two artefacts.** A Unity client must set
      `NetworkSettings.RequireSealedSession`, and that ships in a built player, not in a
      deployment variable.

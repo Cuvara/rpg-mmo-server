@@ -18,14 +18,22 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- **`make flow-up-sealed` / `make flow-check-sealed`**, so the sealed path is exercisable
-  locally on purpose rather than only in CI. `GAMESERVER_SEALED=require ./stack.sh up|check`
-  is the same thing without make.
-- **`stack.sh check` derives `SMOKE_SEALED` from `GAMESERVER_SEALED`.** They are independent
-  variables that must agree — a `require` server and a smoke test that cannot seal is a
-  refused connection, which reports a broken stack when the stack is fine. An explicitly
-  set `SMOKE_SEALED` still wins, which is how you assert the refusal on purpose:
-  `GAMESERVER_SEALED=require SMOKE_SEALED=0` should FAIL.
+- **`make flow-up-sealed`**, so the sealed path is exercisable locally on purpose rather
+  than only in CI. `GAMESERVER_SEALED=require ./stack.sh up` is the same thing without make.
+- **`stack.sh check` refuses up front when asked to check a sealed stack**, and warns when
+  the stack is sealed and it is about to be refused. **The smoke test cannot check a sealed
+  stack and no environment variable fixes that**: it speaks JSON, hand-rolled over
+  `encoding/json` with no encoding switch, and a JSON client can never carry a sealed
+  frame — so a `require` server refuses it at the join with `encoding_cannot_seal`, before
+  any sealing code runs. Its JSON-ness is load-bearing rather than incidental: it makes the
+  smoke test an *independent* second implementation of the wire.
+  - An earlier draft of this change derived `SMOKE_SEALED=1` from
+    `GAMESERVER_SEALED=require` so the two halves could not drift. That would have turned a
+    check that cannot pass into a check that runs and always fails. It was measured failing
+    on a live stack before it shipped, which is the only reason it is not in this entry as
+    a feature.
+  - There is deliberately **no `flow-check-sealed`**. To drive a sealed stack, use the load
+    generator, which speaks protobuf: `loadtest -sealed -encoding proto`.
 
 ### Fixed
 - **`stack.sh up` rebuilds `modules/nakama.so` when it is older than any `nakama/` or `shared/`

@@ -306,10 +306,15 @@ services:
       #   GAMESERVER_SEALED=require ./stack.sh up
       #   GAMESERVER_SEALED=require ./stack.sh check
       #
-      # stack.sh derives the smoke test's SMOKE_SEALED from this value, so both
-      # halves move together; setting only one of them is a refusal, not a
-      # warning. Once the samples set RequireSealedSession, delete the override
-      # below and let this inherit.
+      # NOTE: `stack.sh check` cannot verify a sealed stack. The smoke test speaks
+      # JSON, and a JSON client can never seal, so a `require` server refuses it
+      # at the join (encoding_cannot_seal) — measured live, not inferred. Drive a
+      # sealed stack with the load generator instead:
+      #   cd ../loadtest && go run ./cmd/loadtest -sealed -encoding proto
+      #
+      # That is also why no ENVIRONMENT can be set to `require` yet: the deploy
+      # verifier is the same JSON smoke test, so requiring encryption currently
+      # deprecates the thing that gates every deploy.
       GAMESERVER_SEALED: ${GAMESERVER_SEALED:-off}
       GAMESERVER_MODE: map
       GAMESERVER_MAP_ID: ${GAMESERVER_MAP_ID:-map_01}
