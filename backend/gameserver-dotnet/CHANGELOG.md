@@ -33,6 +33,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the value a real server runs with comes from `Program.cs`, the only production
   constructor. A second production entry point that forgets to set it would get an
   unencrypted server with no error.
+- **`/status` gained `sealed_required` and `sealed_cipher`**, and the field table in
+  `docs/README.md` now leads with the trap: the `transport_*` fields describe the
+  TRANSPORT only, so on the default configuration (TCP, sealing required)
+  `transport_encrypted` reads `false` while every gameplay frame is encrypted and
+  authenticated above it. A dashboard or deploy check reading only those fields would
+  report an encrypting server as plaintext. Published while `none`/`false` for the same
+  reason the transport fields are: a missing field is the wrong answer to a security
+  question.
 - **ADR-22's status was stale** — it still read "Not implemented" after the implementation
   merged in #294. It now records what shipped, and that it is on by default.
 

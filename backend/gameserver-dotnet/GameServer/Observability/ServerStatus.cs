@@ -257,6 +257,38 @@ public sealed class ServerStatus
     public string TransportPostureSummary { get; set; } = "";
 
     /// <summary>
+    /// A sealed session is required on the gameplay hop (<c>GAMESERVER_SEALED=require</c>,
+    /// the default).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Read this before concluding anything from <see cref="TransportEncrypted"/>.</b>
+    /// The transport fields describe the transport only. On the default configuration —
+    /// TCP with sealing required — <c>transport_encrypted</c> is <c>false</c> while every
+    /// gameplay frame is in fact encrypted and authenticated a layer above it. A dashboard
+    /// or a deploy check reading only the transport fields would report an encrypting
+    /// server as plaintext, which is the wrong answer to a security question in the
+    /// direction that causes work rather than the direction that causes a breach.
+    /// </para>
+    /// <para>
+    /// It is also not a claim that nothing is readable. The join handshake before the
+    /// sealed session exists, and the whole gateway hop, are unaffected by this field.
+    /// </para>
+    /// </remarks>
+    [JsonPropertyName("sealed_required")]
+    public bool SealedRequired { get; set; }
+
+    /// <summary>
+    /// AEAD in force on the gameplay hop once a session is sealed, or <c>none</c> when
+    /// sealing is off. Published while <c>none</c> for the same reason
+    /// <see cref="TransportAuthenticated"/> is published while false: a missing field is
+    /// the wrong answer to a security question, and a never-incremented OpenTelemetry
+    /// instrument is ABSENT from <c>/metrics</c> rather than zero.
+    /// </summary>
+    [JsonPropertyName("sealed_cipher")]
+    public string SealedCipher { get; set; } = "none";
+
+    /// <summary>
     /// Configured per-connection downlink budget in bytes of snapshot payload
     /// (<c>GAMESERVER_MAX_SNAPSHOT_BYTES</c>); 0 means the budget is off and a snapshot is
     /// bounded only by the AOI radius. Published next to what it produced, because reading

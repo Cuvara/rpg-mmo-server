@@ -109,10 +109,13 @@ set. Flags are **space-separated** (`--addr :9000`).
 
 #### Realtime transport (`--transport`, `TRANSPORT_KEY`)
 
-> **The server tells you what it is actually doing, on every boot.** Encryption here is
-> off by default *twice* — the transport defaults to TCP, which has no packet-crypt layer
-> at all, and `TRANSPORT_KEY` defaults to empty — so "is this deployment encrypted" is not
-> answerable from one variable. The posture is logged at startup (at **Warning** whenever
+> **The server tells you what it is actually doing, on every boot.** "Is this deployment
+> encrypted" is not answerable from one variable, and — since `GAMESERVER_SEALED` began
+> defaulting to `require` — **not answerable from the `transport_*` fields at all**. Those
+> describe the transport only. On the default configuration the transport is TCP with no
+> packet-crypt layer, so `transport_encrypted` is `false`, while every gameplay frame is
+> encrypted and authenticated a layer above it by the sealed session. Read
+> `sealed_required` before concluding anything from `transport_encrypted`. The posture is logged at startup (at **Warning** whenever
 > traffic is in cleartext, Information when it is not) and published on `/status`:
 >
 > | field | meaning |
@@ -123,6 +126,8 @@ set. Flags are **space-separated** (`--addr :9000`).
 > | `transport_authenticated` | tampering is detectable — **`false` on every configuration this server supports today** |
 > | `transport_cipher` | `aes-256-cfb`, or `none` |
 > | `transport_posture` | one line stating what is happening and what is not |
+> | `sealed_required` | a sealed session is required on the gameplay hop (`GAMESERVER_SEALED=require`, the default). **This, not `transport_encrypted`, is what says gameplay frames are encrypted** |
+> | `sealed_cipher` | `chacha20-poly1305`, or `none` when sealing is off |
 >
 > Mirrored as `gameserver_transport_encrypted` and `gameserver_transport_authenticated`,
 > which are **gauges** rather than counters precisely so they are present when they read

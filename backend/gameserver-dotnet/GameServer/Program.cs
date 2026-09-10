@@ -784,6 +784,10 @@ metricsEndpoint?.SetStatusProvider(() =>
         TransportAuthenticated = transportPosture.Authenticated,
         TransportCipher = transportPosture.Cipher,
         TransportPostureSummary = transportPosture.Summary,
+        SealedRequired = sealedRequirement == GameServer.Net.Sealed.SealedRequirement.Required,
+        SealedCipher = sealedRequirement == GameServer.Net.Sealed.SealedRequirement.Required
+            ? "chacha20-poly1305"
+            : "none",
         FrameOrderObserved = server.FrameOrder.FramesObserved,
         FrameOrderInversions = server.FrameOrder.Inversions,
         FrameOrderDuplicates = server.FrameOrder.Duplicates,
