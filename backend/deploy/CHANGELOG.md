@@ -5,6 +5,30 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY` pinned explicitly at every gateway deploy path**
+  (ADR-23), all of them OFF: `docker-compose.yml` (gateway service), `k8s/app/40-gateway.yaml`
+  (literal empty values, not omitted — an absent variable is indistinguishable from an
+  unconsidered one, and this is a security setting), `.github/workflows/cd.yml` (written on
+  both branches so "off" is a fact in the generated `.env` rather than an absence),
+  `scripts/deploy-local.sh`, and `.env.example` with a worked `openssl` line.
+- **CD refuses a half-configured pair.** Setting exactly one of the two fails the deploy, the
+  same shape as the `GAMESERVER_SEALED` normalisation beside it and for the same reason: a
+  silent fallback is how the two halves disagreed in the first place, and "TLS quietly disabled
+  by a typo" is the wrong direction to fail in. The block was extracted and executed across
+  eight inputs — both unset, both set, each half alone, whitespace-only, a trailing space on a
+  real path, and the names absent from the environment entirely — rather than read.
+
+### Fixed
+
+- **`stack.sh`: `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY` added to `STACK_OVERRIDABLE`.** Not a
+  precaution — adding them to `.env.example` would otherwise have recreated the documented
+  silent no-op at `stack.sh:130`: the file mentions the names, `set -a; . .env` assigns them,
+  and the file's empty value would clobber an operator's `GATEWAY_TLS_CERT=... ./stack.sh up`,
+  bringing the stack up plaintext with nothing saying so. Verified by running the
+  save/source/restore block against a `.env` that mentions both names.
+
 ### Fixed
 - **`GAMESERVER_SEALED=REQUIRE` produced a sealed server and a JSON verifier.** The game
   server parses the value with `.Trim().ToLowerInvariant()`; the CD generator compared the

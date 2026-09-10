@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -46,6 +48,11 @@ type Gateway struct {
 
 	// transportKey is the pre-shared KCP encryption key ("" = plaintext).
 	transportKey string
+
+	// tlsConfig makes Run wrap the listener so this process terminates TLS
+	// itself (ADR-23). Nil is plaintext and is the default. Immutable after
+	// New, so Run reads it lock-free.
+	tlsConfig *tls.Config
 
 	// kickStream publishes duplicate-login supersede events for game servers
 	// to consume (events:kick, ADR-5 Streams). Nil only when the option was
@@ -159,6 +166,51 @@ func WithJoinTokenSecret(spec string) Option {
 // Ignored for TCP. Empty means plaintext (and Listen logs a warning).
 func WithTransportKey(key string) Option {
 	return func(g *Gateway) { g.transportKey = key }
+}
+
+// WithTLS makes the gateway terminate TLS on its own listener (ADR-23).
+//
+// A nil config means plaintext, which is the default and the shipped state.
+// There is deliberately no "prefer TLS" and no sniffing: a listener with a
+// certificate serves TLS only and closes a plaintext client. ADR-22 decision 3
+// applies unchanged — a protocol that can be talked down to cleartext will be,
+// and the only reliable defence is having nothing to downgrade to.
+//
+// TLS is meaningful only over TCP; over KCP it is ignored and the boot posture
+// says so. See LoadTLSConfig for how the certificate is read.
+func WithTLS(cfg *tls.Config) Option {
+	return func(g *Gateway) { g.tlsConfig = cfg }
+}
+
+// LoadTLSConfig builds a server TLS config from a certificate and key path.
+//
+// Both empty means "no TLS" and returns (nil, nil) — the default. Exactly one
+// of them set is a configuration ERROR rather than a silent fallback to
+// plaintext: an operator who set one and typo'd the other meant to have TLS,
+// and starting anyway would hand them the plaintext listener they were trying
+// to eliminate while their config file says otherwise.
+//
+// TLS 1.2 is the floor. It is not 1.3 because the client half is unwritten and
+// pinning 1.3 before knowing what Unity's TLS stack negotiates on Android would
+// be choosing a constraint blind; raise it once the client is measured.
+func LoadTLSConfig(certPath, keyPath string) (*tls.Config, error) {
+	certPath, keyPath = strings.TrimSpace(certPath), strings.TrimSpace(keyPath)
+	switch {
+	case certPath == "" && keyPath == "":
+		return nil, nil
+	case certPath == "":
+		return nil, fmt.Errorf("gateway tls: key is set but certificate is not; set both or neither")
+	case keyPath == "":
+		return nil, fmt.Errorf("gateway tls: certificate is set but key is not; set both or neither")
+	}
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("gateway tls: load keypair (%s, %s): %w", certPath, keyPath, err)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}, nil
 }
 
 // WithConnRateLimit bounds accepted connections per source IP: `burst`
@@ -375,6 +427,28 @@ func (g *Gateway) Run(addr string) error {
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
+
+	// TLS termination in THIS process (ADR-23), not at an edge. Wrapping the
+	// listener is the whole change: TLS hands Accept a net.Conn like any other,
+	// so the 4-byte-length framing, the codec and every handler below are
+	// untouched.
+	//
+	// TLS needs a reliable ordered byte stream, which KCP is not, so a cert on
+	// a KCP listener is refused at startup rather than ignored. Ignoring it
+	// would produce a gateway that was configured for TLS, is serving
+	// plaintext, and says "kcp" — the believed-protected state ADR-21 exists to
+	// prevent.
+	tlsActive := false
+	if g.tlsConfig != nil {
+		if transport.Normalize(g.transportKind) != transport.KindTCP {
+			ln.Close()
+			return fmt.Errorf("listen: TLS is configured but the transport is %q; TLS requires a reliable ordered stream, so use --transport tcp or unset the certificate",
+				transport.Normalize(g.transportKind))
+		}
+		ln = tls.NewListener(ln, g.tlsConfig)
+		tlsActive = true
+	}
+
 	g.mu.Lock()
 	g.listener = ln
 	g.mu.Unlock()
@@ -388,7 +462,7 @@ func (g *Gateway) Run(addr string) error {
 	// the wire in cleartext — TCP has no packet-crypt layer and the key is
 	// ignored. A security field that is confidently false is worse than one that
 	// is missing, because nobody goes looking behind it.
-	posture := transport.Posture(g.transportKind, g.transportKey, addr)
+	posture := transport.PostureTLS(g.transportKind, g.transportKey, addr, tlsActive)
 	if g.metrics != nil {
 		g.metrics.SetTransportPosture(posture)
 	}
@@ -396,6 +470,7 @@ func (g *Gateway) Run(addr string) error {
 	g.logger.Info("gateway listening",
 		"addr", ln.Addr().String(),
 		"transport", posture.Transport,
+		"tls", posture.TLS,
 		"encrypted", posture.Encrypted,
 		"authenticated", posture.Authenticated,
 		"cipher", posture.Cipher,
