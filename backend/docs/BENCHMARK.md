@@ -2361,11 +2361,47 @@ the frame-order probe stayed at zero. The two layers behave differently on purpo
   `LastInputTick` intact. A client that restarts its own input tick has *all* of its input
   refused until it climbs past the pre-disconnect value.
 
-> ⚠️ **That second bullet is a live behaviour, not a hypothetical, and it is not a crypto
-> issue.** It is measured above: 596/596 refused. Whether a real player is affected depends
-> on whether the shipped client restarts its input tick on reconnect — `SendInput(long tick,
-> …)` takes the tick from its caller, so that is an integration question this measurement
-> did not settle. **It is worth settling.**
+> ⚠️ **That second bullet was a live bug, and it is fixed in this change.** It is not a
+> crypto issue; the measurement merely walked into it.
+
+#### The reconnect bug this measurement found, and its fix
+
+The shipped client **is** affected, on one path. `NetworkBootstrap._inputTick` is only ever
+incremented and never reset, so an in-process reconnect (the `ReconnectPolicy` path, e.g. a
+dropped connection) keeps climbing and is fine. But a **process restart or scene reload**
+builds a new bootstrap with `_inputTick = 0` — i.e. exactly the "crashed and came straight
+back" case — and nothing on the server cleared the entity's cursor on reattach.
+
+Cost, measured: a 5s session reached tick 88, and the reconnecting session had its **first
+88 frames refused** before anything moved. **The freeze lasts as long as the previous
+session did**, so ten minutes of play meant ten minutes of a player who could not move —
+capped only by the 30s hold, since after that the entity is gone and the cursor with it.
+
+**Fix:** clear the whole `InputCursor` when reattaching an entity to a new connection. Every
+field in it is per-session client bookkeeping — the tick, the held direction, and
+`LastMoveTick`, whose staleness would otherwise size the first step of the new session by
+how long the player was away. The rule is the same one this ADR settles for the crypto
+counter: **the counter's scope must follow the session, not the entity.**
+
+It opens no replay hole. The monotonic check exists to reject stale input *within* a
+session; a new session needs a fresh single-use join token, input stays monotonic inside it,
+and replaying one's own old movement gains nothing because the server integrates position
+from its own speed stat rather than trusting the client.
+
+Same harness, before and after:
+
+| | `stale_tick` before | after |
+|---|---:|---:|
+| 1 player, 5s session then reconnect | 88 of 88 | **0** |
+| 4 players, 8s session then reconnect | 596 of 596 | **0** |
+
+> **One residual, recorded rather than hidden.** Inputs from the old session that are still
+> queued when the socket closes drain *after* the reattach reset and re-advance the cursor,
+> so a very fast reconnect can still refuse a short burst — 2 frames in a test that
+> disconnected mid-send. It is bounded by one drain window, self-corrects within a tick or
+> two, and is a different mechanism (queued-input lifetime, not cursor scope). Fixing it
+> means purging a user's pending inputs on reattach, which touches the ingest hot path;
+> that is a separate decision and has not been made here.
 
 ### Conclusion for ADR-22 — quotable
 

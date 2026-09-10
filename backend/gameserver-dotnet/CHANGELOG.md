@@ -39,6 +39,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   **No code changes.** Also records that this must not ship until the gateway hop is
   confidential, since until then the model's guarantees are bounded by a plaintext hop.
 
+### Fixed
+- **A reconnecting client no longer has its input refused because of the previous session's
+  tick counter.** The entity survives the hold window carrying
+  `InputCursor.LastInputTick`, and nothing cleared it on reattach — so a client that
+  restarts its own input tick had EVERY input rejected as `stale_tick` until it climbed
+  back past the pre-disconnect value. **The freeze lasted as long as the previous session
+  did**: ten minutes of play meant ten minutes of a player who could not move.
+- **The shipped client is affected on one path.** `NetworkBootstrap._inputTick` is only
+  ever incremented, so an in-process reconnect keeps climbing and was always fine; a
+  **process restart or scene reload** builds a new bootstrap at tick 0 — the "crashed and
+  came straight back" case.
+- Fix: clear the whole `InputCursor` on reattach. Every field in it is per-session client
+  bookkeeping, including `LastMoveTick`, whose staleness would otherwise size the first
+  step of the new session by how long the player was away. Same rule ADR-22 settles for
+  the crypto replay counter: **the counter's scope follows the session, not the entity.**
+  Measured with the harness that found it — `stale_tick` 88→0 and 596→0.
+  One residual is recorded in `docs/BENCHMARK.md` Part XII rather than hidden: inputs still
+  queued when the old socket closes drain after the reset and can refuse a short burst.
+
 ### Added
 - **`FrameOrderProbe` and the `frame_order_*` fields on `/status`** — the measurement
   answering ADR-22's open question on whether the nonce-as-sequence replay rule needs a
