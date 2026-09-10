@@ -16,7 +16,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   3. the base was changed *after* opening — retargeting fires `pull_request: edited`, which
      is not in the default activity types, so **fixing cause 2 does not start CI**;
   4. a `paths:` filter excluded the PR — the original bug's shape.
-  Each reads as "nothing is wrong". The section carries a diagnostic table, the two rules
+  Each reads as "nothing is wrong". The section also warns that `CONFLICTING` is a
+  **`mergeable`** value and not a `mergeStateStatus` one — `MergeStateStatus` has no such
+  value, so checking the wrong field never matches and the reader concludes cause 1 does not
+  apply. A conflicted PR reads `mergeStateStatus: DIRTY`; `BLOCKED` is what a *healthy* PR
+  shows while checks are pending. The first draft of this very section named the wrong
+  field, which is the failure the section is about. The section carries a diagnostic table, the two rules
   that follow from it (never read an empty check list as green; verify the fix *started a
   run* rather than that the cause is gone), and the `gh workflow run --ref` recovery.
 - Also recorded there: `gh pr edit` is a silent no-op on this repo (deprecated GraphQL

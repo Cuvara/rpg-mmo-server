@@ -774,10 +774,27 @@ PR, and two of them *while fixing another one of them*.
 
 | # | Cause | Tell | Fix |
 |---|---|---|---|
-| 1 | **The PR is `CONFLICTING`.** GitHub cannot compute a merge commit, so it runs nothing | `gh pr view <n> --json mergeStateStatus` → `CONFLICTING` (not `BLOCKED`) | rebase; CI starts on push |
+| 1 | **The PR has conflicts.** GitHub cannot compute a merge commit, so it runs nothing | `gh pr view <n> --json mergeable,mergeStateStatus` → `mergeable: CONFLICTING`, `mergeStateStatus: DIRTY` | rebase; CI starts on push |
 | 2 | **The base is not a listed branch.** A *stacked* PR — base is another feature branch — matches no `pull_request: branches:` entry | `gh pr view <n> --json baseRefName` is not one of `main`/`master`/`develop`/`staging` | merge the parent, then retarget — **and see 3** |
 | 3 | **The base was changed after opening.** Retargeting fires `pull_request: edited`, which is not in the default activity types, so **fixing cause 2 does not start CI** | base is correct, checks still empty, no new run appears | `gh workflow run <workflow> --ref <branch>` on **both** workflows, or push any commit |
 | 4 | **A `paths:` filter excluded the PR.** The original bug's shape | the workflow has a `paths:` filter on `pull_request` | none here by design — see the bullet above |
+
+**`CONFLICTING` and `DIRTY` are two different fields, and the mistake is easy.**
+`CONFLICTING` is a **`mergeable`** value; `mergeStateStatus` has no such value at
+all. Checking `mergeStateStatus` for `CONFLICTING` therefore never matches, and
+the reader concludes cause 1 does not apply to them:
+
+```
+$ gh api graphql -f query='{ __type(name:"MergeStateStatus"){enumValues{name}} }'
+DIRTY UNKNOWN BLOCKED BEHIND UNSTABLE HAS_HOOKS CLEAN
+
+$ gh api graphql -f query='{ __type(name:"MergeableState"){enumValues{name}} }'
+MERGEABLE CONFLICTING UNKNOWN
+```
+
+And do **not** read `BLOCKED` as a problem: it is what a *healthy* PR shows while
+its checks are pending or a review is outstanding. A PR blocked by cause 1 reads
+`DIRTY`.
 
 Two rules follow, and they are the point of this table:
 
