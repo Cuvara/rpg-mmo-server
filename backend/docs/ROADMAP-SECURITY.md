@@ -340,9 +340,13 @@ inventing a cipher.
      chore** — its JSON-ness is much of its value, because it makes it an independent second
      implementation of the wire rather than a consumer of the server's generated types.
 
-     Separately, there is also no `GAMESERVER_SEALED` or `SMOKE_SEALED` plumbing anywhere in
-     `.github/` or `backend/deploy/` (verified against the deployed `deploy/.env` as well as
-     the repo), so the config work is outstanding too — it is simply not what blocks.
+     Every deploy path now pins `off` explicitly — compose and its override, the two Agones
+     fleet manifests (**dev runs `DEPLOY_MODE=k8s`, so the compose pin covers none of it**),
+     host mode, and the CD `.env` generator, which is the one reviewable place an
+     environment can opt in. So the flip changes the default only for servers started
+     *outside* deployment config: the integration suite, a developer's `dotnet run`,
+     `kcpprobe`. That is exactly the population the new tests cover, and none of the
+     deployed ones.
 
      The local compose file pins `off` for its own reason: the Unity sample scenes that dial
      a live backend are the netcode package's acceptance path, and they gained a

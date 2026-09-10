@@ -7,6 +7,29 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Every deploy path pins `GAMESERVER_SEALED=off`, not just compose.** The game server
+  binary now defaults to `require`, so a config site that says nothing takes encryption by
+  default — and **no deploy path can survive that yet**, because `verify.sh` layer 4 and
+  `post-deploy-smoke` both run the JSON smoketest against what was just deployed and a JSON
+  client can never seal. Pinning one file would have been worse than pinning none: it reads
+  as covered.
+  - `backend/deploy/docker-compose.override.yml` — the second map server. Unpinned it would
+    have produced the worst version of the mistake: `map_01` unsealed and `map_02` sealed on
+    the same stack, so a client transferring between maps works on one and is refused on the
+    other.
+  - `backend/deploy/agones/fleet-map-dotnet-dev.yaml` and
+    `backend/deploy/k8s/app/50-fleet-map.yaml` — **the k8s path, which is what dev actually
+    runs** (`DEPLOY_MODE=k8s` in the live `deploy/.env`). Agones-allocated game servers do
+    not read the compose file at all, so the compose pin covered none of dev.
+  - `scripts/deploy-local.sh` — host mode, exported so the spawned server inherits it.
+  - `.github/workflows/cd.yml` — writes `GAMESERVER_SEALED=${GAMESERVER_SEALED:-off}` into
+    the generated `deploy/.env`, so an environment has **one reviewable place to opt in**,
+    the same shape and reason as `ALLOCATOR=${ALLOCATOR:-none}`. `SMOKE_SEALED` is
+    deliberately **not** derived alongside it, with the reason at the line: no value of it
+    makes verification pass against a sealed server, so deriving one converts a check that
+    cannot pass into a check that always fails. Setting `GAMESERVER_SEALED=require` on an
+    environment today therefore produces a red deploy — correctly, and by design.
+
 - **`docker-compose.yml` pins `GAMESERVER_SEALED=off` explicitly**, now that a stock game
   server defaults to `require`. Pinned deliberately, with the reason at the line, so the
   next reader knows it is a decision and not an oversight: six Unity sample scenes

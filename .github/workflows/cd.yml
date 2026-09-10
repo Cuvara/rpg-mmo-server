@@ -797,6 +797,24 @@ jobs:
             echo "GAMESERVER_ADDR=${GAMESERVER_ADDR}"
             echo "GAMESERVER_MAP_ID=${GAMESERVER_MAP_ID}"
             echo "GAMESERVER_RUNTIME=dotnet"
+            # Sealed transport on the gameplay hop. The game server binary defaults
+            # to `require`; every deploy path pins it OFF, and this is the one place
+            # an environment can opt in, by setting GAMESERVER_SEALED as an
+            # Environment variable. Same shape and same reason as ALLOCATOR below.
+            #
+            # SMOKE_SEALED IS DELIBERATELY NOT DERIVED HERE, and must not be added
+            # as an "obvious" companion line. The smoketest speaks JSON, a JSON
+            # client can never carry a sealed frame, and a `require` server refuses
+            # it at the join with `encoding_cannot_seal` -- measured on a live stack.
+            # There is no value of SMOKE_SEALED that makes post-deploy-smoke or
+            # verify.sh layer 4 pass against a sealed server, so deriving one would
+            # convert a check that cannot pass into a check that always fails.
+            #
+            # Which means: setting GAMESERVER_SEALED=require on an environment TODAY
+            # produces a red deploy, by design and correctly. It becomes usable when
+            # the smoketest speaks protobuf. See backend/docs/ROADMAP-SECURITY.md
+            # step 5.
+            echo "GAMESERVER_SEALED=${GAMESERVER_SEALED:-off}"
             echo "SIM_CRITICAL_HZ=${SIM_CRITICAL_HZ}"
             echo "SIM_WORLD_HZ=${SIM_WORLD_HZ}"
             echo "SIM_BACKGROUND_HZ=${SIM_BACKGROUND_HZ}"

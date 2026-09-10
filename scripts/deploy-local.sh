@@ -66,12 +66,24 @@ load_env
 GATEWAY_ADDR="${GATEWAY_ADDR:-:8000}"
 GAMESERVER_ADDR="${GAMESERVER_ADDR:-:9000}"
 GAMESERVER_MAP_ID="${GAMESERVER_MAP_ID:-map_01}"
+# Sealed transport on the gameplay hop. PINNED OFF, deliberately: the game server
+# binary now defaults to `require`, so a deploy path that says nothing takes
+# encryption by default -- and no deploy path can survive that yet. `verify.sh`
+# layer 4 and post-deploy-smoke both run the Go smoketest against what was just
+# deployed, the smoketest speaks JSON, and a JSON client can NEVER seal, so a
+# `require` server refuses it at the join with `encoding_cannot_seal`. Measured on
+# a live stack. No value of SMOKE_SEALED makes that pass.
+#
+# Same shape as the other deploy config (ALLOCATOR=${ALLOCATOR:-none} in cd.yml):
+# off unless the environment opts in, so nothing takes down an environment that
+# never asked for it. Flip when the smoketest speaks protobuf.
+GAMESERVER_SEALED="${GAMESERVER_SEALED:-off}"
 # Exported so the gameserver process inherits the same values whether they came
 # from deploy/.env or from these defaults. REDIS_* and GAMESERVER_PUBLIC_ADDR go
 # with them: the server self-registers, so it needs the registry address and the
 # address to advertise. In host mode there is no port mapping, so falling back to
 # GAMESERVER_ADDR is correct.
-export GAMESERVER_ADDR GAMESERVER_MAP_ID
+export GAMESERVER_ADDR GAMESERVER_MAP_ID GAMESERVER_SEALED
 export REDIS_ADDR REDIS_PASSWORD GAMESERVER_PUBLIC_ADDR
 # Both binaries refuse to start without JOIN_TOKEN_SECRET, and it must hold the
 # same value on the gateway and every game server. It is deliberately separate
