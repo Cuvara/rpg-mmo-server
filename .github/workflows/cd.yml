@@ -802,30 +802,39 @@ jobs:
             # an environment can opt in, by setting GAMESERVER_SEALED as an
             # Environment variable. Same shape and same reason as ALLOCATOR below.
             #
-            # SMOKE_SEALED IS STILL NOT DERIVED HERE, and the reason has CHANGED.
+            # THE TWO SMOKE_ VARIABLES BELOW MUST MOVE WITH IT, AND WITH EACH OTHER.
             #
-            # It used to be that it could not work: the smoketest sent JSON, and a
-            # JSON client can never carry a sealed frame, so a `require` server
-            # refused it at the join with `encoding_cannot_seal` -- measured on a
-            # live stack. That is fixed; the smoketest has an -encoding flag and a
-            # sealed protobuf run passes against a `require` server.
+            # post-deploy-smoke sources this file and runs the Go smoketest against
+            # the stack that was just deployed, so the verifier's configuration has
+            # to match the server's or the deploy fails on a healthy stack. Both
+            # are needed, not one: a sealed run is necessarily a protobuf run,
+            # because the JSON codec has no sealed frame and a `require` server
+            # refuses a JSON client at the join with `encoding_cannot_seal`.
+            # Deriving SMOKE_SEALED alone reproduces that failure exactly, which is
+            # why the binary itself refuses `-sealed` without `-encoding proto`
+            # rather than trusting this file to get the pair right.
             #
-            # What remains is that TWO variables must be derived together --
-            # SMOKE_SEALED=1 AND SMOKE_ENCODING=proto -- because a sealed run must
-            # be a protobuf run. Deriving only the first reproduces the original
-            # failure exactly. `backend/deploy/stack.sh` does derive both, and this
-            # generator should follow when an environment is first set to
-            # `require`; that change belongs with whoever does it, so the values
-            # are chosen and verified together rather than half-landed here.
-            # There is no value of SMOKE_SEALED that makes post-deploy-smoke or
-            # verify.sh layer 4 pass against a sealed server, so deriving one would
-            # convert a check that cannot pass into a check that always fails.
+            # SMOKE_ENCODING is set on BOTH branches rather than only the sealed
+            # one. It is already the default, so writing `json` changes nothing
+            # today -- but it makes the pairing visible at the line, and it means a
+            # future reader editing one value sees the other beside it instead of
+            # having to know it exists.
             #
-            # Which means: setting GAMESERVER_SEALED=require on an environment today
-            # still produces a red deploy -- not because the check cannot pass any
-            # more, but because these two lines are missing. See
-            # backend/docs/ROADMAP-SECURITY.md step 5.
+            # This does NOT turn sealing on anywhere. It makes
+            # GAMESERVER_SEALED=require a working switch instead of a red deploy;
+            # setting it on an environment is a separate, deliberate act, and it
+            # carries a client rollout with it (a Unity player must set
+            # NetworkSettings.RequireSealedSession, which ships in a built player
+            # and not in a deployment variable). See backend/docs/ROADMAP-SECURITY.md
+            # step 5.
             echo "GAMESERVER_SEALED=${GAMESERVER_SEALED:-off}"
+            if [ "${GAMESERVER_SEALED:-off}" = "require" ]; then
+              echo "SMOKE_SEALED=1"
+              echo "SMOKE_ENCODING=proto"
+            else
+              echo "SMOKE_SEALED=0"
+              echo "SMOKE_ENCODING=json"
+            fi
             echo "SIM_CRITICAL_HZ=${SIM_CRITICAL_HZ}"
             echo "SIM_WORLD_HZ=${SIM_WORLD_HZ}"
             echo "SIM_BACKGROUND_HZ=${SIM_BACKGROUND_HZ}"

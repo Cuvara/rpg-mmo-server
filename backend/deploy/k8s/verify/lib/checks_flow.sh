@@ -56,21 +56,43 @@ check_flow_smoke() {
   fi
   [ -n "${VERIFY_HOLD_TTL:-}" ] && args+=(--hold-ttl "$VERIFY_HOLD_TTL")
 
+  # Sealed gameplay hop. This layer does NOT read deploy/.env -- that file
+  # describes the compose stack and k8s mode did not deploy it -- so the
+  # SMOKE_SEALED/SMOKE_ENCODING derivation in cd.yml's generator does not reach
+  # here. The target file is this path's equivalent, and VERIFY_SEALED is its
+  # one input.
+  #
+  # Both flags, never one. A sealed run is necessarily a protobuf run: the JSON
+  # codec has no sealed frame, so a `require` server refuses a JSON client at
+  # the join with `encoding_cannot_seal`. The binary refuses `-sealed` without
+  # `-encoding proto` for exactly this reason, so getting it wrong here is a
+  # startup error rather than a confusing mid-run failure.
+  #
+  # Unset means unsealed, which is what every environment is today. This must
+  # match the fleet manifests' GAMESERVER_SEALED for the environment being
+  # verified, and a mismatch is a REAL failure: the server refusing a client it
+  # is configured to refuse is the check working.
+  local sealed_mode="plaintext gameplay hop"
+  if [ "${VERIFY_SEALED:-0}" != "0" ]; then
+    args+=(--sealed --encoding proto)
+    sealed_mode="SEALED gameplay hop (chacha20-poly1305 over protobuf)"
+  fi
+
   local out rc
   out=$(JWT_SECRET="$VERIFY_JWT_SECRET" "$bin" "${args[@]}" 2>&1); rc=$?
   echo "$out" | sed 's/^/      | /'
   if [ $rc -ne 0 ] || [[ "$out" != *"SMOKE=PASS"* ]]; then
     fail "the end-to-end flow did not complete" \
-      "SMOKE=PASS and exit 0" "exit=$rc; last line: $(echo "$out" | tail -1)" \
+      "SMOKE=PASS and exit 0 ($sealed_mode)" "exit=$rc; last line: $(echo "$out" | tail -1)" \
       "the transcript above -- the first failing step names the hop"
     return
   fi
   if [ -z "${VERIFY_GAME_DB_URL:-}" ]; then
-    warn "flow passed but WITHOUT persistence: $db_mode. Movement and snapshots are proven; the player_states write and the reload after the hold are NOT."
+    warn "flow passed but WITHOUT persistence: $db_mode ($sealed_mode). Movement and snapshots are proven; the player_states write and the reload after the hold are NOT."
     return
   fi
   VERIFY_SMOKE_OUTPUT="$out"
-  pass "SMOKE=PASS with --strict-addr and $db_mode"
+  pass "SMOKE=PASS with --strict-addr, $db_mode, $sealed_mode"
 }
 
 # Attribute the GATEWAY, not just the registry. registry.stack_identity proves
