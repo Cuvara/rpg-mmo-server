@@ -5,6 +5,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`TestNoJSONDefaultingEnvelopeConstructor` — a source scan, so there is no sixth site.**
+  `send-budget`'s design, taken verbatim from #303. It reads the package's non-test sources
+  and fails naming file and line if any `messages.NewEnvelope(` survives.
+
+  **Deliberately not behavioural**, and the reasoning is the useful part: the defect it
+  guards was not wrong behaviour, it was an **unvisited line**. A behavioural test would
+  have to reach the reload step, against a sealed server, with a live database, to notice —
+  which is precisely why two reviewers did not. A test that can only catch the bug under
+  the conditions that hid it is not a guard.
+
+  It also fails when it scans **zero** files, because a guard that checks nothing passes
+  for the wrong reason — the same class of defect it exists to catch.
+
 ### Fixed
 - **A fifth `NewEnvelope` call site that `-encoding` did not reach.** `smoke/db.go`'s
   disconnect at the end of the reload check was still hardcoded to JSON, so a
