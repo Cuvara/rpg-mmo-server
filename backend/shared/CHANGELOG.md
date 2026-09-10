@@ -7,6 +7,39 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`shared/sessionkey`: per-session keys, derived rather than distributed.** Transport
+  encryption used ONE pre-shared key — the same value in every client binary and every
+  server — so extracting it from a single client decrypted every player's traffic for ever,
+  and rotating it meant redeploying everything at once. The key is now per join:
+  `HKDF-SHA256(ikm = JOIN_TOKEN_SECRET, salt = join token jti, info = "cuvara/session-key/v1", L = 32)`.
+  - **The game server is never sent the key.** It derives the same value from the secret it
+    holds and the `jti` in the token it already verifies, so nothing carrying key material
+    crosses the gameplay hop, and nothing is stored. Only the client is sent one, because
+    only the client cannot derive it.
+  - `sessionkey.Key` redacts itself through `fmt`, `slog`, `%#v` and `encoding/json`. The
+    realistic leak is not a deliberate log call but a struct handed to a formatter by code
+    that did not know it held a secret, and a test asserts every one of those paths.
+  - A golden vector is shared with the C# implementation. Two implementations that each
+    round-trip against themselves can still disagree with each other, and a disagreement
+    here produces no error anywhere — the client encrypts with one key, the server decrypts
+    with another, and the session simply never forms.
+  - `Info` and `Size` are pinned by a test: they are wire contract, and changing either
+    silently breaks every peer.
+- **`EnterWorldResponse.SessionKey`** (`wire.proto` field 5, Protobuf only). Tagged
+  `json:"-"` **by design**: the legacy JSON encoding cannot carry a key, because exempting
+  the field from redaction would put the material back on the path the redaction exists to
+  close — and JSON is the encoding a human is most likely to paste into an issue. The
+  consequence is stateable: a JSON client cannot be encrypted.
+
+> **Limitation recorded with the feature, not beneath it.** The client cannot derive the
+> key, so it must travel gateway → client, and the gateway hop is the *same transport
+> stack* as the gameplay hop — plaintext TCP by default. In the default configuration an
+> eavesdropper on the gateway hop reads the key and can decrypt that session. This turns
+> "compromise one binary, decrypt everyone for ever" into "eavesdrop the gateway hop,
+> decrypt one session": strictly better, and not end-to-end confidentiality.
+
+### Added
+
 - **`transport.Posture(kind, key, addr)`** — the confidentiality posture of a listener as
   one computed fact: transport, whether a key is configured, whether packets are actually
   ciphertext, whether they are authenticated, the cipher in force, whether the bind is

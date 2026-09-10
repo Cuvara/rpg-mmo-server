@@ -5,6 +5,22 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **The gateway mints a per-session key and returns it in `EnterWorldResponse`.** Derived
+  from the join-token **signing** key and the freshly minted token's `jti` (see
+  `shared/sessionkey`), so during a secret rotation the gateway and the game server move
+  together — deriving from an older ring entry would be a downgrade surface for no benefit,
+  since the `jti` is fresh per join and there is never an old session key worth honouring.
+  - The key is returned to the client and **not** forwarded to the game server, which
+    derives the same value itself. Nothing carrying key material crosses the gameplay hop.
+  - Verified against real containers: a live handshake through the gateway returned a
+    32-byte key equal to the key derived independently from the token's `jti`, and the key
+    material appeared **zero** times in either container's logs, `/status` or `/metrics`.
+    3/3 players then completed a full gateway → game server join.
+  - See `docs/API.md` for the field, the derivation, and the residual exposure — the key
+    travels in the clear over a gateway hop that is plaintext TCP by default.
+
 ### Fixed
 
 - **The gateway reported `encrypted: true` while sending cleartext.** The startup log

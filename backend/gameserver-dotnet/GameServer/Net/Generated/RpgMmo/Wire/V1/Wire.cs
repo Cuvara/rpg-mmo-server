@@ -29,47 +29,47 @@ namespace RpgMmo.Wire.V1 {
             "dG9rZW4YASABKAkSGAoQcHJvdG9jb2xfdmVyc2lvbhgCIAEoDSJUCgxBdXRo",
             "UmVzcG9uc2USCgoCb2sYASABKAgSDwoHdXNlcl9pZBgCIAEoCRINCgVlcnJv",
             "chgDIAEoCRIYChBwcm90b2NvbF92ZXJzaW9uGAQgASgNIiMKEUVudGVyV29y",
-            "bGRSZXF1ZXN0Eg4KBm1hcF9pZBgBIAEoCSJfChJFbnRlcldvcmxkUmVzcG9u",
+            "bGRSZXF1ZXN0Eg4KBm1hcF9pZBgBIAEoCSJ0ChJFbnRlcldvcmxkUmVzcG9u",
             "c2USEwoLc2VydmVyX2FkZHIYASABKAkSEgoKam9pbl90b2tlbhgCIAEoCRIR",
-            "Cgl0cmFuc3BvcnQYAyABKAkSDQoFZXJyb3IYBCABKAkiOwoQSm9pblRva2Vu",
-            "UmVxdWVzdBINCgV0b2tlbhgBIAEoCRIYChBwcm90b2NvbF92ZXJzaW9uGAIg",
-            "ASgNImwKEUpvaW5Ub2tlblJlc3BvbnNlEgoKAm9rGAEgASgIEg8KB3VzZXJf",
-            "aWQYAiABKAkSDQoFZXJyb3IYAyABKAkSEQoJdGlja19yYXRlGAQgASgNEhgK",
-            "EHByb3RvY29sX3ZlcnNpb24YBSABKA0iVgoMSW5wdXRNZXNzYWdlEgwKBHRp",
-            "Y2sYASABKAQSDgoGbW92ZV94GAIgASgCEg4KBm1vdmVfeRgDIAEoAhIYChBh",
-            "dHRhY2tfdGFyZ2V0X2lkGAQgASgJIu0BCg5FbnRpdHlTbmFwc2hvdBIKCgJp",
-            "ZBgBIAEoCRIRCgl0eXBlX25hbWUYAiABKAkSCQoBeBgDIAEoAhIJCgF5GAQg",
-            "ASgCEgoKAmhwGAUgASgFEg4KBm1heF9ocBgGIAEoBRIoCgR0eXBlGAcgASgO",
-            "MhoucnBnbW1vLndpcmUudjEuRW50aXR5VHlwZRIOCgZoYW5kbGUYCCABKA0S",
-            "DQoFc3BlZWQYCSABKAISEwoLZmFjaW5nX2JyYWQYCiABKA0SLAoGYWN0aW9u",
-            "GAsgASgOMhwucnBnbW1vLndpcmUudjEuRW50aXR5QWN0aW9uIoIBCg9TbmFw",
-            "c2hvdE1lc3NhZ2USDAoEdGljaxgBIAEoBBIQCghhY2tfdGljaxgCIAEoBBIM",
-            "CgRmdWxsGAMgASgIEjAKCGVudGl0aWVzGAQgAygLMh4ucnBnbW1vLndpcmUu",
-            "djEuRW50aXR5U25hcHNob3QSDwoHcmVtb3ZlZBgFIAMoCSIjChFEaXNjb25u",
-            "ZWN0TWVzc2FnZRIOCgZyZWFzb24YASABKAkiDwoNUmVzeW5jUmVxdWVzdCIk",
-            "ChJUcmFuc2Zlck1hcFJlcXVlc3QSDgoGbWFwX2lkGAEgASgJIjAKE1RyYW5z",
-            "ZmVyTWFwUmVzcG9uc2USCgoCb2sYASABKAgSDQoFZXJyb3IYAiABKAkiIAoL",
-            "UGluZ01lc3NhZ2USEQoJdGltZXN0YW1wGAEgASgDIjUKC1BvbmdNZXNzYWdl",
-            "EhEKCXRpbWVzdGFtcBgBIAEoAxITCgtzZXJ2ZXJfdGltZRgCIAEoAyIdCgtL",
-            "aWNrTWVzc2FnZRIOCgZyZWFzb24YASABKAkqiwMKB01zZ1R5cGUSGAoUTVNH",
-            "X1RZUEVfVU5TUEVDSUZJRUQQABIRCg1NU0dfVFlQRV9BVVRIEAESFgoSTVNH",
-            "X1RZUEVfQVVUSF9SRVNQEAISGAoUTVNHX1RZUEVfRU5URVJfV09STEQQAxId",
-            "ChlNU0dfVFlQRV9FTlRFUl9XT1JMRF9SRVNQEAQSFwoTTVNHX1RZUEVfSk9J",
-            "Tl9UT0tFThAFEhwKGE1TR19UWVBFX0pPSU5fVE9LRU5fUkVTUBAGEhIKDk1T",
-            "R19UWVBFX0lOUFVUEAcSFQoRTVNHX1RZUEVfU05BUFNIT1QQCBIXChNNU0df",
-            "VFlQRV9ESVNDT05ORUNUEAkSEwoPTVNHX1RZUEVfUkVTWU5DEAoSGQoVTVNH",
-            "X1RZUEVfVFJBTlNGRVJfTUFQEA0SHgoaTVNHX1RZUEVfVFJBTlNGRVJfTUFQ",
-            "X1JFU1AQDhIRCg1NU0dfVFlQRV9QSU5HEAsSEQoNTVNHX1RZUEVfUE9ORxAM",
-            "EhEKDU1TR19UWVBFX0tJQ0sQDyqdAQoKRW50aXR5VHlwZRIbChdFTlRJVFlf",
-            "VFlQRV9VTlNQRUNJRklFRBAAEhYKEkVOVElUWV9UWVBFX1BMQVlFUhABEhMK",
-            "D0VOVElUWV9UWVBFX01PQhACEhMKD0VOVElUWV9UWVBFX05QQxADEhQKEEVO",
-            "VElUWV9UWVBFX0lURU0QBBIaChZFTlRJVFlfVFlQRV9QUk9KRUNUSUxFEAUq",
-            "lAEKDEVudGl0eUFjdGlvbhIdChlFTlRJVFlfQUNUSU9OX1VOU1BFQ0lGSUVE",
-            "EAASFgoSRU5USVRZX0FDVElPTl9JRExFEAESGAoURU5USVRZX0FDVElPTl9N",
-            "T1ZJTkcQAhIbChdFTlRJVFlfQUNUSU9OX0FUVEFDS0lORxADEhYKEkVOVElU",
-            "WV9BQ1RJT05fREVBRBAEQkZaM2dpdGh1Yi5jb20vZHV5Y3VvbmcvcnBnLW1t",
-            "by9zaGFyZWQvcHJvdG8vZ2VuO3dpcmVwYqoCDlJwZ01tby5XaXJlLlYxYgZw",
-            "cm90bzM="));
+            "Cgl0cmFuc3BvcnQYAyABKAkSDQoFZXJyb3IYBCABKAkSEwoLc2Vzc2lvbl9r",
+            "ZXkYBSABKAwiOwoQSm9pblRva2VuUmVxdWVzdBINCgV0b2tlbhgBIAEoCRIY",
+            "ChBwcm90b2NvbF92ZXJzaW9uGAIgASgNImwKEUpvaW5Ub2tlblJlc3BvbnNl",
+            "EgoKAm9rGAEgASgIEg8KB3VzZXJfaWQYAiABKAkSDQoFZXJyb3IYAyABKAkS",
+            "EQoJdGlja19yYXRlGAQgASgNEhgKEHByb3RvY29sX3ZlcnNpb24YBSABKA0i",
+            "VgoMSW5wdXRNZXNzYWdlEgwKBHRpY2sYASABKAQSDgoGbW92ZV94GAIgASgC",
+            "Eg4KBm1vdmVfeRgDIAEoAhIYChBhdHRhY2tfdGFyZ2V0X2lkGAQgASgJIu0B",
+            "Cg5FbnRpdHlTbmFwc2hvdBIKCgJpZBgBIAEoCRIRCgl0eXBlX25hbWUYAiAB",
+            "KAkSCQoBeBgDIAEoAhIJCgF5GAQgASgCEgoKAmhwGAUgASgFEg4KBm1heF9o",
+            "cBgGIAEoBRIoCgR0eXBlGAcgASgOMhoucnBnbW1vLndpcmUudjEuRW50aXR5",
+            "VHlwZRIOCgZoYW5kbGUYCCABKA0SDQoFc3BlZWQYCSABKAISEwoLZmFjaW5n",
+            "X2JyYWQYCiABKA0SLAoGYWN0aW9uGAsgASgOMhwucnBnbW1vLndpcmUudjEu",
+            "RW50aXR5QWN0aW9uIoIBCg9TbmFwc2hvdE1lc3NhZ2USDAoEdGljaxgBIAEo",
+            "BBIQCghhY2tfdGljaxgCIAEoBBIMCgRmdWxsGAMgASgIEjAKCGVudGl0aWVz",
+            "GAQgAygLMh4ucnBnbW1vLndpcmUudjEuRW50aXR5U25hcHNob3QSDwoHcmVt",
+            "b3ZlZBgFIAMoCSIjChFEaXNjb25uZWN0TWVzc2FnZRIOCgZyZWFzb24YASAB",
+            "KAkiDwoNUmVzeW5jUmVxdWVzdCIkChJUcmFuc2Zlck1hcFJlcXVlc3QSDgoG",
+            "bWFwX2lkGAEgASgJIjAKE1RyYW5zZmVyTWFwUmVzcG9uc2USCgoCb2sYASAB",
+            "KAgSDQoFZXJyb3IYAiABKAkiIAoLUGluZ01lc3NhZ2USEQoJdGltZXN0YW1w",
+            "GAEgASgDIjUKC1BvbmdNZXNzYWdlEhEKCXRpbWVzdGFtcBgBIAEoAxITCgtz",
+            "ZXJ2ZXJfdGltZRgCIAEoAyIdCgtLaWNrTWVzc2FnZRIOCgZyZWFzb24YASAB",
+            "KAkqiwMKB01zZ1R5cGUSGAoUTVNHX1RZUEVfVU5TUEVDSUZJRUQQABIRCg1N",
+            "U0dfVFlQRV9BVVRIEAESFgoSTVNHX1RZUEVfQVVUSF9SRVNQEAISGAoUTVNH",
+            "X1RZUEVfRU5URVJfV09STEQQAxIdChlNU0dfVFlQRV9FTlRFUl9XT1JMRF9S",
+            "RVNQEAQSFwoTTVNHX1RZUEVfSk9JTl9UT0tFThAFEhwKGE1TR19UWVBFX0pP",
+            "SU5fVE9LRU5fUkVTUBAGEhIKDk1TR19UWVBFX0lOUFVUEAcSFQoRTVNHX1RZ",
+            "UEVfU05BUFNIT1QQCBIXChNNU0dfVFlQRV9ESVNDT05ORUNUEAkSEwoPTVNH",
+            "X1RZUEVfUkVTWU5DEAoSGQoVTVNHX1RZUEVfVFJBTlNGRVJfTUFQEA0SHgoa",
+            "TVNHX1RZUEVfVFJBTlNGRVJfTUFQX1JFU1AQDhIRCg1NU0dfVFlQRV9QSU5H",
+            "EAsSEQoNTVNHX1RZUEVfUE9ORxAMEhEKDU1TR19UWVBFX0tJQ0sQDyqdAQoK",
+            "RW50aXR5VHlwZRIbChdFTlRJVFlfVFlQRV9VTlNQRUNJRklFRBAAEhYKEkVO",
+            "VElUWV9UWVBFX1BMQVlFUhABEhMKD0VOVElUWV9UWVBFX01PQhACEhMKD0VO",
+            "VElUWV9UWVBFX05QQxADEhQKEEVOVElUWV9UWVBFX0lURU0QBBIaChZFTlRJ",
+            "VFlfVFlQRV9QUk9KRUNUSUxFEAUqlAEKDEVudGl0eUFjdGlvbhIdChlFTlRJ",
+            "VFlfQUNUSU9OX1VOU1BFQ0lGSUVEEAASFgoSRU5USVRZX0FDVElPTl9JRExF",
+            "EAESGAoURU5USVRZX0FDVElPTl9NT1ZJTkcQAhIbChdFTlRJVFlfQUNUSU9O",
+            "X0FUVEFDS0lORxADEhYKEkVOVElUWV9BQ1RJT05fREVBRBAEQkZaM2dpdGh1",
+            "Yi5jb20vZHV5Y3VvbmcvcnBnLW1tby9zaGFyZWQvcHJvdG8vZ2VuO3dpcmVw",
+            "YqoCDlJwZ01tby5XaXJlLlYxYgZwcm90bzM="));
       descriptor = pbr::FileDescriptor.FromGeneratedCode(descriptorData,
           new pbr::FileDescriptor[] { },
           new pbr::GeneratedClrTypeInfo(new[] {typeof(global::RpgMmo.Wire.V1.MsgType), typeof(global::RpgMmo.Wire.V1.EntityType), typeof(global::RpgMmo.Wire.V1.EntityAction), }, null, new pbr::GeneratedClrTypeInfo[] {
@@ -77,7 +77,7 @@ namespace RpgMmo.Wire.V1 {
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.AuthRequest), global::RpgMmo.Wire.V1.AuthRequest.Parser, new[]{ "Token", "ProtocolVersion" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.AuthResponse), global::RpgMmo.Wire.V1.AuthResponse.Parser, new[]{ "Ok", "UserId", "Error", "ProtocolVersion" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EnterWorldRequest), global::RpgMmo.Wire.V1.EnterWorldRequest.Parser, new[]{ "MapId" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EnterWorldResponse), global::RpgMmo.Wire.V1.EnterWorldResponse.Parser, new[]{ "ServerAddr", "JoinToken", "Transport", "Error" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EnterWorldResponse), global::RpgMmo.Wire.V1.EnterWorldResponse.Parser, new[]{ "ServerAddr", "JoinToken", "Transport", "Error", "SessionKey" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenRequest), global::RpgMmo.Wire.V1.JoinTokenRequest.Parser, new[]{ "Token", "ProtocolVersion" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenResponse), global::RpgMmo.Wire.V1.JoinTokenResponse.Parser, new[]{ "Ok", "UserId", "Error", "TickRate", "ProtocolVersion" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.InputMessage), global::RpgMmo.Wire.V1.InputMessage.Parser, new[]{ "Tick", "MoveX", "MoveY", "AttackTargetId" }, null, null, null, null),
@@ -1290,6 +1290,7 @@ namespace RpgMmo.Wire.V1 {
       joinToken_ = other.joinToken_;
       transport_ = other.transport_;
       error_ = other.error_;
+      sessionKey_ = other.sessionKey_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -1347,6 +1348,59 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "session_key" field.</summary>
+    public const int SessionKeyFieldNumber = 5;
+    private pb::ByteString sessionKey_ = pb::ByteString.Empty;
+    /// <summary>
+    /// Per-session key for encrypting the gameplay hop. 32 bytes, or empty when the
+    /// gateway has no join-token secret configured to derive one from.
+    ///
+    /// WHAT IT REPLACES. Before this, transport encryption used ONE pre-shared key,
+    /// the same value in every client binary and every server. Extracting it from a
+    /// single client decrypted every player's traffic, for ever, and rotating it
+    /// meant redeploying everything at once. This field makes the key per-join.
+    ///
+    /// THE SERVER NEVER RECEIVES THIS. It is not forwarded, not stored and not put
+    /// in the join token. Both ends DERIVE it independently:
+    ///
+    ///   session_key = HKDF-SHA256(ikm  = JOIN_TOKEN_SECRET,
+    ///                             salt = join token's `jti` claim,
+    ///                             info = "cuvara/session-key/v1",
+    ///                             L    = 32)
+    ///
+    /// The game server has the secret and reads `jti` out of the token it already
+    /// verifies, so it computes the same value with nothing crossing the gameplay
+    /// hop. The client cannot derive it — it has no secret — which is the whole
+    /// reason this field exists.
+    ///
+    /// Rooting session keys in JOIN_TOKEN_SECRET adds no new class of failure:
+    /// anyone holding that secret can already mint a join token for any user, which
+    /// is total compromise. The HKDF `info` string is the domain separation that
+    /// keeps derivation from interacting with signing.
+    ///
+    /// LIMITATION, AND IT IS NOT A FOOTNOTE. This field carries the key to the
+    /// client in the clear, and the gateway hop is the SAME transport stack as the
+    /// gameplay hop — plaintext TCP by default. So in the default configuration an
+    /// eavesdropper positioned on the gateway hop reads this value and can decrypt
+    /// that session. Per-session keys turn "compromise one binary, decrypt everyone
+    /// for ever" into "eavesdrop the gateway hop, decrypt one session" — a real
+    /// improvement, and NOT the end-to-end confidentiality the name suggests.
+    /// Closing it requires the gateway hop to be encrypted too; see ADR-21 and
+    /// docs/ROADMAP-SECURITY.md.
+    ///
+    /// A receiver MUST NOT log this, echo it in an error, or expose it on a status
+    /// or metrics surface. Implementations wrap it in a type whose string form is
+    /// redacted for exactly that reason.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public pb::ByteString SessionKey {
+      get { return sessionKey_; }
+      set {
+        sessionKey_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -1366,6 +1420,7 @@ namespace RpgMmo.Wire.V1 {
       if (JoinToken != other.JoinToken) return false;
       if (Transport != other.Transport) return false;
       if (Error != other.Error) return false;
+      if (SessionKey != other.SessionKey) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -1377,6 +1432,7 @@ namespace RpgMmo.Wire.V1 {
       if (JoinToken.Length != 0) hash ^= JoinToken.GetHashCode();
       if (Transport.Length != 0) hash ^= Transport.GetHashCode();
       if (Error.Length != 0) hash ^= Error.GetHashCode();
+      if (SessionKey.Length != 0) hash ^= SessionKey.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -1411,6 +1467,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(34);
         output.WriteString(Error);
       }
+      if (SessionKey.Length != 0) {
+        output.WriteRawTag(42);
+        output.WriteBytes(SessionKey);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -1437,6 +1497,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(34);
         output.WriteString(Error);
       }
+      if (SessionKey.Length != 0) {
+        output.WriteRawTag(42);
+        output.WriteBytes(SessionKey);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -1458,6 +1522,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (Error.Length != 0) {
         size += 1 + pb::CodedOutputStream.ComputeStringSize(Error);
+      }
+      if (SessionKey.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeBytesSize(SessionKey);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -1482,6 +1549,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.Error.Length != 0) {
         Error = other.Error;
+      }
+      if (other.SessionKey.Length != 0) {
+        SessionKey = other.SessionKey;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -1518,6 +1588,10 @@ namespace RpgMmo.Wire.V1 {
             Error = input.ReadString();
             break;
           }
+          case 42: {
+            SessionKey = input.ReadBytes();
+            break;
+          }
         }
       }
     #endif
@@ -1551,6 +1625,10 @@ namespace RpgMmo.Wire.V1 {
           }
           case 34: {
             Error = input.ReadString();
+            break;
+          }
+          case 42: {
+            SessionKey = input.ReadBytes();
             break;
           }
         }

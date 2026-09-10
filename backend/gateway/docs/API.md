@@ -35,9 +35,48 @@ field 2 — a silent half-parse rather than an error.
 1. Client → Gateway  MsgAuth          AuthRequest{Token}          (JWT from Nakama)
 2. Gateway → Client  MsgAuthResp      AuthResponse{OK, UserID}
 3. Client → Gateway  MsgEnterWorld    EnterWorldRequest{MapID}
-4. Gateway → Client  MsgEnterWorldResp EnterWorldResponse{ServerAddr, JoinToken, Transport}
+4. Gateway → Client  MsgEnterWorldResp EnterWorldResponse{ServerAddr, JoinToken, Transport, SessionKey}
 5. Client → Gateway  MsgDisconnect    (no payload)                (optional, graceful)
 ```
+
+### `SessionKey` — the per-session key for the gameplay hop
+
+32 bytes, or empty when the gateway has no join-token secret to derive one from.
+**Protobuf only**: the legacy JSON encoding does not carry this field, so a JSON
+client gets no key and cannot be encrypted.
+
+It replaces a single pre-shared key that was identical in every client binary and
+every server — extract it once and you decrypted everyone, for ever. This one is
+per join.
+
+**The game server is never sent it.** Both ends derive the same value:
+
+```
+session_key = HKDF-SHA256(ikm  = JOIN_TOKEN_SECRET,
+                          salt = join token's `jti` claim,
+                          info = "cuvara/session-key/v1",
+                          L    = 32)
+```
+
+The game server holds the secret and reads `jti` out of the token it already
+verifies, so nothing carrying the key crosses the gameplay hop. The client cannot
+derive it — it has no secret — which is the only reason this field exists.
+
+**Clients must not log it, echo it in an error, or display it.** The Go and C#
+implementations wrap it in a type that renders as `[redacted session key]`
+through every string, logging and JSON path, and a test asserts the serialised
+`/status` payload contains no key material.
+
+> **Limitation, and it is not a footnote.** This field carries the key in the
+> clear, and the gateway hop is the *same transport stack* as the gameplay hop —
+> plaintext TCP by default. So in the default configuration an eavesdropper on
+> the gateway hop reads the key and can decrypt that session. Per-session keys
+> turn *"compromise one binary, decrypt everyone for ever"* into *"eavesdrop the
+> gateway hop, decrypt one session"* — a real improvement, and **not** the
+> end-to-end confidentiality the name suggests. Closing it requires encrypting
+> the gateway hop as well; see ADR-21 and `backend/docs/ROADMAP-SECURITY.md`.
+
+Nothing consumes the key yet: the AEAD that will use it is a separate change.
 
 `Transport` names the realtime transport the **target game server** speaks —
 `"tcp"` or `"kcp"` — copied from that server's registry entry. **Empty means

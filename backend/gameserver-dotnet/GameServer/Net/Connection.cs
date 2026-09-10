@@ -95,6 +95,27 @@ public sealed class Connection : IDisposable
     public string JoinJti { get; init; } = "";
 
     /// <summary>
+    /// Per-session key for this connection, derived from the join-token secret and
+    /// <see cref="JoinJti"/> — never received from the client and never transmitted.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Empty when the server has no join-token secret or the token carried no jti. Nothing
+    /// consumes it yet: the AEAD that will use it is a separate change. It is derived and
+    /// held here now so that the key exists per session before any cipher depends on it,
+    /// and so that the derivation is exercised on every real join rather than only in a
+    /// test.
+    /// </para>
+    /// <para>
+    /// <b>It must never be logged, echoed in an error, or published.</b>
+    /// <see cref="GameServer.Net.Security.SessionKey"/> renders as a redacted marker
+    /// through every string path for that reason, and a test asserts the serialised
+    /// <c>/status</c> payload contains no key material.
+    /// </para>
+    /// </remarks>
+    public GameServer.Net.Security.SessionKey SessionKey { get; init; }
+
+    /// <summary>
     /// Wire encoding this connection speaks, latched from the first frame decoded
     /// on it and used for every reply.
     /// </summary>

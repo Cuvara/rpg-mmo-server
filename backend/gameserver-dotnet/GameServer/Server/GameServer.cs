@@ -1204,7 +1204,11 @@ public sealed class GameServerHost : IAsyncDisposable
             // matches on, so a kick can only ever hit the login it names.
             conn = new Connection(userId, accepted, connLogger, tempConn.Encoding)
             {
-                JoinJti = claims.Jti
+                JoinJti = claims.Jti,
+                // Derived, not received. The gateway computed the same value from the same
+                // secret and jti and gave it to the client; nothing carrying it crosses
+                // this hop. See GameServer.Net.Security.SessionKey.
+                SessionKey = Net.Security.SessionKey.Derive(_options.JoinTokenSecret, claims.Jti),
             };
             conn.DeltaState.MaxSnapshotBytes = _options.MaxSnapshotBytes;
 

@@ -8,6 +8,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The game server derives a per-session key on every join, and is never sent one.**
+  `GameServer.Net.Security.SessionKey` computes
+  `HKDF-SHA256(ikm = JOIN_TOKEN_SECRET, salt = jti, info = "cuvara/session-key/v1", L = 32)`
+  from the secret it already holds and the `jti` in the token it already verifies, so no
+  key material crosses the gameplay hop and none is stored. Held on `Connection.SessionKey`
+  so the derivation runs on every real join rather than only in a test.
+  - **Cross-implementation golden vector** shared with `shared/sessionkey`'s Go test. Two
+    implementations that each round-trip against themselves can still disagree with each
+    other, and a disagreement produces no error anywhere — the session simply never forms.
+  - `SessionKey.ToString()` renders `[redacted session key]`, and tests assert that
+    interpolation, `string.Format` and concatenation cannot leak it — plus one that
+    serialises the real `/status` payload and requires no key material in it, since that is
+    the surface most likely to grow a field by accident later.
+  - Derivation **refuses rather than falling back**: no secret or no `jti` yields an empty
+    key, never a weaker one. A negotiable path is a downgrade attack.
+  - Nothing consumes the key yet; the AEAD that will use it is a separate change.
+
+### Added
+
 - **The server reports its transport confidentiality posture on every boot, and publishes
   it.** Encryption on the gameplay hop is off by default *twice* — the transport defaults
   to `tcp`, which has no packet-crypt layer, and `TRANSPORT_KEY` defaults to empty — so

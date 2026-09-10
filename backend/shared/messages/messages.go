@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"github.com/duycuong/rpg-mmo/shared/sessionkey"
 )
 
 // ErrInvalidMsgType marks an envelope whose type is 0.
@@ -32,22 +34,22 @@ var ErrUnknownHandle = errors.New("snapshot references an unknown entity handle"
 type MsgType uint8
 
 const (
-	MsgAuth           MsgType = iota + 1 // client -> gateway
-	MsgAuthResp                          // gateway -> client
-	MsgEnterWorld                        // client -> gateway
-	MsgEnterWorldResp                    // gateway -> client
-	MsgJoinToken                         // client -> gameserver
-	MsgJoinTokenResp                     // gameserver -> client
-	MsgInput                             // client -> gameserver (per tick)
-	MsgSnapshot                          // gameserver -> client (per tick)
-	MsgDisconnect                        // either direction
-	MsgResync                            // client -> gameserver (request a full keyframe)
-	_                                    // 11: reserved
-	_                                    // 12: reserved
-	MsgTransferMap                       // client -> gameserver (request map transfer)
-	MsgTransferMapResp                   // gameserver -> client (transfer result)
-	MsgPing       MsgType = 11           // either direction (heartbeat)
-	MsgPong       MsgType = 12           // either direction (heartbeat reply)
+	MsgAuth            MsgType = iota + 1 // client -> gateway
+	MsgAuthResp                           // gateway -> client
+	MsgEnterWorld                         // client -> gateway
+	MsgEnterWorldResp                     // gateway -> client
+	MsgJoinToken                          // client -> gameserver
+	MsgJoinTokenResp                      // gameserver -> client
+	MsgInput                              // client -> gameserver (per tick)
+	MsgSnapshot                           // gameserver -> client (per tick)
+	MsgDisconnect                         // either direction
+	MsgResync                             // client -> gameserver (request a full keyframe)
+	_                                     // 11: reserved
+	_                                     // 12: reserved
+	MsgTransferMap                        // client -> gameserver (request map transfer)
+	MsgTransferMapResp                    // gameserver -> client (transfer result)
+	MsgPing            MsgType = 11       // either direction (heartbeat)
+	MsgPong            MsgType = 12       // either direction (heartbeat reply)
 	// 13 and 14 are reserved for MsgTransferMap/Resp.
 	MsgKick MsgType = 15 // server -> client (forced disconnect with reason)
 )
@@ -238,6 +240,39 @@ type EnterWorldResponse struct {
 	JoinToken  string `json:"join_token,omitempty"`
 	Transport  string `json:"transport,omitempty"`
 	Error      string `json:"error,omitempty"`
+
+	// SessionKey is the per-session key for the gameplay hop, or empty when the
+	// gateway has no join-token secret to derive one from.
+	//
+	// The game server never receives this: it derives the same value from the
+	// secret it holds and the jti in the token it verifies (see
+	// shared/sessionkey). This field exists only because the CLIENT cannot
+	// derive it — it has no secret.
+	//
+	// It is sessionkey.Key rather than []byte on purpose: Key redacts itself
+	// through fmt, slog and %#v, so a struct that happens to be logged cannot
+	// leak the material.
+	//
+	// `json:"-"` IS PART OF THE DESIGN, NOT AN OVERSIGHT. The legacy JSON
+	// encoding therefore cannot carry a session key at all, and a JSON client
+	// gets none. Two reasons, and both matter more than serving that client:
+	//
+	//  1. Key marshals to a redacted string precisely so it cannot leak through
+	//     something that serialises a struct without knowing it holds a secret.
+	//     Exempting this one field would put the material back on exactly the
+	//     path the redaction exists to close, and JSON is the encoding a human
+	//     is most likely to paste into an issue.
+	//  2. JSON is the legacy encoding (ADR-9) and is expected to disappear.
+	//     Protobuf carries the key as bytes and is what the client speaks.
+	//
+	// The consequence is stateable: a JSON client cannot be encrypted. Under the
+	// no-fallback rule that means such a client must be refused rather than
+	// served in cleartext once encryption is required — a step 4 decision.
+	//
+	// LIMITATION: this travels to the client over the gateway hop, which is the
+	// same transport stack as the gameplay hop and is plaintext TCP by default.
+	// See the package comment on shared/sessionkey.
+	SessionKey sessionkey.Key `json:"-"`
 }
 
 // JoinTokenRequest is sent by the client to authenticate with a game server.

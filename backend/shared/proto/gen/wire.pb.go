@@ -523,11 +523,51 @@ func (x *EnterWorldRequest) GetMapId() string {
 // `transport` tells the client which realtime transport the target game server
 // speaks ("tcp" or "kcp"). Empty means "tcp".
 type EnterWorldResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ServerAddr    string                 `protobuf:"bytes,1,opt,name=server_addr,json=serverAddr,proto3" json:"server_addr,omitempty"`
-	JoinToken     string                 `protobuf:"bytes,2,opt,name=join_token,json=joinToken,proto3" json:"join_token,omitempty"`
-	Transport     string                 `protobuf:"bytes,3,opt,name=transport,proto3" json:"transport,omitempty"`
-	Error         string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	ServerAddr string                 `protobuf:"bytes,1,opt,name=server_addr,json=serverAddr,proto3" json:"server_addr,omitempty"`
+	JoinToken  string                 `protobuf:"bytes,2,opt,name=join_token,json=joinToken,proto3" json:"join_token,omitempty"`
+	Transport  string                 `protobuf:"bytes,3,opt,name=transport,proto3" json:"transport,omitempty"`
+	Error      string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	// Per-session key for encrypting the gameplay hop. 32 bytes, or empty when the
+	// gateway has no join-token secret configured to derive one from.
+	//
+	// WHAT IT REPLACES. Before this, transport encryption used ONE pre-shared key,
+	// the same value in every client binary and every server. Extracting it from a
+	// single client decrypted every player's traffic, for ever, and rotating it
+	// meant redeploying everything at once. This field makes the key per-join.
+	//
+	// THE SERVER NEVER RECEIVES THIS. It is not forwarded, not stored and not put
+	// in the join token. Both ends DERIVE it independently:
+	//
+	//	session_key = HKDF-SHA256(ikm  = JOIN_TOKEN_SECRET,
+	//	                          salt = join token's `jti` claim,
+	//	                          info = "cuvara/session-key/v1",
+	//	                          L    = 32)
+	//
+	// The game server has the secret and reads `jti` out of the token it already
+	// verifies, so it computes the same value with nothing crossing the gameplay
+	// hop. The client cannot derive it — it has no secret — which is the whole
+	// reason this field exists.
+	//
+	// Rooting session keys in JOIN_TOKEN_SECRET adds no new class of failure:
+	// anyone holding that secret can already mint a join token for any user, which
+	// is total compromise. The HKDF `info` string is the domain separation that
+	// keeps derivation from interacting with signing.
+	//
+	// LIMITATION, AND IT IS NOT A FOOTNOTE. This field carries the key to the
+	// client in the clear, and the gateway hop is the SAME transport stack as the
+	// gameplay hop — plaintext TCP by default. So in the default configuration an
+	// eavesdropper positioned on the gateway hop reads this value and can decrypt
+	// that session. Per-session keys turn "compromise one binary, decrypt everyone
+	// for ever" into "eavesdrop the gateway hop, decrypt one session" — a real
+	// improvement, and NOT the end-to-end confidentiality the name suggests.
+	// Closing it requires the gateway hop to be encrypted too; see ADR-21 and
+	// docs/ROADMAP-SECURITY.md.
+	//
+	// A receiver MUST NOT log this, echo it in an error, or expose it on a status
+	// or metrics surface. Implementations wrap it in a type whose string form is
+	// redacted for exactly that reason.
+	SessionKey    []byte `protobuf:"bytes,5,opt,name=session_key,json=sessionKey,proto3" json:"session_key,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -588,6 +628,13 @@ func (x *EnterWorldResponse) GetError() string {
 		return x.Error
 	}
 	return ""
+}
+
+func (x *EnterWorldResponse) GetSessionKey() []byte {
+	if x != nil {
+		return x.SessionKey
+	}
+	return nil
 }
 
 // JoinTokenRequest is sent by the client to authenticate with a game server.
@@ -1485,14 +1532,16 @@ const file_wire_proto_rawDesc = "" +
 	"\x05error\x18\x03 \x01(\tR\x05error\x12)\n" +
 	"\x10protocol_version\x18\x04 \x01(\rR\x0fprotocolVersion\"*\n" +
 	"\x11EnterWorldRequest\x12\x15\n" +
-	"\x06map_id\x18\x01 \x01(\tR\x05mapId\"\x88\x01\n" +
+	"\x06map_id\x18\x01 \x01(\tR\x05mapId\"\xa9\x01\n" +
 	"\x12EnterWorldResponse\x12\x1f\n" +
 	"\vserver_addr\x18\x01 \x01(\tR\n" +
 	"serverAddr\x12\x1d\n" +
 	"\n" +
 	"join_token\x18\x02 \x01(\tR\tjoinToken\x12\x1c\n" +
 	"\ttransport\x18\x03 \x01(\tR\ttransport\x12\x14\n" +
-	"\x05error\x18\x04 \x01(\tR\x05error\"S\n" +
+	"\x05error\x18\x04 \x01(\tR\x05error\x12\x1f\n" +
+	"\vsession_key\x18\x05 \x01(\fR\n" +
+	"sessionKey\"S\n" +
 	"\x10JoinTokenRequest\x12\x14\n" +
 	"\x05token\x18\x01 \x01(\tR\x05token\x12)\n" +
 	"\x10protocol_version\x18\x02 \x01(\rR\x0fprotocolVersion\"\x9a\x01\n" +
