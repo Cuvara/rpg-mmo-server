@@ -5,6 +5,22 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **The gateway no longer derives or returns a session key.** ADR-22 supersedes the derived
+  key with an authenticated X25519 exchange on the gameplay hop; `EnterWorldResponse` field
+  5 is removed and reserved. See `backend/docs/SEALED-FRAMING.md`.
+  - Worth recording for whoever implements the replacement: the client still cannot derive
+    the handshake binding key, so something must still reach it over the gateway hop — and
+    that hop is plaintext TCP by default. ADR-22 decision 8 holds the model until it is
+    confidential, and §6 of the spec explains why the gameplay-hop handshake cannot simply
+    be reused there: it is anchored in the join token, which does not exist yet at that
+    point.
+
+> **Nothing here encrypts anything yet.** No cipher, MAC or curve is implemented, and none
+> is stubbed: an implementation that "worked" would let every test above it pass while
+> proving nothing about the bytes. ADR-22's library choice is still open.
+
 ### Added
 
 - **The gateway mints a per-session key and returns it in `EnterWorldResponse`.** Derived

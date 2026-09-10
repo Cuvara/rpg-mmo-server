@@ -1077,9 +1077,6 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 		ServerAddr: result.ServerAddr,
 		JoinToken:  result.JoinToken,
 		Transport:  result.Transport,
-		// The only copy of the key that ever travels. The game server derives its
-		// own; nothing here is forwarded to it.
-		SessionKey: result.SessionKey,
 	})
 	if err != nil {
 		g.logger.Error("marshal enter world response", "err", err)

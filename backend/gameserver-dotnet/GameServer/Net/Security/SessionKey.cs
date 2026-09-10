@@ -9,6 +9,17 @@ namespace GameServer.Net.Security;
 /// </summary>
 /// <remarks>
 /// <para>
+/// <b>SUPERSEDED as an encryption key (ADR-22, 2026-09-10).</b> This derivation no longer
+/// produces the key that encrypts the gameplay hop — that is now an authenticated X25519
+/// exchange, which gives forward secrecy this cannot: a derived key is a pure function of
+/// a long-lived secret and a <c>jti</c> that travels in the clear, so anyone who later
+/// obtains <c>JOIN_TOKEN_SECRET</c> can decrypt every recorded past session. What it is
+/// for now is the handshake <i>binding</i> — proving possession of
+/// <c>JOIN_TOKEN_SECRET</c>-derived material so a man-in-the-middle cannot substitute its
+/// own ephemeral key. See <c>backend/docs/SEALED-FRAMING.md</c> §5. The bytes are
+/// unchanged, so the golden vector still holds; only the purpose moved.
+/// </para>
+/// <para>
 /// <b>What this replaces.</b> Transport encryption used ONE pre-shared key: the same value
 /// in every client binary and every server. Extracting it from a single client decrypted
 /// every player's traffic for ever, and rotating it meant redeploying everything at once.

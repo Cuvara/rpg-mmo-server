@@ -6,7 +6,6 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	wirepb "github.com/duycuong/rpg-mmo/shared/proto/gen"
-	"github.com/duycuong/rpg-mmo/shared/sessionkey"
 )
 
 // This file is the only place where the domain structs in messages.go and the
@@ -150,7 +149,6 @@ func unmarshalProtoPayload(data []byte, v any) error {
 		}
 		t.ServerAddr, t.JoinToken = pb.ServerAddr, pb.JoinToken
 		t.Transport, t.Error = pb.Transport, pb.Error
-		t.SessionKey = sessionkey.FromBytes(pb.SessionKey)
 
 	case *JoinTokenRequest:
 		var pb wirepb.JoinTokenRequest
@@ -286,7 +284,6 @@ func enterWorldRespPB(t EnterWorldResponse) *wirepb.EnterWorldResponse {
 		JoinToken:  t.JoinToken,
 		Transport:  t.Transport,
 		Error:      t.Error,
-		SessionKey: t.SessionKey.Bytes(),
 	}
 }
 

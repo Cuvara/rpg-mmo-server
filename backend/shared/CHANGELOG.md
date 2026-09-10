@@ -7,6 +7,51 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`shared/sealed`: the wire format, replay rule and refusal policy for realtime
+  confidentiality**, specified and tested without a cipher. Normative spec:
+  `backend/docs/SEALED-FRAMING.md`.
+  - **Sealing happens above the transport, around the Envelope**, not at the packet layer.
+    The KCP packet-crypt layer cannot be used: it is per-*listener* (kcp-go takes one
+    `BlockCrypt` for every datagram, with no per-remote key selection) so it cannot carry a
+    per-session key — and TCP, the default transport, has no such layer at all. Above the
+    transport, one implementation serves both.
+  - Frame: `[4B length][0xC1 marker][1B version][8B sequence][ciphertext][16B tag]`, with
+    the whole 10-byte header as additional authenticated data, so a frame cannot be
+    renumbered to replay it nor rolled back to an older format. `0xC1` cannot begin a
+    well-formed Envelope, so it cannot be confused with the `0x08`/`0x7B` encoding sniff.
+    Overhead is ~390 B/s per client at 15 Hz — 0.85% of the measured 45.9 KB/s.
+  - **Nonce is a bare counter, and that is safe only because each direction has its own
+    key.** Documented at the function, with the consequence stated: if one key ever serves
+    both directions, the nonce must grow a direction byte the same day or the scheme is
+    broken.
+  - **Two replay validators behind one interface** — strict-monotonic and a 64-frame
+    sliding window (the IPsec/DTLS rule) — because whether the ARQ can reorder at this
+    layer is still being measured. The finding lands as a one-line change at the call site
+    rather than a rewrite. Both refuse what they cannot judge.
+  - **Handshake transcript** `label || 0x00 || jti || 0x00 || client_pub || server_pub`,
+    with a golden vector shared with the C# implementation. The NUL separators stop two
+    different (jti, key) pairs producing identical bytes; including both ephemeral public
+    keys is what stops a replayed binding authenticating a man-in-the-middle's exchange.
+  - **Refusal has two states, not three.** A "preferred" mode is a downgrade attack with a
+    friendly name, so a peer that does not seal gets no session.
+
+### Changed
+
+- **`EnterWorldResponse.session_key` (field 5) is removed and the number reserved.** ADR-22
+  supersedes the derived session key with an authenticated X25519 exchange, which gives
+  forward secrecy the derivation could not. The number is reserved rather than reused: a
+  peer built against the old schema would read whatever replaced it as 32 bytes of key
+  material and fail in a way that looks like a key mismatch rather than a schema mismatch.
+- **`shared/sessionkey` records its superseded purpose.** The bytes and the golden vector
+  are unchanged; what moved is what the value is *for* — it is now the handshake binding
+  key, proving possession of `JOIN_TOKEN_SECRET`-derived material, not an encryption key.
+
+> **Nothing here encrypts anything yet.** No cipher, MAC or curve is implemented, and none
+> is stubbed: an implementation that "worked" would let every test above it pass while
+> proving nothing about the bytes. ADR-22's library choice is still open.
+
+### Added
+
 - **`shared/sessionkey`: per-session keys, derived rather than distributed.** Transport
   encryption used ONE pre-shared key — the same value in every client binary and every
   server — so extracting it from a single client decrypted every player's traffic for ever,

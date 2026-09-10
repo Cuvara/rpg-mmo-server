@@ -113,6 +113,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`GameServer/Net/Sealed`: the C# half of the sealed wire format**, mirroring
+  `shared/sealed` byte for byte — frame layout, nonce construction, the two replay
+  validators behind one interface, the handshake transcript, and the refusal policy.
+  Normative spec: `backend/docs/SEALED-FRAMING.md`.
+  - **Cross-implementation golden vector** for the transcript, matching the Go test. Two
+    implementations that each round-trip against themselves can still disagree, and the
+    failure is silent: the handshake never completes and nothing names the cause.
+  - The refusal policy encodes the ADR-22 consequence explicitly: a JSON client cannot
+    carry a sealed session, so once encryption is required it is **refused**, not served in
+    the clear. That effectively deprecates the JSON encoding for any deployment that
+    requires encryption.
+
+### Changed
+
+- **`SessionKey` records its superseded purpose** — bytes and golden vector unchanged, but
+  the value is now the handshake binding key rather than an encryption key.
+
+> **Nothing here encrypts anything yet.** No cipher, MAC or curve is implemented, and none
+> is stubbed: an implementation that "worked" would let every test above it pass while
+> proving nothing about the bytes. ADR-22's library choice is still open.
+
+### Added
+
 - **The game server derives a per-session key on every join, and is never sent one.**
   `GameServer.Net.Security.SessionKey` computes
   `HKDF-SHA256(ikm = JOIN_TOKEN_SECRET, salt = jti, info = "cuvara/session-key/v1", L = 32)`
