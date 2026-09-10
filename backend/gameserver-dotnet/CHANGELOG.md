@@ -7,6 +7,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Documentation
+- **The crypto survey's preserved-types list was incomplete, and the way it was incomplete
+  generalises.** `Org.BouncyCastle.Crypto.Macs.HMac` was missing — needed by the handshake
+  binding — because the IL2CPP probe that produced the list never exercised the transcript
+  binding. The list was complete for what the probe tested and incomplete for what the
+  protocol shipped.
+
+  Stated in the document rather than quietly patched, because a `link.xml` wrong this way
+  has **no symptom until a device runs it**: a missing entry compiles, passes every Editor
+  test, passes every `Minimal`-stripped build, and then fails at the first handshake in a
+  `High`-stripped player. A preserved-types list is only evidence about the code paths the
+  probe walked.
+
+### Documentation
 - **ADR-22 settles the transport crypto model, and supersedes two earlier recommendations of
   this project's own — including one that shipped four days after it was written.** The model
   is **ChaCha20-Poly1305 over an authenticated X25519 exchange**, HKDF-SHA256 derivation, and
