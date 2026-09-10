@@ -215,6 +215,30 @@ services:
       JOIN_TOKEN_SECRET: ${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      # ---------------------------------------------------------------------
+      # Gateway-hop TLS (ADR-23) — OFF, and pinned explicitly.
+      # ---------------------------------------------------------------------
+      # The gateway hop carries the client's auth token: a ONE-HOUR REUSABLE
+      # bearer credential, measured crossing this hop in the clear. Setting
+      # both of these to PEM paths inside the container makes the gateway
+      # terminate TLS itself and closes that.
+      #
+      # It is empty here for one reason, and it is not caution: THE UNITY
+      # CLIENT CANNOT SPEAK TLS TO THE GATEWAY YET. Turning this on with the
+      # current client refuses every player — there is deliberately no
+      # plaintext fallback (ADR-23 decision 3), because a listener that accepts
+      # both is a downgrade attack with a friendly name.
+      #
+      # Setting exactly ONE of the two is a startup ERROR, not a fall back to
+      # plaintext.
+      #
+      # It does NOT cover the client→Nakama hop, which MINTS that auth token
+      # and is plain HTTP in this file (the nakama service has no
+      # --socket.ssl_certificate). That hop also carries a TWO-HOUR reusable
+      # Nakama session token, so it is the higher-value half and turning this
+      # on alone buys less than it looks like it does.
+      GATEWAY_TLS_CERT: ${GATEWAY_TLS_CERT:-}
+      GATEWAY_TLS_KEY: ${GATEWAY_TLS_KEY:-}
       # Prometheus endpoint (/metrics, /healthz). Scraped in-network by the
       # `monitoring` profile as gateway:9102; set to "off" to disable.
       METRICS_ADDR: ":9102"

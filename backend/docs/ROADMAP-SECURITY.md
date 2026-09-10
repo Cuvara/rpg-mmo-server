@@ -392,6 +392,43 @@ inventing a cipher.
      | gateway | join token | 30 s | yes |
      | gameplay | join token | 30 s | yes |
 
+     **REPRODUCED 2026-09-10 and correct — but it was pointed at the wrong end of the
+     path. See [ADR-23](ARCHITECTURE-DECISIONS.md#adr-23--the-gateway-hop-gets-tls-not-a-second-sealed-handshake-and-the-credential-it-exposes-leaks-one-hop-earlier).**
+     Every row above re-measured true, and the single-use column — which a tap cannot
+     show — was measured separately by replaying each captured credential from a fresh
+     connection. Both taps are now committed as
+     `integration_test/hop_confidentiality_tap_test.go` rather than being a one-off.
+
+     What the table omits is the hop that **mints** the auth token. The client obtains it
+     from Nakama's `gateway_token` RPC over **plain HTTP**, and a tap on that hop reads,
+     in the clear:
+
+     | hop | credential | lifetime | single-use |
+     |---|---|---|---|
+     | **meta (Nakama)** | **Nakama session token** | **7200 s** | **no** |
+     | meta (Nakama) | Nakama refresh token | 3600 s | no |
+     | meta (Nakama) | **the gateway auth token itself** | 3600 s | no |
+     | meta (Nakama) | the Nakama server key (HTTP Basic) | n/a | no |
+
+     `docker-compose.yml` starts Nakama with no `--socket.ssl_certificate`, `NAKAMA_URL`
+     is `http://` everywhere, and `deploy/k8s/data/nakama.yaml` exposes 7350 with no
+     Ingress and no TLS. **There is no environment in which this hop is encrypted.**
+
+     That inverts consequence 2 below in one respect worth stating plainly: the auth token
+     is *not* the most valuable credential on the path either. The **two-hour Nakama
+     session token** is, because it mints fresh one-hour auth tokens on demand for as long
+     as it lives, and it is exposed on a hop no bespoke protocol of ours can protect —
+     Nakama is a third-party binary, so the answer there is TLS in front of it, not a
+     handshake we write.
+
+     **A caution about the instrument, because it was wrong first.** The initial capture of
+     the meta hop found no auth token, and reporting that as good news would have been
+     easy. The token was there and the response was **gzip-encoded**; a byte scan for
+     `eyJ...` cannot see through gzip. Compression is not confidentiality. Re-running with
+     `Accept-Encoding` suppressed showed all four credentials, and a real Unity client
+     sends `Accept-Encoding: gzip` too — so any future tap on an HTTP hop must account for
+     content coding before reporting an absence.
+
      Two consequences, and the first changes what step 5 should do:
 
      1. **Sealing the join exchange on the gameplay hop alone would buy nothing.** The
@@ -422,7 +459,29 @@ inventing a cipher.
      production-only guard — a disguised blast radius, which is worse than a wide one.
      The posture is instead reported loudly on every boot and on `/status`
      (`sealed_required`, `sealed_cipher`).
-6. Only then revisit Option D, against whatever the hosting shape has become.
+6. **The gateway hop is settled by [ADR-23](ARCHITECTURE-DECISIONS.md#adr-23--the-gateway-hop-gets-tls-not-a-second-sealed-handshake-and-the-credential-it-exposes-leaks-one-hop-earlier)
+   (2026-09-10), and not the way this roadmap assumed.** It gets **TLS terminated in the
+   gateway process**, behind `GATEWAY_TLS_CERT`/`GATEWAY_TLS_KEY`, defaulting off and
+   pinned explicitly at every deploy path. A second sealed handshake for this hop was
+   **rejected**: the Go server half of the sealed protocol does not exist (only the C# one
+   does), the hop has no `jti` to anchor a transcript, and an unauthenticated exchange
+   would make `BindingVerified` a field that is always false. Read ADR-23 before proposing
+   a sealed gateway handshake again.
+
+   **Implemented server-side; the flag is off everywhere and cannot be turned on yet.**
+   The Unity client speaks raw TCP to the gateway and there is no plaintext fallback by
+   design, so enabling it today refuses every player. **The client needs two things, in
+   `Cuvara/Netcode`:** TLS on the gateway connection, verified in an IL2CPP *player* build
+   with certificate validation ON; and `https://` for the Nakama base URL.
+
+7. **THE BLOCKING ITEM IS NOW THE META HOP, not the gateway hop.** It carries a two-hour
+   reusable Nakama session token and the auth token itself, in the clear, in every
+   environment. It is an ops change — Nakama's own `--socket.ssl_certificate`, or a
+   terminator in front of it — and it is worth more than the gateway half. Turning the
+   gateway flag on while this is plaintext buys materially less than it appears to, which
+   is why the gateway's boot posture line says so out loud.
+
+8. Only then revisit Option D, against whatever the hosting shape has become.
 
 ---
 

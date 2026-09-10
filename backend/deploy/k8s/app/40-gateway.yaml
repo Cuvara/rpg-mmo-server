@@ -134,6 +134,31 @@ spec:
                 secretKeyRef:
                   name: rpg-app-secrets
                   key: join-token-secret
+            # Gateway-hop TLS (ADR-23) — OFF, pinned as a literal empty string.
+            #
+            # The gateway hop carries a ONE-HOUR REUSABLE auth token, measured
+            # crossing it in the clear. Both variables set to in-container PEM
+            # paths (mount them from a Secret) makes the gateway terminate TLS
+            # itself; exactly one set is a startup ERROR, never a fall back to
+            # plaintext.
+            #
+            # Pinned here as an empty literal rather than omitted, for the same
+            # reason GAMESERVER_SEALED is a literal "off" in the fleet manifests:
+            # an absent variable is indistinguishable from an unconsidered one,
+            # and this is a security setting.
+            #
+            # It is off because THE UNITY CLIENT CANNOT SPEAK TLS TO THE GATEWAY
+            # YET, and there is no plaintext fallback by design — turning it on
+            # today refuses every player.
+            #
+            # It would not cover the client->Nakama hop either. That hop mints
+            # this token, carries a two-hour reusable Nakama session token, and
+            # is served as plain HTTP by k8s/data/nakama.yaml with no Ingress
+            # and no TLS. It is the higher-value half and it is not fixed here.
+            - name: GATEWAY_TLS_CERT
+              value: ""
+            - name: GATEWAY_TLS_KEY
+              value: ""
             - name: REDIS_ADDR
               valueFrom:
                 configMapKeyRef:

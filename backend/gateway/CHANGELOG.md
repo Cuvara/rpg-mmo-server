@@ -5,6 +5,44 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Gateway-hop TLS, terminated in the gateway process — `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY`
+  (`--tls-cert` / `--tls-key`). OFF by default and pinned explicitly at every deploy path.**
+  ADR-23. The gateway hop carries the client's auth token, and a byte tap measured that token
+  crossing it in the clear with a **one-hour lifetime and no single-use guard** — the most
+  valuable credential on either realtime hop, and one that mints join tokens on demand for its
+  whole hour. `tls.NewListener` wraps the listener returned by `transport.Listen`, so the
+  4-byte-length framing, the codec and every handler below are untouched.
+
+  **Terminated in-process, not at an edge, and that is the decision rather than an
+  implementation detail.** TLS terminated in front of the gateway is confidential *to the
+  terminator* and plaintext from there on; on the single-node k3d dev and staging boxes the
+  terminator and the gateway are the same host, so an edge-terminated deployment there would
+  buy nothing while reporting itself encrypted. An external terminator remains compatible and
+  can be added in front later.
+
+  **No negotiation and no plaintext fallback** (ADR-22 decision 3, unchanged): a listener with a
+  certificate serves TLS only and closes a plaintext client. The gateway already sniffs byte 0
+  to tell JSON from protobuf, so "accept both and sniff" is a natural-looking mistake sitting
+  right there; it is a downgrade attack with a friendly name.
+
+  **Setting exactly one of the two is a startup error**, not a fall back to plaintext — an
+  operator who set one and typo'd the other meant to have TLS, and starting anyway hands them
+  the plaintext listener they were trying to remove. **A certificate on a KCP listener is also
+  refused at startup**: TLS needs a reliable ordered stream, and ignoring the certificate would
+  produce a gateway configured for TLS, serving plaintext, reporting `kcp`.
+
+  **What it does NOT cover, measured the same day:** the client→Nakama meta hop, which MINTS
+  the auth token, is plain HTTP in every environment and also carries a **two-hour reusable
+  Nakama session token**. That hop is the higher-value half and is not addressed here; the boot
+  posture line says so rather than leaving an operator to infer it.
+
+  **It cannot be turned on yet.** The Unity client speaks raw TCP to the gateway; enabling this
+  with the current client refuses every player. `Cuvara/Netcode` needs TLS on the gateway
+  connection (verified in an IL2CPP *player* build, certificate validation ON) and `https://`
+  for Nakama.
+
 ### Changed
 
 - **The gateway no longer derives or returns a session key.** ADR-22 supersedes the derived

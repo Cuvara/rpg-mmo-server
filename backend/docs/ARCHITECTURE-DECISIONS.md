@@ -2985,6 +2985,102 @@ The redacting key type, the no-fallback rule, the shared cross-implementation ve
 
 ---
 
+## ADR-23 — The gateway hop gets TLS, not a second sealed handshake; and the credential it exposes leaks one hop earlier
+
+**Status:** accepted 2026-09-10. **Implemented server-side and behind a flag that defaults off** (`GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY`; unset means plaintext, exactly as `GAMESERVER_SEALED` shipped). The client half is not written — the Unity client speaks raw TCP to the gateway and must learn to speak TLS before the flag can be turned on anywhere.
+
+Follows ADR-22, which sealed the **gameplay** hop and whose decision 8 says the model "does not ship until the gateway hop is also confidential". This ADR is that work, and it changes what "that work" means.
+
+### 1. What was measured, and the measurement that was missing
+
+The 2026-09-10 two-hop tap recorded in `ROADMAP-SECURITY.md` was **reproduced and is correct**. A byte-logging TCP relay was placed on both hops of a fully sealed session and every JWT crossing either hop in the clear was decoded with no key:
+
+| hop | credential | lifetime | single-use | reproduced |
+|---|---|---|---|---|
+| gateway | auth token | 3600 s | no | ✅ |
+| gateway | join token | 30 s | yes | ✅ |
+| gameplay | join token (same `jti`) | 30 s | yes | ✅ |
+
+All four columns now have an executable form. `integration_test/hop_confidentiality_tap_test.go` taps both hops at once and reads the credentials out of the recording; the "single-use" column, which a tap cannot show, is measured by **replaying each captured credential from a fresh connection** — the auth token is accepted twice and mints a fresh join token on the second use; the join token is refused on replay by `JtiTracker`.
+
+**But the tap was pointed at the wrong end of the path.** The auth token does not originate on the gateway hop. It is *minted* one hop earlier, by Nakama's `gateway_token` RPC, and delivered to the client over **plain HTTP**. That hop was never tapped. It has been now, against the live dev stack:
+
+| hop | protocol | credentials readable in the clear |
+|---|---|---|
+| **client → Nakama (meta)** | **HTTP/1.1, no TLS** | **Nakama session token (2 h, reusable, mints gateway auth tokens on demand)**; Nakama refresh token (1 h); **the gateway auth token itself (1 h)**; the Nakama server key, as HTTP Basic |
+| client → gateway | raw TCP + protobuf | gateway auth token (1 h, reusable); join token (30 s) |
+| client → game server | raw TCP + protobuf | join token (30 s) — sent before the seal exists; everything after is ChaCha20-Poly1305 (ADR-22) |
+
+`docker-compose.yml` starts Nakama with no `--socket.ssl_certificate`, `NAKAMA_URL` is `http://` in compose and in the load harness, and `deploy/k8s/data/nakama.yaml` exposes port 7350 with no Ingress and no TLS. There is no environment in which this hop is encrypted today.
+
+**This inverts the conclusion the task was framed on.** Sealing the gateway hop while the meta hop is plaintext is precisely the error `ROADMAP-SECURITY.md` already caught once for the join token: *the same credential crosses an unprotected hop first, so closing the second hop leaves the value it was protecting already spent.* An attacker positioned to read the gateway hop is on the client's network path, and the meta hop is on the same path. Worse, the meta hop carries a **strictly more valuable** credential than the one the whole exercise is about: a two-hour Nakama session token that mints one-hour gateway auth tokens for as long as it lives. Capturing the auth token wins an hour; capturing the session token wins two hours *and* renewal.
+
+**A note on the instrument, because it was wrong first.** The first Nakama capture found no gateway auth token and it would have been easy to report that as good news. The token was there; the response was **gzip-encoded**, and a byte scan for `eyJ...` cannot see through gzip. Compression is not confidentiality — the finding was an artefact of the tap, not a property of the hop — and re-running with `Accept-Encoding` suppressed showed all four credentials. Any future tap on an HTTP hop must account for content coding, and a real Unity client sends `Accept-Encoding: gzip` too.
+
+### 2. Why "reuse the sealed machinery" is more expensive than it looks
+
+The gameplay-hop handshake anchors on the join token's `jti` plus `JOIN_TOKEN_SECRET`: the server proves possession of secret-derived material, and the client is authenticated by the token. **On the gateway hop none of that exists at connect time.** The client holds only its Nakama auth JWT, which is a *client* credential and cannot authenticate the *gateway* to the client. There is no shared secret a shipped player may carry — that is the pre-shared-key mistake ADR-21 records and ADR-22 supersedes.
+
+Three costs that are not visible from "we already have `shared/sealed`":
+
+1. **The Go server half of the sealed handshake does not exist.** `backend/shared/sealed` is a *client* implementation plus primitives. `RunClientHandshake` exists; there is no `RunServerHandshake`, and `ValidateClientHello` is called from nowhere in the repository, not even a test. The only server half ever written is C# (`GameServer/Net/Sealed/SealedHandshakeServer.cs`). Sealing the gateway hop means writing a **new server half of a security protocol, in a language where it has never been written**, and the failure mode of getting it subtly wrong is a session that round-trips perfectly and protects nothing.
+2. **`Transcript` refuses an empty `jti`, and the gateway hop has no `jti`.** A new anchor has to be invented, which means a second transcript shape inside a protocol whose entire safety argument is that both peers agree on one byte layout.
+3. **`messages.Decode` fuses the length prefix and the body decode**, and sealing has to happen between them. The gateway's read path (`connection.go:484`) and write path (`connection.go:535`) both have to be split.
+
+Against that, wrapping the listener in TLS is `tls.NewListener` around the `net.Listener` that `transport.Listen` already returns. **No framing change at all.**
+
+### 3. Options, with what each does not buy
+
+#### Option A — unauthenticated ephemeral X25519 on the gateway hop
+
+Reuse the sealed exchange with no binding, the way `ClientHandshakeConfig` already permits by leaving `JoinTokenSecret` empty (`BindingVerified=false`).
+
+- **Buys:** closes the *passive* capture that was measured on the gateway hop. Composes with anything better later.
+- **Does not buy:** any MITM protection — an active attacker completes one exchange with each side and both ends see a healthy encrypted session. Nothing on the meta hop.
+- **Cost:** items 1–3 above, plus client work.
+- **The hidden cost, and it is the reason to reject rather than defer.** On the gameplay hop `BindingVerified=false` is honest reporting of a *degraded* case: the verified case exists, the load harness runs it, and a shipped client that cannot check is told so. On the gateway hop there would be **no verified case, ever** — the field would report a distinction that does not exist. That permanently installs an unauthenticated mode inside a protocol whose ADR-22 decision 3 is "no negotiation and no fallback", and it converts an honest instrument into a decorative one. A boolean that is always false is worse than no boolean, because the next reader assumes the true case is reachable.
+
+#### Option B — pinned gateway identity key
+
+- **Buys:** real MITM protection on the gateway hop, with no CA.
+- **Does not buy:** anything on the meta hop. Nakama is a third-party binary; no bespoke key of ours goes in front of it.
+- **Cost:** key distribution and rotation, shipped in a built player.
+- **The hidden cost:** pinning makes rotation a client release. A compromised or lost gateway key is then repaired at **app-store review latency — days — not deploy latency**, and until then every installed client either fails closed (an outage) or falls back (a downgrade attack). This is ADR-21's complaint about the pre-shared key reappearing in a new place with a better cipher, and the PSK at least did not require a store submission to fix.
+
+#### Option C — TLS on the gateway hop
+
+- **Buys:** confidentiality *and* authentication with a real CA, no key in the player, standard rotation, a standard implementation (ADR-22 decision 4), and it is the mechanism the gateway's own posture warning has been recommending on every boot since the posture work landed. Uniquely among the options, **the identical mechanism closes the meta hop**, which carries the more valuable credential and where no bespoke protocol is available.
+- **Does not buy:** anything against a malicious *player* — see ADR-22, this is not anti-cheat. Nothing on the gameplay hop, which is already sealed and stays sealed: game servers are Agones-allocated pods reached by ephemeral address, and putting a CA-issued certificate in front of each is a problem TLS does not solve for us.
+- **Cost:** certificates, a DNS name, renewal, and the client must speak TLS. `SslStream` under IL2CPP is **not verified** — it is the go/no-go for this option and it is the same shape of risk that `AesGcm` turned out to be in ADR-22, so it must be tested in a **player build**, not the Editor.
+- **The hidden cost, stated because it is the one that decides where the terminator goes.** TLS *terminated at an edge* is confidential **to the edge, not to the gateway**: everything past the terminator is plaintext on the pod network, so an edge terminator moves the trust boundary rather than removing it. On the single-node k3d dev and staging boxes the terminator and the gateway are the same host, so an edge-terminated deployment there would buy **nothing at all** while reporting itself as encrypted — the "believed protected" state ADR-21 exists to prevent. **This is why the implementation terminates TLS in the gateway process itself** rather than recommending an ingress: it is the only placement whose guarantee does not depend on a hosting shape ADR-15/16 have not settled. An external terminator remains compatible and can be added in front later.
+
+#### Option D — shorten and single-use the auth token instead of hiding it
+
+Reduce `constants.SessionTTL` and give the gateway auth token a `jti` consumed once, mirroring the join token.
+
+- **Buys:** reduces the auth token from "one hour, reusable" to the join token's class on **every hop at once**, including the meta hop, with no protocol change, no client crypto and no ops change.
+- **Does not buy:** confidentiality. User ids, map ids and the flow stay readable. It reduces the value of one captured item; it encrypts nothing.
+- **Cost:** the client must fetch a token per gateway connection, so **every reconnect becomes a Nakama round trip — at exactly the moment the network is bad**. It also converts a Nakama outage from "connected players are fine" into "any reconnect fails", which is a worse availability posture than the one it improves on.
+- **And it misses the worst credential.** `constants.SessionTTL` is the gateway auth token's lifetime *and* the Redis session key TTL (`gateway/session/manager.go:73,117,141`) — two independent meanings on one constant, so shortening it shortens the session record too. Meanwhile the **two-hour Nakama session token** is set by Nakama's own `--session.token_expiry_sec` and is untouched by any of this.
+
+### 4. Decisions
+
+1. **Do not build a second sealed handshake for the gateway hop.** Option A is rejected on the always-false-`BindingVerified` argument above, not merely on cost. Option B is parked; revisit only if TLS is shown impossible on a target platform.
+2. **The gateway hop gets TLS, terminated in the gateway process**, behind `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY`. Unset means plaintext and is the default, matching how `GAMESERVER_SEALED` was rolled out. Every deploy path pins the default explicitly.
+3. **There is no negotiation.** A listener with a certificate configured serves TLS only; it does not accept a plaintext client and does not sniff. ADR-22 decision 3 applies unchanged — a protocol that can be talked down to cleartext will be.
+4. **The meta hop is in scope and is the higher-value half.** It is not fixed by this change and must not be described as fixed by it. It is an ops change — Nakama's own `--socket.ssl_certificate`, or a terminator in front — and it is tracked as the blocking item in `ROADMAP-SECURITY.md`. **Turning the gateway flag on while the meta hop is plaintext buys materially less than it appears to**, and the posture reporting says so at boot rather than leaving it to be inferred.
+5. **`TransportPosture.Authenticated` becomes reachable.** It has been hard-coded `false` with a comment saying so, precisely so that its becoming true is visible in a diff. TLS is the configuration that makes it true, and it is now computed rather than pinned.
+6. **The tap is a committed instrument, not a one-off.** `integration_test/hop_confidentiality_tap_test.go` is the acceptance mechanism for this ADR and for any future claim about what crosses a hop. A green unit suite is not acceptance; the before/after pair from this tap is.
+7. **The Unity client needs two things, in the other repo:** TLS on the gateway connection (`SslStream` or equivalent, verified in an IL2CPP **player build**, with certificate validation *on* — a client that accepts any certificate has Option A's guarantee with Option C's cost), and `https://` for the Nakama base URL. Neither is written.
+
+### What this ADR does not claim
+
+- It does not claim the gateway hop is confidential today. The flag defaults off and no deployment sets it.
+- It does not claim the measured exposure is closed. Two of the three hops remain plaintext in every environment that exists, and the one this ADR addresses cannot be turned on until the client speaks TLS.
+- It does not reduce cheating. See ADR-22 and `ROADMAP-SECURITY.md` §0.
+
+---
+
 ## Summary of decisions
 
 | # | Area | Decision |
@@ -3011,3 +3107,4 @@ The redacting key type, the no-fallback rule, the shared cross-implementation ve
 | 20 | Duplicate-login kick | **Gateway→gameserver eviction over one shared `events:kick` Stream, keyed by join-token jti** (ADR-5 consumer-group ACK, never Pub/Sub). On duplicate login the gateway publishes `session_superseded` with the old session's jti; each game server consumes via its own group (`gs:{server_id}`, created at `$`, destroyed on graceful shutdown), kicks only the connection holding that jti (newest login wins, redelivery idempotent), releases the entity with **no reconnect hold**, and sends the standard `MsgKick`+`MsgDisconnect` pair. One shared stream because server ids churn under a noeviction Redis (ADR-4). Counters: `gateway_kick_publish_total`, `gameserver_players_kicked_total`. The gateway→gateway socket eviction stays with ADR-17 |
 | 21 | Transport confidentiality | **Proposed, not accepted — a record of posture only.** KCP has real AES-256-CFB packet encryption, kcp-go-compatible and symmetric across Go and C# (`KcpCrypto.cs` / `shared/transport/crypto.go`), fail-closed on a wrong key. But it is **off by default twice** — the transport default is `tcp`, which has no encryption path, and the key variable defaults to empty, which means plaintext — and a **pre-shared key is not a session key**: every client shares one static secret that ships in the binary, so it resists a passive observer and not a player. No negotiation, no key id, no rotation without a hard cutover; CFB plus a linear CRC32 is confidentiality, not authentication, and the CRC is not a MAC. Deferred because every current environment is localhost/LAN and the hosting shape above dev is unsettled (ADR-15/16) — choosing an AEAD and a key exchange now means choosing them twice. **Reporting the transport and whether a key is in force does not wait for that decision.** Do not describe this link as "unencrypted"; describe it as unencrypted by default and unauthenticated when on |
 | 22 | Transport crypto | **Accepted 2026-09-10 as the target model; NOT implemented.** ChaCha20-Poly1305 over an **authenticated** X25519 exchange, HKDF-SHA256 derivation, **nonce as the replay counter** (one mechanism removing both replay and nonce reuse). Supersedes #288's `HKDF(JOIN_TOKEN_SECRET, jti)` derivation, which has **no forward secrecy** — obtaining the long-term secret later decrypts every recorded past session. **The DH must prove possession of secret-derived material, not echo the join token**, which an eavesdropper can read and replay; unauthenticated DH on a plaintext hop is a clean MITM that produces confidence rather than security. Measured in a built IL2CPP player: `AesGcm` **compiles then throws**, `ChaCha20Poly1305`/`HKDF`/`ECDiffieHellman` **absent**, only `Aes`/`HMACSHA256`/`RandomNumberGenerator` work; and measured on .NET 10, **X25519 is absent there too** while ChaCha20-Poly1305 and HKDF are built in — so **X25519 must be vendored on two runtimes**, ideally by one pure-C# library serving both. GNS rejected (replaces the transport and deletes the Go loadtest harness), Hazel rejected (no Go, thin crypto). No negotiation, no fallback, standard implementations only, cross-implementation vectors as a deliverable, field 5 reserved not reused. **Library settled: BouncyCastle 2.7.0** — the only candidate supplying X25519; RFC vectors pass in a built IL2CPP player at **both Minimal and High stripping**, at a cost of 4.7 MB and 2 350 types. **Replay: strict counter, no sliding window** — zero inversions in 22 374 frames across both transports under hostile `tc netem`, and chosen because a wrong counter fails loudly while a wrong window accepts a replay silently; three conditions attach, including bounding the forward jump, since the ordering guarantee is inherited from a hand-ported KCP rather than owned. **Does not ship until the gateway hop is confidential** |
+| 23 | Gateway-hop confidentiality | **TLS terminated in the gateway process**, behind `GATEWAY_TLS_CERT`/`GATEWAY_TLS_KEY`, **defaulting off** and pinned explicitly at every deploy site. A second sealed handshake for this hop is **rejected**: the Go server half of the sealed protocol does not exist, the hop has no `jti` to anchor a transcript, and an unauthenticated exchange would make `BindingVerified` a field that is always false. Terminating **in the process, not at an edge**, because an edge terminator is confidential only to the edge and buys nothing on the single-node dev/staging boxes. **The measurement that motivated this was incomplete**: the auth token is minted over a plaintext HTTP hop to Nakama that also carries a 2-hour reusable Nakama session token, so the meta hop is the higher-value half and is NOT fixed here. No negotiation, no plaintext fallback. The client half (TLS on the gateway connection, `https://` for Nakama) is unwritten, so the flag is off everywhere |

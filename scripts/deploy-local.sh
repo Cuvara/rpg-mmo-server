@@ -85,6 +85,15 @@ GAMESERVER_SEALED="${GAMESERVER_SEALED:-off}"
 # GAMESERVER_ADDR is correct.
 export GAMESERVER_ADDR GAMESERVER_MAP_ID GAMESERVER_SEALED
 export REDIS_ADDR REDIS_PASSWORD GAMESERVER_PUBLIC_ADDR
+# Gateway-hop TLS (ADR-23). Same shape and same reason as GAMESERVER_SEALED
+# above: off unless the environment opts in, pinned explicitly so a reader can
+# see it was considered. Both must be set together — the gateway exits 1 on
+# exactly one, rather than starting plaintext.
+#
+# This is a bare-metal path with no container, so these are host paths.
+GATEWAY_TLS_CERT="${GATEWAY_TLS_CERT:-}"
+GATEWAY_TLS_KEY="${GATEWAY_TLS_KEY:-}"
+export GATEWAY_TLS_CERT GATEWAY_TLS_KEY
 # Both binaries refuse to start without JOIN_TOKEN_SECRET, and it must hold the
 # same value on the gateway and every game server. It is deliberately separate
 # from JWT_SECRET: a compromised game server must not be able to forge client

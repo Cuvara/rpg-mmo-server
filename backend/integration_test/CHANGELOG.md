@@ -7,6 +7,30 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`hop_confidentiality_tap_test.go` — a two-hop byte tap, committed as an instrument.**
+  ADR-23. A transparent TCP relay sits in the path of the gateway hop *and* the gameplay hop of
+  one fully sealed session and records every byte in both directions, then reads the bearer
+  credentials out of the recording using no key — exactly what a passive observer on the path
+  can do.
+
+  It exists because the sealed-session tests cannot answer the question that matters. They
+  assert each frame arrived with the sealed marker, which proves the gameplay hop is encrypted;
+  they cannot see a credential leaking on the *other* hop, because they only read one socket.
+
+  Reproduces the 2026-09-10 measurement in `docs/ROADMAP-SECURITY.md`: the auth token is
+  readable on the gateway hop with the shipped `constants.SessionTTL` lifetime, and the
+  *identical* join token — same `jti` — is readable on both hops. The auth token is signed with
+  `constants.SessionTTL` rather than a test-local duration so the lifetime asserted is the one
+  Nakama actually issues.
+
+- **`TestHopConfidentiality_CapturedCredentialReuse`** measures the "single-use" column, which a
+  tap structurally cannot: it replays each captured credential from a fresh connection. The
+  auth token is accepted twice and mints a fresh join token on the second use; the join token is
+  refused on replay by `JtiTracker`. A tap shows a credential is readable, not what it is worth
+  once read.
+
+### Added
+
 - **`sealed_session_e2e_test.go` — end-to-end coverage of the sealed session**, against a
   server spawned with **no `--sealed` argument**, so the new `require` default is what is
   under test rather than the flag:

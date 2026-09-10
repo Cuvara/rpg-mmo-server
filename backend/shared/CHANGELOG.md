@@ -7,6 +7,30 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`transport.PostureTLS` and `TransportPosture.TLS`** — the confidentiality posture now
+  accounts for a listener that terminates TLS itself (ADR-23). `Posture` is unchanged and is
+  now `PostureTLS(..., false)`, pinned by a test so the non-TLS callers cannot drift.
+  `CipherTLS` names the layer rather than a suite, because the suite is negotiated per
+  connection and is not knowable at listen time — a guess in a security field is the failure
+  this type exists to prevent.
+
+### Changed
+
+- **`TransportPosture.Authenticated` is computed instead of hard-coded `false`.** It was pinned
+  with a comment saying its becoming true should be visible in a diff; this is that diff. TLS
+  is the only configuration that makes it true — the KCP path is AES-256-CFB with a CRC32, and
+  a CRC is not a MAC.
+- **`TransportPosture.KeyIgnored()` now tests the cipher, not `!Encrypted`.** Those were the
+  same thing until TLS existed and are not any more: TCP + TLS + `TRANSPORT_KEY` is encrypted
+  *and* the key is still doing nothing. Written the old way it would have quietly started
+  answering "the key is fine" for a misconfiguration, hidden behind an unrelated feature being
+  on. A regression row in `posture_tls_test.go` covers exactly this pair, and was verified to
+  fail against the old expression.
+- **`config.Config` gains `GatewayTLSCert` / `GatewayTLSKey`** (`GATEWAY_TLS_CERT`,
+  `GATEWAY_TLS_KEY`), both defaulting to empty.
+
+### Added
+
 - **`jwt.ParseUnverified`** — decodes a token's claims **without** checking its signature.
   It answers "what does this token say", never "is this token genuine", and the doc comment
   says so at length because every call site is a place a reviewer should look twice.
