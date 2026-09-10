@@ -5,6 +5,34 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`GAMESERVER_SEALED=require ./stack.sh …` was a silent no-op on any box with a
+  CD-written `.env`.** `set -a; . "$ENV_FILE"` *assigns*, so every name the file mentions
+  clobbers whatever the operator put on the command line. Once CD's generator started
+  writing `GAMESERVER_SEALED` into `deploy/.env`, the file's `off` beat the caller's
+  `require`, `make flow-up-sealed` brought up an **unsealed** stack, and nothing said so.
+
+  Measured on this project's own deploy directory, where `.env:17` reads
+  `GAMESERVER_SEALED=off`. With the fix the guard sees `require = require`; without it,
+  `off = require`.
+
+  `stack.sh` now preserves caller-set values for `GAMESERVER_SEALED`, `SMOKE_SEALED` and
+  `SMOKE_ENCODING` across the sourcing. Only those: ports and secrets must keep coming from
+  the file, because they describe the containers that are actually running — verified by
+  checking that a caller's `GATEWAY_ADDR` is still correctly overridden by the file.
+
+  **This is the second independent way that target can silently do nothing.** The first is
+  the WSL/`WSLENV` boundary, which `stack.sh:93` has documented since before today. They are
+  unrelated, so fixing one leaves the other, and both fail by quietly doing the ordinary
+  thing.
+
+### Documentation
+- **Correction: the `WSLENV` note added to the Makefile was not a new finding.** It was
+  already in `stack.sh` — *"WSL only forwards environment variables to a Windows process
+  when they are listed in `$WSLENV`"* — in a file read several times that day. The Makefile
+  placement is still worth having, because a reader of `flow-up-sealed` would not find a
+  note filed under compose project naming, but it was presented as a discovery and was not.
+
 ### Documentation
 - **`make flow-up-sealed` silently does nothing on WSL with Docker Desktop**, and the
   Makefile now says so at the target. The WSL `docker` is `exec docker.exe "$@"`, and the
