@@ -66,11 +66,23 @@ type ClientStats struct {
 	// handle the client had no binding for. Non-zero means client and server
 	// disagreed about interning state; a run that resyncs constantly is
 	// reconstructing far less than its snapshot count suggests.
-	Resyncs        int `json:"resyncs,omitempty"`
-	SnapshotsTotal int `json:"snapshots_total"`
-	KeyframesTotal int `json:"keyframes_total"`
-	DeltasTotal    int `json:"deltas_total"`
-	InputsTotal    int `json:"inputs_total"`
+	Resyncs int `json:"resyncs,omitempty"`
+
+	// SealedPlayers counts players that completed the sealed handshake, and
+	// SealedBindingVerified those that also checked the server's binding.
+	//
+	// Reported ALWAYS, not omitempty, when sealing was requested: "the field is
+	// absent" is the wrong answer to "was this session encrypted", and the gap
+	// between these two numbers is the difference between confidentiality and
+	// authenticity. A harness holding the join-token secret should see them
+	// equal; a shipped client cannot verify at all and would show the second as
+	// zero.
+	SealedPlayers         int `json:"sealed_players"`
+	SealedBindingVerified int `json:"sealed_binding_verified"`
+	SnapshotsTotal        int `json:"snapshots_total"`
+	KeyframesTotal        int `json:"keyframes_total"`
+	DeltasTotal           int `json:"deltas_total"`
+	InputsTotal           int `json:"inputs_total"`
 
 	// HeartbeatsTotal counts MsgPing frames the virtual players answered, on the
 	// game-server socket and on the held gateway socket respectively. They are

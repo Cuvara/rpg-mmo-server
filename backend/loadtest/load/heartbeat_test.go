@@ -82,7 +82,7 @@ func decodeAll(t *testing.T, raw []byte) []messages.Envelope {
 	var out []messages.Envelope
 	r := bufio.NewReader(bytes.NewReader(raw))
 	for {
-		env, _, err := decodeCounted(r)
+		env, _, err := decodeCounted(r, nil)
 		if err == io.EOF {
 			return out
 		}

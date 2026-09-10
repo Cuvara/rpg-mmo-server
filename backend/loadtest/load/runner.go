@@ -190,6 +190,12 @@ func aggregateClients(stats []*PlayerStats, windowSec float64) ClientStats {
 		ack.Merge(s.AckLatency)
 		out.SnapshotsTotal += s.Snapshots
 		out.Resyncs += s.Resyncs
+		if s.SealedBindingVerified {
+			out.SealedBindingVerified++
+		}
+		if s.Sealed {
+			out.SealedPlayers++
+		}
 		out.KeyframesTotal += s.Keyframes
 		out.DeltasTotal += s.Deltas
 		out.InputsTotal += s.Inputs

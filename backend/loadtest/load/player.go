@@ -14,6 +14,7 @@ import (
 
 	"github.com/duycuong/rpg-mmo/shared/jwt"
 	"github.com/duycuong/rpg-mmo/shared/messages"
+	"github.com/duycuong/rpg-mmo/shared/sealed"
 	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
@@ -37,7 +38,16 @@ type PlayerStats struct {
 	Snapshots int
 	// Resyncs counts keyframes this player had to request because a snapshot
 	// referenced an entity handle it had no binding for.
-	Resyncs   int
+	Resyncs int
+
+	// Sealed reports that this player completed the sealed handshake.
+	Sealed bool
+
+	// SealedBindingVerified reports that this player checked the server's
+	// handshake binding — which it can only do because the harness holds the
+	// join-token secret. A shipped client cannot, and reports false.
+	SealedBindingVerified bool
+
 	Keyframes int
 	Deltas    int
 	Inputs    int
@@ -83,6 +93,11 @@ type player struct {
 	gwRead *bufio.Reader
 	gsConn net.Conn
 	gsRead *bufio.Reader
+
+	// Sealed sessions for the GAME-SERVER socket only, installed by the sealed
+	// handshake. Nil until then, and nil for ever on the gateway socket.
+	sealedOut *sealed.Session
+	sealedIn  *sealed.Session
 
 	stats     *PlayerStats
 	measuring *atomic.Bool
@@ -244,7 +259,71 @@ func (p *player) gameServerJoin() error {
 	if !joinResp.OK {
 		return fmt.Errorf("join rejected: %s", joinResp.Error)
 	}
+
+	if p.cfg.Sealed {
+		if err := p.sealSession(conn); err != nil {
+			return fmt.Errorf("sealed handshake: %w", err)
+		}
+	}
 	return nil
+}
+
+// sealSession runs the client half of the sealed handshake and installs the two
+// one-direction sessions. Every failure returns an error and the caller drops
+// the connection: there is no cleartext fallback, by design.
+//
+// The load generator holds the join-token secret because it mints its own
+// tokens, so unlike a shipped client it CAN verify the server's binding — and it
+// does. That makes this harness the only client in the system that currently
+// proves the man-in-the-middle defence end to end.
+func (p *player) sealSession(conn net.Conn) error {
+	// Verified rather than merely parsed: the harness minted this token itself,
+	// so a failure here is a configuration fault worth failing on rather than a
+	// peer's problem.
+	claims, err := jwt.Verify(p.joinToken, p.cfg.JoinTokenSecret)
+	if err != nil {
+		return fmt.Errorf("read jti: %w", err)
+	}
+
+	result, err := sealed.RunClientHandshake(
+		sealed.ClientHandshakeConfig{JTI: claims.Jti, JoinTokenSecret: p.cfg.JoinTokenSecret},
+		func(pub []byte) error {
+			return p.send(conn, mustEnvelope(p.cfg.Encoding, messages.MsgSealedClientHello,
+				messages.SealedClientHello{PublicKey: pub}))
+		},
+		func() ([]byte, []byte, string, error) {
+			env, _, err := decodeCounted(p.gsRead, nil)
+			if err != nil {
+				return nil, nil, "", err
+			}
+			if env.Type != messages.MsgSealedServerHello {
+				return nil, nil, "", fmt.Errorf("want server hello, got type %d", env.Type)
+			}
+			var hello messages.SealedServerHello
+			if err := env.UnmarshalPayload(&hello); err != nil {
+				return nil, nil, "", err
+			}
+			return hello.PublicKey, hello.Binding, hello.Error, nil
+		},
+	)
+	if err != nil {
+		return err
+	}
+
+	p.sealedOut, p.sealedIn = result.Outbound, result.Inbound
+	p.stats.Sealed = true
+	p.stats.SealedBindingVerified = result.BindingVerified
+	return nil
+}
+
+func mustEnvelope(enc messages.Encoding, t messages.MsgType, v any) messages.Envelope {
+	env, err := messages.NewEnvelopeAs(enc, t, v)
+	if err != nil {
+		// Only reachable for a payload type the codec has no encoder for, which
+		// is a programming error rather than a runtime condition.
+		panic(err)
+	}
+	return env
 }
 
 // pendingInput pairs a client input tick with the instant it left the socket.
@@ -339,7 +418,7 @@ func (p *player) readLoop(ctx context.Context, sentCh <-chan pendingInput) error
 		if err := p.gsConn.SetReadDeadline(time.Now().Add(p.cfg.Timeout)); err != nil {
 			return err
 		}
-		env, n, err := decodeCounted(p.gsRead)
+		env, n, err := decodeCounted(p.gsRead, p.sealedIn)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -493,7 +572,7 @@ func (p *player) holdGatewayLoop(ctx context.Context, conn net.Conn, r io.Reader
 		if err := conn.SetReadDeadline(time.Now().Add(p.cfg.Timeout)); err != nil {
 			return
 		}
-		env, _, err := decodeCounted(r)
+		env, _, err := decodeCounted(r, nil)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue // idle gateway socket: nothing to answer, keep waiting
@@ -582,8 +661,30 @@ func (p *player) send(conn net.Conn, env messages.Envelope) error {
 	return err
 }
 
+// encodeFrame seals only on the GAME-SERVER socket. The gateway hop has its own
+// (still-unencrypted) trust model, and sealing it with these keys would be
+// meaningless — the keys are derived from a join token the gateway issues.
+func (p *player) encodeFrame(conn net.Conn, env messages.Envelope) ([]byte, error) {
+	body, err := messages.Encode(env)
+	if err != nil || p.sealedOut == nil || conn != p.gsConn {
+		return body, err
+	}
+	inner, err := messages.EncodeBody(env)
+	if err != nil {
+		return nil, err
+	}
+	frame, err := p.sealedOut.Seal(inner)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 4+len(frame))
+	binary.BigEndian.PutUint32(out[:4], uint32(len(frame)))
+	copy(out[4:], frame)
+	return out, nil
+}
+
 func (p *player) sendCounted(conn net.Conn, env messages.Envelope) (int, error) {
-	data, err := messages.Encode(env)
+	data, err := p.encodeFrame(conn, env)
 	if err != nil {
 		return 0, err
 	}
@@ -597,7 +698,7 @@ func (p *player) sendCounted(conn net.Conn, env messages.Envelope) (int, error) 
 // bytes consumed (4-byte prefix + payload). shared/messages.Decode does the same
 // framing but discards the size, which is exactly what a throughput measurement
 // needs.
-func decodeCounted(r io.Reader) (messages.Envelope, int, error) {
+func decodeCounted(r io.Reader, inbound *sealed.Session) (messages.Envelope, int, error) {
 	var env messages.Envelope
 	var lenBuf [4]byte
 	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
@@ -610,6 +711,17 @@ func decodeCounted(r io.Reader) (messages.Envelope, int, error) {
 	data := make([]byte, length)
 	if _, err := io.ReadFull(r, data); err != nil {
 		return env, 4, err
+	}
+	if inbound != nil {
+		plain, err := inbound.Open(data)
+		if err != nil {
+			// One error for every failure — cleartext where a sealed frame is
+			// required, a forged tag, a replay. The caller kills the session for
+			// all of them, and distinguishing them here would only help an
+			// attacker locate the edge it hit.
+			return env, 4 + int(length), fmt.Errorf("sealed frame rejected: %w", err)
+		}
+		data = plain
 	}
 	env, err := messages.DecodeBody(data)
 	if err != nil {
@@ -633,7 +745,7 @@ func (p *player) roundTrip(conn net.Conn, r io.Reader, reqType messages.MsgType,
 		if err := conn.SetReadDeadline(time.Now().Add(p.cfg.Timeout)); err != nil {
 			return err
 		}
-		resp, _, err := decodeCounted(r)
+		resp, _, err := decodeCounted(r, nil)
 		if err != nil {
 			return fmt.Errorf("recv: %w", err)
 		}

@@ -202,6 +202,15 @@ type Config struct {
 	// measurement: the run still records what the server actually reported.
 	BaselineEntities int
 
+	// Sealed runs the sealed-session handshake on the gameplay hop and encrypts
+	// every frame after it.
+	//
+	// Configured on BOTH ends, never negotiated on the wire: the server has
+	// GAMESERVER_SEALED and this is its counterpart. A wire-negotiated setting
+	// would be a downgrade attack — an attacker strips the offer and both ends
+	// conclude the other could do no better.
+	Sealed bool
+
 	// --- plumbing ---
 	Timeout      time.Duration
 	HoldGateway  bool // keep the gateway socket open for the whole run
@@ -295,6 +304,7 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	fs.IntVar(&cfg.AbusePlayers, "abuse-players", cfg.AbusePlayers, "How many players misbehave, chosen by index (0 = none)")
 	fs.StringVar(&encoding, "encoding", encoding, "Wire encoding: proto (default — what the client speaks, ADR-9) or json (legacy arm)")
 	fs.IntVar(&cfg.BaselineEntities, "baseline-entities", cfg.BaselineEntities, "Entities the server holds with no players (e.g. its enemy spawner); tolerated by the not-empty-at-start validity check")
+	fs.BoolVar(&cfg.Sealed, "sealed", cfg.Sealed, "Run the sealed-session handshake on the gameplay hop and encrypt every frame after it (must match the server's GAMESERVER_SEALED)")
 	fs.DurationVar(&cfg.Timeout, "timeout", cfg.Timeout, "Per-operation network timeout")
 	fs.BoolVar(&cfg.HoldGateway, "hold-gateway", cfg.HoldGateway, "Keep the gateway socket open for the whole run (as a real client does)")
 	fs.StringVar(&cfg.GSMetricsURL, "gameserver-metrics", cfg.GSMetricsURL, "Game server /metrics URL ('' to skip)")
