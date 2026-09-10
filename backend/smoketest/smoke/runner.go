@@ -26,6 +26,12 @@ type Runner struct {
 	out io.Writer
 	hc  *http.Client
 
+	// enc is cfg.Encoding resolved once, at construction, so a typo is a startup
+	// error rather than a silent fall-through to JSON on every frame. Against a
+	// `require` server that fall-through would be refused at the join with
+	// `encoding_cannot_seal` and look like a broken stack rather than a typo.
+	enc messages.Encoding
+
 	sessionToken string // Nakama session token (step b)
 	deviceID     string // device id authenticated with (step b)
 	userID       string // Nakama user id (step c)
@@ -57,7 +63,21 @@ type Runner struct {
 
 // NewRunner builds a Runner for cfg, writing progress to out.
 func NewRunner(cfg Config, out io.Writer) *Runner {
-	return &Runner{cfg: cfg, out: out, hc: &http.Client{Timeout: cfg.Timeout}}
+	return &Runner{cfg: cfg, out: out, hc: &http.Client{Timeout: cfg.Timeout}, enc: encodingFor(cfg.Encoding)}
+}
+
+// encodingFor maps the configured name onto a wire encoding.
+//
+// An unrecognised value is JSON, deliberately and loudly: Validate rejects it
+// before a Runner is built, so reaching this default means the value bypassed
+// validation, and JSON is the encoding that has always been sent. Choosing
+// protobuf here instead would turn a configuration mistake into a silently
+// different wire format.
+func encodingFor(name string) messages.Encoding {
+	if strings.EqualFold(strings.TrimSpace(name), "proto") {
+		return messages.EncodingProto
+	}
+	return messages.EncodingJSON
 }
 
 // skip is returned by a step that could not run for want of configuration. The
@@ -357,7 +377,7 @@ func (r *Runner) stepGameServerFlow() (string, error) {
 	// 5 u/s at 15Hz: N/3). The exact value depends on server config, so the assertion
 	// below only checks "moved forward, and not by a per-message teleport".
 	for i := 0; i < r.cfg.Inputs; i++ {
-		env, err := messages.NewEnvelope(messages.MsgInput, messages.InputMessage{
+		env, err := messages.NewEnvelopeAs(r.enc, messages.MsgInput, messages.InputMessage{
 			Tick:  uint64(i + 1),
 			MoveX: 1.0,
 			MoveY: 0.0,
@@ -431,7 +451,7 @@ drain:
 	// matters on KCP — UDP has no FIN, so without it the server only notices
 	// the client is gone when the reconnect hold expires. KCP flushes on its
 	// 10ms update tick and Close() does not drain, hence the short pause.
-	if env, err := messages.NewEnvelope(messages.MsgDisconnect, struct{}{}); err == nil {
+	if env, err := messages.NewEnvelopeAs(r.enc, messages.MsgDisconnect, struct{}{}); err == nil {
 		_ = r.send(conn, env)
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -566,7 +586,7 @@ func (r *Runner) sealSession(conn net.Conn) error {
 	result, err := sealed.RunClientHandshake(
 		sealed.ClientHandshakeConfig{JTI: claims.Jti},
 		func(pub []byte) error {
-			env, err := messages.NewEnvelope(messages.MsgSealedClientHello,
+			env, err := messages.NewEnvelopeAs(r.enc, messages.MsgSealedClientHello,
 				messages.SealedClientHello{PublicKey: pub})
 			if err != nil {
 				return err
@@ -603,7 +623,7 @@ func (r *Runner) sealSession(conn net.Conn) error {
 // snapshot) are skipped.
 func (r *Runner) roundTrip(conn net.Conn, reqType messages.MsgType, reqPayload any,
 	wantType messages.MsgType, out any) error {
-	env, err := messages.NewEnvelope(reqType, reqPayload)
+	env, err := messages.NewEnvelopeAs(r.enc, reqType, reqPayload)
 	if err != nil {
 		return fmt.Errorf("encode: %w", err)
 	}

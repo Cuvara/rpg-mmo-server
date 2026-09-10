@@ -6,6 +6,37 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`-encoding` / `SMOKE_ENCODING`: the smoke test can send protobuf, so it can check a
+  sealed stack.** Defaults to `json`, so every existing run is byte-identical and CD proves
+  exactly what it proved before.
+
+  **Why this was thought to be hard, and was not.** A `require` game server refused this
+  client at the join with `encoding_cannot_seal`, which was diagnosed — in this changelog,
+  in `ROADMAP-SECURITY.md`, and in a `stack.sh` comment — as "it hand-rolls `encoding/json`
+  with no encoding switch, and that independence is much of its value; protobuf is a
+  decision, not a chore". That was wrong. It calls `messages.NewEnvelope`, and `codec.go`
+  defines that as `NewEnvelopeAs(EncodingJSON, ...)` in the **shared** codec the gateway and
+  the load generator already use. There was no hand-rolled encoder and no independence to
+  lose. Four call sites in `runner.go`.
+
+  Verified live against a `require` server rather than in unit tests: JSON refused
+  (`encoding_cannot_seal`), protobuf + sealing **`SMOKE=PASS`** with
+  `sealed=true binding_verified=false` over 16 snapshots, protobuf without a hello refused
+  (`sealed handshake failed (NoHello)`) — three populations, three distinct reasons in the
+  server's own log.
+
+  `binding_verified=false` is correct and expected: this client receives its join token from
+  the real gateway and so holds no `JOIN_TOKEN_SECRET`. It behaves exactly like a shipped
+  client, which is the point of it.
+
+### Changed
+- **An unrecognised encoding is refused at startup, not defaulted.** Empty is *unset* and
+  maps to JSON — a `Config` built in code leaves it zero — but a non-empty value that is
+  neither `json` nor `proto` is a typo, and those are different things. Silently falling
+  back would be invisible against an `off` server and, against a `require` one, would be
+  refused at the join in a way that reads as a broken stack rather than a misspelt flag.
+
+### Added
 
 - **`SMOKE_SEALED`: the smoke test can speak a sealed session — but the path is UNREACHABLE
   today, and this entry overstated it when it was written.**

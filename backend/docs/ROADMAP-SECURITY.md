@@ -325,20 +325,42 @@ inventing a cipher.
    **What this does not yet buy, stated precisely**, because the sentence this replaces
    said the previous four steps "buy nothing in production" and that is still nearly true:
 
-   - **No environment can be set to `require` yet, and the blocker is not plumbing.**
-     `post-deploy-smoke` and `verify.sh`'s `flow.smoke` both run the Go smoketest against
-     the stack they just deployed — and **the smoketest speaks JSON**, hand-rolled over
-     `encoding/json` with no encoding switch. A JSON client can never carry a sealed frame,
-     so a `require` server refuses it at the join with `encoding_cannot_seal`. Measured
-     live, not inferred: the sealed arm fails with `read server hello: read length: EOF`
-     and the server names the cause in its own log.
+   - **The deploy verifier can now check a sealed stack. This blocker is closed.**
 
-     Stated as the rule this roadmap already contains: **requiring encryption deprecates
-     JSON; the deploy verifier is a JSON client; therefore requiring encryption deprecates
-     the deploy verifier.** No environment variable or source-of-truth scheme reaches this.
-     The prerequisite is a smoketest that speaks protobuf, and that is a **decision, not a
-     chore** — its JSON-ness is much of its value, because it makes it an independent second
-     implementation of the wire rather than a consumer of the server's generated types.
+     It was real: `post-deploy-smoke` and `verify.sh`'s `flow.smoke` both run the Go
+     smoketest against the stack they just deployed, and the smoketest sent JSON, which can
+     never carry a sealed frame — so a `require` server refused it at the join with
+     `encoding_cannot_seal`. Measured live, not inferred: the sealed arm failed with
+     `read server hello: read length: EOF` and the server named the cause in its own log.
+
+     **The diagnosis of WHY was wrong, and the error is worth more than the fix.** This
+     document said the smoketest "hand-rolled `encoding/json` with no encoding switch", that
+     its JSON-ness was "much of its value" as an independent second implementation, and that
+     protobuf was therefore "a decision, not a chore". None of that was true. It calls
+     `messages.NewEnvelope`, which is `NewEnvelopeAs(EncodingJSON, ...)` in
+     `shared/messages` — the same codec the gateway and the load generator use. There was no
+     hand-rolled encoder and no independence to lose. **Two sessions asserted it in writing,
+     one restating the other's words more strongly, and neither opened the file.** The fix
+     was an `-encoding` flag and four call sites.
+
+     Verified live against a `require` server, all three populations, each refused or
+     admitted for a distinct reason in the server's own log:
+
+     | client | result |
+     |---|---|
+     | JSON | refused — `encoding_cannot_seal` |
+     | protobuf, sealing | **`SMOKE=PASS`**, `sealed=true binding_verified=false`, 16 snapshots |
+     | protobuf, no hello | refused — `sealed handshake failed (NoHello)` |
+
+     `binding_verified=false` is the shipped-client state and is reported rather than
+     implied: the smoketest receives its join token from the real gateway, so it holds no
+     `JOIN_TOKEN_SECRET` and cannot verify the server's binding. The load generator, which
+     mints its own tokens, is still the only peer that proves the man-in-the-middle defence.
+
+     **What remains before an environment can be set to `require`** is only the CD
+     generator: it must derive `SMOKE_SEALED=1` *and* `SMOKE_ENCODING=proto` together,
+     because a sealed run must be a protobuf run. `backend/deploy/stack.sh` derives both;
+     `cd.yml` does not yet, and says so at the line.
 
      Every deploy path now pins `off` explicitly — compose and its override, the two Agones
      fleet manifests (**dev runs `DEPLOY_MODE=k8s`, so the compose pin covers none of it**),

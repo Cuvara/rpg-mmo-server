@@ -28,6 +28,24 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `projectCards` field), so a base change needs the REST API.
 
 ### Changed
+- **`stack.sh check` now derives `SMOKE_SEALED` *and* `SMOKE_ENCODING` together** when the
+  stack is sealed, and `make flow-check-sealed` is back. The guard that refused to check a
+  sealed stack has been removed rather than worked around: the smoke test gained an
+  `-encoding` flag, so the reason it could not is gone.
+
+  The two are derived together because they are one decision — **a sealed run must be a
+  protobuf run**, and deriving only `SMOKE_SEALED` reproduces the original
+  `encoding_cannot_seal` failure exactly. The one combination that still cannot work
+  (`SMOKE_SEALED=1` with a non-protobuf encoding) is refused up front; `SMOKE_SEALED=0`
+  still wins, so the refusal can be asserted deliberately.
+
+- **`cd.yml`'s reason for not deriving `SMOKE_SEALED` is corrected in place.** It said the
+  smoketest speaks JSON and the check therefore cannot pass. It can now. What remains is
+  that both variables must be derived together, and that belongs with whoever first sets an
+  environment to `require` — so the comment says that instead of a fact that stopped being
+  true.
+
+### Changed
 
 - **Every deploy path pins `GAMESERVER_SEALED=off`, not just compose.** The game server
   binary now defaults to `require`, so a config site that says nothing takes encryption by
