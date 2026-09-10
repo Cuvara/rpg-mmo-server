@@ -813,14 +813,32 @@ jobs:
           # .env would hand them the plaintext listener they were trying to remove
           # while the environment says otherwise. The gateway binary refuses this
           # too; catching it here fails the DEPLOY instead of CrashLooping the pod.
-          # `tr -d`, matching the sealed normalisation above, so a value pasted into
-          # a GitHub Environment variable with a stray newline still works. Note it
-          # strips INTERNAL whitespace too, while the gateway's own LoadTLSConfig
-          # only trims the ends: a certificate path containing a space would differ
-          # between the two. Container PEM paths do not contain spaces, and matching
-          # the established normalisation is worth more here than the edge case.
-          tls_cert=$(printf '%s' "${GATEWAY_TLS_CERT:-}" | tr -d '[:space:]')
-          tls_key=$(printf '%s' "${GATEWAY_TLS_KEY:-}" | tr -d '[:space:]')
+          # TRIMMED AT THE ENDS ONLY, to match `strings.TrimSpace` in the gateway's
+          # own LoadTLSConfig (server.go). The sealed normalisation above uses
+          # `tr -d '[:space:]'` and is right to: GAMESERVER_SEALED is a KEYWORD, so
+          # internal whitespace is meaningless there. A certificate path is a
+          # different kind of value -- internal whitespace is DATA -- and `tr -d`
+          # would write `/mycerts/c.pem` for an environment that set
+          # `/my certs/c.pem`, handing the binary a path it never asked for.
+          #
+          # It fails closed (the gateway exits 1 rather than starting plaintext),
+          # so this was legibility rather than security. It is fixed anyway: reusing
+          # a keyword normaliser on a path is a check that LOOKS like it matches the
+          # consumer and does not, which is the shape this file has been bitten by
+          # twice already.
+          # sed is line-oriented, so a `sed`-based trim leaves an embedded newline
+          # in place -- and a value pasted into a GitHub Environment variable with a
+          # stray newline is the case that actually happens. Parameter expansion
+          # strips whitespace of every kind from the ends and nothing from within,
+          # which is exactly strings.TrimSpace.
+          trim_ends() {
+            _v=$1
+            while :; do case $_v in [[:space:]]*) _v=${_v#?} ;; *) break ;; esac; done
+            while :; do case $_v in *[[:space:]]) _v=${_v%?} ;; *) break ;; esac; done
+            printf '%s' "$_v"
+          }
+          tls_cert=$(trim_ends "${GATEWAY_TLS_CERT:-}")
+          tls_key=$(trim_ends "${GATEWAY_TLS_KEY:-}")
           if { [ -n "$tls_cert" ] && [ -z "$tls_key" ]; } || { [ -z "$tls_cert" ] && [ -n "$tls_key" ]; }; then
             echo "::error::GATEWAY_TLS_CERT and GATEWAY_TLS_KEY must be set together or not at all." >&2
             echo "         Exactly one is set, which would deploy a PLAINTEXT gateway on an" >&2
