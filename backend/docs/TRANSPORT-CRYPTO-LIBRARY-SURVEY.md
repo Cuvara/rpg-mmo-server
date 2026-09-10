@@ -173,6 +173,28 @@ compile on an overload that does not exist:
   [PASS] BC throws on a tampered tag
 ```
 
+### RESULT — run 2026-09-10, and it passed
+
+Built a Windows IL2CPP player twice and ran both. **Identical output at both stripping levels:**
+
+```
+Minimal stripping                              High stripping + link.xml
+[PASS] ChaCha20-Poly1305 (RFC 8439 s2.8.2)     identical
+[PASS] rejects a tampered tag                  identical
+[PASS] X25519 (RFC 7748 s6.1)                  identical
+[PASS] HKDF-SHA256 (RFC 5869 A.1)              identical
+[PASS] key generation uses a working RNG       identical
+```
+
+The reported Android CIL-Linker failure **did not reproduce** with the `link.xml` below.
+
+**The limit, which this document will not let drift:** that result is **Windows** IL2CPP. The
+report is **Android**. An Android IL2CPP APK builds from this project — proved the same day — but
+there was no device to run it on, so **the Android question is open and merely no longer blocking**.
+Nothing here claims Android is confirmed.
+
+BouncyCastle is therefore adopted, and ADR-22's library question is closed.
+
 ### How to run it
 
 1. Copy `lib/netstandard2.0/BouncyCastle.Cryptography.dll` from the NuGet package into
