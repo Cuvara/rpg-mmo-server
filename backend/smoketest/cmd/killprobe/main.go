@@ -63,6 +63,10 @@ func main() {
 	jwt, userID := gatewayToken(hc, *nakamaURL, sessionToken)
 	say("gateway token ok, user=%s", userID)
 
+	// Read the wallet BEFORE anything happens. A reward is a change, and without
+	// the baseline "10 gold" could equally be yesterday's.
+	walletBefore := wallet(hc, *nakamaURL, sessionToken)
+
 	// ---- gateway: auth + enter world -----------------------------------------
 	serverAddr, joinToken := enterWorld(*gatewayAddr, jwt, *mapID)
 	say("enter world ok, server=%s", serverAddr)
@@ -87,13 +91,13 @@ func main() {
 	// ---- walk to a mob and hit it --------------------------------------------
 	state := messages.NewSnapshotState()
 	var (
-		tick      uint64
-		me        messages.EntitySnapshot
-		targetID  string
-		lastHP    = -1
-		attacks   int
-		haveMe    bool
-		killedMsg string
+		tick            uint64
+		me              messages.EntitySnapshot
+		targetID        string
+		lastHP          = -1
+		attacks         int
+		haveMe          bool
+		lastWalletCheck = time.Now()
 	)
 
 	_ = conn.SetReadDeadline(deadline)
@@ -135,17 +139,33 @@ func main() {
 			continue
 		}
 
-		// Did the thing we were hitting die? "Died" here is the server's word for
-		// it: the entity leaves the world, so it stops being in the state we can
-		// read. HP reaching 0 in the last snapshot that mentions it is the other
-		// half of the evidence.
+		// A mob that disappears from our view has EITHER died OR walked out of the
+		// area of interest, and on this end the two are the same bytes. An early
+		// version of this probe called both a kill and reported "killed after 1
+		// attack, last HP seen 16" -- a full-health mob that had simply wandered
+		// off, with an empty wallet to prove the claim false.
+		//
+		// So disappearing decides nothing: re-target and keep fighting. The WALLET
+		// is the only verdict, and it is checked on a timer below. It cannot be
+		// produced by an entity leaving the AOI.
 		if targetID != "" {
 			if t, ok := state.Get(targetID); ok {
 				lastHP = t.HP
-			} else if attacks > 0 {
-				killedMsg = fmt.Sprintf("mob %s is gone from the world after %d attacks (last HP seen %d)",
-					targetID, attacks, lastHP)
-				break
+			} else {
+				if attacks > 0 {
+					say("%s left our view after %d attacks (last HP seen %d); picking another",
+						targetID, attacks, lastHP)
+				}
+				targetID = ""
+			}
+		}
+
+		// Poll the wallet while still fighting, rather than deciding when to stop.
+		if time.Since(lastWalletCheck) > 2*time.Second {
+			lastWalletCheck = time.Now()
+			if now := wallet(hc, *nakamaURL, sessionToken); !sameWallet(walletBefore, now) {
+				say("REWARDED: wallet %v -> %v after %d attacks", walletBefore, now, attacks)
+				return
 			}
 		}
 
@@ -181,12 +201,60 @@ func main() {
 		}
 	}
 
-	if killedMsg == "" {
-		fail("no kill within the budget (attacks sent: %d, last target HP: %d)", attacks, lastHP)
+	// The fight ran out of budget. Give the batcher a last chance -- it flushes on
+	// a 3s cadence and retries with backoff, so a kill in the final seconds has not
+	// necessarily been paid yet.
+	for i := 0; i < 10; i++ {
+		time.Sleep(2 * time.Second)
+		if now := wallet(hc, *nakamaURL, sessionToken); !sameWallet(walletBefore, now) {
+			say("REWARDED: wallet %v -> %v after %d attacks", walletBefore, now, attacks)
+			return
+		}
 	}
 
-	say("KILL: %s", killedMsg)
-	say("the game server should now flush reward_kills to Nakama within ~3s")
+	fail("no reward within the budget: %d attacks sent, wallet still %v. Either nothing died "+
+		"(mobs leave the area of interest, and this probe cannot tell that from a death) or "+
+		"the reward path is broken — read the game server log for reward_kills.",
+		attacks, walletBefore)
+}
+
+// wallet reads the authenticated account's wallet. It is the only claim in this
+// program that cannot be produced by a mob wandering out of view.
+func wallet(hc *http.Client, nakamaURL, sessionToken string) map[string]float64 {
+	req, _ := http.NewRequest(http.MethodGet, strings.TrimRight(nakamaURL, "/")+"/v2/account", nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	resp, err := hc.Do(req)
+	if err != nil {
+		fail("GET /v2/account: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		fail("GET /v2/account: status %d: %s", resp.StatusCode, raw)
+	}
+	var out struct {
+		Wallet string `json:"wallet"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		fail("decode account: %v", err)
+	}
+	w := map[string]float64{}
+	if out.Wallet != "" {
+		_ = json.Unmarshal([]byte(out.Wallet), &w)
+	}
+	return w
+}
+
+func sameWallet(a, b map[string]float64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 // ---- the flow's HTTP half ---------------------------------------------------
