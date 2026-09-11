@@ -335,7 +335,7 @@ func (r *Runner) stepGameServerFlow() (string, error) {
 		// Immediately after the join reply and before any gameplay frame, which
 		// is where the server runs its half. Any failure aborts the step: there
 		// is no cleartext fallback on either side.
-		if err := r.sealSession(conn); err != nil {
+		if err := r.sealSession(conn, r.joinToken); err != nil {
 			return "", fmt.Errorf("sealed handshake: %w", err)
 		}
 	}
@@ -574,13 +574,18 @@ func (r *Runner) recv(conn net.Conn) (messages.Envelope, error) {
 // against a passive eavesdropper, nothing against an active one — but a run that
 // does not SAY so leaves "the session is encrypted" to be read as "the server is
 // authenticated", which is what ADR-21 exists to stop.
-func (r *Runner) sealSession(conn net.Conn) error {
+func (r *Runner) sealSession(conn net.Conn, joinToken string) error {
 	// The smoke test goes through the REAL gateway, so it receives its join token
 	// rather than minting one and never holds JOIN_TOKEN_SECRET. That makes it
 	// the closest thing in this repo to a shipped client, and it behaves like
 	// one: it reads the jti without verifying (the server verifies the same
 	// token properly), and it cannot check the server's binding.
-	claims, err := jwt.ParseUnverified(r.joinToken)
+	// The token of THIS connection, never r.joinToken. The sealed handshake is bound
+	// to the join token's jti, and a rejoin carries a different token: reading the
+	// runner's field sealed the second connection against the FIRST token's jti, the
+	// server's binding check failed, and the step reported "player never appeared in a
+	// snapshot after rejoin" -- a persistence symptom for an encryption cause.
+	claims, err := jwt.ParseUnverified(joinToken)
 	if err != nil {
 		return fmt.Errorf("read jti from join token: %w", err)
 	}

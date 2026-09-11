@@ -514,6 +514,22 @@ func (r *Runner) stepGameStateReload() (string, error) {
 		return "", fmt.Errorf("reload: join rejected: %s", joinResp.Error)
 	}
 
+	// The REJOIN needs its own sealed handshake. A sealed session is per connection --
+	// it is keyed by a fresh X25519 exchange bound to the join token's jti -- so the
+	// one negotiated in gameserver_join does not carry over to this second socket.
+	//
+	// This step predates sealing and was never taught to do it. Against a `require`
+	// server it therefore joined and was then refused, and the failure surfaced as
+	// "player never appeared in a snapshot after rejoin" -- a persistence symptom for
+	// an encryption cause, which is the most expensive kind of wrong message. Measured
+	// on the k3d-rpg-dev deploy the day sealing was turned on: every other step passed,
+	// including gamestate_player_row, and only the reload failed.
+	if r.cfg.Sealed {
+		if err := r.sealSession(conn, enterResp.JoinToken); err != nil {
+			return "", fmt.Errorf("reload: sealed handshake: %w", err)
+		}
+	}
+
 	// Read snapshots (without sending any input) until our entity shows up.
 	state := messages.NewSnapshotState()
 	deadline := time.Now().Add(r.cfg.Timeout)
