@@ -162,6 +162,47 @@ if [ "$IMPORT_IMAGES" = "1" ]; then
   # does NOT apply to it. Its tag is a Nakama version and its image is built
   # out-of-band, so its stamped revision is whenever the plugin was last built --
   # never this run's commit. Putting it in that loop would refuse every deploy.
+  # Set by nakama_rebuild when it actually rebuilds, so the rollout below knows it
+  # must replace the running pod. The tag never changes, so `kubectl apply` sees no
+  # diff and would leave the OLD plugin running beside a freshly imported image --
+  # which is indistinguishable from a successful deploy, and was.
+  nk_rebuilt=0
+
+  # Rebuilds the Nakama image from THIS commit and re-imports it. This script used
+  # to say it "cannot rebuild the image"; that was a choice, not a limit, and it
+  # cost three weeks of a silently broken economy -- the baked plugin predated the
+  # reward_kills RPC the game server was calling, so every reward returned NotFound
+  # while every deploy stayed green.
+  #
+  # Opt out with NAKAMA_AUTO_REBUILD=0 (a local deploy against a plugin you are
+  # deliberately holding, say). The build is skipped entirely when nothing drifted.
+  nakama_rebuild() {
+    if [ "${NAKAMA_AUTO_REBUILD:-1}" = "0" ]; then
+      echo "NAKAMA_AUTO_REBUILD=0, leaving $NAKAMA_IMAGE as it is"
+      return 0
+    fi
+    local dockerfile="$HERE/../nakama-plugin.Dockerfile"
+    local context="$HERE/../.."
+    if [ ! -f "$dockerfile" ]; then
+      echo "::warning::cannot rebuild $NAKAMA_IMAGE: $dockerfile is missing"
+      return 0
+    fi
+    say "rebuilding $NAKAMA_IMAGE from $(git -C "$HERE" rev-parse --short HEAD)"
+    if docker build -f "$dockerfile" \
+         --build-arg NAKAMA_VERSION="${NAKAMA_IMAGE##*:}" \
+         --build-arg GIT_REVISION="$(git -C "$HERE" rev-parse HEAD)" \
+         --target runtime -t "$NAKAMA_IMAGE" "$context"; then
+      nk_rebuilt=1
+      nk_rev=$(git -C "$HERE" rev-parse HEAD)
+      echo "rebuilt $NAKAMA_IMAGE at revision $nk_rev"
+    else
+      # Not fatal: the old image still runs, and refusing the whole deploy over a
+      # plugin build would be a worse failure than the drift it is fixing. The
+      # annotation is what makes it impossible to miss.
+      echo "::error title=Nakama plugin rebuild failed::$NAKAMA_IMAGE could not be rebuilt; the cluster keeps the OLD plugin"
+    fi
+  }
+
   if [ -n "$NAKAMA_IMAGE" ]; then
     say "import the nakama image into the k3d node"
     if docker image inspect "$NAKAMA_IMAGE" >/dev/null 2>&1; then
@@ -197,7 +238,7 @@ if [ "$IMPORT_IMAGES" = "1" ]; then
             echo "  from this commit. The plugin in the cluster predates the code being deployed."
             echo "  An RPC added since then does not exist in the cluster, and the caller"
             echo "  sees NotFound rather than anything that names this."
-            echo "  Rebuild with: make -C backend/deploy image"
+            nakama_rebuild
           else
             echo "$NAKAMA_IMAGE carries the same nakama/shared trees as this commit"
           fi
@@ -208,9 +249,13 @@ if [ "$IMPORT_IMAGES" = "1" ]; then
           echo "  revision reported was Heroic Labs' own release commit and had nothing to do"
           echo "  with the plugin baked in. That was the state until 2026-08-20. Rebuild:"
           echo "    make -C backend/deploy image      # or docker build --build-arg GIT_REVISION=..."
+          nakama_rebuild
         fi
       else
         echo "WARNING: $NAKAMA_IMAGE carries no revision label; its plugin cannot be audited."
+        # Unauditable is treated as drifted. The alternative is to trust an image
+        # that cannot say what is in it, which is how the stale plugin survived.
+        nakama_rebuild
       fi
       echo "importing $NAKAMA_IMAGE (revision ${nk_rev:-unstamped})"
       docker save "$NAKAMA_IMAGE" | docker exec -i "$K3D_NODE" ctr -n k8s.io images import -
@@ -266,6 +311,12 @@ say "wait for the data tier"
 $K rollout status -n rpg-k8s-data statefulset/postgres-meta --timeout=180s
 $K rollout status -n rpg-k8s-data statefulset/postgres-game --timeout=180s
 $K rollout status -n rpg-k8s-data statefulset/redis         --timeout=180s
+# A rebuilt image reuses the tag, so `apply` above saw no diff and the old pod is
+# still running the old plugin. Replace it explicitly, or the import was pointless.
+if [ "${nk_rebuilt:-0}" = "1" ]; then
+  say "restarting nakama to pick up the rebuilt plugin"
+  $K rollout restart -n rpg-k8s-data deploy/nakama
+fi
 $K rollout status -n rpg-k8s-data deploy/nakama             --timeout=300s
 
 # Read the images the cluster is ALREADY running, before `apply` overwrites the

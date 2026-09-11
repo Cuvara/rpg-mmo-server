@@ -30,6 +30,25 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   The warning stays non-fatal — a deploy that refuses because the plugin is a few commits
   old helps nobody — but it now surfaces on the run summary instead of in scrollback.
 
+### Added
+- **The deploy rebuilds the Nakama plugin image when it has drifted, instead of only saying
+  so.** `dev-up.sh` used to state that it "cannot rebuild the image". That was a choice, not
+  a limit, and the choice is what let a three-week-old plugin sit in the cluster: the image
+  tag is a Nakama *version*, so nothing ever moved it, and no job anywhere rebuilt it.
+
+  On drift — or on an image whose revision label cannot be audited, which is now treated the
+  same way, because trusting an image that cannot say what is in it is how this survived —
+  the deploy rebuilds from the current commit and re-imports.
+
+  It then **restarts the Deployment**, which is the half that is easy to miss: the rebuilt
+  image reuses the tag, so `kubectl apply` sees no diff and the old pod keeps running the
+  old plugin beside a freshly imported image. That state is indistinguishable from a
+  successful deploy, and it is what a rebuild-without-restart would have produced.
+
+  A failed rebuild is loud but not fatal (the cluster keeps the old plugin; refusing the
+  whole deploy over a plugin build is a worse failure than the drift). `NAKAMA_AUTO_REBUILD=0`
+  opts out, for a plugin someone is deliberately holding.
+
 - **`kills_alltime` was writable by clients on `dev`.** The rebuilt plugin refused to boot:
 
   ```
