@@ -5,6 +5,28 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`killprobe` claimed kills it had not made.** It treated "the mob is no longer in my
+  snapshot" as a death. A mob that walks out of the area of interest produces exactly those
+  bytes, and the probe duly reported `killed after 1 attacks (last HP seen 16)` — a
+  full-health mob that had wandered off. The wallet was `{}`, which is what exposed it.
+
+  Disappearance now decides nothing: the probe re-targets and keeps fighting. **The wallet
+  is the verdict** — read once before the fight for a baseline, then polled every two
+  seconds while fighting, because a reward is a *change* and without the baseline "10 gold"
+  could equally be yesterday's. It cannot be produced by an entity leaving the AOI.
+
+  Live run after the change, showing both halves working:
+
+  ```
+  enemy-358 left our view after 9 attacks (last HP seen 8); picking another
+  target enemy-359 at (6.2,-3.2) hp=16/16, me at (3.0,0.5)
+  REWARDED: wallet map[] -> map[gold:10] after 12 attacks
+  ```
+
+  Failure now names both possibilities rather than asserting one: nothing died, or the
+  reward path is broken.
+
 ### Added
 - **`cmd/killprobe` — drives one REAL kill through a deployed stack**, so the reward path
   can be observed rather than inferred. Everything up to the join is the smoketest's own
