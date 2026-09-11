@@ -6,6 +6,29 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`gamestate_reload` failed against a sealed server, and blamed persistence for it.** The
+  step rejoins on a second connection and never sealed it, so a `require` server refused the
+  rejoin and the step reported
+
+  ```
+  reload: player <id> never appeared in a snapshot after rejoin
+  ```
+
+  — a persistence symptom for an encryption cause, which is the most expensive kind of wrong
+  message. Measured on the k3d-rpg-dev deploy the day sealing was turned on: every other
+  step passed, `gamestate_player_row` included, and only the reload failed.
+
+- **`sealSession` sealed against the wrong join token, which is why the first fix did not
+  work.** It read `r.joinToken` — the token from the *original* `EnterWorld` — while the
+  rejoin carries a fresh one. The handshake is bound to the join token's `jti`, so the
+  second connection was sealed against the first token's `jti`, the server's binding check
+  failed, and the symptom was identical to not sealing at all. It now takes the token of the
+  connection it is sealing, passed by each caller.
+
+  Full sealed run against the live deploy after both fixes, `gamestate_reload` included:
+  `SMOKE=PASS`.
+
+### Fixed
 - **`killprobe` claimed kills it had not made.** It treated "the mob is no longer in my
   snapshot" as a death. A mob that walks out of the area of interest produces exactly those
   bytes, and the probe duly reported `killed after 1 attacks (last HP seen 16)` — a
