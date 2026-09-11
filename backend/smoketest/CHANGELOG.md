@@ -29,6 +29,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `SMOKE=PASS`.
 
 ### Fixed
+- **`sealSession`'s doc comment claimed the opposite of what the function does.** It read
+  "the smoke test holds the join-token secret, so unlike a shipped client it VERIFIES the
+  server's binding — which is what makes this a real check of the man-in-the-middle
+  defence". The function body, four lines below, says the reverse and is correct: the
+  smoketest goes through the REAL gateway, receives its join token, never holds
+  `JOIN_TOKEN_SECRET`, and calls `sealed.RunClientHandshake` with
+  `ClientHandshakeConfig{JTI: ...}` and no secret — which is exactly why every sealed run
+  reports `binding_verified=false`. Comment corrected. Nothing about the behaviour changed;
+  what changed is that a reader auditing "does CI prove the MITM defence?" now gets the
+  right answer (it does not — only the load generator, which mints its own tokens, does).
+
 - **`killprobe` claimed kills it had not made.** It treated "the mob is no longer in my
   snapshot" as a death. A mob that walks out of the area of interest produces exactly those
   bytes, and the probe duly reported `killed after 1 attacks (last HP seen 16)` — a

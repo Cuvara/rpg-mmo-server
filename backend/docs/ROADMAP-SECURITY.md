@@ -357,18 +357,65 @@ inventing a cipher.
      `JOIN_TOKEN_SECRET` and cannot verify the server's binding. The load generator, which
      mints its own tokens, is still the only peer that proves the man-in-the-middle defence.
 
-     **What remains before an environment can be set to `require`** is only the CD
-     generator: it must derive `SMOKE_SEALED=1` *and* `SMOKE_ENCODING=proto` together,
-     because a sealed run must be a protobuf run. `backend/deploy/stack.sh` derives both;
-     `cd.yml` does not yet, and says so at the line.
+     **And it cannot simply be handed to a client, which is why this is a residual rather
+     than a configuration gap.** The binding is an HMAC-SHA256 over the transcript under a
+     key derived from `JOIN_TOKEN_SECRET` (`SealedTranscriptSigner`, mirrored by
+     `shared/sealed.NewTranscriptSigner`) — a **symmetric** MAC under the same HS256 secret
+     the gateway *mints join tokens with* (`gateway/transfer/join_token.go`,
+     `shared/config/config.go:86`). A client able to verify a binding is a client able to
+     forge a join token for any player on any server, which is a worse break than the one
+     the binding defends against. So while `binding_verified=false`, a sealed gameplay hop
+     buys **confidentiality against a passive eavesdropper and nothing against an active
+     one** — an attacker who can substitute the server's ephemeral key gets a session both
+     ends believe is protected (`shared/sealed/client.go:23-37`,
+     `SealedHandshakeServer` remarks). The fix is an asymmetric, pinnable server identity
+     key; it is unbuilt, and ADR-23 is where that decision lives.
 
-     Every deploy path now pins `off` explicitly — compose and its override, the two Agones
-     fleet manifests (**dev runs `DEPLOY_MODE=k8s`, so the compose pin covers none of it**),
-     host mode, and the CD `.env` generator, which is the one reviewable place an
-     environment can opt in. So the flip changes the default only for servers started
-     *outside* deployment config: the integration suite, a developer's `dotnet run`,
-     `kcpprobe`. That is exactly the population the new tests cover, and none of the
-     deployed ones.
+     **The CD-generator blocker is closed (2026-09-11).** It read: the generator must derive
+     `SMOKE_SEALED=1` *and* `SMOKE_ENCODING=proto` together, because a sealed run must be a
+     protobuf run. `backend/deploy/stack.sh` derived both; `cd.yml` did not. It now does —
+     `cd.yml` normalises `GAMESERVER_SEALED` once and writes both `SMOKE_` values from the
+     normalised result, on both branches. The paragraph above was stale before this one was
+     written, which is the recurring failure mode of this document: a condition gets met and
+     the sentence naming it does not move.
+
+     **THE REAL BLOCKER WAS ALWAYS THE SHIPPED UNITY CLIENT, AND IT WAS WRITTEN DOWN
+     NOWHERE.** `backend/deploy/k8s/app/50-fleet-map.yaml` carried the comment "flip this
+     when the smoketest speaks protobuf" long after the smoketest spoke protobuf. Measured
+     on the live `k3d-rpg-dev` cluster on 2026-09-11 with `require` in force: the Go
+     smoketest at `-sealed -encoding proto` returned `sealed=true ... SMOKE=PASS`, the same
+     smoketest speaking JSON was correctly refused — and **the real Unity client FAILED**,
+     because it registers the JSON codec and never sets `RequireSealedSession`.
+
+     #### Migration order — the client ships first
+
+     1. A netcode release that registers the **protobuf** codec and sets
+        `NetworkSettings.RequireSealedSession`, pinned in the client repo's
+        `Packages/manifest.json` **and** `packages-lock.json`, shipped in a **built player**.
+     2. Only then `GAMESERVER_SEALED=require` on the fleet, with the matching
+        `VERIFY_SEALED=1` in the verify target, in one change.
+
+     In the other order **every player is refused at the join**. There is no degraded mode
+     and no plaintext fallback by design (decision 3; `SealedPolicy.RefusalFor`), so it is a
+     closed door rather than a slow connection. The symptom, so the next person recognises
+     it instead of debugging the cluster:
+
+     ```
+     [DOTSNet] FATAL: ... gateway closed the connection during the handshake
+     ```
+
+     followed by reconnect attempts that all fail identically. The server names the actual
+     cause in its own log — `encoding_cannot_seal` for a JSON client,
+     `sealed handshake failed (NoHello)` for a protobuf client that never sends the hello —
+     so read the game-server log, not the player's.
+
+     **Current deploy-path state (2026-09-11).** The k8s fleet
+     (`k8s/app/50-fleet-map.yaml`) pins **`require`**, with `VERIFY_SEALED=1` in both
+     `k8s-dev.env` and `k8s-stg.env`; there is no per-environment overlay, so that one
+     literal seals dev *and* staging. Everything else still pins `off` explicitly — compose
+     and its override, the separate `agones/fleet-map-dotnet-dev.yaml` fleet, host mode, and
+     the CD `.env` generator, which remains the one reviewable place a compose/host
+     environment opts in by setting the `GAMESERVER_SEALED` Environment variable.
 
      The local compose file pins `off` for its own reason: the Unity sample scenes that dial
      a live backend are the netcode package's acceptance path, and they gained a
