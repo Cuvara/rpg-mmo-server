@@ -278,12 +278,22 @@ func TestSealedSession_RequireServerAcceptsSealingClient(t *testing.T) {
 // TestSealedSession_RequireServerRefusesJSONClient is the executable form of the
 // claim that requiring encryption deprecates JSON.
 //
-// A JSON client is not served in the clear and is not downgraded: the join is
-// ACCEPTED (the server answers MsgJoinTokenResp, because it must tell the client
-// who it is before it can refuse it for anything else) and then the connection is
-// closed with no further frames. That shape matters operationally -- an operator
-// reading "join accepted" in a client log and concluding the client works is the
-// mistake this test documents.
+// THE SHAPE CHANGED, DELIBERATELY. This test used to assert that the join was
+// ACCEPTED and the connection then closed with no further frames, on the reasoning
+// that the server "must tell the client who it is before it can refuse it for
+// anything else". That reasoning does not hold for THIS refusal: the encoding is
+// known before any identity matters, the client already has its user id from the
+// gateway, and nothing about a JSON client can be fixed by learning it again.
+//
+// What the old shape cost was measured, not argued. Against a live `require`
+// listener a client was answered Ok=true, counted in players_online, reported IN
+// WORLD, and was then closed a few frames later with a bare `broken pipe`. The
+// old comment called that "the mistake this test documents" -- and then pinned the
+// mistake in place. A Unity client's reconnect policy turned it into 21 rejoin
+// cycles naming nothing.
+//
+// So the refusal now rides IN the join reply: Ok=false, Error=encoding_cannot_seal,
+// before the player is counted. An operator reading the client log sees the cause.
 //
 // There is no setting that fixes such a client. The JSON codec has no sealed
 // frame, so the only fix is a client that speaks protobuf.
@@ -346,14 +356,21 @@ func TestSealedSession_RequireServerRefusesJSONClient(t *testing.T) {
 	if err := joinRespEnv.UnmarshalPayload(&joinResp); err != nil {
 		t.Fatalf("unmarshal join response: %v", err)
 	}
-	if !joinResp.OK {
-		t.Fatalf("join was rejected outright: %q -- this test asserts the harder shape, "+
-			"where the join succeeds and the refusal comes after", joinResp.Error)
+	// The refusal rides in the join reply itself, and it NAMES ITSELF. An operator
+	// reading a client log must be able to tell this apart from a network fault
+	// without reading the server's source.
+	if joinResp.OK {
+		t.Fatal("join was accepted for a JSON client on a require server: the refusal " +
+			"must ride in the join reply, or the client believes it is playing")
+	}
+	if joinResp.Error != "encoding_cannot_seal" {
+		t.Fatalf("join refused with %q, want %q -- an unattributable refusal is the "+
+			"failure this test exists to prevent", joinResp.Error, "encoding_cannot_seal")
 	}
 
-	// The refusal: the next read ends the stream. Anything else -- a snapshot, a
-	// cleartext frame of any kind -- means the server served a client that cannot
-	// encrypt, which is the failure the `require` default exists to prevent.
+	// And nothing follows it. A snapshot, or any other frame, would mean the server
+	// served a client that cannot encrypt -- the failure the `require` default exists
+	// to prevent.
 	env, err := gs.Receive()
 	if err == nil {
 		t.Fatalf("server sent a type-%d frame to a JSON client on a require server; "+
@@ -365,7 +382,7 @@ func TestSealedSession_RequireServerRefusesJSONClient(t *testing.T) {
 		// leaving a client hanging rather than refused.
 		t.Fatalf("want EOF (connection closed), got %v", err)
 	}
-	t.Log("PASS: JSON client joined, then was closed rather than served in the clear")
+	t.Log("PASS: JSON client refused in the join reply, naming the encoding")
 }
 
 // TestSealedSession_RequireServerRefusesNonSealingProtoClient covers the rollout
@@ -373,8 +390,22 @@ func TestSealedSession_RequireServerRefusesJSONClient(t *testing.T) {
 // simply has not shipped the sealed handshake yet. That is every existing client
 // on the day the default flips, so its failure mode is worth pinning.
 //
-// It must not be served in the clear. The server waits for a ClientHello and closes
-// at the handshake deadline.
+// It must not be served in the clear. The server waits for a ClientHello and, at the
+// handshake deadline, KICKS with a reason before closing.
+//
+// The kick is new and it reverses an earlier decision, so the reasoning belongs here
+// rather than in a commit nobody will read. This refusal cannot ride in the join
+// reply the way the JSON one now does: the client will not run the key exchange
+// until it knows the join was accepted, so by the time the server knows there is no
+// hello coming, the client already believes it is in the world. Closing silently
+// leaves that belief intact -- measured, a Unity client's reconnect policy rejoined
+// and was closed 21 times in a row, with nothing on either side naming encryption.
+// DisconnectCause.Kicked maps to ReconnectDecision.Never in that policy, so one kick
+// ends it.
+//
+// The kick frame is cleartext, and that is correct HERE AND ONLY HERE: no sealed
+// session was ever established, so there is nothing to downgrade, and the reason is
+// a fixed string that tells an eavesdropper only what the refusal already told them.
 func TestSealedSession_RequireServerRefusesNonSealingProtoClient(t *testing.T) {
 	requireDotnet(t)
 
@@ -388,12 +419,32 @@ func TestSealedSession_RequireServerRefusesNonSealingProtoClient(t *testing.T) {
 		// A write may also fail once the peer has gone, which is the same refusal.
 		t.Logf("input write failed (peer already closed): %v", err)
 	}
-	if env, _, err := gs.recv(5 * time.Second); err == nil {
-		t.Fatalf("server sent a type-%d frame to a client that never sealed", env.Type)
-	} else if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-		t.Fatalf("want EOF (connection closed at the handshake deadline), got %v", err)
+	// Exactly one frame is allowed here, and it must be the kick that names the
+	// cause. A snapshot -- or anything else -- would mean the server served a client
+	// that never sealed.
+	env, _, err := gs.recv(5 * time.Second)
+	if err != nil {
+		t.Fatalf("want a Kick naming the refusal, got %v -- a silent close is what "+
+			"turned this into a 21-cycle rejoin loop", err)
 	}
-	t.Log("PASS: non-sealing protobuf client was closed, not served in the clear")
+	if env.Type != messages.MsgKick {
+		t.Fatalf("server sent a type-%d frame to a client that never sealed; want a Kick", env.Type)
+	}
+	var kick messages.KickMessage
+	if err := env.UnmarshalPayload(&kick); err != nil {
+		t.Fatalf("unmarshal kick: %v", err)
+	}
+	if kick.Reason != "no_sealed_session" {
+		t.Fatalf("kick reason %q, want %q", kick.Reason, "no_sealed_session")
+	}
+
+	// And then the connection ends. The kick is a refusal, not a warning.
+	if next, _, err := gs.recv(5 * time.Second); err == nil {
+		t.Fatalf("server sent a type-%d frame after the kick", next.Type)
+	} else if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("want EOF after the kick, got %v", err)
+	}
+	t.Log("PASS: non-sealing protobuf client was kicked with a reason, then closed")
 }
 
 func mustProto(t *testing.T, typ messages.MsgType, payload any) messages.Envelope {

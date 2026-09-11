@@ -1341,6 +1341,35 @@ public sealed class GameServerHost : IAsyncDisposable
             // an unauthenticated peer with the server's simulation configuration would be
             // giving away tuning data for nothing. Absent means 0, which the schema
             // defines as "refuse to predict" — the correct answer to a failed join.
+            // An encoding that cannot seal is decided HERE, in the join reply, not after
+            // it. The answer needs no handshake -- a JSON client can never carry a sealed
+            // frame -- so there is nothing to wait for, and telling the client in its own
+            // join reply is the difference between "rejected: encoding_cannot_seal" and a
+            // socket that closes for no stated reason a few frames later.
+            //
+            // Measured before this change, against a `require` listener: the client was
+            // told Ok=true, counted as online, reported IN WORLD, and was then closed on
+            // its fifth input with a bare `broken pipe`. The Unity client's reconnect
+            // policy then rejoined and was closed again, 21 times, naming nothing.
+            if (_options.SealedTransport == Net.Sealed.SealedRequirement.Required
+                && conn.Encoding != WireEncoding.Proto)
+            {
+                _logger.LogWarning(
+                    "Refusing {UserId} at the join: encryption is required and this client's " +
+                    "encoding cannot seal ({Reason})",
+                    userId, Net.Sealed.SealedRefusalReason.EncodingCannotSeal);
+
+                var refusal = WireProtocol.NewEnvelope(MsgType.JoinTokenResp,
+                    new JoinTokenResponse
+                    {
+                        Ok = false,
+                        Error = Net.Sealed.SealedRefusalReason.EncodingCannotSeal,
+                    },
+                    conn.Encoding);
+                await conn.WriteOneAsync(refusal);
+                return;
+            }
+
             var resp = WireProtocol.NewEnvelope(MsgType.JoinTokenResp,
                 new JoinTokenResponse
             {
@@ -1378,12 +1407,63 @@ public sealed class GameServerHost : IAsyncDisposable
                     return;
                 }
 
-                var outcome = await Net.Sealed.SealedHandshakeServer.RunAsync(
-                    conn, _options.JoinTokenSecret, claims.Jti, _logger, handshakeToken);
+                Net.Sealed.SealedHandshakeServer.Outcome outcome;
+                try
+                {
+                    outcome = await Net.Sealed.SealedHandshakeServer.RunAsync(
+                        conn, _options.JoinTokenSecret, claims.Jti, _logger, handshakeToken);
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    // The handshake deadline expired while the read was parked on a silent
+                    // peer. That is the COMMONEST refusal in practice -- it is what a
+                    // client with sealing switched off looks like -- and it used to escape
+                    // as an exception, past the refusal branch below, to the handler's
+                    // catch-all. The peer was closed with nothing said.
+                    //
+                    // The guard is on `ct`, not on the linked token: both are cancelled on
+                    // host shutdown, and a server that is stopping should close quietly
+                    // rather than accuse the player of anything.
+                    outcome = Net.Sealed.SealedHandshakeServer.Outcome.NoHello;
+                }
+
                 if (outcome != Net.Sealed.SealedHandshakeServer.Outcome.Ok)
                 {
                     _logger.LogWarning(
                         "Refusing {UserId}: sealed handshake failed ({Outcome})", userId, outcome);
+
+                    // SAY SO before closing. This path cannot be decided in the join reply
+                    // -- the client must know the join was accepted before it will run the
+                    // key exchange -- so by the time we know, the client already believes
+                    // it is in the world. Closing silently makes that belief permanent:
+                    // the client sees PeerClosed, the reconnect policy rejoins, and it
+                    // loops. Measured at 21 rejoin cycles for one Unity client, with
+                    // nothing in any log naming encryption.
+                    //
+                    // A kick is the one signal that stops it: DisconnectCause.Kicked maps
+                    // to ReconnectDecision.Never in the client's policy, so the player is
+                    // told why once instead of being bounced forever. The frame is
+                    // cleartext, which is correct here and only here -- no sealed session
+                    // was ever established, there is nothing to downgrade, and the reason
+                    // string carries no secret.
+                    try
+                    {
+                        var kick = WireProtocol.NewEnvelope(MsgType.Kick,
+                            new RpgMmo.Wire.V1.KickMessage
+                            {
+                                Reason = Net.Sealed.SealedRefusalReason.NoSealedSession,
+                            },
+                            conn.Encoding);
+                        await conn.WriteOneAsync(kick);
+                    }
+                    catch (Exception kickEx)
+                    {
+                        // A peer that has already gone is the normal case here, not a
+                        // fault: the refusal stands either way.
+                        _logger.LogDebug(kickEx,
+                            "could not tell {UserId} why the sealed handshake refusal happened", userId);
+                    }
+
                     return;
                 }
             }
