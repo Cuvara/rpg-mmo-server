@@ -46,6 +46,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
   The middle row is the real Unity client, not a test double.
 
+  **This reverses a documented decision, so the reversal is documented too.**
+  `TestSealedSession_RequireServerRefusesJSONClient` asserted the old shape on the
+  reasoning that the server "must tell the client who it is before it can refuse it for
+  anything else". That does not hold for this refusal: the encoding is known before any
+  identity matters, and the client already has its user id from the gateway. The same test
+  called the accept-then-close shape "the mistake this test documents" — and then pinned
+  the mistake in place. Both integration tests now assert the named refusal and carry the
+  reasoning for the change rather than only its result.
+
 ### Added
 - **The IL2CPP TLS probe has been RUN, and the answer is GO on Windows.** A real Windows
   IL2CPP player, Unity `6000.3.9f1`, at **both** `Minimal` and `High` stripping, passes all
