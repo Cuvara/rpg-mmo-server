@@ -5,6 +5,82 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **The k8s gameplay hop is sealed: `GAMESERVER_SEALED` moves `off` -> `require` in
+  `k8s/app/50-fleet-map.yaml`, and `VERIFY_SEALED` moves `0` -> `1` in
+  `k8s/verify/targets/k8s-dev.env` and `k8s-stg.env`.** ADR-22 sealed sessions
+  (ChaCha20-Poly1305 over an authenticated X25519 exchange, HKDF-SHA256, the sequence
+  doubling as the replay counter) are implemented on all three sides and the game-server
+  binary has defaulted to `require` since 2026-09-10; every deployed environment pinned it
+  `off`. This flips the k8s fleet.
+
+  **THIS CHANGE HAS A MERGE ORDER, AND IT IS NOT OPTIONAL.**
+
+  1. The Unity client ships first — a netcode release that registers the **protobuf** codec
+     and sets `NetworkSettings.RequireSealedSession`, pinned in the client's
+     `Packages/manifest.json` **and** `packages-lock.json`, in a **built player**. It is not
+     a deployment variable and it cannot be turned on from this repo.
+  2. Only then does this change merge and deploy.
+
+  Done in the other order, **every player is refused at the join**. There is no degraded
+  mode and no plaintext fallback by design (ADR-22 decision 3, `SealedPolicy.RefusalFor`),
+  so the outcome is a closed door, not a slow connection. **What it looks like, so the next
+  person recognises it instead of debugging the cluster:**
+
+  ```
+  [DOTSNet] FATAL: ... gateway closed the connection during the handshake
+  ```
+
+  followed by reconnect attempts that all fail the same way. Server-side the cause is named
+  properly, and that is the log to read: a JSON client is refused with
+  `encoding_cannot_seal`, a protobuf client that never sends the hello with
+  `sealed handshake failed (NoHello)`. **The revert is this one manifest value plus the two
+  target files, together** — flipping the manifest back without the targets, or the reverse,
+  is a red deploy on a healthy stack.
+
+  **Why the old comment was wrong.** The line said "flip this when the smoketest speaks
+  protobuf". The smoketest has spoken protobuf since `-encoding proto` landed
+  (`backend/smoketest/smoke/helpers.go`), and both deploy paths derive `SMOKE_SEALED=1` with
+  `SMOKE_ENCODING=proto` together (`cd.yml` .env generator, `backend/deploy/stack.sh`). So
+  the stated condition was already met while the real blocker — the shipped client — was
+  written down nowhere.
+
+  **Measured on the live `k3d-rpg-dev` cluster, 2026-09-11, with `require` in force:**
+
+  | client | result |
+  |---|---|
+  | Go smoketest `-sealed -encoding proto` | `sealed=true ... SMOKE=PASS` |
+  | Go smoketest, JSON, same server | refused, correctly |
+  | the real Unity client | **FAILED** — registers the JSON codec, never sets `RequireSealedSession` |
+
+  **Blast radius: dev AND staging.** There is no per-environment overlay — dev and staging
+  apply the same `k8s/app/*.yaml` into the same namespaces on different clusters, selected
+  by `vars.KUBE_CONTEXT` / `vars.K8S_VERIFY_TARGET`. One literal seals both, which is why
+  `k8s-stg.env` is flipped here too. Production is untouched: it is not a `k8s`-mode
+  environment (there is no third verify target, and `dev-up.sh` hardcodes the
+  `rpg-k8s-*` namespaces, so a second k8s environment would need its own cluster).
+
+  **The compose/host paths need no change in this repo.** `docker-compose.yml`,
+  `docker-compose.override.yml` and `scripts/deploy-local.sh` all read
+  `${GAMESERVER_SEALED:-off}`, and `cd.yml` normalises the same variable and derives both
+  `SMOKE_` values from it. An environment on `DEPLOY_MODE=host` or `containers` opts in by
+  setting the `GAMESERVER_SEALED` **GitHub Environment variable** to `require` — one
+  reviewable place, no code change — and the same client precondition applies to it.
+
+  **What sealing buys while `binding_verified=false`, stated so it is not overstated.** The
+  passing smoke run reported `sealed=true binding_verified=false`. That is the shipped-client
+  state, not a defect: the server always signs a binding over a transcript covering both
+  ephemeral public keys (`SealedHandshakeServer.RunAsync`), but verifying it needs
+  `JOIN_TOKEN_SECRET` — the HS256 key the gateway **mints join tokens with**
+  (`gateway/transfer/join_token.go`, `shared/config/config.go:86`). A client holding it could
+  forge a join token for any player on any server, a strictly worse break than the one the
+  binding defends against, so no shipped client may carry it. **The hop therefore gets
+  confidentiality against a passive eavesdropper and nothing against an active one**
+  (`shared/sealed/client.go:23-37`). Only the load generator, which mints its own tokens,
+  currently proves the man-in-the-middle defence. Do not let "the gameplay hop is encrypted"
+  be read as "the game server is authenticated"; the fix is the pinned identity key, which
+  is unbuilt (ADR-23).
+
 ### Fixed
 - **The stale-plugin warning is now a `::warning::` annotation, because the plain one was
   invisible and it cost the entire economy.** `dev-up.sh` has warned about Nakama plugin

@@ -68,10 +68,14 @@ check_flow_smoke() {
   # `-encoding proto` for exactly this reason, so getting it wrong here is a
   # startup error rather than a confusing mid-run failure.
   #
-  # Unset means unsealed, which is what every environment is today. This must
-  # match the fleet manifests' GAMESERVER_SEALED for the environment being
-  # verified, and a mismatch is a REAL failure: the server refusing a client it
-  # is configured to refuse is the check working.
+  # Unset means unsealed. That is NO LONGER what every environment is: as of
+  # 2026-09-11 the k8s targets (k8s-dev.env, k8s-stg.env) default VERIFY_SEALED
+  # to 1, matching GAMESERVER_SEALED=require in backend/deploy/k8s/app/50-fleet-map.yaml.
+  # The dev-agones target still defaults to unset/0, matching the separate
+  # agones/fleet-map-dotnet-dev.yaml fleet, which stays "off". This must match
+  # the fleet manifest's GAMESERVER_SEALED for the environment being verified,
+  # and a mismatch is a REAL failure: the server refusing a client it is
+  # configured to refuse is the check working.
   local sealed_mode="plaintext gameplay hop"
   if [ "${VERIFY_SEALED:-0}" != "0" ]; then
     args+=(--sealed --encoding proto)
