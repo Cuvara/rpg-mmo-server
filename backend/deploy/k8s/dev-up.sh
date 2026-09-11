@@ -185,8 +185,18 @@ if [ "$IMPORT_IMAGES" = "1" ]; then
             [ -n "$a" ] && [ "$a" != "$b" ] && nk_drift="$nk_drift $path"
           done
           if [ -n "$nk_drift" ]; then
+            # ::warning:: so GitHub surfaces it on the run summary. A plain echo
+            # scrolls past in a green deploy, and this one did: on 2026-09-10 CD
+            # printed exactly this text, the deploy went green, and the plugin in
+            # the cluster was three weeks old -- old enough to be missing the
+            # `reward_kills` RPC the game server had been calling since #233, so
+            # EVERY kill reward failed with "RPC function not found". Nobody read
+            # the line, because nothing made it worth reading.
+            echo "::warning title=Nakama plugin is stale::$NAKAMA_IMAGE was built from ${nk_rev}; $nk_drift differ(s) from this commit. Rebuild: make -C backend/deploy image"
             echo "WARNING: $NAKAMA_IMAGE was built from ${nk_rev}, whose$nk_drift differ(s)"
             echo "  from this commit. The plugin in the cluster predates the code being deployed."
+            echo "  An RPC added since then does not exist in the cluster, and the caller"
+            echo "  sees NotFound rather than anything that names this."
             echo "  Rebuild with: make -C backend/deploy image"
           else
             echo "$NAKAMA_IMAGE carries the same nakama/shared trees as this commit"

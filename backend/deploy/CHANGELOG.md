@@ -6,6 +6,46 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **The stale-plugin warning is now a `::warning::` annotation, because the plain one was
+  invisible and it cost the entire economy.** `dev-up.sh` has warned about Nakama plugin
+  drift for weeks. On 2026-09-10 CD printed exactly that line, the deploy went green, and
+  nobody read it:
+
+  ```
+  WARNING: rpg-mmo/nakama:3.40.0 was built from 768ca78…, whose backend/nakama backend/shared
+    differ(s) from this commit. The plugin in the cluster predates the code being deployed.
+  ```
+
+  The consequence was not cosmetic. The image tag is a **Nakama version**, so it never
+  moves; the `nakama.so` inside it was built **2026-08-20** and predates the batched
+  `reward_kills` RPC (#233/#274). The game server had been calling it ever since, and every
+  call came back `NotFound code=5 {"error":"RPC function not found"}`. Measured on live
+  `k3d-rpg-dev`: `reward_kill` and `submit_kill` answered 400, `reward_kills` answered
+  **404**.
+
+  So the reward path was broken in three layers, each hiding the next: the Fleet never
+  passed `NAKAMA_URL` (fixed in #315, and the server simply issued no RPC); then the RPC
+  reached Nakama and did not exist; and the rebuilt plugin then refused to start at all.
+
+  The warning stays non-fatal — a deploy that refuses because the plugin is a few commits
+  old helps nobody — but it now surfaces on the run summary instead of in scrollback.
+
+- **`kills_alltime` was writable by clients on `dev`.** The rebuilt plugin refused to boot:
+
+  ```
+  setup leaderboards: leaderboard kills_alltime exists with authoritative=false,
+  so clients can write their own scores
+  ```
+
+  That refusal is the feature — it is how a leaderboard created before the check became
+  visible. Fixed with the documented `UPDATE leaderboard SET authoritative = true`, which
+  keeps existing records; Nakama then started and `reward_kills` answered 400 instead of
+  404.
+
+  Anything deployed from a Nakama DB older than that check should be audited the same way:
+  `SELECT id, authoritative FROM leaderboard;`
+
+### Fixed
 - **The k8s Fleet never told the game server where Nakama was, so no reward RPC has ever
   been issued from it.** The C# server reads `NAKAMA_URL`; absent, it logs
   `Nakama: disabled (NAKAMA_URL unset)` and issues nothing. The Fleet passed no `NAKAMA_*`
