@@ -6,6 +6,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **A listener that requires sealing now says WHY it refuses.** Both refusal paths were
+  silent, and the silence was worse than the refusal: measured against a live `require`
+  listener, a client was answered `Ok=true`, counted in `players_online`, reported IN WORLD,
+  and was then closed on its fifth input with a bare `broken pipe`. A Unity client's
+  reconnect policy rejoined and was closed again — **21 cycles** — with nothing on either
+  side naming encryption. It presents as a flaky network, not as a configuration mismatch.
+
+  Two changes, refused at deliberately different moments:
+
+  **An encoding that cannot seal is decided in the join reply.** No handshake can change
+  that answer — a JSON frame has no room for the sealed layout — so there is nothing to
+  wait for, and the client is told `JoinTokenResponse{Ok=false, Error="encoding_cannot_seal"}`
+  before the player is counted. Measured after: `join rejected: encoding_cannot_seal` at
+  **4 ms**, against a `broken pipe` at 400 ms before.
+
+  **A missing handshake is answered with a kick carrying the reason.** This one cannot be
+  decided earlier: the client will not run the key exchange until it knows the join was
+  accepted, so by the time the server knows, the client already believes it is in the world.
+  `DisconnectCause.Kicked` maps to `ReconnectDecision.Never` in the client's policy, so the
+  player is told once instead of being bounced forever. The kick frame is cleartext, which
+  is correct here and only here: no sealed session was ever established, there is nothing to
+  downgrade, and the reason string carries no secret.
+
+  The commonest case of that second path was escaping entirely. When the handshake deadline
+  expired on a silent peer, `ReadOneAsync` threw `OperationCanceledException`, which flew
+  past the refusal branch to the handler's catch-all — so the refusal code never ran. It is
+  now caught and routed into the refusal, guarded on the HOST token rather than the linked
+  one: a server that is stopping closes quietly rather than accusing the player of anything.
+
+  Verified on the deployed k3d-rpg-dev fleet with the built image, three ways:
+
+  | client | before | after |
+  |---|---|---|
+  | JSON | `broken pipe` at 400 ms | **`join rejected: encoding_cannot_seal`** at 4 ms |
+  | protobuf, unsealed | `PeerClosed`, 21 rejoin cycles | **`Kicked (no_sealed_session)`**, 0 rejoins |
+  | protobuf, sealed | `SMOKE=PASS` | `SMOKE=PASS` (unchanged — the positive control) |
+
+  The middle row is the real Unity client, not a test double.
+
 ### Added
 - **The IL2CPP TLS probe has been RUN, and the answer is GO on Windows.** A real Windows
   IL2CPP player, Unity `6000.3.9f1`, at **both** `Minimal` and `High` stripping, passes all
