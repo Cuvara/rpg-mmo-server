@@ -6,6 +6,30 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`cmd/killprobe` — drives one REAL kill through a deployed stack**, so the reward path
+  can be observed rather than inferred. Everything up to the join is the smoketest's own
+  flow (device auth, `gateway_token`, `MsgAuth` + `MsgEnterWorld`, `MsgJoinToken`); what it
+  adds is the part no harness had — it walks to a mob and hits it until the mob leaves the
+  world, which is what makes `KillRewardBatcher` flush `reward_kills` to Nakama.
+
+  It answers `MsgPing`. Without that the server drops the connection mid-fight on a
+  heartbeat timeout, which arrives as a bare `EOF` and reads like the game server crashed;
+  the first run killed fast enough not to notice and the second did not.
+
+  First live run on `k3d-rpg-dev` found the reward path broken two layers deeper than the
+  wiring fixed alongside it — see `backend/deploy/CHANGELOG.md`. Proven afterwards from
+  Nakama's own database:
+
+  | user | what it did | wallet | `kills_alltime` |
+  |---|---|---|---|
+  | `bd63b16a` | killed a mob | `{"gold": 10}` | 1 |
+  | `6e1f43a8` | killed a mob; its batch retried across a Nakama restart | `{"gold": 10}` | 1 |
+  | `de119f3d` | dropped on a heartbeat timeout before killing anything | `{}` | absent |
+
+  The third row is the control: no kill, no reward. The second is exactly-once batching
+  surviving a restart, which is the behaviour #274 claims and had never demonstrated.
+
+### Added
 - **`TestNoJSONDefaultingEnvelopeConstructor` — a source scan, so there is no sixth site.**
   `send-budget`'s design, taken verbatim from #303. It reads the package's non-test sources
   and fails naming file and line if any `messages.NewEnvelope(` survives.
