@@ -6,6 +6,41 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **The k8s Fleet never told the game server where Nakama was, so no reward RPC has ever
+  been issued from it.** The C# server reads `NAKAMA_URL`; absent, it logs
+  `Nakama: disabled (NAKAMA_URL unset)` and issues nothing. The Fleet passed no `NAKAMA_*`
+  variable at all — and carried no comment saying so, unlike `GAMESERVER_SEALED` beside it,
+  which pins itself off with a paragraph of reasoning. Compose has always passed
+  `NAKAMA_URL` (`docker-compose.yml:432`), so the gap was k8s-only and invisible to
+  everything that runs under compose. `dev` runs `DEPLOY_MODE=k8s`. The exactly-once kill
+  rewards merged in #274 had therefore never executed on the environment that deploys.
+
+  The Fleet now takes `NAKAMA_URL` from `gameserver-config` and `NAKAMA_HTTP_KEY` from
+  `rpg-app-secrets`, **neither `optional`**. That differs from `GAME_DB_URL` next to it on
+  purpose: an absent DSN has a defined, handled meaning (in-memory store), while an absent
+  Nakama URL means "the rewards you believe are being awarded are not", which has no safe
+  reading — so a missing key must stop the pod rather than start one that looks healthy.
+
+  A Secret cannot cross a namespace, so `runtime.http_key` now lives twice — `nakama` in
+  `rpg-k8s-data` (what Nakama starts with) and `rpg-app-secrets` in `rpg-k8s-realtime`
+  (what the game server presents). `dev-up.sh` asserts they are equal, exactly as it
+  already asserts `JWT_SECRET` against the gateway's, because nothing else compares them
+  and a mismatch is a 401 on every reward while both workloads report healthy.
+
+  Verified on live `k3d-rpg-dev`, not inferred. Before: the checks refuse
+  (`rpg-app-secrets has no nakama-http-key`, `gameserver-config has no nakama-url`). After:
+  the recycled pod logs `Nakama: http://nakama.rpg-k8s-data.svc.cluster.local:7350`, and a
+  probe pod in the realtime namespace, taking the key from the same Secret the Fleet reads,
+  gets **400 `user_id is required`** — authenticated and into the handler — against **401**
+  for a wrong key and **401** for Nakama's published default.
+
+### Changed
+- **The deploy gates say so when they pass.** `dev-up.sh` printed only on failure, so a log
+  could not distinguish "the check ran and passed" from "the check was never there" — which
+  is the class of fault these checks exist to catch. The JWT match, the static-key check,
+  the http-key match and the Nakama URL each now print one line on success.
+
+### Fixed
 - **The ADR-24 Nakama key gate did not cover the environment `dev` actually deploys.** That
   gate writes `deploy/.env` — the **compose** path. `dev` runs `DEPLOY_MODE=k8s`, where the
   keys come from the out-of-band `nakama` Secret in `rpg-k8s-data` instead, so nothing

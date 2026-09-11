@@ -80,3 +80,19 @@ data:
   # or a per-pod value via the downward API (status.hostIP), and neither
   # exists in this repo. ADR-16 records this as the condition to revisit on.
   advertise-host: "127.0.0.1"
+  # WHERE THE GAME SERVER POSTS ITS RUNTIME RPCs (reward_kills / submit_kill).
+  #
+  # Absent, the C# server logs `Nakama: disabled (NAKAMA_URL unset)` and issues
+  # no RPC at all -- which is what this fleet did until now. The economy work
+  # merged, CI was green, the deploy was green, and not one reward had ever
+  # been awarded on this cluster. Compose has always passed the equivalent
+  # (`NAKAMA_URL` in docker-compose.yml), so the gap was k8s-only and invisible
+  # from every test that runs under compose.
+  #
+  # Service DNS, like redis-addr above: `nakama` in rpg-k8s-data, port 7350 is
+  # the HTTP API (7349 is gRPC, 7351 the console).
+  #
+  # The scheme follows ADR-24's meta-hop TLS decision. It is http:// here
+  # because this cluster's Nakama terminates no TLS; move BOTH together, or the
+  # server speaks plaintext to a listener that no longer answers it.
+  nakama-url: "http://nakama.rpg-k8s-data.svc.cluster.local:7350"
