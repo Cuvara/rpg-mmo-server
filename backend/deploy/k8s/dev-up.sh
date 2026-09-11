@@ -290,6 +290,7 @@ if [ -z "$nk_jwt" ] || [ "$nk_jwt" != "$gw_jwt" ]; then
   echo "  Nakama signs the gateway token; the gateway verifies it locally." >&2
   exit 1
 fi
+echo "checked: nakama's JWT_SECRET matches the gateway's jwt-secret"
 
 # The two STATIC Nakama keys, asserted for the same reason as the JWT above: this
 # Secret is applied out-of-band, so nothing else looks at it, and a value left at
@@ -321,6 +322,51 @@ for _pair in "NAKAMA_SERVER_KEY:defaultkey" "NAKAMA_HTTP_KEY:defaulthttpkey"; do
     exit 1
   fi
 done
+# Said out loud on SUCCESS too. A gate that is silent when it passes cannot be
+# told apart, in a log, from a gate that was never there -- which is the whole
+# class of fault these checks exist to catch.
+echo "checked: nakama static keys are set and are not Nakama's published defaults"
+
+# The game server's copy of runtime.http_key. A Secret cannot cross a namespace,
+# so the value lives twice -- `nakama` in rpg-k8s-data (what Nakama starts with)
+# and `rpg-app-secrets` in rpg-k8s-realtime (what the game server presents) --
+# and NOTHING ELSE COMPARES THEM. Same shape and same reason as the JWT check
+# above: a mismatch yields a stack that comes up perfectly healthy and returns
+# 401 on every reward, which is indistinguishable from an economy that is simply
+# quiet.
+#
+# Absent is worse than mismatched, because the server's own fallback is the
+# published default: Program.cs reads `Env("NAKAMA_HTTP_KEY") ?? "defaulthttpkey"`.
+gs_http_key=$($K get secret rpg-app-secrets -n rpg-k8s-realtime -o 'jsonpath={.data.nakama-http-key}' 2>/dev/null | base64 -d 2>/dev/null || true)
+nk_http_key=$($K get secret nakama -n rpg-k8s-data -o 'jsonpath={.data.NAKAMA_HTTP_KEY}' 2>/dev/null | base64 -d 2>/dev/null || true)
+if [ -z "$gs_http_key" ]; then
+  echo "ERROR: rpg-app-secrets has no nakama-http-key." >&2
+  echo "  The game server POSTs reward_kills / submit_kill with it. Without it the" >&2
+  echo "  Fleet cannot start (the key is not optional, on purpose), and if it could" >&2
+  echo "  the server would fall back to Nakama's published default." >&2
+  echo "  Add it with the SAME value as NAKAMA_HTTP_KEY in the nakama Secret:" >&2
+  echo "    kubectl -n rpg-k8s-realtime patch secret rpg-app-secrets --type=json \\" >&2
+  echo "      -p \"[{\\\"op\\\":\\\"add\\\",\\\"path\\\":\\\"/data/nakama-http-key\\\",\\\"value\\\":\\\"\$(printf %s \"\$KEY\" | base64 -w0)\\\"}]\"" >&2
+  exit 1
+fi
+if [ "$gs_http_key" != "$nk_http_key" ]; then
+  echo "ERROR: rpg-app-secrets' nakama-http-key does not equal the nakama Secret's NAKAMA_HTTP_KEY." >&2
+  echo "  Nakama would reject every reward RPC with 401 while both workloads look healthy." >&2
+  exit 1
+fi
+echo "checked: the game server's nakama-http-key matches the one Nakama starts with"
+
+# The URL the reward RPCs are POSTed to. Absent, the server logs
+# "Nakama: disabled (NAKAMA_URL unset)" and issues no RPC at all -- which is
+# exactly how this fleet ran for weeks with the economy work merged and green.
+gs_nakama_url=$($K get configmap gameserver-config -n rpg-k8s-realtime -o 'jsonpath={.data.nakama-url}' 2>/dev/null || true)
+if [ -z "$gs_nakama_url" ]; then
+  echo "ERROR: gameserver-config has no nakama-url." >&2
+  echo "  The game server would start with Nakama DISABLED and award nothing, quietly." >&2
+  echo "  Apply app/20-configmaps.yaml from this commit." >&2
+  exit 1
+fi
+echo "checked: the game server will reach Nakama at $gs_nakama_url"
 $K apply -f "$HERE/app/40-gateway.yaml" -f "$HERE/app/50-fleet-map.yaml"
 
 # Pin the resolved images over whatever the manifests carry. The Fleet is
