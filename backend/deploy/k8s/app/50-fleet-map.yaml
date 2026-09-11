@@ -115,23 +115,61 @@ spec:
                   value: "map_01"
                 - name: GAMESERVER_ADDR
                   value: ":9000"
-                # Sealed transport on the gameplay hop. PINNED OFF, and this is a
-                # decision rather than an oversight: the game server binary now
-                # defaults to `require`, so a manifest that says nothing takes
-                # encryption by default -- and this deployment cannot survive that
-                # yet. `verify.sh` layer 4 and `post-deploy-smoke` both run the Go
-                # smoketest against what was just deployed, the smoketest speaks
-                # JSON, and a JSON client can NEVER seal: a `require` server refuses
-                # it at the join with `encoding_cannot_seal`. Measured on a live
-                # stack, not inferred. There is no value of SMOKE_SEALED that makes
-                # that pass, so the only safe state for a deploy path today is off.
+                # Sealed transport on the gameplay hop. REQUIRED.
                 #
-                # Same shape as ALLOCATOR=${ALLOCATOR:-none} in cd.yml, for the same
-                # reason: off unless the environment opts in, so nothing can take
-                # down an environment that never asked for it. Flip this when the
-                # smoketest speaks protobuf.
+                # This line read `off` until 2026-09-11, under the note "flip this
+                # when the smoketest speaks protobuf". THAT NOTE NAMED THE WRONG
+                # BLOCKER and must not come back in that form. The smoketest gained
+                # `-encoding proto` (backend/smoketest/smoke/helpers.go) and both
+                # deploy paths derive the pair for you -- cd.yml's .env generator
+                # and backend/deploy/stack.sh each set SMOKE_SEALED=1 together with
+                # SMOKE_ENCODING=proto -- so the verifier stopped being the
+                # obstacle well before anyone updated this comment. The obstacle was
+                # always the SHIPPED UNITY CLIENT, and nobody had written it down.
+                #
+                # THE REAL PRECONDITION, which this value now asserts is met: a
+                # client that reaches this fleet must BOTH (1) speak protobuf and
+                # (2) set NetworkSettings.RequireSealedSession. Not either. The JSON
+                # codec has no sealed frame at all, so a JSON client is refused at
+                # the join with `encoding_cannot_seal` however else it is
+                # configured; a protobuf client that never sends the hello is
+                # refused with `sealed handshake failed (NoHello)`.
+                #
+                # MEASURED against this fleet on the live k3d-rpg-dev cluster on
+                # 2026-09-11, with GAMESERVER_SEALED=require actually in force:
+                #   Go smoketest -sealed -encoding proto  -> SMOKE=PASS, sealed=true
+                #   Go smoketest, JSON, same server       -> REFUSED, correctly
+                #   the real Unity client                 -> FAILED: it registers the
+                #        JSON codec and never sets RequireSealedSession
+                # The third row is the whole reason this change carries a merge
+                # order. Sealing against a client that cannot seal is not a degraded
+                # mode, it is a closed door: EVERY player is refused at the join.
+                # The migration order and the symptom to recognise are written down
+                # in backend/deploy/CHANGELOG.md and backend/docs/ROADMAP-SECURITY.md
+                # step 5 -- read one of them before reverting this value.
+                #
+                # WHAT THIS BUYS, STATED HONESTLY. The passing smoke run above also
+                # reported `binding_verified=false`, and that is the shipped-client
+                # state rather than a defect: verifying the server's binding needs
+                # JOIN_TOKEN_SECRET, which is the HS256 key the gateway MINTS join
+                # tokens with (backend/gateway/transfer/join_token.go), so a client
+                # able to check the binding would also be able to forge a join token
+                # for any player on any server. So what is bought here is
+                # confidentiality against a PASSIVE eavesdropper -- which the X25519
+                # exchange gives on its own -- and NOTHING against an active one.
+                # Do not read "the hop is encrypted" as "the server is
+                # authenticated". backend/shared/sealed/client.go:23-37 and ADR-22 /
+                # ADR-23 carry the full statement.
+                #
+                # THIS MANIFEST IS APPLIED TO EVERY k8s ENVIRONMENT. dev and staging
+                # run the same namespaces on different clusters (cd.yml resolve step,
+                # DEPLOY_MODE/KUBE_CONTEXT/K8S_VERIFY_TARGET per environment), so
+                # this one value seals BOTH. VERIFY_SEALED is therefore set to 1 in
+                # verify/targets/k8s-dev.env AND k8s-stg.env in the same change: a
+                # verifier that disagrees with this line is a red deploy on a
+                # perfectly healthy stack.
                 - name: GAMESERVER_SEALED
-                  value: "off"
+                  value: "require"
                 # GAMESERVER_PUBLIC_ADDR IS ABSENT ON PURPOSE. It replaces the
                 # WHOLE advertised address, so it cannot carry a port that is
                 # only known at scheduling time — and it is read only when

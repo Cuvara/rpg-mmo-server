@@ -563,9 +563,11 @@ func (r *Runner) recv(conn net.Conn) (messages.Envelope, error) {
 // sealSession runs the client half of the handshake and installs both
 // directions. Every failure aborts: there is no cleartext fallback, by design.
 //
-// The smoke test holds the join-token secret, so unlike a shipped client it
-// VERIFIES the server's binding — which is what makes this a real check of the
-// man-in-the-middle defence rather than only of confidentiality.
+// The smoke test does NOT hold the join-token secret, so like a shipped client it
+// CANNOT verify the server's binding: it receives its join token from the real
+// gateway rather than minting one. This step therefore checks confidentiality and
+// the refusal rules, NOT the man-in-the-middle defence. The load generator, which
+// mints its own tokens, is the only peer in this repo that checks that.
 //
 // On success it records BindingVerified for the step's detail line. False is the
 // CORRECT state for a client holding no join-token secret — confidentiality
