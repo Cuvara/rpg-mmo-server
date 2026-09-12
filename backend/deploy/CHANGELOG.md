@@ -5,6 +5,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **The dungeon fleet runs `replicas: 2` now that dungeon-mode registration has landed.** It
+  shipped at 0 for one reason, recorded here because the reason is the interesting part:
+  `Program.cs` resolves `--map-id ?? GAMESERVER_MAP_ID ?? "map_01"`, and this fleet pins no
+  map id **on purpose** -- so every pod of it fell back to `map_01` and self-registered
+  there, which with the map fleet's pod is three live servers for one map. The fallback was
+  the hazard, not a missing value.
+
+  That is closed: in dungeon mode the server writes its `servers:id:` hash and is never added
+  to `servers:map:`, whatever map id the fallback hands it, pinned by a test that names the
+  fallback. Raising the count is therefore safe **after** that change and was not safe before,
+  which is why it is a separate commit rather than the one the manifest comment asked for --
+  the property that matters is the order, and this is the order.
+
 ### Fixed
 - **The dungeon fleet ships at `replicas: 0` until the game-server half lands.** As merged it
   was `replicas: 2`, and that was one deploy away from splitting dev's world. The fleet
