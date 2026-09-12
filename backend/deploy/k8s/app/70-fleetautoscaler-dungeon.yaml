@@ -1,0 +1,95 @@
+# Buffer FleetAutoscaler for the DUNGEON fleet (ADR-14 stage 7, ADR-18, ADR-26).
+#
+# WHY THIS FLEET AND NOT THE MAP FLEET -- the whole of ADR-18 in four lines.
+# ADR-18 forbids a FleetAutoscaler on a fleet that pins one GAMESERVER_MAP_ID
+# for every replica, because the C# server self-registers into Redis at STARTUP
+# rather than on allocation: there, a spare Ready pod is a SECOND LIVE SERVER
+# for that map, measured on k3d 2026-08-18 (scale 1 -> 2 put two members into
+# servers:map:map_01 5.38s later, no allocation involved). This fleet pins no
+# map id and its pods register nothing into the map index (ADR-26 decision 8),
+# so a spare Ready pod here is what the word means -- an idle instance waiting
+# for a party. ADR-18 decision 4 names exactly that shape as the condition that
+# unlocks replicas > 1 AND a buffer autoscaler, and this is the first fleet in
+# the project to have it.
+#
+# THE CHECK MOVED FIRST. verify.sh's cluster.autoscaler now sweeps every fleet
+# in the target namespaces instead of only the one a target names, and is FAIL
+# for a map-pinned fleet with an autoscaler, PASS for a map-less one. It was
+# already map-id-conditional, so nothing had to be weakened to admit this file;
+# what it lacked was reach. Proven offline against both fleet shapes by
+# verify/tests/autoscaler_rule_test.sh.
+#
+# APPLY ORDER IS LOAD-BEARING, AND THIS FILE IS NOT PART OF THE BULK APPLY.
+# 60-fleet-dungeon.yaml ships replicas: 0 so that `kubectl apply` cannot create
+# a pod on the moving `:develop` tag before dev-up.sh pins the resolved image --
+# on 2026-09-12 that exact race put three live servers on map_01. An autoscaler
+# with a minReplicas floor defeats that protection: applied alongside the Fleet
+# it drives replicas off zero within one sync interval, BEFORE the pin. So
+# dev-up.sh applies this file AFTER pinning the image, and deletes it when
+# K8S_DUNGEON_REPLICAS=0 (the documented way to take dungeons out of service
+# without editing a manifest -- a floor of 2 would otherwise undo that scale-down
+# within 30s). Applying it by hand ahead of a pin has the same hazard as
+# applying the Fleet with a non-zero replica count, and for the same reason.
+apiVersion: autoscaling.agones.dev/v1
+kind: FleetAutoscaler
+metadata:
+  name: dungeon-servers-dotnet-k8s-buffer
+  namespace: rpg-k8s-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    rpg-mmo/role: dungeon
+spec:
+  fleetName: dungeon-servers-dotnet-k8s
+  policy:
+    # BUFFER, NOT WEBHOOK, AND NOT A CCU THRESHOLD. ADR-14 decision 5: the
+    # per-server player ceiling is UNKNOWN and is not measurable on this
+    # hardware (ADR-7 -- the load generator shares the box and uses more CPU
+    # than the server under test). A buffer policy is "keep N Ready spare",
+    # which needs no such number; any policy keyed on players-per-server would
+    # be a guess written as if it were a measurement.
+    type: Buffer
+    buffer:
+      # TWO, and the reason is the party model rather than a capacity figure.
+      #
+      # An instance holds ONE party (ADR-26 decision 2) and a party is capped at
+      # 4, so "buffer" here counts PARTIES ABOUT TO ENTER, not players. Two is
+      # the number dev already runs -- K8S_DUNGEON_REPLICAS defaults to 2 -- so
+      # this codifies the standing figure rather than inventing a new one, and
+      # it lets a second party enter while the first instance is still being
+      # replaced.
+      #
+      # What it buys: a cold pod start measured at 5.38s on k3d, removed from
+      # inside the client's EnterWorld budget. What it does NOT buy, and must
+      # not be read as: any claim about how many parties this cluster can carry.
+      # No dungeon has ever run under load.
+      bufferSize: 2
+      # Agones requires minReplicas >= bufferSize for an absolute buffer (0
+      # would be defaulted to bufferSize anyway). Stated explicitly so the floor
+      # that fights `kubectl scale --replicas=0` is visible in the file that
+      # creates it, not inferred from a defaulting rule.
+      minReplicas: 2
+      # SIX IS A LEAK BOUND, NOT A CAPACITY CEILING.
+      #
+      # ADR-26 records a MEASURED failure: a pod that is Allocated and never
+      # joined never satisfies the self-shutdown rule (everHadPlayer stays
+      # false) and Agones does not reclaim an Allocated pod, so it is held
+      # forever. Two runs of cmd/dungeonprobe consumed both replicas of the
+      # two-replica dev fleet permanently. With a buffer autoscaler and no
+      # ceiling, that stops being a visible outage and becomes an unbounded
+      # one: the autoscaler replaces every leaked pod, indefinitely, until the
+      # node runs out.
+      #
+      # So the cap exists to make the leak hit a wall an operator can see. Six
+      # is four concurrent parties plus the buffer; at 150m/96Mi requested per
+      # pod that is 900m/576Mi reserved at full stretch, which leaves the map
+      # fleet room on this single k3d node. Raise it when the bounded join
+      # deadline ADR-26 asks for exists -- not before, because until then the
+      # ceiling is the only thing bounding the leak.
+      maxReplicas: 6
+  sync:
+    type: FixedInterval
+    fixedInterval:
+      # 30s, against a 5.38s pod start. Faster than the cold start it exists to
+      # hide would burn nothing useful; much slower and a party entering right
+      # after another pays the start anyway.
+      seconds: 30

@@ -5,6 +5,107 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **A buffer `FleetAutoscaler` on the dungeon fleet -- the first one in this project**
+  (`k8s/app/70-fleetautoscaler-dungeon.yaml`, ADR-14 stage 7). Buffer policy, `bufferSize: 2`,
+  `minReplicas: 2`, `maxReplicas: 6`, 30s fixed sync, on
+  `rpg-k8s-realtime/dungeon-servers-dotnet-k8s`. ADR-18 forbids an autoscaler on a fleet that
+  pins one `GAMESERVER_MAP_ID` for every replica, because the C# server self-registers at
+  **startup** and a spare Ready pod is then a second live server for that map -- measured on
+  k3d, `1 -> 2` put two members into `servers:map:map_01` 5.38s later with no allocation
+  involved. **That argument does not reach this fleet**: its pods pin no map id and register
+  nothing into the map index (ADR-26 decision 8), so a spare Ready pod is an idle instance
+  waiting for a party, which is the exact shape ADR-18 decision 4 names as the unlock. The map
+  fleet is unchanged: `replicas: 1`, no autoscaler.
+  - `bufferSize: 2` counts **parties about to enter**, not players -- an instance holds one
+    party (ADR-26 decision 2) and a party is capped at 4. Two is the figure dev already runs
+    (`K8S_DUNGEON_REPLICAS` defaults to 2), so this codifies the standing number rather than
+    inventing one. It buys the removal of a 5.38s cold pod start from inside the client's
+    `EnterWorld` budget and claims **nothing** about capacity; no dungeon has ever run under
+    load.
+  - `maxReplicas: 6` is a **bound on ADR-26's measured instance leak**, not a capacity ceiling.
+    A pod that is Allocated and never joined never self-shuts down (`everHadPlayer` stays
+    false) and Agones never reclaims an Allocated pod; with no ceiling the autoscaler replaces
+    every leaked pod indefinitely, turning a visible outage into an unbounded one. Raise it
+    when the bounded join deadline ADR-26 asks for exists, not before.
+- **`k8s/verify/tests/autoscaler_rule_test.sh`** -- runs the `cluster.autoscaler` decision
+  offline against canned `kubectl get -o json` documents carrying the **real** shape of both
+  fleets, and asserts three verdicts: PASS with no autoscaler, **FAIL** with one on the
+  map-pinned fleet, PASS with one on the map-less fleet. It exists because the only live proof
+  of a prohibition is to create the forbidden object on a shared cluster -- which is how the
+  2026-08-18 proof had to be done -- and that manufactures the ADR-2 split-world hazard on
+  purpose. No cluster, no mutation, both answers in one run.
+
+### Changed
+- **`cluster.autoscaler` now sweeps every Fleet in `VERIFY_NAMESPACES`**, not just the single
+  fleet a target file names in `VERIFY_FLEET` (`k8s/verify/lib/checks_cluster.sh`). The old
+  form was complete when there was one fleet and covered half the fleets once the dungeon fleet
+  landed: an autoscaler placed on the fleet a target does not name was neither refused nor
+  reported. **The map-id condition itself was not loosened** -- a pod template with no
+  `GAMESERVER_MAP_ID` at all already returned empty from `fleet_wide_map_id` and already read
+  as "not pinned", so admitting the dungeon autoscaler required no exemption. What it lacked
+  was reach. `VERIFY_FLEET`, when set, is still asserted to exist.
+  - The rule moved into `classify_fleets()`, which takes two JSON documents out of the
+    environment and touches no cluster, so it can be tested offline. The separator between its
+    fields is `|` and **not** a tab: tab is IFS whitespace, so `IFS=$'\t' read` collapses two
+    adjacent tabs and a fleet with no map id would have had its autoscaler list read back as
+    its map id -- which renders as a PASS on exactly the fleet the rule is about. Caught by the
+    new test before it could be believed.
+- **`dev-up.sh` applies the autoscaler after pinning the dungeon image, and deletes it when
+  `K8S_DUNGEON_REPLICAS=0`.** A `minReplicas` floor overrides a manual scale, which collides
+  with two existing deliberate behaviours. `60-fleet-dungeon.yaml` ships `replicas: 0` so
+  `apply` cannot create a pod on the moving `:develop` tag before the pin -- on 2026-09-12 that
+  race put three live servers on map_01 -- and an autoscaler in the bulk apply defeats that
+  within one sync interval, so `70-*.yaml` is deliberately **not** in the bulk apply.
+  `K8S_DUNGEON_REPLICAS=0` is the documented way to take dungeons out of service without
+  editing a manifest, and a floor of 2 would undo it within 30s, so that path deletes the
+  autoscaler instead. In steady state the two agree on the number (`allocated + 2` == 2 with
+  nothing allocated); only the order matters.
+- **`rollback-to-compose.sh` now retires the dungeon fleet too, autoscaler first.** It drained
+  only the map fleet, leaving dungeon pods that nothing could allocate -- the compose gateway
+  sets no `ALLOCATOR_FLEET_DUNGEON`. Deleting the `FleetAutoscaler` before the drain is not
+  tidiness: with the floor still in place the scale-down reverses itself within 30s.
+
+### Documentation
+- **ADR-14 stage 8 closes as "retired and documented", not "deleted", and the report says
+  which.** Checked before deleting anything: the Go-image manifests
+  (`fleet-map.yaml`, `fleet-dungeon.yaml`, `fleet-map-dev.yaml`, `fleet-dungeon-dev.yaml`,
+  `allocation.yaml`, `autoscaler.yaml`, `autoscaler-dev.yaml`) were **already** deleted in
+  `6281c72`, and `map-servers-dev` / `dungeon-servers-dev` are gone from `k3d-rpg-dev`
+  (verified read-only). The three files left in `deploy/agones/` are **not** Go manifests:
+  `fleet-map-dotnet-dev.yaml`, `allocation-dev.yaml` and `secret-example.yaml` are the C# dev
+  fleet in `rpg-realtime`, applied by `k3s/setup-dev.sh`, verified by the `dev-agones` target,
+  named by `docker-compose.yml`/`.env.example` through `ALLOCATOR_FLEET_MAP`, and scaled
+  **back to 1** by `k8s/rollback-to-compose.sh`. Deleting them deletes the documented rollback
+  out of the k8s app tier, so they stay and the documentation that called them live was fixed
+  instead.
+- **`docs/K3S.md`'s manifest table listed the deleted Go manifests twice**, in two blocks that
+  disagreed with each other and with the directory. Rewritten to the three files that exist,
+  with a pointer to the app-tier fleets, which are a different set in a different namespace.
+  "Why there is no autoscaler" is now "Why there is no autoscaler on a MAP fleet (and why the
+  dungeon fleet has one)" and carries the stage-7 outcome plus the two ordering rules.
+- **`k8s/app/README.md` no longer claims "this does not replace anything".** That stopped being
+  true when `dev-up.sh` gained its retire step; the legacy fleet is the rollback target, not
+  the live one. Adds the `70-*.yaml` row and a table of the three ways a manual scale and the
+  autoscaler would fight, with the resolution for each.
+- **ADR-18 and ADR-26 amended rather than rewritten.** ADR-18 gains an amendment recording that
+  its decision-4 unlock arrived as a *second fleet* rather than as either named mechanism, that
+  decision 1 is untouched, and that the check was widened rather than weakened. ADR-26's
+  "cluster.autoscaler needs a second look" consequence records what the second look actually
+  found: not the feared false FAIL, but a check that inspected only one fleet.
+- **`CORE-COMPLETION.md` C4 marked done**, which closes the last C item.
+- **`60-fleet-dungeon.yaml` carried two near-identical copies of its own header comment**, both
+  still opening "TWO, and this is the fleet where a spare is meaningful" while the value below
+  had become `replicas: 0`, and both still saying "STILL NO FleetAutoscaler ... the check moves
+  first". Collapsed to one block that keeps the map_01-fallback history (which is why the rule
+  is worded "registers no map" rather than "pins no map id") and records that the check did
+  move first and the autoscaler now exists in its own file.
+- `deploy/CLAUDE.md`, `docs/README.md`, `k8s/README.md` and `k8s/verify/README.md` updated for
+  the new manifest and the check's new scope. `docs/REALTIME-FLOW.md` was left alone
+  deliberately: its header scopes it as historical analysis dated 2026-08-17, and the fleet
+  listing in it is evidence from that date rather than a claim about today.
+
+
 ### Documentation
 - **`CORE-COMPLETION.md`: the gate is open.** C1 (dungeon instancing) is marked done and
   measured, not asserted -- a party created through Nakama, two members entering, both handed

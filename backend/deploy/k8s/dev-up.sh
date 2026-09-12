@@ -63,6 +63,11 @@ K8S_FLEET_DUNGEON="${K8S_FLEET_DUNGEON:-dungeon-servers-dotnet-k8s}"
 # (ADR-26 decision 8); set to 0 to take dungeons out of service without
 # touching the manifest.
 K8S_DUNGEON_REPLICAS="${K8S_DUNGEON_REPLICAS:-2}"
+# The buffer FleetAutoscaler on that fleet (app/70-fleetautoscaler-dungeon.yaml).
+# Named here only so the K8S_DUNGEON_REPLICAS=0 path can delete it by name --
+# leaving a minReplicas floor in place would scale the fleet back up within one
+# sync interval and make "out of service" a state that does not hold.
+K8S_FLEET_DUNGEON_AUTOSCALER="${K8S_FLEET_DUNGEON_AUTOSCALER:-dungeon-servers-dotnet-k8s-buffer}"
 # Floor of the Agones dynamic port range. Everything BELOW it in k3d's
 # published 7000-7100 is reserved for infrastructure (gateway 7000, nakama
 # 7001). See app/40-gateway.yaml.
@@ -528,6 +533,33 @@ if [ -n "$dungeon_pre" ]; then
   # so that `apply` cannot create a pod on the moving tag before this line runs.
   $K scale fleet "$K8S_FLEET_DUNGEON" -n rpg-k8s-realtime --replicas="$K8S_DUNGEON_REPLICAS" >/dev/null
   echo "dungeon fleet scaled to $K8S_DUNGEON_REPLICAS"
+
+  # THE BUFFER AUTOSCALER IS APPLIED HERE, AND NOWHERE EARLIER (ADR-14 stage 7).
+  #
+  # It is deliberately absent from the bulk `apply` above. A Buffer autoscaler
+  # carries a minReplicas floor, so applying it beside the Fleet drives the
+  # replica count off zero within one sync interval -- BEFORE the image pin --
+  # which is the precise race the manifest's `replicas: 0` exists to prevent,
+  # and which on 2026-09-12 put three live servers on map_01.
+  #
+  # It is legal on THIS fleet and illegal on the map fleet: these pods pin no
+  # GAMESERVER_MAP_ID and register no map (ADR-26 decision 8), so a spare Ready
+  # pod is an idle instance rather than a second live server for a map
+  # (ADR-18 decision 4). verify.sh's cluster.autoscaler sweeps both fleets and
+  # says so.
+  #
+  # K8S_DUNGEON_REPLICAS=0 means "take dungeons out of service", and a floor of
+  # 2 would undo that within 30s -- so that case DELETES the autoscaler instead
+  # of applying it. The two must not be left to fight; whichever ran last would
+  # win, and the observable result would be a fleet that scales back up by
+  # itself for no visible reason.
+  if [ "$K8S_DUNGEON_REPLICAS" -gt 0 ]; then
+    $K apply -f "$HERE/app/70-fleetautoscaler-dungeon.yaml"
+  else
+    $K delete fleetautoscaler "$K8S_FLEET_DUNGEON_AUTOSCALER" -n rpg-k8s-realtime \
+      --ignore-not-found >/dev/null
+    echo "dungeon autoscaler removed (K8S_DUNGEON_REPLICAS=0 takes dungeons out of service)"
+  fi
 else
   echo "no dungeon fleet present; nothing to pin"
 fi

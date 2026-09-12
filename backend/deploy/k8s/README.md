@@ -132,6 +132,14 @@ than warning about it; `cluster.autoscaler` **fails** if a `FleetAutoscaler`
 ever appears on this fleet. Scaling the fleet needs per-replica map assignment
 first, which does not exist yet — see **ADR-18**.
 
+**The dungeon fleet is the exception, and it is not a softening of this rule.**
+`dungeon-servers-dotnet-k8s` pins no `GAMESERVER_MAP_ID` and its pods register
+nothing into `servers:map:` (ADR-26 decision 8), so a spare Ready pod there is an
+idle instance waiting for a party rather than a second live server for a world.
+It runs `replicas: 2` and, since 2026-09-13, a Buffer `FleetAutoscaler`
+(`app/70-fleetautoscaler-dungeon.yaml`, 2 / 2-6, 30s sync — ADR-14 stage 7).
+Everything above still applies, unchanged, to the map fleet.
+
 ### Why `EnterWorld` waits on one branch and refuses on the others
 
 The five conditions, the message each one sends the client and the `file:line`

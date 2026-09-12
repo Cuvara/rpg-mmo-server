@@ -1,15 +1,21 @@
-# App tier on Kubernetes — gateway + map fleet in `rpg-k8s-realtime`
+# App tier on Kubernetes — gateway, map fleet and dungeon fleet in `rpg-k8s-realtime`
 
-The Go gateway as a Deployment with the RBAC it needs to allocate, and an
-Agones Fleet of C# game servers, both inside the cluster. It is the second
+The Go gateway as a Deployment with the RBAC it needs to allocate, and two
+Agones Fleets of C# game servers, all inside the cluster. It is the second
 half of moving the whole system to k3s/Agones; the data tier (Redis, both
 PostgreSQL instances, Nakama) belongs in `rpg-k8s-data` and is owned
 elsewhere.
 
-**This does not replace anything.** `backend/deploy/agones/` holds the live
-dev fleet in namespace `rpg-realtime`, allocated from by the compose-run
-gateway; it is untouched. The deploy path for dev/staging/prod is still
-`DEPLOY_MODE=containers` (ADR-16: "Agones is proven, not adopted").
+**What this replaces, corrected 2026-09-13.** This file used to say "this does
+not replace anything" and describe `backend/deploy/agones/` as the live dev
+fleet. That stopped being true when `dev-up.sh` gained its retire step: it
+scales `rpg-realtime/map-servers-dotnet-dev` to zero and clears its registry
+entries, so on `k3d-rpg-dev` the fleets that serve dev are the two in **this**
+directory and the legacy one sits at `replicas: 0`. `backend/deploy/agones/` is
+not dead either — `k3s/setup-dev.sh` still applies it and
+`k8s/rollback-to-compose.sh` scales it back to 1 as the documented rollback —
+so it is the **rollback target**, not the live fleet, and is kept for that and
+nothing else (ADR-14 stage 8).
 
 Read first: ADR-16 (what shipped and how it was proven), ADR-15 decision 3
 (the six prerequisites), ADR-14, ADR-3, ADR-2, ADR-1.
@@ -26,6 +32,7 @@ Read first: ADR-16 (what shipped and how it was proven), ADR-15 decision 3
 | `40-gateway.yaml` | Gateway Deployment + NodePort Service (client) + ClusterIP Service (metrics) |
 | `50-fleet-map.yaml` | `map-servers-dotnet-k8s` Fleet, `replicas: 1`, dynamic port, health on, no autoscaler |
 | `60-fleet-dungeon.yaml` | `dungeon-servers-dotnet-k8s` Fleet, **`replicas: 0` in the manifest**, **no `GAMESERVER_MAP_ID`**, capacity 8. Its pods register no map and are allocated to a party (ADR-26); spare Ready pods are correct on this fleet and wrong on the one above. `dev-up.sh` scales it to `K8S_DUNGEON_REPLICAS` (default 2) **after** pinning the image — applying this file by hand leaves it at zero on purpose, because the image tag in it is the moving `:develop` |
+| `70-fleetautoscaler-dungeon.yaml` | **The project's only `FleetAutoscaler`** — Buffer, `bufferSize: 2`, `minReplicas: 2`, `maxReplicas: 6`, 30s sync, on the **dungeon** fleet (ADR-14 stage 7). Legal there and forbidden on the map fleet: these pods pin no map id and register no map, so a spare Ready pod is an idle instance rather than a second live server for `map_01` (ADR-18 decision 4, ADR-26 decision 8). `maxReplicas: 6` is a **bound on ADR-26's measured instance leak**, not a capacity figure. **Not part of the bulk apply** — see below |
 | `proof/*` | Scaffold Redis and a ConfigMap override, for bringing this tier up before `rpg-k8s-data` exists. **Not the data tier** — with that namespace present, skip both files |
 
 ## Apply
@@ -44,7 +51,32 @@ $K apply -f /tmp/rpg-app.secret.yaml
 # ONLY while rpg-k8s-data does not exist (skip both once it does):
 $K apply -f proof/redis-scaffold.yaml -f proof/configmaps-scaffold.yaml
 $K apply -f 40-gateway.yaml -f 50-fleet-map.yaml -f 60-fleet-dungeon.yaml
+
+# The autoscaler is applied LAST, AFTER the dungeon fleet's image is pinned to a
+# resolved digest/commit and the fleet has been scaled up. Its minReplicas floor
+# would otherwise create pods on the moving `:develop` tag -- exactly the race
+# 60-fleet-dungeon.yaml's `replicas: 0` exists to prevent, and which on
+# 2026-09-12 put three live servers on map_01. dev-up.sh does this in the right
+# order for you; by hand, pin first.
+$K apply -f 70-fleetautoscaler-dungeon.yaml
 ```
+
+### The autoscaler and a manual scale will fight, and the fight is resolved by order
+
+A Buffer policy owns `spec.replicas`. Three consequences, all handled in
+`dev-up.sh` and `rollback-to-compose.sh` rather than left to whoever runs a
+`kubectl scale` next:
+
+| Situation | What happens without care | Resolution |
+|---|---|---|
+| Autoscaler applied beside the Fleet | The floor drives replicas off zero **before** the image pin; pods run the moving `:develop` tag | `dev-up.sh` applies `70-*.yaml` after the pin and the scale-up; it is not in the bulk apply |
+| `K8S_DUNGEON_REPLICAS=0` ("dungeons out of service") | `kubectl scale --replicas=0` is undone within one 30s sync | `dev-up.sh` **deletes** the autoscaler in that case instead of applying it |
+| `rollback-to-compose.sh` draining the dungeon fleet | Same: the drain reverses itself | The script deletes the autoscaler **before** draining |
+
+In steady state there is no fight: the autoscaler converges on
+`allocated + 2`, which with nothing allocated is the same `2` that
+`K8S_DUNGEON_REPLICAS` sets, so the scale-up and the autoscaler agree on the
+number and only the order matters.
 
 ## How a client reaches this tier
 
