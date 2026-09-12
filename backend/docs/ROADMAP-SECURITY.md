@@ -390,8 +390,36 @@ inventing a cipher.
      buys **confidentiality against a passive eavesdropper and nothing against an active
      one** — an attacker who can substitute the server's ephemeral key gets a session both
      ends believe is protected (`shared/sealed/client.go:23-37`,
-     `SealedHandshakeServer` remarks). The fix is an asymmetric, pinnable server identity
-     key; it is unbuilt, and ADR-23 is where that decision lives.
+     `SealedHandshakeServer` remarks).
+
+     **The fix is decided and is [ADR-25](ARCHITECTURE-DECISIONS.md#adr-25--the-game-server-proves-its-identity-with-an-ed25519-key-it-generates-per-pod-the-clients-trust-in-that-key-is-the-gateway-hops-trust-not-its-own)
+     (2026-09-12). It is NOT implemented.** Not ADR-23, which parked a pinned identity key
+     for the *gateway* hop and is where this pointer used to send people. The game server
+     signs the sealed handshake with an **Ed25519 key it generates per pod at startup**,
+     whose public half travels pod -> registry -> gateway -> `enter_world_resp`. Per pod,
+     not per fleet: the peer is an Agones replica whose address is composed at scheduling
+     time (ADR-16), so rotation is pod replacement and there is no long-lived private key
+     mounted into the most player-exposed process in the system. New field numbers only
+     (`SealedServerHello.server_signature = 4`); the transcript bytes do not change, so
+     ADR-22's cross-implementation vectors stay valid and old clients do not break.
+
+     **And the honest half, which decides how it may be reported.** The key is delivered
+     over the gateway hop, so it is exactly as trustworthy as that hop -- plaintext in every
+     environment today (step 6). An attacker able to man-in-the-middle the gameplay hop is
+     on the same path as the gateway hop and simply substitutes the key, so **ADR-25 alone
+     changes nothing for him**; what it changes is that a break which is free today starts
+     requiring the gateway hop as well, and that turning step 6's flag on then closes both.
+     ADR-25 decision 6 therefore has the client report `server_identity_verified` as true
+     **only** when the key arrived over an authenticated hop, and report the weaker truth
+     otherwise -- because a boolean that can never be true is the decorative instrument
+     ADR-23 decision 1 rejected its own Option A for. Rejected there and recorded so they
+     are not re-proposed: TLS on the gameplay hop instead (no stable address to certify for
+     an Agones pod, deletes machinery that is live on dev and staging, does not apply to KCP
+     at all), pinning a fleet key in the built player (rotation becomes an app-store release
+     -- ADR-23's Option B cost, unchanged), and doing nothing (the symmetric binding can
+     never reach a shipped client, so this is a dead end rather than a backlog item).
+     Ed25519 under Unity IL2CPP is an **unrun** go/no-go probe and must assert the
+     *negative* case.
 
      **The CD-generator blocker is closed (2026-09-11).** It read: the generator must derive
      `SMOKE_SEALED=1` *and* `SMOKE_ENCODING=proto` together, because a sealed run must be a
@@ -596,6 +624,11 @@ inventing a cipher.
    made sealing work by default is therefore unavailable. Turning this on needs a
    certificate the client already trusts, or the pin shipped with the client. That is a
    deployment decision, and it is the remaining work on this step.
+
+   **And a second thing now waits on it.** ADR-25 (step 5) delivers the game server's
+   identity key over this hop, so the gameplay hop's man-in-the-middle defence is worth
+   nothing until this flag is on. The two do not merge into one task -- ADR-25 can be built
+   first and composes -- but neither may be *reported* as MITM protection alone.
 
 7. **The meta hop is settled by [ADR-24](ARCHITECTURE-DECISIONS.md#adr-24--the-meta-hop-gets-nakamas-own-tls-but-the-credential-worth-stealing-there-is-a-default-valued-static-key-not-a-token)
    (2026-09-10) — and the confidentiality half turned out not to be the important half.**

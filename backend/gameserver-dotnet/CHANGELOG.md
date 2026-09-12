@@ -6,6 +6,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **ADR-25: the game server will prove its identity with an Ed25519 key it generates per
+  pod.** Design only -- **no runtime code changed**, and nothing described below is
+  implemented. It decides the residual ADR-22 left open and that `ROADMAP-SECURITY.md`
+  step 5 names: every sealed session on dev and staging reports `binding_verified=false`,
+  and **no configuration can make it true**. The binding this server signs
+  (`Net/Sealed/SealedHandshakeServer.cs:105-112`) is a *symmetric* HMAC-SHA256 under a key
+  derived from `JOIN_TOKEN_SECRET` (`Net/Sealed/SealedTranscriptSigner.cs:21-32`,
+  `Net/Sealed/SealedCrypto.cs:98-107`) -- the same HS256 secret the gateway **mints join
+  tokens with** (`gateway/transfer/join_token.go:17-23`, `shared/config/config.go:25-28`).
+  A client able to verify it is a client able to forge a join token for any player on any
+  server, so it can never be handed to one. The consequence, stated in the direction that
+  matters: a sealed gameplay hop is confidential against a **passive** eavesdropper and
+  offers **nothing** against an active one.
+
+  The decision is a **per-pod** Ed25519 keypair, generated at startup and never written
+  anywhere, whose public half travels pod -> registry -> gateway -> `enter_world_resp`.
+  Per pod rather than per fleet because the peer is an Agones replica whose address is
+  composed at scheduling time (ADR-16): rotation is pod replacement, and a fleet-wide
+  private key mounted into the most player-exposed process in the system is the
+  worst-isolated secret available. Wire impact is additive -- `server_signature = 4` on
+  `SealedServerHello`, a new field on `EnterWorldResponse` and `storage.ServerInfo` -- the
+  **transcript bytes do not change**, so ADR-22's cross-implementation vectors stay valid
+  and old clients do not break. No negotiation and no fallback, unchanged.
+
+  **What it does not buy, because the key rides the gateway hop:** that hop is plaintext in
+  every environment today (ADR-23's TLS is implemented and off, blocked on certificate
+  distribution), so an attacker on the client's path substitutes the key and the signature
+  he forges verifies. ADR-25 alone changes nothing for him; it makes a currently free break
+  require the gateway hop too, and composes so that turning ADR-23's flag on closes both.
+  Decision 6 keeps that honest: a client reports `server_identity_verified` only when the
+  key arrived over an **authenticated** hop. Rejected and recorded: TLS on the gameplay hop
+  (no stable address to certify, deletes machinery live on dev and staging, does not apply
+  to KCP), pinning a fleet key in the built player (rotation becomes an app-store release),
+  and doing nothing (a boolean that can never be true is a dead end, not a backlog item).
+  **Ed25519 under Unity IL2CPP is an unrun go/no-go probe** and must assert the *negative*
+  case -- ADR-22 found `AesGcm` type-checking and then throwing in a player.
+
 ### Fixed
 - **A listener that requires sealing now says WHY it refuses.** Both refusal paths were
   silent, and the silence was worse than the refusal: measured against a live `require`
