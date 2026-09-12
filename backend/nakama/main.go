@@ -11,6 +11,7 @@ import (
 
 	"github.com/duycuong/rpg-mmo/nakama/auth"
 	"github.com/duycuong/rpg-mmo/nakama/economy"
+	"github.com/duycuong/rpg-mmo/nakama/social"
 	"github.com/heroiclabs/nakama-common/runtime"
 )
 
@@ -49,6 +50,24 @@ func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runti
 	}
 	if err := initializer.RegisterRpc(economy.RPCGetLeaderboard, economy.GetLeaderboardRPC); err != nil {
 		return fmt.Errorf("register rpc %s: %w", economy.RPCGetLeaderboard, err)
+	}
+
+	// Social RPCs (party). party_create/join/leave require a client session;
+	// party_get is also called by the gateway over runtime.http_key to verify
+	// party membership before allocating a dungeon instance.
+	partyRPCs := []struct {
+		name    string
+		handler func(context.Context, runtime.Logger, *sql.DB, runtime.NakamaModule, string) (string, error)
+	}{
+		{social.RPCPartyCreate, social.PartyCreateRPC},
+		{social.RPCPartyJoin, social.PartyJoinRPC},
+		{social.RPCPartyLeave, social.PartyLeaveRPC},
+		{social.RPCPartyGet, social.PartyGetRPC},
+	}
+	for _, r := range partyRPCs {
+		if err := initializer.RegisterRpc(r.name, r.handler); err != nil {
+			return fmt.Errorf("register rpc %s: %w", r.name, err)
+		}
 	}
 
 	// Create leaderboards (idempotent)
