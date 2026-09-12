@@ -75,7 +75,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   also logs that fallback at **Warning** on boot, naming where the value does and does not
   go, because a dungeon pod whose registry hash reads `map_01` is otherwise an alarming
   thing to find. This is what makes a non-zero replica count on the dungeon fleet correct
-  again -- the manifest itself goes back to `replicas: 2` in #337.
+  again. The manifest itself does **not** carry `replicas: 2`, though #337 briefly set it
+  there: it ships `replicas: 0` and `dev-up.sh` scales it up after pinning the image (#339),
+  because `apply` creates pods before the pin runs and the tag in the manifest is the moving
+  `:develop`. That is a separate hazard from this one and was found the same day, on the same
+  fleet, by the same deploy.
 
   Depends on ADR-26, which is still in review (#331).
 
