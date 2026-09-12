@@ -5,6 +5,35 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **The gateway can be given a TLS certificate without editing the Deployment.**
+  `k8s/app/40-gateway.yaml` now mounts a `gateway-tls` Secret at `/etc/gateway/tls`, so
+  turning ADR-23's TLS on is setting the two paths that were already there rather than
+  rewriting the pod spec. The volume is `optional: true`, which is load-bearing: the Secret
+  does not exist on an environment that has not opted in, and a required volume would stop
+  every gateway pod there with `CreateContainerConfigError` — turning an opt-in feature into
+  an outage for everyone who did not opt in.
+
+  **It stays OFF, and the reason is now measured rather than assumed.** On k3d-rpg-dev with
+  the paths set, the gateway logged `"tls":true,"encrypted":true,"authenticated":true` and
+  three Unity clients played through it — gateway TLS and the sealed gameplay hop live at
+  the same time — **but only because they were handed the certificate to pin**
+  (`-cuvara-gateway-tls 1 -cuvara-gateway-tls-cert <PEM>`).
+
+  Unlike the sealed gameplay hop, a mismatch here **cannot name itself**. The listener is
+  wrapped in TLS, so it has no way to answer a plaintext client in a language that client
+  understands: a player build without the flag gets a closed socket, not a stated cause. The
+  escalate-on-refusal path that made sealing work by default (netcode v0.36.2) is therefore
+  unavailable here. Enabling it needs a certificate the client already trusts, or the pin
+  shipped with the client — a deployment decision, not a flag.
+
+### Fixed
+- **Two roadmap claims that the last two days made false.** `ROADMAP-SECURITY.md` step 5
+  still read "NOT YET IN ANY DEPLOYMENT" after dev and staging were flipped to `require` and
+  CD began verifying it on every deploy; step 6 still said the client "needs two things" that
+  netcode v0.36.0 shipped. Both now carry what was measured, including the four defects that
+  only surfaced when sealing was actually switched on.
+
 ### Changed
 - **The k8s gameplay hop is sealed: `GAMESERVER_SEALED` moves `off` -> `require` in
   `k8s/app/50-fleet-map.yaml`, and `VERIFY_SEALED` moves `0` -> `1` in

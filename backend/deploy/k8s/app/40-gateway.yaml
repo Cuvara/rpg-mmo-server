@@ -155,6 +155,31 @@ spec:
             # this token, carries a two-hour reusable Nakama session token, and
             # is served as plain HTTP by k8s/data/nakama.yaml with no Ingress
             # and no TLS. It is the higher-value half and it is not fixed here.
+            #
+            # TO TURN IT ON, on a cluster: create the Secret the volume below
+            # mounts, then set both paths here. Both or neither -- exactly one
+            # is a startup error, not a quiet fall back to plaintext.
+            #
+            #   kubectl -n rpg-k8s-realtime create secret generic gateway-tls \
+            #     --from-literal=tls.crt="$(cat tls.crt)" \
+            #     --from-literal=tls.key="$(cat tls.key)"
+            #   GATEWAY_TLS_CERT=/etc/gateway/tls/tls.crt
+            #   GATEWAY_TLS_KEY=/etc/gateway/tls/tls.key
+            #
+            # MEASURED on k3d-rpg-dev, 2026-09-12: with those set the gateway
+            # logs `"tls":true,"encrypted":true,"authenticated":true` and three
+            # Unity clients played through it -- BUT only because they were
+            # given the certificate to pin:
+            #
+            #   -cuvara-gateway-tls 1 -cuvara-gateway-tls-cert <the PEM>
+            #
+            # THAT IS WHY THIS IS STILL OFF. Unlike the sealed gameplay hop,
+            # a mismatch here CANNOT name itself: the listener is wrapped in
+            # TLS, so it has no way to answer a plaintext client in a language
+            # that client understands. A player build without the flag does not
+            # get "wrong protocol", it gets a closed socket. Turning this on
+            # needs either a certificate the client already trusts, or the pin
+            # shipped with the client -- a deployment decision, not a flag.
             - name: GATEWAY_TLS_CERT
               value: ""
             - name: GATEWAY_TLS_KEY
@@ -238,6 +263,21 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          # The certificate the GATEWAY_TLS_CERT/_KEY paths above point at, when
+          # they are set. `optional: true` is load-bearing: the Secret does not
+          # exist on an environment that has not opted into TLS, and a required
+          # volume would stop every gateway pod there with
+          # CreateContainerConfigError -- turning an opt-in feature into an
+          # outage for everyone who did not opt in.
+          volumeMounts:
+            - name: gateway-tls
+              mountPath: /etc/gateway/tls
+              readOnly: true
+      volumes:
+        - name: gateway-tls
+          secret:
+            secretName: gateway-tls
+            optional: true
 ---
 # Client-facing Service. ClusterIP, and deliberately NOT NodePort.
 #

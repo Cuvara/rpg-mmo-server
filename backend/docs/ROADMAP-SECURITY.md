@@ -317,10 +317,32 @@ inventing a cipher.
    behaviour the current code has. For Option E the vectors are the deliverable, not an
    afterthought: an encrypt-then-MAC composition that is subtly wrong still round-trips
    against itself.
-5. **DONE on the game server (2026-09-10), NOT YET IN ANY DEPLOYMENT.** `GAMESERVER_SEALED`
-   defaults to `require`: a stock game server encrypts the gameplay hop and refuses every
-   client that cannot seal. `off` is now a deliberate, reviewable choice rather than the
-   value an operator gets by saying nothing.
+5. **DONE, AND DEPLOYED (2026-09-11).** `GAMESERVER_SEALED` defaults to `require`: a stock
+   game server encrypts the gameplay hop and refuses every client that cannot seal. `off` is
+   a deliberate, reviewable choice rather than the value an operator gets by saying nothing.
+
+   dev and staging now run `require`. CD verifies it on every deploy —
+   `SMOKE=PASS … SEALED gameplay hop (chacha20-poly1305 over protobuf)`, `VERIFY=PASS` —
+   and three real Unity players connect with **no flags at all**.
+
+   Four things had to be fixed before that was true, and each was invisible until sealing
+   was actually switched on:
+
+   - The shipped client registered the **JSON** codec, which can never seal. A `require`
+     server refused it, and the refusal reached the player as nothing more informative than
+     a closed connection during the handshake.
+   - The refusal **did not name itself** on either path. A JSON client was answered
+     `Ok=true`, counted in `players_online`, reported IN WORLD, then closed on its fifth
+     input with a bare `broken pipe`; a protobuf client that never sealed produced 21 rejoin
+     cycles. Both now say why — the encoding refusal rides in the join reply, the missing
+     handshake arrives as a kick carrying `no_sealed_session`.
+   - The **smoketest's reload step** rejoined without sealing, and then sealed against the
+     *first* connection's join token, so it failed twice in a row with a persistence message
+     for an encryption cause.
+   - A default player still could not play without a flag, so the client now **escalates**
+     on that named kick: refused for not sealing, it reconnects WITH sealing. It escalates
+     and never downgrades — the runtime has exactly one assignment to
+     `RequireSealedSession` and it is `= true`.
 
    **What this does not yet buy, stated precisely**, because the sentence this replaces
    said the previous four steps "buy nothing in production" and that is still nearly true:
@@ -550,11 +572,30 @@ inventing a cipher.
    would make `BindingVerified` a field that is always false. Read ADR-23 before proposing
    a sealed gateway handshake again.
 
-   **Implemented server-side; the flag is off everywhere and cannot be turned on yet.**
-   The Unity client speaks raw TCP to the gateway and there is no plaintext fallback by
-   design, so enabling it today refuses every player. **The client needs two things, in
-   `Cuvara/Netcode`:** TLS on the gateway connection, verified in an IL2CPP *player* build
-   with certificate validation ON; and `https://` for the Nakama base URL.
+   **The client side is DONE (netcode v0.36.0, 2026-09-11).** Both things this step asked
+   for exist: `NetworkSettings.GatewayUseTls` wraps the gateway connection in TLS with
+   certificate validation ON and no way to turn validation off (a pin is the supported way
+   to reach a self-signed gateway, and it is *stricter* than the trust store), verified in
+   an IL2CPP player build at Minimal and High stripping; and `-cuvara-nakama-scheme https`
+   selects the Nakama scheme.
+
+   **MEASURED END TO END on k3d-rpg-dev, 2026-09-12.** With `GATEWAY_TLS_CERT/_KEY` set the
+   gateway logs `"tls":true,"encrypted":true,"authenticated":true`, and three Unity clients
+   played through it — gateway TLS and the sealed gameplay hop both live at once:
+
+   ```
+   [transport-security] gateway → 127.0.0.1: TLS, pinned to <PEM>
+   [Net] sealed session established
+   ```
+
+   **It is still off everywhere, and the blocker is no longer code.** Those clients only
+   connected because they were handed the certificate to pin. Unlike the sealed hop, a
+   mismatch here **cannot name itself**: the listener is wrapped in TLS, so it has no way to
+   answer a plaintext client in a language that client understands — a player without the
+   flag gets a closed socket, not a stated cause, and the escalate-on-refusal trick that
+   made sealing work by default is therefore unavailable. Turning this on needs a
+   certificate the client already trusts, or the pin shipped with the client. That is a
+   deployment decision, and it is the remaining work on this step.
 
 7. **The meta hop is settled by [ADR-24](ARCHITECTURE-DECISIONS.md#adr-24--the-meta-hop-gets-nakamas-own-tls-but-the-credential-worth-stealing-there-is-a-default-valued-static-key-not-a-token)
    (2026-09-10) — and the confidentiality half turned out not to be the important half.**
