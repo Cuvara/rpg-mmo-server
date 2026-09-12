@@ -5,6 +5,40 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`app/60-fleet-dungeon.yaml`: the dungeon fleet (ADR-26 / ADR-14 stage 6).** Two things
+  make it not-a-second-map-fleet, and both are ADR-26 on the deployment side.
+
+  It **pins no `GAMESERVER_MAP_ID`**. A map pod claims `map_01` at boot and is found through
+  `servers:map:map_01`; a dungeon pod claims nothing and is allocated to a party, with the
+  gateway recording that mapping itself. A map id here would put every replica into the map
+  index and let `FindServer` hand a passing player someone else's dungeon.
+
+  It runs **`replicas: 2`, and spare Ready pods are correct on this fleet.** ADR-18 forbids
+  that on the map fleet because every replica self-registers under one map id, so a spare is
+  a second live server for one world. None of it applies to a fleet whose pods register no
+  map -- ADR-18 names exactly this shape as the condition that unlocks `replicas > 1`. A
+  spare is what makes dungeon entry fit inside the client's EnterWorld budget instead of
+  paying a cold pod start inside it. **Still no `FleetAutoscaler`**, although one is now
+  defensible: `verify.sh`'s `cluster.autoscaler` check fails on any autoscaler it finds and
+  stands down only for a per-pod-map-id fleet, so adding one before the check knows about
+  this fleet turns every deploy red on a healthy stack. The check moves first.
+
+  Capacity is **8**, and it is not a tuning knob: a dungeon instance holds one party, the
+  party cap is 4, and the slack covers a reconnecting member still inside the 60s hold being
+  counted alongside their replacement. Resources are bounds scaled from the map fleet's
+  measurements, **not** dungeon measurements -- no dungeon has ever run.
+
+### Changed
+- `40-gateway.yaml` sets `ALLOCATOR_FLEET_DUNGEON` (it was `""` because no such fleet
+  existed) and gains `NAKAMA_URL`/`NAKAMA_HTTP_KEY`, both **optional**, used for one
+  question asked once per dungeon entry: is this user in the party they named. Absent, the
+  gateway refuses dungeon entry with a message saying dungeons are not configured and map
+  play is untouched -- which is why these are optional here while the game server's
+  identically-named variables are not: there an absent URL silently awards no rewards, here
+  it closes one door loudly.
+- `dev-up.sh` applies the new fleet alongside the map fleet.
+
 ### Documentation
 - **`CORE-COMPLETION.md` C3 (Android) is done, and was measured rather than assumed.** An
   Android player built for `arm64,x86_64` ran on an x86_64 emulator against the dev cluster,

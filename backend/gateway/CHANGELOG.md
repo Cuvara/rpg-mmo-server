@@ -6,6 +6,38 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Dungeon entry (ADR-26 / ADR-14 stage 6).** `EnterWorldRequest` gains `party_id`; a
+  non-empty value means "an instance of the content named by `map_id`, for this party".
+  There is no `MsgEnterDungeon` -- a second message type would duplicate the auth, budget,
+  rate-limit and error paths `handleEnterWorld` already owns, and the copies would drift.
+
+  The instance is keyed by the **party**, not the content id: `AssignDungeon` looks up
+  `dungeon:party:{party_id}`, and only the first member to arrive allocates. That election
+  is the part worth reading -- four members entering at the same instant would otherwise
+  allocate four pods and orphan three of them immediately, since nothing would ever look
+  them up again. It is an election rather than a lock: losers wait for the winner's
+  **answer**, not for a released lock, so a winner that dies costs the claim TTL rather
+  than serialising the whole party.
+
+  Membership is verified against Nakama's `party_get` over the server-to-server HTTP key,
+  **before** allocating and never per tick. An allocation is the most expensive thing an
+  unauthorised request could trigger, so the check runs first. The two client-fault
+  outcomes are kept distinct from each other and from an outage: `not a member of that
+  party`, `party does not exist`, and a wrapped transport error. Collapsing them would
+  report a Nakama outage to players as a permissions problem and make them retry a refusal
+  forever.
+
+  `AllocateDungeon` is deliberately not `FindServer` with a different argument: `FindServer`
+  asks "who serves this map" and allocates only when nobody does, while this asks for a
+  **new** instance every call. It waits on the pod's own `servers:id:` entry rather than a
+  map index, because a dungeon pod is absent from `servers:map:` by design and because the
+  allocation response carries the node address, which ADR-16 measured as not dialable.
+
+  Off unless configured: `WithDungeons` treats an index without a membership authority (or
+  the reverse) as "dungeons off" rather than half-on, and a deployment with neither keeps
+  serving maps and refuses dungeon entry with a message that says so.
+
+### Added
 
 - **Gateway-hop TLS, terminated in the gateway process — `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY`
   (`--tls-cert` / `--tls-key`). OFF by default and pinned explicitly at every deploy path.**

@@ -6,6 +6,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`EnterWorldRequest.party_id` (field 2) and `storage.DungeonIndex`** for ADR-26. The wire
+  field is additive in both encodings -- `omitempty` on the JSON side keeps a map entry
+  byte-identical to what a pre-ADR-26 peer produces, so the field is not merely
+  Protobuf-compatible.
+
+  `DungeonIndex` carries two keys rather than one because allocation and lookup answer
+  different questions: `ClaimAllocation` elects exactly one member of a party to do the
+  allocating, and `Publish`/`Lookup` carry the result the others read. Entries expire, and
+  that is not incidental -- a claim that never expired would wedge a party permanently after
+  one gateway crash, and a mapping that outlived its pod would hand a client an address that
+  is not answering. `MemoryDungeonIndex` honours the TTLs and takes an injectable clock, so a
+  test can reach expiry without sleeping.
+
+### Added
 
 - **`transport.PostureTLS` and `TransportPosture.TLS`** — the confidentiality posture now
   accounts for a listener that terminates TLS itself (ADR-23). `Posture` is unchanged and is

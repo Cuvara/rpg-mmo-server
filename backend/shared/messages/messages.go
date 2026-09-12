@@ -258,9 +258,23 @@ type AuthResponse struct {
 	ProtocolVersion uint32 `json:"protocol_version,omitempty"`
 }
 
-// EnterWorldRequest asks the gateway to assign a map server.
+// EnterWorldRequest asks the gateway to assign a game server.
+//
+// PartyID selects between the two things this one message can ask for, and
+// ADR-26 decision 1 is why there is only one message rather than two:
+//
+//	empty     -> a MAP server for MapID, the flow that has always existed.
+//	non-empty -> a DUNGEON INSTANCE of the content named by MapID, for this
+//	             party. The first member's request allocates a pod; every later
+//	             member is handed the SAME address, because the instance is keyed
+//	             by the party and not by the content (ADR-26 decision 2).
+//
+// omitempty on PartyID keeps the JSON encoding byte-identical for map requests,
+// so a pre-ADR-26 peer and this one produce the same bytes for the same map
+// entry — the field is additive in both encodings, not just in Protobuf.
 type EnterWorldRequest struct {
-	MapID string `json:"map_id"`
+	MapID   string `json:"map_id"`
+	PartyID string `json:"party_id,omitempty"`
 }
 
 // EnterWorldResponse contains the game server address and join token.

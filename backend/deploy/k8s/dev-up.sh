@@ -470,7 +470,7 @@ if [ -z "$gs_nakama_url" ]; then
   exit 1
 fi
 echo "checked: the game server will reach Nakama at $gs_nakama_url"
-$K apply -f "$HERE/app/40-gateway.yaml" -f "$HERE/app/50-fleet-map.yaml"
+$K apply -f "$HERE/app/40-gateway.yaml" -f "$HERE/app/50-fleet-map.yaml" -f "$HERE/app/60-fleet-dungeon.yaml"
 
 # Pin the resolved images over whatever the manifests carry. The Fleet is
 # scaled to 0 across the image change on purpose: every replica registers the

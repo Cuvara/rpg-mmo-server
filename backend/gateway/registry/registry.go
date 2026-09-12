@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/duycuong/rpg-mmo/gateway/metrics"
+	gameerrors "github.com/duycuong/rpg-mmo/shared/errors"
 	"github.com/duycuong/rpg-mmo/shared/storage"
 )
 
@@ -773,4 +774,42 @@ func (s *RegistryService) trackServer(info storage.ServerInfo) {
 	if s.watcher != nil && info.ServerID != "" {
 		s.watcher.TrackServer(info.ServerID, info.MapID)
 	}
+}
+
+// AllocateDungeon allocates a fresh instance from the dungeon fleet and waits
+// for that pod to publish its own registry entry.
+//
+// It is deliberately NOT FindServer with a different argument, and the
+// difference is the whole of ADR-26 decision 2:
+//
+//   - FindServer asks "which server serves this map?", searching the
+//     servers:map: index and allocating only when the answer is nobody. One
+//     live server per map (ADR-2).
+//   - This asks for a NEW instance every time it is called. Two parties
+//     entering the same dungeon content must get two pods, and the caller --
+//     not this function -- is responsible for calling it once per party
+//     (storage.DungeonIndex.ClaimAllocation elects that caller).
+//
+// The wait is on the pod's OWN entry rather than on a map index, because a
+// dungeon pod publishes servers:id:{server_id} and is deliberately absent from
+// servers:map: (ADR-26 decision 8). The wait is also not optional: the
+// allocation response carries the node address, which ADR-16 measured as not
+// dialable, while the pod's own entry carries the composed address that is.
+func (s *RegistryService) AllocateDungeon(ctx context.Context, contentID string) (storage.ServerInfo, error) {
+	ka, ok := s.allocator.(KindAllocator)
+	if !ok {
+		return storage.ServerInfo{}, fmt.Errorf("allocate dungeon: allocator does not support kinds: %w",
+			gameerrors.New(gameerrors.ErrNotImplemented, "kind allocation not implemented"))
+	}
+
+	allocated, err := ka.Allocate(ctx, AllocationRequest{Kind: KindDungeon, MapID: contentID})
+	if err != nil {
+		return storage.ServerInfo{}, fmt.Errorf("allocate dungeon %q: %w", contentID, err)
+	}
+
+	info, err := s.awaitRegistration(ctx, allocated.ServerID)
+	if err != nil {
+		return storage.ServerInfo{}, fmt.Errorf("allocate dungeon %q: server %s: %w", contentID, allocated.ServerID, err)
+	}
+	return info, nil
 }
