@@ -317,7 +317,49 @@ if [ "${nk_rebuilt:-0}" = "1" ]; then
   say "restarting nakama to pick up the rebuilt plugin"
   $K rollout restart -n rpg-k8s-data deploy/nakama
 fi
-$K rollout status -n rpg-k8s-data deploy/nakama             --timeout=300s
+# PREFLIGHT: the leaderboard the plugin refuses to boot against.
+#
+# `kills_alltime` must be authoritative -- a client-writable kill leaderboard is a
+# client that can write its own kill count -- and the Go plugin FAILS INIT rather
+# than accept one. The failure is invisible where it is read: Nakama crash-loops,
+# `rollout status` times out 300s later, and CD prints
+# `error: timed out waiting for the condition` with nothing about leaderboards.
+# The cause is only in the pod log, one `kubectl logs` away from a reader who does
+# not yet know to look.
+#
+# This defect lives in each ENVIRONMENT'S DATABASE, not in the image, so a green
+# dev deploy predicts nothing: dev was fixed by hand on 2026-09-10 and staging
+# failed the identical way on 2026-09-12. Production has never been deployed and
+# will hit it on its first run unless this gate is here.
+#
+# Skipped, not failed, when the table does not exist yet: a first-ever deploy runs
+# the Nakama migration in an init container, so there is nothing to inspect and
+# nothing wrong.
+lb_auth=$($K exec -n rpg-k8s-data postgres-meta-0 -- \
+  psql -U nakama -d nakama -tAc \
+  "SELECT authoritative FROM leaderboard WHERE id = 'kills_alltime';" 2>/dev/null | tr -d '[:space:]' || true)
+if [ "$lb_auth" = "f" ]; then
+  echo "ERROR: leaderboard kills_alltime has authoritative=false on this cluster." >&2
+  echo "  The Nakama Go plugin refuses to start against it, so Nakama will crash-loop" >&2
+  echo "  and the rollout below would time out after 300s naming only a timeout." >&2
+  echo "  Fix, keeping every existing record:" >&2
+  echo "    kubectl --context $KUBE_CONTEXT -n rpg-k8s-data exec postgres-meta-0 -- \\" >&2
+  echo "      psql -U nakama -d nakama -c \"UPDATE leaderboard SET authoritative = true WHERE id = 'kills_alltime';\"" >&2
+  echo "  Then re-run this deploy. To discard the records instead, set LEADERBOARD_MIGRATE=recreate." >&2
+  exit 1
+fi
+if [ -n "$lb_auth" ]; then
+  echo "checked: leaderboard kills_alltime is authoritative (clients cannot write their own scores)"
+fi
+
+# If the rollout fails anyway, say WHY. Without this the operator sees only
+# `timed out waiting for the condition`; the actual reason is a fatal line in the
+# pod log, and it is worth the four lines here to put it in the same output.
+if ! $K rollout status -n rpg-k8s-data deploy/nakama --timeout=300s; then
+  echo "ERROR: nakama did not become Ready. Its last log lines:" >&2
+  $K logs -n rpg-k8s-data deploy/nakama --tail=20 2>&1 | sed 's/^/  /' >&2 || true
+  exit 1
+fi
 
 # Read the images the cluster is ALREADY running, before `apply` overwrites the
 # specs with whatever tag the manifests carry. Comparing after the apply always

@@ -5,6 +5,22 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`dev-up.sh` now gates on the leaderboard the Nakama plugin refuses to boot against,
+  and says why the rollout failed when it fails anyway.** `kills_alltime` must be
+  `authoritative=true`; the Go plugin fails `InitModule` rather than accept a
+  client-writable kill leaderboard. Nothing said so where it was read: Nakama crash-looped,
+  `rollout status` timed out 300s later, and CD printed `error: timed out waiting for the
+  condition` with no mention of leaderboards -- the cause was only in the pod log. **This
+  defect lives in each environment's database, not in the image**, so a green dev deploy
+  predicted nothing: dev was fixed by hand on 2026-09-10 and staging failed identically on
+  2026-09-12 during the develop -> staging promotion. Production has never been deployed
+  and would have met it on its first run. The gate prints the record-preserving `UPDATE`
+  verbatim, and skips (rather than fails) when the table does not exist yet, which is the
+  first-ever-deploy case. The `rollout status` for Nakama is now wrapped so a failure dumps
+  the pod's last 20 log lines into the same output.
+
+
 ### Fixed
 - **Nakama's k8s probes do not follow its TLS decision, and the hazard is now recorded where
   someone will hit it.** All three (`startup`, `readiness`, `liveness`) are `httpGet` with no
