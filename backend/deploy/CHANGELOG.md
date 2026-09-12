@@ -5,6 +5,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`CORE-COMPLETION.md` said the gate was open; it is open on the backend only.** C1 and C2
+  were proven by a Go probe, and the Unity client has **none** of either: `party_id` appears
+  nowhere in `com.cuvara.netcode`, nothing in `Assets/Scripts/` mentions a party or a dungeon,
+  and the client is pinned to a netcode version predating the wire field. A real player cannot
+  ask for a dungeon — there is no field to ask with. Added as **C5**, and the correction states
+  the lesson rather than only the fact: "measured on dev" meant measured with the tool that was
+  easiest to write, and a probe speaking the protocol directly proves a backend while proving
+  nothing about whether anyone can reach it.
+
 ### Documentation
 - **`CORE-COMPLETION.md`: the gate is open.** C1 (dungeon instancing) is marked done and
   measured, not asserted -- a party created through Nakama, two members entering, both handed
