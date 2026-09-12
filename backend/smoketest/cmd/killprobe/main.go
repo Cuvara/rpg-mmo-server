@@ -14,6 +14,7 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -26,7 +27,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/duycuong/rpg-mmo/shared/jwt"
 	"github.com/duycuong/rpg-mmo/shared/messages"
+	"github.com/duycuong/rpg-mmo/shared/sealed"
+)
+
+// The sealed session for the one connection this probe opens. dev and staging run
+// GAMESERVER_SEALED=require, and a JSON client is refused outright there --
+// `join rejected: encoding_cannot_seal` -- so this probe spoke a dialect its own
+// deployment had stopped accepting the day sealing was turned on.
+var (
+	sealOut *sealed.Session
+	sealIn  *sealed.Session
 )
 
 const (
@@ -88,6 +100,16 @@ func main() {
 	}
 	say("joined as %s (tick rate %d)", joinResp.UserID, joinResp.TickRate)
 
+	// The sealed handshake, immediately after the join reply and before any gameplay
+	// frame -- the server runs its half at exactly that point, and no frame may be
+	// written half-sealed. Unconditional on purpose: this probe exists to exercise the
+	// deployed stack, dev and staging both require sealing, and a flag to skip it would
+	// only be a way to run a test that no longer resembles the deployment.
+	if err := sealSession(conn, joinToken); err != nil {
+		fail("sealed handshake: %v", err)
+	}
+	say("sealed session established (binding verified: %v)", sealBindingVerified)
+
 	// ---- walk to a mob and hit it --------------------------------------------
 	state := messages.NewSnapshotState()
 	var (
@@ -103,7 +125,7 @@ func main() {
 	_ = conn.SetReadDeadline(deadline)
 
 	for time.Now().Before(deadline) {
-		env, err := messages.Decode(conn)
+		env, err := readFrame(conn)
 		if err != nil {
 			fail("read: %v", err)
 		}
@@ -346,6 +368,64 @@ func enterWorld(gatewayAddr, jwt, mapID string) (string, string) {
 	return enterResp.ServerAddr, enterResp.JoinToken
 }
 
+// sealSession runs the client half of ADR-22's handshake and installs the two
+// one-direction keys for this connection.
+//
+// The jti comes from THIS connection's join token. It is read WITHOUT verifying the
+// signature, which is safe because the jti is only a salt in the key schedule: a
+// forged one derives keys the server does not share, so the handshake fails rather
+// than succeeding on attacker-chosen material.
+func sealSession(conn net.Conn, joinToken string) error {
+	claims, err := jwt.ParseUnverified(joinToken)
+	if err != nil {
+		return fmt.Errorf("read jti from join token: %w", err)
+	}
+
+	result, err := sealed.RunClientHandshake(
+		sealed.ClientHandshakeConfig{JTI: claims.Jti},
+		func(pub []byte) error {
+			env, err := messages.NewEnvelopeAs(messages.EncodingProto,
+				messages.MsgSealedClientHello, messages.SealedClientHello{PublicKey: pub})
+			if err != nil {
+				return err
+			}
+			data, err := messages.Encode(env)
+			if err != nil {
+				return err
+			}
+			_, err = conn.Write(data)
+			return err
+		},
+		func() ([]byte, []byte, string, error) {
+			env, err := messages.Decode(conn)
+			if err != nil {
+				return nil, nil, "", err
+			}
+			if env.Type != messages.MsgSealedServerHello {
+				return nil, nil, "", fmt.Errorf("want server hello, got type %d", env.Type)
+			}
+			var hello messages.SealedServerHello
+			if err := env.UnmarshalPayload(&hello); err != nil {
+				return nil, nil, "", err
+			}
+			return hello.PublicKey, hello.Binding, hello.Error, nil
+		},
+	)
+	if err != nil {
+		return err
+	}
+
+	sealOut, sealIn = result.Outbound, result.Inbound
+	// Reported, never asserted. A shipped client cannot hold JOIN_TOKEN_SECRET -- it is
+	// the key the gateway MINTS join tokens with -- so this is false here for the same
+	// reason it is false in the shipped client, and the session is confidential against
+	// a passive eavesdropper only.
+	sealBindingVerified = result.BindingVerified
+	return nil
+}
+
+var sealBindingVerified bool
+
 // ---- wire helpers -----------------------------------------------------------
 
 func send(conn net.Conn, payload any) error {
@@ -360,11 +440,11 @@ func send(conn net.Conn, payload any) error {
 }
 
 func sendTyped(conn net.Conn, t messages.MsgType, payload any) error {
-	env, err := messages.NewEnvelopeAs(messages.EncodingJSON, t, payload)
+	env, err := messages.NewEnvelopeAs(messages.EncodingProto, t, payload)
 	if err != nil {
 		return err
 	}
-	data, err := messages.Encode(env)
+	data, err := encodeFrame(env)
 	if err != nil {
 		return err
 	}
@@ -372,8 +452,53 @@ func sendTyped(conn net.Conn, t messages.MsgType, payload any) error {
 	return err
 }
 
+// encodeFrame seals the body once a session exists. Before that it is the plain
+// [4-byte length][body] framing the join and the hello exchange use.
+func encodeFrame(env messages.Envelope) ([]byte, error) {
+	if sealOut == nil {
+		return messages.Encode(env)
+	}
+	body, err := messages.EncodeBody(env)
+	if err != nil {
+		return nil, err
+	}
+	frame, err := sealOut.Seal(body)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 4+len(frame))
+	binary.BigEndian.PutUint32(out[:4], uint32(len(frame)))
+	copy(out[4:], frame)
+	return out, nil
+}
+
+// readFrame is the inbound half. A cleartext frame arriving after the session is
+// installed is a downgrade attempt and fails here rather than being served.
+func readFrame(conn net.Conn) (messages.Envelope, error) {
+	if sealIn == nil {
+		return messages.Decode(conn)
+	}
+	var lenBuf [4]byte
+	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
+		return messages.Envelope{}, err
+	}
+	length := binary.BigEndian.Uint32(lenBuf[:])
+	if length == 0 || length > 1<<20 {
+		return messages.Envelope{}, fmt.Errorf("sealed frame length %d out of range", length)
+	}
+	body := make([]byte, length)
+	if _, err := io.ReadFull(conn, body); err != nil {
+		return messages.Envelope{}, err
+	}
+	plain, err := sealIn.Open(body)
+	if err != nil {
+		return messages.Envelope{}, fmt.Errorf("open sealed frame: %w", err)
+	}
+	return messages.DecodeBody(plain)
+}
+
 func roundTrip(conn net.Conn, reqType messages.MsgType, req any, wantType messages.MsgType, out any) error {
-	env, err := messages.NewEnvelopeAs(messages.EncodingJSON, reqType, req)
+	env, err := messages.NewEnvelopeAs(messages.EncodingProto, reqType, req)
 	if err != nil {
 		return err
 	}

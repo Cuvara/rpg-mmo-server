@@ -6,6 +6,30 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`killprobe` spoke JSON, so turning sealing on broke it.** The day `GAMESERVER_SEALED`
+  flipped to `require` on dev, the reward acceptance harness stopped working:
+
+  ```
+  [killprobe] FAILED: join rejected: encoding_cannot_seal
+  ```
+
+  The refusal is clear — that part is the server fix working — but the tool that proves
+  rewards actually flow could no longer run against the environment it exists to prove. A
+  harness that stops running is worse than one that fails, because nothing reports its
+  absence.
+
+  It now speaks Protobuf and runs the ADR-22 handshake immediately after the join, before
+  any gameplay frame, with the sealed framing on both directions. Sealing is
+  **unconditional**: dev and staging both require it, and a flag to skip it would only be a
+  way to run a probe that no longer resembles the deployment.
+
+  `binding_verified` is reported, never asserted — a probe cannot hold `JOIN_TOKEN_SECRET`
+  for the same reason a shipped client cannot.
+
+  Verified against the live sealed fleet: `REWARDED: wallet map[] -> map[gold:10] after 30
+  attacks`.
+
+### Fixed
 - **`gamestate_reload` failed against a sealed server, and blamed persistence for it.** The
   step rejoins on a second connection and never sealed it, so a `require` server refused the
   rejoin and the step reported
