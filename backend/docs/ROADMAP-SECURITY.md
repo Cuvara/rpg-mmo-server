@@ -60,21 +60,28 @@ eviction is keyed by it (ADR-20).
 
 ### 1.2 What is missing, ranked by value against effort
 
-These are the items that would actually reduce cheating. **This is where the budget should
-go, ahead of §2.**
+**Read this before planning from it: A1, A2 and A3 are DONE.** This table listed all six
+as open until 2026-09-12, and the three that shipped between 2026-09-09 and 2026-09-11 were
+never struck off — so a reader planning from it would have re-specified work that already
+exists in the tree. The done rows are kept, not deleted, because the reasoning in them is
+what the implementations were built against.
 
-| # | Gap | Why it matters | Effort |
-|---|---|---|---|
-| A1 | **No telemetry on rejected input.** `ValidationLogic` returns an error string and the server drops the input; nothing counts rejections per player over time. | A cheater probing the rules generates a rejection pattern no honest client produces. Today that signal is discarded. **Counting it is cheap and it is the foundation every later detection rests on.** | Low |
-| A2 | **No per-account rate/anomaly budget.** `MaxInputsPerConnection` is a per-tick cap, not a behavioural budget. | Distinguishes "hit the cap once on a lag spike" from "sat at the cap for ten minutes". | Low |
-| A3 | **No replay protection on the game hop.** Nothing binds a packet to a session and a position in the stream. | A captured packet can be re-sent. A session-keyed MAC with a sequence number closes this — and this is the one place §2's work genuinely helps anti-cheat. | Medium |
-| A4 | **Attack validation is per-attack, not per-rate.** `ValidateAttack` checks range and cooldown for one attack; nothing audits sustained attack rate against what the cooldown permits. | Cooldown bypass is the classic combat cheat. | Medium |
-| A5 | **No server-side plausibility audit on position.** Integration is authoritative, so position cannot be forged directly — but there is no check that a client's *claimed* input pattern is physically plausible over time. | Defence in depth; low priority precisely because A-authority already holds. | Medium |
-| A6 | **Client-side anti-cheat: none.** | Deliberate. Client-side anti-cheat on an IL2CPP build raises the cost of cheating, it does not prevent it, and it is defeated once and then defeated forever by everyone. **Do not invest here before A1-A4.** | High, low value |
+| # | Gap | State | Why it matters | Effort |
+|---|---|---|---|---|
+| A1 | **Telemetry on rejected input.** `ValidationLogic` returns an error string and the server drops the input; nothing counted rejections per player over time. | ✅ **DONE.** `GameServer/Input/InputRejection.cs` is a bounded reason enum (bounded deliberately: the reason *strings* embed attacker-controlled values, so they are unusable as metric labels). `InputHandler` classifies at every rejection site; `GameMetrics.RecordInputRejected` counts per reason, pre-seeded at zero so a reason that never fires is still visible. Pinned by `GameServer.Tests/Input/InputRejectionTelemetryTests.cs`. | A cheater probing the rules generates a rejection pattern no honest client produces. **Counting it is cheap and it is the foundation every later detection rests on.** | Low |
+| A2 | **Per-account rate/anomaly budget.** `MaxInputsPerConnection` is a per-tick cap, not a behavioural budget. | ✅ **DONE, record-only.** `GameServer/Input/InputAnomalyTracker.cs` keeps a decaying per-account score (60s half-life, 4096 accounts tracked, weighted per rejection reason) keyed on the join token's user id, so it survives a reconnect. **It flags and records; it never acts on a player** — the false-positive rate of any threshold here is still unmeasured, and most rejection reasons rise with latency. Enforcement is a later, smaller change once a baseline exists to choose a threshold against. | Distinguishes "hit the cap once on a lag spike" from "sat at the cap for ten minutes". | Low |
+| A3 | **Replay protection on the game hop.** Nothing bound a packet to a session and a position in the stream. | ✅ **DONE** via ADR-22 sealed sessions, deployed to dev and staging at `GAMESERVER_SEALED=require`. The per-direction sequence number is the replay counter, and it is AEAD-authenticated rather than bolted on. Residual, recorded at ADR-22 and not closed by it: `binding_verified=false` — the transcript signer is symmetric under `JOIN_TOKEN_SECRET`, so a client able to verify the binding could forge join tokens. | A captured packet can be re-sent. | Medium |
+| A4 | **Attack validation is per-attack, not per-rate.** `CombatLogic.ValidateAttack` checks range and cooldown for one attack; nothing audits sustained attack rate against what the cooldown permits. Per-attack *classification* exists (`ServerStatus` attack counters, `GameServer.Tests/Input/AttackTelemetryTests.cs`) — that is a count of outcomes, not an audit of rate over time. | ⬜ **OPEN — the next one to do.** | Cooldown bypass is the classic combat cheat. | Medium |
+| A5 | **No server-side plausibility audit on position.** Integration is authoritative, so position cannot be forged directly — but there is no check that a client's *claimed* input pattern is physically plausible over time. | ⬜ OPEN. | Defence in depth; low priority precisely because A-authority already holds. | Medium |
+| A6 | **Client-side anti-cheat: none.** | ⬜ OPEN, deliberately. | Client-side anti-cheat on an IL2CPP build raises the cost of cheating, it does not prevent it, and it is defeated once and then defeated forever by everyone. **Do not invest here before A1-A4.** | High, low value |
 
-**Recommendation: A1 and A2 first.** They are days, not weeks, they are pure server-side,
-they need no protocol change, and without them nothing else can be measured. A detection
-system built before the telemetry exists is a system nobody can tune.
+**Recommendation, updated 2026-09-12: A4 next, then A2's enforcement step.** A1 and A2
+delivered what they promised — there is now a per-reason rejection count and a decaying
+per-account score — so the thing that was blocking every later detector (no telemetry to
+tune against) is gone. A4 is the remaining gap with a named, common cheat behind it, it is
+pure server-side, and it needs no protocol change. A2's enforcement step should come after
+A4 rather than before it, because both want the same thing next: a baseline measured from
+real sessions, not an invented threshold.
 
 ---
 
