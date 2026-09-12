@@ -62,10 +62,19 @@ func NewNakamaParty(baseURL, httpKey string, timeout time.Duration) *NakamaParty
 	}
 }
 
+// partyGetResponse mirrors the party_get reply. The field names are Nakama's
+// side of the contract, verified against backend/nakama/social/party.go rather
+// than assumed: the leader field is "leader_id", not "leader".
+//
+// LeaderID is unused by this check and is decoded anyway, so the struct
+// describes the message rather than only the part this caller happens to read.
+// A future check ("only the leader may take a party into a dungeon") needs it,
+// and a struct that silently drops a field is where that check would start
+// life reading an empty string.
 type partyGetResponse struct {
-	PartyID string   `json:"party_id"`
-	Leader  string   `json:"leader"`
-	Members []string `json:"members"`
+	PartyID  string   `json:"party_id"`
+	LeaderID string   `json:"leader_id"`
+	Members  []string `json:"members"`
 }
 
 // IsMember implements PartyMembership.
