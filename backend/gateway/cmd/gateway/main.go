@@ -15,6 +15,7 @@ import (
 	"github.com/duycuong/rpg-mmo/gateway/registry"
 	"github.com/duycuong/rpg-mmo/gateway/server"
 	"github.com/duycuong/rpg-mmo/gateway/session"
+	"github.com/duycuong/rpg-mmo/gateway/transfer"
 	"github.com/duycuong/rpg-mmo/shared/config"
 	"github.com/duycuong/rpg-mmo/shared/logger"
 	"github.com/duycuong/rpg-mmo/shared/messages"
@@ -48,6 +49,7 @@ func main() {
 	allocatorMode := flag.String("allocator", "", "Game server allocator: none or agones (overrides ALLOCATOR; default none)")
 	allocNamespace := flag.String("allocator-namespace", "", "Kubernetes namespace holding the Agones fleets (overrides ALLOCATOR_NAMESPACE)")
 	allocFleetMap := flag.String("allocator-fleet-map", "", "Agones Fleet for map servers (overrides ALLOCATOR_FLEET_MAP)")
+	nakamaURL := flag.String("nakama-url", "", "Base URL of Nakama, used ONLY to check party membership before allocating a dungeon instance (overrides NAKAMA_URL). Unset = dungeons are unavailable; map play is unaffected. The gateway still verifies auth tokens locally and never calls Nakama on the login path (ADR-3)")
 	allocFleetDungeon := flag.String("allocator-fleet-dungeon", "", "Agones Fleet for dungeon servers (overrides ALLOCATOR_FLEET_DUNGEON). No default: no dungeon fleet is deployed yet, and unset makes a dungeon allocation fail immediately and legibly")
 	allocTransport := flag.String("allocator-transport", "", "Realtime transport the allocated fleet's game servers listen with: tcp or kcp (overrides ALLOCATOR_TRANSPORT; defaults to --transport)")
 	metricsAddr := flag.String("metrics-addr", "", "Prometheus metrics listen address, e.g. :9102 (overrides METRICS_ADDR; \"off\" or an empty METRICS_ADDR disables it)")
@@ -183,6 +185,13 @@ func main() {
 		// consumer-group recovery counter that feeds
 		// gateway_stream_group_loss_total.
 		redisStream *redisstore.EventStream
+		// dungeonIndex is non-nil only on the Redis backend. Redis-only on
+		// purpose: the party -> instance mapping is cross-process state by
+		// definition -- four party members may arrive at four gateway
+		// processes, and an in-process index would give each of them its own
+		// dungeon. A nil index means "dungeons off", which server.WithDungeons
+		// treats as a supported state rather than an error.
+		dungeonIndex storage.DungeonIndex
 	)
 
 	switch mode {
@@ -201,6 +210,11 @@ func main() {
 		stream := redisstore.NewEventStreamWithClient(client, "gateway", consumer)
 		stream.SetLogger(log)
 		sessionStore, serverRegistry, eventStream = sess, reg, stream
+		// The party -> instance index shares the one pool above. Redis-only on
+		// purpose: it is cross-process state by definition -- four party members
+		// may arrive at four gateway processes, and an in-process index would
+		// give each of them its own dungeon.
+		dungeonIndex = redisstore.NewDungeonIndexWithClient(client)
 		closers = append(closers, stream.Close, client.Close)
 
 		// Redis is a real dependency of login and map assignment, so it gates
@@ -250,8 +264,8 @@ func main() {
 	}
 	if allocMode == allocatorAgones {
 		agonesCfg := registry.AgonesConfig{
-			Namespace:    firstNonEmpty(*allocNamespace, os.Getenv("ALLOCATOR_NAMESPACE"), registry.DefaultNamespace),
-			FleetMap:     firstNonEmpty(*allocFleetMap, os.Getenv("ALLOCATOR_FLEET_MAP"), registry.DefaultFleetMap),
+			Namespace: firstNonEmpty(*allocNamespace, os.Getenv("ALLOCATOR_NAMESPACE"), registry.DefaultNamespace),
+			FleetMap:  firstNonEmpty(*allocFleetMap, os.Getenv("ALLOCATOR_FLEET_MAP"), registry.DefaultFleetMap),
 			// No default fleet: dungeon allocation is unconfigured until a
 			// dungeon fleet exists (ADR-14 stage 6).
 			FleetDungeon: firstNonEmpty(*allocFleetDungeon, os.Getenv("ALLOCATOR_FLEET_DUNGEON")),
@@ -353,6 +367,23 @@ func main() {
 		log,
 	)
 
+	// Party membership is asked over Nakama's server-to-server HTTP key -- the
+	// same internal channel the game server uses for rewards (ADR-24). It is
+	// consulted once per dungeon entry and never on the login or gameplay path.
+	var partyMembers transfer.PartyMembership
+	if nURL := firstNonEmpty(*nakamaURL, os.Getenv("NAKAMA_URL")); nURL != "" {
+		nKey := os.Getenv("NAKAMA_HTTP_KEY")
+		if nKey == "" {
+			// Refusing here rather than defaulting: Nakama's published default
+			// key reaches the server-only RPCs, and ADR-24 records that every
+			// deployed compose environment once ran it unknowingly.
+			log.Warn("NAKAMA_URL is set but NAKAMA_HTTP_KEY is empty; dungeon entry stays disabled rather than calling Nakama with no key")
+		} else {
+			partyMembers = transfer.NewNakamaParty(nURL, nKey, 0)
+			log.Info("dungeon entry enabled", "nakama_url", nURL)
+		}
+	}
+
 	gw = server.New(sessions, reg, cfg.JWTSecret, log,
 		server.WithEventRelay(relay), server.WithTransport(listenTransport),
 		server.WithMetrics(met),
@@ -366,6 +397,11 @@ func main() {
 		server.WithTransportKey(tKey),
 		server.WithTLS(tlsConf),
 		server.WithJoinTokenSecret(joinSecret),
+		// Dungeons need BOTH the cross-process index and the membership
+		// authority; WithDungeons treats one-without-the-other as off, so a
+		// deployment missing either keeps working for map play and refuses
+		// dungeon entry legibly (ADR-26 decision 3).
+		server.WithDungeons(dungeonIndex, partyMembers),
 		// The per-IP limiter is configured per minute (the natural unit for a
 		// login rate) but the bucket refills per second.
 		server.WithConnRateLimit(connRatePerMin/60, connBurst),

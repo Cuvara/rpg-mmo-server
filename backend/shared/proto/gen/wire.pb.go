@@ -489,10 +489,24 @@ func (x *AuthResponse) GetProtocolVersion() uint32 {
 	return 0
 }
 
-// EnterWorldRequest asks the gateway to assign a map server.
+// EnterWorldRequest asks the gateway to assign a game server.
+//
+// `party_id` selects between the two things this one message can ask for, and
+// ADR-26 decision 1 is the reason there is only one message:
+//
+//	empty     -> a MAP server for `map_id`, the flow that has always existed.
+//	non-empty -> a DUNGEON INSTANCE of the content named by `map_id`, for this
+//	             party. The first member's request allocates a pod; every later
+//	             member is handed the SAME address, because the instance is
+//	             keyed by the party and not by the content (ADR-26 decision 2).
+//
+// The gateway verifies the caller really is a member of the named party against
+// Nakama, once per entry (ADR-26 decision 3). A client that names a party it is
+// not in is refused; it is not quietly given a map.
 type EnterWorldRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	MapId         string                 `protobuf:"bytes,1,opt,name=map_id,json=mapId,proto3" json:"map_id,omitempty"`
+	PartyId       string                 `protobuf:"bytes,2,opt,name=party_id,json=partyId,proto3" json:"party_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -530,6 +544,13 @@ func (*EnterWorldRequest) Descriptor() ([]byte, []int) {
 func (x *EnterWorldRequest) GetMapId() string {
 	if x != nil {
 		return x.MapId
+	}
+	return ""
+}
+
+func (x *EnterWorldRequest) GetPartyId() string {
+	if x != nil {
+		return x.PartyId
 	}
 	return ""
 }
@@ -1636,9 +1657,10 @@ const file_wire_proto_rawDesc = "" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x14\n" +
 	"\x05error\x18\x03 \x01(\tR\x05error\x12)\n" +
-	"\x10protocol_version\x18\x04 \x01(\rR\x0fprotocolVersion\"*\n" +
+	"\x10protocol_version\x18\x04 \x01(\rR\x0fprotocolVersion\"E\n" +
 	"\x11EnterWorldRequest\x12\x15\n" +
-	"\x06map_id\x18\x01 \x01(\tR\x05mapId\"\x9b\x01\n" +
+	"\x06map_id\x18\x01 \x01(\tR\x05mapId\x12\x19\n" +
+	"\bparty_id\x18\x02 \x01(\tR\apartyId\"\x9b\x01\n" +
 	"\x12EnterWorldResponse\x12\x1f\n" +
 	"\vserver_addr\x18\x01 \x01(\tR\n" +
 	"serverAddr\x12\x1d\n" +

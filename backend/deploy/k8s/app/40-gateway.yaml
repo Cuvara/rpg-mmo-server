@@ -212,11 +212,39 @@ spec:
               value: "rpg-k8s-realtime"
             - name: ALLOCATOR_FLEET_MAP
               value: "map-servers-dotnet-k8s"
-            # No dungeon fleet exists (ADR-14 stage 6 unstarted). Left unset
-            # so KindDungeon fails with ErrKindNotConfigured naming the knob,
-            # instead of a 404 for a fleet that was never going to be there.
+            # The dungeon fleet, deployed by 60-fleet-dungeon.yaml (ADR-26 /
+            # ADR-14 stage 6). This value read "" until 2026-09-12 because no
+            # such fleet existed; an unset value still fails legibly with
+            # ErrKindNotConfigured naming this knob, so reverting it degrades
+            # dungeon entry without touching map play.
             - name: ALLOCATOR_FLEET_DUNGEON
-              value: ""
+              value: "dungeon-servers-dotnet-k8s"
+            # NAKAMA — party membership, and ONLY party membership.
+            #
+            # The gateway verifies auth tokens locally and never calls Nakama on
+            # the login path (ADR-3). This URL exists for one question, asked
+            # once per dungeon entry and never per tick: "is this user in the
+            # party they named?" (ADR-26 decision 3). Membership is not mirrored
+            # into Redis, because a mirror of an authority is a second authority
+            # that disagrees under partition.
+            #
+            # Absent, dungeon entry is refused with a message saying dungeons
+            # are not configured, and map play is untouched. That is why this is
+            # `optional: true` while the game server's identically-named
+            # variable is not: there, an absent URL silently awards no rewards;
+            # here, an absent URL closes one door loudly.
+            - name: NAKAMA_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: gameserver-config
+                  key: nakama-url
+                  optional: true
+            - name: NAKAMA_HTTP_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: rpg-app-secrets
+                  key: nakama-http-key
+                  optional: true
             # What the FLEET listens with, not what this gateway listens with.
             # It is announced to the client BEFORE the pod's own registration
             # lands, so a mismatch tells the client to speak the wrong

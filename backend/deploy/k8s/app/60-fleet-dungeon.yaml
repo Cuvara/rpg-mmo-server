@@ -1,0 +1,351 @@
+# Dungeon-server Fleet for the k8s-hosted app tier (ADR-26, ADR-14 stage 6).
+#
+# This fleet is NOT a second map fleet with a different name, and the two
+# differences below are the whole of ADR-26 on the deployment side.
+#
+# 1. IT PINS NO GAMESERVER_MAP_ID. A map pod claims map_01 at boot and is found
+#    through servers:map:map_01. A dungeon pod claims nothing: it is allocated
+#    to a PARTY, and the gateway records that mapping itself under
+#    dungeon:party:{party_id} (ADR-26 decision 2). The pod publishes only its
+#    own servers:id: entry so the gateway can read its dialable address, and is
+#    deliberately absent from the map index (decision 8) -- a dungeon advertised
+#    as a map would be handed to an unrelated player by FindServer.
+#
+# 2. IT CARRIES SPARE READY PODS, AND THAT IS CORRECT HERE. ADR-18 forbids
+#    replicas > 1 on the map fleet because every replica self-registers under
+#    the same map id, so a spare pod is a second live server for one world.
+#    None of that applies to a fleet whose pods register no map: its replicas
+#    are interchangeable until allocated, which is the exact shape ADR-18 names
+#    as the condition that unlocks replicas > 1 and a buffer autoscaler. A
+#    spare is what makes dungeon entry fast rather than a cold pod start inside
+#    the client's EnterWorld budget.
+#
+# THE IMAGE TAG IS A CLAIM, NOT A FACT -- same as the map fleet:
+#   docker save rpg-mmo/gameserver-dotnet:develop | \
+#     docker exec -i k3d-rpg-dev-server-0 ctr -n k8s.io images import -
+apiVersion: agones.dev/v1
+kind: Fleet
+metadata:
+  name: dungeon-servers-dotnet-k8s
+  namespace: rpg-k8s-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    rpg-mmo/role: dungeon
+    rpg-mmo/runtime: dotnet
+spec:
+  # TWO, and this is the fleet where a spare is meaningful.
+  #
+  # ADR-18's argument against replicas > 1 is specific to a fleet that pins one
+  # GAMESERVER_MAP_ID for every replica: there, a second Ready pod registers
+  # under the same map id at boot and ADR-2's invariant is broken by the replica
+  # count alone. This fleet pins no map id and its pods register no map, so a
+  # second Ready pod is what it sounds like -- an idle instance waiting to be
+  # allocated to a party.
+  #
+  # Why a spare matters here and not there: dungeon entry happens inside the
+  # client's EnterWorld budget, and that budget is sized to stay within the
+  # gateway's heartbeat window. A cold pod start inside it is the difference
+  # between entering a dungeon and being told to retry.
+  #
+  # STILL NO FleetAutoscaler, for now. A buffer autoscaler is defensible on this
+  # fleet -- ADR-18 says so explicitly -- but `verify.sh`'s cluster.autoscaler
+  # check currently FAILS on any autoscaler it finds and stands down only for a
+  # fleet with a per-pod map id. Adding one before that check knows about this
+  # fleet turns every deploy red on a healthy stack. The check moves first.
+  replicas: 2
+  scheduling: Packed
+  template:
+    metadata:
+      labels:
+        rpg-mmo/role: dungeon
+        rpg-mmo/runtime: dotnet
+    spec:
+      ports:
+        # `name: game` is a CONTRACT. The gateway's allocator picks the port
+        # whose name is exactly "game" (agones_allocator.go, gamePortName);
+        # renaming it fails every allocation with `no "game" port in
+        # allocation status`.
+        - name: game
+          containerPort: 9000
+          protocol: TCP
+          # Dynamic on purpose. Static would make containerPort == hostPort
+          # and let the address be configured, at the cost of what
+          # `scheduling: Packed` is for — one GameServer per port per node
+          # (ADR-15 decision 2 option B, rejected).
+          portPolicy: Dynamic
+      # Health is ON, matching the dev fleet: HttpAgonesSdk really does POST
+      # /ready, /health, /allocate, /shutdown to the sidecar. The coupling is
+      # real — the ping shares a process with the tick loop, so a tick loop
+      # stalled past initialDelay + period*failureThreshold is a killed pod.
+      # That is why the CPU limit below is 1000m and not 500m: CFS throttling
+      # shows up as missed ticks, and a throttled server is now a killed one.
+      health:
+        initialDelaySeconds: 10
+        periodSeconds: 5
+        failureThreshold: 3
+      template:
+        spec:
+          # Pull from a private registry when registry-creds exists in this
+          # namespace. Silently ignored when absent (k3d import, no registry).
+          imagePullSecrets:
+            - name: registry-creds
+          containers:
+            - name: gameserver
+              image: rpg-mmo/gameserver-dotnet:develop
+              imagePullPolicy: IfNotPresent
+              env:
+                # -----------------------------------------------------------
+                # SERVER-ID CHAIN — POD_NAME must stay the ONLY source.
+                # -----------------------------------------------------------
+                #   Agones GameServer name -> pod name -> POD_NAME -> serverId
+                #   -> the Redis registry entry -> the `sid` the gateway signs
+                #   -> what the pod compares on join.
+                #
+                # DO NOT ADD GAMESERVER_ID. Program.cs resolves
+                # `--server-id ?? GAMESERVER_ID ?? POD_NAME`, so GAMESERVER_ID
+                # WINS. docker-compose.yml sets GAMESERVER_ID=gs-dotnet-map_01
+                # and is right to (one static container, one static id);
+                # copying that line here gives every pod the same hardcoded id
+                # while the allocator hands the client the GameServer's real
+                # name, and every join is then rejected with "Token is for a
+                # different server" — a message that says nothing about the
+                # cause.
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                - name: AGONES_ENABLED
+                  value: "true"
+                # AGONES_SDK_HTTP_PORT is deliberately NOT set: Agones injects
+                # it per pod and the SDK defaults to 9358. Pinning it here
+                # pins a value the controller is free to change.
+                - name: GAMESERVER_MODE
+                  value: "dungeon"
+                # GAMESERVER_MAP_ID IS ABSENT ON PURPOSE -- see the header.
+                # A dungeon pod is allocated to a party, not to a world, and it
+                # must not appear in servers:map: (ADR-26 decision 8). Adding a
+                # map id here would put every replica of this fleet into that
+                # index and let FindServer hand a passing player someone else's
+                # dungeon.
+                - name: GAMESERVER_ADDR
+                  value: ":9000"
+                # Sealed transport on the gameplay hop. REQUIRED.
+                #
+                # This line read `off` until 2026-09-11, under the note "flip this
+                # when the smoketest speaks protobuf". THAT NOTE NAMED THE WRONG
+                # BLOCKER and must not come back in that form. The smoketest gained
+                # `-encoding proto` (backend/smoketest/smoke/helpers.go) and both
+                # deploy paths derive the pair for you -- cd.yml's .env generator
+                # and backend/deploy/stack.sh each set SMOKE_SEALED=1 together with
+                # SMOKE_ENCODING=proto -- so the verifier stopped being the
+                # obstacle well before anyone updated this comment. The obstacle was
+                # always the SHIPPED UNITY CLIENT, and nobody had written it down.
+                #
+                # THE REAL PRECONDITION, which this value now asserts is met: a
+                # client that reaches this fleet must BOTH (1) speak protobuf and
+                # (2) set NetworkSettings.RequireSealedSession. Not either. The JSON
+                # codec has no sealed frame at all, so a JSON client is refused at
+                # the join with `encoding_cannot_seal` however else it is
+                # configured; a protobuf client that never sends the hello is
+                # refused with `sealed handshake failed (NoHello)`.
+                #
+                # MEASURED against this fleet on the live k3d-rpg-dev cluster on
+                # 2026-09-11, with GAMESERVER_SEALED=require actually in force:
+                #   Go smoketest -sealed -encoding proto  -> SMOKE=PASS, sealed=true
+                #   Go smoketest, JSON, same server       -> REFUSED, correctly
+                #   the real Unity client                 -> FAILED: it registers the
+                #        JSON codec and never sets RequireSealedSession
+                # The third row is the whole reason this change carries a merge
+                # order. Sealing against a client that cannot seal is not a degraded
+                # mode, it is a closed door: EVERY player is refused at the join.
+                # The migration order and the symptom to recognise are written down
+                # in backend/deploy/CHANGELOG.md and backend/docs/ROADMAP-SECURITY.md
+                # step 5 -- read one of them before reverting this value.
+                #
+                # WHAT THIS BUYS, STATED HONESTLY. The passing smoke run above also
+                # reported `binding_verified=false`, and that is the shipped-client
+                # state rather than a defect: verifying the server's binding needs
+                # JOIN_TOKEN_SECRET, which is the HS256 key the gateway MINTS join
+                # tokens with (backend/gateway/transfer/join_token.go), so a client
+                # able to check the binding would also be able to forge a join token
+                # for any player on any server. So what is bought here is
+                # confidentiality against a PASSIVE eavesdropper -- which the X25519
+                # exchange gives on its own -- and NOTHING against an active one.
+                # Do not read "the hop is encrypted" as "the server is
+                # authenticated". backend/shared/sealed/client.go:23-37 and ADR-22 /
+                # ADR-23 carry the full statement.
+                #
+                # THIS MANIFEST IS APPLIED TO EVERY k8s ENVIRONMENT. dev and staging
+                # run the same namespaces on different clusters (cd.yml resolve step,
+                # DEPLOY_MODE/KUBE_CONTEXT/K8S_VERIFY_TARGET per environment), so
+                # this one value seals BOTH. VERIFY_SEALED is therefore set to 1 in
+                # verify/targets/k8s-dev.env AND k8s-stg.env in the same change: a
+                # verifier that disagrees with this line is a red deploy on a
+                # perfectly healthy stack.
+                - name: GAMESERVER_SEALED
+                  value: "require"
+                # GAMESERVER_PUBLIC_ADDR IS ABSENT ON PURPOSE. It replaces the
+                # WHOLE advertised address, so it cannot carry a port that is
+                # only known at scheduling time — and it is read only when
+                # Agones is OFF. Setting it alongside the override below is
+                # the classic way to advertise a stale port to every client.
+                #
+                # ADVERTISE HOST: the host half only. Composed by the server
+                # with the Agones-assigned port (ADR-16 decision 2):
+                #     <GAMESERVER_ADVERTISE_HOST or status.address>:<port>
+                # `optional: true` is correct and is NOT the REDIS_ADDR case:
+                # absent means "advertise status.address unmodified", which is
+                # a meaningful, handled state.
+                - name: GAMESERVER_ADVERTISE_HOST
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: advertise-host
+                      optional: true
+                - name: JWT_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: rpg-app-secrets
+                      key: jwt-secret
+                # Same value as the gateway's, different value from
+                # JWT_SECRET. Not optional: a missing key must be a visible
+                # CreateContainerConfigError, not a server that rejects every
+                # join.
+                - name: JOIN_TOKEN_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: rpg-app-secrets
+                      key: join-token-secret
+                # SIM_WORLD_HZ is the replication rate and therefore what
+                # moves bandwidth per client. The other two must divide
+                # SIM_CRITICAL_HZ exactly or the container exits 2 at startup.
+                - name: SIM_CRITICAL_HZ
+                  value: "60"
+                - name: SIM_WORLD_HZ
+                  value: "15"
+                - name: SIM_BACKGROUND_HZ
+                  value: "5"
+                # ADMISSION LIMIT -- a party, not a map.
+                #
+                # The map fleet's 100 is a measured figure about how many
+                # players one simulation can carry. This fleet's limit is not a
+                # capacity question at all: a dungeon instance holds ONE party,
+                # and the root CLAUDE.md caps a party at 4. Eight leaves room
+                # for a reconnecting member still inside the 60s hold to be
+                # counted alongside their replacement rather than refused at the
+                # door, which is the one way a party of four can legitimately
+                # need more than four admissions at once.
+                #
+                # It is NOT a tuning knob for how much this pod can take. If a
+                # dungeon ever holds more than one party, that is a design
+                # change to ADR-26 decision 2, not an edit to this number.
+                - name: GAMESERVER_CAPACITY
+                  value: "8"
+                # In-cluster DNS, NOT host.k3d.internal. The dev fleet uses
+                # the host alias because its data tier is in compose on this
+                # box; that string is what makes it work here and nowhere
+                # else.
+                #
+                # NOT `optional: true`, unlike advertise-host: an unset
+                # REDIS_ADDR is not an error in the server — it just runs
+                # WITHOUT REGISTERING, so the pod is Ready, the logs are
+                # clean, and the gateway can never find it. A
+                # CreateContainerConfigError is the better failure.
+                - name: REDIS_ADDR
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: redis-addr
+                - name: REDIS_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: rpg-app-secrets
+                      key: redis-password
+                      optional: true
+                # /metrics + /healthz. Not an Agones port — and if one is ever
+                # added, it must NOT be named "game".
+                - name: METRICS_ADDR
+                  value: ":9101"
+                # Blank => in-memory player store, state lost on every pod
+                # replacement (any rollout, eviction or health kill). A
+                # configured-but-unreachable DSN exits 1 rather than degrading
+                # quietly.
+                - name: GAME_DB_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: rpg-app-secrets
+                      key: game-db-url
+                      optional: true
+                # NAKAMA — the reward path (reward_kills / submit_kill).
+                #
+                # Absent, the server logs `Nakama: disabled (NAKAMA_URL unset)`
+                # and issues no RPC at all. That is not a degraded mode anyone
+                # asked for; it is what this fleet did until now, silently, while
+                # the economy work shipped and every deploy was green. Compose has
+                # always passed these, so nothing that runs under compose could
+                # have caught it.
+                #
+                # NOT `optional: true`, unlike GAME_DB_URL above, and the
+                # difference is deliberate. An absent DSN has a defined, handled
+                # meaning (in-memory store). An absent Nakama URL means "the
+                # rewards you think are being awarded are not", which has no safe
+                # interpretation -- so a missing key must stop the pod with
+                # CreateContainerConfigError rather than start one that looks fine.
+                # dev-up.sh checks both before the Fleet ever sees this spec, so
+                # the normal failure is a sentence, not an event on a pod.
+                - name: NAKAMA_URL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: nakama-url
+                # Must equal NAKAMA_HTTP_KEY in the `nakama` Secret in
+                # rpg-k8s-data. Two Secrets in two namespaces holding one value,
+                # because a Secret cannot cross a namespace; dev-up.sh asserts
+                # they match, since a mismatch is a 401 on every reward and
+                # nothing else compares them.
+                - name: NAKAMA_HTTP_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: rpg-app-secrets
+                      key: nakama-http-key
+              # Sized from backend/docs/BENCHMARK.md: ~30 MiB idle, ~82 MiB at
+              # 200 players (the highest figure ever recorded there); 47.3% of
+              # one core at 200 players, i.e. inside a 500m limit only by
+              # rounding, which is why the limit is 1000m now that health is
+              # on.
+              #
+              # CPU REQUEST 200m -> 250m (#145). `scheduling: Packed` packs pods
+              # by REQUEST, so a request that describes idle rather than load is
+              # a scheduler that overcommits a node under exactly the conditions
+              # that matter. Measured peak on this fleet at 100 players is 240m;
+              # 200m was below it, 250m is above it. The limit is untouched at
+              # 1000m — this changes what the scheduler reserves, not what the
+              # pod may use.
+              #
+              # The MEMORY request stays 128Mi deliberately: measured peak at
+              # 100 players is 54Mi and the highest figure BENCHMARK.md has ever
+              # recorded is 82Mi at 200 players, so 128Mi already sits above
+              # load, not at idle. Both requests are now above measured peak,
+              # which is the property that was missing, and neither is a guess
+              # about a player count nobody has run.
+              # Sized from the map fleet's measurements scaled to this fleet's
+              # admission limit, and NOT from a dungeon measurement -- because
+              # no dungeon has ever run. The map fleet measured 240m and 54Mi at
+              # 100 players; this one admits 8. The requests below are therefore
+              # far above anything 8 players can produce, deliberately: the CPU
+              # LIMIT stays at 1000m because health is on and CFS throttling
+              # shows up as missed ticks, and a throttled server is a killed
+              # one. The requests are what `scheduling: Packed` reserves, and
+              # this fleet runs spares -- so they are kept modest enough that
+              # two idle replicas do not price a node out of hosting the map
+              # fleet beside them.
+              #
+              # Revisit with a real measurement once a dungeon has run under
+              # load. Until then these are bounds, not findings.
+              resources:
+                requests:
+                  memory: "96Mi"
+                  cpu: "150m"
+                limits:
+                  memory: "256Mi"
+                  cpu: "1000m"

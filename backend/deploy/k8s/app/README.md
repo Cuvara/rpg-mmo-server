@@ -25,6 +25,7 @@ Read first: ADR-16 (what shipped and how it was proven), ADR-15 decision 3
 | `30-secret-template.yaml` | Template. `jwt-secret`, `join-token-secret` (**different values**), `redis-password`, `game-db-url`, `transport-key` |
 | `40-gateway.yaml` | Gateway Deployment + NodePort Service (client) + ClusterIP Service (metrics) |
 | `50-fleet-map.yaml` | `map-servers-dotnet-k8s` Fleet, `replicas: 1`, dynamic port, health on, no autoscaler |
+| `60-fleet-dungeon.yaml` | `dungeon-servers-dotnet-k8s` Fleet, `replicas: 2`, **no `GAMESERVER_MAP_ID`**, capacity 8. Its pods register no map and are allocated to a party (ADR-26); spare Ready pods are correct on this fleet and wrong on the one above |
 | `proof/*` | Scaffold Redis and a ConfigMap override, for bringing this tier up before `rpg-k8s-data` exists. **Not the data tier** — with that namespace present, skip both files |
 
 ## Apply
@@ -42,7 +43,7 @@ $K apply -f 00-namespace.yaml -f 05-agones-sdk-rbac.yaml -f 10-rbac.yaml -f 20-c
 $K apply -f /tmp/rpg-app.secret.yaml
 # ONLY while rpg-k8s-data does not exist (skip both once it does):
 $K apply -f proof/redis-scaffold.yaml -f proof/configmaps-scaffold.yaml
-$K apply -f 40-gateway.yaml -f 50-fleet-map.yaml
+$K apply -f 40-gateway.yaml -f 50-fleet-map.yaml -f 60-fleet-dungeon.yaml
 ```
 
 ## How a client reaches this tier

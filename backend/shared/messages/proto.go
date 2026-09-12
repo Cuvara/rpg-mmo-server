@@ -42,9 +42,9 @@ func marshalProtoPayload(v any) ([]byte, error) {
 		m = authRespPB(*t)
 
 	case EnterWorldRequest:
-		m = &wirepb.EnterWorldRequest{MapId: t.MapID}
+		m = &wirepb.EnterWorldRequest{MapId: t.MapID, PartyId: t.PartyID}
 	case *EnterWorldRequest:
-		m = &wirepb.EnterWorldRequest{MapId: t.MapID}
+		m = &wirepb.EnterWorldRequest{MapId: t.MapID, PartyId: t.PartyID}
 
 	case EnterWorldResponse:
 		m = enterWorldRespPB(t)
@@ -150,7 +150,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 		if err := proto.Unmarshal(data, &pb); err != nil {
 			return wrapUnmarshal(v, err)
 		}
-		t.MapID = pb.MapId
+		t.MapID, t.PartyID = pb.MapId, pb.PartyId
 
 	case *EnterWorldResponse:
 		var pb wirepb.EnterWorldResponse
