@@ -5,6 +5,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **`CORE-COMPLETION.md`: the gate is open.** C1 (dungeon instancing) is marked done and
+  measured, not asserted -- a party created through Nakama, two members entering, both handed
+  the **same** instance address, an outsider refused by name, and map entry unaffected on the
+  same gateway. The file now states what content may be written against and, more usefully,
+  what it must not: position inside a dungeon is not durable (ADR-26 decision 5), encounters
+  are not resumable (decision 4 defers encounter checkpointing), and the per-server player
+  ceiling is still unknown (ADR-7, blocked on hardware).
+
 ### Fixed
 - **The dungeon fleet ran an unpinned image and put three live servers on `map_01`.** Caught
   by `verify.sh` on the dev deploy (`registry.one_server` FAILED) -- after the pods were live.
