@@ -5,6 +5,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Nakama's k8s probes do not follow its TLS decision, and the hazard is now recorded where
+  someone will hit it.** All three (`startup`, `readiness`, `liveness`) are `httpGet` with no
+  `scheme`, which means HTTP. Set `NAKAMA_TLS_CERT/_KEY` and Nakama answers TLS on the same
+  port, so every probe fails with `client sent an HTTP request to an HTTPS server` and the
+  pod **never becomes Ready** — measured on k3d-rpg-dev 2026-09-12, the rollout timed out
+  with the container itself healthy.
+
+  Not fixed here, deliberately: there is no per-environment overlay to vary a probe in, so
+  the fix has to be one spec that works both ways. `scheme: HTTPS` is wrong when TLS is off,
+  and an exec probe needs a shell and curl in the Nakama image. That is a decision for
+  whoever enables TLS, and it is now written at the probes instead of waiting to be
+  rediscovered as a timed-out rollout.
+
 ### Added
 - **The gateway can be given a TLS certificate without editing the Deployment.**
   `k8s/app/40-gateway.yaml` now mounts a `gateway-tls` Secret at `/etc/gateway/tls`, so

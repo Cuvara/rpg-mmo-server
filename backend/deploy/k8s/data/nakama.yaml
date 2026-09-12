@@ -167,6 +167,20 @@ spec:
             - { name: console, containerPort: 7351 }
             - { name: metrics, containerPort: 9100 }
           # Compose runs `/nakama/nakama healthcheck`, which is an HTTP GET of
+          # THESE PROBES DO NOT FOLLOW THE TLS DECISION, AND THAT IS A BUG WAITING
+          # FOR WHOEVER TURNS IT ON. `httpGet` with no `scheme` means HTTP. Set
+          # NAKAMA_TLS_CERT/_KEY and Nakama answers TLS on this same port, so all
+          # three probes start failing with
+          #
+          #   http: TLS handshake error ... client sent an HTTP request to an HTTPS server
+          #
+          # and the pod NEVER becomes Ready -- measured on k3d-rpg-dev 2026-09-12,
+          # the rollout timed out with the container itself healthy. There is no
+          # per-environment overlay to vary this in (dev and staging apply the same
+          # files), so a fix has to be one spec that works both ways: `scheme: HTTPS`
+          # is wrong when TLS is off, and an exec probe needs a shell and curl in the
+          # Nakama image. Decide it as part of enabling TLS, not after.
+          #
           # /healthcheck against itself. Doing it as an httpGet probe is the same
           # check without forking a second copy of a 200MB binary every 10s.
           startupProbe:

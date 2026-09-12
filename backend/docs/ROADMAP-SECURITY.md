@@ -635,6 +635,35 @@ inventing a cipher.
    same second returns a **byte-identical** token — a 2 s sleep produced the predicted five.
    Both were caught only because a number was written down before it was measured.
 
+   **MEASURED on k3d-rpg-dev, 2026-09-12 — the plumbing works and TWO blockers are real.**
+   With `NAKAMA_TLS_CERT/_KEY` set, Nakama terminates TLS on its own port: `https://` answers
+   200 and plain `http://` gets 400. Neither blocker is code that is missing; both are
+   decisions that have to be made before it can be turned on anywhere.
+
+   - **Nakama's own k8s probes break.** All three (`startup`, `readiness`, `liveness`) are
+     `httpGet` with no `scheme`, which means HTTP, so with TLS on they fail with
+     `client sent an HTTP request to an HTTPS server` and the pod never becomes Ready — the
+     rollout timed out with the container itself perfectly healthy. There is no
+     per-environment overlay to vary the probe in, so the fix must be one spec that works
+     both ways: `scheme: HTTPS` is wrong when TLS is off, and an exec probe needs a shell
+     and curl in the Nakama image. Recorded at the probes themselves in
+     `k8s/data/nakama.yaml`.
+
+   - **The Unity client refuses a self-signed certificate, and cannot be pinned the way the
+     gateway hop can.** With the client pointed at `https://` it fails every request with
+     `Curl error 60: Cert verify failed. Certificate is not correctly signed by a trusted
+     CA. UnityTls error code: 7`. That refusal is correct — but the gateway hop's answer
+     does not transfer. That hop is `SslStream` inside `TcpTransport`, where
+     `TlsOptions.PinnedCertificate` pins an exact DER; the Nakama hop goes through Nakama's
+     SDK on `UnityWebRequestAdapter`, i.e. Unity's own HTTP stack, which needs a
+     `CertificateHandler` to pin at all. So this hop needs **either a CA-trusted
+     certificate, or a pinning `CertificateHandler` written for it** — the latter is real
+     client work, not configuration.
+
+   Note also that turning this on moves a third party: the C# game server calls Nakama's
+   reward RPCs over `NAKAMA_URL`, which `k8s/app/20-configmaps.yaml` pins to `http://`. It
+   has to move to `https://` in the same change, and it has its own trust decision.
+
 8. Only then revisit Option D, against whatever the hosting shape has become.
 
 ---
