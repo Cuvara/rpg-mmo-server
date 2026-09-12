@@ -69,6 +69,14 @@ C3 (Android) is done and C4 (ADR-14 stages 7-8) remains, but neither changes the
 flow content sits on: an Android client joins the same way a Windows one does — measured, not
 assumed — and an autoscaler changes how many servers exist, not what a server does.
 
+**One known gap, found by running it rather than by reading it.** A dungeon pod that is
+allocated and then never joined never shuts itself down -- decision 6 requires
+`everHadPlayer`, which is what stops a fresh pod dying at boot, and Agones never reclaims an
+Allocated pod. Two probe runs consumed both replicas of the dev fleet permanently. In
+production this is any client that receives an address and dies before dialling. It needs a
+bounded join deadline; until then a dungeon fleet needs headroom over its real concurrency.
+It does not block content, because content does not depend on the shape of that fix.
+
 **What content can now be written against.** An open-world map session and a party-instanced
 dungeon session, both server-authoritative, both sealed, with rewards going through Nakama
 transactionally at grant time. What it must NOT be written against: durable position inside a
