@@ -198,6 +198,13 @@ second replica without answering a question first. Read this before writing
 | `redis` (`rpg-k8s-data`) | StatefulSet, 1 PVC | 1 | Sessions (TTL), server registry `servers:*`, event stream `events:*` — **not a cache**, `noeviction` (ADR-4) | Joins fail while it is down; gameplay is untouched, and each game server repairs its own registry entry on the next heartbeat |
 | `postgres-game` (`rpg-k8s-data`) | StatefulSet, 1 PVC | 1 | `player_states` — authoritative player position/HP, written only by the game server (ADR-1) | Gameplay continues and the 30s save sweep **fails silently into a log line and `gameserver.player.saves{status="error"}`**; new players cannot load saved state |
 | `postgres-meta` (`rpg-k8s-data`) | StatefulSet, 1 PVC | 1 | Nakama's own database — accounts, storage, leaderboards. Migrated by Nakama, never by us | Nakama cannot authenticate |
+
+> **Leaderboard migration on k3d staging/prod:** if `nakama` crash-loops with
+> `leaderboard kills_alltime exists with authoritative=false`, follow
+> `backend/nakama/docs/RUNBOOK.md` path **A** — `UPDATE leaderboard SET
+> authoritative = true WHERE id = 'kills_alltime';` on `postgres-meta`, then
+> restart the `nakama` Deployment. Do **not** set `LEADERBOARD_MIGRATE=recreate`
+> (the dev compose file does); it discards every record on the board.
 | `map-servers-dotnet-k8s` | Agones Fleet | 1 | The live server for `map_01` | Everyone on the map drops. The map is unjoinable, refused in milliseconds rather than queued. See [Why the fleet is `replicas: 1`](#why-the-fleet-is-replicas-1), and #151 for what would actually unlock more than one |
 
 Blast radii per dependency, with measured RTO/RPO numbers, are in

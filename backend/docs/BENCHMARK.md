@@ -319,6 +319,42 @@ reported, not fixed.
 
 ## 8. Confounds — read this before quoting any number
 
+> ### Audited 2026-09-10: the marching-crowd trap, and why no figure here fell into it
+>
+> `loadtest`'s **default** movement mode, `cluster`, drives every player +X for ever
+> at 5 u/s against a 50-unit AOI radius. Its comment claims this is "the worst-case
+> dense-crowd shape" — true of the players, who march together and stay mutually
+> in-AOI, and **false of any population that does not march with them**. Against a
+> stationary population (server-spawned enemies, `LOADTEST_ENTITIES`, a stock
+> spawner) the players walk out of AOI and the run measures a nearly empty view
+> while reporting the population it started with. Measured elsewhere at 1 player /
+> 300 stationary entities: snapshot bytes/s fell 113 -> 0.6 kB/s by t=24s, inside
+> the default 60 s window.
+>
+> **`spread` marches too** — its headings are all inside the +X/+Y quadrant — so
+> only **`still`** holds position. The trap is not specific to `cluster`.
+>
+> **Every published figure in this document was checked against the raw result
+> JSON, and none is affected.** The check is `entities` vs `players_online` at the
+> end of each level: a stationary population shows up as entities exceeding the
+> players. Every published run reads **entities == players == online** — the
+> sweeps behind Parts I, II, III, IV and IX, and the six `tick-variance` runs. Two
+> independent things kept it that way: the capacity runs set
+> `GAMESERVER_ENEMIES=false`, and [§2](#2-methodology)'s run protocol restarts the
+> container and waits for `gameserver_entities` to read **0** before every level.
+>
+> **What the audit did find is a live trap in the recipe, not in the results** —
+> see the warning in [§10](#10-reproducing). Three contaminated runs do exist in
+> the results tree (`results/2026-09-07-develop-c05f715/run-{10,50,100}-cluster.json`,
+> 14/16/16 entities against 10 players online); they are the discarded
+> through-the-gateway attempts of [§26](#26-the-first-pass-measured-the-wrong-wire-and-the-tool-now-says-which)
+> and no figure here comes from them.
+>
+> **Direction, if a figure ever is affected:** a contaminated run measures a
+> *shrinking* AOI, so per-client bandwidth and per-tick gather cost read **too
+> low**, and the error grows through the window. A ratio between two arms measured
+> the same way is largely preserved while both absolute numbers are wrong.
+
 **The machine:**
 
 | | |
@@ -690,23 +726,60 @@ Ordered by measured impact:
 cd backend/loadtest
 go build -o loadtest ./cmd/loadtest
 
-# Single level against the stock dev stack, full gateway path.
-JWT_SECRET=dev-secret-change-me ./loadtest -players 10 -duration 60s
+# Secrets: read them from deploy/.env, which is what the stack was started with.
+export JWT_SECRET=$(grep '^JWT_SECRET=' ../deploy/.env | cut -d= -f2-)
+export JOIN_TOKEN_SECRET=$(grep '^JOIN_TOKEN_SECRET=' ../deploy/.env | cut -d= -f2-)
 
-# The capacity sweep as run here: dedicated server, direct join.
+# Single level against the stock dev stack, full gateway path. The stock map
+# server spawns 6 enemies, so declare them or every level is INVALID as
+# "not empty when the level started". Stay at or below 10 players here: the
+# gateway admits 10 connections/min per source IP (GATEWAY_CONN_RATE_PER_MIN),
+# and a 50-player level through it joins 10 and fails 40.
+#
+# ⚠️ PASS -movement still WHENEVER THE POPULATION IS STATIONARY — as it is here.
+# The default mode (cluster) marches every player +X for ever, so against the 6
+# stationary enemies the players leave them behind and the run measures an almost
+# empty AOI long before the 60s window closes, while still reporting 6 entities.
+# `-baseline-entities 6` declares them so the level counts as VALID, which means
+# this is the one configuration in this document that turns a contaminated run
+# into a passing one instead of an INVALID one. `spread` marches too; only `still`
+# holds position. See the audit note in §8.
+./loadtest -players 10 -duration 60s -baseline-entities 6 -movement still
+
+# The capacity sweep as run here: dedicated server, direct join, no spawner.
 docker run -d --name rpg-gs-bench --network rpg-mmo-meta_default \
   -p 9300:9000 -p 9301:9101 \
-  -e JWT_SECRET=dev-secret-change-me -e GAMESERVER_ADDR=:9000 \
+  -e JWT_SECRET="$JWT_SECRET" -e JOIN_TOKEN_SECRET="$JOIN_TOKEN_SECRET" \
+  -e GAMESERVER_ADDR=:9000 \
   -e GAMESERVER_MAP_ID=map_bench -e GAMESERVER_ID=gs-bench \
   -e GAMESERVER_CAPACITY=2000 -e METRICS_ADDR=:9101 \
+  -e GAMESERVER_ENEMIES=false \
   rpg-mmo/gameserver-dotnet:dev
 
-JWT_SECRET=dev-secret-change-me ./loadtest \
+./loadtest \
   -join direct -gameserver-addr 127.0.0.1:9300 -server-id gs-bench \
+  -join-token-secret "$JOIN_TOKEN_SECRET" \
   -gameserver-metrics http://localhost:9301/metrics -gateway-metrics "" \
-  -sweep 50,100,150,200 -duration 35s -warmup 8s -movement cluster \
+  -sweep 50,100,150,200 -repeat 3 -duration 35s -warmup 8s -movement cluster \
   -json sweep.json
 ```
+
+Three things in that recipe changed after the runs in this document and bit the
+2026-09-07 re-run, so they are stated rather than left to be rediscovered:
+
+- **`JOIN_TOKEN_SECRET` is mandatory.** The server refuses to start without a
+  dedicated one (`JOIN_TOKEN_SECRET is required but not set -- refusing to
+  start`); the old recipe let it fall back to `JWT_SECRET`, and the generator
+  still does (`-join-token-secret` defaults to the JWT secret), so pass it on
+  both sides or the join tokens will not verify.
+- **`GAMESERVER_ENEMIES=false`** on the bench server, or `-baseline-entities 6`
+  on the generator. The spawner is on by default and its 6 entities trip the
+  not-empty-at-start validity check on every level.
+- **`-encoding` defaults to `proto` now**, matching the client. The 2026-09-07
+  first pass ran under the old `json` default and read 274 KB/s per client at
+  200 — the JSON arm's number, not a regression against the 45.9 KB/s Protobuf
+  figure. The summary header now names the arm, so the mistake is visible on
+  the page rather than in the flag list.
 
 Restart the container and wait for `gameserver_entities` to read 0 between
 levels, or the leak in §7 will contaminate the results.
@@ -1454,6 +1527,17 @@ The implementation and its differential test are on `feat/aoi-spatial-index` at
 `2e3e5db`, reverted by the following commit. It is correct and covered; it is
 simply not worth running.
 
+> **Superseded, on this Part's own terms — see
+> [Part X](#part-x--the-spatial-index-revisited-and-this-time-kept-2026-09-09).**
+> The second condition listed above ("a composition path the index can use as
+> cheaply as the scan does") was met by [Part VII](#part-vii--trimmed-aoi-compose-and-int-keyed-delta-state-2026-08-27-issue-237):
+> the gather's product became a 7-field `EntityView`, small enough to store *in*
+> the index, which moves composition from once-per-match-per-viewer to
+> once-per-entity-per-tick. A rebuilt index now ships, gated on population spread.
+> **Nothing in this Part is withdrawn** — it was right about the index it measured,
+> and its dense row is still why the new one refuses to engage on a clustered
+> population.
+
 ### What this leaves, now that §23 has landed
 
 This section originally closed by pointing at `EntityState` composition as the
@@ -1499,6 +1583,14 @@ B: SIM_CRITICAL_HZ=60 SIM_WORLD_HZ=15 SIM_BACKGROUND_HZ=5   (= the new default)
 loadtest -join direct -players 50 -duration 45s -warmup 5s -encoding proto
 GAMESERVER_ENEMIES=false   (so the measurement is the player path, not wave timing)
 ```
+
+> **Movement mode is not recorded here, so this ran on the default, `cluster`.**
+> The 2026-09-10 audit ([§8](#8-confounds--read-this-before-quoting-any-number))
+> clears it anyway: `GAMESERVER_ENEMIES=false` means there is no stationary
+> population for the marching players to leave behind, and the entity leak that
+> could have supplied one from a previous run was fixed on 2026-08-07, eight days
+> before this. The mode should have been written down regardless — every other
+> loadtest Part records it, and "cleared by a second fact" is weaker than "stated".
 
 `-join direct` bypasses the gateway: the gateway is not in the gameplay data path
 (ADR-3), and including it would only add join-time noise to a steady-state measurement.
@@ -1715,3 +1807,670 @@ asserted, not measured here. The JSON snapshot path is not measured — it is
 not the production encoding and keeps its allocating serializer by documented
 choice. And per Part V's rule: these are allocation figures, not time — they
 say nothing about the tick ceiling, which remains blocked on ADR-7.
+
+## Part IX — end-to-end re-run on `develop@c05f715` (2026-09-07)
+
+A full re-run of the Part I/IV sweep against the current head, taken as the
+baseline before the 2026-09-07 audit work starts. Same generator, same shape:
+dedicated bench server (`GAMESERVER_ENEMIES=false`, capacity 2000, no registry,
+TCP), direct join, `cluster` movement, 35 s measure after 8 s settle, ramp 20/s,
+**three repeats per level**, levels 50/100/150/200. Host: the same WSL2 developer
+workstation as every other part, with Docker Desktop, two k3d clusters, the
+compose dev stack and three AI agents building C# alongside — read
+[Confounds](#confounds-read-this-before-quoting-any-number) before quoting
+anything from the tick columns. Raw results:
+[`results/2026-09-07-develop-c05f715/`](../loadtest/results/2026-09-07-develop-c05f715/)
+(`proto/` is the run that matters; the top-level files are the JSON arm, see §26).
+
+### 24. Measured (Protobuf, the wire the client speaks)
+
+| players | pass | tick p99 median | tick p99 min..max | tick mean | snap p99 | ack p99 | **KB/s/client** | server CPU / RSS |
+|---|---|---|---|---|---|---|---|---|
+| 50 | 3/3 | 0.5 ms | 0.5..0.5 ms | 0.06 ms | 69 ms | 68 ms | **15.3** | — |
+| 100 | 3/3 | 0.7 ms | 0.7..0.8 ms | 0.11 ms | 71 ms | 69 ms | **30.4** | — |
+| 150 | 3/3 | 2.1 ms | 1.9..2.2 ms | 0.20 ms | 72 ms | 70 ms | **45.9** | — |
+| 200 | 3/3 | 3.2 ms | 2.8..3.5 ms | 0.35 ms | 76 ms | 73 ms | **61.7** | ~38 % / 48 MiB |
+
+Every level joined all of its players, 0 % of ticks over the 66.67 ms budget,
+`achieved_tick_hz` 59.99–60.03 on the 60 Hz critical loop, snapshot cadence a
+clean 15 Hz (`snap p50` 66.7 ms at every level). The generator's verdict is
+**"CEILING: at least 200 — no level swept failed consistently, sweep higher"**.
+Tick is nowhere near binding: p99 at 200 is 5 % of the budget.
+
+### 25. Bandwidth per client is up 34 % since Part IV, and crosses ADR-7's line earlier
+
+Part IV measured **45.9 KB/s per client at 200** on `develop@cb31656`
+(2026-08-07). This run reads **61.7 KB/s at 200**, and hits 45.9 at **150**.
+Per entity per snapshot that is 21.0 bytes now against 15.7 then — about
++5 bytes per entity — from an identical generator configuration
+(`config` blocks of `intern-200.json` and `proto/sweep-direct-proto.json[3]`
+differ in nothing but `baseline_entities`, which is new and 0).
+
+The suspect is on the wire schema's own log: `009c31f feat(shared)!: carry
+per-entity speed on the snapshot wire` added a `float` per entity
+(`wire.proto:202`) after Part IV; a 4-byte float plus its tag is the whole
+gap. **This is a correlation from the commit log, not an isolated
+measurement** — the honest test is a two-arm run of `cb31656` against
+`c05f715` from the same generator, and it has not been run. What is measured
+is the consequence: ADR-7's `< 50 KB/s` mobile threshold, which Part IV placed
+"above 200 and not yet bracketed", now sits at roughly **160 players on a
+worst-case cluster**. Bandwidth remains the binding constraint, and it bit
+earlier than the documented number says.
+
+Two things this does not mean. It is not the KCP encryption from ADR-8 — this
+run is TCP, plaintext, and the arm is identical to Part IV's. And it is not
+tick regression: mean tick at 200 is 0.35 ms against Part IV's 0.3–0.7 ms.
+
+### 26. The first pass measured the wrong wire, and the tool now says which
+
+The first sweep of the day was run without `-encoding` and produced
+**274 KB/s per client at 200** — read for an hour as a 6x regression against
+Part IV. It was the JSON arm: the generator's default was still `json`, kept
+from the days when JSON was the wire. Those results are retained at the top
+level of the results directory as the JSON control (compare 248 KB/s at 200 in
+Part I's JSON run — consistent, given the extra float), and the generator
+now defaults to `proto` and prints `encoding=<arm>` in the summary header.
+That run also produced one straddling level — 200 players, 2/3 pass, the
+failing run at snapshot p99 425 ms / ack p99 1.2 s with the box under a deploy
+— which the median rule correctly kept at 200 and which the Protobuf run did
+not reproduce (3/3, snap p99 ≤ 77 ms).
+
+Before that, the very first attempt through the gateway against the stock dev
+stack produced no valid level at all, for two reasons that are now in §10's
+recipe: the stock map server's 6 spawned enemies trip the not-empty-at-start
+validity gate (`-baseline-entities` now declares them), and the gateway admits
+10 connections per minute per source IP, so a 50-player level joined 10 and
+failed 40. Neither is a server fault; both were the harness meeting a server
+that had moved on since the recipe was written.
+
+---
+
+## Part X — the spatial index, revisited and this time kept (2026-09-09)
+
+**Result: a uniform spatial grid now ships, gated on population spread.** It is
+**1.9–2.4x faster on the stock 1000x1000 map at 200 players**, up to **3.1x at
+1600 entities**, and — the part that matters given Part V — **never slower**,
+because the gather takes the plain scan whenever the population is too clustered
+for the index to pay. Part V is not withdrawn: it was right about the index it
+measured, and it named the conditions under which the answer would change. The one
+governing the *implementation* has since been met; the one governing whether the
+work was warranted has not — read the next section before quoting anything here.
+
+> **⚠️ Superseded by [Part XI](#part-xi--the-gate-against-clustered-populations-and-the-sort-that-was-the-real-problem-2026-09-10). Do not quote this Part's ratios.**
+>
+> Two things below did not survive contact with clustered populations and with
+> `develop`. **"Never slower" was false as merged**: the gate protected the
+> low-occupancy end it was calibrated on, and nothing protected the middle, where
+> the index ran 1.3-2.3x *slower* on realistic clustered layouts. And this Part's
+> ratio columns **do not reproduce** on develop — `realistic, 400` was published at
+> 1.07-1.22x and re-runs at 0.39-0.63x — because `EntityView` was widened after
+> these figures were taken and the index was sorting arrays of it.
+>
+> Part XI fixes the cause (sort an index permutation, not the structs), restores and
+> exceeds these margins, and confirms the 96-cell threshold needs no change. The
+> method below stands; the numbers are superseded.
+
+> **Not affected by the marching-crowd trap
+> ([§8](#8-confounds--read-this-before-quoting-any-number)).** This Part and
+> Part XI are in-process xUnit benches — `AoiIndexBench`, `AoiClusteredGateBench` —
+> that build an `EcsWorld` in the test process and query fixed positions. They
+> never start `loadtest`, never open a socket, and have no movement mode at all.
+> The trap is therefore **not** an alternative explanation for this Part's ratios
+> failing to reproduce; that remains attributed to `EntityView` widening, strongly
+> supported and not isolated, as [Part XI](#part-xi--the-gate-against-clustered-populations-and-the-sort-that-was-the-real-problem-2026-09-10)
+> records.
+
+### Why this was rebuilt, which is not the same as why it was justified
+
+**State this before the numbers, because the numbers are persuasive and the provenance
+is not.** Part VII's caveat has two clauses: re-measure the index against post-#237
+numbers, *"and only if AOI cost resurfaces as a bound."* **The first clause is satisfied
+by this Part. The second is not, and has not been.** Nobody measured AOI cost resurfacing
+as a bound. This index was rebuilt because the work was assigned, and it was assigned on
+the strength of a Big-O argument — which is precisely the reasoning
+[Part V](#part-v--the-spatial-index-that-lost-2026-08-14) exists to stop. Four changes in
+this sequence have now been commissioned against a term that turned out not to be the
+expensive one, and a reader arriving at the 2x figures below should not infer that a
+measurement asked for this one.
+
+What makes it safe to ship anyway is not the win, it is **the gate**: below 96 occupied
+cells the gather takes the plain scan and builds nothing, so on the densities where the
+index does not pay the change is inert rather than negative. An unconditional index would
+not have been shippable on this evidence, and the naive version of the gate — measured at
+0.82-0.91x, below — was not either.
+
+The honest summary is that this is a scale-readiness change with a measured upside on the
+stock map and a measured floor of parity everywhere else, not a response to a bottleneck
+anyone observed.
+
+### Why the answer changed
+
+Part V found the scan's cost was not the distance tests but **composing an entity
+struct per match**, and that the index made composition *worse*: it held only an
+`Entity` handle, so it composed through seven random-access component lookups per
+match against a scan that composed from the chunk it was already iterating. Its
+closing section listed what would have to be true to revisit, and the second item
+was *"a composition path the index can use as cheaply as the scan does"*.
+
+[Part VII](#part-vii--trimmed-aoi-compose-and-int-keyed-delta-state-2026-08-27-issue-237)
+(issue #237) supplied it. The gather's product is now `EntityView` — seven fields,
+exactly what the snapshot encoder consumes — and that struct is **small enough to
+store inside the index**. So the index no longer composes at query time at all: it
+composes once per entity during its O(n) rebuild, and a query copies the finished
+struct.
+
+The consequence is the one that decides the result. Composition stops being per
+match *per viewer* and becomes per entity *per tick*. At 200 viewers averaging 15
+matches each that is **3 000 composes replaced by 200** — and the redundancy
+across viewers is something the brute-force scan pays too and cannot stop paying.
+The first index paid more per match than the scan; this one pays less.
+
+### The measurement
+
+`GameServer.Tests/Bench/AoiIndexBench.cs`, `BENCH_AOI=1`. Both arms run a full
+gather — every viewer's AOI query for one tick, through `EcsWorld.ReadAll`, the
+path the tick loop takes — back to back inside every round, 120 rounds after 20
+warmup, three independent repetitions. **The indexed arm's rebuild is inside the
+measured region**: an index that only looks good with its build time excluded is
+not an index, it is an accounting error.
+
+Two methodological notes, both of which changed numbers:
+
+- **Arm order alternates per round.** With a fixed order the second arm read
+  ~5% faster on rows where *both arms take the same code path* — an ordering bias
+  indistinguishable from a small real win, and 5% is the size of several results
+  here.
+- **This harness is committed**, and states its clock (`Stopwatch`,
+  `Stopwatch.Frequency` 1 000 000 000 Hz, high-resolution true). Part V's was not,
+  which is what made its absolute microseconds the one figure class the #153 clock
+  audit could not trace. Per that audit's standing rule the **ratios** below are
+  the quotable figures.
+
+| cell | n | spread | avg matches/query | occupied cells | brute µs | indexed µs | ratio (3 runs) |
+|---|---|---|---|---|---|---|---|
+| **stock map 1000x1000** | 200 | 1000 | 2.5 | 163 | 152 | 82 | **1.86–2.39x faster** |
+| sparse (Part V row 1) | 200 | 1000 | 2.5 | 163 | 524 | 453 | 1.16–2.12x faster |
+| realistic (Part V row 2) | 200 | 250 | 21.8 | 33 | 186 | 196 | 0.95–1.00x (gate off) |
+| dense (Part V row 3) | 400 | 250 | 42.9 | 36 | 928 | 937 | 0.99–1.05x (gate off) |
+| house realistic (disc 175) | 200 | — | 15.4 | 49 | 200 | 203 | 0.96–1.00x (gate off) |
+| house realistic (disc 175) | 400 | — | 30.5 | 52 | 833 | 852 | 0.98–1.01x (gate off) |
+| realistic, 400 | 400 | 500 | 12.9 | 99 | 727 | 598 | 1.07–1.22x faster* |
+| realistic, 800 | 800 | 700 | 12.8 | 193 | 2880 | 1367 | 1.99–2.16x faster |
+| realistic, 1600 | 1600 | 1000 | 12.8 | 394 | 10029 | 2705 | **3.71–4.01x faster** |
+
+\* one repetition of this row read 0.63x while the identical configuration in the
+calibration sweep below read 1.11–1.26x three times running. That is host noise,
+not a property of the row — §8's ±50% swing, visible because this cell sits nearest
+the gate threshold. It is left in rather than dropped.
+
+### The gate, and why it is occupancy rather than entity count
+
+The obvious gate — "use the index above N entities" — gets this workload
+**backwards**, and Part V's own table is the proof: its dense-400 row loses while
+its sparse-200 row wins. Entity count does not predict the result.
+
+What does is how far the population is spread, because a query visits at most a 3x3
+neighbourhood and therefore examines roughly `9 / OccupiedCells` of the world. The
+calibration sweep varies spread at fixed n, and the crossover lands in the same
+place at both entity counts — confirming the count itself does not enter:
+
+| n | 16 cells | 36 | 59–64 | 86–99 | 123–167 | 163–250 |
+|---|---|---|---|---|---|---|
+| 200 | 1.01x | 1.00x | 1.03x | 1.00x | 1.38–1.50x | 1.88–2.10x |
+| 400 | 0.96–1.01x | 0.97–1.00x | 0.99–1.01x | 1.11–1.26x | 1.42–1.61x | 2.13–2.45x |
+
+`SpatialGrid.MinOccupiedCellsToQuery` is therefore **96**, the first round value
+clear of the crossover, and it is checked against the statistic the rebuild has
+already computed.
+
+**The gate is a performance decision and never a correctness one.** Both paths
+return the same entities in the same order — `AoiIndexDifferentialTests` asserts
+exactly that, unconditionally — so a wrong answer from the gate costs microseconds
+and cannot cost an entity.
+
+One refinement was needed to make the fallback free. Gating *after* a rebuild still
+paid for the rebuild, and measured **0.82–0.91x** on the rows that fall back — a
+regression at precisely the density the game runs at today. The decision is
+therefore carried from the last rebuild and re-probed every 64 gathers (~4 s at
+15 Hz), so a falling-back world builds nothing. Those rows now read 0.95–1.06x,
+i.e. parity within noise.
+
+### What this means for the server as it runs today
+
+It depends entirely on how far players spread, and both cases are handled:
+
+- **The stock map is 1000x1000 with an AOI radius of 50** (`GameConstants`), so
+  200 players spread over it occupy ~163 cells and the index is **on, at ~2x**.
+- **The in-house "realistic" density** every other bench in that folder uses — a
+  disc of radius 175, the `TickBreakdownBench` placement — occupies ~49 cells, and
+  the index is **off, at parity**. Part V's "realistic" 250x250 row is the same
+  regime.
+
+So this is not a change that makes the tick unconditionally cheaper; it is one that
+makes the AOI gather scale with *area covered* instead of with entity count, and
+declines to engage when there is no area to exploit. What it does **not** do is
+move the per-server player ceiling, which remains **UNKNOWN** and blocked on a
+separate load-generator machine (ADR-7) — the gather is 77–83% of a 200-viewer
+tick, but no tick figure from this host bounds anything.
+
+### What was not done
+
+- **`Shared.GameLogic` is untouched.** `AoiLogic.GetNearbyEntities` is still the
+  brute-force definition of visibility, and is now also the differential test's
+  oracle. That is deliberate: a client has exactly one observer and nothing to
+  amortise a per-tick index build against, so an index there is cost with no
+  benefit. Client and server continue to agree on visibility semantics because they
+  run the same predicate — the index only chooses which entities to test.
+- **No incremental maintenance.** The index is rebuilt whole each gather scope, for
+  the reason Part V's version gave and which has not changed: positions are written
+  from the input handler, the enemy move system and the spawn/reconnect path, and an
+  incremental index must intercept all of them forever, including the next one
+  someone adds. A missed write does not throw — it leaves an entity in the wrong
+  bucket, and the symptom is a player who vanishes from someone else's screen.
+
+---
+
+## Part XI — the gate against clustered populations, and the sort that was the real problem (2026-09-10)
+
+**Result: the gate statistic was not the defect. The index's per-match ordering
+cost was.** As merged, the 96-cell occupancy gate admitted the index on realistic
+clustered layouts where it ran **2.0-2.4x slower** than the scan it replaced — a
+live regression on exactly the population shape an MMO produces. Sorting an index
+permutation instead of an array of `EntityView` structs removes the regression:
+admitted layouts move from **0.41-0.63x to 0.85-2.25x**, and every layout the gate
+refuses would indeed have lost.
+
+**One residual loss survives and is not hidden here.** `4 loose crowds` (118 cells,
+19.6 matches per query) reads **0.85-0.89x across three runs** — a reproducible ~14%
+loss that the gate still admits, and two neighbouring clustered layouts sit at parity
+within noise. That is an order of magnitude better than the 0.41-0.45x it read before
+the fix, but it is not the clean "never slower" this Part's first draft claimed, and
+the claim has been corrected rather than the number buried.
+
+### What was asked, and why both hypotheses were wrong
+
+[Part X](#part-x--the-spatial-index-revisited-and-this-time-kept-2026-09-09) closed
+with a caveat in its own words: the threshold was calibrated on **uniform random**
+layouts, and real players clump onto spawns, objectives, boss doors and towns.
+Occupancy is the gate's only input and clustering is what moves it, so the gate
+could be systematically wrong in the one regime that occurs.
+
+The predicted failure was specific: *k* tight crowds occupy few cells, so occupancy
+should read "not worth indexing", while a viewer inside a crowd still only examines
+its own crowd — so the index should have been **refused a win**. Measured, that
+does not happen. **Not one gate-OFF row wins.** The failure is the opposite one and
+was not predicted by anyone: the gate says **ON** for clustered layouts where the
+index is far slower, because clustering drives *matches per query* up, and matches
+are what the index was paying too much for.
+
+That is worth stating plainly because it is the second time in this sequence that
+an AOI change was reasoned about correctly and still aimed at the wrong term.
+
+### Layouts
+
+Hotspot populations on the stock 1000x1000 map, AOI radius 50: *k* gathering points
+holding most of the players, Gaussian-scattered with standard deviation sigma, the
+remainder roaming uniformly. Sigma is quoted against the AOI radius — sigma 25 is a
+crowd tighter than one AOI (a boss door), sigma 100 a loose gathering several AOIs
+across (a town square). Uniform layouts are measured **in the same harness** rather
+than compared across harnesses to Part X, which turned out to matter (below).
+
+Same discipline as Part V and Part X: full gather per arm, rebuild inside the
+measured region, alternating arm order, `Stopwatch` only, 100 rounds after 20
+warmup, three repetitions, ratios quotable. The indexed arm runs with the gate
+**forced open**, because the question is what the gate gives up.
+
+**The pre-fix arm is a verbatim replica living in the bench**, following Part VII's
+precedent — its `LegacyStringKeyedDeltaState` is the encoder it replaced, kept in the
+bench file so the A arm is the code that actually ran and production carries nothing
+that exists only for a benchmark. An earlier revision of this work flipped a mutable
+static inside `SpatialGrid` instead; that is gone, and the grid now has exactly one
+ordering strategy. The replica copies the cell maths, the counting sort, the
+neighbourhood walk, the full-sweep fallback and the inclusive predicate unchanged, and
+**the bench asserts it returns what the scan returns, in the same order, on every
+layout before taking a single timing** — an arm that is fast because it is wrong would
+invalidate the whole comparison. It rebuilds from a pre-composed array rather than
+from chunk spans, so it does slightly *less* work than the code it stands in for and
+the penalty it reports is a **lower bound**.
+
+**The two pairs are measured separately, and that is a result in itself.** Running all
+three arms interleaved in one round changed both ratios materially — the
+uniform-full-map row read 1.76-1.91x as a pair and **1.12x** with a third arm added,
+because three working sets evict each other where two do not and the index arms carry
+more state than the scan. Each pair therefore runs on its own. Anyone extending this
+bench with a fourth arm should expect the same distortion and re-pair rather than
+add.
+
+### The measurement, both ordering strategies
+
+`GameServer.Tests/Bench/AoiClusteredGateBench.cs`, `BENCH_AOI=1`.
+
+| layout | cells | gate | match/q | cand. frac | struct sort (replica) | **permutation (shipped)** |
+|---|---|---|---|---|---|---|
+| 2 tight crowds (400) | 44 | OFF | 110.3 | 0.395 | 0.13-0.15x | 0.36-0.38x* |
+| 2 tight crowds (800) | 61 | OFF | 229.2 | 0.402 | 0.14x | 0.40x |
+| 4 tight crowds | 60 | OFF | 55.3 | 0.201 | 0.19-0.21x | 0.50-0.56x |
+| 8 tight crowds | 67 | OFF | 38.6 | 0.169 | 0.25-0.26x | 0.61-0.65x |
+| uniform, spread 250 | 36 | OFF | 43.7 | 0.262 | 0.23-0.24x | 0.54-0.58x |
+| uniform, spread 350 | 62 | OFF | 23.7 | 0.148 | 0.35-0.38x | 0.75-0.81x |
+| 16 tight crowds | 105 | ON | 18.9 | 0.078 | **0.44-0.49x** | 0.92-1.00x |
+| 4 loose crowds | 118 | ON | 19.6 | 0.108 | **0.41-0.45x** | **0.85-0.89x** |
+| 8 loose crowds | 133 | ON | 14.7 | 0.086 | **0.52-0.55x** | 1.01-1.15x |
+| 4 crowds + 30% roaming | 157 | ON | 15.6 | 0.081 | **0.47-0.51x** | 0.92-1.01x |
+| 8 crowds + 30% roaming | 169 | ON | 14.1 | 0.075 | **0.51-0.54x** | 0.99-1.07x |
+| 8 crowds + 50% roaming | 196 | ON | 10.5 | 0.055 | **0.65-0.68x** | 1.13-1.25x |
+| 8 very loose crowds | 209 | ON | 6.4 | 0.039 | 1.04-1.11x | 1.45-1.52x |
+| uniform, spread 500 | 99 | ON | 12.6 | 0.081 | **0.60-0.63x** | 1.07-1.24x |
+| uniform, spread 700 | 170 | ON | 7.1 | 0.044 | 0.96-0.99x | 1.27-1.31x |
+| uniform, full map (400) | 262 | ON | 4.0 | 0.024 | 1.37-1.51x | 1.52-1.75x |
+| uniform, full map (200) | 160 | ON | 2.5 | 0.026 | 1.34-1.45x | 1.74-1.98x |
+| uniform, full map (800) | 340 | ON | 7.0 | 0.023 | 1.69-1.70x | 2.20-2.25x |
+
+Bold in the struct-sort column marks the defect: **six gate-ON layouts where the
+merged index was 1.5-2.4x slower than the scan it replaced**, five of them clustered
+and one uniform. Bold in the shipped column marks the one that is still, mildly,
+below parity.
+
+Figures are the range over three independent runs of the whole bench, not three
+repetitions inside one run, because the run-to-run spread turned out to be wider than
+the within-run spread on the near-parity rows — 4 loose crowds read 0.86-0.89 in one
+run and 0.85-0.86 in another, and `8 loose crowds` moved 1.01-1.15.
+
+\* one repetition of that row read 0.84x against 0.36/0.38 in the other two. Host
+noise (§8); the row is a clear loss either way and is refused by the gate.
+
+### What the sort was costing
+
+The index discovers matches cell-major and must emit them scan-major, so it sorts
+each query's matches back into scan order. That sort was over an **array of
+`EntityView`** — a wide struct carrying two object references and seven value
+fields — so every swap copied the whole thing, with write barriers for the
+references. It now sorts an `int` permutation and gathers once at the end: 4 bytes
+per swap, each view touched exactly once.
+
+The effect is large and it is concentrated exactly where it hurts, because sort cost
+grows with matches per query and **matches per query is what clustering raises**.
+Crowded layouts improve by 2.2-3.1x, sparse ones by 1.1-1.3x. This is a per-match
+cost, and per-match cost is precisely what the brute-force scan does not pay — which
+is why it, and not the gate, decided whether the index was worth anything on a
+crowded map.
+
+### Part X's margins do not reproduce, and this is why
+
+Re-running Part X's own harness unchanged on `develop` gives materially worse
+numbers than Part X published:
+
+| Part X row | Part X published | re-run on develop (struct sort) |
+|---|---|---|
+| realistic, 400 (99 cells) | 1.07-1.22x | **0.39-0.63x** |
+| realistic, 800 (193 cells) | 1.99-2.16x | 0.91-1.05x |
+| realistic, 1600 (394 cells) | 3.71-4.01x | 1.64-1.76x |
+| calib n=400 spread=500 | 1.11-1.26x | 0.53-0.55x |
+| calib n=400 spread=700 | 1.42-1.61x | 0.86-0.93x |
+| stock map, 200 | 1.86-2.39x | 1.63-1.69x |
+
+Between the two measurements, `29aa8d9` added `FacingBrad` and `Action` to
+`EntityView`, widening by 8 bytes the struct the sort was moving. That is a direct
+mechanism for a sort-bound cost to grow, and the permutation sort — which makes the
+sort insensitive to the struct's width — recovers and exceeds the original figures.
+**The attribution is strongly supported but not isolated**: no A/B across that commit
+is possible, because Part X's harness postdates it. Other develop changes could
+contribute.
+
+Two consequences, both stated rather than quietly fixed:
+
+- **Part X's ratio columns should be read as superseded by this Part**, not as a
+  second opinion. They were correct for the code and the struct that existed when
+  they were taken.
+- **Part X's headline claim "never slower" was false as merged.** The gate protected
+  the low-occupancy end, which is what it was calibrated to do, and nothing protected
+  the middle. The claim is true again with the permutation sort, and now on clustered
+  layouts as well as uniform ones — but it was wrong in between, and a reader who
+  deployed on that basis would have been misled.
+
+This also settles a loose end Part X flagged as noise. Its `realistic, 400` row read
+`0.63x 1.19x 1.22x` and the 0.63 was dismissed as host variance. It was not: that
+configuration genuinely loses under the struct sort, and the re-run reads
+0.39-0.63x consistently. The anomalous repetitions were the other two.
+
+### The recommendation, and what stays
+
+**Ship the permutation sort. Keep `MinOccupiedCellsToQuery = 96` — with one honest
+caveat that the first draft of this Part did not have.**
+
+The refusals are right: 62 cells reads 0.75-0.81x and is refused, 99 cells reads
+1.07-1.24x and is admitted, so the crossover does sit near the threshold. But the gate
+still admits **one reproducible small loss** — `4 loose crowds`, 118 cells, at
+0.85-0.89x — and two more layouts at parity within noise (`16 tight crowds` 105 cells,
+`4 crowds + 30% roaming` 157 cells). The claim "every admitted layout wins" was made
+before the run-to-run spread was characterised and **is not supported**.
+
+Two things follow, and both are the owner's call rather than settled here:
+
+- **Occupancy cannot fix this by moving the threshold**, because it orders these rows
+  wrongly. 105 cells reads 0.92-1.00x while 118 cells reads 0.85-0.89x — the *lower*
+  occupancy is the *better* layout, so no threshold separates them. Excluding the loss
+  means raising the gate to ~128, which also excludes two layouts that are fine.
+- **`EstimateCandidateFraction` does separate them**: the loss sits at 0.108, the
+  highest of any admitted layout, while everything that wins is at 0.086 or below. A
+  threshold of ~0.09 would admit exactly the winners.
+
+The residual is ~14% on one modelled layout, against the 2.0-2.4x regression this Part
+removes, so it does not block the fix. It is recorded rather than tuned away because
+tuning a threshold against three modelled layouts is how a gate ends up calibrated on
+the wrong distribution — which is the mistake this Part exists to correct.
+
+**Occupancy stays the gate statistic.** A replacement was implemented and measured —
+`SpatialGrid.EstimateCandidateFraction`, the mean fraction of the population a query
+must examine, from the cell histogram — and it is the better predictor on paper:
+monotone across both layout families, where occupancy is not (160 cells wins at
+2.04-2.31x while 157 cells wins at only 1.10-1.14x, and under the struct sort
+occupancy could not separate the families at all). It is **not adopted here**, on cost:
+computing it takes nine dictionary probes per occupied cell per rebuild, which is real
+work on the tick thread, and the decision it would improve is worth ~14% on one
+modelled layout. That trade could reasonably go the other way once there is telemetry
+to calibrate against — it is the one statistic measured that gets every row in this
+Part right. It stays in the code as a benchmark diagnostic so the next person to
+suspect the gate can measure instead of arguing.
+
+### What was not done
+
+- **The probe interval is still reasoned rather than measured.** 64 gathers (~4 s at
+  15 Hz) is chosen so a falling-back world wastes under 2% of the gather on
+  re-probing. Both directions of being wrong cost microseconds, so this remains a low
+  priority, but it is not a measurement.
+- **No layout was taken from a real session.** These are hotspot models chosen to
+  resemble play — a handful of gathering points, most players at one of them, a
+  roaming tail. They are not telemetry, and the day this game has real position
+  telemetry, the crossover should be re-measured against it rather than against this.
+- **Nothing about the per-server player ceiling changes.** It remains **UNKNOWN**
+  and blocked on a separate load-generator machine (ADR-7).
+
+## Part XII — can a frame reach the decode step out of order? (2026-09-10, ADR-22)
+
+**Question.** ADR-22's transport-crypto model uses the AEAD nonce as a monotonic sequence
+number and rejects any nonce at or below the highest seen. That is replay protection and
+nonce-reuse prevention in one mechanism — but it is only safe if frames cannot legitimately
+arrive out of order. If they can, it needs a sliding window, and a window has its own bugs,
+every one of which is a security bug. The ADR left this open **to be measured rather than
+assumed**. This is the measurement.
+
+### Method
+
+A probe (`GameServer/Observability/FrameOrderProbe.cs`) records, per connection, whether
+each input frame's tick is greater than the highest already seen. It is driven from the
+input dispatch inside `Connection.ReadLoopAsync`'s handler, which is awaited inline — one
+frame is decoded, dispatched and completed before the next is read — so **the order it sees
+is the order bytes arrived on that connection's stream**, which is the order a decrypt step
+would see. Client input ticks are strictly increasing by construction, so any frame not
+greater than the highest seen arrived out of order, duplicated, or replayed.
+
+Impairment is real, not simulated: `tc netem` on loopback, **filtered to the game port
+only** (`prio` qdisc + a `u32 dport` filter) so the metrics endpoint stays clean — a
+whole-interface qdisc also delays `/status` and makes the harness unusable.
+
+> **It deliberately does not read the existing `stale_tick` counter.** That check
+> (`input.Tick <= cursor.LastInputTick`) runs in the tick loop, two queues downstream of the
+> socket: the per-connection ingest coalescer and the world-wide pending list. Worse, the
+> coalescer **silently absorbs** an out-of-order movement input (`EcsWorld.PushInput`
+> returns `Coalesced`) so it never reaches that check at all. `stale_tick` reports
+> post-queue order and cannot answer this question.
+
+### Results — 22,374 input frames, zero reordering
+
+| Condition | Transport | Impairment | Frames | Inversions | Duplicates | Fwd gaps |
+|---|---|---|---:|---:|---:|---:|
+| clean | TCP | none | 2032 | **0** | 0 | 0 |
+| clean | KCP | none | 1248 | **0** | 0 | 0 |
+| reorder | TCP | `delay 10ms reorder 30% 50%` | 1248 | **0** | 0 | 0 |
+| reorder | KCP | `delay 10ms reorder 30% 50%` | 1254 | **0** | 0 | 0 |
+| loss | TCP | `loss 10%` | 1254 | **0** | 0 | 0 |
+| loss | KCP | `loss 10%` | 1254 | **0** | 0 | 0 |
+| hostile | TCP | `delay 15ms reorder 25% 50% loss 8% duplicate 5%` | 1524 | **0** | 0 | 0 |
+| hostile | KCP | same | 1518 | **0** | 0 | 0 |
+| hostile, 20 players | KCP | same | 9850 | **0** | 0 | 0 |
+| reconnect | TCP | none | 1192 | **0** | 0 | 0 |
+
+**Zero inversions and zero duplicates in every condition, on both transports.** Note the
+`duplicate 5%` rows in particular: duplicated datagrams did not become duplicated frames,
+because both stacks discard them below the decode.
+
+Why, structurally: TCP is a bare `NetworkStream`, in-order by construction. KCP runs in
+**stream mode** on both sides (`tuneSession` in Go, `KcpTuning.Apply` in C#), and the C#
+side is a vendored port of kcp-go whose `Kcp.MoveRcvBufToQueue` releases a segment only when
+`seg.Sn == _rcvNxt`, with `ParseData` dropping duplicates and out-of-window segments. Above
+that, exactly one read loop owns each connection.
+
+### Reconnect: the crypto layer is unaffected, the simulation layer is not
+
+Same accounts reconnecting inside the 30s entity hold (`loadtest -run-id` fixes the ids so
+the same accounts come back):
+
+```
+after 1st session:  frames=596   inversions=0  |  stale_tick=0
+after RECONNECT  :  frames=1192  inversions=0  |  stale_tick=596
+```
+
+**Every one of the second session's 596 input frames was rejected as `stale_tick`**, while
+the frame-order probe stayed at zero. The two layers behave differently on purpose:
+
+- The **crypto counter would be per session**, and a reconnect is a brand-new `Connection`
+  with fresh read state — the counter resets together with the session key it belongs to.
+  A strict monotonic rule is therefore safe across reconnect.
+- The **simulation counter is per entity**, and the entity survives the hold with its
+  `LastInputTick` intact. A client that restarts its own input tick has *all* of its input
+  refused until it climbs past the pre-disconnect value.
+
+> ⚠️ **That second bullet was a live bug, and it is fixed in this change.** It is not a
+> crypto issue; the measurement merely walked into it.
+
+#### The reconnect bug this measurement found, and its fix
+
+The shipped client **is** affected, on one path. `NetworkBootstrap._inputTick` is only ever
+incremented and never reset, so an in-process reconnect (the `ReconnectPolicy` path, e.g. a
+dropped connection) keeps climbing and is fine. But a **process restart or scene reload**
+builds a new bootstrap with `_inputTick = 0` — i.e. exactly the "crashed and came straight
+back" case — and nothing on the server cleared the entity's cursor on reattach.
+
+Cost, measured: a 5s session reached tick 88, and the reconnecting session had its **first
+88 frames refused** before anything moved. **The freeze lasts as long as the previous
+session did**, so ten minutes of play meant ten minutes of a player who could not move —
+capped only by the 30s hold, since after that the entity is gone and the cursor with it.
+
+**Fix:** clear the whole `InputCursor` when reattaching an entity to a new connection. Every
+field in it is per-session client bookkeeping — the tick, the held direction, and
+`LastMoveTick`, whose staleness would otherwise size the first step of the new session by
+how long the player was away. The rule is the same one this ADR settles for the crypto
+counter: **the counter's scope must follow the session, not the entity.**
+
+It opens no replay hole. The monotonic check exists to reject stale input *within* a
+session; a new session needs a fresh single-use join token, input stays monotonic inside it,
+and replaying one's own old movement gains nothing because the server integrates position
+from its own speed stat rather than trusting the client.
+
+Same harness, before and after:
+
+| | `stale_tick` before | after |
+|---|---:|---:|
+| 1 player, 5s session then reconnect | 88 of 88 | **0** |
+| 4 players, 8s session then reconnect | 596 of 596 | **0** |
+
+> **One residual, recorded rather than hidden.** Inputs from the old session that are still
+> queued when the socket closes drain *after* the reattach reset and re-advance the cursor,
+> so a very fast reconnect can still refuse a short burst — 2 frames in a test that
+> disconnected mid-send. It is bounded by one drain window, self-corrects within a tick or
+> two, and is a different mechanism (queued-input lifetime, not cursor scope). Fixing it
+> means purging a user's pending inputs on reattach, which touches the ingest hot path;
+> that is a separate decision and has not been made here.
+
+##### What the reset does to the client's reconciliation anchor
+
+`LastInputTick` is what the server puts on the wire as `ack_tick`, so clearing it means the
+first snapshot after a reattach acks **0** — until the new session's first input is accepted,
+one round trip later. That is the half of this fix that lives in the client, and it was
+checked in `com.cuvara.netcode` rather than assumed. Four independent reasons it is safe,
+all of them already in the shipped client:
+
+1. **The client zeroes its own anchor on every join.** `GameSessionClient.JoinAsync` sets
+   `AckTick = 0L` (and `ServerTick = 0L`, `_resolver.Reset()`) as part of joining. A server
+   that acks 0 at that moment is agreeing with the client, not contradicting it.
+2. **The client's anchor is monotonic, with a comment naming this exact hazard.**
+   `if (resolved.AckTick > AckTick)` — *"a snapshot that omits ack_tick carries zero and must
+   never lower it."* So even where the client's own counter kept climbing (an in-process
+   reconnect), an ack of 0 cannot drag the anchor backwards.
+3. **`ack_tick` does not move the player.** In `LocalMovePredictor.Reconcile` it is used only
+   by `DropAcknowledged`, which retires pending inputs with `Tick <= ackTick`; the positional
+   correction comes from the snapshot's own tick via the history buffer, not from `ack_tick`.
+   `DropAcknowledged(0)` therefore retires nothing and moves nothing — no snap, no
+   rubber-band. The cost is that up to one round trip of pending inputs is held one snapshot
+   longer than necessary, and the next ack retires all of them at once.
+4. **Holding them cannot overflow.** The pending ring is `Capacity = 128` — about 8.5s at
+   15Hz — and overflow is counted in `DroppedInputs` rather than absorbed. One extra round
+   trip is two orders of magnitude clear of it.
+
+Which path the predictor takes depends on the reconnect kind, and both are benign. A fresh
+process has an unseeded predictor, so its first `Reconcile` takes the `!_seeded` branch and
+adopts the authoritative position outright — the ordinary join path, unchanged by this fix.
+An in-process reconnect keeps a seeded predictor and its pending inputs; those survive the
+zero ack by (3) and are retired by the first real ack. `AckLatencyEstimator.RecordAck` early-
+returns on `ackTick <= 0`, so the latency estimate is not poisoned by the gap either.
+
+### Conclusion for ADR-22 — quotable
+
+> **A sliding window is not required. Use the strict counter — and make the assumption it
+> rests on explicit and observable.**
+>
+> Measured across 22,374 input frames on both transports, including 30% packet reordering,
+> 10% loss and 5% duplication injected with `tc netem`: **zero out-of-order frames, zero
+> duplicates.** Neither transport can present a reordered frame to the decode step —
+> TCP by construction, KCP because both implementations run in stream mode and gate
+> delivery on the next expected sequence number — and exactly one read loop owns each
+> connection, so there is no concurrency at the decode layer to reintroduce it.
+>
+> The strict counter is also the **safer failure mode**, which is the argument that
+> survives even if the measurement is someday wrong. If a strict counter is wrong, the
+> session breaks loudly: a legitimate frame is refused and the client notices immediately.
+> If a window is wrong, it accepts a frame it should have refused, and that is a silent
+> replay. Given a choice between a mechanism that fails loudly and one that fails silently,
+> in a layer whose entire job is to refuse things, take the loud one.
+>
+> **Three conditions attach**, because the guarantee is inherited rather than owned:
+>
+> 1. **The ordering assumption must be asserted, not assumed.** `ITransportConnection`
+>    already documents "reliable, ordered byte stream"; the crypto layer must refuse to
+>    operate on a transport that does not declare it, so adding an unordered transport
+>    (QUIC datagrams, a raw-UDP fast path) fails closed instead of silently reusing nonces.
+> 2. **Rejections must be counted, not merely performed.** A counter that silently drops
+>    out-of-order frames turns a transport regression into an unexplained disconnect. The
+>    `frame_order_*` fields on `/status` exist for this and read zero today.
+> 3. **The stated rule is incomplete on the forward side.** "Reject nonce ≤ highest seen"
+>    says nothing about a *large forward jump*, which burns nonce space and forces an early
+>    rekey. The exposure is limited — a forged frame cannot advance the counter because it
+>    will not authenticate, so only the genuine peer can do this, and only to itself — but
+>    the rule should still bound the forward gap it accepts rather than leave it unstated.
+>
+> The KCP ordering guarantee this rests on is, on the C# side, **a hand-port rather than a
+> library**: roughly ten lines in `Kcp.MoveRcvBufToQueue`. That is correct today and is
+> covered by the measurement above, but it is a local invariant, not a third-party one,
+> which is precisely why conditions 1 and 2 are not optional.
+

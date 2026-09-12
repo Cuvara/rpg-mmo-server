@@ -77,8 +77,11 @@ const (
 //
 //	MovementStill:   positions never change -> deltas are empty -> the JSON term
 //	                 collapses to ~0 while the scan and diff terms stay O(n^2).
-//	MovementCluster: every entity moves every tick, and every entity is inside
-//	                 every other entity's AOI -> the JSON term is fully O(n^2).
+//	MovementCluster: every PLAYER moves every tick and stays inside every other
+//	                 player's AOI -> the JSON term is fully O(n^2) in the players.
+//	                 It does NOT hold the players near server-side entities: see
+//	                 the MovementCluster comment below before using it with
+//	                 LOADTEST_ENTITIES or an enemy spawner.
 //
 // Running the same player count in both modes isolates serialization cost from
 // scan cost with no server-side change required.
@@ -86,8 +89,28 @@ const (
 	// MovementStill sends zero-vector input: ack still advances (LastInputTick is
 	// bumped before the deadzone check), but no position changes.
 	MovementStill = "still"
-	// MovementCluster moves every player along +X. They spawn at the origin and
-	// stay mutually in-AOI, so this is the worst-case dense-crowd shape.
+	// MovementCluster moves every player along +X, for ever, at PlayerSpeed. They
+	// spawn at the origin and stay mutually in-AOI, so for PLAYER-vs-PLAYER density
+	// this is the worst-case dense-crowd shape.
+	//
+	// IT IS NOT THAT for any population that does not march with them. Players leave
+	// the origin at 5 u/s against a 50-unit AOI radius, so they clear an
+	// origin-centred crowd in ~10s and are ~300 units away by the end of a default
+	// 60s window. Against server-side entities — LOADTEST_ENTITIES, which orbit the
+	// origin, or a stock map's enemy spawner — the visible set therefore COLLAPSES
+	// DURING THE RUN, and every per-client figure decays with it while the run still
+	// reports the population it started with.
+	//
+	// Measured 2026-09-09, 1 player, 300 LOADTEST_ENTITIES, server-side snapshot
+	// bytes/s sampled every 4s:
+	//
+	//	movement=still     117.6 kB/s flat for the whole run
+	//	movement=cluster   113 -> 80 -> 50 -> 17 -> 0.6 kB/s by t=24s
+	//
+	// This mode is the DEFAULT, so a default-configuration run longer than ~25s
+	// against a stationary entity population measures a nearly empty AOI. Use
+	// MovementStill whenever the density under test comes from server-side entities
+	// rather than from the players themselves; see TestClusterLeavesAStationaryCrowd.
 	MovementCluster = "cluster"
 	// MovementSpread gives each player a distinct heading in the +X/+Y quadrant.
 	// NOTE: at the default 5 u/s and a 50-unit AOI radius, a 60s run cannot
@@ -95,6 +118,31 @@ const (
 	// low-density control — it is only useful for exercising bounds clamping.
 	// Use MovementStill as the "cheap serialization" control instead.
 	MovementSpread = "spread"
+)
+
+// Abuse modes make a share of the virtual players send input the server is
+// expected to REFUSE, so the rejection telemetry and the per-account anomaly
+// score can be exercised deliberately instead of waited for.
+//
+// The harness is otherwise scrupulously well-behaved — it answers pings, sends
+// normalised vectors and disconnects politely — which is correct for a benchmark
+// and useless for testing a detector. These modes are the opposite of that, and
+// only that: nothing here tries to gain an advantage, because the server already
+// refuses all of it. The point is to produce the SIGNAL.
+const (
+	// AbuseNone is the default: every player behaves.
+	AbuseNone = "none"
+	// AbuseDirection sends a grossly oversized movement vector, which
+	// MovementSystem.ResolveDirection refuses outright. Server-side reason:
+	// invalid_direction — the one reason the shipped client cannot produce, and
+	// so the only one that carries weight in the anomaly score.
+	AbuseDirection = "direction"
+	// AbuseStale replays the same input tick for ever. Server-side reason:
+	// stale_tick.
+	AbuseStale = "stale"
+	// AbuseAttack attacks an entity id that does not exist. Server-side reason:
+	// attack_target_unresolved.
+	AbuseAttack = "attack"
 )
 
 // Config holds every knob of a load run.
@@ -121,11 +169,47 @@ type Config struct {
 	AuthMode AuthMode
 	Movement string
 
+	// RunID fixes the run identifier that user ids are derived from
+	// ("lt-<runID>-<idx>"). Empty means a fresh random one per run, which is the
+	// default and what keeps concurrent runs from colliding.
+	//
+	// Setting it explicitly is what makes a RECONNECT measurable: run once, stop,
+	// run again with the same value, and the same accounts come back to a server
+	// that is still holding their entities. That is the only way to exercise the
+	// path where a client restarts its own input-tick counter against server-side
+	// state that remembers the old one.
+	RunID string
+
+	// Abuse is the misbehaviour pattern used by the abusive share of players.
+	Abuse string
+
+	// AbusePlayers is how many players misbehave, selected by index so a run is
+	// reproducible. Zero means none, whatever Abuse is set to.
+	AbusePlayers int
+
 	// Encoding selects the wire encoding every virtual player speaks. The server
 	// answers in whatever encoding it is addressed in, so flipping this A/B-tests
 	// JSON against Protobuf against one unchanged server binary — the comparison
 	// stays controlled instead of spanning two builds.
 	Encoding messages.Encoding
+
+	// BaselineEntities is how many entities the server holds with zero players
+	// in it — the enemy spawner's population on a stock map server, for one.
+	// The validity gate rejects a level whose server reports more entities than
+	// players, because that is the signature of a dirty server; without this
+	// knob a server that spawns enemies by design fails that gate on every
+	// level and the sweep produces nothing. It is a declared expectation, not a
+	// measurement: the run still records what the server actually reported.
+	BaselineEntities int
+
+	// Sealed runs the sealed-session handshake on the gameplay hop and encrypts
+	// every frame after it.
+	//
+	// Configured on BOTH ends, never negotiated on the wire: the server has
+	// GAMESERVER_SEALED and this is its counterpart. A wire-negotiated setting
+	// would be a downgrade attack — an attacker strips the offer and both ends
+	// conclude the other could do no better.
+	Sealed bool
 
 	// --- plumbing ---
 	Timeout      time.Duration
@@ -168,18 +252,22 @@ const TickBudget = time.Second / DefaultTickRate
 // getenv is injected for testability (pass os.Getenv in production).
 func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	cfg := Config{
-		NakamaURL:       envOr(getenv, "NAKAMA_URL", DefaultNakamaURL),
-		ServerKey:       envOr(getenv, "NAKAMA_SERVER_KEY", DefaultServerKey),
-		GatewayAddr:     envOr(getenv, "GATEWAY_ADDR", DefaultGatewayAddr),
-		Transport:       envOr(getenv, "TRANSPORT", DefaultTransport),
-		JWTSecret:       getenv("JWT_SECRET"),
-		MapID:           envOr(getenv, "LOADTEST_MAP_ID", DefaultMapID),
-		Players:         10,
-		RampRate:        20,
-		Duration:        DefaultDuration,
-		TickRate:        DefaultTickRate,
-		AuthMode:        AuthPresigned,
-		Movement:        MovementCluster,
+		NakamaURL:   envOr(getenv, "NAKAMA_URL", DefaultNakamaURL),
+		ServerKey:   envOr(getenv, "NAKAMA_SERVER_KEY", DefaultServerKey),
+		GatewayAddr: envOr(getenv, "GATEWAY_ADDR", DefaultGatewayAddr),
+		Transport:   envOr(getenv, "TRANSPORT", DefaultTransport),
+		JWTSecret:   getenv("JWT_SECRET"),
+		MapID:       envOr(getenv, "LOADTEST_MAP_ID", DefaultMapID),
+		Players:     10,
+		RampRate:    20,
+		Duration:    DefaultDuration,
+		TickRate:    DefaultTickRate,
+		AuthMode:    AuthPresigned,
+		Movement:    MovementCluster,
+		// Protobuf is what the Unity client speaks (ADR-9); JSON is the legacy
+		// arm. A sweep that does not say which encoding it drove measures the
+		// wrong wire by default — and did, for one sweep, before this default.
+		Encoding:        messages.EncodingProto,
 		JoinMode:        JoinGateway,
 		GameServerAddr:  envOr(getenv, "GAMESERVER_PUBLIC_ADDR", DefaultGameServerAddr),
 		ServerID:        envOr(getenv, "GAMESERVER_ID", DefaultServerID),
@@ -211,7 +299,12 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	fs.IntVar(&cfg.TickRate, "tick-rate", cfg.TickRate, "Client input sends per second")
 	fs.StringVar(&authMode, "auth", authMode, "Auth path: presigned (default, benchmarks the game path) or nakama (adds real login cost)")
 	fs.StringVar(&cfg.Movement, "movement", cfg.Movement, "Input pattern: cluster, still or spread")
-	fs.StringVar(&encoding, "encoding", encoding, "Wire encoding: json (legacy) or proto")
+	fs.StringVar(&cfg.RunID, "run-id", cfg.RunID, "Fix the run id user ids are derived from (default: random per run). Reusing one makes the same accounts reconnect, which is how the reconnect path is measured")
+	fs.StringVar(&cfg.Abuse, "abuse", cfg.Abuse, "Misbehaviour for the abusive share: none, direction (oversized move vector), stale (replayed input tick) or attack (nonexistent target). Exercises the server's input-rejection telemetry; the server refuses all of it, so nothing here gains an advantage")
+	fs.IntVar(&cfg.AbusePlayers, "abuse-players", cfg.AbusePlayers, "How many players misbehave, chosen by index (0 = none)")
+	fs.StringVar(&encoding, "encoding", encoding, "Wire encoding: proto (default — what the client speaks, ADR-9) or json (legacy arm)")
+	fs.IntVar(&cfg.BaselineEntities, "baseline-entities", cfg.BaselineEntities, "Entities the server holds with no players (e.g. its enemy spawner); tolerated by the not-empty-at-start validity check")
+	fs.BoolVar(&cfg.Sealed, "sealed", cfg.Sealed, "Run the sealed-session handshake on the gameplay hop and encrypt every frame after it (must match the server's GAMESERVER_SEALED)")
 	fs.DurationVar(&cfg.Timeout, "timeout", cfg.Timeout, "Per-operation network timeout")
 	fs.BoolVar(&cfg.HoldGateway, "hold-gateway", cfg.HoldGateway, "Keep the gateway socket open for the whole run (as a real client does)")
 	fs.StringVar(&cfg.GSMetricsURL, "gameserver-metrics", cfg.GSMetricsURL, "Game server /metrics URL ('' to skip)")
@@ -242,6 +335,9 @@ func (c Config) Validate() error {
 	if c.JWTSecret == "" {
 		return fmt.Errorf("JWT_SECRET is required (env or -jwt-secret)")
 	}
+	if c.BaselineEntities < 0 {
+		return fmt.Errorf("-baseline-entities must be >= 0, got %d", c.BaselineEntities)
+	}
 	if c.Players <= 0 {
 		return fmt.Errorf("players must be > 0, got %d", c.Players)
 	}
@@ -266,6 +362,19 @@ func (c Config) Validate() error {
 	case MovementStill, MovementCluster, MovementSpread:
 	default:
 		return fmt.Errorf("movement must be one of still|cluster|spread, got %q", c.Movement)
+	}
+
+	switch c.Abuse {
+	case "", AbuseNone, AbuseDirection, AbuseStale, AbuseAttack:
+	default:
+		return fmt.Errorf("abuse must be one of none|direction|stale|attack, got %q", c.Abuse)
+	}
+
+	if c.AbusePlayers < 0 {
+		return fmt.Errorf("abuse-players must be >= 0, got %d", c.AbusePlayers)
+	}
+	if c.AbusePlayers > c.Players {
+		return fmt.Errorf("abuse-players (%d) exceeds players (%d)", c.AbusePlayers, c.Players)
 	}
 	switch c.JoinMode {
 	case JoinGateway:

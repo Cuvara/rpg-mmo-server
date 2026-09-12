@@ -3,6 +3,7 @@ package smoke
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/duycuong/rpg-mmo/shared/jwt"
 	"github.com/duycuong/rpg-mmo/shared/messages"
+	"github.com/duycuong/rpg-mmo/shared/sealed"
 	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
@@ -24,6 +26,12 @@ type Runner struct {
 	out io.Writer
 	hc  *http.Client
 
+	// enc is cfg.Encoding resolved once, at construction, so a typo is a startup
+	// error rather than a silent fall-through to JSON on every frame. Against a
+	// `require` server that fall-through would be refused at the join with
+	// `encoding_cannot_seal` and look like a broken stack rather than a typo.
+	enc messages.Encoding
+
 	sessionToken string // Nakama session token (step b)
 	deviceID     string // device id authenticated with (step b)
 	userID       string // Nakama user id (step c)
@@ -32,6 +40,16 @@ type Runner struct {
 	serverAddr   string // game server addr from EnterWorldResponse (step e)
 	serverTrans  string // game server transport from EnterWorldResponse (step e)
 	joinToken    string // join token from EnterWorldResponse (step e)
+
+	// Sealed sessions for the GAME-SERVER socket only, installed by the sealed
+	// handshake when Config.Sealed is set. The gateway hop is never sealed with
+	// these keys: they derive from a join token the gateway itself issues.
+	sealedConn net.Conn
+	sealedOut  *sealed.Session
+	sealedIn   *sealed.Session
+
+	// sealedBindingVerified is surfaced in the game-server step's detail line.
+	sealedBindingVerified bool
 
 	// runStart is the wall clock at Run(); every persisted row this run asserts
 	// on must be newer than it, which is what stops a stale row from passing.
@@ -45,7 +63,21 @@ type Runner struct {
 
 // NewRunner builds a Runner for cfg, writing progress to out.
 func NewRunner(cfg Config, out io.Writer) *Runner {
-	return &Runner{cfg: cfg, out: out, hc: &http.Client{Timeout: cfg.Timeout}}
+	return &Runner{cfg: cfg, out: out, hc: &http.Client{Timeout: cfg.Timeout}, enc: encodingFor(cfg.Encoding)}
+}
+
+// encodingFor maps the configured name onto a wire encoding.
+//
+// An unrecognised value is JSON, deliberately and loudly: Validate rejects it
+// before a Runner is built, so reaching this default means the value bypassed
+// validation, and JSON is the encoding that has always been sent. Choosing
+// protobuf here instead would turn a configuration mistake into a silently
+// different wire format.
+func encodingFor(name string) messages.Encoding {
+	if strings.EqualFold(strings.TrimSpace(name), "proto") {
+		return messages.EncodingProto
+	}
+	return messages.EncodingJSON
 }
 
 // skip is returned by a step that could not run for want of configuration. The
@@ -299,6 +331,15 @@ func (r *Runner) stepGameServerFlow() (string, error) {
 	if !joinResp.OK {
 		return "", fmt.Errorf("join rejected: %s", joinResp.Error)
 	}
+	if r.cfg.Sealed {
+		// Immediately after the join reply and before any gameplay frame, which
+		// is where the server runs its half. Any failure aborts the step: there
+		// is no cleartext fallback on either side.
+		if err := r.sealSession(conn, r.joinToken); err != nil {
+			return "", fmt.Errorf("sealed handshake: %w", err)
+		}
+	}
+
 	if joinResp.UserID != r.userID {
 		return "", fmt.Errorf("join user %q != %q", joinResp.UserID, r.userID)
 	}
@@ -336,7 +377,7 @@ func (r *Runner) stepGameServerFlow() (string, error) {
 	// 5 u/s at 15Hz: N/3). The exact value depends on server config, so the assertion
 	// below only checks "moved forward, and not by a per-message teleport".
 	for i := 0; i < r.cfg.Inputs; i++ {
-		env, err := messages.NewEnvelope(messages.MsgInput, messages.InputMessage{
+		env, err := messages.NewEnvelopeAs(r.enc, messages.MsgInput, messages.InputMessage{
 			Tick:  uint64(i + 1),
 			MoveX: 1.0,
 			MoveY: 0.0,
@@ -410,7 +451,7 @@ drain:
 	// matters on KCP — UDP has no FIN, so without it the server only notices
 	// the client is gone when the reconnect hold expires. KCP flushes on its
 	// 10ms update tick and Close() does not drain, hence the short pause.
-	if env, err := messages.NewEnvelope(messages.MsgDisconnect, struct{}{}); err == nil {
+	if env, err := messages.NewEnvelopeAs(r.enc, messages.MsgDisconnect, struct{}{}); err == nil {
 		_ = r.send(conn, env)
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -419,8 +460,15 @@ drain:
 	r.disconnectAt = time.Now()
 	// ack_tick / keyframe counts are reported, not asserted: a server predating the
 	// delta protocol sends neither, and the smoke test must stay green against it.
-	return fmt.Sprintf("snapshots=%d (keyframes=%d deltas=%d) final_x=%.2f ack_tick=%d",
-		snapshots, state.Keyframes, state.Deltas, lastX, state.AckTick), nil
+	detail := fmt.Sprintf("snapshots=%d (keyframes=%d deltas=%d) final_x=%.2f ack_tick=%d",
+		snapshots, state.Keyframes, state.Deltas, lastX, state.AckTick)
+	if r.cfg.Sealed {
+		// Both facts, always. "sealed" alone would let a reader take
+		// confidentiality for authenticity, which is exactly the conflation
+		// ADR-21 was written about.
+		detail += fmt.Sprintf(" sealed=true binding_verified=%v", r.sealedBindingVerified)
+	}
+	return detail, nil
 }
 
 // ---------------------------------------------------------------- wire utils
@@ -453,7 +501,7 @@ func (r *Runner) dialTarget(kind, target string) (net.Conn, error) {
 }
 
 func (r *Runner) send(conn net.Conn, env messages.Envelope) error {
-	data, err := messages.Encode(env)
+	data, err := r.encodeFrame(conn, env)
 	if err != nil {
 		return err
 	}
@@ -464,11 +512,117 @@ func (r *Runner) send(conn net.Conn, env messages.Envelope) error {
 	return err
 }
 
+// encodeFrame seals only on the socket the handshake ran over.
+func (r *Runner) encodeFrame(conn net.Conn, env messages.Envelope) ([]byte, error) {
+	if r.sealedOut == nil || conn != r.sealedConn {
+		return messages.Encode(env)
+	}
+	body, err := messages.EncodeBody(env)
+	if err != nil {
+		return nil, err
+	}
+	frame, err := r.sealedOut.Seal(body)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 4+len(frame))
+	binary.BigEndian.PutUint32(out[:4], uint32(len(frame)))
+	copy(out[4:], frame)
+	return out, nil
+}
+
 func (r *Runner) recv(conn net.Conn) (messages.Envelope, error) {
 	if err := conn.SetReadDeadline(time.Now().Add(r.cfg.Timeout)); err != nil {
 		return messages.Envelope{}, err
 	}
-	return messages.Decode(conn)
+	if r.sealedIn == nil || conn != r.sealedConn {
+		return messages.Decode(conn)
+	}
+
+	var lenBuf [4]byte
+	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
+		return messages.Envelope{}, err
+	}
+	length := binary.BigEndian.Uint32(lenBuf[:])
+	if length == 0 || length > 1<<20 {
+		return messages.Envelope{}, fmt.Errorf("sealed frame length %d out of range", length)
+	}
+	body := make([]byte, length)
+	if _, err := io.ReadFull(conn, body); err != nil {
+		return messages.Envelope{}, err
+	}
+	plain, err := r.sealedIn.Open(body)
+	if err != nil {
+		// One error for every failure — cleartext where sealed is required, a
+		// forged tag, a replay. The caller aborts for all of them.
+		return messages.Envelope{}, fmt.Errorf("sealed frame rejected: %w", err)
+	}
+	return messages.DecodeBody(plain)
+}
+
+// sealSession runs the client half of the handshake and installs both
+// directions. Every failure aborts: there is no cleartext fallback, by design.
+//
+// The smoke test does NOT hold the join-token secret, so like a shipped client it
+// CANNOT verify the server's binding: it receives its join token from the real
+// gateway rather than minting one. This step therefore checks confidentiality and
+// the refusal rules, NOT the man-in-the-middle defence. The load generator, which
+// mints its own tokens, is the only peer in this repo that checks that.
+//
+// On success it records BindingVerified for the step's detail line. False is the
+// CORRECT state for a client holding no join-token secret — confidentiality
+// against a passive eavesdropper, nothing against an active one — but a run that
+// does not SAY so leaves "the session is encrypted" to be read as "the server is
+// authenticated", which is what ADR-21 exists to stop.
+func (r *Runner) sealSession(conn net.Conn, joinToken string) error {
+	// The smoke test goes through the REAL gateway, so it receives its join token
+	// rather than minting one and never holds JOIN_TOKEN_SECRET. That makes it
+	// the closest thing in this repo to a shipped client, and it behaves like
+	// one: it reads the jti without verifying (the server verifies the same
+	// token properly), and it cannot check the server's binding.
+	// The token of THIS connection, never r.joinToken. The sealed handshake is bound
+	// to the join token's jti, and a rejoin carries a different token: reading the
+	// runner's field sealed the second connection against the FIRST token's jti, the
+	// server's binding check failed, and the step reported "player never appeared in a
+	// snapshot after rejoin" -- a persistence symptom for an encryption cause.
+	claims, err := jwt.ParseUnverified(joinToken)
+	if err != nil {
+		return fmt.Errorf("read jti from join token: %w", err)
+	}
+
+	result, err := sealed.RunClientHandshake(
+		sealed.ClientHandshakeConfig{JTI: claims.Jti},
+		func(pub []byte) error {
+			env, err := messages.NewEnvelopeAs(r.enc, messages.MsgSealedClientHello,
+				messages.SealedClientHello{PublicKey: pub})
+			if err != nil {
+				return err
+			}
+			return r.send(conn, env)
+		},
+		func() ([]byte, []byte, string, error) {
+			env, err := r.recv(conn)
+			if err != nil {
+				return nil, nil, "", err
+			}
+			if env.Type != messages.MsgSealedServerHello {
+				return nil, nil, "", fmt.Errorf("want server hello, got type %d", env.Type)
+			}
+			var hello messages.SealedServerHello
+			if err := env.UnmarshalPayload(&hello); err != nil {
+				return nil, nil, "", err
+			}
+			return hello.PublicKey, hello.Binding, hello.Error, nil
+		},
+	)
+	if err != nil {
+		return err
+	}
+
+	r.sealedConn, r.sealedOut, r.sealedIn = conn, result.Outbound, result.Inbound
+
+	r.sealedBindingVerified = result.BindingVerified
+	return nil
 }
 
 // roundTrip sends one request envelope and waits for a response of wantType,
@@ -476,7 +630,7 @@ func (r *Runner) recv(conn net.Conn) (messages.Envelope, error) {
 // snapshot) are skipped.
 func (r *Runner) roundTrip(conn net.Conn, reqType messages.MsgType, reqPayload any,
 	wantType messages.MsgType, out any) error {
-	env, err := messages.NewEnvelope(reqType, reqPayload)
+	env, err := messages.NewEnvelopeAs(r.enc, reqType, reqPayload)
 	if err != nil {
 		return fmt.Errorf("encode: %w", err)
 	}

@@ -61,6 +61,18 @@ const (
 	MsgType_MSG_TYPE_PONG              MsgType = 12 // either direction (heartbeat reply)
 	// 13 and 14 are reserved for MsgTransferMap/Resp.
 	MsgType_MSG_TYPE_KICK MsgType = 15 // server -> client (forced disconnect with reason)
+	// Sealed-session handshake on the GAMEPLAY hop only. See
+	// backend/docs/SEALED-FRAMING.md.
+	//
+	// 16 and 17 rather than the next free small numbers for a reason worth
+	// stating: both stay inside the one-byte varint range (<= 127), so the
+	// envelope tag cost does not change, and leaving 18-31 clear keeps a
+	// contiguous block for the gateway hop's own handshake when ADR-22 settles
+	// it. Recycling a number is how two versions silently disagree about what a
+	// byte means, which is why field 5 of EnterWorldResponse is reserved rather
+	// than reused.
+	MsgType_MSG_TYPE_SEALED_CLIENT_HELLO MsgType = 16 // client -> gameserver
+	MsgType_MSG_TYPE_SEALED_SERVER_HELLO MsgType = 17 // gameserver -> client
 )
 
 // Enum value maps for MsgType.
@@ -82,24 +94,28 @@ var (
 		11: "MSG_TYPE_PING",
 		12: "MSG_TYPE_PONG",
 		15: "MSG_TYPE_KICK",
+		16: "MSG_TYPE_SEALED_CLIENT_HELLO",
+		17: "MSG_TYPE_SEALED_SERVER_HELLO",
 	}
 	MsgType_value = map[string]int32{
-		"MSG_TYPE_UNSPECIFIED":       0,
-		"MSG_TYPE_AUTH":              1,
-		"MSG_TYPE_AUTH_RESP":         2,
-		"MSG_TYPE_ENTER_WORLD":       3,
-		"MSG_TYPE_ENTER_WORLD_RESP":  4,
-		"MSG_TYPE_JOIN_TOKEN":        5,
-		"MSG_TYPE_JOIN_TOKEN_RESP":   6,
-		"MSG_TYPE_INPUT":             7,
-		"MSG_TYPE_SNAPSHOT":          8,
-		"MSG_TYPE_DISCONNECT":        9,
-		"MSG_TYPE_RESYNC":            10,
-		"MSG_TYPE_TRANSFER_MAP":      13,
-		"MSG_TYPE_TRANSFER_MAP_RESP": 14,
-		"MSG_TYPE_PING":              11,
-		"MSG_TYPE_PONG":              12,
-		"MSG_TYPE_KICK":              15,
+		"MSG_TYPE_UNSPECIFIED":         0,
+		"MSG_TYPE_AUTH":                1,
+		"MSG_TYPE_AUTH_RESP":           2,
+		"MSG_TYPE_ENTER_WORLD":         3,
+		"MSG_TYPE_ENTER_WORLD_RESP":    4,
+		"MSG_TYPE_JOIN_TOKEN":          5,
+		"MSG_TYPE_JOIN_TOKEN_RESP":     6,
+		"MSG_TYPE_INPUT":               7,
+		"MSG_TYPE_SNAPSHOT":            8,
+		"MSG_TYPE_DISCONNECT":          9,
+		"MSG_TYPE_RESYNC":              10,
+		"MSG_TYPE_TRANSFER_MAP":        13,
+		"MSG_TYPE_TRANSFER_MAP_RESP":   14,
+		"MSG_TYPE_PING":                11,
+		"MSG_TYPE_PONG":                12,
+		"MSG_TYPE_KICK":                15,
+		"MSG_TYPE_SEALED_CLIENT_HELLO": 16,
+		"MSG_TYPE_SEALED_SERVER_HELLO": 17,
 	}
 )
 
@@ -198,13 +214,95 @@ func (EntityType) EnumDescriptor() ([]byte, []int) {
 	return file_wire_proto_rawDescGZIP(), []int{1}
 }
 
+// EntityAction is a coarse, level-triggered description of what an entity is
+// doing right now, for a renderer to pick an animation from.
+//
+// Numbers are FROZEN once shipped. Append only; never renumber.
+//
+// ZERO IS RESERVED and means "not sent" — a sender that predates this field, or
+// one that has nothing to say. IDLE is deliberately 1, NOT 0: proto3 elides a
+// zero enum, so making idle the zero value would make "this entity is standing
+// still" and "this server does not know about actions" the same bytes. That is
+// the exact ambiguity documented at length on `speed` below, and here it is
+// avoidable for free, so it is avoided. `EntityType` already reserves 0 the same
+// way (ENTITY_TYPE_UNSPECIFIED means "see type_name"), so this is the file's
+// established idiom rather than a new rule.
+//
+// This is LEVEL-triggered, not edge-triggered: it says what state the entity is
+// in, not that a state was entered. A renderer that needs to retrigger the same
+// action twice in a row (attack, attack) cannot get that edge from this field
+// alone — that needs a sequence number, which is an animation-system concern and
+// is deliberately not here. See shared/docs/DESIGN.md, "Entity facing and action
+// state on the wire", for what was left out and why.
+type EntityAction int32
+
+const (
+	EntityAction_ENTITY_ACTION_UNSPECIFIED EntityAction = 0 // not sent / unknown — never "idle"
+	EntityAction_ENTITY_ACTION_IDLE        EntityAction = 1
+	EntityAction_ENTITY_ACTION_MOVING      EntityAction = 2
+	EntityAction_ENTITY_ACTION_ATTACKING   EntityAction = 3
+	EntityAction_ENTITY_ACTION_DEAD        EntityAction = 4
+)
+
+// Enum value maps for EntityAction.
+var (
+	EntityAction_name = map[int32]string{
+		0: "ENTITY_ACTION_UNSPECIFIED",
+		1: "ENTITY_ACTION_IDLE",
+		2: "ENTITY_ACTION_MOVING",
+		3: "ENTITY_ACTION_ATTACKING",
+		4: "ENTITY_ACTION_DEAD",
+	}
+	EntityAction_value = map[string]int32{
+		"ENTITY_ACTION_UNSPECIFIED": 0,
+		"ENTITY_ACTION_IDLE":        1,
+		"ENTITY_ACTION_MOVING":      2,
+		"ENTITY_ACTION_ATTACKING":   3,
+		"ENTITY_ACTION_DEAD":        4,
+	}
+)
+
+func (x EntityAction) Enum() *EntityAction {
+	p := new(EntityAction)
+	*p = x
+	return p
+}
+
+func (x EntityAction) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (EntityAction) Descriptor() protoreflect.EnumDescriptor {
+	return file_wire_proto_enumTypes[2].Descriptor()
+}
+
+func (EntityAction) Type() protoreflect.EnumType {
+	return &file_wire_proto_enumTypes[2]
+}
+
+func (x EntityAction) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use EntityAction.Descriptor instead.
+func (EntityAction) EnumDescriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{2}
+}
+
 // Envelope is the top-level wire message.
 //
 // `type` is field 1 and is always >= 1 for any real message, so proto3 never
 // elides it and an encoded Envelope ALWAYS begins with tag byte 0x08. A JSON
 // envelope always begins with '{' (0x7B). Those cannot collide, which is what
-// lets a peer identify the encoding from the first body byte alone — no version
-// negotiation and no extra handshake round trip. See docs/DESIGN.md.
+// lets a peer identify the ENCODING from the first body byte alone — no
+// encoding negotiation and no extra handshake round trip. See docs/DESIGN.md.
+//
+// That sniffing answers "how are these bytes framed", NOT "do the two sides
+// agree on what the fields mean". The latter is `protocol_version`, carried on
+// the two handshake requests (AuthRequest, JoinTokenRequest) and echoed on their
+// responses. It costs nothing per message — deliberately NOT a field here,
+// because an Envelope field is paid on every snapshot of every tick forever to
+// re-state a number that cannot change within a connection.
 //
 // `payload` stays opaque bytes rather than becoming a oneof so that routing and
 // payload decoding remain separable, exactly as in the JSON encoding: a proxy or
@@ -263,10 +361,14 @@ func (x *Envelope) GetPayload() []byte {
 
 // AuthRequest is sent by the client to authenticate with the gateway.
 type AuthRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Token         string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Token string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	// Wire protocol version this client implements. See "Protocol version" above.
+	// Zero means "not advertised" (a client predating the field), which is
+	// admitted or refused according to the gateway's --min-protocol-version.
+	ProtocolVersion uint32 `protobuf:"varint,2,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *AuthRequest) Reset() {
@@ -306,14 +408,27 @@ func (x *AuthRequest) GetToken() string {
 	return ""
 }
 
+func (x *AuthRequest) GetProtocolVersion() uint32 {
+	if x != nil {
+		return x.ProtocolVersion
+	}
+	return 0
+}
+
 // AuthResponse is the gateway's reply to an auth request.
 type AuthResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Ok            bool                   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	UserId        string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
-	Error         string                 `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Ok     bool                   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	UserId string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Error  string                 `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
+	// The gateway's own wire protocol version, echoed so a new client can detect
+	// an OLD gateway: a gateway predating this field replies with 0 here, and 0 is
+	// the client's only signal that its version was never checked. Sent on
+	// rejection too — unlike tick_rate, this is not privileged tuning, and a
+	// client refused for a version mismatch needs to know which version to be.
+	ProtocolVersion uint32 `protobuf:"varint,4,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *AuthResponse) Reset() {
@@ -365,6 +480,13 @@ func (x *AuthResponse) GetError() string {
 		return x.Error
 	}
 	return ""
+}
+
+func (x *AuthResponse) GetProtocolVersion() uint32 {
+	if x != nil {
+		return x.ProtocolVersion
+	}
+	return 0
 }
 
 // EnterWorldRequest asks the gateway to assign a map server.
@@ -486,10 +608,23 @@ func (x *EnterWorldResponse) GetError() string {
 
 // JoinTokenRequest is sent by the client to authenticate with a game server.
 type JoinTokenRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Token         string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Token string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	// Wire protocol version this client implements. See "Protocol version" above.
+	//
+	// Checked here INDEPENDENTLY of the gateway's check on AuthRequest, and that
+	// duplication is deliberate rather than redundant. Under ADR-3 these are two
+	// separate connections to two separate processes: the gateway is a redirector
+	// that hands back {ServerAddr, JoinToken} and never carries a snapshot, so it
+	// cannot vouch for a client's ability to read one. The gateway and the game
+	// server are also deployed and upgraded independently, so "the gateway
+	// accepted it" says nothing about the schema the game server encodes with —
+	// and it is the game server, not the gateway, that a version disagreement
+	// actually corrupts, because the snapshot stream is where a misparse turns
+	// into a wrong world.
+	ProtocolVersion uint32 `protobuf:"varint,2,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *JoinTokenRequest) Reset() {
@@ -529,6 +664,13 @@ func (x *JoinTokenRequest) GetToken() string {
 	return ""
 }
 
+func (x *JoinTokenRequest) GetProtocolVersion() uint32 {
+	if x != nil {
+		return x.ProtocolVersion
+	}
+	return 0
+}
+
 // JoinTokenResponse confirms whether the join was accepted.
 type JoinTokenResponse struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
@@ -542,9 +684,18 @@ type JoinTokenResponse struct {
 	// 0 means "not supplied" (a pre-0.x server that predates this field). A client
 	// that sees 0 must REFUSE to predict rather than assume 15: assuming is exactly
 	// the silent desync this field closes (#93).
-	TickRate      uint32 `protobuf:"varint,4,opt,name=tick_rate,json=tickRate,proto3" json:"tick_rate,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	TickRate uint32 `protobuf:"varint,4,opt,name=tick_rate,json=tickRate,proto3" json:"tick_rate,omitempty"`
+	// The game server's own wire protocol version, echoed so a new client can
+	// detect an OLD game server. See "Protocol version" above.
+	//
+	// Unlike `tick_rate`, this IS sent on a rejected join (`ok = false`). A
+	// rejected client is told nothing about the server's tuning because it has not
+	// proved it is entitled to it — but a client refused for a version mismatch
+	// has to be told which version it failed against, or the refusal is as opaque
+	// as the parse error it replaces and the operator learns nothing from it.
+	ProtocolVersion uint32 `protobuf:"varint,5,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *JoinTokenResponse) Reset() {
@@ -601,6 +752,13 @@ func (x *JoinTokenResponse) GetError() string {
 func (x *JoinTokenResponse) GetTickRate() uint32 {
 	if x != nil {
 		return x.TickRate
+	}
+	return 0
+}
+
+func (x *JoinTokenResponse) GetProtocolVersion() uint32 {
+	if x != nil {
+		return x.ProtocolVersion
 	}
 	return 0
 }
@@ -751,7 +909,49 @@ type EntitySnapshot struct {
 	// ~5 bytes and inherit the whole handle-lifecycle contract above; speed is a
 	// plain value with no identity, and the delta encoder already suppresses
 	// entities whose state has not changed at all.
-	Speed         float32 `protobuf:"fixed32,9,opt,name=speed,proto3" json:"speed,omitempty"`
+	Speed float32 `protobuf:"fixed32,9,opt,name=speed,proto3" json:"speed,omitempty"`
+	// Facing direction, as 16-bit BINARY RADIANS BIASED BY ONE.
+	//
+	//	wire 0                -> NOT SENT: this sender has no facing to report.
+	//	wire v in [1, 65536]  -> angle = (v - 1) * 2*PI / 65536 radians,
+	//	                         counter-clockwise from +X (due east).
+	//
+	// WHY THE BIAS, AND WHY NOT A FLOAT. `float facing` is the obvious encoding and
+	// it is wrong here, because proto3 elides a zero float and 0.0 radians is a
+	// perfectly ordinary facing — due east. A server meaning "facing east" and a
+	// server predating this field would put IDENTICAL BYTES on the wire, and no
+	// receiver rule can separate them.
+	//
+	// `speed` below has exactly that ambiguity and has to document its way around
+	// it, because a speed of zero is genuinely meaningful and float is the natural
+	// type. Facing has no such excuse: reserving zero costs one addition on each
+	// side and removes the ambiguity BY CONSTRUCTION rather than by asking every
+	// implementer to remember a rule. Every representable angle has a non-zero wire
+	// value, so an absent field means one thing only.
+	//
+	// It is also smaller: 1-3 bytes of varint against a float's fixed 5, on the
+	// hottest message in the protocol. That is the same class of saving as the
+	// entity-type enum (which exists to save 6 bytes per entity) and id interning
+	// (~15). Resolution is 360/65536 = 0.0055 degrees, far below anything a player
+	// can see.
+	//
+	// RECEIVER RULE. Zero means "no value" — NOT "facing east". A receiver MUST
+	// keep the entity's last known facing, or derive one from its movement, rather
+	// than snapping it to east. Trusting a zero unconditionally means every entity
+	// from an old server points the same way, which reads as a content bug and gets
+	// debugged as one.
+	//
+	// Sent on every mention of an entity, never interned, for the same reason as
+	// `speed`: a receiver that resolves a handle expects complete state.
+	FacingBrad uint32 `protobuf:"varint,10,opt,name=facing_brad,json=facingBrad,proto3" json:"facing_brad,omitempty"`
+	// What the entity is doing, for animation selection. See EntityAction above.
+	//
+	// ENTITY_ACTION_UNSPECIFIED (0) means "not sent", never "idle" — idle is 1.
+	// A receiver MUST treat 0 as "no value" and keep whatever it was showing, not
+	// fall back to idle: an old server would otherwise freeze every entity in the
+	// world into an idle pose, which looks like a broken animator rather than a
+	// missing field.
+	Action        EntityAction `protobuf:"varint,11,opt,name=action,proto3,enum=rpgmmo.wire.v1.EntityAction" json:"action,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -847,6 +1047,20 @@ func (x *EntitySnapshot) GetSpeed() float32 {
 		return x.Speed
 	}
 	return 0
+}
+
+func (x *EntitySnapshot) GetFacingBrad() uint32 {
+	if x != nil {
+		return x.FacingBrad
+	}
+	return 0
+}
+
+func (x *EntitySnapshot) GetAction() EntityAction {
+	if x != nil {
+		return x.Action
+	}
+	return EntityAction_ENTITY_ACTION_UNSPECIFIED
 }
 
 // SnapshotMessage is a world state update sent to the client.
@@ -1269,6 +1483,143 @@ func (x *KickMessage) GetReason() string {
 	return ""
 }
 
+// SealedClientHello opens the sealed-session handshake.
+type SealedClientHello struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Ephemeral X25519 public key, 32 bytes.
+	//
+	// EPHEMERAL PER CONNECTION. Reusing one across sessions forfeits the forward
+	// secrecy that is the entire reason ADR-22 supersedes the earlier
+	// derived-key scheme: with a fresh pair per connection, a long-lived secret
+	// obtained later cannot decrypt traffic recorded earlier.
+	PublicKey     []byte `protobuf:"bytes,1,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SealedClientHello) Reset() {
+	*x = SealedClientHello{}
+	mi := &file_wire_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SealedClientHello) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SealedClientHello) ProtoMessage() {}
+
+func (x *SealedClientHello) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SealedClientHello.ProtoReflect.Descriptor instead.
+func (*SealedClientHello) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *SealedClientHello) GetPublicKey() []byte {
+	if x != nil {
+		return x.PublicKey
+	}
+	return nil
+}
+
+// SealedServerHello answers it and proves the server holds the session's
+// join-token-derived material.
+type SealedServerHello struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Ephemeral X25519 public key, 32 bytes. Ephemeral per connection, as above.
+	PublicKey []byte `protobuf:"bytes,1,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
+	// HMAC-SHA256 over the handshake transcript, 32 bytes:
+	//
+	//	"cuvara/sealed-handshake/v1" || 0x00 || jti || 0x00
+	//	  || client_public (32) || server_public (32)
+	//
+	// BOTH EPHEMERAL PUBLIC KEYS ARE IN THE TRANSCRIPT, and that is what stops a
+	// man in the middle: an attacker who substitutes its own key changes the
+	// transcript, so the binding it read off the wire no longer verifies. Without
+	// them, a replayed binding would authenticate the attacker's exchange as
+	// readily as the real one and the MITM would be clean and undetectable.
+	//
+	// The NUL separators are load-bearing too. Without them the transcript is a
+	// concatenation whose pieces can be re-split, so a jti ending in one byte of
+	// the next field yields the same bytes as a different (jti, key) pair and a
+	// MAC over it authenticates both readings equally.
+	//
+	// A receiver MUST compare this in constant time. A byte-by-byte comparison
+	// leaks the position of the first mismatch, which is enough to forge a tag one
+	// byte at a time against a peer that keeps answering — and this peer answers
+	// every handshake attempt.
+	Binding []byte `protobuf:"bytes,2,opt,name=binding,proto3" json:"binding,omitempty"`
+	// Set when the server refuses the handshake. The client MUST NOT retry
+	// without encryption: there is no cleartext fallback by design, because a
+	// protocol that can be talked down to cleartext will be.
+	Error         string `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SealedServerHello) Reset() {
+	*x = SealedServerHello{}
+	mi := &file_wire_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SealedServerHello) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SealedServerHello) ProtoMessage() {}
+
+func (x *SealedServerHello) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SealedServerHello.ProtoReflect.Descriptor instead.
+func (*SealedServerHello) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *SealedServerHello) GetPublicKey() []byte {
+	if x != nil {
+		return x.PublicKey
+	}
+	return nil
+}
+
+func (x *SealedServerHello) GetBinding() []byte {
+	if x != nil {
+		return x.Binding
+	}
+	return nil
+}
+
+func (x *SealedServerHello) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
 var File_wire_proto protoreflect.FileDescriptor
 
 const file_wire_proto_rawDesc = "" +
@@ -1277,34 +1628,38 @@ const file_wire_proto_rawDesc = "" +
 	"wire.proto\x12\x0erpgmmo.wire.v1\"8\n" +
 	"\bEnvelope\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\rR\x04type\x12\x18\n" +
-	"\apayload\x18\x02 \x01(\fR\apayload\"#\n" +
+	"\apayload\x18\x02 \x01(\fR\apayload\"N\n" +
 	"\vAuthRequest\x12\x14\n" +
-	"\x05token\x18\x01 \x01(\tR\x05token\"M\n" +
+	"\x05token\x18\x01 \x01(\tR\x05token\x12)\n" +
+	"\x10protocol_version\x18\x02 \x01(\rR\x0fprotocolVersion\"x\n" +
 	"\fAuthResponse\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x14\n" +
-	"\x05error\x18\x03 \x01(\tR\x05error\"*\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error\x12)\n" +
+	"\x10protocol_version\x18\x04 \x01(\rR\x0fprotocolVersion\"*\n" +
 	"\x11EnterWorldRequest\x12\x15\n" +
-	"\x06map_id\x18\x01 \x01(\tR\x05mapId\"\x88\x01\n" +
+	"\x06map_id\x18\x01 \x01(\tR\x05mapId\"\x9b\x01\n" +
 	"\x12EnterWorldResponse\x12\x1f\n" +
 	"\vserver_addr\x18\x01 \x01(\tR\n" +
 	"serverAddr\x12\x1d\n" +
 	"\n" +
 	"join_token\x18\x02 \x01(\tR\tjoinToken\x12\x1c\n" +
 	"\ttransport\x18\x03 \x01(\tR\ttransport\x12\x14\n" +
-	"\x05error\x18\x04 \x01(\tR\x05error\"(\n" +
+	"\x05error\x18\x04 \x01(\tR\x05errorJ\x04\b\x05\x10\x06R\vsession_key\"S\n" +
 	"\x10JoinTokenRequest\x12\x14\n" +
-	"\x05token\x18\x01 \x01(\tR\x05token\"o\n" +
+	"\x05token\x18\x01 \x01(\tR\x05token\x12)\n" +
+	"\x10protocol_version\x18\x02 \x01(\rR\x0fprotocolVersion\"\x9a\x01\n" +
 	"\x11JoinTokenResponse\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x14\n" +
 	"\x05error\x18\x03 \x01(\tR\x05error\x12\x1b\n" +
-	"\ttick_rate\x18\x04 \x01(\rR\btickRate\"z\n" +
+	"\ttick_rate\x18\x04 \x01(\rR\btickRate\x12)\n" +
+	"\x10protocol_version\x18\x05 \x01(\rR\x0fprotocolVersion\"z\n" +
 	"\fInputMessage\x12\x12\n" +
 	"\x04tick\x18\x01 \x01(\x04R\x04tick\x12\x15\n" +
 	"\x06move_x\x18\x02 \x01(\x02R\x05moveX\x12\x15\n" +
 	"\x06move_y\x18\x03 \x01(\x02R\x05moveY\x12(\n" +
-	"\x10attack_target_id\x18\x04 \x01(\tR\x0eattackTargetId\"\xde\x01\n" +
+	"\x10attack_target_id\x18\x04 \x01(\tR\x0eattackTargetId\"\xb5\x02\n" +
 	"\x0eEntitySnapshot\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\ttype_name\x18\x02 \x01(\tR\btypeName\x12\f\n" +
@@ -1314,7 +1669,11 @@ const file_wire_proto_rawDesc = "" +
 	"\x06max_hp\x18\x06 \x01(\x05R\x05maxHp\x12.\n" +
 	"\x04type\x18\a \x01(\x0e2\x1a.rpgmmo.wire.v1.EntityTypeR\x04type\x12\x16\n" +
 	"\x06handle\x18\b \x01(\rR\x06handle\x12\x14\n" +
-	"\x05speed\x18\t \x01(\x02R\x05speed\"\xaa\x01\n" +
+	"\x05speed\x18\t \x01(\x02R\x05speed\x12\x1f\n" +
+	"\vfacing_brad\x18\n" +
+	" \x01(\rR\n" +
+	"facingBrad\x124\n" +
+	"\x06action\x18\v \x01(\x0e2\x1c.rpgmmo.wire.v1.EntityActionR\x06action\"\xaa\x01\n" +
 	"\x0fSnapshotMessage\x12\x12\n" +
 	"\x04tick\x18\x01 \x01(\x04R\x04tick\x12\x19\n" +
 	"\back_tick\x18\x02 \x01(\x04R\aackTick\x12\x12\n" +
@@ -1336,7 +1695,15 @@ const file_wire_proto_rawDesc = "" +
 	"\vserver_time\x18\x02 \x01(\x03R\n" +
 	"serverTime\"%\n" +
 	"\vKickMessage\x12\x16\n" +
-	"\x06reason\x18\x01 \x01(\tR\x06reason*\x8b\x03\n" +
+	"\x06reason\x18\x01 \x01(\tR\x06reason\"2\n" +
+	"\x11SealedClientHello\x12\x1d\n" +
+	"\n" +
+	"public_key\x18\x01 \x01(\fR\tpublicKey\"b\n" +
+	"\x11SealedServerHello\x12\x1d\n" +
+	"\n" +
+	"public_key\x18\x01 \x01(\fR\tpublicKey\x12\x18\n" +
+	"\abinding\x18\x02 \x01(\fR\abinding\x12\x14\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error*\xcf\x03\n" +
 	"\aMsgType\x12\x18\n" +
 	"\x14MSG_TYPE_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rMSG_TYPE_AUTH\x10\x01\x12\x16\n" +
@@ -1354,7 +1721,9 @@ const file_wire_proto_rawDesc = "" +
 	"\x1aMSG_TYPE_TRANSFER_MAP_RESP\x10\x0e\x12\x11\n" +
 	"\rMSG_TYPE_PING\x10\v\x12\x11\n" +
 	"\rMSG_TYPE_PONG\x10\f\x12\x11\n" +
-	"\rMSG_TYPE_KICK\x10\x0f*\x9d\x01\n" +
+	"\rMSG_TYPE_KICK\x10\x0f\x12 \n" +
+	"\x1cMSG_TYPE_SEALED_CLIENT_HELLO\x10\x10\x12 \n" +
+	"\x1cMSG_TYPE_SEALED_SERVER_HELLO\x10\x11*\x9d\x01\n" +
 	"\n" +
 	"EntityType\x12\x1b\n" +
 	"\x17ENTITY_TYPE_UNSPECIFIED\x10\x00\x12\x16\n" +
@@ -1362,7 +1731,13 @@ const file_wire_proto_rawDesc = "" +
 	"\x0fENTITY_TYPE_MOB\x10\x02\x12\x13\n" +
 	"\x0fENTITY_TYPE_NPC\x10\x03\x12\x14\n" +
 	"\x10ENTITY_TYPE_ITEM\x10\x04\x12\x1a\n" +
-	"\x16ENTITY_TYPE_PROJECTILE\x10\x05BFZ3github.com/duycuong/rpg-mmo/shared/proto/gen;wirepb\xaa\x02\x0eRpgMmo.Wire.V1b\x06proto3"
+	"\x16ENTITY_TYPE_PROJECTILE\x10\x05*\x94\x01\n" +
+	"\fEntityAction\x12\x1d\n" +
+	"\x19ENTITY_ACTION_UNSPECIFIED\x10\x00\x12\x16\n" +
+	"\x12ENTITY_ACTION_IDLE\x10\x01\x12\x18\n" +
+	"\x14ENTITY_ACTION_MOVING\x10\x02\x12\x1b\n" +
+	"\x17ENTITY_ACTION_ATTACKING\x10\x03\x12\x16\n" +
+	"\x12ENTITY_ACTION_DEAD\x10\x04BFZ3github.com/duycuong/rpg-mmo/shared/proto/gen;wirepb\xaa\x02\x0eRpgMmo.Wire.V1b\x06proto3"
 
 var (
 	file_wire_proto_rawDescOnce sync.Once
@@ -1376,37 +1751,41 @@ func file_wire_proto_rawDescGZIP() []byte {
 	return file_wire_proto_rawDescData
 }
 
-var file_wire_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_wire_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_wire_proto_goTypes = []any{
 	(MsgType)(0),                // 0: rpgmmo.wire.v1.MsgType
 	(EntityType)(0),             // 1: rpgmmo.wire.v1.EntityType
-	(*Envelope)(nil),            // 2: rpgmmo.wire.v1.Envelope
-	(*AuthRequest)(nil),         // 3: rpgmmo.wire.v1.AuthRequest
-	(*AuthResponse)(nil),        // 4: rpgmmo.wire.v1.AuthResponse
-	(*EnterWorldRequest)(nil),   // 5: rpgmmo.wire.v1.EnterWorldRequest
-	(*EnterWorldResponse)(nil),  // 6: rpgmmo.wire.v1.EnterWorldResponse
-	(*JoinTokenRequest)(nil),    // 7: rpgmmo.wire.v1.JoinTokenRequest
-	(*JoinTokenResponse)(nil),   // 8: rpgmmo.wire.v1.JoinTokenResponse
-	(*InputMessage)(nil),        // 9: rpgmmo.wire.v1.InputMessage
-	(*EntitySnapshot)(nil),      // 10: rpgmmo.wire.v1.EntitySnapshot
-	(*SnapshotMessage)(nil),     // 11: rpgmmo.wire.v1.SnapshotMessage
-	(*DisconnectMessage)(nil),   // 12: rpgmmo.wire.v1.DisconnectMessage
-	(*ResyncRequest)(nil),       // 13: rpgmmo.wire.v1.ResyncRequest
-	(*TransferMapRequest)(nil),  // 14: rpgmmo.wire.v1.TransferMapRequest
-	(*TransferMapResponse)(nil), // 15: rpgmmo.wire.v1.TransferMapResponse
-	(*PingMessage)(nil),         // 16: rpgmmo.wire.v1.PingMessage
-	(*PongMessage)(nil),         // 17: rpgmmo.wire.v1.PongMessage
-	(*KickMessage)(nil),         // 18: rpgmmo.wire.v1.KickMessage
+	(EntityAction)(0),           // 2: rpgmmo.wire.v1.EntityAction
+	(*Envelope)(nil),            // 3: rpgmmo.wire.v1.Envelope
+	(*AuthRequest)(nil),         // 4: rpgmmo.wire.v1.AuthRequest
+	(*AuthResponse)(nil),        // 5: rpgmmo.wire.v1.AuthResponse
+	(*EnterWorldRequest)(nil),   // 6: rpgmmo.wire.v1.EnterWorldRequest
+	(*EnterWorldResponse)(nil),  // 7: rpgmmo.wire.v1.EnterWorldResponse
+	(*JoinTokenRequest)(nil),    // 8: rpgmmo.wire.v1.JoinTokenRequest
+	(*JoinTokenResponse)(nil),   // 9: rpgmmo.wire.v1.JoinTokenResponse
+	(*InputMessage)(nil),        // 10: rpgmmo.wire.v1.InputMessage
+	(*EntitySnapshot)(nil),      // 11: rpgmmo.wire.v1.EntitySnapshot
+	(*SnapshotMessage)(nil),     // 12: rpgmmo.wire.v1.SnapshotMessage
+	(*DisconnectMessage)(nil),   // 13: rpgmmo.wire.v1.DisconnectMessage
+	(*ResyncRequest)(nil),       // 14: rpgmmo.wire.v1.ResyncRequest
+	(*TransferMapRequest)(nil),  // 15: rpgmmo.wire.v1.TransferMapRequest
+	(*TransferMapResponse)(nil), // 16: rpgmmo.wire.v1.TransferMapResponse
+	(*PingMessage)(nil),         // 17: rpgmmo.wire.v1.PingMessage
+	(*PongMessage)(nil),         // 18: rpgmmo.wire.v1.PongMessage
+	(*KickMessage)(nil),         // 19: rpgmmo.wire.v1.KickMessage
+	(*SealedClientHello)(nil),   // 20: rpgmmo.wire.v1.SealedClientHello
+	(*SealedServerHello)(nil),   // 21: rpgmmo.wire.v1.SealedServerHello
 }
 var file_wire_proto_depIdxs = []int32{
 	1,  // 0: rpgmmo.wire.v1.EntitySnapshot.type:type_name -> rpgmmo.wire.v1.EntityType
-	10, // 1: rpgmmo.wire.v1.SnapshotMessage.entities:type_name -> rpgmmo.wire.v1.EntitySnapshot
-	2,  // [2:2] is the sub-list for method output_type
-	2,  // [2:2] is the sub-list for method input_type
-	2,  // [2:2] is the sub-list for extension type_name
-	2,  // [2:2] is the sub-list for extension extendee
-	0,  // [0:2] is the sub-list for field type_name
+	2,  // 1: rpgmmo.wire.v1.EntitySnapshot.action:type_name -> rpgmmo.wire.v1.EntityAction
+	11, // 2: rpgmmo.wire.v1.SnapshotMessage.entities:type_name -> rpgmmo.wire.v1.EntitySnapshot
+	3,  // [3:3] is the sub-list for method output_type
+	3,  // [3:3] is the sub-list for method input_type
+	3,  // [3:3] is the sub-list for extension type_name
+	3,  // [3:3] is the sub-list for extension extendee
+	0,  // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_wire_proto_init() }
@@ -1419,8 +1798,8 @@ func file_wire_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_wire_proto_rawDesc), len(file_wire_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   17,
+			NumEnums:      3,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

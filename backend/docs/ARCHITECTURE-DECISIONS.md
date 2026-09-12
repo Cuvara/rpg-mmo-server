@@ -255,9 +255,11 @@ token TTL is 30s (`constants.JoinTokenTTL`).
    token is what authorizes the direct connection, so bypassing the gateway gains
    an attacker nothing — they still need a signed token naming that exact server.
 
-Note the `sid` check is currently conditional: it is skipped when either the
+~~Note the `sid` check is currently conditional: it is skipped when either the
 server's configured id or the token's claim is empty (`GameServer.cs:225-228`).
-That is a soft spot worth closing.
+That is a soft spot worth closing.~~ **Resolved**: the check is now unconditional
+(`GameServer.cs:847`) and the server always generates a non-empty id
+(`Program.cs:19`).
 
 **Proxy mode is a documented future option, not a plan.** It becomes attractive
 only if we need client IP hiding / DDoS shielding of game-server pods, or strict
@@ -279,8 +281,10 @@ becoming a gameplay SPOF.
 
 ### Follow-up work
 
-- **S** — Make the `sid` check unconditional: refuse a token with no `sid`, and
-  refuse to start a server with no id, instead of skipping the comparison.
+- ~~**S** — Make the `sid` check unconditional: refuse a token with no `sid`, and
+  refuse to start a server with no id, instead of skipping the comparison.~~
+  **Done.** `GameServer.cs:847` rejects empty and mismatched `sid`
+  unconditionally; `Program.cs:19` always generates a non-empty server id.
 - **S** — Update the drawio diagram labels (pages 1, 2, 3, 8/9) to "Gateway
   (auth + redirect)". Page 4 is already correct — it has no gateway lifeline.
 - **M** — If pod exposure becomes a problem, prototype KCP proxy mode behind the
@@ -797,9 +801,11 @@ A tier's CCU claim is only publishable once a run at that CCU holds every thresh
   serializes inline while `Connection.Send` merely enqueues; doing it in the
   writer task removes the dominant term from the critical path without changing
   the encoding.
-- **S** — Fix the entity leak on disconnect (BENCHMARK.md §7). Highest priority of
+- ~~**S** — Fix the entity leak on disconnect (BENCHMARK.md §7). Highest priority of
   all — it makes the O(n²) cost grow with cumulative joins rather than concurrent
-  players.
+  players.~~ **Done.** `entityAttached` flag + `finally` block in `GameServer.cs`
+  ensures every exit path calls `OnPlayerDisconnected`. BENCHMARK.md §16 re-ran
+  the sweep after this fix.
 - **S** — Stagger per-connection keyframe counters to stop the keyframe stampede.
 - **M** — Spatial-grid AOI. Measurement demotes this: it targets the ~20% term.
 - **⛔ BLOCKER** — Put the load generator on a **separate machine** from the
@@ -2786,6 +2792,536 @@ frames the same-gateway eviction already defined.
 
 ---
 
+## ADR-21 — Transport confidentiality: what exists is a pre-shared key on the non-default transport, and it is not a session key
+
+**Status:** **proposed 2026-09-09, NOT accepted.** Records the measured posture and the options; decides nothing. Raised because a survey of the remaining infrastructure gaps first reported "the game link is not encrypted", and that was **wrong** — encryption exists. The accurate finding is narrower and more specific, and it is written here so the next survey does not repeat the error in either direction.
+
+### What is actually there, verified 2026-09-09
+
+`GameServer/Net/Transport/KcpCrypto.cs` implements packet encryption compatible with `github.com/xtaci/kcp-go/v5`'s `NewAESBlockCrypt`, matching `backend/shared/transport/crypto.go` byte for byte, down to a shared HKDF domain-separation string (`rpg-mmo/transport/kcp/aes-256`). AES-256, CFB mode, kcp-go's fixed IV, a 16-byte random per-packet nonce ahead of the plaintext to make the first ciphertext block differ, and a CRC32 inside the encryption. The key comes from one environment variable, used verbatim at 64 hex chars and stretched with HKDF-SHA256 otherwise. A peer with the wrong key decrypts to noise, fails the CRC, and never forms a session — fail-closed, asserted by tests on both sides.
+
+That is real, it is symmetric across the Go and C# implementations, and it should not be described as absent.
+
+### The four things it is not
+
+1. **It is off by default, twice over.** The transport default is `tcp`, not `kcp` (`GameServer/Program.cs`, `--transport`), and TCP has no encryption path at all. Independently, the key variable defaults to `""`, and empty means plaintext. So the shipped default configuration carries gameplay traffic in the clear on both counts, and nothing reports that it is doing so.
+2. **A pre-shared key is not a session key.** Every client shares one static key, so it is a secret that ships inside the game binary. It resists a passive observer on the network path. It does not resist a *player*, who has the key by construction. There is no per-session key exchange, no forward secrecy, and no rotation story: changing the key is a simultaneous redeploy of every server and every client.
+3. **There is no negotiation and no key id.** The class says so itself. That is a deliberate and defensible choice — it removes the downgrade attack that negotiation invites — but it means a key rotation is a hard cutover, not a rollout, and it interacts directly with the protocol-versioning gap being closed separately.
+4. **CFB with a CRC32 is confidentiality, not authentication.** CFB is malleable and CRC32 is linear. The construction is inherited from kcp-go and compatibility with it is the reason to keep it; it is not a modern AEAD and should not be described as one. Anyone reasoning about an *active* attacker, as opposed to an eavesdropper, must not treat the CRC as a MAC.
+
+### Why this is deferred rather than fixed
+
+Every environment this system currently runs in is localhost or LAN: dev on the box, staging on `k3d-rpg-stg`. There is no public hop to protect yet, and ADR-15/16 record that the hosting shape above dev is not settled. Choosing an AEAD, a key-exchange, and a rotation story before knowing the deployment shape means choosing them twice.
+
+Deferral is also cheap to reverse *and* expensive to get wrong: this is the one gap on the list where a plausible-looking implementation that is subtly weak is worse than the honest plaintext default, because it moves the system from "known unprotected" to "believed protected".
+
+### What must happen before it is accepted, in order
+
+1. **A threat model, written down.** Passive network observer, active on-path attacker, and a malicious *player* are three different adversaries and the current design answers only the first. The third is the one a game actually faces, and no transport encryption addresses it — that is server-authority's job, which ADR-10 already assigns.
+2. **Stop defaulting to silence.** Independent of any crypto decision, the server should report its transport and whether a key is in force, at startup and in metrics. A deployment that believes it is encrypted and is not is the failure this repository keeps documenting under a different name. **This step is worth doing on its own merits and does not wait for the rest of this ADR.**
+3. **Then** choose the construction, against the deployment shape ADR-15/16 settle — and prefer a vetted implementation over anything hand-rolled. Note the constraint from the client side: a UPM package cannot declare a scoped registry, so any library must be source-only or a vendored assembly that survives Unity IL2CPP as well as NativeAOT on the server.
+
+### Decision
+
+None. This ADR is a record, not a change. Nothing in the code moves on it.
+
+---
+
+## ADR-22 — Transport crypto: ChaCha20-Poly1305 over an authenticated X25519 exchange, with the nonce as the replay counter
+
+**Status:** accepted 2026-09-10 as the target model, and **implemented on the server and in the Go clients** — the C# game server (`GameServer/Net/Sealed`), the Go implementation (`backend/shared/sealed`) and the Go load/smoke harnesses all speak it, with published RFC vectors and a shared cross-implementation vector pinning the bytes between them. **It is now the default**: `GAMESERVER_SEALED` defaults to `require`, so a stock server encrypts the gameplay hop and refuses every client that cannot seal. The Unity client half is written but not yet on the release cadence, which is why the local compose stack pins the flag off (see `backend/deploy/docker-compose.yml`). Normative wire format: `backend/docs/SEALED-FRAMING.md`.
+
+Supersedes the deferral in ADR-21 and supersedes the key-derivation scheme merged in #288, which is retained for the parts of it that carry forward.
+
+### The model
+
+```
+X25519 ephemeral exchange, authenticated by the join token
+        |
+        v
+HKDF-SHA256( ikm  = X25519(eph_priv, peer_pub) ‖ bind
+             salt = jti
+             info = "cuvara/session/v1" )
+        |
+        v
+ChaCha20-Poly1305 per frame, nonce = monotonic sequence number
+        |
+        v
+receiver rejects nonce <= highest seen  ->  replay protection
+```
+
+Where `bind` is material only a holder of `JOIN_TOKEN_SECRET` can produce.
+
+### Why each piece, and what it is not there for
+
+**None of this reduces cheating.** A cheater is a legitimate player holding the client, the session and any key inside it. This defends against a third party on the network path. The anti-cheat work is A1-A6 in `ROADMAP-SECURITY.md` §1. Anyone reading this ADR as an anti-cheat measure has misread it.
+
+**ChaCha20-Poly1305, not AES-GCM.** An AEAD rather than a cipher plus a MAC, so there is no encrypt-then-MAC ordering to get wrong, no "the MAC must cover the nonce" to forget, and no constant-time comparison to botch — the failure modes an earlier draft of the roadmap accepted when it recommended AES-CTR + HMAC. ChaCha20 is also designed to be fast **without** hardware AES, which is exactly the platform that lacks it (see the measurement below).
+
+**X25519, not derivation from a long-term secret.** #288 derived the session key as `HKDF(JOIN_TOKEN_SECRET, jti)`. That has no forward secrecy: the key is a pure function of a long-term secret and a `jti` that travels in the clear, so **anyone who later obtains `JOIN_TOKEN_SECRET` decrypts every recorded past session**. A DH exchange removes that, and removes the gateway-hop key delivery ADR-21 and #288 both had to record as a limitation.
+
+**The exchange MUST be authenticated, and echoing the token is not enough.** An unauthenticated X25519 on a plaintext hop is a clean man-in-the-middle: the attacker completes one exchange with each side and both ends see a perfectly healthy encrypted session, with nothing to observe. The binding must **prove possession of secret-derived material**, not merely present the token — an eavesdropper can read the token off the wire and replay it. This is the condition that makes the whole model safe; without it the model is worse than useless, because it produces confidence.
+
+**The rule has a forward half, and stating only the backward half is incomplete.** "Reject any
+nonce at or below the highest seen" says nothing about a large forward *jump*, which burns nonce
+space and forces an early rekey. The exposure is bounded — a forged frame cannot advance the counter
+because it will not authenticate, so only the genuine peer can do this, and only to itself — but the
+rule must say so rather than leave it unstated. **Bound the forward jump.**
+
+**Three conditions attach to choosing a bare counter**, because the ordering guarantee is *inherited
+rather than owned*: the C# KCP is a hand-port and this rests on roughly ten lines of
+`MoveRcvBufToQueue`.
+
+1. **Assert the ordering contract, do not assume it.** Refuse to operate over a transport that does
+   not declare ordered delivery, so a future QUIC-datagram or raw-UDP path **fails closed** instead
+   of silently reusing nonces.
+2. **Count rejections, do not merely perform them.** A replay validator that refuses silently is
+   indistinguishable from one that is never exercised.
+3. **Bound the forward jump**, per the paragraph above.
+
+**The nonce is the sequence number, and that is two problems solved by one mechanism.** ChaCha20-Poly1305 authenticates each frame but does **not** stop a valid frame being replayed. With a per-session key, using a monotonic counter as the nonce and rejecting any nonce at or below the highest seen gives replay protection for free — and simultaneously removes nonce reuse, which is the catastrophic failure mode of this AEAD. A sliding window is needed only if the layer below can reorder; KCP delivers reliably and in order, but **the crypto layer must not depend on that** and should enforce its own ordering.
+
+### What the client runtime actually provides — measured, not assumed
+
+Run in a **built IL2CPP player** (Windows, `ManagedStrippingLevel.Minimal`), not the Editor, because Mono and IL2CPP use different class-library profiles (`unityjit` vs `unityaot`) and the Editor's answer does not transfer:
+
+```
+platform : WindowsPlayer
+runtime  : Mono Unity IL2CPP
+
+AesGcm                     : THREW PlatformNotSupportedException
+ChaCha20Poly1305 (reflect) : TYPE ABSENT
+HKDF (reflect)             : TYPE ABSENT
+ECDiffieHellman (reflect)  : TYPE ABSENT
+Aes (raw block)            : OK
+HMACSHA256                 : OK
+RandomNumberGenerator      : OK
+```
+
+`AesGcm` **compiles and then throws** — the type is in the reference assembly and the implementation is not. That is the worst available failure mode: it type-checks, so an implementation written against it passes review, passes compilation, passes CI, and fails on a device.
+
+Measured on .NET 10.0.10 as well, because assuming the server side was the mistake that produced two of the superseded recommendations:
+
+```
+ChaCha20Poly1305           : OK -- round trip + rejects a tampered tag
+HKDF                       : OK
+X25519 via ECDiffieHellman : curve25519=no  X25519=no  Curve25519=no
+X25519 native type         : absent from System.Security.Cryptography
+```
+
+| | Go | .NET 10 (measured) | Unity IL2CPP (measured) |
+|---|---|---|---|
+| ChaCha20-Poly1305 | `x/crypto`, already a dependency in 5 modules | **built in** | **absent** |
+| X25519 | `x/crypto/curve25519`, same | **ABSENT** | **absent** |
+| HKDF-SHA256 | built in | **built in** | **absent** — build from `HMACSHA256` |
+
+**X25519 is missing from two of the three runtimes, not one.** That is worse than this ADR first assumed and it tightens the library requirement rather than loosening it: the client needs ChaCha20-Poly1305 **and** X25519, the .NET server needs X25519, and **the same pure-C# library should serve both** — solving two runtimes once. It must not be a native plugin, since a UPM package cannot declare a scoped registry and IL2CPP ships to platforms where a native binary is a per-platform build-matrix cost.
+
+Go needs nothing vendored on any of the three. A UPM package cannot declare a scoped registry, so it must be source or a vendored assembly, and it must be verified in an IL2CPP **player build** — AOT can break generics, `unsafe` and `Span` in ways the Editor never shows.
+
+### Alternatives rejected
+
+**GameNetworkingSockets (Valve).** Genuinely good and battle-tested, with real per-session crypto. Rejected because adopting it replaces the transport rather than adding crypto to it: ~950 lines of Go transport, ~3 700 of C#, ~2 000 of Unity netcode, plus the delta encoder, id interning, golden vectors and the protocol-version handshake that sit on top. It is C++, so it needs native bindings for three runtimes and has no official Go support — and `backend/loadtest` is Go and speaks the game protocol directly, so adopting GNS **deletes the harness that performed this project's live acceptance runs**. Revisit only if a measured need appears (NAT punching, relay, or transport cost shown to be a bottleneck); the migration cost will not have grown.
+
+**Hazel Networking.** C#-only, so no Go side at all, and its crypto story is thin — DTLS exists only in some forks. Strictly worse than GNS for the one thing being asked of it.
+
+**Terminate TLS at the edge (ADR-21 option D).** Still the right answer for the gateway hop eventually, and still blocked on the hosting shape ADR-15/16 leave unsettled.
+
+**Keeping AES-256-CFB and adding a MAC.** Rejected: CFB with a CRC32 is what exists today, the CRC is linear and is not a MAC, and bolting on an HMAC by hand reintroduces every composition error an AEAD removes.
+
+### Decisions
+
+1. **Target model is as above**: ChaCha20-Poly1305 over an authenticated X25519 exchange, HKDF-SHA256 for derivation, nonce-as-sequence for replay protection.
+2. **The DH exchange must be authenticated by proof of possession of `JOIN_TOKEN_SECRET`-derived material.** An implementation that merely echoes the join token is rejected at review.
+3. **No negotiation and no fallback.** "Client did not present a key" means *no session*, never *plaintext session*. A negotiable path is a downgrade attack. `KcpCrypto` already fails closed; match it.
+4. **Standard implementations only.** No hand-written cipher, MAC or curve on any side.
+5. **Cross-implementation test vectors are a deliverable, not an afterthought.** Each side generates, the other two decrypt and confirm. An implementation that is subtly wrong still round-trips against itself and reports no error anywhere.
+6. **`EnterWorldResponse.session_key` (field 5) is reserved, not reused**, once X25519 makes it dead weight. Reusing a field number is how two versions silently disagree about what a byte means.
+7. **The key is never printable**, enforced by a redacting type rather than by discipline — as shipped in #288 and to be carried forward. The realistic leak is a struct handed to a formatter by code that did not know it held a secret.
+8. **This does not ship until the gateway hop is also confidential.** Until then the model's guarantees are bounded by a plaintext hop, and saying otherwise would produce exactly the *believed protected* state ADR-21 was written to prevent.
+
+### What is carried forward from #288
+
+The redacting key type, the no-fallback rule, the shared cross-implementation vector and the `jti` plumbing all survive. What is superseded is only the derivation itself.
+
+### Open, and to be closed before implementation
+
+- ~~X25519 availability on .NET 10~~ — **CLOSED, measured: absent.** `ECDiffieHellman` rejects `curve25519`, `X25519` and `Curve25519` as friendly names, and no X25519 type exists in `System.Security.Cryptography`. The server must vendor it too.
+- ~~Which pure-C# library~~ — **CLOSED: `BouncyCastle.Cryptography` 2.7.0**, and it is the only
+  candidate that provides X25519 at all. `NaCl.Core` 2.2.0 is an excellent AEAD in 33 KB and has
+  **no curve**, so the lightweight two-library route dies on X25519 rather than on the cipher.
+  Verified against RFC 8439 §2.8.2, RFC 7748 §6.1 in both directions, and RFC 5869 A.1, plus
+  cross-checked against Go `x/crypto` over a real exchange with random keys — and then run **in a
+  built Windows IL2CPP player at both `Minimal` and `High` stripping**:
+
+  ```
+  [PASS] ChaCha20-Poly1305 (RFC 8439 s2.8.2)   [PASS] rejects a tampered tag
+  [PASS] X25519 (RFC 7748 s6.1)                [PASS] HKDF-SHA256 (RFC 5869 A.1)
+  [PASS] key generation uses a working RNG
+  Minimal and High produced identical output.
+  ```
+
+  The `High` run is not ceremony: a third-party report describes an **Android** IL2CPP CIL-Linker
+  failure on BouncyCastle 2.x, and only a `High` build exercises the linker question at all. It did
+  not reproduce here with the `link.xml` in the survey. **That result is Windows; the Android report
+  is not disproved by it** and should be confirmed on a device before shipping to Android.
+
+  Cost, stated because it is real: **4.7 MB and 2 350 public types** in a package that has almost no
+  dependencies today, and IL2CPP converts to C++ every type the linker keeps.
+
+- ~~Whether KCP's ordering removes the need for a sliding window~~ — **CLOSED: it does. Use a strict
+  counter, no window**, subject to the three conditions below. Measured with real `tc netem`
+  impairment on **both** transports: **zero inversions and zero duplicate frames across 22 374
+  frames**, under clean, `reorder 30%`, `loss 10%`, and a hostile `reorder 25% + loss 8% +
+  duplicate 5%` mix, plus a 20-player run and a reconnect. Duplicated *datagrams* never became
+  duplicated *frames* — both stacks discard them below the decode — and `ReadLoopAsync` is strictly
+  serial per connection, so there is no concurrency at the decode layer to reintroduce disorder.
+
+  **The recommendation does not rest on the number.** Zero measured is not zero possible, and the
+  deciding argument is the failure mode: **a strict counter that is wrong breaks the session loudly
+  and the client notices immediately; a window that is wrong accepts a frame it should have refused
+  — a silent replay.** In a layer whose entire job is refusing things, take the mechanism that fails
+  loudly.
+
+---
+
+## ADR-23 — The gateway hop gets TLS, not a second sealed handshake; and the credential it exposes leaks one hop earlier
+
+**Status:** accepted 2026-09-10. **Implemented server-side and behind a flag that defaults off** (`GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY`; unset means plaintext, exactly as `GAMESERVER_SEALED` shipped). The client half is not written — the Unity client speaks raw TCP to the gateway and must learn to speak TLS before the flag can be turned on anywhere.
+
+Follows ADR-22, which sealed the **gameplay** hop and whose decision 8 says the model "does not ship until the gateway hop is also confidential". This ADR is that work, and it changes what "that work" means.
+
+### 1. What was measured, and the measurement that was missing
+
+The 2026-09-10 two-hop tap recorded in `ROADMAP-SECURITY.md` was **reproduced and is correct**. A byte-logging TCP relay was placed on both hops of a fully sealed session and every JWT crossing either hop in the clear was decoded with no key:
+
+| hop | credential | lifetime | single-use | reproduced |
+|---|---|---|---|---|
+| gateway | auth token | 3600 s | no | ✅ |
+| gateway | join token | 30 s | yes | ✅ |
+| gameplay | join token (same `jti`) | 30 s | yes | ✅ |
+
+All four columns now have an executable form. `integration_test/hop_confidentiality_tap_test.go` taps both hops at once and reads the credentials out of the recording; the "single-use" column, which a tap cannot show, is measured by **replaying each captured credential from a fresh connection** — the auth token is accepted twice and mints a fresh join token on the second use; the join token is refused on replay by `JtiTracker`.
+
+**But the tap was pointed at the wrong end of the path.** The auth token does not originate on the gateway hop. It is *minted* one hop earlier, by Nakama's `gateway_token` RPC, and delivered to the client over **plain HTTP**. That hop was never tapped. It has been now, against the live dev stack:
+
+| hop | protocol | credentials readable in the clear |
+|---|---|---|
+| **client → Nakama (meta)** | **HTTP/1.1, no TLS** | **Nakama session token (2 h, reusable, mints gateway auth tokens on demand)**; Nakama refresh token (1 h); **the gateway auth token itself (1 h)**; the Nakama server key, as HTTP Basic |
+| client → gateway | raw TCP + protobuf | gateway auth token (1 h, reusable); join token (30 s) |
+| client → game server | raw TCP + protobuf | join token (30 s) — sent before the seal exists; everything after is ChaCha20-Poly1305 (ADR-22) |
+
+`docker-compose.yml` starts Nakama with no `--socket.ssl_certificate`, `NAKAMA_URL` is `http://` in compose and in the load harness, and `deploy/k8s/data/nakama.yaml` exposes port 7350 with no Ingress and no TLS. There is no environment in which this hop is encrypted today.
+
+**This inverts the conclusion the task was framed on.** Sealing the gateway hop while the meta hop is plaintext is precisely the error `ROADMAP-SECURITY.md` already caught once for the join token: *the same credential crosses an unprotected hop first, so closing the second hop leaves the value it was protecting already spent.* An attacker positioned to read the gateway hop is on the client's network path, and the meta hop is on the same path. Worse, the meta hop carries a **strictly more valuable** credential than the one the whole exercise is about: a two-hour Nakama session token that mints one-hour gateway auth tokens for as long as it lives. Capturing the auth token wins an hour; capturing the session token wins two hours *and* renewal.
+
+**A note on the instrument, because it was wrong first.** The first Nakama capture found no gateway auth token and it would have been easy to report that as good news. The token was there; the response was **gzip-encoded**, and a byte scan for `eyJ...` cannot see through gzip. Compression is not confidentiality — the finding was an artefact of the tap, not a property of the hop — and re-running with `Accept-Encoding` suppressed showed all four credentials. Any future tap on an HTTP hop must account for content coding, and a real Unity client sends `Accept-Encoding: gzip` too.
+
+### 2. Why "reuse the sealed machinery" is more expensive than it looks
+
+The gameplay-hop handshake anchors on the join token's `jti` plus `JOIN_TOKEN_SECRET`: the server proves possession of secret-derived material, and the client is authenticated by the token. **On the gateway hop none of that exists at connect time.** The client holds only its Nakama auth JWT, which is a *client* credential and cannot authenticate the *gateway* to the client. There is no shared secret a shipped player may carry — that is the pre-shared-key mistake ADR-21 records and ADR-22 supersedes.
+
+Three costs that are not visible from "we already have `shared/sealed`":
+
+1. **The Go server half of the sealed handshake does not exist.** `backend/shared/sealed` is a *client* implementation plus primitives. `RunClientHandshake` exists; there is no `RunServerHandshake`, and `ValidateClientHello` is called from nowhere in the repository, not even a test. The only server half ever written is C# (`GameServer/Net/Sealed/SealedHandshakeServer.cs`). Sealing the gateway hop means writing a **new server half of a security protocol, in a language where it has never been written**, and the failure mode of getting it subtly wrong is a session that round-trips perfectly and protects nothing.
+2. **`Transcript` refuses an empty `jti`, and the gateway hop has no `jti`.** A new anchor has to be invented, which means a second transcript shape inside a protocol whose entire safety argument is that both peers agree on one byte layout.
+3. **`messages.Decode` fuses the length prefix and the body decode**, and sealing has to happen between them. The gateway's read path (`connection.go:484`) and write path (`connection.go:535`) both have to be split.
+
+Against that, wrapping the listener in TLS is `tls.NewListener` around the `net.Listener` that `transport.Listen` already returns. **No framing change at all.**
+
+### 3. Options, with what each does not buy
+
+#### Option A — unauthenticated ephemeral X25519 on the gateway hop
+
+Reuse the sealed exchange with no binding, the way `ClientHandshakeConfig` already permits by leaving `JoinTokenSecret` empty (`BindingVerified=false`).
+
+- **Buys:** closes the *passive* capture that was measured on the gateway hop. Composes with anything better later.
+- **Does not buy:** any MITM protection — an active attacker completes one exchange with each side and both ends see a healthy encrypted session. Nothing on the meta hop.
+- **Cost:** items 1–3 above, plus client work.
+- **The hidden cost, and it is the reason to reject rather than defer.** On the gameplay hop `BindingVerified=false` is honest reporting of a *degraded* case: the verified case exists, the load harness runs it, and a shipped client that cannot check is told so. On the gateway hop there would be **no verified case, ever** — the field would report a distinction that does not exist. That permanently installs an unauthenticated mode inside a protocol whose ADR-22 decision 3 is "no negotiation and no fallback", and it converts an honest instrument into a decorative one. A boolean that is always false is worse than no boolean, because the next reader assumes the true case is reachable.
+
+#### Option B — pinned gateway identity key
+
+- **Buys:** real MITM protection on the gateway hop, with no CA.
+- **Does not buy:** anything on the meta hop. Nakama is a third-party binary; no bespoke key of ours goes in front of it.
+- **Cost:** key distribution and rotation, shipped in a built player.
+- **The hidden cost:** pinning makes rotation a client release. A compromised or lost gateway key is then repaired at **app-store review latency — days — not deploy latency**, and until then every installed client either fails closed (an outage) or falls back (a downgrade attack). This is ADR-21's complaint about the pre-shared key reappearing in a new place with a better cipher, and the PSK at least did not require a store submission to fix.
+
+#### Option C — TLS on the gateway hop
+
+- **Buys:** confidentiality *and* authentication with a real CA, no key in the player, standard rotation, a standard implementation (ADR-22 decision 4), and it is the mechanism the gateway's own posture warning has been recommending on every boot since the posture work landed. Uniquely among the options, **the identical mechanism closes the meta hop**, which carries the more valuable credential and where no bespoke protocol is available.
+- **Does not buy:** anything against a malicious *player* — see ADR-22, this is not anti-cheat. Nothing on the gameplay hop, which is already sealed and stays sealed: game servers are Agones-allocated pods reached by ephemeral address, and putting a CA-issued certificate in front of each is a problem TLS does not solve for us.
+- **Cost:** certificates, a DNS name, renewal, and the client must speak TLS. `SslStream` under IL2CPP is **not verified** — it is the go/no-go for this option and it is the same shape of risk that `AesGcm` turned out to be in ADR-22, so it must be tested in a **player build**, not the Editor.
+- **The hidden cost, stated because it is the one that decides where the terminator goes.** TLS *terminated at an edge* is confidential **to the edge, not to the gateway**: everything past the terminator is plaintext on the pod network, so an edge terminator moves the trust boundary rather than removing it. On the single-node k3d dev and staging boxes the terminator and the gateway are the same host, so an edge-terminated deployment there would buy **nothing at all** while reporting itself as encrypted — the "believed protected" state ADR-21 exists to prevent. **This is why the implementation terminates TLS in the gateway process itself** rather than recommending an ingress: it is the only placement whose guarantee does not depend on a hosting shape ADR-15/16 have not settled. An external terminator remains compatible and can be added in front later.
+
+#### Option D — shorten and single-use the auth token instead of hiding it
+
+Reduce `constants.SessionTTL` and give the gateway auth token a `jti` consumed once, mirroring the join token.
+
+- **Buys:** reduces the auth token from "one hour, reusable" to the join token's class on **every hop at once**, including the meta hop, with no protocol change, no client crypto and no ops change.
+- **Does not buy:** confidentiality. User ids, map ids and the flow stay readable. It reduces the value of one captured item; it encrypts nothing.
+- **Cost:** the client must fetch a token per gateway connection, so **every reconnect becomes a Nakama round trip — at exactly the moment the network is bad**. It also converts a Nakama outage from "connected players are fine" into "any reconnect fails", which is a worse availability posture than the one it improves on.
+- **And it misses the worst credential.** `constants.SessionTTL` is the gateway auth token's lifetime *and* the Redis session key TTL (`gateway/session/manager.go:73,117,141`) — two independent meanings on one constant, so shortening it shortens the session record too. Meanwhile the **two-hour Nakama session token** is set by Nakama's own `--session.token_expiry_sec` and is untouched by any of this.
+
+### 4. Decisions
+
+1. **Do not build a second sealed handshake for the gateway hop.** Option A is rejected on the always-false-`BindingVerified` argument above, not merely on cost. Option B is parked; revisit only if TLS is shown impossible on a target platform.
+2. **The gateway hop gets TLS, terminated in the gateway process**, behind `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY`. Unset means plaintext and is the default, matching how `GAMESERVER_SEALED` was rolled out. Every deploy path pins the default explicitly.
+3. **There is no negotiation.** A listener with a certificate configured serves TLS only; it does not accept a plaintext client and does not sniff. ADR-22 decision 3 applies unchanged — a protocol that can be talked down to cleartext will be.
+4. **The meta hop is in scope and is the higher-value half.** It is not fixed by this change and must not be described as fixed by it. It is an ops change — Nakama's own `--socket.ssl_certificate`, or a terminator in front — and it is tracked as the blocking item in `ROADMAP-SECURITY.md`. **Turning the gateway flag on while the meta hop is plaintext buys materially less than it appears to**, and the posture reporting says so at boot rather than leaving it to be inferred.
+5. **`TransportPosture.Authenticated` becomes reachable.** It has been hard-coded `false` with a comment saying so, precisely so that its becoming true is visible in a diff. TLS is the configuration that makes it true, and it is now computed rather than pinned.
+6. **The tap is a committed instrument, not a one-off.** `integration_test/hop_confidentiality_tap_test.go` is the acceptance mechanism for this ADR and for any future claim about what crosses a hop. A green unit suite is not acceptance; the before/after pair from this tap is.
+7. **The Unity client needs two things, in the other repo:** TLS on the gateway connection (`SslStream` or equivalent, verified in an IL2CPP **player build**, with certificate validation *on* — a client that accepts any certificate has Option A's guarantee with Option C's cost), and `https://` for the Nakama base URL. Neither is written.
+
+### What this ADR does not claim
+
+- It does not claim the gateway hop is confidential today. The flag defaults off and no deployment sets it.
+- It does not claim the measured exposure is closed. Two of the three hops remain plaintext in every environment that exists, and the one this ADR addresses cannot be turned on until the client speaks TLS.
+- It does not reduce cheating. See ADR-22 and `ROADMAP-SECURITY.md` §0.
+
+---
+
+## ADR-24 — The meta hop gets Nakama's own TLS, but the credential worth stealing there is a default-valued static key, not a token
+
+**Status:** accepted 2026-09-10. **Implemented behind a flag that defaults off** (`NAKAMA_TLS_CERT` / `NAKAMA_TLS_KEY`), plus a **CD gate on the two Nakama static keys**, which is the higher-value half and is the reason this ADR is not simply "ADR-23 again on another port".
+
+Follows [ADR-23](#adr-23--the-gateway-hop-gets-tls-not-a-second-sealed-handshake-and-the-credential-it-exposes-leaks-one-hop-earlier), which closed the gateway hop and named this hop as the blocking item.
+
+### 1. What actually crosses the meta hop
+
+The earlier measurement scanned two REST calls and found four credentials. A tap exercising **everything a client does on that port** — auth, RPCs, account reads, session refresh, and the realtime WebSocket — finds more. Measured 2026-09-10 against the live dev stack, `Accept-Encoding` suppressed *and* every gzip member inflated before scanning:
+
+| what | where | lifetime | notes |
+|---|---|---|---|
+| Nakama session token | response body, **and the WebSocket URL** | 7200 s | mints gateway auth tokens on demand |
+| Nakama refresh token | response body | 3600 s | mints new session tokens |
+| gateway auth token | response body | 3600 s | the ADR-23 credential |
+| re-issued session + refresh pair | session refresh response | 7200 s / 3600 s | **every refresh re-exposes both** |
+| `NAKAMA_SERVER_KEY` | `Authorization: Basic` | **never expires** | static, in every client build |
+| `runtime.http_key` | **URL query string** | **never expires** | static, server-only RPCs |
+
+**Two things here were not previously recorded.**
+
+**The realtime WebSocket.** Nakama serves `/ws` on the same port; it upgrades (`101 Switching Protocols`) and takes the session token **in the query string**. Everything Nakama-realtime — chat, presence, party, notifications — rides it. A query-string credential is worse than a header one *even after TLS*, because it lands in access logs, proxy logs and referrers; TLS protects the wire, not the log. Nothing in this repo opens one, but the Unity client is the consumer of exactly those features.
+
+**Session refresh re-exposes.** A refresh returns a fresh session *and* refresh token on the same plaintext hop, so the exposure repeats for as long as the client runs rather than being a single login-time window.
+
+*Instrument caveat, again.* The first run of this tap reported **three** distinct JWTs where five were predicted. That was not a clean result: Nakama's `exp` has second granularity, so a refresh issued in the same second returns a **byte-identical** token and the distinct-count silently under-reports. A 2 s sleep produced five, with lifetimes of `2h0m2s`/`1h0m2s` — the offset is the sleep, which is what confirms it. The count disagreeing with a written-down prediction is the only reason it was caught.
+
+### 2. The finding that outranks confidentiality
+
+**Both Nakama static keys are at their published defaults, and both authenticate.** Verified with wrong-key controls rather than inferred from a status code:
+
+```
+reward_kill, no key            -> 401 "Auth token or HTTP key required"
+reward_kill, WRONG http_key    -> 401 "HTTP key invalid"
+reward_kill, DEFAULT http_key  -> 400 "user_id is required"   <- PASSED AUTH
+device auth, server_key=defaultkey -> 200      device auth, wrong key -> 401
+```
+
+`defaulthttpkey` reaches the handler for `reward_kill` and `submit_kill` — the **server-only reward-granting and leaderboard-submission RPCs**. `defaultkey` mints accounts and sessions.
+
+**And it is not just the dev box: `cd.yml` never writes `NAKAMA_HTTP_KEY` at all.** It writes `NAKAMA_SERVER_KEY=${NAKAMA_SERVER_KEY:-defaultkey}` (from a secret, defaulting) and no `NAKAMA_HTTP_KEY` line. `deploy/.env` is regenerated **wholesale** on every deploy, so the name is absent from the file, and compose's `${NAKAMA_HTTP_KEY:-defaulthttpkey}` resolves to the default **in every environment CD deploys** — for the Nakama flag and for the game server's client env alike. It fails **open and silently**: rewards flow, nothing warns except a Nakama startup line nobody reads.
+
+**This is why the framing needed adjusting.** Encrypting this hop defends the *path*. It does nothing about an attacker who simply connects to the port — published on `0.0.0.0` in compose — and presents a key from the Nakama documentation. Shipping TLS alone here would close the window while the door stays unlocked, and would do it in a way that reads, in every dashboard and boot log, as "the meta hop is now secure".
+
+**So: the keys first, then TLS.** Both are in this change; the ordering matters only in that the key gate must not be described as a nice-to-have alongside it.
+
+### 3. There is a second hop on this port, and it is ours
+
+The tap covered client → Nakama. Checked, rather than scoped out:
+
+- **Gateway → Nakama: does not exist.** No HTTP client, no URL, no `NAKAMA_*` config anywhere in `backend/gateway/`. Its only tie is the shared HS256 secret, verified locally. `gateway/CLAUDE.md`'s claim is accurate.
+- **The `nakama.so` plugin makes no outbound calls at all.** Inbound handlers only.
+- **The C# game server → Nakama is real, and it is on this hop.** `GameServer/Nakama/NakamaClient.cs:112` and `:204` build `{_baseUrl}/v2/rpc/...?http_key={_httpKey}` and POST it. So the reward path puts a never-expiring static key in a URL over plain HTTP, on the same port and the same network as the session tokens. **It exists in compose only** — `k8s/app/50-fleet-map.yaml` sets no `NAKAMA_URL`, so under Agones the game server does not call Nakama and the reward path is silently inert there. That asymmetry is a separate problem and is recorded, not fixed here.
+
+**Consequence for this change:** turning Nakama TLS on *requires* `NAKAMA_URL` to become `https://` for the game server too, or the reward path breaks. The two move together, which is why the flag is one setting and not two.
+
+### 4. Nakama's own TLS: measured, including what it does NOT cover
+
+`--socket.ssl_certificate` / `--socket.ssl_private_key` on `heroiclabs/nakama:3.40.0`, measured from a helper container against every listener:
+
+| port | plaintext | TLS | covered? |
+|---|---|---|---|
+| 7350 client API **and `/ws`** | `400` (refused) | `200` | **yes, and TLS-only — no plaintext fallback** |
+| 7351 console | **`200`** | fails | **no** |
+| 9100 metrics | **`200`** | fails | **no** |
+
+`/ws` over `wss` reaches the auth layer (`401` on a bogus token); over `ws` it is refused. So the WebSocket **is** covered, which is the part that mattered most.
+
+**The flag's name is accurate and its scope is narrower than "Nakama now has TLS."** It is the *socket* listener only. In compose all four ports publish on `0.0.0.0`, so an operator who enables it gets a TLS client port and a **plaintext console on 0.0.0.0** — with a real password — plus plaintext metrics. Anyone reading "SSL mode enabled" as "Nakama is encrypted" would be wrong in the direction that matters.
+
+**Nakama upstream explicitly discourages this option**, and says so at startup:
+
+```
+WARNING: enabling direct SSL termination is not recommended,
+use an SSL-capable proxy or load balancer for production!
+INFO  SSL mode enabled
+```
+
+That warning is a real cost and is not dismissed below.
+
+### 5. Options
+
+#### Option A — Nakama's own TLS (`--socket.ssl_certificate`) — **taken**
+
+- **Buys:** the client port and the WebSocket, TLS-only with no plaintext fallback, which matches ADR-22 decision 3 without us having to enforce it. No new component. ADR-23's in-process argument applies unchanged: on a single-node box a terminator and Nakama are the same host, so an edge terminator would report itself encrypted while buying nothing.
+- **Does not buy:** the console or metrics ports; anything about the default keys; anything about credentials in URLs surviving into logs.
+- **Cost, named:** **upstream recommends against it.** The honest reading is that the recommendation targets production fleets where a proxy is terminating anyway and Nakama's TLS stack is less exercised than a proxy's — not a correctness claim. We take it *because the alternative buys nothing in the only shapes we currently run*, and this ADR records that the moment a real edge exists, Option B is correct and this flag should go off.
+
+#### Option B — a reverse proxy in front of Nakama
+
+- **Buys:** what upstream recommends; can cover console and metrics too; standard certificate tooling.
+- **Does not buy:** anything on a single-node box, where it terminates on the same host it protects — ADR-23's hidden cost, unchanged.
+- **Cost:** a new component in a deploy path that is `DEPLOY_MODE=containers` and has no edge. Correct later; premature now.
+
+#### Option C — rotate the keys and leave the hop plaintext
+
+- **Buys:** removes the actual authentication bypass, for the price of two environment variables. This is the cheapest security win available anywhere in the system right now.
+- **Does not buy:** confidentiality. Every token above stays readable.
+- **Verdict: not an alternative to A — a prerequisite.** Doing A without C ships a misleading posture; doing C without A leaves the measured exposure. Both.
+
+#### Option D — move credentials out of URLs
+
+Considered and **rejected as not ours to make.** Nakama's WebSocket takes the token as a query parameter and `runtime.http_key` is query-only; both are upstream API shapes. We cannot fix them without forking Nakama or proxying it. **Recorded so it is not re-proposed as an oversight**, and because it is the one exposure TLS genuinely does not close: after TLS, those credentials still land in Nakama's own access logs.
+
+### 6. Decisions
+
+1. **Nakama terminates TLS itself**, behind `NAKAMA_TLS_CERT` / `NAKAMA_TLS_KEY`, **defaulting off**, pinned explicitly at every deploy path. Setting exactly one is a deploy failure, not a fall back to plaintext.
+2. **`NAKAMA_URL` moves to `https://` in the same change** wherever the flag is on, because `NakamaClient.cs` is a second consumer of this hop and would otherwise break silently.
+3. **CD fails the deploy when either Nakama static key is missing or left at its documented default.** `NAKAMA_HTTP_KEY` is now written at all, which it was not. This is the part of this ADR with the largest effect per line.
+4. **No `InsecureSkipVerify`, on any side, in any environment — including dev.** A client that accepts any certificate has the passive-eavesdropper guarantee at the price of the authenticated one (ADR-23 on the gateway hop, unchanged). Dev therefore runs the flag **off** rather than running it on with a self-signed certificate and a disabled check. **A dev convenience that trains an `InsecureSkipVerify` into the client is a worse outcome than dev staying plaintext**, because the flag ships in a player and the plaintext does not.
+5. **The console and metrics ports are NOT covered and must not be described as covered.** They are separately exposed on `0.0.0.0` in compose. Tracked as a follow-up, named in `ROADMAP-SECURITY.md`; not fixed here, because binding them is a deploy-topology change with its own blast radius.
+6. **The static keys' presence in the client binary is out of scope, with a reason.** `NAKAMA_SERVER_KEY` is architecturally a client credential — Nakama requires every client to present it — so it cannot be secret, and rotating it is a client release. Its value is therefore *bounded by what a client may do*, which is why the key that actually matters is `runtime.http_key`: that one is server-only, grants reward and leaderboard writes, and has no business being guessable. Decision 3 is aimed at it.
+7. **Credentials in URLs survive TLS.** Stated in the posture text rather than left to be discovered.
+
+### What this ADR does not claim
+
+- It does not claim the meta hop is confidential today. The flag defaults off, and no deploy path sets it.
+- It does not make Nakama's console or metrics ports confidential.
+- It does not address the Nakama→Postgres hop, which specifies no `sslmode` in either deployment.
+- It does not fix the compose/k8s asymmetry that makes the reward path inert under Agones.
+- It does not reduce cheating. See ADR-22 and `ROADMAP-SECURITY.md` §0.
+
+---
+
+## ADR-25 — The game server proves its identity with an Ed25519 key it generates per pod; the client's trust in that key is the gateway hop's trust, not its own
+
+**Status:** accepted 2026-09-12 as the target model. **NOT implemented** — no runtime code changes with this ADR. It closes the residual that ADR-22's sealed sessions left open and that `ROADMAP-SECURITY.md` step 5 names: every sealed session in dev and staging reports `binding_verified=false`, and no change to configuration can make it true.
+
+Follows [ADR-22](#adr-22--transport-crypto-chacha20-poly1305-over-an-authenticated-x25519-exchange-with-the-nonce-as-the-replay-counter), which defined the binding, and [ADR-23](#adr-23--the-gateway-hop-gets-tls-not-a-second-sealed-handshake-and-the-credential-it-exposes-leaks-one-hop-earlier), which parked "Option B — pinned identity key" for the gateway hop. This is the same question on the *gameplay* hop, where the answer comes out differently because the peer being authenticated is an Agones pod rather than a stable service.
+
+### 1. The residual, verified rather than restated
+
+Four facts, each checked in the tree at `92f5fec`:
+
+1. **The server always signs a binding over a transcript covering both ephemeral public keys.** `GameServer/Net/Sealed/SealedHandshakeServer.cs:105-112` builds `SealedHandshake.Transcript(jti, clientPublic, server.Public)` and puts `signer.Sign(transcript)` into `SealedServerHello.Binding`. The transcript bytes are `"cuvara/sealed-handshake/v1" ‖ 0x00 ‖ jti ‖ 0x00 ‖ client_public(32) ‖ server_public(32)` — `shared/sealed/handshake.go:75-87`, mirrored in the schema comment at `shared/proto/wire.proto:547-556`.
+2. **The client verifies only when it holds a secret.** `shared/sealed/client.go:101-120`: `verified := false`, then `if cfg.JoinTokenSecret != ""` … `verified = true`. Empty means do not verify, and `ClientHandshakeConfig.JoinTokenSecret`'s own comment (`client.go:45-48`) says empty "is the correct configuration for a shipped client".
+3. **The signature is a symmetric HMAC-SHA256.** `GameServer/Net/Sealed/SealedTranscriptSigner.cs:21-32` is `HMac(new Sha256Digest())` under `SealedCrypto.DeriveBindingKey(joinTokenSecret, jti)` — `SealedCrypto.cs:98-107`, an HKDF of `JOIN_TOKEN_SECRET` salted by the `jti`.
+4. **`JOIN_TOKEN_SECRET` is the key the gateway mints join tokens with.** `shared/config/config.go:25-28` (`JoinTokenSecret` is "the HS256 secret … for the gateway -> game server join token"), read from the environment at `config.go:86`; `gateway/transfer/join_token.go:17-23` and `:28-37` sign with it.
+
+**Therefore the binding cannot be handed to a client, and this is a protocol residual rather than a configuration gap.** A client able to *verify* a binding holds `JOIN_TOKEN_SECRET`, and a client holding `JOIN_TOKEN_SECRET` can *forge* a join token for any user against any server — strictly worse than the man in the middle the binding defends against. There is no setting, no secret-splitting and no deploy change that reaches `binding_verified=true` for a real player. The fix is a different primitive.
+
+**What that costs today, stated in the direction that matters.** A sealed gameplay hop is confidential against a **passive** eavesdropper — the X25519 exchange provides that on its own — and offers **nothing** against an active one: an attacker who substitutes its own ephemeral key completes one exchange with each side and both ends see a healthy encrypted session (`shared/sealed/client.go:23-37`, `SealedHandshakeServer.cs:54-63`). "The gameplay hop is encrypted" must not be read as "the game server is authenticated". `deploy/k8s/app/50-fleet-map.yaml:171-172` pins `GAMESERVER_SEALED: "require"` for dev *and* staging, and `GAMESERVER_SEALED` defaults to `require` in code (`GameServer/Program.cs:63`), so this is the state of every session that exists.
+
+**Only the load generator exercises the defence.** `loadtest/load/player.go:194` mints its own join token and `:283-315` verifies the binding with the same secret, recording the result in `SealedBindingVerified` (`player.go:46-49`). The integration suite does the same (`integration_test/sealed_session_e2e_test.go:241-275`). Every one of those peers holds the secret because it *is* the server side wearing a client costume. The smoketest, which receives its token from the real gateway like a player does, reports `binding_verified=false` (`ROADMAP-SECURITY.md`, step 5 table).
+
+### 2. The shape of the peer decides most of this
+
+The thing being authenticated is not a service. It is a Fleet replica:
+
+- Its address is composed at scheduling time — port from the Agones status read, host from `GAMESERVER_ADVERTISE_HOST` — because `status.address` is the node address and is not dialable (ADR-16, and `deploy/k8s/app/50-fleet-map.yaml:185-188`).
+- It registers **itself** into Redis after reporting Ready, and the gateway mints a join token only from that entry (ADR-16). `storage.ServerInfo` (`shared/storage/interfaces.go:38-45`) carries `ServerID`, `MapID`, `Addr`, `Transport`, `Capacity`, `PlayerCount` — and **no key field**.
+- Its lifetime is a pod's. Scaling, a rollout or a crash replaces it, and ADR-18 already treats replacement as routine.
+
+Two consequences fall straight out. **A long-lived key mounted into the pod is the worst-isolated secret we have** — the game server is the process most exposed to player-controlled input, and a fleet-wide key extracted from one pod impersonates the whole fleet until someone notices. And **a key that lives as long as the pod needs no rotation procedure at all**, because the Fleet is the rotation procedure.
+
+### 3. How the client learns what to expect, and what that inherits
+
+The gateway already tells the client where to go, and the client already trusts that answer for the address: `gateway/server/server.go:1151-1155` fills `EnterWorldResponse{ServerAddr, JoinToken, Transport}` from the registry lookup. An expected server public key riding in the same message adds no new trust relationship — it reuses the one the client is already forced to have, since an attacker who can rewrite `ServerAddr` already redirects the player wherever it likes.
+
+**What it inherits must be stated plainly rather than left to be inferred.** The gateway hop is plaintext in every environment today. ADR-23's TLS is implemented and defaults off (`shared/config/config.go:33-36`), and it cannot be turned on without solving certificate distribution: on `k3d-rpg-dev` the gateway logged `"tls":true,"encrypted":true,"authenticated":true` and three Unity clients played through it **only because they were handed the certificate to pin** (`backend/deploy/CHANGELOG.md:17-28`, `ROADMAP-SECURITY.md` step 6). Unlike the sealed hop, a TLS mismatch there cannot name itself, so the escalate-on-refusal trick that made sealing work by default is unavailable.
+
+So a key delivered over that hop is **exactly as trustworthy as that hop**, and today that is not very. An attacker positioned to man-in-the-middle the gameplay hop is on the client's network path, and the gateway hop is the same client on the same path: he substitutes the key in `enter_world_resp` and the signature he then forges verifies. **This ADR alone changes nothing for that attacker.** What it does is convert a break that is currently free into one that requires owning the gateway hop as well, and compose so that turning ADR-23's flag on closes both at once. That is worth doing, and it is not worth overstating — which is why decision 6 below refuses to let the client report success it has not earned.
+
+### 4. Options
+
+#### Option A — Ed25519 signature over the sealed transcript, per-pod key, public half delivered in `enter_world_resp` — **taken**
+
+The pod generates an Ed25519 keypair at startup, publishes the public half in its own registry entry, and signs the handshake transcript with the private half. The gateway returns that public key alongside `ServerAddr` and `JoinToken`. The client checks the signature against the key it was given and refuses the session on a mismatch.
+
+- **Buys:** a `server_identity_verified` that a **real shipped player can reach**, with no secret in the binary. Real MITM protection on the gameplay hop *conditional on the gateway hop being authenticated*. No key at rest anywhere: the private half exists only in the pod's memory for the pod's lifetime. No rotation procedure, no key-distribution ops, no Secret to leak — the material the fleet already mounts (`rpg-app-secrets`, `50-fleet-map.yaml:200-203`) does not grow.
+- **Does not buy:** anything against a malicious *player* — this is not anti-cheat, see ADR-22 and `ROADMAP-SECURITY.md` §0. Nothing about the join token, which still crosses the gameplay hop in the clear before sealing begins. Nothing on the meta hop (ADR-24). And nothing at all while the gateway hop is plaintext, per §3.
+- **Cost:** a new signed input and a new wire field on both implementations plus Unity, cross-implementation vectors (ADR-22 decision 5), a registry field, and one gateway plumbing change. Ed25519 is `crypto/ed25519` in the Go standard library and is in BouncyCastle 2.7.0, which `GameServer/GameServer.csproj:14` already references — so the server side adds no dependency. **Unity IL2CPP is unverified**; see decision 8.
+- **The hidden cost, and it is the reason decision 6 exists.** The trust anchor moves rather than disappearing: it becomes the gateway hop *and* the registry write path. Anything that can write `servers:map:*` in Redis can publish its own public key and be believed. Redis sits on the trusted backend network (ADR-4) and that is an assumption this ADR leans on, not one it removes.
+
+#### Option B — TLS on the gameplay hop instead of sealing
+
+- **Buys:** confidentiality and authentication from a standard implementation with standard rotation, and it is the mechanism ADR-23 chose one hop over.
+- **Does not buy:** any of it cheaply here, and ADR-23 already says why in its own Option C: game servers "are Agones-allocated pods reached by ephemeral address, and putting a CA-issued certificate in front of each is a problem TLS does not solve for us" (ADR-23 §3, Option C). The address is composed at scheduling time from `GAMESERVER_ADVERTISE_HOST` plus an allocated port; there is no stable DNS name to issue a certificate for and no place to renew one.
+- **Cost, and why it is not merely "expensive":** it deletes machinery that is **live in production today**. Sealing is `require` on dev and staging and three real Unity players connect with no flags. Replacing it means re-doing the framing (`SEALED-FRAMING.md`), the replay counter, the cross-implementation vectors, and the Go harnesses — and TLS does not apply to the KCP transport at all, which ADR-21 keeps as the production target for this hop. `SslStream` under IL2CPP measured **GO on Windows only**, both stripping levels, with **Android still unanswered** (`ROADMAP-SECURITY.md` step 6, `backend/docs/tls-probe/README.md`).
+- **Verdict: rejected.** It is the right answer for the gateway and meta hops, which have stable addresses, and the wrong one here for the same reason ADR-22 chose sealing in the first place.
+
+#### Option C — pin a long-lived fleet or environment key in the client binary
+
+One keypair per fleet or per environment, the public half shipped inside the player, no gateway delivery at all.
+
+- **Buys:** MITM protection on the gameplay hop that does **not** depend on the gateway hop — the only option here with that property, and the reason it is not dismissed.
+- **Does not buy:** anything for a pod that is not in that fleet, so a second fleet or a new environment is a client release. Nothing on the other two hops.
+- **Cost:** the private half must be mounted into every game-server pod, which is exactly the "worst-isolated secret we have" from §2. One compromised pod compromises the fleet identity for as long as the pin stands.
+- **The hidden cost:** ADR-23's Option B argument, unchanged — **pinning makes rotation a client release**, so a compromised key is repaired at app-store review latency, days, not deploy latency. Until then every installed client either fails closed (an outage) or falls back (a downgrade attack, forbidden by ADR-22 decision 3). ADR-21 records this complaint against the pre-shared key; a pinned fleet key is the same complaint with a better primitive.
+- **Verdict: rejected as the default, retained as an operator option.** The key stays *pinnable* — it is an Ed25519 public key and a build that wants to pin one can — but the shipped client does not pin, because the thing worth pinning in this system is the gateway certificate (one stable endpoint, protecting both hops) and not an ephemeral pod.
+
+#### Option D — do nothing, and keep reporting `binding_verified=false`
+
+- **Buys:** nothing, at no cost. And it is not absurd today: while the gateway hop is plaintext, an attacker who could exploit this residual can already win on the hop that delivers the address, so the *exploitable* gap does not widen by waiting.
+- **Does not buy:** a way out. This is the deciding argument rather than the cost one. The symmetric binding can **never** be given to a shipped client, so `binding_verified` is a field that can never be true for a real player — the always-false boolean ADR-23 decision 1 rejected its Option A for, already installed and already shipping. A protocol that has no reachable authenticated state is not "waiting"; it is finished, in the wrong place.
+- **Verdict: rejected.** The residual is a dead end, not a backlog item.
+
+**Ranking:** A, then C, then D, then B. C above D because it at least reaches an authenticated state; D above B because doing nothing is cheaper than a migration that deletes working, deployed machinery and still has no certificate to issue.
+
+### 5. What changes on the wire
+
+`SealedServerHello` today is `public_key = 1`, `binding = 2`, `error = 3` (`shared/proto/wire.proto:543-573`).
+
+- **Add `bytes server_signature = 4`** — 64 bytes, Ed25519.
+- **Sign a new input, and leave the transcript byte-identical.** The signed input is `"cuvara/sealed-identity/v1" ‖ 0x00 ‖ transcript ‖ 0x00 ‖ identity_public(32)`, where `transcript` is exactly the bytes `shared/sealed/handshake.go:75-87` already produces. The transcript itself is **not** touched: key derivation (`DeriveDirectionKeys`) and the existing HMAC binding keep their current bytes and their current vectors. The identity key is inside the signed input because a signature that does not name its signer authenticates a statement about a key rather than a key, and the NUL separators are load-bearing for the reason the schema comment already gives (`wire.proto:558-561`).
+- **Do not reuse field 2.** `binding` stays what it is — the harness path, which is the only peer that proves the defence end to end today. Giving one field number two meanings discriminated by length is how two versions silently disagree about what a byte means; ADR-22 decision 6 reserved `EnterWorldResponse` field 5 rather than reuse it for the same reason. Field 2 may be reserved later, in its own change, once nothing verifies it.
+- **`EnterWorldResponse` gains `bytes server_public_key`** at a fresh field number, and `storage.ServerInfo` gains the matching field so the registry can carry it from the pod to the gateway.
+- **Old clients do not break.** Adding fields is backward-compatible in Protobuf, and a client that ignores field 4 behaves exactly as it does today. There is still **no negotiation and no fallback**: the server always signs, and a client that has been told to check and cannot is refused rather than downgraded (ADR-22 decision 3).
+- **Migration order is gateway-and-server first, client second** — the inverse of the sealing rollout, and it is the safe direction here precisely because the client change is the enforcing one. A client that requires an identity key against a gateway that does not publish one gets a closed door, which is the failure ADR-22's rollout produced when the order was wrong (`ROADMAP-SECURITY.md` step 5, "Migration order — the client ships first").
+
+### 6. Rotation and compromise
+
+- **Rotation is pod replacement.** There is no key to roll, no overlap window and no keyring, because the keypair is generated at startup and dies with the process. A Fleet rollout rotates every identity in the fleet as a side effect of something it already does.
+- **A leaked private key buys the pod's remaining lifetime, and only for sessions the gateway sends to that pod.** An attacker who can extract it is already executing in the pod, where he has the player data anyway — so the leak's marginal value is small, which is the point of not having a fleet-wide key.
+- **A compromised gateway is total**, unchanged from today: it chooses the address and now also the key. This ADR does not move that.
+- **A compromised Redis is equally total** for this mechanism, and that is new. Anything that can write a registry entry can publish a key and be believed. ADR-4's "Redis is on the trusted backend network" is load-bearing for this ADR and is named here rather than assumed.
+- **`JOIN_TOKEN_SECRET` keeps its current job and its current rotation story.** It signs join tokens; it stops being the thing a client would need in order to authenticate a server. Nothing about the keyring in `jwt.Keyring` changes.
+
+### 7. Decisions
+
+1. **The game server signs the sealed handshake with an Ed25519 key it generates per pod at startup.** Not per fleet, not per environment. The private half never leaves the process and is never written to a Secret, a ConfigMap or disk.
+2. **The public half travels pod → registry → gateway → `enter_world_resp`.** No new trust relationship: the client already takes `ServerAddr` from that message on the same authority.
+3. **The signed input is defined on top of the existing transcript, which does not change.** `"cuvara/sealed-identity/v1" ‖ 0x00 ‖ transcript ‖ 0x00 ‖ identity_public`. Derivation and the HMAC binding keep their current bytes, so ADR-22's cross-implementation vectors stay valid and the new signature gets vectors of its own — generated by each side, verified by the other two, as a deliverable rather than an afterthought.
+4. **New field numbers only. `SealedServerHello.binding` is not reused and is not removed in this change.**
+5. **No negotiation and no fallback.** A signature that does not verify is a closed connection, never a session. A client that requires identity and is not given a key is refused. ADR-22 decision 3 applies unchanged.
+6. **A client reports `server_identity_verified` as true only when the key it checked arrived over an *authenticated* hop** — that is, with ADR-23's gateway TLS in force and its certificate validated. Over a plaintext gateway hop the client has checked a signature against a key an attacker could have chosen, and it must report the weaker truth. **An instrument that reports the strong claim on the weak evidence is worse than no instrument**, and that is the whole of ADR-23's argument for rejecting its Option A, applied to ourselves.
+7. **The shipped client does not pin.** The key is pinnable and an operator-controlled build may pin it (Option C stays available for a fixed fleet), but the default path delivers it per session, because pinning an ephemeral pod's key would make the pin either useless or a client release per rollout.
+8. **Ed25519 under Unity IL2CPP is a go/no-go probe, and it runs before implementation, in a built player at `Minimal` and `High` stripping.** Go has `crypto/ed25519` in the standard library and the .NET server has BouncyCastle 2.7.0 already (`GameServer/GameServer.csproj:14`); the client runtime is the one that has surprised us twice — `AesGcm` compiled and threw, `ECDiffieHellman`/`HKDF`/`ChaCha20Poly1305` were absent (ADR-22). **Assert the negative case**: a signature over a tampered transcript must be REJECTED, not merely that a good one verifies. A verifier that accepts everything is indistinguishable from one that works.
+9. **This may be implemented before ADR-23's TLS is enabled, and must not be *reported* as man-in-the-middle protection until it is.** Decision 6 is the mechanism that keeps that honest; §3 is the reason.
+
+### What this ADR does not claim
+
+- It does not claim the gameplay hop is authenticated today, or that it becomes so the moment this is implemented. Over a plaintext gateway hop the key is attacker-choosable and the guarantee is unchanged from the current one.
+- It does not close the plaintext join token that crosses the gameplay hop before sealing begins, and does not touch the gateway or meta hops (ADR-23, ADR-24).
+- It does not make `JOIN_TOKEN_SECRET` less valuable or less in need of rotation.
+- It does not remove the trust placed in the registry write path; it adds to it.
+- It does not reduce cheating. See ADR-22 and `ROADMAP-SECURITY.md` §0.
+- **It is not implemented.** No runtime code changed with this ADR, and every field described in §5 is a proposal.
+
+---
+
 ## Summary of decisions
 
 | # | Area | Decision |
@@ -2810,3 +3346,8 @@ frames the same-gateway eviction already defined.
 | 18 | Fleet autoscaling | **No `FleetAutoscaler` on a fleet that pins one `GAMESERVER_MAP_ID` for every replica.** The C# server self-registers at startup, not on allocation, so a "spare" Ready pod is a second live server for that map: measured on k3d 2026-08-18, scaling `1 -> 2` put two members into `servers:map:map_01` 5.4s later with no allocation involved, and `FindServer` hands clients one of them (the least-loaded then; the lowest `ServerID` since #203). `ready=0` is therefore the correct steady state and tooling says so instead of warning. Enforced by `verify.sh` check `cluster.autoscaler` (FAIL), which stands down for a fleet with a per-pod map id. `replicas > 1` and a buffer autoscaler unlock together, on a per-pod map id or on registering at `Allocated` rather than `Ready` — an autoscaler does nothing for the "second map cannot be served" symptom, which is a fleet-targeted-allocation problem |
 | 19 | Game content | **Content is JSON on disk in `backend/content/`, owned by the game server, served to clients over HTTP at `/content` and never carried by the `Shared.GameLogic` package.** The package is pinned by exact commit, so content in it costs a tag plus two file bumps per balance tweak — correct for simulation rules, fatal for content. The server loads and validates at boot and **refuses to start** on invalid content, reporting every fault in one pass. Clients send `?hash=` and get `304` once they hold the current set; the hash ships in both `ETag` and `X-Content-Hash` because `UnityWebRequest` and some proxies strip the former. The **schema and validator are shared** (`Shared.GameLogic/Content/`), the **parser is not** — Unity compiles the package as source and has no `System.Text.Json`, the server is NativeAOT and cannot reflect, so no single parser satisfies both; golden vectors cover the gap as in ADR-10. No hot reload: content changes need a restart, because rules changing under a running simulation makes every desync unreproducible |
 | 20 | Duplicate-login kick | **Gateway→gameserver eviction over one shared `events:kick` Stream, keyed by join-token jti** (ADR-5 consumer-group ACK, never Pub/Sub). On duplicate login the gateway publishes `session_superseded` with the old session's jti; each game server consumes via its own group (`gs:{server_id}`, created at `$`, destroyed on graceful shutdown), kicks only the connection holding that jti (newest login wins, redelivery idempotent), releases the entity with **no reconnect hold**, and sends the standard `MsgKick`+`MsgDisconnect` pair. One shared stream because server ids churn under a noeviction Redis (ADR-4). Counters: `gateway_kick_publish_total`, `gameserver_players_kicked_total`. The gateway→gateway socket eviction stays with ADR-17 |
+| 21 | Transport confidentiality | **Proposed, not accepted — a record of posture only.** KCP has real AES-256-CFB packet encryption, kcp-go-compatible and symmetric across Go and C# (`KcpCrypto.cs` / `shared/transport/crypto.go`), fail-closed on a wrong key. But it is **off by default twice** — the transport default is `tcp`, which has no encryption path, and the key variable defaults to empty, which means plaintext — and a **pre-shared key is not a session key**: every client shares one static secret that ships in the binary, so it resists a passive observer and not a player. No negotiation, no key id, no rotation without a hard cutover; CFB plus a linear CRC32 is confidentiality, not authentication, and the CRC is not a MAC. Deferred because every current environment is localhost/LAN and the hosting shape above dev is unsettled (ADR-15/16) — choosing an AEAD and a key exchange now means choosing them twice. **Reporting the transport and whether a key is in force does not wait for that decision.** Do not describe this link as "unencrypted"; describe it as unencrypted by default and unauthenticated when on |
+| 22 | Transport crypto | **Accepted 2026-09-10 as the target model; NOT implemented.** ChaCha20-Poly1305 over an **authenticated** X25519 exchange, HKDF-SHA256 derivation, **nonce as the replay counter** (one mechanism removing both replay and nonce reuse). Supersedes #288's `HKDF(JOIN_TOKEN_SECRET, jti)` derivation, which has **no forward secrecy** — obtaining the long-term secret later decrypts every recorded past session. **The DH must prove possession of secret-derived material, not echo the join token**, which an eavesdropper can read and replay; unauthenticated DH on a plaintext hop is a clean MITM that produces confidence rather than security. Measured in a built IL2CPP player: `AesGcm` **compiles then throws**, `ChaCha20Poly1305`/`HKDF`/`ECDiffieHellman` **absent**, only `Aes`/`HMACSHA256`/`RandomNumberGenerator` work; and measured on .NET 10, **X25519 is absent there too** while ChaCha20-Poly1305 and HKDF are built in — so **X25519 must be vendored on two runtimes**, ideally by one pure-C# library serving both. GNS rejected (replaces the transport and deletes the Go loadtest harness), Hazel rejected (no Go, thin crypto). No negotiation, no fallback, standard implementations only, cross-implementation vectors as a deliverable, field 5 reserved not reused. **Library settled: BouncyCastle 2.7.0** — the only candidate supplying X25519; RFC vectors pass in a built IL2CPP player at **both Minimal and High stripping**, at a cost of 4.7 MB and 2 350 types. **Replay: strict counter, no sliding window** — zero inversions in 22 374 frames across both transports under hostile `tc netem`, and chosen because a wrong counter fails loudly while a wrong window accepts a replay silently; three conditions attach, including bounding the forward jump, since the ordering guarantee is inherited from a hand-ported KCP rather than owned. **Does not ship until the gateway hop is confidential** |
+| 23 | Gateway-hop confidentiality | **TLS terminated in the gateway process**, behind `GATEWAY_TLS_CERT`/`GATEWAY_TLS_KEY`, **defaulting off** and pinned explicitly at every deploy site. A second sealed handshake for this hop is **rejected**: the Go server half of the sealed protocol does not exist, the hop has no `jti` to anchor a transcript, and an unauthenticated exchange would make `BindingVerified` a field that is always false. Terminating **in the process, not at an edge**, because an edge terminator is confidential only to the edge and buys nothing on the single-node dev/staging boxes. **The measurement that motivated this was incomplete**: the auth token is minted over a plaintext HTTP hop to Nakama that also carries a 2-hour reusable Nakama session token, so the meta hop is the higher-value half and is NOT fixed here. No negotiation, no plaintext fallback. The client half (TLS on the gateway connection, `https://` for Nakama) is unwritten, so the flag is off everywhere |
+| 24 | Meta-hop (Nakama) confidentiality | **Nakama terminates TLS itself** (`--socket.ssl_certificate`), behind `NAKAMA_TLS_CERT`/`NAKAMA_TLS_KEY`, **defaulting off** and pinned at every deploy path; `NAKAMA_URL` moves to `https://` in the same change because the **C# game server is a second consumer of this hop** (`NakamaClient.cs`, compose only — absent under Agones). Measured: the flag covers port 7350 **including the `/ws` realtime socket**, TLS-only, and does **NOT** cover the console (7351) or metrics (9100), both published on `0.0.0.0` in compose; upstream explicitly warns against direct SSL termination and we take it anyway because an edge terminator buys nothing on a single-node box. **The larger finding is not confidentiality**: both Nakama static keys sit at their published defaults and both authenticate — `defaulthttpkey` reaches the server-only reward and leaderboard RPCs — and `cd.yml` never wrote `NAKAMA_HTTP_KEY` at all, so every deployed compose environment ran the default. CD now fails on a missing or default key. **No `InsecureSkipVerify` anywhere, including dev**: dev runs the flag off rather than on with a disabled check. Credentials in URLs (the `/ws` token, `http_key`) survive TLS into access logs and are an upstream API shape we cannot fix |
+| 25 | Game-server identity | **Accepted 2026-09-12 as the target model; NOT implemented.** The game server signs the sealed handshake with an **Ed25519 key it generates per pod at startup**, whose public half travels pod -> registry -> gateway -> `enter_world_resp`. Replaces a residual that no configuration can close: the ADR-22 binding is a **symmetric** HMAC under `JOIN_TOKEN_SECRET` (`SealedTranscriptSigner.cs:21-32`, `SealedCrypto.cs:98-107`), which is the key the gateway **mints join tokens with** (`gateway/transfer/join_token.go:17-23`, `shared/config/config.go:25-28`) - so a client able to verify is a client able to forge, and `binding_verified=false` (`shared/sealed/client.go:101-120`) is permanent for every shipped player. Consequence today: the sealed hop is confidential against a **passive** eavesdropper and offers **nothing** against an active one. Per-pod, not per-fleet, because the peer is an Agones replica whose address is composed at scheduling time (ADR-16): rotation is pod replacement, and a fleet-wide private key mounted into the most player-exposed process is the worst-isolated secret available. **The key is delivered over the gateway hop, so it is exactly as trustworthy as that hop** - plaintext everywhere today, ADR-23's TLS implemented and off because it needs certificate distribution - therefore a client reports `server_identity_verified` only when the key arrived over an authenticated hop, and reports the weaker truth otherwise. New field numbers only (`server_signature = 4`); the transcript bytes do not change; old clients do not break; no negotiation, no fallback. **TLS on the gameplay hop rejected** (no stable address to certify, deletes machinery live in production, does not apply to KCP), **pinning a fleet key in the player rejected as the default** (rotation becomes an app-store release - ADR-23 Option B), **doing nothing rejected** (an always-false boolean is a dead end, not a backlog item). Ed25519 under Unity IL2CPP is an unrun go/no-go probe, asserting the NEGATIVE case |

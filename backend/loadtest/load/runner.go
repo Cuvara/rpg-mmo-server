@@ -35,7 +35,10 @@ func NewRunner(cfg Config, out io.Writer) *Runner {
 // when the run could not be executed at all; a run where every player failed to
 // connect is a valid Result with PlayersJoined == 0.
 func (r *Runner) Run(ctx context.Context) (*Result, error) {
-	runID := newRunID()
+	runID := r.cfg.RunID
+	if runID == "" {
+		runID = newRunID()
+	}
 	started := time.Now()
 
 	res := &Result{
@@ -44,17 +47,18 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 		RunID:   runID,
 		Started: started,
 		Config: ResultConfig{
-			Players:       r.cfg.Players,
-			RampRate:      r.cfg.RampRate,
-			DurationSec:   r.cfg.Duration.Seconds(),
-			ClientTickHz:  r.cfg.TickRate,
-			AuthMode:      string(r.cfg.AuthMode),
-			Movement:      r.cfg.Movement,
-			Encoding:      r.cfg.Encoding.String(),
-			MapID:         r.cfg.MapID,
-			Transport:     r.cfg.Transport,
-			HoldGateway:   r.cfg.HoldGateway,
-			TickBudgetSec: TickBudget.Seconds(),
+			Players:          r.cfg.Players,
+			RampRate:         r.cfg.RampRate,
+			DurationSec:      r.cfg.Duration.Seconds(),
+			ClientTickHz:     r.cfg.TickRate,
+			AuthMode:         string(r.cfg.AuthMode),
+			Movement:         r.cfg.Movement,
+			Encoding:         r.cfg.Encoding.String(),
+			BaselineEntities: r.cfg.BaselineEntities,
+			MapID:            r.cfg.MapID,
+			Transport:        r.cfg.Transport,
+			HoldGateway:      r.cfg.HoldGateway,
+			TickBudgetSec:    TickBudget.Seconds(),
 		},
 	}
 
@@ -186,6 +190,12 @@ func aggregateClients(stats []*PlayerStats, windowSec float64) ClientStats {
 		ack.Merge(s.AckLatency)
 		out.SnapshotsTotal += s.Snapshots
 		out.Resyncs += s.Resyncs
+		if s.SealedBindingVerified {
+			out.SealedBindingVerified++
+		}
+		if s.Sealed {
+			out.SealedPlayers++
+		}
 		out.KeyframesTotal += s.Keyframes
 		out.DeltasTotal += s.Deltas
 		out.InputsTotal += s.Inputs
@@ -392,14 +402,21 @@ func validityFailure(res *Result) string {
 
 	// 3. The server cannot hold more players or entities than were asked of it.
 	//    When it reports more, the process was not clean at the start of the
-	//    level and is carrying load from somewhere else.
+	//    level and is carrying load from somewhere else. Entities get a declared
+	//    allowance (-baseline-entities) for servers that populate the map
+	//    themselves; players never do — nothing but a client puts a player there.
 	if s.Scraped {
 		if s.PlayersOnline > float64(c.PlayersRequested) {
 			return fmt.Sprintf("server reported %.0f players online for a %d-player level; it was not empty when the level started",
 				s.PlayersOnline, c.PlayersRequested)
 		}
-		if s.Entities > float64(c.PlayersRequested) {
-			return fmt.Sprintf("server reported %.0f entities for a %d-player level; it was not empty when the level started",
+		allowed := c.PlayersRequested + res.Config.BaselineEntities
+		if s.Entities > float64(allowed) {
+			if res.Config.BaselineEntities > 0 {
+				return fmt.Sprintf("server reported %.0f entities for a %d-player level with a %d-entity baseline; it was not empty when the level started",
+					s.Entities, c.PlayersRequested, res.Config.BaselineEntities)
+			}
+			return fmt.Sprintf("server reported %.0f entities for a %d-player level; it was not empty when the level started (a server that spawns enemies by design needs -baseline-entities)",
 				s.Entities, c.PlayersRequested)
 		}
 	}

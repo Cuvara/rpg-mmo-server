@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Text;
 using System.Text.Json;
 using Google.Protobuf;
+using GameServer.Net.Sealed;
 using RpgMmo.Wire.V1;
 
 namespace GameServer.Net;
@@ -74,6 +75,105 @@ public static class WireProtocol
     /// <summary>Maximum message size (1 MB).</summary>
     public const int MaxMessageSize = 1 << 20;
 
+    /// <summary>
+    /// Version of the wire schema this build implements. Mirrors
+    /// <c>shared/messages.WireProtocolVersion</c> (Go) and
+    /// <c>Runtime/Protocol/WireProtocolVersion.cs</c> (Unity client).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// It names the SEMANTICS of <c>shared/proto/wire.proto</c> — what the fields
+    /// mean — not its shape and not its encoding. Shape is self-describing
+    /// (proto3 skips unknown fields) and encoding is sniffed from byte 0; neither
+    /// catches two peers that parse every byte and then disagree about what a
+    /// field means. That is the failure this number makes loud.
+    /// </para>
+    /// <para>
+    /// <b>Bump it</b> for: reusing or renumbering a field, removing a field a
+    /// receiver acts on, changing the meaning/units/reference frame of an
+    /// existing field, changing the snapshot state machine (handle lifecycle,
+    /// keyframe reset, the delta "changed" rule, the merge algorithm), or adding
+    /// something a receiver MUST act on to stay correct. Do NOT bump for a purely
+    /// additive optional field covered by a documented "zero means not sent"
+    /// rule. Full contract: <c>wire.proto</c> under "Protocol version", and
+    /// normatively <c>docs/API.md</c>.
+    /// </para>
+    /// <para>
+    /// No language can be authoritative for the other two, so each pins the value
+    /// and tests assert it on its own side.
+    /// </para>
+    /// </remarks>
+    public const uint ProtocolVersion = 1;
+
+    /// <summary>
+    /// Wire value meaning "this peer does not advertise a version" — a peer built
+    /// before the field existed.
+    /// </summary>
+    /// <remarks>
+    /// proto3 elides a zero uint32, so an absent field and an explicit 0 are the
+    /// same bytes. Real versions therefore start at 1 and 0 is permanently
+    /// reserved for "unknown", exactly as <c>ENTITY_TYPE_UNSPECIFIED</c> reserves
+    /// 0. A receiver must not read 0 as "version zero".
+    /// </remarks>
+    public const uint ProtocolVersionUnversioned = 0;
+
+    /// <summary>
+    /// The named reason a peer is refused for speaking a different wire protocol
+    /// version. Travels in <c>JoinTokenResponse.Error</c>.
+    /// </summary>
+    /// <remarks>
+    /// Follows the existing machine-readable reason convention
+    /// (<c>duplicate_login</c>, <c>server_shutdown</c>). The point of the version
+    /// handshake is that this string appears instead of a parse error, a silent
+    /// close, or a successful connection that is confidently wrong.
+    /// </remarks>
+    public const string ReasonProtocolVersionMismatch = "protocol_version_mismatch";
+
+    /// <summary>Outcome of checking a peer's advertised protocol version.</summary>
+    public enum VersionVerdict
+    {
+        /// <summary>The peer advertised exactly this build's version.</summary>
+        Accepted,
+
+        /// <summary>
+        /// The peer advertised nothing and the configured minimum still tolerates
+        /// that. Admission on trust — callers MUST count it separately, because
+        /// the counter reaching zero is the only evidence that raising the
+        /// minimum will not lock out real players.
+        /// </summary>
+        AcceptedUnversioned,
+
+        /// <summary>The peer's version is one this build cannot serve.</summary>
+        Refused,
+    }
+
+    /// <summary>
+    /// Decide whether a peer advertising <paramref name="peerVersion"/> may be
+    /// admitted by a receiver whose configured floor is
+    /// <paramref name="minVersion"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The rule is EXACT MATCH against <see cref="ProtocolVersion"/>, with one
+    /// configured exemption for the unversioned case. Exact match, rather than
+    /// "peer >= min", is the honest rule for a single integer carrying no
+    /// compatibility range: a peer one version AHEAD is refused just as firmly as
+    /// one behind, because this build cannot know what a later version changed
+    /// and admitting it would be the guess the mechanism exists to prevent.
+    /// </para>
+    /// <para>
+    /// Mirrors <c>shared/messages.CheckProtocolVersion</c> in Go; the two are
+    /// asserted to agree by the interop tests.
+    /// </para>
+    /// </remarks>
+    public static VersionVerdict CheckProtocolVersion(uint peerVersion, uint minVersion)
+    {
+        if (peerVersion == ProtocolVersion) return VersionVerdict.Accepted;
+        if (peerVersion == ProtocolVersionUnversioned && minVersion == ProtocolVersionUnversioned)
+            return VersionVerdict.AcceptedUnversioned;
+        return VersionVerdict.Refused;
+    }
+
     /// <summary>First byte of a JSON body.</summary>
     private const byte JsonPrefix = (byte)'{';
 
@@ -106,6 +206,20 @@ public static class WireProtocol
         byte[] frame = new byte[4 + body.Length];
         BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(0, 4), body.Length);
         body.CopyTo(frame, 4);
+        return frame;
+    }
+
+    /// <summary>Add the 4-byte big-endian length prefix to an already-built body.</summary>
+    /// <remarks>
+    /// The prefix stays in the clear even when the body is sealed: it is what finds the
+    /// frame boundary, so a reader needs it before it can have a key. Its value leaks only
+    /// the frame's length, which traffic analysis already sees.
+    /// </remarks>
+    public static byte[] Frame(ReadOnlySpan<byte> body)
+    {
+        byte[] frame = new byte[4 + body.Length];
+        BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(0, 4), body.Length);
+        body.CopyTo(frame.AsSpan(4));
         return frame;
     }
 
@@ -246,6 +360,53 @@ public static class WireProtocol
         return DecodeBody(scratch.Body.AsSpan(0, length));
     }
 
+    /// <summary>
+    /// Read one frame, unsealing it first when a sealed session is in force.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// When <paramref name="inbound"/> is null this is exactly the cleartext path. When it
+    /// is not, a frame that is NOT sealed is refused rather than parsed: after the
+    /// handshake, cleartext where a sealed frame is required is either a confused peer or
+    /// an attacker stripping the encryption, and there is no third reading. Accepting it
+    /// would be a downgrade the protocol deliberately has no room for.
+    /// </para>
+    /// <para>
+    /// <see cref="SealedSession.Open"/> is what enforces authenticate-before-replay-check,
+    /// so nothing here may look at the sequence number.
+    /// </para>
+    /// </remarks>
+    public static async ValueTask<Envelope?> DecodeAsync(
+        Stream stream, FrameReadBuffer scratch, SealedSession? inbound, CancellationToken ct)
+    {
+        if (inbound is null) return await DecodeAsync(stream, scratch, ct);
+
+        int read = await ReadExactAsync(stream, scratch.Header, 4, ct);
+        if (read == 0) return null; // clean EOF
+        if (read < 4) throw new IOException("Incomplete length header");
+
+        int length = BinaryPrimitives.ReadInt32BigEndian(scratch.Header);
+        if (length <= 0 || length > MaxMessageSize)
+            throw new IOException($"Invalid message length: {length}");
+
+        scratch.EnsureBody(length);
+        read = await ReadExactAsync(stream, scratch.Body, length, ct);
+        if (read < length) throw new IOException("Incomplete message body");
+
+        SealedOpenResult result = inbound.Open(scratch.Body.AsSpan(0, length), out byte[] plaintext);
+        if (result != SealedOpenResult.Ok)
+        {
+            // ONE message to the peer, but a distinguishable one to US. A rejected sealed
+            // frame closes the connection, and without this it is indistinguishable in the
+            // log from an ordinary disconnect — which is the "a check nobody reads is not
+            // a check" failure, one layer down. The counts on the session say which rule
+            // fired; this says that one did.
+            throw new SealedFrameRejectedException();
+        }
+
+        return DecodeBody(plaintext);
+    }
+
     // ─────────────────────── envelope construction ───────────────────────
 
     /// <summary>
@@ -257,6 +418,26 @@ public static class WireProtocol
     /// answers (see <c>Connection.Encoding</c>), never with a hard-coded one —
     /// that is what keeps a Protobuf server able to serve a JSON client.
     /// </remarks>
+    /// <summary>
+    /// Build a sealed-handshake reply. <b>Protobuf only</b>, deliberately: the handshake
+    /// fields are absent from the JSON message set so key material can never be rendered
+    /// into a human-readable payload, which is also why a JSON client cannot be encrypted
+    /// and must be refused rather than served in the clear.
+    /// </summary>
+    public static Envelope NewEnvelope(MsgType type, SealedServerHello payload, WireEncoding encoding)
+    {
+        if (encoding != WireEncoding.Proto)
+            throw new InvalidOperationException(
+                "the sealed handshake has no JSON encoding; a JSON client cannot be sealed");
+
+        return new Envelope
+        {
+            Type = RequireMsgType(type),
+            Payload = payload.ToByteArray(),
+            Encoding = WireEncoding.Proto,
+        };
+    }
+
     public static Envelope NewEnvelope(MsgType type, JoinTokenResponse payload, WireEncoding encoding) =>
         new()
         {
@@ -373,6 +554,12 @@ public static class WireProtocol
         ReadOnlySpan<byte> span = envelope.Payload;
         object? result = typeof(T) switch
         {
+            // Protobuf only. A JSON peer reaching here is a peer that cannot be
+            // sealed, and the refusal is the point rather than a gap.
+            var t when t == typeof(SealedClientHello) => proto
+                ? SealedClientHello.Parser.ParseFrom(span)
+                : throw new InvalidOperationException(
+                    "the sealed handshake has no JSON encoding; a JSON client cannot be sealed"),
             var t when t == typeof(JoinTokenRequest) => proto
                 ? JoinTokenRequest.Parser.ParseFrom(span)
                 : JsonReader.ReadJoinTokenRequest(envelope.Payload),
@@ -519,4 +706,20 @@ public sealed class FrameReadBuffer
         while (capacity < length) capacity *= 2;
         Body = new byte[capacity];
     }
+}
+
+/// <summary>
+/// A sealed frame did not authenticate, replayed, or arrived as cleartext where a sealed
+/// frame was required.
+/// </summary>
+/// <remarks>
+/// An <see cref="IOException"/> so the existing read-loop teardown handles it unchanged,
+/// but its own type so the log can say what happened. The peer learns nothing either way:
+/// the connection simply closes, exactly as it would for any other frame-level failure.
+/// </remarks>
+public sealed class SealedFrameRejectedException : IOException
+{
+    /// <summary>Build the exception.</summary>
+    public SealedFrameRejectedException()
+        : base("sealed frame rejected (not authenticated, replayed, or not sealed)") { }
 }

@@ -48,6 +48,53 @@ public readonly struct PendingInput
 }
 
 /// <summary>
+/// Outcome of <see cref="EcsWorld.PushInput(string, InputData, InputIngress?)"/>.
+/// </summary>
+public enum InputIngestResult
+{
+    /// <summary>Appended to the pending queue.</summary>
+    Enqueued,
+
+    /// <summary>
+    /// A movement-only input replaced this connection's previous movement-only input in
+    /// place: the queue did not grow, and the tick will integrate the newer direction.
+    /// </summary>
+    Coalesced,
+
+    /// <summary>Dropped: the connection had already queued its per-tick input budget.</summary>
+    DroppedConnectionBudget,
+
+    /// <summary>Dropped: the world-wide pending queue was full.</summary>
+    DroppedQueueFull,
+}
+
+/// <summary>
+/// Per-connection state for bounded input ingestion — owned by the connection, read and
+/// written only under the world's input lock.
+///
+/// <para>Every field is relative to a <i>drain epoch</i>: the queue is emptied once per
+/// base tick, and a counter that was not reset with it would throttle a client for the
+/// whole session after one burst. Stamping the epoch on the ingress state instead of
+/// clearing a dictionary of them per tick keeps the reset O(1) per connection and keeps
+/// the world free of a per-user map on the input path (workspace audit F04).</para>
+/// </summary>
+public sealed class InputIngress
+{
+    /// <summary>Drain epoch the counters below belong to.</summary>
+    internal long Epoch = -1;
+
+    /// <summary>Inputs this connection has in the queue since the last drain.</summary>
+    internal int Pending;
+
+    /// <summary>
+    /// Index in the queue of this connection's newest entry, when that entry is
+    /// movement-only and therefore replaceable; -1 otherwise (nothing queued, or the
+    /// newest entry carries an edge-triggered action that must stay distinct).
+    /// </summary>
+    internal int ReplaceableIndex = -1;
+}
+
+/// <summary>
 /// The server's entity store, backed by <see href="https://github.com/genaray/Arch">Arch</see>
 /// (ADR-10). Replaces the hand-rolled <c>GameWorld</c> dictionary: Arch owns entity
 /// identity, component storage, queries and iteration order. Nothing else stores
@@ -111,6 +158,51 @@ public sealed class EcsWorld : IDisposable
     private readonly ReaderWriterLockSlim _rwLock = new();
     private readonly object _inputLock = new();
 
+    /// <summary>Incremented on every drain; see <see cref="InputIngress"/>.</summary>
+    private long _drainEpoch;
+
+    /// <summary>Default for <see cref="MaxInputsPerConnection"/> (<c>GAMESERVER_MAX_INPUTS_PER_TICK</c>).</summary>
+    public const int DefaultMaxInputsPerConnection = 32;
+
+    /// <summary>
+    /// Most inputs one connection may have queued between two drains. A client that plays
+    /// by the rules sends one input per critical tick, so a handful per drain; the budget
+    /// is headroom for a burst of edge-triggered actions, not a rate a client should reach.
+    /// Movement-only inputs coalesce in place and never count against it more than once.
+    /// </summary>
+    public int MaxInputsPerConnection { get; private set; } = DefaultMaxInputsPerConnection;
+
+    /// <summary>
+    /// Most inputs the whole queue may hold between two drains, across every connection
+    /// (<c>GAMESERVER_MAX_PENDING_INPUTS</c>). The world-wide backstop for the per-connection
+    /// budget: what bounds the tick's drain and the memory behind it when many connections
+    /// all spend their budget at once.
+    /// </summary>
+    public int MaxPendingInputs { get; private set; } = int.MaxValue;
+
+    /// <summary>Inputs queued and not yet drained. Diagnostics and tests.</summary>
+    public int PendingInputCount
+    {
+        get { lock (_inputLock) return _pendingInputs.Count; }
+    }
+
+    /// <summary>
+    /// Set the ingestion bounds. Values below 1 fall back to the defaults (per-connection)
+    /// or to "unbounded" (world-wide), which is what a caller that does not configure them
+    /// gets — unit tests and benches push inputs straight into the queue and are not the
+    /// flood this guards against.
+    /// </summary>
+    public void ConfigureInputBounds(int maxInputsPerConnection, int maxPendingInputs)
+    {
+        lock (_inputLock)
+        {
+            MaxInputsPerConnection = maxInputsPerConnection < 1
+                ? DefaultMaxInputsPerConnection
+                : maxInputsPerConnection;
+            MaxPendingInputs = maxPendingInputs < 1 ? int.MaxValue : maxPendingInputs;
+        }
+    }
+
     /// <summary>
     /// The component-level write scope handed to <see cref="UpdateComponents"/>.
     /// One per world, created once: entering a scope must not allocate, because the
@@ -157,6 +249,100 @@ public sealed class EcsWorld : IDisposable
     /// and keeps <see cref="ReadAllParallel"/> genuinely parallel, which a mutex over the
     /// AOI gather would not: the gather is 77-83% of a 200-viewer tick.</para>
     /// </summary>
+    /// <summary>
+    /// Spatial index over entity positions, rebuilt at the top of each gather scope and
+    /// queried once per viewer. See <see cref="SpatialGrid"/> for why this exists at all
+    /// given that BENCHMARK.md Part V reverted the first one, and what changed since.
+    ///
+    /// <para>Cell size is the default AOI radius: a query then covers at most a 3x3
+    /// neighbourhood, the smallest that can contain a circle of that radius. Smaller cells
+    /// mean more cell lookups per query for fewer candidates each; larger cells mean fewer
+    /// lookups over more candidates.</para>
+    /// </summary>
+    private readonly SpatialGrid _grid = new(GameConstants.DefaultAoiRadius);
+
+    /// <summary>
+    /// True when <see cref="_grid"/> was rebuilt inside the current read scope and may be
+    /// queried. Outside a gather scope the index is not maintained, so every other caller
+    /// takes the full scan — which is also what keeps the brute-force path live and
+    /// exercised rather than dead code behind a flag.
+    ///
+    /// <para>Written only by the scope owner, before any worker is dispatched and after
+    /// every worker has rendezvoused, so the parallel gather reads it without a race.</para>
+    /// </summary>
+    private volatile bool _gridFresh;
+
+    /// <summary>
+    /// Whether the last rebuild found the population spread out enough for the index to
+    /// beat the scan — see <see cref="SpatialGrid.IsWorthQuerying"/>. Starts true so a
+    /// fresh world probes on its first gather rather than waiting out an interval.
+    /// </summary>
+    private bool _gridUseful = true;
+
+    /// <summary>
+    /// Gathers since the last rebuild, while <see cref="_gridUseful"/> is false. Bounds how
+    /// long a world that has spread out keeps taking the scan.
+    /// </summary>
+    private int _gridProbeCountdown;
+
+    /// <summary>
+    /// How often to rebuild the index purely to re-measure occupancy while the gather is
+    /// taking the brute-force path. ~4 s at the 15 Hz simulation rate: long enough that the
+    /// wasted rebuild is under 2% of the gather, short enough that a map emptying out is
+    /// picked up well within a player's attention span. Being wrong for a few seconds costs
+    /// microseconds and never an entity.
+    /// </summary>
+    private const int ProbeIntervalTicks = 64;
+
+    /// <summary>
+    /// Per-thread query scratch: match ordinals and their views, before the sort that
+    /// restores brute-force order.
+    ///
+    /// <para><b>Thread-static, not instance fields.</b> The gather runs on several workers
+    /// inside one <see cref="ReadAllParallel"/> region and each issues its own queries;
+    /// instance scratch would be a straightforward data race. The grid itself is read-only
+    /// once rebuilt, so it needs no such treatment.</para>
+    /// </summary>
+    [ThreadStatic] private static int[]? _aoiScratchOrdinals;
+
+    /// <inheritdoc cref="_aoiScratchOrdinals"/>
+    [ThreadStatic] private static EntityView[]? _aoiScratchViews;
+
+    /// <summary>
+    /// Index permutation the match sort orders, so the sort swaps 4-byte slots rather than
+    /// whole <see cref="EntityView"/> structs. See <c>SpatialGrid.Emit</c>.
+    /// </summary>
+    [ThreadStatic] private static int[]? _aoiScratchSlots;
+
+    /// <summary>
+    /// Escape hatch for the differential test and the A/B benchmark: when false, gather
+    /// scopes do not build or consult the index and every AOI query takes the full scan.
+    /// Not a production switch — the two paths are required to agree, and
+    /// <c>AoiIndexDifferentialTests</c> is what enforces that.
+    /// </summary>
+    internal bool AoiIndexEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Occupied cell count from the last rebuild, for the benchmark's calibration of the
+    /// usefulness gate. Diagnostics only.
+    /// </summary>
+    internal int AoiIndexOccupiedCells => _grid.OccupiedCells;
+
+    /// <summary>
+    /// Occupancy threshold the gate compares against, overridable so the benchmark can
+    /// force the index on for populations the shipped gate rejects — which is the only way
+    /// to measure what the gate is giving up. Defaults to the shipped value; production
+    /// never sets it.
+    /// </summary>
+    internal int AoiIndexGateThreshold { get; set; } = SpatialGrid.MinOccupiedCellsToQuery;
+
+    /// <summary>
+    /// Mean fraction of the population a query has to examine, estimated from the cell
+    /// histogram — the benchmark's instrument for testing whether occupancy is the right
+    /// gate statistic on clustered populations. Diagnostics only.
+    /// </summary>
+    internal double AoiIndexCandidateFraction => _grid.EstimateCandidateFraction();
+
     private readonly List<Query> _readQueries = new();
 
     /// <summary>The AOI scan's query. Read paths only; refreshed under the write lock.</summary>
@@ -552,6 +738,8 @@ public sealed class EcsWorld : IDisposable
                         Defense = combats[i].Defense,
                         CooldownUntilTick = combats[i].CooldownUntilTick,
                         Speed = locomotions[i].Speed,
+                        FacingBrad = locomotions[i].FacingBrad,
+                        Action = locomotions[i].Action,
                         LastInputTick = cursors[i].LastInputTick,
                     };
                     if (sink != null) sink.Add(composed);
@@ -611,7 +799,12 @@ public sealed class EcsWorld : IDisposable
                         positions[i].Value,
                         healths[i].Hp,
                         healths[i].MaxHp,
-                        locomotions[i].Speed);
+                        locomotions[i].Speed,
+                        // Facing and action ride the Locomotion span that is already
+                        // fetched, which is exactly why they were put there rather than
+                        // in a component of their own — no extra GetSpan in this loop.
+                        locomotions[i].FacingBrad,
+                        locomotions[i].Action);
                 }
 
                 matches++;
@@ -625,8 +818,19 @@ public sealed class EcsWorld : IDisposable
     /// Snapshot-view AOI scan for <see cref="WorldReader"/>; the read lock is already
     /// held. The form <see cref="Net.Connection"/>'s gather uses.
     /// </summary>
-    internal int ScanRangeViewsLockedForReader(Vec2 center, float radius, Span<EntityView> destination) =>
-        ScanRangeViewsLocked(center, radius, destination);
+    /// <remarks>
+    /// Takes the spatial index when a gather scope has rebuilt it, and the full scan
+    /// otherwise — so a future caller reaching the reader outside a gather scope gets
+    /// correct results rather than empty ones. The two paths are required to return the
+    /// same entities in the same order; <c>AoiIndexDifferentialTests</c> enforces it.
+    /// </remarks>
+    internal int ScanRangeViewsLockedForReader(Vec2 center, float radius, Span<EntityView> destination)
+    {
+        if (!_gridFresh) return ScanRangeViewsLocked(center, radius, destination);
+
+        RentAoiScratch(_grid.Count, out Span<int> ordinals, out Span<EntityView> views, out Span<int> slots);
+        return _grid.Query(in center, radius, destination, ordinals, views, slots);
+    }
 
     /// <summary>
     /// Fill <paramref name="destination"/> with the trimmed snapshot view of every
@@ -687,12 +891,114 @@ public sealed class EcsWorld : IDisposable
     {
         _rwLock.EnterReadLock();
         _iterationDepth++;
-        try { action(_reader); }
+        try
+        {
+            RebuildSpatialIndexLocked();
+            action(_reader);
+        }
         finally
         {
+            _gridFresh = false;
             _iterationDepth--;
             _rwLock.ExitReadLock();
         }
+    }
+
+    /// <summary>
+    /// Rebuild the spatial index from current component storage: one linear pass, no
+    /// distance tests, immediately before the queries that read it — so the index cannot
+    /// be stale and no position write anywhere needs to know it exists.
+    ///
+    /// <para>The pass composes each entity's <see cref="EntityView"/> as it goes, from the
+    /// same chunk spans and in the same order <see cref="ScanRangeViewsLocked"/> would.
+    /// That is the point of the whole change: composition happens once per entity per tick
+    /// here, instead of once per match per viewer in each of N per-viewer scans.</para>
+    /// </summary>
+    private void RebuildSpatialIndexLocked()
+    {
+        if (!AoiIndexEnabled) return;
+
+        // Do not build an index this tick is not going to query. A rebuild composes every
+        // entity, so building one and then falling back to the scan costs the gather a
+        // measured 10-18% for nothing — which would make this change a regression at
+        // exactly the density the game runs at today.
+        //
+        // The decision is therefore carried from the last rebuild rather than taken from
+        // this one, and re-probed every ProbeIntervalTicks so a population that spreads out
+        // is picked up again. Both directions of being wrong cost only microseconds: the
+        // two paths return identical results, and geometry moves slowly — a player travels
+        // Speed/tick, so occupancy cannot change materially inside a ~4 s probe interval.
+        if (!_gridUseful && ++_gridProbeCountdown < ProbeIntervalTicks)
+        {
+            _gridFresh = false;
+            return;
+        }
+
+        _gridProbeCountdown = 0;
+        _grid.Begin(_index.Count);
+
+        // _allEntitiesQuery, never _arch.Query(...): shared lock — see issue #176. Same
+        // query and therefore the same chunk order as the brute-force scan, which is what
+        // makes the scan ordinals mean what the index claims they mean.
+        foreach (ref var chunk in _allEntitiesQuery.GetChunkIterator())
+        {
+            var positions = chunk.GetSpan<Position>();
+            var ids = chunk.GetSpan<EntityIdRef>();
+            var kinds = chunk.GetSpan<EntityKind>();
+            var healths = chunk.GetSpan<Health>();
+            var locomotions = chunk.GetSpan<Locomotion>();
+            int count = chunk.Count;
+            for (int i = 0; i < count; i++)
+            {
+                _grid.Add(new EntityView(
+                    ids[i].Stable,
+                    ids[i].Value,
+                    kinds[i].Value,
+                    positions[i].Value,
+                    healths[i].Hp,
+                    healths[i].MaxHp,
+                    locomotions[i].Speed,
+                    // Same Locomotion span the scan arm reads, and it MUST be read here
+                    // too: the index composes once per entity at rebuild and a query then
+                    // copies the finished struct, so anything omitted here is omitted for
+                    // every viewer that goes through the index — and only for those. The
+                    // scan arm would still be right, so the two arms would disagree while
+                    // both looked healthy, which the differential tests catch by comparing
+                    // whole views rather than positions.
+                    locomotions[i].FacingBrad,
+                    locomotions[i].Action));
+            }
+        }
+
+        _grid.Finish();
+
+        // The usefulness gate. An index that is slower than the scan at the density the
+        // game actually runs at is a regression with a nice name — BENCHMARK.md Part V is
+        // the record of exactly that — so the gather takes the scan whenever the population
+        // is too clustered for a 3x3 neighbourhood to narrow anything. Purely a performance
+        // decision: both paths return identical results.
+        _gridUseful = _grid.OccupiedCells >= AoiIndexGateThreshold;
+        _gridFresh = _gridUseful;
+    }
+
+    /// <summary>
+    /// Borrow this thread's AOI query scratch, grown to hold <paramref name="needed"/>
+    /// matches. Amortises to no allocation once the population has stabilised.
+    /// </summary>
+    private static void RentAoiScratch(
+        int needed, out Span<int> ordinals, out Span<EntityView> views, out Span<int> slots)
+    {
+        if (_aoiScratchOrdinals is null || _aoiScratchOrdinals.Length < needed)
+        {
+            int capacity = Math.Max(needed, (_aoiScratchOrdinals?.Length ?? 0) * 2);
+            _aoiScratchOrdinals = new int[capacity];
+            _aoiScratchViews = new EntityView[capacity];
+            _aoiScratchSlots = new int[capacity];
+        }
+
+        ordinals = _aoiScratchOrdinals;
+        views = _aoiScratchViews!;
+        slots = _aoiScratchSlots!;
     }
 
     /// <summary>
@@ -754,9 +1060,14 @@ public sealed class EcsWorld : IDisposable
             // dispatched, so a one-worker read region costs what the serial one costs.
             _rwLock.EnterReadLock();
             _iterationDepth++;
-            try { body(_reader, 0); }
+            try
+            {
+                RebuildSpatialIndexLocked();
+                body(_reader, 0);
+            }
             finally
             {
+                _gridFresh = false;
                 _iterationDepth--;
                 _rwLock.ExitReadLock();
             }
@@ -766,6 +1077,12 @@ public sealed class EcsWorld : IDisposable
         _rwLock.EnterReadLock();
         try
         {
+            // Rebuilt by the owner before any worker is woken, and torn down only after
+            // every worker has rendezvoused, so the workers see a grid that is complete
+            // and never mutated for the whole region. Each worker's query scratch is
+            // thread-static, so the shared structure is strictly read-only.
+            RebuildSpatialIndexLocked();
+
             Exception?[] failures = _regionFailures;
             Array.Clear(failures, 0, workerCount);
             _pool.RunReadRegion(workerCount, body, failures);
@@ -783,7 +1100,11 @@ public sealed class EcsWorld : IDisposable
                     : new AggregateException("One or more gather workers failed.", thrown);
             }
         }
-        finally { _rwLock.ExitReadLock(); }
+        finally
+        {
+            _gridFresh = false;
+            _rwLock.ExitReadLock();
+        }
     }
 
     /// <summary>AOI scan for <see cref="WorldReader"/>; the read lock is already held.</summary>
@@ -1288,16 +1609,80 @@ public sealed class EcsWorld : IDisposable
     /// the tick loop's own structural/update phase, so the cost is a barrier, not a
     /// wait for the simulation.
     /// </remarks>
-    public void PushInput(string userId, InputData input)
+    public void PushInput(string userId, InputData input) => PushInput(userId, input, null);
+
+    /// <summary>
+    /// Queue an input under the ingestion bounds, coalescing movement before the queue
+    /// grows.
+    /// </summary>
+    /// <remarks>
+    /// <para>The tick loop already coalesces movement to the newest input per player — but
+    /// it does so <i>after</i> every packet has been decoded, allocated and appended, so a
+    /// client sending thousands of inputs per tick grew the queue by thousands before the
+    /// tick threw all but one away (workspace audit F04). The coalescing now happens here,
+    /// at ingest, under the same lock: a movement-only input <b>replaces</b> this
+    /// connection's newest queued entry when that entry is also movement-only, so a
+    /// movement flood occupies one slot however fast it arrives.</para>
+    ///
+    /// <para><b>Edge-triggered actions stay distinct.</b> An input carrying an attack target
+    /// is never replaced and never replaces: it is appended, and it also ends the run of
+    /// replaceable movement behind it, so ordering — which the handler's monotonic tick
+    /// check depends on — is exactly what the client sent. Those are bounded instead by
+    /// <see cref="MaxInputsPerConnection"/> per drain, and the queue as a whole by
+    /// <see cref="MaxPendingInputs"/>; anything beyond is dropped and reported through the
+    /// return value so the caller can count it.</para>
+    ///
+    /// <para>Passing a null <paramref name="ingress"/> is the unbounded path: no
+    /// per-connection budget, no coalescing, only the world-wide bound — for callers that
+    /// have no connection (tests, benches, scaffolding).</para>
+    /// </remarks>
+    public InputIngestResult PushInput(string userId, InputData input, InputIngress? ingress)
     {
         EntityHandle handle;
         _rwLock.EnterReadLock();
         try { handle = ResolveLocked(userId); }
         finally { _rwLock.ExitReadLock(); }
 
+        var pending = new PendingInput(userId, handle, input);
+        bool movementOnly = string.IsNullOrEmpty(input.AttackTargetId);
+
         lock (_inputLock)
         {
-            _pendingInputs.Add(new PendingInput(userId, handle, input));
+            if (ingress == null)
+            {
+                if (_pendingInputs.Count >= MaxPendingInputs) return InputIngestResult.DroppedQueueFull;
+                _pendingInputs.Add(pending);
+                return InputIngestResult.Enqueued;
+            }
+
+            if (ingress.Epoch != _drainEpoch)
+            {
+                ingress.Epoch = _drainEpoch;
+                ingress.Pending = 0;
+                ingress.ReplaceableIndex = -1;
+            }
+
+            if (movementOnly && ingress.ReplaceableIndex >= 0)
+            {
+                // Newest wins, as the tick would decide anyway. An older tick arriving
+                // after a newer one (impossible on an ordered stream, but cheap to
+                // honour) is simply absorbed: the handler would reject it as
+                // non-monotonic if it were queued.
+                int i = ingress.ReplaceableIndex;
+                if (input.Tick >= _pendingInputs[i].Input.Tick)
+                {
+                    _pendingInputs[i] = pending;
+                }
+                return InputIngestResult.Coalesced;
+            }
+
+            if (ingress.Pending >= MaxInputsPerConnection) return InputIngestResult.DroppedConnectionBudget;
+            if (_pendingInputs.Count >= MaxPendingInputs) return InputIngestResult.DroppedQueueFull;
+
+            _pendingInputs.Add(pending);
+            ingress.Pending++;
+            ingress.ReplaceableIndex = movementOnly ? _pendingInputs.Count - 1 : -1;
+            return InputIngestResult.Enqueued;
         }
     }
 
@@ -1320,6 +1705,9 @@ public sealed class EcsWorld : IDisposable
         {
             destination.AddRange(_pendingInputs);
             _pendingInputs.Clear();
+            // Every connection's per-drain budget and coalescing cursor is now stale;
+            // the next PushInput on each resets it against this value.
+            _drainEpoch++;
         }
     }
 
@@ -1750,6 +2138,8 @@ public sealed class EcsWorld : IDisposable
             Defense = combat.Defense,
             CooldownUntilTick = combat.CooldownUntilTick,
             Speed = locomotion.Speed,
+            FacingBrad = locomotion.FacingBrad,
+            Action = locomotion.Action,
             LastInputTick = cursor.LastInputTick,
         };
     }
@@ -1776,6 +2166,8 @@ public sealed class EcsWorld : IDisposable
             Defense = combats[i].Defense,
             CooldownUntilTick = combats[i].CooldownUntilTick,
             Speed = locomotions[i].Speed,
+            FacingBrad = locomotions[i].FacingBrad,
+            Action = locomotions[i].Action,
             LastInputTick = cursors[i].LastInputTick,
         };
     }
@@ -1803,6 +2195,8 @@ public sealed class EcsWorld : IDisposable
 
         ref var locomotion = ref _arch.Get<Locomotion>(entity);
         locomotion.Speed = state.Speed;
+        locomotion.FacingBrad = state.FacingBrad;
+        locomotion.Action = state.Action;
 
         ref var cursor = ref _arch.Get<InputCursor>(entity);
         cursor.LastInputTick = state.LastInputTick;

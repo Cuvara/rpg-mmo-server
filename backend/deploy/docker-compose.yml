@@ -89,13 +89,64 @@ services:
       # Nakama signs client session tokens with session.encryption_key, so the
       # gateway can verify them locally with no roundtrip.
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      # DEV ONLY. The nakama plugin now creates the kills_alltime leaderboard
+      # authoritative and refuses to load if an existing board is not (audit
+      # F02). Stacks created before that hold the old board; this makes the
+      # plugin delete and recreate it on start-up, DISCARDING its records —
+      # fine for a local stack, never for staging/prod, which flip the row with
+      # SQL instead (backend/nakama/docs/RUNBOOK.md, "Migrate a
+      # non-authoritative kills_alltime leaderboard", path A).
+      LEADERBOARD_MIGRATE: recreate
+      # ---------------------------------------------------------------------
+      # Meta-hop TLS (ADR-24) — OFF, and pinned explicitly.
+      # ---------------------------------------------------------------------
+      # In-CONTAINER paths to a PEM pair. Both empty = plaintext, the default.
+      # When set, Nakama terminates TLS itself on :7350.
+      #
+      # MEASURED SCOPE, because the flag's name is narrower than "Nakama has
+      # TLS": it covers the SOCKET listener :7350 only — including the /ws
+      # realtime socket, TLS-only, plaintext refused — and does NOT cover the
+      # console :7351 or metrics :9100, both of which are published below on
+      # 0.0.0.0 and stay in the clear.
+      #
+      # Nakama itself warns that direct SSL termination is not recommended and
+      # prefers a proxy. We take it anyway on a single-node box, where a
+      # terminator and Nakama are the same host so a proxy would report itself
+      # encrypted while buying nothing (ADR-23's argument, unchanged). The
+      # moment a real edge exists, front Nakama and turn this off.
+      #
+      # Mount the PEMs in via the volumes block below. Note a bind mount from a
+      # /tmp WSL path silently creates an empty DIRECTORY at the mount point
+      # ("is a directory" at startup) — put certs on a Windows-visible path or
+      # use a named volume.
+      NAKAMA_TLS_CERT: ${NAKAMA_TLS_CERT:-}
+      NAKAMA_TLS_KEY: ${NAKAMA_TLS_KEY:-}
     entrypoint:
       - /bin/sh
       - -ec
       - |
         /nakama/nakama migrate up \
           --database.address "${POSTGRES_USER:-nakama}:${POSTGRES_PASSWORD:-localdev}@postgres:5432/${POSTGRES_DB:-nakama}"
-        exec /nakama/nakama \
+        # Meta-hop TLS (ADR-24). Built here rather than interpolated by compose
+        # because compose has no conditionals and an EMPTY --socket.ssl_certificate
+        # is not the same as an ABSENT one: Nakama reads the empty path, fails to
+        # load it and exits. Half-configured is refused rather than falling back to
+        # plaintext, matching the gateway pair and the CD gate.
+        #
+        # Built with `set --` rather than a string, because an unquoted string
+        # word-splits and a certificate path may legitimately contain a space —
+        # the same distinction that made cd.yml trim these at the ends only.
+        set --
+        if [ -n "$${NAKAMA_TLS_CERT}" ] || [ -n "$${NAKAMA_TLS_KEY}" ]; then
+          if [ -z "$${NAKAMA_TLS_CERT}" ] || [ -z "$${NAKAMA_TLS_KEY}" ]; then
+            echo "NAKAMA_TLS_CERT and NAKAMA_TLS_KEY must be set together or not at all" >&2
+            exit 1
+          fi
+          set -- --socket.ssl_certificate "$${NAKAMA_TLS_CERT}" \
+                 --socket.ssl_private_key "$${NAKAMA_TLS_KEY}"
+          echo "nakama: TLS ON for :7350 (console :7351 and metrics :9100 stay PLAINTEXT — ADR-24)"
+        fi
+        exec /nakama/nakama "$$@" \
           --name rpg-nakama-local \
           --database.address "${POSTGRES_USER:-nakama}:${POSTGRES_PASSWORD:-localdev}@postgres:5432/${POSTGRES_DB:-nakama}" \
           --logger.level DEBUG \
@@ -207,6 +258,30 @@ services:
       JOIN_TOKEN_SECRET: ${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      # ---------------------------------------------------------------------
+      # Gateway-hop TLS (ADR-23) — OFF, and pinned explicitly.
+      # ---------------------------------------------------------------------
+      # The gateway hop carries the client's auth token: a ONE-HOUR REUSABLE
+      # bearer credential, measured crossing this hop in the clear. Setting
+      # both of these to PEM paths inside the container makes the gateway
+      # terminate TLS itself and closes that.
+      #
+      # It is empty here for one reason, and it is not caution: THE UNITY
+      # CLIENT CANNOT SPEAK TLS TO THE GATEWAY YET. Turning this on with the
+      # current client refuses every player — there is deliberately no
+      # plaintext fallback (ADR-23 decision 3), because a listener that accepts
+      # both is a downgrade attack with a friendly name.
+      #
+      # Setting exactly ONE of the two is a startup ERROR, not a fall back to
+      # plaintext.
+      #
+      # It does NOT cover the client→Nakama hop, which MINTS that auth token
+      # and is plain HTTP in this file (the nakama service has no
+      # --socket.ssl_certificate). That hop also carries a TWO-HOUR reusable
+      # Nakama session token, so it is the higher-value half and turning this
+      # on alone buys less than it looks like it does.
+      GATEWAY_TLS_CERT: ${GATEWAY_TLS_CERT:-}
+      GATEWAY_TLS_KEY: ${GATEWAY_TLS_KEY:-}
       # Prometheus endpoint (/metrics, /healthz). Scraped in-network by the
       # `monitoring` profile as gateway:9102; set to "off" to disable.
       METRICS_ADDR: ":9102"
@@ -280,6 +355,35 @@ services:
       # service above, and NOT JWT_SECRET (see the comment there).
       JOIN_TOKEN_SECRET: ${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}
       GAMESERVER_ADDR: ":9000"
+      # PINNED OFF ON PURPOSE — this is a decision, not an oversight.
+      #
+      # A stock game server defaults to `require`: it encrypts the gameplay hop
+      # and refuses every client that cannot seal. This stack does NOT inherit
+      # that default yet, because six Unity sample scenes in the client repo
+      # (DOTSNetworkBridge, the three E2ECertification scenes, ReconnectPolicyDemo
+      # and WorldView) construct NetworkSettings and dial a live backend, and none
+      # of them sets RequireSealedSession. Those scenes are the package's
+      # acceptance path, not demos — inheriting the default here would break all
+      # six with a refusal, and the fix lives in the other repo on a package
+      # release cadence (netcode change -> tag -> manifest + lock bump).
+      #
+      # To run this stack sealed on purpose — which you should, before shipping
+      # anything that depends on it:
+      #
+      #   GAMESERVER_SEALED=require ./stack.sh up
+      #   GAMESERVER_SEALED=require ./stack.sh check
+      #
+      # NOTE on verifying a sealed stack: the smoke test defaults to JSON, and a
+      # JSON client can never carry a sealed frame, so a `require` server refuses
+      # it at the join with `encoding_cannot_seal` -- measured live, not inferred.
+      # It CAN seal, over protobuf, and `stack.sh check` derives BOTH halves for
+      # you when the stack is sealed:
+      #   GAMESERVER_SEALED=require ./stack.sh check     (or: make flow-check-sealed)
+      #
+      # That is also why no ENVIRONMENT can be set to `require` yet: the deploy
+      # verifier is the same JSON smoke test, so requiring encryption currently
+      # deprecates the thing that gates every deploy.
+      GAMESERVER_SEALED: ${GAMESERVER_SEALED:-off}
       GAMESERVER_MODE: map
       GAMESERVER_MAP_ID: ${GAMESERVER_MAP_ID:-map_01}
       GAMESERVER_ID: ${GAMESERVER_ID:-gs-dotnet-${GAMESERVER_MAP_ID:-map_01}}
@@ -320,7 +424,12 @@ services:
       # NOTE: the default below is hostless, so it is only right for host mode.
       # Set GAMESERVER_PUBLIC_ADDR explicitly whenever ports are published.
       GAMESERVER_PUBLIC_ADDR: ${GAMESERVER_PUBLIC_ADDR:-:${GAMESERVER_CONTAINER_PORT:-9200}}
-      NAKAMA_URL: http://nakama:7350
+      # Follows the meta-hop TLS decision (ADR-24) rather than being configured
+      # independently. The C# game server is a SECOND consumer of this hop --
+      # NakamaClient.cs POSTs /v2/rpc/reward_kills?http_key=... -- so if Nakama
+      # moves to TLS and this stays http://, the reward path breaks silently.
+      # Two sources of truth for one hop is exactly how that happens.
+      NAKAMA_URL: ${NAKAMA_URL:-http://nakama:7350}
       NAKAMA_HTTP_KEY: ${NAKAMA_HTTP_KEY:-defaulthttpkey}
       GAME_DB_URL: postgres://${POSTGRES_GAME_USER:-game}:${POSTGRES_GAME_PASSWORD:-localdev}@postgres-game:5432/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable
     ports:

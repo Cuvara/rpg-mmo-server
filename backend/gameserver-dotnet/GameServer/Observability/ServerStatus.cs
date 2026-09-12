@@ -186,8 +186,252 @@ public sealed class ServerStatus
     [JsonPropertyName("players_kicked")]
     public long PlayersKicked { get; set; }
 
+    /// <summary>
+    /// Accepted transports that have not completed the join handshake right now. Outside
+    /// <see cref="PlayersOnline"/> and outside <see cref="Capacity"/>: bounded by
+    /// <c>GAMESERVER_MAX_PENDING_HANDSHAKES</c> instead. Same value as
+    /// <c>gameserver_handshakes_pending</c>.
+    /// </summary>
+    [JsonPropertyName("handshakes_pending")]
+    public int HandshakesPending { get; set; }
+
+    /// <summary>
+    /// Handshakes refused before authentication since process start, every reason (pool
+    /// full, deadline, malformed first frame). Same value as the sum over
+    /// <c>gameserver_handshakes_rejected_total</c>. A capacity refusal is not one of
+    /// these — that is an authenticated join, logged at Warning.
+    /// </summary>
+    [JsonPropertyName("handshakes_rejected")]
+    public long HandshakesRejected { get; set; }
+
+    /// <summary>
+    /// Client inputs discarded at ingest since process start, every reason (per-connection
+    /// budget, world-wide queue full). Same value as the sum over
+    /// <c>gameserver_inputs_dropped_total</c>. Movement coalesced in place is not a drop.
+    /// </summary>
+    [JsonPropertyName("inputs_dropped")]
+    public long InputsDropped { get; set; }
+
+    // ── Transport confidentiality ────────────────────────────────────────────────
+    //
+    // Always present, never omitted, and deliberately more than one field. Encryption here
+    // is off by default twice (TCP has no packet-crypt layer; TRANSPORT_KEY defaults to
+    // empty), so the question an operator needs answered is not "is there a key" but "what
+    // is actually happening to these bytes". Published here rather than only as metrics
+    // because a never-incremented OpenTelemetry instrument is ABSENT from /metrics rather
+    // than zero — see the note in docs/METRICS.md — and "the field is missing" is exactly
+    // the wrong answer to a security question.
+
+    /// <summary>Transport this server listens with: <c>tcp</c> or <c>kcp</c>.</summary>
+    [JsonPropertyName("transport")]
+    public string Transport { get; set; } = "tcp";
+
+    /// <summary>
+    /// <c>TRANSPORT_KEY</c> holds a value. <b>Not the same as encryption being on</b>: on
+    /// TCP the key is ignored, which is the configuration most easily mistaken for working
+    /// encryption. Compare with <see cref="TransportEncrypted"/>.
+    /// </summary>
+    [JsonPropertyName("transport_key_configured")]
+    public bool TransportKeyConfigured { get; set; }
+
+    /// <summary>Packets leave this process as ciphertext.</summary>
+    [JsonPropertyName("transport_encrypted")]
+    public bool TransportEncrypted { get; set; }
+
+    /// <summary>
+    /// Tampering with a packet in flight is detectable. <b>False on every configuration
+    /// this server currently supports</b>: the KCP path is AES-CFB with a CRC32, and a
+    /// CRC32 is a linear checksum, not a MAC. Separate from
+    /// <see cref="TransportEncrypted"/> so that "encrypted" cannot be read as "safe from
+    /// tampering", and published while false so that its becoming true is a visible event.
+    /// </summary>
+    [JsonPropertyName("transport_authenticated")]
+    public bool TransportAuthenticated { get; set; }
+
+    /// <summary>Cipher actually in force, or <c>none</c>.</summary>
+    [JsonPropertyName("transport_cipher")]
+    public string TransportCipher { get; set; } = "none";
+
+    /// <summary>One line stating what is happening to the bytes, and what is not.</summary>
+    [JsonPropertyName("transport_posture")]
+    public string TransportPostureSummary { get; set; } = "";
+
+    /// <summary>
+    /// A sealed session is required on the gameplay hop (<c>GAMESERVER_SEALED=require</c>,
+    /// the default).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Read this before concluding anything from <see cref="TransportEncrypted"/>.</b>
+    /// The transport fields describe the transport only. On the default configuration —
+    /// TCP with sealing required — <c>transport_encrypted</c> is <c>false</c> while every
+    /// gameplay frame is in fact encrypted and authenticated a layer above it. A dashboard
+    /// or a deploy check reading only the transport fields would report an encrypting
+    /// server as plaintext, which is the wrong answer to a security question in the
+    /// direction that causes work rather than the direction that causes a breach.
+    /// </para>
+    /// <para>
+    /// It is also not a claim that nothing is readable. The join handshake before the
+    /// sealed session exists, and the whole gateway hop, are unaffected by this field.
+    /// </para>
+    /// </remarks>
+    [JsonPropertyName("sealed_required")]
+    public bool SealedRequired { get; set; }
+
+    /// <summary>
+    /// AEAD in force on the gameplay hop once a session is sealed, or <c>none</c> when
+    /// sealing is off. Published while <c>none</c> for the same reason
+    /// <see cref="TransportAuthenticated"/> is published while false: a missing field is
+    /// the wrong answer to a security question, and a never-incremented OpenTelemetry
+    /// instrument is ABSENT from <c>/metrics</c> rather than zero.
+    /// </summary>
+    [JsonPropertyName("sealed_cipher")]
+    public string SealedCipher { get; set; } = "none";
+
+    /// <summary>
+    /// Configured per-connection downlink budget in bytes of snapshot payload
+    /// (<c>GAMESERVER_MAX_SNAPSHOT_BYTES</c>); 0 means the budget is off and a snapshot is
+    /// bounded only by the AOI radius. Published next to what it produced, because reading
+    /// <c>snapshot_entities_shed</c> without knowing the cap that caused it says nothing.
+    /// </summary>
+    [JsonPropertyName("max_snapshot_bytes")]
+    public int MaxSnapshotBytes { get; set; }
+
+    /// <summary>
+    /// Bytes of snapshot frames written to client sockets since process start, envelope
+    /// and length prefix included. With <see cref="UptimeSeconds"/> and
+    /// <see cref="PlayersOnline"/> this is the per-client downlink rate ADR-7's
+    /// &lt; 50 KB/s mobile threshold is about. Same value as
+    /// <c>gameserver_snapshots_bytes_total</c>.
+    /// </summary>
+    [JsonPropertyName("snapshot_bytes")]
+    public long SnapshotBytes { get; set; }
+
+    /// <summary>
+    /// Entity updates deferred by the downlink budget since start. Deferred, not dropped:
+    /// the entity stays dirty and is re-offered on the next snapshot. Read with
+    /// <see cref="SnapshotMaxShedAge"/>.
+    /// </summary>
+    [JsonPropertyName("snapshot_entities_shed")]
+    public long SnapshotEntitiesShed { get; set; }
+
+    /// <summary>
+    /// Despawn notifications deferred by the downlink budget since start. Should stay at
+    /// zero: despawns outrank every non-self update, so this moves only when the budget is
+    /// too small for the despawn list alone.
+    /// </summary>
+    [JsonPropertyName("snapshot_removals_deferred")]
+    public long SnapshotRemovalsDeferred { get; set; }
+
+    /// <summary>
+    /// Longest deferral, in snapshots, any entity has reached on any live connection.
+    /// High-water mark. Bounded by the number of dirty entities in one observer's AOI, not
+    /// by session length — a value that keeps climbing means the budget is too small for
+    /// the crowd rather than that an entity is stuck.
+    /// </summary>
+    [JsonPropertyName("snapshot_max_shed_age")]
+    public int SnapshotMaxShedAge { get; set; }
+
+    /// <summary>
+    /// <c>MsgTransferMap</c> requests refused because a transfer was already running on
+    /// that connection. Same value as <c>gameserver_transfers_rejected_total</c>.
+    /// </summary>
+    [JsonPropertyName("transfers_rejected")]
+    public long TransfersRejected { get; set; }
+
     [JsonPropertyName("postgres")]
     public string Postgres { get; set; } = "disconnected";
+
+    /// <summary>
+    /// Client inputs refused by validation since start, all reasons.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Published here as a plain zero, always. The Prometheus counters are primed at zero
+    /// too, but this stays the surface an operator should read: it cannot be confused with
+    /// a broken scrape, and it carries the per-account detail that would be unbounded
+    /// cardinality as a metric label.
+    /// </para>
+    /// <para>
+    /// <b>Most of these are normal.</b> Attack rejections and dead-entity input rise with a
+    /// player's latency; only <c>invalid_direction</c> is something the shipped client
+    /// cannot produce. Read the breakdown, not the total.
+    /// </para>
+    /// </remarks>
+    [JsonPropertyName("inputs_rejected")]
+    public long InputsRejected { get; set; }
+
+    /// <summary>Refused inputs by reason, keyed by the metric label.</summary>
+    [JsonPropertyName("inputs_rejected_by_reason")]
+    public Dictionary<string, long> InputsRejectedByReason { get; set; } = new();
+
+    /// <summary>Accounts currently tracked for input anomalies.</summary>
+    [JsonPropertyName("anomaly_accounts_tracked")]
+    public int AnomalyAccountsTracked { get; set; }
+
+    /// <summary>
+    /// Accounts whose decaying anomaly score is at or above the alert threshold right now.
+    /// </summary>
+    [JsonPropertyName("anomaly_accounts_over_threshold")]
+    public int AnomalyAccountsOverThreshold { get; set; }
+
+    /// <summary>
+    /// Times any account has crossed the alert threshold since start.
+    /// <b>Observation only</b> — no player is ever acted on by this.
+    /// </summary>
+    [JsonPropertyName("anomaly_alerts")]
+    public long AnomalyAlerts { get; set; }
+
+    /// <summary>
+    /// Observations discarded because the tracker hit its account cap. Non-zero means the
+    /// numbers above describe only part of the population.
+    /// </summary>
+    [JsonPropertyName("anomaly_accounts_dropped")]
+    public long AnomalyAccountsDropped { get; set; }
+
+    /// <summary>
+    /// The most anomalous accounts, ordered by score.
+    /// </summary>
+    /// <remarks>
+    /// Ordered by SCORE, not by raw rejection count. The account with the most rejections
+    /// is usually the one with the worst connection, and presenting that player at the top
+    /// of a list an operator reads as "most suspicious" is how a latency problem gets
+    /// mistaken for cheating.
+    /// </remarks>
+    [JsonPropertyName("anomaly_top_accounts")]
+    public List<AnomalousAccount> AnomalyTopAccounts { get; set; } = new();
+
+    /// <summary>
+    /// Input frames whose ARRIVAL order was inspected at the decode step (ADR-22).
+    /// </summary>
+    [JsonPropertyName("frame_order_observed")]
+    public long FrameOrderObserved { get; set; }
+
+    /// <summary>
+    /// Frames that arrived with a tick strictly below the highest already seen on their
+    /// connection — genuine reordering. <b>The number ADR-22's open question turns on:</b>
+    /// a nonce-as-sequence rule with no sliding window is safe only while this is zero.
+    /// </summary>
+    [JsonPropertyName("frame_order_inversions")]
+    public long FrameOrderInversions { get; set; }
+
+    /// <summary>Frames repeating the highest tick already seen on their connection.</summary>
+    [JsonPropertyName("frame_order_duplicates")]
+    public long FrameOrderDuplicates { get; set; }
+
+    /// <summary>
+    /// How far back the worst inversion reached, in ticks — the minimum width a sliding
+    /// window would need. Zero means nothing observed required one.
+    /// </summary>
+    [JsonPropertyName("frame_order_largest_backward_jump")]
+    public long FrameOrderLargestBackwardJump { get; set; }
+
+    /// <summary>
+    /// Frames arriving more than one tick above the previous highest: a gap left by a lost
+    /// or unsent frame. A strict monotonic rule must accept these.
+    /// </summary>
+    [JsonPropertyName("frame_order_forward_gaps")]
+    public long FrameOrderForwardGaps { get; set; }
 
     /// <summary>
     /// Seconds since the process started, measured on a <b>monotonic</b> clock
@@ -221,6 +465,39 @@ public sealed class ServerStatus
         WorldHz = rates.WorldHz;
         BackgroundHz = rates.BackgroundHz;
     }
+}
+
+/// <summary>
+/// One account's refused-input record, for <c>/status</c>.
+/// </summary>
+/// <remarks>
+/// <b>This is not an accusation.</b> A high score means "worth looking at", and the most
+/// common cause of a high rejection count is a bad connection, not a modified client. The
+/// per-reason breakdown is included precisely so the two can be told apart: an account
+/// whose rejections are all attack-path is lagging; one producing
+/// <c>invalid_direction</c> is sending packets the shipped client cannot produce.
+/// </remarks>
+public sealed class AnomalousAccount
+{
+    /// <summary>Account id (the join token's <c>sub</c> claim).</summary>
+    [JsonPropertyName("user_id")]
+    public string UserId { get; set; } = "";
+
+    /// <summary>Total refused inputs recorded for this account.</summary>
+    [JsonPropertyName("rejections")]
+    public long Rejections { get; set; }
+
+    /// <summary>Current decaying anomaly score.</summary>
+    [JsonPropertyName("score")]
+    public double Score { get; set; }
+
+    /// <summary>Times this account has crossed the alert threshold.</summary>
+    [JsonPropertyName("alerts")]
+    public long Alerts { get; set; }
+
+    /// <summary>Refused inputs by reason, keyed by the metric label.</summary>
+    [JsonPropertyName("by_reason")]
+    public Dictionary<string, long> ByReason { get; set; } = new();
 }
 
 /// <summary>

@@ -548,3 +548,224 @@ re-receives the whole batch through the reclaim path — which the idempotent-
 handler discipline this stream has always required already covers. A failed
 batch ACK is logged and *not* retried: the entries stay pending and the reclaim
 pass redelivers them, degrading the failure to duplicate delivery, never loss.
+
+## Wire protocol version: one integer, handshake-only, exact match (2026-09-09)
+
+`wire.proto` had no version field of any kind. Client and server agreed on the
+meaning of the wire by convention alone, and a version-skewed build was not
+refused — it connected, parsed every byte, and was confidently wrong. That is the
+failure mode this repository keeps meeting: it compiles, it connects, and the
+numbers are consistent about the wrong thing.
+
+### What the number is, and is not
+
+`protocol_version` names the **semantics** of the schema. It deliberately does
+not name:
+
+- **Shape.** proto3 already skips unknown fields, so an added field needs no
+  version to be safe.
+- **Encoding.** Already sniffed from byte 0 (`0x08` vs `{`), and that stays as it
+  is. The sniffing comment used to say "no version negotiation"; it now says no
+  *encoding* negotiation, because the two questions are genuinely different and
+  conflating them is what left the second one unanswered for so long.
+
+What is left is the case neither covers: both peers parse successfully and
+disagree about what a field *means*. Only an explicit number catches that.
+
+### Where it rides
+
+On the two handshake **requests** (`AuthRequest`, `JoinTokenRequest`), echoed on
+their responses. **Not** on `Envelope`: an envelope field is paid on every
+snapshot of every tick to re-state a number that cannot change within a
+connection, and this protocol rejects that trade elsewhere for the same reason
+(the entity-type enum exists because a string type was ~19% of a keyframe).
+
+Both hops check independently. Under ADR-3 the gateway is a redirector that never
+carries a snapshot and is deployed separately from the game server, so "the
+gateway accepted it" says nothing about whether the client can read what the game
+server encodes — and it is the game-server hop that a disagreement corrupts.
+
+The responses echo the server's version because that is the **only** way a new
+client detects an old server: an old server does not know the field, ignores what
+the client sent, and answers without one. A `0` coming back is the client's sole
+signal that nobody checked.
+
+### Zero means "did not advertise", and is admitted by default
+
+proto3 elides a zero `uint32`, so a peer predating the field is indistinguishable
+from one sending `0` — the same trap documented at length on
+`EntitySnapshot.speed`. Versions therefore start at **1** and `0` is reserved,
+exactly as `ENTITY_TYPE_UNSPECIFIED` reserves `0`.
+
+**Decision: admit unversioned peers by default, count them, and gate the change
+behind a flag.**
+
+Considered and rejected: *refuse unversioned peers immediately.* It is the
+stricter reading of the goal, and it is wrong on the day it ships — every client
+in existence sends `0`, so it closes a hypothetical by breaking everything real.
+In this repository that is not abstract: roughly thirty call sites across
+`integration_test/`, `smoketest/` and `loadtest/` construct `AuthRequest{Token:…}`
+and `JoinTokenRequest{Token:…}` with no version at all.
+
+The admission is on **trust**, not evidence: a pre-versioning build and a merely
+non-conforming client look identical. So it is counted
+(`gateway_unversioned_handshakes_total`,
+`gameserver_handshakes_unversioned_total`). An admission nobody can see is
+behaviourally identical to having no check, and is precisely the silent fallback
+the `tick_rate` rule in `gameserver-dotnet/docs/API.md` forbids.
+
+The migration is one flag — `--min-protocol-version` /
+`GAMESERVER_MIN_PROTOCOL_VERSION` — set to 1 once the counter has gone flat. An
+unversioned peer is then refused through the *same* named path as a mismatched
+one, rather than a second convention for a second flavour of wrong.
+
+### Exact match, not `>=`
+
+A peer one version ahead is refused as firmly as one behind. A single integer
+carries no compatibility range, so `>=` would be admitting a peer whose changes
+this build cannot know — a guess at exactly the point the mechanism exists to
+stop guessing. A real window has to be a min/max pair negotiated on the wire, and
+that is a deliberate schema change, not a comparison operator.
+
+### The reason is a bare token
+
+`protocol_version_mismatch`, in `error` on `AuthResponse` / `JoinTokenResponse`,
+following `duplicate_login` / `server_shutdown` / `session_expired` /
+`rate_limited`. Versions go to logs and metrics, never into the token: a reason
+that embeds numbers is one a client parses with a regex, or not at all.
+
+The check runs **before** credential verification on both hops. Answering
+`invalid token` to a client whose real problem is its build sends the operator to
+the wrong layer — the same wasted chase the field exists to prevent — and it
+declines to spend an HMAC on a connection already refused.
+
+### Three constants, no single source
+
+`shared/messages.WireProtocolVersion` (Go),
+`GameServer/Net/WireProtocol.ProtocolVersion` (C#) and
+`Runtime/Protocol/WireProtocolVersion.Current` (Unity). No language can be
+authoritative for the other two, so each pins the value and asserts it by test; a
+bump is a three-file edit plus a row in the API.md version table. This is a real
+cost and is accepted: the alternative is generating the constant from the proto,
+which would put a build step between three repos that currently share only
+committed artefacts.
+
+## Entity facing and action state on the wire (2026-09-09)
+
+### The gap
+
+`EntitySnapshot` carried `id, type_name, x, y, hp, max_hp, type, handle, speed`
+and nothing else. There was no facing, no rotation, no velocity and no action or
+animation state — and nothing resembling any of them existed in the ECS either
+(`grep -iE 'facing|rotation|velocity|action_state'` over `GameServer/` and
+`Shared.GameLogic/` returned only "operator-facing" prose and JWT key
+*rotation*).
+
+The consequence is larger than a missing field. **A character cannot be made to
+face the direction it is walking, and an attack cannot be animated**, without a
+schema change across both repositories — so "the core plumbing is closed" was not
+true of the one thing every renderer needs first. This closes it with the
+smallest field set that does, and deliberately not more.
+
+### What was added
+
+Two fields on `EntitySnapshot`:
+
+| Field | # | Type | Cost |
+|---|---|---|---|
+| `facing_brad` | 10 | `uint32`, 16-bit binary radians, biased +1 | 1–3 bytes |
+| `action` | 11 | `EntityAction` enum | 0–2 bytes |
+
+### Facing is a biased integer, not a float — and that is the whole point
+
+The obvious encoding is `float facing` in radians. It was rejected, because it
+walks straight into the trap this protocol has already been bitten by twice:
+**proto3 elides a zero, and 0.0 radians is a perfectly ordinary facing** (due
+east, +X). A sender that means "facing east" and a sender that predates the field
+would be byte-identical, and there is no receiver rule that can separate them.
+
+`speed` has that ambiguity and has to document its way around it, because
+`speed = 0` is genuinely meaningful and the natural encoding is a float. Facing
+has no such excuse: the ambiguity can be **designed out** rather than documented
+around, and it was.
+
+```
+wire value 0        -> NOT SENT (no facing known)
+wire value v ∈ [1, 65536] -> angle = (v - 1) * 2π / 65536 radians,
+                             counter-clockwise from +X
+```
+
+Reserving zero costs one addition on each side and buys:
+
+- **No ambiguity by construction.** Every representable angle has a non-zero wire
+  value, so an elided field means exactly one thing. Compare the paragraph-long
+  receiver rule `speed` needs.
+- **Smaller.** 1–3 bytes of varint against a float's fixed 5. On the hottest
+  message in the protocol — one per entity in the AOI, every tick — that is the
+  same class of saving as the entity-type enum (which exists to save 6 bytes) and
+  id interning (~15).
+- **Enough resolution.** 360°/65536 ≈ 0.0055°, far below anything a player can
+  perceive or a renderer needs.
+
+Rejected alternatives, for the record:
+
+- **`optional float facing` (proto3 field presence).** Idiomatic, self-describing,
+  gives real `HasFacing`. Rejected on two counts: it is 5 bytes rather than ~2 on
+  the hottest message, and this schema's hand-written JSON codecs (Go struct tags,
+  C# `Utf8JsonWriter`/`Utf8JsonReader`) have no presence concept, so the legacy
+  encoding would need a parallel convention anyway — two rules for one idea.
+- **`float facing` + `bool has_facing`.** 7 bytes, and two fields that must be
+  kept in sync is a worse contract than one that cannot disagree with itself.
+- **A direction vector `(fx, fy)`.** 10 bytes for one degree of freedom, and it
+  can be non-normalised, which is a second invariant to police.
+
+### Action is an enum with zero reserved, following `EntityType`
+
+```
+ENTITY_ACTION_UNSPECIFIED = 0   // not sent / unknown
+ENTITY_ACTION_IDLE        = 1
+ENTITY_ACTION_MOVING      = 2
+ENTITY_ACTION_ATTACKING   = 3
+ENTITY_ACTION_DEAD        = 4
+```
+
+Idle is **1, not 0**, for exactly the reason above: zero has to keep meaning "not
+sent". This is the same trick `EntityType` already uses
+(`ENTITY_TYPE_UNSPECIFIED = 0` means "see `type_name`"), so it is the file's
+established idiom rather than a new one, and enum zero-elision costs nothing.
+
+### What was deliberately left out
+
+- **Velocity.** Not needed for either goal: facing travels explicitly, the local
+  player is predicted, and remote entities are interpolated between snapshots. It
+  would add 8–10 bytes per entity per tick to the hottest message to serve
+  dead-reckoning, which is not implemented. Revisit it when dead reckoning is,
+  and revisit it with a measurement.
+- **An action sequence number.** A renderer that wants to retrigger the *same*
+  action twice in a row (attack, attack) needs an edge, and a level-triggered
+  enum cannot give one. That is an animation-system concern; the goal here is
+  that a game can render facing and a discrete state, not that it has a full
+  animation pipeline. Named here so the limitation is known rather than
+  discovered.
+- **Pitch / 3D orientation.** The simulation is 2D (`Vec2` throughout).
+
+### It did NOT bump `protocol_version`
+
+Both fields are additive and optional, both have a documented "zero means not
+sent" rule, and an old peer ignoring either degrades **visibly** (no facing, no
+action) rather than diverging silently. By the bump rules recorded in the section
+above, that is explicitly a non-bump. Worth stating plainly because it is the
+first change made after the version field shipped, and a versioning rule that
+fired on its very next change would be a build counter rather than a
+compatibility contract.
+
+### The delta encoder is where this could have gone silently wrong
+
+`SnapshotDeltaState.SentView` is the **only** thing deciding whether a delta
+resends an entity, and it compares a fixed field list. A new field that the
+comparison ignores produces stale state that never updates until the next
+keyframe — up to 30 ticks of a character facing the wrong way, with no error on
+either side and no test of the keyframe path able to see it. The `Speed` field
+already carries a comment saying exactly this. Both new fields are therefore in
+`SentView`'s field list, its constructor, its `Equals` and its `GetHashCode`, and
+in `Rent()`'s reset.

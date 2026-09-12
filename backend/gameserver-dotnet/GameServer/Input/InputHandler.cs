@@ -3,6 +3,10 @@ using Shared.GameLogic.Components;
 using Shared.GameLogic.Systems;
 using GameServer.World;
 using GameServer.World.Components;
+using GameServer.Net;
+// Disambiguated from the generated wire enum of the same name: the two mirror each
+// other by design, and this file means the simulation one.
+using SimAction = Shared.GameLogic.Components.EntityAction;
 
 namespace GameServer.Input;
 
@@ -68,6 +72,48 @@ public sealed class InputHandler
     /// <summary>Attack-path counters. See <see cref="AttackTelemetry"/> for the contract.</summary>
     public AttackTelemetry Attacks { get; } = new();
 
+    /// <summary>
+    /// Called once per refused input with the account and the reason.
+    /// </summary>
+    /// <remarks>
+    /// A callback rather than a direct dependency on <c>GameMetrics</c> and the anomaly
+    /// tracker: this class is constructed directly by a dozen tests, and making it require
+    /// an observability stack would either force every one of them to build one or invite
+    /// a null-object that quietly does nothing. Optional and null by default keeps the
+    /// hot path free when nothing is observing.
+    /// </remarks>
+    private readonly Action<string, InputRejectionReason>? _onRejected;
+
+    /// <summary>Report a refused input. Cheap when nothing is listening.</summary>
+    private void Reject(string userId, InputRejectionReason reason) =>
+        _onRejected?.Invoke(userId, reason);
+
+    /// <summary>
+    /// Map a <see cref="CombatLogic.ValidateAttack"/> reason onto the bounded enum.
+    /// </summary>
+    /// <remarks>
+    /// <b>Reference comparison, not string equality.</b> Every reason that validator
+    /// returns is an interned constant (#249) — which is also why the rejection path
+    /// allocates nothing — so identity is exact and free, and the existing out-of-range
+    /// log below already relies on the same property. An unrecognised reason maps to
+    /// <see cref="InputRejectionReason.AttackTargetUnresolved"/>'s sibling rather than
+    /// being silently dropped: if a new reason is added to the validator without being
+    /// classified here, it lands in a real bucket and shows up, instead of vanishing.
+    /// </remarks>
+    private static InputRejectionReason ClassifyAttackRejection(string? attackErr)
+    {
+        if (ReferenceEquals(attackErr, CombatLogic.OutOfRangeRejection))
+            return InputRejectionReason.AttackOutOfRange;
+
+        // The other two are also constants, but private to the validator's source rather
+        // than exposed as named fields, so these compare by value. Cheap: it only runs on
+        // a rejection, and only for reasons that are not the interned out-of-range one.
+        if (attackErr == "attack on cooldown") return InputRejectionReason.AttackOnCooldown;
+        if (attackErr == "target is already dead") return InputRejectionReason.AttackTargetDead;
+
+        return InputRejectionReason.AttackOther;
+    }
+
     /// <summary>Fixed simulation timestep in seconds used for movement integration.</summary>
     public float DeltaTime => _deltaTime;
 
@@ -87,11 +133,13 @@ public sealed class InputHandler
         ILogger logger,
         DeathHandler? onDeath = null,
         int tickRate = GameConstants.DefaultTickRate,
-        MapBounds? bounds = null)
+        MapBounds? bounds = null,
+        Action<string, InputRejectionReason>? onRejected = null)
     {
         _world = world;
         _logger = logger;
         _onDeath = onDeath;
+        _onRejected = onRejected;
         _deltaTime = MovementSystem.DeltaTimeForTickRate(
             tickRate > 0 ? tickRate : GameConstants.DefaultTickRate);
         _bounds = bounds ?? MapBounds.Default;
@@ -270,6 +318,17 @@ public sealed class InputHandler
             {
                 position.Value = newPosition;
                 cursor.LastMoveTick = baseTick;
+
+                // The coasting path moves the entity too, so it owns the same facing and
+                // action it would have had from a packet. Without this an entity that
+                // keeps walking between input packets would report Idle on most ticks -
+                // the animation would stutter at the client's send rate rather than
+                // following the simulation, which is the same class of bug HeldMove
+                // itself exists to fix for position.
+                ref Locomotion locomotion = ref writer.LocomotionOf(in handle);
+                uint facing = FacingCodec.FromDirection(cursor.HeldMoveX, cursor.HeldMoveY);
+                if (facing != FacingCodec.NotSent) locomotion.FacingBrad = facing;
+                locomotion.Action = SimAction.Moving;
             }
         }
     }
@@ -342,14 +401,26 @@ public sealed class InputHandler
         // Revalidate: a handle resolved at ingest can be stale by the time the tick runs
         // if the entity was destroyed in between. TickLoop rebinds first, so this is the
         // backstop, not the mechanism.
-        if (!writer.IsAlive(in self)) return;
+        if (!writer.IsAlive(in self))
+        {
+            Reject(userId, InputRejectionReason.EntityGone);
+            return;
+        }
 
         // Skip if dead
-        if (writer.HealthOf(self).Dead) return;
+        if (writer.HealthOf(self).Dead)
+        {
+            Reject(userId, InputRejectionReason.DeadEntity);
+            return;
+        }
 
         // Monotonic tick check
         ref InputCursor cursor = ref writer.InputCursorOf(self);
-        if (input.Tick <= cursor.LastInputTick) return;
+        if (input.Tick <= cursor.LastInputTick)
+        {
+            Reject(userId, InputRejectionReason.StaleTick);
+            return;
+        }
         cursor.LastInputTick = input.Tick;
 
         // --- Movement ---
@@ -404,6 +475,19 @@ public sealed class InputHandler
             {
                 position.Value = newPosition;
 
+                // Face the way we just moved, and say so on the wire.
+                //
+                // Derived from the RAW input direction rather than from the position
+                // delta: the delta is post-clamp, so a player walking into a map bound
+                // would be reported as facing along the wall instead of into it, which
+                // is visibly wrong at exactly the moment a player is pushing against
+                // something. FromDirection returns "not sent" for a zero vector, so a
+                // deadzone input cannot blank an established facing.
+                ref Locomotion locomotion = ref writer.LocomotionOf(self);
+                uint facing = FacingCodec.FromDirection(input.MoveX, input.MoveY);
+                if (facing != FacingCodec.NotSent) locomotion.FacingBrad = facing;
+                locomotion.Action = SimAction.Moving;
+
                 // Hold the direction so the critical group can keep integrating between
                 // packets (ApplyHeldMovement). Recorded after a successful step, so a
                 // rejected or deadzone input never becomes a held one.
@@ -420,11 +504,22 @@ public sealed class InputHandler
                 // above and ResolveDirection ever diverge, this is the backstop.
                 cursor.HeldFromTick = 0;
                 cursor.LastMoveTick = currentTick;
+
+                // An explicit stop is Idle, not Unspecified. Facing is deliberately NOT
+                // cleared: a character that halts keeps looking the way it was going,
+                // which is what a player expects and what avoids a visible snap to east
+                // every time someone releases the stick.
+                //
+                // No Dead check needed - this method returned above if the entity is
+                // dead, so reaching here means it is alive and genuinely standing still.
+                writer.LocomotionOf(self).Action = SimAction.Idle;
             }
             else if (moveResult == MoveResult.Rejected)
             {
                 // Grossly invalid vector (NaN/inf/oversized): log and drop, never throw.
                 // Guarded like the attack log below: no allocation with Debug off.
+                Reject(userId, InputRejectionReason.InvalidDirection);
+
                 if (_logger.IsEnabled(LogLevel.Debug))
                 {
                     _logger.LogDebug("Dropped invalid move from {UserId}: ({MoveX}, {MoveY})",
@@ -450,6 +545,7 @@ public sealed class InputHandler
             if (!target.IsValid)
             {
                 Attacks.Unresolved++;
+                Reject(userId, InputRejectionReason.AttackTargetUnresolved);
             }
             else
             {
@@ -470,6 +566,13 @@ public sealed class InputHandler
 
                     ulong cooldownUntil = currentTick + (ulong)_cooldownTicks;
                     writer.CombatOf(self).CooldownUntilTick = cooldownUntil;
+
+                // Attacking outranks moving for this tick: an attack is the thing a
+                // player is meant to see. It is level-triggered, so it lasts exactly one
+                // tick unless the next tick attacks again - a renderer that needs to
+                // retrigger the same attack twice needs an edge this field cannot give,
+                // which is documented on the enum.
+                writer.LocomotionOf(self).Action = SimAction.Attacking;
                     attacker.CooldownUntilTick = cooldownUntil; // the killer state the callback sees
 
                     if (CombatLogic.HandleDeath(ref t))
@@ -500,12 +603,24 @@ public sealed class InputHandler
                         ref Health targetHealth = ref writer.HealthOf(target);
                         targetHealth.Hp = t.Hp;
                         targetHealth.Dead = t.Dead;
+
+                        // Death is terminal for the action field: nothing else this
+                        // entity was doing matters any more, and a corpse reported as
+                        // Moving would keep playing a walk cycle.
+                        //
+                        // Nothing has to guard against a later writer clobbering this.
+                        // Both movement paths bail on a dead entity before they touch
+                        // Action - ApplyHeldMovement `continue`s on Health.Dead and
+                        // ProcessInput returns on it - so a dead entity is never reached
+                        // by the Moving or Attacking writers at all.
+                        if (t.Dead) writer.LocomotionOf(target).Action = SimAction.Dead;
                     }
                 }
                 else
                 {
                     Attacks.Rejected++;
                     Attacks.LastRejection = attackErr;
+                    Reject(userId, ClassifyAttackRejection(attackErr));
                     // Guarded like the attack log above: no allocation with Debug off.
                     // The distance detail the out-of-range message used to carry is
                     // computed HERE, only under the guard: the validator returns an

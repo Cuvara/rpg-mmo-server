@@ -4,6 +4,11 @@
 #   make flow-up     # build every image + start postgres, redis, nakama,
 #                    # gateway and the C# game server, correctly wired
 #   make flow-check  # prove the full client flow through it (smoketest)
+#
+# Encrypted gameplay hop (off by default here — see docker-compose.yml):
+#   make flow-up-sealed     # same stack, GAMESERVER_SEALED=require
+#
+#   make flow-check-sealed  # verify that sealed stack, end to end
 #   make flow-down   # stop everything (keeps data volumes)
 #
 # Backing services only (gateway/gameserver run on the host with go run /
@@ -72,6 +77,30 @@ endif
 .PHONY: flow-up
 flow-up: ## ONE COMMAND: build everything and run the whole backend
 	$(STACK) up $(STACK_FLAGS)
+
+.PHONY: flow-up-sealed
+flow-up-sealed: ## Same as flow-up, with the gameplay hop encrypted (GAMESERVER_SEALED=require)
+# ON WSL WITH DOCKER DESKTOP THIS TARGET SILENTLY DOES NOTHING, and the stack comes
+# up UNSEALED with no error anywhere.
+#
+# `docker` here is /home/<user>/bin/docker, a two-line shell script that does
+# `exec docker.exe "$@"`. Crossing WSL -> Windows drops every environment variable
+# not named in WSLENV, so compose interpolates `${GAMESERVER_SEALED:-off}` to its
+# default and reports success. The compose files are correct; the boundary is what
+# fails.
+#
+#   WSLENV=GAMESERVER_SEALED make flow-up-sealed
+#
+# Measured, and measured twice: the first measurement looked like a broken pin
+# until a control -- a throwaway compose file with `${PROBE_VAR:-fallback}` --
+# showed the CHANNEL was dropping variables, not the variable. Prove the channel
+# before concluding anything about the value; without that control this would have
+# been filed as a defect against correct code.
+	GAMESERVER_SEALED=require $(STACK) up $(STACK_FLAGS)
+
+.PHONY: flow-check-sealed
+flow-check-sealed: ## Verify a sealed stack (smoke test in protobuf, sealing enabled)
+	GAMESERVER_SEALED=require $(STACK) check
 
 .PHONY: flow-down
 flow-down: ## Stop the whole stack (keeps data volumes)

@@ -6,6 +6,283 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+
+- **`transport.PostureTLS` and `TransportPosture.TLS`** — the confidentiality posture now
+  accounts for a listener that terminates TLS itself (ADR-23). `Posture` is unchanged and is
+  now `PostureTLS(..., false)`, pinned by a test so the non-TLS callers cannot drift.
+  `CipherTLS` names the layer rather than a suite, because the suite is negotiated per
+  connection and is not knowable at listen time — a guess in a security field is the failure
+  this type exists to prevent.
+
+### Changed
+
+- **`TransportPosture.Authenticated` is computed instead of hard-coded `false`.** It was pinned
+  with a comment saying its becoming true should be visible in a diff; this is that diff. TLS
+  is the only configuration that makes it true — the KCP path is AES-256-CFB with a CRC32, and
+  a CRC is not a MAC.
+- **`TransportPosture.KeyIgnored()` now tests the cipher, not `!Encrypted`.** Those were the
+  same thing until TLS existed and are not any more: TCP + TLS + `TRANSPORT_KEY` is encrypted
+  *and* the key is still doing nothing. Written the old way it would have quietly started
+  answering "the key is fine" for a misconfiguration, hidden behind an unrelated feature being
+  on. A regression row in `posture_tls_test.go` covers exactly this pair, and was verified to
+  fail against the old expression.
+- **`config.Config` gains `GatewayTLSCert` / `GatewayTLSKey`** (`GATEWAY_TLS_CERT`,
+  `GATEWAY_TLS_KEY`), both defaulting to empty.
+
+### Added
+
+- **`jwt.ParseUnverified`** — decodes a token's claims **without** checking its signature.
+  It answers "what does this token say", never "is this token genuine", and the doc comment
+  says so at length because every call site is a place a reviewer should look twice.
+  - It exists for one legitimate case: a **client** reading the `jti` out of its own join
+    token. The `jti` anchors the sealed handshake transcript, and a client cannot hold
+    `JOIN_TOKEN_SECRET` — putting that secret in a client binary is the pre-shared-key
+    mistake ADR-22 supersedes. The client decides nothing on these claims; it names the
+    session it is already in, and the server verifies the same token properly.
+
+### Added
+
+- **`sealed.RunClientHandshake`: the Go client half of the sealed exchange.** It mirrors
+  `SealedHandshakeServer` step for step and contains no transport — the caller supplies the
+  two frame callbacks — so the load generator, the smoke test and the integration suite can
+  share it despite framing bytes differently.
+  - **`BindingVerified` is on the result, not implied.** Verifying the server's binding
+    needs `JOIN_TOKEN_SECRET`, which a shipped client must not carry; passing an empty
+    secret is the correct configuration for one and yields confidentiality against a
+    passive eavesdropper and nothing against an active one. A harness that already holds
+    the secret should verify, and then it is true — those harnesses are currently the only
+    peers that can prove the man-in-the-middle defence end to end.
+  - Tested both ways round, including **a test asserting a non-verifying client accepts a
+    substituted ephemeral key**. That is today's exposure written down as an executable
+    fact, so it starts failing the day the pinned identity key removes it.
+  - The attacker model in those tests signs the binding over the REAL server's key and
+    announces a tampered one — an attacker who can rewrite the hello but cannot compute a
+    binding. Signing over the tampered key instead would model an attacker holding the
+    secret, against which there is nothing to defend, since it could mint its own tokens.
+
+### Added
+
+- **`SealedClientHello` / `SealedServerHello` (`MsgType` 16 and 17), gameplay hop only.**
+  Both travel in the clear, immediately after `MsgJoinToken` — there is no key yet, which
+  is what they exist to establish. 16/17 stay inside the one-byte varint range and leave
+  18-31 clear for the gateway hop's own handshake once ADR-22 settles it; recycling a
+  number is how two versions silently disagree about what a byte means.
+  - **Protobuf only.** The handshake is deliberately absent from the JSON message set so
+    key material can never be rendered into a human-readable payload — which is also why a
+    JSON client cannot be sealed and must be refused rather than served in the clear.
+
+### Added
+
+- **`shared/sealed` now carries the real primitives** — ChaCha20-Poly1305 (RFC 8439),
+  X25519 (RFC 7748) and HKDF-SHA256 (RFC 5869), all from `golang.org/x/crypto`, which was
+  already a dependency. **Nothing here implements a cipher, a MAC or a curve.**
+  - **Published RFC vectors, not only round-trips.** A round-trip proves an implementation
+    agrees with itself, which a subtly wrong one also does, silently. Tampering is
+    rejected in ciphertext, tag, additional data and length — the AAD case being the one
+    that can be wrong while every round-trip still passes.
+  - **Low-order X25519 points are refused.** Accepting one forces a shared secret the
+    attacker knows and both sides agree on: a complete break dressed as a successful
+    handshake.
+  - **Two direction keys, derived from the shared secret and salted by the transcript.**
+    Two, not one, is what makes the bare counter nonce safe — the client's sequence 7 and
+    the server's sequence 7 are encrypted under different keys. Salting with the
+    transcript binds the keys to the exact exchange, so two runs that agreed on a secret
+    but disagreed about anything else fail rather than proceeding half-agreed.
+  - **The handshake binding is HMAC-SHA256 under a key derived from `JOIN_TOKEN_SECRET`
+    and the jti**, verified with `hmac.Equal` — constant time, because a byte-by-byte
+    compare leaks the first mismatch position and that is enough to forge a tag one byte
+    at a time against a peer that keeps answering.
+  - **A cross-implementation vector** pins one complete handshake and one complete sealed
+    frame against the C# suite, value by value.
+
+### Changed
+
+- **The replay rule is settled and hardened.** `wire-contract` measured zero inversions
+  across 22 374 frames on both transports under hostile `tc netem`, so the strict counter
+  is correct and the window stays available but unused. Three conditions attach, because
+  the ordering is inherited rather than owned — TCP guarantees it, KCP gets it from a
+  hand-ported reassembly path:
+  - **Asserted, not assumed**: validators declare `RequiresOrderedTransport`, and a
+    session refuses to construct when a strict counter meets a transport that does not
+    promise ordering, so a future QUIC-datagram or raw-UDP path fails closed instead of
+    dropping legitimate frames and presenting as packet loss.
+  - **Rejections are counted by cause** — not authenticated, replayed, forward jump — and
+    returned identically. A validator that refuses silently is indistinguishable from one
+    that was never wired in, and under attack these counters are the only thing that
+    changes.
+  - **The forward jump is bounded.** Rejecting anything at or below the highest seen says
+    nothing about a leap *forward*, which burns nonce space and, with a strict counter, is
+    irreversible: every later legitimate frame carries a lower sequence and is refused for
+    ever, so the session dies quietly after authenticating perfectly well.
+
+### Added
+
+- **`shared/sealed`: the wire format, replay rule and refusal policy for realtime
+  confidentiality**, specified and tested without a cipher. Normative spec:
+  `backend/docs/SEALED-FRAMING.md`.
+  - **Sealing happens above the transport, around the Envelope**, not at the packet layer.
+    The KCP packet-crypt layer cannot be used: it is per-*listener* (kcp-go takes one
+    `BlockCrypt` for every datagram, with no per-remote key selection) so it cannot carry a
+    per-session key — and TCP, the default transport, has no such layer at all. Above the
+    transport, one implementation serves both.
+  - Frame: `[4B length][0xC1 marker][1B version][8B sequence][ciphertext][16B tag]`, with
+    the whole 10-byte header as additional authenticated data, so a frame cannot be
+    renumbered to replay it nor rolled back to an older format. `0xC1` cannot begin a
+    well-formed Envelope, so it cannot be confused with the `0x08`/`0x7B` encoding sniff.
+    Overhead is ~390 B/s per client at 15 Hz — 0.85% of the measured 45.9 KB/s.
+  - **Nonce is a bare counter, and that is safe only because each direction has its own
+    key.** Documented at the function, with the consequence stated: if one key ever serves
+    both directions, the nonce must grow a direction byte the same day or the scheme is
+    broken.
+  - **Two replay validators behind one interface** — strict-monotonic and a 64-frame
+    sliding window (the IPsec/DTLS rule) — because whether the ARQ can reorder at this
+    layer is still being measured. The finding lands as a one-line change at the call site
+    rather than a rewrite. Both refuse what they cannot judge.
+  - **Handshake transcript** `label || 0x00 || jti || 0x00 || client_pub || server_pub`,
+    with a golden vector shared with the C# implementation. The NUL separators stop two
+    different (jti, key) pairs producing identical bytes; including both ephemeral public
+    keys is what stops a replayed binding authenticating a man-in-the-middle's exchange.
+  - **The ordering rule is enforced by structure.** `sealed.Session` performs
+    authenticate-then-replay-check itself and exposes no way to do one without the other,
+    because the natural-looking implementation is backwards: the sequence is cleartext and
+    right there in the header, so reading it and checking the window before spending CPU
+    on the AEAD lets an attacker advance a peer's window with forged frames and lock out
+    the real sender. Verified against a deliberate mutation that reverses the order.
+  - **The gateway hop's anchor is decided**: a pinned gateway *public* identity key, which
+    dissolves the binding-key delivery problem rather than working around it. Recorded in
+    the spec with the distinction that matters — the old scheme shipped a *secret* in the
+    binary, this ships a *public* key whose extraction gains an attacker nothing — and with
+    the requirement to pin current **and** next, since rotation cannot be retrofitted
+    during the emergency that is the only time it is wanted.
+  - **Refusal has two states, not three.** A "preferred" mode is a downgrade attack with a
+    friendly name, so a peer that does not seal gets no session.
+
+### Changed
+
+- **`EnterWorldResponse.session_key` (field 5) is removed and the number reserved.** ADR-22
+  supersedes the derived session key with an authenticated X25519 exchange, which gives
+  forward secrecy the derivation could not. The number is reserved rather than reused: a
+  peer built against the old schema would read whatever replaced it as 32 bytes of key
+  material and fail in a way that looks like a key mismatch rather than a schema mismatch.
+- **`shared/sessionkey` records its superseded purpose.** The bytes and the golden vector
+  are unchanged; what moved is what the value is *for* — it is now the handshake binding
+  key, proving possession of `JOIN_TOKEN_SECRET`-derived material, not an encryption key.
+
+> **Nothing here encrypts anything yet.** No cipher, MAC or curve is implemented, and none
+> is stubbed: an implementation that "worked" would let every test above it pass while
+> proving nothing about the bytes. ADR-22's library choice is still open.
+
+### Added
+
+- **`shared/sessionkey`: per-session keys, derived rather than distributed.** Transport
+  encryption used ONE pre-shared key — the same value in every client binary and every
+  server — so extracting it from a single client decrypted every player's traffic for ever,
+  and rotating it meant redeploying everything at once. The key is now per join:
+  `HKDF-SHA256(ikm = JOIN_TOKEN_SECRET, salt = join token jti, info = "cuvara/session-key/v1", L = 32)`.
+  - **The game server is never sent the key.** It derives the same value from the secret it
+    holds and the `jti` in the token it already verifies, so nothing carrying key material
+    crosses the gameplay hop, and nothing is stored. Only the client is sent one, because
+    only the client cannot derive it.
+  - `sessionkey.Key` redacts itself through `fmt`, `slog`, `%#v` and `encoding/json`. The
+    realistic leak is not a deliberate log call but a struct handed to a formatter by code
+    that did not know it held a secret, and a test asserts every one of those paths.
+  - A golden vector is shared with the C# implementation. Two implementations that each
+    round-trip against themselves can still disagree with each other, and a disagreement
+    here produces no error anywhere — the client encrypts with one key, the server decrypts
+    with another, and the session simply never forms.
+  - `Info` and `Size` are pinned by a test: they are wire contract, and changing either
+    silently breaks every peer.
+- **`EnterWorldResponse.SessionKey`** (`wire.proto` field 5, Protobuf only). Tagged
+  `json:"-"` **by design**: the legacy JSON encoding cannot carry a key, because exempting
+  the field from redaction would put the material back on the path the redaction exists to
+  close — and JSON is the encoding a human is most likely to paste into an issue. The
+  consequence is stateable: a JSON client cannot be encrypted.
+
+> **Limitation recorded with the feature, not beneath it.** The client cannot derive the
+> key, so it must travel gateway → client, and the gateway hop is the *same transport
+> stack* as the gameplay hop — plaintext TCP by default. In the default configuration an
+> eavesdropper on the gateway hop reads the key and can decrypt that session. This turns
+> "compromise one binary, decrypt everyone for ever" into "eavesdrop the gateway hop,
+> decrypt one session": strictly better, and not end-to-end confidentiality.
+
+### Added
+
+- **`transport.Posture(kind, key, addr)`** — the confidentiality posture of a listener as
+  one computed fact: transport, whether a key is configured, whether packets are actually
+  ciphertext, whether they are authenticated, the cipher in force, whether the bind is
+  beyond loopback, and a one-line summary. Mirrors the C# `TransportPosture` field for
+  field so both halves of the backend describe themselves the same way.
+  - Exists because encryption is off by default **twice** — the transport defaults to
+    `tcp`, which has no packet-crypt layer, and the key defaults to empty — so no single
+    value answers "is this encrypted", and the combination that answers "no" most
+    emphatically is the default one.
+  - `Encrypted` and `Authenticated` are separate fields, and `Authenticated` is hard-coded
+    `false` with the reason stated: the KCP path is AES-256-CFB with a CRC32, and a CRC32
+    is linear, not a MAC, so a modified datagram is not detectable. One "secure" boolean
+    would let a reader take confidentiality for integrity.
+  - `KeyIgnored()` names the configuration most easily mistaken for working encryption: a
+    key set on TCP, where it is accepted and then does nothing.
+  - Bind classification is deliberately pessimistic — wildcard binds (`:8000`,
+    `0.0.0.0:8000`, `[::]:8000`) and anything unparseable count as beyond loopback, because
+    wildcard is the container shape and exempting it would exempt exactly the deployments
+    this reporting is for.
+
+### Added
+- **`EntitySnapshot.facing_brad` (field 10) and `EntitySnapshot.action` (field 11).**
+  The snapshot carried `id, type_name, x, y, hp, max_hp, type, handle, speed` and
+  nothing else — no facing, no rotation, no action state. A character could not be
+  made to face the direction it was walking, and an attack could not be animated,
+  without a schema change across both repos, so the "core plumbing is closed"
+  claim was not true of the first thing any renderer needs.
+- **Facing is a BIASED 16-bit binary radian value, not a float, and that is the
+  point.** proto3 elides a zero and 0.0 radians is a perfectly ordinary facing
+  (due east), so a float would put "facing east" and "field not sent" on the wire
+  as identical bytes — the trap `speed` has to document its way around because
+  a zero speed is genuinely meaningful. Facing has no such excuse, so wire 0 is
+  reserved and a real angle is `(v-1) * 2*Pi / 65536`: every representable
+  direction has a non-zero encoding, by construction rather than by asking every
+  implementer to remember a rule. It is also 1-3 bytes against a float's 5, on
+  the hottest message in the protocol.
+- **`EntityAction` reserves 0 for "not sent" and numbers IDLE as 1**, for the same
+  reason and following `ENTITY_TYPE_UNSPECIFIED`'s precedent. A receiver that read
+  0 as "idle" would let an old server freeze every entity into an idle pose.
+- **`messages.FacingBradFromRadians` / `RadiansFromFacingBrad`** — the reference
+  codec the C# server and the Unity client mirror; `messages.EntityAction` mirrors
+  the enum. Neither field bumped `WireProtocolVersion`: both are additive with a
+  documented zero rule and degrade visibly rather than diverging silently, which
+  the bump rules explicitly call a non-bump. Rationale, the rejected encodings
+  (`optional float`, `float`+`bool`, a direction vector) and what was deliberately
+  left out (velocity, an action sequence number): `docs/DESIGN.md`, "Entity facing
+  and action state on the wire".
+
+### Added
+- **Wire protocol version negotiation (`protocol_version`).** `wire.proto` had no
+  version field of any kind: client and server agreed on the meaning of the wire
+  by convention, and a version-skewed build was not refused — it connected,
+  parsed every byte and was confidently wrong. Adds `protocol_version` to
+  `AuthRequest`/`AuthResponse` (fields 2/4) and
+  `JoinTokenRequest`/`JoinTokenResponse` (fields 2/5), the constant
+  `messages.WireProtocolVersion` (currently **1**), `ProtocolVersionUnversioned`,
+  the reason token `ReasonProtocolVersionMismatch`
+  (`"protocol_version_mismatch"`), and `messages.CheckProtocolVersion` — the one
+  decision function both Go peers share.
+- **Semantics.** The number names what the schema MEANS, not its shape (proto3
+  already skips unknown fields) nor its encoding (already sniffed from byte 0).
+  It rides the two handshake requests, never `Envelope` — an envelope field would
+  be paid on every snapshot of every tick to restate a per-connection constant.
+  Matching is EXACT: a peer one version ahead is refused as firmly as one behind,
+  because a single integer carries no compatibility range.
+- **Zero means "did not advertise", and is admitted by default.** proto3 elides a
+  zero `uint32`, so a pre-versioning peer is indistinguishable from one sending
+  0 — the trap already documented on `EntitySnapshot.speed`. Versions start at 1
+  and 0 is reserved. Unversioned peers are admitted **on trust** and counted, so
+  the trust is visible; the migration is one flag once that counter goes flat.
+  Rationale and the rejected alternatives: `docs/DESIGN.md`, "Wire protocol
+  version".
+
+## [0.9.0] - 2026-09-05
+
+### Added
 - **`constants.KickEventStream` (`"kick"`) and `constants.EventSessionSuperseded`
   (`"session_superseded"`)** — the gateway → game-server duplicate-login kick
   channel (ADR-20), the Streams rebuild of what #211 deleted. One shared stream
@@ -15,6 +292,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   removed `GatewayKickChannel` described). The C# consumer mirrors both
   literals (`GameServer/Events/KickEvents.cs`); payload contract in
   `gameserver-dotnet/docs/API.md`.
+
+### Removed
+- **`storage/pgstore/` package deleted** (ADR-1 follow-up). No Go binary imported
+  it — the C# game server has its own `PostgresPlayerStore`. The `pgx/v5`
+  dependency is also removed from `go.mod`.
 
 ### Changed
 - **docs**: `docs/DESIGN.md` no longer says the C# game server publishes into a

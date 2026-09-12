@@ -37,6 +37,16 @@ services:
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
       JOIN_TOKEN_SECRET: ${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}
       GAMESERVER_ADDR: ":9000"
+      # PINNED OFF ON PURPOSE, and it must stay in step with the map_01 service in
+      # docker-compose.yml -- see the long note there for why. In short: the binary
+      # now defaults to `require`, and a stack that requires encryption cannot be
+      # verified by the Go smoketest, which speaks JSON and can never seal.
+      #
+      # This file is the second map server, so leaving it unpinned would produce
+      # the worst version of the mistake: map_01 unsealed and map_02 sealed on the
+      # same stack, with a client that transfers between them working on one map
+      # and being refused on the other.
+      GAMESERVER_SEALED: ${GAMESERVER_SEALED:-off}
       GAMESERVER_MODE: map
       GAMESERVER_MAP_ID: map_02
       GAMESERVER_ID: gs-dotnet-map_02
@@ -50,7 +60,12 @@ services:
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
       GAMESERVER_PUBLIC_ADDR: "127.0.0.1:9002"
-      NAKAMA_URL: http://nakama:7350
+      # Follows the meta-hop TLS decision (ADR-24) rather than being configured
+      # independently. The C# game server is a SECOND consumer of this hop --
+      # NakamaClient.cs POSTs /v2/rpc/reward_kills?http_key=... -- so if Nakama
+      # moves to TLS and this stays http://, the reward path breaks silently.
+      # Two sources of truth for one hop is exactly how that happens.
+      NAKAMA_URL: ${NAKAMA_URL:-http://nakama:7350}
       NAKAMA_HTTP_KEY: ${NAKAMA_HTTP_KEY:-defaulthttpkey}
       GAME_DB_URL: postgres://${POSTGRES_GAME_USER:-game}:${POSTGRES_GAME_PASSWORD:-localdev}@postgres-game:5432/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable
     ports:

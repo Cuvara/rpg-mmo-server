@@ -32,9 +32,9 @@ func marshalProtoPayload(v any) ([]byte, error) {
 		return nil, nil
 
 	case AuthRequest:
-		m = &wirepb.AuthRequest{Token: t.Token}
+		m = authReqPB(t)
 	case *AuthRequest:
-		m = &wirepb.AuthRequest{Token: t.Token}
+		m = authReqPB(*t)
 
 	case AuthResponse:
 		m = authRespPB(t)
@@ -52,9 +52,9 @@ func marshalProtoPayload(v any) ([]byte, error) {
 		m = enterWorldRespPB(*t)
 
 	case JoinTokenRequest:
-		m = &wirepb.JoinTokenRequest{Token: t.Token}
+		m = joinTokenReqPB(t)
 	case *JoinTokenRequest:
-		m = &wirepb.JoinTokenRequest{Token: t.Token}
+		m = joinTokenReqPB(*t)
 
 	case JoinTokenResponse:
 		m = joinTokenRespPB(t)
@@ -95,6 +95,16 @@ func marshalProtoPayload(v any) ([]byte, error) {
 	case *PongMessage:
 		m = &wirepb.PongMessage{Timestamp: t.Timestamp, ServerTime: t.ServerTime}
 
+	case SealedClientHello:
+		m = &wirepb.SealedClientHello{PublicKey: t.PublicKey}
+	case *SealedClientHello:
+		m = &wirepb.SealedClientHello{PublicKey: t.PublicKey}
+
+	case SealedServerHello:
+		m = &wirepb.SealedServerHello{PublicKey: t.PublicKey, Binding: t.Binding, Error: t.Error}
+	case *SealedServerHello:
+		m = &wirepb.SealedServerHello{PublicKey: t.PublicKey, Binding: t.Binding, Error: t.Error}
+
 	case KickMessage:
 		m = &wirepb.KickMessage{Reason: t.Reason}
 	case *KickMessage:
@@ -125,6 +135,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 			return wrapUnmarshal(v, err)
 		}
 		t.Token = pb.Token
+		t.ProtocolVersion = pb.ProtocolVersion
 
 	case *AuthResponse:
 		var pb wirepb.AuthResponse
@@ -132,6 +143,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 			return wrapUnmarshal(v, err)
 		}
 		t.OK, t.UserID, t.Error = pb.Ok, pb.UserId, pb.Error
+		t.ProtocolVersion = pb.ProtocolVersion
 
 	case *EnterWorldRequest:
 		var pb wirepb.EnterWorldRequest
@@ -148,12 +160,27 @@ func unmarshalProtoPayload(data []byte, v any) error {
 		t.ServerAddr, t.JoinToken = pb.ServerAddr, pb.JoinToken
 		t.Transport, t.Error = pb.Transport, pb.Error
 
+	case *SealedClientHello:
+		var pb wirepb.SealedClientHello
+		if err := proto.Unmarshal(data, &pb); err != nil {
+			return wrapUnmarshal(v, err)
+		}
+		t.PublicKey = pb.PublicKey
+
+	case *SealedServerHello:
+		var pb wirepb.SealedServerHello
+		if err := proto.Unmarshal(data, &pb); err != nil {
+			return wrapUnmarshal(v, err)
+		}
+		t.PublicKey, t.Binding, t.Error = pb.PublicKey, pb.Binding, pb.Error
+
 	case *JoinTokenRequest:
 		var pb wirepb.JoinTokenRequest
 		if err := proto.Unmarshal(data, &pb); err != nil {
 			return wrapUnmarshal(v, err)
 		}
 		t.Token = pb.Token
+		t.ProtocolVersion = pb.ProtocolVersion
 
 	case *JoinTokenResponse:
 		var pb wirepb.JoinTokenResponse
@@ -162,6 +189,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 		}
 		t.OK, t.UserID, t.Error = pb.Ok, pb.UserId, pb.Error
 		t.TickRate = pb.TickRate
+		t.ProtocolVersion = pb.ProtocolVersion
 
 	case *InputMessage:
 		var pb wirepb.InputMessage
@@ -197,6 +225,12 @@ func unmarshalProtoPayload(data []byte, v any) error {
 					MaxHP:  int(e.MaxHp),
 					Handle: e.Handle,
 					Speed:  e.Speed,
+					// Unknown future action values are carried through as-is rather
+					// than clamped to a known one: a value this build does not
+					// recognise belongs to a newer peer, and mapping it onto "idle"
+					// would turn "I do not know" into a confident wrong answer.
+					FacingBrad: e.FacingBrad,
+					Action:     EntityAction(e.Action),
 				}
 			}
 			t.Entities = ents
@@ -255,8 +289,17 @@ func wrapUnmarshal(v any, err error) error {
 	return fmt.Errorf("unmarshal proto payload %T: %w", v, err)
 }
 
+func authReqPB(t AuthRequest) *wirepb.AuthRequest {
+	return &wirepb.AuthRequest{Token: t.Token, ProtocolVersion: t.ProtocolVersion}
+}
+
 func authRespPB(t AuthResponse) *wirepb.AuthResponse {
-	return &wirepb.AuthResponse{Ok: t.OK, UserId: t.UserID, Error: t.Error}
+	return &wirepb.AuthResponse{
+		Ok:              t.OK,
+		UserId:          t.UserID,
+		Error:           t.Error,
+		ProtocolVersion: t.ProtocolVersion,
+	}
 }
 
 func enterWorldRespPB(t EnterWorldResponse) *wirepb.EnterWorldResponse {
@@ -268,8 +311,18 @@ func enterWorldRespPB(t EnterWorldResponse) *wirepb.EnterWorldResponse {
 	}
 }
 
+func joinTokenReqPB(t JoinTokenRequest) *wirepb.JoinTokenRequest {
+	return &wirepb.JoinTokenRequest{Token: t.Token, ProtocolVersion: t.ProtocolVersion}
+}
+
 func joinTokenRespPB(t JoinTokenResponse) *wirepb.JoinTokenResponse {
-	return &wirepb.JoinTokenResponse{Ok: t.OK, UserId: t.UserID, Error: t.Error, TickRate: t.TickRate}
+	return &wirepb.JoinTokenResponse{
+		Ok:              t.OK,
+		UserId:          t.UserID,
+		Error:           t.Error,
+		TickRate:        t.TickRate,
+		ProtocolVersion: t.ProtocolVersion,
+	}
 }
 
 func transferMapRespPB(t TransferMapResponse) *wirepb.TransferMapResponse {
@@ -337,6 +390,12 @@ func snapshotPB(t SnapshotMessage) *wirepb.SnapshotMessage {
 				MaxHp:  int32(e.MaxHP),
 				Handle: e.Handle,
 				Speed:  e.Speed,
+				// Both are plain pass-throughs: the "zero means not sent" contract
+				// lives in the encoding itself (facing is biased so no real angle is
+				// 0; action reserves 0) rather than in a translation here, which is
+				// exactly why those encodings were chosen.
+				FacingBrad: e.FacingBrad,
+				Action:     wirepb.EntityAction(e.Action),
 			}
 			// Enum when we can (2 bytes), name when we cannot (2 + len). Never
 			// both: the reader prefers the enum, so setting both would make the

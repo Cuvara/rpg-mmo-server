@@ -5,6 +5,585 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Nakama's k8s probes do not follow its TLS decision, and the hazard is now recorded where
+  someone will hit it.** All three (`startup`, `readiness`, `liveness`) are `httpGet` with no
+  `scheme`, which means HTTP. Set `NAKAMA_TLS_CERT/_KEY` and Nakama answers TLS on the same
+  port, so every probe fails with `client sent an HTTP request to an HTTPS server` and the
+  pod **never becomes Ready** — measured on k3d-rpg-dev 2026-09-12, the rollout timed out
+  with the container itself healthy.
+
+  Not fixed here, deliberately: there is no per-environment overlay to vary a probe in, so
+  the fix has to be one spec that works both ways. `scheme: HTTPS` is wrong when TLS is off,
+  and an exec probe needs a shell and curl in the Nakama image. That is a decision for
+  whoever enables TLS, and it is now written at the probes instead of waiting to be
+  rediscovered as a timed-out rollout.
+
+### Added
+- **The gateway can be given a TLS certificate without editing the Deployment.**
+  `k8s/app/40-gateway.yaml` now mounts a `gateway-tls` Secret at `/etc/gateway/tls`, so
+  turning ADR-23's TLS on is setting the two paths that were already there rather than
+  rewriting the pod spec. The volume is `optional: true`, which is load-bearing: the Secret
+  does not exist on an environment that has not opted in, and a required volume would stop
+  every gateway pod there with `CreateContainerConfigError` — turning an opt-in feature into
+  an outage for everyone who did not opt in.
+
+  **It stays OFF, and the reason is now measured rather than assumed.** On k3d-rpg-dev with
+  the paths set, the gateway logged `"tls":true,"encrypted":true,"authenticated":true` and
+  three Unity clients played through it — gateway TLS and the sealed gameplay hop live at
+  the same time — **but only because they were handed the certificate to pin**
+  (`-cuvara-gateway-tls 1 -cuvara-gateway-tls-cert <PEM>`).
+
+  Unlike the sealed gameplay hop, a mismatch here **cannot name itself**. The listener is
+  wrapped in TLS, so it has no way to answer a plaintext client in a language that client
+  understands: a player build without the flag gets a closed socket, not a stated cause. The
+  escalate-on-refusal path that made sealing work by default (netcode v0.36.2) is therefore
+  unavailable here. Enabling it needs a certificate the client already trusts, or the pin
+  shipped with the client — a deployment decision, not a flag.
+
+### Fixed
+- **Two roadmap claims that the last two days made false.** `ROADMAP-SECURITY.md` step 5
+  still read "NOT YET IN ANY DEPLOYMENT" after dev and staging were flipped to `require` and
+  CD began verifying it on every deploy; step 6 still said the client "needs two things" that
+  netcode v0.36.0 shipped. Both now carry what was measured, including the four defects that
+  only surfaced when sealing was actually switched on.
+
+### Changed
+- **The k8s gameplay hop is sealed: `GAMESERVER_SEALED` moves `off` -> `require` in
+  `k8s/app/50-fleet-map.yaml`, and `VERIFY_SEALED` moves `0` -> `1` in
+  `k8s/verify/targets/k8s-dev.env` and `k8s-stg.env`.** ADR-22 sealed sessions
+  (ChaCha20-Poly1305 over an authenticated X25519 exchange, HKDF-SHA256, the sequence
+  doubling as the replay counter) are implemented on all three sides and the game-server
+  binary has defaulted to `require` since 2026-09-10; every deployed environment pinned it
+  `off`. This flips the k8s fleet.
+
+  **THIS CHANGE HAS A MERGE ORDER, AND IT IS NOT OPTIONAL.**
+
+  1. The Unity client ships first — a netcode release that registers the **protobuf** codec
+     and sets `NetworkSettings.RequireSealedSession`, pinned in the client's
+     `Packages/manifest.json` **and** `packages-lock.json`, in a **built player**. It is not
+     a deployment variable and it cannot be turned on from this repo.
+  2. Only then does this change merge and deploy.
+
+  Done in the other order, **every player is refused at the join**. There is no degraded
+  mode and no plaintext fallback by design (ADR-22 decision 3, `SealedPolicy.RefusalFor`),
+  so the outcome is a closed door, not a slow connection. **What it looks like, so the next
+  person recognises it instead of debugging the cluster:**
+
+  ```
+  [DOTSNet] FATAL: ... gateway closed the connection during the handshake
+  ```
+
+  followed by reconnect attempts that all fail the same way. Server-side the cause is named
+  properly, and that is the log to read: a JSON client is refused with
+  `encoding_cannot_seal`, a protobuf client that never sends the hello with
+  `sealed handshake failed (NoHello)`. **The revert is this one manifest value plus the two
+  target files, together** — flipping the manifest back without the targets, or the reverse,
+  is a red deploy on a healthy stack.
+
+  **Why the old comment was wrong.** The line said "flip this when the smoketest speaks
+  protobuf". The smoketest has spoken protobuf since `-encoding proto` landed
+  (`backend/smoketest/smoke/helpers.go`), and both deploy paths derive `SMOKE_SEALED=1` with
+  `SMOKE_ENCODING=proto` together (`cd.yml` .env generator, `backend/deploy/stack.sh`). So
+  the stated condition was already met while the real blocker — the shipped client — was
+  written down nowhere.
+
+  **Measured on the live `k3d-rpg-dev` cluster, 2026-09-11, with `require` in force:**
+
+  | client | result |
+  |---|---|
+  | Go smoketest `-sealed -encoding proto` | `sealed=true ... SMOKE=PASS` |
+  | Go smoketest, JSON, same server | refused, correctly |
+  | the real Unity client | **FAILED** — registers the JSON codec, never sets `RequireSealedSession` |
+
+  **Blast radius: dev AND staging.** There is no per-environment overlay — dev and staging
+  apply the same `k8s/app/*.yaml` into the same namespaces on different clusters, selected
+  by `vars.KUBE_CONTEXT` / `vars.K8S_VERIFY_TARGET`. One literal seals both, which is why
+  `k8s-stg.env` is flipped here too. Production is untouched: it is not a `k8s`-mode
+  environment (there is no third verify target, and `dev-up.sh` hardcodes the
+  `rpg-k8s-*` namespaces, so a second k8s environment would need its own cluster).
+
+  **The compose/host paths need no change in this repo.** `docker-compose.yml`,
+  `docker-compose.override.yml` and `scripts/deploy-local.sh` all read
+  `${GAMESERVER_SEALED:-off}`, and `cd.yml` normalises the same variable and derives both
+  `SMOKE_` values from it. An environment on `DEPLOY_MODE=host` or `containers` opts in by
+  setting the `GAMESERVER_SEALED` **GitHub Environment variable** to `require` — one
+  reviewable place, no code change — and the same client precondition applies to it.
+
+  **What sealing buys while `binding_verified=false`, stated so it is not overstated.** The
+  passing smoke run reported `sealed=true binding_verified=false`. That is the shipped-client
+  state, not a defect: the server always signs a binding over a transcript covering both
+  ephemeral public keys (`SealedHandshakeServer.RunAsync`), but verifying it needs
+  `JOIN_TOKEN_SECRET` — the HS256 key the gateway **mints join tokens with**
+  (`gateway/transfer/join_token.go`, `shared/config/config.go:86`). A client holding it could
+  forge a join token for any player on any server, a strictly worse break than the one the
+  binding defends against, so no shipped client may carry it. **The hop therefore gets
+  confidentiality against a passive eavesdropper and nothing against an active one**
+  (`shared/sealed/client.go:23-37`). Only the load generator, which mints its own tokens,
+  currently proves the man-in-the-middle defence. Do not let "the gameplay hop is encrypted"
+  be read as "the game server is authenticated"; the fix is the pinned identity key, which
+  is unbuilt (ADR-23).
+
+### Fixed
+- **The stale-plugin warning is now a `::warning::` annotation, because the plain one was
+  invisible and it cost the entire economy.** `dev-up.sh` has warned about Nakama plugin
+  drift for weeks. On 2026-09-10 CD printed exactly that line, the deploy went green, and
+  nobody read it:
+
+  ```
+  WARNING: rpg-mmo/nakama:3.40.0 was built from 768ca78…, whose backend/nakama backend/shared
+    differ(s) from this commit. The plugin in the cluster predates the code being deployed.
+  ```
+
+  The consequence was not cosmetic. The image tag is a **Nakama version**, so it never
+  moves; the `nakama.so` inside it was built **2026-08-20** and predates the batched
+  `reward_kills` RPC (#233/#274). The game server had been calling it ever since, and every
+  call came back `NotFound code=5 {"error":"RPC function not found"}`. Measured on live
+  `k3d-rpg-dev`: `reward_kill` and `submit_kill` answered 400, `reward_kills` answered
+  **404**.
+
+  So the reward path was broken in three layers, each hiding the next: the Fleet never
+  passed `NAKAMA_URL` (fixed in #315, and the server simply issued no RPC); then the RPC
+  reached Nakama and did not exist; and the rebuilt plugin then refused to start at all.
+
+  The warning stays non-fatal — a deploy that refuses because the plugin is a few commits
+  old helps nobody — but it now surfaces on the run summary instead of in scrollback.
+
+### Added
+- **The deploy rebuilds the Nakama plugin image when it has drifted, instead of only saying
+  so.** `dev-up.sh` used to state that it "cannot rebuild the image". That was a choice, not
+  a limit, and the choice is what let a three-week-old plugin sit in the cluster: the image
+  tag is a Nakama *version*, so nothing ever moved it, and no job anywhere rebuilt it.
+
+  On drift — or on an image whose revision label cannot be audited, which is now treated the
+  same way, because trusting an image that cannot say what is in it is how this survived —
+  the deploy rebuilds from the current commit and re-imports.
+
+  It then **restarts the Deployment**, which is the half that is easy to miss: the rebuilt
+  image reuses the tag, so `kubectl apply` sees no diff and the old pod keeps running the
+  old plugin beside a freshly imported image. That state is indistinguishable from a
+  successful deploy, and it is what a rebuild-without-restart would have produced.
+
+  A failed rebuild is loud but not fatal (the cluster keeps the old plugin; refusing the
+  whole deploy over a plugin build is a worse failure than the drift). `NAKAMA_AUTO_REBUILD=0`
+  opts out, for a plugin someone is deliberately holding.
+
+- **`kills_alltime` was writable by clients on `dev`.** The rebuilt plugin refused to boot:
+
+  ```
+  setup leaderboards: leaderboard kills_alltime exists with authoritative=false,
+  so clients can write their own scores
+  ```
+
+  That refusal is the feature — it is how a leaderboard created before the check became
+  visible. Fixed with the documented `UPDATE leaderboard SET authoritative = true`, which
+  keeps existing records; Nakama then started and `reward_kills` answered 400 instead of
+  404.
+
+  Anything deployed from a Nakama DB older than that check should be audited the same way:
+  `SELECT id, authoritative FROM leaderboard;`
+
+### Fixed
+- **The k8s Fleet never told the game server where Nakama was, so no reward RPC has ever
+  been issued from it.** The C# server reads `NAKAMA_URL`; absent, it logs
+  `Nakama: disabled (NAKAMA_URL unset)` and issues nothing. The Fleet passed no `NAKAMA_*`
+  variable at all — and carried no comment saying so, unlike `GAMESERVER_SEALED` beside it,
+  which pins itself off with a paragraph of reasoning. Compose has always passed
+  `NAKAMA_URL` (`docker-compose.yml:432`), so the gap was k8s-only and invisible to
+  everything that runs under compose. `dev` runs `DEPLOY_MODE=k8s`. The exactly-once kill
+  rewards merged in #274 had therefore never executed on the environment that deploys.
+
+  The Fleet now takes `NAKAMA_URL` from `gameserver-config` and `NAKAMA_HTTP_KEY` from
+  `rpg-app-secrets`, **neither `optional`**. That differs from `GAME_DB_URL` next to it on
+  purpose: an absent DSN has a defined, handled meaning (in-memory store), while an absent
+  Nakama URL means "the rewards you believe are being awarded are not", which has no safe
+  reading — so a missing key must stop the pod rather than start one that looks healthy.
+
+  A Secret cannot cross a namespace, so `runtime.http_key` now lives twice — `nakama` in
+  `rpg-k8s-data` (what Nakama starts with) and `rpg-app-secrets` in `rpg-k8s-realtime`
+  (what the game server presents). `dev-up.sh` asserts they are equal, exactly as it
+  already asserts `JWT_SECRET` against the gateway's, because nothing else compares them
+  and a mismatch is a 401 on every reward while both workloads report healthy.
+
+  Verified on live `k3d-rpg-dev`, not inferred. Before: the checks refuse
+  (`rpg-app-secrets has no nakama-http-key`, `gameserver-config has no nakama-url`). After:
+  the recycled pod logs `Nakama: http://nakama.rpg-k8s-data.svc.cluster.local:7350`, and a
+  probe pod in the realtime namespace, taking the key from the same Secret the Fleet reads,
+  gets **400 `user_id is required`** — authenticated and into the handler — against **401**
+  for a wrong key and **401** for Nakama's published default.
+
+### Changed
+- **The deploy gates say so when they pass.** `dev-up.sh` printed only on failure, so a log
+  could not distinguish "the check ran and passed" from "the check was never there" — which
+  is the class of fault these checks exist to catch. The JWT match, the static-key check,
+  the http-key match and the Nakama URL each now print one line on success.
+
+### Fixed
+- **The ADR-24 Nakama key gate did not cover the environment `dev` actually deploys.** That
+  gate writes `deploy/.env` — the **compose** path. `dev` runs `DEPLOY_MODE=k8s`, where the
+  keys come from the out-of-band `nakama` Secret in `rpg-k8s-data` instead, so nothing
+  checked them. Measured on live `k3d-rpg-dev` *after* the gate shipped and CD went green:
+
+  ```
+  GET /v2/rpc/reward_kill?http_key=defaulthttpkey  ->  400 "user_id is required"
+  ```
+
+  400, not 401: the published default key had **passed authentication and reached the
+  handler**, on the deployed dev environment, gating the server-only `reward_kill` /
+  `submit_kill` RPCs. The Secret held `NAKAMA_HTTP_KEY = defaulthttpkey` literally.
+  (`NAKAMA_SERVER_KEY` there was already a real value, which is why only one of the two
+  showed.)
+
+  `dev-up.sh` now asserts both static keys the same way it already asserts `JWT_SECRET`
+  against the gateway's — present, and not at Nakama's published default — and refuses to
+  deploy otherwise. The assertion lives where the Secret is read, because that Secret is
+  applied out-of-band and nothing else looks at it.
+
+  `k8s/data/secrets.example.yaml` no longer ships `defaultkey` / `defaulthttpkey` as its
+  values. A copy that already contains a working default is a copy nobody edits; the
+  placeholders now name the command that produces a real one.
+
+  **Nothing consumed the rotated key**, which is worth recording rather than assuming: the
+  k8s game server logs `Nakama: disabled (NAKAMA_URL unset)`, so no reward RPC has ever been
+  issued from that deployment. Rewards not flowing in k8s `dev` is a separate gap, not
+  closed here.
+
+### Security
+
+- **CD now FAILS the deploy when either Nakama static key is unset or left at its published
+  default** (ADR-24). This closes a defect, not a hypothetical: `cd.yml` **never wrote
+  `NAKAMA_HTTP_KEY` at all**, and `deploy/.env` is regenerated wholesale, so the name was absent
+  from the file and compose's `${NAKAMA_HTTP_KEY:-defaulthttpkey}` resolved to the default **in
+  every environment CD deploys** — for the Nakama flag and for the game server's client env alike.
+
+  That key gates the **server-only** `reward_kill` / `submit_kill` RPCs. Measured against the live
+  stack rather than inferred: no key gives `401 "Auth token or HTTP key required"`, a wrong key
+  gives `401 "HTTP key invalid"`, and `defaulthttpkey` gives `400 "user_id is required"` — i.e. it
+  passed authentication and reached the handler. `defaultkey` likewise mints accounts and sessions
+  (`200` vs `401` for a wrong key). It failed **open and silently**: rewards flowed and nothing
+  warned.
+
+  `NAKAMA_SERVER_KEY`'s `:-defaultkey` fallback in the generator is also gone — the gate already
+  refuses empty and refuses the default, so a fallback could only reintroduce what it exists to
+  prevent.
+
+### Added
+
+- **`NAKAMA_TLS_CERT` / `NAKAMA_TLS_KEY` — Nakama terminates TLS on its own listener**, OFF by
+  default and pinned explicitly at `docker-compose.yml`, `docker-compose.override.yml`,
+  `k8s/data/nakama.yaml` (literal empty values, not omitted), `cd.yml` (written on both branches)
+  and `.env.example`. Exactly one set is a startup **and** deploy error, never a fall back to
+  plaintext.
+
+  **Measured scope, because the flag's name is narrower than "Nakama has TLS":** it covers the
+  socket listener `:7350` only — **including the `/ws` realtime socket**, TLS-only with plaintext
+  refused (`400`) — and does **not** cover the console `:7351` or metrics `:9100`, which in compose
+  publish on `0.0.0.0` and stay in the clear. Nakama itself logs
+  `WARNING: enabling direct SSL termination is not recommended`; taken anyway because on a
+  single-node box a proxy terminates on the same host it protects (ADR-23's argument).
+
+- **`NAKAMA_URL` follows the TLS decision** rather than being configured independently, in compose
+  and in CD. The C# game server is a **second consumer of this hop** — `NakamaClient.cs` POSTs
+  `/v2/rpc/reward_kills?http_key=…` — so two sources of truth for one hop is exactly how it ends up
+  speaking `http://` to an `https://` listener.
+
+### Fixed
+
+- **`stack.sh`: `NAKAMA_TLS_CERT`, `NAKAMA_TLS_KEY` and `NAKAMA_URL` added to `STACK_OVERRIDABLE`.**
+  `.env.example` now writes all three names, so without this a derived or CD-generated `.env` would
+  clobber an operator's command-line override — the documented silent no-op at `stack.sh:130`, in a
+  setting where the failure is "the operator believes the hop is encrypted".
+
+### Notes
+
+- The compose and k8s Nakama entrypoints build the SSL flags with `set --` rather than a string. An
+  **empty** `--socket.ssl_certificate` is not the same as an absent one (Nakama reads the empty path
+  and exits), and an unquoted string would word-split a certificate path containing a space — the
+  same distinction that made `cd.yml` trim these at the ends only. Both entrypoints were executed
+  against a stub across five inputs, not read.
+- Mounting certs from a `/tmp` WSL path makes Docker Desktop create an empty **directory** at the
+  mount point (`is a directory` at startup); `docker cp` resolves `/mnt/e/...` against `E:\`. Use a
+  named volume or a Windows path form. Recorded in `.env.example`.
+
+### Fixed
+- **CD trimmed the TLS certificate paths with a keyword normaliser.** `tr -d '[:space:]'`
+  is right for `GAMESERVER_SEALED` — a keyword, where internal whitespace is meaningless —
+  and wrong for a **path**, where it is data. It would have written `/mycerts/c.pem` for an
+  environment that set `/my certs/c.pem`, handing the gateway a path nobody configured.
+
+  It failed closed (the gateway exits 1 rather than starting plaintext), so this was
+  legibility rather than security. Fixed anyway: **reusing a keyword normaliser on a path
+  is a check that looks like it matches its consumer and does not**, which is the shape
+  this file has been bitten by twice.
+
+  Now trims the ends only, matching `strings.TrimSpace` in `LoadTLSConfig`. Verified by
+  running both against Go's own `strings.TrimSpace` across six inputs — leading/trailing
+  spaces, an internal space, an embedded newline, tabs, and empty — and requiring exact
+  agreement on all of them.
+
+  **The first attempt at this fix was worse than what it replaced.** A `sed`-based trim is
+  line-oriented, so it left an embedded newline in place — and a value pasted into a GitHub
+  Environment variable with a stray newline is the case that actually happens, not the edge
+  case. Caught by running it rather than reading it. The shipped form uses parameter
+  expansion.
+
+### Documentation
+- **Three notes recorded for the meta hop** (`ROADMAP-SECURITY.md`): the Nakama server key
+  is a static shared secret in every client build and crosses that hop as HTTP Basic; any
+  HTTP tap must suppress `Accept-Encoding` before reporting an absence, because the first
+  capture missed a gzipped token; and an `SslStream`/IL2CPP measurement must assert that a
+  **bad certificate is refused**, since degraded validation is indistinguishable from
+  working validation when only the positive case is tested.
+
+### Added
+
+- **`GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY` pinned explicitly at every gateway deploy path**
+  (ADR-23), all of them OFF: `docker-compose.yml` (gateway service), `k8s/app/40-gateway.yaml`
+  (literal empty values, not omitted — an absent variable is indistinguishable from an
+  unconsidered one, and this is a security setting), `.github/workflows/cd.yml` (written on
+  both branches so "off" is a fact in the generated `.env` rather than an absence),
+  `scripts/deploy-local.sh`, and `.env.example` with a worked `openssl` line.
+- **CD refuses a half-configured pair.** Setting exactly one of the two fails the deploy, the
+  same shape as the `GAMESERVER_SEALED` normalisation beside it and for the same reason: a
+  silent fallback is how the two halves disagreed in the first place, and "TLS quietly disabled
+  by a typo" is the wrong direction to fail in. The block was extracted and executed across
+  eight inputs — both unset, both set, each half alone, whitespace-only, a trailing space on a
+  real path, and the names absent from the environment entirely — rather than read.
+
+### Fixed
+
+- **`stack.sh`: `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY` added to `STACK_OVERRIDABLE`.** Not a
+  precaution — adding them to `.env.example` would otherwise have recreated the documented
+  silent no-op at `stack.sh:130`: the file mentions the names, `set -a; . .env` assigns them,
+  and the file's empty value would clobber an operator's `GATEWAY_TLS_CERT=... ./stack.sh up`,
+  bringing the stack up plaintext with nothing saying so. Verified by running the
+  save/source/restore block against a `.env` that mentions both names.
+
+### Fixed
+- **`GAMESERVER_SEALED=REQUIRE` produced a sealed server and a JSON verifier.** The game
+  server parses the value with `.Trim().ToLowerInvariant()`; the CD generator compared the
+  raw string with `= "require"`. Two parsers, one input, different rules — so `REQUIRE`,
+  `Require` or `" require "` gave a server that **seals** and a smoke test configured for
+  **JSON**, which is a red deploy on a perfectly healthy stack with nothing pointing at the
+  capitalisation.
+
+  The generator now normalises once and writes the **normalised** value, so both halves
+  agree by construction. An unrecognised value **fails the deploy** rather than falling back
+  to `off`: a silent fallback is how the two halves disagreed in the first place, and
+  "encryption quietly disabled by a typo" is the wrong direction to fail in.
+
+  **Found by executing the generator rather than reading it** — the block is shell embedded
+  in a workflow, so nothing runs it until CD does. Executed across seven inputs:
+
+  ```
+  []            -> off      SMOKE_SEALED=0 SMOKE_ENCODING=json
+  [off]         -> off      SMOKE_SEALED=0 SMOKE_ENCODING=json
+  [require]     -> require  SMOKE_SEALED=1 SMOKE_ENCODING=proto
+  [REQUIRE]     -> require  SMOKE_SEALED=1 SMOKE_ENCODING=proto   <- was 0/json
+  [ require ]   -> require  SMOKE_SEALED=1 SMOKE_ENCODING=proto   <- was 0/json
+  [Require]     -> require  SMOKE_SEALED=1 SMOKE_ENCODING=proto   <- was 0/json
+  [preferred]   -> deploy refused
+  ```
+
+  Observed and deliberately not changed: `VERIFY_SEALED` on the k8s path is `!= "0"`, so
+  `VERIFY_SEALED=false` would read as ON. Surprising, but it has a single parser, so it
+  cannot produce the disagreement this entry is about.
+
+### Fixed
+- **`GAMESERVER_SEALED=require ./stack.sh …` was a silent no-op on any box with a
+  CD-written `.env`.** `set -a; . "$ENV_FILE"` *assigns*, so every name the file mentions
+  clobbers whatever the operator put on the command line. Once CD's generator started
+  writing `GAMESERVER_SEALED` into `deploy/.env`, the file's `off` beat the caller's
+  `require`, `make flow-up-sealed` brought up an **unsealed** stack, and nothing said so.
+
+  Measured on this project's own deploy directory, where `.env:17` reads
+  `GAMESERVER_SEALED=off`. With the fix the guard sees `require = require`; without it,
+  `off = require`.
+
+  `stack.sh` now preserves caller-set values for `GAMESERVER_SEALED`, `SMOKE_SEALED` and
+  `SMOKE_ENCODING` across the sourcing. Only those: ports and secrets must keep coming from
+  the file, because they describe the containers that are actually running — verified by
+  checking that a caller's `GATEWAY_ADDR` is still correctly overridden by the file.
+
+  **This is the second independent way that target can silently do nothing.** The first is
+  the WSL/`WSLENV` boundary, which `stack.sh:93` has documented since before today. They are
+  unrelated, so fixing one leaves the other, and both fail by quietly doing the ordinary
+  thing.
+
+### Documentation
+- **Correction: the `WSLENV` note added to the Makefile was not a new finding.** It was
+  already in `stack.sh` — *"WSL only forwards environment variables to a Windows process
+  when they are listed in `$WSLENV`"* — in a file read several times that day. The Makefile
+  placement is still worth having, because a reader of `flow-up-sealed` would not find a
+  note filed under compose project naming, but it was presented as a discovery and was not.
+
+### Documentation
+- **`make flow-up-sealed` silently does nothing on WSL with Docker Desktop**, and the
+  Makefile now says so at the target. The WSL `docker` is `exec docker.exe "$@"`, and the
+  WSL→Windows boundary drops every variable not named in `WSLENV`, so compose interpolates
+  the `off` default and reports success. The compose files are correct; the boundary is
+  what fails. `WSLENV=GAMESERVER_SEALED make flow-up-sealed` works.
+
+  Recorded with how it was found, because the finding nearly went the other way: the first
+  measurement looked like a broken pin, and only a control — a throwaway compose file with
+  `${PROBE_VAR:-fallback}` — showed the channel was dropping variables rather than the
+  variable being wrong. Prove the channel before concluding anything about the value.
+
+### Fixed
+- **The `docker-compose.yml` note still said a sealed stack could not be verified.** It
+  can, as of the smoke test's `-encoding` flag, and `stack.sh check` derives both halves.
+  Replaced with `send-budget`'s wording from #300, adapted to the derivation that shipped.
+
+### Added
+
+- **`GAMESERVER_SEALED` now drives the deploy verifier too**, so setting it on an
+  environment is a working switch instead of a red deploy. It stays the single input; the
+  two variables the smoke test needs are derived from it in the two places that reach the
+  two invocation sites:
+  - **`cd.yml`'s `deploy/.env` generator** writes `SMOKE_SEALED` **and** `SMOKE_ENCODING`
+    together, on **both** branches. `SMOKE_ENCODING=json` is already the default and changes
+    nothing today; writing it anyway makes the pairing visible at the line, so a future
+    reader editing one sees the other beside it.
+  - **`checks_flow.sh`** gains `VERIFY_SEALED`, because the k8s path does **not** source
+    `deploy/.env` — that file describes the compose stack, which k8s mode did not deploy.
+    This was the caveat raised when a single source of truth was first proposed, and it is
+    now closed rather than carried.
+  - **Both are needed, never one.** A sealed run is necessarily a protobuf run: the JSON
+    codec has no sealed frame, so a `require` server refuses a JSON client at the join with
+    `encoding_cannot_seal`. Deriving `SMOKE_SEALED` alone reproduces that failure exactly.
+- **`flow.smoke` now names the hop mode in its pass, warn and fail lines.** A green line
+  that does not say whether it verified a sealed or a plaintext hop cannot tell you what was
+  covered — the same reason `db_mode` is already reported there.
+
+### Changed
+
+- **Replaced the comment at the `GAMESERVER_SEALED` line that said `SMOKE_SEALED` must NOT
+  be derived.** It was true when the smoke test could not seal in any configuration, and it
+  sat exactly where someone would look before adding these lines — a stale warning in the
+  one position where it would stop the correct change. Its replacement states the live
+  constraint instead: the two variables move together, and turning sealing on for an
+  environment is still a separate, deliberate act carrying a client rollout with it.
+
+> **This turns nothing on.** Every deploy path still pins `GAMESERVER_SEALED=off` and both
+> verify targets still default `VERIFY_SEALED=0`.
+
+### Documentation
+
+- **`docs/CICD.md` § 6b: "no checks reported" has four causes, not one.** The 2026-08-06
+  entry fixed one of them (`ci.yml` not listing `develop` under `pull_request`) and the
+  symptom outlived the fix. All four were hit on 2026-09-10, three of them on a single PR,
+  and **two of them while fixing another one of them**:
+  1. the PR is `CONFLICTING`, so GitHub cannot compute a merge commit and runs nothing;
+  2. the base is a feature branch (a stacked PR), matching no `pull_request: branches:` entry;
+  3. the base was changed *after* opening — retargeting fires `pull_request: edited`, which
+     is not in the default activity types, so **fixing cause 2 does not start CI**;
+  4. a `paths:` filter excluded the PR — the original bug's shape.
+  Each reads as "nothing is wrong". The section also warns that `CONFLICTING` is a
+  **`mergeable`** value and not a `mergeStateStatus` one — `MergeStateStatus` has no such
+  value, so checking the wrong field never matches and the reader concludes cause 1 does not
+  apply. A conflicted PR reads `mergeStateStatus: DIRTY`; `BLOCKED` is what a *healthy* PR
+  shows while checks are pending. The first draft of this very section named the wrong
+  field, which is the failure the section is about. The section carries a diagnostic table, the two rules
+  that follow from it (never read an empty check list as green; verify the fix *started a
+  run* rather than that the cause is gone), and the `gh workflow run --ref` recovery.
+- Also recorded there: `gh pr edit` is a silent no-op on this repo (deprecated GraphQL
+  `projectCards` field), so a base change needs the REST API.
+
+### Changed
+- **`stack.sh check` now derives `SMOKE_SEALED` *and* `SMOKE_ENCODING` together** when the
+  stack is sealed, and `make flow-check-sealed` is back. The guard that refused to check a
+  sealed stack has been removed rather than worked around: the smoke test gained an
+  `-encoding` flag, so the reason it could not is gone.
+
+  The two are derived together because they are one decision — **a sealed run must be a
+  protobuf run**, and deriving only `SMOKE_SEALED` reproduces the original
+  `encoding_cannot_seal` failure exactly. The one combination that still cannot work
+  (`SMOKE_SEALED=1` with a non-protobuf encoding) is refused up front; `SMOKE_SEALED=0`
+  still wins, so the refusal can be asserted deliberately.
+
+- **`cd.yml`'s reason for not deriving `SMOKE_SEALED` is corrected in place.** It said the
+  smoketest speaks JSON and the check therefore cannot pass. It can now. What remains is
+  that both variables must be derived together, and that belongs with whoever first sets an
+  environment to `require` — so the comment says that instead of a fact that stopped being
+  true.
+
+### Changed
+
+- **Every deploy path pins `GAMESERVER_SEALED=off`, not just compose.** The game server
+  binary now defaults to `require`, so a config site that says nothing takes encryption by
+  default — and **no deploy path can survive that yet**, because `verify.sh` layer 4 and
+  `post-deploy-smoke` both run the JSON smoketest against what was just deployed and a JSON
+  client can never seal. Pinning one file would have been worse than pinning none: it reads
+  as covered.
+  - `backend/deploy/docker-compose.override.yml` — the second map server. Unpinned it would
+    have produced the worst version of the mistake: `map_01` unsealed and `map_02` sealed on
+    the same stack, so a client transferring between maps works on one and is refused on the
+    other.
+  - `backend/deploy/agones/fleet-map-dotnet-dev.yaml` and
+    `backend/deploy/k8s/app/50-fleet-map.yaml` — **the k8s path, which is what dev actually
+    runs** (`DEPLOY_MODE=k8s` in the live `deploy/.env`). Agones-allocated game servers do
+    not read the compose file at all, so the compose pin covered none of dev.
+  - `scripts/deploy-local.sh` — host mode, exported so the spawned server inherits it.
+  - `.github/workflows/cd.yml` — writes `GAMESERVER_SEALED=${GAMESERVER_SEALED:-off}` into
+    the generated `deploy/.env`, so an environment has **one reviewable place to opt in**,
+    the same shape and reason as `ALLOCATOR=${ALLOCATOR:-none}`. `SMOKE_SEALED` is
+    deliberately **not** derived alongside it, with the reason at the line: no value of it
+    makes verification pass against a sealed server, so deriving one converts a check that
+    cannot pass into a check that always fails. Setting `GAMESERVER_SEALED=require` on an
+    environment today therefore produces a red deploy — correctly, and by design.
+
+- **`docker-compose.yml` pins `GAMESERVER_SEALED=off` explicitly**, now that a stock game
+  server defaults to `require`. Pinned deliberately, with the reason at the line, so the
+  next reader knows it is a decision and not an oversight: six Unity sample scenes
+  (`DOTSNetworkBridge`, three `E2ECertification` scenes, `ReconnectPolicyDemo`, `WorldView`)
+  construct `NetworkSettings` and dial a live backend without setting
+  `RequireSealedSession`, and those scenes are the netcode package's acceptance path rather
+  than demos. Inheriting the default would break all six, and the fix lives in the client
+  repo on a package release cadence. The pin comes out when the samples set the flag.
+
+### Added
+
+- **`make flow-up-sealed`**, so the sealed path is exercisable locally on purpose rather
+  than only in CI. `GAMESERVER_SEALED=require ./stack.sh up` is the same thing without make.
+- **`stack.sh check` refuses up front when asked to check a sealed stack**, and warns when
+  the stack is sealed and it is about to be refused. **The smoke test cannot check a sealed
+  stack and no environment variable fixes that**: it speaks JSON, hand-rolled over
+  `encoding/json` with no encoding switch, and a JSON client can never carry a sealed
+  frame — so a `require` server refuses it at the join with `encoding_cannot_seal`, before
+  any sealing code runs. Its JSON-ness is load-bearing rather than incidental: it makes the
+  smoke test an *independent* second implementation of the wire.
+  - An earlier draft of this change derived `SMOKE_SEALED=1` from
+    `GAMESERVER_SEALED=require` so the two halves could not drift. That would have turned a
+    check that cannot pass into a check that runs and always fails. It was measured failing
+    on a live stack before it shipped, which is the only reason it is not in this entry as
+    a feature.
+  - There is deliberately **no `flow-check-sealed`**. To drive a sealed stack, use the load
+    generator, which speaks protobuf: `loadtest -sealed -encoding proto`.
+
+### Fixed
+- **`stack.sh up` rebuilds `modules/nakama.so` when it is older than any `nakama/` or `shared/`
+  Go source (or the plugin Dockerfile), not only when the file is missing.** The old
+  "present — skipping plugin build" rule let a mainline checkout run an 11-day-old plugin
+  through every `up` while a fresh worktree beside it — where the file did not exist yet — got a
+  current one; on 2026-09-07 the live economy probe read the *old* RPC behaviour on a develop
+  that had just merged the fix. Nakama is stopped before the rebuild because a running
+  container holds the file open on Windows-backed mounts. `--no-build` still skips everything.
+
+### Changed
+- **`docker-compose.yml` nakama service sets `LEADERBOARD_MIGRATE=recreate` (dev only).**
+  The nakama plugin now creates `kills_alltime` authoritative and refuses to load when an
+  existing board is not (`backend/nakama` Unreleased, audit F02). Every existing local
+  stack holds the old non-authoritative board, so without this the next `stack.sh up`
+  would fail closed for every developer. The variable makes the plugin delete and
+  recreate the board on start-up, discarding its records — acceptable for a local stack.
+  It is passed as a plain container env var because the plugin falls back from
+  `--runtime.env` to the process env, same as `JWT_SECRET` here. `k8s/data/nakama.yaml`
+  and `k8s/README.md` carry the opposite instruction: staging/prod must use RUNBOOK
+  path A (SQL flip of the `leaderboard.authoritative` row + restart) and must not set
+  `recreate`.
+
+## [0.9.0] - 2026-09-05
+
 ### Added
 - **ADR-15 prerequisite 2: ConfigMap init-gamestate manifests.**
   `k8s/data/configmap-init-gamestate.yaml` documents the ConfigMap shape that

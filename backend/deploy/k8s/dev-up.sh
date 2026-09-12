@@ -162,6 +162,47 @@ if [ "$IMPORT_IMAGES" = "1" ]; then
   # does NOT apply to it. Its tag is a Nakama version and its image is built
   # out-of-band, so its stamped revision is whenever the plugin was last built --
   # never this run's commit. Putting it in that loop would refuse every deploy.
+  # Set by nakama_rebuild when it actually rebuilds, so the rollout below knows it
+  # must replace the running pod. The tag never changes, so `kubectl apply` sees no
+  # diff and would leave the OLD plugin running beside a freshly imported image --
+  # which is indistinguishable from a successful deploy, and was.
+  nk_rebuilt=0
+
+  # Rebuilds the Nakama image from THIS commit and re-imports it. This script used
+  # to say it "cannot rebuild the image"; that was a choice, not a limit, and it
+  # cost three weeks of a silently broken economy -- the baked plugin predated the
+  # reward_kills RPC the game server was calling, so every reward returned NotFound
+  # while every deploy stayed green.
+  #
+  # Opt out with NAKAMA_AUTO_REBUILD=0 (a local deploy against a plugin you are
+  # deliberately holding, say). The build is skipped entirely when nothing drifted.
+  nakama_rebuild() {
+    if [ "${NAKAMA_AUTO_REBUILD:-1}" = "0" ]; then
+      echo "NAKAMA_AUTO_REBUILD=0, leaving $NAKAMA_IMAGE as it is"
+      return 0
+    fi
+    local dockerfile="$HERE/../nakama-plugin.Dockerfile"
+    local context="$HERE/../.."
+    if [ ! -f "$dockerfile" ]; then
+      echo "::warning::cannot rebuild $NAKAMA_IMAGE: $dockerfile is missing"
+      return 0
+    fi
+    say "rebuilding $NAKAMA_IMAGE from $(git -C "$HERE" rev-parse --short HEAD)"
+    if docker build -f "$dockerfile" \
+         --build-arg NAKAMA_VERSION="${NAKAMA_IMAGE##*:}" \
+         --build-arg GIT_REVISION="$(git -C "$HERE" rev-parse HEAD)" \
+         --target runtime -t "$NAKAMA_IMAGE" "$context"; then
+      nk_rebuilt=1
+      nk_rev=$(git -C "$HERE" rev-parse HEAD)
+      echo "rebuilt $NAKAMA_IMAGE at revision $nk_rev"
+    else
+      # Not fatal: the old image still runs, and refusing the whole deploy over a
+      # plugin build would be a worse failure than the drift it is fixing. The
+      # annotation is what makes it impossible to miss.
+      echo "::error title=Nakama plugin rebuild failed::$NAKAMA_IMAGE could not be rebuilt; the cluster keeps the OLD plugin"
+    fi
+  }
+
   if [ -n "$NAKAMA_IMAGE" ]; then
     say "import the nakama image into the k3d node"
     if docker image inspect "$NAKAMA_IMAGE" >/dev/null 2>&1; then
@@ -185,9 +226,19 @@ if [ "$IMPORT_IMAGES" = "1" ]; then
             [ -n "$a" ] && [ "$a" != "$b" ] && nk_drift="$nk_drift $path"
           done
           if [ -n "$nk_drift" ]; then
+            # ::warning:: so GitHub surfaces it on the run summary. A plain echo
+            # scrolls past in a green deploy, and this one did: on 2026-09-10 CD
+            # printed exactly this text, the deploy went green, and the plugin in
+            # the cluster was three weeks old -- old enough to be missing the
+            # `reward_kills` RPC the game server had been calling since #233, so
+            # EVERY kill reward failed with "RPC function not found". Nobody read
+            # the line, because nothing made it worth reading.
+            echo "::warning title=Nakama plugin is stale::$NAKAMA_IMAGE was built from ${nk_rev}; $nk_drift differ(s) from this commit. Rebuild: make -C backend/deploy image"
             echo "WARNING: $NAKAMA_IMAGE was built from ${nk_rev}, whose$nk_drift differ(s)"
             echo "  from this commit. The plugin in the cluster predates the code being deployed."
-            echo "  Rebuild with: make -C backend/deploy image"
+            echo "  An RPC added since then does not exist in the cluster, and the caller"
+            echo "  sees NotFound rather than anything that names this."
+            nakama_rebuild
           else
             echo "$NAKAMA_IMAGE carries the same nakama/shared trees as this commit"
           fi
@@ -198,9 +249,13 @@ if [ "$IMPORT_IMAGES" = "1" ]; then
           echo "  revision reported was Heroic Labs' own release commit and had nothing to do"
           echo "  with the plugin baked in. That was the state until 2026-08-20. Rebuild:"
           echo "    make -C backend/deploy image      # or docker build --build-arg GIT_REVISION=..."
+          nakama_rebuild
         fi
       else
         echo "WARNING: $NAKAMA_IMAGE carries no revision label; its plugin cannot be audited."
+        # Unauditable is treated as drifted. The alternative is to trust an image
+        # that cannot say what is in it, which is how the stale plugin survived.
+        nakama_rebuild
       fi
       echo "importing $NAKAMA_IMAGE (revision ${nk_rev:-unstamped})"
       docker save "$NAKAMA_IMAGE" | docker exec -i "$K3D_NODE" ctr -n k8s.io images import -
@@ -256,6 +311,12 @@ say "wait for the data tier"
 $K rollout status -n rpg-k8s-data statefulset/postgres-meta --timeout=180s
 $K rollout status -n rpg-k8s-data statefulset/postgres-game --timeout=180s
 $K rollout status -n rpg-k8s-data statefulset/redis         --timeout=180s
+# A rebuilt image reuses the tag, so `apply` above saw no diff and the old pod is
+# still running the old plugin. Replace it explicitly, or the import was pointless.
+if [ "${nk_rebuilt:-0}" = "1" ]; then
+  say "restarting nakama to pick up the rebuilt plugin"
+  $K rollout restart -n rpg-k8s-data deploy/nakama
+fi
 $K rollout status -n rpg-k8s-data deploy/nakama             --timeout=300s
 
 # Read the images the cluster is ALREADY running, before `apply` overwrites the
@@ -290,6 +351,83 @@ if [ -z "$nk_jwt" ] || [ "$nk_jwt" != "$gw_jwt" ]; then
   echo "  Nakama signs the gateway token; the gateway verifies it locally." >&2
   exit 1
 fi
+echo "checked: nakama's JWT_SECRET matches the gateway's jwt-secret"
+
+# The two STATIC Nakama keys, asserted for the same reason as the JWT above: this
+# Secret is applied out-of-band, so nothing else looks at it, and a value left at
+# Nakama's published default authenticates anyone who can reach the service.
+#
+# This is not hypothetical. cd.yml gained a gate for it in ADR-24, but that gate
+# writes deploy/.env -- the COMPOSE path. dev runs DEPLOY_MODE=k8s, where the keys
+# come from this Secret instead, so the gate never covered the environment dev
+# actually deploys. Measured on live k3d-rpg-dev after that gate shipped:
+# `?http_key=defaulthttpkey` still returned 400 "user_id is required", i.e. it had
+# passed authentication and reached the handler.
+#
+# runtime.http_key gates the server-only reward_kill / submit_kill RPCs.
+for _pair in "NAKAMA_SERVER_KEY:defaultkey" "NAKAMA_HTTP_KEY:defaulthttpkey"; do
+  _name=${_pair%%:*}
+  _bad=${_pair##*:}
+  _val=$($K get secret nakama -n rpg-k8s-data -o "jsonpath={.data.$_name}" 2>/dev/null | base64 -d 2>/dev/null || true)
+  if [ -z "$_val" ]; then
+    echo "ERROR: nakama Secret has no $_name." >&2
+    echo "  It is a static, never-expiring server credential. Absent means Nakama is" >&2
+    echo "  started with an empty key, which is not a safe default in either direction." >&2
+    echo "  Set it: openssl rand -hex 32" >&2
+    exit 1
+  fi
+  if [ "$_val" = "$_bad" ]; then
+    echo "ERROR: nakama Secret's $_name is Nakama's published default ('$_bad')." >&2
+    echo "  That value authenticates: measured, not inferred. Rotate it with" >&2
+    echo "  openssl rand -hex 32 and re-apply the Secret." >&2
+    exit 1
+  fi
+done
+# Said out loud on SUCCESS too. A gate that is silent when it passes cannot be
+# told apart, in a log, from a gate that was never there -- which is the whole
+# class of fault these checks exist to catch.
+echo "checked: nakama static keys are set and are not Nakama's published defaults"
+
+# The game server's copy of runtime.http_key. A Secret cannot cross a namespace,
+# so the value lives twice -- `nakama` in rpg-k8s-data (what Nakama starts with)
+# and `rpg-app-secrets` in rpg-k8s-realtime (what the game server presents) --
+# and NOTHING ELSE COMPARES THEM. Same shape and same reason as the JWT check
+# above: a mismatch yields a stack that comes up perfectly healthy and returns
+# 401 on every reward, which is indistinguishable from an economy that is simply
+# quiet.
+#
+# Absent is worse than mismatched, because the server's own fallback is the
+# published default: Program.cs reads `Env("NAKAMA_HTTP_KEY") ?? "defaulthttpkey"`.
+gs_http_key=$($K get secret rpg-app-secrets -n rpg-k8s-realtime -o 'jsonpath={.data.nakama-http-key}' 2>/dev/null | base64 -d 2>/dev/null || true)
+nk_http_key=$($K get secret nakama -n rpg-k8s-data -o 'jsonpath={.data.NAKAMA_HTTP_KEY}' 2>/dev/null | base64 -d 2>/dev/null || true)
+if [ -z "$gs_http_key" ]; then
+  echo "ERROR: rpg-app-secrets has no nakama-http-key." >&2
+  echo "  The game server POSTs reward_kills / submit_kill with it. Without it the" >&2
+  echo "  Fleet cannot start (the key is not optional, on purpose), and if it could" >&2
+  echo "  the server would fall back to Nakama's published default." >&2
+  echo "  Add it with the SAME value as NAKAMA_HTTP_KEY in the nakama Secret:" >&2
+  echo "    kubectl -n rpg-k8s-realtime patch secret rpg-app-secrets --type=json \\" >&2
+  echo "      -p \"[{\\\"op\\\":\\\"add\\\",\\\"path\\\":\\\"/data/nakama-http-key\\\",\\\"value\\\":\\\"\$(printf %s \"\$KEY\" | base64 -w0)\\\"}]\"" >&2
+  exit 1
+fi
+if [ "$gs_http_key" != "$nk_http_key" ]; then
+  echo "ERROR: rpg-app-secrets' nakama-http-key does not equal the nakama Secret's NAKAMA_HTTP_KEY." >&2
+  echo "  Nakama would reject every reward RPC with 401 while both workloads look healthy." >&2
+  exit 1
+fi
+echo "checked: the game server's nakama-http-key matches the one Nakama starts with"
+
+# The URL the reward RPCs are POSTed to. Absent, the server logs
+# "Nakama: disabled (NAKAMA_URL unset)" and issues no RPC at all -- which is
+# exactly how this fleet ran for weeks with the economy work merged and green.
+gs_nakama_url=$($K get configmap gameserver-config -n rpg-k8s-realtime -o 'jsonpath={.data.nakama-url}' 2>/dev/null || true)
+if [ -z "$gs_nakama_url" ]; then
+  echo "ERROR: gameserver-config has no nakama-url." >&2
+  echo "  The game server would start with Nakama DISABLED and award nothing, quietly." >&2
+  echo "  Apply app/20-configmaps.yaml from this commit." >&2
+  exit 1
+fi
+echo "checked: the game server will reach Nakama at $gs_nakama_url"
 $K apply -f "$HERE/app/40-gateway.yaml" -f "$HERE/app/50-fleet-map.yaml"
 
 # Pin the resolved images over whatever the manifests carry. The Fleet is

@@ -15,6 +15,21 @@
 //
 // An empty key means plaintext. Every mode exits non-zero on failure and prints
 // a single-line result, so a test harness can assert on it.
+//
+// # This probe cannot talk to a stock server
+//
+// A stock game server defaults to GAMESERVER_SEALED=require: it runs a sealed
+// handshake after the join reply and closes any connection that does not. This
+// probe does not speak it, so `join` against a default server accepts the join
+// and is then disconnected. Point it at a server started with GAMESERVER_SEALED=off
+// (or --sealed off).
+//
+// That is deliberate and it is not a gap to fill here. The thing under test is the
+// KCP transport — framing, tuning profile, transport-level key derivation — and
+// sealing sits a layer above it, on top of any transport. Teaching this probe to
+// seal would widen what a failure could mean without widening what it proves. The
+// sealed handshake has its own Go client in backend/shared/sealed and its own
+// end-to-end coverage in backend/integration_test/sealed_session_e2e_test.go.
 package main
 
 import (

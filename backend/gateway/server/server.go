@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,6 +49,11 @@ type Gateway struct {
 	// transportKey is the pre-shared KCP encryption key ("" = plaintext).
 	transportKey string
 
+	// tlsConfig makes Run wrap the listener so this process terminates TLS
+	// itself (ADR-23). Nil is plaintext and is the default. Immutable after
+	// New, so Run reads it lock-free.
+	tlsConfig *tls.Config
+
 	// kickStream publishes duplicate-login supersede events for game servers
 	// to consume (events:kick, ADR-5 Streams). Nil only when the option was
 	// not passed; main.go always passes it, and publishSupersede logs loudly
@@ -78,6 +85,18 @@ type Gateway struct {
 	// tests that need the deadline to expire in milliseconds. Immutable after
 	// the gateway starts serving.
 	enterWorldBudget time.Duration
+
+	// minProtocolVersion is the lowest wire protocol version this gateway will
+	// admit on MsgAuth. Zero — the shipping default — also admits a client that
+	// advertises nothing, because proto3 elides a zero and every client built
+	// before the field is indistinguishable from one sending 0.
+	//
+	// Set it to messages.WireProtocolVersion once the fleet advertises and an
+	// unversioned client is refused through the same named path as a mismatched
+	// one. The gateway_unversioned_handshakes_total counter is what says that
+	// flip is safe; flipping it while the counter is still moving locks out real
+	// players. Immutable after the gateway starts serving.
+	minProtocolVersion uint32
 
 	mu        sync.Mutex
 	listener  net.Listener
@@ -149,6 +168,51 @@ func WithTransportKey(key string) Option {
 	return func(g *Gateway) { g.transportKey = key }
 }
 
+// WithTLS makes the gateway terminate TLS on its own listener (ADR-23).
+//
+// A nil config means plaintext, which is the default and the shipped state.
+// There is deliberately no "prefer TLS" and no sniffing: a listener with a
+// certificate serves TLS only and closes a plaintext client. ADR-22 decision 3
+// applies unchanged — a protocol that can be talked down to cleartext will be,
+// and the only reliable defence is having nothing to downgrade to.
+//
+// TLS is meaningful only over TCP; over KCP it is ignored and the boot posture
+// says so. See LoadTLSConfig for how the certificate is read.
+func WithTLS(cfg *tls.Config) Option {
+	return func(g *Gateway) { g.tlsConfig = cfg }
+}
+
+// LoadTLSConfig builds a server TLS config from a certificate and key path.
+//
+// Both empty means "no TLS" and returns (nil, nil) — the default. Exactly one
+// of them set is a configuration ERROR rather than a silent fallback to
+// plaintext: an operator who set one and typo'd the other meant to have TLS,
+// and starting anyway would hand them the plaintext listener they were trying
+// to eliminate while their config file says otherwise.
+//
+// TLS 1.2 is the floor. It is not 1.3 because the client half is unwritten and
+// pinning 1.3 before knowing what Unity's TLS stack negotiates on Android would
+// be choosing a constraint blind; raise it once the client is measured.
+func LoadTLSConfig(certPath, keyPath string) (*tls.Config, error) {
+	certPath, keyPath = strings.TrimSpace(certPath), strings.TrimSpace(keyPath)
+	switch {
+	case certPath == "" && keyPath == "":
+		return nil, nil
+	case certPath == "":
+		return nil, fmt.Errorf("gateway tls: key is set but certificate is not; set both or neither")
+	case keyPath == "":
+		return nil, fmt.Errorf("gateway tls: certificate is set but key is not; set both or neither")
+	}
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("gateway tls: load keypair (%s, %s): %w", certPath, keyPath, err)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}, nil
+}
+
 // WithConnRateLimit bounds accepted connections per source IP: `burst`
 // instantly, then `ratePerSec` sustained. A non-positive rate disables it.
 //
@@ -170,6 +234,15 @@ func WithMsgRateLimit(ratePerSec, burst float64) Option {
 	return func(g *Gateway) {
 		g.msgRate = ratePerSec
 		g.msgBurst = burst
+	}
+}
+
+// WithMinProtocolVersion sets the lowest wire protocol version the gateway
+// admits. Zero (the default) additionally admits clients that advertise no
+// version at all; see Gateway.minProtocolVersion.
+func WithMinProtocolVersion(v uint32) Option {
+	return func(g *Gateway) {
+		g.minProtocolVersion = v
 	}
 }
 
@@ -354,16 +427,65 @@ func (g *Gateway) Run(addr string) error {
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
+
+	// TLS termination in THIS process (ADR-23), not at an edge. Wrapping the
+	// listener is the whole change: TLS hands Accept a net.Conn like any other,
+	// so the 4-byte-length framing, the codec and every handler below are
+	// untouched.
+	//
+	// TLS needs a reliable ordered byte stream, which KCP is not, so a cert on
+	// a KCP listener is refused at startup rather than ignored. Ignoring it
+	// would produce a gateway that was configured for TLS, is serving
+	// plaintext, and says "kcp" — the believed-protected state ADR-21 exists to
+	// prevent.
+	tlsActive := false
+	if g.tlsConfig != nil {
+		if transport.Normalize(g.transportKind) != transport.KindTCP {
+			ln.Close()
+			return fmt.Errorf("listen: TLS is configured but the transport is %q; TLS requires a reliable ordered stream, so use --transport tcp or unset the certificate",
+				transport.Normalize(g.transportKind))
+		}
+		ln = tls.NewListener(ln, g.tlsConfig)
+		tlsActive = true
+	}
+
 	g.mu.Lock()
 	g.listener = ln
 	g.mu.Unlock()
 	g.connLimiter.StartCleanup(time.Minute)
+
+	// Transport confidentiality posture, reported on every boot.
+	//
+	// The field this replaces was WRONG, not merely incomplete: it logged
+	// `encrypted` as `g.transportKey != ""`, so a gateway on TCP with a key set
+	// reported encrypted=true while putting every auth frame and join token on
+	// the wire in cleartext — TCP has no packet-crypt layer and the key is
+	// ignored. A security field that is confidently false is worse than one that
+	// is missing, because nobody goes looking behind it.
+	posture := transport.PostureTLS(g.transportKind, g.transportKey, addr, tlsActive)
+	if g.metrics != nil {
+		g.metrics.SetTransportPosture(posture)
+	}
+
 	g.logger.Info("gateway listening",
 		"addr", ln.Addr().String(),
-		"transport", transport.Normalize(g.transportKind),
-		"encrypted", g.transportKey != "",
+		"transport", posture.Transport,
+		"tls", posture.TLS,
+		"encrypted", posture.Encrypted,
+		"authenticated", posture.Authenticated,
+		"cipher", posture.Cipher,
 		"conn_limit", g.connLimiter.Enabled(),
 		"msg_limit", g.msgRate > 0)
+
+	if posture.Encrypted {
+		g.logger.Info("transport posture", "summary", posture.Summary)
+	} else {
+		// Warn, every boot, including for the default configuration. Before this
+		// the only cleartext case that warned was KCP-without-a-key, so plain TCP
+		// -- the default, and the one with no encryption at all -- was silent.
+		g.logger.Warn("transport posture", "summary", posture.Summary,
+			"remedy", "set "+transport.KeyEnvVar+" (32-byte hex) and --transport kcp, or terminate TLS in front of this listener")
+	}
 
 	for {
 		conn, err := ln.Accept()
@@ -559,8 +681,9 @@ func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
 		g.logger.Warn("message rate limited",
 			"conn", cc.ID(), "ip", cc.RemoteIP(), "user", cc.UserID(), "type", env.Type)
 		resp, err := cc.Reply(messages.MsgAuthResp, messages.AuthResponse{
-			OK:    false,
-			Error: "rate limited",
+			OK:              false,
+			Error:           "rate limited",
+			ProtocolVersion: messages.WireProtocolVersion,
 		})
 		if err != nil {
 			cc.Close()
@@ -700,6 +823,45 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 		return
 	}
 
+	// The version check runs BEFORE the token is verified, deliberately. A peer
+	// that cannot speak this schema is refused whether or not its credential is
+	// good: the refusal is about the connection being unusable, not about who is
+	// on the far end, and answering "protocol_version_mismatch" to a valid token
+	// is more useful to an operator than answering "invalid token" to a client
+	// whose real problem is that it is a version behind. It also declines to
+	// spend an HMAC verification on a connection that is already refused.
+	switch messages.CheckProtocolVersion(req.ProtocolVersion, g.minProtocolVersion) {
+	case messages.VersionAccepted:
+		// Nothing to record: this is the expected path.
+
+	case messages.VersionAcceptedUnversioned:
+		// Admitted on trust. Counted, and logged once per connection, because an
+		// invisible fallback is behaviourally identical to having no check.
+		g.metrics.UnversionedHandshake()
+		// Debug, not Info: a healthy session has a documented per-session log
+		// budget (TestSessionVolumeIsBoundedPerSession) and this notice is not
+		// worth a line of it on every login during the whole migration window.
+		// gateway_unversioned_handshakes_total is the instrument that matters;
+		// this line only helps when someone is already looking at one connection.
+		if cc.firstUnversionedNotice() {
+			g.logger.Debug("client advertised no protocol version",
+				"conn", cc.ID(), "ip", cc.RemoteIP(),
+				"gateway_version", messages.WireProtocolVersion)
+		}
+
+	case messages.VersionRefused:
+		g.metrics.AuthResult(false)
+		g.metrics.ProtocolVersionRefused()
+		g.logAuthFailure(cc, slog.LevelWarn, "", messages.ReasonProtocolVersionMismatch,
+			messages.ProtocolVersionMismatchError(req.ProtocolVersion, g.minProtocolVersion))
+		// SendAndClose, not Send: unlike a bad token, this is not retryable on
+		// the same connection. Nothing the client can do without a new build
+		// will change the answer, so holding the socket open would only let it
+		// retry into the same refusal.
+		g.sendAuthRefusalAndClose(cc, messages.ReasonProtocolVersionMismatch)
+		return
+	}
+
 	userID, err := session.VerifyClientJWTKeyring(req.Token, g.authKeys)
 	if err != nil {
 		g.metrics.AuthResult(false)
@@ -777,8 +939,9 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 	}
 
 	resp, err := cc.Reply(messages.MsgAuthResp, messages.AuthResponse{
-		OK:     true,
-		UserID: userID,
+		OK:              true,
+		UserID:          userID,
+		ProtocolVersion: messages.WireProtocolVersion,
 	})
 	if err != nil {
 		g.logger.Error("marshal auth response", "err", err)
@@ -874,11 +1037,35 @@ func (g *Gateway) sendAuthError(cc *ClientConn, msg string) {
 	resp, err := cc.Reply(messages.MsgAuthResp, messages.AuthResponse{
 		OK:    false,
 		Error: msg,
+		// Echoed on every failure, not only a version refusal: a client that
+		// cannot parse this frame's OTHER fields still learns which schema the
+		// gateway speaks, which is the one thing that tells it whether the
+		// failure is its credential or its build.
+		ProtocolVersion: messages.WireProtocolVersion,
 	})
 	if err != nil {
 		return
 	}
 	cc.Send(resp)
+}
+
+// sendAuthRefusalAndClose answers a version-refused client and hangs up.
+//
+// Send + Close would race: Close can RST the socket before the kernel has
+// flushed the frame, and the client would see a bare disconnect instead of the
+// named reason — which is precisely the failure this whole mechanism exists to
+// remove. SendAndClose flushes first.
+func (g *Gateway) sendAuthRefusalAndClose(cc *ClientConn, reason string) {
+	resp, err := cc.Reply(messages.MsgAuthResp, messages.AuthResponse{
+		OK:              false,
+		Error:           reason,
+		ProtocolVersion: messages.WireProtocolVersion,
+	})
+	if err != nil {
+		cc.Close()
+		return
+	}
+	cc.SendAndClose(resp)
 }
 
 // handleEnterWorld assigns a game server for the requested map and mints the

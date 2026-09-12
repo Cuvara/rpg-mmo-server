@@ -139,16 +139,20 @@ public class SnapshotByteIdentityTests
     [Fact]
     public void ProtobufSnapshotStream_IsByteIdenticalToThePreRefactorFixture()
     {
-        // Rebaselined 2026-08-14 for the `speed` field (wire.proto field 9,
-        // rpg-mmo-server#91). Previous: 5E31830689214B517284D7D9C5E9336B9ADBAD681B11EAF896980D60686C61CB
+        // Rebaselined 2026-09-09 for `facing_brad` (field 10) and `action` (field 11).
+        // Previous: 7AADCC48A2ADCE07DE60C9775CEF45AE28783CC117032781203B5997A2C531C0
+        // Before that: 5E31830689214B517284D7D9C5E9336B9ADBAD681B11EAF896980D60686C61CB
+        //   (2026-08-14, the `speed` field — wire.proto field 9, rpg-mmo-server#91).
         //
         // This digest is SUPPOSED to be hard to change, and it moved because the
-        // protocol deliberately gained a field — not because a walk was restructured.
-        // Every entity now carries 5 more bytes (1-byte tag + fixed32), so every
-        // snapshot in the scenario differs. If you are reading this because the test
-        // failed again, the question to answer first is whether YOUR change was
-        // supposed to alter the wire. If it was not, do not touch the constant.
-        const string expected = "7AADCC48A2ADCE07DE60C9775CEF45AE28783CC117032781203B5997A2C531C0";
+        // protocol deliberately gained two fields — not because a walk was
+        // restructured. The scenario's players move every tick, so they now carry a
+        // facing varint and an action varint; entities that never move carry neither,
+        // because both fields reserve zero for "not sent" and proto3 elides it.
+        // If you are reading this because the test failed again, the question to answer
+        // first is whether YOUR change was supposed to alter the wire. If it was not,
+        // do not touch the constant.
+        const string expected = "7D47D5A005CDC8F2334085D89FE5B649FA63D4FDC0BF2575D2AF7144B0537998";
 
         (string digest, string head) = RunScenario(WireEncoding.Proto);
 
@@ -164,13 +168,20 @@ public class SnapshotByteIdentityTests
     [Fact]
     public void JsonSnapshotStream_IsByteIdenticalToThePreRefactorFixture()
     {
-        // Rebaselined 2026-08-14 for the `speed` field, same change as the Protobuf
-        // digest above. Previous: 24D8C5C2AB12909864D9BB4ACE6CB629AC9B1DDD0DDB3DF09B8DD24AF11A293C
+        // Rebaselined 2026-09-09 for `facing_brad` and `action`, same change as the
+        // Protobuf digest above.
+        // Previous: 595071000A77F0D502A3AD46F90DE4438064A6379734FE86A95CE72D74EFE737
+        // Before that: 24D8C5C2AB12909864D9BB4ACE6CB629AC9B1DDD0DDB3DF09B8DD24AF11A293C
+        //   (2026-08-14, the `speed` field).
         //
         // JSON is not proto3 and does NOT elide a zero, so `"speed":0` appears on every
         // entity here even when Protobuf would omit it — which is why the two encodings
-        // are pinned separately.
-        const string expected = "595071000A77F0D502A3AD46F90DE4438064A6379734FE86A95CE72D74EFE737";
+        // are pinned separately. The two NEW fields are the exception to that asymmetry:
+        // this writer omits them when zero, deliberately, because zero is their reserved
+        // "not sent" value rather than a legitimate reading. Writing `"facing_brad":0`
+        // would assert "there is a facing and it is the reserved value", which is not a
+        // thing — so here the JSON and Protobuf encodings agree.
+        const string expected = "77C0F2543E1FABF651C69CAF2FC882E7BBFDEE24ECBC65DC1FB77F7A98D7E914";
 
         (string digest, string head) = RunScenario(WireEncoding.Json);
 

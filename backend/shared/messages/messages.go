@@ -32,25 +32,60 @@ var ErrUnknownHandle = errors.New("snapshot references an unknown entity handle"
 type MsgType uint8
 
 const (
-	MsgAuth           MsgType = iota + 1 // client -> gateway
-	MsgAuthResp                          // gateway -> client
-	MsgEnterWorld                        // client -> gateway
-	MsgEnterWorldResp                    // gateway -> client
-	MsgJoinToken                         // client -> gameserver
-	MsgJoinTokenResp                     // gameserver -> client
-	MsgInput                             // client -> gameserver (per tick)
-	MsgSnapshot                          // gameserver -> client (per tick)
-	MsgDisconnect                        // either direction
-	MsgResync                            // client -> gameserver (request a full keyframe)
-	_                                    // 11: reserved
-	_                                    // 12: reserved
-	MsgTransferMap                       // client -> gameserver (request map transfer)
-	MsgTransferMapResp                   // gameserver -> client (transfer result)
-	MsgPing       MsgType = 11           // either direction (heartbeat)
-	MsgPong       MsgType = 12           // either direction (heartbeat reply)
+	MsgAuth            MsgType = iota + 1 // client -> gateway
+	MsgAuthResp                           // gateway -> client
+	MsgEnterWorld                         // client -> gateway
+	MsgEnterWorldResp                     // gateway -> client
+	MsgJoinToken                          // client -> gameserver
+	MsgJoinTokenResp                      // gameserver -> client
+	MsgInput                              // client -> gameserver (per tick)
+	MsgSnapshot                           // gameserver -> client (per tick)
+	MsgDisconnect                         // either direction
+	MsgResync                             // client -> gameserver (request a full keyframe)
+	_                                     // 11: reserved
+	_                                     // 12: reserved
+	MsgTransferMap                        // client -> gameserver (request map transfer)
+	MsgTransferMapResp                    // gameserver -> client (transfer result)
+	MsgPing            MsgType = 11       // either direction (heartbeat)
+	MsgPong            MsgType = 12       // either direction (heartbeat reply)
 	// 13 and 14 are reserved for MsgTransferMap/Resp.
 	MsgKick MsgType = 15 // server -> client (forced disconnect with reason)
+
+	// Sealed-session handshake, GAMEPLAY HOP ONLY. See
+	// backend/docs/SEALED-FRAMING.md. Both are sent in the clear, immediately
+	// after MsgJoinToken and before any sealed frame — there is no key yet,
+	// which is what they exist to establish.
+	//
+	// 16/17 stay inside the one-byte varint range, and 18-31 are left clear for
+	// the gateway hop's own handshake once ADR-22 settles it.
+	MsgSealedClientHello MsgType = 16 // client -> gameserver
+	MsgSealedServerHello MsgType = 17 // gameserver -> client
 )
+
+// SealedClientHello opens the sealed-session handshake on the gameplay hop.
+type SealedClientHello struct {
+	// PublicKey is a 32-byte ephemeral X25519 public key, fresh per connection.
+	// Reusing one across sessions forfeits forward secrecy, which is the whole
+	// reason this exchange exists rather than a derived key.
+	PublicKey []byte `json:"public_key,omitempty"`
+}
+
+// SealedServerHello answers it and proves the server holds this session's
+// join-token-derived material.
+type SealedServerHello struct {
+	// PublicKey is a 32-byte ephemeral X25519 public key, fresh per connection.
+	PublicKey []byte `json:"public_key,omitempty"`
+
+	// Binding is HMAC-SHA256 over the handshake transcript. Both ephemeral
+	// public keys are inside it, which is what stops a man in the middle:
+	// substituting a key changes the transcript, so a replayed binding no longer
+	// verifies. Compare it in constant time.
+	Binding []byte `json:"binding,omitempty"`
+
+	// Error is set when the server refuses. A client MUST NOT retry without
+	// encryption — there is no cleartext fallback by design.
+	Error string `json:"error,omitempty"`
+}
 
 // Encoding selects how an Envelope and its payload are serialized.
 //
@@ -158,9 +193,56 @@ func (e Envelope) UnmarshalPayload(v any) error {
 // encodings. shared/messages/proto.go converts them to and from the generated
 // types; that conversion is the only place the two representations meet.
 
+// WireProtocolVersion is the version of the wire schema this build implements.
+//
+// It names the SEMANTICS of shared/proto/wire.proto — what the fields mean — not
+// its shape and not its encoding. Shape is self-describing (proto3 skips unknown
+// fields) and encoding is sniffed from byte 0; neither catches two peers that
+// parse every byte and disagree about what a field means, which is the failure
+// this number exists to make loud.
+//
+// Bump it for: reusing or renumbering a field, removing a field a receiver acts
+// on, changing the meaning/units/reference frame of an existing field, changing
+// the snapshot state machine (handle lifecycle, keyframe reset, the delta
+// "changed" rule, the normative merge algorithm), or adding something a receiver
+// MUST act on to stay correct. Do NOT bump for a purely additive optional field
+// covered by a documented "zero means not sent" rule — an old peer ignoring it
+// is a supported configuration, which is the point of writing that rule down.
+//
+// The full contract, including the migration path for unversioned peers, is in
+// shared/proto/wire.proto under "Protocol version", and normatively in
+// gameserver-dotnet/docs/API.md. C# mirrors this constant in
+// GameServer/Net/WireProtocol.cs and the Unity client in
+// Runtime/Protocol/WireProtocolVersion.cs; no language can be authoritative for
+// the other two, so each pins the value and tests assert it here.
+const WireProtocolVersion uint32 = 1
+
+// ProtocolVersionUnversioned is the wire value meaning "this peer does not
+// advertise a version" — a peer built before the field existed.
+//
+// proto3 elides a zero uint32, so an absent field and an explicit 0 are the same
+// bytes. Real versions therefore start at 1 and 0 is permanently reserved for
+// "unknown", exactly as ENTITY_TYPE_UNSPECIFIED reserves 0 in the entity-type
+// enum. A receiver must not read 0 as "version zero".
+const ProtocolVersionUnversioned uint32 = 0
+
+// ReasonProtocolVersionMismatch is the named reason a peer is refused for
+// speaking a different wire protocol version.
+//
+// It travels in the `error` field of AuthResponse or JoinTokenResponse and
+// follows the existing machine-readable reason convention ("duplicate_login",
+// "server_shutdown", "session_expired", "rate_limited"). The point of the whole
+// version handshake is that this string appears instead of a parse error, a
+// silent close, or — worst — a successful connection that is confidently wrong.
+const ReasonProtocolVersionMismatch = "protocol_version_mismatch"
+
 // AuthRequest is sent by the client to authenticate with the gateway.
 type AuthRequest struct {
 	Token string `json:"token"`
+	// ProtocolVersion is the wire schema version this client implements.
+	// 0 means "not advertised" (a client predating the field); the gateway
+	// admits or refuses that according to --min-protocol-version.
+	ProtocolVersion uint32 `json:"protocol_version,omitempty"`
 }
 
 // AuthResponse is the gateway's reply to an auth request.
@@ -168,6 +250,12 @@ type AuthResponse struct {
 	OK     bool   `json:"ok"`
 	UserID string `json:"user_id,omitempty"`
 	Error  string `json:"error,omitempty"`
+	// ProtocolVersion is the gateway's own wire schema version, echoed so a new
+	// client can detect an OLD gateway: one predating this field replies with 0,
+	// and that 0 is the client's only signal that its version was never checked.
+	// Sent on rejection too — a client refused for a mismatch has to be told
+	// which version it failed against.
+	ProtocolVersion uint32 `json:"protocol_version,omitempty"`
 }
 
 // EnterWorldRequest asks the gateway to assign a map server.
@@ -190,6 +278,14 @@ type EnterWorldResponse struct {
 // JoinTokenRequest is sent by the client to authenticate with a game server.
 type JoinTokenRequest struct {
 	Token string `json:"token"`
+	// ProtocolVersion is the wire schema version this client implements.
+	//
+	// Checked by the game server INDEPENDENTLY of the gateway's check on
+	// AuthRequest. Under ADR-3 these are two connections to two separately
+	// deployed processes, and the gateway never carries a snapshot — so "the
+	// gateway accepted it" says nothing about whether this client can read what
+	// this game server encodes.
+	ProtocolVersion uint32 `json:"protocol_version,omitempty"`
 }
 
 // JoinTokenResponse confirms whether the join was accepted.
@@ -203,6 +299,12 @@ type JoinTokenResponse struct {
 	// at. 0 means "not supplied" (a pre-0.x server); a client seeing 0 must refuse
 	// to predict rather than assume 15, which is the silent desync #93 closes.
 	TickRate uint32 `json:"tick_rate,omitempty"`
+	// ProtocolVersion is the game server's own wire schema version, echoed so a
+	// new client can detect an OLD game server. Unlike TickRate this is sent on
+	// a rejected join too: a client refused for a version mismatch must be told
+	// which version it failed against, or the refusal is as opaque as the parse
+	// error it replaces.
+	ProtocolVersion uint32 `json:"protocol_version,omitempty"`
 }
 
 // InputMessage carries player input for one tick.
@@ -261,6 +363,29 @@ type EntitySnapshot struct {
 	// entity. Receivers must fall back to a configured default rather than
 	// conclude the entity cannot move.
 	Speed float32 `json:"speed"`
+
+	// FacingBrad is the entity's facing as 16-bit binary radians BIASED BY ONE:
+	// 0 means "not sent", and a real facing is (brad-1)*2*Pi/65536 radians
+	// counter-clockwise from +X. Use FacingBradFromRadians /
+	// RadiansFromFacingBrad rather than doing the arithmetic at call sites.
+	//
+	// The bias exists because 0.0 radians is a legitimate facing (due east), so a
+	// plain float would make "east" and "not sent" the same bytes under proto3's
+	// zero elision. Unlike Speed, that ambiguity is avoidable here, so it is
+	// avoided rather than documented around. `omitempty` keeps an unset facing off
+	// the JSON wire too, so both encodings spell "not sent" the same way.
+	FacingBrad uint32 `json:"facing_brad,omitempty"`
+
+	// Action is what the entity is doing, for animation selection.
+	//
+	// Zero (ActionUnspecified) means "not sent", NEVER "idle" — idle is 1. A
+	// receiver must keep whatever it was showing rather than falling back to idle,
+	// or an old server freezes every entity into an idle pose.
+	//
+	// Carried as an integer in JSON as well as Protobuf. Unlike `type`, this field
+	// has no pre-enum string form to stay compatible with, so both encodings carry
+	// the same value and there is no second convention to remember.
+	Action EntityAction `json:"action,omitempty"`
 }
 
 // DisconnectMessage ends a session politely. Both encodings accept an empty

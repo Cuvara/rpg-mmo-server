@@ -58,6 +58,10 @@ human inspection and for the Unity DOTS sample, which polls it.
   "event_publish_failures": 0,
   "kick_consumer": "redis",
   "players_kicked": 0,
+  "handshakes_pending": 0,
+  "handshakes_rejected": 0,
+  "inputs_dropped": 0,
+  "transfers_rejected": 0,
   "postgres": "connected",
   "uptime_seconds": 12105
 }
@@ -85,6 +89,10 @@ so it reported the compiled-in default of 15 on servers whose prediction rate wa
 | `events_dropped` / `event_publish_failures` | Loss counters of the Redis event stream, since process start — the same values as `gameserver_events_dropped_total` / `gameserver_events_publish_failures_total` above. Always `0` under `"event_stream": "noop"` |
 | `kick_consumer` | State of the duplicate-login kick consumer on `events:kick` (ADR-20): `redis` (consuming as group `gs:{server_id}`) or `disabled` (`REDIS_ADDR` unset, or the consumer failed to start — supersede events for this server are then never acted on, so a re-logging-in user keeps their old connection here) |
 | `players_kicked` | Duplicate-login kicks executed since process start — connections force-closed because a `session_superseded` event named their join-token jti. Same value as `gameserver_players_kicked_total`. Always `0` under `"kick_consumer": "disabled"` |
+| `handshakes_pending` | Accepted sockets currently inside the join handshake — **not** in `players_online` and **not** under `capacity`; bounded by `GAMESERVER_MAX_PENDING_HANDSHAKES` instead. Same value as `gameserver_handshakes_pending`. A number that sits at the bound is a pre-join flood (or a client fleet that connects and never joins) |
+| `handshakes_rejected` | Handshakes refused **before authentication** since process start, every reason summed: pool full at accept, no complete join frame by `GAMESERVER_HANDSHAKE_TIMEOUT_MS`, or a first frame that was not a well-formed `MsgJoinToken`. Same value as `sum(gameserver_handshakes_rejected_total)`. A capacity refusal is not one of these — that is an authenticated join, logged at Warning |
+| `inputs_dropped` | Client inputs discarded at ingest since process start (per-connection budget or world-wide queue cap, summed). Same value as `sum(gameserver_inputs_dropped_total)`. Movement coalesced in place is **not** a drop and not counted here |
+| `transfers_rejected` | `MsgTransferMap` requests refused because a transfer was already running on that connection. Same value as `gameserver_transfers_rejected_total` |
 | `uptime_seconds` | Seconds since process start on a **monotonic** clock (`Stopwatch`), not wall time — see below |
 
 ### Do not compute a rate — read `achieved_tick_hz`
@@ -144,12 +152,252 @@ The same value is exported as the Prometheus gauge `gameserver_achieved_tick_hz`
 | `gameserver_players_online` | gauge | `map_id` | Connected players |
 | `gameserver_entities` | gauge | — | Entities in the world |
 | `gameserver_snapshots_sent_total` | counter | `map_id` | Snapshot messages sent |
+| `gameserver_snapshots_bytes_total` | counter | `map_id` | Bytes of snapshot frames written to client sockets, envelope and 4-byte length prefix included. Divide by `gameserver_players_online` and by the scrape interval for the per-client downlink rate — the figure ADR-7's `< 50 KB/s` mobile threshold is about, and the one measured at 45.9 KB/s at 200 players |
+| `gameserver_snapshots_entities_shed_total` | counter | `map_id` | Entity updates **deferred** by the per-connection downlink budget (`GAMESERVER_MAX_SNAPSHOT_BYTES`). Deferred, not dropped: the entity stays dirty and is re-offered on the next snapshot. Read it with `max_shed_age` — a high rate with a low age is the cap doing its job on a crowd; a high age means a client is falling behind. Flat zero is the expected reading at any load the server is known to handle |
+| `gameserver_snapshots_removals_deferred_total` | counter | `map_id` | Despawn notifications deferred by the budget. Worse than a deferred update — the client renders an entity that no longer exists — so despawns outrank every non-self update and this should stay flat at zero. It moves only when the budget is too small for the despawn list on its own, which means the budget is set below one AOI's worth of churn |
+| `gameserver_transport_encrypted` | gauge | `map_id`, `transport`, `cipher` | 1 when packets leave this server as ciphertext, 0 when they are cleartext. **0 is the default** — `transport=tcp` has no packet encryption and `TRANSPORT_KEY` defaults to empty — so alert on this being 0 rather than assuming it is 1. A **gauge** on purpose: a never-incremented counter is absent from `/metrics`, and "is this server encrypted" must never answer by being missing |
+| `gameserver_transport_authenticated` | gauge | `map_id`, `transport`, `cipher` | 1 when tampering with a packet in flight is detectable. **Currently 0 on every supported configuration**: the KCP path is AES-CFB with a CRC32, and a CRC32 is linear, not a MAC. Separate from `transport_encrypted` so encryption cannot be read as integrity; published while 0 so that its becoming 1 is a visible event |
+| `gameserver_snapshots_max_shed_age` | gauge | `map_id` | Longest deferral, in snapshots, any entity on any live connection has reached. **High-water mark** — it does not fall while a connection lives, so read the rate of climb, not the level. The scheduler is strictly oldest-first, so it is bounded by the number of dirty entities in one observer's AOI and not by session length; a value that keeps climbing means the budget is too small for the crowd |
 | `gameserver_player_saves_total` | counter | `status=ok\|error` | Persistence results from the async saver |
 | `gameserver_events_published_total` | counter | `type` | Cross-server events handed to the event stream by `EventPublisher`. With the Redis backend this counts hand-offs into the publish queue, not confirmed `XADD`s — subtract the two counters below for what actually reached the stream |
 | `gameserver_events_dropped_total` | counter | — | Events dropped **oldest-first** because the Redis event stream's bounded publish queue (4096) was full — i.e. Redis was unreachable long enough to fill it — or the event was offered after shutdown. Zero forever on a healthy server; any non-zero rate means the gateway relay is missing events |
 | `gameserver_events_publish_failures_total` | counter | — | Events dropped after exhausting the `XADD` retry budget (3 attempts with short backoff). Distinct from `dropped`: these reached the head of the queue and still could not be written. Sustained increments alongside a flat `dropped` means Redis is up but refusing writes (e.g. OOM under `noeviction`) |
 | `gameserver_resyncs_total` | counter | `map_id` | Keyframes **requested by a client** — see below |
 | `gameserver_players_kicked_total` | counter | `map_id` | Duplicate-login kicks (ADR-20): connections force-closed because a `session_superseded` event on `events:kick` named their join-token jti. Entity released immediately, no reconnect hold. Pair with the gateway's `gateway_kick_publish_total`: publishes without matching kicks means events are being lost or mis-addressed |
+| `gameserver_handshakes_pending` | gauge | `map_id` | Accepted sockets inside the join handshake right now. Outside `players_online` and outside `capacity`; bounded by `GAMESERVER_MAX_PENDING_HANDSHAKES` |
+| `gameserver_handshakes_rejected_total` | counter | `map_id`, `reason` | Handshakes refused before authentication: `pool_full` (closed at accept, pending pool at its bound), `timeout` (no complete join frame within `GAMESERVER_HANDSHAKE_TIMEOUT_MS` — idle socket, partial prefix or partial body), `malformed` (first frame was not a well-formed `MsgJoinToken`). Not a capacity refusal |
+| `gameserver_inputs_dropped_total` | counter | `map_id`, `reason` | Inputs discarded at ingest: `connection_budget` (one connection exceeded `GAMESERVER_MAX_INPUTS_PER_TICK` between two drains) or `queue_full` (the world-wide queue hit `GAMESERVER_MAX_PENDING_INPUTS`). A rising `connection_budget` from one map with flat `processed_inputs` is one client flooding; a rising `queue_full` is the population as a whole |
+| `gameserver_inputs_coalesced_total` | counter | `map_id` | Movement-only inputs that replaced the sender's previous queued movement in place. **Not a loss** — the tick integrates one direction per player per tick regardless — but the rate says how far above the tick rate clients are sending |
+| `gameserver_transfers_rejected_total` | counter | `map_id` | `MsgTransferMap` refused because one was already in flight on that connection |
+
+> **A counter that has never incremented is not in `/metrics` at all.** The OpenTelemetry
+> Prometheus exporter emits an instrument only once it has recorded a value, so on a
+> healthy server `gameserver_snapshots_entities_shed_total`,
+> `gameserver_snapshots_removals_deferred_total` and `gameserver_resyncs_total` are simply
+> **missing** rather than zero. Verified on a live server 2026-09-09: with
+> `GAMESERVER_MAX_SNAPSHOT_BYTES=0` the two shedding counters do not appear, while
+> `gameserver_snapshots_bytes_total` and the `..._max_shed_age` gauge do (a gauge's
+> callback always runs).
+>
+> This matters because those are the *alarm* counters: the ones that vanish are exactly
+> the ones whose absence means "everything is fine", and in a dashboard that reads
+> identically to "the scrape is broken" or "this build does not have the feature". When
+> you need to distinguish the two, read **`/status`**, which always publishes
+> `snapshot_entities_shed`, `snapshot_removals_deferred`, `snapshot_max_shed_age`,
+> `snapshot_bytes` and the `max_snapshot_bytes` that produced them — as plain zeros when
+> nothing has happened. Alert on the `/status` field or on `absent()`-tolerant PromQL, not
+> on a bare counter rate.
+
+### The rule that follows from it
+
+> **Push-recorded counters must be primed after the MeterProvider exists. Pull-based
+> observable gauges need not be.**
+
+Both halves are live in this codebase and they look contradictory until the rule is
+stated, so it is stated here rather than left to be re-derived:
+
+| | Mechanism | Ordering requirement |
+|---|---|---|
+| `gameserver_inputs_rejected_total{reason}`, `gameserver_input_anomaly_alerts_total` | `Counter.Add()` — a measurement **pushed** once | **Must** be primed *after* `MetricsEndpoint.TryStart` builds the provider. `GameMetrics.PrimeCounters()` |
+| `gameserver_transport_encrypted`, `gameserver_transport_authenticated` | `CreateObservableGauge` — a callback **pulled** at scrape time | None. `GameMetrics.SetTransportPosture` may be called before `TryStart`, and is |
+
+A push with nothing subscribed to the meter is silently dropped; a pull runs whenever the
+scrape happens, so when its backing state was set is irrelevant. That is why
+`PrimeCounters()` is deliberately *not* in the `GameMetrics` constructor while
+`SetTransportPosture()` deliberately *is* called before the endpoint starts.
+
+**Both arrangements are correct. Do not "fix" either one to match the other.** The counter
+priming was in the constructor first, passed every unit test — they read the mirrored
+`long` fields, not a scrape — and produced no series at all on a live server;
+`AlarmCountersAreVisibleAtZeroOnlyAfterPriming` now reproduces production's construction
+order so that regression fails loudly.
+
+
+## Input rejection and the anomaly score (roadmap A1/A2)
+
+**What this is for.** Server authority already stops the cheats that matter — movement is
+integrated from the server's own speed stat, "never on how many input packets a client
+sends". The gap was that **nothing observed**: `ValidationLogic` refused an input and the
+server dropped it, so a client probing the rules left no trace. These counters are that
+trace. They change no enforcement.
+
+### The counters
+
+`gameserver_inputs_rejected_total{reason}` — inputs that reached the tick and were refused.
+Distinct from `gameserver_inputs_dropped_total`, which is ingest backpressure.
+
+| `reason` | Meaning | Honest cause? |
+|---|---|---|
+| `entity_gone` | Entity destroyed between ingest and tick | **Yes** — a benign race |
+| `dead_entity` | Input from a dead player | **Yes** — one round trip of it after every death |
+| `stale_tick` | `input.Tick <= LastInputTick` | **Ambiguous** — reordered UDP, or a reconnecting client whose tick counter restarts against a held entity |
+| `invalid_direction` | Vector NaN/inf/oversized | **No** — the shipped client normalises before sending |
+| `attack_target_unresolved` | Target id did not resolve | **Yes** — target despawned in flight |
+| `attack_target_dead` | Target already dead | **Yes** — someone else's blow landed first |
+| `attack_out_of_range` | Target outside attack range | **Yes** — target moved in flight; rises with RTT |
+| `attack_on_cooldown` | Cooldown had not expired | **Mostly** — client cooldown prediction drift |
+| `attack_other` | Validator reason this build does not classify | **N/A** — means the classifier is stale, i.e. a bug in `InputRejection` |
+
+**All nine series are primed to zero at startup**, so "no rejections" reads as `0` rather
+than as an absent series. That is deliberate and it is why the reasons are a bounded enum
+rather than the validator's free-form strings — which additionally embed
+attacker-controlled values (the rejected vector, the target id) and would be unbounded
+cardinality a client could mint on demand.
+
+`gameserver_input_anomaly_alerts_total` — times an account's decaying score first crossed
+the alert threshold. **Observation only; no player is ever acted on.**
+
+### `/status`
+
+`inputs_rejected`, `inputs_rejected_by_reason` (every reason, always, including zeros),
+`anomaly_accounts_tracked`, `anomaly_accounts_over_threshold`, `anomaly_alerts`,
+`anomaly_accounts_dropped`, and `anomaly_top_accounts` — the per-account breakdown, which
+cannot be a metric label without unbounded cardinality.
+
+`anomaly_top_accounts` is ordered **by score, not by rejection count**. The account with
+the most rejections is usually the one with the worst connection, and putting that player
+at the top of a list an operator reads as "most suspicious" is how a latency problem gets
+mistaken for cheating.
+
+### How to read it — and the limit on how far
+
+> **⚠️ There is no measured baseline for an honest player's rejection rate.** Every
+> figure this repository has is from loopback, where the latency that produces most
+> rejections does not exist. Until that baseline is measured against real players on real
+> networks, **no threshold here is tuned**, and the default alert score is a placeholder
+> chosen to flag sustained forged input and nothing else.
+
+That limit is why the score deliberately counts **only `invalid_direction`**. An earlier
+version gave the latency-explicable reasons a weight of 0.1; its own test disproved it, and
+the measured reason is worth stating exactly, because the obvious explanation is the wrong
+one. At that weight a player producing an out-of-range attack on every one of 200 inputs
+lands *within a rounding artefact* of the default threshold of 20 — but not the way you
+would guess: a plain sum of `0.1` two hundred times is `20.000000000000014`, which
+**overshoots**. What put the real score under the line is that the decay runs before every
+addition, shaving the running total continuously so it never quite reaches `200 x weight`.
+Measured: `19.999998878470578`, short by `1.1e-06`.
+
+**That shortfall scales with how fast the machine ran the loop** — slower hardware decays
+more between records and falls further short, faster hardware converges on the plain sum,
+which is over the line. So whether a maximally laggy player was flagged depended on host
+speed. That is a coin flip, not a threshold. A weight small enough to be safe and large
+enough to matter cannot be chosen without the baseline, so the score answers the one
+question it can answer honestly: *how much input is this account sending that the shipped
+client cannot produce?* The other reasons are still counted and still published per
+account — they are just not treated as evidence.
+
+**Reading the breakdown matters more than the total.** An account whose rejections are all
+attack-path is lagging. One producing `invalid_direction` is sending packets the shipped
+client cannot produce — and note even that is a client that *tried*, not one that
+achieved: the server already ignores the value.
+
+
+### Live acceptance, 2026-09-09
+
+Measured against a real server (`--metrics-addr=:9401`, `GAMESERVER_ENEMIES=false`) driven
+by `loadtest -join direct -movement still`. Counters differenced across each run.
+
+**Priming works — but only because it happens after the MeterProvider exists.** On a server
+that has never refused an input:
+
+```
+gameserver_input_anomaly_alerts_total{map_id="map_01"} 0
+gameserver_inputs_rejected_total{map_id="map_01",reason="attack_on_cooldown"} 0
+... all nine reasons, all 0 ...
+```
+
+> **This did not work at first, and the failure was invisible to every test.** Priming was
+> originally done in the `GameMetrics` constructor, which runs one line *before*
+> `MetricsEndpoint.TryStart` builds the provider — so the measurements had nothing
+> subscribed to the meter and were dropped. Unit tests passed (they read the mirrored
+> `long` fields, not the scrape) and a live `/metrics` showed **no series at all**. It is
+> now `GameMetrics.PrimeCounters()`, called after `TryStart`, and
+> `AlarmCountersAreVisibleAtZeroOnlyAfterPriming` guards the ordering.
+
+**Each abuse mode moves exactly its own reason, and nothing else:**
+
+| Run | Counter movement |
+|---|---|
+| `-abuse direction -abuse-players 2` (of 10) | `invalid_direction` **+446** (2 x 223), all other reasons **0** |
+| `-abuse stale -abuse-players 2` (of 4) | `stale_tick` **+296**, all others **0** |
+| `-abuse attack -abuse-players 2` (of 4) | `attack_target_unresolved` **+298**, all others **0** |
+| **8 honest players, no abuse** | **no rejections of any reason** |
+
+**The honest arm scores zero in the same measurement.** In the mixed 10-player run the 8
+honest players produced no rejections at all, and only the 2 abusers were tracked:
+
+```
+inputs_rejected         : 446
+accounts_tracked        : 2      accounts_over_threshold : 2      anomaly_alerts : 2
+lt-...-00000  score=187.61  rejections=223  alerts=1  {invalid_direction: 223}
+lt-...-00001  score=187.61  rejections=223  alerts=1  {invalid_direction: 223}
+```
+
+**And the weighting does what it claims.** After all three runs, six accounts are tracked
+and only two have a non-zero score:
+
+```
+lt-e0f80fbe-00000   score= 92.39   rejections=223     <- invalid_direction
+lt-e0f80fbe-00001   score= 92.39   rejections=223     <- invalid_direction
+lt-815d8b30-00001   score=  0.00   rejections=149     <- stale_tick / attack_target_unresolved
+lt-815d8b30-00000   score=  0.00   rejections=149
+```
+
+The bottom two rows are the design working: **149 refused inputs each, and a score of
+zero.** Counted, published, visible to an operator — and not treated as evidence, because
+nothing about them is something an honest client could not also produce. The drop from
+187.61 to 92.39 on the top rows is the 60-second half-life decaying between runs.
+
+### Exercising it
+
+`loadtest` can generate each pattern deliberately, so the counters are testable rather
+than only observable in production:
+
+```bash
+# 2 of 50 players send an oversized movement vector; the rest behave.
+go run ./cmd/loadtest -players 50 -abuse direction -abuse-players 2 -movement still ...
+```
+
+`-abuse` takes `none` (default), `direction` → `invalid_direction`, `stale` →
+`stale_tick`, `attack` → `attack_target_unresolved`. Abusive players are chosen by index,
+so a run is reproducible. Use **`-movement still`** for anything measured against a
+stationary population — `cluster` marches players out of the AOI within ~25s.
+
+
+
+## Frame arrival order (`frame_order_*`) — the ADR-22 measurement
+
+`/status` publishes five fields recording whether a frame can reach the per-connection
+decode step out of order. They exist to answer ADR-22's open question — whether the
+nonce-as-sequence replay rule needs a sliding window — **by measurement rather than
+assumption**, and to keep answering it.
+
+| Field | Meaning |
+|---|---|
+| `frame_order_observed` | Input frames whose arrival order was inspected |
+| `frame_order_inversions` | Frames with a tick **strictly below** the highest seen on that connection — genuine reordering or replay |
+| `frame_order_duplicates` | Frames repeating the highest tick seen |
+| `frame_order_largest_backward_jump` | How far back the worst inversion reached — the minimum width a sliding window would need |
+| `frame_order_forward_gaps` | Frames arriving more than one tick above the previous highest — a lost or unsent frame |
+
+**Expected value for `inversions` and `duplicates`: exactly zero, always.** Measured at
+zero across 22,374 frames on both transports under injected reordering, loss and
+duplication — `backend/docs/BENCHMARK.md` Part XII. A non-zero reading means the transport
+stopped delivering in order, which is a **security-relevant** change and not merely a
+performance one: it is the condition under which a strict monotonic replay counter would
+start refusing legitimate frames.
+
+`forward_gaps` is different and is **not** an alarm: a strict monotonic rule must accept
+gaps, because a genuinely lost frame leaves a hole in the counter and refusing to move past
+it would turn packet loss into a disconnect.
+
+> **This is not the same thing as `stale_tick`.** That counter lives in the tick loop, two
+> queues downstream — the per-connection ingest coalescer and the world-wide pending list —
+> and the coalescer silently absorbs an out-of-order movement input before it is ever
+> reached. `stale_tick` reports post-queue order; these fields report arrival order. Reading
+> one for the other answers neither question. The reconnect measurement in Part XII shows
+> them diverging completely: `stale_tick` at 596 while `frame_order_inversions` stayed at 0.
+
 
 Useful queries:
 

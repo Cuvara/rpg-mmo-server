@@ -17,10 +17,23 @@ import (
 // Config holds every endpoint and knob the smoke test needs. All values can be
 // set via environment variables and overridden with CLI flags.
 type Config struct {
-	NakamaURL     string        // NAKAMA_URL      — Nakama HTTP base URL
-	ServerKey     string        // NAKAMA_SERVER_KEY — Nakama socket server key
-	GatewayAddr   string        // GATEWAY_ADDR    — gateway listen addr
-	Transport     string        // TRANSPORT       — gateway hop transport: tcp or kcp
+	NakamaURL   string // NAKAMA_URL      — Nakama HTTP base URL
+	ServerKey   string // NAKAMA_SERVER_KEY — Nakama socket server key
+	GatewayAddr string // GATEWAY_ADDR    — gateway listen addr
+	Transport   string // TRANSPORT       — gateway hop transport: tcp or kcp
+
+	// Encoding is the wire encoding every frame this run sends is marshaled in.
+	// Configuration on BOTH ends is not needed — the server answers in whatever
+	// encoding it is addressed in — but a `require` game server REFUSES a JSON
+	// client outright (`encoding_cannot_seal`), because a JSON payload cannot
+	// carry a sealed frame. So a sealed run must be a protobuf run.
+	//
+	// Defaults to JSON, which is what every deploy verifies with today. It is
+	// not the encoding a real client speaks (ADR-9: the client is protobuf), so
+	// a JSON run proves the legacy arm still works and NOT that the shipped
+	// client's path does.
+	Encoding string // SMOKE_ENCODING  — json (default) or proto
+
 	JWTSecret     string        // JWT_SECRET      — shared secret for local JWT verify
 	MapID         string        // SMOKE_MAP_ID    — map to enter
 	Timeout       time.Duration // SMOKE_TIMEOUT   — per network operation
@@ -53,6 +66,12 @@ type Config struct {
 	// config rather than something a server advertised.
 	StrictAddr bool // SMOKE_STRICT_ADDR
 
+	// Sealed runs the sealed-session handshake on the gameplay hop and encrypts
+	// every frame after it. Must match the server's GAMESERVER_SEALED: this is
+	// configuration on BOTH ends, never a negotiation on the wire, because a
+	// negotiable encryption setting is a downgrade attack with a friendly name.
+	Sealed bool // SMOKE_SEALED    — run the sealed-session handshake
+
 	SkipDB          bool          // SMOKE_SKIP_DB    — skip every persistence check
 	RequireDB       bool          // SMOKE_REQUIRE_DB — a skipped persistence check fails the run
 	ExpectMigration int           // SMOKE_EXPECT_MIGRATION — required schema_migrations version
@@ -66,6 +85,11 @@ const (
 	DefaultNakamaURL   = "http://localhost:7350"
 	DefaultServerKey   = "defaultkey"
 	DefaultGatewayAddr = ":8000"
+	// DefaultEncoding keeps every existing run byte-identical: JSON is what the
+	// smoke test has always sent and what every deploy currently verifies with.
+	// Changing this default silently changes what CD proves, so it is a flag.
+	DefaultEncoding = "json"
+
 	// DefaultTransport keeps the CD smoke test on TCP unless TRANSPORT says
 	// otherwise. The game server hop is not configured here: it always follows
 	// EnterWorldResponse.Transport.
@@ -121,6 +145,7 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 		ServerKey:     EnvOr(getenv, "NAKAMA_SERVER_KEY", DefaultServerKey),
 		GatewayAddr:   EnvOr(getenv, "GATEWAY_ADDR", DefaultGatewayAddr),
 		Transport:     EnvOr(getenv, "TRANSPORT", DefaultTransport),
+		Encoding:      EnvOr(getenv, "SMOKE_ENCODING", DefaultEncoding),
 		JWTSecret:     getenv("JWT_SECRET"),
 		MapID:         EnvOr(getenv, "SMOKE_MAP_ID", DefaultMapID),
 		Timeout:       DefaultTimeout,
@@ -131,6 +156,7 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 		DeviceID:        getenv("SMOKE_DEVICE_ID"),
 		GameDBURL:       getenv("GAME_DB_URL"),
 		StrictAddr:      isTruthy(getenv("SMOKE_STRICT_ADDR")),
+		Sealed:          isTruthy(getenv("SMOKE_SEALED")),
 		SkipDB:          isTruthy(getenv("SMOKE_SKIP_DB")),
 		RequireDB:       isTruthy(getenv("SMOKE_REQUIRE_DB")),
 		ExpectMigration: DefaultExpectMigration,
@@ -170,6 +196,8 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	fs.StringVar(&cfg.ServerKey, "server-key", cfg.ServerKey, "Nakama server key")
 	fs.StringVar(&cfg.GatewayAddr, "gateway-addr", cfg.GatewayAddr, "Gateway address")
 	fs.StringVar(&cfg.Transport, "transport", cfg.Transport, "Transport for the gateway hop: tcp or kcp")
+	fs.BoolVar(&cfg.Sealed, "sealed", cfg.Sealed, "Run the sealed-session handshake on the gameplay hop and encrypt every frame after it (requires -encoding proto; must match the server's GAMESERVER_SEALED)")
+	fs.StringVar(&cfg.Encoding, "encoding", cfg.Encoding, "Wire encoding for every frame sent: json (default, the legacy arm) or proto (what the shipped client speaks, and the only one a sealed session can use)")
 	fs.StringVar(&cfg.JWTSecret, "jwt-secret", cfg.JWTSecret, "Shared JWT secret for local verification")
 	fs.StringVar(&cfg.MapID, "map-id", cfg.MapID, "Map ID to enter")
 	fs.DurationVar(&cfg.Timeout, "timeout", cfg.Timeout, "Per-operation network timeout")
@@ -204,6 +232,37 @@ func (c Config) Validate() error {
 	}
 	if c.MinSnapshots <= 0 {
 		return fmt.Errorf("min-snapshots must be > 0, got %d", c.MinSnapshots)
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Encoding)) {
+	// Empty is UNSET, not wrong: a Config built in code rather than from the
+	// environment leaves it zero, and encodingFor maps that to JSON. A non-empty
+	// value that is neither is a typo, and those are different things.
+	case "", "json", "proto":
+	default:
+		// Refused rather than defaulted. A typo that silently becomes JSON is
+		// invisible against an `off` server and, against a `require` one, is
+		// refused at the join with `encoding_cannot_seal` -- which reads as a
+		// broken stack rather than as a misspelt flag.
+		return fmt.Errorf("encoding must be json or proto, got %q", c.Encoding)
+	}
+	// SEALING REQUIRES PROTOBUF, and the combination is refused rather than fixed.
+	//
+	// The JSON codec has no sealed frame, so a server with GAMESERVER_SEALED=require
+	// refuses a JSON client at the join with `encoding_cannot_seal` -- and the join
+	// is ACCEPTED first, so a log reading "join accepted" is not evidence the client
+	// works. Measured live, not inferred.
+	//
+	// This does not silently upgrade the encoding. Someone who wrote
+	// `-sealed -encoding json` believes one of those two things about the run, and
+	// choosing the other for them hides which -- the same reason the server has two
+	// sealing modes and not three.
+	//
+	// It lives here rather than only in stack.sh because a wrapper can be bypassed
+	// and the binary is what CD actually runs.
+	if c.Sealed && strings.ToLower(strings.TrimSpace(c.Encoding)) != "proto" {
+		return fmt.Errorf(
+			"sealed runs require -encoding proto, got %q: a JSON client cannot carry a sealed frame",
+			c.Encoding)
 	}
 	if err := transport.Validate(c.Transport); err != nil {
 		return fmt.Errorf("transport: %w", err)

@@ -54,13 +54,36 @@ Errors:
 
 ### `reward_kills`
 
-Grants gold **and** leaderboard score for a batch of kills in one call. This is
-the RPC the game server uses; it replaced the per-kill `reward_kill` +
-`submit_kill` pair, which cost 2 HTTP requests and 2 separate meta-DB
-transactions per mob kill (rpg-mmo-server#233).
+Grants gold **and** leaderboard score for a batch of kills in one call,
+**exactly once per `batch_id`**. This is the RPC the game server uses; it
+replaced the per-kill `reward_kill` + `submit_kill` pair, which cost 2 HTTP
+requests and 2 separate meta-DB transactions per mob kill (rpg-mmo-server#233).
 
-- **Auth**: `runtime.http_key` (server-to-server); not meant for clients.
+- **Auth**: **server-only** — `runtime.http_key` (server-to-server). A call
+  carrying a Nakama client session (user id / session id / session expiry in
+  the request context) is rejected with code `7` (`PERMISSION_DENIED`, HTTP
+  403) **before the payload is parsed** and before any wallet or leaderboard
+  write. Enforced by `economy.requireServerCaller`, shared by all three
+  mutation RPCs.
 - **Registered in**: `main.go` → `economy.RewardKillsRPC`
+
+> ⚠️ **`runtime.http_key` is a static, never-expiring bearer secret, and it travels
+> in the URL QUERY STRING** — `POST /v2/rpc/reward_kills?http_key=…`, both as Nakama
+> requires it and as `GameServer/Nakama/NakamaClient.cs` sends it.
+>
+> Two consequences worth stating rather than discovering (ADR-24):
+>
+> 1. **Left at Nakama's published default it authenticates.** Measured on the live
+>    stack: no key → `401 "Auth token or HTTP key required"`; a wrong key → `401
+>    "HTTP key invalid"`; `defaulthttpkey` → `400 "user_id is required"`, i.e. past
+>    auth and into the handler. Anyone who can reach `:7350` could grant rewards.
+>    CD now refuses to deploy an environment whose `NAKAMA_HTTP_KEY` is unset or
+>    default — it previously never wrote the variable at all, so every deployed
+>    environment ran the default.
+> 2. **A query-string credential survives TLS into logs.** Making the hop
+>    confidential (ADR-24) stops it being read off the wire; it does not stop it
+>    appearing in Nakama's own access logs or any future proxy's. That is an
+>    upstream API shape, not something this repo can change.
 
 Request payload:
 
@@ -71,29 +94,60 @@ Request payload:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `user_id` | string | yes | Nakama user id of the killer |
-| `kills` | int | yes | 1..1000 (`MaxKillsPerBatch`); the cap exists so a corrupted payload cannot mint unbounded gold |
-| `map_id` | string | no | Recorded in the wallet metadata |
-| `batch_id` | string | no | Flush-attempt id, recorded in the wallet metadata as the audit trail for a suspected double grant and the key a future idempotency guard would use. Not deduplicated on today |
+| `kills` | int | yes | 1..1000 (`MaxKillsPerBatch`). Out of range → code `11`, nothing granted; the caller splits |
+| `map_id` | string | no | Recorded in the wallet metadata and the receipt |
+| `batch_id` | string | **yes** | **Idempotency key.** Must be stable across every retry of the same batch. A `batch_id` already granted is replayed from its receipt with no second wallet change |
 
 Response payload:
 
 ```json
-{ "success": true, "gold": 480, "score": 41, "rank": 2 }
+{ "success": true, "status": "granted", "replayed": false, "gold": 30, "balance": 480, "score": 41, "rank": 2 }
 ```
 
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | bool | Always `true` on 2xx |
+| `status` | string | `granted` — gold and score committed. `partial` — gold committed, leaderboard write failed; **resend the same `batch_id`**, the replay retries only the leaderboard |
+| `replayed` | bool | `true` when this `batch_id` had already been granted by an earlier call; the wallet was not touched again |
+| `gold` | int | Gold granted for this batch (`GoldPerKill × kills`) — on the original call and on replays |
+| `balance` | int | Wallet gold after the grant; present only on the call that performed it |
+| `score`, `rank` | int | Leaderboard state; `0` with `status: partial` |
+| `leaderboard_error` | string | Set with `status: partial` |
+
+**Exactly-once mechanics.** The wallet update and a receipt
+(`storage collection "reward_receipts"`, key = `batch_id`, owner = `user_id`,
+permissions read 0 / write 0) are committed in one transaction via
+`nk.MultiUpdate`, with the receipt written create-only (`version: "*"`). A
+resent `batch_id` finds the receipt and is answered as a replay; two duplicates
+racing past the lookup both reach `MultiUpdate`, the loser fails the version
+check, its whole transaction (wallet included) rolls back, and it is answered
+as a replay too. The leaderboard increment is **not** in that transaction
+(Nakama's `MultiUpdate` does not cover leaderboards): its outcome is recorded
+in the receipt afterwards (`leaderboard_done`), which is what lets a replay
+retry only the leaderboard. If that receipt update itself fails after the
+score landed, a later replay increments the score once more — bounded score
+drift on a double fault is the accepted cost (ADR-6); it is logged as
+`receipt update failed for batch …`.
+
 **Error contract — load-bearing for the caller's retry policy.** An error
-(non-2xx) is returned **only when nothing was granted**: bad payload, or the
-wallet update itself failed. A caller receiving an error may therefore re-queue
-the batch without risking a double grant. Once the wallet update has succeeded
-the call always reports success — a leaderboard failure after it is logged and
-returned as `leaderboard_error` in the response, never as an error, because an
-error at that point would invite a retry that grants the gold twice. Bounded
-score loss is the accepted cost; double gold is not (ADR-6).
+(non-2xx) is returned **only when nothing was granted by this call**, so any
+error — and any timeout — may be answered by resending the **same**
+`batch_id`. Never mint a new id for a retry: that is the one way to grant
+twice.
 
 | Code | Message | Cause |
 |------|---------|-------|
-| 3 | `invalid payload` / `user_id is required` / `kills must be in 1..1000` | Malformed request; nothing granted |
-| 13 | `wallet update failed: …` | Wallet write failed; nothing granted, safe to retry |
+| 7 | `server-only rpc` | Caller is a client session, not `runtime.http_key`; nothing granted, do not retry |
+| 3 | `invalid payload` / `user_id is required` / `batch_id is required` | Malformed request; nothing granted |
+| 11 | `kills must be in 1..1000` | `OUT_OF_RANGE` (`CodeKillsOutOfRange`); nothing granted. Split the batch — each part under a **new** id, since this one never reached the wallet |
+| 13 | `receipt lookup failed: …` / `wallet update failed: …` | Storage or transaction failure; nothing granted, safe to resend the same id |
+
+**Receipt retention.** One receipt per granted batch, i.e. one per killer per
+game-server flush that carried kills (a 3s flush ≈ ≤1,200 rows per grinding
+player per hour, a few hundred bytes each). Nothing prunes them yet; they are
+the audit trail for a disputed grant (`SELECT` on storage collection
+`reward_receipts`, or the Console's Storage page). A retention job is a
+follow-up, not a blocker at current scale.
 
 ### `reward_kill`, `submit_kill` (legacy per-kill pair)
 
@@ -102,12 +156,18 @@ grants one kill's gold (`reward_kill`) or one leaderboard point (`submit_kill`)
 per HTTP call — the per-kill amplification `reward_kills` exists to remove. New
 callers should use `reward_kills`.
 
+Both are **server-only** under the same guard as `reward_kills`: a client
+session gets code `7` `server-only rpc` before the payload is read.
+
 ### `get_leaderboard`
 
 Returns the top 10 of `kills_alltime` as
 `{ "leaderboard_id": …, "records": [{ "rank", "user_id", "username", "score" }] }`.
-Server-to-server (`http_key`); clients read the leaderboard through Nakama's own
-REST API instead.
+Read-only, so it carries no caller guard: callable with `http_key` or by a
+client session. The `kills_alltime` board is **authoritative** — records can be
+written only by the runtime (the server-only RPCs above); a client's own
+`WriteLeaderboardRecord` against it is refused by Nakama. Clients may still
+*read* it through Nakama's own REST API.
 
 ## Hooks
 
@@ -168,6 +228,11 @@ to `Player-<first 8 chars of user id>`.
 | `auth.ErrUnauthenticated`, `ErrInvalidPayload`, `ErrInternal`, `ErrInvalidEmail`, `ErrWeakPassword`, `ErrRateLimited` | Client-facing runtime errors |
 | `auth.ProfileCollection`, `ProfileKey`, `StartingLevel`, `DefaultMinPasswordLength` | Constants |
 | `auth.TokenRatePerSec`, `TokenBurst`, `TokenIdleTTL` | `gateway_token` rate-limit constants |
+| `economy.RPCRewardKill`, `RPCRewardKills`, `RPCSubmitKill`, `RPCGetLeaderboard` | RPC id constants |
+| `economy.RewardKillRPC`, `RewardKillsRPC`, `SubmitKillRPC`, `GetLeaderboardRPC` | RPC handlers |
+| `economy.ErrServerOnly` | Code `7` error returned to client sessions by the mutation RPCs |
+| `economy.SetupLeaderboards(ctx, logger, nk)` | Creates `kills_alltime` (authoritative) or fails init if an existing board is not |
+| `economy.LeaderboardKillsAllTime`, `LeaderboardMigrateEnv`, `GoldPerKill`, `MaxKillsPerBatch`, `CodeKillsOutOfRange`, `ReceiptCollection`, `StatusGranted`, `StatusPartial` | Constants |
 
 ### `gateway_token` rate limit
 

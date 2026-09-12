@@ -77,11 +77,17 @@ set. Flags are **space-separated** (`--addr :9000`).
 | `--addr` | `GAMESERVER_ADDR` | `:9000` | Game traffic listen address |
 | `--map-id` | `GAMESERVER_MAP_ID` | `map_01` | Map identifier, also the `map_id` metric label |
 | `--server-id` | `GAMESERVER_ID` / `POD_NAME` | random | Server identity checked against the join token |
-| `--capacity` | `GAMESERVER_CAPACITY` | `100` | Maximum concurrent players. A join beyond it is refused with `"Server is full"` **and logged at Warning** with the count, the limit and the user — this refusal was silent until #145, so a server turning players away and a broken one produced identical logs. The value is published into the registry and enforced by the gateway too, so it is a fleet-wide admission limit, not a pod-local one. Also reported as `capacity` on `/status` |
+| `--capacity` | `GAMESERVER_CAPACITY` | `100` | Maximum concurrent players. A join beyond it is refused with `"Server is full"` **and logged at Warning** with the count, the limit and the user — this refusal was silent until #145, so a server turning players away and a broken one produced identical logs. The value is published into the registry and enforced by the gateway too, so it is a fleet-wide admission limit, not a pod-local one. Also reported as `capacity` on `/status`. Admission is **atomic**: the slot is reserved before the player-store load and released if the join fails, so N concurrent joins against one free slot admit exactly one; a user rejoining over their own still-open connection *replaces* it and takes no second slot; a user in the reconnect hold window is not an occupant (see `docs/DESIGN.md`, "Admission hardening") |
+| `--max-pending-handshakes` | `GAMESERVER_MAX_PENDING_HANDSHAKES` | `256` | Most accepted sockets allowed in the join handshake at once. **Separate from `--capacity`**, which counts authenticated players only. An accept beyond it is closed on the spot with no reply and counted as `gameserver_handshakes_rejected_total{reason="pool_full"}`. Published as `handshakes_pending` on `/status` |
+| `--handshake-timeout-ms` | `GAMESERVER_HANDSHAKE_TIMEOUT_MS` | `5000` | Deadline, from accept, for a peer to deliver a complete, valid `MsgJoinToken` (and to read the reply to a rejected one). An idle socket, a partial length prefix or a partial body is closed at the deadline and counted as `reason="timeout"`; a frame that is not a join is closed immediately as `reason="malformed"`. Linked to shutdown, so pending reads unwind on stop. Covers only what the peer controls — the player-store load after verification runs on the host token |
+| `--max-inputs-per-tick` | `GAMESERVER_MAX_INPUTS_PER_TICK` | `32` | Most inputs one connection may queue between two tick drains. Movement-only inputs **coalesce in place** (newest wins) and occupy one slot however often they are sent; inputs carrying an attack target are kept distinct and budgeted by this. Beyond it inputs are dropped and counted as `gameserver_inputs_dropped_total{reason="connection_budget"}` |
+| `--max-pending-inputs` | `GAMESERVER_MAX_PENDING_INPUTS` | `0` → capacity × per-tick budget | World-wide cap on the pending input queue between two drains. `0` derives it as `GAMESERVER_CAPACITY × GAMESERVER_MAX_INPUTS_PER_TICK` — every admitted player spending their whole budget at once still fits. Beyond it inputs are dropped and counted as `reason="queue_full"` |
+| `--max-snapshot-bytes` | `GAMESERVER_MAX_SNAPSHOT_BYTES` | `8192` | **Per-connection downlink budget**: most bytes of snapshot *payload* one client may be sent per snapshot. The counterpart to `--max-inputs-per-tick` on the other direction of the wire — before it, the AOI radius was the only bound on a snapshot, and a radius bounds *area*, not how many entities stand inside it. `0` disables it and restores the pre-budget encoder exactly. **Protobuf connections only** (every byte figure in the encoder is a protobuf size; a JSON frame for the same snapshot is several times larger, so a JSON stream is bounded only by the AOI radius). It is a **tail cap, not a shaper** — but it engages earlier than first documented: measured live, a stock server starts shedding at **~200 entities in one observer's AOI** (keyframes only; the steady delta stream is clipped from ~317). The original "~2.7× the mean snapshot, never engages" derivation sized the cap against a *delta-weighted* mean and was wrong; a keyframe costs ~41 B/entity against a delta's ~26. See "Downlink budget" in `docs/DESIGN.md` for the corrected derivation and the measured table. When it does, entities are **deferred, never dropped** — see "Downlink budget" in `docs/DESIGN.md`. Reported as `max_snapshot_bytes` on `/status`, with `snapshot_bytes`, `snapshot_entities_shed`, `snapshot_removals_deferred` and `snapshot_max_shed_age` |
 | `--sim-critical-hz` | `SIM_CRITICAL_HZ` | `60` | Frequency of the **critical** group (input, movement, combat). This is also the **base tick rate** of the loop — every other group is derived from it |
 | `--sim-world-hz` | `SIM_WORLD_HZ` | `15` | Frequency of the **world** group (AI, spawning, despawning) **and of the snapshot broadcast**. Must divide `SIM_CRITICAL_HZ` exactly and must not exceed it, or the server exits with code 2 |
 | `--sim-background-hz` | `SIM_BACKGROUND_HZ` | `5` | Frequency of the **background** group (work that tolerates a whole interval of delay). Must divide `SIM_CRITICAL_HZ` exactly and must not exceed `SIM_WORLD_HZ` |
 | `--tick-rate` | `GAMESERVER_TICK_RATE` | *(unset → `60/15/5`)* | **Legacy single-rate switch.** Sets *every* group to this one rate, i.e. base = world = background, snapshots every tick — the pre-multi-rate server exactly. Only applies when no `SIM_*_HZ` environment variable is set; any of them present wins and the tick rate is ignored |
+| `--sealed` | `GAMESERVER_SEALED` | `require` | **Sealed session on the gameplay hop.** `require` runs an authenticated X25519 exchange after the join reply and encrypts every frame after it with ChaCha20-Poly1305 (ADR-22; normative format in `backend/docs/SEALED-FRAMING.md`). `off` restores the pre-sealing server exactly. **Two values, not three** — there is no "preferred" mode, because a negotiable encryption setting is a downgrade attack with a friendly name; any other value exits with code 2 rather than guessing. A `require` server **refuses** every client that cannot seal: a JSON client is closed after the join reply and **no setting fixes it** (the JSON codec has no sealed frame), and a protobuf client that never sends `MsgSealedClientHello` is closed at `--handshake-timeout-ms`. A client must therefore set `NetworkSettings.RequireSealedSession` in the same rollout, and that ships in a built player, not in a deployment variable |
 | `--keyframe-interval` | `GAMESERVER_KEYFRAME_INTERVAL` | `30` | Delta snapshots between full keyframes; `0` disables delta encoding (see `docs/API.md`) |
 | `--gather-workers` | `GAMESERVER_GATHER_WORKERS` | `1` | Threads the AOI gather may use. `1` is serial. Above `1` it applies only from 500 viewers up — measured gain is 2.0-2.7x at 500 viewers / 4 workers, inside the noise at 200, a loss at 50 (see `docs/DESIGN.md`, "Where the tick budget goes") |
 | `--map-width` | `GAMESERVER_MAP_WIDTH` | `1000` | Map width in world units |
@@ -102,6 +108,47 @@ set. Flags are **space-separated** (`--addr :9000`).
 | `--redis-password` | `REDIS_PASSWORD` | *(unset)* | Registry Redis password |
 
 #### Realtime transport (`--transport`, `TRANSPORT_KEY`)
+
+> **The server tells you what it is actually doing, on every boot.** "Is this deployment
+> encrypted" is not answerable from one variable, and — since `GAMESERVER_SEALED` began
+> defaulting to `require` — **not answerable from the `transport_*` fields at all**. Those
+> describe the transport only. On the default configuration the transport is TCP with no
+> packet-crypt layer, so `transport_encrypted` is `false`, while every gameplay frame is
+> encrypted and authenticated a layer above it by the sealed session. Read
+> `sealed_required` before concluding anything from `transport_encrypted`. The posture is logged at startup (at **Warning** whenever
+> traffic is in cleartext, Information when it is not) and published on `/status`:
+>
+> | field | meaning |
+> |---|---|
+> | `transport` | `tcp` or `kcp` |
+> | `transport_key_configured` | `TRANSPORT_KEY` holds a value — **not** the same as encryption being on |
+> | `transport_encrypted` | packets leave as ciphertext |
+> | `transport_authenticated` | tampering is detectable — **`false` on every configuration this server supports today** |
+> | `transport_cipher` | `aes-256-cfb`, or `none` |
+> | `transport_posture` | one line stating what is happening and what is not |
+> | `sealed_required` | a sealed session is required on the gameplay hop (`GAMESERVER_SEALED=require`, the default). **This, not `transport_encrypted`, is what says gameplay frames are encrypted** |
+> | `sealed_cipher` | `chacha20-poly1305`, or `none` when sealing is off |
+>
+> Mirrored as `gameserver_transport_encrypted` and `gameserver_transport_authenticated`,
+> which are **gauges** rather than counters precisely so they are present when they read
+> `0` (a never-incremented counter is absent from `/metrics` entirely — see
+> `docs/METRICS.md`).
+>
+> The four combinations, all reported:
+>
+> | transport | key | result |
+> |---|---|---|
+> | `tcp` (default) | unset | **plaintext** — the default, and it used to log nothing at all |
+> | `tcp` | set | **plaintext**, and the key is *ignored* — the configuration most easily mistaken for working encryption |
+> | `kcp` | unset | **plaintext** |
+> | `kcp` | set | **encrypted**, `aes-256-cfb`, and **not authenticated** |
+>
+> **Encrypted is not authenticated.** The KCP path is AES-CFB with a CRC32, and a CRC32 is
+> a linear checksum, not a MAC: an attacker who can modify datagrams can make controlled
+> changes to the plaintext and repair the checksum. That is why the two are separate
+> fields, and why `transport_authenticated` is published while false rather than omitted —
+> so that its becoming true is a visible event. See ADR-21 and
+> `docs/ROADMAP-SECURITY.md` §2.
 
 The gameplay hop (client ↔ this server) speaks **TCP** by default and **KCP over
 UDP** with `--transport kcp`. KCP is reliable and ordered like TCP, but its ARQ

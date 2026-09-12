@@ -8,6 +8,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
 func TestMetrics_RecordersUpdateCollectors(t *testing.T) {
@@ -145,4 +147,66 @@ func get(t *testing.T, url string) (string, int) {
 		t.Fatalf("read %s: %v", url, err)
 	}
 	return string(b), resp.StatusCode
+}
+
+// TestSetTransportPostureReportsTcpKeyAsUnencrypted pins the regression this
+// replaced. The gateway used to log `encrypted` as `transportKey != ""`, so a
+// gateway configured with transport=tcp and a key set reported encrypted=true
+// while putting every auth frame and join token on the wire in cleartext — TCP
+// has no packet-crypt layer and the key is ignored. A security signal that is
+// confidently wrong is worse than one that is missing, because nobody looks
+// behind it.
+func TestSetTransportPostureReportsTcpKeyAsUnencrypted(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+
+	m.SetTransportPosture(transport.Posture(transport.KindTCP,
+		"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", ":8000"))
+
+	if got := testutil.ToFloat64(m.TransportEncrypted.WithLabelValues("tcp", transport.CipherNone)); got != 0 {
+		t.Errorf("gateway_transport_encrypted = %v for tcp with a key set, want 0", got)
+	}
+	if got := testutil.ToFloat64(m.TransportAuthenticated.WithLabelValues("tcp", transport.CipherNone)); got != 0 {
+		t.Errorf("gateway_transport_authenticated = %v, want 0", got)
+	}
+}
+
+// The one configuration that does encrypt still reports so — and still reports
+// that it does not authenticate.
+func TestSetTransportPostureReportsKcpKeyAsEncryptedNotAuthenticated(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+
+	m.SetTransportPosture(transport.Posture(transport.KindKCP,
+		"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", ":8000"))
+
+	if got := testutil.ToFloat64(m.TransportEncrypted.WithLabelValues("kcp", transport.CipherAESCFB)); got != 1 {
+		t.Errorf("gateway_transport_encrypted = %v for kcp with a key, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.TransportAuthenticated.WithLabelValues("kcp", transport.CipherAESCFB)); got != 0 {
+		t.Errorf("gateway_transport_authenticated = %v, want 0 — AES-CFB with a CRC32 is not a MAC", got)
+	}
+}
+
+// A gauge is present when it reads 0; that is why these are gauges and not
+// counters. Asserted, because "the metric is missing" is the answer this whole
+// change exists to prevent.
+func TestTransportPostureGaugesArePresentWhenZero(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+	m.SetTransportPosture(transport.Posture(transport.KindTCP, "", ":8000"))
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, f := range families {
+		seen[f.GetName()] = true
+	}
+	for _, name := range []string{"gateway_transport_encrypted", "gateway_transport_authenticated"} {
+		if !seen[name] {
+			t.Errorf("%s absent from /metrics while reporting 0 — a security question must never be answered by a missing field", name)
+		}
+	}
 }

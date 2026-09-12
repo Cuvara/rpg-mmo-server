@@ -3,6 +3,8 @@ package load
 import (
 	"testing"
 	"time"
+
+	"github.com/duycuong/rpg-mmo/shared/messages"
 )
 
 func env(m map[string]string) func(string) string {
@@ -23,6 +25,14 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	if cfg.TickRate != DefaultTickRate {
 		t.Errorf("TickRate = %d, want %d", cfg.TickRate, DefaultTickRate)
+	}
+	// Protobuf is the wire the client speaks (ADR-9). A JSON default measured
+	// the legacy arm for a whole sweep before anyone noticed the ~5x gap.
+	if cfg.Encoding != messages.EncodingProto {
+		t.Errorf("Encoding = %q, want proto: the default must measure the wire the client actually uses", cfg.Encoding)
+	}
+	if cfg.BaselineEntities != 0 {
+		t.Errorf("BaselineEntities = %d, want 0 (the validity gate is strict unless told otherwise)", cfg.BaselineEntities)
 	}
 	// An unset JOIN_TOKEN_SECRET must fall back to JWT_SECRET, mirroring the
 	// game server's own fallback.
@@ -59,6 +69,23 @@ func TestLoadConfigFlags(t *testing.T) {
 	}
 	if cfg.RampDuration() != 10*time.Second {
 		t.Errorf("RampDuration = %s, want 10s (50 players at 5/s)", cfg.RampDuration())
+	}
+}
+
+func TestLoadConfigEncodingAndBaselineFlags(t *testing.T) {
+	cfg, err := LoadConfig(env(map[string]string{"JWT_SECRET": "s"}),
+		[]string{"-encoding", "json", "-baseline-entities", "6"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Encoding != messages.EncodingJSON {
+		t.Errorf("Encoding = %q, want json (the legacy arm must stay reachable for A/B sweeps)", cfg.Encoding)
+	}
+	if cfg.BaselineEntities != 6 {
+		t.Errorf("BaselineEntities = %d, want 6", cfg.BaselineEntities)
+	}
+	if _, err := LoadConfig(env(map[string]string{"JWT_SECRET": "s"}), []string{"-baseline-entities", "-1"}); err == nil {
+		t.Error("a negative baseline must be rejected; it would tighten the gate below zero players")
 	}
 }
 
@@ -128,5 +155,63 @@ func TestNormalizeDialAddr(t *testing.T) {
 		if got := NormalizeDialAddr(tt.in); got != tt.want {
 			t.Errorf("NormalizeDialAddr(%q) = %q, want %q", tt.in, got, tt.want)
 		}
+	}
+}
+
+// TestClusterLeavesAStationaryCrowd pins the arithmetic behind the warning on
+// MovementCluster: a player marching +X clears an origin-centred AOI long before a
+// default run finishes, so the mode cannot be used to hold players inside a stationary
+// entity population.
+//
+// This is a guard on a documented claim, not on code that can regress on its own. It
+// exists because the claim it replaces — "they stay mutually in-AOI, so this is the
+// worst-case dense-crowd shape" — was true of the players and false of everything else,
+// and a run that believed it measured a nearly empty AOI while reporting the population
+// it started with. Measured live: server-side snapshot bytes fell from 113 kB/s to
+// 0.6 kB/s by t=24s under this mode, and stayed flat at 117.6 kB/s under MovementStill.
+func TestClusterLeavesAStationaryCrowd(t *testing.T) {
+	// Server-side constants this mode is measured against.
+	const (
+		playerSpeed = 5.0  // ServerDefaults.DefaultPlayerSpeed, world units/second
+		aoiRadius   = 50.0 // GameConstants.DefaultAoiRadius
+	)
+
+	secondsToClearAOI := aoiRadius / playerSpeed
+	if secondsToClearAOI > 15 {
+		t.Fatalf("a cluster player now takes %.1fs to clear the AOI; the warning on "+
+			"MovementCluster is calibrated for ~10s and should be re-derived", secondsToClearAOI)
+	}
+
+	// The default measurement window starts after the warmup and runs for Duration.
+	// If the player is already outside the AOI when measurement begins, the mode is
+	// measuring an empty AOI for the whole window, not merely part of it.
+	distanceAtWindowStart := playerSpeed * DefaultWarmup.Seconds()
+	if distanceAtWindowStart < aoiRadius {
+		t.Logf("player is %.0f units out when measurement starts (AOI %.0f): the collapse "+
+			"happens during the window", distanceAtWindowStart, aoiRadius)
+	}
+
+	distanceAtWindowEnd := playerSpeed * (DefaultWarmup + DefaultDuration).Seconds()
+	if distanceAtWindowEnd <= aoiRadius {
+		t.Fatalf("a default run now ends %.0f units from spawn, within the %.0f-unit AOI; "+
+			"MovementCluster no longer walks players out of a stationary crowd and its "+
+			"warning should be revisited", distanceAtWindowEnd, aoiRadius)
+	}
+
+	// And the mode really is the default, which is what makes the above a trap rather
+	// than an opt-in.
+	cfg, err := LoadConfig(func(k string) string {
+		if k == "JWT_SECRET" {
+			return "test-secret"
+		}
+		return ""
+	}, nil)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Movement != MovementCluster {
+		t.Fatalf("default movement = %q, want %q — if the default moved, the warning on "+
+			"MovementCluster overstates the risk and should be toned down",
+			cfg.Movement, MovementCluster)
 	}
 }

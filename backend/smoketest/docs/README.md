@@ -100,6 +100,8 @@ All endpoints are overridable via env and/or flags (flags win):
 | `GAME_DB_URL` | `--game-db-url` | *(unset)* | Game-state DSN. Unset ⇒ the three `gamestate_*` checks **SKIP** |
 | `SMOKE_DEVICE_ID` | `--device-id` | *(random)* | Pin the Nakama device id (reuses the account) instead of generating one |
 | `SMOKE_SKIP_DB` | `--skip-db` | `false` | Skip every persistence check |
+| `SMOKE_ENCODING` | `--encoding` | `json` | Wire encoding for every frame this client **sends**: `json` or `proto`. The server answers in the encoding the client spoke, so there is nothing to set on the read side. An unrecognised value fails the run rather than falling back |
+| `SMOKE_SEALED` | `--sealed` | `false` | Run the sealed-session handshake on the gameplay hop and encrypt every frame after it. **Requires `--encoding proto`** and refuses the combination otherwise (see below). Must match the server's `GAMESERVER_SEALED` — configuration on both ends, never a wire negotiation |
 | `SMOKE_REQUIRE_DB` | `--require-db` | `false` | Fail instead of skipping when a persistence check cannot run |
 | `SMOKE_EXPECT_MIGRATION` | `--expect-migration-version` | `1` | Required `schema_migrations` version — **bump with every new migration** |
 | `SMOKE_DB_POLL_TIMEOUT` | `--db-poll-timeout` | `75s` | Deadline for the `player_states` row |
@@ -157,6 +159,30 @@ JWT_SECRET=dev-secret-change-me GATEWAY_ADDR=127.0.0.1:8000 \
 # Full flow with both hops on KCP
 JWT_SECRET=dev-secret-change-me TRANSPORT=kcp GATEWAY_ADDR=127.0.0.1:8200 \
   SMOKE_MAP_ID=map_kcp bin/smoketest
+```
+
+
+### Sealing requires protobuf, and the combination is refused rather than fixed
+
+`--sealed --encoding json` is rejected at startup. The JSON codec has **no sealed
+frame**, so a server with `GAMESERVER_SEALED=require` refuses a JSON client at the
+join with `encoding_cannot_seal` — the join is *accepted*, then the connection
+closes, so a log line reading "join accepted" is not evidence the client works.
+
+The smoke test does not upgrade the encoding for you. Someone who wrote
+`--sealed --encoding json` believes one of those two things about the run, and
+silently choosing the other hides which — the same reason the server has two
+sealing modes and not three.
+
+The refusal lives in the binary, not only in `stack.sh`: a wrapper can be bypassed,
+and the binary is what CD runs.
+
+```bash
+# Drive a sealed stack directly
+JWT_SECRET=... go run ./cmd/smoketest --sealed --encoding proto
+
+# Or let stack.sh derive both halves for you
+GAMESERVER_SEALED=require ./stack.sh check
 ```
 
 ## Run locally

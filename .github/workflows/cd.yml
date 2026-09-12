@@ -642,6 +642,17 @@ jobs:
           NAKAMA_CONSOLE_PASSWORD: ${{ secrets.NAKAMA_CONSOLE_PASSWORD }}
           REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
           NAKAMA_SERVER_KEY: ${{ secrets.NAKAMA_SERVER_KEY }}
+          # NAKAMA_HTTP_KEY was NEVER PLUMBED HERE UNTIL ADR-24, and the effect was
+          # not cosmetic: deploy/.env is regenerated WHOLESALE, so the name was
+          # absent from it, compose fell back to `${NAKAMA_HTTP_KEY:-defaulthttpkey}`,
+          # and every deployed environment ran Nakama's PUBLISHED DEFAULT http key.
+          # That key authenticates the SERVER-ONLY reward_kill / submit_kill RPCs.
+          # Measured: a wrong key gives 401 "HTTP key invalid", `defaulthttpkey`
+          # gives 400 "user_id is required" -- i.e. it passed auth and reached the
+          # handler. It failed open and silently: rewards flowed, nothing warned.
+          NAKAMA_HTTP_KEY: ${{ secrets.NAKAMA_HTTP_KEY }}
+          NAKAMA_TLS_CERT: ${{ vars.NAKAMA_TLS_CERT }}
+          NAKAMA_TLS_KEY: ${{ vars.NAKAMA_TLS_KEY }}
           NAKAMA_VERSION: ${{ vars.NAKAMA_VERSION || '3.40.0' }}
           POSTGRES_DB: ${{ vars.POSTGRES_DB || 'nakama' }}
           POSTGRES_USER: ${{ vars.POSTGRES_USER || 'nakama' }}
@@ -780,6 +791,122 @@ jobs:
           esac
           umask 077
           envfile="$RPG_DEPLOY_DIR/deploy/.env"
+
+          # NORMALISE GAMESERVER_SEALED ONCE, HERE, and write the normalised value.
+          #
+          # The game server parses it with .Trim().ToLowerInvariant(); this generator
+          # used to compare the raw string with `= "require"`. Two parsers, one input,
+          # different rules -- so `REQUIRE` or ` require ` produced a server that SEALS
+          # and a smoke test configured for JSON, which is a red deploy on a healthy
+          # stack and gives no hint that a capitalisation caused it. Found by executing
+          # this block rather than reading it.
+          #
+          # An unrecognised value FAILS THE DEPLOY rather than falling back to `off`.
+          # A silent fallback is how the two halves disagreed in the first place, and
+          # "encryption quietly disabled by a typo" is the wrong direction to fail in.
+          sealed_norm=$(printf '%s' "${GAMESERVER_SEALED:-off}" \
+            | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+          case "$sealed_norm" in
+            off|require) ;;
+            *)
+              echo "::error::GAMESERVER_SEALED=\"${GAMESERVER_SEALED}\" is not off or require." >&2
+              echo "         There is no \"preferred\" mode: a negotiable encryption setting" >&2
+              echo "         is a downgrade attack with a friendly name." >&2
+              exit 1
+              ;;
+          esac
+          # Gateway-hop TLS (ADR-23). Both unset is plaintext and is the default on
+          # every environment; setting BOTH to in-container PEM paths turns it on.
+          #
+          # Exactly one of the two FAILS THE DEPLOY, for the same reason the sealed
+          # value above fails on an unrecognised word: an operator who set one and
+          # typo'd the other meant to have TLS, and generating a half-configured
+          # .env would hand them the plaintext listener they were trying to remove
+          # while the environment says otherwise. The gateway binary refuses this
+          # too; catching it here fails the DEPLOY instead of CrashLooping the pod.
+          # TRIMMED AT THE ENDS ONLY, to match `strings.TrimSpace` in the gateway's
+          # own LoadTLSConfig (server.go). The sealed normalisation above uses
+          # `tr -d '[:space:]'` and is right to: GAMESERVER_SEALED is a KEYWORD, so
+          # internal whitespace is meaningless there. A certificate path is a
+          # different kind of value -- internal whitespace is DATA -- and `tr -d`
+          # would write `/mycerts/c.pem` for an environment that set
+          # `/my certs/c.pem`, handing the binary a path it never asked for.
+          #
+          # It fails closed (the gateway exits 1 rather than starting plaintext),
+          # so this was legibility rather than security. It is fixed anyway: reusing
+          # a keyword normaliser on a path is a check that LOOKS like it matches the
+          # consumer and does not, which is the shape this file has been bitten by
+          # twice already.
+          # sed is line-oriented, so a `sed`-based trim leaves an embedded newline
+          # in place -- and a value pasted into a GitHub Environment variable with a
+          # stray newline is the case that actually happens. Parameter expansion
+          # strips whitespace of every kind from the ends and nothing from within,
+          # which is exactly strings.TrimSpace.
+          trim_ends() {
+            _v=$1
+            while :; do case $_v in [[:space:]]*) _v=${_v#?} ;; *) break ;; esac; done
+            while :; do case $_v in *[[:space:]]) _v=${_v%?} ;; *) break ;; esac; done
+            printf '%s' "$_v"
+          }
+          tls_cert=$(trim_ends "${GATEWAY_TLS_CERT:-}")
+          tls_key=$(trim_ends "${GATEWAY_TLS_KEY:-}")
+          if { [ -n "$tls_cert" ] && [ -z "$tls_key" ]; } || { [ -z "$tls_cert" ] && [ -n "$tls_key" ]; }; then
+            echo "::error::GATEWAY_TLS_CERT and GATEWAY_TLS_KEY must be set together or not at all." >&2
+            echo "         Exactly one is set, which would deploy a PLAINTEXT gateway on an" >&2
+            echo "         environment configured for TLS. Set both or neither." >&2
+            exit 1
+          fi
+
+          # ---- Nakama static keys (ADR-24) -----------------------------------
+          # These are NOT session credentials. They never expire, and one of them
+          # -- runtime.http_key -- gates the SERVER-ONLY reward_kill / submit_kill
+          # RPCs. Left at Nakama's published defaults they authenticate anyone who
+          # can reach port 7350, which is published on 0.0.0.0 in compose.
+          #
+          # Refusing to deploy is the right direction to fail here: a missing key
+          # previously meant "silently use the documented default", which is the
+          # worst of the three possible behaviours.
+          nakama_server_key=$(trim_ends "${NAKAMA_SERVER_KEY:-}")
+          nakama_http_key=$(trim_ends "${NAKAMA_HTTP_KEY:-}")
+          key_fault=0
+          for _pair in "NAKAMA_SERVER_KEY:$nakama_server_key:defaultkey" \
+                       "NAKAMA_HTTP_KEY:$nakama_http_key:defaulthttpkey"; do
+            _name=${_pair%%:*}; _rest=${_pair#*:}
+            _val=${_rest%:*}; _bad=${_rest##*:}
+            if [ -z "$_val" ]; then
+              echo "::error::$_name is not set for this environment." >&2
+              echo "         It is a static, never-expiring server credential. Unset used to mean" >&2
+              echo "         'fall back to Nakama's published default', which authenticated anyone." >&2
+              echo "         Set it as a repository/environment SECRET: openssl rand -hex 32" >&2
+              key_fault=1
+            elif [ "$_val" = "$_bad" ]; then
+              echo "::error::$_name is set to Nakama's published default ('$_bad')." >&2
+              echo "         Measured: that value passes authentication. Rotate it." >&2
+              key_fault=1
+            fi
+          done
+          [ "$key_fault" -eq 0 ] || exit 1
+
+          # ---- Nakama TLS (ADR-24) -------------------------------------------
+          # Same shape as the gateway pair above: both or neither, trimmed at the
+          # ends only because these are PATHS. When on, NAKAMA_URL must become
+          # https:// as well -- the C# game server is a second consumer of this hop
+          # (NakamaClient.cs) and would otherwise keep speaking plaintext to a
+          # listener that no longer answers it.
+          nakama_tls_cert=$(trim_ends "${NAKAMA_TLS_CERT:-}")
+          nakama_tls_key=$(trim_ends "${NAKAMA_TLS_KEY:-}")
+          if { [ -n "$nakama_tls_cert" ] && [ -z "$nakama_tls_key" ]; } || \
+             { [ -z "$nakama_tls_cert" ] && [ -n "$nakama_tls_key" ]; }; then
+            echo "::error::NAKAMA_TLS_CERT and NAKAMA_TLS_KEY must be set together or not at all." >&2
+            echo "         Exactly one is set, which would deploy a PLAINTEXT Nakama on an" >&2
+            echo "         environment configured for TLS. Set both or neither." >&2
+            exit 1
+          fi
+          if [ -n "$nakama_tls_cert" ]; then
+            nakama_scheme=https
+          else
+            nakama_scheme=http
+          fi
           {
             echo "# Generated by CD ($GITHUB_RUN_ID) — do not edit by hand."
             echo "NAKAMA_VERSION=${NAKAMA_VERSION}"
@@ -792,11 +919,67 @@ jobs:
             echo "JOIN_TOKEN_SECRET=${JOIN_TOKEN_SECRET}"
             echo "NAKAMA_CONSOLE_USER=${NAKAMA_CONSOLE_USER}"
             echo "NAKAMA_CONSOLE_PASSWORD=${NAKAMA_CONSOLE_PASSWORD}"
-            echo "NAKAMA_SERVER_KEY=${NAKAMA_SERVER_KEY:-defaultkey}"
+            # No `:-defaultkey` fallback any more — the gate above already refused
+            # empty and refused the default, so a fallback here could only re-introduce
+            # what it exists to prevent.
+            echo "NAKAMA_SERVER_KEY=${nakama_server_key}"
+            echo "NAKAMA_HTTP_KEY=${nakama_http_key}"
+            echo "NAKAMA_TLS_CERT=${nakama_tls_cert}"
+            echo "NAKAMA_TLS_KEY=${nakama_tls_key}"
+            # NAKAMA_URL follows the TLS decision rather than being configured
+            # independently, because two sources of truth for one hop is how the
+            # game server ends up speaking http:// to an https:// listener.
+            echo "NAKAMA_URL=${nakama_scheme}://nakama:7350"
             echo "GATEWAY_ADDR=${GATEWAY_ADDR}"
+            # Written on BOTH branches — empty is a value here, not an omission.
+            # deploy/.env is sourced with `set -a`, so a name this file does not
+            # mention keeps whatever the operator's shell had; writing the empty
+            # string is what makes "TLS is off on this environment" a fact in the
+            # generated file rather than an absence. Same reasoning as
+            # SMOKE_ENCODING being written on both branches below.
+            echo "GATEWAY_TLS_CERT=${tls_cert}"
+            echo "GATEWAY_TLS_KEY=${tls_key}"
             echo "GAMESERVER_ADDR=${GAMESERVER_ADDR}"
             echo "GAMESERVER_MAP_ID=${GAMESERVER_MAP_ID}"
             echo "GAMESERVER_RUNTIME=dotnet"
+            # Sealed transport on the gameplay hop. The game server binary defaults
+            # to `require`; every deploy path pins it OFF, and this is the one place
+            # an environment can opt in, by setting GAMESERVER_SEALED as an
+            # Environment variable. Same shape and same reason as ALLOCATOR below.
+            #
+            # THE TWO SMOKE_ VARIABLES BELOW MUST MOVE WITH IT, AND WITH EACH OTHER.
+            #
+            # post-deploy-smoke sources this file and runs the Go smoketest against
+            # the stack that was just deployed, so the verifier's configuration has
+            # to match the server's or the deploy fails on a healthy stack. Both
+            # are needed, not one: a sealed run is necessarily a protobuf run,
+            # because the JSON codec has no sealed frame and a `require` server
+            # refuses a JSON client at the join with `encoding_cannot_seal`.
+            # Deriving SMOKE_SEALED alone reproduces that failure exactly, which is
+            # why the binary itself refuses `-sealed` without `-encoding proto`
+            # rather than trusting this file to get the pair right.
+            #
+            # SMOKE_ENCODING is set on BOTH branches rather than only the sealed
+            # one. It is already the default, so writing `json` changes nothing
+            # today -- but it makes the pairing visible at the line, and it means a
+            # future reader editing one value sees the other beside it instead of
+            # having to know it exists.
+            #
+            # This does NOT turn sealing on anywhere. It makes
+            # GAMESERVER_SEALED=require a working switch instead of a red deploy;
+            # setting it on an environment is a separate, deliberate act, and it
+            # carries a client rollout with it (a Unity player must set
+            # NetworkSettings.RequireSealedSession, which ships in a built player
+            # and not in a deployment variable). See backend/docs/ROADMAP-SECURITY.md
+            # step 5.
+            echo "GAMESERVER_SEALED=$sealed_norm"
+            if [ "$sealed_norm" = "require" ]; then
+              echo "SMOKE_SEALED=1"
+              echo "SMOKE_ENCODING=proto"
+            else
+              echo "SMOKE_SEALED=0"
+              echo "SMOKE_ENCODING=json"
+            fi
             echo "SIM_CRITICAL_HZ=${SIM_CRITICAL_HZ}"
             echo "SIM_WORLD_HZ=${SIM_WORLD_HZ}"
             echo "SIM_BACKGROUND_HZ=${SIM_BACKGROUND_HZ}"

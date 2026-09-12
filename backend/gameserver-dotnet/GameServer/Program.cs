@@ -18,6 +18,53 @@ string addr = GetArg(args, "--addr") ?? Env("GAMESERVER_ADDR") ?? ":9000";
 string mapId = GetArg(args, "--map-id") ?? Env("GAMESERVER_MAP_ID") ?? "map_01";
 string serverId = GetArg(args, "--server-id") ?? Env("GAMESERVER_ID") ?? Env("POD_NAME") ?? $"gs-{Guid.NewGuid():N}"[..12];
 int capacity = int.TryParse(GetArg(args, "--capacity") ?? Env("GAMESERVER_CAPACITY"), out var cap) ? cap : 100;
+// Pre-join bounds (workspace audit F03). Capacity counts authenticated players only; these
+// two bound the phase before that — how many accepted sockets may sit in the handshake at
+// once, and how long each may take to deliver a complete join frame.
+int maxPendingHandshakes = int.TryParse(
+    GetArg(args, "--max-pending-handshakes") ?? Env("GAMESERVER_MAX_PENDING_HANDSHAKES"), out var mph) && mph > 0
+    ? mph : ServerOptions.DefaultMaxPendingHandshakes;
+// Wire protocol version floor. 0 (default) also admits a client that advertises no
+// version at all -- see ServerOptions.MinProtocolVersion for why that is the shipping
+// default and what has to be true before raising it.
+uint minProtocolVersion = uint.TryParse(
+    GetArg(args, "--min-protocol-version") ?? Env("GAMESERVER_MIN_PROTOCOL_VERSION"), out var mpv)
+    ? mpv : 0u;
+int handshakeTimeoutMs = int.TryParse(
+    GetArg(args, "--handshake-timeout-ms") ?? Env("GAMESERVER_HANDSHAKE_TIMEOUT_MS"), out var hto) && hto > 0
+    ? hto : (int)ServerOptions.DefaultHandshakeTimeout.TotalMilliseconds;
+// Ingestion bounds (workspace audit F04): inputs one connection may queue between two tick
+// drains, and the world-wide queue cap (0 = capacity x per-connection budget).
+int maxInputsPerTick = int.TryParse(
+    GetArg(args, "--max-inputs-per-tick") ?? Env("GAMESERVER_MAX_INPUTS_PER_TICK"), out var mipt) && mipt > 0
+    ? mipt : GameServer.World.EcsWorld.DefaultMaxInputsPerConnection;
+int maxPendingInputs = int.TryParse(
+    GetArg(args, "--max-pending-inputs") ?? Env("GAMESERVER_MAX_PENDING_INPUTS"), out var mpi) && mpi > 0
+    ? mpi : 0;
+// Downlink bound: bytes of snapshot payload one connection may be sent per snapshot.
+// The counterpart to --max-inputs-per-tick, on the other direction of the wire, and the
+// only thing bounding a snapshot's size other than the AOI radius — which bounds area,
+// not how many entities stand inside it. Explicit 0 disables it; a negative or unparsable
+// value falls back to the default rather than being treated as "off", because "off" must
+// be something an operator asked for.
+// Sealed transport on the gameplay hop. Two values, not three: a "preferred" mode is a
+// downgrade attack with a friendly name.
+//
+// DEFAULTS TO `require`. A stock server encrypts the gameplay hop and refuses every client
+// that cannot seal — which is every JSON client, and every protobuf client that does not
+// run the ClientHello/ServerHello exchange. That refusal is the point: an unencrypted
+// default is a default nobody chose, and the transport posture line at boot said so on
+// every boot for as long as it was `off`.
+//
+// `off` restores the pre-sealing server exactly. It is a deliberate, reviewable choice —
+// the local compose stack and the JSON interop tests set it explicitly — never a fallback
+// this code reaches on its own. There is no value that means "seal if the client can":
+// see the refusal below.
+string sealedMode = (GetArg(args, "--sealed") ?? Env("GAMESERVER_SEALED") ?? "require").Trim().ToLowerInvariant();
+
+int maxSnapshotBytes = int.TryParse(
+    GetArg(args, "--max-snapshot-bytes") ?? Env("GAMESERVER_MAX_SNAPSHOT_BYTES"), out var msb) && msb >= 0
+    ? msb : GameServer.Snapshot.SnapshotDeltaState.DefaultMaxSnapshotBytes;
 // Falls back to the shared constant, not to a literal. The client derives its own
 // integration step from the same constant, and it is compiled into both sides, so a
 // literal here means bumping GameConstants.DefaultTickRate moves the client and leaves
@@ -154,6 +201,10 @@ logger.LogInformation("  Transport: {Transport}{Encryption}", transport,
 logger.LogInformation("  MapId:     {MapId}", mapId);
 logger.LogInformation("  ServerId:  {ServerId}", serverId);
 logger.LogInformation("  Capacity:  {Capacity}", capacity);
+logger.LogInformation("  Handshake: {Pending} pending max, {Timeout}ms deadline",
+    maxPendingHandshakes, handshakeTimeoutMs);
+logger.LogInformation("  Inputs:    {PerTick}/connection/tick, {Total} world-wide",
+    maxInputsPerTick, maxPendingInputs > 0 ? maxPendingInputs.ToString() : $"{capacity}x{maxInputsPerTick}");
 logger.LogInformation("  SimRates:  {Rates}", $"critical={criticalHz}Hz world={worldHz}Hz background={backgroundHz}Hz");
 logger.LogInformation("  Snapshots: {Mode}", keyframeInterval > 0
     ? $"delta, keyframe every {keyframeInterval} snapshots"
@@ -293,6 +344,18 @@ if (!SimulationRates.TryCreate(criticalHz, worldHz, backgroundHz, out Simulation
 // compiler instead of asserting it at each use site.
 SimulationRates simulationRates = simRates!;
 
+if (sealedMode is not ("off" or "require"))
+{
+    logger.LogCritical(
+        "unknown GAMESERVER_SEALED value {Value} (want \"off\" or \"require\"). There is no " +
+        "\"preferred\" mode: a negotiable encryption setting is a downgrade attack with a " +
+        "friendly name.", sealedMode);
+    return 2;
+}
+var sealedRequirement = sealedMode == "require"
+    ? GameServer.Net.Sealed.SealedRequirement.Required
+    : GameServer.Net.Sealed.SealedRequirement.Disabled;
+
 if (!TransportKind.IsValid(transport))
 {
     logger.LogCritical("unknown transport {Transport} (want {Tcp} or {Kcp})",
@@ -300,21 +363,68 @@ if (!TransportKind.IsValid(transport))
     return 2;
 }
 
-// Mirror of the Go listener's warning (backend/shared/transport/transport.go): KCP
-// without a key puts the join token and every snapshot on the wire in cleartext UDP,
-// which is fine for local dev and not for anything reachable from the internet.
-if (transport == TransportKind.Kcp && string.IsNullOrWhiteSpace(transportKey))
+// Transport confidentiality posture, reported on EVERY boot rather than only on the two
+// combinations that used to warn.
+//
+// What this replaces logged nothing at all for the default configuration -- TCP with no
+// key, i.e. no encryption whatsoever -- because it only warned about KCP-without-a-key and
+// a key-set-on-TCP. The configuration most likely to be deployed by accident was the one
+// configuration that said nothing, which is exactly backwards. See TransportPosture.
+var transportPosture = TransportPosture.For(transport, transportKey, addr);
+
+if (transportPosture.Encrypted)
 {
-    logger.LogWarning(
-        "KCP listener is UNENCRYPTED -- join tokens and gameplay traffic are in cleartext; set {KeyVar} " +
-        "(32-byte hex) before exposing this port (addr={Addr}, transport={Transport})",
-        TransportKind.KeyEnvVar, addr, TransportKind.Kcp);
+    // Still not silent when it is working: "encrypted but not authenticated" is a real
+    // limitation an operator needs in front of them, not a footnote in a design doc.
+    logger.LogInformation(
+        "Transport posture: {Transport}, {Summary} (cipher={Cipher}, encrypted={Encrypted}, authenticated={Authenticated}, addr={Addr})",
+        transportPosture.Transport, transportPosture.Summary, transportPosture.Cipher,
+        transportPosture.Encrypted, transportPosture.Authenticated, addr);
 }
-if (transport == TransportKind.Tcp && !string.IsNullOrWhiteSpace(transportKey))
+else if (sealedRequirement == GameServer.Net.Sealed.SealedRequirement.Required)
+{
+    // The transport IS plaintext and the summary above is accurate about it -- but
+    // "PLAINTEXT, set TRANSPORT_KEY" is the wrong thing to shout at an operator who has
+    // already solved gameplay confidentiality a layer up, and better: the sealed session
+    // is authenticated, which TRANSPORT_KEY's pre-shared key is not.
+    //
+    // Reported at Information rather than Warning for that reason, and it states what is
+    // still readable rather than implying nothing is. A boot line that said "encrypted"
+    // flat out would be the same overclaim as describing the client as verifying the
+    // server's binding.
+    logger.LogInformation(
+        "Transport posture: {Transport}, {Summary} (cipher={Cipher}, encrypted={Encrypted}, authenticated={Authenticated}, addr={Addr}) " +
+        "-- but a SEALED SESSION is required on the gameplay hop, so gameplay frames are encrypted and authenticated above this transport. " +
+        "Still readable on the wire: the join handshake before the sealed session exists (MsgJoinToken and its reply, and the sealed hello exchange), " +
+        "and the whole gateway hop.",
+        transportPosture.Transport, transportPosture.Summary, transportPosture.Cipher,
+        transportPosture.Encrypted, transportPosture.Authenticated, addr);
+}
+else
 {
     logger.LogWarning(
-        "{KeyVar} is set but the transport is TCP, which has no packet encryption -- the key is IGNORED. " +
-        "Use --transport kcp, or terminate TLS in front of this listener.", TransportKind.KeyEnvVar);
+        "Transport posture: {Transport}, {Summary} (cipher={Cipher}, encrypted={Encrypted}, authenticated={Authenticated}, addr={Addr}). " +
+        "Set {KeyVar} (32-byte hex) and --transport kcp, or terminate TLS in front of this listener.",
+        transportPosture.Transport, transportPosture.Summary, transportPosture.Cipher,
+        transportPosture.Encrypted, transportPosture.Authenticated, addr, TransportKind.KeyEnvVar);
+}
+
+// The sealed posture is reported on EVERY boot, for the same reason the transport posture
+// is: the configuration most likely to be deployed by accident must not be the one that
+// says nothing. `off` is now a deliberate choice, so it gets a line saying what that
+// choice costs rather than silence.
+if (sealedRequirement == GameServer.Net.Sealed.SealedRequirement.Required)
+{
+    logger.LogInformation(
+        "Sealed session: REQUIRED (chacha20-poly1305 over authenticated X25519). Clients that cannot seal are refused: " +
+        "a JSON client is closed after the join reply and no setting fixes it, and a protobuf client that sends no " +
+        "sealed hello is closed at the handshake deadline. A Unity client must set NetworkSettings.RequireSealedSession.");
+}
+else
+{
+    logger.LogWarning(
+        "Sealed session: OFF -- gameplay frames travel in the clear on this listener. This is not the default " +
+        "(GAMESERVER_SEALED defaults to \"require\"); something set it to \"off\" for this process.");
 }
 
 if (string.IsNullOrEmpty(jwtSecret))
@@ -349,7 +459,21 @@ logger.LogInformation("  JoinToken: JOIN_TOKEN_SECRET, {Count} key(s){Rotating}"
 // ── Metrics (OpenTelemetry -> Prometheus) ──
 
 using var metrics = new GameMetrics(mapId);
+
+// Published as gauges as well as on /status: a scrape must be able to answer "is this
+// server encrypted" without a human reading a log line from boot time. Registered here,
+// immediately after the meter exists, so no scrape can observe the default-constructed
+// (unlabelled) state.
+metrics.SetTransportPosture(
+    transportPosture.Transport, transportPosture.Cipher,
+    transportPosture.Encrypted, transportPosture.Authenticated);
 await using var metricsEndpoint = MetricsEndpoint.TryStart(metricsAddr, metrics, serverId, logger);
+
+// AFTER TryStart, never before: TryStart is what builds the MeterProvider, and a
+// measurement recorded with nothing subscribed to the meter is silently dropped. Priming
+// in the GameMetrics constructor looked right, passed its tests, and produced no series at
+// all on a live scrape. See GameMetrics.PrimeCounters.
+metrics.PrimeCounters();
 
 // ── Game content (items, and whatever content types follow) ──
 //
@@ -513,6 +637,13 @@ var options = new ServerOptions
     GatherWorkers = gatherWorkers,
     MapBounds = MapBounds.FromSize(mapWidth, mapHeight),
     Capacity = capacity,
+    MaxPendingHandshakes = maxPendingHandshakes,
+    MinProtocolVersion = minProtocolVersion,
+    HandshakeTimeout = TimeSpan.FromMilliseconds(handshakeTimeoutMs),
+    MaxInputsPerConnection = maxInputsPerTick,
+    MaxPendingInputs = maxPendingInputs,
+    MaxSnapshotBytes = maxSnapshotBytes,
+    SealedTransport = sealedRequirement,
     JwtSecret = jwtSecret,
     JoinTokenSecret = joinTokenSecret,
     HoldTtl = mode == "dungeon" ? TimeSpan.FromSeconds(60) : TimeSpan.FromSeconds(30),
@@ -644,6 +775,53 @@ metricsEndpoint?.SetStatusProvider(() =>
         EventPublishFailures = redisEventStream?.PublishFailures ?? 0,
         KickConsumer = kickConsumer != null ? "redis" : "disabled",
         PlayersKicked = metrics.PlayersKicked,
+        HandshakesPending = server.PendingHandshakes,
+        HandshakesRejected = metrics.HandshakesRejected,
+        InputsDropped = metrics.InputsDropped,
+        Transport = transportPosture.Transport,
+        TransportKeyConfigured = transportPosture.KeyConfigured,
+        TransportEncrypted = transportPosture.Encrypted,
+        TransportAuthenticated = transportPosture.Authenticated,
+        TransportCipher = transportPosture.Cipher,
+        TransportPostureSummary = transportPosture.Summary,
+        SealedRequired = sealedRequirement == GameServer.Net.Sealed.SealedRequirement.Required,
+        SealedCipher = sealedRequirement == GameServer.Net.Sealed.SealedRequirement.Required
+            ? "chacha20-poly1305"
+            : "none",
+        FrameOrderObserved = server.FrameOrder.FramesObserved,
+        FrameOrderInversions = server.FrameOrder.Inversions,
+        FrameOrderDuplicates = server.FrameOrder.Duplicates,
+        FrameOrderLargestBackwardJump = server.FrameOrder.LargestBackwardJump,
+        FrameOrderForwardGaps = server.FrameOrder.ForwardGaps,
+        InputsRejected = metrics.InputsRejectedTotal,
+        // Every reason, always, including the ones at zero. That is the whole point of the
+        // bounded enum: the healthy reading for these is zero, and a missing key would be
+        // indistinguishable from a build without the feature.
+        InputsRejectedByReason = GameServer.Input.InputRejection.All.ToDictionary(
+            GameServer.Input.InputRejection.Label,
+            metrics.InputsRejected),
+        AnomalyAccountsTracked = server.Anomalies.TrackedAccounts,
+        AnomalyAccountsOverThreshold = server.Anomalies.AccountsOverThreshold(),
+        AnomalyAlerts = metrics.AnomalyAlerts,
+        AnomalyAccountsDropped = server.Anomalies.DroppedAccounts,
+        AnomalyTopAccounts = server.Anomalies.TopByScore(10)
+            .Select(a => new GameServer.Observability.AnomalousAccount
+            {
+                UserId = a.UserId,
+                Rejections = a.Total,
+                Score = a.Score,
+                Alerts = a.Alerts,
+                ByReason = GameServer.Input.InputRejection.All.ToDictionary(
+                    GameServer.Input.InputRejection.Label,
+                    r => a.ByReason[(int)r]),
+            })
+            .ToList(),
+        MaxSnapshotBytes = maxSnapshotBytes,
+        SnapshotBytes = metrics.SnapshotBytes,
+        SnapshotEntitiesShed = metrics.SnapshotEntitiesShed,
+        SnapshotRemovalsDeferred = metrics.SnapshotRemovalsDeferred,
+        SnapshotMaxShedAge = metrics.MaxShedAge,
+        TransfersRejected = metrics.TransfersRejected,
         Postgres = postgresStore != null ? "connected" : "disconnected",
         UptimeSeconds = (long)uptime.Elapsed.TotalSeconds
     };

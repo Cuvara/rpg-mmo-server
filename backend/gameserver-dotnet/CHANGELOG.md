@@ -7,6 +7,1098 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **ADR-25: the game server will prove its identity with an Ed25519 key it generates per
+  pod.** Design only -- **no runtime code changed**, and nothing described below is
+  implemented. It decides the residual ADR-22 left open and that `ROADMAP-SECURITY.md`
+  step 5 names: every sealed session on dev and staging reports `binding_verified=false`,
+  and **no configuration can make it true**. The binding this server signs
+  (`Net/Sealed/SealedHandshakeServer.cs:105-112`) is a *symmetric* HMAC-SHA256 under a key
+  derived from `JOIN_TOKEN_SECRET` (`Net/Sealed/SealedTranscriptSigner.cs:21-32`,
+  `Net/Sealed/SealedCrypto.cs:98-107`) -- the same HS256 secret the gateway **mints join
+  tokens with** (`gateway/transfer/join_token.go:17-23`, `shared/config/config.go:25-28`).
+  A client able to verify it is a client able to forge a join token for any player on any
+  server, so it can never be handed to one. The consequence, stated in the direction that
+  matters: a sealed gameplay hop is confidential against a **passive** eavesdropper and
+  offers **nothing** against an active one.
+
+  The decision is a **per-pod** Ed25519 keypair, generated at startup and never written
+  anywhere, whose public half travels pod -> registry -> gateway -> `enter_world_resp`.
+  Per pod rather than per fleet because the peer is an Agones replica whose address is
+  composed at scheduling time (ADR-16): rotation is pod replacement, and a fleet-wide
+  private key mounted into the most player-exposed process in the system is the
+  worst-isolated secret available. Wire impact is additive -- `server_signature = 4` on
+  `SealedServerHello`, a new field on `EnterWorldResponse` and `storage.ServerInfo` -- the
+  **transcript bytes do not change**, so ADR-22's cross-implementation vectors stay valid
+  and old clients do not break. No negotiation and no fallback, unchanged.
+
+  **What it does not buy, because the key rides the gateway hop:** that hop is plaintext in
+  every environment today (ADR-23's TLS is implemented and off, blocked on certificate
+  distribution), so an attacker on the client's path substitutes the key and the signature
+  he forges verifies. ADR-25 alone changes nothing for him; it makes a currently free break
+  require the gateway hop too, and composes so that turning ADR-23's flag on closes both.
+  Decision 6 keeps that honest: a client reports `server_identity_verified` only when the
+  key arrived over an **authenticated** hop. Rejected and recorded: TLS on the gameplay hop
+  (no stable address to certify, deletes machinery live on dev and staging, does not apply
+  to KCP), pinning a fleet key in the built player (rotation becomes an app-store release),
+  and doing nothing (a boolean that can never be true is a dead end, not a backlog item).
+  **Ed25519 under Unity IL2CPP is an unrun go/no-go probe** and must assert the *negative*
+  case -- ADR-22 found `AesGcm` type-checking and then throwing in a player.
+
+### Fixed
+- **A listener that requires sealing now says WHY it refuses.** Both refusal paths were
+  silent, and the silence was worse than the refusal: measured against a live `require`
+  listener, a client was answered `Ok=true`, counted in `players_online`, reported IN WORLD,
+  and was then closed on its fifth input with a bare `broken pipe`. A Unity client's
+  reconnect policy rejoined and was closed again — **21 cycles** — with nothing on either
+  side naming encryption. It presents as a flaky network, not as a configuration mismatch.
+
+  Two changes, refused at deliberately different moments:
+
+  **An encoding that cannot seal is decided in the join reply.** No handshake can change
+  that answer — a JSON frame has no room for the sealed layout — so there is nothing to
+  wait for, and the client is told `JoinTokenResponse{Ok=false, Error="encoding_cannot_seal"}`
+  before the player is counted. Measured after: `join rejected: encoding_cannot_seal` at
+  **4 ms**, against a `broken pipe` at 400 ms before.
+
+  **A missing handshake is answered with a kick carrying the reason.** This one cannot be
+  decided earlier: the client will not run the key exchange until it knows the join was
+  accepted, so by the time the server knows, the client already believes it is in the world.
+  `DisconnectCause.Kicked` maps to `ReconnectDecision.Never` in the client's policy, so the
+  player is told once instead of being bounced forever. The kick frame is cleartext, which
+  is correct here and only here: no sealed session was ever established, there is nothing to
+  downgrade, and the reason string carries no secret.
+
+  The commonest case of that second path was escaping entirely. When the handshake deadline
+  expired on a silent peer, `ReadOneAsync` threw `OperationCanceledException`, which flew
+  past the refusal branch to the handler's catch-all — so the refusal code never ran. It is
+  now caught and routed into the refusal, guarded on the HOST token rather than the linked
+  one: a server that is stopping closes quietly rather than accusing the player of anything.
+
+  Verified on the deployed k3d-rpg-dev fleet with the built image, three ways:
+
+  | client | before | after |
+  |---|---|---|
+  | JSON | `broken pipe` at 400 ms | **`join rejected: encoding_cannot_seal`** at 4 ms |
+  | protobuf, unsealed | `PeerClosed`, 21 rejoin cycles | **`Kicked (no_sealed_session)`**, 0 rejoins |
+  | protobuf, sealed | `SMOKE=PASS` | `SMOKE=PASS` (unchanged — the positive control) |
+
+  The middle row is the real Unity client, not a test double.
+
+  **This reverses a documented decision, so the reversal is documented too.**
+  `TestSealedSession_RequireServerRefusesJSONClient` asserted the old shape on the
+  reasoning that the server "must tell the client who it is before it can refuse it for
+  anything else". That does not hold for this refusal: the encoding is known before any
+  identity matters, and the client already has its user id from the gateway. The same test
+  called the accept-then-close shape "the mistake this test documents" — and then pinned
+  the mistake in place. Both integration tests now assert the named refusal and carry the
+  reasoning for the change rather than only its result.
+
+### Added
+- **The IL2CPP TLS probe has been RUN, and the answer is GO on Windows.** A real Windows
+  IL2CPP player, Unity `6000.3.9f1`, at **both** `Minimal` and `High` stripping, passes all
+  four assertions — including the one that matters, that an untrusted certificate is
+  **refused**. High stripping changing nothing is the part that was in doubt: the linker
+  keeps what `SslStream` needs with no `link.xml` entry. This is the go/no-go for ADR-23's
+  gateway-hop TLS and for the client's `https://` Nakama hop; `backend/docs/tls-probe/`
+  and `ROADMAP-SECURITY.md` now carry the result instead of "not yet run in a player".
+
+  Three details differ from the .NET 10 run, and asserting on any of them would pass on
+  .NET and fail in a player: the player negotiates **Tls12**, not Tls13;
+  `SslStream.CipherAlgorithm` reports **`None`** (the obsolete property is not populated
+  under IL2CPP, so it says nothing about the cipher in use); and the refusal message is
+  the generic `Authentication failed, see inner exception.` rather than the .NET text
+  naming `UntrustedRoot`.
+
+  **Android is still unanswered** and nothing here transfers to it, for the same reason
+  ADR-22's BouncyCastle result is Windows-only.
+
+- **`backend/docs/tls-probe/harness/`** — the Editor build script and the self-quit
+  component used to produce that player, so the run is repeatable rather than a one-off.
+  It builds its scene programmatically (a committed `.unity` is GUIDs and YAML that can
+  drift from the component it instantiates), and it carries the two failures that cost the
+  most time: it asserts `GameAssembly.dll` alongside the build result, and it flushes the
+  scripting-backend restore with `AssetDatabase.SaveAssets()`.
+
+  That second one was not theory. A run logged `restored backend=Mono2x` and still left
+  `Standalone: 1` (IL2CPP) and `managedStrippingLevel: {Standalone: 4}` (High) on disk —
+  the build persists `ProjectSettings.asset`, the restore after it did not, and `-quit`
+  exits without flushing. The *next* run then read the leaked value as the one to
+  preserve, so it compounds. Verified by rebuilding with the flush in place and reading
+  the file back: `Standalone: 0` / `0`, Mono2x and Disabled.
+
+### Fixed
+- **The IL2CPP TLS probe did not compile in Unity**, which the "verified before shipping"
+  note in its README implied it must. `SslProtocols.Tls13` does not exist in Unity's
+  netstandard2.1 profile, so the first player build failed with
+  `error CS0117: 'SslProtocols' does not contain a definition for 'Tls13'` — while
+  batchmode Unity exited **0**. Executing every API on .NET 10 first rules out unrelated
+  runtime throws; it says nothing about a different class-library profile, and the README
+  now says so instead of claiming the file "cannot fail to compile".
+
+  The pinned protocol list was the wrong assertion regardless: it measures the list rather
+  than the platform. The probe now passes `SslProtocols.None` and lets the platform choose,
+  which is also what a real client does.
+
+  The README also gained the shape of the failure that cost the most time. The same build
+  later died at `fatal error C1085: ... No space left on device`, reported `result=Failed`,
+  exited 0 again, and **left a plausible 652 KB `TlsProbe.exe` behind** with no
+  `GameAssembly.dll` next to it. Running that shell pops a modal `Failed to load il2cpp`
+  and writes a zero-byte log — indistinguishable, from a script, from a player still
+  starting up. Asserting that the .exe exists is therefore not enough; the README now lists
+  the three checks that are (build result, `GameAssembly.dll`, a terminating log line) and
+  records that IL2CPP needs ~25 GB of scratch in the regenerable `Library/Bee`.
+
+### Added
+- **`backend/docs/tls-probe/` — the IL2CPP TLS probe**, the go/no-go for ADR-23's
+  gateway-hop TLS and for the client's `https://` Nakama hop.
+
+  **It asserts a refusal, not a success.** ADR-22 caught `AesGcm` type-checking and then
+  throwing at runtime — a loud failure. Certificate validation is likelier to fail
+  *quietly*, and validation that silently accepts anything is indistinguishable from
+  validation that works if only a good certificate is ever tested. So assertion 1 is that
+  an **untrusted certificate is refused**; a probe showing only a good one connecting would
+  pass on a platform where TLS is worthless.
+
+  Three more: an explicitly trusted certificate completes (so a refusal in 1 cannot be
+  confused with "SslStream is broken"), the validation callback is invoked at all, and it
+  receives a **real** `SslPolicyErrors` rather than `None` — pinning code that trusts
+  `None` for an untrusted certificate accepts anything.
+
+  Self-contained: embedded self-signed certificate, loopback listener, no network and no
+  `badssl.com`, so an offline or locked-down device still answers and no one else's
+  certificate expiry can perturb the result.
+
+  **Verified before shipping**, to the standard the crypto probe set: every API executed on
+  .NET 10 first, all four assertions holding there (`UntrustedRoot` refusal, TLS 1.3 /
+  AES-256 on the trusted path, `RemoteCertificateChainErrors` at the callback), and
+  mutation-tested in both directions — degrading validation fails assertion 1, a `None`
+  callback fails assertion 4.
+
+  **Not yet run in a player.** That is exactly the gap it exists to close, and it is stated
+  rather than implied. The verdict line names the platform it actually ran on, because a
+  probe reporting "works under IL2CPP" from the Editor is the overclaim it exists to catch.
+
+### Documentation
+- **Measured what actually crosses each hop in the clear, and the recorded residual
+  understated it.** A byte tap on both hops of a fully sealed session (26 sealed frames,
+  `SMOKE=PASS`) decoded every JWT travelling in the clear:
+
+  | hop | credential | lifetime | single-use |
+  |---|---|---|---|
+  | gateway | **auth token** | **3600 s** | **no** |
+  | gateway | join token | 30 s | yes |
+  | gameplay | join token | 30 s | yes |
+
+  **Sealing the join exchange on the gameplay hop alone would buy nothing** — the identical
+  join token, same `jti`, crosses the gateway hop first, to the same observer on the same
+  path. And the exposure the residual named is the *least* valuable of the three: the
+  one-hour reusable auth token on the gateway hop was recorded nowhere.
+
+  Consequence: the gateway hop is the work; the join exchange closes as a side-effect and
+  cannot usefully be closed before it. The reorder option is recorded with its cost — it
+  moves an X25519 exchange ahead of any token check — so it is not re-proposed.
+
+### Changed
+
+- **`GAMESERVER_SEALED` now defaults to `require`.** A stock game server encrypts the
+  gameplay hop (authenticated X25519 -> ChaCha20-Poly1305, ADR-22) and refuses every
+  client that cannot seal. `off` restores the previous behaviour exactly and is now a
+  deliberate, reviewable choice rather than the value you get by saying nothing.
+  - **The rollout is two artefacts, not one.** A client must set
+    `NetworkSettings.RequireSealedSession` in the same rollout, and that value ships in a
+    built Unity player — there is no deployment variable for it.
+  - **A JSON client is refused and no setting fixes it.** The JSON codec has no sealed
+    frame, so the only fix is a client that speaks protobuf. The refusal has a shape worth
+    knowing: the join is *accepted* (the server must answer `MsgJoinTokenResp` before it
+    can refuse for anything else) and the connection is then closed, so a client log
+    reading "join accepted" is not evidence the client works.
+  - **A protobuf client that never sends `MsgSealedClientHello`** is closed at
+    `--handshake-timeout-ms`. That is every existing client on the day this lands.
+  - `--sealed` / `GAMESERVER_SEALED` is now in the flag table in `docs/README.md`, which
+    it had never been added to; the default it documents is the new one.
+
+### Documentation
+
+- **`ServerOptions.SealedTransport`'s initialiser is not the server's default**, and the
+  XML doc now says so at the property. It stays `Disabled` so a unit test constructing
+  `ServerOptions` for an unrelated reason does not acquire a handshake it never asked for;
+  the value a real server runs with comes from `Program.cs`, the only production
+  constructor. A second production entry point that forgets to set it would get an
+  unencrypted server with no error.
+- **`/status` gained `sealed_required` and `sealed_cipher`**, and the field table in
+  `docs/README.md` now leads with the trap: the `transport_*` fields describe the
+  TRANSPORT only, so on the default configuration (TCP, sealing required)
+  `transport_encrypted` reads `false` while every gameplay frame is encrypted and
+  authenticated above it. A dashboard or deploy check reading only those fields would
+  report an encrypting server as plaintext. Published while `none`/`false` for the same
+  reason the transport fields are: a missing field is the wrong answer to a security
+  question.
+- **ADR-22's status was stale** — it still read "Not implemented" after the implementation
+  merged in #294. It now records what shipped, and that it is on by default.
+
+### Documentation
+- **The crypto survey's preserved-types list was incomplete, and the way it was incomplete
+  generalises.** `Org.BouncyCastle.Crypto.Macs.HMac` was missing — needed by the handshake
+  binding — because the IL2CPP probe that produced the list never exercised the transcript
+  binding. The list was complete for what the probe tested and incomplete for what the
+  protocol shipped.
+
+  Stated in the document rather than quietly patched, because a `link.xml` wrong this way
+  has **no symptom until a device runs it**: a missing entry compiles, passes every Editor
+  test, passes every `Minimal`-stripped build, and then fails at the first handshake in a
+  `High`-stripped player. A preserved-types list is only evidence about the code paths the
+  probe walked.
+- **Corrected an overclaim in my own sealed-session evidence.** `SEALED-FRAMING.md` said
+  "the client verified the server's binding" from the live run, and
+  `SealedHandshakeServer` said the binding is "what lets the client detect a man in the
+  middle". Both read as a shipped property. **The probe could verify it only because it
+  held `JOIN_TOKEN_SECRET`**; a real client must not carry that secret, since putting it
+  in a binary is precisely the pre-shared-key mistake ADR-22 supersedes.
+  - So until the pinned gateway identity key lands, a shipped client completes the
+    exchange **without** verifying the binding: it gets confidentiality against a passive
+    eavesdropper — X25519 provides that on its own — and **not** man-in-the-middle
+    protection.
+  - The server is unaffected and signs the binding regardless, so the protection is
+    already on the wire waiting for a client that can check it. The Unity side names the
+    gap (`WithoutBindingVerification`, a `BindingVerified` flag, and a test asserting a MITM
+    succeeds against it), which is what makes it start failing the day it becomes untrue.
+  - Documentation only; no behaviour change. Recorded because a document that claims a
+    protection the system does not have is the "believed protected" failure ADR-21 exists
+    to prevent — and this one was mine.
+
+### Documentation
+- **ADR-22 settles the transport crypto model, and supersedes two earlier recommendations of
+  this project's own — including one that shipped four days after it was written.** The model
+  is **ChaCha20-Poly1305 over an authenticated X25519 exchange**, HKDF-SHA256 derivation, and
+  **the nonce doubling as the replay counter** — one mechanism that removes both replay and
+  nonce reuse, the latter being this AEAD's catastrophic failure mode.
+
+  **What it supersedes, and why each was wrong.** `ROADMAP-SECURITY.md` first recommended the
+  built-in `AesGcm`; measured in a built IL2CPP player it **compiles and then throws
+  `PlatformNotSupportedException`** — the type is in the reference assembly and the
+  implementation is not, which is the worst available failure mode because it type-checks and
+  fails on a device. It then recommended AES-CTR + HMAC-SHA256, which reintroduces every
+  ordering and constant-time error an AEAD removes. And #288's `HKDF(JOIN_TOKEN_SECRET, jti)`
+  derivation has **no forward secrecy**: the key is a pure function of a long-term secret and
+  a `jti` that travels in the clear, so obtaining that secret later decrypts *every recorded
+  past session*.
+
+  **The condition that makes the model safe is stated as a decision, not a note.** An
+  unauthenticated X25519 on a plaintext hop is a clean man-in-the-middle in which both ends
+  see a perfectly healthy encrypted session. The binding must **prove possession of
+  secret-derived material, not echo the join token** — an eavesdropper can read the token off
+  the wire and replay it. An implementation that only echoes is rejected at review.
+
+  Client runtime capability is recorded as measured rather than assumed: in an IL2CPP player,
+  `ChaCha20Poly1305`, `HKDF` and `ECDiffieHellman` are **absent** and only `Aes`,
+  `HMACSHA256` and `RandomNumberGenerator` work — so the client needs **one** vendored
+  pure-C# library, not a native plugin. GameNetworkingSockets is rejected with reasons
+  (replacing the transport would delete the Go loadtest harness that ran this project's live
+  acceptance); Hazel is rejected for having no Go side.
+
+  **No code changes.** Also records that this must not ship until the gateway hop is
+  confidential, since until then the model's guarantees are bounded by a plaintext hop.
+
+### Fixed
+- **A reconnecting client no longer has its input refused because of the previous session's
+  tick counter.** The entity survives the hold window carrying
+  `InputCursor.LastInputTick`, and nothing cleared it on reattach — so a client that
+  restarts its own input tick had EVERY input rejected as `stale_tick` until it climbed
+  back past the pre-disconnect value. **The freeze lasted as long as the previous session
+  did**: ten minutes of play meant ten minutes of a player who could not move.
+- **The shipped client is affected on one path.** `NetworkBootstrap._inputTick` is only
+  ever incremented, so an in-process reconnect keeps climbing and was always fine; a
+  **process restart or scene reload** builds a new bootstrap at tick 0 — the "crashed and
+  came straight back" case.
+- Fix: clear the whole `InputCursor` on reattach. Every field in it is per-session client
+  bookkeeping, including `LastMoveTick`, whose staleness would otherwise size the first
+  step of the new session by how long the player was away. Same rule ADR-22 settles for
+  the crypto replay counter: **the counter's scope follows the session, not the entity.**
+  Measured with the harness that found it — `stale_tick` 88→0 and 596→0.
+  One residual is recorded in `docs/BENCHMARK.md` Part XII rather than hidden: inputs still
+  queued when the old socket closes drain after the reset and can refuse a short burst.
+- The client side of the same fix was checked, not assumed: `LastInputTick` is `ack_tick` on
+  the wire, so the reset makes the first post-reattach snapshot ack **0**. The shipped
+  client already zeroes `AckTick` in `GameSessionClient.JoinAsync`, guards it monotonically
+  (*"a snapshot that omits ack_tick carries zero and must never lower it"*), uses `ack_tick`
+  only to retire pending inputs — the positional correction comes from the snapshot tick —
+  and holds a 128-entry ring, so the one extra round trip of pending inputs cannot overflow
+  it. No client change is needed. Detail in `docs/BENCHMARK.md` Part XII.
+- The `StaleTick` remark in `Input/InputRejection.cs` described this bug **as a caveat about
+  reading a counter** and never followed it to the player-facing freeze. Corrected in place
+  with the original text kept, because the sequence is the point.
+
+### Added
+- **`FrameOrderProbe` and the `frame_order_*` fields on `/status`** — the measurement
+  answering ADR-22's open question on whether the nonce-as-sequence replay rule needs a
+  sliding window. Records, per connection, whether an input frame's tick is greater than
+  the highest already seen, driven from the input dispatch inside
+  `Connection.ReadLoopAsync`'s handler — which is awaited inline, so the order it sees is
+  the order bytes arrived, which is the order a decrypt step would see.
+- **Deliberately not the existing `stale_tick` counter.** That check runs in the tick loop,
+  two queues downstream, and `EcsWorld.PushInput`'s coalescer **silently absorbs** an
+  out-of-order movement input before it is ever reached. `stale_tick` reports post-queue
+  order and cannot answer the question; the reconnect measurement shows the two diverging
+  completely (596 vs 0).
+- **Result: zero reordering across 22,374 frames**, on both transports, under 30% packet
+  reordering, 10% loss and 5% duplication injected with `tc netem`. Full method, matrix and
+  the quotable conclusion for ADR-22: `backend/docs/BENCHMARK.md` Part XII.
+
+- **Surveyed and verified the pure-C# crypto library for ADR-22, closing its second open
+  question on the .NET side.** `backend/docs/TRANSPORT-CRYPTO-LIBRARY-SURVEY.md`, with an
+  IL2CPP probe in `backend/docs/crypto-probe/`.
+
+  **Recommendation: `BouncyCastle.Cryptography` 2.7.0 — one library for both runtimes.**
+  MIT, **0 P/Invoke methods**, no package dependencies, and no reference to
+  `System.Runtime.Intrinsics`, `Unsafe`, `Numerics.Vector` or `Reflection.Emit` — all read
+  out of the assembly metadata rather than taken from a README. Verified on .NET 10 against
+  **published vectors**: RFC 8439 §2.8.2 (ChaCha20-Poly1305), RFC 7748 §6.1 (X25519, both
+  directions), RFC 5869 A.1 (HKDF-SHA256), plus tamper rejection — and cross-checked against
+  Go `x/crypto` v0.57.0 in **both directions over a real X25519 exchange with random keys**.
+  The cost is stated rather than buried: **4 771 KB and 2 350 public types**, plus a
+  third-party report of an Android IL2CPP CIL-Linker failure on BouncyCastle 2.x.
+
+  **It is the only candidate that provides X25519 at all.** `NaCl.Core` 2.2.0 is an
+  excellent AEAD — MIT, 33 KB, Wycheproof-tested, vectors pass — and has **no X25519**, so
+  the lightweight two-library route dies not on the cipher but on the curve. Rejected with
+  evidence: NSec/Sodium.Core/Geralt (libsodium, native); `Rebex.Elliptic.Curve25519`
+  (**fails RFC 7748 through its public API** — derived `d23c65b6…` where the RFC says
+  `8520f009…`, and the two sides did not agree with each other; the raw class is
+  `internal`); `NaCl.Net` (MPL-2.0, last released 2020-07-24); and six micro-packages with
+  378–40 000 downloads and no audit signal.
+
+  **Not claimed: IL2CPP.** Everything above is .NET 10. Per ADR-22's own lesson — `AesGcm`
+  compiled and then threw on a device — that is not sufficient, so the survey ships a probe
+  instead of a conclusion. `Il2cppCryptoProbe.cs` asserts the same published vectors in a
+  built player, reports a throw as a result rather than losing it, is written to Unity's
+  profile (C# 9, no `Convert.FromHexString`, which is .NET 5+ and absent from
+  `netstandard2.1`), and **every API call it makes was executed on .NET 10 first** so it
+  cannot fail to compile on an overload that does not exist. It must be run at
+  `ManagedStrippingLevel.Minimal` **and** `High` with the supplied `link.xml`, because only
+  the second answers the linker question the Android report raises.
+
+  If adopted, the .NET server takes **only X25519** from the library — .NET 10 already has
+  ChaCha20-Poly1305 and HKDF, re-confirmed here by having to disambiguate BouncyCastle's
+  `ChaCha20Poly1305` against `System.Security.Cryptography.ChaCha20Poly1305` to compile.
+
+### Added
+
+- **The sealed session is wired into the gameplay hop and proved on a live server.**
+  `GAMESERVER_SEALED` / `--sealed`, `off` (default) or `require`. Two values, not three: a
+  "preferred" mode is a downgrade attack with a friendly name.
+  - The handshake runs between the join reply and the read/write loops, so no frame is
+    ever written half-sealed. After it, every frame in both directions is sealed and there
+    is no per-message choice and no way back to cleartext.
+  - **Every failure closes the connection.** A JSON client is refused before the handshake
+    is attempted, because the sealed frame is a binary layout JSON has no room for — which
+    means requiring encryption effectively deprecates the JSON encoding.
+  - **Proved live, paired, on one image.** With `sealed=off`: 13 cleartext Envelope
+    frames, 0 sealed. With `sealed=require`: 6 cleartext (the pre-handshake join) and 11
+    sealed. A client that corrupted one byte of its send key after a correct handshake had
+    every frame refused and the session closed. A capture of ciphertext alone shows only
+    that bytes are unreadable; the pair shows this change made them so.
+  - **The join exchange is still readable, by design and now written down.** The handshake
+    runs after `MsgJoinToken`, so the token and its reply remain in the clear on that hop.
+    Short-lived and single-use, so the exposure is a seconds-long replay window rather than
+    a durable credential — but real, and not closed by this change.
+
+### Changed
+
+- **The three conditions on the replay rule now exist on the C# side too.** They were
+  implemented in Go first and the asymmetry would have rotted: the forward-jump bound, the
+  `RequiresOrderedTransport` assertion that makes a future unordered transport fail closed,
+  and rejection counters by cause.
+- **A rejected sealed frame is distinguishable in the log from an ordinary disconnect.**
+  It previously tore the connection down through the same `IOException` path as a peer
+  hanging up, so a security check firing looked exactly like normal traffic — the "a check
+  nobody reads is not a check" failure one layer down. It now raises
+  `SealedFrameRejectedException` and logs the per-cause counts. The peer still learns
+  nothing: the connection simply closes, as it would for any frame-level failure.
+
+### Added
+
+- **`GameServer/Net/Sealed` now carries the real primitives**, via
+  **BouncyCastle.Cryptography 2.7.0** — ChaCha20-Poly1305, X25519 and HKDF-SHA256, plus
+  HMAC-SHA256 for the handshake binding with `Arrays.FixedTimeEquals` for the comparison.
+  **Nothing here implements a cipher, a MAC or a curve.**
+  - **Why BouncyCastle for all three when .NET 10 has two.** .NET has `ChaCha20Poly1305`
+    and `HKDF` built in and both are measured working on 10.0.10, but it has **no X25519 at
+    all**, so BouncyCastle is required regardless. One library means the server and the
+    Unity client run the *same* implementation, which removes a class of interop question
+    rather than answering it three times. The cost is stated where it will be needed:
+    BouncyCastle's AEAD is managed code where .NET's is the platform's and
+    hardware-assisted, and swapping `SealedAead` alone is a contained change if it ever
+    shows up in a tick profile.
+  - **Published RFC vectors** (8439 §2.8.2, 7748 §6.1, 5869 A.1), tampering rejected in
+    ciphertext, tag, additional data and length, and low-order X25519 points refused.
+  - **A cross-implementation vector** asserting one complete handshake and one complete
+    sealed frame against the Go suite, value by value: C# opens the frame Go sealed, and
+    C# seals a byte-identical frame from the same inputs. A frame sealed for the other
+    direction is refused, which is what proves the two keys are distinct in use and not
+    merely in derivation.
+
+### Added
+
+- **`GameServer/Net/Sealed`: the C# half of the sealed wire format**, mirroring
+  `shared/sealed` byte for byte — frame layout, nonce construction, the two replay
+  validators behind one interface, the handshake transcript, and the refusal policy.
+  Normative spec: `backend/docs/SEALED-FRAMING.md`.
+  - **Cross-implementation golden vector** for the transcript, matching the Go test. Two
+    implementations that each round-trip against themselves can still disagree, and the
+    failure is silent: the handshake never completes and nothing names the cause.
+  - **`SealedSession` enforces the ordering rule by structure**, not by comment:
+    authenticate first, offer the sequence to the replay validator only once the tag has
+    proved the header was not forged. A test fails if a forged frame reaches the
+    validator, and it was checked against a deliberate mutation reversing the order.
+  - The refusal policy encodes the ADR-22 consequence explicitly: a JSON client cannot
+    carry a sealed session, so once encryption is required it is **refused**, not served in
+    the clear. That effectively deprecates the JSON encoding for any deployment that
+    requires encryption.
+
+### Changed
+
+- **`SessionKey` records its superseded purpose** — bytes and golden vector unchanged, but
+  the value is now the handshake binding key rather than an encryption key.
+
+> **Nothing here encrypts anything yet.** No cipher, MAC or curve is implemented, and none
+> is stubbed: an implementation that "worked" would let every test above it pass while
+> proving nothing about the bytes. ADR-22's library choice is still open.
+
+### Added
+
+- **The game server derives a per-session key on every join, and is never sent one.**
+  `GameServer.Net.Security.SessionKey` computes
+  `HKDF-SHA256(ikm = JOIN_TOKEN_SECRET, salt = jti, info = "cuvara/session-key/v1", L = 32)`
+  from the secret it already holds and the `jti` in the token it already verifies, so no
+  key material crosses the gameplay hop and none is stored. Held on `Connection.SessionKey`
+  so the derivation runs on every real join rather than only in a test.
+  - **Cross-implementation golden vector** shared with `shared/sessionkey`'s Go test. Two
+    implementations that each round-trip against themselves can still disagree with each
+    other, and a disagreement produces no error anywhere — the session simply never forms.
+  - `SessionKey.ToString()` renders `[redacted session key]`, and tests assert that
+    interpolation, `string.Format` and concatenation cannot leak it — plus one that
+    serialises the real `/status` payload and requires no key material in it, since that is
+    the surface most likely to grow a field by accident later.
+  - Derivation **refuses rather than falling back**: no secret or no `jti` yields an empty
+    key, never a weaker one. A negotiable path is a downgrade attack.
+  - Nothing consumes the key yet; the AEAD that will use it is a separate change.
+
+### Added
+
+- **The server reports its transport confidentiality posture on every boot, and publishes
+  it.** Encryption on the gameplay hop is off by default *twice* — the transport defaults
+  to `tcp`, which has no packet-crypt layer, and `TRANSPORT_KEY` defaults to empty — so
+  "is this deployment encrypted" was not answerable from any single variable, and a
+  deployment that believed it was encrypted and was not had nothing telling it so.
+  - `GameServer/Net/Transport/TransportPosture.cs` derives the posture once from
+    configuration: transport, whether a key is configured, whether packets are actually
+    ciphertext, whether they are authenticated, the cipher in force, whether the listener
+    is bound beyond loopback, and a one-line summary.
+  - Logged at startup — **at Warning whenever traffic is in cleartext**, Information when
+    it is not — and published on `/status` as `transport`, `transport_key_configured`,
+    `transport_encrypted`, `transport_authenticated`, `transport_cipher` and
+    `transport_posture`.
+  - Mirrored as `gameserver_transport_encrypted` and `gameserver_transport_authenticated`.
+    **Gauges, not counters**, because a never-incremented counter is absent from
+    `/metrics` entirely and a security question must never be answered by a missing field.
+  - **What this replaced said nothing about the default.** It warned on exactly two of the
+    four combinations — KCP without a key, and a key set on TCP. Plain TCP with no key, the
+    stock configuration and the one with no encryption of any kind, produced no log line at
+    all. All four now report, and `transport_key_configured` is deliberately separate from
+    `transport_encrypted` so that "key set, silently ignored on TCP" is legible rather than
+    mistaken for working encryption.
+  - **`transport_authenticated` is published while permanently `false`.** The KCP path is
+    AES-CFB with a CRC32; a CRC32 is linear and is not a MAC, so a modified packet is not
+    detectable. Keeping it as its own field means "encrypted" cannot be read as "safe from
+    tampering", and means its becoming true will be a visible event rather than an
+    assumption. No cipher changed in this entry — this is reporting only.
+  - Verified on live containers in all four transport/key combinations plus a loopback
+    bind, checking the startup log, `/status` and both gauges each time.
+
+- **Telemetry on refused input, per reason and per account (security roadmap A1/A2).**
+  `ValidationLogic` refused an input and the server dropped it; nothing counted
+  rejections, so a client probing the rules left no trace. It does now.
+  `gameserver_inputs_rejected_total{reason}` plus `/status`'s `inputs_rejected`,
+  `inputs_rejected_by_reason` and `anomaly_*` fields.
+- **Reasons are a BOUNDED enum (`InputRejectionReason`), not the validator's strings.**
+  Two of those strings embed attacker-controlled values — the rejected vector and the
+  target id — so as metric labels they are unbounded cardinality a client can mint on
+  demand, turning a detection signal into a denial of service against the thing detecting
+  it. Being bounded also lets every series be **primed to zero at startup**, so "no
+  rejections" reads as `0` rather than as an absent series; these are alarm counters,
+  where absence is the healthy reading and is otherwise indistinguishable from a broken
+  scrape (the `send-budget` finding in `docs/METRICS.md`).
+- **`InputAnomalyTracker` — a decaying per-ACCOUNT score.** Keyed on the join token's
+  user id, so it survives a reconnect; the existing per-connection input budget does not,
+  which is what made it a counter of how often someone reconnects. Exponential decay
+  rather than a fixed window, so a lag spike fades and only a sustained rate holds a
+  plateau.
+- **`loadtest -abuse direction|stale|attack` with `-abuse-players N`.** The harness was
+  scrupulously well-behaved, which is right for a benchmark and useless for testing a
+  detector; these make it generate each rejection pattern deliberately. Abusive players
+  are chosen by index so runs are reproducible. The oversized vector is large but
+  **finite** — `encoding/json` cannot represent NaN or Inf, so a non-finite vector would
+  fail to encode client-side on the legacy json arm and never reach the server.
+
+### Fixed
+- **The zero-priming was in the wrong place and silently did nothing.** It ran in the
+  `GameMetrics` constructor, one line before `MetricsEndpoint.TryStart` builds the
+  MeterProvider — so the measurements had nothing subscribed to the meter and were
+  dropped. Every unit test passed (they read the mirrored `long` fields, not the scrape)
+  and a live `/metrics` showed **no series at all**. Now `GameMetrics.PrimeCounters()`,
+  called after `TryStart`, with `AlarmCountersAreVisibleAtZeroOnlyAfterPriming` guarding
+  the ordering. Caught by live acceptance, not by the suite.
+
+### Changed
+- **The anomaly score counts only `invalid_direction`, and that is a deliberate
+  narrowing.** The first version weighted latency-explicable reasons lightly; its own test
+  disproved it — at that weight a player producing an out-of-range attack on every input
+  crossed the threshold at 200 rejections, and the test asserting they would not passed by
+  a hair. The measured cause is not the obvious one: a plain sum of `0.1` x200 is
+  `20.000000000000014` and **overshoots**; what put the real score under the line is the
+  decay running before every addition, measured at `19.999998878470578` — short by
+  `1.1e-06`, a margin that scales with how fast the machine ran the loop. **No honest baseline
+  has ever been measured** — every figure here is from loopback, where the latency that
+  produces those rejections does not exist — so a safe-but-meaningful weight cannot be
+  chosen. The score answers the one question it can answer honestly: how much input is
+  this account sending that the shipped client cannot produce. The rest are still counted
+  and published per account, just not treated as evidence.
+- **Nothing acts on a player.** A2 offered log / flag / rate-limit / kick; this
+  implements flag-and-record. A detector that kicks before anyone has seen its
+  false-positive curve gets switched off after the first bad night, and the telemetry goes
+  with it. `/status` orders accounts by score rather than by rejection count, because the
+  account with the most rejections is usually the worst-connected one.
+
+### Fixed
+
+- **The AOI index was 1.3-2.3x SLOWER than the scan on clustered maps, and the gate was
+  waving it through.** The occupancy gate was audited against populations shaped like play
+  — hotspot crowds with a roaming tail — rather than the uniform-random layouts it was
+  calibrated on. Six layouts the gate admitted ran slower than the brute-force scan it
+  replaced, five of them clustered: `4 loose crowds` 0.43-0.45x, `4 crowds + 30% roaming`
+  0.50-0.54x, `8 crowds + 30% roaming` 0.55-0.61x, `16 tight crowds` 0.47-0.49x, and
+  `uniform spread 500` 0.64-0.65x. Part X's claim that the index is "never slower" was
+  false as merged.
+
+  **The cause was not the gate statistic.** The index discovers matches cell-major and must
+  emit them scan-major, so it sorts each query's matches back into scan order — and that
+  sort was over an array of `EntityView`, a wide struct carrying two object references, so
+  every swap copied the whole thing with write barriers. Sort cost grows with matches per
+  query, and matches per query is exactly what clustering raises, so the cost landed
+  precisely where the population is densest.
+
+  `SpatialGrid.Emit` now sorts an **`int` permutation** and gathers once at the end: 4 bytes
+  per swap, each view touched exactly once. Admitted layouts move from **0.41-0.63x to
+  0.85-2.25x**, and every layout the gate refuses would indeed have lost.
+
+  **One residual loss is admitted and recorded rather than tuned away**: `4 loose crowds`
+  (118 cells, 19.6 matches/query) reads 0.85-0.89x across three runs, with two more
+  clustered layouts at parity within noise. Occupancy cannot fix it by moving the threshold,
+  because it orders those rows wrongly — 105 cells reads 0.92-1.00x while 118 cells reads
+  0.85-0.89x, so the lower occupancy is the better layout. `EstimateCandidateFraction` does
+  separate them (the loss sits at 0.108, every winner at 0.086 or below), which is the case
+  for revisiting the statistic when there is telemetry to calibrate against.
+
+  Wire output is unaffected — the emitted order is identical, which is what
+  `AoiIndexDifferentialTests` asserts. `backend/docs/BENCHMARK.md` **Part XI** has the
+  layouts, both ordering strategies side by side, and the recommendation.
+
+- **Part X's published ratios no longer reproduce and are marked superseded.** Re-running
+  its own harness unchanged on develop gives 0.39-0.63x where it published 1.07-1.22x.
+  Between the two measurements `29aa8d9` added `FacingBrad` and `Action` to `EntityView`,
+  widening by 8 bytes the struct the sort was moving — a direct mechanism for a sort-bound
+  cost to grow, strongly supported but not isolated (no A/B across that commit is possible,
+  because the harness postdates it). The permutation sort makes the sort insensitive to the
+  struct's width and recovers the original margins. Part X now carries a pointer saying so
+  rather than being silently left to mislead.
+
+  This also settles a loose end Part X flagged as host noise: its `realistic, 400` row read
+  `0.63x 1.19x 1.22x` and the 0.63 was dismissed. It was the true value.
+
+- **The downlink budget's default was derived from the wrong number, and the first live
+  run against a real server found it.** The stated derivation — "45.9 KB/s per client at
+  200 players over 15 Hz is a ~3.06 KB mean snapshot, so 8 KiB is ~2.7x the mean and will
+  never engage at a load the server is known to handle" — sized a **peak-bounding cap
+  against a delta-weighted mean**. 29 snapshots in 30 are deltas, which name an entity by
+  a handle; a keyframe names it by its id string. Measured with 13-character ids:
+  **25.9 B/entity on a delta, 40.9 B/entity on a keyframe**.
+  - What the default actually does, measured on a server built from `0bc02a3` and driven
+    by `loadtest`: it starts shedding at **~200 entities in one observer's AOI** (on
+    keyframes only) and starts clipping the steady delta stream at **~317**. 200 entities
+    in one AOI is the population BENCHMARK.md's own 200-player figure implies, so the
+    "never engages" claim was false at exactly the documented load.
+  - The consequence is now stated rather than denied: a shed keyframe makes
+    `SnapshotMerger` drop those entities (full snapshots replace the set) until the next
+    delta re-introduces them. Live deferral age on those keyframes was **1 snapshot**, so a
+    stock server at 200+ AOI entities drops its outermost entities for ~67 ms once per
+    keyframe interval — bounded, never wrong state, but a visible edge flicker.
+  - **8192 is unchanged.** The mechanism is sound and the artefact is bounded; changing a
+    default is a product decision, not a correctness one. What changed is that the number
+    is now measured and stated instead of asserted.
+  - `TheKeyframeCrossesTheDefaultBudgetBeforeTheDeltaDoes` derives both thresholds from the
+    encoder instead of restating them, so the derivation cannot silently rot again. Its
+    in-process figure (25.86 B/entity on a delta) matches the live server's 25.7–26.0.
+
+### Changed
+
+- **`MinOccupiedCellsToQuery` stays at 96.** With the sort fixed the threshold is correct on
+  clustered layouts too — the crossover sits between 62 cells (0.81-0.88x, refused) and 99
+  cells (1.25-1.30x, admitted). The audit's own hypothesis, that tight crowds would be
+  *refused* a win they deserved, does not occur: not one gate-OFF layout wins.
+
+### Added
+
+- `AoiClusteredGateBench` — hotspot layouts (crowd count, tightness, roaming fraction) on
+  the stock 1000x1000 map, with uniform layouts measured in the **same** harness so the two
+  families are comparable without crossing harnesses. Runs the index with the gate forced
+  open, so what the gate gives up is visible.
+
+  The pre-fix arm is a **verbatim replica inside the bench**, following Part VII's
+  `LegacyStringKeyedDeltaState` precedent, so production carries no benchmark-only switch;
+  the bench asserts the replica returns what the scan returns, in the same order, on every
+  layout before taking a timing. The two pairs (scan vs shipped, scan vs replica) are
+  measured **separately**: interleaving all three arms in one round moved the
+  uniform-full-map ratio from 1.76-1.91x to 1.12x, because three working sets evict each
+  other where two do not.
+
+- `SpatialGrid.EstimateCandidateFraction` — the mean fraction of the population a query must
+  examine, from the cell histogram. Implemented and measured as a candidate replacement for
+  occupancy, and **deliberately not adopted**: it is the better predictor (monotone across
+  both layout families, where occupancy is not), but once the sort is fixed occupancy makes
+  no wrong call on any layout measured, and this costs nine dictionary probes per occupied
+  cell per rebuild. Kept as a benchmark diagnostic so the next person to suspect the gate can
+  measure rather than argue.
+
+### Added
+- **The server produces and ships per-entity facing and action state**
+  (`wire.proto` fields 10 and 11). `Locomotion` gains `FacingBrad` and `Action`;
+  they live there rather than in a new component because `Locomotion` is already
+  fetched by the AOI gather, so they cost no extra `GetSpan` in the hottest loop
+  in the server — the exact cost issue #237 removed by trimming that scan.
+- **Written wherever a position is advanced**: `InputHandler.ProcessInput` (packet),
+  `InputHandler.ApplyHeldMovement` (coasting — without it an entity would report
+  Idle on most ticks and the animation would stutter at the client's send rate),
+  and on attack and death. Facing is derived from the RAW input direction, not the
+  position delta: the delta is post-clamp, so a player walking into a map bound
+  would otherwise be reported as facing along the wall instead of into it. Facing
+  PERSISTS when an entity stops, so a character that halts keeps looking the way
+  it was going instead of snapping to east.
+- **Both fields are in `SnapshotDeltaState.SentView`'s change comparison**, which
+  is the only thing deciding whether a delta resends an entity. An entity that
+  turns on the spot, or starts attacking without moving, changes nothing else —
+  so omitting either would have produced a client rendering a stale facing and a
+  stale animation until the next keyframe, up to 30 ticks later, with no error on
+  either side. `FacingAndActionTests` pins both cases.
+- **`GameServer/Net/FacingCodec.cs`** — the biased binary-radian codec, mirroring
+  `shared/messages/facing.go`. Deliberately NOT in `Shared.GameLogic`: encoding a
+  direction needs `MathF.Atan2`, which ADR-10 forbids there as
+  implementation-defined across NativeAOT x64 and IL2CPP ARM64. The client only
+  ever needs the decode half, so no `Atan2` has to agree across runtimes.
+
+### Changed
+- **`SnapshotByteIdentityTests` digests rebaselined** for the two new fields, with
+  the previous values kept in comments per the existing convention. The scenario's
+  players move, so they now carry a facing and an action varint; entities that
+  never move carry neither, because both fields reserve zero and proto3 elides it.
+- **`snapshot_merger.json` gains two cases** — one where only facing and action
+  change across a delta (which every pre-existing case would have passed while
+  dropping both fields), and one pinning that an omitted field is ZEROED by the
+  whole-struct merge rather than preserved, since that is the behaviour every
+  consumer's "keep the last value" rule exists to compensate for. The fixture's
+  `SnapEntity` also gained `speed`, which these vectors had never covered at all.
+
+### Added
+- **The game server refuses a version-mismatched client with
+  `protocol_version_mismatch`.** The join handshake now checks
+  `JoinTokenRequest.ProtocolVersion` (`WireProtocol.CheckProtocolVersion`) before
+  verifying the JWT, and answers `JoinTokenResponse{Ok:false,
+  Error:"protocol_version_mismatch"}`. Checked INDEPENDENTLY of the gateway's
+  check on `MsgAuth`: under ADR-3 these are two connections to two separately
+  deployed processes, the gateway never carries a snapshot, and it is this hop a
+  version disagreement actually corrupts.
+- **`WireProtocol.ProtocolVersion` (currently 1)**, `ProtocolVersionUnversioned`,
+  `ReasonProtocolVersionMismatch` and `CheckProtocolVersion`, mirroring
+  `shared/messages` in Go and `Runtime/Protocol/WireProtocolVersion` in the Unity
+  client. No language can be authoritative for the other two, so each pins the
+  value and asserts it by test.
+- **`GAMESERVER_MIN_PROTOCOL_VERSION` / `--min-protocol-version`** (default 0,
+  which also admits a client advertising nothing) and
+  `ServerOptions.MinProtocolVersion`.
+- **`HandshakeRejectReason.ProtocolVersion`** and the counter
+  `gameserver.handshakes.unversioned`. The new reject reason is deliberately
+  distinct from `malformed`: the frame parsed perfectly, and telling the two apart
+  is the difference between "a client is broken" and "a rollout is skewed".
+- **`JoinTokenResponse` echoes the server version on rejections too**, unlike
+  `tick_rate` — a client refused for a mismatch has to be told which version it
+  failed against, or the refusal is as opaque as the parse error it replaces.
+
+### Fixed
+- `scripts/admission-probe.py` pool check read the pending-handshake gauge **after** a
+  sequential per-socket EOF scan; with the production defaults (256 slots, 5 s deadline) the scan
+  outlived the deadline, the accepted sockets had already timed out, and the check reported
+  `pending gauge=0 (want 256)` against a correct server. The gauge is now sampled right after the
+  connects and the surplus is found with one `select()` pass. Verified against the merged develop:
+  `257 idle conns: 1 closed at accept, pending gauge=256, pool_full +1`.
+### Documentation
+- **ADR-21 records the transport-confidentiality posture, and corrects a survey finding that
+  said the game link is unencrypted.** It is not. `Net/Transport/KcpCrypto.cs` implements
+  AES-256-CFB packet encryption compatible with `github.com/xtaci/kcp-go/v5`'s
+  `NewAESBlockCrypt`, symmetric with `backend/shared/transport/crypto.go` down to a shared
+  HKDF domain string, fail-closed on a wrong key. The accurate finding is narrower: it is
+  **off by default twice** — the transport default is `tcp`, which has no encryption path at
+  all, and the key variable defaults to empty, which means plaintext — and a **pre-shared key
+  is not a session key**. Every client holds the same static secret, so it resists a passive
+  network observer and not a player, and rotating it is a simultaneous redeploy of both sides
+  rather than a rollout. CFB with a linear CRC32 is confidentiality, not authentication; the
+  CRC is not a MAC, which matters to anyone reasoning about an active attacker rather than an
+  eavesdropper.
+
+  Deferred rather than fixed: every current environment is localhost or LAN, and the hosting
+  shape above dev is unsettled (ADR-15/16), so choosing an AEAD and a key exchange now means
+  choosing them twice. This is also the one gap where a plausible-but-weak implementation is
+  **worse** than the honest plaintext default, because it moves the system from known
+  unprotected to believed protected.
+
+  **No code changes.** One prerequisite in that ADR does not wait on the deferred decision and
+  is not done here: the server does not report which transport it speaks or whether a key is
+  in force, so a deployment that believes it is encrypted and is not has nothing telling it so.
+
+- **A uniform spatial index for the AOI gather, gated on population spread.**
+  `SpatialGrid` is rebuilt once per gather scope and queried once per viewer, and the
+  snapshot gather takes it when the population occupies at least 96 cells. Measured
+  **1.9-2.4x faster on the stock 1000x1000 map at 200 players** and **3.7-4.0x at 1600
+  entities**, at parity when the population is clustered, and never slower.
+  `backend/docs/BENCHMARK.md` **Part X** has the full sweep, the calibration behind the
+  threshold, and the two methodology fixes that changed numbers.
+
+  **This is the second attempt; the first one lost.** Part V measured a uniform grid at
+  2.8x *slower* and reverted it, because the scan's cost is composing a struct per match
+  and that index composed through seven random-access lookups per match. What changed is
+  issue #237: the gather's product is now the 7-field `EntityView`, small enough to store
+  **inside** the index, so composition happens once per entity during the O(n) rebuild
+  instead of once per match per viewer — at 200 viewers averaging 15 matches, 3 000
+  composes replaced by 200.
+
+  **Provenance, stated because the numbers are persuasive and the provenance is not.**
+  Part VII's caveat has two clauses — re-measure against post-#237 numbers, "and only if
+  AOI cost resurfaces as a bound". The first is satisfied; **the second is not and has not
+  been**. Nobody measured AOI cost resurfacing as a bound; this was rebuilt because the
+  work was assigned, on a Big-O argument, which is the reasoning Part V exists to stop.
+  What makes it safe to ship regardless is the gate: below the threshold the change is
+  inert rather than negative. It is a scale-readiness change with a measured floor of
+  parity, not a response to an observed bottleneck.
+
+  The gate is on **occupied cells, not entity count**: a query visits at most a 3x3
+  neighbourhood, so spread predicts the win and count does not — Part V's dense-400 row
+  loses while its sparse-200 row wins. It is a performance decision only; both paths return
+  identical entities in identical order. A falling-back world builds no index at all (the
+  decision is carried from the last rebuild and re-probed every 64 gathers), because gating
+  after the rebuild still paid for it and measured 0.82-0.91x on exactly the densities that
+  fall back.
+
+- `AoiIndexDifferentialTests` — the index against the brute-force scan over randomised
+  populations and every case that breaks a naive grid: radius-boundary entities (a full
+  360-degree ring), diagonal neighbour cells, cell edges from both sides, duplicate
+  positions, everything in one cell, negative coordinates (where truncation and flooring
+  disagree), far-out-of-bounds positions, zero and huge radii, an empty world, a single
+  entity, the overflow contract, and the parallel gather on four workers. Asserts identical
+  **order** as well as membership — order is wire-visible, because the delta encoder interns
+  entity ids in AOI arrival order — and cross-checks against `Shared.GameLogic`'s
+  `AoiLogic.GetNearbyEntities`, the rule the Unity client predicts with.
+
+- `AoiIndexBench` — the committed A/B harness behind Part X, stating its clock
+  (`Stopwatch`). Part V's harness was never committed, which is what made its absolute
+  microseconds the one figure class the #153 clock audit could not trace.
+
+- **Exact-boundary tests, on all three copies of the AOI predicate** — the indexed cell
+  walk, the index's full-sweep fallback, and the brute-force scan. Entities are placed
+  where `DistanceSq == radiusSq` holds **exactly** in float (Pythagorean triples and
+  axis-aligned points at integer coordinates), and each test asserts that premise about
+  itself before asserting inclusion.
+
+  This closes a real gap rather than adding coverage for its own sake. The previous
+  360-degree "boundary ring" was built from `cos`/`sin`, so its points landed *near* the
+  radius and never on it — the set of floats satisfying the equality exactly is
+  measure-zero. Flipping the indexed path's comparison from `>` to `>=` therefore left the
+  entire suite green. Verified by mutation: `>=` at the cell walk now fails exactly
+  `ExactBoundary_OnTheIndexedCellWalk_IsInclusive`, `>=` at the fallback fails exactly
+  `ExactBoundary_OnTheFullSweepFallback_IsInclusive`, and each leaves the other passing —
+  which also confirms the two tests reach the two branches they claim to. The bug this
+  would have shipped is an entity at exactly the AOI radius flickering at the edge of
+  view, which presents as a network fault and gets debugged in the wrong layer.
+
+### Changed
+
+- `EcsWorld.ReadAll` / `ReadAllParallel` rebuild the spatial index at the top of the scope
+  and tear it down on exit. The rebuild is whole rather than incremental, deliberately:
+  positions are written from the input handler, the enemy move system and the
+  spawn/reconnect path, and an incremental index would have to intercept all of them
+  forever. A missed write does not throw — it leaves an entity in the wrong bucket, and the
+  symptom is a player who vanishes from someone else's screen.
+
+  Under `ReadAllParallel` the index is built by the owner before any worker is woken and
+  released only after every worker has rendezvoused, so workers see a structure that is
+  complete and never mutated. Per-query scratch is thread-static rather than instance state,
+  which shared scratch would have made a data race.
+
+- `Shared.GameLogic` is **untouched**. `AoiLogic.GetNearbyEntities` remains the brute-force
+  definition of visibility and is now also the differential test's oracle: a client has one
+  observer and nothing to amortise a per-tick index build against, so an index there would
+  be cost with no benefit. Client and server still agree on visibility because they run the
+  same predicate — the index only chooses which entities to test.
+- **Per-connection downlink budget on the snapshot send path**
+  (`--max-snapshot-bytes` / `GAMESERVER_MAX_SNAPSHOT_BYTES`, default `8192`, `0`
+  disables). The AOI radius was the only thing bounding a snapshot, and a radius
+  bounds *area*, not population: a crowd inside one observer's circle produced a frame
+  as large as the crowd, per client, per tick. There was an input-side flood guard
+  (`GAMESERVER_MAX_INPUTS_PER_TICK`) and nothing on the downlink.
+  - Enforced **inside** `SnapshotDeltaState`, not in front of it. A filter that
+    decided what to send after the encoder decided what the client knows would drop an
+    entity from the wire while `_lastSent` recorded it as delivered — the client wrong
+    about it until the next keyframe, with nothing reporting an error. Instead
+    `_lastSent` and `_handles` are written only after the bytes are appended, so a
+    deferred entity leaves both untouched: it stays dirty and is re-offered, and it is
+    never given a handle, so no handle can reach the wire without its binding.
+    Despawns follow the same rule — a key leaves `_lastSent` only if its id was
+    actually written into `removed`.
+  - **Priority**: the observer's own entity (the reconciliation anchor, never
+    deferred) → despawns (a ghost is wrong state, not stale state) → longest deferral
+    first → nearest first → AOI index. Strict oldest-first plus a floor that always
+    emits the top candidate bounds the longest deferral by the number of dirty
+    entities in the observer's AOI, independent of session length.
+  - **Byte-identical when it does not bite**: `0` runs the pre-budget encoder
+    unchanged, and a configured-but-unexceeded budget emits in AOI order with the same
+    bytes — asserted tick by tick. Re-ordering happens only on a snapshot that sheds.
+  - Applies to **Protobuf connections only**; every byte figure in the encoder is a
+    protobuf size and a JSON frame is several times larger, so a JSON stream stays
+    bounded only by the AOI radius (stated limitation — ADR-9 legacy encoding).
+  - The deferral bound is stated precisely, because testing it corrected it: the
+    "longest wait is the size of the dirty set" claim holds only while the budget is
+    spent on entity updates alone. The floor guarantees one candidate per snapshot and
+    the observer's own entity is priority 1, so under a despawn backlog that slot goes
+    to self every tick and other dirty entities additionally wait for the backlog to
+    drain — measured at 63 ticks against a dirty set of 6. Still finite and still
+    independent of session length (the high-water mark stops moving once the backlog
+    drains, asserted), but not the dirty-set figure, and `max_shed_age` will show the
+    larger one during heavy AOI churn.
+  - Deferral records are pruned against the visible set each snapshot. Without that,
+    an entity that is new, is deferred before it is ever sent, and then leaves the AOI
+    never becomes a despawn and its record survives for the life of the connection —
+    a slow per-connection leak on any map whose spawns churn at the edge of a circle.
+  - `Shared.GameLogic` and `wire.proto` are untouched: deferral is invisible in the
+    protocol and an existing client needs no change. `docs/API.md` gains a normative
+    "Downlink budget" section saying so.
+- **Counters for the budget**, in Prometheus and on `/status`:
+  `gameserver_snapshots_bytes_total` (real socket bytes, envelope included — the
+  figure ADR-7's `< 50 KB/s` per-client threshold is about),
+  `gameserver_snapshots_entities_shed_total`,
+  `gameserver_snapshots_removals_deferred_total` (should stay flat at zero) and the
+  `gameserver_snapshots_max_shed_age` gauge, plus `max_snapshot_bytes` on `/status` so
+  the others can be read against the cap that produced them.
+### Documentation
+- **`backend/docs/ROADMAP-SECURITY.md` plans the work ADR-21 deferred, and separates it
+  from anti-cheat, which is a different problem.** The roadmap was commissioned as "the
+  security task, because it is anti-cheat"; those are two problems and conflating them
+  spends the budget in the wrong place. **A cheater is a legitimate player** who holds the
+  client, the session and any key shipped inside the client, so transport encryption stops
+  sniffing, tampering and third-party replay — and stops no speed hack, teleport, cooldown
+  bypass or modified client, because every one of those is produced by the endpoint that
+  holds the key.
+
+  Records what already defends the game, because it makes the remaining work narrow rather
+  than foundational: `MovementSystem` integrates `direction * speed * dt` from the server's
+  own speed stat and *"never on how many input packets a client sends"*, `ResolveDirection`
+  normalises the input vector, `ValidationLogic` rejects dead-entity and malformed input and
+  defers attacks to `CombatLogic.ValidateAttack`, and `MaxInputsPerConnection` bounds the
+  uplink. Server authority on movement is the single most important anti-cheat property and
+  it is already true.
+
+  Ranks six anti-cheat gaps, recommending **rejected-input telemetry and a per-account
+  anomaly budget first** — days of pure server-side work, no protocol change, and nothing
+  later can be tuned without them. Client-side anti-cheat is explicitly ranked last: high
+  effort, defeated once and then defeated for everyone.
+
+  For transport confidentiality it records the design insight that removes the expensive
+  part: **the gateway is already a trusted key distribution point** (ADR-3), so it can mint a
+  per-session key alongside the JoinToken — no Diffie-Hellman, no certificates, no extra
+  round trip, and no key in the client binary to extract. Four library options are compared
+  with concrete trade-offs; the recommendation is the **built-in .NET/Go AEAD**, because it
+  adds no dependency (decisive, since a UPM package cannot declare a scoped registry) and is
+  hardware-accelerated. Its go/no-go is stated as an open question rather than an assumption:
+  **`AesGcm` availability under IL2CPP must be verified by a real build**, with libsodium as
+  the fallback and BouncyCastle rejected for the per-packet path on performance.
+
+  Sequenced so that step 1 — reporting which transport is in use and whether a key is in
+  force — depends on none of the decisions above and can ship immediately.
+
+  **Updated the same day with a measurement that overturned its own recommendation.** A probe
+  run in Unity 6000.3.9f1 batchmode (`Mono 6.13.0`) found `AesGcm` **compiles and then throws
+  `PlatformNotSupportedException`**, and `ChaCha20Poly1305` does not exist in that BCL profile
+  at all. That is the worst failure mode available, because it type-checks: an implementation
+  written against it passes review and compilation and fails on a player's device. `Aes` and
+  `HMACSHA256` are both present and working — the primitives `KcpCrypto` already uses.
+
+  The recommendation moves to **AES-CTR + HMAC-SHA256, encrypt-then-MAC**, built from those
+  measured-present primitives: no dependency on any side, available everywhere Unity ships,
+  and authenticated, which is the actual defect. Its cost is that the composition must be got
+  exactly right, so shared cross-implementation test vectors are named as the deliverable
+  rather than an afterthought — a wrong encrypt-then-MAC still round-trips against itself.
+
+  Also records the asymmetry that makes this affordable: **a client handles ~35 packets/s and
+  a server thousands.** At the measured 155 us per 1200-byte packet a client spends ~0.5% of
+  one core, so software crypto is not a client problem; the constraint is that both ends must
+  speak the same construction, and the client is the end with no AEAD. The 155 us is a naive
+  implementation on a loaded machine and is labelled an upper bound, not a benchmark. The
+  measurement is Editor Mono; the same result is expected under IL2CPP and is explicitly
+  marked unconfirmed pending one player build.
+
+### Fixed
+- **Kill rewards are retried under a stable batch id and never dropped** (audit
+  2026-09-07 F06, P1). `KillRewardBatcher` minted a fresh GUID per send and dropped any
+  batch whose answer never arrived, because without server-side deduplication a retry
+  could double-grant. Nakama's `reward_kills` now files a receipt per `batch_id` in the
+  transaction that grants the gold (`backend/nakama` Unreleased), so the batcher cuts
+  each batch **once** — id assigned when it is cut from the pending count, kept for
+  every retry — and re-sends on `NotGranted`, `Unknown` (timeout / transport failure)
+  and the new `Partial` outcome alike, with per-killer exponential backoff (flush
+  interval doubling to 60s). Kills that arrive while a batch is outstanding form a new
+  batch and are never merged into an id that may already be filed at Nakama with the
+  smaller count. `DroppedKills` is gone (nothing is dropped); `PendingKills` and
+  `RequeuedBatches` replace it.
+- **Backlogs above Nakama's 1000-kill cap are split** (F07). A killer's pending count
+  is cut into batches of ≤ `DefaultMaxKillsPerBatch` (1000), each with its own stable
+  id, so a backlog accumulated during an outage is always sendable once Nakama is
+  back. If Nakama nevertheless answers code 11 (`OUT_OF_RANGE`, nothing granted) the
+  batch is halved under new ids.
+- `NakamaClient.RewardKillsAsync` now reads the response body: `status: partial`
+  (gold granted, leaderboard failed) maps to `KillRewardOutcome.Partial`, a non-2xx
+  with error code 11 to `TooLarge`; a 2xx without a `status` field (older plugin) is
+  still `Granted`. `HttpRequestException` is now `Unknown` rather than `NotGranted` —
+  the distinction no longer changes the retry decision, and a reset after delivery is
+  indistinguishable from one before it.
+
+### Changed
+- **Sender-side durability was considered and not built.** Kills recorded (or cut into
+  batches) that Nakama has not yet acknowledged live only in memory: a game-server crash
+  loses at most the last flush interval of kills per killer plus whatever is backed off
+  during a Nakama outage. `IPlayerStore` is a fixed `PlayerState` record over a
+  migrated Postgres schema, so a durable pending record would be a new table,
+  migration and store method for a loss window that is already bounded and
+  gold-only. Documented in `docs/DESIGN.md` ("Kill rewards are exactly-once per batch
+  id") rather than papered over.
+- `KillRewardBatcher` gains a constructor overload with `maxKillsPerBatch` and a
+  `TimeProvider` (test seams); the production call in `GameServer.cs` is unchanged.
+
+### Tests
+- `KillRewardBatcherTests` rewritten around the new contract (15 tests): same batch id
+  across retries for NotGranted / timeout / partial; timeouts never dropped across
+  repeated retries; backoff holds a batch until its slot; 999/1000/1001/2500 kills →
+  1/1/2/3 batches under the cap with distinct ids; split batches keep their own ids
+  across retries; kills arriving during a flush form a new batch; code 11 splits under
+  new ids; one killer's failure does not hold back another; legacy body without
+  `status` is granted.
+### Added
+
+- **Bounded, deadlined join handshake** (workspace audit F03). The accept loop now
+  takes a slot in a bounded pending-handshake pool before starting a handler
+  (`GAMESERVER_MAX_PENDING_HANDSHAKES`, default `256`; beyond it the socket is closed
+  at accept with no reply), and the handler reads the first frame under an absolute
+  deadline linked to host shutdown (`GAMESERVER_HANDSHAKE_TIMEOUT_MS`, default
+  `5000`). Idle sockets, partial length prefixes and partial bodies unwind at the
+  deadline; a first frame that is not a well-formed `MsgJoinToken` is refused
+  immediately; stopping the host cancels every pending read. The accepted transport is
+  disposed on every exit path — previously a throw before the session `Connection`
+  existed left it with no owner. New `HandshakeGate`; new flags
+  `--max-pending-handshakes`, `--handshake-timeout-ms`.
+- **Atomic capacity admission** (`AdmissionController`). A capacity slot is reserved
+  under one lock *before* the awaited player-store load and committed under the same
+  lock when the connection registers; the reservation is released on every failure
+  path. N concurrent joins against one free slot now admit exactly one — before, every
+  join in flight during the load saw the same slot. A user rejoining over their own
+  still-open connection **replaces** it and takes no second slot (previously refused
+  as `"Server is full"` at capacity); a user in the reconnect hold window is not an
+  occupant and rejoins on one slot.
+- **Bounded input ingestion** (workspace audit F04). Movement-only inputs coalesce
+  **at ingest**, in place, newest wins — a movement flood occupies one queue slot.
+  Inputs carrying an attack target stay distinct and in order, budgeted per
+  connection per tick drain (`GAMESERVER_MAX_INPUTS_PER_TICK`, default `32`) and by a
+  world-wide queue cap (`GAMESERVER_MAX_PENDING_INPUTS`, default `0` = capacity ×
+  budget). `EcsWorld.PushInput` gains an `InputIngress` overload returning
+  `InputIngestResult`; `Connection.Ingress` owns the per-connection state. New flags
+  `--max-inputs-per-tick`, `--max-pending-inputs`.
+- **One map transfer per connection.** A second `MsgTransferMap` while one is running
+  is answered `TransferMapResp{ok:false, error:"transfer already in progress"}` from the
+  send queue and counted. `Connection.TryBeginTransfer` / `EndTransfer`.
+- **Metrics and `/status`**: `gameserver_handshakes_pending` (gauge),
+  `gameserver_handshakes_rejected_total{reason=pool_full|timeout|malformed}`,
+  `gameserver_inputs_dropped_total{reason=connection_budget|queue_full}`,
+  `gameserver_inputs_coalesced_total`, `gameserver_transfers_rejected_total`; `/status`
+  fields `handshakes_pending`, `handshakes_rejected`, `inputs_dropped`,
+  `transfers_rejected`. All separate from `players_online`.
+- **Tests** (+26): `AdmissionControllerTests` (concurrent reservations, replacement,
+  release, commit refusal, `HandshakeGate`), `HandshakeHardeningTests` (idle, pool cap,
+  partial prefix, partial body, malformed, wrong first message, shutdown cancels),
+  `AtomicAdmissionTests` (12 concurrent joins vs capacity 3 admit exactly 3 with the
+  store seeing only 3 loads; fast-rejoin at capacity 1; rejoin during hold; aborted
+  join releases), `InputIngestionTests` (ingest rules on `EcsWorld`; live flood from one
+  connection stays inside the bound while a second connection's input is acked in the
+  snapshot stream; concurrent transfer rejected). Shared `HardeningHarness`.
+
+- **Live probe** `scripts/admission-probe.py` (python3 stdlib, no deps): against a
+  running server, checks idle close at the deadline, pool cap (`N+1` idle sockets),
+  partial/malformed frame handling with the pending gauge returning to baseline, and
+  an input flood from one authenticated player while a second player's input is
+  still acked — PASS/FAIL per check, non-zero exit on failure. Documented, with
+  reference output from a live run, in the new `docs/RUNBOOK.md`.
+
+- **Measured downlink-budget behaviour in `docs/DESIGN.md`** — a table of downlink
+  bytes/s per client, entities shed, max deferral, despawns deferred and client resyncs at
+  budgets from off down to 512 B, taken from a live server at 300 AOI entities and 10
+  players. Halving the cap roughly halves the downlink (118 033 → 7 570 B/s/client);
+  despawns deferred and client resyncs were **0 at every budget**, i.e. no client ever saw
+  an entity handle without a binding under sustained shedding.
+- **A note in `docs/METRICS.md` that a never-incremented counter is absent from
+  `/metrics` entirely**, not zero — so on a healthy server the two shedding counters and
+  `gameserver_resyncs_total` are missing, which in a dashboard is indistinguishable from a
+  broken scrape or a build without the feature. `/status` always publishes them as plain
+  zeros and is the surface to alert from. Verified live.
+
+### Changed
+
+- `Connection.ReadOneAsync` / `WriteOneAsync` take an optional `CancellationToken`
+  linked with the connection's own — the handshake deadline rides it.
+- The accept loop's handler task is started with `CancellationToken.None`: started
+  with the host token, an accept racing shutdown could skip the handler and leak the
+  pool slot and the transport.
+- Capacity-refusal log line reports `{Occupancy}/{Capacity}` (connected + reserved)
+  instead of the raw connection count.
+
+### Docs
+
+- `docs/README.md` configuration table: four new rows, capacity row describes the
+  atomic/replacement semantics. `docs/METRICS.md`: new `/status` fields and
+  Prometheus series. `docs/API.md`: handshake deadline and pool on `join_token_resp`,
+  `"transfer already in progress"` in the transfer error table. `docs/DESIGN.md`:
+  "Admission hardening" section with the decisions (holds do not retain slots;
+  deadline excludes the store load; source-IP controls deliberately not done).
+### Documentation
+
+- Add the 2026-09-07 workspace reliability and performance audit, covering backend,
+  Unity integration and resolved Cuvara packages, with prioritized findings,
+  implementation stages and explicit validation limitations. Prioritize built-in
+  Nakama APIs, including evaluating conditional storage plus MultiUpdate for
+  reward deduplication, before custom infrastructure. No runtime changes.
+
+## [0.9.0] - 2026-09-05
+
+### Added
+
+- **Golden vectors for AOI and SnapshotMerger** (ADR-10, #263). Two new fixture
+  files (`Shared.GameLogic/GoldenVectors/aoi.json` — 13 cases, `snapshot_merger.json`
+  — 11 cases) and their xUnit test runners. AOI vectors cover inside/outside/boundary,
+  diagonal distance, negative coords, zero radius, and buffer overflow counting.
+  Merger vectors cover keyframe replace, delta upsert/add/remove, tick monotonicity,
+  reset, and multi-step accumulation. Total golden vectors: 91 → 115.
 
 - **`LoadTestSpawner` — server-synced entity load testing** (`LOADTEST_ENTITIES=N`).
   Bulk-spawns N entities at startup in a uniform disc within AOI radius 40, orbits

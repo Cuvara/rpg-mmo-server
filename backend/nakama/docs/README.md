@@ -17,7 +17,7 @@ Depends on: `github.com/duycuong/rpg-mmo/shared` (via `replace ../shared`) and
 | Auth — email/password pre-auth validation | ✅ | `auth/validate.go` |
 | Auth — social (Google/Apple/Facebook) | Planned | — |
 | Economy — atomic transactions, wallet, inventory | Planned | — |
-| Leaderboard — rankings, season management | Planned | — |
+| Leaderboard — `kills_alltime` (authoritative), server-only score writes | Done | season management planned |
 | Social — party, friends, chat, guild, presence | Planned | — |
 | Matchmaking, notifications | Planned | — |
 

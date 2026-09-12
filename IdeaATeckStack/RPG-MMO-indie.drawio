@@ -236,7 +236,7 @@
         <mxCell id="p1-26" value="PostgreSQL (Meta)" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="760" y="40" width="170" height="40" as="geometry" />
         </mxCell>
-        <mxCell id="p1-27" value="Gateway (UDP/KCP)" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+        <mxCell id="p1-27" value="Gateway (auth + redirect)" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="1000" y="40" width="170" height="40" as="geometry" />
         </mxCell>
         <mxCell id="p1-28" value="Redis" style="whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
@@ -1042,7 +1042,7 @@
         <mxCell id="p7-28" value="Crash Reporter" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#666666;" vertex="1" parent="1">
           <mxGeometry x="1010" y="420" width="240" height="40" as="geometry" />
         </mxCell>
-        <mxCell id="p7-29" value="☁️ Gateway / Map Server&#xa;(UDP/KCP)" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1;" vertex="1" parent="1">
+        <mxCell id="p7-29" value="☁️ Gateway (auth + redirect)&#xa;/ Map Server" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="150" y="970" width="280" height="60" as="geometry" />
         </mxCell>
         <mxCell id="p7-30" value="☁️ Nakama Backend&#xa;(HTTPS/WebSocket)" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1;" vertex="1" parent="1">

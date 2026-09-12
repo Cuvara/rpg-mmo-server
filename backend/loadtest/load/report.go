@@ -97,8 +97,11 @@ func WriteSummary(w io.Writer, results []*Result) {
 	if len(results) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "\n--- loadtest results (tick budget %.2fms @ %dHz) ---\n",
-		TickBudget.Seconds()*1000, DefaultTickRate)
+	// The encoding is in the header because the two arms differ ~5x in bytes per
+	// client from identical load, and a table that does not say which one it
+	// drove has already been read as the other one once.
+	fmt.Fprintf(w, "\n--- loadtest results (tick budget %.2fms @ %dHz, encoding=%s) ---\n",
+		TickBudget.Seconds()*1000, DefaultTickRate, encodingOf(results))
 	WriteTable(w, results)
 
 	fmt.Fprintln(w)
@@ -149,4 +152,22 @@ func pad(s string, w int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", w-len(s))
+}
+
+// encodingOf names the wire encoding a set of results drove, or "mixed" when a
+// sweep deliberately spans both arms (scripts/encoding-sweep.sh).
+func encodingOf(results []*Result) string {
+	enc := ""
+	for _, r := range results {
+		switch {
+		case enc == "":
+			enc = r.Config.Encoding
+		case enc != r.Config.Encoding:
+			return "mixed"
+		}
+	}
+	if enc == "" {
+		return "unknown"
+	}
+	return enc
 }

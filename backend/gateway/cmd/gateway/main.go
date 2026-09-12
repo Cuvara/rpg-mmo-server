@@ -17,6 +17,7 @@ import (
 	"github.com/duycuong/rpg-mmo/gateway/session"
 	"github.com/duycuong/rpg-mmo/shared/config"
 	"github.com/duycuong/rpg-mmo/shared/logger"
+	"github.com/duycuong/rpg-mmo/shared/messages"
 	"github.com/duycuong/rpg-mmo/shared/storage"
 	"github.com/duycuong/rpg-mmo/shared/storage/redisstore"
 	"github.com/duycuong/rpg-mmo/shared/transport"
@@ -55,9 +56,12 @@ func main() {
 	allocMismatchTTL := flag.Duration("allocation-mismatch-ttl", 0, "How long to refuse further allocations for a map after an allocated server turned out to serve a different map (overrides ALLOCATION_MISMATCH_TTL; default 60s, negative disables). Agones cannot un-allocate, so without this a client retrying an unservable map drains the fleet one GameServer per attempt")
 	allocKubeconfig := flag.String("allocator-kubeconfig", "", "Kubeconfig path for the allocator (default: in-cluster config, then $KUBECONFIG, then ~/.kube/config)")
 	transportKey := flag.String("transport-key", "", "Pre-shared key encrypting the KCP listener, 32-byte hex recommended (overrides TRANSPORT_KEY; empty = plaintext)")
+	tlsCert := flag.String("tls-cert", "", "PEM certificate making the gateway terminate TLS itself (overrides GATEWAY_TLS_CERT). Requires --tls-key and --transport tcp. Unset = plaintext, which is the default. Covers the client<->gateway hop only: the client<->Nakama meta hop mints the auth token and is separate (ADR-23)")
+	tlsKey := flag.String("tls-key", "", "PEM private key for --tls-cert (overrides GATEWAY_TLS_KEY). Setting exactly one of the two is a startup error, not a fallback to plaintext")
 	joinTokenSecret := flag.String("join-token-secret", "", "HS256 secret (comma-separated list to rotate) for gateway->gameserver join tokens (overrides JOIN_TOKEN_SECRET; REQUIRED)")
 	connRate := flag.Float64("conn-rate-per-min", -1, "Max accepted connections per minute per source IP (overrides GATEWAY_CONN_RATE_PER_MIN; 0 disables)")
 	msgRate := flag.Float64("msg-rate-per-sec", -1, "Max inbound messages per second per connection (overrides GATEWAY_MSG_RATE_PER_SEC; 0 disables)")
+	minProtoVersion := flag.Uint("min-protocol-version", 0, "Lowest wire protocol version a client may advertise on MsgAuth (default 0, which also admits clients advertising nothing). Set to 1 once every client advertises: an unversioned client is then refused with reason \"protocol_version_mismatch\" instead of being admitted on trust. Watch gateway_unversioned_handshakes_total go flat at zero before flipping it -- flipping while it still moves locks out real players")
 	flag.Parse()
 
 	cfg := config.Load()
@@ -84,6 +88,8 @@ func main() {
 	//   TRANSPORT_KEY      — KCP wire encryption. Empty = plaintext.
 	//   JWT_SECRET         — Nakama-issued client auth token.
 	//   JOIN_TOKEN_SECRET  — gateway-issued join token. REQUIRED (fatal if unset).
+	//   GATEWAY_TLS_CERT/_KEY — TLS on this listener (ADR-23). Both empty =
+	//                      plaintext, the default; exactly one set is FATAL.
 	tKey := cfg.TransportKey
 	if *transportKey != "" {
 		tKey = *transportKey
@@ -93,6 +99,24 @@ func main() {
 			log.Error("invalid transport key", "err", kerr)
 			os.Exit(1)
 		}
+	}
+
+	// GATEWAY_TLS_CERT / GATEWAY_TLS_KEY — the fourth security input, and the
+	// only one that is authenticated (ADR-23). Unset is plaintext and is the
+	// default; a bad or half-set pair is FATAL rather than a fall back, because
+	// falling back hands an operator the plaintext listener they were trying to
+	// remove while their configuration says they removed it.
+	tlsCertPath, tlsKeyPath := cfg.GatewayTLSCert, cfg.GatewayTLSKey
+	if *tlsCert != "" {
+		tlsCertPath = *tlsCert
+	}
+	if *tlsKey != "" {
+		tlsKeyPath = *tlsKey
+	}
+	tlsConf, terr := server.LoadTLSConfig(tlsCertPath, tlsKeyPath)
+	if terr != nil {
+		log.Error("invalid gateway TLS configuration", "err", terr)
+		os.Exit(1)
 	}
 
 	joinSecret := cfg.JoinTokenSecret
@@ -340,11 +364,13 @@ func main() {
 		server.WithKickStream(eventStream),
 		server.WithKickConsumer(kickConsumer),
 		server.WithTransportKey(tKey),
+		server.WithTLS(tlsConf),
 		server.WithJoinTokenSecret(joinSecret),
 		// The per-IP limiter is configured per minute (the natural unit for a
 		// login rate) but the bucket refills per second.
 		server.WithConnRateLimit(connRatePerMin/60, connBurst),
 		server.WithMsgRateLimit(msgRatePerSec, msgBurst),
+		server.WithMinProtocolVersion(uint32(*minProtoVersion)),
 	)
 
 	// Graceful shutdown on SIGINT/SIGTERM.
@@ -375,7 +401,9 @@ func main() {
 		slog.String("transport", transport.Normalize(listenTransport)),
 		slog.Bool("transport_encrypted", tKey != ""),
 		slog.Float64("conn_rate_per_min", connRatePerMin),
-		slog.Float64("msg_rate_per_sec", msgRatePerSec))
+		slog.Float64("msg_rate_per_sec", msgRatePerSec),
+		slog.Uint64("wire_protocol_version", uint64(messages.WireProtocolVersion)),
+		slog.Uint64("min_protocol_version", uint64(*minProtoVersion)))
 	if err := gw.Run(listenAddr); err != nil {
 		log.Error("gateway exited with error", "err", err)
 		os.Exit(1)

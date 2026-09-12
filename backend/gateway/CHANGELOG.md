@@ -6,6 +6,128 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+
+- **Gateway-hop TLS, terminated in the gateway process — `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY`
+  (`--tls-cert` / `--tls-key`). OFF by default and pinned explicitly at every deploy path.**
+  ADR-23. The gateway hop carries the client's auth token, and a byte tap measured that token
+  crossing it in the clear with a **one-hour lifetime and no single-use guard** — the most
+  valuable credential on either realtime hop, and one that mints join tokens on demand for its
+  whole hour. `tls.NewListener` wraps the listener returned by `transport.Listen`, so the
+  4-byte-length framing, the codec and every handler below are untouched.
+
+  **Terminated in-process, not at an edge, and that is the decision rather than an
+  implementation detail.** TLS terminated in front of the gateway is confidential *to the
+  terminator* and plaintext from there on; on the single-node k3d dev and staging boxes the
+  terminator and the gateway are the same host, so an edge-terminated deployment there would
+  buy nothing while reporting itself encrypted. An external terminator remains compatible and
+  can be added in front later.
+
+  **No negotiation and no plaintext fallback** (ADR-22 decision 3, unchanged): a listener with a
+  certificate serves TLS only and closes a plaintext client. The gateway already sniffs byte 0
+  to tell JSON from protobuf, so "accept both and sniff" is a natural-looking mistake sitting
+  right there; it is a downgrade attack with a friendly name.
+
+  **Setting exactly one of the two is a startup error**, not a fall back to plaintext — an
+  operator who set one and typo'd the other meant to have TLS, and starting anyway hands them
+  the plaintext listener they were trying to remove. **A certificate on a KCP listener is also
+  refused at startup**: TLS needs a reliable ordered stream, and ignoring the certificate would
+  produce a gateway configured for TLS, serving plaintext, reporting `kcp`.
+
+  **What it does NOT cover, measured the same day:** the client→Nakama meta hop, which MINTS
+  the auth token, is plain HTTP in every environment and also carries a **two-hour reusable
+  Nakama session token**. That hop is the higher-value half and is not addressed here; the boot
+  posture line says so rather than leaving an operator to infer it.
+
+  **It cannot be turned on yet.** The Unity client speaks raw TCP to the gateway; enabling this
+  with the current client refuses every player. `Cuvara/Netcode` needs TLS on the gateway
+  connection (verified in an IL2CPP *player* build, certificate validation ON) and `https://`
+  for Nakama.
+
+### Changed
+
+- **The gateway no longer derives or returns a session key.** ADR-22 supersedes the derived
+  key with an authenticated X25519 exchange on the gameplay hop; `EnterWorldResponse` field
+  5 is removed and reserved. See `backend/docs/SEALED-FRAMING.md`.
+  - Worth recording for whoever implements the replacement: the client still cannot derive
+    the handshake binding key, so something must still reach it over the gateway hop — and
+    that hop is plaintext TCP by default. ADR-22 decision 8 holds the model until it is
+    confidential, and §6 of the spec explains why the gameplay-hop handshake cannot simply
+    be reused there: it is anchored in the join token, which does not exist yet at that
+    point.
+
+> **Nothing here encrypts anything yet.** No cipher, MAC or curve is implemented, and none
+> is stubbed: an implementation that "worked" would let every test above it pass while
+> proving nothing about the bytes. ADR-22's library choice is still open.
+
+### Added
+
+- **The gateway mints a per-session key and returns it in `EnterWorldResponse`.** Derived
+  from the join-token **signing** key and the freshly minted token's `jti` (see
+  `shared/sessionkey`), so during a secret rotation the gateway and the game server move
+  together — deriving from an older ring entry would be a downgrade surface for no benefit,
+  since the `jti` is fresh per join and there is never an old session key worth honouring.
+  - The key is returned to the client and **not** forwarded to the game server, which
+    derives the same value itself. Nothing carrying key material crosses the gameplay hop.
+  - Verified against real containers: a live handshake through the gateway returned a
+    32-byte key equal to the key derived independently from the token's `jti`, and the key
+    material appeared **zero** times in either container's logs, `/status` or `/metrics`.
+    3/3 players then completed a full gateway → game server join.
+  - See `docs/API.md` for the field, the derivation, and the residual exposure — the key
+    travels in the clear over a gateway hop that is plaintext TCP by default.
+
+### Fixed
+
+- **The gateway reported `encrypted: true` while sending cleartext.** The startup log
+  computed that field as `transportKey != ""`, which is true whenever a key is configured —
+  including on TCP, where there is no packet-crypt layer and the key is silently ignored. A
+  gateway deployed as `transport=tcp` with `TRANSPORT_KEY` set therefore announced itself as
+  encrypted on every boot while putting every auth frame and join token on the wire in
+  clear. **A security signal that is confidently wrong is worse than one that is missing**,
+  because nobody looks behind it.
+  - Now derived from `transport.Posture` (shared module) and reported as `encrypted`,
+    `authenticated` and `cipher`, plus a `transport posture` line — **at Warning whenever
+    traffic is in cleartext**, Information when it is not. Before this the only cleartext
+    case that warned was KCP-without-a-key, so plain TCP — the default, and the case with no
+    encryption at all — was silent.
+  - Demonstrated live rather than argued: the pre-change image logs
+    `"encrypted":true` for `transport=tcp` with a key set, with no posture line and no
+    transport gauges; the new image logs `"encrypted":false` and a WARN for the same
+    configuration.
+
+### Added
+
+- **`gateway_transport_encrypted` and `gateway_transport_authenticated`**, labelled by
+  transport and cipher, set once at listen time. **Gauges, not counters**: a counter that
+  never increments is absent from `/metrics` entirely, and "is this gateway encrypted" must
+  never be answered by a missing field. Asserted by a test that gathers the registry and
+  requires both families to be present while reporting 0.
+
+### Added
+- **The gateway refuses a version-mismatched client with a named reason
+  (`protocol_version_mismatch`) instead of admitting it.** `handleAuth` now
+  checks `AuthRequest.ProtocolVersion` via `messages.CheckProtocolVersion` and
+  answers `AuthResponse{OK:false, Error:"protocol_version_mismatch"}`, then
+  closes with `SendAndClose` so the frame is flushed rather than RST away. The
+  check runs BEFORE JWT verification: a peer that cannot speak the schema is
+  refused whether or not its credential is good, and reporting `invalid token`
+  for what is really a stale build sends the operator to the wrong layer.
+- **`--min-protocol-version`** (default 0). Zero also admits a client that
+  advertises nothing, which is every client on the day this ships. Set it to 1
+  once `gateway_unversioned_handshakes_total` has gone flat across a deploy
+  window; an unversioned client is then refused through the same named path as a
+  mismatched one.
+- **Metrics `gateway_unversioned_handshakes_total` and
+  `gateway_protocol_version_refused_total`.** The first is the migration
+  instrument, not a health metric: admitting an unversioned client is admission
+  on trust, and an admission nobody can see is behaviourally identical to having
+  no check.
+- **Every `AuthResponse` echoes the gateway's own version**, including rejections.
+  It is the only way a new client detects an OLD gateway, which replies with 0
+  because it never knew the field.
+
+## [0.9.0] - 2026-09-05
+
+### Added
 - **Multi-gateway duplicate-login kick (ADR-17).** When a user logs in on gateway
   B while their old session lives on gateway A, gateway B now publishes a
   `gateway_superseded` event on the `events:gateway_kick` Redis Stream

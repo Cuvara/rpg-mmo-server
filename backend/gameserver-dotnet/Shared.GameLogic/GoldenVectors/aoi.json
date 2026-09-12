@@ -1,0 +1,156 @@
+{
+  "cases": [
+    {
+      "name": "single_entity_inside_radius",
+      "centerX": "0x00000000",
+      "centerY": "0x00000000",
+      "radius": "0x42480000",
+      "entities": [
+        {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100}
+      ],
+      "expectedIds": ["p1"],
+      "expectedCount": 1
+    },
+    {
+      "name": "single_entity_outside_radius",
+      "centerX": "0x00000000",
+      "centerY": "0x00000000",
+      "radius": "0x42480000",
+      "entities": [
+        {"id": "p1", "type": "player", "x": "0x43480000", "y": "0x00000000", "hp": 100, "maxHp": 100}
+      ],
+      "expectedIds": [],
+      "expectedCount": 0
+    },
+    {
+      "name": "entity_exactly_on_boundary",
+      "centerX": "0x00000000",
+      "centerY": "0x00000000",
+      "radius": "0x42480000",
+      "entities": [
+        {"id": "p1", "type": "player", "x": "0x42480000", "y": "0x00000000", "hp": 100, "maxHp": 100}
+      ],
+      "expectedIds": ["p1"],
+      "expectedCount": 1
+    },
+    {
+      "name": "entity_just_outside_boundary",
+      "centerX": "0x00000000",
+      "centerY": "0x00000000",
+      "radius": "0x42480000",
+      "entities": [
+        {"id": "p1", "type": "player", "x": "0x42490000", "y": "0x00000000", "hp": 100, "maxHp": 100}
+      ],
+      "expectedIds": [],
+      "expectedCount": 0
+    },
+    {
+      "name": "multiple_entities_mixed",
+      "centerX": "0x41200000",
+      "centerY": "0x41200000",
+      "radius": "0x42480000",
+      "entities": [
+        {"id": "p1", "type": "player", "x": "0x41A00000", "y": "0x41A00000", "hp": 100, "maxHp": 100},
+        {"id": "m1", "type": "mob", "x": "0x43960000", "y": "0x43960000", "hp": 50, "maxHp": 50},
+        {"id": "p2", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 80, "maxHp": 100},
+        {"id": "m2", "type": "mob", "x": "0x43480000", "y": "0x00000000", "hp": 30, "maxHp": 50}
+      ],
+      "expectedIds": ["p1", "p2"],
+      "expectedCount": 2
+    },
+    {
+      "name": "no_entities",
+      "centerX": "0x00000000",
+      "centerY": "0x00000000",
+      "radius": "0x42480000",
+      "entities": [],
+      "expectedIds": [],
+      "expectedCount": 0
+    },
+    {
+      "name": "all_entities_inside",
+      "centerX": "0x00000000",
+      "centerY": "0x00000000",
+      "radius": "0x461C4000",
+      "entities": [
+        {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100},
+        {"id": "p2", "type": "player", "x": "0xC1200000", "y": "0xC1200000", "hp": 80, "maxHp": 100},
+        {"id": "m1", "type": "mob", "x": "0x42C80000", "y": "0x42480000", "hp": 50, "maxHp": 50}
+      ],
+      "expectedIds": ["p1", "p2", "m1"],
+      "expectedCount": 3
+    },
+    {
+      "name": "center_offset_positive",
+      "centerX": "0x42C80000",
+      "centerY": "0x42C80000",
+      "radius": "0x41200000",
+      "entities": [
+        {"id": "p1", "type": "player", "x": "0x42CA0000", "y": "0x42CA0000", "hp": 100, "maxHp": 100},
+        {"id": "p2", "type": "player", "x": "0x00000000", "y": "0x00000000", "hp": 80, "maxHp": 100}
+      ],
+      "expectedIds": ["p1"],
+      "expectedCount": 1
+    },
+    {
+      "name": "negative_coordinates",
+      "centerX": "0xC2480000",
+      "centerY": "0xC2480000",
+      "radius": "0x42480000",
+      "entities": [
+        {"id": "p1", "type": "player", "x": "0xC2480000", "y": "0xC2480000", "hp": 100, "maxHp": 100},
+        {"id": "p2", "type": "player", "x": "0x42480000", "y": "0x42480000", "hp": 80, "maxHp": 100}
+      ],
+      "expectedIds": ["p1"],
+      "expectedCount": 1
+    },
+    {
+      "name": "zero_radius",
+      "centerX": "0x41200000",
+      "centerY": "0x41200000",
+      "radius": "0x00000000",
+      "entities": [
+        {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100},
+        {"id": "p2", "type": "player", "x": "0x41300000", "y": "0x41200000", "hp": 80, "maxHp": 100}
+      ],
+      "expectedIds": ["p1"],
+      "expectedCount": 1
+    },
+    {
+      "name": "diagonal_distance_inside",
+      "centerX": "0x00000000",
+      "centerY": "0x00000000",
+      "radius": "0x42480000",
+      "entities": [
+        {"id": "p1", "type": "player", "x": "0x41F00000", "y": "0x41F00000", "hp": 100, "maxHp": 100}
+      ],
+      "expectedIds": ["p1"],
+      "expectedCount": 1
+    },
+    {
+      "name": "diagonal_distance_outside",
+      "centerX": "0x00000000",
+      "centerY": "0x00000000",
+      "radius": "0x42480000",
+      "entities": [
+        {"id": "p1", "type": "player", "x": "0x42480000", "y": "0x42480000", "hp": 100, "maxHp": 100}
+      ],
+      "expectedIds": [],
+      "expectedCount": 0
+    },
+    {
+      "name": "buffer_overflow_count",
+      "centerX": "0x00000000",
+      "centerY": "0x00000000",
+      "radius": "0x461C4000",
+      "entities": [
+        {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x00000000", "hp": 100, "maxHp": 100},
+        {"id": "p2", "type": "player", "x": "0x41A00000", "y": "0x00000000", "hp": 80, "maxHp": 100},
+        {"id": "p3", "type": "player", "x": "0x42200000", "y": "0x00000000", "hp": 60, "maxHp": 100}
+      ],
+      "bufferSize": 2,
+      "expectedIds": ["p1", "p2"],
+      "expectedCount": 3
+    }
+  ]
+}
