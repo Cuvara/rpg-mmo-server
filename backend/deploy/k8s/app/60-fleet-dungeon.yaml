@@ -52,24 +52,34 @@ spec:
   # check currently FAILS on any autoscaler it finds and stands down only for a
   # fleet with a per-pod map id. Adding one before that check knows about this
   # fleet turns every deploy red on a healthy stack. The check moves first.
-  # ZERO UNTIL THE GAME-SERVER HALF LANDS, and this is not caution -- it is a
-  # live break that was one deploy away.
+  # TWO, and this is the fleet where a spare is meaningful.
   #
-  # Program.cs resolves `--map-id ?? GAMESERVER_MAP_ID ?? "map_01"`. This fleet
-  # deliberately sets no map id (see the header), so TODAY every pod from it
-  # falls back to **map_01** and self-registers under it -- three live servers
-  # for one map, which is exactly the ADR-2 invariant ADR-26 was written to
-  # protect. `verify.sh`'s registry.one_server would catch it and turn the
-  # deploy red, so it fails loudly rather than silently; it would still split
-  # dev's world in the meantime.
+  # It was 0 from 2026-09-12 until dungeon-mode registration landed, because
+  # Program.cs resolves `--map-id ?? GAMESERVER_MAP_ID ?? "map_01"` and this
+  # fleet pins no map id -- so every pod of it used to fall back to map_01 and
+  # self-register there, which with the map pod is three live servers for one
+  # map. That is closed now: in dungeon mode the server writes its
+  # servers:id: hash and is never added to servers:map:, whatever map id the
+  # fallback hands it (ADR-26 decision 8, pinned by a test that names the
+  # fallback as the hazard).
   #
-  # ADR-26 decision 8 is what fixes it: in dungeon mode the server publishes its
-  # own servers:id: entry and registers no map at all. Until that ships, the
-  # correct replica count for this fleet is none.
+  # ADR-18's argument against replicas > 1 is specific to a fleet that pins one
+  # GAMESERVER_MAP_ID for every replica: there, a second Ready pod registers
+  # under the same map id at boot and ADR-2's invariant is broken by the replica
+  # count alone. This fleet's pods register no map, so a second Ready pod is
+  # what it sounds like -- an idle instance waiting to be allocated to a party.
   #
-  # RAISE THIS TO 2 IN THE SAME CHANGE that lands dungeon-mode registration --
-  # not before, and not in a separate follow-up nobody schedules.
-  replicas: 0
+  # Why a spare matters here and not there: dungeon entry happens inside the
+  # client's EnterWorld budget, which is sized to stay within the gateway's
+  # heartbeat window. A cold pod start inside it is the difference between
+  # entering a dungeon and being told to retry.
+  #
+  # STILL NO FleetAutoscaler. A buffer autoscaler is defensible on this fleet --
+  # ADR-18 says so explicitly -- but verify.sh's cluster.autoscaler check FAILS
+  # on any autoscaler it finds and stands down only for a fleet with a per-pod
+  # map id. Adding one before that check knows about this fleet turns every
+  # deploy red on a healthy stack. The check moves first.
+  replicas: 2
   scheduling: Packed
   template:
     metadata:
