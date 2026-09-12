@@ -6,6 +6,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Documentation
+- **`CORE-COMPLETION.md`: every C item is done, and C5 was proven with two real built players.**
+  Not a probe this time -- two Windows players, one creating a party through Nakama and one
+  joining it by id, both entered the **same** dungeon instance (`127.0.0.1:7019`), which
+  reported `players_online: 2` and `sealed_cipher: chacha20-poly1305`. Both were refused on
+  their first join for not sealing and escalated themselves, which is the shipped default.
+
+  The correction block added on 2026-09-12 -- when C1 was marked done on the strength of a Go
+  probe while the client could not ask for a dungeon at all -- is marked resolved rather than
+  deleted. The gap closed in a day; the lesson outlives it.
+
+### Documentation
 - **The join deadline and the dungeon autoscaler are now MEASURED on dev, not only
   unit-tested.** Both shipped with an explicit "never run on a cluster" caveat. The two
   `dungeonprobe` runs that leaked a two-replica fleet permanently on 2026-09-12 were repeated
