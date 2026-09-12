@@ -6,6 +6,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Documentation
+- **`CORE-COMPLETION.md` C3 (Android) is done, and was measured rather than assumed.** An
+  Android player built for `arm64,x86_64` ran on an x86_64 emulator against the dev cluster,
+  reached IN WORLD, was kicked `no_sealed_session`, reconnected with sealing, established the
+  session and stayed in world -- the full ADR-22 escalation path, on the platform the game
+  targets, for the first time. Server side: `players_online: 1`,
+  `sealed_cipher: chacha20-poly1305`. Two client gaps were found doing it (arm64-only builds
+  install on no usable emulator; an Android build could not be pointed at a backend at all)
+  and are fixed in the client repo. The gate itself is unchanged: **C1 and C2 still stand
+  between here and gameplay content.**
+
+### Documentation
 - **`docs/CORE-COMPLETION.md`: the checklist that says when the gameplay-content gate
   opens.** "Is the core done?" was being answered from memory, and both places that record
   state have been caught describing a state that had changed under them. Its rule is ADR-14's

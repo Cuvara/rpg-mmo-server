@@ -36,7 +36,7 @@ Last audited: **2026-09-12**, against `origin/develop` and the live `k3d-rpg-dev
 |---|---|---|---|
 | C1 | **Dungeon instancing — ADR-14 stage 6.** Allocate per party, lifecycle, shutdown. Today `--mode=dungeon` changes exactly one thing, the hold TTL (`Program.cs`: 60s vs 30s), `ALLOCATOR_FLEET_DUNGEON` is empty on every environment, no dungeon fleet manifest exists, and **the word "checkpoint" appears in no `.cs` or `.go` file in the repo**. | The project's one-line description is "open-world maps + instanced dungeons". Half of that has no plumbing. Any dungeon content written now targets a flow that does not exist. | L |
 | C2 | **Party, and the Nakama social surface it needs.** `backend/nakama/` contains `auth/` and `economy/` only — there is no `social/` or `matchmaking/` directory. | C1 allocates *per party*. Without a party there is nothing to allocate per. | M |
-| C3 | **Android proven.** The client CI builds Android, but no Android build has been run and joined a server, so the mobile transport path (TLS, sealed session, reconnect) is unmeasured on the platform the game targets. | "Mobile/PC" is in the project description; a transport that works only on Windows is not a proven transport. | M |
+| C3 | ~~**Android proven.**~~ **DONE 2026-09-12.** An Android player built with `ANDROID_ABIS=arm64,x86_64` ran on an x86_64 emulator against the dev cluster and went **IN WORLD**, then took the full ADR-22 escalation: kicked `no_sealed_session`, reconnected with sealing, `sealed session established`, back in world and stable, with the server reporting `players_online: 1` and `sealed_cipher: chacha20-poly1305`. Two client gaps were found and fixed getting there: the build was **arm64-only**, which installs on no usable emulator, and **an Android build could not be pointed at a backend at all** — every override was a CLI flag or an env var, and Android has neither. | M |
 | C4 | **ADR-14 stages 7 and 8.** Buffer-based `FleetAutoscaler`; retire the superseded `deploy/agones/` manifests. | Fleet scaling policy is plumbing. Deliberately deferred, not forgotten — `verify.sh` currently asserts the *absence* of an autoscaler. | S |
 
 ## Blocked on something that is not code
@@ -56,9 +56,10 @@ does not depend on them.
 
 ## When the gate opens
 
-**When C1 and C2 are demonstrated.** C3 and C4 are real work but they do not change the
-shape of any flow gameplay sits on: an Android client joins the same way a Windows one
-does, and an autoscaler changes how many servers exist, not what a server does.
+**When C1 and C2 are demonstrated.** C3 is now done and C4 remains, but neither changes the
+shape of any flow gameplay sits on: an Android client joins the same way a Windows one does
+— which is no longer an assumption, it was measured on 2026-09-12 — and an autoscaler changes
+how many servers exist, not what a server does.
 
 C1 and C2 do change that shape — a dungeon run is a different lifecycle from a map session,
 and content written against a map session does not survive the difference. That is exactly
