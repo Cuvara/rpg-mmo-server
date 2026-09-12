@@ -15,7 +15,14 @@ using GameServer.Server;
 
 string mode = GetArg(args, "--mode") ?? Env("GAMESERVER_MODE") ?? "map";
 string addr = GetArg(args, "--addr") ?? Env("GAMESERVER_ADDR") ?? ":9000";
-string mapId = GetArg(args, "--map-id") ?? Env("GAMESERVER_MAP_ID") ?? "map_01";
+string? explicitMapId = GetArg(args, "--map-id") ?? Env("GAMESERVER_MAP_ID");
+// The fallback is the hazard, not a missing value: a dungeon fleet pins NO map id on
+// purpose, so every pod from it lands on "map_01" here. What stops that becoming three
+// live servers for one map (ADR-2) is the registration scope -- a dungeon server writes
+// its servers:id: hash and never joins servers:map: (ADR-26 decision 8) -- not this
+// string. The warning below says so out loud, because a dungeon pod whose registry hash
+// reads map_01 is otherwise a genuinely alarming thing to find.
+string mapId = explicitMapId ?? "map_01";
 string serverId = GetArg(args, "--server-id") ?? Env("GAMESERVER_ID") ?? Env("POD_NAME") ?? $"gs-{Guid.NewGuid():N}"[..12];
 int capacity = int.TryParse(GetArg(args, "--capacity") ?? Env("GAMESERVER_CAPACITY"), out var cap) ? cap : 100;
 // Pre-join bounds (workspace audit F03). Capacity counts authenticated players only; these
@@ -193,6 +200,16 @@ int agonesPort = useAgones ? HttpAgonesSdk.ResolvePort(logger) : HttpAgonesSdk.D
 
 logger.LogInformation("GameServer .NET starting");
 logger.LogInformation("  Mode:      {Mode}", mode);
+if (GameServerHost.IsDungeonMode(mode) && explicitMapId == null)
+{
+    logger.LogWarning(
+        "  Dungeon mode with no map id configured, so the default '{MapId}' applies. This " +
+        "is expected on a dungeon fleet, which pins no GAMESERVER_MAP_ID: the value is " +
+        "recorded in this pod's servers:id: hash and NOWHERE ELSE. A dungeon server does " +
+        "not join servers:map:, so it cannot be found by map lookup and cannot become a " +
+        "second live server for '{MapId}' (ADR-26 decision 8).",
+        mapId, mapId);
+}
 logger.LogInformation("  Address:   {Addr}", addr);
 logger.LogInformation("  Transport: {Transport}{Encryption}", transport,
     transport == TransportKind.Kcp

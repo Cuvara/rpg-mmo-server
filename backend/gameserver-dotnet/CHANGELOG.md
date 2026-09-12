@@ -66,6 +66,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   window). Evaluated after a hold expires and after a duplicate-login kick, which removes
   an entity outright and schedules no hold of its own.
 
+  **The map-id fallback is the hazard, and it is closed by the mode.** A dungeon fleet
+  pins no `GAMESERVER_MAP_ID` on purpose, and `Program.cs` resolves
+  `--map-id ?? GAMESERVER_MAP_ID ?? "map_01"` -- so a dungeon pod still *carries* the map
+  fleet's own id. Nothing about the registration scope reads the map id: it comes from
+  the mode, so a pod carrying `map_01` still registers no map, and two dungeon replicas
+  beside the map pod are one live server for that map rather than three. The server now
+  also logs that fallback at **Warning** on boot, naming where the value does and does not
+  go, because a dungeon pod whose registry hash reads `map_01` is otherwise an alarming
+  thing to find. This is what makes a non-zero replica count on the dungeon fleet correct
+  again -- the manifest itself goes back to `replicas: 2` in #337.
+
   Depends on ADR-26, which is still in review (#331).
 
 - **Roadmap A4: the accepted-attack rate is audited per account** --
