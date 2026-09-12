@@ -5,6 +5,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **The join deadline and the dungeon autoscaler are now MEASURED on dev, not only
+  unit-tested.** Both shipped with an explicit "never run on a cluster" caveat. The two
+  `dungeonprobe` runs that leaked a two-replica fleet permanently on 2026-09-12 were repeated
+  against the fix and the fleet watched every 20s: both leaked instances released themselves
+  between **t+80s and t+100s** -- the 90s deadline -- and the fleet returned to its buffer.
+
+  The same observation is the first live evidence for the autoscaler: **four** GameServers at
+  t+20s is two allocated plus the two Ready spares the buffer maintains, converging back to
+  two. Recorded in ADR-26's consequence, which now says measured rather than closed.
+
 ### Added
 - **A buffer `FleetAutoscaler` on the dungeon fleet -- the first one in this project**
   (`k8s/app/70-fleetautoscaler-dungeon.yaml`, ADR-14 stage 7). Buffer policy, `bufferSize: 2`,

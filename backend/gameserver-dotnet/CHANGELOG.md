@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **ADR-26's status line said "NOT implemented" for a day after it stopped being true.**
+  Decisions 1, 2, 3, 5, 6, 7 and 8 all shipped on 2026-09-12/13 and were proven on dev; the
+  header still described the ADR as a target model. That is the exact staleness this document
+  warns about in three other places, and it was flagged by the agent that implemented the join
+  deadline rather than found by anyone reading the header. It now states what shipped, what was
+  measured, and that **decision 4 is the one exception** -- encounter checkpointing is deferred
+  by choice, not pending. "Implemented" over an ADR with a deliberately-unbuilt decision would
+  be its own kind of wrong.
+
 ### Added
 - **ADR-26 allocation leak closed: a dungeon instance whose party never arrives releases
   itself.** Measured on dev, not predicted: decision 6's shutdown rule requires
