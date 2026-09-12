@@ -5,6 +5,24 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **`docs/CORE-COMPLETION.md`: the checklist that says when the gameplay-content gate
+  opens.** "Is the core done?" was being answered from memory, and both places that record
+  state have been caught describing a state that had changed under them. Its rule is ADR-14's
+  own: a row is ✅ only when it has been *demonstrated*, not when the code exists. The audit
+  finds **two** items standing between here and gameplay content -- dungeon instancing
+  (ADR-14 stage 6; `--mode=dungeon` changes exactly one thing today, the hold TTL, and the
+  word "checkpoint" appears in no `.cs` or `.go` file in the repo) and party/social in Nakama
+  (`backend/nakama/` has `auth/` and `economy/` only), the second being a precondition of the
+  first because dungeons allocate *per party*. Android proof and ADR-14 stages 7-8 are listed
+  as real but non-gating: they do not change the shape of any flow content sits on. Five more
+  items are listed as blocked on something that is not code, so nobody plans work against them.
+- **ADR-14's status line said stages 5-8 remain open; stage 5 has shipped.** Dev and staging
+  gateways run `ALLOCATOR=agones`, a pod reaches `Allocated`, and `flow.smoke` joins a real
+  client to it -- stage 5's own definition. Same staleness the ADR itself warns about two
+  sentences earlier.
+
+
 ### Added
 - **`dev-up.sh` now gates on the leaderboard the Nakama plugin refuses to boot against,
   and says why the rollout failed when it fails anyway.** `kills_alltime` must be

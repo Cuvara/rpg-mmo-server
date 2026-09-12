@@ -1855,7 +1855,7 @@ it benefits, and it quadruples snapshot bandwidth, which the measured 45.9 KB/s 
 
 ## ADR-14 — Agones owns the pod, Redis owns the lookup; the C# server's SDK is a stub and must be written over the HTTP sidecar
 
-**Status:** accepted 2026-08-17. **Superseded in part — stages 1-4 have since shipped and are proven; see ADR-16.** The line below said "not yet implemented, nothing in this ADR has shipped"; that was true when written and stopped being true the same day, which is exactly the staleness this document keeps warning about. `HttpAgonesSdk` exists and reports Ready/Health/Allocate/Shutdown, the address is read from the sidecar, and a real client has joined an Agones-managed server. Stages 5-8 remain open.
+**Status:** accepted 2026-08-17. **Superseded in part — stages 1-4 have since shipped and are proven; see ADR-16.** The line below said "not yet implemented, nothing in this ADR has shipped"; that was true when written and stopped being true the same day, which is exactly the staleness this document keeps warning about. `HttpAgonesSdk` exists and reports Ready/Health/Allocate/Shutdown, the address is read from the sidecar, and a real client has joined an Agones-managed server. **Stage 5 has since shipped too** (2026-09-12 audit): dev and staging gateways run `ALLOCATOR=agones`, a pod reaches `Allocated`, and `flow.smoke` joins a real client to it end to end -- which is this stage's own definition. **Stages 6-8 remain open**, and stage 6 (dungeon instancing) is one of the two items `CORE-COMPLETION.md` names as the gate before gameplay content.
 Extends ADR-2 (whose allocation branch this is the missing half of) and is constrained by
 ADR-1 (one writer per datum) and ADR-7 (the unknown player ceiling).
 
