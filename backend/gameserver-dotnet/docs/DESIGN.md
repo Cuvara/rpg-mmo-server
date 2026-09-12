@@ -574,6 +574,68 @@ It is evaluated after a hold expires and after a duplicate-login kick (which rem
 entity outright and schedules no hold of its own, so nothing else would notice that the
 last member had gone).
 
+### It releases itself if its party never arrives (the join deadline)
+
+The `has ever had a player` term above has a cost, and it was **measured, not predicted**:
+a pod that is allocated and then **never joined** satisfies the rule forever. It sits
+`Allocated`, Agones does not reclaim an Allocated pod (ADR-16), and the replica is gone
+until an operator releases it by hand. Two runs of `backend/smoketest/cmd/dungeonprobe` on
+dev — which asks the gateway for an address and never dials the game server — consumed both
+replicas of a two-replica fleet permanently, after which every further party got
+`all servers busy, retry shortly`. In production the same shape is any client that receives
+`{ServerAddr, JoinToken}` and then crashes, is killed, or loses connectivity before dialling.
+
+The fix is **not** another term in decision 6's rule: the pod cannot tell "my party has not
+arrived yet" from "my party is never arriving" without a clock. So it gets one.
+
+`GameServerHost.ShouldShutdownUnjoinedInstance` is a second, separate rule:
+
+| Term | Without it |
+|------|-----------|
+| dungeon mode | a quiet map server would end itself; a map server is allocated for nobody in particular, so "nobody joined" is not a fault there |
+| has **never** had a player | it would kill a live party mid-run, and a pod that emptied after a real run, both of which are decision 6's business |
+| no handshake in flight | the party's join is already on the wire; an accepted socket still inside the handshake has not set `everHadPlayer` yet |
+| a positive deadline | there would be no way to opt out, and the mechanism could not be disabled without a second flag |
+
+**The two rules cannot both fire.** Decision 6 requires `everHadPlayer`; the deadline
+requires its negation. They partition the space on that one term, so the deadline cannot
+weaken decision 6 by construction rather than by care — `TheTwoShutdownRules_AreMutuallyExclusive`
+pins it over the cross product of their shared inputs.
+
+**Where the clock starts: `Allocated`, and the pod really can know.** Not boot. A dungeon
+fleet pins no `GAMESERVER_MAP_ID`, so it is the one fleet shape ADR-18 says *should* carry
+spare `Ready` replicas, and a pod parked in that buffer for an hour is not leaking — Agones
+can still scale it away. The sidecar's `GET /gameserver` carries `status.state`, surfaced as
+`IAgonesSdk.GetStateAsync()` and already polled by `AgonesAllocationGate` for the
+register-on-allocated gate; the deadline reuses that gate verbatim rather than
+re-implementing it. With Agones **disabled** — compose, a local run, every test — there is no
+allocation to observe and no allocator to leak a replica to, so the clock starts at start-up:
+a dungeon process started by hand was started for a party that is about to arrive.
+
+**Why 90s and not the 30s join-token TTL.** ADR-26 named `constants.JoinTokenTTL` as the
+natural candidate, reasoning that the allocation is unusable once the token expires. That is
+true of the token and false of the deadline, because **the two clocks do not start
+together**. This one starts at `Allocated`; the gateway mints the token *after* that — it
+allocates, waits up to `registry.DefaultAllocationWaitTimeout` (15s) for the pod to publish
+its registry entry, and only then signs a token that lives a further `constants.JoinTokenTTL`
+(30s). The last legitimate arrival is therefore **~45s after Allocated**, and a 30s deadline
+would kill pods out from under parties still holding a valid token. `GAMESERVER_JOIN_DEADLINE_SECONDS`
+/ `--join-deadline-seconds` defaults to **90s**, twice that worst case: long enough that no
+honest join loses its instance, short enough that a leaked pod is reclaimed within a fleet's
+scale-up latency rather than never. `0` disables it, and the start-up banner says so out loud.
+
+**`Stopwatch`, never `DateTime.UtcNow`.** This host's `CLOCK_REALTIME` runs 10-17% fast and
+has been observed stepping backwards (#153), so a wall-clock budget silently shrinks under
+exactly the load the deadline exists to tolerate.
+
+**A live party is protected twice, deliberately.** The watch loop consults the rule *first*
+and treats it as the sole authority on whether the pod dies; only once the rule has declined
+does it notice `EverHadPlayer` and stop polling. Mutation-testing the two separately shows
+each absorbs a single-point break in the other — the live mid-run and emptied-instance tests
+fail only when both the rule's `!everHadPlayer` term and the loop's exit leg are removed
+together. That is the intended shape for the one failure mode here that destroys a live
+party's dungeon; the pure rule tests still catch either break on its own.
+
 ### Measured constants (2026-08-12)
 
 Two constants below are quoted as specifications throughout these docs. They
