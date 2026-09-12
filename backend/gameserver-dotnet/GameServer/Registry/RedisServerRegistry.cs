@@ -106,14 +106,21 @@ return 1
     private IDatabase Db => _mux.GetDatabase();
 
     /// <inheritdoc />
-    public async Task RegisterAsync(ServerInfo info, CancellationToken ct)
+    public async Task RegisterAsync(ServerInfo info, RegistrationScope scope, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         var key = (RedisKey)ServerKey(info.ServerId);
         var db = Db;
 
-        // Same three operations, same order, as the Go TxPipeline: HSET, EXPIRE,
-        // SADD. Batched so they travel as one round trip.
+        // Same operations, same order, as the Go TxPipeline: HSET, EXPIRE, SADD.
+        // Batched so they travel as one round trip.
+        //
+        // The SADD — and ONLY the SADD — is conditional. Under
+        // RegistrationScope.HashOnly the hash and its TTL are written exactly as
+        // before, so the gateway still reads this pod's dialable address and the
+        // entry still expires on its own when the pod dies; what is skipped is the
+        // map index, which would otherwise advertise a dungeon instance to
+        // FindServer (ADR-26 decision 8).
         var batch = db.CreateBatch();
         var hset = batch.HashSetAsync(key,
         [
@@ -125,14 +132,18 @@ return 1
             new HashEntry(FieldPlayerCount, info.PlayerCount),
         ]);
         var expire = batch.KeyExpireAsync(key, _ttl);
-        var sadd = batch.SetAddAsync(MapKey(info.MapId), info.ServerId);
+        Task<bool>? sadd = scope == RegistrationScope.MapIndexed
+            ? batch.SetAddAsync(MapKey(info.MapId), info.ServerId)
+            : null;
         batch.Execute();
 
-        await Task.WhenAll(hset, expire, sadd);
+        await hset;
+        await expire;
+        if (sadd != null) await sadd;
 
         _logger.LogInformation(
-            "Registered {ServerId} in Redis: map={MapId} addr={Addr} transport={Transport} capacity={Capacity} ttl={Ttl}s",
-            info.ServerId, info.MapId, info.Addr, info.Transport, info.Capacity, (int)_ttl.TotalSeconds);
+            "Registered {ServerId} in Redis: map={MapId} addr={Addr} transport={Transport} capacity={Capacity} ttl={Ttl}s scope={Scope}",
+            info.ServerId, info.MapId, info.Addr, info.Transport, info.Capacity, (int)_ttl.TotalSeconds, scope);
     }
 
     /// <inheritdoc />

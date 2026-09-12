@@ -24,6 +24,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `dungeon_checkpoints` table named in `shared/CLAUDE.md` stays deferred.
 
 ### Added
+- **ADR-26 decisions 5, 6 and 8: `--mode=dungeon` is now an instanced server, not a map
+  server with a longer hold.** Until this change the mode reached exactly one line -- the
+  reconnect hold TTL. Three behaviours now hang off it, each gated in one place.
+
+  **It does not appear in the map index.** `IServerRegistry.RegisterAsync` takes a
+  `RegistrationScope` (`MapIndexed` / `HashOnly`). A dungeon pod still writes
+  `servers:id:{server_id}` in full, with its heartbeat TTL untouched -- the gateway
+  allocates the pod, learns its name and then waits for exactly that hash to read the
+  dialable address out of, so skipping it would make a dungeon **unallocatable** rather
+  than merely unindexed -- and it no longer joins `servers:map:{map_id}`, the set
+  `FindServer` searches. An indexed instance would be handed to an unrelated player as if
+  it were a map, and a dungeon fleet pins no `GAMESERVER_MAP_ID`, so the key it wrote
+  would be the empty one. `GameServerHost` narrows the scope **from the mode**, not from
+  the composition root, so a caller that builds `RegistrationOptions` without thinking
+  about dungeons cannot get it wrong.
+
+  **It does not persist `map_id` or position.** `player_states` holds one row per player
+  with a single `map_id` (`Persistence/AsyncSaver.cs`), and `PlayerSpawn.Resolve` discards
+  coordinates belonging to another map -- so a dungeon server saving normally would stamp
+  the dungeon's id over the player's origin map and return them to that map's **spawn
+  point** instead of where they left, a silent permanent teleport as the price of entering
+  a dungeon. `AsyncSaver` now takes a `PlayerSaveScope`; in dungeon mode it is
+  `StatsOnly` and routes through the new `IPlayerStore.SavePlayerStatsAsync`, which writes
+  HP and max HP and leaves `map_id`/`x`/`y` exactly as the origin wrote them.
+  `PostgresPlayerStore` overrides it with a single upsert whose `DO UPDATE` names only
+  `hp` and `max_hp`, so the merge is atomic rather than a read-modify-write; the interface
+  default (load, merge, save) covers any other store. A player with no row yet gets one
+  with an **empty** map id, which `PlayerSpawn.SameMap` reads as unattributable -- the
+  same spawn-point outcome as no row, with the HP kept. **No second row per player.**
+  The stated cost, from the ADR: position inside a dungeon is not durable.
+
+  **It shuts itself down when it empties.** After the last member leaves and their hold
+  expires with no reconnect, the pod reports `Shutdown` to the Agones sidecar and ends its
+  own run -- the pod is the only party that knows both facts, and one that outlives its
+  party can never be allocated again. The rule is the pure
+  `GameServerHost.ShouldShutdownEmptyInstance(isDungeon, everHadPlayer, connections,
+  pendingHolds)`; each term stops a specific wrong shutdown (a map server ending when
+  empty, a fresh pod ending at boot before its party dials in, an ending while somebody is
+  still connected, and an ending while a second member is still inside their own hold
+  window). Evaluated after a hold expires and after a duplicate-login kick, which removes
+  an entity outright and schedules no hold of its own.
+
+  Depends on ADR-26, which is still in review (#331).
+
 - **Roadmap A4: the accepted-attack rate is audited per account** --
   `GameServer/Input/AttackRateAudit.cs`, wired at the one site in `InputHandler` where an
   attack passes validation, surfaced as `gameserver.combat.attack_rate.violations` and
@@ -56,6 +100,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and only the audit flags it. Its negative control -- identical input, one entity -- is
   refused by the cooldown and flags nothing. Both the "never flags" and "wrong window"
   mutations of the audit fail the unit tests, with different failure counts.
+
+### Changed
+- **The dungeon reconnect hold window comes from `ServerOptions.HoldTtl` alone.** It was
+  computed in two places: `Program.cs` set 60s for `--mode=dungeon`, and
+  `Server/GameServer.cs` then hardcoded 60s again, ignoring whatever it had been given.
+  Behaviour for the shipped composition root is unchanged (it still sets 60s), but a host
+  constructed directly with a dungeon mode and a short TTL now gets the short TTL -- which
+  is what makes the empty-instance shutdown testable without a real 60s wait.
+- `GameServerHost.ShutdownStarted` and `GameServerHost.EverHadPlayer` are published for
+  diagnostics and tests. `ShutdownStarted` flips when a teardown is *decided*, not when it
+  finishes, so an observer asserting that a server has not decided to stop does not have to
+  outwait the 2s client drain.
 
 ### Documentation
 - **`ROADMAP-SECURITY.md` §1.2 said A1, A2 and A3 were missing; all three had shipped.**

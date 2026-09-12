@@ -73,7 +73,7 @@ set. Flags are **space-separated** (`--addr :9000`).
 
 | Flag | Environment variable | Default | Description |
 |------|----------------------|---------|-------------|
-| `--mode` | `GAMESERVER_MODE` | `map` | `map` or `dungeon` (dungeon uses a 60s reconnect hold) |
+| `--mode` | `GAMESERVER_MODE` | `map` | `map` or `dungeon`. Dungeon mode changes **three** things, all from ADR-26: a **60s** reconnect hold instead of 30s; the pod writes its `servers:id:` registry hash but **never joins the `servers:map:` index**, so `FindServer` cannot hand one party's instance to an unrelated player (decision 8); and the pod **persists only the map-independent player fields** — HP and max HP — leaving `map_id`, `x` and `y` as the origin map wrote them (decision 5). A dungeon instance also **ends its own process** once the last member has left and their hold has expired with no reconnect (decision 6). See `docs/DESIGN.md`, "Dungeon mode" |
 | `--addr` | `GAMESERVER_ADDR` | `:9000` | Game traffic listen address |
 | `--map-id` | `GAMESERVER_MAP_ID` | `map_01` | Map identifier, also the `map_id` metric label |
 | `--server-id` | `GAMESERVER_ID` / `POD_NAME` | random | Server identity checked against the join token |
