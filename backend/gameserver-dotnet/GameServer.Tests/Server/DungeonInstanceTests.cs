@@ -27,6 +27,13 @@ public class DungeonInstanceTests
     private const string ServerId = "gs-dungeon";
     private static readonly TimeSpan ShortHold = TimeSpan.FromMilliseconds(400);
 
+    /// <summary>
+    /// What <c>Program.cs</c> falls back to when no map id is configured —
+    /// <c>--map-id ?? GAMESERVER_MAP_ID ?? "map_01"</c> — which is exactly what a dungeon
+    /// fleet pod gets, because that fleet pins no map id on purpose.
+    /// </summary>
+    private const string FallbackMapId = "map_01";
+
     // ── Decision 8: registration scope ──────────────────────────────────────
 
     /// <summary>
@@ -42,6 +49,28 @@ public class DungeonInstanceTests
 
         await h.WaitForAsync(() => registry.LastScope != null);
         Assert.Equal(RegistrationScope.HashOnly, registry.LastScope);
+    }
+
+    /// <summary>
+    /// The fleet case (#334). A dungeon fleet pins no <c>GAMESERVER_MAP_ID</c>, so
+    /// <c>Program.cs</c>'s fallback hands the pod <c>map_01</c> — the map fleet's own id.
+    /// The scope must still be <c>HashOnly</c>: what keeps a dungeon out of the map index
+    /// is the MODE, never the map id it happens to be carrying.
+    /// </summary>
+    [Fact]
+    public async Task DungeonHost_CarryingTheFallbackMapId_StillRegistersTheHashOnly()
+    {
+        var registry = new RecordingRegistry();
+        await using var h = await Harness.StartAsync(
+            mode: "dungeon", registry: registry, mapId: FallbackMapId);
+
+        await h.WaitForAsync(() => registry.LastScope != null);
+        Assert.Equal(RegistrationScope.HashOnly, registry.LastScope);
+
+        // And it really did carry that map id — otherwise this would pass against a host
+        // that had simply been given a different one.
+        Assert.True(registry.Registered.TryPeek(out var info));
+        Assert.Equal(FallbackMapId, info!.MapId);
     }
 
     /// <summary>The control: a map server still indexes itself, the same as ever.</summary>
@@ -247,13 +276,15 @@ public class DungeonInstanceTests
             string mode,
             RecordingAgonesSdk? agones = null,
             RecordingRegistry? registry = null,
-            TimeSpan? hold = null)
+            TimeSpan? hold = null,
+            string? mapId = null)
         {
+            string effectiveMapId = mapId ?? (mode == "dungeon" ? "dungeon_test" : "map_test");
             var options = new ServerOptions
             {
                 ServerAddr = ":0",
                 ServerId = ServerId,
-                MapId = mode == "dungeon" ? "dungeon_test" : "map_test",
+                MapId = effectiveMapId,
                 Mode = mode,
                 Transport = TransportKind.Tcp,
                 TickRate = 20,
@@ -267,7 +298,7 @@ public class DungeonInstanceTests
                 Registration = registry == null ? null : new RegistrationOptions
                 {
                     ServerId = ServerId,
-                    MapId = mode == "dungeon" ? "dungeon_test" : "map_test",
+                    MapId = effectiveMapId,
                     PublicAddr = "127.0.0.1:9999",
                 },
                 LoggerFactory = NullLoggerFactory.Instance,

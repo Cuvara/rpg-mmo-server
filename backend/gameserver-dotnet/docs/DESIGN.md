@@ -521,6 +521,17 @@ Expressed as `RegistrationScope` (`MapIndexed` / `HashOnly`), passed to
 so a caller that builds `RegistrationOptions` without thinking about dungeons cannot get
 this wrong.
 
+**The map-id fallback is the hazard, not a missing map id.** A dungeon fleet pins no
+`GAMESERVER_MAP_ID`, and `Program.cs` resolves `--map-id ?? GAMESERVER_MAP_ID ?? "map_01"`
+— so a dungeon pod *carries* the map fleet's own id. Nothing in the registration scope
+reads the map id; it comes from the mode alone, so such a pod still registers no map and
+two dungeon replicas beside the map pod are **one** live server for `map_01`, not three.
+The server logs that fallback at Warning on boot, naming where the value goes (this pod's
+`servers:id:` hash) and where it does not (the map index), because a dungeon hash reading
+`map_01` is otherwise an alarming thing to find. Deregistration is safe for the same
+reason the index is: the registry removes only its own server id from the set, so a
+dungeon pod leaving cannot evict the real map server.
+
 ### It does not persist `map_id` or position (decision 5)
 
 `player_states` holds **one row per player** with a single `map_id`, and

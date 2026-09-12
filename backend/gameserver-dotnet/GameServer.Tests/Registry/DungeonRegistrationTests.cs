@@ -90,6 +90,77 @@ public class DungeonRegistrationTests
     }
 
     /// <summary>
+    /// The live break this exists to close (#334). A dungeon fleet pins no
+    /// <c>GAMESERVER_MAP_ID</c> on purpose, and <c>Program.cs</c> resolves
+    /// <c>--map-id ?? GAMESERVER_MAP_ID ?? "map_01"</c> — so every pod of that fleet
+    /// carries the DEFAULT map id, the same one the map fleet's pod is registered under.
+    ///
+    /// <para>The fallback is the hazard, not a missing value: with the index written, two
+    /// dungeon replicas plus the map pod would be three live servers for <c>map_01</c>,
+    /// which is the ADR-2 invariant ADR-26 exists to protect. The map server already in
+    /// that index must be the ONLY member afterwards.</para>
+    /// </summary>
+    [SkippableFact]
+    public async Task DungeonPodUnderTheMapIdFallback_LeavesTheRealMapServerAloneInTheIndex()
+    {
+        _redis.SkipUnlessAvailable(nameof(DungeonPodUnderTheMapIdFallback_LeavesTheRealMapServerAloneInTheIndex));
+        var (reg, mux) = await ConnectAsync();
+        await using var _ = reg;
+
+        // A unique stand-in for "map_01": the default a dungeon pod falls back to, and a
+        // map id a real map server is already registered under.
+        string fallbackMapId = $"map_01_{Guid.NewGuid():N}"[..20];
+        string mapServerId = $"gs-real-{Guid.NewGuid():N}"[..16];
+        string dungeonA = $"gs-dunA-{Guid.NewGuid():N}"[..16];
+        string dungeonB = $"gs-dunB-{Guid.NewGuid():N}"[..16];
+
+        await reg.RegisterAsync(Info(mapServerId, fallbackMapId), RegistrationScope.MapIndexed, default);
+
+        // Two replicas, exactly as `replicas: 2` on the dungeon fleet produces.
+        await reg.RegisterAsync(Info(dungeonA, fallbackMapId), RegistrationScope.HashOnly, default);
+        await reg.RegisterAsync(Info(dungeonB, fallbackMapId), RegistrationScope.HashOnly, default);
+
+        var db = mux.GetDatabase();
+
+        // One server for that map, and it is the map server.
+        var members = (await db.SetMembersAsync($"servers:map:{fallbackMapId}"))
+            .Select(v => v.ToString()).ToArray();
+        Assert.Equal([mapServerId], members);
+
+        // Both dungeon pods are still individually addressable, which is what the gateway
+        // allocates against.
+        Assert.True(await db.KeyExistsAsync($"servers:id:{dungeonA}"));
+        Assert.True(await db.KeyExistsAsync($"servers:id:{dungeonB}"));
+    }
+
+    /// <summary>
+    /// Deregistering a dungeon pod that carried the fallback map id must not evict the
+    /// real map server from the index. The registry prunes by member, so it only ever
+    /// removes its own id — pinned here because the deregister path passes a map id it
+    /// was never indexed under.
+    /// </summary>
+    [SkippableFact]
+    public async Task DeregisteringADungeonPod_DoesNotEvictTheMapServerFromTheIndex()
+    {
+        _redis.SkipUnlessAvailable(nameof(DeregisteringADungeonPod_DoesNotEvictTheMapServerFromTheIndex));
+        var (reg, mux) = await ConnectAsync();
+        await using var _ = reg;
+
+        string fallbackMapId = $"map_01_{Guid.NewGuid():N}"[..20];
+        string mapServerId = $"gs-real-{Guid.NewGuid():N}"[..16];
+        string dungeonId = $"gs-dun-{Guid.NewGuid():N}"[..16];
+
+        await reg.RegisterAsync(Info(mapServerId, fallbackMapId), RegistrationScope.MapIndexed, default);
+        await reg.RegisterAsync(Info(dungeonId, fallbackMapId), RegistrationScope.HashOnly, default);
+
+        await reg.DeregisterAsync(dungeonId, fallbackMapId, default);
+
+        var db = mux.GetDatabase();
+        Assert.False(await db.KeyExistsAsync($"servers:id:{dungeonId}"));
+        Assert.True(await db.SetContainsAsync($"servers:map:{fallbackMapId}", mapServerId));
+    }
+
+    /// <summary>
     /// Heartbeat behaviour is scope-independent: the TTL lives on the hash, which both
     /// scopes write, so a dungeon pod self-heals after a Redis wipe exactly like a map.
     /// </summary>
