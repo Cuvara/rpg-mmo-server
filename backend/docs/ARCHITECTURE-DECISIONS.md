@@ -3378,7 +3378,18 @@ One keypair per fleet or per environment, the public half shipped inside the pla
 
 ## ADR-26 — A dungeon instance is keyed by the party, and a "checkpoint" is the player at the boundary, not the encounter
 
-**Status:** accepted 2026-09-12 as the target model; **NOT implemented**. Implements ADR-14
+**Status:** accepted 2026-09-12 and **IMPLEMENTED 2026-09-12/13** -- the line below read "NOT
+implemented" for a day after it stopped being true, which is the staleness this document warns
+about in three other places. Shipped: decision 1 (`party_id` on `EnterWorld`), 2 (the
+party-keyed index), 3 (membership verified against Nakama), 5 (a dungeon server persists no
+`map_id` or position), 6 (self-shutdown when empty), 7 (return by map transfer) and 8 (a
+dungeon pod registers no map), on the backend and, from 2026-09-13, on the Unity client.
+**Proven on dev**: two members of one party handed the same instance address, an outsider
+refused by name, map entry unaffected (`smoketest/cmd/dungeonprobe`). **Decision 4 is the
+exception and is design-only by choice** -- a "checkpoint" here is the player at the boundary,
+and encounter checkpointing stays deferred until there is an encounter worth losing. The
+allocation leak this ADR recorded as an open consequence was closed on 2026-09-13 by a bounded
+join deadline. Implements ADR-14
 stage 6, the first of the two items `CORE-COMPLETION.md` names as the gate before gameplay
 content. Constrained by ADR-2 (one live server per `map_id`), ADR-3 (the gateway is a
 redirector), ADR-6 (the ≤30s crash-loss window) and ADR-16 (the advertised address is
