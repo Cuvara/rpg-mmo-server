@@ -52,7 +52,24 @@ spec:
   # check currently FAILS on any autoscaler it finds and stands down only for a
   # fleet with a per-pod map id. Adding one before that check knows about this
   # fleet turns every deploy red on a healthy stack. The check moves first.
-  replicas: 2
+  # ZERO UNTIL THE GAME-SERVER HALF LANDS, and this is not caution -- it is a
+  # live break that was one deploy away.
+  #
+  # Program.cs resolves `--map-id ?? GAMESERVER_MAP_ID ?? "map_01"`. This fleet
+  # deliberately sets no map id (see the header), so TODAY every pod from it
+  # falls back to **map_01** and self-registers under it -- three live servers
+  # for one map, which is exactly the ADR-2 invariant ADR-26 was written to
+  # protect. `verify.sh`'s registry.one_server would catch it and turn the
+  # deploy red, so it fails loudly rather than silently; it would still split
+  # dev's world in the meantime.
+  #
+  # ADR-26 decision 8 is what fixes it: in dungeon mode the server publishes its
+  # own servers:id: entry and registers no map at all. Until that ships, the
+  # correct replica count for this fleet is none.
+  #
+  # RAISE THIS TO 2 IN THE SAME CHANGE that lands dungeon-mode registration --
+  # not before, and not in a separate follow-up nobody schedules.
+  replicas: 0
   scheduling: Packed
   template:
     metadata:

@@ -5,6 +5,18 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **The dungeon fleet ships at `replicas: 0` until the game-server half lands.** As merged it
+  was `replicas: 2`, and that was one deploy away from splitting dev's world. The fleet
+  deliberately pins no `GAMESERVER_MAP_ID` -- but `Program.cs` resolves
+  `--map-id ?? GAMESERVER_MAP_ID ?? "map_01"`, so **today** every pod from it falls back to
+  `map_01` and self-registers under it. Three live servers for one map: the exact ADR-2
+  invariant ADR-26 was written to protect. `verify.sh`'s `registry.one_server` would have
+  caught it and turned the deploy red, so it would have failed loudly rather than silently --
+  it would still have split the world first. ADR-26 decision 8 (in dungeon mode the server
+  publishes its own `servers:id:` entry and registers no map) is what makes a non-zero replica
+  count correct, and the count moves back to 2 in the same change that lands it.
+
 ### Added
 - **`app/60-fleet-dungeon.yaml`: the dungeon fleet (ADR-26 / ADR-14 stage 6).** Two things
   make it not-a-second-map-fleet, and both are ADR-26 on the deployment side.
