@@ -5,6 +5,29 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **The dungeon fleet ran an unpinned image and put three live servers on `map_01`.** Caught
+  by `verify.sh` on the dev deploy (`registry.one_server` FAILED) -- after the pods were live.
+
+  `dev-up.sh` pins the resolved commit over the manifests' moving `:develop` tag, but it only
+  did so for the **map** fleet; adding the dungeon fleet to the `apply` line without adding it
+  to the pin left its pods on whatever `:develop` happened to be. That image predated
+  dungeon-mode registration, so the pods self-registered into `servers:map:map_01` exactly
+  like map servers. Measured in Redis: `SMEMBERS servers:map:map_01` held both dungeon pods
+  alongside the map pod, and the dungeon pods carried `rpg-mmo/gameserver-dotnet:develop`
+  while the map pod carried the pinned commit.
+
+  Two changes, because pinning alone is not enough: `apply` creates pods the instant it runs,
+  **before** the pin. So the manifest now ships **`replicas: 0`** and `dev-up.sh` scales it to
+  `K8S_DUNGEON_REPLICAS` (default 2) only after pinning. A fleet that cannot run the wrong
+  build beats a fleet that runs it briefly, and "briefly" here means long enough to break
+  ADR-2 and fail a deploy. Applying the file by hand now yields zero pods, for the same reason
+  a hand-apply would get the unpinned image.
+
+  No drain-on-image-change for this fleet, unlike the map fleet, and that is deliberate: its
+  pods claim no map, so old and new replicas running together is not a split world -- they are
+  interchangeable instances, and a party allocated to an old one keeps it until the run ends.
+
 ### Changed
 - **The dungeon fleet runs `replicas: 2` now that dungeon-mode registration has landed.** It
   shipped at 0 for one reason, recorded here because the reason is the interesting part:

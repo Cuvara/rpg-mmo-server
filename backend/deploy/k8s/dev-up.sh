@@ -53,6 +53,16 @@ COMPOSE_REDIS_CONTAINER="${COMPOSE_REDIS_CONTAINER:-rpg-redis}"
 LEGACY_FLEET_NS="${LEGACY_FLEET_NS:-rpg-realtime}"
 LEGACY_FLEET="${LEGACY_FLEET:-map-servers-dotnet-dev}"
 K8S_FLEET="${K8S_FLEET:-map-servers-dotnet-k8s}"
+# The dungeon fleet is pinned by the SAME resolved image as the map fleet --
+# one binary, two modes. It is a separate variable only so the pin below can
+# name it; there is no scenario where the two fleets should run different
+# builds.
+K8S_FLEET_DUNGEON="${K8S_FLEET_DUNGEON:-dungeon-servers-dotnet-k8s}"
+# Spare instances so dungeon entry does not pay a cold pod start inside the
+# client's EnterWorld budget. Safe above 1 only because these pods claim no map
+# (ADR-26 decision 8); set to 0 to take dungeons out of service without
+# touching the manifest.
+K8S_DUNGEON_REPLICAS="${K8S_DUNGEON_REPLICAS:-2}"
 # Floor of the Agones dynamic port range. Everything BELOW it in k3d's
 # published 7000-7100 is reserved for infrastructure (gateway 7000, nakama
 # 7001). See app/40-gateway.yaml.
@@ -493,6 +503,33 @@ else
   $K patch fleet "$K8S_FLEET" -n rpg-k8s-realtime --type=json \
     -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/template/spec/containers/0/image\",\"value\":\"$GAMESERVER_IMAGE\"}]" >/dev/null
   echo "game server image unchanged ($GAMESERVER_IMAGE); fleet left running"
+fi
+
+# PIN THE DUNGEON FLEET TOO.
+#
+# It was missed when the fleet was added, and the failure was not subtle: the
+# manifest carries the moving `:develop` tag, so the pods ran an image that
+# predated dungeon-mode registration, self-registered into servers:map:map_01
+# like a map server, and put THREE live servers on map_01. verify.sh caught it
+# (registry.one_server FAILED) -- after the pods were already live.
+#
+# Unlike the map fleet there is no drain-on-change dance here, and the reason is
+# the same property that makes this fleet able to carry spares: its pods claim
+# no map, so old and new replicas running together is not a split world. They
+# are interchangeable instances, and a party allocated to an old one keeps it
+# until the run ends.
+dungeon_pre=$($K get fleet "$K8S_FLEET_DUNGEON" -n rpg-k8s-realtime \
+  -o jsonpath='{.spec.template.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+if [ -n "$dungeon_pre" ]; then
+  $K patch fleet "$K8S_FLEET_DUNGEON" -n rpg-k8s-realtime --type=json \
+    -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/template/spec/containers/0/image\",\"value\":\"$GAMESERVER_IMAGE\"}]" >/dev/null
+  echo "dungeon fleet image pinned (${dungeon_pre} -> $GAMESERVER_IMAGE)"
+  # Scale up only NOW, after the pin. The manifest ships replicas: 0 precisely
+  # so that `apply` cannot create a pod on the moving tag before this line runs.
+  $K scale fleet "$K8S_FLEET_DUNGEON" -n rpg-k8s-realtime --replicas="$K8S_DUNGEON_REPLICAS" >/dev/null
+  echo "dungeon fleet scaled to $K8S_DUNGEON_REPLICAS"
+else
+  echo "no dungeon fleet present; nothing to pin"
 fi
 
 say "wait for the gateway"
