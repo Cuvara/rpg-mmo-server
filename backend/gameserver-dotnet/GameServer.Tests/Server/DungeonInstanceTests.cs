@@ -260,6 +260,201 @@ public class DungeonInstanceTests
         Assert.Equal(1, agones.ShutdownCalls);
     }
 
+    // ── The join deadline: the allocation leak (ADR-26 consequence) ──────────
+
+    /// <summary>
+    /// The deadline rule as a pure function. It is the exact complement of decision 6 on
+    /// <c>everHadPlayer</c>, plus a handshake guard and an off switch.
+    /// </summary>
+    [Theory]
+    // isDungeon, everHadPlayer, pendingHandshakes, waitedMs, deadlineMs, expected
+    [InlineData(true, false, 0, 1000, 1000, true)]   // the one case that releases the pod
+    [InlineData(true, false, 0, 1001, 1000, true)]   // and every case past it
+    [InlineData(true, false, 0, 999, 1000, false)]   // not one tick early
+    [InlineData(true, false, 0, 0, 1000, false)]     // freshly allocated: wait
+    [InlineData(false, false, 0, 5000, 1000, false)] // a map server is allocated for nobody in particular
+    [InlineData(true, true, 0, 5000, 1000, false)]   // had a player: decision 6's business, never this one
+    [InlineData(true, false, 1, 5000, 1000, false)]  // the party is mid-handshake RIGHT NOW
+    [InlineData(true, false, 3, 5000, 1000, false)]
+    [InlineData(true, false, 0, 5000, 0, false)]     // deadline 0 disables the mechanism
+    [InlineData(true, false, 0, 5000, -1, false)]    // as does a negative one
+    public void ShouldShutdownUnjoinedInstance_IsTrueOnlyForAnExpiredUnjoinedDungeon(
+        bool isDungeon, bool everHadPlayer, int pendingHandshakes,
+        int waitedMs, int deadlineMs, bool expected)
+    {
+        Assert.Equal(
+            expected,
+            GameServerHost.ShouldShutdownUnjoinedInstance(
+                isDungeon, everHadPlayer, pendingHandshakes,
+                TimeSpan.FromMilliseconds(waitedMs), TimeSpan.FromMilliseconds(deadlineMs)));
+    }
+
+    /// <summary>
+    /// The proof that the new path cannot weaken decision 6: over the whole cross product of
+    /// their shared inputs, the two rules are never both true. Decision 6 requires
+    /// <c>everHadPlayer</c>, the deadline requires its negation, so a pod mid-run and a pod
+    /// that emptied after a real run are decided by decision 6 alone — exactly as before this
+    /// change existed.
+    /// </summary>
+    [Fact]
+    public void TheTwoShutdownRules_AreMutuallyExclusive()
+    {
+        foreach (bool isDungeon in new[] { true, false })
+        foreach (bool everHadPlayer in new[] { true, false })
+        foreach (int connections in new[] { 0, 1, 4 })
+        foreach (int pendingHolds in new[] { 0, 1, 3 })
+        foreach (int pendingHandshakes in new[] { 0, 1 })
+        foreach (int waitedMs in new[] { 0, 500, 5000 })
+        foreach (int deadlineMs in new[] { 0, 1000 })
+        {
+            bool decisionSix = GameServerHost.ShouldShutdownEmptyInstance(
+                isDungeon, everHadPlayer, connections, pendingHolds);
+            bool deadline = GameServerHost.ShouldShutdownUnjoinedInstance(
+                isDungeon, everHadPlayer, pendingHandshakes,
+                TimeSpan.FromMilliseconds(waitedMs), TimeSpan.FromMilliseconds(deadlineMs));
+
+            Assert.False(decisionSix && deadline,
+                $"both rules fired for isDungeon={isDungeon} everHadPlayer={everHadPlayer} " +
+                $"connections={connections} holds={pendingHolds} handshakes={pendingHandshakes} " +
+                $"waited={waitedMs}ms deadline={deadlineMs}ms");
+        }
+    }
+
+    /// <summary>
+    /// The poll interval tracks the deadline so a short one is still observed with
+    /// resolution to spare, is capped at a second so a 90s wait is not a busy loop, and is
+    /// floored so a pathological deadline cannot spin.
+    /// </summary>
+    [Theory]
+    [InlineData(90_000, 1000)]  // capped at 1s
+    [InlineData(4_000, 1000)]   // exactly at the cap
+    [InlineData(2_000, 500)]    // a quarter
+    [InlineData(400, 100)]
+    [InlineData(100, 50)]       // floored
+    [InlineData(4, 50)]         // floored hard
+    public void JoinDeadlinePollInterval_TracksTheDeadlineWithinBounds(int deadlineMs, int expectedMs) =>
+        Assert.Equal(
+            TimeSpan.FromMilliseconds(expectedMs),
+            GameServerHost.JoinDeadlinePollInterval(TimeSpan.FromMilliseconds(deadlineMs)));
+
+    /// <summary>
+    /// <b>The leak, closed.</b> A dungeon pod that is allocated and never joined releases
+    /// itself once the deadline lapses — and, the other half of the assertion, <b>not
+    /// before</b>. Without the "not before" leg this would pass against a pod that shut down
+    /// at boot, which is the exact regression <c>everHadPlayer</c> was added to prevent.
+    /// </summary>
+    [Fact]
+    public async Task InstanceThatIsNeverJoined_ReleasesItselfAfterTheDeadline()
+    {
+        var agones = new RecordingAgonesSdk();
+        var deadline = TimeSpan.FromSeconds(3);
+        await using var h = await Harness.StartAsync(
+            mode: "dungeon", agones: agones, joinDeadline: deadline);
+
+        // Not before. A third of the deadline in, the pod must still be waiting for its
+        // party — this is the boot case the old rule protects.
+        await Task.Delay(deadline / 3);
+        Assert.False(h.Server.EverHadPlayer);
+        Assert.False(h.Server.ShutdownStarted, "the instance gave up before its deadline");
+        Assert.Equal(0, agones.ShutdownCalls);
+
+        // And after: it reports Shutdown to the sidecar and ends its own run, so Agones can
+        // reclaim the replica instead of holding it Allocated forever.
+        await h.WaitForShutdownAsync(TimeSpan.FromSeconds(60));
+        Assert.Equal(1, agones.ShutdownCalls);
+        Assert.False(h.Server.EverHadPlayer);
+    }
+
+    /// <summary>
+    /// <b>A pod mid-run is never killed by the deadline.</b> The player is still connected
+    /// long after a deadline that has lapsed several times over; the instance must not
+    /// notice. This is the failure that would destroy a live party's dungeon.
+    /// </summary>
+    [Fact]
+    public async Task InstanceMidRun_IsNeverKilledByTheDeadline()
+    {
+        var agones = new RecordingAgonesSdk();
+        await using var h = await Harness.StartAsync(
+            mode: "dungeon", agones: agones,
+            hold: TimeSpan.FromSeconds(30),
+            joinDeadline: TimeSpan.FromMilliseconds(200));
+
+        using var delver = await h.JoinAsync("delver-mid-run");
+        Assert.True(h.Server.EverHadPlayer);
+
+        // Comfortably longer than the deadline, which by now has lapsed several times over.
+        await h.AssertStaysUpAsync();
+        Assert.Equal(0, agones.ShutdownCalls);
+        Assert.Equal(1, h.Server.EntityCount);
+    }
+
+    /// <summary>
+    /// <b>A pod that had a player and emptied follows decision 6, not the deadline.</b> The
+    /// deadline here is far shorter than the reconnect hold, so if the two paths were not
+    /// mutually exclusive the pod would die while the member was still inside their window —
+    /// a dropped mobile connection destroying the party's instance.
+    ///
+    /// <para>The shutdown that does eventually happen is decision 6's: it lands when the
+    /// HOLD expires, not when the deadline did.</para>
+    /// </summary>
+    [Fact]
+    public async Task InstanceThatEmptied_FollowsDecisionSixAndNotTheDeadline()
+    {
+        var agones = new RecordingAgonesSdk();
+        var hold = TimeSpan.FromSeconds(5);
+        await using var h = await Harness.StartAsync(
+            mode: "dungeon", agones: agones,
+            hold: hold,
+            joinDeadline: TimeSpan.FromMilliseconds(200));
+
+        (await h.JoinAsync("delver-dropped")).Dispose();
+        await h.WaitForAsync(() => h.Server.PendingHolds == 1);
+
+        // Well past the deadline, well short of the hold: nobody is connected and the
+        // deadline has lapsed, and the pod must still be up because a player DID arrive.
+        await Task.Delay(hold / 2);
+        Assert.True(h.Server.EverHadPlayer);
+        Assert.Equal(1, h.Server.PendingHolds);
+        Assert.Equal(0, agones.ShutdownCalls);
+        Assert.False(h.Server.ShutdownStarted, "the join deadline killed a pod that had a player");
+
+        // Then the hold lapses and decision 6 — not the deadline — ends the instance.
+        await h.WaitForShutdownAsync(TimeSpan.FromSeconds(60));
+        Assert.Equal(1, agones.ShutdownCalls);
+    }
+
+    /// <summary>
+    /// A map server is allocated for nobody in particular, so "nobody joined" is not a fault
+    /// there and the deadline must not be armed at all. Without this, a quiet map server
+    /// would end itself every time the last player logged off for the night.
+    /// </summary>
+    [Fact]
+    public async Task MapServerThatIsNeverJoined_IsNotKilledByTheDeadline()
+    {
+        var agones = new RecordingAgonesSdk();
+        await using var h = await Harness.StartAsync(
+            mode: "map", agones: agones, joinDeadline: TimeSpan.FromMilliseconds(200));
+
+        await h.AssertStaysUpAsync();
+        Assert.Equal(0, agones.ShutdownCalls);
+    }
+
+    /// <summary>
+    /// Zero is the off switch, and it is the whole off switch — no second flag. A deployment
+    /// that sets it accepts the leak knowingly, and the start-up banner says so.
+    /// </summary>
+    [Fact]
+    public async Task ZeroDeadline_DisablesTheMechanismEntirely()
+    {
+        var agones = new RecordingAgonesSdk();
+        await using var h = await Harness.StartAsync(
+            mode: "dungeon", agones: agones, joinDeadline: TimeSpan.Zero);
+
+        await h.AssertStaysUpAsync();
+        Assert.Equal(0, agones.ShutdownCalls);
+        Assert.False(h.Server.EverHadPlayer);
+    }
+
     // ── Harness ─────────────────────────────────────────────────────────────
 
     private sealed class Harness : IAsyncDisposable
@@ -277,7 +472,8 @@ public class DungeonInstanceTests
             RecordingAgonesSdk? agones = null,
             RecordingRegistry? registry = null,
             TimeSpan? hold = null,
-            string? mapId = null)
+            string? mapId = null,
+            TimeSpan? joinDeadline = null)
         {
             string effectiveMapId = mapId ?? (mode == "dungeon" ? "dungeon_test" : "map_test");
             var options = new ServerOptions
@@ -292,6 +488,7 @@ public class DungeonInstanceTests
                 JwtSecret = JwtSecret,
                 JoinTokenSecret = JwtSecret,
                 HoldTtl = hold ?? ShortHold,
+                DungeonJoinDeadline = joinDeadline ?? ServerOptions.DefaultDungeonJoinDeadline,
                 SaveInterval = TimeSpan.FromHours(1),
                 AgonesSdk = agones,
                 ServerRegistry = registry,

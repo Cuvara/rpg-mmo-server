@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Threading.Channels;
 using System.Net;
 using System.Net.Sockets;
@@ -235,6 +236,42 @@ public class ServerOptions
     /// it is simply no longer sufficient.</para>
     /// </summary>
     public bool RegisterOnAllocated { get; set; }
+
+    /// <summary>
+    /// The default join deadline: 90 seconds. See <see cref="DungeonJoinDeadline"/> for
+    /// why it is not <c>constants.JoinTokenTTL</c>.
+    /// </summary>
+    public static readonly TimeSpan DefaultDungeonJoinDeadline = TimeSpan.FromSeconds(90);
+
+    /// <summary>
+    /// How long an instanced dungeon pod waits for its <b>first</b> player before ending its
+    /// own run — <c>GAMESERVER_JOIN_DEADLINE_SECONDS</c> / <c>--join-deadline-seconds</c>.
+    /// Zero or negative disables the deadline. Ignored outside dungeon mode.
+    ///
+    /// <para><b>Why it exists.</b> ADR-26 decision 6 will not shut down a pod that has never
+    /// had a player, because a freshly scheduled pod must not race the party it was
+    /// allocated for. The cost of that term, measured on dev, is that a pod which is
+    /// allocated and then <i>never joined</i> satisfies the rule forever: it sits
+    /// <c>Allocated</c>, Agones does not reclaim an Allocated pod (ADR-16), and the replica
+    /// is gone until an operator releases it by hand. Two <c>cmd/dungeonprobe</c> runs
+    /// consumed a two-replica fleet permanently. In production the same shape is any client
+    /// that receives <c>{ServerAddr, JoinToken}</c> and dies before dialling.</para>
+    ///
+    /// <para><b>Why 90s and not the 30s join-token TTL.</b> ADR-26 named
+    /// <c>constants.JoinTokenTTL</c> as the natural candidate, on the reasoning that the
+    /// allocation is unusable by anyone once the token expires. That is true of the token
+    /// and false of the deadline, because the two clocks do not start together: this one
+    /// starts when the pod observes <c>Allocated</c>, and the gateway mints the token
+    /// <i>after</i> that — it allocates, then waits up to
+    /// <c>registry.DefaultAllocationWaitTimeout</c> (15s) for this pod to publish its
+    /// registry entry, and only then signs a token that lives a further
+    /// <c>constants.JoinTokenTTL</c> (30s). The last legitimate arrival is therefore ~45s
+    /// after Allocated, and a 30s deadline would kill pods out from under parties still
+    /// holding a valid token. 90s is twice that worst case: long enough that no honest join
+    /// loses its instance, short enough that a leaked pod is reclaimed within a fleet's
+    /// scale-up latency rather than never.</para>
+    /// </summary>
+    public TimeSpan DungeonJoinDeadline { get; set; } = DefaultDungeonJoinDeadline;
 
     public IEventStream? EventStream { get; set; }
     public ILoggerFactory? LoggerFactory { get; set; }
@@ -874,6 +911,33 @@ public sealed class GameServerHost : IAsyncDisposable
 
                 await _registration.StartAsync(_cts.Token);
             }
+        }
+
+        // The bounded join deadline (ADR-26). Dungeon mode only — a map server is
+        // allocated for nobody in particular, so "nobody joined" is not a fault there — and
+        // only when a positive deadline is configured. It runs in the background for the
+        // same reason the allocation gate does: it may wait a long time for Allocated, and
+        // the listener has to be accepting and the health loop pinging throughout.
+        //
+        // Fire-and-forget rather than held: ShutdownAsync must not await this task, because
+        // this task is one of the callers of ShutdownAsync.
+        if (_isDungeon && _options.DungeonJoinDeadline > TimeSpan.Zero)
+        {
+            var deadlineCt = _cts.Token;
+            _ = Task.Run(async () =>
+            {
+                try { await WatchJoinDeadlineAsync(deadlineCt); }
+                catch (OperationCanceledException) { /* shutdown raced the deadline */ }
+                catch (Exception ex)
+                {
+                    // Unobserved, this would take the process down at a GC rather than at
+                    // the fault. A failed deadline watch must degrade to the pre-existing
+                    // behaviour (the pod leaks), not to a crash.
+                    _logger.LogError(ex,
+                        "The dungeon join-deadline watch failed; this instance will not " +
+                        "release itself if its party never arrives");
+                }
+            }, CancellationToken.None);
         }
 
         // Start background tasks
@@ -1905,6 +1969,46 @@ public sealed class GameServerHost : IAsyncDisposable
         isDungeon && everHadPlayer && connections == 0 && pendingHolds == 0;
 
     /// <summary>
+    /// Whether a dungeon instance whose party never arrived should now end its own process —
+    /// the bounded join deadline that closes ADR-26's measured allocation leak.
+    ///
+    /// <para><b>This does not weaken <see cref="ShouldShutdownEmptyInstance"/>; it cannot.</b>
+    /// That rule requires <c>everHadPlayer</c> and this one requires <c>!everHadPlayer</c>,
+    /// so for any input at most one of the two is true and neither can ever fire on the
+    /// other's case. A pod mid-run, and a pod that emptied after a real run, are both
+    /// <c>everHadPlayer == true</c> and are therefore decided by decision 6 alone, exactly
+    /// as before. <c>GameServerHost_ShutdownRulesAreMutuallyExclusive</c> pins that.</para>
+    ///
+    /// <list type="bullet">
+    ///   <item><b>Dungeon only.</b> A map server is long-lived by definition (ADR-2) and is
+    ///   allocated for nobody in particular, so "nobody joined" is not a fault there.</item>
+    ///   <item><b>It must never have had a player.</b> The complement of decision 6.</item>
+    ///   <item><b>No handshake in flight.</b> A socket that has been accepted and is still
+    ///   inside the join handshake has not set <c>everHadPlayer</c> yet. Shutting down on
+    ///   the deadline instant would kill the party it exists to wait for, with the arrival
+    ///   already on the wire. Non-zero means "wait another slice", not "never".</item>
+    ///   <item><b>A positive deadline.</b> Zero or negative disables the mechanism, which
+    ///   is how a deployment opts out without a second flag.</item>
+    /// </list>
+    /// </summary>
+    /// <param name="isDungeon">Whether this process runs an instanced dungeon.</param>
+    /// <param name="everHadPlayer">Whether any player has ever joined this process.</param>
+    /// <param name="pendingHandshakes">Accepted sockets still inside the join handshake.</param>
+    /// <param name="waited">Monotonic time since the clock started — see
+    /// <see cref="WatchJoinDeadlineAsync"/> for where that is. Must come from a
+    /// <see cref="Stopwatch"/>: this host's <c>CLOCK_REALTIME</c> runs 10-17% fast and has
+    /// been observed stepping backwards (#153), so a wall-clock budget silently shrinks
+    /// under exactly the load it exists to tolerate.</param>
+    /// <param name="deadline">The configured deadline; zero or less disables it.</param>
+    /// <returns>True when the allocation has expired unused and the pod should report
+    /// Shutdown to Agones.</returns>
+    internal static bool ShouldShutdownUnjoinedInstance(
+        bool isDungeon, bool everHadPlayer, int pendingHandshakes,
+        TimeSpan waited, TimeSpan deadline) =>
+        isDungeon && !everHadPlayer && pendingHandshakes == 0
+        && deadline > TimeSpan.Zero && waited >= deadline;
+
+    /// <summary>
     /// End the process when this dungeon instance has emptied for good.
     ///
     /// <para>Called from the paths that can leave the world without players: a reconnect
@@ -1937,6 +2041,129 @@ public sealed class GameServerHost : IAsyncDisposable
                 _logger.LogError(ex, "Dungeon instance shutdown failed for {ServerId}", _options.ServerId);
             }
         });
+    }
+
+    /// <summary>
+    /// How often the join deadline is re-evaluated once the clock is running. Capped at a
+    /// quarter of the deadline so a short deadline (tests, a tuned fleet) is still observed
+    /// with resolution to spare, and floored at 50ms so a pathologically short one does not
+    /// become a busy loop.
+    /// </summary>
+    internal static TimeSpan JoinDeadlinePollInterval(TimeSpan deadline)
+    {
+        var quarter = TimeSpan.FromTicks(deadline.Ticks / 4);
+        var capped = quarter < TimeSpan.FromSeconds(1) ? quarter : TimeSpan.FromSeconds(1);
+        return capped < TimeSpan.FromMilliseconds(50) ? TimeSpan.FromMilliseconds(50) : capped;
+    }
+
+    /// <summary>
+    /// End a dungeon instance whose party never arrived (ADR-26, the allocation leak).
+    ///
+    /// <para><b>Where the clock starts, and how the pod knows.</b> Not at boot. A dungeon
+    /// fleet carries spare <c>Ready</c> replicas on purpose (ADR-18 unlocks exactly that
+    /// shape for a fleet pinning no map id), and a pod parked in that buffer for an hour is
+    /// not leaking — Agones can still scale it away. The clock therefore starts when the pod
+    /// observes its own GameServer at <c>Allocated</c>, which it <b>can</b> do: the sidecar's
+    /// <c>GET /gameserver</c> carries <c>status.state</c>, surfaced as
+    /// <see cref="IAgonesSdk.GetStateAsync"/> and already polled by
+    /// <see cref="AgonesAllocationGate"/> for the registration gate. That gate is reused here
+    /// verbatim rather than re-implemented. When <c>RegisterOnAllocated</c> is also armed the
+    /// two waits poll independently, which costs one extra small sidecar GET per second per
+    /// unallocated pod and keeps the two mechanisms from sharing a failure.</para>
+    ///
+    /// <para><b>With Agones disabled</b> — compose, a local run, every test — there is no
+    /// allocation to observe and no allocator to leak a pod to, so the clock starts at boot:
+    /// a dungeon process started by hand was started for a party that is about to arrive.
+    /// That is the only honest fallback; waiting for a state that can never be read would
+    /// disable the mechanism silently.</para>
+    ///
+    /// <para><see cref="Stopwatch"/>, never <c>DateTime.UtcNow</c>: this host's
+    /// <c>CLOCK_REALTIME</c> runs 10-17% fast and has been seen stepping backwards (#153),
+    /// and a wall-clock budget would shrink under exactly the load this exists to
+    /// tolerate.</para>
+    ///
+    /// <para>Fire-and-forget teardown, the same shape
+    /// <see cref="ShutdownIfInstanceFinished"/> uses, and for the same reason: this task must
+    /// not be what <see cref="ShutdownAsync"/> waits on, or a shutdown started from here
+    /// would wait on itself.</para>
+    /// </summary>
+    private async Task WatchJoinDeadlineAsync(CancellationToken ct)
+    {
+        var deadline = _options.DungeonJoinDeadline;
+
+        if (_agonesSdk.IsEnabled)
+        {
+            var gateLogger = _loggerFactory.CreateLogger("DungeonJoinDeadline");
+            if (!await AgonesAllocationGate.WaitForAllocatedAsync(_agonesSdk, ct, gateLogger)
+                    .ConfigureAwait(false))
+            {
+                // Cancelled before ever being allocated. A Ready pod that is shutting down
+                // was never leaking, so there is nothing for this path to say.
+                return;
+            }
+
+            _logger.LogInformation(
+                "Dungeon instance {ServerId} is Allocated; its party has {Deadline}s to join " +
+                "before the instance releases itself (ADR-26 join deadline)",
+                _options.ServerId, deadline.TotalSeconds);
+        }
+        else
+        {
+            _logger.LogInformation(
+                "Dungeon instance {ServerId} has {Deadline}s to receive its first player " +
+                "before it releases itself (ADR-26 join deadline; Agones is disabled, so the " +
+                "clock starts at start-up rather than at Allocated)",
+                _options.ServerId, deadline.TotalSeconds);
+        }
+
+        var waited = Stopwatch.StartNew();
+        var slice = JoinDeadlinePollInterval(deadline);
+
+        while (!ct.IsCancellationRequested)
+        {
+            // The rule is consulted FIRST and is the sole authority on whether this pod
+            // dies. The EverHadPlayer branch below it only stops the polling and says so in
+            // the log — it must never be what protects a live party, because then a wrong
+            // rule would be invisible to every test that drives a real host.
+            if (ShouldShutdownUnjoinedInstance(
+                    _isDungeon, EverHadPlayer, PendingHandshakes, waited.Elapsed, deadline))
+            {
+                if (Volatile.Read(ref _shutdownStarted) != 0)
+                    return;
+
+                _logger.LogWarning(
+                    "Dungeon instance {ServerId} was never joined within {Deadline}s; releasing " +
+                    "it rather than leaking the allocation. In production this is a client that " +
+                    "received its address and join token and died before dialling (ADR-26).",
+                    _options.ServerId, deadline.TotalSeconds);
+
+                _ = Task.Run(async () =>
+                {
+                    try { await ShutdownAsync(); }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex,
+                            "Join-deadline shutdown failed for {ServerId}", _options.ServerId);
+                    }
+                });
+                return;
+            }
+
+            if (EverHadPlayer)
+            {
+                // The party arrived and the rule has already declined. The instance's life
+                // is decision 6's business from here, and this task has nothing further to
+                // decide, ever.
+                _logger.LogInformation(
+                    "Dungeon instance {ServerId} received its first player after {Elapsed:F1}s; " +
+                    "the join deadline no longer applies",
+                    _options.ServerId, waited.Elapsed.TotalSeconds);
+                return;
+            }
+
+            try { await Task.Delay(slice, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; }
+        }
     }
 
     /// <param name="countedOnline">

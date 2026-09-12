@@ -185,6 +185,20 @@ string? advertiseHost = GetArg(args, "--advertise-host") ?? Env("GAMESERVER_ADVE
 bool registerOnAllocated =
     HasFlag(args, "--register-on-allocated") || Env("GAMESERVER_REGISTER_ON_ALLOCATED") == "true";
 
+// The bounded join deadline for an instanced dungeon (ADR-26). A dungeon pod that is
+// allocated and then never joined would otherwise sit Allocated forever — Agones does not
+// reclaim an Allocated pod — and the replica is lost until an operator releases it by hand.
+// Seconds; 0 disables it. Dungeon mode only; ignored on a map server. See
+// ServerOptions.DungeonJoinDeadline for why the default is 90s and not the 30s join-token TTL.
+TimeSpan joinDeadline =
+    double.TryParse(
+        GetArg(args, "--join-deadline-seconds") ?? Env("GAMESERVER_JOIN_DEADLINE_SECONDS"),
+        System.Globalization.NumberStyles.Float,
+        System.Globalization.CultureInfo.InvariantCulture,
+        out var jds) && jds >= 0
+        ? TimeSpan.FromSeconds(jds)
+        : ServerOptions.DefaultDungeonJoinDeadline;
+
 // ── Logging ──
 
 using var loggerFactory = LoggerFactory.Create(builder =>
@@ -209,6 +223,14 @@ if (GameServerHost.IsDungeonMode(mode) && explicitMapId == null)
         "not join servers:map:, so it cannot be found by map lookup and cannot become a " +
         "second live server for '{MapId}' (ADR-26 decision 8).",
         mapId, mapId);
+}
+if (GameServerHost.IsDungeonMode(mode))
+{
+    logger.LogInformation(
+        joinDeadline > TimeSpan.Zero
+            ? "  Join deadline: {Deadline}s — an instance whose party never arrives releases itself (ADR-26)"
+            : "  Join deadline: DISABLED — an instance whose party never arrives will hold its Agones allocation forever (ADR-26)",
+        joinDeadline.TotalSeconds);
 }
 logger.LogInformation("  Address:   {Addr}", addr);
 logger.LogInformation("  Transport: {Transport}{Encryption}", transport,
@@ -669,6 +691,7 @@ var options = new ServerOptions
     AgonesSdk = agonesSdk,
     AdvertiseHost = advertiseHost,
     RegisterOnAllocated = registerOnAllocated,
+    DungeonJoinDeadline = joinDeadline,
     // Redis Streams when REDIS_ADDR is configured (RedisEventStream XADDs into
     // `events:game`, the stream the gateway's relay consumes — ADR-5); Noop
     // otherwise, and cross-server events are generated (entity_killed) and then

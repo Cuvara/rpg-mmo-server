@@ -6,6 +6,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **ADR-26 allocation leak closed: a dungeon instance whose party never arrives releases
+  itself.** Measured on dev, not predicted: decision 6's shutdown rule requires
+  `everHadPlayer`, so a pod that was **allocated and then never joined** satisfied it forever
+  -- it sat `Allocated`, Agones does not reclaim an Allocated pod (ADR-16), and two runs of
+  `smoketest/cmd/dungeonprobe` consumed both replicas of a two-replica fleet permanently.
+  In production the same shape is any client that receives `{ServerAddr, JoinToken}` and dies
+  before dialling.
+
+  The fix is a **second rule**, not another term in decision 6's -- the pod cannot tell "my
+  party has not arrived yet" from "my party is never arriving" without a clock.
+  `GameServerHost.ShouldShutdownUnjoinedInstance` is
+  `isDungeon && !everHadPlayer && pendingHandshakes == 0 && deadline > 0 && waited >= deadline`,
+  the **exact complement of decision 6 on `everHadPlayer`**. The two therefore partition the
+  space on that one term and can never both fire, so a pod mid-run and a pod that emptied
+  after a real run stay decision 6's business exactly as before --
+  `TheTwoShutdownRules_AreMutuallyExclusive` pins that over the cross product of their shared
+  inputs rather than leaving it to care. `pendingHandshakes` is in the rule because a socket
+  still inside the join handshake has not set `everHadPlayer` yet, and killing the pod on the
+  deadline instant would kill the party it exists to wait for with the arrival already on the
+  wire.
+
+  **The clock starts at `Allocated`, and the pod really can observe that** -- ADR-26 left the
+  question open. The sidecar's `GET /gameserver` carries `status.state`, already surfaced as
+  `IAgonesSdk.GetStateAsync()` and already polled by `AgonesAllocationGate`; the deadline
+  reuses that gate rather than re-implementing it. Not boot: a dungeon fleet pins no map id
+  and is the one fleet shape ADR-18 says should carry spare `Ready` replicas, and a pod parked
+  in that buffer is not leaking. With Agones disabled -- compose, a local run, every test --
+  there is no allocation to observe and no allocator to leak a replica to, so the clock starts
+  at start-up.
+
+  **The deadline is 90s, not the 30s `constants.JoinTokenTTL` ADR-26 proposed.** That
+  reasoning -- the allocation is unusable once the token expires -- is true of the token and
+  false of the deadline, because the two clocks do not start together: the gateway mints the
+  token *after* allocating, having waited up to `registry.DefaultAllocationWaitTimeout` (15s)
+  for the pod to register, so the last legitimate arrival is ~45s past `Allocated` and a 30s
+  deadline would kill pods out from under parties still holding a valid token. New
+  `ServerOptions.DungeonJoinDeadline`, set by `--join-deadline-seconds` /
+  `GAMESERVER_JOIN_DEADLINE_SECONDS`; `0` disables the mechanism and the start-up banner says
+  which of the two a dungeon pod is running. Dungeon mode only -- a map server is allocated
+  for nobody in particular, so "nobody joined" is not a fault there.
+
+  Timed with `Stopwatch`, never `DateTime.UtcNow` (#153): this host's `CLOCK_REALTIME` runs
+  10-17% fast and has been observed stepping backwards, so a wall-clock budget would silently
+  shrink under exactly the load the deadline exists to tolerate.
+
 ### Documentation
 - **ADR-26: dungeon instancing is keyed by the party, and a "checkpoint" is the player at the
   boundary.** Design only -- **no runtime code changed**. It implements ADR-14 stage 6, the
