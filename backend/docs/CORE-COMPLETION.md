@@ -38,6 +38,7 @@ Last audited: **2026-09-12**, against `origin/develop` and the live `k3d-rpg-dev
 | C2 | ~~**Party, and the Nakama social surface it needs.**~~ **DONE for what gates C1, 2026-09-12.** `backend/nakama/social/` ships `party_create` / `party_join` / `party_leave` / `party_get`, cap 4 held by a version check rather than a read-then-write (two joiners on a 3-member party both read 3 and both commit, otherwise). `party_get` answers server-to-server over `runtime.http_key`, which is the one thing ADR-26 decision 3 needs. **Friends, chat, guild, presence and matchmaking are still not started** -- they are not gating, because nothing in C1 asks them anything. | M |
 | C3 | ~~**Android proven.**~~ **DONE 2026-09-12.** An Android player built with `ANDROID_ABIS=arm64,x86_64` ran on an x86_64 emulator against the dev cluster and went **IN WORLD**, then took the full ADR-22 escalation: kicked `no_sealed_session`, reconnected with sealing, `sealed session established`, back in world and stable, with the server reporting `players_online: 1` and `sealed_cipher: chacha20-poly1305`. Two client gaps were found and fixed getting there: the build was **arm64-only**, which installs on no usable emulator, and **an Android build could not be pointed at a backend at all** — every override was a CLI flag or an env var, and Android has neither. | M |
 | C4 | ~~**ADR-14 stages 7 and 8.**~~ **DONE 2026-09-13.** Stage 7: `deploy/k8s/app/70-fleetautoscaler-dungeon.yaml`, Buffer 2 / 2-6 on a 30s sync, on the **dungeon** fleet — the first fleet whose spare Ready pods claim no world (ADR-18 decision 4, ADR-26 decision 8). The map fleet's prohibition is unchanged; `verify.sh`'s `cluster.autoscaler` needed no loosening to admit it (a template with no `GAMESERVER_MAP_ID` already read as unpinned) but did need **reach** — it inspected only the fleet a target names, and now sweeps every fleet in `VERIFY_NAMESPACES`. Proven offline on both fleet shapes by `verify/tests/autoscaler_rule_test.sh`: FAIL for the map-pinned one, PASS for the map-less one. Stage 8: the Go-image manifests were already deleted (`6281c72`) and `map-servers-dev` / `dungeon-servers-dev` are gone from `k3d-rpg-dev`; the three files left in `deploy/agones/` are the C# dev fleet that `rollback-to-compose.sh` restores, so they were **documented as the rollback target rather than deleted**. | S |
+| C5 | **The client half of C1 and C2.** The netcode package needs the proto resync that carries `party_id` (a backend proto merge reddens every netcode PR until it happens), then a party API client (`party_create` / `party_join` / `party_leave` / `party_get` over Nakama) and a dungeon entry path that sends `party_id` on `EnterWorld`. Today: **zero of it exists.** | Content for dungeons and parties has nothing to attach to, and the feature is unreachable by any real player. | M |
 
 ## Blocked on something that is not code
 
@@ -56,7 +57,21 @@ does not depend on them.
 
 ## When the gate opens
 
-## THE GATE IS OPEN, 2026-09-12
+## THE GATE IS OPEN ON THE BACKEND. THE CLIENT HALF IS NOT BUILT, 2026-09-13
+
+> **Correction to the line below, which was written the day before and overstated what
+> shipped.** C1 and C2 are proven **server-side**, by a Go probe. They are **absent from the
+> Unity client**: `grep party_id` in `com.cuvara.netcode` returns nothing, `grep -i "party\|dungeon"`
+> in `Assets/Scripts/` returns nothing, and the client is pinned to netcode `v0.36.2`
+> (`669116a7`), which predates `party_id` being added to `wire.proto`. **A real player cannot
+> create a party or enter a dungeon today — there is no field on the client's wire to ask
+> with.**
+>
+> This is tracked as **C5** below. The lesson is worth more than the correction: "measured on
+> dev" meant measured with the tool that was easiest to write, and a probe that speaks the
+> protocol directly can prove a backend and prove nothing about whether anyone can reach it.
+
+
 
 **C1 and C2 are both demonstrated, so gameplay content can start.** The proof is one line of
 `cmd/dungeonprobe` output against the dev cluster:
