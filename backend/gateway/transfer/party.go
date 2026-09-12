@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -71,6 +72,51 @@ func NewNakamaParty(baseURL, httpKey string, timeout time.Duration) *NakamaParty
 // A future check ("only the leader may take a party into a dungeon") needs it,
 // and a struct that silently drops a field is where that check would start
 // life reading an empty string.
+// gRPC codes party_get can return, as the module defines them
+// (backend/nakama/social/errors.go).
+const (
+	grpcCodeNotFound = 5  // the party genuinely does not exist
+	grpcCodeInternal = 13 // storage failed; an outage, not the caller's fault
+)
+
+// classifyPartyError decides whether a non-2xx reply means "that party is gone"
+// or "Nakama is having a bad time".
+//
+// It reads the gRPC code out of the JSON body FIRST and falls back to the HTTP
+// status. That order is the opposite of the obvious one, and the reason is that
+// the code is the value the party module actually controls: it returns
+// runtime.Error{Code: 5} for an absent party and collapses every storage
+// failure to 13. The HTTP status in front of that is produced by
+// grpc-gateway's own mapping, which nobody here has verified against a running
+// Nakama -- it SHOULD be 404 and 500, and "should" is not something to route a
+// player-facing refusal on.
+//
+// Getting this backwards has one specific cost: a Nakama outage reported as
+// "that party no longer exists" tells every player in the game that their party
+// vanished, and tells the operator nothing.
+func classifyPartyError(resp *http.Response) error {
+	var body struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Error   string `json:"error"`
+	}
+	// A body that will not decode is not itself an answer; fall through to the
+	// status, which at least distinguishes 4xx from 5xx.
+	_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&body)
+
+	switch body.Code {
+	case grpcCodeNotFound:
+		return ErrPartyUnknown
+	case grpcCodeInternal:
+		return fmt.Errorf("party membership: nakama internal error (code %d): %s", body.Code, body.Message)
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		return ErrPartyUnknown
+	}
+	return fmt.Errorf("party membership: party_get status %d: %s", resp.StatusCode, body.Message)
+}
+
 type partyGetResponse struct {
 	PartyID  string   `json:"party_id"`
 	LeaderID string   `json:"leader_id"`
@@ -108,11 +154,8 @@ func (n *NakamaParty) IsMember(ctx context.Context, partyID, userID string) (boo
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
-		return false, ErrPartyUnknown
-	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return false, fmt.Errorf("party membership: party_get status %d", resp.StatusCode)
+		return false, classifyPartyError(resp)
 	}
 
 	// The reply is the same double encoding in reverse: {"payload":"<json>"}.
