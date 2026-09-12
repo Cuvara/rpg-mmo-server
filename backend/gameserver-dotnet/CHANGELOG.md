@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **`ROADMAP-SECURITY.md` §1.2 said A1, A2 and A3 were missing; all three had shipped.**
+  The table was written when all six anti-cheat gaps were open and was never struck off as
+  work landed between 2026-09-09 and 2026-09-11, so a reader planning from it would have
+  re-specified `Input/InputRejection.cs`, `Input/InputAnomalyTracker.cs` and ADR-22's
+  replay counter -- all of which exist in the tree with tests. The three rows are rewritten
+  with their state and the file that implements them rather than deleted, because the
+  reasoning in them is what those implementations were built against. A2's row now records
+  the part that is easy to misread as done: the tracker **flags and records, it never acts
+  on a player**, because no threshold here has a measured false-positive rate yet. The
+  recommendation line, which still said "A1 and A2 first", now names **A4** as next.
+
 ### Added
 - **ADR-25: the game server will prove its identity with an Ed25519 key it generates per
   pod.** Design only -- **no runtime code changed**, and nothing described below is
