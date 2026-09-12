@@ -18,7 +18,8 @@ Depends on: `github.com/duycuong/rpg-mmo/shared` (via `replace ../shared`) and
 | Auth — social (Google/Apple/Facebook) | Planned | — |
 | Economy — atomic transactions, wallet, inventory | Planned | — |
 | Leaderboard — `kills_alltime` (authoritative), server-only score writes | Done | season management planned |
-| Social — party, friends, chat, guild, presence | Planned | — |
+| Social — **party** (create/join/leave/get, max 4, storage-backed) | ✅ | `social/party.go` |
+| Social — friends, chat, guild, presence | Planned | — |
 | Matchmaking, notifications | Planned | — |
 
 ## Layout
@@ -32,6 +33,15 @@ nakama/
     token.go         # gateway_token RPC + token issuance
     profile.go       # after-auth hooks + EnsureProfile storage logic
     validate.go      # before-auth email hook + credential validation
+  economy/
+    reward.go        # reward_kill (legacy per-kill)
+    reward_batch.go  # reward_kills — batched, exactly-once per batch_id
+    caller.go        # requireServerCaller — server-only guard
+    leaderboard.go   # kills_alltime setup, submit_kill, get_leaderboard
+  social/
+    party.go         # party_create / party_join / party_leave / party_get
+    errors.go        # client-facing runtime errors + gRPC codes
+    ratelimit.go     # per-user bucket for the party mutations
   docs/              # README / API / DESIGN / RUNBOOK
 ```
 

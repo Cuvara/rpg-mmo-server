@@ -5,6 +5,49 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Party, as four Nakama RPCs over the storage engine** (`social/`, roadmap item C2). `party_create`,
+  `party_join`, `party_leave`, `party_get`, registered from `main.go`. Capped at **4 members**
+  (`social.MaxPartyMembers`, the number the root `CLAUDE.md` states under Social); the 5th join is
+  refused with gRPC code `9` and a typed `party is full`, not a silent no-op.
+  - **Not** Nakama's realtime/socket Party API. This client talks to Nakama over HTTP for meta and
+    keeps its sockets for the gateway and the game server (ADR-3), and realtime party state is not
+    addressable from a `runtime.http_key` call — which it has to be, because the gateway verifies
+    party membership before allocating a dungeon instance. `party_get` is the one party RPC that
+    accepts **both** a client session and an `http_key` call, for exactly that; the three mutations
+    act on "the caller" and reject a subject-less `http_key` call with code `16`.
+  - **The member cap is held by a storage version check, not by a read.** Two players joining a
+    3-member party at the same moment both read 3, both compute 4, and a read-then-write check lets
+    both commit — 5 members. Every mutation is instead one `nk.MultiUpdate` carrying the party
+    record at the version read this attempt **and** the per-user membership index create-only
+    (`"*"`), so Nakama rejects the whole update if either check fails: one join commits, the other
+    re-reads a full party and is answered `party is full`. Bounded at 5 attempts, re-validating on
+    each; exhausting the budget returns code `10` (`ABORTED`), the one party error worth retrying.
+    A test drives real goroutines through a version-enforcing in-memory store with a barrier
+    holding every racer at the same version. Removing the cap check makes it report 6 members in a
+    4-member party; removing the `Version` field makes admitted joiners vanish from the party.
+  - **A user is in at most one party, and joining another one fails** (`already in a party`) rather
+    than silently moving them: auto-leaving turns an additive-looking call destructive — a mistyped
+    or replayed join by a party leader would transfer that leadership away, or delete the party if
+    they were its last member. Re-joining the party you are already in **is** idempotent success,
+    so a client retrying after a timeout is not told "already in a party" about its own party.
+  - Leader leaving transfers leadership to the longest-standing remaining member; the last member
+    leaving deletes the party record in the same update as their index, so a party never outlives
+    its members. Two torn states that would otherwise strand a player are cleared by `party_leave`:
+    an index whose party is gone, and an index pointing at a party that does not list the user.
+  - Party records are **system-owned** with permissions `0/0`, so no client can read or write party
+    state through Nakama's public storage API — only through these RPCs, which are what enforce the
+    cap and the leadership rules.
+  - The three mutations share one per-user token bucket (`PartyWriteRatePerSec` 0.5/s, burst 10),
+    because the abuse shape is a create/leave loop and per-RPC buckets would let it run at the sum
+    of the limits. `party_get` is **not** limited: the gateway's calls carry no user id to key on,
+    and keying them to the empty string would let one player throttle the cluster's dungeon
+    allocations. Same per-process caveat as `gateway_token`.
+  - `docs/API.md` gains the RPC reference (payloads, the full error/code table, the storage
+    records), `docs/DESIGN.md` the rationale, and `docs/README.md` no longer lists party as
+    Planned. Friends, chat, guild, presence and matchmaking remain not started.
+
 ### Security
 
 - **`NAKAMA_HTTP_KEY` must now be set and non-default for any deployed environment** (ADR-24). It

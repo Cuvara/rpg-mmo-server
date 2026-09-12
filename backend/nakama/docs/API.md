@@ -169,6 +169,99 @@ written only by the runtime (the server-only RPCs above); a client's own
 `WriteLeaderboardRecord` against it is refused by Nakama. Clients may still
 *read* it through Nakama's own REST API.
 
+### `party_create`, `party_join`, `party_leave`, `party_get`
+
+Storage-backed party, capped at **4 members** (`social.MaxPartyMembers`). Not
+Nakama's realtime/socket Party API — see `DESIGN.md` for why.
+
+- **Registered in**: `main.go` → `social.PartyCreateRPC` / `PartyJoinRPC` /
+  `PartyLeaveRPC` / `PartyGetRPC`
+- **Auth**: `party_create`, `party_join` and `party_leave` require a Nakama
+  client session; a `http_key` caller has no subject and gets code `16`.
+  **`party_get` accepts both** — the gateway calls it server-to-server to
+  verify party membership before allocating a dungeon instance.
+
+Request payload — `party_join` and `party_get` only (`party_create` and
+`party_leave` act on the caller and take no payload):
+
+```json
+{ "party_id": "8f14e45fceea167a5a36dedd4bea2543" }
+```
+
+Response payload (all four RPCs share it):
+
+```json
+{
+  "party_id": "8f14e45fceea167a5a36dedd4bea2543",
+  "leader_id": "3f9c…",
+  "members": ["3f9c…", "a71b…"],
+  "member_count": 2,
+  "max_members": 4,
+  "created_at": 1785801600,
+  "updated_at": 1785801742
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `party_id` | string | 128-bit hex id. **Empty** when the call left the caller in no party — i.e. the last member leaving, which deletes the party. |
+| `leader_id` | string | Always one of `members` |
+| `members` | string[] | Join order, leader first at creation. Order is load-bearing: leadership transfers to `members[0]` after the leader is removed. |
+| `member_count` | int | `len(members)` |
+| `max_members` | int | Always `MaxPartyMembers` (4), so a client can render "3/4" without hardcoding the cap |
+
+Behaviour:
+
+| RPC | Effect |
+|-----|--------|
+| `party_create` | Caller becomes leader of a new party of one. Fails if the caller is already in a party. |
+| `party_join` | Adds the caller. The 5th member is refused with code `9`. Re-joining the party you are already in is **idempotent success**, so a client retrying after a timeout is not told "already in a party" about itself. |
+| `party_leave` | Removes the caller. Leader leaving transfers leadership to `members[0]`; last member leaving **deletes** the party. |
+| `party_get` | Reads leader + members. The gateway's check is `GetParty(...).IsMember(userID)`. |
+
+Errors:
+
+| Code | Message | Cause |
+|------|---------|-------|
+| 16 | `unauthenticated` | No user id in the context. Mutations only; `party_get` never returns it. |
+| 3 | `invalid payload` | Payload is not valid JSON |
+| 3 | `party_id is required` | `party_id` missing or empty on `party_join` / `party_get` |
+| 5 | `party not found` | No party under that id. Normal for a stale id: a party is deleted when its last member leaves. |
+| 9 | `party is full` | Join would exceed `MaxPartyMembers`. `FAILED_PRECONDITION`, not `RESOURCE_EXHAUSTED`: it is a game rule and retrying cannot help. |
+| 9 | `already in a party` | Caller is in a **different** party. Call `party_leave` first — the join does **not** move you silently. |
+| 9 | `not in a party` | `party_leave` with no membership |
+| 10 | `party is being modified concurrently, retry` | 5 optimistic-concurrency attempts all lost the version check. The **one** party error worth retrying. |
+| 8 | `rate limited` | Mutation rate limit (below). `party_get` is not limited. |
+| 13 | `internal error` | Storage failure. Detail is logged, never returned. |
+
+Storage records:
+
+| Property | Party | Membership index |
+|----------|-------|------------------|
+| Collection | `party` | `party_member` |
+| Key | party id | `current` (one per user — the fixed key is what makes the create-only write enforce one party per user) |
+| Owner | **system** (empty user id) | the member |
+| Permission read | `0` | `1` (owner may read "which party am I in" without an RPC) |
+| Permission write | `0` | `0` |
+
+Both records are written in **one `nk.MultiUpdate`** per mutation, so the party
+and its reverse index can never disagree.
+
+### `party` mutation rate limit
+
+| Limit | Value | Key |
+|-------|-------|-----|
+| Sustained | `PartyWriteRatePerSec` = 0.5/s (one per 2s) | authenticated user id |
+| Burst | `PartyWriteBurst` = 10 | authenticated user id |
+
+One bucket shared by `party_create`, `party_join` and `party_leave`, because
+the abuse shape is a create/leave or join/leave loop and per-RPC buckets would
+let it run at the sum of the limits. Same per-process caveat as `gateway_token`.
+
+`party_get` is deliberately **not** limited: the gateway's calls carry no user
+id to key a bucket on, and keying them all to the empty string would let one
+player's joins throttle the whole cluster's dungeon allocations.
+
 ## Hooks
 
 ### `BeforeAuthenticateEmail`
@@ -233,6 +326,14 @@ to `Player-<first 8 chars of user id>`.
 | `economy.ErrServerOnly` | Code `7` error returned to client sessions by the mutation RPCs |
 | `economy.SetupLeaderboards(ctx, logger, nk)` | Creates `kills_alltime` (authoritative) or fails init if an existing board is not |
 | `economy.LeaderboardKillsAllTime`, `LeaderboardMigrateEnv`, `GoldPerKill`, `MaxKillsPerBatch`, `CodeKillsOutOfRange`, `ReceiptCollection`, `StatusGranted`, `StatusPartial` | Constants |
+| `social.RPCPartyCreate`, `RPCPartyJoin`, `RPCPartyLeave`, `RPCPartyGet` | RPC id constants |
+| `social.PartyCreateRPC`, `PartyJoinRPC`, `PartyLeaveRPC`, `PartyGetRPC` | RPC handlers |
+| `social.CreateParty` / `JoinParty` / `LeaveParty` / `GetParty` | Party logic against a narrow storage interface (unit-testable without Nakama) |
+| `social.Party` / `Party.IsMember(userID)` | Stored party record; `IsMember` is the gateway's dungeon-entry check |
+| `social.PartyRequest` / `PartyResponse` | RPC payload types |
+| `social.ErrPartyFull`, `ErrAlreadyInParty`, `ErrNotInParty`, `ErrPartyNotFound`, `ErrPartyBusy`, `ErrPartyIDRequired`, `ErrUnauthenticated`, `ErrInvalidPayload`, `ErrRateLimited`, `ErrInternal` | Client-facing runtime errors |
+| `social.MaxPartyMembers`, `PartyCollection`, `MembershipCollection`, `MembershipKey` | Constants |
+| `social.PartyWriteRatePerSec`, `PartyWriteBurst`, `PartyWriteIdleTTL` | Party mutation rate-limit constants |
 
 ### `gateway_token` rate limit
 

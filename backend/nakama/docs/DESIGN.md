@@ -247,3 +247,80 @@ ids.
 - No sender-side durability. Kills the game server recorded but had not yet
   been acknowledged when it died are gone; that is the game server's window
   to document (`gameserver-dotnet/docs/DESIGN.md`), not Nakama's to close.
+
+## 2026-09-12 — Party: storage RPCs, not the realtime Party API
+
+Nakama ships a realtime (socket) Party API. The party in `social/` does not use
+it, for two independent reasons:
+
+1. **There is no Nakama socket to hang it off.** This client talks to Nakama
+   over HTTP for every meta service; its two realtime sockets go to the gateway
+   and to the game server (ADR-3). A realtime party would mean a third
+   connection whose only job is party state.
+2. **The gateway has to be able to ask.** Before allocating a dungeon instance
+   the gateway verifies that the user entering really is in the party they
+   claim. Realtime party state lives in the socket layer and is not addressable
+   from a `runtime.http_key` call. A storage-backed party is, which is exactly
+   what `party_get` does — it is the one party RPC that accepts both a client
+   session and an `http_key` call.
+
+So a party is two storage records and four RPCs over them. See `API.md` for the
+record layout.
+
+### The member cap is enforced by a version check, not by a read
+
+The cap is 4 (root `CLAUDE.md`, Social: "Party API (max 4)"). A read-then-write
+cap check does not hold it: two players joining a 3-member party at the same
+moment both read 3, both compute 4, and both write — 5 members.
+
+Every mutation is therefore one `nk.MultiUpdate` carrying **both** records,
+where the party write always carries the storage version read at the start of
+that attempt and the membership write carries the create-only version `"*"`.
+Nakama rejects the entire update — storage and all — if either version check
+fails. So one of the two racing joins commits and the other is rejected,
+re-reads a party that now has 4 members, and is answered `party is full`.
+
+The retry loop is bounded at 5 attempts (`maxWriteAttempts`) and **re-reads and
+re-validates on every attempt**, which is what makes retrying safe: a stale
+read can never commit. The loop's real length is bounded by the number of
+players racing on one party, because every winner moves the party closer to
+full, at which point the remaining attempts fail fast on the cap instead of
+retrying. Exhausting the budget returns code `10` (`ABORTED`) — the one party
+error a client should retry.
+
+`social` has a test for this that drives real goroutines through a
+version-enforcing in-memory store, holding all racers at the same party version
+with a barrier. Dropping either the cap check or the `Version` field from the
+party write makes it fail — the first with 6 members in a 4-member party, the
+second with admitted joiners missing from the party (a lost update).
+
+### One party at a time, and why joining another one fails
+
+A user is in **at most one** party, enforced by the per-user membership index
+(`party_member`/`current`) and its create-only write rather than by scanning
+parties.
+
+Joining while already in a different party **fails** with `already in a party`.
+It deliberately does not silently move the caller: auto-leaving would make an
+additive-looking call destructive — if the caller happened to be leading a
+party, a mistyped or replayed join would transfer that leadership away, or
+delete the party outright if they were its last member. A client that wants to
+switch calls `party_leave` first, and the error names the condition so it can.
+
+Re-joining the party you are **already** in is idempotent success, not an
+error, so a client retrying after a timeout is never told "already in a party"
+about the party it asked for.
+
+### Leadership and deletion
+
+A party always has exactly one leader, because the gateway allocates a dungeon
+per leader. When the leader leaves and others remain, leadership transfers to
+`members[0]` after removal — the longest-standing remaining member. No
+election, no vote. When the last member leaves, the party record is deleted in
+the same update as their index, so a party never outlives its members and a
+stale party id reads as `party not found`.
+
+Two torn states are handled rather than ignored, because either would strand a
+player: a membership index whose party no longer exists is cleared by
+`party_leave` (otherwise that user could never join anything again), and an
+index pointing at a party that does not list the user is likewise dropped.
