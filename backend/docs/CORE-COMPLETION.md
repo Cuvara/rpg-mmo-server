@@ -37,8 +37,8 @@ Last audited: **2026-09-12**, against `origin/develop` and the live `k3d-rpg-dev
 | C1 | ~~**Dungeon instancing — ADR-14 stage 6.**~~ **DONE 2026-09-12.** Measured on dev: a party created through Nakama, two members entering, **both handed `127.0.0.1:7031` — one instance** — an outsider refused with `not a member of that party`, and map entry unaffected on the same gateway (`cmd/dungeonprobe`). ADR-26: entry through `EnterWorld` with `party_id`, the instance keyed by party, membership checked against Nakama before allocating, a dungeon pod that registers no map and does not persist `map_id`/position, and self-shutdown when empty. | L |
 | C2 | ~~**Party, and the Nakama social surface it needs.**~~ **DONE for what gates C1, 2026-09-12.** `backend/nakama/social/` ships `party_create` / `party_join` / `party_leave` / `party_get`, cap 4 held by a version check rather than a read-then-write (two joiners on a 3-member party both read 3 and both commit, otherwise). `party_get` answers server-to-server over `runtime.http_key`, which is the one thing ADR-26 decision 3 needs. **Friends, chat, guild, presence and matchmaking are still not started** -- they are not gating, because nothing in C1 asks them anything. | M |
 | C3 | ~~**Android proven.**~~ **DONE 2026-09-12.** An Android player built with `ANDROID_ABIS=arm64,x86_64` ran on an x86_64 emulator against the dev cluster and went **IN WORLD**, then took the full ADR-22 escalation: kicked `no_sealed_session`, reconnected with sealing, `sealed session established`, back in world and stable, with the server reporting `players_online: 1` and `sealed_cipher: chacha20-poly1305`. Two client gaps were found and fixed getting there: the build was **arm64-only**, which installs on no usable emulator, and **an Android build could not be pointed at a backend at all** — every override was a CLI flag or an env var, and Android has neither. | M |
+| C4 | ~~**ADR-14 stages 7 and 8.**~~ **DONE 2026-09-13.** Stage 7: `deploy/k8s/app/70-fleetautoscaler-dungeon.yaml`, Buffer 2 / 2-6 on a 30s sync, on the **dungeon** fleet — the first fleet whose spare Ready pods claim no world (ADR-18 decision 4, ADR-26 decision 8). The map fleet's prohibition is unchanged; `verify.sh`'s `cluster.autoscaler` needed no loosening to admit it (a template with no `GAMESERVER_MAP_ID` already read as unpinned) but did need **reach** — it inspected only the fleet a target names, and now sweeps every fleet in `VERIFY_NAMESPACES`. Proven offline on both fleet shapes by `verify/tests/autoscaler_rule_test.sh`: FAIL for the map-pinned one, PASS for the map-less one. Stage 8: the Go-image manifests were already deleted (`6281c72`) and `map-servers-dev` / `dungeon-servers-dev` are gone from `k3d-rpg-dev`; the three files left in `deploy/agones/` are the C# dev fleet that `rollback-to-compose.sh` restores, so they were **documented as the rollback target rather than deleted**. | S |
 | C5 | **The client half of C1 and C2.** The netcode package needs the proto resync that carries `party_id` (a backend proto merge reddens every netcode PR until it happens), then a party API client (`party_create` / `party_join` / `party_leave` / `party_get` over Nakama) and a dungeon entry path that sends `party_id` on `EnterWorld`. Today: **zero of it exists.** | Content for dungeons and parties has nothing to attach to, and the feature is unreachable by any real player. | M |
-| C4 | **ADR-14 stages 7 and 8.** Buffer-based `FleetAutoscaler`; retire the superseded `deploy/agones/` manifests. | Fleet scaling policy is plumbing. Deliberately deferred, not forgotten — `verify.sh` currently asserts the *absence* of an autoscaler. | S |
 
 ## Blocked on something that is not code
 
@@ -80,9 +80,10 @@ does not depend on them.
 DUNGEON OK: one party, one instance at 127.0.0.1:7031; outsider refused; maps unaffected
 ```
 
-C3 (Android) is done and C4 (ADR-14 stages 7-8) remains, but neither changes the shape of any
-flow content sits on: an Android client joins the same way a Windows one does — measured, not
-assumed — and an autoscaler changes how many servers exist, not what a server does.
+C3 (Android) and C4 (ADR-14 stages 7-8) are both done now, and neither changed the shape of
+any flow content sits on: an Android client joins the same way a Windows one does — measured,
+not assumed — and an autoscaler changes how many servers exist, not what a server does.
+**Every C item is closed.**
 
 **One known gap, found by running it rather than by reading it.** A dungeon pod that is
 allocated and then never joined never shuts itself down -- decision 6 requires

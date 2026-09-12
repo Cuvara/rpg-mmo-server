@@ -109,23 +109,52 @@ for c in spec.get("containers",[]) or []:
 '
 }
 
-# Names any FleetAutoscaler in the cluster whose fleetName is this fleet.
-# Cluster-wide on purpose: an autoscaler in the wrong namespace does nothing,
-# and one in the right namespace is the whole hazard, so the namespace is
-# compared rather than pre-filtered.
-fleet_autoscalers() {
-  local ns="$1" name="$2"
-  k get fleetautoscalers -A -o json 2>/dev/null | python3 -c '
-import json,sys
-ns,fleet=sys.argv[1],sys.argv[2]
-try: d=json.load(sys.stdin)
-except Exception: sys.exit(0)
-for it in d.get("items",[]):
+# The whole rule, in one place, over DATA rather than over a cluster.
+#
+# Reads two JSON documents (a Fleet list and a FleetAutoscaler list, as
+# `kubectl get -A -o json` returns them) out of the environment, and emits one
+# line per fleet in the named namespaces:
+#
+#     <ns>/<fleet>|<fleet-wide map id or empty>|<autoscalers, comma-separated>
+#
+# The separator is `|` and NOT a tab, because tab is IFS whitespace: `IFS=$'\t'
+# read` collapses two adjacent tabs into one, so a fleet with no map id would
+# have its autoscaler list read back as its map id -- which reads as a PASS
+# ("pins <autoscaler name>") on exactly the fleet this rule is about. Caught by
+# verify/tests/autoscaler_rule_test.sh before it could be believed.
+#
+# Kept free of kubectl on purpose: this function is what verify/tests/
+# autoscaler_rule_test.sh exercises offline, so the rule can be proven to say
+# FAIL for one fleet shape and PASS for the other without a cluster and without
+# creating a FleetAutoscaler anywhere.
+#
+# Only a literal `value:` counts as a pinned map id -- see fleet_wide_map_id.
+classify_fleets() {
+  python3 -c '
+import json,os,sys
+want=set(sys.argv[1].split())
+def load(name):
+    try: return json.loads(os.environ.get(name,"") or "{}")
+    except Exception: return {}
+fleets=load("FLEETS_JSON"); fas=load("FAS_JSON")
+byfleet={}
+for it in fas.get("items",[]) or []:
     m=it.get("metadata",{}); s=it.get("spec",{})
-    if m.get("namespace")==ns and s.get("fleetName")==fleet:
-        pol=s.get("policy",{}).get("type","?")
-        print("%s/%s(policy=%s)" % (m.get("namespace"), m.get("name"), pol))
-' "$ns" "$name"
+    key=(m.get("namespace"), s.get("fleetName"))
+    pol=s.get("policy",{}).get("type","?")
+    byfleet.setdefault(key,[]).append("%s/%s(policy=%s)" % (m.get("namespace"), m.get("name"), pol))
+for it in fleets.get("items",[]) or []:
+    m=it.get("metadata",{}); ns=m.get("namespace"); name=m.get("name")
+    if want and ns not in want: continue
+    spec=it.get("spec",{}).get("template",{}).get("spec",{}).get("template",{}).get("spec",{})
+    mapid=""
+    for c in spec.get("containers",[]) or []:
+        for e in c.get("env",[]) or []:
+            if e.get("name")=="GAMESERVER_MAP_ID" and "value" in e:
+                mapid=e["value"]; break
+        if mapid: break
+    print("%s/%s|%s|%s" % (ns, name, mapid, ",".join(sorted(byfleet.get((ns,name),[])))))
+' "$1"
 }
 
 # NO FleetAutoscaler on a fleet whose pods all carry the same map id.
@@ -145,40 +174,69 @@ for it in d.get("items",[]):
 # Deliberately a FAIL, not a WARN. Prose saying "do not add one" is already in
 # 50-fleet-map.yaml, deploy/CLAUDE.md and docs/K3S.md, and prose did not stop it
 # being proposed again.
+#
+# IT SWEEPS EVERY FLEET IN $VERIFY_NAMESPACES, not just $VERIFY_FLEET, since
+# 2026-09-13 (ADR-14 stage 7). It used to inspect the one fleet a target names,
+# which was the whole cluster's worth of fleets when there was one fleet. There
+# are two now -- a map fleet that pins GAMESERVER_MAP_ID and a dungeon fleet
+# that pins none (ADR-26 decision 8) -- and a rule that only looks at the fleet
+# a target happens to name is a rule that would have missed an autoscaler put on
+# the OTHER one. The map fleet is still the fleet the prohibition is about; the
+# sweep is what makes "no autoscaler on a map-pinned fleet" a statement about
+# the deployment rather than about one line in a target file.
+#
+# The map-less side is a PASS, not an exemption bolted on for the dungeon fleet:
+# ADR-18 decision 4 already names "a Ready pod that is not yet claiming a world"
+# as the condition that unlocks a buffer autoscaler, and a fleet that pins no
+# map id is exactly that. Nothing was weakened to let the dungeon autoscaler
+# through -- the map fleet's shape still fails, which
+# verify/tests/autoscaler_rule_test.sh proves offline on both shapes.
 check_no_single_map_autoscaler() {
-  if [ -z "${VERIFY_FLEET:-}" ]; then
-    skip "no Agones fleet declared (VERIFY_FLEET empty) -- autoscaler posture UNVERIFIED for this target"
-    return
-  fi
-  local ns="${VERIFY_FLEET%%/*}" name="${VERIFY_FLEET##*/}"
-  if ! k get fleet "$name" -n "$ns" >/dev/null 2>&1; then
-    fail "fleet not found" "$VERIFY_FLEET exists" "absent" \
-      "kubectl --context $KUBE_CONTEXT get fleet -A"
-    return
-  fi
+  local fleets fas rows
+  fleets=$(k get fleet -A -o json 2>/dev/null)
+  fas=$(k get fleetautoscalers -A -o json 2>/dev/null)
 
-  local mapid autos
-  mapid=$(fleet_wide_map_id "$ns" "$name")
-  autos=$(fleet_autoscalers "$ns" "$name" | tr '\n' ' ')
-  autos="${autos% }"
-
-  if [ -z "$mapid" ]; then
-    if [ -n "$autos" ]; then
-      pass "fleet pins no fleet-wide GAMESERVER_MAP_ID, so a spare Ready pod is genuinely spare; autoscaler(s) permitted: $autos"
-    else
-      pass "fleet pins no fleet-wide GAMESERVER_MAP_ID; no autoscaler present (permitted either way)"
+  # VERIFY_FLEET is still asserted to exist: a target that names a fleet which
+  # is not there must not read as "swept the namespaces, found nothing wrong".
+  if [ -n "${VERIFY_FLEET:-}" ]; then
+    local ns="${VERIFY_FLEET%%/*}" name="${VERIFY_FLEET##*/}"
+    if ! FLEETS_JSON="$fleets" FAS_JSON="" classify_fleets "$ns" | grep -q "^${ns}/${name}|"; then
+      fail "fleet not found" "$VERIFY_FLEET exists" "absent" \
+        "kubectl --context $KUBE_CONTEXT get fleet -A"
+      return
     fi
+  fi
+
+  rows=$(FLEETS_JSON="$fleets" FAS_JSON="$fas" classify_fleets "${VERIFY_NAMESPACES:-}")
+  if [ -z "$rows" ]; then
+    skip "no Agones Fleet in ${VERIFY_NAMESPACES:-<no namespaces declared>} -- autoscaler posture UNVERIFIED for this target. This is absence of coverage, not evidence that no autoscaler exists."
     return
   fi
 
-  if [ -n "$autos" ]; then
+  local violations=() summary=() fleet mapid autos
+  while IFS='|' read -r fleet mapid autos; do
+    [ -z "$fleet" ] && continue
+    if [ -n "$mapid" ] && [ -n "$autos" ]; then
+      violations+=("$fleet pins GAMESERVER_MAP_ID=$mapid and is targeted by $autos")
+      continue
+    fi
+    if [ -n "$mapid" ]; then
+      summary+=("$fleet pins $mapid, no autoscaler (correct)")
+    elif [ -n "$autos" ]; then
+      summary+=("$fleet pins no map id, autoscaler permitted: $autos")
+    else
+      summary+=("$fleet pins no map id, no autoscaler (permitted either way)")
+    fi
+  done <<<"$rows"
+
+  if [ ${#violations[@]} -gt 0 ]; then
     fail "FleetAutoscaler on a single-map fleet" \
-      "no FleetAutoscaler targeting $VERIFY_FLEET while its template pins GAMESERVER_MAP_ID=$mapid" \
-      "$autos" \
-      "kubectl --context $KUBE_CONTEXT delete fleetautoscaler <name> -n $ns  # every Ready pod self-registers as a second live server for $mapid (ADR-2/ADR-18); see backend/deploy/docs/K3S.md 'Why there is no autoscaler'"
+      "no FleetAutoscaler targeting a fleet whose template pins a fleet-wide GAMESERVER_MAP_ID" \
+      "$(printf '%s; ' "${violations[@]}")" \
+      "kubectl --context $KUBE_CONTEXT delete fleetautoscaler <name> -n <ns>  # every Ready pod of a map-pinned fleet self-registers as a second live server for that map (ADR-2/ADR-18); see backend/deploy/docs/K3S.md 'Why there is no autoscaler'"
     return
   fi
-  pass "no FleetAutoscaler targets $VERIFY_FLEET, which pins GAMESERVER_MAP_ID=$mapid fleet-wide -- a buffer of Ready pods would be a buffer of live servers for $mapid"
+  pass "$(printf '%s; ' "${summary[@]}")"
 }
 
 # A fleet at its declared size. Agones counts Ready and Allocated separately;
@@ -426,7 +484,7 @@ register cluster.fleet      1 "Agones fleet at its declared size" \
   check_fleet_replicas
 register cluster.autoscaler 1 "no buffer autoscaler on a single-map fleet" \
   "no FleetAutoscaler targets a fleet whose pod template pins one GAMESERVER_MAP_ID for every replica -- on such a fleet a spare Ready pod is a second live server for that map, because the C# server self-registers at startup rather than on allocation (ADR-2, ADR-18)" \
-  "nothing about fleets it does not name, and nothing about a map id supplied per pod via valueFrom -- that case is reported as unpinned and the rule stands down" \
+  "nothing about fleets outside VERIFY_NAMESPACES, and nothing about a map id supplied per pod via valueFrom -- that case is reported as unpinned and the rule stands down. It does NOT say an autoscaler on a map-less fleet is correctly SIZED: buffer sizing is a capacity question and nothing here measures capacity" \
   check_no_single_map_autoscaler
 register cluster.restarts   1 "no recent container restart, and nothing crash-looping" \
   "no container in the target namespaces restarted within the last VERIFY_RESTART_WINDOW seconds (default 1800), and every container is Running right now -- so an active crash loop fails at any age" \

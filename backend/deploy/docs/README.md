@@ -8,7 +8,8 @@ All open-source, $0 license: Docker, k3s, Agones, PostgreSQL, Redis, Grafana, Pr
 | Area | Files | Status |
 |------|-------|--------|
 | Local dev backing stack | `docker-compose.yml`, `nakama-plugin.Dockerfile`, `Makefile`, `.env.example` | ✅ Usable |
-| Agones game server fleet | `agones/fleet-map-dotnet-dev.yaml`, `agones/secret-example.yaml`, `agones/allocation-dev.yaml` | ✅ Authored + server-side dry-run clean. **Never deployed** — ADR-14 stage 4 is the first run |
+| Agones game server fleet (legacy dev, `rpg-realtime`) | `agones/fleet-map-dotnet-dev.yaml`, `agones/secret-example.yaml`, `agones/allocation-dev.yaml` | ✅ Deployed and since **retired** — `dev-up.sh` scales it to 0 on every deploy. Kept as the **rollback target** of `k8s/rollback-to-compose.sh`, which scales it back to 1; that is the only reason these three files still exist (ADR-14 stage 8) |
+| Agones fleets, app tier (`rpg-k8s-realtime`) | `k8s/app/50-fleet-map.yaml`, `k8s/app/60-fleet-dungeon.yaml`, `k8s/app/70-fleetautoscaler-dungeon.yaml` | ✅ Live on `k3d-rpg-dev`. Map fleet `replicas: 1` and **no** autoscaler (ADR-18); dungeon fleet with a Buffer autoscaler, legal there because its pods pin no map id (ADR-26 decision 8) |
 | Build automation | `scripts/build-all.sh` (repo root) | ✅ Usable |
 | CD pipeline | `.github/workflows/cd.yml`, `scripts/deploy-local.sh` | ✅ Two modes: host binaries or full-docker (`vars.DEPLOY_MODE`) |
 | VPS bootstrap | `scripts/bootstrap-vps.sh` | ✅ Docker + deploy user + Actions runner + ufw, idempotent, `--dry-run` |

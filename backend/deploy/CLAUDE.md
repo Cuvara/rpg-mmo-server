@@ -139,7 +139,9 @@ deploy/
     secret-example.yaml         #   Secret template, dev placeholders
     allocation-dev.yaml         #   GameServerAllocation (kubectl create)
     #  no fleet-map/fleet-dungeon (Go images, deleted with the Go server),
-    #  no autoscaler (incoherent for a map fleet — see docs/K3S.md)
+    #  no autoscaler here (incoherent for a map fleet — see docs/K3S.md).
+    #  The ONE FleetAutoscaler in this repo lives in k8s/app/ and targets the
+    #  DUNGEON fleet, whose pods pin no map id (ADR-14 stage 7, ADR-18, ADR-26).
   db/
     init-meta.sql
     init-gamestate.sql

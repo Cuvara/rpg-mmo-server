@@ -1978,6 +1978,29 @@ deployed against it.
 | 7 | Buffer-based `FleetAutoscaler` per decision 5 | S | Yes |
 | 8 | Retire `map-servers-dev` and `dungeon-servers-dev`, and delete the Go-image manifests | S | Deployment only |
 
+> **Stages 7 and 8, 2026-09-13.**
+>
+> **Stage 7 is done, on the DUNGEON fleet and only there.** ADR-18 refused a buffer autoscaler
+> on a fleet that pins one `GAMESERVER_MAP_ID` for every replica and named the fleet shape that
+> would unlock it; the dungeon fleet (ADR-26) is that shape.
+> `deploy/k8s/app/70-fleetautoscaler-dungeon.yaml` is Buffer 2 / 2-6 on a 30s sync, applied
+> after the image pin because a `minReplicas` floor overrides the `replicas: 0` that protects
+> the pin. See the amendment on ADR-18. Decision 5 stands exactly as written: buffer on server
+> count, nothing keyed on players-per-server, because ADR-7's ceiling is still unknown.
+>
+> **Stage 8 was two jobs, and only one of them was still outstanding.** The Go-image manifests
+> (`fleet-map.yaml`, `fleet-dungeon.yaml`, `fleet-map-dev.yaml`, `fleet-dungeon-dev.yaml`,
+> `allocation.yaml`, `autoscaler.yaml`, `autoscaler-dev.yaml`) were deleted in `6281c72`, and
+> `map-servers-dev` / `dungeon-servers-dev` no longer exist on `k3d-rpg-dev` — verified
+> read-only, `kubectl get fleet -A` returns neither. What remains in `deploy/agones/` is
+> **not** a Go fleet: `fleet-map-dotnet-dev.yaml`, `allocation-dev.yaml` and
+> `secret-example.yaml` are the C# dev fleet in `rpg-realtime`, which `dev-up.sh` scales to
+> zero on every deploy and `rollback-to-compose.sh` scales **back to 1** as the documented
+> rollback out of the k8s app tier. Deleting them deletes that rollback, so they stay, and what
+> changed is the documentation that called them live: `deploy/k8s/app/README.md` no longer
+> claims "this does not replace anything", and `docs/K3S.md`'s manifest table — which listed
+> the deleted files twice, in two blocks that disagreed — now lists the three that exist. Stage
+> 8 closes as *retired and documented as the rollback target*, not as *deleted*.
 Stage 5 is the first point at which anything is *proved*. Stages 1-4 reduce risk; they do not
 demonstrate that the thing works.
 
@@ -2645,6 +2668,37 @@ sentence; they are separate paths with separate client messages, tabulated in
 firing by construction, `replicas > 1` becomes a capacity question rather than a correctness
 one, and ADR-14 decision 5's buffer policy becomes the right thing to write — against a fleet
 whose spare pods are spare.
+
+> **Amendment, 2026-09-13 — the revisit happened, from the other direction (ADR-14 stage 7).**
+> Neither mechanism in decision 4 landed for the *map* fleet; what landed instead was a
+> **second fleet** that has the property decision 4 describes from birth. The dungeon fleet
+> (`rpg-k8s-realtime/dungeon-servers-dotnet-k8s`, ADR-26) pins **no** `GAMESERVER_MAP_ID` and
+> its pods register nothing into `servers:map:` (ADR-26 decision 8), so a `Ready` pod there is
+> not claiming a world. `deploy/k8s/app/70-fleetautoscaler-dungeon.yaml` is therefore the first
+> `FleetAutoscaler` in this project: Buffer, `bufferSize: 2`, `minReplicas: 2`,
+> `maxReplicas: 6`, 30s sync.
+>
+> **Nothing above is weakened, and decision 1 is untouched.** The map fleet still pins a
+> fleet-wide map id, still runs `replicas: 1`, and still may not have an autoscaler.
+> Decision 3's check needed **no loosening** to admit the dungeon one: `fleet_wide_map_id`
+> already returned empty for a template with no `GAMESERVER_MAP_ID`, which the check already
+> treated as "not pinned". What it needed was **reach** — it inspected only the single fleet a
+> verify target names, which was every fleet in the cluster when there was one fleet and is
+> half of them now. It sweeps every Fleet in `VERIFY_NAMESPACES` as of the same date.
+>
+> `maxReplicas: 6` is a **leak bound rather than a capacity figure**, and that is the one new
+> piece of reasoning here. ADR-26 records, measured, that a dungeon pod which is Allocated and
+> never joined is never reclaimed. A buffer autoscaler with no ceiling turns that from a
+> visible outage into an unbounded one, because it replaces each leaked pod. The cap is what
+> makes the leak hit a wall an operator can see, and it should not be raised before the bounded
+> join deadline ADR-26 asks for exists. ADR-7 is still untouched: nothing here is keyed on
+> players per server, because that number is still unknown.
+>
+> **A `minReplicas` floor overrides a manual scale, which is an operational rule, not a
+> footnote.** `60-fleet-dungeon.yaml` ships `replicas: 0` so `apply` cannot create a pod on the
+> moving `:develop` tag before `dev-up.sh` pins the image; an autoscaler applied in the same
+> breath defeats that within one sync interval. So the autoscaler is applied **after** the pin,
+> and `K8S_DUNGEON_REPLICAS=0` **deletes** it rather than scaling against it.
 
 ---
 
@@ -3429,6 +3483,15 @@ description is "open-world maps + instanced dungeons"; half of it has no plumbin
   exactly the fleet shape ADR-18 says unlocks `replicas > 1` and a buffer autoscaler. The
   dungeon fleet is therefore the first fleet here that **should** have spare Ready pods, and
   the check must not fail it for having them.
+
+  > **Second look taken, 2026-09-13 (ADR-14 stage 7).** The check did **not** fail a map-less
+  > fleet — it already read a template with no `GAMESERVER_MAP_ID` as unpinned and stood down.
+  > The real gap was narrower and would not have been found by reading the branch: it inspected
+  > only the one fleet a verify target names (`VERIFY_FLEET`), so an autoscaler placed on the
+  > *other* fleet in the namespace was neither refused nor noticed. It now sweeps every Fleet in
+  > `VERIFY_NAMESPACES`. The dungeon fleet's buffer autoscaler shipped with it, and the
+  > maximum is sized against the leak measured above rather than against a concurrency
+  > nobody has run.
 - **Party membership becomes a dependency of the realtime path.** A Nakama outage currently
   stops new logins; after this it also stops dungeon entry, while map play continues. That is
   the correct blast radius and it is worth writing down before someone is surprised by it.
@@ -3492,7 +3555,7 @@ description is "open-world maps + instanced dungeons"; half of it has no plumbin
 | 15 | Realtime tier on k8s | **Proposed, not accepted — prerequisites 1,2,3,4,5,6 now complete (2026-09-04).** StatefulSets/PVCs (done), ConfigMaps + initdb Job (done), Nakama plugin Dockerfile (done), Secrets (done), registry push script + `imagePullSecrets` (done), RBAC (done). The deploy path stays `DEPLOY_MODE=containers`; the manifests are ready but the acceptance decision (LoadBalancer vs hostPort, multi-replica gateway) is still open. ADR-3 is unchanged |
 | 16 | Agones on k3s | Realtime tier **proven** on Agones/k3d: a real client joined an Agones-managed server in strict-address mode. Docker Desktop k8s cannot host it (Kubernetes `hostPort` is never published to the host); k3d with a mapped port range can. The advertised address is **composed** — port from the Agones status read, host from `GAMESERVER_ADVERTISE_HOST` — because `status.address` is the node address and is not dialable. ADR-2 is now enforced in code (allocate only for a map with no live server); the join token is minted only after the pod self-registers. Allocated pods are never reclaimed; the map-fleet allocator policy stays open; the deploy path stays `DEPLOY_MODE=containers` |
 | 17 | Availability posture on k8s | **Statement of posture, not a manifest change.** Every workload in `deploy/k8s/` is **one replica**. `strategy: Recreate` on `hostPort` workloads is **required**. The **gateway→gateway half of the duplicate-login kick is now implemented (2026-09-04)**: `KickConsumer` in `server/kick_consumer.go` consumes `events:gateway_kick` via per-instance consumer group `gw:{gateway_id}`, closes the old user's socket when `old_gateway_id` matches. Remaining before multi-replica: answer the hostPort exposure question (LoadBalancer/Ingress), cross-instance single-flight (ADR-16), and Redis persistence/replication (ADR-4) |
-| 18 | Fleet autoscaling | **No `FleetAutoscaler` on a fleet that pins one `GAMESERVER_MAP_ID` for every replica.** The C# server self-registers at startup, not on allocation, so a "spare" Ready pod is a second live server for that map: measured on k3d 2026-08-18, scaling `1 -> 2` put two members into `servers:map:map_01` 5.4s later with no allocation involved, and `FindServer` hands clients one of them (the least-loaded then; the lowest `ServerID` since #203). `ready=0` is therefore the correct steady state and tooling says so instead of warning. Enforced by `verify.sh` check `cluster.autoscaler` (FAIL), which stands down for a fleet with a per-pod map id. `replicas > 1` and a buffer autoscaler unlock together, on a per-pod map id or on registering at `Allocated` rather than `Ready` — an autoscaler does nothing for the "second map cannot be served" symptom, which is a fleet-targeted-allocation problem |
+| 18 | Fleet autoscaling | **No `FleetAutoscaler` on a fleet that pins one `GAMESERVER_MAP_ID` for every replica.** The C# server self-registers at startup, not on allocation, so a "spare" Ready pod is a second live server for that map: measured on k3d 2026-08-18, scaling `1 -> 2` put two members into `servers:map:map_01` 5.4s later with no allocation involved, and `FindServer` hands clients one of them (the least-loaded then; the lowest `ServerID` since #203). `ready=0` is therefore the correct steady state and tooling says so instead of warning. Enforced by `verify.sh` check `cluster.autoscaler` (FAIL), which stands down for a fleet with a per-pod map id. `replicas > 1` and a buffer autoscaler unlock together, on a per-pod map id or on registering at `Allocated` rather than `Ready` — an autoscaler does nothing for the "second map cannot be served" symptom, which is a fleet-targeted-allocation problem. **Amended 2026-09-13:** the unlock arrived as a *second fleet* rather than as either mechanism — the dungeon fleet pins no map id, so it carries the project's first `FleetAutoscaler` (Buffer 2/2-6, 30s). The map fleet's prohibition is unchanged and the check was not loosened to allow it; it was widened to sweep **every** fleet in the target namespaces instead of only the one a target names. `maxReplicas` is a bound on ADR-26's measured instance leak, not a capacity figure |
 | 19 | Game content | **Content is JSON on disk in `backend/content/`, owned by the game server, served to clients over HTTP at `/content` and never carried by the `Shared.GameLogic` package.** The package is pinned by exact commit, so content in it costs a tag plus two file bumps per balance tweak — correct for simulation rules, fatal for content. The server loads and validates at boot and **refuses to start** on invalid content, reporting every fault in one pass. Clients send `?hash=` and get `304` once they hold the current set; the hash ships in both `ETag` and `X-Content-Hash` because `UnityWebRequest` and some proxies strip the former. The **schema and validator are shared** (`Shared.GameLogic/Content/`), the **parser is not** — Unity compiles the package as source and has no `System.Text.Json`, the server is NativeAOT and cannot reflect, so no single parser satisfies both; golden vectors cover the gap as in ADR-10. No hot reload: content changes need a restart, because rules changing under a running simulation makes every desync unreproducible |
 | 20 | Duplicate-login kick | **Gateway→gameserver eviction over one shared `events:kick` Stream, keyed by join-token jti** (ADR-5 consumer-group ACK, never Pub/Sub). On duplicate login the gateway publishes `session_superseded` with the old session's jti; each game server consumes via its own group (`gs:{server_id}`, created at `$`, destroyed on graceful shutdown), kicks only the connection holding that jti (newest login wins, redelivery idempotent), releases the entity with **no reconnect hold**, and sends the standard `MsgKick`+`MsgDisconnect` pair. One shared stream because server ids churn under a noeviction Redis (ADR-4). Counters: `gateway_kick_publish_total`, `gameserver_players_kicked_total`. The gateway→gateway socket eviction stays with ADR-17 |
 | 21 | Transport confidentiality | **Proposed, not accepted — a record of posture only.** KCP has real AES-256-CFB packet encryption, kcp-go-compatible and symmetric across Go and C# (`KcpCrypto.cs` / `shared/transport/crypto.go`), fail-closed on a wrong key. But it is **off by default twice** — the transport default is `tcp`, which has no encryption path, and the key variable defaults to empty, which means plaintext — and a **pre-shared key is not a session key**: every client shares one static secret that ships in the binary, so it resists a passive observer and not a player. No negotiation, no key id, no rotation without a hard cutover; CFB plus a linear CRC32 is confidentiality, not authentication, and the CRC is not a MAC. Deferred because every current environment is localhost/LAN and the hosting shape above dev is unsettled (ADR-15/16) — choosing an AEAD and a key exchange now means choosing them twice. **Reporting the transport and whether a key is in force does not wait for that decision.** Do not describe this link as "unencrypted"; describe it as unencrypted by default and unauthenticated when on |
