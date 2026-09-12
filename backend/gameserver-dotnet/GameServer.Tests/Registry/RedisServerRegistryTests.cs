@@ -43,7 +43,7 @@ public class RedisServerRegistryTests
         await using var _ = reg;
 
         string serverId = $"gs-shape-{Guid.NewGuid():N}"[..16];
-        await reg.RegisterAsync(Info(serverId, "map_shape", players: 7), default);
+        await reg.RegisterAsync(Info(serverId, "map_shape", players: 7), RegistrationScope.MapIndexed, default);
 
         var db = mux.GetDatabase();
         var hash = (await db.HashGetAllAsync($"servers:id:{serverId}"))
@@ -93,7 +93,7 @@ public class RedisServerRegistryTests
         var db = mux.GetDatabase();
 
         string serverId = $"gs-hb-{Guid.NewGuid():N}"[..16];
-        await reg.RegisterAsync(Info(serverId, "map_hb"), default);
+        await reg.RegisterAsync(Info(serverId, "map_hb"), RegistrationScope.MapIndexed, default);
 
         // Let some of the TTL burn off, then prove the heartbeat re-arms it.
         //
@@ -133,7 +133,7 @@ public class RedisServerRegistryTests
         var db = mux.GetDatabase();
 
         string serverId = $"gs-exp-{Guid.NewGuid():N}"[..16];
-        await reg.RegisterAsync(Info(serverId, "map_exp"), default);
+        await reg.RegisterAsync(Info(serverId, "map_exp"), RegistrationScope.MapIndexed, default);
         Assert.True(await db.KeyExistsAsync($"servers:id:{serverId}"));
 
         await Task.Delay(1800);
@@ -150,7 +150,7 @@ public class RedisServerRegistryTests
         var db = mux.GetDatabase();
 
         string serverId = $"gs-dereg-{Guid.NewGuid():N}"[..16];
-        await reg.RegisterAsync(Info(serverId, "map_dereg"), default);
+        await reg.RegisterAsync(Info(serverId, "map_dereg"), RegistrationScope.MapIndexed, default);
 
         await reg.DeregisterAsync(serverId, "map_dereg", default);
 
@@ -167,7 +167,7 @@ public class RedisServerRegistryTests
         var db = mux.GetDatabase();
 
         string serverId = $"gs-count-{Guid.NewGuid():N}"[..16];
-        await reg.RegisterAsync(Info(serverId, "map_count"), default);
+        await reg.RegisterAsync(Info(serverId, "map_count"), RegistrationScope.MapIndexed, default);
 
         Assert.True(await reg.UpdatePlayerCountAsync(serverId, 42, default));
         Assert.Equal("42", (await db.HashGetAsync($"servers:id:{serverId}", "player_count")).ToString());

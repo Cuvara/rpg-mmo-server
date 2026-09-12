@@ -489,11 +489,79 @@ All validation is server-authoritative:
 ## Disconnect and Reconnect
 
 - On TCP disconnect, the server holds the player entity for a grace period:
-  **30 seconds** on map servers, **60 seconds** on dungeon servers.
+  **30 seconds** on map servers, **60 seconds** on dungeon servers. The window is
+  `ServerOptions.HoldTtl` and nothing else — the composition root derives it from
+  `--mode`, so there is one place to read it and one place to change it.
 - During the hold, the entity is marked inactive (no AI targeting, no damage).
 - If the client reconnects with a valid session token within the window, it
   resumes with full state. Otherwise the entity is removed and the session is
   invalidated.
+
+## Dungeon mode
+
+`--mode=dungeon` selects an **instanced** server: one live world per party, not one per
+map id. Three behaviours besides the longer reconnect hold hang off it, all of them
+implementing ADR-26, and all of them gated in exactly one place each.
+
+### It does not appear in the map index (decision 8)
+
+The registry holds two keys. `servers:id:{server_id}` is a HASH and the source of truth:
+it carries the dialable composed address and the heartbeat TTL. `servers:map:{map_id}` is
+a SET, and it is the index the gateway's `FindServer` searches.
+
+A dungeon pod writes the **hash** — the gateway allocates the pod, learns its name, and
+then waits for exactly that hash to appear so it can read the address — and never joins
+the **index**. An indexed instance would be handed to an unrelated player as if it were a
+map, and a dungeon fleet pins no `GAMESERVER_MAP_ID`, so the key it wrote would be the
+empty one. Heartbeat, TTL and the re-register-on-wipe repair are unchanged: they all live
+on the hash.
+
+Expressed as `RegistrationScope` (`MapIndexed` / `HashOnly`), passed to
+`IServerRegistry.RegisterAsync`. `GameServerHost` narrows the scope itself from the mode,
+so a caller that builds `RegistrationOptions` without thinking about dungeons cannot get
+this wrong.
+
+### It does not persist `map_id` or position (decision 5)
+
+`player_states` holds **one row per player** with a single `map_id`, and
+`PlayerSpawn.Resolve` discards saved coordinates whose row belongs to another map. A
+dungeon server saving the row in full would therefore stamp the dungeon's id over the
+player's origin map, and their next join on that map would put them at its **spawn point**
+instead of where they left — a silent, permanent teleport as the price of a dungeon run.
+
+In dungeon mode `AsyncSaver` runs at `PlayerSaveScope.StatsOnly` and calls
+`IPlayerStore.SavePlayerStatsAsync`, which writes HP and max HP and leaves `map_id`, `x`
+and `y` untouched. `PostgresPlayerStore` expresses that as a single upsert whose
+`DO UPDATE` clause names only `hp` and `max_hp`, so the merge is atomic. A player with no
+row yet gets one with an **empty** map id, which `PlayerSpawn.SameMap` reads as
+unattributable — the same spawn-point outcome as no row at all, with the HP preserved.
+
+**The stated cost**: position inside a dungeon is not durable. A disconnect past the 60s
+hold returns the player to the origin map where they stood, not to the dungeon. There is
+deliberately no second row per player, and no encounter-level checkpoint — ADR-26
+decision 4 defers that until there is an encounter worth losing.
+
+### It shuts itself down when it empties (decision 6)
+
+After the last member leaves **and** that member's hold expires with no reconnect, the pod
+reports `Shutdown` to the Agones sidecar and ends its own run. Not on a timer and not by
+an external reaper: the pod is the only party that knows both facts, and a dungeon pod
+that outlives its party can never be allocated again, because the gateway keys allocation
+on a party that no longer exists.
+
+The rule is `GameServerHost.ShouldShutdownEmptyInstance`, and every term of it is there to
+stop a specific wrong shutdown:
+
+| Term | Without it |
+|------|-----------|
+| dungeon mode | a map server would end itself the moment it emptied |
+| has ever had a player | a freshly scheduled pod would shut down at boot, racing the party to its own instance |
+| no live connections | somebody is still playing |
+| no pending holds | two members leaving together: the first hold to expire would take the pod down while the second is still inside their reconnect window |
+
+It is evaluated after a hold expires and after a duplicate-login kick (which removes an
+entity outright and schedules no hold of its own, so nothing else would notice that the
+last member had gone).
 
 ### Measured constants (2026-08-12)
 

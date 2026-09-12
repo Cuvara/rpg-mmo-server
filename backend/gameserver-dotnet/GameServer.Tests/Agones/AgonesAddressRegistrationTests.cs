@@ -663,9 +663,13 @@ public class AgonesAddressRegistrationTests
         /// <summary>The first entry written — the one a gateway could read before any repair.</summary>
         public ServerInfo? FirstRegistered => Registered.TryPeek(out var info) ? info : null;
 
-        public Task RegisterAsync(ServerInfo info, CancellationToken ct)
+        /// <summary>The scope of the most recent registration.</summary>
+        public RegistrationScope? LastScope { get; private set; }
+
+        public Task RegisterAsync(ServerInfo info, RegistrationScope scope, CancellationToken ct)
         {
             if (RegisterSequence == 0) RegisterSequence = _clock.Next();
+            LastScope = scope;
             Registered.Enqueue(info);
             Registered1.TrySetResult();
             return Task.CompletedTask;

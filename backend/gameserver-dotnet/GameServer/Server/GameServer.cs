@@ -397,6 +397,14 @@ public sealed class GameServerHost : IAsyncDisposable
     /// <summary>0 until the first ShutdownAsync caller wins the race, 1 afterwards.</summary>
     private int _shutdownStarted;
 
+    /// <summary>
+    /// Whether a teardown has been started. True as soon as a caller wins the race in
+    /// <see cref="ShutdownAsync"/>, i.e. well before the teardown finishes — so a test
+    /// asserting that a server has NOT decided to stop does not have to outwait the 2s
+    /// client drain to find out.
+    /// </summary>
+    public bool ShutdownStarted => Volatile.Read(ref _shutdownStarted) != 0;
+
     /// <summary>0 until the first player join has reported Allocate to Agones, 1 afterwards.</summary>
     private int _allocateReported;
 
@@ -406,6 +414,30 @@ public sealed class GameServerHost : IAsyncDisposable
 
     /// <summary>Entity hold timers for reconnect (user ID -> hold CTS).</summary>
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _holds = new();
+
+    /// <summary>
+    /// Whether this process is an instanced dungeon rather than an open-world map. Read
+    /// once from <see cref="ServerOptions.Mode"/>, because three separate behaviours hang
+    /// off it (ADR-26 decisions 5, 6 and 8) and a string compare at each of them is three
+    /// chances to spell it differently.
+    /// </summary>
+    private readonly bool _isDungeon;
+
+    /// <summary>The one spelling of dungeon mode. Case-insensitive; everything else is a map.</summary>
+    /// <param name="mode">The configured <c>--mode</c> value.</param>
+    /// <returns>True when <paramref name="mode"/> selects an instanced dungeon.</returns>
+    internal static bool IsDungeonMode(string? mode) =>
+        string.Equals(mode, "dungeon", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>0 until a player has joined this process, 1 afterwards. Never resets.</summary>
+    private int _everHadPlayer;
+
+    /// <summary>
+    /// Whether any player has ever joined this process. A dungeon pod that has not had one
+    /// yet is a pod waiting for its party, not an empty instance — see
+    /// <see cref="ShouldShutdownEmptyInstance"/>.
+    /// </summary>
+    public bool EverHadPlayer => Volatile.Read(ref _everHadPlayer) != 0;
 
     /// <summary>
     /// Entities currently in the world — the exact value the <c>gameserver_entities</c>
@@ -475,6 +507,7 @@ public sealed class GameServerHost : IAsyncDisposable
     public GameServerHost(ServerOptions options)
     {
         _options = options;
+        _isDungeon = IsDungeonMode(options.Mode);
         _loggerFactory = options.LoggerFactory ?? Microsoft.Extensions.Logging.LoggerFactory.Create(b =>
             b.AddConsole().SetMinimumLevel(LogLevel.Information));
         _logger = _loggerFactory.CreateLogger<GameServerHost>();
@@ -626,7 +659,12 @@ public sealed class GameServerHost : IAsyncDisposable
             options.MapId,
             options.SaveInterval,
             _loggerFactory.CreateLogger<AsyncSaver>(),
-            _metrics);
+            _metrics,
+            // A dungeon instance writes HP and nothing else. Writing the row in full here
+            // would stamp the instance's id over the player's origin map, and they would
+            // come back to that map's spawn point rather than where they left — a silent
+            // permanent teleport as the price of a dungeon run (ADR-26 decision 5).
+            _isDungeon ? PlayerSaveScope.StatsOnly : PlayerSaveScope.Full);
 
         if (options.ServerRegistry != null)
         {
@@ -636,9 +674,18 @@ public sealed class GameServerHost : IAsyncDisposable
                     $"{nameof(ServerOptions.Registration)} is required when {nameof(ServerOptions.ServerRegistry)} is set",
                     nameof(options));
             }
+
+            // The MODE decides the scope, not the composition root: a dungeon pod must
+            // never reach the map index, whoever built the options and whatever they put
+            // in them (ADR-26 decision 8). The hash is still written — it is where the
+            // gateway reads this instance's dialable address from.
+            var registration = _isDungeon
+                ? options.Registration with { Scope = RegistrationScope.HashOnly }
+                : options.Registration;
+
             _registration = new RegistrationService(
                 options.ServerRegistry,
-                options.Registration,
+                registration,
                 () => _connections.Count,
                 _loggerFactory.CreateLogger<RegistrationService>());
         }
@@ -1356,6 +1403,10 @@ public sealed class GameServerHost : IAsyncDisposable
             // or down Redis must never delay a player entering the world.
             _registration?.NotifyPlayerCountChanged();
             NotifyAgonesAllocatedOnce();
+            // Latched here, next to the Agones allocate report, because it means the same
+            // thing: this process has served a player. A dungeon instance that empties may
+            // shut itself down; one that has never filled may not (ADR-26 decision 6).
+            Volatile.Write(ref _everHadPlayer, 1);
             _logger.LogInformation("Player {UserId} joined (total: {Count})", userId, _connections.Count);
 
             // Step 5: Send JoinTokenResp
@@ -1805,6 +1856,10 @@ public sealed class GameServerHost : IAsyncDisposable
             _world.RemoveEntity(userId);
             _metrics?.PlayerLeft();
             _registration?.NotifyPlayerCountChanged();
+
+            // A kick removes the entity outright and schedules no hold, so nothing else
+            // would ever notice that this was the last member of the party.
+            ShutdownIfInstanceFinished();
         }
         conn.Close();
 
@@ -1820,6 +1875,68 @@ public sealed class GameServerHost : IAsyncDisposable
         var resp = WireProtocol.NewEnvelope(MsgType.TransferMapResp,
             new TransferMapResponse { Ok = false, Error = error }, conn.Encoding);
         await conn.WriteOneAsync(resp);
+    }
+
+    /// <summary>
+    /// Whether an instance that has just lost an entity should now end its own process.
+    ///
+    /// <para>Pure, and static, so the rule can be tested exhaustively without a socket:
+    /// every one of the four conditions below has a case that gets it wrong, and three of
+    /// them are races that are painful to stage against a live host.</para>
+    ///
+    /// <list type="bullet">
+    ///   <item><b>Dungeon only.</b> A map server is long-lived by definition (ADR-2, one
+    ///   live server per map id); an empty map is a quiet map, not a finished one.</item>
+    ///   <item><b>It must have had a player.</b> Otherwise a freshly scheduled pod shuts
+    ///   itself down at boot, before the party it was allocated for can dial in.</item>
+    ///   <item><b>No live connections.</b> Somebody is still playing.</item>
+    ///   <item><b>No pending holds.</b> Two members leaving together schedule two holds;
+    ///   the first to expire must not take the pod down while the second is still inside
+    ///   its 60s reconnect window.</item>
+    /// </list>
+    /// </summary>
+    /// <param name="isDungeon">Whether this process runs an instanced dungeon.</param>
+    /// <param name="everHadPlayer">Whether any player has ever joined this process.</param>
+    /// <param name="connections">Live player connections right now.</param>
+    /// <param name="pendingHolds">Reconnect holds still running right now.</param>
+    /// <returns>True when the instance is finished and should report Shutdown to Agones.</returns>
+    internal static bool ShouldShutdownEmptyInstance(
+        bool isDungeon, bool everHadPlayer, int connections, int pendingHolds) =>
+        isDungeon && everHadPlayer && connections == 0 && pendingHolds == 0;
+
+    /// <summary>
+    /// End the process when this dungeon instance has emptied for good.
+    ///
+    /// <para>Called from the paths that can leave the world without players: a reconnect
+    /// hold expiring, and a duplicate-login kick (which removes the entity outright and so
+    /// schedules no hold of its own). The pod is the only party that knows both that the
+    /// last member left and that their hold lapsed without a reconnect, which is why this
+    /// is neither a timer nor an external reaper (ADR-26 decision 6).</para>
+    ///
+    /// <para><see cref="ShutdownAsync"/> is idempotent and reports <c>Shutdown</c> to the
+    /// Agones sidecar at its tail, so this adds no second teardown path — it only decides
+    /// when the existing one runs. Fire-and-forget: the caller is a hold task, and the
+    /// teardown it starts drains connections and waits on the final save.</para>
+    /// </summary>
+    private void ShutdownIfInstanceFinished()
+    {
+        if (!ShouldShutdownEmptyInstance(_isDungeon, EverHadPlayer, _connections.Count, _holds.Count))
+            return;
+        if (Volatile.Read(ref _shutdownStarted) != 0)
+            return;
+
+        _logger.LogInformation(
+            "Dungeon instance {ServerId} is empty and the last reconnect hold has expired; shutting down",
+            _options.ServerId);
+
+        _ = Task.Run(async () =>
+        {
+            try { await ShutdownAsync(); }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Dungeon instance shutdown failed for {ServerId}", _options.ServerId);
+            }
+        });
     }
 
     /// <param name="countedOnline">
@@ -1858,9 +1975,11 @@ public sealed class GameServerHost : IAsyncDisposable
             return;
         }
 
-        var holdTtl = _options.Mode == "dungeon"
-            ? TimeSpan.FromSeconds(60)
-            : _options.HoldTtl;
+        // One source for the window: ServerOptions.HoldTtl, which the composition root
+        // already sets to 60s for a dungeon and 30s for a map. It used to be hardcoded to
+        // 60s here as well, so a dungeon host could not be given a shorter window — which
+        // made the empty-instance shutdown below untestable without a real 60s wait.
+        var holdTtl = _options.HoldTtl;
 
         var holdCts = new CancellationTokenSource();
         // Replace rather than overwrite: a superseded hold's CTS would otherwise never
@@ -1898,6 +2017,10 @@ public sealed class GameServerHost : IAsyncDisposable
                 {
                     _world.RemoveEntity(userId);
                     _logger.LogInformation("Entity hold expired for {UserId}, entity removed", userId);
+
+                    // Checked AFTER the removal above, so the hold this task owns is
+                    // already out of _holds and cannot count itself as a reason to stay.
+                    ShutdownIfInstanceFinished();
                 }
                 else
                 {
