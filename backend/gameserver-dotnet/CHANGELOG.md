@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Roadmap A4: the accepted-attack rate is audited per account** --
+  `GameServer/Input/AttackRateAudit.cs`, wired at the one site in `InputHandler` where an
+  attack passes validation, surfaced as `gameserver.combat.attack_rate.violations` and
+  `/status attack_rate_violations`. **Record-only: it never acts on a player**, for the same
+  reason `InputAnomalyTracker` does not -- no threshold here has a measured false-positive
+  rate against real players yet.
+
+  **What it is for, stated without overselling it.** `CombatLogic.ValidateAttack` compares
+  the simulation tick against `CooldownUntilTick`, which lives on the attacker's *entity*.
+  That is exact for one entity and structurally blind to anything that hands an account a
+  different one, and `PlayerState` persists `UserId, X, Y, Hp, MaxHp, MapId` -- not the
+  cooldown. **No live exploit is claimed:** a reconnect inside the hold window reattaches
+  the same entity with its cooldown intact (`Server/GameServer.cs`, "Acquire or reattach
+  entity"), and the two routes that do yield a fresh entity -- a map transfer, which removes
+  the entity with no hold, and an absence past the hold TTL -- both cost far more time than
+  the 500 ms cooldown they reset. The value is the blind spot itself: an account exceeding
+  the rate through any such route is **never refused**, so A1's per-reason counters and A2's
+  anomaly score stay silent throughout, and this is the only counter that would move.
+
+  Measured in **simulation ticks, never wall-clock** -- the cooldown it audits is
+  tick-based, and this host's `CLOCK_REALTIME` runs 10-17% fast and has been observed
+  stepping backwards (#153). The window is a true sliding one: a tumbling window lets a
+  client land twice the permitted rate across a boundary and calls it compliant, which is
+  the exact rate an entity reset produces. Keyed on the **account**, so two honest players
+  are not added together and one account on two connections is not split apart.
+
+  `AttackRateAuditSeamTests` proves the blindness rather than asserting it: running a real
+  `EcsWorld` and a real `InputHandler`, with the entity replaced between swings, the
+  validator **accepts every attack and rejects none** at eight times the permitted rate,
+  and only the audit flags it. Its negative control -- identical input, one entity -- is
+  refused by the cooldown and flags nothing. Both the "never flags" and "wrong window"
+  mutations of the audit fail the unit tests, with different failure counts.
+
 ### Documentation
 - **`ROADMAP-SECURITY.md` §1.2 said A1, A2 and A3 were missing; all three had shipped.**
   The table was written when all six anti-cheat gaps were open and was never struck off as

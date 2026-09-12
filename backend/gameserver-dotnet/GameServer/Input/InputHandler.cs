@@ -84,6 +84,13 @@ public sealed class InputHandler
     /// </remarks>
     private readonly Action<string, InputRejectionReason>? _onRejected;
 
+    /// <summary>
+    /// Called with the ACCOUNT id for every attack that passed validation, so the accepted
+    /// rate can be audited across connections. Wired by the host; null in the tests that
+    /// construct this handler directly.
+    /// </summary>
+    private readonly Action<string, ulong>? _onAttackAccepted;
+
     /// <summary>Report a refused input. Cheap when nothing is listening.</summary>
     private void Reject(string userId, InputRejectionReason reason) =>
         _onRejected?.Invoke(userId, reason);
@@ -134,12 +141,14 @@ public sealed class InputHandler
         DeathHandler? onDeath = null,
         int tickRate = GameConstants.DefaultTickRate,
         MapBounds? bounds = null,
-        Action<string, InputRejectionReason>? onRejected = null)
+        Action<string, InputRejectionReason>? onRejected = null,
+        Action<string, ulong>? onAttackAccepted = null)
     {
         _world = world;
         _logger = logger;
         _onDeath = onDeath;
         _onRejected = onRejected;
+        _onAttackAccepted = onAttackAccepted;
         _deltaTime = MovementSystem.DeltaTimeForTickRate(
             tickRate > 0 ? tickRate : GameConstants.DefaultTickRate);
         _bounds = bounds ?? MapBounds.Default;
@@ -561,6 +570,12 @@ public sealed class InputHandler
                 if (attackErr == null)
                 {
                     Attacks.Accepted++;
+
+                    // The audit sees the ACCEPTED attack, not the refused one. ValidateAttack
+                    // has just confirmed this attack is legal for this entity; whether the
+                    // ACCOUNT should have been able to land it this soon is a question no
+                    // per-entity check can answer -- see AttackRateAudit.
+                    _onAttackAccepted?.Invoke(userId, currentTick);
                     int damage = CombatLogic.CalculateDamage(in attacker, in t);
                     t.Hp -= damage;
 

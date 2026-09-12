@@ -328,6 +328,12 @@ public sealed class GameServerHost : IAsyncDisposable
     private readonly Input.InputAnomalyTracker _anomalies = new();
 
     /// <summary>
+    /// Audits the ACCEPTED attack rate per account. Constructed in the body rather than
+    /// initialised here because it needs the resolved tick rate.
+    /// </summary>
+    private readonly Input.AttackRateAudit _attackRates;
+
+    /// <summary>
     /// Frame arrival-order measurement for ADR-22's open question on whether the
     /// nonce-as-sequence rule needs a sliding window.
     /// </summary>
@@ -460,6 +466,9 @@ public sealed class GameServerHost : IAsyncDisposable
     /// </summary>
     public Input.InputAnomalyTracker Anomalies => _anomalies;
 
+    /// <summary>The accepted-attack-rate audit (roadmap A4). Observation only.</summary>
+    public Input.AttackRateAudit AttackRates => _attackRates;
+
     /// <summary>Frame arrival-order measurement. See <see cref="Observability.FrameOrderProbe"/>.</summary>
     public Observability.FrameOrderProbe FrameOrder => _frameOrder;
 
@@ -527,6 +536,12 @@ public sealed class GameServerHost : IAsyncDisposable
         SimulationRates rates = options.SimulationRates ?? SimulationRates.Uniform(options.TickRate);
         _rates = rates;
 
+        // Same two inputs the per-attack cooldown uses, so the audit's bound is derived
+        // from the rule it is auditing rather than restated next to it.
+        _attackRates = new Input.AttackRateAudit(
+            rates.MovementHz,
+            Shared.GameLogic.Components.GameConstants.AttackCooldownTicks(rates.MovementHz));
+
         _inputHandler = new InputHandler(
             _world,
             _loggerFactory.CreateLogger<InputHandler>(),
@@ -561,6 +576,20 @@ public sealed class GameServerHost : IAsyncDisposable
                         "Observation only, no action taken.",
                         userId, InputRejection.Label(reason));
                     _metrics?.RecordAnomalyAlert();
+                }
+            },
+            // Accepted attacks feed the rate audit. Keyed on the account so it survives the
+            // reconnect that resets the entity's cooldown -- which is the hole it exists to
+            // see (AttackRateAudit).
+            (userId, tick) =>
+            {
+                if (_attackRates.RecordAccepted(userId, tick))
+                {
+                    _logger.LogWarning(
+                        "Accepted attack rate for {UserId} exceeded what the cooldown permits " +
+                        "({Permitted} in {Window} ticks). Observation only, no action taken.",
+                        userId, _attackRates.Permitted, _attackRates.WindowTicks);
+                    _metrics?.RecordAttackRateViolation();
                 }
             });
 

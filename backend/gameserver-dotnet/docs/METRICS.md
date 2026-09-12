@@ -247,12 +247,30 @@ cardinality a client could mint on demand.
 `gameserver_input_anomaly_alerts_total` — times an account's decaying score first crossed
 the alert threshold. **Observation only; no player is ever acted on.**
 
+`gameserver_combat_attack_rate_violations_total` — times an ACCOUNT landed more **accepted**
+attacks inside the audit window than one entity's cooldown permits. **Observation only; no
+player is ever acted on.**
+
+Read it differently from the rejection counters, because it is their complement rather than
+more of the same. Every attack counted here **passed validation** — the per-attack cooldown
+check is exact for one entity and blind to anything that hands an account a different one,
+and nothing persists a cooldown across entities. So an account exceeding the rate through
+such a route produces **no rejections at all**: `inputs_rejected` and the anomaly score
+stay flat, and this is the only series that moves.
+
+A non-zero value is not evidence of a known exploit — today a reconnect reattaches the same
+entity, cooldown intact, and the routes that do yield a fresh one cost more time than the
+500 ms cooldown they reset. Treat a rise as "a path that should not exist now does",
+whether that path is a cheat or a bug of ours.
+
 ### `/status`
 
 `inputs_rejected`, `inputs_rejected_by_reason` (every reason, always, including zeros),
 `anomaly_accounts_tracked`, `anomaly_accounts_over_threshold`, `anomaly_alerts`,
 `anomaly_accounts_dropped`, and `anomaly_top_accounts` — the per-account breakdown, which
 cannot be a metric label without unbounded cardinality.
+
+`attack_rate_violations` — the same count as the metric above.
 
 `anomaly_top_accounts` is ordered **by score, not by rejection count**. The account with
 the most rejections is usually the one with the worst connection, and putting that player
