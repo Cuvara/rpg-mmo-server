@@ -3507,7 +3507,8 @@ description is "open-world maps + instanced dungeons"; half of it has no plumbin
   stops new logins; after this it also stops dungeon entry, while map play continues. That is
   the correct blast radius and it is worth writing down before someone is surprised by it.
 - **An allocation that never becomes a session leaks the instance. MEASURED, not predicted.
-  CLOSED 2026-09-13 by a bounded join deadline.**
+  CLOSED 2026-09-13 by a bounded join deadline, and the fix is MEASURED on dev rather than
+  only unit-tested.**
   Decision 6's rule is `isDungeon && everHadPlayer && connections == 0 && pendingHolds == 0`,
   and `everHadPlayer` is there to stop a fresh pod shutting down at boot before its party
   arrives. The cost of that term was that a pod which is **allocated and then never joined**
@@ -3518,6 +3519,21 @@ description is "open-world maps + instanced dungeons"; half of it has no plumbin
   pods were released by hand. In production the same shape is a client that receives
   `{ServerAddr, JoinToken}` and dies before dialling: crash, kill, lost connectivity. That is
   not rare.
+
+  **The live proof, 2026-09-13 on `k3d-rpg-dev`.** The two probe runs that leaked the fleet
+  permanently the day before were repeated against the fix, watching the fleet every 20s:
+
+  ```
+  [t+20s]  4 gs | 4mj9f:Allocated  q8n49:Allocated  g4mmx:Ready  n8tz4:Ready
+  [t+80s]  4 gs | 4mj9f:Allocated  q8n49:Allocated  g4mmx:Ready  n8tz4:Ready
+  [t+100s] 2 gs | ml7ds:Ready      n8tz4:Ready
+  ```
+
+  Both leaked instances released themselves between t+80s and t+100s -- the 90s deadline --
+  and the fleet returned to its buffer. The same observation is the first live evidence for
+  ADR-18's autoscaler on this fleet: four GameServers at t+20s is two allocated plus the
+  **two Ready spares the buffer maintains**, converging back to two once the allocations went
+  away. Neither mechanism had been run on a cluster before this.
 
   **What closed it.** A second rule, `GameServerHost.ShouldShutdownUnjoinedInstance`, and
   **not** another term in decision 6's -- the pod cannot distinguish "my party has not arrived
