@@ -5,6 +5,38 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`cmd/dungeonprobe`: proves ADR-26 end to end against a running deployment.** A real party
+  created through Nakama's RPCs, entering a dungeon through the real gateway.
+
+  It exists because the unit tests on both sides can only prove their own halves: the
+  gateway's drive a fake party authority and a fake allocator, the Nakama module's drive an
+  in-process storage double. Neither can answer the question that matters -- do two players
+  who joined the same party through Nakama land on the **same pod**?
+
+  **The verdict is the address.** Not "both calls succeeded": two successful calls returning
+  two different pods is precisely the failure ADR-26 decision 2 exists to prevent, and it
+  looks like success from every angle except that one.
+
+  The negative control runs **first**, before the members enter. It is the security assertion,
+  and an assertion placed after everything else is the one that gets skipped on the day it
+  would have fired; it also needs no allocated pod, so it still runs and still means something
+  against a fleet scaled to zero. It asserts not just that the outsider is refused but that the
+  refusal **names the party** -- "all servers busy" there would be a pass-looking result from a
+  gateway that never checked at all.
+
+  **Measured on dev, 2026-09-12**, with the dungeon fleet at `replicas: 0`:
+  ```
+  party created: 0615e1c3faf6fb9bff4574a91b2518de (leader)
+  member joined the same party
+  outsider refused, and the reason names the party: "not a member of that party"
+  FAILED: enter world rejected: all servers busy, retry shortly
+  ```
+  The first three lines are the live proof that the party RPCs and the gateway's
+  membership check work against a real Nakama -- the Nakama module's own author could not
+  verify that, having never loaded the plugin. The fourth is the expected answer from an
+  empty fleet and is what the game-server half of ADR-26 unblocks.
+
 ### Fixed
 - **`killprobe` spoke JSON, so turning sealing on broke it.** The day `GAMESERVER_SEALED`
   flipped to `require` on dev, the reward acceptance harness stopped working:
