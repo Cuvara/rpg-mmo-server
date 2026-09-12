@@ -25,7 +25,7 @@ Read first: ADR-16 (what shipped and how it was proven), ADR-15 decision 3
 | `30-secret-template.yaml` | Template. `jwt-secret`, `join-token-secret` (**different values**), `redis-password`, `game-db-url`, `transport-key` |
 | `40-gateway.yaml` | Gateway Deployment + NodePort Service (client) + ClusterIP Service (metrics) |
 | `50-fleet-map.yaml` | `map-servers-dotnet-k8s` Fleet, `replicas: 1`, dynamic port, health on, no autoscaler |
-| `60-fleet-dungeon.yaml` | `dungeon-servers-dotnet-k8s` Fleet, `replicas: 2`, **no `GAMESERVER_MAP_ID`**, capacity 8. Its pods register no map and are allocated to a party (ADR-26); spare Ready pods are correct on this fleet and wrong on the one above |
+| `60-fleet-dungeon.yaml` | `dungeon-servers-dotnet-k8s` Fleet, **`replicas: 0` in the manifest**, **no `GAMESERVER_MAP_ID`**, capacity 8. Its pods register no map and are allocated to a party (ADR-26); spare Ready pods are correct on this fleet and wrong on the one above. `dev-up.sh` scales it to `K8S_DUNGEON_REPLICAS` (default 2) **after** pinning the image — applying this file by hand leaves it at zero on purpose, because the image tag in it is the moving `:develop` |
 | `proof/*` | Scaffold Redis and a ConfigMap override, for bringing this tier up before `rpg-k8s-data` exists. **Not the data tier** — with that namespace present, skip both files |
 
 ## Apply

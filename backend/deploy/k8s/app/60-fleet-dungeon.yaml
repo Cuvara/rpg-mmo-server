@@ -79,7 +79,21 @@ spec:
   # on any autoscaler it finds and stands down only for a fleet with a per-pod
   # map id. Adding one before that check knows about this fleet turns every
   # deploy red on a healthy stack. The check moves first.
-  replicas: 2
+  # ZERO IN THE MANIFEST, TWO AT RUNTIME -- and the gap is the point.
+  #
+  # The image below is the moving `:develop` tag. dev-up.sh pins the resolved
+  # commit over it, but `apply` creates pods the instant it runs, BEFORE the pin
+  # -- so a non-zero count here means every deploy briefly runs whatever
+  # `:develop` happens to be. That is not hypothetical: on 2026-09-12 it was an
+  # image predating dungeon-mode registration, whose pods self-registered into
+  # servers:map:map_01 and put three live servers on one map. verify.sh caught
+  # it, after they were already live.
+  #
+  # So the manifest ships a fleet that cannot run the wrong build, and dev-up.sh
+  # scales it up after pinning. A human applying this file by hand gets zero
+  # pods for the same reason they would get the unpinned image; the README says
+  # how to bring it up deliberately.
+  replicas: 0
   scheduling: Packed
   template:
     metadata:
