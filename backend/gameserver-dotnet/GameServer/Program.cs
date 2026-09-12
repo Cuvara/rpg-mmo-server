@@ -767,6 +767,7 @@ metricsEndpoint?.SetStatusProvider(() =>
         AttacksUnresolved = server.AttackStats.Unresolved,
         AttacksRejected = server.AttackStats.Rejected,
         AttacksAccepted = server.AttackStats.Accepted,
+        AttackRateViolations = server.AttackRates.Violations,
         AttackKills = server.AttackStats.Kills,
         LastAttackRejection = server.AttackStats.LastRejection,
         Redis = serverRegistry != null ? "connected" : "disconnected",

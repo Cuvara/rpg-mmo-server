@@ -79,6 +79,7 @@ public sealed class GameMetrics : IDisposable
     private readonly Counter<long> _unversionedHandshakes;
     private readonly Counter<long> _inputsRejected;
     private readonly Counter<long> _anomalyAlerts;
+    private readonly Counter<long> _attackRateViolations;
     private readonly TagList[] _inputRejectionTags;
     private readonly Counter<long> _inputsDropped;
     private readonly Counter<long> _inputsCoalesced;
@@ -269,6 +270,18 @@ public sealed class GameMetrics : IDisposable
             };
             _inputRejectionTags[(int)reason] = tags;
         }
+
+        _attackRateViolations = _meter.CreateCounter<long>(
+            "gameserver.combat.attack_rate.violations",
+            description: "Times an ACCOUNT landed more ACCEPTED attacks inside the audit " +
+                         "window than one entity's cooldown permits. Every attack counted " +
+                         "here PASSED validation, so this is the one signal the rejection " +
+                         "counters cannot produce: the cooldown check is exact for one " +
+                         "entity and blind to anything handing an account a different one. " +
+                         "No live exploit is claimed -- a reconnect reattaches the same " +
+                         "entity, cooldown intact. Read a rise as a path that should not " +
+                         "exist now doing so, cheat or bug. OBSERVATION ONLY: nothing is " +
+                         "done to the player.");
 
         _anomalyAlerts = _meter.CreateCounter<long>(
             "gameserver.input.anomaly.alerts",
@@ -679,6 +692,7 @@ public sealed class GameMetrics : IDisposable
     private long _inputsDroppedQueueFull;
     private long _inputsCoalescedCount;
     private long _anomalyAlertCount;
+    private long _attackRateViolationCount;
     private readonly long[] _inputsRejectedByReason =
         new long[GameServer.Input.InputRejection.All.Length];
     private long _transfersRejectedCount;
@@ -743,6 +757,7 @@ public sealed class GameMetrics : IDisposable
             _inputsRejected.Add(0, _inputRejectionTags[(int)reason]);
 
         _anomalyAlerts.Add(0, _mapTags);
+        _attackRateViolations.Add(0, _mapTags);
     }
 
     /// <summary>
@@ -775,6 +790,19 @@ public sealed class GameMetrics : IDisposable
 
     /// <summary>Accounts that have crossed the anomaly alert threshold since start.</summary>
     public long AnomalyAlerts => Interlocked.Read(ref _anomalyAlertCount);
+
+    /// <summary>
+    /// Record one account exceeding the accepted-attack rate its cooldown permits.
+    /// Observation only -- see <c>Input/AttackRateAudit.cs</c>.
+    /// </summary>
+    public void RecordAttackRateViolation()
+    {
+        Interlocked.Increment(ref _attackRateViolationCount);
+        _attackRateViolations.Add(1, _mapTags);
+    }
+
+    /// <summary>Accounts flagged for exceeding the permitted attack rate since start.</summary>
+    public long AttackRateViolations => Interlocked.Read(ref _attackRateViolationCount);
 
     /// <summary>Inputs refused by validation for one reason.</summary>
     public long InputsRejected(GameServer.Input.InputRejectionReason reason)

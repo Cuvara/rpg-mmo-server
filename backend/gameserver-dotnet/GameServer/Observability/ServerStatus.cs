@@ -126,6 +126,13 @@ public sealed class ServerStatus
     [JsonPropertyName("attacks_rejected")]
     public long AttacksRejected { get; set; }
 
+    /// <summary>
+    /// Times an account landed more accepted attacks inside the audit window than one
+    /// entity's cooldown permits. Observation only; see <c>Input/AttackRateAudit.cs</c>.
+    /// </summary>
+    [JsonPropertyName("attack_rate_violations")]
+    public long AttackRateViolations { get; set; }
+
     /// <summary>Attacks that dealt damage.</summary>
     [JsonPropertyName("attacks_accepted")]
     public long AttacksAccepted { get; set; }
