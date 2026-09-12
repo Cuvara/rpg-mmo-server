@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **ADR-26: dungeon instancing is keyed by the party, and a "checkpoint" is the player at the
+  boundary.** Design only -- **no runtime code changed**. It implements ADR-14 stage 6, the
+  first of the two items `CORE-COMPLETION.md` names as the gate before gameplay content, and
+  records six decisions with their rejections. The two most load-bearing: the instance is keyed
+  by **party**, not content id, and **ADR-2's one-live-server-per-`map_id`
+  rule must not be extended to cover it** -- two servers on one map split a shared world,
+  whereas each dungeon instance is a distinct logical world by design, so keying by content
+  would give the entire game one shared dungeon. And a **dungeon server must not persist
+  `map_id` or position**: `player_states` holds one row per player (`AsyncSaver.cs:10`) and
+  `PlayerSpawn.Resolve` discards another map's coordinates, so a normal save would stamp the
+  dungeon over the origin map and silently teleport the player to a spawn point as the price of
+  a dungeon run. The stated cost of that choice is that position inside a dungeon is not
+  durable. The ADR also narrows the word "checkpoint" deliberately: this one makes a crash cost
+  the run and nothing of the character, and does **not** make a boss fight resumable -- the
+  `dungeon_checkpoints` table named in `shared/CLAUDE.md` stays deferred.
+
 ### Added
 - **Roadmap A4: the accepted-attack rate is audited per account** --
   `GameServer/Input/AttackRateAudit.cs`, wired at the one site in `InputHandler` where an

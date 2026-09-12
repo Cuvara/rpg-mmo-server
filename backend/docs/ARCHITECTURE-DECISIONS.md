@@ -3322,6 +3322,135 @@ One keypair per fleet or per environment, the public half shipped inside the pla
 
 ---
 
+## ADR-26 — A dungeon instance is keyed by the party, and a "checkpoint" is the player at the boundary, not the encounter
+
+**Status:** accepted 2026-09-12 as the target model; **NOT implemented**. Implements ADR-14
+stage 6, the first of the two items `CORE-COMPLETION.md` names as the gate before gameplay
+content. Constrained by ADR-2 (one live server per `map_id`), ADR-3 (the gateway is a
+redirector), ADR-6 (the ≤30s crash-loss window) and ADR-16 (the advertised address is
+composed, not configured).
+
+### The state this replaces
+
+`--mode=dungeon` changes **one** thing: the reconnect hold TTL, 60s instead of 30s
+(`Program.cs:649`). Everything else a dungeon needs is absent, and absent in a way that
+reads as present:
+
+- `gateway/transfer/dungeon.go` defines a `DungeonTransfer` interface whose only
+  implementation is `StubDungeonTransfer`, which returns `ErrNotImplemented`. 32 lines, of
+  which 14 are a comment about map transfer.
+- `registry.KindDungeon` exists and the allocator will honour it, but
+  `ALLOCATOR_FLEET_DUNGEON` is **empty on every environment** and there is no dungeon fleet
+  manifest, so every dungeon allocation fails immediately — deliberately and legibly, which
+  is the one thing here that is already right.
+- The word **"checkpoint" appears in no `.cs` or `.go` file in this repository.** It appears
+  in `shared/CLAUDE.md` as a table name and in ADR-6's backlog as an M-sized item.
+
+So a dungeon today is a map server with a longer hold window. The project's one-line
+description is "open-world maps + instanced dungeons"; half of it has no plumbing.
+
+### Decisions
+
+1. **Entry reuses `MsgEnterWorld`. There is no `MsgEnterDungeon`.**
+   `EnterWorldRequest` gains `party_id = 2`; a **non-empty `party_id` means "an instance of
+   the content named by `map_id`, for this party"**. One flow, one set of failure modes, one
+   place where a client learns an address and a join token. A second message type would
+   duplicate the auth, budget, rate-limit and error paths that `handleEnterWorld` already
+   owns, and the two copies would drift — which is exactly what the comment at the top of
+   `dungeon.go` observed about map transfer needing no gateway change at all.
+
+2. **The instance is keyed by the PARTY, not by the content id.**
+   Redis holds `dungeon:party:{party_id} -> ServerInfo`. The first member's `EnterWorld`
+   allocates a pod and writes that key; every later member reads it and is handed the **same**
+   address. **ADR-2 does not apply here and must not be extended to cover this**: ADR-2's
+   one-live-server rule exists because two servers claiming one `map_id` split a shared world,
+   whereas each dungeon instance is a distinct logical world by design — a sentence already in
+   ADR-2 and now load-bearing. Keying by content id would give every party in the game one
+   shared dungeon, which is the opposite of instancing.
+
+3. **The gateway verifies party membership against Nakama, once per entry.**
+   It calls the `party_get` RPC over the internal HTTP key — the same server-to-server channel
+   the game server already uses for rewards (ADR-24) — and refuses the entry if the caller is
+   not a member of the party they named. Membership lives in Nakama because that is where
+   social state lives; **it is not mirrored into the gateway or Redis**, because a mirror of an
+   authority is a second authority that disagrees under partition. The cost is one internal
+   RPC per dungeon entry, never per tick, on a path that already blocks for an allocation.
+
+4. **A "dungeon checkpoint" in this ADR is the player's state at the instance boundary. It is
+   not encounter progress, and saying so is the point.**
+   The player is saved on the way in and on the way out. A crash mid-run therefore costs **the
+   run** — the instance, its mobs, its encounter progress — and costs **nothing of the
+   character**. Encounter-level checkpointing (the `dungeon_checkpoints` table named in
+   `shared/CLAUDE.md` and priced at M in ADR-6) is **explicitly deferred**, because it is only
+   worth building once there is an encounter worth losing, and today there is none. The name
+   is being claimed with a narrower meaning than the backlog item it shares a word with, so
+   the two must not be confused later: this one does not make a boss fight resumable.
+
+5. **A dungeon server does NOT overwrite the player's `map_id` or position.**
+   `player_states` holds **one row per player** with a single `MapId` (`AsyncSaver.cs:10`), and
+   `PlayerSpawn.Resolve` discards saved coordinates whose row belongs to another map. A
+   dungeon server that saved normally would therefore stamp the dungeon's id over the origin
+   map, and the player would return to the origin map's **spawn point** rather than where they
+   left — a silent, permanent teleport as the price of entering a dungeon. In dungeon mode the
+   server persists the map-independent fields (HP, and whatever later joins them) and leaves
+   `MapId`/position as the origin wrote them. The consequence is stated rather than hidden:
+   **position inside a dungeon is not durable**, and a disconnect past the 60s hold returns
+   the player to the origin map where they stood, not to the dungeon.
+
+6. **The instance shuts itself down when it empties.**
+   After the last member leaves and that member's 60s dungeon hold expires with no reconnect,
+   the server reports `Shutdown` to the Agones sidecar and exits. Not on a timer, not on a
+   reaper: the pod is the only party that knows both facts, and ADR-14 already gives it the
+   SDK to say so. A dungeon pod that outlives its party is a pod nobody will ever allocate
+   again, because decision 2 keys allocation on a party that no longer exists.
+
+7. **The return trip is the existing flow, and the client remembers the origin.**
+   Leaving a dungeon is `MsgTransferMap` to the origin map — the client-driven path that
+   already works and needs no gateway change. The gateway does not remember where a party came
+   from, because decision 5 means the durable record already says it.
+
+8. **A dungeon pod does not self-register into the map index.**
+   `RegistrationService` writes `servers:map:{map_id}` at startup for every server, and
+   nothing today gates that on mode (`--mode=dungeon` reaches exactly one line,
+   `GameServer.cs:1861`). A dungeon pod doing that is wrong twice: it advertises an instance
+   to `FindServer`, which would hand an unrelated player a dungeon as if it were a map, and on
+   a fleet that pins no `GAMESERVER_MAP_ID` it would write the empty key. The dungeon
+   lookup is decision 2's party key, written by the **gateway** at allocation, and a dungeon
+   server therefore reports `Ready` to Agones and registers **nothing**. This is the same
+   ordering ADR-14 decision 3 pins for map servers, with the second half removed.
+
+### Consequences
+
+- **A dungeon fleet must exist before any of this is testable.** `ALLOCATOR_FLEET_DUNGEON`
+  unset is a legible failure today and becomes a blocking one the moment a client can ask.
+- **`verify.sh` gains a layer, and `cluster.autoscaler` needs a second look.** ADR-18 forbids
+  an autoscaler on a fleet that pins one `GAMESERVER_MAP_ID` for every replica; a dungeon
+  fleet pins **no** map id — its replicas are interchangeable until allocated — so it is
+  exactly the fleet shape ADR-18 says unlocks `replicas > 1` and a buffer autoscaler. The
+  dungeon fleet is therefore the first fleet here that **should** have spare Ready pods, and
+  the check must not fail it for having them.
+- **Party membership becomes a dependency of the realtime path.** A Nakama outage currently
+  stops new logins; after this it also stops dungeon entry, while map play continues. That is
+  the correct blast radius and it is worth writing down before someone is surprised by it.
+- **This ADR does not make dungeons crash-safe** (decision 4) and does not give a party a
+  shared chat, a leader, or matchmaking beyond what the party RPCs provide. It makes a party
+  of players land in one instance together and get home afterwards.
+
+### Rejected
+
+- **A new `MsgEnterDungeon` message type.** Decision 1.
+- **Keying the instance by content id** — one shared dungeon per content for the whole game,
+  i.e. not instancing. Decision 2.
+- **Mirroring party membership into Redis** so the gateway need not call Nakama. Two
+  authorities that disagree under partition, to save one RPC on a path that already waits for
+  a pod allocation. Decision 3.
+- **Encounter-level checkpointing now.** Deferred with its name kept distinct. Decision 4.
+- **Letting the dungeon server save normally.** A silent teleport to the origin spawn point as
+  the price of a dungeon run. Decision 5.
+- **A reaper that sweeps idle dungeon pods.** The pod knows; a sweeper guesses. Decision 6.
+
+---
+
 ## Summary of decisions
 
 | # | Area | Decision |
@@ -3351,3 +3480,4 @@ One keypair per fleet or per environment, the public half shipped inside the pla
 | 23 | Gateway-hop confidentiality | **TLS terminated in the gateway process**, behind `GATEWAY_TLS_CERT`/`GATEWAY_TLS_KEY`, **defaulting off** and pinned explicitly at every deploy site. A second sealed handshake for this hop is **rejected**: the Go server half of the sealed protocol does not exist, the hop has no `jti` to anchor a transcript, and an unauthenticated exchange would make `BindingVerified` a field that is always false. Terminating **in the process, not at an edge**, because an edge terminator is confidential only to the edge and buys nothing on the single-node dev/staging boxes. **The measurement that motivated this was incomplete**: the auth token is minted over a plaintext HTTP hop to Nakama that also carries a 2-hour reusable Nakama session token, so the meta hop is the higher-value half and is NOT fixed here. No negotiation, no plaintext fallback. The client half (TLS on the gateway connection, `https://` for Nakama) is unwritten, so the flag is off everywhere |
 | 24 | Meta-hop (Nakama) confidentiality | **Nakama terminates TLS itself** (`--socket.ssl_certificate`), behind `NAKAMA_TLS_CERT`/`NAKAMA_TLS_KEY`, **defaulting off** and pinned at every deploy path; `NAKAMA_URL` moves to `https://` in the same change because the **C# game server is a second consumer of this hop** (`NakamaClient.cs`, compose only — absent under Agones). Measured: the flag covers port 7350 **including the `/ws` realtime socket**, TLS-only, and does **NOT** cover the console (7351) or metrics (9100), both published on `0.0.0.0` in compose; upstream explicitly warns against direct SSL termination and we take it anyway because an edge terminator buys nothing on a single-node box. **The larger finding is not confidentiality**: both Nakama static keys sit at their published defaults and both authenticate — `defaulthttpkey` reaches the server-only reward and leaderboard RPCs — and `cd.yml` never wrote `NAKAMA_HTTP_KEY` at all, so every deployed compose environment ran the default. CD now fails on a missing or default key. **No `InsecureSkipVerify` anywhere, including dev**: dev runs the flag off rather than on with a disabled check. Credentials in URLs (the `/ws` token, `http_key`) survive TLS into access logs and are an upstream API shape we cannot fix |
 | 25 | Game-server identity | **Accepted 2026-09-12 as the target model; NOT implemented.** The game server signs the sealed handshake with an **Ed25519 key it generates per pod at startup**, whose public half travels pod -> registry -> gateway -> `enter_world_resp`. Replaces a residual that no configuration can close: the ADR-22 binding is a **symmetric** HMAC under `JOIN_TOKEN_SECRET` (`SealedTranscriptSigner.cs:21-32`, `SealedCrypto.cs:98-107`), which is the key the gateway **mints join tokens with** (`gateway/transfer/join_token.go:17-23`, `shared/config/config.go:25-28`) - so a client able to verify is a client able to forge, and `binding_verified=false` (`shared/sealed/client.go:101-120`) is permanent for every shipped player. Consequence today: the sealed hop is confidential against a **passive** eavesdropper and offers **nothing** against an active one. Per-pod, not per-fleet, because the peer is an Agones replica whose address is composed at scheduling time (ADR-16): rotation is pod replacement, and a fleet-wide private key mounted into the most player-exposed process is the worst-isolated secret available. **The key is delivered over the gateway hop, so it is exactly as trustworthy as that hop** - plaintext everywhere today, ADR-23's TLS implemented and off because it needs certificate distribution - therefore a client reports `server_identity_verified` only when the key arrived over an authenticated hop, and reports the weaker truth otherwise. New field numbers only (`server_signature = 4`); the transcript bytes do not change; old clients do not break; no negotiation, no fallback. **TLS on the gameplay hop rejected** (no stable address to certify, deletes machinery live in production, does not apply to KCP), **pinning a fleet key in the player rejected as the default** (rotation becomes an app-store release - ADR-23 Option B), **doing nothing rejected** (an always-false boolean is a dead end, not a backlog item). Ed25519 under Unity IL2CPP is an unrun go/no-go probe, asserting the NEGATIVE case |
+| 26 | Dungeon instancing | **Accepted 2026-09-12 as the target model; NOT implemented.** Implements ADR-14 stage 6. Entry reuses `MsgEnterWorld` with a new **`party_id`**; there is no `MsgEnterDungeon`, because a second message type duplicates the auth, budget, rate-limit and error paths `handleEnterWorld` already owns. **The instance is keyed by the PARTY, not the content id** (`dungeon:party:{party_id} -> ServerInfo`): the first member allocates, the rest are handed the same address. **ADR-2 does not apply and must not be extended to cover it** - two servers on one `map_id` split a shared world, whereas each dungeon instance is a distinct logical world by design; keying by content would give the whole game one shared dungeon. Membership is verified against Nakama's `party_get` over the internal HTTP key **once per entry, never per tick**, and is **not mirrored** into the gateway or Redis - a mirror of an authority is a second authority that disagrees under partition. **A "checkpoint" here is the player at the boundary, not encounter progress**: a crash costs the run and nothing of the character, and the `dungeon_checkpoints` table named in `shared/CLAUDE.md` stays deferred, because it is only worth building once there is an encounter worth losing. **A dungeon server must not save `map_id` or position** - `player_states` holds one row per player and `PlayerSpawn` discards another map's coordinates, so a normal save would stamp the dungeon over the origin and silently teleport the player to a spawn point as the price of entering; the cost of that choice is that **position inside a dungeon is not durable**. The pod **shuts itself down** when the last member's 60s hold expires, because the pod is the only party that knows both facts and a pod outliving its party can never be allocated again. Return is the existing `MsgTransferMap`. **A dungeon pod self-registers NOTHING** - `RegistrationService` writes `servers:map:{map_id}` for every server today and nothing gates it on mode, which on a dungeon pod would both advertise an instance to `FindServer` and, on a fleet pinning no map id, write the empty key. Notable knock-on: a dungeon fleet pins **no** `GAMESERVER_MAP_ID`, so it is the first fleet here that **should** carry spare Ready pods and ADR-18's `cluster.autoscaler` check must not fail it. Rejected: a new message type, content-keyed instances, mirrored membership, encounter checkpoints now, saving normally, a sweeper |
