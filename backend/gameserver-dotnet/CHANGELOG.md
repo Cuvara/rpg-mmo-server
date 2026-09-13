@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **ADR-25 decision 8 is answered: Ed25519 survives Unity IL2CPP at `High` stripping.**
+  Measured 2026-09-13 in a built Windows Standalone player from the Sealed Session Probe
+  sample (`Cuvara/Netcode` v0.38.2): all eight self-checks passed, including the negative case
+  this decision insists on — one byte of a genuine signature flipped, and the verifier refused
+  it. A verifier that accepts everything is indistinguishable from one that works, which is
+  why the refusal is the line that matters rather than the verification.
+
+  **Nothing on this module depended on that answer, and the entry is here anyway** because
+  this is where ADR-25's implementation is recorded and a reader who arrives at that entry is
+  the one asking whether the client can actually check what this server signs.
+
+  The scope is written down at ADR-25 decision 8 rather than summarised optimistically:
+  `Minimal` was not run separately, **Android is unmeasured** (and the BouncyCastle
+  CIL-Linker failure `link.xml` guards against was reported *on Android*), and whether those
+  `link.xml` entries are load-bearing is untested — a control run without them means editing
+  the resolved package under `Library/PackageCache`, which the package rules forbid. So the
+  claim is "Ed25519 survives `High` with those entries present", not "the entries are
+  unnecessary".
+
+  `ROADMAP-SECURITY.md` step 5 carried "**ADR-25 decision 8's IL2CPP go/no-go probe has NOT
+  been run**" and now carries the result instead.
+
 ### Added
 - **ADR-25 implemented: the game server proves its identity with an Ed25519 key it generates
   per pod.** `Net/Sealed/ServerIdentity.cs` makes the keypair once at startup from a
