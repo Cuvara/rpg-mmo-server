@@ -485,6 +485,71 @@ if [ -z "$gs_nakama_url" ]; then
   exit 1
 fi
 echo "checked: the game server will reach Nakama at $gs_nakama_url"
+
+# GATEWAY-HOP TLS (ADR-23): refuse the half-configured shapes here, because the
+# pod cannot explain them and the client cannot either.
+#
+# Three ways this goes wrong, all silent somewhere:
+#   - one path set, not both  -> the gateway exits at startup, correctly, but the
+#     event is a CrashLoopBackOff rather than a sentence.
+#   - paths set, no Secret    -> the optional volume is absent, so the paths point
+#     at nothing and the gateway exits on an unreadable file.
+#   - Secret present, no paths -> TLS is silently OFF while someone believes they
+#     turned it on. This is the dangerous one: everything is healthy and the hop
+#     is plaintext.
+# A TLS listener cannot answer a plaintext client in a language it understands, so
+# the third case is indistinguishable from success from the gateway's side.
+tls_cert_path=$($K get configmap gateway-config -n rpg-k8s-realtime -o 'jsonpath={.data.tls-cert-path}' 2>/dev/null || true)
+tls_key_path=$($K get configmap gateway-config -n rpg-k8s-realtime -o 'jsonpath={.data.tls-key-path}' 2>/dev/null || true)
+tls_secret=$($K get secret gateway-tls -n rpg-k8s-realtime -o 'jsonpath={.metadata.name}' 2>/dev/null || true)
+
+if { [ -n "$tls_cert_path" ] && [ -z "$tls_key_path" ]; } || { [ -z "$tls_cert_path" ] && [ -n "$tls_key_path" ]; }; then
+  echo "ERROR: gateway-config has exactly one of tls-cert-path / tls-key-path." >&2
+  echo "  The gateway treats one-without-the-other as a startup error on purpose." >&2
+  echo "  Set both, or neither." >&2
+  exit 1
+fi
+
+if [ -n "$tls_cert_path" ] && [ -z "$tls_secret" ]; then
+  echo "ERROR: gateway-config names TLS paths but the gateway-tls Secret is absent." >&2
+  echo "  The volume is optional, so those paths would point at nothing and the" >&2
+  echo "  gateway would exit on an unreadable certificate." >&2
+  echo "  Create it (PEM files in the current directory):" >&2
+  echo "    kubectl --context $KUBE_CONTEXT -n rpg-k8s-realtime create secret generic gateway-tls \\" >&2
+  echo "      --from-file=tls.crt=tls.crt --from-file=tls.key=tls.key" >&2
+  exit 1
+fi
+
+if [ -z "$tls_cert_path" ] && [ -n "$tls_secret" ]; then
+  echo "WARNING: a gateway-tls Secret exists but gateway-config names no TLS paths," >&2
+  echo "         so THE GATEWAY HOP IS PLAINTEXT. Nothing about a healthy gateway" >&2
+  echo "         distinguishes this from TLS being on -- which is why it is said here." >&2
+  echo "         To turn it on:" >&2
+  echo "           kubectl --context $KUBE_CONTEXT -n rpg-k8s-realtime patch configmap gateway-config \\" >&2
+  echo "             --type=merge -p '{\"data\":{\"tls-cert-path\":\"/etc/gateway/tls/tls.crt\",\"tls-key-path\":\"/etc/gateway/tls/tls.key\"}}'" >&2
+fi
+
+if [ -n "$tls_cert_path" ]; then
+  # Write the pin out of the cluster's OWN Secret, so every client this deploy
+  # hands it to pins what the gateway actually serves. A copy kept anywhere else
+  # is a copy that can go stale, and a stale pin fails in the one way that does
+  # not name itself (a closed socket).
+  mkdir -p "$RUN_DIR"
+  gw_pin="$RUN_DIR/gateway-tls.crt"
+  if ! $K get secret gateway-tls -n rpg-k8s-realtime -o 'jsonpath={.data.tls\.crt}' 2>/dev/null | base64 -d > "$gw_pin"; then
+    echo "ERROR: could not read tls.crt out of the gateway-tls Secret." >&2
+    exit 1
+  fi
+  if ! grep -q "BEGIN CERTIFICATE" "$gw_pin"; then
+    echo "ERROR: the gateway-tls Secret's tls.crt is not a PEM certificate." >&2
+    exit 1
+  fi
+  echo "checked: the gateway hop terminates TLS ($tls_cert_path); pin written to $gw_pin"
+  echo "          every client needs it: -cuvara-gateway-tls 1 -cuvara-gateway-tls-cert $gw_pin"
+  export VERIFY_GATEWAY_TLS_CERT="$gw_pin"
+else
+  echo "checked: the gateway hop is plaintext (no TLS paths in gateway-config) -- ADR-23's default"
+fi
 $K apply -f "$HERE/app/40-gateway.yaml" -f "$HERE/app/50-fleet-map.yaml" -f "$HERE/app/60-fleet-dungeon.yaml"
 
 # Pin the resolved images over whatever the manifests carry. The Fleet is
