@@ -158,8 +158,15 @@ curl -s http://127.0.0.1:9090/api/v1/label/__name__/values | grep -o 'gameserver
 
 Owned by the game server module. The dashboard consumes
 `gameserver_tick_duration_seconds` (histogram), `gameserver_players_online`
-(gauge) and `gameserver_save_errors_total` (counter). Panels stay empty until
-that exporter is live.
+(gauge) and `gameserver_player_saves_total{status="error"}` (counter). Panels
+stay empty until that exporter is live.
+
+> Until 2026-09-13 this said `gameserver_save_errors_total`, which **has never
+> existed** — the instrument is `gameserver.player.saves`, exported as
+> `gameserver_player_saves_total` with a `status` label. The save-errors panel
+> therefore read "No data" for its whole life, and "no data" on an error panel
+> looks exactly like "no errors". Checked against a running pod's `/metrics`:
+> every other metric named in this file does exist.
 
 ### Nakama (`:9100`)
 
@@ -177,7 +184,7 @@ tell you whether the game is healthy:
 | Players online | `sum by (map_id) (gameserver_players_online)` | Load per map + total CCU. |
 | Gateway connections active | `sum by (instance) (gateway_connections_active)` | Should track players online; a growing gap means sockets leak or clients stall before EnterWorld. |
 | Auth / EnterWorld failure ratio | `rate(gateway_auth_total{result="fail"}[5m]) / rate(gateway_auth_total[5m])` | Sustained >10% = JWT secret mismatch with Nakama, expired tokens, or (EnterWorld) no server has capacity. |
-| Save errors + allocation failures | `rate(gameserver_save_errors_total[5m])`, `rate(gateway_allocations_total{result="fail"}[5m])` | Anything non-zero is player progress at risk / Agones unable to give us pods. |
+| Save errors + allocation failures | `rate(gameserver_player_saves_total{status="error"}[5m])`, `rate(gateway_allocations_total{result="fail"}[5m])` | Anything non-zero is player progress at risk / Agones unable to give us pods. |
 | Scrape targets up | `max by (job) (up)` | Which exporters are alive. |
 
 Editing: change it in Grafana, then **Export → Save to file** back into

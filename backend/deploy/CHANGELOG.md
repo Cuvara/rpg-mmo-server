@@ -5,6 +5,27 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`docs/MONITORING.md` still named `gameserver_save_errors_total` twice.** #356 fixed the
+  Grafana panel that queried it and left the document that told you to query it — so the
+  dashboard was right and the instructions were still wrong. The metric **has never existed**:
+  the instrument is `gameserver.player.saves`, exported as `gameserver_player_saves_total` with
+  a `status` label, and `status="error"` was verified at the source
+  (`_saveErrorTags`, `RecordPlayerSaveError`) rather than assumed.
+
+  **Every other metric named in that file was checked against a running pod's `/metrics`**,
+  because one wrong name is a typo and a pattern is a process problem. All nine exist. The
+  save-errors name is the only casualty, so #356's finding was complete in scope as well as
+  correct.
+
+  Worth recording how nearly that check went wrong: the first sweep `exec`-ed into the gateway
+  pod, which has no `wget`, got empty output, and reported five live gateway metrics as
+  missing. Scraping the metrics **service** from a pod that does have a client returned all
+  ten. A scrape that fails silently reads exactly like a metric that does not exist — the same
+  shape as the panel this entry is about, met while fixing it.
+
+## [Unreleased]
+
 ### Added
 - **The first alert rule in this repository** (`monitoring/alerts.yaml`, wired via
   `rule_files:` in `monitoring/prometheus.yaml` and mounted in compose). Until now
