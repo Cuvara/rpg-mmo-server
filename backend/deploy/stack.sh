@@ -164,7 +164,12 @@ fi
 # alongside the certificate pair -- if the file pinned it to http:// while the
 # operator turned TLS on, the game server would speak plaintext to a listener
 # that no longer answers it, which is the silent half of this failure.
-STACK_OVERRIDABLE="GAMESERVER_SEALED SMOKE_SEALED SMOKE_ENCODING GATEWAY_TLS_CERT GATEWAY_TLS_KEY NAKAMA_TLS_CERT NAKAMA_TLS_KEY NAKAMA_URL"
+# NAKAMA_TLS_PIN is the game server's end of the same decision -- the certificate
+# it pins for an https:// NAKAMA_URL -- and is overridable for the same reason:
+# .env.example writes the name, and a file value of "" would silently turn a
+# pinned run back into a platform-validation run that then refuses the self-signed
+# certificate, several steps away from the variable that caused it.
+STACK_OVERRIDABLE="GAMESERVER_SEALED SMOKE_SEALED SMOKE_ENCODING GATEWAY_TLS_CERT GATEWAY_TLS_KEY NAKAMA_TLS_CERT NAKAMA_TLS_KEY NAKAMA_TLS_PIN NAKAMA_URL"
 _stack_saved=""
 for _n in $STACK_OVERRIDABLE; do
 	eval "_set=\${$_n+yes}"

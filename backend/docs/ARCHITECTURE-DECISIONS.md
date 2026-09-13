@@ -3139,6 +3139,8 @@ Reduce `constants.SessionTTL` and give the gateway auth token a `jti` consumed o
 
 **Status:** accepted 2026-09-10. **Implemented behind a flag that defaults off** (`NAKAMA_TLS_CERT` / `NAKAMA_TLS_KEY`), plus a **CD gate on the two Nakama static keys**, which is the higher-value half and is the reason this ADR is not simply "ADR-23 again on another port".
 
+**Updated 2026-09-13: the two blockers measured on 2026-09-12 are closed, and the flag still defaults off.** Turning it on used to be impossible rather than merely undone — the k8s probes broke the pod and the Unity client refused the certificate. Both now have answers (§8), both sides pin instead of skipping verification, and the remaining work is a deploy, not code. Decision 4 changed shape as a result and is rewritten below rather than deleted: the rule (*no `InsecureSkipVerify`, anywhere, including dev*) is unchanged; what changed is that dev no longer has to choose between that and plaintext, because pinning now reaches a self-signed Nakama from both clients of the hop.
+
 Follows [ADR-23](#adr-23--the-gateway-hop-gets-tls-not-a-second-sealed-handshake-and-the-credential-it-exposes-leaks-one-hop-earlier), which closed the gateway hop and named this hop as the blocking item.
 
 ### 1. What actually crosses the meta hop
@@ -3244,14 +3246,53 @@ Considered and **rejected as not ours to make.** Nakama's WebSocket takes the to
 1. **Nakama terminates TLS itself**, behind `NAKAMA_TLS_CERT` / `NAKAMA_TLS_KEY`, **defaulting off**, pinned explicitly at every deploy path. Setting exactly one is a deploy failure, not a fall back to plaintext.
 2. **`NAKAMA_URL` moves to `https://` in the same change** wherever the flag is on, because `NakamaClient.cs` is a second consumer of this hop and would otherwise break silently.
 3. **CD fails the deploy when either Nakama static key is missing or left at its documented default.** `NAKAMA_HTTP_KEY` is now written at all, which it was not. This is the part of this ADR with the largest effect per line.
-4. **No `InsecureSkipVerify`, on any side, in any environment — including dev.** A client that accepts any certificate has the passive-eavesdropper guarantee at the price of the authenticated one (ADR-23 on the gateway hop, unchanged). Dev therefore runs the flag **off** rather than running it on with a self-signed certificate and a disabled check. **A dev convenience that trains an `InsecureSkipVerify` into the client is a worse outcome than dev staying plaintext**, because the flag ships in a player and the plaintext does not.
+4. **No `InsecureSkipVerify`, on any side, in any environment — including dev.** A client that accepts any certificate has the passive-eavesdropper guarantee at the price of the authenticated one (ADR-23 on the gateway hop, unchanged). **A dev convenience that trains an `InsecureSkipVerify` into the client is a worse outcome than dev staying plaintext**, because the flag ships in a player and the plaintext does not.
+
+   **Rewritten 2026-09-13.** This decision used to continue: *"Dev therefore runs the flag off rather than running it on with a self-signed certificate and a disabled check."* That conclusion was drawn from a false dichotomy — accept-anything or plaintext — and the third option was simply not built yet. It is now: **both consumers of this hop pin the certificate**, which is *stricter* than the public trust store, not looser, because an attacker must present that exact certificate rather than any certificate some CA will sign. The C# game server pins with `NAKAMA_TLS_PIN` (`GameServer/Nakama/NakamaTlsPin.cs`), the Unity player with `-cuvara-nakama-tls-cert` (`PinnedCertificateHandler`), and neither offers an accept-anything mode — the Unity handler refuses to construct with an empty pin, and the game server refuses to *start* when a pin is set against a plaintext `NAKAMA_URL`. So dev may now run the flag on with a self-signed certificate, and the rule this decision is actually about is untouched.
 5. **The console and metrics ports are NOT covered and must not be described as covered.** They are separately exposed on `0.0.0.0` in compose. Tracked as a follow-up, named in `ROADMAP-SECURITY.md`; not fixed here, because binding them is a deploy-topology change with its own blast radius.
 6. **The static keys' presence in the client binary is out of scope, with a reason.** `NAKAMA_SERVER_KEY` is architecturally a client credential — Nakama requires every client to present it — so it cannot be secret, and rotating it is a client release. Its value is therefore *bounded by what a client may do*, which is why the key that actually matters is `runtime.http_key`: that one is server-only, grants reward and leaderboard writes, and has no business being guessable. Decision 3 is aimed at it.
 7. **Credentials in URLs survive TLS.** Stated in the posture text rather than left to be discovered.
 
+
+### 8. Measured 2026-09-12/13: the two blockers, and what closed them
+
+The flag worked the day it landed — `https://` answered 200, plain `http://` got 400 — and was still unusable, for two reasons that were nobody's code being missing.
+
+#### 8.1 Nakama's own k8s probes broke, and every obvious fix is wrong
+
+All three probes were `httpGet` with no `scheme`, which means HTTP, against `:7350` — the one port the flag converts to TLS. With TLS on they failed with `client sent an HTTP request to an HTTPS server` and the pod never became Ready; the rollout timed out with the container perfectly healthy.
+
+There is no per-environment overlay to vary a probe in, so the fix had to be **one spec that works in both modes**. Four candidates, each rejected on a measurement:
+
+| Candidate | Verdict |
+|---|---|
+| `scheme: HTTPS` on `:7350` | Correct with TLS on, **wrong with it off** — and off is the default at every deploy path. It trades a broken opt-in for a broken default. |
+| exec `/nakama/nakama healthcheck` | **Nakama v3.40.0's healthcheck subcommand is `http.Get("http://localhost:" + port)`** — hardcoded plaintext, no TLS branch, no config lookup. It breaks under TLS exactly like the `httpGet` did, and forks a 200MB binary every 10s. This also means **compose's healthcheck had the same bug**, which nobody had recorded. |
+| exec `curl` / `wget` | The image has neither. `heroiclabs/nakama:3.40.0` is Debian 12 with no `curl`, no `wget`, no `nc`, no `python3`, no `openssl` — measured inside the running pod. |
+| `tcpSocket :7350` | Mode-independent, and answers a different question: *is something accepting connections*, not *is Nakama serving*. A probe that cannot tell a wedged Nakama from a healthy one is worse than the bug it replaces. |
+
+**Taken: probe the metrics listener.** `:9100` is measured in §4 as *not covered* by `--socket.ssl_certificate`, so it is plain HTTP whether the flag is on or off. All three probes are now `httpGet { path: /, port: metrics }`, and compose's healthcheck is `/nakama/nakama healthcheck 9100` — the same trick, using the subcommand's port argument.
+
+**What that gives up, stated rather than glossed:** `:9100` is a different `http.Server` in the same process than the client API, so the probes prove the *process* is alive and serving HTTP, not that the client-API mux still answers. The gap is narrow because the old target was narrow too — Nakama's `/healthcheck` is a static 200 (`{}` on the wire) that checks no dependency — so the only failure now missed is a wedge confined to the API mux while the metrics mux answers. A certificate the operator got wrong is **not** in that gap: Nakama cannot read it, exits, and the pod crash-loops visibly.
+
+#### 8.2 The Unity client refused the certificate, and `TlsOptions` does not reach this hop
+
+Pointed at `https://`, the player failed every request with `Curl error 60: Cert verify failed. Certificate is not correctly signed by a trusted CA. UnityTls error code: 7`. That refusal is *correct*. The gateway hop's answer does not transfer: that hop is `SslStream` inside `TcpTransport`, where `TlsOptions.PinnedCertificate` pins an exact DER, while this hop goes through Nakama's SDK on `UnityWebRequestAdapter` — Unity's own HTTP stack, which pins only through a `CertificateHandler`.
+
+**Taken: a pinning `CertificateHandler`, and a Nakama `IHttpAdapter` that installs it.** `UnityWebRequestAdapter` never sets `certificateHandler`, so the handler alone is not enough — the client ships its own `IHttpAdapter` (a copy of the stock adapter's behaviour plus the handler) and hands it to `new Client(...)`. `ValidateCertificate` compares the presented DER against the pinned DER byte for byte and returns false otherwise. **There is no accept-anything path**: the handler's constructor throws on an empty pin, `Matches` returns false for a null or empty pin, and nothing exposes a "trust all" flag to configuration.
+
+**Two limits of `CertificateHandler`, recorded because they are not obvious:**
+
+- **WebGL cannot use it.** The browser performs the TLS handshake, so Unity never calls `ValidateCertificate`. A WebGL player therefore needs a CA-issued certificate on this hop; pinning is not available to it and must not be claimed for it.
+- **It pins the leaf only.** That is the intent — it is the same discipline as `TlsOptions` — but it means a certificate rotation is a client change, exactly as it is for the gateway hop.
+
+The C# game server is the third consumer and has the same problem for the same reason, solved the same way: `NAKAMA_TLS_PIN` builds an `HttpClientHandler` whose `ServerCertificateCustomValidationCallback` compares `cert.RawData` to the pinned DER with `CryptographicOperations.FixedTimeEquals`. Setting it against a non-`https` `NAKAMA_URL` is a **startup refusal**, not a warning, on the same "set together or not at all" principle as the certificate pair itself.
+
+---
+
 ### What this ADR does not claim
 
-- It does not claim the meta hop is confidential today. The flag defaults off, and no deploy path sets it.
+- It does not claim the meta hop is confidential today. The flag defaults off, and no deploy path sets it — what changed on 2026-09-13 is that turning it on is now a deploy rather than a blocked task (§8).
 - It does not make Nakama's console or metrics ports confidential.
 - It does not address the Nakama→Postgres hop, which specifies no `sslmode` in either deployment.
 - It does not fix the compose/k8s asymmetry that makes the reward path inert under Agones.

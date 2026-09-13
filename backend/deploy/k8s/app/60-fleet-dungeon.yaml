@@ -331,6 +331,23 @@ spec:
                     configMapKeyRef:
                       name: gameserver-config
                       key: nakama-url
+                # The certificate this pod PINS for that hop, when nakama-url is
+                # https and Nakama's certificate is self-signed (ADR-24). Empty
+                # -- the committed value -- means .NET's own validation, which is
+                # right for http:// and for a CA-issued certificate, and which
+                # REFUSES a self-signed one. `optional: true` here and NOT on
+                # nakama-url above, because an absent pin has a defined meaning
+                # and an absent URL does not.
+                #
+                # Setting it is step 4 of README.md §"Turning the meta hop's TLS
+                # on" and needs the volume at the bottom of this file uncommented
+                # too: the value is a PATH, and nothing mounts the file for it.
+                - name: NAKAMA_TLS_PIN
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: nakama-tls-pin
+                      optional: true
                 # Must equal NAKAMA_HTTP_KEY in the `nakama` Secret in
                 # rpg-k8s-data. Two Secrets in two namespaces holding one value,
                 # because a Secret cannot cross a namespace; dev-up.sh asserts
@@ -375,6 +392,18 @@ spec:
               #
               # Revisit with a real measurement once a dungeon has run under
               # load. Until then these are bounds, not findings.
+              # Meta-hop TLS (ADR-24), the game server's end. Uncomment
+              # TOGETHER with `nakama-tls-pin` in 20-configmaps.yaml and the
+              # pod-level `volumes:` block below; the configmap value is the
+              # path this mount creates.
+              #
+              # The Secret holds ONLY the public certificate -- the same PEM
+              # Nakama presents. The private key stays in the `nakama-tls`
+              # Secret in rpg-k8s-data and must not be copied here.
+              # volumeMounts:
+              #   - name: nakama-tls-pin
+              #     mountPath: /etc/nakama-tls
+              #     readOnly: true
               resources:
                 requests:
                   memory: "96Mi"
@@ -382,3 +411,12 @@ spec:
                 limits:
                   memory: "256Mi"
                   cpu: "1000m"
+          # Meta-hop TLS (ADR-24), pod level. Uncomment with the volumeMount in
+          # the container above. `nakama-tls-pin` is created by the recipe in
+          # k8s/data/README.md and lives in THIS namespace -- a Secret cannot
+          # cross one, which is the same reason NAKAMA_HTTP_KEY exists twice.
+          # volumes:
+          #   - name: nakama-tls-pin
+          #     secret:
+          #       secretName: nakama-tls-pin
+          #       defaultMode: 0444
