@@ -400,10 +400,10 @@ spec:
               # The Secret holds ONLY the public certificate -- the same PEM
               # Nakama presents. The private key stays in the `nakama-tls`
               # Secret in rpg-k8s-data and must not be copied here.
-              # volumeMounts:
-              #   - name: nakama-tls-pin
-              #     mountPath: /etc/nakama-tls
-              #     readOnly: true
+              volumeMounts:
+                - name: nakama-tls-pin
+                  mountPath: /etc/nakama-tls
+                  readOnly: true
               resources:
                 requests:
                   memory: "96Mi"
@@ -415,8 +415,13 @@ spec:
           # the container above. `nakama-tls-pin` is created by the recipe in
           # k8s/data/README.md and lives in THIS namespace -- a Secret cannot
           # cross one, which is the same reason NAKAMA_HTTP_KEY exists twice.
-          # volumes:
-          #   - name: nakama-tls-pin
-          #     secret:
-          #       secretName: nakama-tls-pin
-          #       defaultMode: 0444
+          volumes:
+            - name: nakama-tls-pin
+              secret:
+                secretName: nakama-tls-pin
+                # optional: this manifest is applied unchanged to dev and staging,
+                # and a required Secret would wedge every pod in the cluster that
+                # has not opted in. Absent Secret + empty `nakama-tls-pin` in
+                # gameserver-config is the flag off, which is the default.
+                optional: true
+                defaultMode: 0444

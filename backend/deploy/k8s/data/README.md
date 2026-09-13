@@ -472,20 +472,48 @@ namespace, so it is a second Secret — a Secret cannot cross one, the same reas
 `NAKAMA_HTTP_KEY` exists twice. **Do not copy the key into it.**
 
 ```bash
-kubectl --context k3d-rpg-dev -n rpg-k8s-app create secret generic nakama-tls-pin \
+kubectl --context k3d-rpg-dev -n rpg-k8s-realtime create secret generic nakama-tls-pin \
   --from-file=tls.crt=tls.crt
 ```
 
-**Step 3 — uncomment and set, in four files.** All of it is marked in place:
+**Step 3 — set two ConfigMaps. No manifest edit.**
 
-| File | Edit |
-|---|---|
-| `k8s/data/nakama.yaml` | `NAKAMA_TLS_CERT: "/nakama/tls/tls.crt"`, `NAKAMA_TLS_KEY: "/nakama/tls/tls.key"`; uncomment the `volumeMounts` and `volumes` blocks |
-| `k8s/app/20-configmaps.yaml` | `nakama-url` → `https://…:7350`; `nakama-tls-pin` → `/etc/nakama-tls/tls.crt` |
-| `k8s/app/50-fleet-map.yaml` | uncomment `volumeMounts` and `volumes` |
-| `k8s/app/60-fleet-dungeon.yaml` | the same two blocks |
+This used to be four file edits and it no longer is. The manifests are applied
+**unchanged to dev and staging**, so an edit here turned the flag on in both
+clusters or neither — and a required Secret volume wedged every pod in the cluster
+that had not opted in. The mounts now ship uncommented with `optional: true`, and
+the paths come from ConfigMap keys that are also optional, so **an absent key is
+the flag off**. That is the same shape ADR-23's gateway TLS uses, for the same
+reason.
+
+```bash
+# Nakama's end: where it reads its certificate and key from.
+kubectl --context k3d-rpg-dev -n rpg-k8s-data create configmap nakama-config \
+  --from-literal=tls-cert-path=/nakama/tls/tls.crt \
+  --from-literal=tls-key-path=/nakama/tls/tls.key \
+  --dry-run=client -o yaml | kubectl --context k3d-rpg-dev apply -f -
+
+# The game server's end: the URL it dials and the pin it checks the leaf against.
+kubectl --context k3d-rpg-dev -n rpg-k8s-realtime patch configmap gameserver-config \
+  --type=merge -p '{"data":{
+    "nakama-url":"https://nakama.rpg-k8s-data.svc.cluster.local:7350",
+    "nakama-tls-pin":"/etc/nakama-tls/tls.crt"}}'
+```
 
 The probes need no edit — that is what moving them to `:9100` bought.
+
+> **A fleet update does NOT recreate an Allocated GameServer.** Measured
+> 2026-09-12/13: after applying the fleets and patching the ConfigMap, the one
+> `Allocated` map server kept running with the old plaintext `NAKAMA_URL` and no
+> pin mounted, and **every reward RPC it made failed** with
+> `BadRequest code=-1 Client sent an HTTP request to an HTTPS server` while the
+> game itself carried on working perfectly. Environment variables are fixed at pod
+> creation, so a ConfigMap patch never reaches a running pod either. Delete the
+> allocated GameServer (`kubectl delete gs <name>`) and let the fleet replace it,
+> or accept that the rollout is not complete until that player leaves.
+>
+> Nothing alerts on this. It is the steady-state gap ADR-24 §8.1 records, seen
+> live.
 
 **Step 4 — apply, and watch the thing that used to fail.**
 
@@ -513,7 +541,7 @@ kubectl --context k3d-rpg-dev -n rpg-k8s-data run tlscheck --rm -i --restart=Nev
 # expect https:200 and http:400
 
 # 2. The game server: no certificate error on the reward path.
-kubectl --context k3d-rpg-dev -n rpg-k8s-app logs -l agones.dev/fleet=fleet-map \
+kubectl --context k3d-rpg-dev -n rpg-k8s-realtime logs -l agones.dev/fleet=fleet-map \
   --tail=200 | grep -E "NakamaTLS|reward|certificate"
 # expect "NakamaTLS: pinned to /etc/nakama-tls/tls.crt (sha256:...)"
 

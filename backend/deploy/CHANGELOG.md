@@ -5,6 +5,67 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **The meta hop's TLS (ADR-24) is a per-CLUSTER opt-in, not a manifest edit — and it is ON in
+  dev.** The recipe used to be "uncomment blocks in four files", which cannot work: these
+  manifests are applied **unchanged to dev and staging**, so an edit turned the flag on in both
+  or neither, and a required Secret volume would have wedged every pod in the cluster that had
+  not opted in.
+
+  The mounts now ship uncommented with `optional: true`, and the paths come from ConfigMap keys
+  that are also optional, so **an absent key is the flag off**. Turning it on is two ConfigMaps
+  and two Secrets; turning it off is deleting them. This is the shape ADR-23's gateway TLS
+  already uses, for the same reason.
+
+  **Measured on both clusters with the same manifests, 2026-09-13:**
+
+  | | dev (opted in) | staging (not opted in) |
+  |---|---|---|
+  | `NAKAMA_TLS_CERT` in the pod | `/nakama/tls/tls.crt` | empty |
+  | files in `/nakama/tls` | the pair | **0** |
+  | Nakama's log | `SSL mode enabled` | nothing |
+  | `:7350` over plaintext | **`http:400`** | `http:200` |
+  | `:7350` over TLS | `https:200` | — |
+
+  The staging column is the control: the cluster that did not opt in was applied the same
+  files and stayed plaintext and healthy.
+
+### Added
+- **A `dev-up.sh` gate for the meta hop, mirroring the gateway's.** It refuses the halfway
+  states rather than deploying them:
+
+  - exactly one of `tls-cert-path` / `tls-key-path` → error;
+  - TLS paths named but no `nakama-tls` Secret → error (the volume is optional, so the paths
+    would point at an empty directory);
+  - **Nakama on TLS with the game server still on `http://`** → error. This is the dangerous
+    one and it is not hypothetical: it happened here on 2026-09-13, and every reward RPC failed
+    with `BadRequest code=-1 Client sent an HTTP request to an HTTPS server` **while the game
+    itself kept working perfectly**. It is a `LogWarning` with no counter and no alert, so
+    nothing but a human reading pod logs would ever have noticed;
+  - `https` URL with no pin, or a pin whose Secret is absent → error (Nakama's certificate is
+    self-signed by design, so .NET's own validation correctly refuses it and every reward RPC
+    fails on the certificate);
+  - a pin set while Nakama terminates no TLS → error, because a pin on a plaintext hop protects
+    nothing while reading as though it does.
+
+  The gate was exercised against the live cluster rather than reasoned about: it passes dev
+  (opted in) and staging (not), and both dangerous states were **created on purpose** on dev
+  and refused with `exit=1` before being restored.
+
+### Fixed
+- **`k8s/data/README.md` told you to create a Secret in a namespace that does not exist.**
+  Steps 2 and the verification block said `rpg-k8s-app`; the namespace is `rpg-k8s-realtime`,
+  and `rpg-k8s-app` appears in no manifest anywhere in the repo. Anyone following the recipe
+  hit `error: failed to create secret namespaces "rpg-k8s-app" not found` at step 2 — which is
+  at least loud. The verification command would have been worse: it would have reported no
+  matching pods rather than a failure.
+- **The README now records that a fleet update does NOT recreate an `Allocated` GameServer.**
+  Environment variables are fixed at pod creation and a ConfigMap patch never reaches a running
+  pod, so the new spec reaches only new pods — which is how the reward path above came to be
+  broken on one server while the fleet looked fully rolled out.
+
+## [Unreleased]
+
 ### Documentation
 - **The probe move's real cost is now a named open item, not a reassuring sentence
   (ADR-24 §8.1, `k8s/data/README.md`).** The first write-up said the change was "not a

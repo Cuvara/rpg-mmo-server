@@ -550,6 +550,67 @@ if [ -n "$tls_cert_path" ]; then
 else
   echo "checked: the gateway hop is plaintext (no TLS paths in gateway-config) -- ADR-23's default"
 fi
+# --- the meta hop's TLS (ADR-24) -------------------------------------------
+# The same three states as the gateway above, and the third is worse here: a
+# plaintext game server against a TLS-only Nakama fails EVERY reward RPC while
+# the game itself keeps working perfectly. Measured 2026-09-13 on this cluster --
+# `BadRequest code=-1 Client sent an HTTP request to an HTTPS server`, logged as a
+# warning, with no counter and no alert. Nobody notices until a player asks where
+# their gold went.
+nk_cert_path=$($K get configmap nakama-config -n rpg-k8s-data -o 'jsonpath={.data.tls-cert-path}' 2>/dev/null || true)
+nk_key_path=$($K get configmap nakama-config -n rpg-k8s-data -o 'jsonpath={.data.tls-key-path}' 2>/dev/null || true)
+nk_secret=$($K get secret nakama-tls -n rpg-k8s-data -o 'jsonpath={.metadata.name}' 2>/dev/null || true)
+nk_url=$($K get configmap gameserver-config -n rpg-k8s-realtime -o 'jsonpath={.data.nakama-url}' 2>/dev/null || true)
+nk_pin=$($K get configmap gameserver-config -n rpg-k8s-realtime -o 'jsonpath={.data.nakama-tls-pin}' 2>/dev/null || true)
+nk_pin_secret=$($K get secret nakama-tls-pin -n rpg-k8s-realtime -o 'jsonpath={.metadata.name}' 2>/dev/null || true)
+
+if { [ -n "$nk_cert_path" ] && [ -z "$nk_key_path" ]; } || { [ -z "$nk_cert_path" ] && [ -n "$nk_key_path" ]; }; then
+  echo "ERROR: nakama-config has exactly one of tls-cert-path / tls-key-path." >&2
+  echo "  Nakama's entrypoint treats one-without-the-other as a startup error." >&2
+  exit 1
+fi
+
+if [ -n "$nk_cert_path" ] && [ -z "$nk_secret" ]; then
+  echo "ERROR: nakama-config names TLS paths but the nakama-tls Secret is absent." >&2
+  echo "  The volume is optional, so those paths point at an empty directory." >&2
+  echo "  See k8s/data/README.md \"Turning the meta hop's TLS on\"." >&2
+  exit 1
+fi
+
+if [ -n "$nk_cert_path" ]; then
+  # Nakama terminates TLS. Every consumer must have moved WITH it.
+  case "$nk_url" in
+    https://*) ;;
+    *)
+      echo "ERROR: Nakama terminates TLS but gameserver-config nakama-url is '$nk_url'." >&2
+      echo "  Every reward RPC would fail with 'Client sent an HTTP request to an" >&2
+      echo "  HTTPS server' while the game kept working. Nothing alerts on it." >&2
+      exit 1
+      ;;
+  esac
+  if [ -z "$nk_pin" ]; then
+    echo "ERROR: nakama-url is https but gameserver-config nakama-tls-pin is empty." >&2
+    echo "  Nakama's certificate is self-signed by design, so .NET's own validation" >&2
+    echo "  correctly refuses it and every reward RPC fails on the certificate." >&2
+    exit 1
+  fi
+  if [ -z "$nk_pin_secret" ]; then
+    echo "ERROR: nakama-tls-pin names $nk_pin but the nakama-tls-pin Secret is absent" >&2
+    echo "  in rpg-k8s-realtime, so that path is an empty directory." >&2
+    exit 1
+  fi
+  echo "checked: the meta hop terminates TLS ($nk_cert_path), the game server dials"
+  echo "          $nk_url and pins $nk_pin"
+else
+  if [ -n "$nk_pin" ]; then
+    echo "ERROR: gameserver-config sets nakama-tls-pin but Nakama terminates no TLS." >&2
+    echo "  The game server refuses to start on a pin against a plaintext URL --" >&2
+    echo "  a pin on a plaintext hop protects nothing while reading as though it does." >&2
+    exit 1
+  fi
+  echo "checked: the meta hop is plaintext (no TLS paths in nakama-config) -- ADR-24's default"
+fi
+
 $K apply -f "$HERE/app/40-gateway.yaml" -f "$HERE/app/50-fleet-map.yaml" -f "$HERE/app/60-fleet-dungeon.yaml"
 
 # Pin the resolved images over whatever the manifests carry. The Fleet is
