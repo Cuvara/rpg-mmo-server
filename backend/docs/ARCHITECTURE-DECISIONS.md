@@ -3321,7 +3321,7 @@ The C# game server is the third consumer and has the same problem for the same r
 
 ## ADR-25 — The game server proves its identity with an Ed25519 key it generates per pod; the client's trust in that key is the gateway hop's trust, not its own
 
-**Status:** accepted 2026-09-12 as the target model; **BACKEND IMPLEMENTED 2026-09-13** — decisions 1, 2, 3, 4 and 5 ship on the game server, the registry, the gateway and the Go client half. **Decision 6 is implemented as a REPORTING contract and currently resolves to the weaker truth on every environment**, which is the honest outcome and not a gap: `sealed.ClientResult` splits `IdentityChecked` (a signature verified under the key we were given) from `IdentityKeyHopAuthenticated` (whether that key arrived over an authenticated hop), and only their conjunction is `IdentityVerified`. ADR-23's gateway TLS is off everywhere, so a passing smoke run prints `identity_checked=true key_hop_authenticated=false server_identity_verified=false`. **Decisions 7 and 8 are NOT done**: nothing pins, by design, and the Unity IL2CPP probe decision 8 requires has not been run — the client half is a separate change and this one deliberately touched no Unity code. It closes the residual that ADR-22's sealed sessions left open and that `ROADMAP-SECURITY.md` step 5 names: every sealed session in dev and staging reports `binding_verified=false`, and no change to configuration can make it true. **That field is unchanged and still false**; the identity signature is the reachable replacement beside it, not a repair of it.
+**Status:** accepted 2026-09-12 as the target model; **BACKEND IMPLEMENTED 2026-09-13** — decisions 1, 2, 3, 4 and 5 ship on the game server, the registry, the gateway and the Go client half. **Decision 6 is implemented as a REPORTING contract and currently resolves to the weaker truth on every environment**, which is the honest outcome and not a gap: `sealed.ClientResult` splits `IdentityChecked` (a signature verified under the key we were given) from `IdentityKeyHopAuthenticated` (whether that key arrived over an authenticated hop), and only their conjunction is `IdentityVerified`. ADR-23's gateway TLS is off everywhere, so a passing smoke run prints `identity_checked=true key_hop_authenticated=false server_identity_verified=false`. **Decision 8 is DONE and decision 7 is not**: nothing pins, by design; the Unity IL2CPP probe was run on 2026-09-13 and Ed25519 survives `High` stripping in a built Windows player — see decision 8 for the measurement and its exact scope. **The Unity client half shipped 2026-09-13** in `Cuvara/Netcode` v0.38.0-v0.38.2: `ServerIdentityVerifier` plus the plumbing that reads `server_public_key` off `enter_world_resp` and `server_signature` off the sealed hello, with `Verified` computed as the conjunction in one place. It closes the residual that ADR-22's sealed sessions left open and that `ROADMAP-SECURITY.md` step 5 names: every sealed session in dev and staging reports `binding_verified=false`, and no change to configuration can make it true. **That field is unchanged and still false**; the identity signature is the reachable replacement beside it, not a repair of it.
 
 **What shipped, concretely.** `GameServer/Net/Sealed/ServerIdentity.cs` generates an Ed25519 keypair per pod at startup, in memory, with no configuration path that could supply one. `SealedHandshakeServer` signs `"cuvara/sealed-identity/v1" ‖ 0x00 ‖ transcript ‖ 0x00 ‖ identity_public` and sends it as `SealedServerHello.server_signature = 4`; **the transcript bytes did not change**, so ADR-22's vectors still reproduce, and the new signature has vectors of its own asserted independently by `shared/sealed/interop_test.go` and `GameServer.Tests/Net/ServerIdentityInteropTests.cs`. The public half travels as the Redis hash field `identity_key` (standard padded base64) and reaches the client at `EnterWorldResponse.server_public_key = 6`. `binding` keeps field 2 and its meaning; field 5 stays reserved.
 
@@ -3424,7 +3424,45 @@ One keypair per fleet or per environment, the public half shipped inside the pla
 5. **No negotiation and no fallback.** A signature that does not verify is a closed connection, never a session. A client that requires identity and is not given a key is refused. ADR-22 decision 3 applies unchanged.
 6. **A client reports `server_identity_verified` as true only when the key it checked arrived over an *authenticated* hop** — that is, with ADR-23's gateway TLS in force and its certificate validated. Over a plaintext gateway hop the client has checked a signature against a key an attacker could have chosen, and it must report the weaker truth. **An instrument that reports the strong claim on the weak evidence is worse than no instrument**, and that is the whole of ADR-23's argument for rejecting its Option A, applied to ourselves.
 7. **The shipped client does not pin.** The key is pinnable and an operator-controlled build may pin it (Option C stays available for a fixed fleet), but the default path delivers it per session, because pinning an ephemeral pod's key would make the pin either useless or a client release per rollout.
-8. **Ed25519 under Unity IL2CPP is a go/no-go probe, and it runs before implementation, in a built player at `Minimal` and `High` stripping.** Go has `crypto/ed25519` in the standard library and the .NET server has BouncyCastle 2.7.0 already (`GameServer/GameServer.csproj:14`); the client runtime is the one that has surprised us twice — `AesGcm` compiled and threw, `ECDiffieHellman`/`HKDF`/`ChaCha20Poly1305` were absent (ADR-22). **Assert the negative case**: a signature over a tampered transcript must be REJECTED, not merely that a good one verifies. A verifier that accepts everything is indistinguishable from one that works.
+8. **Ed25519 under Unity IL2CPP is a go/no-go probe, and it runs before implementation, in a built player at `Minimal` and `High` stripping.**
+
+   > **MEASURED 2026-09-13 — GO, on Windows, at `High`.** A Windows Standalone IL2CPP
+   > player built at `ManagedStrippingLevel.High` from the Sealed Session Probe sample
+   > (`Cuvara/Netcode` v0.38.2) ran all eight of its self-checks and reported
+   > `VERDICT: ALL CHECKS PASSED`. The two that answer this decision:
+   >
+   > ```
+   > [SealedSessionProbe/selfcheck] Ed25519 signing produced 64 bytes: OK
+   > [SealedSessionProbe/selfcheck] Ed25519 verification of a genuine signature: OK
+   > [SealedSessionProbe/selfcheck] a flipped signature byte is refused: OK
+   > [SealedSessionProbe/selfcheck] the same signature reads as verified ONLY over an
+   >   authenticated hop: OK (plaintext: checked=True verified=False; TLS: checked=True verified=True)
+   > ```
+   >
+   > The negative case this decision demands is the third line, and it is a real
+   > refusal rather than an absence: one byte of a genuine signature flipped, and the
+   > verifier said no.
+   >
+   > **What this does NOT cover, stated so nobody reads it as more:**
+   >
+   > - **`Minimal` was not run separately.** `High` is the stricter of the two and it
+   >   passed, so a `Minimal` failure would be surprising — but "would be surprising"
+   >   is not a measurement, and this decision asked for both.
+   > - **Android is unmeasured**, as it is for `SslStream` in ADR-22's survey. The
+   >   BouncyCastle CIL-Linker failure that `link.xml` exists to guard against was
+   >   *reported on Android*, and this run was Windows.
+   > - **Whether `link.xml` is load-bearing here is untested.** The run had
+   >   `Ed25519Signer` and `Ed25519PublicKeyParameters` preserved; no control run was
+   >   made with them absent, because doing so means editing the resolved package under
+   >   `Library/PackageCache`, which the package rules forbid. So the honest claim is
+   >   "Ed25519 survives `High` **with those entries present**", not "the entries are
+   >   unnecessary" and not "the entries are what saved it".
+   >
+   > The probe had to grow a headless mode to produce this at all: a scene whose only
+   > output is on-screen labels cannot answer a question about a player build except
+   > through somebody reporting what they saw.
+
+ Go has `crypto/ed25519` in the standard library and the .NET server has BouncyCastle 2.7.0 already (`GameServer/GameServer.csproj:14`); the client runtime is the one that has surprised us twice — `AesGcm` compiled and threw, `ECDiffieHellman`/`HKDF`/`ChaCha20Poly1305` were absent (ADR-22). **Assert the negative case**: a signature over a tampered transcript must be REJECTED, not merely that a good one verifies. A verifier that accepts everything is indistinguishable from one that works.
 9. **This may be implemented before ADR-23's TLS is enabled, and must not be *reported* as man-in-the-middle protection until it is.** Decision 6 is the mechanism that keeps that honest; §3 is the reason.
 
 ### What this ADR does not claim

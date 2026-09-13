@@ -424,10 +424,20 @@ inventing a cipher.
      keypair and signs; the registry carries the public half as `identity_key`; the gateway
      relays it in `enter_world_resp`; and the Go client half (`shared/sealed`) verifies it
      and refuses a session on any failure, which the smoke test now exercises as the
-     closest thing here to a shipped player. **Unity does not verify yet** -- that is a
-     separate change -- and **ADR-25 decision 8's IL2CPP go/no-go probe has NOT been run**,
-     so Ed25519 under IL2CPP at `Minimal` and `High` stripping remains unanswered. Nothing
-     on the backend depends on that answer; the client half does.
+     closest thing here to a shipped player. **Unity verifies as of 2026-09-13**
+     (`Cuvara/Netcode` v0.38.0-v0.38.2): `ServerIdentityVerifier` plus the plumbing that
+     reads `server_public_key` off `enter_world_resp` and `server_signature` off the sealed
+     hello, with `Verified` computed as the conjunction of "the signature checked out" and
+     "the key arrived over an authenticated hop" in one place, so no call site can re-derive
+     it and get it wrong.
+
+     **ADR-25 decision 8's IL2CPP go/no-go probe RAN on 2026-09-13 and the answer is GO** --
+     on Windows, at `High` stripping, all eight self-checks passing in a built player
+     including the negative case (a flipped signature byte refused). `Minimal` was not run
+     separately and **Android is unmeasured**, which matters because the BouncyCastle
+     CIL-Linker failure `link.xml` guards against was reported on Android. The exact scope,
+     and why "`link.xml` is load-bearing" is NOT among the things this measured, is recorded
+     at ADR-25 decision 8.
 
      **`binding_verified` is unchanged and is still false.** It was not repaired and cannot
      be. The identity signature sits beside it as the reachable replacement, and the two
