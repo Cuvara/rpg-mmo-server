@@ -6,6 +6,27 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **ADR-25: the gateway relays the game server's identity key.** `AssignResult` gains
+  `ServerPublicKey`, decoded from the target's `identity_key` registry field, and
+  `EnterWorldResponse` carries it to the client at new field 6. The gateway **never
+  generates, stores or validates** this key -- it relays the one the pod published, which
+  adds no trust relationship the client did not already have, since an attacker who can
+  rewrite `ServerAddr` in this same message already redirects the player anywhere.
+
+  **An absent or malformed key never fails an assignment.** A pre-ADR-25 server publishes
+  none, and a garbage value decodes to none; in both cases the join proceeds and a client
+  that requires identity refuses one hop later at the sealed handshake, where the error can
+  actually name encryption. Failing here would turn one bad registry write into a map-wide
+  outage. The enter-world log line carries `server_key=<bool>` -- the presence, not the key
+  -- because the ABSENCE is the entire explanation for a client that will not seal, and that
+  has to be findable without reading Redis by hand.
+
+  **What this does NOT buy while the gateway hop is plaintext**, which it is everywhere
+  today: an attacker positioned to man-in-the-middle the gameplay hop is on the same path as
+  this hop, substitutes the key here, and forges a signature that verifies. The change
+  converts a free break into one that also requires owning this hop, and composes so that
+  turning ADR-23's TLS flag on closes both at once. It is not man-in-the-middle protection
+  until then, and the client's reporting says so (`sealed.ClientResult.IdentityVerified`).
 - **Dungeon entry (ADR-26 / ADR-14 stage 6).** `EnterWorldRequest` gains `party_id`; a
   non-empty value means "an instance of the content named by `map_id`, for this party".
   There is no `MsgEnterDungeon` -- a second message type would duplicate the auth, budget,

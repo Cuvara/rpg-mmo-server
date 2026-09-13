@@ -6,6 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **ADR-25 implemented: the game server proves its identity with an Ed25519 key it generates
+  per pod.** `Net/Sealed/ServerIdentity.cs` makes the keypair once at startup from a
+  cryptographic RNG. It is **never persisted, never configured and never mounted** -- there
+  is deliberately no flag, no environment variable and no file path that can supply one,
+  because the moment such a path exists somebody mounts a fleet-wide private key into the
+  process most exposed to player-controlled input. Rotation is pod replacement; the Fleet
+  already does it on every scale, rollout and crash, so there is no key to roll, no overlap
+  window and no keyring.
+
+  `SealedHandshakeServer` signs the existing transcript -- wrapped, not modified -- and puts
+  the 64-byte signature in `SealedServerHello.server_signature` (new field 4). The HMAC
+  `binding` is unchanged and still sent: it serves the harnesses that hold
+  `JOIN_TOKEN_SECRET`, and reusing its field number is how two versions come to disagree
+  silently about a byte. **The server always signs and never negotiates.**
+
+  The public half is published as `identity_key` in this pod's Redis registry entry
+  (`RegistrationOptions.IdentityKey`, rebuilt by `BuildInfo` so every heartbeat REPAIR
+  republishes it -- a repaired entry missing the key would leave a server every
+  identity-requiring client refuses, with the registry reporting perfect health). The
+  gateway forwards it to the client in `enter_world_resp`.
+
+  **What it does not buy, said at every boot rather than only here.** The key reaches the
+  client over the gateway hop, plaintext in every environment today. An attacker able to
+  man-in-the-middle the gameplay hop is on that same path: he substitutes the key and forges
+  a signature that verifies. So a verified signature proves the gameplay peer holds THAT
+  key -- an identity guarantee only once the delivering hop is itself authenticated (ADR-23
+  TLS). The startup log states this in full, and the client half reports the distinction
+  rather than collapsing it (ADR-25 decision 6).
+
+  **NativeAOT**: BouncyCastle's Ed25519 is managed arithmetic with no reflection and no
+  dynamic loading, so nothing here needs a trimming root. No new dependency -- BouncyCastle
+  2.7.0 was already a `PackageReference`.
+
+  Tests assert the **negative** case, per ADR-25 decision 8: a tampered transcript, a
+  signature replayed into another session, a signature by another identity, a genuine
+  signature naming a different key, bit flips at both ends, an all-zero signature and a
+  short one are each rejected individually. `ServerIdentityInteropTests` pins the signed
+  input and the signature byte for byte against `shared/sealed/interop_test.go` -- two sides
+  that each round-trip against themselves agree with themselves, not with each other, and a
+  divergence would show in production as a client refusing every session with nothing in any
+  log naming encryption.
+
 ### Documentation
 - **ADR-26's status line said "NOT implemented" for a day after it stopped being true.**
   Decisions 1, 2, 3, 5, 6, 7 and 8 all shipped on 2026-09-12/13 and were proven on dev; the

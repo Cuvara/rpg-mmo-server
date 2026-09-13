@@ -7,6 +7,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **ADR-25: updated for the new `readHello` signature.** The sealed client callback now
+  returns the server's Ed25519 `server_signature` as a third `[]byte`. The suite still
+  passes no `ServerPublicKey`, so it exercises the pre-ADR-25 path deliberately: it holds
+  `JOIN_TOKEN_SECRET` and its value here is proving the *binding* end to end, which remains
+  the only thing that path covers. Identity verification is proven by the smoke test, which
+  receives its token from the real gateway like a player does.
+
 - **`hop_confidentiality_tap_test.go` — a two-hop byte tap, committed as an instrument.**
   ADR-23. A transparent TCP relay sits in the path of the gateway hop *and* the gameplay hop of
   one fully sealed session and records every byte in both directions, then reads the bearer

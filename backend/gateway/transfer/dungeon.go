@@ -170,10 +170,11 @@ func mintForServer(info storage.ServerInfo, userID string, joinKeys jwt.Keyring)
 		return AssignResult{}, fmt.Errorf("assign dungeon: read back jti: %w", err)
 	}
 	return AssignResult{
-		ServerID:   info.ServerID,
-		ServerAddr: info.Addr,
-		JoinToken:  token,
-		Transport:  info.Transport,
-		JTI:        claims.Jti,
+		ServerID:        info.ServerID,
+		ServerAddr:      info.Addr,
+		JoinToken:       token,
+		Transport:       info.Transport,
+		JTI:             claims.Jti,
+		ServerPublicKey: identityKeyOf(info),
 	}, nil
 }

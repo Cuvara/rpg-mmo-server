@@ -17,8 +17,12 @@ public class RedisServerRegistryTests
 
     public RedisServerRegistryTests(RedisFixture redis) => _redis = redis;
 
-    private static ServerInfo Info(string serverId, string mapId, int players = 0) =>
-        new(serverId, mapId, "10.0.0.5:9200", "tcp", 100, players);
+    /// <summary>A fixed, valid base64 Ed25519 public key, so the hash assertions can pin bytes.</summary>
+    private const string TestIdentityKey = "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=";
+
+    private static ServerInfo Info(string serverId, string mapId, int players = 0,
+        string identityKey = TestIdentityKey) =>
+        new(serverId, mapId, "10.0.0.5:9200", "tcp", 100, players, identityKey);
 
     /// <summary>
     /// The TTL <see cref="ConnectAsync"/> uses unless a test asks for another. Named rather
@@ -56,7 +60,12 @@ public class RedisServerRegistryTests
         Assert.Equal("tcp", hash["transport"]);
         Assert.Equal("100", hash["capacity"]);
         Assert.Equal("7", hash["player_count"]);
-        Assert.Equal(6, hash.Count); // no extra fields the gateway would not expect
+        // ADR-25. The gateway reads this field with sealed.DecodeIdentityKey and hands the
+        // decoded bytes to the client; a rename or a different base64 alphabet here is a
+        // silent break, because the gateway would read an empty key and every client that
+        // requires identity would refuse a server that is perfectly capable of it.
+        Assert.Equal(TestIdentityKey, hash["identity_key"]);
+        Assert.Equal(7, hash.Count); // no extra fields the gateway would not expect
 
         // The map index is a plain SET of ids, with no TTL of its own.
         Assert.True(await db.SetContainsAsync("servers:map:map_shape", serverId));
@@ -81,6 +90,37 @@ public class RedisServerRegistryTests
         var ttl1 = await db.KeyTimeToLiveAsync($"servers:id:{serverId}");
         Assert.NotNull(ttl1);
         Assert.InRange(ttl1!.Value, TimeSpan.Zero, Ttl);
+    }
+
+    /// <summary>
+    /// A server that publishes no identity key still writes a complete, readable entry
+    /// (ADR-25), because an empty key must not take a map offline.
+    /// </summary>
+    /// <remarks>
+    /// The field is written EMPTY rather than omitted. Omitting it would make an old entry
+    /// and a new one differ in shape as well as in content, and the Go reader's
+    /// <c>f["identity_key"]</c> yields "" for both — so writing the empty string keeps one
+    /// shape for the gateway to parse and one meaning for it to act on.
+    /// </remarks>
+    [SkippableFact]
+    public async Task Register_WithNoIdentity_WritesAnEmptyFieldRatherThanOmittingIt()
+    {
+        _redis.SkipUnlessAvailable(nameof(Register_WithNoIdentity_WritesAnEmptyFieldRatherThanOmittingIt));
+        var (reg, mux) = await ConnectAsync();
+        await using var _ = reg;
+
+        string serverId = $"gs-noid-{Guid.NewGuid():N}"[..16];
+        await reg.RegisterAsync(Info(serverId, "map_noid", identityKey: ""), RegistrationScope.MapIndexed, default);
+
+        var db = mux.GetDatabase();
+        var hash = (await db.HashGetAllAsync($"servers:id:{serverId}"))
+            .ToDictionary(e => e.Name.ToString(), e => e.Value.ToString());
+
+        Assert.True(hash.ContainsKey("identity_key"));
+        Assert.Equal("", hash["identity_key"]);
+        Assert.Equal(7, hash.Count);
+        // Still findable: an identity-less server is a server, not a broken entry.
+        Assert.True(await db.SetContainsAsync("servers:map:map_noid", serverId));
     }
 
     [SkippableFact]

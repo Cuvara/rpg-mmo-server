@@ -155,6 +155,28 @@ public class ServerOptions
     /// </para>
     /// </remarks>
     public Net.Sealed.SealedRequirement SealedTransport { get; set; } = Net.Sealed.SealedRequirement.Disabled;
+
+    /// <summary>
+    /// This pod's Ed25519 identity, used to sign the sealed handshake (ADR-25).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Defaults to a freshly generated pair rather than to null, so that an entry point or
+    /// a test which forgets to set it still signs with a real per-process key instead of
+    /// crashing or -- far worse -- sending an empty signature that a client would read as
+    /// "this build predates ADR-25". There is no setter path that loads key material from
+    /// configuration, and that omission is the design: see <see cref="Net.Sealed.ServerIdentity"/>.
+    /// </para>
+    /// <para>
+    /// The public half must also reach the registry, or the gateway has nothing to hand the
+    /// client and the signature cannot be checked by anyone. <c>Program.cs</c> generates one
+    /// identity and passes it to both this and <c>RegistrationOptions.IdentityKey</c>;
+    /// two separately generated identities would produce a signature that never verifies,
+    /// which is a failure mode worth naming because it looks exactly like a man in the
+    /// middle.
+    /// </para>
+    /// </remarks>
+    public Net.Sealed.ServerIdentity ServerIdentity { get; set; } = Net.Sealed.ServerIdentity.Generate();
     /// <summary>
     /// HS256 secret (or comma-separated rotation list) for the Nakama-issued
     /// client auth token. The game server itself never sees that token; this is
@@ -1555,7 +1577,8 @@ public sealed class GameServerHost : IAsyncDisposable
                 try
                 {
                     outcome = await Net.Sealed.SealedHandshakeServer.RunAsync(
-                        conn, _options.JoinTokenSecret, claims.Jti, _logger, handshakeToken);
+                        conn, _options.JoinTokenSecret, claims.Jti, _options.ServerIdentity,
+                        _logger, handshakeToken);
                 }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {

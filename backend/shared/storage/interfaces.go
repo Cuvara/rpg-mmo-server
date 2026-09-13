@@ -42,6 +42,26 @@ type ServerInfo struct {
 	Transport   string `json:"transport,omitempty"`
 	Capacity    int    `json:"capacity"`
 	PlayerCount int    `json:"player_count"`
+
+	// IdentityKey is the server's Ed25519 identity public key (ADR-25), base64
+	// standard encoding with padding of exactly 32 raw bytes. The pod generates
+	// it at startup and publishes it here; the gateway forwards it to clients in
+	// EnterWorldResponse.ServerPublicKey.
+	//
+	// It is written by the C# game server and read by the Go gateway with NO
+	// translation layer, so the Redis hash field name ("identity_key") and this
+	// encoding are a cross-language contract — see
+	// GameServer.Registry.RedisServerRegistry and
+	// GameServer.Net.Sealed.ServerIdentity. Use sealed.EncodeIdentityKey /
+	// sealed.DecodeIdentityKey rather than calling base64 directly, so the two
+	// sides cannot drift on padding.
+	//
+	// Empty for a server older than ADR-25, which is why nothing may treat an
+	// empty value as an error. It is also why anything that can WRITE a registry
+	// entry can publish its own key and be believed: ADR-4's trusted backend
+	// network is load-bearing for this field, and ADR-25 §6 says so explicitly
+	// rather than leaving it assumed.
+	IdentityKey string `json:"identity_key,omitempty"`
 }
 
 // Event is a cross-server event message.

@@ -6,6 +6,21 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **The smoke test verifies the game server's identity signature (ADR-25).** It passes the
+  `server_public_key` the real gateway handed it into the sealed handshake, so a forged or
+  missing signature now ends the run instead of being reported. This is the closest peer in
+  the repo to a shipped client -- it receives its join token rather than minting one -- so it
+  is the one that proves a REAL player can reach an authenticated state, which
+  `binding_verified` never could.
+
+  The game-server step reports **three** facts rather than one:
+  `identity_checked`, `key_hop_authenticated` and `server_identity_verified`. While the
+  gateway hop is plaintext a passing run prints `checked=true authenticated=false
+  verified=false`, and that is the honest result, not a degraded one: the key was delivered
+  over a hop an attacker could have owned. `KeyHopAuthenticated` is hard-coded false and is
+  the single line to change when ADR-23's gateway TLS is on AND this client validates the
+  certificate -- not before. A backend with no identity key still passes with
+  `identity_key=false`, so the suite stays green against a pre-ADR-25 deployment.
 - **`cmd/dungeonprobe`: proves ADR-26 end to end against a running deployment.** A real party
   created through Nakama's RPCs, entering a dungeon through the real gateway.
 

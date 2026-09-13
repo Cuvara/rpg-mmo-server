@@ -74,7 +74,7 @@ both encodings; the JSON column shows the legacy field names, which match the
 | 1 | `auth` | client → gateway | `{ token, protocol_version? }` |
 | 2 | `auth_resp` | gateway → client | `{ ok, user_id?, error?, protocol_version? }` |
 | 3 | `enter_world` | client → gateway | `{ map_id }` |
-| 4 | `enter_world_resp` | gateway → client | `{ server_addr?, join_token?, transport?, error? }` |
+| 4 | `enter_world_resp` | gateway → client | `{ server_addr?, join_token?, transport?, error?, server_public_key? }` — `server_public_key` is the target game server's 32-byte Ed25519 identity key (ADR-25), field **6**; field 5 is reserved forever |
 | 5 | `join_token` | client → gameserver | `{ token, protocol_version? }` |
 | 6 | `join_token_resp` | gameserver → client | `{ ok, user_id?, error?, tick_rate?, protocol_version? }` — see below |
 | 7 | `input` | client → gameserver | `{ tick, move_x, move_y, attack_target_id? }` |

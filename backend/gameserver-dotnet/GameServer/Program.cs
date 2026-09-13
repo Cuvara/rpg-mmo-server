@@ -466,6 +466,34 @@ else
         "(GAMESERVER_SEALED defaults to \"require\"); something set it to \"off\" for this process.");
 }
 
+// ── Per-pod identity (ADR-25) ──
+//
+// Generated here, once, in memory. NOT read from configuration and NOT persisted: there is
+// deliberately no flag, no environment variable and no file path that can supply one,
+// because the moment such a path exists somebody mounts a fleet-wide private key into the
+// process most exposed to player-controlled input. Rotation is pod replacement -- the Fleet
+// already does it on every scale, rollout and crash -- so there is nothing to roll here.
+//
+// Unconditional, not gated on `sealedRequirement`. The key is cheap, and publishing it even
+// when this listener is not sealing keeps the registry entry uniform, so a gateway never has
+// to explain why one entry has the field and another does not.
+var serverIdentity = GameServer.Net.Sealed.ServerIdentity.Generate();
+
+// Logged at every boot, like the transport and sealed postures, because a claim about
+// identity that is not visible in the log is a claim nobody can check against a live pod.
+// The line states the limit as well as the fact: this key reaches the client over the
+// gateway hop, and while that hop is plaintext (ADR-23's TLS is implemented and off
+// everywhere) a client that checks the signature has learned that its peer holds THIS key,
+// not that this key is ours. An attacker on the client's path substitutes it in
+// enter_world_resp and forges a signature that verifies.
+logger.LogInformation(
+    "Server identity: ed25519 {IdentityKey} -- generated for THIS POD at startup, never persisted, dies with the " +
+    "process. Published to the registry as identity_key and handed to clients in enter_world_resp. A client can " +
+    "verify the sealed handshake signature with it, but that proves the gameplay peer holds this key -- it is only " +
+    "an identity guarantee once the gateway hop that delivers the key is itself authenticated (ADR-23 TLS, off " +
+    "everywhere today). See ADR-25 decision 6.",
+    serverIdentity.PublicKeyBase64);
+
 if (string.IsNullOrEmpty(jwtSecret))
 {
     logger.LogWarning("JWT_SECRET not set -- token validation will reject all tokens in production");
@@ -607,7 +635,10 @@ if (!string.IsNullOrWhiteSpace(redisAddr))
             PublicAddr = publicAddr,
             Transport = transport,
             Capacity = capacity,
-            Ttl = RegistryDefaults.HeartbeatTtl
+            Ttl = RegistryDefaults.HeartbeatTtl,
+            // ADR-25. Rebuilt into every registration AND every heartbeat repair, so an
+            // entry that Redis lost and the loop re-created is never missing the key.
+            IdentityKey = serverIdentity.PublicKeyBase64
         };
     }
     catch (Exception ex)
@@ -683,6 +714,7 @@ var options = new ServerOptions
     MaxPendingInputs = maxPendingInputs,
     MaxSnapshotBytes = maxSnapshotBytes,
     SealedTransport = sealedRequirement,
+    ServerIdentity = serverIdentity,
     JwtSecret = jwtSecret,
     JoinTokenSecret = joinTokenSecret,
     HoldTtl = mode == "dungeon" ? TimeSpan.FromSeconds(60) : TimeSpan.FromSeconds(30),

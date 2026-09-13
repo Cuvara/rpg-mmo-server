@@ -18,15 +18,20 @@ public class RegistrationServiceTests
 
     public RegistrationServiceTests(RedisFixture redis) => _redis = redis;
 
-    private static RegistrationOptions Opts(string serverId, string mapId, TimeSpan ttl) => new()
+    private static RegistrationOptions Opts(string serverId, string mapId, TimeSpan ttl,
+        string identityKey = TestIdentityKey) => new()
     {
         ServerId = serverId,
         MapId = mapId,
         PublicAddr = "203.0.113.7:9200",
         Transport = "tcp",
         Capacity = 64,
-        Ttl = ttl
+        Ttl = ttl,
+        IdentityKey = identityKey
     };
+
+    /// <summary>A fixed, valid base64 Ed25519 public key so the assertions can pin bytes.</summary>
+    private const string TestIdentityKey = "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=";
 
     private async Task<(RedisServerRegistry reg, IConnectionMultiplexer mux)> ConnectAsync(TimeSpan ttl)
     {
@@ -51,6 +56,9 @@ public class RegistrationServiceTests
         Assert.NotEmpty(hash);
         Assert.Equal("203.0.113.7:9200",
             hash.First(e => e.Name == "addr").Value.ToString());
+        // ADR-25. The gateway can only hand a client a key that got published here.
+        Assert.Equal(TestIdentityKey,
+            hash.First(e => e.Name == "identity_key").Value.ToString());
 
         cts.Cancel();
     }
@@ -127,6 +135,12 @@ public class RegistrationServiceTests
             "the registry entry never came back — a Redis wipe would still need a human");
         // The map index must be rebuilt too, otherwise the gateway's FindByMapID
         // finds nothing even though the hash exists.
+        // ADR-25: the REPAIRED entry must carry the identity key, not just the address.
+        // A repair that rebuilt the hash without it would leave a server every
+        // identity-requiring client refuses, for as long as the pod lives, with the
+        // gateway reporting a perfectly healthy registration.
+        Assert.Equal(TestIdentityKey,
+            (await db.HashGetAsync($"servers:id:{serverId}", "identity_key")).ToString());
         Assert.True(await db.SetContainsAsync("servers:map:map_heal", serverId),
             "the map index was not rebuilt, so the gateway still cannot find this server");
 

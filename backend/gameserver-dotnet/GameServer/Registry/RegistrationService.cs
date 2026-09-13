@@ -53,6 +53,19 @@ public sealed record RegistrationOptions
     /// <see cref="RegistrationScope"/> for why the hash is never optional.
     /// </summary>
     public RegistrationScope Scope { get; init; } = RegistrationScope.MapIndexed;
+
+    /// <summary>
+    /// This pod's Ed25519 identity public key in base64 (ADR-25), taken from
+    /// <see cref="GameServer.Net.Sealed.ServerIdentity.PublicKeyBase64"/>.
+    /// </summary>
+    /// <remarks>
+    /// Publishing it is what lets the gateway hand it to a client, and republishing it on
+    /// every heartbeat repair is what keeps a re-created entry complete — a repaired entry
+    /// missing this field would silently stop a client from requiring identity against a
+    /// server that is perfectly capable of it. That is why it lives on the options and is
+    /// rebuilt by <c>BuildInfo</c> rather than being written once at first registration.
+    /// </remarks>
+    public string IdentityKey { get; init; } = "";
 }
 
 /// <summary>
@@ -142,7 +155,8 @@ public sealed class RegistrationService : IAsyncDisposable
         PublicAddr,
         _options.Transport,
         _options.Capacity,
-        _playerCount());
+        _playerCount(),
+        _options.IdentityKey);
 
     /// <summary>
     /// Register immediately, then start the heartbeat loop.
