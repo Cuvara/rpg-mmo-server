@@ -427,11 +427,18 @@ alternatives in the table, and it is written here so nobody has to re-derive it.
 
 So the first notice is **a human, when players cannot authenticate**.
 
-**The cheapest close, named and not built:** a counter on the game server's
-Nakama call outcomes — it already distinguishes `Granted` / `Partial` /
-`NotGranted` / transport failure — plus an alert on the failure rate. That covers
-the wedge *and* a certificate misconfiguration, from the consumer's side, which
-is the side that cares whether the hop works.
+**Closed 2026-09-13** — and the failure it describes happened first, on the day
+the flag went on: one stale `Allocated` GameServer kept the old plaintext
+`NAKAMA_URL` and failed every reward RPC while the game played perfectly.
+`gameserver_nakama_reward_outcomes_total{map_id,outcome}` now counts every answer
+to `reward_kills`, and `deploy/monitoring/alerts.yaml` — this repository's first
+alert rule — fires when more than half of them have not landed for ten minutes.
+It watches from the consumer's side, which is the only side that can see `:7350`
+be unreachable, untrusted **or** wedged; the probes on `:9100` cannot see any of
+the three. `backend/gameserver-dotnet/docs/METRICS.md` has the label meanings.
+
+**Still not closed:** the lost automatic restart. Nothing kills a pod whose API
+mux has wedged — the alert says a human should look.
 
 Compose has the same trap and it was not recorded when the flag landed: its
 healthcheck was bare `/nakama/nakama healthcheck`, which defaults to 7350. It is

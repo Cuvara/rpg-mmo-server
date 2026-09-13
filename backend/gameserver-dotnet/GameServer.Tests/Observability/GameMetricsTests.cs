@@ -359,4 +359,90 @@ public class GameMetricsTests
             GameServer.Input.InputRejection.All.Select(GameServer.Input.InputRejection.Label).OrderBy(x => x),
             seen.OrderBy(x => x));
     }
+    // ── The Nakama reward path (ADR-24 §8.1) ─────────────────────────────────
+
+    [Fact]
+    public void RewardOutcomes_AreLabelledPerOutcome()
+    {
+        using var h = new Harness(nameof(RewardOutcomes_AreLabelledPerOutcome));
+
+        h.Metrics.RecordNakamaRewardOutcome(GameServer.Nakama.KillRewardOutcome.Granted);
+        h.Metrics.RecordNakamaRewardOutcome(GameServer.Nakama.KillRewardOutcome.Granted);
+        h.Metrics.RecordNakamaRewardOutcome(GameServer.Nakama.KillRewardOutcome.Partial);
+        h.Metrics.RecordNakamaRewardOutcome(GameServer.Nakama.KillRewardOutcome.NotGranted);
+        h.Metrics.RecordNakamaRewardOutcome(GameServer.Nakama.KillRewardOutcome.TooLarge);
+        h.Metrics.RecordNakamaRewardOutcome(GameServer.Nakama.KillRewardOutcome.Unknown);
+
+        var metric = Find(h.Collect(), "gameserver.nakama.reward_outcomes");
+        Assert.NotNull(metric);
+
+        Assert.Equal(2, SumLong(metric!, ("outcome", "granted")));
+        Assert.Equal(1, SumLong(metric!, ("outcome", "partial")));
+        Assert.Equal(1, SumLong(metric!, ("outcome", "not_granted")));
+        Assert.Equal(1, SumLong(metric!, ("outcome", "too_large")));
+        Assert.Equal(1, SumLong(metric!, ("outcome", "unknown")));
+        Assert.Equal(6, SumLong(metric!, ("map_id", "map_01")));
+    }
+
+    /// <summary>
+    /// The alert reads a RATIO, so the successful answer has to be counted too. A failure
+    /// counter with no denominator cannot tell "the hop is broken" from "nobody killed
+    /// anything" — and the second is the normal state of an idle map.
+    /// </summary>
+    [Fact]
+    public void RewardOutcomes_CountTheDenominatorToo()
+    {
+        using var h = new Harness(nameof(RewardOutcomes_CountTheDenominatorToo));
+
+        h.Metrics.RecordNakamaRewardOutcome(GameServer.Nakama.KillRewardOutcome.Granted);
+        h.Metrics.RecordNakamaRewardOutcome(GameServer.Nakama.KillRewardOutcome.Unknown);
+
+        Assert.Equal(1, h.Metrics.NakamaRewardsGranted);
+        Assert.Equal(1, h.Metrics.NakamaRewardsNotGranted);
+    }
+
+    /// <summary>
+    /// <c>TooLarge</c> is the batcher splitting a batch as designed, not a hop failure.
+    /// Folding it into the not-granted summary would give the alert a routine background
+    /// rate to hide in, which is how a threshold ends up set above the thing it watches.
+    /// </summary>
+    [Fact]
+    public void RewardOutcomes_TooLargeIsNotAFailure()
+    {
+        using var h = new Harness(nameof(RewardOutcomes_TooLargeIsNotAFailure));
+
+        h.Metrics.RecordNakamaRewardOutcome(GameServer.Nakama.KillRewardOutcome.TooLarge);
+        h.Metrics.RecordNakamaRewardOutcome(GameServer.Nakama.KillRewardOutcome.TooLarge);
+
+        Assert.Equal(0, h.Metrics.NakamaRewardsNotGranted);
+        Assert.Equal(0, h.Metrics.NakamaRewardsGranted);
+
+        // Still visible on the wire, though -- it is a real answer and hiding it would
+        // make a batch-splitting storm invisible.
+        var metric = Find(h.Collect(), "gameserver.nakama.reward_outcomes");
+        Assert.Equal(2, SumLong(metric!, ("outcome", "too_large")));
+    }
+
+    /// <summary>
+    /// The three shapes the meta hop has actually failed in all reach a non-granted label,
+    /// which is the claim the alert rests on. Named individually so a future change that
+    /// silently reclassifies one of them fails here rather than in production.
+    /// </summary>
+    [Theory]
+    [InlineData(GameServer.Nakama.KillRewardOutcome.NotGranted, "not_granted")] // plaintext URL vs a TLS-only Nakama: HTTP 400
+    [InlineData(GameServer.Nakama.KillRewardOutcome.Unknown, "unknown")]        // self-signed cert with no pin, or a wedged mux
+    [InlineData(GameServer.Nakama.KillRewardOutcome.Partial, "partial")]        // gold in, leaderboard lost
+    public void RewardOutcomes_EveryMeasuredFailureShapeIsCounted(
+        GameServer.Nakama.KillRewardOutcome outcome, string label)
+    {
+        using var h = new Harness($"{nameof(RewardOutcomes_EveryMeasuredFailureShapeIsCounted)}.{label}");
+
+        h.Metrics.RecordNakamaRewardOutcome(outcome);
+
+        var metric = Find(h.Collect(), "gameserver.nakama.reward_outcomes");
+        Assert.NotNull(metric);
+        Assert.Equal(1, SumLong(metric!, ("outcome", label)));
+        Assert.Equal(1, h.Metrics.NakamaRewardsNotGranted);
+    }
+
 }

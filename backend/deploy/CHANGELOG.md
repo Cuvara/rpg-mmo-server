@@ -5,6 +5,31 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **The first alert rule in this repository** (`monitoring/alerts.yaml`, wired via
+  `rule_files:` in `monitoring/prometheus.yaml` and mounted in compose). Until now
+  monitoring was one scrape config and one dashboard: every number was visible to someone
+  already looking and said nothing to anyone who was not, which ADR-24 §8.1 named as the
+  reason a quietly broken reward path was only ever found by a human reading pod logs.
+
+  `NakamaRewardsNotLanding` fires when more than half of `reward_kills` answers on a map
+  have not landed for ten minutes -- a RATIO, not a rate, because an absolute threshold is
+  wrong on an idle map in both directions. `NakamaRewardPathSilent` is its info-level
+  companion for no answers at all while players are online, which is how the k8s fleet ran
+  for weeks with `NAKAMA_URL` unset and every deploy green. No Alertmanager in this stack,
+  so a firing rule surfaces on Prometheus' Alerts page and in Grafana -- stated in the file
+  rather than implied.
+
+### Fixed
+- **A Grafana panel that has always read "No data".** `rpg-gameplay.json` queried
+  `gameserver_save_errors_total`, which does not exist and never has -- the instrument is
+  `gameserver.player.saves`, exported as `gameserver_player_saves_total` with a `status`
+  label. Verified by grepping the whole module for the name (zero hits outside the
+  dashboard) and by reading the live `_total` names off a running pod. Same shape as the
+  `agones.dev/fleet` selector fixed yesterday: a query that silently returns nothing reads
+  as good news.
+
+
 ### Fixed
 - **The "turning it back off" instruction still described the mechanism its own section had
   just replaced.** #354 rewrote the meta-hop TLS recipe from "uncomment four files" to two

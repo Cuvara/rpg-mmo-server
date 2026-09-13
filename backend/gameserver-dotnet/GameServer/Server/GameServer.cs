@@ -633,7 +633,8 @@ public sealed class GameServerHost : IAsyncDisposable
             _killBatcher = new Nakama.KillRewardBatcher(
                 _nakamaClient,
                 options.MapId,
-                _loggerFactory.CreateLogger<Nakama.KillRewardBatcher>());
+                _loggerFactory.CreateLogger<Nakama.KillRewardBatcher>(),
+                _metrics);
         }
 
         var eventStream = options.EventStream ?? new NoopEventStream();

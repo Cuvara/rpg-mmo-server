@@ -3290,7 +3290,15 @@ The sentence above was first written as *"not a regression, because the old targ
 
 **So the first notice in steady state is a human**, when players cannot authenticate.
 
-**The cheapest close, named and deliberately not built here:** a counter on the game server's Nakama call outcomes — it already distinguishes `Granted` / `Partial` / `NotGranted` / transport failure — plus an alert on its failure rate. That covers the wedge **and** a certificate misconfiguration, from the **consumer's** side, which is the side that cares whether the hop works. An open item named honestly is worth more today than a metric nobody alerts on.
+**CLOSED 2026-09-13, and the live failure came first.** This was written as "the cheapest close, named and deliberately not built here: a counter on the game server's Nakama call outcomes plus an alert on its failure rate". It is built, because the thing it describes happened the same day: turning the flag on in dev left one `Allocated` map GameServer running with the old plaintext `NAKAMA_URL` — Agones does not recreate an allocated GameServer on a fleet update, and env is fixed at pod creation — so **every reward RPC it made failed with `400 Client sent an HTTP request to an HTTPS server` while the game itself played perfectly**, as a `LogWarning` with nothing counting it. It was found by reading pod logs, which is this section's "first notice is a human", confirmed rather than predicted.
+
+`gameserver_nakama_reward_outcomes_total{map_id,outcome}` now counts every answer to `reward_kills`, and `deploy/monitoring/alerts.yaml` is this repository's **first alert rule**. Three properties are deliberate and each has a reason a reader would otherwise have to reconstruct:
+
+- **On the consumer's side, not Nakama's.** Nakama's own probes answer for `:9100` and structurally cannot see `:7350` be unreachable, untrusted or wedged. This counter records what happened when this process actually tried to use it, so it covers all three at once — including the API-mux wedge above, which arrives as a timeout.
+- **`granted` is counted too.** The alert is a ratio; a failure counter with no denominator cannot tell "the hop is broken" from "nobody killed anything", and the second is the normal state of an idle map.
+- **`too_large` is excluded from the failure side.** That outcome is the batcher splitting an oversized batch as designed, and folding it in would give the alert a routine background rate to hide in.
+
+**What is still not closed:** the lost automatic restart above. Nothing kills a pod whose API mux has wedged; the alert says a human should look. That is a smaller gap than the one this section opened with, and it is still a gap.
 
 #### 8.2 The Unity client refused the certificate, and `TlsOptions` does not reach this hop
 

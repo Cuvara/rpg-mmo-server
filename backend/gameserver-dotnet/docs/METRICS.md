@@ -146,6 +146,7 @@ The same value is exported as the Prometheus gauge `gameserver_achieved_tick_hz`
 | `gameserver_tick_processed_inputs_total` | counter | `map_id` | Inputs applied by the tick loop |
 | `gameserver_sim_group_duration_seconds` | histogram | `map_id`, `group` | Wall time of one run of a simulation group — `group=critical\|world\|background` |
 | `gameserver_sim_group_runs_total` | counter | `map_id`, `group` | Times a simulation group has run. The ratio between groups **is** the configured rate ratio |
+| `gameserver_nakama_reward_outcomes_total` | counter | `map_id`, `outcome` | Answers to Nakama's `reward_kills`, one per attempt including retries — `outcome=granted\|partial\|not_granted\|too_large\|unknown`. See below |
 | `gameserver_tick_overruns_total` | counter | `map_id` | Base ticks whose work exceeded the base period — see below |
 | `gameserver_tick_backlog_dropped_total` | counter | `map_id` | Base ticks discarded because the loop fell too far behind the wall clock — see below |
 | `gameserver_achieved_tick_hz` | gauge | `map_id` | **Measured** base-tick rate over a 2s window, from the monotonic clock. Compare with the configured `SIM_CRITICAL_HZ` — a healthy server has them equal. Never derived from wall time: a wall-clock rate on a host with a fast `CLOCK_REALTIME` reports a healthy loop as slow (#147/#153). `0` = not measured yet |
@@ -604,6 +605,45 @@ game server directly, because the gateway is a redirector and not in the gamepla
 data path ([ADR-3](../../docs/ARCHITECTURE-DECISIONS.md#adr-3--gateway-is-a-redirector-not-a-router)).
 A gateway counter here would always read zero, which is worse than absent: a
 permanently-zero series looks like a healthy signal rather than a missing one.
+
+### `gameserver_nakama_reward_outcomes_total` — the only thing watching the meta hop from the consumer's side
+
+The reward path fails **quietly by construction**: `NakamaClient` logs a warning
+and the batcher re-queues, so a hop that is broken for every player looks
+identical to a healthy one from inside the game. ADR-24 §8.1 recorded that
+nothing in the deployment noticed, and that the first notice in practice was a
+human reading pod logs. This counter is what replaced that.
+
+It is on the **consumer's** side on purpose. Nakama's own k8s probes answer for
+the metrics listener `:9100`, which the meta hop's TLS never covers — so they
+cannot see the client API on `:7350` be unreachable, untrusted or wedged. This
+counter can, because it is a record of what actually happened when this process
+tried to use it.
+
+Every failure mode that has genuinely occurred lands on a label:
+
+| What happened | Outcome |
+|---|---|
+| A stale `Allocated` GameServer left on a plaintext `NAKAMA_URL` after the hop moved to TLS. Nakama's TLS listener answers `400 Client sent an HTTP request to an HTTPS server`. **Measured on k3d-rpg-dev, 2026-09-13** — one pod, every reward RPC failing, the game itself playing perfectly | `not_granted` |
+| A self-signed Nakama with no `NAKAMA_TLS_PIN`: .NET refuses the certificate, `HttpRequestException` before any answer | `unknown` |
+| The client-API mux wedged while `:9100` still answers — the gap ADR-24 §8.1 names | `unknown` (timeout) |
+| Gold committed, leaderboard write failed | `partial` |
+| Batch over Nakama's per-batch cap — **the batcher splitting as designed, not a failure** | `too_large` |
+
+**`granted` is counted too, and that is not padding.** The alert reads a ratio,
+and a failure counter with no denominator cannot tell "the hop is broken" from
+"nobody killed anything" — the second being the normal state of an idle map.
+`too_large` is excluded from the failure side for the mirror-image reason: a
+routine background rate is somewhere for a real signal to hide.
+
+**Counted in the batcher, not in `NakamaClient`.** The batcher is the one place
+that sees every answer exactly once, retries included, so a hop that fails and is
+retried forever shows a rising non-granted rate rather than one lost kill.
+
+`deploy/monitoring/alerts.yaml` turns it into the repository's **first alert
+rule** — `NakamaRewardsNotLanding` fires when more than half of the answers on a
+map have not landed for ten minutes. Read that file before changing the labels
+here; the expression names them.
 
 ## Testing
 

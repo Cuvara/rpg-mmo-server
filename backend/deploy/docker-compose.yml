@@ -521,6 +521,9 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./monitoring/prometheus.yaml:/otel-lgtm/prometheus.yaml:ro
+      # Alert rules, referenced by rule_files: in the file above. Mounted as a
+      # separate file rather than inlined so `promtool check rules` can read it.
+      - ./monitoring/alerts.yaml:/otel-lgtm/alerts.yaml:ro
       - ./monitoring/grafana-dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/rpg-dashboards.yaml:ro
       - ./monitoring/dashboards:/otel-lgtm/dashboards-rpg:ro
       # All bundled components write under /data — one volume keeps dashboards,
