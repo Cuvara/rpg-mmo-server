@@ -285,6 +285,21 @@ spec:
                   name: rpg-app-secrets
                   key: nakama-http-key
                   optional: true
+            # The meta hop's pin (ADR-24), from the SAME ConfigMap key the game
+            # server reads, so the two cannot disagree about which certificate
+            # Nakama presents. Empty = plaintext Nakama, which is the default.
+            #
+            # The gateway REFUSES TO START on a mismatch (https URL with no pin,
+            # or a pin against a plaintext URL). Before that refusal existed it
+            # started cleanly and failed every dungeon entry with an x509 error
+            # the client saw as a bare "internal error", while map play carried
+            # on working -- so nothing looked wrong anywhere.
+            - name: NAKAMA_TLS_PIN
+              valueFrom:
+                configMapKeyRef:
+                  name: gameserver-config
+                  key: nakama-tls-pin
+                  optional: true
             # What the FLEET listens with, not what this gateway listens with.
             # It is announced to the client BEFORE the pod's own registration
             # lands, so a mismatch tells the client to speak the wrong
@@ -341,11 +356,21 @@ spec:
             - name: gateway-tls
               mountPath: /etc/gateway/tls
               readOnly: true
+            # Same mount path the game server uses, because the same ConfigMap
+            # key names the path for both.
+            - name: nakama-tls-pin
+              mountPath: /etc/nakama-tls
+              readOnly: true
       volumes:
         - name: gateway-tls
           secret:
             secretName: gateway-tls
             optional: true
+        - name: nakama-tls-pin
+          secret:
+            secretName: nakama-tls-pin
+            optional: true
+            defaultMode: 0444
 ---
 # Client-facing Service. ClusterIP, and deliberately NOT NodePort.
 #

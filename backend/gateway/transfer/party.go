@@ -2,12 +2,15 @@ package transfer
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -53,14 +56,65 @@ type NakamaParty struct {
 // runs BEFORE an allocation that may take seconds of that budget. A slow
 // Nakama must cost the entry attempt, not the connection.
 func NewNakamaParty(baseURL, httpKey string, timeout time.Duration) *NakamaParty {
+	p, err := NewNakamaPartyTLS(baseURL, httpKey, "", timeout)
+	if err != nil {
+		// Unreachable with an empty pin; kept so the old signature cannot start
+		// returning an error to its existing callers.
+		panic(err)
+	}
+	return p
+}
+
+// NewNakamaPartyTLS builds a membership checker that can reach a Nakama which
+// terminates its own TLS (ADR-24).
+//
+// pinPath is the PEM of the certificate Nakama presents. It is REQUIRED for an
+// https base URL and refused for a plaintext one, the same "set together or not
+// at all" rule the game server enforces at startup -- Nakama's meta-hop
+// certificate is self-signed by design (ADR-24 decision 4) and is pinned, never
+// trusted through a CA.
+//
+// Without this the gateway failed EVERY dungeon entry the moment the flag went
+// on: `party membership: call party_get: ... x509: certificate signed by unknown
+// authority`, surfaced to the client as a bare "internal error". Map play was
+// unaffected, so nothing else looked wrong.
+func NewNakamaPartyTLS(baseURL, httpKey, pinPath string, timeout time.Duration) (*NakamaParty, error) {
 	if timeout <= 0 {
 		timeout = 2 * time.Second
 	}
-	return &NakamaParty{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		httpKey: httpKey,
-		client:  &http.Client{Timeout: timeout},
+	base := strings.TrimRight(baseURL, "/")
+	client := &http.Client{Timeout: timeout}
+
+	isHTTPS := strings.HasPrefix(base, "https://")
+	if pinPath != "" && !isHTTPS {
+		return nil, fmt.Errorf(
+			"NAKAMA_TLS_PIN is set but NAKAMA_URL is not https (%s): a pin on a "+
+				"plaintext hop protects nothing while reading as though it does", base)
 	}
+	if isHTTPS {
+		if pinPath == "" {
+			return nil, fmt.Errorf(
+				"NAKAMA_URL is https (%s) but NAKAMA_TLS_PIN is empty; Nakama's "+
+					"meta-hop certificate is self-signed by design (ADR-24 decision 4) "+
+					"and must be pinned, never trusted through a CA", base)
+		}
+		pem, err := os.ReadFile(pinPath)
+		if err != nil {
+			return nil, fmt.Errorf("read NAKAMA_TLS_PIN %s: %w", pinPath, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("NAKAMA_TLS_PIN %s is not a PEM certificate", pinPath)
+		}
+		// RootCAs rather than InsecureSkipVerify: the hostname is still checked
+		// against a real name, and an accept-anything client would defeat the
+		// point of pinning entirely.
+		client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+		}
+	}
+
+	return &NakamaParty{baseURL: base, httpKey: httpKey, client: client}, nil
 }
 
 // partyGetResponse mirrors the party_get reply. The field names are Nakama's

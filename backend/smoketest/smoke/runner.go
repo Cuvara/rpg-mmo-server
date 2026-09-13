@@ -112,7 +112,7 @@ func NewRunner(cfg Config, out io.Writer) (*Runner, error) {
 					"meta-hop certificate is self-signed by design (ADR-24 decision 4) "+
 					"and is PINNED, never trusted through a CA", cfg.NakamaURL)
 		}
-		tlsConfig, err := pinnedNakamaTLS(cfg.NakamaTLSCert, cfg.NakamaURL)
+		tlsConfig, err := PinnedTLSConfig(cfg.NakamaTLSCert, cfg.NakamaURL)
 		if err != nil {
 			return nil, fmt.Errorf("nakama pin: %w", err)
 		}
@@ -768,7 +768,7 @@ func truncate(b []byte, n int) string {
 	return s
 }
 
-// pinnedNakamaTLS trusts exactly one certificate -- the leaf, compared byte for
+// PinnedTLSConfig trusts exactly one certificate -- the leaf, compared byte for
 // byte against what Nakama presents.
 //
 // InsecureSkipVerify is true and is not what it sounds like: it disables the
@@ -776,7 +776,7 @@ func truncate(b []byte, n int) string {
 // is how Go expresses "replace verification", not "remove it". Pinning is
 // STRICTER than the public trust store: a certificate signed by any CA on earth
 // is refused unless it is this exact one.
-func pinnedNakamaTLS(pemPath, nakamaURL string) (*tls.Config, error) {
+func PinnedTLSConfig(pemPath, nakamaURL string) (*tls.Config, error) {
 	pinned, err := LoadPinnedCertificate(pemPath)
 	if err != nil {
 		return nil, err
