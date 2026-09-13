@@ -6,6 +6,36 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **The "turning it back off" instruction still described the mechanism its own section had
+  just replaced.** #354 rewrote the meta-hop TLS recipe from "uncomment four files" to two
+  ConfigMaps, and left a line eight paragraphs down saying turning it off is "the same four
+  files in reverse". Mine, shipped in the same PR as the rewrite: I changed the section and
+  did not re-read what sat under it.
+
+  That is the exact failure this file now warns about twice — in the compose block, and in the
+  four manifest comments — arriving a third time, in the document doing the warning. A
+  paragraph is no more self-checking than a comment: nothing compiles either.
+
+  **Both directions are now measured on `k3d-rpg-dev` rather than described**, which is what
+  made the correction worth more than a one-line edit:
+
+  | | off | back on |
+  |---|---|---|
+  | `NAKAMA_TLS_CERT` in the pod | empty | `/nakama/tls/tls.crt` |
+  | `SSL mode enabled` in the log | absent | present |
+  | `:7350` plaintext via the API proxy | `{}` | **BadRequest** |
+  | `:7350` TLS via the API proxy | — | `{}` |
+  | `dev-up.sh` gate says | plaintext (ADR-24's default) | terminates TLS |
+  | `killprobe` end to end | — | `REWARDED: wallet map[] -> map[gold:20]` |
+
+  The two Secrets were left in place across the cycle on purpose, and the off column proves
+  the claim made about them: the files stay mounted and **nothing reads them** while the
+  ConfigMap keys are absent. That is what `optional: true` buys, stated as a measurement
+  instead of an assurance.
+
+## [Unreleased]
+
+### Fixed
 - **A commented-out compose block that would have broken the file the moment anyone
   followed its own instruction.** The `gameserver-dotnet` TLS mount was written *inside*
   the `environment:` mapping, between `NAKAMA_TLS_PIN` and `GAME_DB_URL`. Commented it
