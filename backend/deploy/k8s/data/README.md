@@ -606,8 +606,28 @@ Nakama→Postgres DSN still specifies no `sslmode`, and the session token still
 travels in the `/ws` query string where TLS protects the wire but not Nakama's
 own access log.
 
-**Turning it back off** is the same four files in reverse plus a rollout; the
-two Secrets can stay, they are inert while the paths are empty.
+**Turning it back off** is deleting the two ConfigMap keys and rolling; no file
+is edited, because none was edited to turn it on. An earlier draft of this line
+said "the same four files in reverse", which was true of the mechanism replaced
+above and survived the rewrite of the section it sits under -- the exact failure
+this file now warns about twice.
+
+```bash
+kubectl --context k3d-rpg-dev -n rpg-k8s-data delete configmap nakama-config
+kubectl --context k3d-rpg-dev -n rpg-k8s-realtime patch configmap gameserver-config \
+  --type=merge -p '{"data":{
+    "nakama-url":"http://nakama.rpg-k8s-data.svc.cluster.local:7350",
+    "nakama-tls-pin":""}}'
+kubectl --context k3d-rpg-dev -n rpg-k8s-data rollout restart deploy/nakama
+```
+
+Both moves together, as on the way in: a game server left pinning while Nakama
+stops terminating TLS **refuses to start**, and `dev-up.sh` refuses that state
+before it reaches a cluster. The two Secrets can stay -- they are inert while the
+ConfigMap keys are absent, which is what `optional: true` buys.
+
+Delete the `Allocated` GameServers afterwards or the rollout is not complete; see
+the warning in step 4.
 
 ## Verification
 
