@@ -23,21 +23,48 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/duycuong/rpg-mmo/shared/messages"
+	"github.com/duycuong/rpg-mmo/smoketest/smoke"
 )
 
 func main() {
 	nakamaURL := flag.String("nakama", "http://127.0.0.1:7001", "Nakama base URL")
 	serverKey := flag.String("server-key", "", "Nakama server key (HTTP Basic user)")
 	gatewayAddr := flag.String("gateway", "127.0.0.1:7000", "gateway host:port")
+	gatewayTLSCert := flag.String("gateway-tls-cert", "",
+		"PEM of the gateway's certificate; set to speak TLS to the gateway (ADR-23)")
+	nakamaTLSCert := flag.String("nakama-tls-cert", "",
+		"PEM of Nakama's certificate; required when -nakama is https (ADR-24)")
 	content := flag.String("content", "dungeon_01", "dungeon content id (sent as map_id)")
 	flag.Parse()
 
+	// Set together or refused, matching the game server's own startup rule: a pin
+	// on a plaintext hop protects nothing while reading as though it does, and an
+	// https URL with no pin fails inside an x509 message several steps from the
+	// cause -- which is exactly how this probe failed the first time the meta
+	// hop's TLS was on.
+	if *nakamaTLSCert != "" && !strings.HasPrefix(*nakamaURL, "https://") {
+		fail("-nakama-tls-cert was given but -nakama is not https")
+	}
+	if strings.HasPrefix(*nakamaURL, "https://") && *nakamaTLSCert == "" {
+		fail("-nakama is https but no -nakama-tls-cert was given; Nakama's meta-hop " +
+			"certificate is self-signed by design (ADR-24 decision 4) and is PINNED")
+	}
+
 	hc := &http.Client{Timeout: 15 * time.Second}
+	if *nakamaTLSCert != "" {
+		cfg, err := smoke.PinnedTLSConfig(*nakamaTLSCert, hostOf(*nakamaURL))
+		if err != nil {
+			fail("nakama pin: %v", err)
+		}
+		hc.Transport = &http.Transport{TLSClientConfig: cfg}
+	}
+	gatewayPin = *gatewayTLSCert
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 
 	// Three accounts: two party members and one outsider. The outsider is not
@@ -218,12 +245,33 @@ func enterWorldAllowError(gatewayAddr, jwt, mapID, partyID string) (string, stri
 	return addr, errMsg
 }
 
+// gatewayPin is the gateway hop's certificate (ADR-23), set once from the flag.
+// A package-level value because enterWorld is called from five places and
+// threading a pin through each would invite one of them being missed -- which is
+// the failure this whole class of bug keeps taking.
+var gatewayPin string
+
 func enterWorldRaw(gatewayAddr, jwt, mapID, partyID string) (string, string, string) {
 	conn, err := net.DialTimeout("tcp", gatewayAddr, 10*time.Second)
 	if err != nil {
 		fail("dial gateway %s: %v", gatewayAddr, err)
 	}
 	defer conn.Close()
+
+	// No downgrade: a pin that fails to match ends the probe rather than
+	// retrying in the clear, because a probe that quietly falls back measures the
+	// wrong stack and then reports success.
+	if gatewayPin != "" {
+		host, _, splitErr := net.SplitHostPort(gatewayAddr)
+		if splitErr != nil {
+			host = gatewayAddr
+		}
+		tlsConn, wrapErr := smoke.WrapGatewayTLS(conn, gatewayPin, host, 10*time.Second)
+		if wrapErr != nil {
+			fail("gateway tls: %v", wrapErr)
+		}
+		conn = tlsConn
+	}
 	_ = conn.SetDeadline(time.Now().Add(45 * time.Second))
 
 	var authResp messages.AuthResponse
@@ -279,4 +327,13 @@ func roundTrip(conn net.Conn, reqType messages.MsgType, req any, wantType messag
 		return resp.UnmarshalPayload(out)
 	}
 	return fmt.Errorf("no frame of type %d received", wantType)
+}
+
+// hostOf returns the hostname from a URL, for SNI and the pin's ServerName.
+func hostOf(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }

@@ -5,6 +5,37 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **The gateway failed EVERY dungeon entry the moment the meta hop's TLS went on, and the
+  client saw only "internal error".** It reads `NAKAMA_URL` from the same ConfigMap key the
+  game server does, so it followed the URL to `https://` — with no pin, and Nakama's
+  certificate is self-signed by design:
+
+  ```
+  enter world failed  map=dungeon_01 party=eba24465... reason=no_assignment
+    err="assign dungeon: party membership: call party_get: ...
+         tls: failed to verify certificate: x509: certificate signed by unknown authority"
+  ```
+
+  **Map play was unaffected**, so nothing else looked wrong — the gateway was healthy, the
+  fleets were Ready, the smoke test passed. Only dungeon entry was dead, and only for as long
+  as nobody tried one.
+
+  `NAKAMA_TLS_PIN` (new, read from the same `nakama-tls-pin` ConfigMap key the game server
+  uses, so the two cannot disagree about which certificate Nakama presents) fixes it, with
+  `RootCAs` rather than `InsecureSkipVerify` — the hostname is still checked, and an
+  accept-anything client would defeat the point of pinning.
+
+  **A mismatch is now a startup refusal, not a per-entry failure**: an https URL with no pin,
+  or a pin against a plaintext URL, exits 2 with the reason. Before this the process started
+  cleanly and the fault surfaced one dungeon entry at a time, as a message naming nothing.
+
+  Found by `dungeonprobe`'s negative control, which asserts that an outsider's refusal **names
+  the party**. It did not — it said "internal error" — and that assertion is the only reason
+  this was caught rather than read as a working refusal.
+
+## [Unreleased]
+
 ### Added
 - **ADR-25: the gateway relays the game server's identity key.** `AssignResult` gains
   `ServerPublicKey`, decoded from the target's `identity_key` registry field, and

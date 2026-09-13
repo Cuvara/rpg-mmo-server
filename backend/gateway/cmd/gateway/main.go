@@ -379,8 +379,19 @@ func main() {
 			// deployed compose environment once ran it unknowingly.
 			log.Warn("NAKAMA_URL is set but NAKAMA_HTTP_KEY is empty; dungeon entry stays disabled rather than calling Nakama with no key")
 		} else {
-			partyMembers = transfer.NewNakamaParty(nURL, nKey, 0)
-			log.Info("dungeon entry enabled", "nakama_url", nURL)
+			// The pin travels with the URL (ADR-24). A wrong combination is a
+			// STARTUP failure rather than a per-entry one: before this, an https
+			// URL with no pin started cleanly and then failed every dungeon
+			// entry with an x509 error the client saw as "internal error", while
+			// map play carried on working and nothing else looked wrong.
+			pin := os.Getenv("NAKAMA_TLS_PIN")
+			pm, perr := transfer.NewNakamaPartyTLS(nURL, nKey, pin, 0)
+			if perr != nil {
+				log.Error("dungeon entry cannot be enabled", "err", perr)
+				os.Exit(2)
+			}
+			partyMembers = pm
+			log.Info("dungeon entry enabled", "nakama_url", nURL, "nakama_tls_pin", pin != "")
 		}
 	}
 

@@ -6,6 +6,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`dungeonprobe` takes both pins too (`-gateway-tls-cert`, `-nakama-tls-cert`).** It is the
+  tool that proves C1 (dungeon instancing), and it could not run at all against a dev cluster
+  with either flag on. Its negative control — an outsider's refusal must **name the party** —
+  is what caught the gateway failing every dungeon entry with a bare "internal error".
+
+  `smoke.PinnedTLSConfig` is exported for it rather than copied; the gateway pin is a
+  package-level value because `enterWorld` is called from five places and threading it through
+  each invites one being missed, which is exactly the failure this class of bug keeps taking.
+
 - **`-nakama-tls-cert` / `NAKAMA_TLS_CERT`: the smoketest can reach a Nakama that terminates
   its own TLS (ADR-24).** Without it the suite reported `context deadline exceeded` against a
   perfectly healthy Nakama — **a plaintext GET to a TLS listener is not refused, it hangs**, and
