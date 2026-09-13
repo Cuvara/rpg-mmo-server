@@ -96,3 +96,18 @@ data:
   # because this cluster's Nakama terminates no TLS; move BOTH together, or the
   # server speaks plaintext to a listener that no longer answers it.
   nakama-url: "http://nakama.rpg-k8s-data.svc.cluster.local:7350"
+  # THE GAME SERVER'S END OF THE SAME DECISION (ADR-24), and the third of the
+  # four things that have to move together when the meta hop's TLS goes on.
+  #
+  # Empty = .NET's own certificate validation. That is right for http:// and for
+  # an https:// Nakama holding a CA-issued certificate, and it correctly REFUSES
+  # a self-signed one -- so with a self-signed Nakama and this left empty, every
+  # reward RPC fails on the certificate and the game itself keeps working, which
+  # is the quiet failure mode this key exists to prevent.
+  #
+  # Set it to the in-container PATH of the PEM Nakama presents (the public half
+  # only), which means uncommenting the volume and volumeMount in the two fleet
+  # files -- nothing else mounts it. The value the recipe uses is
+  # /etc/nakama-tls/tls.crt. The server refuses to start if this is set while
+  # nakama-url is not https.
+  nakama-tls-pin: ""

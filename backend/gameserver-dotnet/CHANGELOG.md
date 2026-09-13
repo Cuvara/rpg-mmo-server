@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`NAKAMA_TLS_PIN`: this server can now reach a Nakama that terminates its own TLS with a
+  self-signed certificate (ADR-24 §8.2).** `NakamaClient` POSTs `reward_kills` over
+  `NAKAMA_URL`; when that moves to `https://` -- which ADR-24 requires the moment Nakama's
+  flag goes on -- .NET's validation correctly refuses a certificate no CA signed, and every
+  reward RPC fails on it while the game itself keeps working. `NakamaTlsPin` pins the leaf
+  instead: `HttpClientHandler.ServerCertificateCustomValidationCallback` comparing
+  `cert.RawData` to the pinned DER with `CryptographicOperations.FixedTimeEquals`.
+
+  **There is no accept-anything mode, and the type refuses to be turned into one:**
+  `CreatePinnedHandler` throws on an empty pin, `Matches` returns false for a null or empty
+  pin, and an unparseable PEM throws rather than silently pinning nothing. Setting the pin
+  against a non-`https` `NAKAMA_URL` is a **startup refusal** (exit 2), not a warning -- a pin
+  on a plaintext hop protects nothing while reading as though it does, which is the same
+  "set together or not at all" rule the certificate pair itself follows. Startup now logs a
+  `NakamaTLS:` line naming the trust in force, including the fingerprint of the pin.
+
+  New `GameServerOptions.NakamaHttpHandler` carries it, reusing the seam the batcher tests
+  already used for a fake `HttpMessageHandler` -- one property, not two.
+- 11 tests in `GameServer.Tests/Nakama/NakamaTlsPinTests.cs`, weighted towards **refusal**,
+  because a pin that accepts is visible in any working deploy and a pin that accepts too much
+  is visible in none: a second self-signed certificate with the *same subject* is rejected, a
+  single flipped byte is rejected, an empty pin matches nothing, and `CreatePinnedHandler`
+  refuses to build an accept-anything handler.
+
+
 ### Documentation
 - **ADR-26's status line said "NOT implemented" for a day after it stopped being true.**
   Decisions 1, 2, 3, 5, 6, 7 and 8 all shipped on 2026-09-12/13 and were proven on dev; the

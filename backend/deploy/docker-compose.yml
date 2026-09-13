@@ -168,7 +168,23 @@ services:
       # Compiled Go plugin (nakama.so) is dropped here by `make plugin`.
       - ./modules:/nakama/data/modules
     healthcheck:
-      test: ["CMD", "/nakama/nakama", "healthcheck"]
+      # THE PORT ARGUMENT IS LOAD-BEARING, AND IT IS 9100 ON PURPOSE.
+      #
+      # Nakama v3.40.0's healthcheck subcommand is
+      # `http.Get("http://localhost:" + port)` -- hardcoded http, no TLS branch,
+      # no config lookup (main.go). Bare `healthcheck` therefore defaults to 7350
+      # and, the moment NAKAMA_TLS_CERT/_KEY are set above, GETs plaintext HTTP
+      # against a listener that now speaks only TLS. It fails, the container is
+      # marked unhealthy, and every `depends_on: service_healthy` in this file
+      # blocks -- so the whole stack refuses to come up over a perfectly healthy Nakama.
+      # That breakage was NOT recorded when the flag landed; the k8s probes were.
+      #
+      # 9100 is the Prometheus listener, which `--socket.ssl_certificate` does
+      # not cover (ADR-24 §4). Its root path answers 200 in both modes, so this
+      # is one spec for both. Same trade as the k8s probes: it proves the process
+      # is serving HTTP, not that the client-API mux answers. The image ships no
+      # curl and no wget (Debian 12, measured), so there is no third option.
+      test: ["CMD", "/nakama/nakama", "healthcheck", "9100"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -431,6 +447,11 @@ services:
       # Two sources of truth for one hop is exactly how that happens.
       NAKAMA_URL: ${NAKAMA_URL:-http://nakama:7350}
       NAKAMA_HTTP_KEY: ${NAKAMA_HTTP_KEY:-defaulthttpkey}
+      # The game server's end of the same decision: the certificate it PINS when
+      # NAKAMA_URL is https and Nakama's certificate is self-signed. Empty means
+      # .NET's own validation, which refuses a self-signed Nakama -- correctly.
+      # Set together with an https URL or the server refuses to start.
+      NAKAMA_TLS_PIN: ${NAKAMA_TLS_PIN:-}
       GAME_DB_URL: postgres://${POSTGRES_GAME_USER:-game}:${POSTGRES_GAME_PASSWORD:-localdev}@postgres-game:5432/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable
     ports:
       - "${GAMESERVER_CONTAINER_PORT:-9200}:9000"

@@ -67,6 +67,11 @@ services:
       # Two sources of truth for one hop is exactly how that happens.
       NAKAMA_URL: ${NAKAMA_URL:-http://nakama:7350}
       NAKAMA_HTTP_KEY: ${NAKAMA_HTTP_KEY:-defaulthttpkey}
+      # The game server's end of the same decision: the certificate it PINS when
+      # NAKAMA_URL is https and Nakama's certificate is self-signed. Empty means
+      # .NET's own validation, which refuses a self-signed Nakama -- correctly.
+      # Set together with an https URL or the server refuses to start.
+      NAKAMA_TLS_PIN: ${NAKAMA_TLS_PIN:-}
       GAME_DB_URL: postgres://${POSTGRES_GAME_USER:-game}:${POSTGRES_GAME_PASSWORD:-localdev}@postgres-game:5432/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable
     ports:
       - "9002:9000"
