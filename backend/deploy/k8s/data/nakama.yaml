@@ -108,10 +108,24 @@ spec:
             #
             # The PROBES need no change: they were moved off :7350 onto the
             # metrics listener precisely so this flag has one less thing to break.
+            # Per-CLUSTER, not per-manifest: this file is applied unchanged to dev
+            # and staging, so a hardcoded path here would turn TLS on in both or
+            # neither. `optional: true` means an absent ConfigMap or an absent key
+            # leaves these empty, which is the flag off -- the same shape the
+            # gateway's own TLS opt-in uses (ADR-23), and the reason neither needs
+            # a per-environment overlay.
             - name: NAKAMA_TLS_CERT
-              value: ""
+              valueFrom:
+                configMapKeyRef:
+                  name: nakama-config
+                  key: tls-cert-path
+                  optional: true
             - name: NAKAMA_TLS_KEY
-              value: ""
+              valueFrom:
+                configMapKeyRef:
+                  name: nakama-config
+                  key: tls-key-path
+                  optional: true
           # Do NOT set LEADERBOARD_MIGRATE=recreate here: it deletes every
           # kills_alltime record. If the plugin refuses to load with
           # "leaderboard kills_alltime exists with authoritative=false", use
@@ -239,15 +253,20 @@ spec:
           # Meta-hop TLS (ADR-24), step 2 of 4 in README.md §"Turning the meta
           # hop's TLS on". Uncomment TOGETHER with the two NAKAMA_TLS_* values
           # above and the volume below; the paths here are what those values name.
-          # volumeMounts:
-          #   - name: nakama-tls
-          #     mountPath: /nakama/tls
-          #     readOnly: true
+          volumeMounts:
+            - name: nakama-tls
+              mountPath: /nakama/tls
+              readOnly: true
       # Meta-hop TLS (ADR-24), step 3 of 4. `secretName: nakama-tls` is created
       # by the recipe; `defaultMode: 0400` keeps the private key unreadable by
       # anything but the container's own user.
-      # volumes:
-      #   - name: nakama-tls
-      #     secret:
-      #       secretName: nakama-tls
-      #       defaultMode: 0400
+      volumes:
+        - name: nakama-tls
+          secret:
+            secretName: nakama-tls
+            # optional: an absent Secret mounts an empty directory instead of
+            # wedging the pod in ContainerCreating. With no Secret the two
+            # NAKAMA_TLS_* values are empty too, so nothing reads the directory
+            # and the flag is simply off.
+            optional: true
+            defaultMode: 0400
