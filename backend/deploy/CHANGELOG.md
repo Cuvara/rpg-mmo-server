@@ -5,6 +5,29 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Gateway-hop TLS is ON for dev (ADR-23), and enablement is a per-cluster Secret rather than a
+  manifest edit.** `GATEWAY_TLS_CERT`/`GATEWAY_TLS_KEY` now read from **optional** `gateway-config`
+  keys. That shape is load-bearing: `40-gateway.yaml` is applied unchanged to dev and staging, so a
+  literal path turns TLS on for both at once and the cluster without a `gateway-tls` Secret then fails
+  to start -- both-or-neither is a deliberate startup error. Same trap ADR-26 hit with
+  `GAMESERVER_SEALED`, where one value sealed two environments.
+
+  `dev-up.sh` gains gates for the three half-configured shapes, and the third is the dangerous one:
+  **a Secret present with no ConfigMap paths means TLS is silently OFF while someone believes they
+  turned it on**, and nothing about a healthy gateway distinguishes that from success. It also writes
+  the pin out of the cluster's own Secret on every deploy, so clients pin what the gateway actually
+  serves instead of a copy someone remembered to update.
+
+- **`verify.sh`'s `flow.smoke` pins the gateway certificate, and reads whether TLS is on from the
+  CLUSTER.** Not from the target file, and not from whether a pin file happens to exist -- both can
+  disagree with the deployment, and each disagreement blames the wrong thing. A pin supplied against
+  a plaintext gateway now FAILS rather than being ignored, because somebody believing that hop is
+  encrypted when it is not is exactly the state nothing else here would reveal.
+
+  Without this the check would have become the thing that broke when TLS was turned on: an unpinned
+  run against a TLS gateway fails with a bare `read length: EOF`, naming nothing from either end.
+
 ### Documentation
 - **The join deadline and the dungeon autoscaler are now MEASURED on dev, not only
   unit-tested.** Both shipped with an explicit "never run on a cluster" caveat. The two
