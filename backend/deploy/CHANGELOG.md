@@ -43,6 +43,39 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   player, a docker-compose variant, and what the flag still does not cover. The manifests
   carry commented-out volume and volumeMount blocks so the recipe is uncomment-and-apply.
 
+### Added
+- **Gateway-hop TLS is ON for dev (ADR-23), and enablement is a per-cluster Secret rather than a
+  manifest edit.** `GATEWAY_TLS_CERT`/`GATEWAY_TLS_KEY` now read from **optional** `gateway-config`
+  keys. That shape is load-bearing: `40-gateway.yaml` is applied unchanged to dev and staging, so a
+  literal path turns TLS on for both at once and the cluster without a `gateway-tls` Secret then fails
+  to start -- both-or-neither is a deliberate startup error. Same trap ADR-26 hit with
+  `GAMESERVER_SEALED`, where one value sealed two environments.
+
+  `dev-up.sh` gains gates for the three half-configured shapes, and the third is the dangerous one:
+  **a Secret present with no ConfigMap paths means TLS is silently OFF while someone believes they
+  turned it on**, and nothing about a healthy gateway distinguishes that from success. It also writes
+  the pin out of the cluster's own Secret on every deploy, so clients pin what the gateway actually
+  serves instead of a copy someone remembered to update.
+
+- **`verify.sh`'s `flow.smoke` pins the gateway certificate, and reads whether TLS is on from the
+  CLUSTER.** Not from the target file, and not from whether a pin file happens to exist -- both can
+  disagree with the deployment, and each disagreement blames the wrong thing. A pin supplied against
+  a plaintext gateway now FAILS rather than being ignored, because somebody believing that hop is
+  encrypted when it is not is exactly the state nothing else here would reveal.
+
+  Without this the check would have become the thing that broke when TLS was turned on: an unpinned
+  run against a TLS gateway fails with a bare `read length: EOF`, naming nothing from either end.
+
+### Documentation
+- **`CORE-COMPLETION.md`: every C item is done, and C5 was proven with two real built players.**
+  Not a probe this time -- two Windows players, one creating a party through Nakama and one
+  joining it by id, both entered the **same** dungeon instance (`127.0.0.1:7019`), which
+  reported `players_online: 2` and `sealed_cipher: chacha20-poly1305`. Both were refused on
+  their first join for not sealing and escalated themselves, which is the shipped default.
+
+  The correction block added on 2026-09-12 -- when C1 was marked done on the strength of a Go
+  probe while the client could not ask for a dungeon at all -- is marked resolved rather than
+  deleted. The gap closed in a day; the lesson outlives it.
 
 ### Documentation
 - **The join deadline and the dungeon autoscaler are now MEASURED on dev, not only
