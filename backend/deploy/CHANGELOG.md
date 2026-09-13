@@ -6,6 +6,36 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **The verification suite could not verify a deployment with the meta hop's TLS on — three more
+  consumers that had not moved with the flag.** Found by running `verify.sh` against the dev
+  cluster after `dev-up.sh` finally succeeded:
+
+  | Consumer | Symptom |
+  |---|---|
+  | `lib/checks_data.sh` | `curl` without `--cacert` printed **`observed: 000`** — a code that names no cause |
+  | `verify/probe` | plaintext GET **hung** until the deadline, reporting Nakama as dead |
+  | `lib/checks_flow.sh` | never passed the pin to the smoketest, so the flow check could not run |
+
+  All three now take the pin, and `targets/k8s-dev.env` makes `VERIFY_NAKAMA_URL` and
+  `VERIFY_NAKAMA_TLS_CERT` **overridable** so `dev-up.sh`'s exports win — it already writes the
+  pin out of the cluster's own `nakama-tls` Secret.
+
+  **`--cacert`/`RootCAs`, never `-k`.** An accept-anything probe passes against anything at all,
+  which is the failure these checks exist to catch.
+
+### Measured
+- **`verify.sh --target k8s-dev` against the dev cluster, both hops on: 19 PASS, 1 FAIL, 2 SKIP,
+  2 WARN.** `flow.smoke` reports `SMOKE=PASS` with a **sealed gameplay hop
+  (chacha20-poly1305 over protobuf), TLS gateway hop, certificate PINNED**, plus persistence and
+  a 30 s hold-window reload. Before these fixes the same cluster reported 6 PASS / 9 FAIL.
+
+  The one FAIL is `refusal.alloc_wait`, which needs `docker run` and hit this box's intermittent
+  docker (`exec: docker.exe: not found`; the daemon probe fails ~8 times in 10 here). Not a code
+  result either way.
+
+## [Unreleased]
+
+### Fixed
 - **`dev-up.sh`'s own Nakama health probe still spoke plaintext, and failed the whole deploy the
   first time the meta hop's TLS was on.** Nakama was healthy and answering TLS on that exact
   port; the script reported `ERROR: Nakama does not answer /healthcheck on the published port

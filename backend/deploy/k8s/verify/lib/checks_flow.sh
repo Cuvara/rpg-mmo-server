@@ -46,6 +46,11 @@ check_flow_smoke() {
     --strict-addr
     --expect-migration-version "${VERIFY_GAME_MIGRATION:-1}"
   )
+  # The meta hop's pin (ADR-24). The smoketest refuses an https URL without it
+  # rather than failing inside an x509 message several steps from the cause.
+  if [ -n "${VERIFY_NAKAMA_TLS_CERT:-}" ]; then
+    args+=(--nakama-tls-cert "$VERIFY_NAKAMA_TLS_CERT")
+  fi
   local db_mode
   if [ -n "${VERIFY_GAME_DB_URL:-}" ]; then
     args+=(--game-db-url "$VERIFY_GAME_DB_URL" --require-db)

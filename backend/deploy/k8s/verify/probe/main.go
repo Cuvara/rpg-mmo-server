@@ -19,6 +19,8 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -35,14 +37,15 @@ import (
 )
 
 type config struct {
-	nakamaURL string
-	serverKey string
-	gateway   string
-	transport string
-	jwtSecret string
-	mapID     string
-	deviceID  string
-	timeout   time.Duration
+	nakamaURL     string
+	nakamaTLSCert string
+	serverKey     string
+	gateway       string
+	transport     string
+	jwtSecret     string
+	mapID         string
+	deviceID      string
+	timeout       time.Duration
 }
 
 func main() {
@@ -54,6 +57,8 @@ func main() {
 	var cfg config
 	fs := flag.NewFlagSet("probe "+sub, flag.ExitOnError)
 	fs.StringVar(&cfg.nakamaURL, "nakama-url", envOr("NAKAMA_URL", "http://localhost:7350"), "Nakama HTTP base URL")
+	fs.StringVar(&cfg.nakamaTLSCert, "nakama-tls-cert", envOr("NAKAMA_TLS_CERT", ""),
+		"PEM of Nakama's certificate; required when -nakama-url is https (ADR-24)")
 	fs.StringVar(&cfg.serverKey, "server-key", envOr("NAKAMA_SERVER_KEY", "defaultkey"), "Nakama server key")
 	fs.StringVar(&cfg.gateway, "gateway-addr", envOr("GATEWAY_ADDR", "127.0.0.1:8000"), "Gateway address")
 	fs.StringVar(&cfg.transport, "transport", envOr("TRANSPORT", "tcp"), "Gateway transport: tcp or kcp")
@@ -84,6 +89,34 @@ func main() {
 // JWT locally with the shared secret — the same check the gateway performs.
 func mustToken(cfg config) (token, userID string) {
 	hc := &http.Client{Timeout: cfg.timeout}
+
+	// The meta hop (ADR-24). A plaintext GET to a TLS listener does not get
+	// refused, it HANGS, and the timeout then names Nakama instead of the scheme
+	// -- which is exactly how this probe reported a healthy Nakama as dead.
+	if cfg.nakamaTLSCert != "" && !strings.HasPrefix(cfg.nakamaURL, "https://") {
+		fmt.Printf("RESULT=error nakama-tls-cert given but nakama-url is not https (%s)\n", cfg.nakamaURL)
+		os.Exit(1)
+	}
+	if strings.HasPrefix(cfg.nakamaURL, "https://") {
+		if cfg.nakamaTLSCert == "" {
+			fmt.Printf("RESULT=error nakama-url is https (%s) but no nakama-tls-cert was given; "+
+				"the meta hop's certificate is self-signed by design and is PINNED\n", cfg.nakamaURL)
+			os.Exit(1)
+		}
+		pem, err := os.ReadFile(cfg.nakamaTLSCert)
+		if err != nil {
+			fmt.Printf("RESULT=error reading nakama-tls-cert: %v\n", err)
+			os.Exit(1)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			fmt.Printf("RESULT=error nakama-tls-cert is not a PEM certificate: %s\n", cfg.nakamaTLSCert)
+			os.Exit(1)
+		}
+		// RootCAs, not InsecureSkipVerify: the certificate carries IP:127.0.0.1 as
+		// a SAN precisely so the hostname is still checked against a real name.
+		hc.Transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}
+	}
 	base := strings.TrimRight(cfg.nakamaURL, "/")
 
 	deviceID := cfg.deviceID

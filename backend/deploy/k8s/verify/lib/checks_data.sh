@@ -122,7 +122,16 @@ check_redis_noeviction() {
 # --- Nakama --------------------------------------------------------------
 check_nakama_health() {
   local code
-  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "${VERIFY_NAKAMA_URL%/}/healthcheck" 2>&1)
+  # The pin travels with the URL (ADR-24). Without --cacert this printed 000
+  # against a perfectly healthy TLS Nakama -- curl could not complete the
+  # handshake, and "000" names no cause at all. --cacert and not -k: an
+  # accept-anything probe passes against anything, which is the failure it is
+  # here to catch.
+  local -a nk_curl=(curl -s -o /dev/null -w '%{http_code}' --max-time 10)
+  if [ -n "${VERIFY_NAKAMA_TLS_CERT:-}" ]; then
+    nk_curl+=(--cacert "$VERIFY_NAKAMA_TLS_CERT")
+  fi
+  code=$("${nk_curl[@]}" "${VERIFY_NAKAMA_URL%/}/healthcheck" 2>&1)
   if [ "$code" != "200" ]; then
     fail "Nakama /healthcheck did not return 200" "200" "${code:-<no response>}" \
       "docker logs rpg-nakama / kubectl logs deploy/nakama; VERIFY_NAKAMA_URL=$VERIFY_NAKAMA_URL"

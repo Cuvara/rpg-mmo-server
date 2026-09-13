@@ -6,6 +6,27 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`-nakama-tls-cert` / `NAKAMA_TLS_CERT`: the smoketest can reach a Nakama that terminates
+  its own TLS (ADR-24).** Without it the suite reported `context deadline exceeded` against a
+  perfectly healthy Nakama — **a plaintext GET to a TLS listener is not refused, it hangs**, and
+  the timeout then names Nakama rather than the scheme. That is worse than a clean failure: it
+  sends the reader to look at the wrong component.
+
+  The pin is the leaf, compared byte for byte, and `InsecureSkipVerify` disables only the
+  DEFAULT verifier so `VerifyPeerCertificate` is the sole decider — how Go spells "replace
+  verification", not "remove it". Pinning is **stricter** than the public trust store.
+
+  Two startup refusals rather than warnings, matching the game server's own rule: a pin against
+  a non-https URL is refused (a pin on a plaintext hop protects nothing while reading as though
+  it does), and an https URL with no pin is refused up front rather than failing deep inside an
+  x509 message.
+
+  `NewRunner` now returns an error instead of a bare `*Runner`, because these are configuration
+  faults that must stop the run rather than surface as a mid-flight failure.
+
+## [Unreleased]
+
+### Added
 - **`killprobe` can pin both TLS hops: `-gateway-tls-cert` (ADR-23) and `-nakama-tls-cert`
   (ADR-24).** Without them the probe could not run at all against a dev cluster with either
   flag on, so the one tool that proves the reward path end to end stopped working exactly when
