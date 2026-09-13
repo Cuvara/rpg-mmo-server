@@ -316,9 +316,12 @@ spec:
                 # nakama-url above, because an absent pin has a defined meaning
                 # and an absent URL does not.
                 #
-                # Setting it is step 4 of README.md §"Turning the meta hop's TLS
-                # on" and needs the volume at the bottom of this file uncommented
-                # too: the value is a PATH, and nothing mounts the file for it.
+                # Setting it is part of README.md §"Turning the meta hop's TLS
+                # on", and needs NO edit to this file: the volume at the bottom is
+                # already here and already optional. An earlier draft said to
+                # uncomment it, which was true of a mechanism that no longer
+                # exists -- the value is a PATH, and that volume is what puts a
+                # file there.
                 - name: NAKAMA_TLS_PIN
                   valueFrom:
                     configMapKeyRef:

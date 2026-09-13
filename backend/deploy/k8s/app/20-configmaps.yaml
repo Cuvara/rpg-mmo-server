@@ -106,8 +106,9 @@ data:
   # is the quiet failure mode this key exists to prevent.
   #
   # Set it to the in-container PATH of the PEM Nakama presents (the public half
-  # only), which means uncommenting the volume and volumeMount in the two fleet
-  # files -- nothing else mounts it. The value the recipe uses is
-  # /etc/nakama-tls/tls.crt. The server refuses to start if this is set while
-  # nakama-url is not https.
+  # only). The two fleet files already mount it, optionally, so setting this key
+  # is the whole act -- an earlier draft of this comment said to uncomment those
+  # volumes, which was true of a mechanism that no longer exists. The value the
+  # recipe uses is /etc/nakama-tls/tls.crt. The server refuses to start if this is
+  # set while nakama-url is not https.
   nakama-tls-pin: ""

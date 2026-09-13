@@ -167,6 +167,12 @@ services:
     volumes:
       # Compiled Go plugin (nakama.so) is dropped here by `make plugin`.
       - ./modules:/nakama/data/modules
+      # Meta-hop TLS (ADR-24). Uncomment together with NAKAMA_TLS_CERT/_KEY above
+      # and the matching mount on gameserver-dotnet; the paths those variables name
+      # are the ones this mount creates. `./tls` and NOT a /tmp path -- a bind mount
+      # from a /tmp WSL path silently creates an empty DIRECTORY at the mount point
+      # and Nakama exits with "is a directory".
+      # - ./tls:/nakama/tls:ro
     healthcheck:
       # THE PORT ARGUMENT IS LOAD-BEARING, AND IT IS 9100 ON PURPOSE.
       #
@@ -453,6 +459,18 @@ services:
       # Set together with an https URL or the server refuses to start.
       NAKAMA_TLS_PIN: ${NAKAMA_TLS_PIN:-}
       GAME_DB_URL: postgres://${POSTGRES_GAME_USER:-game}:${POSTGRES_GAME_PASSWORD:-localdev}@postgres-game:5432/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable
+    # Meta-hop TLS (ADR-24): the file NAKAMA_TLS_PIN names. Uncomment with that
+    # variable. The certificate is PUBLIC and the key is not needed here -- do not
+    # mount the pair into a service that terminates no TLS.
+    #
+    # This block is a sibling of `environment:` and not a line inside it, which is
+    # not a formatting preference: `volumes:` indented into the mapping above
+    # closes it, and the next environment entry then fails to parse. A commented
+    # block is only as correct as the file it becomes when uncommented, and
+    # nothing in CI reads comments -- so this one was verified by uncommenting it
+    # and parsing the result, not by reading it.
+    # volumes:
+    #   - ./tls/tls.crt:/nakama/tls/tls.crt:ro
     ports:
       - "${GAMESERVER_CONTAINER_PORT:-9200}:9000"
       - "${GAMESERVER_METRICS_PORT:-9101}:9101"
