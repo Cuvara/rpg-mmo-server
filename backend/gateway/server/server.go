@@ -1163,6 +1163,11 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 		"conn", cc.ID(), "user", userID, "map", req.MapID, "party", req.PartyID,
 		"server", result.ServerID, "server_addr", result.ServerAddr,
 		"transport", result.Transport,
+		// Whether this assignment carried a server identity key (ADR-25), not
+		// the key itself: a public key in every enter-world line is noise, but
+		// its ABSENCE is the whole explanation for a client that refuses to
+		// seal, and that must be findable in the gateway's own log.
+		"server_key", len(result.ServerPublicKey) > 0,
 		"dur_ms", time.Since(start).Milliseconds())
 
 	// Update session with server and map association (task 2c). On its own
@@ -1186,6 +1191,12 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 		ServerAddr: result.ServerAddr,
 		JoinToken:  result.JoinToken,
 		Transport:  result.Transport,
+		// ADR-25. Forwarded verbatim from the registry entry; the gateway never
+		// generates, stores or validates this key, it only relays the one the pod
+		// published. Empty when that pod predates ADR-25 — logged above as
+		// server_key=false so an operator can see WHY a client that requires
+		// identity refused, without having to read the registry by hand.
+		ServerPublicKey: result.ServerPublicKey,
 	})
 	if err != nil {
 		g.logger.Error("marshal enter world response", "err", err)

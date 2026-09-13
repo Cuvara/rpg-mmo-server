@@ -68,10 +68,37 @@ public static class SealedHandshakeServer
     /// flag, and a test asserting a man in the middle succeeds against it — so it starts
     /// failing the day the identity key makes it untrue.
     /// </para>
+    /// <para>
+    /// <b>ADR-25: the Ed25519 identity signature is that replacement, and it ships in the
+    /// same reply.</b> <paramref name="identity"/> is this pod's per-process keypair; the
+    /// signature goes in <c>SealedServerHello.ServerSignature</c> and a client checks it
+    /// with the public half the gateway delivered in <c>enter_world_resp</c>. It needs no
+    /// secret in the binary, so unlike the binding it is reachable by a real player.
+    /// <b>Both fields are sent.</b> The binding still serves the harnesses that hold
+    /// <c>JOIN_TOKEN_SECRET</c>, and reusing its field number for the signature is how two
+    /// versions come to disagree silently about what a byte means.
+    /// </para>
+    /// <para>
+    /// <b>The server always signs, and never negotiates.</b> There is no capability
+    /// exchange and no downgrade: a client that ignores the new field behaves exactly as it
+    /// did before, and a client that requires identity and is handed no key refuses on its
+    /// own side. That is what makes the server-and-gateway-first migration order the safe
+    /// one here — the inverse of the sealing rollout, where the client shipped first and
+    /// met a closed door.
+    /// </para>
+    /// <para>
+    /// <b>A verified signature still does not mean the gameplay hop is authenticated</b>
+    /// while the gateway hop is plaintext, which it is in every environment today. The key
+    /// is exactly as trustworthy as the hop that delivered it. See
+    /// <see cref="ServerIdentity"/> and ADR-25 §3.
+    /// </para>
     /// </remarks>
     public static async Task<Outcome> RunAsync(
-        Connection conn, string joinTokenSecret, string jti, ILogger logger, CancellationToken ct)
+        Connection conn, string joinTokenSecret, string jti, ServerIdentity identity,
+        ILogger logger, CancellationToken ct)
     {
+        ArgumentNullException.ThrowIfNull(identity);
+
         SealedTranscriptSigner signer;
         try
         {
@@ -109,6 +136,10 @@ public static class SealedHandshakeServer
         {
             PublicKey = Google.Protobuf.ByteString.CopyFrom(server.Public),
             Binding = Google.Protobuf.ByteString.CopyFrom(signer.Sign(transcript)),
+            // The SAME transcript bytes, wrapped rather than replaced (ADR-25 decision 3).
+            // DeriveDirectionKeys above and the binding beside it both read that array
+            // unchanged, so ADR-22's cross-implementation vectors remain valid.
+            ServerSignature = Google.Protobuf.ByteString.CopyFrom(identity.Sign(transcript)),
         };
         await conn.WriteOneAsync(
             WireProtocol.NewEnvelope(MsgType.SealedServerHello, reply, conn.Encoding), ct);
@@ -120,7 +151,9 @@ public static class SealedHandshakeServer
             inbound: new SealedSession(new SealedAead(c2s), new StrictMonotonicSequence()),
             outbound: new SealedSession(new SealedAead(s2c), new StrictMonotonicSequence()));
 
-        logger.LogInformation("Sealed session established for {UserId} (cipher=chacha20-poly1305)", conn.UserId);
+        logger.LogInformation(
+            "Sealed session established for {UserId} (cipher=chacha20-poly1305, identity=ed25519 {IdentityKey})",
+            conn.UserId, identity.PublicKeyBase64);
         return Outcome.Ok;
     }
 }

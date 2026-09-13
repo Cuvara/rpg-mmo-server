@@ -136,7 +136,7 @@ Both hellos are sent **in the clear** — there is no key yet.
 
 ```
 client → server   ClientHello { client_public (32) }
-server → client   ServerHello { server_public (32), binding (32) }
+server → client   ServerHello { server_public (32), binding (32), server_signature (64) }
 ```
 
 Shared secret from X25519 over the two ephemeral keys; per-direction keys derived from it
@@ -172,6 +172,46 @@ both readings equally. Two bytes remove the whole class.
 `Verify` must be **constant-time**. A byte-by-byte comparison leaks the position of the
 first mismatch, which is enough to forge a tag one byte at a time against a peer that keeps
 answering.
+
+### The identity signature, which is the one a real client can check (ADR-25)
+
+```
+signed_input = "cuvara/sealed-identity/v1" || 0x00 || transcript || 0x00
+               || identity_public (32)
+
+server_signature = Ed25519(pod's private identity key, signed_input)     -- 64 bytes
+```
+
+**The transcript above is reused byte for byte.** It is wrapped, never modified: the
+direction keys and the binding keep reading the same array, so the cross-implementation
+vectors in §8 stay valid and this signature gets vectors of its own beside them.
+
+**Why a second mechanism at all.** The binding is a *symmetric* MAC under
+`JOIN_TOKEN_SECRET` — the key the gateway mints join tokens with. A client able to verify
+it is a client able to forge a token for any player on any server, so `binding_verified` is
+permanently false for every shipped client and no configuration reaches true. The Ed25519
+signature needs only the public half, which a binary can carry safely.
+
+**Where the public half comes from.** The pod generates the keypair at startup, in memory,
+never persisted; publishes the public half in its Redis registry entry as `identity_key`
+(standard padded base64); and the gateway hands it to the client in
+`enter_world_resp.server_public_key`. Rotation is pod replacement.
+
+**The identity key is inside the signed input** because a signature that does not name its
+signer authenticates a statement *about* a key rather than a key — pod A's signature over
+an exchange would otherwise serve anyone claiming to be pod B. The NUL separators are
+load-bearing for the same re-splitting reason as above.
+
+**And the limit, which must not be dropped when this is summarised.** The key travels over
+the gateway hop, and that hop is plaintext in every environment today (§6, ADR-23). An
+attacker positioned to man-in-the-middle *this* hop is on the same network path: he
+substitutes the key in `enter_world_resp` and forges a signature that verifies against it.
+So a verified signature proves the gameplay peer holds **the key we were handed** — an
+identity guarantee only once the delivering hop is itself authenticated. A client must
+therefore report two things separately, `identity_checked` and `key_hop_authenticated`, and
+claim `server_identity_verified` only for their conjunction (ADR-25 decision 6). What this
+buys today is that a break which was free now also requires owning the gateway hop, and
+that turning ADR-23's flag on closes both at once with no protocol change.
 
 ## 6. Does this apply to the gateway hop?
 
@@ -261,6 +301,7 @@ deployment that requires encryption. That is a consequence to state, not to disc
 | Curve | `x/crypto/curve25519` | BouncyCastle `X25519Agreement` |
 | KDF | `x/crypto/hkdf` | BouncyCastle `HkdfBytesGenerator` |
 | MAC | `crypto/hmac` (+ `hmac.Equal`) | BouncyCastle `HMac` (+ `Arrays.FixedTimeEquals`) |
+| Signature (ADR-25) | `crypto/ed25519` (stdlib) | BouncyCastle `Ed25519Signer` |
 
 Nothing in this repository implements a cipher, a MAC or a curve.
 
@@ -283,6 +324,14 @@ exactly what the RFC vectors on both sides are for.
   secret, transcript, both direction keys, binding tag) and one complete sealed frame,
   asserted value-by-value in both suites. Go seals the frame the C# test opens; C# seals
   the byte-identical frame the Go test opens.
+- **A second vector for the ADR-25 identity signature**, over the SAME transcript: a fixed
+  Ed25519 seed, the derived public key, the full signed input and the 64-byte signature,
+  asserted independently by `shared/sealed/interop_test.go` and
+  `GameServer.Tests/Net/ServerIdentityInteropTests.cs`. Ed25519 is deterministic, which is
+  what makes "both sides produce the same bytes" a vector rather than a round-trip. Its
+  negative half is asserted too — a one-bit change to the vector signature must be
+  rejected — because a verifier that accepts everything reproduces every positive vector
+  there is.
 - **Tampering rejected** in ciphertext, tag, additional data and length — the AAD case
   being the one an implementation can fail while every round-trip still passes.
 - **Low-order X25519 points refused**, since accepting one forces a shared secret the
@@ -324,6 +373,21 @@ and the probe verified the server's binding — proving the server holds
 >
 > The server side is unaffected — it signs the binding regardless, so the protection is
 > already on the wire waiting for a client that can check it.
+>
+> **Update, 2026-09-13 — the backend half of ADR-25 shipped, and it changes what a shipped
+> client can check without changing anything above.** The paragraph about the binding stays
+> true for ever: `binding_verified` is still false for a real player and always will be.
+> What is new is the Ed25519 `server_signature` beside it, which needs only a public key,
+> so a client **can** now detect the substituted ephemeral key that this note says it
+> cannot. The Go client half does; Unity does not yet.
+>
+> Two things this update does **not** say. It does not say the gameplay hop is
+> authenticated — the key arrives over the plaintext gateway hop and is attacker-choosable
+> there, so `server_identity_verified` is reported false on every environment today. And it
+> does not say the pinned gateway identity key of §6 landed; it did not, and ADR-25
+> decision 7 deliberately does not pin. The Unity `BindingVerified` test asserting that a
+> man in the middle succeeds is therefore **still correct and must not be deleted** — it
+> describes the binding, not the signature.
 
 **Wrong key: no session.** A client that completed the handshake correctly and then
 corrupted one byte of its send key had every frame refused and the connection closed:

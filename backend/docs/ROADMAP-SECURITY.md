@@ -70,7 +70,7 @@ what the implementations were built against.
 |---|---|---|---|---|
 | A1 | **Telemetry on rejected input.** `ValidationLogic` returns an error string and the server drops the input; nothing counted rejections per player over time. | ✅ **DONE.** `GameServer/Input/InputRejection.cs` is a bounded reason enum (bounded deliberately: the reason *strings* embed attacker-controlled values, so they are unusable as metric labels). `InputHandler` classifies at every rejection site; `GameMetrics.RecordInputRejected` counts per reason, pre-seeded at zero so a reason that never fires is still visible. Pinned by `GameServer.Tests/Input/InputRejectionTelemetryTests.cs`. | A cheater probing the rules generates a rejection pattern no honest client produces. **Counting it is cheap and it is the foundation every later detection rests on.** | Low |
 | A2 | **Per-account rate/anomaly budget.** `MaxInputsPerConnection` is a per-tick cap, not a behavioural budget. | ✅ **DONE, record-only.** `GameServer/Input/InputAnomalyTracker.cs` keeps a decaying per-account score (60s half-life, 4096 accounts tracked, weighted per rejection reason) keyed on the join token's user id, so it survives a reconnect. **It flags and records; it never acts on a player** — the false-positive rate of any threshold here is still unmeasured, and most rejection reasons rise with latency. Enforcement is a later, smaller change once a baseline exists to choose a threshold against. | Distinguishes "hit the cap once on a lag spike" from "sat at the cap for ten minutes". | Low |
-| A3 | **Replay protection on the game hop.** Nothing bound a packet to a session and a position in the stream. | ✅ **DONE** via ADR-22 sealed sessions, deployed to dev and staging at `GAMESERVER_SEALED=require`. The per-direction sequence number is the replay counter, and it is AEAD-authenticated rather than bolted on. Residual, recorded at ADR-22 and not closed by it: `binding_verified=false` — the transcript signer is symmetric under `JOIN_TOKEN_SECRET`, so a client able to verify the binding could forge join tokens. | A captured packet can be re-sent. | Medium |
+| A3 | **Replay protection on the game hop.** Nothing bound a packet to a session and a position in the stream. | ✅ **DONE** via ADR-22 sealed sessions, deployed to dev and staging at `GAMESERVER_SEALED=require`. The per-direction sequence number is the replay counter, and it is AEAD-authenticated rather than bolted on. Residual, recorded at ADR-22 and not closed by it: `binding_verified=false` — the transcript signer is symmetric under `JOIN_TOKEN_SECRET`, so a client able to verify the binding could forge join tokens. **Addressed beside it, not in it, by ADR-25 (backend shipped 2026-09-13)**: a per-pod Ed25519 signature a client can check with only a public key. `binding_verified` itself stays false for ever. | A captured packet can be re-sent. | Medium |
 | A4 | **Attack validation is per-attack, not per-rate.** `CombatLogic.ValidateAttack` checks range and cooldown for one attack, against `CooldownUntilTick` on the attacker's **entity** — exact for one entity, structurally blind to anything that hands an account a different one. | ✅ **DONE, record-only (2026-09-12).** `GameServer/Input/AttackRateAudit.cs` audits ACCEPTED attacks per **account** over a sliding tick-space window against what the cooldown permits; `gameserver.combat.attack_rate.violations` and `/status attack_rate_violations`. **No live exploit is claimed:** a reconnect inside the hold window reattaches the same entity with its cooldown intact, and the routes that do yield a fresh entity (map transfer, absence past the hold TTL) are far slower than the 500 ms cooldown they reset. The value is the blind spot, not a patch: an account exceeding the rate through any such route is **never refused**, so A1's counters and A2's score stay silent and this is the only counter that moves. `AttackRateAuditSeamTests` demonstrates that against a real world and a real `InputHandler`. | Cooldown bypass is the classic combat cheat. | Medium |
 | A5 | **No server-side plausibility audit on position.** Integration is authoritative, so position cannot be forged directly — but there is no check that a client's *claimed* input pattern is physically plausible over time. | ⬜ OPEN. | Defence in depth; low priority precisely because A-authority already holds. | Medium |
 | A6 | **Client-side anti-cheat: none.** | ⬜ OPEN, deliberately. | Client-side anti-cheat on an IL2CPP build raises the cost of cheating, it does not prevent it, and it is defeated once and then defeated forever by everyone. **Do not invest here before A1-A4.** | High, low value |
@@ -381,6 +381,14 @@ inventing a cipher.
      |---|---|
      | JSON | refused — `encoding_cannot_seal` |
      | protobuf, sealing | **`SMOKE=PASS`**, `sealed=true binding_verified=false`, 16 snapshots |
+
+     Since ADR-25's backend shipped (2026-09-13) that row also carries
+     `identity_checked`, `key_hop_authenticated` and `server_identity_verified`. On a
+     plaintext gateway hop a PASS reads `identity_checked=true key_hop_authenticated=false
+     server_identity_verified=false`: the signature was checked against a key an attacker on
+     the path could have chosen, so the strong claim is withheld. That is ADR-25 decision 6,
+     and it is why the three are reported separately rather than collapsed into one boolean
+     somebody would quote as "authenticated".
      | protobuf, no hello | refused — `sealed handshake failed (NoHello)` |
 
      `binding_verified=false` is the shipped-client state and is reported rather than
@@ -402,7 +410,7 @@ inventing a cipher.
      `SealedHandshakeServer` remarks).
 
      **The fix is decided and is [ADR-25](ARCHITECTURE-DECISIONS.md#adr-25--the-game-server-proves-its-identity-with-an-ed25519-key-it-generates-per-pod-the-clients-trust-in-that-key-is-the-gateway-hops-trust-not-its-own)
-     (2026-09-12). It is NOT implemented.** Not ADR-23, which parked a pinned identity key
+     (2026-09-12). Its BACKEND HALF SHIPPED 2026-09-13; the Unity client half has not.** Not ADR-23, which parked a pinned identity key
      for the *gateway* hop and is where this pointer used to send people. The game server
      signs the sealed handshake with an **Ed25519 key it generates per pod at startup**,
      whose public half travels pod -> registry -> gateway -> `enter_world_resp`. Per pod,
@@ -411,6 +419,19 @@ inventing a cipher.
      mounted into the most player-exposed process in the system. New field numbers only
      (`SealedServerHello.server_signature = 4`); the transcript bytes do not change, so
      ADR-22's cross-implementation vectors stay valid and old clients do not break.
+
+     **What is live as of 2026-09-13, and what is not.** The game server generates the
+     keypair and signs; the registry carries the public half as `identity_key`; the gateway
+     relays it in `enter_world_resp`; and the Go client half (`shared/sealed`) verifies it
+     and refuses a session on any failure, which the smoke test now exercises as the
+     closest thing here to a shipped player. **Unity does not verify yet** -- that is a
+     separate change -- and **ADR-25 decision 8's IL2CPP go/no-go probe has NOT been run**,
+     so Ed25519 under IL2CPP at `Minimal` and `High` stripping remains unanswered. Nothing
+     on the backend depends on that answer; the client half does.
+
+     **`binding_verified` is unchanged and is still false.** It was not repaired and cannot
+     be. The identity signature sits beside it as the reachable replacement, and the two
+     must not be read as one field improving.
 
      **And the honest half, which decides how it may be reported.** The key is delivered
      over the gateway hop, so it is exactly as trustworthy as that hop -- plaintext in every
@@ -634,10 +655,15 @@ inventing a cipher.
    certificate the client already trusts, or the pin shipped with the client. That is a
    deployment decision, and it is the remaining work on this step.
 
-   **And a second thing now waits on it.** ADR-25 (step 5) delivers the game server's
-   identity key over this hop, so the gameplay hop's man-in-the-middle defence is worth
-   nothing until this flag is on. The two do not merge into one task -- ADR-25 can be built
-   first and composes -- but neither may be *reported* as MITM protection alone.
+   **And a second thing now waits on it -- as of 2026-09-13 it is built and waiting.**
+   ADR-25 (step 5) delivers the game server's identity key over this hop, so the gameplay
+   hop's man-in-the-middle defence is worth nothing until this flag is on. The two do not
+   merge into one task -- ADR-25 *was* built first and composes -- but neither may be
+   *reported* as MITM protection alone. The backend now states that itself rather than
+   leaving it to a reader: a client reports `server_identity_verified` only when the key
+   arrived over an authenticated hop, so **turning this flag on is what flips that field**,
+   with no protocol change and no client release. Until then the smoke test prints
+   `key_hop_authenticated=false` on every passing run.
 
 7. **The meta hop is settled by [ADR-24](ARCHITECTURE-DECISIONS.md#adr-24--the-meta-hop-gets-nakamas-own-tls-but-the-credential-worth-stealing-there-is-a-default-valued-static-key-not-a-token)
    (2026-09-10) — and the confidentiality half turned out not to be the important half.**

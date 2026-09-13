@@ -6,6 +6,8 @@ import (
 
 	"github.com/duycuong/rpg-mmo/gateway/registry"
 	"github.com/duycuong/rpg-mmo/shared/jwt"
+	"github.com/duycuong/rpg-mmo/shared/sealed"
+	"github.com/duycuong/rpg-mmo/shared/storage"
 )
 
 // AssignResult holds the result of a map assignment.
@@ -23,6 +25,35 @@ type AssignResult struct {
 	// uses it to name exactly which game-server connection a supersede event
 	// targets (session.SessionData.JoinTokenJTI).
 	JTI string
+
+	// ServerPublicKey is the target server's Ed25519 identity public key, 32 raw
+	// bytes decoded from its registry entry (ADR-25). The gateway forwards it
+	// verbatim in EnterWorldResponse so the client can check the signature the
+	// game server puts in SealedServerHello.
+	//
+	// EMPTY IS NOT AN ERROR and must never fail an assignment. A server older
+	// than ADR-25 publishes no key, and so does one whose entry carries a
+	// malformed value; in both cases the join proceeds and a client that
+	// requires identity refuses it at the sealed handshake, which is where that
+	// decision belongs. Failing the assignment instead would take a whole map
+	// offline for a registry-encoding bug.
+	ServerPublicKey []byte
+}
+
+// identityKeyOf decodes a registry entry's identity key for delivery to the
+// client, returning nil for anything it cannot use.
+//
+// The error is deliberately swallowed HERE rather than propagated. See
+// AssignResult.ServerPublicKey: the caller's alternative to an empty key is a
+// failed join, and a client that cares refuses one hop later with a message
+// that actually names encryption. The gateway logs the absence on the
+// enter-world line, so it is visible without being fatal.
+func identityKeyOf(info storage.ServerInfo) []byte {
+	key, err := sealed.DecodeIdentityKey(info.IdentityKey)
+	if err != nil {
+		return nil
+	}
+	return key
 }
 
 // AssignMap finds an available server for the given map and generates a join
@@ -67,10 +98,11 @@ func AssignMapKeyring(ctx context.Context, userID, mapID string, reg *registry.R
 	}
 
 	return AssignResult{
-		ServerID:   srv.ServerID,
-		ServerAddr: srv.Addr,
-		JoinToken:  token,
-		Transport:  srv.Transport,
-		JTI:        claims.Jti,
+		ServerID:        srv.ServerID,
+		ServerAddr:      srv.Addr,
+		JoinToken:       token,
+		Transport:       srv.Transport,
+		JTI:             claims.Jti,
+		ServerPublicKey: identityKeyOf(srv),
 	}, nil
 }

@@ -291,19 +291,19 @@ func (p *player) sealSession(conn net.Conn) error {
 			return p.send(conn, mustEnvelope(p.cfg.Encoding, messages.MsgSealedClientHello,
 				messages.SealedClientHello{PublicKey: pub}))
 		},
-		func() ([]byte, []byte, string, error) {
+		func() ([]byte, []byte, []byte, string, error) {
 			env, _, err := decodeCounted(p.gsRead, nil)
 			if err != nil {
-				return nil, nil, "", err
+				return nil, nil, nil, "", err
 			}
 			if env.Type != messages.MsgSealedServerHello {
-				return nil, nil, "", fmt.Errorf("want server hello, got type %d", env.Type)
+				return nil, nil, nil, "", fmt.Errorf("want server hello, got type %d", env.Type)
 			}
 			var hello messages.SealedServerHello
 			if err := env.UnmarshalPayload(&hello); err != nil {
-				return nil, nil, "", err
+				return nil, nil, nil, "", err
 			}
-			return hello.PublicKey, hello.Binding, hello.Error, nil
+			return hello.PublicKey, hello.Binding, hello.ServerSignature, hello.Error, nil
 		},
 	)
 	if err != nil {

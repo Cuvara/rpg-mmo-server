@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **ADR-25: updated for the new `readHello` signature.** The sealed client callback now
+  returns the server's Ed25519 `server_signature` as a third `[]byte`. The load generator
+  continues to verify the *binding* and report `sealed_binding_verified` — it mints its own
+  join tokens, so it holds the secret and that check is meaningful here. It does not verify
+  identity: it is the server side wearing a client costume, and the peer that proves the
+  identity path is the smoke test.
+
 - **`-sealed`: the load generator can speak a sealed session**, so the gameplay hop can be
   exercised encrypted end to end rather than only in unit tests.
   - Configured on **both** ends and never negotiated on the wire — this is the counterpart

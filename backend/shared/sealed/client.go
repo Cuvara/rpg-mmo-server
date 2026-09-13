@@ -35,6 +35,44 @@ type ClientResult struct {
 	// true. Those are the only peers that can currently prove the
 	// man-in-the-middle defence works end to end.
 	BindingVerified bool
+
+	// IdentityChecked reports that the server's Ed25519 signature was verified
+	// against the identity key this client was given (ADR-25).
+	//
+	// TRUE HERE IS NOT AN IDENTITY GUARANTEE ON ITS OWN, and the split between
+	// this field and IdentityVerified is the whole point. What a true here
+	// proves is that the peer on the gameplay hop holds the private half of the
+	// key named in EnterWorldResponse.server_public_key. Whether that key is the
+	// real server's is a question about the hop that DELIVERED it.
+	IdentityChecked bool
+
+	// IdentityKeyHopAuthenticated echoes back what the caller asserted about the
+	// hop the identity key arrived over — ADR-23 gateway TLS in force with the
+	// certificate validated, or not.
+	//
+	// It is carried on the result rather than left in the caller's config so
+	// that a reporting path which only sees a ClientResult cannot report the
+	// strong claim without also being able to see the evidence for it.
+	IdentityKeyHopAuthenticated bool
+
+	// IdentityVerified is the ONLY field that means "this is the real game
+	// server": IdentityChecked AND IdentityKeyHopAuthenticated (ADR-25
+	// decision 6).
+	//
+	// Over a plaintext gateway hop — every environment today — the client has
+	// checked a signature against a key an attacker on its network path could
+	// have chosen, and this stays FALSE while IdentityChecked is true. That is
+	// the weaker truth, and reporting it is not pessimism: an attacker who can
+	// man-in-the-middle the gameplay hop is on the same path as the gateway hop,
+	// substitutes the key in enter_world_resp, and the signature he then forges
+	// verifies perfectly. An instrument that reported success there would be
+	// worse than no instrument, which is ADR-23's argument against its own
+	// Option A, applied to ourselves.
+	//
+	// It becomes reachable — with no protocol change and no client release — the
+	// day ADR-23's gateway TLS is on and the caller can honestly pass
+	// KeyHopAuthenticated: true.
+	IdentityVerified bool
 }
 
 // ClientHandshakeConfig is what the client half needs.
@@ -46,6 +84,35 @@ type ClientHandshakeConfig struct {
 	// which is the correct configuration for a shipped client and the wrong one
 	// for a test harness that holds the secret anyway.
 	JoinTokenSecret string
+
+	// ServerPublicKey is the game server's Ed25519 identity key, 32 bytes, as
+	// delivered in EnterWorldResponse.server_public_key (ADR-25).
+	//
+	// NON-EMPTY MEANS REQUIRE IDENTITY. Unlike JoinTokenSecret, which a shipped
+	// client can never hold, this is the field a real player's client SHOULD
+	// set: it carries no secret, so setting it costs nothing and refusing
+	// without it costs a session that cannot be authenticated. When it is set,
+	// a missing, malformed or non-verifying signature ends the handshake with an
+	// error and no session — there is no negotiation and no fallback (ADR-22
+	// decision 3, ADR-25 decision 5).
+	//
+	// Empty means the gateway had no key for this server (an older pod, or an
+	// entry written before the field existed) or the caller chose not to
+	// require one. Then the handshake proceeds exactly as it did before ADR-25
+	// and IdentityChecked is false.
+	ServerPublicKey []byte
+
+	// KeyHopAuthenticated asserts that ServerPublicKey arrived over an
+	// AUTHENTICATED hop — ADR-23 gateway TLS in force, certificate validated —
+	// and it is what separates IdentityChecked from IdentityVerified on the
+	// result.
+	//
+	// DEFAULT FALSE IS THE HONEST DEFAULT AND MUST STAY THAT WAY. Every
+	// environment runs the gateway hop in plaintext today, so a caller that sets
+	// this without actually having validated a certificate is not configuring a
+	// feature; it is falsifying the one field anyone would trust. Set it from
+	// what the transport actually did, never from what the deployment intends.
+	KeyHopAuthenticated bool
 }
 
 // RunClientHandshake performs the client half of the sealed-session exchange.
@@ -64,7 +131,7 @@ type ClientHandshakeConfig struct {
 func RunClientHandshake(
 	cfg ClientHandshakeConfig,
 	sendHello func(publicKey []byte) error,
-	readHello func() (serverPublic, binding []byte, serverError string, err error),
+	readHello func() (serverPublic, binding, serverSignature []byte, serverError string, err error),
 ) (ClientResult, error) {
 	if cfg.JTI == "" {
 		return ClientResult{}, ErrBadJTI
@@ -78,7 +145,7 @@ func RunClientHandshake(
 		return ClientResult{}, fmt.Errorf("sealed: send client hello: %w", err)
 	}
 
-	serverPublicBytes, bindingBytes, serverError, err := readHello()
+	serverPublicBytes, bindingBytes, signatureBytes, serverError, err := readHello()
 	if err != nil {
 		return ClientResult{}, fmt.Errorf("sealed: read server hello: %w", err)
 	}
@@ -119,6 +186,24 @@ func RunClientHandshake(
 		verified = true
 	}
 
+	// ADR-25. Checked BEFORE the shared secret is derived and before any session
+	// exists, for the same reason the binding is: a handshake that is going to be
+	// refused must not first build the thing it would have installed.
+	identityChecked := false
+	if len(cfg.ServerPublicKey) > 0 {
+		if len(signatureBytes) == 0 {
+			// The caller required identity and the peer offered none. Refuse —
+			// do not continue as if identity had not been asked for. This is the
+			// exact shape ADR-25 decision 5 names: "a client that requires
+			// identity and is not given a key is refused".
+			return ClientResult{}, ErrIdentityMissing
+		}
+		if err := VerifyIdentity(cfg.ServerPublicKey, transcript, signatureBytes); err != nil {
+			return ClientResult{}, err
+		}
+		identityChecked = true
+	}
+
 	secret, err := kp.SharedSecret(serverPublic)
 	if err != nil {
 		return ClientResult{}, err
@@ -152,5 +237,16 @@ func RunClientHandshake(
 		return ClientResult{}, err
 	}
 
-	return ClientResult{Outbound: outbound, Inbound: inbound, BindingVerified: verified}, nil
+	return ClientResult{
+		Outbound:        outbound,
+		Inbound:         inbound,
+		BindingVerified: verified,
+		IdentityChecked: identityChecked,
+		// The conjunction is computed HERE, once, rather than left to each
+		// reporting site to remember. Three call sites each re-deriving "checked
+		// and authenticated" is three chances for one of them to report the
+		// strong claim on the weak evidence.
+		IdentityKeyHopAuthenticated: cfg.KeyHopAuthenticated,
+		IdentityVerified:            identityChecked && cfg.KeyHopAuthenticated,
+	}, nil
 }

@@ -19,10 +19,23 @@ namespace GameServer.Registry;
 /// <param name="Transport">Transport clients must use ("tcp" or "kcp").</param>
 /// <param name="Capacity">Maximum concurrent players.</param>
 /// <param name="PlayerCount">Current player count, refreshed on join/leave.</param>
+/// <param name="IdentityKey">
+/// This pod's Ed25519 identity public key (ADR-25), standard base64 with padding of
+/// exactly 32 raw bytes — <see cref="GameServer.Net.Sealed.ServerIdentity.PublicKeyBase64"/>.
+/// The gateway reads it straight out of the hash and hands it to the client in
+/// <c>MsgEnterWorldResp.ServerPublicKey</c>, so the field name and this encoding are a
+/// cross-language contract with <c>shared/storage.ServerInfo.IdentityKey</c> and
+/// <c>sealed.DecodeIdentityKey</c>.
+///
+/// Empty is legal and means "this server publishes no identity" — a pre-ADR-25 build. A
+/// client that requires identity then refuses at the sealed handshake, which is the right
+/// place for that decision; the registry never makes it.
+/// </param>
 public sealed record ServerInfo(
     string ServerId,
     string MapId,
     string Addr,
     string Transport,
     int Capacity,
-    int PlayerCount);
+    int PlayerCount,
+    string IdentityKey = "");

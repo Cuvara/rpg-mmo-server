@@ -6,6 +6,61 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **ADR-25: the game server's per-pod Ed25519 identity, on the wire and in the registry.**
+  `shared/sealed/identity.go` defines the signed input
+  `"cuvara/sealed-identity/v1" || 0x00 || transcript || 0x00 || identity_public(32)` plus
+  `SignIdentity`, `VerifyIdentity` and the registry encoding helpers. **The transcript is
+  wrapped, never modified** -- `DeriveKeys` and the HMAC binding keep reading exactly the
+  bytes `Transcript()` already produced, so ADR-22's cross-implementation vectors stay valid
+  and the signature gets one of its own (`TestInteropIdentityVector`, asserting the same
+  three constants as `ServerIdentityInteropTests.cs`).
+
+  **Why an asymmetric signature at all**: the existing `binding` is an HMAC under
+  `JOIN_TOKEN_SECRET`, the key the gateway *mints join tokens with*, so a client able to
+  verify it could forge a token for any player on any server. `binding_verified` is
+  therefore permanently false for every shipped client and no configuration reaches true.
+  An Ed25519 signature needs only the public half.
+
+  Wire: `SealedServerHello.server_signature = 4` and `EnterWorldResponse.server_public_key
+  = 6`, both **new numbers**. Field 5 of `EnterWorldResponse` stays reserved -- an old peer
+  would read whatever occupied it as 32 bytes of key material -- and `binding` keeps field 2
+  and its current meaning, because one field number with two meanings is how two versions
+  come to disagree silently about a byte. Adding fields is backward-compatible: a peer that
+  sends neither still parses (`TestAPeerThatSendsNeitherFieldStillParses`).
+
+  `storage.ServerInfo` gains `IdentityKey`, carried in the Redis hash field `identity_key`
+  as standard padded base64 of 32 raw bytes. **That field name and encoding are a
+  cross-language contract** -- the C# game server writes the entry and the Go gateway reads
+  it with no translation layer -- so `redisstore` and
+  `GameServer/Registry/RedisServerRegistry.cs` must change together. An entry with no such
+  field reads as an empty key and is **not** an error: that is a pre-ADR-25 server, and
+  failing there would take a whole map offline for an un-upgraded pod.
+
+### Changed
+- **`sealed.RunClientHandshake` reports THREE facts about identity, not one, and the split
+  is the point (ADR-25 decision 6).** `IdentityChecked` means a signature verified under the
+  key the caller supplied. `IdentityKeyHopAuthenticated` is what the caller asserted about
+  the hop that delivered that key. Only their conjunction, `IdentityVerified`, means "this
+  is the real game server".
+
+  Over a plaintext gateway hop -- every environment today, because ADR-23's TLS is
+  implemented and defaults off -- a client has checked a signature against a key an attacker
+  on its own network path could have chosen, and `IdentityVerified` stays **false** while
+  `IdentityChecked` is true. An instrument that reported the strong claim on the weak
+  evidence would be worse than no instrument. The strong state is reachable with no protocol
+  change and no client release the day gateway TLS is on, and that reachability is asserted
+  (`TestIdentityVerifiedBecomesTrueOverAnAuthenticatedHop`) rather than assumed -- an
+  always-false boolean is the dead end ADR-25 rejected Option D for.
+
+  `ClientHandshakeConfig.ServerPublicKey` is the requirement switch: **non-empty means
+  require identity**, and a missing, malformed or non-verifying signature ends the handshake
+  with an error and no session. No negotiation, no fallback (ADR-22 decision 3). Empty means
+  the gateway had no key, and the handshake proceeds exactly as before -- which is what makes
+  the gateway-and-server-first migration order safe.
+
+  **Breaking for callers**: the `readHello` callback now returns `serverSignature` as a
+  third `[]byte`. Updated in the load generator, the smoke test, `killprobe` and the
+  integration suite.
 - **`EnterWorldRequest.party_id` (field 2) and `storage.DungeonIndex`** for ADR-26. The wire
   field is additive in both encodings -- `omitempty` on the JSON side keeps a map entry
   byte-identical to what a pre-ADR-26 peer produces, so the field is not merely

@@ -11,6 +11,9 @@ namespace GameServer.Registry;
 ///   servers:id:{server_id}   HASH  server_id, map_id, addr, transport,
 ///                                  capacity, player_count   (+ TTL)
 ///   servers:map:{map_id}     SET   server ids on that map   (index, no TTL)
+///
+/// Hash fields: server_id, map_id, addr, transport, capacity, player_count,
+/// identity_key. Mirrors shared/storage/redisstore/registry.go byte for byte.
 /// </code>
 /// The hash is the source of truth: a server disappears on its own once it stops
 /// heartbeating, and the gateway prunes the map index lazily on lookup. Key
@@ -30,6 +33,10 @@ public sealed class RedisServerRegistry : IServerRegistry
     private const string FieldTransport = "transport";
     private const string FieldCapacity = "capacity";
     private const string FieldPlayerCount = "player_count";
+    // ADR-25. Written by this process, read by the Go gateway's infoFromFields()
+    // with no translation layer, so the name and the base64 encoding of its value
+    // must change on both sides in one commit or not at all.
+    private const string FieldIdentityKey = "identity_key";
 
     /// <summary>
     /// Sets player_count only if the hash still exists, so a stale writer cannot
@@ -130,6 +137,7 @@ return 1
             new HashEntry(FieldTransport, info.Transport),
             new HashEntry(FieldCapacity, info.Capacity),
             new HashEntry(FieldPlayerCount, info.PlayerCount),
+            new HashEntry(FieldIdentityKey, info.IdentityKey),
         ]);
         var expire = batch.KeyExpireAsync(key, _ttl);
         Task<bool>? sadd = scope == RegistrationScope.MapIndexed
@@ -142,8 +150,9 @@ return 1
         if (sadd != null) await sadd;
 
         _logger.LogInformation(
-            "Registered {ServerId} in Redis: map={MapId} addr={Addr} transport={Transport} capacity={Capacity} ttl={Ttl}s scope={Scope}",
-            info.ServerId, info.MapId, info.Addr, info.Transport, info.Capacity, (int)_ttl.TotalSeconds, scope);
+            "Registered {ServerId} in Redis: map={MapId} addr={Addr} transport={Transport} capacity={Capacity} ttl={Ttl}s scope={Scope} identity={IdentityKey}",
+            info.ServerId, info.MapId, info.Addr, info.Transport, info.Capacity, (int)_ttl.TotalSeconds, scope,
+            string.IsNullOrEmpty(info.IdentityKey) ? "(none)" : info.IdentityKey);
     }
 
     /// <inheritdoc />

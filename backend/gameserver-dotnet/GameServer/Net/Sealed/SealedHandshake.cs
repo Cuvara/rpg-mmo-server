@@ -26,6 +26,24 @@ public static class SealedHandshake
     public const string TranscriptLabel = "cuvara/sealed-handshake/v1";
 
     /// <summary>
+    /// Domain-separation label for the per-pod Ed25519 identity signature (ADR-25). Part of
+    /// the wire contract byte for byte, exactly like <see cref="TranscriptLabel"/>.
+    /// </summary>
+    /// <remarks>
+    /// It is DIFFERENT from <see cref="TranscriptLabel"/> deliberately. The two signed
+    /// inputs must not be confusable — a signature over one must never verify as a signature
+    /// over the other — and a distinct label guarantees that without depending on the
+    /// lengths of the pieces either input happens to contain.
+    /// </remarks>
+    public const string IdentityLabel = "cuvara/sealed-identity/v1";
+
+    /// <summary>Length of an Ed25519 identity public key.</summary>
+    public const int IdentityKeySize = 32;
+
+    /// <summary>Length of an Ed25519 identity signature.</summary>
+    public const int IdentitySignatureSize = 64;
+
+    /// <summary>
     /// Build the bytes both peers authenticate:
     /// <c>label || 0x00 || jti || 0x00 || clientPublic(32) || serverPublic(32)</c>.
     /// </summary>

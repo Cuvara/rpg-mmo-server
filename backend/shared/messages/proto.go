@@ -101,9 +101,9 @@ func marshalProtoPayload(v any) ([]byte, error) {
 		m = &wirepb.SealedClientHello{PublicKey: t.PublicKey}
 
 	case SealedServerHello:
-		m = &wirepb.SealedServerHello{PublicKey: t.PublicKey, Binding: t.Binding, Error: t.Error}
+		m = sealedServerHelloPB(t)
 	case *SealedServerHello:
-		m = &wirepb.SealedServerHello{PublicKey: t.PublicKey, Binding: t.Binding, Error: t.Error}
+		m = sealedServerHelloPB(*t)
 
 	case KickMessage:
 		m = &wirepb.KickMessage{Reason: t.Reason}
@@ -159,6 +159,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 		}
 		t.ServerAddr, t.JoinToken = pb.ServerAddr, pb.JoinToken
 		t.Transport, t.Error = pb.Transport, pb.Error
+		t.ServerPublicKey = pb.ServerPublicKey
 
 	case *SealedClientHello:
 		var pb wirepb.SealedClientHello
@@ -173,6 +174,7 @@ func unmarshalProtoPayload(data []byte, v any) error {
 			return wrapUnmarshal(v, err)
 		}
 		t.PublicKey, t.Binding, t.Error = pb.PublicKey, pb.Binding, pb.Error
+		t.ServerSignature = pb.ServerSignature
 
 	case *JoinTokenRequest:
 		var pb wirepb.JoinTokenRequest
@@ -304,10 +306,20 @@ func authRespPB(t AuthResponse) *wirepb.AuthResponse {
 
 func enterWorldRespPB(t EnterWorldResponse) *wirepb.EnterWorldResponse {
 	return &wirepb.EnterWorldResponse{
-		ServerAddr: t.ServerAddr,
-		JoinToken:  t.JoinToken,
-		Transport:  t.Transport,
-		Error:      t.Error,
+		ServerAddr:      t.ServerAddr,
+		JoinToken:       t.JoinToken,
+		Transport:       t.Transport,
+		Error:           t.Error,
+		ServerPublicKey: t.ServerPublicKey,
+	}
+}
+
+func sealedServerHelloPB(t SealedServerHello) *wirepb.SealedServerHello {
+	return &wirepb.SealedServerHello{
+		PublicKey:       t.PublicKey,
+		Binding:         t.Binding,
+		Error:           t.Error,
+		ServerSignature: t.ServerSignature,
 	}
 }
 

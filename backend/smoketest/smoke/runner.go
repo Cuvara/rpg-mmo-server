@@ -51,6 +51,28 @@ type Runner struct {
 	// sealedBindingVerified is surfaced in the game-server step's detail line.
 	sealedBindingVerified bool
 
+	// serverPublicKey is the game server's Ed25519 identity key as the gateway
+	// delivered it in EnterWorldResponse (ADR-25). Empty against a pre-ADR-25
+	// gateway or game server, which is reported and NOT treated as a failure --
+	// the smoke test must stay green against an older backend.
+	serverPublicKey []byte
+
+	// sealedIdentityChecked records that the server's identity signature verified
+	// under serverPublicKey.
+	//
+	// It is deliberately NOT named "verified". The smoke test reaches the gateway
+	// over plaintext HTTP/TCP like every environment today, so the key it checked
+	// against is one an attacker on its path could have chosen. Checking the
+	// signature therefore proves the gameplay peer holds THAT key -- not that the
+	// key is the real server's. The strong claim needs ADR-23's gateway TLS, and
+	// sealedIdentityHopAuthenticated is the field that would carry it.
+	sealedIdentityChecked bool
+
+	// sealedIdentityHopAuthenticated is whether the hop that delivered the key was
+	// authenticated. False everywhere today; it is reported rather than omitted so
+	// that a green run says WHY the strong claim is absent.
+	sealedIdentityHopAuthenticated bool
+
 	// runStart is the wall clock at Run(); every persisted row this run asserts
 	// on must be newer than it, which is what stops a stale row from passing.
 	runStart     time.Time
@@ -305,6 +327,10 @@ func (r *Runner) stepGatewayAuthEnter() (string, error) {
 	}
 	r.serverAddr = enterResp.ServerAddr
 	r.joinToken = enterResp.JoinToken
+	// ADR-25. Kept even when empty: sealSession decides from its length whether to
+	// require identity, and an empty key against an older backend must leave the
+	// run green rather than refuse the join.
+	r.serverPublicKey = enterResp.ServerPublicKey
 	// The gateway tells us which transport the target game server speaks; an
 	// omitted field means TCP (servers registered before the field existed).
 	r.serverTrans = transport.Normalize(enterResp.Transport)
@@ -467,6 +493,20 @@ drain:
 		// confidentiality for authenticity, which is exactly the conflation
 		// ADR-21 was written about.
 		detail += fmt.Sprintf(" sealed=true binding_verified=%v", r.sealedBindingVerified)
+
+		// ADR-25, reported as THREE facts rather than one, because collapsing them
+		// is the exact mistake decision 6 forbids. "identity_checked" says a
+		// signature verified under the key we were given; "key_hop_authenticated"
+		// says whether that key arrived over a hop we could trust; and
+		// "server_identity_verified" -- the only one that means "this is the real
+		// game server" -- is their conjunction. While the gateway hop is plaintext
+		// a passing run prints checked=true, authenticated=false, verified=false,
+		// and that is the honest result, not a degraded one.
+		detail += fmt.Sprintf(
+			" identity_key=%v identity_checked=%v key_hop_authenticated=%v server_identity_verified=%v",
+			len(r.serverPublicKey) > 0, r.sealedIdentityChecked,
+			r.sealedIdentityHopAuthenticated,
+			r.sealedIdentityChecked && r.sealedIdentityHopAuthenticated)
 	}
 	return detail, nil
 }
@@ -613,7 +653,19 @@ func (r *Runner) sealSession(conn net.Conn, joinToken string) error {
 	}
 
 	result, err := sealed.RunClientHandshake(
-		sealed.ClientHandshakeConfig{JTI: claims.Jti},
+		sealed.ClientHandshakeConfig{
+			JTI: claims.Jti,
+			// The key the real gateway just handed us, exactly as a shipped client
+			// gets it. Non-empty makes the handshake REQUIRE a verifying signature,
+			// so a forged or missing one ends the run rather than being reported.
+			ServerPublicKey: r.serverPublicKey,
+			// FALSE, hard-coded, and it must stay false until ADR-23's gateway TLS
+			// is on AND this client validates the certificate. The smoke test talks
+			// plaintext to the gateway, so asserting otherwise here would fabricate
+			// the one field anyone would trust. This is the line to change when the
+			// hop changes -- not before.
+			KeyHopAuthenticated: false,
+		},
 		func(pub []byte) error {
 			env, err := messages.NewEnvelopeAs(r.enc, messages.MsgSealedClientHello,
 				messages.SealedClientHello{PublicKey: pub})
@@ -622,19 +674,19 @@ func (r *Runner) sealSession(conn net.Conn, joinToken string) error {
 			}
 			return r.send(conn, env)
 		},
-		func() ([]byte, []byte, string, error) {
+		func() ([]byte, []byte, []byte, string, error) {
 			env, err := r.recv(conn)
 			if err != nil {
-				return nil, nil, "", err
+				return nil, nil, nil, "", err
 			}
 			if env.Type != messages.MsgSealedServerHello {
-				return nil, nil, "", fmt.Errorf("want server hello, got type %d", env.Type)
+				return nil, nil, nil, "", fmt.Errorf("want server hello, got type %d", env.Type)
 			}
 			var hello messages.SealedServerHello
 			if err := env.UnmarshalPayload(&hello); err != nil {
-				return nil, nil, "", err
+				return nil, nil, nil, "", err
 			}
-			return hello.PublicKey, hello.Binding, hello.Error, nil
+			return hello.PublicKey, hello.Binding, hello.ServerSignature, hello.Error, nil
 		},
 	)
 	if err != nil {
@@ -644,6 +696,8 @@ func (r *Runner) sealSession(conn net.Conn, joinToken string) error {
 	r.sealedConn, r.sealedOut, r.sealedIn = conn, result.Outbound, result.Inbound
 
 	r.sealedBindingVerified = result.BindingVerified
+	r.sealedIdentityChecked = result.IdentityChecked
+	r.sealedIdentityHopAuthenticated = result.IdentityKeyHopAuthenticated
 	return nil
 }
 
