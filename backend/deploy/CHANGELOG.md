@@ -6,6 +6,46 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **The meta hop's opt-in did not survive a deploy, and the way it failed hid itself.**
+  `app/20-configmaps.yaml` is repo state carrying the plaintext defaults, so every `apply`
+  resets `nakama-url` and `nakama-tls-pin` — while `nakama-config` in `rpg-k8s-data` is
+  cluster-only and survives untouched. Half the flag reverted and half did not: Nakama kept
+  terminating TLS and the game server was told to speak plaintext to it. My defect, from #354.
+
+  **It does not show up when it happens.** Environment variables are fixed at pod creation, so
+  the running game servers keep the values they started with and everything keeps working —
+  until the next pod is created, by a crash or a scale or a rollout nobody connects to this.
+  Measured today: a CD run reset the ConfigMap at 09:51, `killprobe` still reported `REWARDED`
+  minutes later off the stale pods, and the cluster was one pod replacement away from every
+  reward RPC failing.
+
+  `nakama-config` is now the **one** source of truth and the game server's half is derived
+  from it immediately after the apply, rather than maintained in parallel and checked later.
+  The scheme is swapped rather than a host hardcoded, so the host keeps coming from the
+  manifest.
+
+  Verified against the live cluster in the exact state CD left behind:
+
+  | | result |
+  |---|---|
+  | block run on the broken state | `http` + empty pin → `https` + `/etc/nakama-tls/tls.crt` |
+  | the gate that failed CD, after | passes |
+  | run a second time | idempotent, same values |
+  | staging (no `nakama-config`) | **silent no-op**, stays `http` |
+  | a freshly created pod | comes up `https` with the pin |
+
+  That last row is the one that matters: the old state passed every check that reads a running
+  pod, and only a **new** pod exposed it.
+
+### Added
+- **`dev-up.sh`'s gate proved itself on the real pipeline.** It failed the CD deploy at
+  `1ce2bb7` with `ERROR: Nakama terminates TLS but gameserver-config nakama-url is
+  'http://...'` — refusing exactly the half-disabled state described above, on a run nobody
+  staged. A gate that has only ever been fired by hand is not known to fire.
+
+## [Unreleased]
+
+### Fixed
 - **`docs/MONITORING.md` still named `gameserver_save_errors_total` twice.** #356 fixed the
   Grafana panel that queried it and left the document that told you to query it — so the
   dashboard was right and the instructions were still wrong. The metric **has never existed**:

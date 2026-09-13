@@ -390,6 +390,36 @@ say "apply the app tier (rpg-k8s-realtime)"
 for f in 00-namespace.yaml 05-agones-sdk-rbac.yaml 10-rbac.yaml 20-configmaps.yaml; do
   [ -f "$HERE/app/$f" ] && $K apply -f "$HERE/app/$f"
 done
+# --- the meta hop's opt-in has to SURVIVE this apply ------------------------
+# `20-configmaps.yaml` above is repo state and carries the plaintext defaults, so
+# every deploy resets `nakama-url` and `nakama-tls-pin` -- while `nakama-config`
+# in rpg-k8s-data is cluster-only and survives untouched. That asymmetry silently
+# half-disables the flag: Nakama keeps terminating TLS and the game server is told
+# to speak plaintext to it.
+#
+# It is worse than it looks, because it does not show up until something unrelated
+# happens. Environment variables are fixed at pod creation, so the RUNNING game
+# servers keep the values they started with and everything keeps working -- until
+# the next pod is created, whenever that is, by a crash or a scale or a rollout
+# nobody connected to this. Measured 2026-09-13: a CD run reset the ConfigMap, a
+# probe still reported REWARDED off the stale pods, and the cluster was one pod
+# replacement away from every reward RPC failing.
+#
+# So `nakama-config` is the ONE source of truth, and the game server's half is
+# derived from it here rather than maintained in parallel and checked later.
+nk_on=$($K get configmap nakama-config -n rpg-k8s-data -o 'jsonpath={.data.tls-cert-path}' 2>/dev/null || true)
+if [ -n "$nk_on" ]; then
+  cur_url=$($K get configmap gameserver-config -n rpg-k8s-realtime -o 'jsonpath={.data.nakama-url}' 2>/dev/null || true)
+  # Swap the scheme rather than hardcode a host: the host belongs to the manifest
+  # and must keep coming from there.
+  https_url="https://${cur_url#http://}"
+  case "$cur_url" in https://*) https_url="$cur_url" ;; esac
+  $K patch configmap gameserver-config -n rpg-k8s-realtime --type=merge \
+    -p "{\"data\":{\"nakama-url\":\"${https_url}\",\"nakama-tls-pin\":\"/etc/nakama-tls/tls.crt\"}}" >/dev/null
+  echo "restored: the meta hop is on in this cluster, so gameserver-config was moved back to"
+  echo "          ${https_url} with the pin -- the apply above had reset it to the repo default"
+fi
+
 if ! $K get secret rpg-app-secrets -n rpg-k8s-realtime >/dev/null 2>&1; then
   echo "ERROR: secret rpg-k8s-realtime/rpg-app-secrets is absent." >&2
   echo "Fill a copy of app/30-secret-template.yaml OUTSIDE the repo and apply it first." >&2
