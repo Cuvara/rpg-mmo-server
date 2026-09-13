@@ -3275,11 +3275,30 @@ There is no per-environment overlay to vary a probe in, so the fix had to be **o
 
 **What that gives up, stated rather than glossed:** `:9100` is a different `http.Server` in the same process than the client API, so the probes prove the *process* is alive and serving HTTP, not that the client-API mux still answers. The gap is narrow because the old target was narrow too — Nakama's `/healthcheck` is a static 200 (`{}` on the wire) that checks no dependency — so the only failure now missed is a wedge confined to the API mux while the metrics mux answers. A certificate the operator got wrong is **not** in that gap: Nakama cannot read it, exits, and the pod crash-loops visibly.
 
+**OPEN ITEM — the wedged API mux, and the automatic restart this trade cost.**
+
+The sentence above was first written as *"not a regression, because the old target checked nothing either"*. That is true of **dependency** checking and false of one thing that matters, and the correction belongs here rather than being re-derived by whoever hits it:
+
+> The old liveness probe would have **restarted the pod** when the `:7350` server itself stopped answering — a dead accept loop, a wedged listener — because that is exactly what it hit. **The new one will not.** A narrow class of failure has lost its automatic recovery. That is a real cost of this fix, accepted because every alternative in the table above is worse, and it is not the same statement as "the dependency coverage is unchanged".
+
+**And nothing else in the deployment closes it.** Checked, rather than assumed:
+
+- The **C# game server is the only in-cluster consumer of `:7350`** — the gateway makes no Nakama call at all (§3), so gateway health says nothing about this.
+- The game server's Nakama failures are **`LogWarning` only**: no counter, no gauge, nothing on `/metrics`. A wedge is log lines nobody is watching.
+- **No alert rules exist anywhere in `deploy/monitoring/`** — one Prometheus scrape config and one Grafana dashboard, no alerting. Prometheus does scrape `nakama:9100`, so Nakama's own API request counters would flatline *visibly*, but only to someone already looking.
+- `dev-up.sh`, `k8s/verify/lib/checks_flow.sh` and the smoketest all exercise the hop for real — **only at deploy time**, not continuously.
+
+**So the first notice in steady state is a human**, when players cannot authenticate.
+
+**The cheapest close, named and deliberately not built here:** a counter on the game server's Nakama call outcomes — it already distinguishes `Granted` / `Partial` / `NotGranted` / transport failure — plus an alert on its failure rate. That covers the wedge **and** a certificate misconfiguration, from the **consumer's** side, which is the side that cares whether the hop works. An open item named honestly is worth more today than a metric nobody alerts on.
+
 #### 8.2 The Unity client refused the certificate, and `TlsOptions` does not reach this hop
 
 Pointed at `https://`, the player failed every request with `Curl error 60: Cert verify failed. Certificate is not correctly signed by a trusted CA. UnityTls error code: 7`. That refusal is *correct*. The gateway hop's answer does not transfer: that hop is `SslStream` inside `TcpTransport`, where `TlsOptions.PinnedCertificate` pins an exact DER, while this hop goes through Nakama's SDK on `UnityWebRequestAdapter` — Unity's own HTTP stack, which pins only through a `CertificateHandler`.
 
 **Taken: a pinning `CertificateHandler`, and a Nakama `IHttpAdapter` that installs it.** `UnityWebRequestAdapter` never sets `certificateHandler`, so the handler alone is not enough — the client ships its own `IHttpAdapter` (a copy of the stock adapter's behaviour plus the handler) and hands it to `new Client(...)`. `ValidateCertificate` compares the presented DER against the pinned DER byte for byte and returns false otherwise. **There is no accept-anything path**: the handler's constructor throws on an empty pin, `Matches` returns false for a null or empty pin, and nothing exposes a "trust all" flag to configuration.
+
+**The refusal tests were checked by mutation, not only by passing.** Run in the Unity Editor on 2026-09-13: `total=10 passed=10 failed=0`. `Matches` was then mutated to return `true` unconditionally, which produced `passed=5 failed=5` — exactly the five refusal tests and no others. A pin that accepts everything is invisible to a test suite that only ever presents the right certificate, so this is the check that says the suite would notice.
 
 **Two limits of `CertificateHandler`, recorded because they are not obvious:**
 

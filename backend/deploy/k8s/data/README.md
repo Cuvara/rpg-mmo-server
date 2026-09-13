@@ -403,6 +403,36 @@ static 200 (`{}` on the wire) that checks no dependency. A certificate the
 operator got wrong is *not* in that gap — Nakama cannot read it and exits, and
 the pod crash-loops visibly.
 
+**Open item: the wedged API mux, and the automatic restart this cost.** The
+paragraph above was first written as "not a regression, because the old target
+checked nothing either". True of *dependency* checking, and false of one thing
+that matters:
+
+> The old liveness probe would have **restarted the pod** when the `:7350`
+> server itself stopped answering — a dead accept loop, a wedged listener —
+> because that is exactly what it hit. **The new one will not.** A narrow class
+> of failure has lost its automatic recovery.
+
+That is the real cost of this fix. It is the right trade against the four
+alternatives in the table, and it is written here so nobody has to re-derive it.
+
+**Nothing else closes it in steady state**, checked rather than assumed:
+
+| Where you might expect to notice | What is actually there |
+|---|---|
+| the gateway | **not a consumer** — it makes no Nakama call at all, so its health says nothing |
+| the C# game server | the only in-cluster consumer of `:7350`; its Nakama failures are `LogWarning` with **no counter and nothing on `/metrics`** |
+| monitoring | **no alert rules anywhere** in `deploy/monitoring/` — one scrape config, one dashboard. Nakama's own API counters on `:9100` would flatline visibly, but only to someone already looking |
+| `dev-up.sh`, `verify/lib/checks_flow.sh`, smoketest | exercise the hop for real, **only at deploy time** |
+
+So the first notice is **a human, when players cannot authenticate**.
+
+**The cheapest close, named and not built:** a counter on the game server's
+Nakama call outcomes — it already distinguishes `Granted` / `Partial` /
+`NotGranted` / transport failure — plus an alert on the failure rate. That covers
+the wedge *and* a certificate misconfiguration, from the consumer's side, which
+is the side that cares whether the hop works.
+
 Compose has the same trap and it was not recorded when the flag landed: its
 healthcheck was bare `/nakama/nakama healthcheck`, which defaults to 7350. It is
 now `/nakama/nakama healthcheck 9100`, for the same reason and with the same

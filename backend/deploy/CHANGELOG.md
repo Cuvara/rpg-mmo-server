@@ -5,6 +5,26 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **The probe move's real cost is now a named open item, not a reassuring sentence
+  (ADR-24 §8.1, `k8s/data/README.md`).** The first write-up said the change was "not a
+  regression, because the old target checked nothing either". That is true of *dependency*
+  checking and false of one thing that matters: the old liveness probe would have
+  **restarted the pod** when the `:7350` server itself stopped answering, and the new one
+  will not. A narrow class of failure has lost its automatic recovery -- still the right
+  trade against the four measured alternatives, but a cost, and now written where it will
+  be found rather than re-derived.
+
+  **Nothing else closes it in steady state**, checked rather than assumed: the gateway is
+  not a consumer of this hop at all; the C# game server is the only in-cluster one and its
+  Nakama failures are `LogWarning` with no counter and nothing on `/metrics`; there are **no
+  alert rules anywhere** in `deploy/monitoring/`; and `dev-up.sh`, `checks_flow.sh` and the
+  smoketest exercise the hop for real but only at deploy time. First notice is a human, when
+  players cannot authenticate. The cheapest close is named and deliberately **not** built
+  here -- a counter on the game server's existing Nakama outcome cases plus an alert on the
+  failure rate, which catches the wedge and a certificate misconfiguration from the
+  consumer's side.
+
 ### Fixed
 - **Nakama's k8s probes and compose healthcheck no longer break when the meta hop's TLS is
   turned on (ADR-24 §8.1).** All three probes were `httpGet` on `:7350` with no `scheme` --
