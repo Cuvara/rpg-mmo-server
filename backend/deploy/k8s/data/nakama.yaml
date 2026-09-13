@@ -99,12 +99,14 @@ spec:
             # from an unconsidered one, and this is a security setting.
             #
             # To turn on: follow the recipe in README.md §"Turning the meta hop's
-            # TLS on". It is four edits and they must all happen together --
-            # create the `nakama-tls` Secret, set the two values below to the
-            # mounted paths, uncomment the volume and volumeMount at the bottom
-            # of this file, and move `nakama-url` in ../app/20-configmaps.yaml to
-            # https:// (plus the game server's pin). A plaintext NAKAMA_URL
-            # against a TLS-only Nakama fails every reward RPC, silently.
+            # TLS on". It is TWO kubectl commands and NO edit to this file -- an
+            # earlier draft of this comment said four coordinated edits, which was
+            # true of a mechanism that no longer exists. Create the `nakama-tls`
+            # Secret and set the two keys in the `nakama-config` ConfigMap; the
+            # mount below is already here and already optional. `nakama-url` in
+            # ../app/20-configmaps.yaml moves to https:// in the same act, with
+            # the game server's pin -- a plaintext NAKAMA_URL against a TLS-only
+            # Nakama fails every reward RPC, silently.
             #
             # The PROBES need no change: they were moved off :7350 onto the
             # metrics listener precisely so this flag has one less thing to break.
@@ -250,16 +252,18 @@ spec:
           resources:
             requests: { cpu: 100m, memory: 256Mi }
             limits: { memory: 1Gi }
-          # Meta-hop TLS (ADR-24), step 2 of 4 in README.md §"Turning the meta
-          # hop's TLS on". Uncomment TOGETHER with the two NAKAMA_TLS_* values
-          # above and the volume below; the paths here are what those values name.
+          # Meta-hop TLS (ADR-24). Always mounted and never edited: the volume
+          # below is `optional`, so on a cluster with no `nakama-tls` Secret this
+          # is an empty directory that nothing reads. The paths the two
+          # NAKAMA_TLS_* ConfigMap keys name are the ones this mount creates.
           volumeMounts:
             - name: nakama-tls
               mountPath: /nakama/tls
               readOnly: true
-      # Meta-hop TLS (ADR-24), step 3 of 4. `secretName: nakama-tls` is created
-      # by the recipe; `defaultMode: 0400` keeps the private key unreadable by
-      # anything but the container's own user.
+      # Meta-hop TLS (ADR-24). `secretName: nakama-tls` is created by the recipe;
+      # `defaultMode: 0400` keeps the private key unreadable by anything but the
+      # container's own user -- which is uid 0 here, with an empty securityContext,
+      # so 0400 is readable rather than a crash-loop (measured, not assumed).
       volumes:
         - name: nakama-tls
           secret:

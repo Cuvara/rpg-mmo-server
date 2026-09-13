@@ -539,11 +539,28 @@ kubectl --context k3d-rpg-dev -n rpg-k8s-data run tlscheck --rm -i --restart=Nev
   sh -c 'curl -sk -o /dev/null -w "https:%{http_code}\n" https://nakama:7350/healthcheck; \
          curl -s  -o /dev/null -w "http:%{http_code}\n"  http://nakama:7350/healthcheck'
 # expect https:200 and http:400
+#
+# No image pull available? The API server will proxy it, and the `https:` prefix on
+# the service name is what makes it speak TLS to the backend rather than plaintext:
+#   kubectl --context k3d-rpg-dev get --raw \
+#     "/api/v1/namespaces/rpg-k8s-data/services/https:nakama:7350/proxy/healthcheck"
+# It prints {} on success. The unprefixed form is the negative control and must now
+# fail -- it is the plaintext request Nakama refuses.
 
 # 2. The game server: no certificate error on the reward path.
-kubectl --context k3d-rpg-dev -n rpg-k8s-realtime logs -l agones.dev/fleet=fleet-map \
-  --tail=200 | grep -E "NakamaTLS|reward|certificate"
-# expect "NakamaTLS: pinned to /etc/nakama-tls/tls.crt (sha256:...)"
+#
+# NOT `-l agones.dev/fleet=...`. That label is on the GameServer CR and NOT on the
+# pod, so a fleet selector matches zero pods and `kubectl logs` answers "No
+# resources found" -- which reads like a quiet pass rather than a broken command
+# (measured on k3d-rpg-dev 2026-09-13; the pods carry only agones.dev/gameserver,
+# agones.dev/role and agones.dev/safe-to-evict).
+#
+# --prefix is not decoration either: it names the pod each line came from, which is
+# what distinguishes one stale Allocated GameServer still on the old plaintext
+# NAKAMA_URL from a fleet-wide failure. See the warning above about exactly that.
+kubectl --context k3d-rpg-dev -n rpg-k8s-realtime logs -l agones.dev/role=gameserver \
+  --prefix --tail=200 | grep -E "NakamaTLS|reward|certificate"
+# expect "NakamaTLS: pinned to /etc/nakama-tls/tls.crt (sha256:...)" from EVERY pod
 
 # 3. The Unity player: hand it the same PEM.
 #   Tools/verify-multiclient.sh --exe … --nakama-port 7001 … \

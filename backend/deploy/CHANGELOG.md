@@ -5,6 +5,43 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **A commented-out compose block that would have broken the file the moment anyone
+  followed its own instruction.** The `gameserver-dotnet` TLS mount was written *inside*
+  the `environment:` mapping, between `NAKAMA_TLS_PIN` and `GAME_DB_URL`. Commented it
+  parses, so CI stayed green; uncommented -- which is what the comment tells the reader to
+  do -- `volumes:` at four spaces closes `environment:` and the next entry is a syntax
+  error. It is now a sibling of `environment:`, and **the check is the point**: the
+  uncommented form is parsed, not read. A commented block is only as correct as the file it
+  becomes, and nothing in CI reads comments.
+
+  The harness caught its own bug first, which is worth recording: the initial version
+  matched comment lines by exact stripped text, missed one by an indent, and reported a
+  pass with `gameserver.volumes = None`. Matching by shape found all three.
+- **`kubectl logs -l agones.dev/fleet=...` matches nothing, and says so quietly.** That
+  label is on the GameServer CR, **not on the pod** -- the pods carry only
+  `agones.dev/gameserver`, `agones.dev/role` and `agones.dev/safe-to-evict` (measured on
+  k3d-rpg-dev). The verification step therefore answered `No resources found`, which reads
+  like a quiet pass rather than a broken command. Now `-l agones.dev/role=gameserver
+  --prefix`; `--prefix` is load-bearing because it names the pod each line came from, which
+  is what separates one stale `Allocated` GameServer on the old plaintext `NAKAMA_URL` from
+  a fleet-wide failure.
+- **Comments left describing a mechanism that no longer exists.** The ConfigMap-driven
+  opt-in replaced "four coordinated edits, uncomment these volumes", but four comments
+  still told the reader to uncomment blocks that now ship uncommented and optional --
+  `k8s/data/nakama.yaml` (env plus both volume blocks), both fleet files, and
+  `20-configmaps.yaml`. Rewritten to say what the mechanism is now, and to say that they
+  used to say otherwise.
+
+### Added
+- The compose half of the recipe now provides the mount it was telling operators to add by
+  hand: `./tls:/nakama/tls:ro` on `nakama`, and the **public certificate only** on
+  `gameserver-dotnet`. The k8s half was uncomment-and-apply and the compose half was prose.
+- A pull-free alternative for the first verification step, for a cluster that cannot fetch
+  `curlimages/curl`: the API server proxies it, and the `https:` prefix on the service name
+  is what makes it speak TLS to the backend. The unprefixed form is the negative control.
+
+
 ### Changed
 - **The meta hop's TLS (ADR-24) is a per-CLUSTER opt-in, not a manifest edit — and it is ON in
   dev.** The recipe used to be "uncomment blocks in four files", which cannot work: these
