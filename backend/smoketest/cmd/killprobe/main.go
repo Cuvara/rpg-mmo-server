@@ -14,6 +14,8 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -23,11 +25,13 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/duycuong/rpg-mmo/shared/jwt"
+	"github.com/duycuong/rpg-mmo/smoketest/smoke"
 	"github.com/duycuong/rpg-mmo/shared/messages"
 	"github.com/duycuong/rpg-mmo/shared/sealed"
 )
@@ -52,14 +56,43 @@ func main() {
 	gatewayAddr := flag.String("gateway", "127.0.0.1:7000", "gateway host:port")
 	mapID := flag.String("map", "map_01", "map id")
 	budget := flag.Duration("budget", 90*time.Second, "give up after this long")
+	gatewayTLSCert := flag.String("gateway-tls-cert", "",
+		"PEM of the gateway's certificate; set to speak TLS to the gateway (ADR-23)")
+	nakamaTLSCert := flag.String("nakama-tls-cert", "",
+		"PEM of Nakama's certificate; required when -nakama is https (ADR-24)")
 	flag.Parse()
+
+	// A pin on a plaintext URL protects nothing while reading as though it does --
+	// the same "set together or not at all" rule the game server enforces at
+	// startup, refused here for the same reason rather than warned about.
+	if *nakamaTLSCert != "" && !strings.HasPrefix(*nakamaURL, "https://") {
+		fail("-nakama-tls-cert was given but -nakama is not https: a pin on a plaintext "+
+			"hop protects nothing. Either drop the pin or point -nakama at https.")
+	}
+	if strings.HasPrefix(*nakamaURL, "https://") && *nakamaTLSCert == "" {
+		// Falling through would hand the default trust store a self-signed
+		// certificate and fail deep inside the first request with a message about
+		// x509, several steps from the cause.
+		fail("-nakama is https but no -nakama-tls-cert was given. Nakama's meta-hop "+
+			"certificate is self-signed by design (ADR-24 decision 4) and is PINNED, "+
+			"never trusted through a CA. Pass the same PEM the game server mounts.")
+	}
 
 	if *serverKey == "" {
 		fail("-server-key is required")
 	}
 
 	deadline := time.Now().Add(*budget)
+
 	hc := &http.Client{Timeout: 15 * time.Second}
+	if *nakamaTLSCert != "" {
+		tlsConfig, err := pinnedTLSConfig(*nakamaTLSCert, hostOf(*nakamaURL))
+		if err != nil {
+			fail("nakama pin: %v", err)
+		}
+		hc.Transport = &http.Transport{TLSClientConfig: tlsConfig}
+		say("nakama: TLS pinned to %s", *nakamaTLSCert)
+	}
 
 	// ---- Nakama device auth ---------------------------------------------------
 	suffix := make([]byte, 8)
@@ -80,7 +113,7 @@ func main() {
 	walletBefore := wallet(hc, *nakamaURL, sessionToken)
 
 	// ---- gateway: auth + enter world -----------------------------------------
-	serverAddr, joinToken := enterWorld(*gatewayAddr, jwt, *mapID)
+	serverAddr, joinToken := enterWorld(*gatewayAddr, jwt, *mapID, *gatewayTLSCert)
 	say("enter world ok, server=%s", serverAddr)
 
 	// ---- game server: join ----------------------------------------------------
@@ -340,12 +373,27 @@ func gatewayToken(hc *http.Client, nakamaURL, sessionToken string) (string, stri
 	return out.Token, out.UserID
 }
 
-func enterWorld(gatewayAddr, jwt, mapID string) (string, string) {
+func enterWorld(gatewayAddr, jwt, mapID, tlsCertPath string) (string, string) {
 	conn, err := net.DialTimeout("tcp", gatewayAddr, 10*time.Second)
 	if err != nil {
 		fail("dial gateway %s: %v", gatewayAddr, err)
 	}
 	defer conn.Close()
+
+	// The gateway hop (ADR-23). Pinned, not trusted through a CA, and there is no
+	// downgrade: a pin that fails to match ends the probe rather than retrying in
+	// the clear, because a probe that quietly falls back measures the wrong stack.
+	if tlsCertPath != "" {
+		host, _, splitErr := net.SplitHostPort(gatewayAddr)
+		if splitErr != nil {
+			host = gatewayAddr
+		}
+		tlsConn, wrapErr := smoke.WrapGatewayTLS(conn, tlsCertPath, host, 10*time.Second)
+		if wrapErr != nil {
+			fail("gateway tls: %v", wrapErr)
+		}
+		conn = tlsConn
+	}
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	var authResp messages.AuthResponse
@@ -550,3 +598,47 @@ func dialable(addr string) string {
 
 func say(format string, args ...any)  { fmt.Printf("[killprobe] "+format+"\n", args...) }
 func fail(format string, args ...any) { say("FAILED: "+format, args...); os.Exit(1) }
+
+// pinnedTLSConfig builds a TLS config that trusts exactly one certificate -- the
+// leaf, compared byte for byte against what the server presents.
+//
+// InsecureSkipVerify is true and that is not what it sounds like: it disables the
+// DEFAULT verifier so VerifyPeerCertificate can be the only thing that decides,
+// which is how Go expresses "replace verification", not "remove it". Pinning is
+// STRICTER than the public trust store: a certificate signed by any CA on earth is
+// refused unless it is this exact one.
+//
+// The LEAF only. A pin that matched anywhere in the chain would accept a
+// certificate ISSUED BY the pinned one, which is a different guarantee from the one
+// this claims to make.
+func pinnedTLSConfig(pemPath, serverName string) (*tls.Config, error) {
+	pinned, err := smoke.LoadPinnedCertificate(pemPath)
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Config{
+		ServerName:         serverName,
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: true, //nolint:gosec // replaced by the pin below, not removed
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("nakama presented no certificate")
+			}
+			if !bytes.Equal(rawCerts[0], pinned) {
+				return fmt.Errorf(
+					"nakama certificate does not match the pin (presented %d bytes, pinned %d)",
+					len(rawCerts[0]), len(pinned))
+			}
+			return nil
+		},
+	}, nil
+}
+
+// hostOf returns the hostname from a URL, for SNI and for the pin's ServerName.
+func hostOf(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
