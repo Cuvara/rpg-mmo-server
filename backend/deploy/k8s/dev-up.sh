@@ -815,11 +815,48 @@ done
 # NOTE: a bare TCP connect is NOT proof here -- the k3d serverlb accepts on
 # every mapped port whether or not anything is behind it. Nakama's /healthcheck
 # is an application-level answer, so it is what gets asserted.
-if ! curl -fsS --max-time 5 "http://127.0.0.1:${PUBLISHED_NAKAMA_PORT}/healthcheck" >/dev/null 2>&1; then
-  echo "ERROR: Nakama does not answer /healthcheck on the published port ${PUBLISHED_NAKAMA_PORT}." >&2
+# The SCHEME follows the meta hop's flag, from the same source of truth the game
+# server's half is derived from above. Hardcoding http:// here meant this check
+# failed the whole deploy the first time the flag was on -- Nakama was healthy,
+# answering TLS on that exact port, and the script said it did not answer at all.
+# A probe that has not moved with the thing it probes reports the wrong cause.
+nk_probe_scheme="http"
+nk_probe_args=""
+if [ -n "$($K get configmap nakama-config -n rpg-k8s-data -o 'jsonpath={.data.tls-cert-path}' 2>/dev/null || true)" ]; then
+  # Written out of the cluster's OWN Secret, like the gateway pin above: a copy
+  # kept anywhere else is a copy that can go stale, and a stale pin fails in the
+  # one way that does not name itself.
+  mkdir -p "$RUN_DIR"
+  nk_pin="$RUN_DIR/nakama-tls.crt"
+  if ! $K get secret nakama-tls -n rpg-k8s-data -o 'jsonpath={.data.tls\.crt}' 2>/dev/null | base64 -d > "$nk_pin"; then
+    echo "ERROR: the meta hop is on but tls.crt could not be read out of the nakama-tls Secret." >&2
+    exit 1
+  fi
+  if ! grep -q "BEGIN CERTIFICATE" "$nk_pin"; then
+    echo "ERROR: the nakama-tls Secret's tls.crt is not a PEM certificate." >&2
+    exit 1
+  fi
+  nk_probe_scheme="https"
+  # --cacert, NOT -k: this verifies against the pin. Skipping verification would
+  # make the probe pass against anything at all, which is the failure it exists
+  # to catch. The certificate carries IP:127.0.0.1 as a SAN for exactly this.
+  nk_probe_args="--cacert $nk_pin"
+  export VERIFY_NAKAMA_TLS_CERT="$nk_pin"
+fi
+
+if ! curl -fsS --max-time 5 $nk_probe_args "${nk_probe_scheme}://127.0.0.1:${PUBLISHED_NAKAMA_PORT}/healthcheck" >/dev/null 2>&1; then
+  echo "ERROR: Nakama does not answer /healthcheck on ${nk_probe_scheme}://127.0.0.1:${PUBLISHED_NAKAMA_PORT}." >&2
+  if [ "$nk_probe_scheme" = "https" ]; then
+    echo "  The meta hop is on, so this was a TLS request verified against the pin at" >&2
+    echo "  $nk_pin. A plaintext Nakama would fail here too, and so would a" >&2
+    echo "  certificate that is not the one in the nakama-tls Secret." >&2
+  fi
   exit 1
 fi
-echo "nakama http answers on 127.0.0.1:${PUBLISHED_NAKAMA_PORT}"
+echo "nakama answers ${nk_probe_scheme} on 127.0.0.1:${PUBLISHED_NAKAMA_PORT}"
+if [ "$nk_probe_scheme" = "https" ]; then
+  echo "          clients need the pin: -cuvara-nakama-scheme https -cuvara-nakama-tls-cert $nk_pin"
+fi
 echo "gateway published on 127.0.0.1:${PUBLISHED_GATEWAY_PORT}"
 
 # The ONLY forward that remains, and it is not part of the deployment: the
