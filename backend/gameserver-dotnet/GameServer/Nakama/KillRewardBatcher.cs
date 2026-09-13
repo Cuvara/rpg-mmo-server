@@ -65,6 +65,7 @@ public sealed class KillRewardBatcher : IAsyncDisposable
 
     private readonly NakamaClient _client;
     private readonly ILogger _logger;
+    private readonly Observability.GameMetrics? _metrics;
     private readonly string _mapId;
     private readonly TimeSpan _interval;
     private readonly int _maxKillsPerBatch;
@@ -99,10 +100,25 @@ public sealed class KillRewardBatcher : IAsyncDisposable
     public KillRewardBatcher(NakamaClient client, string mapId, ILogger logger, TimeSpan? flushInterval = null)
         : this(client, mapId, logger, flushInterval, maxKillsPerBatch: DefaultMaxKillsPerBatch, clock: null) { }
 
+    /// <param name="metrics">
+    /// Counts every answer Nakama gives (ADR-24 §8.1). Null in tests that do not assert on
+    /// it; production always passes one, because an uncounted reward failure is invisible
+    /// to everything except a human reading pod logs.
+    /// </param>
+    public KillRewardBatcher(NakamaClient client, string mapId, ILogger logger,
+        Observability.GameMetrics? metrics, TimeSpan? flushInterval = null)
+        : this(client, mapId, logger, flushInterval, maxKillsPerBatch: DefaultMaxKillsPerBatch,
+               clock: null, metrics: metrics) { }
+
     /// <param name="maxKillsPerBatch">Test seam: the split threshold. Production uses Nakama's cap.</param>
     /// <param name="clock">Test seam: drives retry backoff. Null uses <see cref="TimeProvider.System"/>.</param>
     public KillRewardBatcher(NakamaClient client, string mapId, ILogger logger, TimeSpan? flushInterval,
         int maxKillsPerBatch, TimeProvider? clock)
+        : this(client, mapId, logger, flushInterval, maxKillsPerBatch, clock, metrics: null) { }
+
+    /// <param name="metrics">See the other overload; null means the outcomes are not counted.</param>
+    public KillRewardBatcher(NakamaClient client, string mapId, ILogger logger, TimeSpan? flushInterval,
+        int maxKillsPerBatch, TimeProvider? clock, Observability.GameMetrics? metrics)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(maxKillsPerBatch, 1);
         _client = client;
@@ -111,6 +127,7 @@ public sealed class KillRewardBatcher : IAsyncDisposable
         _interval = flushInterval ?? DefaultFlushInterval;
         _maxKillsPerBatch = maxKillsPerBatch;
         _clock = clock ?? TimeProvider.System;
+        _metrics = metrics;
         _loop = Task.Run(RunAsync);
     }
 
@@ -203,6 +220,12 @@ public sealed class KillRewardBatcher : IAsyncDisposable
                 }
 
                 var outcome = await _client.RewardKillsAsync(killerId, batch.Kills, _mapId, batch.Id);
+
+                // Counted here rather than inside NakamaClient: this is the one place that
+                // sees every answer exactly once, including the retries, which is what makes
+                // a rate meaningful. Outside the lock -- it touches no batch state.
+                _metrics?.RecordNakamaRewardOutcome(outcome);
+
                 lock (_batches)
                 {
                     var list = ListFor(killerId);

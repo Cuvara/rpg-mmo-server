@@ -77,6 +77,7 @@ public sealed class GameMetrics : IDisposable
     private readonly Counter<long> _playersKicked;
     private readonly Counter<long> _handshakesRejected;
     private readonly Counter<long> _unversionedHandshakes;
+    private readonly Counter<long> _nakamaRewardOutcomes;
     private readonly Counter<long> _inputsRejected;
     private readonly Counter<long> _anomalyAlerts;
     private readonly Counter<long> _attackRateViolations;
@@ -91,6 +92,11 @@ public sealed class GameMetrics : IDisposable
     private readonly TagList _handshakeTimeoutTags;
     private readonly TagList _handshakeMalformedTags;
     private readonly TagList _handshakeProtocolVersionTags;
+    private readonly TagList _rewardGrantedTags;
+    private readonly TagList _rewardPartialTags;
+    private readonly TagList _rewardNotGrantedTags;
+    private readonly TagList _rewardTooLargeTags;
+    private readonly TagList _rewardUnknownTags;
     private readonly TagList _inputBudgetTags;
     private readonly TagList _inputQueueFullTags;
     private readonly TagList _saveOkTags;
@@ -136,6 +142,12 @@ public sealed class GameMetrics : IDisposable
         _handshakeTimeoutTags = new TagList { { "map_id", mapId }, { "reason", "timeout" } };
         _handshakeMalformedTags = new TagList { { "map_id", mapId }, { "reason", "malformed" } };
         _handshakeProtocolVersionTags = new TagList { { "map_id", mapId }, { "reason", "protocol_version" } };
+        _rewardGrantedTags = new TagList { { "map_id", mapId }, { "outcome", "granted" } };
+        _rewardPartialTags = new TagList { { "map_id", mapId }, { "outcome", "partial" } };
+        _rewardNotGrantedTags = new TagList { { "map_id", mapId }, { "outcome", "not_granted" } };
+        _rewardTooLargeTags = new TagList { { "map_id", mapId }, { "outcome", "too_large" } };
+        _rewardUnknownTags = new TagList { { "map_id", mapId }, { "outcome", "unknown" } };
+
         _inputBudgetTags = new TagList { { "map_id", mapId }, { "reason", "connection_budget" } };
         _inputQueueFullTags = new TagList { { "map_id", mapId }, { "reason", "queue_full" } };
 
@@ -240,6 +252,34 @@ public sealed class GameMetrics : IDisposable
                          "trust, since a pre-versioning build is indistinguishable from a " +
                          "non-conforming one. This going flat at zero is the evidence that raising " +
                          "GAMESERVER_MIN_PROTOCOL_VERSION will not lock out real players.");
+
+        // THE COUNTER THAT CLOSES ADR-24 §8.1's OPEN ITEM, and it is on the CONSUMER
+        // side on purpose. Nakama's own probes cannot see this: they answer for the
+        // metrics listener, and the failure this catches is the client API being
+        // unreachable or untrusted FROM HERE. Every mode that has actually happened
+        // lands on a label below --
+        //
+        //   * a stale Allocated GameServer left on a plaintext NAKAMA_URL after the
+        //     hop moved to TLS -> HTTP 400 "Client sent an HTTP request to an HTTPS
+        //     server" -> not_granted. Measured on k3d-rpg-dev 2026-09-13, one pod,
+        //     every reward RPC failing while the game itself played perfectly.
+        //   * a self-signed Nakama with no NAKAMA_TLS_PIN -> .NET refuses the
+        //     certificate -> HttpRequestException -> unknown.
+        //   * a wedged client-API mux while :9100 still answers -> timeout ->
+        //     unknown.
+        //
+        // Before this, all three were a LogWarning with nothing counting them, and
+        // the first notice was a human reading pod logs.
+        _nakamaRewardOutcomes = _meter.CreateCounter<long>(
+            "gameserver.nakama.reward_outcomes",
+            description: "Answers to reward_kills, labelled by outcome: granted (gold and " +
+                         "leaderboard committed), partial (gold committed, leaderboard write " +
+                         "failed), not_granted (Nakama answered an error; nothing granted), " +
+                         "too_large (batch over Nakama's cap, split and resent), unknown (no " +
+                         "answer -- transport failure, certificate refusal or timeout). " +
+                         "Anything but granted means a player's reward did not land on this " +
+                         "attempt. Sustained non-granted is the signal ADR-24 §8.1 says nothing " +
+                         "else in the deployment produces.");
 
         _inputsDropped = _meter.CreateCounter<long>(
             "gameserver.inputs.dropped",
@@ -671,6 +711,63 @@ public sealed class GameMetrics : IDisposable
 
     /// <summary>Clients admitted without advertising a wire protocol version.</summary>
     public long UnversionedHandshakes => Interlocked.Read(ref _unversionedHandshakeCount);
+
+    // ── The Nakama reward path (ADR-24 §8.1) ─────────────────────────────────
+
+    private long _rewardsGranted;
+    private long _rewardsNotGranted;
+
+    /// <summary>
+    /// Record Nakama's answer to one <c>reward_kills</c> batch.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Recorded on <b>every</b> answer including the successful one, because a failure
+    /// counter with no denominator cannot distinguish "the hop is broken" from "nobody
+    /// killed anything". A rate of non-granted answers is only meaningful against the
+    /// rate of granted ones.
+    /// </para>
+    /// <para>
+    /// <c>Partial</c>, <c>NotGranted</c> and <c>Unknown</c> are all counted as not
+    /// granted for the summary property, and <c>TooLarge</c> is <b>not</b> — that one
+    /// is the batcher's own splitting working as designed, and folding it in would give
+    /// the alert a routine background rate to hide in.
+    /// </para>
+    /// </remarks>
+    public void RecordNakamaRewardOutcome(Nakama.KillRewardOutcome outcome)
+    {
+        switch (outcome)
+        {
+            case Nakama.KillRewardOutcome.Granted:
+                Interlocked.Increment(ref _rewardsGranted);
+                _nakamaRewardOutcomes.Add(1, _rewardGrantedTags);
+                break;
+            case Nakama.KillRewardOutcome.Partial:
+                Interlocked.Increment(ref _rewardsNotGranted);
+                _nakamaRewardOutcomes.Add(1, _rewardPartialTags);
+                break;
+            case Nakama.KillRewardOutcome.TooLarge:
+                _nakamaRewardOutcomes.Add(1, _rewardTooLargeTags);
+                break;
+            case Nakama.KillRewardOutcome.Unknown:
+                Interlocked.Increment(ref _rewardsNotGranted);
+                _nakamaRewardOutcomes.Add(1, _rewardUnknownTags);
+                break;
+            default:
+                Interlocked.Increment(ref _rewardsNotGranted);
+                _nakamaRewardOutcomes.Add(1, _rewardNotGrantedTags);
+                break;
+        }
+    }
+
+    /// <summary>reward_kills batches Nakama confirmed. The denominator.</summary>
+    public long NakamaRewardsGranted => Interlocked.Read(ref _rewardsGranted);
+
+    /// <summary>
+    /// reward_kills batches that did not land on this attempt — partial, not_granted or
+    /// unknown. Excludes too_large, which is the batcher splitting as designed.
+    /// </summary>
+    public long NakamaRewardsNotGranted => Interlocked.Read(ref _rewardsNotGranted);
 
     /// <summary>
     /// Record one client admitted without advertising a wire protocol version.

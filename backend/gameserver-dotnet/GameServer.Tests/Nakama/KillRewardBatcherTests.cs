@@ -307,4 +307,76 @@ public class KillRewardBatcherTests
             Assert.Equal(0, batcher.PendingKills);
         }
     }
+    // ── The counter is only real if it is WIRED (ADR-24 §8.1) ────────────────
+
+    /// <summary>
+    /// Drives the batcher with a real <see cref="GameServer.Observability.GameMetrics"/>
+    /// and asserts the counter moved.
+    /// </summary>
+    /// <remarks>
+    /// <b>This test exists because deleting the record call killed nothing.</b> The
+    /// GameMetrics tests cover the counter's own behaviour, so mutating
+    /// <c>_metrics?.RecordNakamaRewardOutcome(outcome)</c> out of the flush loop left all
+    /// six of them green — a counter that never increments in production, invisible to the
+    /// whole suite. Testing the instrument is not testing the wiring, and the wiring is the
+    /// half that closes the gap.
+    /// </remarks>
+    [Fact]
+    public async Task Metrics_AreRecordedForEveryAnswer()
+    {
+        var nakama = new ScriptedNakama();
+        var clock = new FakeClock();
+        var client = new NakamaClient("http://nakama.test:7350", "k", NullLogger.Instance, nakama);
+        using var metrics = new GameServer.Observability.GameMetrics(
+            "map_01", $"rpg.gameserver.test.batcherwiring.{Guid.NewGuid():N}");
+        var batcher = new KillRewardBatcher(
+            client, "map_01", NullLogger.Instance, Interval,
+            KillRewardBatcher.DefaultMaxKillsPerBatch, clock, metrics);
+
+        // One granted, then one server error (not_granted), then the retry succeeds.
+        nakama.Script.Enqueue(ScriptedNakama.Ok);
+        batcher.RecordKill("alice");
+        await FlushLater(batcher, clock);
+
+        nakama.Script.Enqueue(ScriptedNakama.Internal);
+        batcher.RecordKill("bob");
+        await FlushLater(batcher, clock);
+
+        Assert.Equal(1, metrics.NakamaRewardsGranted);
+        Assert.Equal(1, metrics.NakamaRewardsNotGranted);
+
+        nakama.Script.Enqueue(ScriptedNakama.Ok);
+        await FlushLater(batcher, clock);
+
+        // The retry is counted too: the batcher sees every answer, so a hop that fails and
+        // is retried forever shows a rising not-granted rate rather than one lost kill.
+        Assert.Equal(2, metrics.NakamaRewardsGranted);
+        Assert.Equal(1, metrics.NakamaRewardsNotGranted);
+
+        await batcher.DisposeAsync();
+    }
+
+    /// <summary>A timeout — the shape a certificate refusal or a wedged mux produces — counts.</summary>
+    [Fact]
+    public async Task Metrics_CountATimeoutAsNotGranted()
+    {
+        var nakama = new ScriptedNakama();
+        var clock = new FakeClock();
+        var client = new NakamaClient("http://nakama.test:7350", "k", NullLogger.Instance, nakama);
+        using var metrics = new GameServer.Observability.GameMetrics(
+            "map_01", $"rpg.gameserver.test.batchertimeout.{Guid.NewGuid():N}");
+        var batcher = new KillRewardBatcher(
+            client, "map_01", NullLogger.Instance, Interval,
+            KillRewardBatcher.DefaultMaxKillsPerBatch, clock, metrics);
+
+        nakama.Script.Enqueue(ScriptedNakama.Timeout);
+        batcher.RecordKill("alice");
+        await FlushLater(batcher, clock);
+
+        Assert.Equal(0, metrics.NakamaRewardsGranted);
+        Assert.Equal(1, metrics.NakamaRewardsNotGranted);
+
+        await batcher.DisposeAsync();
+    }
+
 }

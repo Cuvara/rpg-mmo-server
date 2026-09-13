@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`gameserver_nakama_reward_outcomes_total` — the reward path now counts its own answers,
+  and ADR-24 §8.1's open item is closed.** The failure came first: turning the meta hop's
+  TLS on in dev left one `Allocated` GameServer on the old plaintext `NAKAMA_URL`, so every
+  reward RPC it made failed with `400 Client sent an HTTP request to an HTTPS server`
+  **while the game itself played perfectly** -- a `LogWarning` with nothing counting it,
+  found by a human reading pod logs.
+
+  One counter, labelled `granted` / `partial` / `not_granted` / `too_large` / `unknown`,
+  recorded in `KillRewardBatcher` because that is the one place that sees every answer
+  exactly once including retries. Three choices with reasons: it is on the CONSUMER's side,
+  because Nakama's probes answer for `:9100` and structurally cannot see `:7350` be
+  unreachable, untrusted or wedged; `granted` is counted too, because the alert is a ratio
+  and a failure counter with no denominator cannot tell "broken" from "nobody killed
+  anything"; and `too_large` is excluded from the failure side, because the batcher
+  splitting an oversized batch is not a failure and a routine background rate is somewhere
+  for a real signal to hide.
+- Eight tests. Six cover the counter, two cover the WIRING -- and the second pair exists
+  because a mutation proved the first six did not. Deleting
+  `_metrics?.RecordNakamaRewardOutcome(outcome)` from the flush loop killed **zero** tests:
+  a counter that never increments in production, invisible to the whole suite. With the
+  batcher tests, the same mutation kills exactly those two. Testing the instrument is not
+  testing the wiring.
+
+
 ### Documentation
 - **ADR-25 decision 8 is answered: Ed25519 survives Unity IL2CPP at `High` stripping.**
   Measured 2026-09-13 in a built Windows Standalone player from the Sealed Session Probe

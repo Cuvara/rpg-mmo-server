@@ -122,7 +122,7 @@
       "id": 5,
       "type": "timeseries",
       "title": "State save errors",
-      "description": "gameserver_save_errors_total — async player-state persistence failures. Non-zero means player progress is at risk.",
+      "description": "gameserver_player_saves_total{status=\"error\"} — async player-state persistence failures. Non-zero means player progress is at risk. (The instrument is gameserver.player.saves with a status label; there has never been a gameserver_save_errors_total, so this panel read No data until 2026-09-13.)",
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
@@ -142,7 +142,7 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(gameserver_save_errors_total[5m]))",
+          "expr": "sum(rate(gameserver_player_saves_total{status=\"error\"}[5m]))",
           "legendFormat": "save errors/s"
         },
         {
