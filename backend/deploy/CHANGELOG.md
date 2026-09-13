@@ -6,6 +6,33 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`dev-up.sh`'s own Nakama health probe still spoke plaintext, and failed the whole deploy the
+  first time the meta hop's TLS was on.** Nakama was healthy and answering TLS on that exact
+  port; the script reported `ERROR: Nakama does not answer /healthcheck on the published port
+  7001` and exited 1. A probe that has not moved with the thing it probes does not merely fail —
+  it reports the **wrong cause**, and sends the reader to look at Nakama.
+
+  The scheme now follows the flag, from the same `nakama-config` source of truth the game
+  server's half is derived from. The pin is written out of the cluster's **own** `nakama-tls`
+  Secret, like the gateway pin beside it, because a copy kept anywhere else can go stale and a
+  stale pin fails in the one way that does not name itself.
+
+  **`--cacert`, not `-k`.** Skipping verification would make the probe pass against anything at
+  all, which is the failure it exists to catch. The certificate carries `IP:127.0.0.1` as a SAN
+  for exactly this. `VERIFY_NAKAMA_TLS_CERT` is exported so the verification suite and any
+  client this deploy hands the pin to check the same bytes.
+
+  Measured: `./dev-up.sh` against `k3d-rpg-dev` with both hops on now exits **0** and prints
+  `nakama answers https on 127.0.0.1:7001`. Before the fix, the same cluster and the same
+  healthy Nakama exited 1.
+
+  This is the fourth consumer of the meta hop found not to have moved with it — after the game
+  server's ConfigMap (#358), the `killprobe` harness (#353) and the recipe's own verification
+  commands (#351). Each was invisible until something exercised it.
+
+## [Unreleased]
+
+### Fixed
 - **The meta hop's opt-in did not survive a deploy, and the way it failed hid itself.**
   `app/20-configmaps.yaml` is repo state carrying the plaintext defaults, so every `apply`
   resets `nakama-url` and `nakama-tls-pin` — while `nakama-config` in `rpg-k8s-data` is
