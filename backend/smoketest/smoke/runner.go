@@ -478,8 +478,30 @@ drain:
 // whose address is operator-supplied local config (GATEWAY_ADDR, ":8000" by
 // default) rather than something a server advertised — strict address mode
 // therefore does not apply to it.
+// dial connects to the GATEWAY, wrapping the socket in TLS when a pin is
+// configured (ADR-23). Only this path does so: dialServer below reaches the game
+// server, whose hop is protected by the sealed session instead, and wrapping
+// that one in TLS as well would be two mechanisms claiming the same job.
 func (r *Runner) dial(kind, addr string) (net.Conn, error) {
-	return r.dialTarget(kind, NormalizeDialAddr(addr))
+	target := NormalizeDialAddr(addr)
+	conn, err := r.dialTarget(kind, target)
+	if err != nil {
+		return nil, err
+	}
+	if r.cfg.GatewayTLSCertPath == "" {
+		return conn, nil
+	}
+
+	host, _, splitErr := net.SplitHostPort(target)
+	if splitErr != nil {
+		host = target
+	}
+	tlsConn, err := wrapGatewayTLS(conn, r.cfg.GatewayTLSCertPath, host, r.cfg.Timeout)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return tlsConn, nil
 }
 
 // dialServer connects to a game server address the gateway advertised. Under

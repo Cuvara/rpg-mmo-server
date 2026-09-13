@@ -6,6 +6,28 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`-gateway-tls-cert` / `SMOKE_GATEWAY_TLS_CERT`: the gateway hop's TLS, with the certificate
+  PINNED byte-for-byte (ADR-23).** Covers the gateway hop only; the gameplay hop is `-sealed`, and
+  setting one says nothing about the other.
+
+  A pin, not a trust store, and that is stricter rather than weaker: the dev and staging gateways are
+  self-signed so chain validation cannot succeed, leaving pinning or skipping -- and skipping is what
+  makes a misconfigured hop look exactly like a working one. A certificate signed by any CA on earth
+  is refused unless it is this exact one. `InsecureSkipVerify` is set and does not mean what it looks
+  like: it removes the DEFAULT verifier so the pin can be the only one that decides, which is how Go
+  expresses "replace verification". The C# client's `PinValidator` does the same and likewise ignores
+  the platform's chain result.
+
+  Measured against `k3d-rpg-dev` on 2026-09-13: correct pin -> `SMOKE=PASS` with `sealed=true`; a
+  different valid self-signed certificate -> refused by name; no pin at all -> `read length: EOF`,
+  which is the closed socket a TLS listener has no way to explain to a plaintext client.
+
+  Unit tests cover both directions, including that the refusal NAMES the pin -- a refusal nobody can
+  attribute costs as much as no refusal. Mutation-checked: deleting the comparison fails them. One
+  honest gap: the "peer presented no certificate" guard is unreachable from a real handshake, so no
+  test exercises it.
+
+### Added
 - **`cmd/dungeonprobe`: proves ADR-26 end to end against a running deployment.** A real party
   created through Nakama's RPCs, entering a dungeon through the real gateway.
 

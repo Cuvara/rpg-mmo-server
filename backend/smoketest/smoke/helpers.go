@@ -72,6 +72,26 @@ type Config struct {
 	// negotiable encryption setting is a downgrade attack with a friendly name.
 	Sealed bool // SMOKE_SEALED    — run the sealed-session handshake
 
+	// GatewayTLSCertPath pins the certificate the GATEWAY hop must present
+	// (ADR-23). Empty = plaintext, which is the default everywhere.
+	//
+	// The gateway hop and the gameplay hop are encrypted by different
+	// mechanisms and this covers only the first: the gateway terminates TLS in
+	// process, while the gameplay hop uses the sealed session above. Setting
+	// one says nothing about the other.
+	//
+	// A PIN, not a trust store. The dev and staging gateways present a
+	// self-signed certificate, so chain validation cannot succeed and must not
+	// be what decides: the presented certificate is compared byte-for-byte
+	// against this file. That is STRICTER than the trust store, not weaker --
+	// a certificate signed by any CA on earth is still refused unless it is
+	// this one.
+	//
+	// There is deliberately no "accept anything" setting. A flag that skipped
+	// verification would make a misconfigured hop look exactly like a working
+	// one, which is the failure this whole check exists to catch.
+	GatewayTLSCertPath string // SMOKE_GATEWAY_TLS_CERT
+
 	SkipDB          bool          // SMOKE_SKIP_DB    — skip every persistence check
 	RequireDB       bool          // SMOKE_REQUIRE_DB — a skipped persistence check fails the run
 	ExpectMigration int           // SMOKE_EXPECT_MIGRATION — required schema_migrations version
@@ -153,16 +173,17 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 		InputInterval: DefaultInputInterval,
 		MinSnapshots:  DefaultMinSnapshots,
 
-		DeviceID:        getenv("SMOKE_DEVICE_ID"),
-		GameDBURL:       getenv("GAME_DB_URL"),
-		StrictAddr:      isTruthy(getenv("SMOKE_STRICT_ADDR")),
-		Sealed:          isTruthy(getenv("SMOKE_SEALED")),
-		SkipDB:          isTruthy(getenv("SMOKE_SKIP_DB")),
-		RequireDB:       isTruthy(getenv("SMOKE_REQUIRE_DB")),
-		ExpectMigration: DefaultExpectMigration,
-		DBPollTimeout:   DefaultDBPollTimeout,
-		DBPollInterval:  DefaultDBPollInterval,
-		HoldTTL:         DefaultHoldTTL,
+		DeviceID:           getenv("SMOKE_DEVICE_ID"),
+		GameDBURL:          getenv("GAME_DB_URL"),
+		StrictAddr:         isTruthy(getenv("SMOKE_STRICT_ADDR")),
+		GatewayTLSCertPath: getenv("SMOKE_GATEWAY_TLS_CERT"),
+		Sealed:             isTruthy(getenv("SMOKE_SEALED")),
+		SkipDB:             isTruthy(getenv("SMOKE_SKIP_DB")),
+		RequireDB:          isTruthy(getenv("SMOKE_REQUIRE_DB")),
+		ExpectMigration:    DefaultExpectMigration,
+		DBPollTimeout:      DefaultDBPollTimeout,
+		DBPollInterval:     DefaultDBPollInterval,
+		HoldTTL:            DefaultHoldTTL,
 	}
 	for _, d := range []struct {
 		key string
@@ -207,6 +228,7 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	fs.StringVar(&cfg.DeviceID, "device-id", cfg.DeviceID, "Nakama device id to authenticate with (default: random per run)")
 	fs.StringVar(&cfg.GameDBURL, "game-db-url", cfg.GameDBURL, "Game-state PostgreSQL DSN; unset skips the game-state checks")
 	fs.BoolVar(&cfg.StrictAddr, "strict-addr", cfg.StrictAddr, "Fail when the gateway advertises a listen-style game server address instead of rewriting it to loopback")
+	fs.StringVar(&cfg.GatewayTLSCertPath, "gateway-tls-cert", cfg.GatewayTLSCertPath, "PEM certificate the GATEWAY hop must present, compared byte-for-byte (ADR-23). Empty = plaintext. Covers the gateway hop only; the gameplay hop is -sealed")
 	fs.BoolVar(&cfg.SkipDB, "skip-db", cfg.SkipDB, "Skip every persistence check (realtime flow only)")
 	fs.BoolVar(&cfg.RequireDB, "require-db", cfg.RequireDB, "Fail instead of skipping when a persistence check cannot run")
 	fs.IntVar(&cfg.ExpectMigration, "expect-migration-version", cfg.ExpectMigration, "Required schema_migrations version")
