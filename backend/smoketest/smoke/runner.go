@@ -3,6 +3,8 @@ package smoke
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +13,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -84,8 +87,39 @@ type Runner struct {
 }
 
 // NewRunner builds a Runner for cfg, writing progress to out.
-func NewRunner(cfg Config, out io.Writer) *Runner {
-	return &Runner{cfg: cfg, out: out, hc: &http.Client{Timeout: cfg.Timeout}, enc: encodingFor(cfg.Encoding)}
+func NewRunner(cfg Config, out io.Writer) (*Runner, error) {
+	hc := &http.Client{Timeout: cfg.Timeout}
+
+	// The meta hop (ADR-24). Set together or refused: a pin against a plaintext
+	// URL protects nothing while reading as though it does, and an https URL with
+	// no pin fails deep inside an x509 message several steps from the cause --
+	// Nakama's certificate is self-signed BY DESIGN and is pinned, never trusted
+	// through a CA.
+	//
+	// This exists because the suite failed with "context deadline exceeded"
+	// against a perfectly healthy Nakama the first time the flag was on: a
+	// plaintext GET to a TLS listener does not get refused, it hangs, and the
+	// timeout names the wrong thing entirely.
+	if cfg.NakamaTLSCert != "" && !strings.HasPrefix(cfg.NakamaURL, "https://") {
+		return nil, fmt.Errorf(
+			"nakama-tls-cert was given but nakama-url is not https (%s): a pin on a "+
+				"plaintext hop protects nothing", cfg.NakamaURL)
+	}
+	if strings.HasPrefix(cfg.NakamaURL, "https://") {
+		if cfg.NakamaTLSCert == "" {
+			return nil, fmt.Errorf(
+				"nakama-url is https (%s) but no nakama-tls-cert was given; Nakama's "+
+					"meta-hop certificate is self-signed by design (ADR-24 decision 4) "+
+					"and is PINNED, never trusted through a CA", cfg.NakamaURL)
+		}
+		tlsConfig, err := pinnedNakamaTLS(cfg.NakamaTLSCert, cfg.NakamaURL)
+		if err != nil {
+			return nil, fmt.Errorf("nakama pin: %w", err)
+		}
+		hc.Transport = &http.Transport{TLSClientConfig: tlsConfig}
+	}
+
+	return &Runner{cfg: cfg, out: out, hc: hc, enc: encodingFor(cfg.Encoding)}, nil
 }
 
 // encodingFor maps the configured name onto a wire encoding.
@@ -732,4 +766,40 @@ func truncate(b []byte, n int) string {
 		return s[:n] + "..."
 	}
 	return s
+}
+
+// pinnedNakamaTLS trusts exactly one certificate -- the leaf, compared byte for
+// byte against what Nakama presents.
+//
+// InsecureSkipVerify is true and is not what it sounds like: it disables the
+// DEFAULT verifier so VerifyPeerCertificate is the only thing that decides, which
+// is how Go expresses "replace verification", not "remove it". Pinning is
+// STRICTER than the public trust store: a certificate signed by any CA on earth
+// is refused unless it is this exact one.
+func pinnedNakamaTLS(pemPath, nakamaURL string) (*tls.Config, error) {
+	pinned, err := LoadPinnedCertificate(pemPath)
+	if err != nil {
+		return nil, err
+	}
+	host := ""
+	if u, uerr := url.Parse(nakamaURL); uerr == nil {
+		host = u.Hostname()
+	}
+	return &tls.Config{
+		ServerName:         host,
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: true, //nolint:gosec // replaced by the pin below, not removed
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("nakama presented no certificate")
+			}
+			// The LEAF only: a pin that matched anywhere in the chain would accept a
+			// certificate ISSUED BY the pinned one, a different guarantee entirely.
+			if !bytes.Equal(rawCerts[0], pinned) {
+				return fmt.Errorf("nakama certificate does not match the pin (presented %d bytes, pinned %d)",
+					len(rawCerts[0]), len(pinned))
+			}
+			return nil
+		},
+	}, nil
 }

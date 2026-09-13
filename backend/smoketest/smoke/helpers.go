@@ -17,10 +17,11 @@ import (
 // Config holds every endpoint and knob the smoke test needs. All values can be
 // set via environment variables and overridden with CLI flags.
 type Config struct {
-	NakamaURL   string // NAKAMA_URL      — Nakama HTTP base URL
-	ServerKey   string // NAKAMA_SERVER_KEY — Nakama socket server key
-	GatewayAddr string // GATEWAY_ADDR    — gateway listen addr
-	Transport   string // TRANSPORT       — gateway hop transport: tcp or kcp
+	NakamaURL     string // NAKAMA_URL      — Nakama HTTP base URL
+	NakamaTLSCert string // NAKAMA_TLS_CERT — PEM of Nakama's certificate, required when NakamaURL is https (ADR-24)
+	ServerKey     string // NAKAMA_SERVER_KEY — Nakama socket server key
+	GatewayAddr   string // GATEWAY_ADDR    — gateway listen addr
+	Transport     string // TRANSPORT       — gateway hop transport: tcp or kcp
 
 	// Encoding is the wire encoding every frame this run sends is marshaled in.
 	// Configuration on BOTH ends is not needed — the server answers in whatever
@@ -162,6 +163,7 @@ func EnvOr(getenv func(string) string, key, def string) string {
 func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	cfg := Config{
 		NakamaURL:     EnvOr(getenv, "NAKAMA_URL", DefaultNakamaURL),
+		NakamaTLSCert: EnvOr(getenv, "NAKAMA_TLS_CERT", ""),
 		ServerKey:     EnvOr(getenv, "NAKAMA_SERVER_KEY", DefaultServerKey),
 		GatewayAddr:   EnvOr(getenv, "GATEWAY_ADDR", DefaultGatewayAddr),
 		Transport:     EnvOr(getenv, "TRANSPORT", DefaultTransport),
@@ -214,6 +216,8 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 
 	fs := flag.NewFlagSet("smoketest", flag.ContinueOnError)
 	fs.StringVar(&cfg.NakamaURL, "nakama-url", cfg.NakamaURL, "Nakama HTTP base URL")
+	fs.StringVar(&cfg.NakamaTLSCert, "nakama-tls-cert", cfg.NakamaTLSCert,
+		"PEM of Nakama's certificate; required when -nakama-url is https (ADR-24)")
 	fs.StringVar(&cfg.ServerKey, "server-key", cfg.ServerKey, "Nakama server key")
 	fs.StringVar(&cfg.GatewayAddr, "gateway-addr", cfg.GatewayAddr, "Gateway address")
 	fs.StringVar(&cfg.Transport, "transport", cfg.Transport, "Transport for the gateway hop: tcp or kcp")
