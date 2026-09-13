@@ -6,6 +6,34 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`killprobe` can pin both TLS hops: `-gateway-tls-cert` (ADR-23) and `-nakama-tls-cert`
+  (ADR-24).** Without them the probe could not run at all against a dev cluster with either
+  flag on, so the one tool that proves the reward path end to end stopped working exactly when
+  the security work it was meant to validate landed.
+
+  **Both are pins, not CA trust, and pinning is stricter than the trust store** — a certificate
+  signed by any CA on earth is refused unless it is this exact one, compared leaf-only and byte
+  for byte. A pin that matched anywhere in the chain would accept a certificate *issued by* the
+  pinned one, which is a different guarantee. `InsecureSkipVerify` is set and that is not what
+  it sounds like: it disables the default verifier so `VerifyPeerCertificate` is the only thing
+  deciding, which is how Go spells "replace verification", not "remove it".
+
+  **Two startup refusals rather than warnings**, matching the game server's own rule: a pin
+  against a non-https `-nakama` is refused, because a pin on a plaintext hop protects nothing
+  while reading as though it does; and an https `-nakama` with no pin is refused up front
+  rather than failing several steps later inside an x509 message, because Nakama's meta-hop
+  certificate is self-signed by design and is never trusted through a CA.
+
+  There is no downgrade on the gateway hop either: a pin that fails to match ends the probe
+  instead of retrying in the clear, because a probe that quietly falls back measures the wrong
+  stack and reports success.
+
+  `smoke.WrapGatewayTLS` and `smoke.LoadPinnedCertificate` are exported for this (they were
+  unexported and reachable only from the smoke tests); no behaviour changed with the rename.
+
+## [Unreleased]
+
+### Added
 - **The smoke test verifies the game server's identity signature (ADR-25).** It passes the
   `server_public_key` the real gateway handed it into the sealed handshake, so a forged or
   missing signature now ends the run instead of being reported. This is the closest peer in

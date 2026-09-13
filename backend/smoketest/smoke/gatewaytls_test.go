@@ -66,7 +66,7 @@ func TestGatewayTLSPin(t *testing.T) {
 			}
 			defer raw.Close()
 
-			conn, err := wrapGatewayTLS(raw, tt.pin, "127.0.0.1", 5*time.Second)
+			conn, err := WrapGatewayTLS(raw, tt.pin, "127.0.0.1", 5*time.Second)
 			switch {
 			case tt.wantErr == "":
 				if err != nil {
@@ -106,7 +106,7 @@ func TestLoadPinnedCertificateRefusesJunk(t *testing.T) {
 			if tt.body != "" {
 				write(t, dir, tt.name+".pem", []byte(tt.body))
 			}
-			_, err := loadPinnedCertificate(path)
+			_, err := LoadPinnedCertificate(path)
 			if err == nil {
 				t.Fatal("junk was accepted as a pin")
 			}

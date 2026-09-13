@@ -536,7 +536,7 @@ func (r *Runner) dial(kind, addr string) (net.Conn, error) {
 	if splitErr != nil {
 		host = target
 	}
-	tlsConn, err := wrapGatewayTLS(conn, r.cfg.GatewayTLSCertPath, host, r.cfg.Timeout)
+	tlsConn, err := WrapGatewayTLS(conn, r.cfg.GatewayTLSCertPath, host, r.cfg.Timeout)
 	if err != nil {
 		_ = conn.Close()
 		return nil, err

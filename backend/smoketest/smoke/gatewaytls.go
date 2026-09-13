@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// wrapGatewayTLS upgrades an already-connected gateway socket to TLS, verifying
+// WrapGatewayTLS upgrades an already-connected gateway socket to TLS, verifying
 // the server's certificate against a PINNED copy (ADR-23).
 //
 // Why a pin and not the trust store: the dev and staging gateways present a
@@ -25,8 +25,8 @@ import (
 // one that decides, which is how Go expresses "replace verification", not
 // "remove it". The C# client does the same thing with its PinValidator, which
 // also ignores the platform's own chain result.
-func wrapGatewayTLS(conn net.Conn, pemPath, serverName string, timeout time.Duration) (net.Conn, error) {
-	pinned, err := loadPinnedCertificate(pemPath)
+func WrapGatewayTLS(conn net.Conn, pemPath, serverName string, timeout time.Duration) (net.Conn, error) {
+	pinned, err := LoadPinnedCertificate(pemPath)
 	if err != nil {
 		return nil, err
 	}
@@ -65,10 +65,10 @@ func wrapGatewayTLS(conn net.Conn, pemPath, serverName string, timeout time.Dura
 	return tlsConn, nil
 }
 
-// loadPinnedCertificate reads a PEM file and returns the raw DER of its first
+// LoadPinnedCertificate reads a PEM file and returns the raw DER of its first
 // CERTIFICATE block -- the same bytes TLS puts on the wire, so the comparison is
 // of wire bytes and not of a parsed, re-encoded approximation.
-func loadPinnedCertificate(path string) ([]byte, error) {
+func LoadPinnedCertificate(path string) ([]byte, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read pinned certificate %s: %w", path, err)
