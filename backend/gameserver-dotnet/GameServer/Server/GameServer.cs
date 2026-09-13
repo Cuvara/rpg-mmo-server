@@ -344,6 +344,19 @@ public class ServerOptions
     public string NakamaHttpKey { get; set; } = "";
 
     /// <summary>
+    /// Transport for the Nakama hop. Null uses .NET's default handler and therefore .NET's
+    /// own certificate validation, which is correct for <c>http://</c> and for an
+    /// <c>https://</c> Nakama holding a CA-issued certificate.
+    /// </summary>
+    /// <remarks>
+    /// The composition root sets this to <see cref="Nakama.NakamaTlsPin.CreatePinnedHandler"/>
+    /// when <c>NAKAMA_TLS_PIN</c> names a certificate — the meta hop running its own TLS with
+    /// a self-signed certificate (ADR-24). It is the same seam the batcher tests use to script
+    /// Nakama's answers, which is why there is one property and not two.
+    /// </remarks>
+    public HttpMessageHandler? NakamaHttpHandler { get; set; }
+
+    /// <summary>
     /// How this server describes itself in the registry. Required when
     /// <see cref="ServerRegistry"/> is set; ignored otherwise.
     /// </summary>
@@ -613,7 +626,8 @@ public sealed class GameServerHost : IAsyncDisposable
             _nakamaClient = new Nakama.NakamaClient(
                 options.NakamaUrl,
                 options.NakamaHttpKey,
-                _loggerFactory.CreateLogger<Nakama.NakamaClient>());
+                _loggerFactory.CreateLogger<Nakama.NakamaClient>(),
+                options.NakamaHttpHandler);
             // One reward_kills call per killer per flush, instead of two HTTP RPCs and
             // two meta-DB transactions per kill (#233).
             _killBatcher = new Nakama.KillRewardBatcher(

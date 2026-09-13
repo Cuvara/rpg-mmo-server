@@ -5,6 +5,64 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **The probe move's real cost is now a named open item, not a reassuring sentence
+  (ADR-24 §8.1, `k8s/data/README.md`).** The first write-up said the change was "not a
+  regression, because the old target checked nothing either". That is true of *dependency*
+  checking and false of one thing that matters: the old liveness probe would have
+  **restarted the pod** when the `:7350` server itself stopped answering, and the new one
+  will not. A narrow class of failure has lost its automatic recovery -- still the right
+  trade against the four measured alternatives, but a cost, and now written where it will
+  be found rather than re-derived.
+
+  **Nothing else closes it in steady state**, checked rather than assumed: the gateway is
+  not a consumer of this hop at all; the C# game server is the only in-cluster one and its
+  Nakama failures are `LogWarning` with no counter and nothing on `/metrics`; there are **no
+  alert rules anywhere** in `deploy/monitoring/`; and `dev-up.sh`, `checks_flow.sh` and the
+  smoketest exercise the hop for real but only at deploy time. First notice is a human, when
+  players cannot authenticate. The cheapest close is named and deliberately **not** built
+  here -- a counter on the game server's existing Nakama outcome cases plus an alert on the
+  failure rate, which catches the wedge and a certificate misconfiguration from the
+  consumer's side.
+
+### Fixed
+- **Nakama's k8s probes and compose healthcheck no longer break when the meta hop's TLS is
+  turned on (ADR-24 §8.1).** All three probes were `httpGet` on `:7350` with no `scheme` --
+  the one port `--socket.ssl_certificate` converts to TLS -- so with the flag on they failed
+  with `client sent an HTTP request to an HTTPS server` and the pod never became Ready
+  (measured on k3d-rpg-dev 2026-09-12, rollout timing out with a healthy container). They now
+  GET `/` on the metrics listener `:9100`, which the flag does not cover, so **one spec works
+  in both modes** and no per-environment overlay is needed.
+
+  **Compose had the same bug and nobody had recorded it.** Its healthcheck was bare
+  `/nakama/nakama healthcheck`, and Nakama v3.40.0's subcommand is
+  `http.Get("http://localhost:" + port)` -- hardcoded plaintext, no TLS branch -- so with TLS
+  on the container would be marked unhealthy and every `depends_on: service_healthy` in the
+  file would block. It is now `healthcheck 9100`, using the subcommand's port argument.
+
+  The alternatives were rejected on measurements, not preference: `scheme: HTTPS` is wrong
+  whenever TLS is off, which is the default at every deploy path; an exec probe cannot use
+  `curl` or `wget` because `heroiclabs/nakama:3.40.0` is Debian 12 and ships neither (nor
+  `nc`, `python3`, `openssl` -- measured in the running pod); and `tcpSocket` cannot tell a
+  wedged Nakama from a healthy one. **The cost is stated rather than glossed:** `:9100` is a
+  different `http.Server` in the same process, so the probes prove the process is serving
+  HTTP, not that the client-API mux answers -- narrow, because the old target was a static
+  200 that checked no dependency.
+
+### Added
+- **`NAKAMA_TLS_PIN`: the game server's end of the meta-hop trust decision (ADR-24 §8.2).**
+  An `https://` `NAKAMA_URL` against a self-signed Nakama fails .NET's certificate validation
+  and every reward RPC with it, while the game keeps working -- the quiet failure this hop
+  specialises in. The new variable names a PEM the server pins byte for byte. Wired through
+  compose (both files), `20-configmaps.yaml` as `nakama-tls-pin`, both Agones fleets, and
+  `STACK_OVERRIDABLE`. Empty everywhere, which means .NET's own validation.
+- **An enable recipe that can be followed verbatim**, in `k8s/data/README.md` §"Turning the
+  meta hop's TLS on": certificate generation with the SANs both clients need, the two Secrets
+  (private key in `rpg-k8s-data`, **public half only** in `rpg-k8s-app`), the four files that
+  must move together, per-consumer verification commands, how to hand the pin to a Unity
+  player, a docker-compose variant, and what the flag still does not cover. The manifests
+  carry commented-out volume and volumeMount blocks so the recipe is uncomment-and-apply.
+
 ### Added
 - **Gateway-hop TLS is ON for dev (ADR-23), and enablement is a per-cluster Secret rather than a
   manifest edit.** `GATEWAY_TLS_CERT`/`GATEWAY_TLS_KEY` now read from **optional** `gateway-config`

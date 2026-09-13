@@ -129,6 +129,12 @@ int loadTestEntities = int.TryParse(
 // Nakama integration: server-to-server RPC for economy + leaderboard
 string? nakamaUrl = Env("NAKAMA_URL"); // e.g. http://rpg-nakama:7350
 string nakamaHttpKey = Env("NAKAMA_HTTP_KEY") ?? "defaulthttpkey";
+// Path to a PEM certificate to PIN for the Nakama hop, when that hop runs Nakama's own
+// TLS with a certificate no CA signed (ADR-24). Unset means .NET's own validation, which
+// is right for http:// and for an https:// Nakama holding a CA-issued certificate -- and
+// which correctly refuses a self-signed one. There is no accept-anything setting, here or
+// anywhere else in this system (ADR-24 decision 4).
+string? nakamaTlsPinPath = Env("NAKAMA_TLS_PIN");
 string jwtSecret = GetArg(args, "--jwt-secret") ?? Env("JWT_SECRET") ?? "";
 // Secret the GATEWAY signs join tokens with. Deliberately NOT JWT_SECRET: this value
 // is distributed to every game-server pod, so a compromised pod must not be able to
@@ -265,7 +271,69 @@ logger.LogInformation("  Register:  {Register}",
         : registerOnAllocated
             ? "at startup (GAMESERVER_REGISTER_ON_ALLOCATED set but Agones is disabled -- IGNORED)"
             : "at startup, right after Ready (default)");
+// ── The Nakama hop's trust decision (ADR-24) ──
+//
+// Three settings have to agree and none of them implies another: whether Nakama
+// terminates TLS, whether NAKAMA_URL says https, and whether this server has the
+// certificate. Every disagreement below is refused or named out loud rather than
+// discovered as a reward RPC that silently stopped working.
+bool nakamaIsHttps = nakamaUrl is not null &&
+    nakamaUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+HttpMessageHandler? nakamaHttpHandler = null;
+string nakamaTrust = "n/a";
+
+if (!string.IsNullOrWhiteSpace(nakamaTlsPinPath))
+{
+    if (string.IsNullOrWhiteSpace(nakamaUrl))
+    {
+        logger.LogWarning("NAKAMA_TLS_PIN is set but NAKAMA_URL is not -- there is no Nakama hop to pin. Ignored.");
+    }
+    else if (!nakamaIsHttps)
+    {
+        // Refused, not downgraded. A pin against a plaintext URL is an operator who
+        // believes this hop is protected and is wrong about it, and the whole point of
+        // ADR-24's "set together or not at all" is that half-configured fails loudly.
+        logger.LogCritical(
+            "NAKAMA_TLS_PIN is set but NAKAMA_URL is '{Url}', which is not https -- refusing to start. " +
+            "Pinning a certificate on a plaintext hop protects nothing while reading as though it does. " +
+            "Move NAKAMA_URL to https:// (Nakama must be running NAKAMA_TLS_CERT/_KEY), or unset the pin.",
+            nakamaUrl);
+        return 2;
+    }
+    else
+    {
+        try
+        {
+            byte[] pin = GameServer.Nakama.NakamaTlsPin.LoadDerFromPemFile(nakamaTlsPinPath);
+            nakamaHttpHandler = GameServer.Nakama.NakamaTlsPin.CreatePinnedHandler(pin);
+            nakamaTrust = $"pinned to {nakamaTlsPinPath} (sha256:{GameServer.Nakama.NakamaTlsPin.Fingerprint(pin)})";
+        }
+        catch (Exception ex)
+        {
+            // Fatal rather than a fall back to platform validation. Falling back would be
+            // the safe DIRECTION -- it refuses a self-signed Nakama -- but it turns "your
+            // pin file is wrong" into "every reward RPC fails with a certificate error",
+            // which is a much longer walk to the same answer.
+            logger.LogCritical(ex,
+                "NAKAMA_TLS_PIN='{Path}' could not be loaded -- refusing to start.", nakamaTlsPinPath);
+            return 2;
+        }
+    }
+}
+else if (nakamaIsHttps)
+{
+    nakamaTrust = "platform trust store (no NAKAMA_TLS_PIN) -- a self-signed Nakama WILL be refused";
+}
+else if (!string.IsNullOrWhiteSpace(nakamaUrl))
+{
+    nakamaTrust = "none -- PLAINTEXT hop, the http_key crosses it in a URL query string";
+}
+
 logger.LogInformation("  Nakama:    {Nakama}", string.IsNullOrWhiteSpace(nakamaUrl) ? "disabled (NAKAMA_URL unset)" : nakamaUrl);
+if (!string.IsNullOrWhiteSpace(nakamaUrl))
+{
+    logger.LogInformation("  NakamaTLS: {Trust}", nakamaTrust);
+}
 logger.LogInformation("  Metrics:   {Metrics}", string.IsNullOrWhiteSpace(metricsAddr) ? "disabled" : metricsAddr);
 logger.LogInformation("  GameDB:    {GameDb}",
     string.IsNullOrWhiteSpace(gameDbUrl) ? "memory" : PostgresPlayerStore.MaskDsn(gameDbUrl));
@@ -747,7 +815,8 @@ var options = new ServerOptions
         ? static world => world.CountWith<GameServer.World.Components.EnemyAi>()
         : null,
     NakamaUrl = nakamaUrl,
-    NakamaHttpKey = nakamaHttpKey
+    NakamaHttpKey = nakamaHttpKey,
+    NakamaHttpHandler = nakamaHttpHandler
 };
 
 // ── Graceful shutdown on SIGINT / SIGTERM ──
