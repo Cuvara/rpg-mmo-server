@@ -3,6 +3,10 @@ using Shared.GameLogic.Components;
 using Shared.GameLogic.Systems;
 using GameServer.World;
 using GameServer.World.Components;
+using GameServer.Net;
+// Disambiguated from the generated wire enum of the same name: the two mirror each
+// other by design, and this file means the simulation one.
+using SimAction = Shared.GameLogic.Components.EntityAction;
 
 namespace GameServer.Input;
 
@@ -23,6 +27,100 @@ public sealed class InputHandler
     private readonly int _cooldownTicks;
     private readonly int _maxBankedTicks;
 
+    /// <summary>
+    /// Running counters for the attack path, exposed on <c>/status</c>.
+    ///
+    /// <para><b>Why these exist:</b> a rejected attack is dropped with a Debug-level log on a
+    /// server that runs at Information, so from the outside a client attacking out of range is
+    /// indistinguishable from a client not attacking at all. That exact ambiguity cost a live
+    /// investigation: zero leaderboard kills over minutes, with no way to tell whether attacks
+    /// were not arriving, arriving and failing to resolve, or arriving and being rejected.
+    /// The counters split those three cases without turning on Debug logging.</para>
+    ///
+    /// <para><b>Threading:</b> written only from the tick thread (input processing runs inside
+    /// the world write lock); read without synchronisation by the status endpoint. Reads are
+    /// diagnostics — a torn read on a 64-bit field cannot happen on the 64-bit targets this
+    /// server ships for, and staleness by a tick is irrelevant here.</para>
+    /// </summary>
+    public sealed class AttackTelemetry
+    {
+        /// <summary>Inputs that carried a non-empty attack target id.</summary>
+        public long Received;
+
+        /// <summary>Attacks whose target id did not resolve to a live entity (despawned, bogus, or already reaped).</summary>
+        public long Unresolved;
+
+        /// <summary>Attacks refused by <see cref="CombatLogic.ValidateAttack"/> (range, cooldown, dead attacker/target…).</summary>
+        public long Rejected;
+
+        /// <summary>Attacks that dealt damage.</summary>
+        public long Accepted;
+
+        /// <summary>Accepted attacks that killed their target.</summary>
+        public long Kills;
+
+        /// <summary>
+        /// The reason string of the most recent rejection, verbatim from
+        /// <see cref="CombatLogic.ValidateAttack"/>. Every reason the validator returns
+        /// is an interned constant (#249), so keeping the reference allocates nothing —
+        /// the old formatted out-of-range message allocated per rejection, and its
+        /// distance detail now lives in the Debug-guarded log at the rejection site.
+        /// </summary>
+        public string? LastRejection;
+    }
+
+    /// <summary>Attack-path counters. See <see cref="AttackTelemetry"/> for the contract.</summary>
+    public AttackTelemetry Attacks { get; } = new();
+
+    /// <summary>
+    /// Called once per refused input with the account and the reason.
+    /// </summary>
+    /// <remarks>
+    /// A callback rather than a direct dependency on <c>GameMetrics</c> and the anomaly
+    /// tracker: this class is constructed directly by a dozen tests, and making it require
+    /// an observability stack would either force every one of them to build one or invite
+    /// a null-object that quietly does nothing. Optional and null by default keeps the
+    /// hot path free when nothing is observing.
+    /// </remarks>
+    private readonly Action<string, InputRejectionReason>? _onRejected;
+
+    /// <summary>
+    /// Called with the ACCOUNT id for every attack that passed validation, so the accepted
+    /// rate can be audited across connections. Wired by the host; null in the tests that
+    /// construct this handler directly.
+    /// </summary>
+    private readonly Action<string, ulong>? _onAttackAccepted;
+
+    /// <summary>Report a refused input. Cheap when nothing is listening.</summary>
+    private void Reject(string userId, InputRejectionReason reason) =>
+        _onRejected?.Invoke(userId, reason);
+
+    /// <summary>
+    /// Map a <see cref="CombatLogic.ValidateAttack"/> reason onto the bounded enum.
+    /// </summary>
+    /// <remarks>
+    /// <b>Reference comparison, not string equality.</b> Every reason that validator
+    /// returns is an interned constant (#249) — which is also why the rejection path
+    /// allocates nothing — so identity is exact and free, and the existing out-of-range
+    /// log below already relies on the same property. An unrecognised reason maps to
+    /// <see cref="InputRejectionReason.AttackTargetUnresolved"/>'s sibling rather than
+    /// being silently dropped: if a new reason is added to the validator without being
+    /// classified here, it lands in a real bucket and shows up, instead of vanishing.
+    /// </remarks>
+    private static InputRejectionReason ClassifyAttackRejection(string? attackErr)
+    {
+        if (ReferenceEquals(attackErr, CombatLogic.OutOfRangeRejection))
+            return InputRejectionReason.AttackOutOfRange;
+
+        // The other two are also constants, but private to the validator's source rather
+        // than exposed as named fields, so these compare by value. Cheap: it only runs on
+        // a rejection, and only for reasons that are not the interned out-of-range one.
+        if (attackErr == "attack on cooldown") return InputRejectionReason.AttackOnCooldown;
+        if (attackErr == "target is already dead") return InputRejectionReason.AttackTargetDead;
+
+        return InputRejectionReason.AttackOther;
+    }
+
     /// <summary>Fixed simulation timestep in seconds used for movement integration.</summary>
     public float DeltaTime => _deltaTime;
 
@@ -42,11 +140,15 @@ public sealed class InputHandler
         ILogger logger,
         DeathHandler? onDeath = null,
         int tickRate = GameConstants.DefaultTickRate,
-        MapBounds? bounds = null)
+        MapBounds? bounds = null,
+        Action<string, InputRejectionReason>? onRejected = null,
+        Action<string, ulong>? onAttackAccepted = null)
     {
         _world = world;
         _logger = logger;
         _onDeath = onDeath;
+        _onRejected = onRejected;
+        _onAttackAccepted = onAttackAccepted;
         _deltaTime = MovementSystem.DeltaTimeForTickRate(
             tickRate > 0 ? tickRate : GameConstants.DefaultTickRate);
         _bounds = bounds ?? MapBounds.Default;
@@ -56,24 +158,38 @@ public sealed class InputHandler
     }
 
     /// <summary>
-    /// Ceiling on how many base ticks of elapsed time one movement step may cover, at this
-    /// handler's rate. See <see cref="GameConstants.MaxBankedMovementMs"/>.
+    /// How many base ticks a held direction keeps producing movement for after the last
+    /// packet that refreshed it, at this handler's rate.
+    ///
+    /// <para><b>The name is historical.</b> It used to be the ceiling on how much elapsed
+    /// time a single step could bank; no step banks anything now, so the same budget is
+    /// spent on the length of the coast instead. Both readings answer the one question
+    /// <see cref="GameConstants.MaxBankedMovementMs"/> exists to answer — how long may the
+    /// server keep moving a player on information it no longer has — which is why the
+    /// constant is unchanged at 250ms. Renaming it means releasing
+    /// <c>Shared.GameLogic</c> and bumping the client's manifest and lock, so it is a
+    /// separate change.</para>
     /// </summary>
     public int MaxBankedTicks => _maxBankedTicks;
 
     /// <summary>
-    /// The timestep for a movement step landing on <paramref name="baseTick"/> for an
-    /// entity that last moved on <paramref name="lastMoveTick"/>.
+    /// The timestep for a movement step landing on <paramref name="baseTick"/>. Always one
+    /// tick.
     ///
-    /// <para>This is the whole of #100's fix. A step covers the time since the entity last
-    /// moved rather than one fixed tick, so the three inputs that per-tick coalescing
-    /// discards from a burst no longer take their simulated time with them. It does not
-    /// weaken what coalescing defends: a client sending every tick always has
-    /// <c>lastMoveTick == baseTick - 1</c> and so earns exactly one tick per tick, and a
-    /// client that was silent is bounded by <see cref="MaxBankedTicks"/>.</para>
+    /// <para>It is a method rather than the constant it returns because the alternative is
+    /// what this replaced, and the difference is the whole movement model. #100 was fixed
+    /// by making a step cover the elapsed time since the entity last moved, so the inputs
+    /// per-tick coalescing discards from a burst did not take their simulated time with
+    /// them. That restored distance and broke smoothness: the recovered time arrived as one
+    /// oversized step — 1.36 units measured live where a normal step is 0.083 — which a
+    /// player reads as the avatar jumping, and which a correctly predicting client is
+    /// snapped back by, because it never took that step itself.</para>
     ///
-    /// <para>A first-ever move (<paramref name="lastMoveTick"/> of 0) is one tick, not the
-    /// whole age of the server.</para>
+    /// <para>The time is now recovered by <see cref="ApplyHeldMovement"/> stepping on every
+    /// tick of the gap instead, so there is nothing left to bank. Keeping the seam here
+    /// keeps the packet path and the held path calling one arithmetic, and keeps the
+    /// deliberate-stop case (<paramref name="heldFromTick"/> of 0) documented where it is
+    /// decided.</para>
     /// </summary>
     private float StepDeltaTime(ulong baseTick, ulong lastMoveTick, ulong heldFromTick)
     {
@@ -86,9 +202,21 @@ public sealed class InputHandler
 
         if (lastMoveTick == 0 || baseTick <= lastMoveTick) return _deltaTime;
 
-        ulong elapsed = baseTick - lastMoveTick;
-        if (elapsed > (ulong)_maxBankedTicks) elapsed = (ulong)_maxBankedTicks;
-        return _deltaTime * elapsed;
+        // ONE TICK, ALWAYS. The step never covers more than the tick it is taken on.
+        //
+        // This is the invariant the whole movement model now rests on: for any interval,
+        // both sides apply exactly one step per tick, so both travel speed x ticks and the
+        // distances are equal BY CONSTRUCTION rather than by two independent measurements
+        // of elapsed time agreeing. Network jitter shifts WHEN a step happens; it can no
+        // longer change HOW MANY there are, which is what prediction and reconciliation are
+        // built to absorb.
+        //
+        // Banking -- multiplying by the elapsed ticks to recover time that went missing --
+        // is what this replaces. It restored the right distance and was wrong by every other
+        // measure: measured on a live server, a 1.36-unit step where a normal one is 0.083,
+        // read by a player as the avatar jumping. There is nothing left to recover, because
+        // with a step on every tick nothing is missed in the first place.
+        return _deltaTime;
     }
 
     /// <summary>Attack cooldown length in simulation ticks at this handler's tick rate.</summary>
@@ -115,32 +243,27 @@ public sealed class InputHandler
     /// pass closes that gap: the newest direction is integrated once per critical tick.</para>
     ///
     /// <para><b>Why it is bounded.</b> A held direction expires
-    /// <paramref name="holdTicks"/> base ticks after it was accepted — one world interval.
-    /// A client that stops sending therefore coasts for at most that long (66ms at the
-    /// default 60/15) rather than drifting forever, and a client that sends an explicit
-    /// deadzone input stops immediately, because that clears the hold rather than
+    /// <see cref="MaxBankedTicks"/> base ticks after the last packet that refreshed it — a
+    /// silence timeout, 250ms at every rate. A client that stops sending therefore coasts
+    /// for at most that long rather than drifting forever, and a client that sends an
+    /// explicit deadzone input stops immediately, because that clears the hold rather than
     /// refreshing it.</para>
     ///
-    /// <para><b>Why it is a no-op on a single-rate server.</b> With one rate,
-    /// <paramref name="holdTicks"/> is 1, and a held direction is by definition at least one
-    /// tick old on any tick where it would be applied here — so the condition can never be
-    /// true and behaviour is exactly the pre-multi-rate model, packet for packet. That is
-    /// what lets the byte-identity and characterization tests stand unchanged.</para>
+    /// <para><b>Why it runs at every rate.</b> It used to be gated off when every group ran
+    /// at one rate, on the reasoning that a client sending once per tick needs nothing
+    /// held. A client that misses a tick needs it at any rate, and a client whose packets
+    /// clump into bursts misses several — which made the single-rate configuration
+    /// <c>staging</c> runs the worst case for #100 rather than the safe one.</para>
     /// </summary>
     /// <param name="writer">Open world write scope.</param>
     /// <param name="baseTick">The canonical base tick.</param>
-    /// <param name="holdTicks">
-    /// How many base ticks a direction stays valid for. One world interval; 1 disables the
-    /// pass entirely.
-    /// </param>
-    public void ApplyHeldMovement(WorldWriter writer, ulong baseTick, int holdTicks)
+    public void ApplyHeldMovement(WorldWriter writer, ulong baseTick)
     {
-        if (holdTicks <= 1) return;
-
         int count = writer.QueryWith<PlayerTag>(_playerHandles);
         if (count > _playerHandles.Length)
         {
-            _playerHandles = new EntityHandle[count];
+            // Headroom: exact-size growth re-queries again at count+1 (#249).
+            _playerHandles = new EntityHandle[count + (count >> 2)];
             count = writer.QueryWith<PlayerTag>(_playerHandles);
         }
 
@@ -153,7 +276,34 @@ public sealed class InputHandler
             ref InputCursor cursor = ref writer.InputCursorOf(in handle);
             if (cursor.HeldFromTick == 0) continue;          // nothing held
             if (cursor.HeldFromTick == baseTick) continue;   // already stepped this tick
-            if (baseTick - cursor.HeldFromTick >= (ulong)holdTicks) continue; // expired
+            // Expiry is a SILENCE TIMEOUT, not a send-rate window.
+            //
+            // The window used to be one world interval -- the nominal spacing of a client
+            // sending at the world rate -- which left no slack at all: measured live, a 15Hz
+            // client's packets arrive 4.19 base ticks apart against a 4-tick window, so the
+            // average interval already overran it and the player stalled for the remainder
+            // of most of them. Any fixed window has that problem, because it is a guess
+            // about the client's send rate expressed as a deadline.
+            //
+            // What the expiry is actually for is the case where a client stops talking
+            // without saying so, and that is a question about SILENCE, not about rate. The
+            // budget is therefore the same 250ms this handler already treats as the limit of
+            // tolerable silence.
+            //
+            // It does not become a coast after the player lets go: a deadzone input clears
+            // the held direction outright, and docs/API.md requires a client to send its
+            // vector on every input tick, so releasing produces an explicit zero the tick
+            // after. This timeout only covers packets that genuinely stopped arriving.
+            //
+            // The comparison is > rather than >=, and that boundary is load-bearing. The
+            // old banking step covered a gap of _maxBankedTicks ticks ENTIRELY, in one
+            // multiplied step; reproducing the same coverage one step at a time means
+            // stepping on gaps 1.._maxBankedTicks inclusive. With >= the last of them is
+            // dropped, and a client whose packets clump into bursts of four at 15Hz -- a
+            // 264ms idle against a 266.7ms budget -- stalls for one tick per burst and
+            // travels 5.00 units where 6.00 is owed. That is #100 reappearing at a smaller
+            // amplitude, so the bound has to be inclusive.
+            if (baseTick - cursor.HeldFromTick > (ulong)_maxBankedTicks) continue;
 
             if (writer.HealthOf(in handle).Dead) continue;
 
@@ -177,6 +327,17 @@ public sealed class InputHandler
             {
                 position.Value = newPosition;
                 cursor.LastMoveTick = baseTick;
+
+                // The coasting path moves the entity too, so it owns the same facing and
+                // action it would have had from a packet. Without this an entity that
+                // keeps walking between input packets would report Idle on most ticks -
+                // the animation would stutter at the client's send rate rather than
+                // following the simulation, which is the same class of bug HeldMove
+                // itself exists to fix for position.
+                ref Locomotion locomotion = ref writer.LocomotionOf(in handle);
+                uint facing = FacingCodec.FromDirection(cursor.HeldMoveX, cursor.HeldMoveY);
+                if (facing != FacingCodec.NotSent) locomotion.FacingBrad = facing;
+                locomotion.Action = SimAction.Moving;
             }
         }
     }
@@ -249,14 +410,26 @@ public sealed class InputHandler
         // Revalidate: a handle resolved at ingest can be stale by the time the tick runs
         // if the entity was destroyed in between. TickLoop rebinds first, so this is the
         // backstop, not the mechanism.
-        if (!writer.IsAlive(in self)) return;
+        if (!writer.IsAlive(in self))
+        {
+            Reject(userId, InputRejectionReason.EntityGone);
+            return;
+        }
 
         // Skip if dead
-        if (writer.HealthOf(self).Dead) return;
+        if (writer.HealthOf(self).Dead)
+        {
+            Reject(userId, InputRejectionReason.DeadEntity);
+            return;
+        }
 
         // Monotonic tick check
         ref InputCursor cursor = ref writer.InputCursorOf(self);
-        if (input.Tick <= cursor.LastInputTick) return;
+        if (input.Tick <= cursor.LastInputTick)
+        {
+            Reject(userId, InputRejectionReason.StaleTick);
+            return;
+        }
         cursor.LastInputTick = input.Tick;
 
         // --- Movement ---
@@ -271,10 +444,11 @@ public sealed class InputHandler
         // never reaches the MoveResult.None branch below, HeldFromTick stays non-zero,
         // and StepDeltaTime repays the entire pause as a lurch on the first step.
         //
-        // In multi-rate mode the lurch is masked: ApplyHeldMovement integrates between
-        // packets and keeps LastMoveTick current, so the elapsed gap the resume sees is
-        // at most one tick. In single-rate mode ApplyHeldMovement is a no-op
-        // (holdTicks <= 1), so the full pause is visible and capped at MaxBankedTicks.
+        // The lurch it prevented is gone with banking, but the clear is not: HeldFromTick
+        // is what separates a player who released the stick from one whose packets stopped
+        // arriving, and only the second is coasted through. Leaving a stop unrecorded makes
+        // every deliberate pause coast for the silence timeout, which is the most common
+        // thing a player does.
         //
         // The deadzone check mirrors MovementSystem.ResolveDirection: same constant,
         // same squared-magnitude test, so the two cannot disagree on what counts as a
@@ -310,6 +484,19 @@ public sealed class InputHandler
             {
                 position.Value = newPosition;
 
+                // Face the way we just moved, and say so on the wire.
+                //
+                // Derived from the RAW input direction rather than from the position
+                // delta: the delta is post-clamp, so a player walking into a map bound
+                // would be reported as facing along the wall instead of into it, which
+                // is visibly wrong at exactly the moment a player is pushing against
+                // something. FromDirection returns "not sent" for a zero vector, so a
+                // deadzone input cannot blank an established facing.
+                ref Locomotion locomotion = ref writer.LocomotionOf(self);
+                uint facing = FacingCodec.FromDirection(input.MoveX, input.MoveY);
+                if (facing != FacingCodec.NotSent) locomotion.FacingBrad = facing;
+                locomotion.Action = SimAction.Moving;
+
                 // Hold the direction so the critical group can keep integrating between
                 // packets (ApplyHeldMovement). Recorded after a successful step, so a
                 // rejected or deadzone input never becomes a held one.
@@ -326,21 +513,50 @@ public sealed class InputHandler
                 // above and ResolveDirection ever diverge, this is the backstop.
                 cursor.HeldFromTick = 0;
                 cursor.LastMoveTick = currentTick;
+
+                // An explicit stop is Idle, not Unspecified. Facing is deliberately NOT
+                // cleared: a character that halts keeps looking the way it was going,
+                // which is what a player expects and what avoids a visible snap to east
+                // every time someone releases the stick.
+                //
+                // No Dead check needed - this method returned above if the entity is
+                // dead, so reaching here means it is alive and genuinely standing still.
+                writer.LocomotionOf(self).Action = SimAction.Idle;
             }
             else if (moveResult == MoveResult.Rejected)
             {
                 // Grossly invalid vector (NaN/inf/oversized): log and drop, never throw.
-                _logger.LogDebug("Dropped invalid move from {UserId}: ({MoveX}, {MoveY})",
-                    userId, input.MoveX, input.MoveY);
+                // Guarded like the attack log below: no allocation with Debug off.
+                Reject(userId, InputRejectionReason.InvalidDirection);
+
+                if (_logger.IsEnabled(LogLevel.Debug))
+                {
+                    _logger.LogDebug("Dropped invalid move from {UserId}: ({MoveX}, {MoveY})",
+                        userId, input.MoveX, input.MoveY);
+                }
             }
         }
 
         // --- Attack ---
         if (!string.IsNullOrEmpty(input.AttackTargetId))
         {
-            _logger.LogDebug("Attack input from {UserId} targeting {TargetId}", userId, input.AttackTargetId);
+            // IsEnabled guard: the LogDebug extension allocates its params array
+            // before the level check, so an unguarded call here allocates once per
+            // attack input inside the world write lock even with Debug off. Input
+            // processing is a no-allocation hot path; the guard makes the disabled
+            // case free.
+            if (_logger.IsEnabled(LogLevel.Debug))
+            {
+                _logger.LogDebug("Attack input from {UserId} targeting {TargetId}", userId, input.AttackTargetId);
+            }
+            Attacks.Received++;
             EntityHandle target = writer.Resolve(input.AttackTargetId);
-            if (target.IsValid)
+            if (!target.IsValid)
+            {
+                Attacks.Unresolved++;
+                Reject(userId, InputRejectionReason.AttackTargetUnresolved);
+            }
+            else
             {
                 // Composed after movement, so the range check sees this tick's position —
                 // the same ordering the get/set form had.
@@ -353,17 +569,40 @@ public sealed class InputHandler
                 string? attackErr = CombatLogic.ValidateAttack(in attacker, in t, currentTick);
                 if (attackErr == null)
                 {
+                    Attacks.Accepted++;
+
+                    // The audit sees the ACCEPTED attack, not the refused one. ValidateAttack
+                    // has just confirmed this attack is legal for this entity; whether the
+                    // ACCOUNT should have been able to land it this soon is a question no
+                    // per-entity check can answer -- see AttackRateAudit.
+                    _onAttackAccepted?.Invoke(userId, currentTick);
                     int damage = CombatLogic.CalculateDamage(in attacker, in t);
                     t.Hp -= damage;
 
                     ulong cooldownUntil = currentTick + (ulong)_cooldownTicks;
                     writer.CombatOf(self).CooldownUntilTick = cooldownUntil;
+
+                // Attacking outranks moving for this tick: an attack is the thing a
+                // player is meant to see. It is level-triggered, so it lasts exactly one
+                // tick unless the next tick attacks again - a renderer that needs to
+                // retrigger the same attack twice needs an edge this field cannot give,
+                // which is documented on the enum.
+                writer.LocomotionOf(self).Action = SimAction.Attacking;
                     attacker.CooldownUntilTick = cooldownUntil; // the killer state the callback sees
 
                     if (CombatLogic.HandleDeath(ref t))
                     {
-                        _logger.LogInformation("Entity {VictimId} killed by {KillerId}",
-                            t.Id, attacker.Id);
+                        Attacks.Kills++;
+                        // Debug, guarded: this fires per kill on the tick thread inside
+                        // the world write lock, and at Information the console sink
+                        // formats and writes synchronously — a wave of AoE kills wrote
+                        // N log lines while every network thread waited on the lock
+                        // (#249). Kill counts stay observable via /status attack_kills.
+                        if (_logger.IsEnabled(LogLevel.Debug))
+                        {
+                            _logger.LogDebug("Entity {VictimId} killed by {KillerId}",
+                                t.Id, attacker.Id);
+                        }
                         _onDeath?.Invoke(t, attacker);
                     }
 
@@ -379,11 +618,45 @@ public sealed class InputHandler
                         ref Health targetHealth = ref writer.HealthOf(target);
                         targetHealth.Hp = t.Hp;
                         targetHealth.Dead = t.Dead;
+
+                        // Death is terminal for the action field: nothing else this
+                        // entity was doing matters any more, and a corpse reported as
+                        // Moving would keep playing a walk cycle.
+                        //
+                        // Nothing has to guard against a later writer clobbering this.
+                        // Both movement paths bail on a dead entity before they touch
+                        // Action - ApplyHeldMovement `continue`s on Health.Dead and
+                        // ProcessInput returns on it - so a dead entity is never reached
+                        // by the Moving or Attacking writers at all.
+                        if (t.Dead) writer.LocomotionOf(target).Action = SimAction.Dead;
                     }
                 }
                 else
                 {
-                    _logger.LogDebug("Invalid attack from {UserId}: {Error}", userId, attackErr);
+                    Attacks.Rejected++;
+                    Attacks.LastRejection = attackErr;
+                    Reject(userId, ClassifyAttackRejection(attackErr));
+                    // Guarded like the attack log above: no allocation with Debug off.
+                    // The distance detail the out-of-range message used to carry is
+                    // computed HERE, only under the guard: the validator returns an
+                    // interned constant so the normal rejection path allocates
+                    // nothing (#249). ReferenceEquals suffices — the constant is the
+                    // only source of that value.
+                    if (_logger.IsEnabled(LogLevel.Debug))
+                    {
+                        if (ReferenceEquals(attackErr, CombatLogic.OutOfRangeRejection))
+                        {
+                            _logger.LogDebug(
+                                "Invalid attack from {UserId}: {Error} (distance {Distance:F2} exceeds {Range:F2})",
+                                userId, attackErr,
+                                Vec2.Distance(attacker.Position, t.Position),
+                                GameConstants.AttackRange);
+                        }
+                        else
+                        {
+                            _logger.LogDebug("Invalid attack from {UserId}: {Error}", userId, attackErr);
+                        }
+                    }
                 }
             }
         }

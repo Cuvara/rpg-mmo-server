@@ -1,0 +1,83 @@
+[loadtest] run 16112150: ramping 50 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 2.481s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] cooldown 20s before the next level
+[loadtest] run 9a0d9514: ramping 100 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 5.008s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] cooldown 20s before the next level
+[loadtest] run cedb9bb2: ramping 150 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 7.54s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] cooldown 20s before the next level
+[loadtest] run 346f78ff: ramping 200 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 10.105s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] players=200 DEGRADED: snapshot interval p99 425.0ms over 2x tick period (133.3ms)
+[loadtest] cooldown 20s before the next level
+[loadtest] run 1c17070c: ramping 50 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 2.481s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] cooldown 20s before the next level
+[loadtest] run d185d337: ramping 100 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 5.002s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] cooldown 20s before the next level
+[loadtest] run 82b4758f: ramping 150 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 7.559s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] cooldown 20s before the next level
+[loadtest] run 2eb87791: ramping 200 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 10.115s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] cooldown 20s before the next level
+[loadtest] run 0587a1b0: ramping 50 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 2.477s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] cooldown 20s before the next level
+[loadtest] run e9d9843d: ramping 100 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 4.998s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] cooldown 20s before the next level
+[loadtest] run 63be7e2e: ramping 150 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 7.557s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] cooldown 20s before the next level
+[loadtest] run 6cdd86a9: ramping 200 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 10.129s; settling for 8s
+[loadtest] measuring for 35s
+
+--- loadtest results (tick budget 66.67ms @ 15Hz) ---
+players  joined  move     tick p50  tick p99  tick mean  over budget  ticks/s  snap p50  snap p99  ack p50  ack p99   rx B/s/p  tx B/s/p  recv%    fail  verdict 
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------
+50       50      cluster  0.25ms    0.49ms    0.06ms     0%           60.00    66.7ms    73.2ms    36.0ms   69.4ms    72020     885       100.00%  0     ok      
+100      100     cluster  0.25ms    0.50ms    0.10ms     0%           60.00    66.7ms    79.1ms    40.6ms   74.5ms    143065    885       100.00%  0     ok      
+150      150     cluster  0.30ms    2.41ms    0.23ms     0%           59.99    66.7ms    89.2ms    46.1ms   85.1ms    214144    885       100.00%  0     ok      
+200      200     cluster  0.34ms    12.50ms   0.66ms     0.05%        60.00    62.8ms    425.0ms   62.4ms   1244.7ms  271919    813       100.08%  0     DEGRADED
+50       50      cluster  0.25ms    0.50ms    0.06ms     0%           60.00    66.7ms    72.2ms    36.5ms   69.7ms    72038     885       100.00%  0     ok      
+100      100     cluster  0.26ms    0.85ms    0.11ms     0%           60.00    66.7ms    79.2ms    40.8ms   75.8ms    143082    885       100.00%  0     ok      
+150      150     cluster  0.30ms    2.38ms    0.22ms     0%           60.00    66.7ms    85.3ms    45.7ms   83.2ms    214150    885       100.00%  0     ok      
+200      200     cluster  0.33ms    4.12ms    0.34ms     0%           59.99    66.8ms    99.4ms    51.6ms   96.0ms    285069    885       99.98%   0     ok      
+50       50      cluster  0.25ms    0.49ms    0.06ms     0%           60.00    66.7ms    72.2ms    37.8ms   69.0ms    72036     885       100.00%  0     ok      
+100      100     cluster  0.25ms    0.64ms    0.10ms     0%           60.03    66.7ms    79.4ms    41.2ms   75.3ms    143083    885       100.00%  0     ok      
+150      150     cluster  0.29ms    1.98ms    0.19ms     0%           60.00    66.7ms    84.0ms    45.5ms   81.3ms    214148    885       100.00%  0     ok      
+200      200     cluster  0.33ms    6.94ms    0.38ms     0%           60.00    66.9ms    97.5ms    52.2ms   94.7ms    285267    885       100.04%  0     ok      
+
+  players=200   DEGRADED: snapshot interval p99 425.0ms over 2x tick period (133.3ms)
+
+HIGHEST PASSING LEVEL: 200 players on one game server
+
+--- capacity (3 valid run(s) per level) ---
+players  pass   invalid  p99 median  tick p99 min..max      tick mean min..max     KB/s/client
+50       3/3    0        0.5ms       0.5..0.5ms             0.1..0.1ms             70.3
+100      3/3    0        0.6ms       0.5..0.9ms             0.1..0.1ms             139.7
+150      3/3    0        2.4ms       2.0..2.4ms             0.2..0.2ms             209.1
+200      2/3    0        6.9ms       4.1..12.5ms            0.3..0.7ms             274.2
+
+CEILING: 200 (median p99 rule); band 200–200
+  Levels whose runs straddle the budget: [200] — some runs passed, some failed.
+  The median decides the level, so a minority of disturbed runs cannot move it,
+  but a straddle means the reading is sensitive to what else the host was doing.
+  Check `host.load_avg_1` in the JSON, and do not sweep during a CD deploy.
+
+[loadtest] JSON written to results/2026-09-07-develop-c05f715/sweep-direct.json

@@ -20,7 +20,17 @@ internal static class EnemyAiTuning
     /// <summary>Maximum simultaneous enemies in the world.</summary>
     public const int MaxEnemies = 30;
 
-    public const int EnemyHp = 30;
+    /// <summary>
+    /// Sized so the demo combat loop can actually complete. The arithmetic that ruled the
+    /// old value of 30 out, measured live with the /status attack counters (291 accepted
+    /// hits in six minutes, zero kills): a radial enemy at <see cref="EnemySpeed"/> 2.5
+    /// crosses a player's <c>GameConstants.AttackRange</c> (3.0) window in at most
+    /// 2·3.0/2.5 = 2.4s; at the 500ms server attack cooldown that is 3-4 accepted hits,
+    /// and at 8 damage per hit (player attack 10 − <see cref="EnemyDefense"/> 2) a pass
+    /// deals 24-32 damage. Against 30 HP a kill required a near-perfect radial alignment;
+    /// 16 HP dies to two hits, which any pass through range produces.
+    /// </summary>
+    public const int EnemyHp = 16;
     public const int EnemyAttack = 5;
     public const int EnemyDefense = 2;
 

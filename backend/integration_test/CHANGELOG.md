@@ -6,6 +6,113 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+
+- **ADR-25: updated for the new `readHello` signature.** The sealed client callback now
+  returns the server's Ed25519 `server_signature` as a third `[]byte`. The suite still
+  passes no `ServerPublicKey`, so it exercises the pre-ADR-25 path deliberately: it holds
+  `JOIN_TOKEN_SECRET` and its value here is proving the *binding* end to end, which remains
+  the only thing that path covers. Identity verification is proven by the smoke test, which
+  receives its token from the real gateway like a player does.
+
+- **`hop_confidentiality_tap_test.go` — a two-hop byte tap, committed as an instrument.**
+  ADR-23. A transparent TCP relay sits in the path of the gateway hop *and* the gameplay hop of
+  one fully sealed session and records every byte in both directions, then reads the bearer
+  credentials out of the recording using no key — exactly what a passive observer on the path
+  can do.
+
+  It exists because the sealed-session tests cannot answer the question that matters. They
+  assert each frame arrived with the sealed marker, which proves the gameplay hop is encrypted;
+  they cannot see a credential leaking on the *other* hop, because they only read one socket.
+
+  Reproduces the 2026-09-10 measurement in `docs/ROADMAP-SECURITY.md`: the auth token is
+  readable on the gateway hop with the shipped `constants.SessionTTL` lifetime, and the
+  *identical* join token — same `jti` — is readable on both hops. The auth token is signed with
+  `constants.SessionTTL` rather than a test-local duration so the lifetime asserted is the one
+  Nakama actually issues.
+
+- **`TestHopConfidentiality_CapturedCredentialReuse`** measures the "single-use" column, which a
+  tap structurally cannot: it replays each captured credential from a fresh connection. The
+  auth token is accepted twice and mints a fresh join token on the second use; the join token is
+  refused on replay by `JtiTracker`. A tap shows a credential is readable, not what it is worth
+  once read.
+
+### Added
+
+- **`sealed_session_e2e_test.go` — end-to-end coverage of the sealed session**, against a
+  server spawned with **no `--sealed` argument**, so the new `require` default is what is
+  under test rather than the flag:
+  - `TestSealedSession_RequireServerAcceptsSealingClient` runs the Go client handshake,
+    asserts the binding was verified (this harness holds `JOIN_TOKEN_SECRET`, so unlike a
+    shipped Unity client it *can* check it), and then asserts every frame after the
+    handshake arrived **sealed** — a handshake that completed and silently fell back to
+    cleartext would pass every other assertion in the file.
+  - `TestSealedSession_RequireServerRefusesJSONClient` is the executable form of "requiring
+    encryption deprecates JSON": the join is accepted, then the connection is closed rather
+    than served in the clear.
+  - `TestSealedSession_RequireServerRefusesNonSealingProtoClient` covers the rollout hazard
+    the JSON case does not — a client that speaks protobuf perfectly well and has not
+    shipped the handshake yet, which is every existing client on flip day.
+
+### Changed
+
+- **`startDotnetGameServerWith` now pins `--sealed off`**, with the reason at the line.
+  Several tests in this suite deliberately speak JSON, which can never be sealed, so
+  against a stock server they would all be refused; the pin is what keeps them exercising
+  the unsealed wire, which the project still supports.
+- **`startDotnetGameServerSealedDefault` added** because that pin means no test reached
+  through the old helper can detect a change to the default. It spawns with no `--sealed`
+  argument at all and is used only by the sealed suite. Splitting the helper was the
+  correction to a first draft in which the new test passed `--sealed require` while its
+  comment claimed to be testing the default — it would have proved only that the flag is
+  wired.
+
+### Added
+
+- **`duplicate_login_kick_e2e_test.go`** — live end-to-end proof of the
+  cross-instance duplicate-login kick (ADR-20; the gap #211 left recorded in
+  ADR-17), miniredis in-process like `redis_event_e2e_test.go`: client A joins
+  the real C# game server through the real gateway handshake; client B
+  authenticates as the same user; the gateway publishes `session_superseded`
+  (with A's join-token jti) into `events:kick`; the C# consumer evicts A with
+  `MsgKick` + `MsgDisconnect` (both `reason=duplicate_login`, asserted equal)
+  and closes the socket; `/status` shows `players_kicked=1` and
+  `kick_consumer=redis` (the game server runs with a real `--metrics-addr`
+  for this test); then B enters the world and joins cleanly, receiving a fresh
+  keyframe containing its own entity — newest login wins.
+
+- **`redis_event_e2e_test.go`** — live end-to-end proof for the Redis-backed
+  `IEventStream` (rpg-mmo-server#255): a real client joins the real C# game
+  server through the real gateway handshake, hunts and kills a scaffolding mob,
+  and the test asserts the `entity_killed` event arrives through the production
+  consumer path — `redisstore.EventStream` (consumer-group ACK) wrapped in
+  `gateway/events.Relay` on the default `events:game` stream — with the
+  documented JSON payload (`victim_id`/`victim_type`/`killer_id`/`map_id`).
+  Redis is miniredis in-process, same rationale as the self-registration flow
+  test: the whole chain runs in the default integration suite with nothing
+  mocked but the Redis process.
+
+### Removed — coverage that this file still describes as present
+
+`transport_flow_test.go` and `redis_flow_test.go` are documented as Added further
+down this file, and **neither exists in the tree.** The directory holds exactly two
+test files: `dotnet_interop_test.go` and `selfreg_flow_test.go`.
+
+Read against the code, those entries now overstate coverage. What went with the two
+files, and currently has **no automated coverage anywhere**:
+
+- the TCP/KCP transport matrix — `mock_client.go` is TCP-only, so no test exercises
+  KCP at all;
+- cross-server `sid` enforcement — a join token is refused by a server it was not
+  minted for, which is a security property no test currently asserts;
+- boss-kill event relay over Redis Streams end to end;
+- the Nakama-token compatibility path inside this module.
+
+Their historical entries are left intact below: they were accurate when written, and
+rewriting them would hide the regression rather than record it. Restore the files or
+delete their entries deliberately — do not leave this file claiming coverage the
+suite does not have.
+
+### Added
 - **`TestFullFlow_SelfRegistration`** (`selfreg_flow_test.go`) — the whole client
   flow over the **deployed topology**, with nothing pre-registered.
 

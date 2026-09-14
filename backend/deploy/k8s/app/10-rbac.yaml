@@ -1,0 +1,63 @@
+# ADR-15 decision 3, item 6 — "the one most likely to be discovered late".
+#
+# Out of cluster `AgonesAllocator` falls back to $KUBECONFIG then
+# ~/.kube/config and allocates as the developer, which is why
+# gateway/registry/agones_allocator.go has always worked without any of this.
+# In cluster, `resolveRESTConfig` PREFERS the service account
+# (rest.InClusterConfig() is tried first when Kubeconfig is empty), so the
+# Deployment needs no kubeconfig at all — and needs exactly one permission.
+#
+# THE RULE IS THE NARROWEST ONE THAT WORKS. The allocator does one thing to
+# the API server:
+#   POST /apis/allocation.agones.dev/v1/namespaces/<ns>/gameserverallocations
+# (agones_allocator.go: allocationPath, http.MethodPost — the only request in
+# the file). It never lists Fleets, never reads GameServers, never watches
+# anything: the fleet name goes into the allocation body as a label selector
+# and the response is parsed for status.address / status.ports / the
+# GameServer name. So: one apiGroup, one resource, one verb, one namespace.
+#
+# Do NOT widen this to `gameservers` or to `get`/`list`. Nothing in the
+# gateway reads GameServer objects — that would be reading Agones' answer to
+# "does this pod exist", which ADR-14 decision 2 assigns to Agones alone while
+# Redis answers "which address serves this map", with neither reading the
+# other. A `list` on gameservers would let a future change quietly cross that
+# line.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rpg-gateway
+  namespace: rpg-k8s-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    app.kubernetes.io/name: gateway
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rpg-gateway-allocator
+  namespace: rpg-k8s-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+rules:
+  # gameserverallocations is a WRITE-ONLY resource by design: the aggregated
+  # API server answers the POST with the allocation result and stores nothing
+  # readable, so `create` alone is a complete grant, not a partial one.
+  - apiGroups: ["allocation.agones.dev"]
+    resources: ["gameserverallocations"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rpg-gateway-allocator
+  namespace: rpg-k8s-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+subjects:
+  - kind: ServiceAccount
+    name: rpg-gateway
+    namespace: rpg-k8s-realtime
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: rpg-gateway-allocator

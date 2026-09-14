@@ -37,7 +37,16 @@ This module contains Nakama Go runtime plugins. All code runs inside Nakama proc
 - XADD `season_ended` to Redis Streams
 
 ### 5. Social Features (Drawio Page 7)
-- **Party**: CreateParty (open=true, max=4), InvitePartyMember, AcceptPartyMember, SendPartyData (chat/ready check)
+- **Party**: IMPLEMENTED 2026-09-12, but **not** as the realtime API this line used to
+  describe. `social/` ships four storage-backed RPCs -- `party_create`, `party_join`,
+  `party_leave`, `party_get` -- cap 4, held by a version check rather than a read. The
+  realtime names that stood here (`CreateParty`, `InvitePartyMember`, `AcceptPartyMember`,
+  `SendPartyData`) are Nakama **socket** Party API concepts and were rejected for two
+  reasons: this client has no Nakama socket (its two realtime sockets go to the gateway and
+  the game server, ADR-3), and the **gateway** must be able to ask "is this user in that
+  party" over `runtime.http_key` before allocating a dungeon instance (ADR-26 decision 3),
+  which realtime party state cannot answer. Chat and ready-check are therefore not built
+  either; they were part of the same rejected shape.
 - **Friends**: AddFriends, AcceptFriend, ListFriends, BlockFriend
 - **Chat**: JoinChat (room/group/DM), WriteChatMessage, broadcast to channel
 - **Guild**: Nakama Groups API (create, join, promote, kick)
@@ -97,7 +106,7 @@ nakama/
     leaderboard.go     # write score, query ranking
     season.go          # archive, reset, rewards
   social/
-    party.go           # Party API wrappers
+    party.go           # Party as storage-backed RPCs (NOT the realtime Party API -- see above)
     friends.go         # Friends operations
     chat.go            # Chat channel management
     guild.go           # Groups API

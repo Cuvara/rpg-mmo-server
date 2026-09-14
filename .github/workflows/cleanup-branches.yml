@@ -1,0 +1,150 @@
+name: Cleanup — Stale merged branches
+
+# Deletes remote branches whose content is already on `develop`.
+#
+# WHY THIS DOES NOT USE `git branch --merged`, WHICH IS THE OBVIOUS WAY:
+#
+# This repo SQUASH-MERGES. A squash merge creates a new commit with a new sha and
+# no parent link to the branch, so `git branch --merged`, `git cherry` and
+# subject-line matching ALL report a fully-merged branch as unmerged. They do not
+# merely miss a few — on a squash-merge repo they are wrong for essentially every
+# branch, so a cleanup built on them deletes nothing and looks like it is working.
+#
+# Measured 2026-08-19: `rpg-mmo-server` had accumulated 50 local / 30 remote
+# branches, nearly all of them merged, while the equivalent workflow in the client
+# repo (built on `--merged`) had been running weekly and had never deleted one.
+#
+# So the test here is CONTENT, not ancestry: merge `develop` with the branch
+# in-memory and ask whether the result differs from `develop`'s own tree. If it
+# does not, the branch adds nothing and is safe to delete. That is the same check
+# a human would do by reading the diff, and it is immune to how the merge was made.
+
+on:
+  schedule:
+    # Every Monday at 06:00 UTC
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "List what would be deleted without deleting it"
+        type: boolean
+        required: false
+        default: true
+      min-age-days:
+        description: "Only consider branches with no commit newer than this many days"
+        type: string
+        required: false
+        default: '7'
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: cleanup-branches
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Delete branches whose content is already on develop
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # A scheduled run passes no inputs, so these are empty there. Empty
+          # dry-run means LIVE: the weekly run is the one that does the work.
+          DRY_RUN: ${{ github.event.inputs.dry-run }}
+          MIN_AGE_DAYS: ${{ github.event.inputs.min-age-days }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+
+          MIN_AGE_DAYS="${MIN_AGE_DAYS:-7}"
+          [[ "${DRY_RUN}" == "true" ]] && DRY=1 || DRY=0
+          CUTOFF=$(date -u -d "${MIN_AGE_DAYS} days ago" +%s)
+
+          git fetch --prune --quiet origin
+          DEVELOP_TREE=$(git rev-parse origin/develop^{tree})
+
+          echo "Target        : origin/develop ($(git rev-parse --short origin/develop), tree ${DEVELOP_TREE:0:12})"
+          echo "Min age       : ${MIN_AGE_DAYS} days"
+          echo "Mode          : $([[ $DRY -eq 1 ]] && echo 'DRY RUN — nothing will be deleted' || echo 'LIVE')"
+          echo ""
+
+          # Branches with an open PR are never touched, however merged they look:
+          # the PR is the statement that someone is still working on it.
+          OPEN_PR_HEADS=$(gh pr list --repo "${REPO}" --state open --limit 200 \
+                            --json headRefName --jq '.[].headRefName' | sort -u)
+
+          DELETED=(); KEPT_UNMERGED=(); KEPT_RECENT=(); KEPT_PR=(); NEEDS_HUMAN=()
+
+          BRANCHES=$(git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin \
+            | grep -vE '^(HEAD|develop|main|master|staging)$' \
+            | grep -vE '^release-' \
+            | sort -u)
+
+          for BRANCH in ${BRANCHES}; do
+            [[ -z "${BRANCH}" ]] && continue
+
+            if grep -qxF "${BRANCH}" <<< "${OPEN_PR_HEADS}"; then
+              KEPT_PR+=("${BRANCH}")
+              continue
+            fi
+
+            LAST=$(git log -1 --format=%ct "origin/${BRANCH}" 2>/dev/null || echo "")
+            if [[ -z "${LAST}" ]]; then
+              NEEDS_HUMAN+=("${BRANCH} — could not read its last commit")
+              continue
+            fi
+            if (( LAST >= CUTOFF )); then
+              KEPT_RECENT+=("${BRANCH} — last commit $(date -u -d @"${LAST}" +%Y-%m-%d)")
+              continue
+            fi
+
+            # The content test. A non-zero exit means the merge conflicts, which
+            # is NOT evidence either way — a squashed branch whose CHANGELOG entry
+            # was reworded conflicts while being fully merged. Report, never guess.
+            if ! MERGED_TREE=$(git merge-tree --write-tree origin/develop "origin/${BRANCH}" 2>/dev/null | head -1); then
+              NEEDS_HUMAN+=("${BRANCH} — merges with conflicts, cannot be judged automatically")
+              continue
+            fi
+
+            if [[ "${MERGED_TREE}" == "${DEVELOP_TREE}" ]]; then
+              if (( DRY == 1 )); then
+                DELETED+=("${BRANCH} (dry run)")
+              elif gh api -X DELETE "repos/${REPO}/git/refs/heads/${BRANCH}" >/dev/null 2>&1; then
+                DELETED+=("${BRANCH}")
+              else
+                NEEDS_HUMAN+=("${BRANCH} — content is merged but the delete call failed")
+              fi
+            else
+              ADDED=$(git diff --numstat origin/develop "${MERGED_TREE}" 2>/dev/null | awk '{a+=$1} END {print a+0}')
+              KEPT_UNMERGED+=("${BRANCH} — would add ${ADDED} line(s) to develop")
+            fi
+          done
+
+          section() { local title="$1"; shift; echo "${title}: $#"; for x in "$@"; do echo "  - ${x}"; done; echo ""; }
+
+          echo "========================================="
+          echo "Summary"
+          echo "========================================="
+          section "Deleted (content already on develop)" "${DELETED[@]+"${DELETED[@]}"}"
+          section "Kept — real unlanded work"            "${KEPT_UNMERGED[@]+"${KEPT_UNMERGED[@]}"}"
+          section "Kept — open pull request"             "${KEPT_PR[@]+"${KEPT_PR[@]}"}"
+          section "Kept — newer than the age cutoff"     "${KEPT_RECENT[@]+"${KEPT_RECENT[@]}"}"
+          section "NEEDS A HUMAN"                        "${NEEDS_HUMAN[@]+"${NEEDS_HUMAN[@]}"}"
+
+          if (( ${#DELETED[@]} > 0 )); then
+            echo "::notice::Deleted ${#DELETED[@]} branch(es) whose content is already on develop."
+          else
+            echo "::notice::Nothing to delete."
+          fi
+          if (( ${#NEEDS_HUMAN[@]} > 0 )); then
+            echo "::warning::${#NEEDS_HUMAN[@]} branch(es) could not be judged automatically — see the summary above."
+          fi

@@ -47,17 +47,27 @@ public class MetricsEndpointTests
         // handed the same number (the old FreePort() released immediately, and the kernel
         // will happily re-issue a port it just took back — three of the four cases failing
         // together in one run is that signature, not four independent collisions). The
-        // handoff itself is still not atomic; see TestPorts.Lease.
-        var lease = new TestPorts.Lease();
-        int port = lease.Port;
-        string addr = string.Format(addrTemplate, port);
-
+        // handoff itself is still not atomic — so bind through TestPorts.BindWithRetry,
+        // which comes back with a NEW lease when the previous port was taken in that gap.
+        // TryStart swallows the bind error and returns null by design (a metrics endpoint
+        // must not kill the game server), so here a lost race surfaces as null rather than
+        // as an exception, and the retry has to treat null as retryable too. This weakens
+        // nothing: a genuine bind regression fails all five attempts, BindWithRetry returns
+        // null, and the Assert.NotNull below still fires.
         using var metrics = new GameMetrics("map_01", $"rpg.gameserver.test.endpoint.{Guid.NewGuid():N}");
 
-        lease.Dispose(); // release, then bind immediately — nothing between these two lines
-        await using var endpoint = MetricsEndpoint.TryStart(addr, metrics, "gs-test", NullLogger.Instance);
+        string boundAddr = "";
+        int boundPort = 0;
+        await using var endpoint = TestPorts.BindWithRetry(leased =>
+        {
+            boundAddr = string.Format(addrTemplate, leased);
+            boundPort = leased;
+            return MetricsEndpoint.TryStart(boundAddr, metrics, "gs-test", NullLogger.Instance);
+        });
 
         Assert.NotNull(endpoint); // null = it failed to bind, which is the regression
+        string addr = boundAddr;
+        int port = boundPort;
         metrics.PlayerJoined();
 
         bool wildcardBound = endpoint!.UriPrefix.StartsWith("http://+:", StringComparison.Ordinal);

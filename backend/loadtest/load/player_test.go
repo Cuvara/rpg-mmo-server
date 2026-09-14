@@ -18,7 +18,7 @@ func TestDecodeCountedReportsWireBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, n, err := decodeCounted(bytes.NewReader(raw))
+	got, n, err := decodeCounted(bytes.NewReader(raw), nil)
 	if err != nil {
 		t.Fatalf("decodeCounted: %v", err)
 	}
@@ -35,13 +35,13 @@ func TestDecodeCountedReportsWireBytes(t *testing.T) {
 func TestDecodeCountedRejectsOversizedFrame(t *testing.T) {
 	// Length prefix claiming 2MB, above the 1MB cap shared/messages enforces.
 	frame := []byte{0x00, 0x20, 0x00, 0x00}
-	if _, _, err := decodeCounted(bytes.NewReader(frame)); err == nil {
+	if _, _, err := decodeCounted(bytes.NewReader(frame), nil); err == nil {
 		t.Error("expected an error for an oversized frame")
 	}
 }
 
 func TestDecodeCountedTruncated(t *testing.T) {
-	if _, _, err := decodeCounted(bytes.NewReader([]byte{0, 0})); err == nil {
+	if _, _, err := decodeCounted(bytes.NewReader([]byte{0, 0}), nil); err == nil {
 		t.Error("expected an error for a truncated length prefix")
 	}
 }

@@ -128,3 +128,199 @@ run a single Nakama instance up to Soft Launch. The production upgrade is a
 Redis-backed counter (`INCR` + `EXPIRE` on
 `ratelimit:gateway_token:{user_id}`), against the Redis the gateway already
 depends on. Tracked in ADR-8.
+
+## 2026-09-07 — Economy RPCs are server-only; kills leaderboard is authoritative
+
+### The boundary a comment did not enforce
+
+`reward_kill`, `reward_kills` and `submit_kill` take the *beneficiary* user id
+from the payload, because the game server grants on a player's behalf. Nakama
+registers every RPC for both authenticated client sessions and
+`runtime.http_key` callers, so until now any logged-in client could call
+`reward_kills` with `{"user_id": "<anyone>", "kills": 1000}` — the "internal
+RPC" note in `CLAUDE.md` was documentation, not enforcement (audit F01, P0).
+
+The two caller kinds are distinguishable only through the request context: a
+client session carries `RUNTIME_CTX_USER_ID`, `RUNTIME_CTX_SESSION_ID` and
+`RUNTIME_CTX_USER_SESSION_EXP`; an `http_key` call carries none of them
+([Nakama runtime introduction](https://heroiclabs.com/docs/nakama/server-framework/introduction/)).
+`economy.requireServerCaller(ctx)` rejects if **any** of the three is set —
+not just the user id — so a future Nakama that populates them differently
+still fails closed. It runs before `json.Unmarshal`, so a client learns nothing
+about the schema and no `WalletUpdate`/`LeaderboardRecordWrite` can be reached;
+the tests assert zero mock calls after rejection. The error is gRPC code 7
+(`PERMISSION_DENIED` → HTTP 403), distinct from the 16 the auth RPCs use for
+"you need a session": here having a session is the problem.
+
+`get_leaderboard` is a read and stays unguarded. `gateway_token` is the
+opposite case (client-only, requires a session) and is untouched. The auth
+hooks (`AfterAuthenticate*`) write storage but are hooks, not RPCs — Nakama
+invokes them, clients cannot — so they need no guard.
+
+Why not check `http_key` itself: the runtime never exposes it to the handler,
+and Nakama already verified it before dispatch. Absence of a session *is* the
+server credential path.
+
+### Authoritative leaderboard, and why the migration is explicit
+
+`kills_alltime` was created with `authoritative=false`, a second score path
+that bypasses the RPCs entirely via Nakama's public `WriteLeaderboardRecord`
+(audit F02, P1). It is now `true`. Nakama's `LeaderboardCreate` is idempotent
+and leaves an existing board's flags untouched, so flipping the argument
+migrates nothing on a running deployment. `SetupLeaderboards` therefore looks
+the board up first (`LeaderboardsGetId`) and handles the legacy case
+deliberately:
+
+- default: **fail InitModule** with the exact fix in the error. Deleting a
+  board destroys its records, and a start-up hook must not decide that on its
+  own; silently continuing would leave a P1 hole open with a log line nobody
+  reads. The data-preserving fix is a one-row SQL update plus restart
+  (`docs/RUNBOOK.md`), because Nakama offers no in-place flag change through
+  the runtime or Console.
+- `LEADERBOARD_MIGRATE=recreate`: delete + recreate, opt-in, for environments
+  whose scores are disposable.
+
+Rollback to an older plugin build is safe against an authoritative board.
+
+## 2026-09-07 — `reward_kills` is exactly-once per batch id
+
+### The problem
+
+`batch_id` was recorded in the wallet metadata and nothing else. The game
+server minted a fresh GUID per send and dropped a batch whose answer never
+arrived, because with no deduplication the only alternative to *maybe lost*
+was *maybe doubled* (audit F06). Both were wrong: a timeout after Nakama
+committed lost nothing but the sender believed it had; a timeout before commit
+lost the gold for real; and a retry under a new id after a post-commit
+connection reset doubled it. Separately, a backlog that grew past
+`MaxKillsPerBatch` during an outage was rejected forever (F07).
+
+### Receipt in the same transaction as the grant
+
+The idempotency record is a Nakama storage object — collection
+`reward_receipts`, key `batch_id`, owner the rewarded user — written
+**create-only** (`Version: "*"`) in the same `nk.MultiUpdate` as the
+`WalletUpdate`. Nakama runs a `MultiUpdate` inside one SQL transaction, so
+either the gold and the receipt both exist or neither does. That single fact
+carries the whole contract:
+
+- a resent id finds its receipt and is replayed — no wallet write;
+- two duplicates racing past the lookup both enter `MultiUpdate`; the second
+  fails the version check and *its whole transaction rolls back*, wallet
+  included, then it is answered as a replay;
+- a failed `MultiUpdate` leaves no receipt, so the error really does mean
+  "nothing granted" and the resend is granted fresh.
+
+Why storage-plus-`MultiUpdate` and not a dedupe marker written separately: a
+marker committed before the wallet loses the gold if the process dies between
+the two; a marker committed after it doubles the gold on the same crash. Only
+the one-transaction form closes that window, and `MultiUpdate` is the only
+supported API that spans storage and wallet in one commit. Why not the wallet
+ledger: it is append-only and not queryable by metadata through the runtime.
+
+`batch_id` is therefore **required** now (code 3 if empty). The only caller is
+our game server, which always sent one.
+
+### The leaderboard stays outside the transaction
+
+`MultiUpdate` does not cover leaderboards, so the score increment runs after
+the commit. Its failure is reported as `status: partial`, never as an error —
+an error would invite a wallet retry — and the receipt records
+`leaderboard_done: false`. A replay of the same id then retries **only** the
+leaderboard and flips the flag on success. Score converges without a second
+gold grant. The one residual double-fault (score landed, receipt update
+failed, batch replayed) increments the score once more; it is logged and is
+the bounded score drift ADR-6 accepts.
+
+### Splitting is the caller's job, but the refusal is machine-readable
+
+`MaxKillsPerBatch` stays at 1000 as the abuse bound. Rejection now uses gRPC
+code 11 (`OUT_OF_RANGE`, `CodeKillsOutOfRange`) instead of the generic 3, so
+the game server can tell "split this" from "malformed" without parsing the
+message. A refused batch never reached the wallet, so the halves may take new
+ids.
+
+### What is deliberately not here
+
+- No receipt pruning. One row per granted batch; see the retention note in
+  `docs/API.md`. A sweep keyed on `granted_at` is the natural follow-up.
+- No sender-side durability. Kills the game server recorded but had not yet
+  been acknowledged when it died are gone; that is the game server's window
+  to document (`gameserver-dotnet/docs/DESIGN.md`), not Nakama's to close.
+
+## 2026-09-12 — Party: storage RPCs, not the realtime Party API
+
+Nakama ships a realtime (socket) Party API. The party in `social/` does not use
+it, for two independent reasons:
+
+1. **There is no Nakama socket to hang it off.** This client talks to Nakama
+   over HTTP for every meta service; its two realtime sockets go to the gateway
+   and to the game server (ADR-3). A realtime party would mean a third
+   connection whose only job is party state.
+2. **The gateway has to be able to ask.** Before allocating a dungeon instance
+   the gateway verifies that the user entering really is in the party they
+   claim. Realtime party state lives in the socket layer and is not addressable
+   from a `runtime.http_key` call. A storage-backed party is, which is exactly
+   what `party_get` does — it is the one party RPC that accepts both a client
+   session and an `http_key` call.
+
+So a party is two storage records and four RPCs over them. See `API.md` for the
+record layout.
+
+### The member cap is enforced by a version check, not by a read
+
+The cap is 4 (root `CLAUDE.md`, Social: "Party API (max 4)"). A read-then-write
+cap check does not hold it: two players joining a 3-member party at the same
+moment both read 3, both compute 4, and both write — 5 members.
+
+Every mutation is therefore one `nk.MultiUpdate` carrying **both** records,
+where the party write always carries the storage version read at the start of
+that attempt and the membership write carries the create-only version `"*"`.
+Nakama rejects the entire update — storage and all — if either version check
+fails. So one of the two racing joins commits and the other is rejected,
+re-reads a party that now has 4 members, and is answered `party is full`.
+
+The retry loop is bounded at 5 attempts (`maxWriteAttempts`) and **re-reads and
+re-validates on every attempt**, which is what makes retrying safe: a stale
+read can never commit. The loop's real length is bounded by the number of
+players racing on one party, because every winner moves the party closer to
+full, at which point the remaining attempts fail fast on the cap instead of
+retrying. Exhausting the budget returns code `10` (`ABORTED`) — the one party
+error a client should retry.
+
+`social` has a test for this that drives real goroutines through a
+version-enforcing in-memory store, holding all racers at the same party version
+with a barrier. Dropping either the cap check or the `Version` field from the
+party write makes it fail — the first with 6 members in a 4-member party, the
+second with admitted joiners missing from the party (a lost update).
+
+### One party at a time, and why joining another one fails
+
+A user is in **at most one** party, enforced by the per-user membership index
+(`party_member`/`current`) and its create-only write rather than by scanning
+parties.
+
+Joining while already in a different party **fails** with `already in a party`.
+It deliberately does not silently move the caller: auto-leaving would make an
+additive-looking call destructive — if the caller happened to be leading a
+party, a mistyped or replayed join would transfer that leadership away, or
+delete the party outright if they were its last member. A client that wants to
+switch calls `party_leave` first, and the error names the condition so it can.
+
+Re-joining the party you are **already** in is idempotent success, not an
+error, so a client retrying after a timeout is never told "already in a party"
+about the party it asked for.
+
+### Leadership and deletion
+
+A party always has exactly one leader, because the gateway allocates a dungeon
+per leader. When the leader leaves and others remain, leadership transfers to
+`members[0]` after removal — the longest-standing remaining member. No
+election, no vote. When the last member leaves, the party record is deleted in
+the same update as their index, so a party never outlives its members and a
+stale party id reads as `party not found`.
+
+Two torn states are handled rather than ignored, because either would strand a
+player: a membership index whose party no longer exists is cleared by
+`party_leave` (otherwise that user could never join anything again), and an
+index pointing at a party that does not list the user is likewise dropped.

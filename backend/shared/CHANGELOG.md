@@ -6,6 +6,494 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **ADR-25: the game server's per-pod Ed25519 identity, on the wire and in the registry.**
+  `shared/sealed/identity.go` defines the signed input
+  `"cuvara/sealed-identity/v1" || 0x00 || transcript || 0x00 || identity_public(32)` plus
+  `SignIdentity`, `VerifyIdentity` and the registry encoding helpers. **The transcript is
+  wrapped, never modified** -- `DeriveKeys` and the HMAC binding keep reading exactly the
+  bytes `Transcript()` already produced, so ADR-22's cross-implementation vectors stay valid
+  and the signature gets one of its own (`TestInteropIdentityVector`, asserting the same
+  three constants as `ServerIdentityInteropTests.cs`).
+
+  **Why an asymmetric signature at all**: the existing `binding` is an HMAC under
+  `JOIN_TOKEN_SECRET`, the key the gateway *mints join tokens with*, so a client able to
+  verify it could forge a token for any player on any server. `binding_verified` is
+  therefore permanently false for every shipped client and no configuration reaches true.
+  An Ed25519 signature needs only the public half.
+
+  Wire: `SealedServerHello.server_signature = 4` and `EnterWorldResponse.server_public_key
+  = 6`, both **new numbers**. Field 5 of `EnterWorldResponse` stays reserved -- an old peer
+  would read whatever occupied it as 32 bytes of key material -- and `binding` keeps field 2
+  and its current meaning, because one field number with two meanings is how two versions
+  come to disagree silently about a byte. Adding fields is backward-compatible: a peer that
+  sends neither still parses (`TestAPeerThatSendsNeitherFieldStillParses`).
+
+  `storage.ServerInfo` gains `IdentityKey`, carried in the Redis hash field `identity_key`
+  as standard padded base64 of 32 raw bytes. **That field name and encoding are a
+  cross-language contract** -- the C# game server writes the entry and the Go gateway reads
+  it with no translation layer -- so `redisstore` and
+  `GameServer/Registry/RedisServerRegistry.cs` must change together. An entry with no such
+  field reads as an empty key and is **not** an error: that is a pre-ADR-25 server, and
+  failing there would take a whole map offline for an un-upgraded pod.
+
+### Changed
+- **`sealed.RunClientHandshake` reports THREE facts about identity, not one, and the split
+  is the point (ADR-25 decision 6).** `IdentityChecked` means a signature verified under the
+  key the caller supplied. `IdentityKeyHopAuthenticated` is what the caller asserted about
+  the hop that delivered that key. Only their conjunction, `IdentityVerified`, means "this
+  is the real game server".
+
+  Over a plaintext gateway hop -- every environment today, because ADR-23's TLS is
+  implemented and defaults off -- a client has checked a signature against a key an attacker
+  on its own network path could have chosen, and `IdentityVerified` stays **false** while
+  `IdentityChecked` is true. An instrument that reported the strong claim on the weak
+  evidence would be worse than no instrument. The strong state is reachable with no protocol
+  change and no client release the day gateway TLS is on, and that reachability is asserted
+  (`TestIdentityVerifiedBecomesTrueOverAnAuthenticatedHop`) rather than assumed -- an
+  always-false boolean is the dead end ADR-25 rejected Option D for.
+
+  `ClientHandshakeConfig.ServerPublicKey` is the requirement switch: **non-empty means
+  require identity**, and a missing, malformed or non-verifying signature ends the handshake
+  with an error and no session. No negotiation, no fallback (ADR-22 decision 3). Empty means
+  the gateway had no key, and the handshake proceeds exactly as before -- which is what makes
+  the gateway-and-server-first migration order safe.
+
+  **Breaking for callers**: the `readHello` callback now returns `serverSignature` as a
+  third `[]byte`. Updated in the load generator, the smoke test, `killprobe` and the
+  integration suite.
+- **`EnterWorldRequest.party_id` (field 2) and `storage.DungeonIndex`** for ADR-26. The wire
+  field is additive in both encodings -- `omitempty` on the JSON side keeps a map entry
+  byte-identical to what a pre-ADR-26 peer produces, so the field is not merely
+  Protobuf-compatible.
+
+  `DungeonIndex` carries two keys rather than one because allocation and lookup answer
+  different questions: `ClaimAllocation` elects exactly one member of a party to do the
+  allocating, and `Publish`/`Lookup` carry the result the others read. Entries expire, and
+  that is not incidental -- a claim that never expired would wedge a party permanently after
+  one gateway crash, and a mapping that outlived its pod would hand a client an address that
+  is not answering. `MemoryDungeonIndex` honours the TTLs and takes an injectable clock, so a
+  test can reach expiry without sleeping.
+
+### Added
+
+- **`transport.PostureTLS` and `TransportPosture.TLS`** — the confidentiality posture now
+  accounts for a listener that terminates TLS itself (ADR-23). `Posture` is unchanged and is
+  now `PostureTLS(..., false)`, pinned by a test so the non-TLS callers cannot drift.
+  `CipherTLS` names the layer rather than a suite, because the suite is negotiated per
+  connection and is not knowable at listen time — a guess in a security field is the failure
+  this type exists to prevent.
+
+### Changed
+
+- **`TransportPosture.Authenticated` is computed instead of hard-coded `false`.** It was pinned
+  with a comment saying its becoming true should be visible in a diff; this is that diff. TLS
+  is the only configuration that makes it true — the KCP path is AES-256-CFB with a CRC32, and
+  a CRC is not a MAC.
+- **`TransportPosture.KeyIgnored()` now tests the cipher, not `!Encrypted`.** Those were the
+  same thing until TLS existed and are not any more: TCP + TLS + `TRANSPORT_KEY` is encrypted
+  *and* the key is still doing nothing. Written the old way it would have quietly started
+  answering "the key is fine" for a misconfiguration, hidden behind an unrelated feature being
+  on. A regression row in `posture_tls_test.go` covers exactly this pair, and was verified to
+  fail against the old expression.
+- **`config.Config` gains `GatewayTLSCert` / `GatewayTLSKey`** (`GATEWAY_TLS_CERT`,
+  `GATEWAY_TLS_KEY`), both defaulting to empty.
+
+### Added
+
+- **`jwt.ParseUnverified`** — decodes a token's claims **without** checking its signature.
+  It answers "what does this token say", never "is this token genuine", and the doc comment
+  says so at length because every call site is a place a reviewer should look twice.
+  - It exists for one legitimate case: a **client** reading the `jti` out of its own join
+    token. The `jti` anchors the sealed handshake transcript, and a client cannot hold
+    `JOIN_TOKEN_SECRET` — putting that secret in a client binary is the pre-shared-key
+    mistake ADR-22 supersedes. The client decides nothing on these claims; it names the
+    session it is already in, and the server verifies the same token properly.
+
+### Added
+
+- **`sealed.RunClientHandshake`: the Go client half of the sealed exchange.** It mirrors
+  `SealedHandshakeServer` step for step and contains no transport — the caller supplies the
+  two frame callbacks — so the load generator, the smoke test and the integration suite can
+  share it despite framing bytes differently.
+  - **`BindingVerified` is on the result, not implied.** Verifying the server's binding
+    needs `JOIN_TOKEN_SECRET`, which a shipped client must not carry; passing an empty
+    secret is the correct configuration for one and yields confidentiality against a
+    passive eavesdropper and nothing against an active one. A harness that already holds
+    the secret should verify, and then it is true — those harnesses are currently the only
+    peers that can prove the man-in-the-middle defence end to end.
+  - Tested both ways round, including **a test asserting a non-verifying client accepts a
+    substituted ephemeral key**. That is today's exposure written down as an executable
+    fact, so it starts failing the day the pinned identity key removes it.
+  - The attacker model in those tests signs the binding over the REAL server's key and
+    announces a tampered one — an attacker who can rewrite the hello but cannot compute a
+    binding. Signing over the tampered key instead would model an attacker holding the
+    secret, against which there is nothing to defend, since it could mint its own tokens.
+
+### Added
+
+- **`SealedClientHello` / `SealedServerHello` (`MsgType` 16 and 17), gameplay hop only.**
+  Both travel in the clear, immediately after `MsgJoinToken` — there is no key yet, which
+  is what they exist to establish. 16/17 stay inside the one-byte varint range and leave
+  18-31 clear for the gateway hop's own handshake once ADR-22 settles it; recycling a
+  number is how two versions silently disagree about what a byte means.
+  - **Protobuf only.** The handshake is deliberately absent from the JSON message set so
+    key material can never be rendered into a human-readable payload — which is also why a
+    JSON client cannot be sealed and must be refused rather than served in the clear.
+
+### Added
+
+- **`shared/sealed` now carries the real primitives** — ChaCha20-Poly1305 (RFC 8439),
+  X25519 (RFC 7748) and HKDF-SHA256 (RFC 5869), all from `golang.org/x/crypto`, which was
+  already a dependency. **Nothing here implements a cipher, a MAC or a curve.**
+  - **Published RFC vectors, not only round-trips.** A round-trip proves an implementation
+    agrees with itself, which a subtly wrong one also does, silently. Tampering is
+    rejected in ciphertext, tag, additional data and length — the AAD case being the one
+    that can be wrong while every round-trip still passes.
+  - **Low-order X25519 points are refused.** Accepting one forces a shared secret the
+    attacker knows and both sides agree on: a complete break dressed as a successful
+    handshake.
+  - **Two direction keys, derived from the shared secret and salted by the transcript.**
+    Two, not one, is what makes the bare counter nonce safe — the client's sequence 7 and
+    the server's sequence 7 are encrypted under different keys. Salting with the
+    transcript binds the keys to the exact exchange, so two runs that agreed on a secret
+    but disagreed about anything else fail rather than proceeding half-agreed.
+  - **The handshake binding is HMAC-SHA256 under a key derived from `JOIN_TOKEN_SECRET`
+    and the jti**, verified with `hmac.Equal` — constant time, because a byte-by-byte
+    compare leaks the first mismatch position and that is enough to forge a tag one byte
+    at a time against a peer that keeps answering.
+  - **A cross-implementation vector** pins one complete handshake and one complete sealed
+    frame against the C# suite, value by value.
+
+### Changed
+
+- **The replay rule is settled and hardened.** `wire-contract` measured zero inversions
+  across 22 374 frames on both transports under hostile `tc netem`, so the strict counter
+  is correct and the window stays available but unused. Three conditions attach, because
+  the ordering is inherited rather than owned — TCP guarantees it, KCP gets it from a
+  hand-ported reassembly path:
+  - **Asserted, not assumed**: validators declare `RequiresOrderedTransport`, and a
+    session refuses to construct when a strict counter meets a transport that does not
+    promise ordering, so a future QUIC-datagram or raw-UDP path fails closed instead of
+    dropping legitimate frames and presenting as packet loss.
+  - **Rejections are counted by cause** — not authenticated, replayed, forward jump — and
+    returned identically. A validator that refuses silently is indistinguishable from one
+    that was never wired in, and under attack these counters are the only thing that
+    changes.
+  - **The forward jump is bounded.** Rejecting anything at or below the highest seen says
+    nothing about a leap *forward*, which burns nonce space and, with a strict counter, is
+    irreversible: every later legitimate frame carries a lower sequence and is refused for
+    ever, so the session dies quietly after authenticating perfectly well.
+
+### Added
+
+- **`shared/sealed`: the wire format, replay rule and refusal policy for realtime
+  confidentiality**, specified and tested without a cipher. Normative spec:
+  `backend/docs/SEALED-FRAMING.md`.
+  - **Sealing happens above the transport, around the Envelope**, not at the packet layer.
+    The KCP packet-crypt layer cannot be used: it is per-*listener* (kcp-go takes one
+    `BlockCrypt` for every datagram, with no per-remote key selection) so it cannot carry a
+    per-session key — and TCP, the default transport, has no such layer at all. Above the
+    transport, one implementation serves both.
+  - Frame: `[4B length][0xC1 marker][1B version][8B sequence][ciphertext][16B tag]`, with
+    the whole 10-byte header as additional authenticated data, so a frame cannot be
+    renumbered to replay it nor rolled back to an older format. `0xC1` cannot begin a
+    well-formed Envelope, so it cannot be confused with the `0x08`/`0x7B` encoding sniff.
+    Overhead is ~390 B/s per client at 15 Hz — 0.85% of the measured 45.9 KB/s.
+  - **Nonce is a bare counter, and that is safe only because each direction has its own
+    key.** Documented at the function, with the consequence stated: if one key ever serves
+    both directions, the nonce must grow a direction byte the same day or the scheme is
+    broken.
+  - **Two replay validators behind one interface** — strict-monotonic and a 64-frame
+    sliding window (the IPsec/DTLS rule) — because whether the ARQ can reorder at this
+    layer is still being measured. The finding lands as a one-line change at the call site
+    rather than a rewrite. Both refuse what they cannot judge.
+  - **Handshake transcript** `label || 0x00 || jti || 0x00 || client_pub || server_pub`,
+    with a golden vector shared with the C# implementation. The NUL separators stop two
+    different (jti, key) pairs producing identical bytes; including both ephemeral public
+    keys is what stops a replayed binding authenticating a man-in-the-middle's exchange.
+  - **The ordering rule is enforced by structure.** `sealed.Session` performs
+    authenticate-then-replay-check itself and exposes no way to do one without the other,
+    because the natural-looking implementation is backwards: the sequence is cleartext and
+    right there in the header, so reading it and checking the window before spending CPU
+    on the AEAD lets an attacker advance a peer's window with forged frames and lock out
+    the real sender. Verified against a deliberate mutation that reverses the order.
+  - **The gateway hop's anchor is decided**: a pinned gateway *public* identity key, which
+    dissolves the binding-key delivery problem rather than working around it. Recorded in
+    the spec with the distinction that matters — the old scheme shipped a *secret* in the
+    binary, this ships a *public* key whose extraction gains an attacker nothing — and with
+    the requirement to pin current **and** next, since rotation cannot be retrofitted
+    during the emergency that is the only time it is wanted.
+  - **Refusal has two states, not three.** A "preferred" mode is a downgrade attack with a
+    friendly name, so a peer that does not seal gets no session.
+
+### Changed
+
+- **`EnterWorldResponse.session_key` (field 5) is removed and the number reserved.** ADR-22
+  supersedes the derived session key with an authenticated X25519 exchange, which gives
+  forward secrecy the derivation could not. The number is reserved rather than reused: a
+  peer built against the old schema would read whatever replaced it as 32 bytes of key
+  material and fail in a way that looks like a key mismatch rather than a schema mismatch.
+- **`shared/sessionkey` records its superseded purpose.** The bytes and the golden vector
+  are unchanged; what moved is what the value is *for* — it is now the handshake binding
+  key, proving possession of `JOIN_TOKEN_SECRET`-derived material, not an encryption key.
+
+> **Nothing here encrypts anything yet.** No cipher, MAC or curve is implemented, and none
+> is stubbed: an implementation that "worked" would let every test above it pass while
+> proving nothing about the bytes. ADR-22's library choice is still open.
+
+### Added
+
+- **`shared/sessionkey`: per-session keys, derived rather than distributed.** Transport
+  encryption used ONE pre-shared key — the same value in every client binary and every
+  server — so extracting it from a single client decrypted every player's traffic for ever,
+  and rotating it meant redeploying everything at once. The key is now per join:
+  `HKDF-SHA256(ikm = JOIN_TOKEN_SECRET, salt = join token jti, info = "cuvara/session-key/v1", L = 32)`.
+  - **The game server is never sent the key.** It derives the same value from the secret it
+    holds and the `jti` in the token it already verifies, so nothing carrying key material
+    crosses the gameplay hop, and nothing is stored. Only the client is sent one, because
+    only the client cannot derive it.
+  - `sessionkey.Key` redacts itself through `fmt`, `slog`, `%#v` and `encoding/json`. The
+    realistic leak is not a deliberate log call but a struct handed to a formatter by code
+    that did not know it held a secret, and a test asserts every one of those paths.
+  - A golden vector is shared with the C# implementation. Two implementations that each
+    round-trip against themselves can still disagree with each other, and a disagreement
+    here produces no error anywhere — the client encrypts with one key, the server decrypts
+    with another, and the session simply never forms.
+  - `Info` and `Size` are pinned by a test: they are wire contract, and changing either
+    silently breaks every peer.
+- **`EnterWorldResponse.SessionKey`** (`wire.proto` field 5, Protobuf only). Tagged
+  `json:"-"` **by design**: the legacy JSON encoding cannot carry a key, because exempting
+  the field from redaction would put the material back on the path the redaction exists to
+  close — and JSON is the encoding a human is most likely to paste into an issue. The
+  consequence is stateable: a JSON client cannot be encrypted.
+
+> **Limitation recorded with the feature, not beneath it.** The client cannot derive the
+> key, so it must travel gateway → client, and the gateway hop is the *same transport
+> stack* as the gameplay hop — plaintext TCP by default. In the default configuration an
+> eavesdropper on the gateway hop reads the key and can decrypt that session. This turns
+> "compromise one binary, decrypt everyone for ever" into "eavesdrop the gateway hop,
+> decrypt one session": strictly better, and not end-to-end confidentiality.
+
+### Added
+
+- **`transport.Posture(kind, key, addr)`** — the confidentiality posture of a listener as
+  one computed fact: transport, whether a key is configured, whether packets are actually
+  ciphertext, whether they are authenticated, the cipher in force, whether the bind is
+  beyond loopback, and a one-line summary. Mirrors the C# `TransportPosture` field for
+  field so both halves of the backend describe themselves the same way.
+  - Exists because encryption is off by default **twice** — the transport defaults to
+    `tcp`, which has no packet-crypt layer, and the key defaults to empty — so no single
+    value answers "is this encrypted", and the combination that answers "no" most
+    emphatically is the default one.
+  - `Encrypted` and `Authenticated` are separate fields, and `Authenticated` is hard-coded
+    `false` with the reason stated: the KCP path is AES-256-CFB with a CRC32, and a CRC32
+    is linear, not a MAC, so a modified datagram is not detectable. One "secure" boolean
+    would let a reader take confidentiality for integrity.
+  - `KeyIgnored()` names the configuration most easily mistaken for working encryption: a
+    key set on TCP, where it is accepted and then does nothing.
+  - Bind classification is deliberately pessimistic — wildcard binds (`:8000`,
+    `0.0.0.0:8000`, `[::]:8000`) and anything unparseable count as beyond loopback, because
+    wildcard is the container shape and exempting it would exempt exactly the deployments
+    this reporting is for.
+
+### Added
+- **`EntitySnapshot.facing_brad` (field 10) and `EntitySnapshot.action` (field 11).**
+  The snapshot carried `id, type_name, x, y, hp, max_hp, type, handle, speed` and
+  nothing else — no facing, no rotation, no action state. A character could not be
+  made to face the direction it was walking, and an attack could not be animated,
+  without a schema change across both repos, so the "core plumbing is closed"
+  claim was not true of the first thing any renderer needs.
+- **Facing is a BIASED 16-bit binary radian value, not a float, and that is the
+  point.** proto3 elides a zero and 0.0 radians is a perfectly ordinary facing
+  (due east), so a float would put "facing east" and "field not sent" on the wire
+  as identical bytes — the trap `speed` has to document its way around because
+  a zero speed is genuinely meaningful. Facing has no such excuse, so wire 0 is
+  reserved and a real angle is `(v-1) * 2*Pi / 65536`: every representable
+  direction has a non-zero encoding, by construction rather than by asking every
+  implementer to remember a rule. It is also 1-3 bytes against a float's 5, on
+  the hottest message in the protocol.
+- **`EntityAction` reserves 0 for "not sent" and numbers IDLE as 1**, for the same
+  reason and following `ENTITY_TYPE_UNSPECIFIED`'s precedent. A receiver that read
+  0 as "idle" would let an old server freeze every entity into an idle pose.
+- **`messages.FacingBradFromRadians` / `RadiansFromFacingBrad`** — the reference
+  codec the C# server and the Unity client mirror; `messages.EntityAction` mirrors
+  the enum. Neither field bumped `WireProtocolVersion`: both are additive with a
+  documented zero rule and degrade visibly rather than diverging silently, which
+  the bump rules explicitly call a non-bump. Rationale, the rejected encodings
+  (`optional float`, `float`+`bool`, a direction vector) and what was deliberately
+  left out (velocity, an action sequence number): `docs/DESIGN.md`, "Entity facing
+  and action state on the wire".
+
+### Added
+- **Wire protocol version negotiation (`protocol_version`).** `wire.proto` had no
+  version field of any kind: client and server agreed on the meaning of the wire
+  by convention, and a version-skewed build was not refused — it connected,
+  parsed every byte and was confidently wrong. Adds `protocol_version` to
+  `AuthRequest`/`AuthResponse` (fields 2/4) and
+  `JoinTokenRequest`/`JoinTokenResponse` (fields 2/5), the constant
+  `messages.WireProtocolVersion` (currently **1**), `ProtocolVersionUnversioned`,
+  the reason token `ReasonProtocolVersionMismatch`
+  (`"protocol_version_mismatch"`), and `messages.CheckProtocolVersion` — the one
+  decision function both Go peers share.
+- **Semantics.** The number names what the schema MEANS, not its shape (proto3
+  already skips unknown fields) nor its encoding (already sniffed from byte 0).
+  It rides the two handshake requests, never `Envelope` — an envelope field would
+  be paid on every snapshot of every tick to restate a per-connection constant.
+  Matching is EXACT: a peer one version ahead is refused as firmly as one behind,
+  because a single integer carries no compatibility range.
+- **Zero means "did not advertise", and is admitted by default.** proto3 elides a
+  zero `uint32`, so a pre-versioning peer is indistinguishable from one sending
+  0 — the trap already documented on `EntitySnapshot.speed`. Versions start at 1
+  and 0 is reserved. Unversioned peers are admitted **on trust** and counted, so
+  the trust is visible; the migration is one flag once that counter goes flat.
+  Rationale and the rejected alternatives: `docs/DESIGN.md`, "Wire protocol
+  version".
+
+## [0.9.0] - 2026-09-05
+
+### Added
+- **`constants.KickEventStream` (`"kick"`) and `constants.EventSessionSuperseded`
+  (`"session_superseded"`)** — the gateway → game-server duplicate-login kick
+  channel (ADR-20), the Streams rebuild of what #211 deleted. One shared stream
+  (`events:kick`) rather than a key per server, because server ids churn and
+  this Redis runs `noeviction` (ADR-4); every game server consumes it through
+  its own consumer group with explicit ACK (ADR-5 — never the Pub/Sub shape the
+  removed `GatewayKickChannel` described). The C# consumer mirrors both
+  literals (`GameServer/Events/KickEvents.cs`); payload contract in
+  `gameserver-dotnet/docs/API.md`.
+
+### Removed
+- **`storage/pgstore/` package deleted** (ADR-1 follow-up). No Go binary imported
+  it — the C# game server has its own `PostgresPlayerStore`. The `pgx/v5`
+  dependency is also removed from `go.mod`.
+
+### Changed
+- **docs**: `docs/DESIGN.md` no longer says the C# game server publishes into a
+  noop — `gameserver-dotnet`'s `RedisEventStream` now feeds `events:game` with
+  this module's publisher contract whenever `REDIS_ADDR` is set (ADR-5
+  follow-up; see `backend/gameserver-dotnet/CHANGELOG.md`). No Go code changes.
+
+### Fixed
+- **`redisstore.EventStream` now reclaims the Pending Entries List**
+  ([#234](https://github.com/Cuvara/rpg-mmo-server/issues/234)). The consumer
+  only ever read `>`, and consumer names are pod names, so an entry delivered
+  to a pod that crashed between handler and `XACK` stayed pending under a name
+  no replacement would ever use — the redelivery half of at-least-once was
+  missing, and the type comment described recovery no code performed. On
+  Subscribe and every 30s (`SetReclaimInterval`) the consumer now walks the
+  group's PEL with `XAUTOCLAIM`, claims entries idle longer than 60s
+  (`SetReclaimMinIdle`) to itself, and redelivers them to the handler. Entries
+  past 5 deliveries (`SetMaxDeliveries`) are dead-lettered: ACKed unhandled,
+  logged loudly, and counted via the new `DeadLetters()` — same pattern as
+  `GroupLosses` for NOGROUP. The cap has deliberately no off switch. Rationale
+  and failure-mode analysis: `docs/DESIGN.md`, "PEL reclaim and the delivery
+  cap".
+
+### Changed
+- **`EventStream` ACKs once per read batch instead of once per message** —
+  one `XACK` round trip per `XREADGROUP` batch (Count 16). A consumer dying
+  mid-batch re-receives the whole batch via the reclaim path, which the
+  required idempotent-handler discipline already covers; a failed batch ACK is
+  logged and left pending for reclaim (duplicate delivery, never loss).
+
+### Removed
+- **`GatewayKickChannel` (`"gateway:kick"`) is gone from `constants/keys.go`**
+  ([#211](https://github.com/Cuvara/rpg-mmo-server/issues/211)). It named a Redis
+  Pub/Sub channel for coordinating duplicate-login kicks between gateway
+  instances. Nothing in either module ever read it: `grep` across the whole
+  backend returned the declaration and nothing else — no publisher, no
+  subscriber, no test. The gateway-side machinery it was declared for
+  (`KickPublisher`/`KickSubscriber`, `handleKickEvent`, the two options) was
+  never constructed by `cmd/gateway/main.go` and is removed in the same change;
+  see `backend/gateway/CHANGELOG.md` for the full reasoning.
+
+  **The comment was the most expensive part of it, and is the reason this is a
+  removal rather than a tidy-up.** Six lines of rationale explained that message
+  loss is acceptable because the old session expires by TTL, and concluded that
+  "Pub/Sub rather than Streams is the right transport". That is a reasoned
+  architectural claim sitting in the constants file, it contradicts ADR-5
+  ("Streams, not pub/sub"), and it was attached to a constant no code used. A
+  future engineer building cross-instance kick would have found it, found it
+  persuasive, and built the wrong thing — with a plausible-looking precedent to
+  cite. Deleting the constant without deleting that argument would have kept the
+  trap; deleting both is the point.
+
+  **This does not remove a capability**, because there was none: with one gateway
+  replica (ADR-17) there is no second instance to coordinate with, and the
+  publisher that would have used this channel was a no-op in every build ever
+  shipped. When a second replica is planned, the transport is a Redis Stream with
+  a consumer group and explicit ACK per ADR-5, whose key would go through
+  `EventStreamPrefix` like every other stream in this file rather than being a
+  bare channel name. `SessionKeyPrefix`, `ServerRegistryKey`, `EventStreamPrefix`
+  and `GameEventStream` are unchanged; all four have live readers.
+
+### Fixed
+- **`EventStream.Publish` now bounds `events:*` with `XADD ... MAXLEN ~ 30_000`,
+  so an untrimmed stream can no longer be what gets Redis OOM-killed**
+  ([#202](https://github.com/Cuvara/rpg-mmo-server/issues/202)). Redis here runs
+  `maxmemory-policy noeviction` deliberately — ADR-4 argues correctly that this
+  instance is a system of record and that evicting a `servers:*` hash removes a
+  live game server from matchmaking with no error anywhere. What was missing was
+  the ceiling that makes the policy *safe* rather than merely strict: `XAdd`
+  carried no `MaxLen`, no `maxmemory` was configured, and the Redis pod is capped
+  at `limits.memory: 256Mi`. The only ceiling that actually existed was the
+  kernel's, and the kernel does not refuse a write — it kills the process whole,
+  taking sessions, the registry and the stream together. That is precisely the
+  outcome `noeviction` was chosen to prevent, reached by a route the ADR did not
+  close. The deploy side of the pair (`maxmemory 128mb`, half the pod limit) is in
+  `backend/deploy/CHANGELOG.md`; this entry is the publisher-side half, which is
+  the one that runs on every write.
+
+  **The length is derived from consumer lag, not from a round number or a memory
+  figure.** The dominant event is `entity_killed`, one per mob death, from every
+  game server into the single shared `events:game` stream. Taking the 200
+  players-per-server figure `backend/docs/BENCHMARK.md` actually measures, and
+  assuming a kill roughly every 10s per player, that is ~20 events/s per server;
+  two live servers plus headroom for the smaller types (`boss_killed`,
+  `rare_drop`, `inventory_changed`) gives a planning rate of **50 events/s**. The
+  only consumer group is the gateway relay, and it falls behind only while it is
+  down — a CD deploy restarts the gateway (ADR-18 calls those outages) and
+  Kubernetes caps `CrashLoopBackOff` at 5 minutes, so **10 minutes** covers a
+  deploy, a backoff cycle and a manual restart. `50/s x 600s = 30_000 entries`.
+  The two assumptions in that chain (the kill rate and the outage window) are
+  stated in the constant's doc comment so the number can be re-derived rather
+  than guessed at when either changes.
+
+  Cross-checked against the ceiling it is meant to stay clear of: an
+  `entity_killed` entry is a short type string and a small JSON payload, under
+  256 bytes including stream node overhead, so the trimmed stream tops out near
+  **7.3MiB — about 6% of the 128mb `maxmemory`**. That relation is the point. The
+  stream is bounded by how far a consumer may fall behind, and is nowhere near
+  large enough to be what exhausts the instance; if Redis ever does refuse a
+  write, `XLEN events:game` is the thing to rule out first, not the thing to
+  blame.
+
+  **Consequence, stated plainly:** past that window entries are dropped rather
+  than delivered, so at-least-once delivery is now explicitly a promise to a
+  consumer that is *running*. A relay down for more than ten minutes at full rate
+  comes back to a gap, not a backlog — and it will not be told about the gap,
+  because a trimmed entry leaves no trace. That is the deliberate trade: these
+  events (world announcements, cross-map loot) are worth delivering because they
+  are timely, and a ten-minute-old `boss_killed` has already lost the property
+  that made it worth the write.
+
+  The approximate form (`~`) is used rather than exact: Redis trims whole
+  radix-tree nodes and stops at the first one it may not drop, so it removes
+  entries in cheap batches and may leave somewhat more than N. Exact trimming
+  would make every publish pay for entry-precise deletion in order to enforce a
+  number that is itself a rounded-off lag budget — real cost for false precision.
+
+  `SetMaxLen` is available for tests and for an operator who needs different
+  retention, and deliberately **cannot** be used as an off switch: a
+  non-positive value keeps the default instead of removing the bound, since an
+  unbounded stream against a `noeviction` Redis is the whole failure being fixed.
+  This lands *before* a real publisher exists — the C# side still publishes into
+  `NoopEventStream` (ADR-5), which is why the bug has not bitten. That was luck,
+  not design: the window between wiring the relay up and filling 256Mi is however
+  long it takes to fill 256Mi, and nobody wiring up an event relay expects to be
+  making a memory-exhaustion change.
+
+### Added
 - **`JoinTokenResponse.TickRate` — the simulation tick rate on the wire
   (`wire.proto` field 4).** Closes
   [#93](https://github.com/Cuvara/rpg-mmo-server/issues/93), the same defect as #91
@@ -76,6 +564,42 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reader: both codecs skip unknown keys. The round-trip fixture now carries a
   non-zero speed, because a zero would round-trip identically through a codec that
   dropped the field entirely and the test would pass vacuously.
+
+
+### Removed
+- **`constants.PlayerLocationKey` (`"player:location:"`), which had neither a reader
+  nor a writer in either repository** ([#210](https://github.com/Cuvara/rpg-mmo-server/issues/210)).
+  A one-line deletion earns a changelog entry because this constant had already cost
+  a real verification run. It is the same shape as #204: something declared,
+  plausible, referenced in documentation, and never wired — and like #204 the
+  declaration was invisible to every test, because a constant with no users cannot
+  fail one. What made it findable was documentation: the client repo's multi-client
+  checklist told an operator to expect three `player:location:*` keys in Redis after
+  three clients join, and a live run against `k3d-rpg-dev` on 2026-08-22 found
+  **zero** while every other row of that checklist passed. The checklist manufactured
+  its own false negative, and an operator working it top to bottom had every reason
+  to call the run broken. That row is corrected separately in
+  Cuvara/IndieRPGMMOAdventure#38.
+
+  **Deleted rather than implemented**, which was the other legal ending. Cross-server
+  player lookup ("which server is this player on", for whispers, party join and admin
+  tooling) is a real need but is not planned work, and the game server already owns
+  per-player position inside its own world — nothing today has to ask Redis where a
+  player is. A declared key that no code path honours is a claim the codebase does
+  not keep, and the cost of the claim is not zero: it misled one verification run and
+  would have misled the next. Restoring it, if cross-server lookup is ever wanted, is
+  one commit — and it would then arrive with the writer on join/leave, the TTL
+  aligned to `SessionTTL`, and the reader that were always missing.
+
+  No code change accompanies the deletion because there was no code to change; the
+  rest of this change is documentation that still believed in the key.
+  `backend/docs/ARCHITECTURE-DECISIONS.md` (ADR-1's "also dead" note and its
+  follow-up item), `backend/docs/CORE_FLOW.md` (the unused-constants item),
+  `backend/gateway/docs/DESIGN.md` (which listed the tracking as a "stub", though
+  nothing was ever stubbed) and `backend/gateway/CLAUDE.md` (which instructed the
+  gateway to "update player location in Redis: `player:{user_id}:location =
+  server_id`", a step no gateway has ever performed) are all corrected here rather
+  than left for the next person to rediscover.
 
 
 ### Added

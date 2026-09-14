@@ -31,6 +31,20 @@ namespace Shared.GameLogic.Systems
         /// <summary>Reconstructed AOI set, keyed by entity ID.</summary>
         public IReadOnlyDictionary<string, EntitySnapshotData> Entities => _entities;
 
+        /// <summary>
+        /// The same map as <see cref="Entities"/>, as its concrete type, so a per-frame
+        /// caller can enumerate it without boxing the struct enumerator.
+        /// </summary>
+        /// <remarks>
+        /// A <c>foreach</c> over the interface boxes <c>Dictionary&lt;K,V&gt;.Enumerator</c>
+        /// — one 88-byte heap object per enumeration, measured. The Unity client's view
+        /// binder enumerates this map once per rendered frame, which at 300–1000 fps made it
+        /// the only per-frame allocation left in that path (~44 KB/s at 500 fps, into a
+        /// stop-the-world GC). Read-only by contract: only the merger writes it, and a
+        /// caller that mutates it desynchronises every consumer of <see cref="Entities"/>.
+        /// </remarks>
+        public Dictionary<string, EntitySnapshotData> EntityMap => _entities;
+
         /// <summary>Number of entities currently visible.</summary>
         public int Count => _entities.Count;
 

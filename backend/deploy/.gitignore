@@ -4,3 +4,11 @@
 # layered on top. Regenerated on every scratch `up`.
 .env.scratch
 modules/*.so
+# Kubeconfig mounted into the gateway container by docker-compose.agones.yml.
+# Cluster credentials — never committed.
+kubeconfig.local
+kubeconfig.local.*
+# A filled-in copy of agones/secret-example.yaml, if anyone materialises one.
+# The template itself carries published dev placeholders and IS committed.
+agones/secret-*.local.yaml
+__pycache__/

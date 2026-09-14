@@ -197,6 +197,16 @@ public sealed class CombatCase
     /// number formatted by two different runtimes is not the thing under test.
     /// </summary>
     public string expectedErrorPrefix = "";
+
+    // simultaneous_kill
+    public int attackerHp;
+    public int targetHp;
+    public int targetAttack;
+    public int attackerDefense;
+    public int expectedAttackerHp;
+    public int expectedTargetHp;
+    public bool expectedAttackerDead;
+    public bool expectedTargetDead;
 }
 
 /// <summary>

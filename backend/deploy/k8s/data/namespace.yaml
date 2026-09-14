@@ -1,0 +1,19 @@
+# Namespace for the data tier (PostgreSQL meta + PostgreSQL gamestate + Redis)
+# and Nakama.
+#
+# NOTE ON THE NAME. deploy/k3s/namespaces.yaml reserves `rpg-data` (stores) and
+# `rpg-meta` (Nakama) as the eventual production layout. This stage uses ONE
+# namespace, `rpg-k8s-data`, deliberately:
+#   * it is a bring-up namespace that must not collide with `rpg-realtime`,
+#     which holds the live Agones fleet on the dev cluster;
+#   * splitting Nakama off from its own PostgreSQL buys nothing here and costs a
+#     second set of NetworkPolicy/DNS names to get wrong.
+# Retargeting is a one-line change in kustomization.yaml (`namespace:`) plus the
+# cross-namespace DNS suffix on NAKAMA_DB_HOST — see README.md §Namespaces.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rpg-k8s-data
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    rpg-mmo/tier: data

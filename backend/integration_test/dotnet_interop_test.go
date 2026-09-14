@@ -162,6 +162,24 @@ func startDotnetGameServer(t *testing.T) (addr string, cleanup func()) {
 // other caller wants the plain defaults.
 func startDotnetGameServerWith(t *testing.T, extraArgs, extraEnv []string) (addr string, cleanup func()) {
 	t.Helper()
+	return startDotnetGameServerRaw(t, extraArgs, extraEnv, true)
+}
+
+// startDotnetGameServerSealedDefault spawns the server with NO --sealed argument at
+// all, so GAMESERVER_SEALED's default in Program.cs is what the test runs against.
+//
+// It exists because startDotnetGameServerWith pins the flag off, which means no
+// test reached through that helper can ever fail if the default is changed. Only
+// backend/integration_test/sealed_session_e2e_test.go uses this.
+func startDotnetGameServerSealedDefault(t *testing.T, extraArgs, extraEnv []string) (addr string, cleanup func()) {
+	t.Helper()
+	return startDotnetGameServerRaw(t, extraArgs, extraEnv, false)
+}
+
+// startDotnetGameServerRaw is the shared body. pinSealedOff decides whether the
+// sealed-transport flag is forced off; see both wrappers above.
+func startDotnetGameServerRaw(t *testing.T, extraArgs, extraEnv []string, pinSealedOff bool) (addr string, cleanup func()) {
+	t.Helper()
 
 	gameServerBuildOnce.Do(buildDotnetGameServer)
 	if gameServerSkip != "" {
@@ -185,6 +203,22 @@ func startDotnetGameServerWith(t *testing.T, extraArgs, extraEnv []string) (addr
 		// the next test's server in this same suite.
 		"--metrics-addr", "",
 	)
+
+	// DO NOT DELETE THIS AS TIDYING, and do not "modernise" the callers instead.
+	// A stock server defaults to GAMESERVER_SEALED=require. The clients in this
+	// suite speak the plain [length][Envelope] framing — several of them in JSON,
+	// which can never be sealed — so against a stock server they would all be
+	// refused. Pinning the flag off is what keeps them exercising the UNSEALED
+	// wire, which is a wire the project still supports and still has to keep
+	// working.
+	//
+	// It also means none of them can detect a change to the default. That is
+	// covered deliberately elsewhere: sealed_session_e2e_test.go spawns through
+	// startDotnetGameServerSealedDefault, and is the only place the default value
+	// itself is under test.
+	if pinSealedOff {
+		serverArgs = append(serverArgs, "--sealed", "off")
+	}
 
 	var cmd *exec.Cmd
 	if gameServerNativeBin != "" {

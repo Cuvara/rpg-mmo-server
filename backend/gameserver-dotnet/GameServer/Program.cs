@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging;
 using Shared.GameLogic.Components;
 using GameServer.Agones;
+using GameServer.Content;
 using GameServer.Events;
 using GameServer.Observability;
 using GameServer.Scaffolding;
@@ -14,9 +15,63 @@ using GameServer.Server;
 
 string mode = GetArg(args, "--mode") ?? Env("GAMESERVER_MODE") ?? "map";
 string addr = GetArg(args, "--addr") ?? Env("GAMESERVER_ADDR") ?? ":9000";
-string mapId = GetArg(args, "--map-id") ?? Env("GAMESERVER_MAP_ID") ?? "map_01";
+string? explicitMapId = GetArg(args, "--map-id") ?? Env("GAMESERVER_MAP_ID");
+// The fallback is the hazard, not a missing value: a dungeon fleet pins NO map id on
+// purpose, so every pod from it lands on "map_01" here. What stops that becoming three
+// live servers for one map (ADR-2) is the registration scope -- a dungeon server writes
+// its servers:id: hash and never joins servers:map: (ADR-26 decision 8) -- not this
+// string. The warning below says so out loud, because a dungeon pod whose registry hash
+// reads map_01 is otherwise a genuinely alarming thing to find.
+string mapId = explicitMapId ?? "map_01";
 string serverId = GetArg(args, "--server-id") ?? Env("GAMESERVER_ID") ?? Env("POD_NAME") ?? $"gs-{Guid.NewGuid():N}"[..12];
 int capacity = int.TryParse(GetArg(args, "--capacity") ?? Env("GAMESERVER_CAPACITY"), out var cap) ? cap : 100;
+// Pre-join bounds (workspace audit F03). Capacity counts authenticated players only; these
+// two bound the phase before that — how many accepted sockets may sit in the handshake at
+// once, and how long each may take to deliver a complete join frame.
+int maxPendingHandshakes = int.TryParse(
+    GetArg(args, "--max-pending-handshakes") ?? Env("GAMESERVER_MAX_PENDING_HANDSHAKES"), out var mph) && mph > 0
+    ? mph : ServerOptions.DefaultMaxPendingHandshakes;
+// Wire protocol version floor. 0 (default) also admits a client that advertises no
+// version at all -- see ServerOptions.MinProtocolVersion for why that is the shipping
+// default and what has to be true before raising it.
+uint minProtocolVersion = uint.TryParse(
+    GetArg(args, "--min-protocol-version") ?? Env("GAMESERVER_MIN_PROTOCOL_VERSION"), out var mpv)
+    ? mpv : 0u;
+int handshakeTimeoutMs = int.TryParse(
+    GetArg(args, "--handshake-timeout-ms") ?? Env("GAMESERVER_HANDSHAKE_TIMEOUT_MS"), out var hto) && hto > 0
+    ? hto : (int)ServerOptions.DefaultHandshakeTimeout.TotalMilliseconds;
+// Ingestion bounds (workspace audit F04): inputs one connection may queue between two tick
+// drains, and the world-wide queue cap (0 = capacity x per-connection budget).
+int maxInputsPerTick = int.TryParse(
+    GetArg(args, "--max-inputs-per-tick") ?? Env("GAMESERVER_MAX_INPUTS_PER_TICK"), out var mipt) && mipt > 0
+    ? mipt : GameServer.World.EcsWorld.DefaultMaxInputsPerConnection;
+int maxPendingInputs = int.TryParse(
+    GetArg(args, "--max-pending-inputs") ?? Env("GAMESERVER_MAX_PENDING_INPUTS"), out var mpi) && mpi > 0
+    ? mpi : 0;
+// Downlink bound: bytes of snapshot payload one connection may be sent per snapshot.
+// The counterpart to --max-inputs-per-tick, on the other direction of the wire, and the
+// only thing bounding a snapshot's size other than the AOI radius — which bounds area,
+// not how many entities stand inside it. Explicit 0 disables it; a negative or unparsable
+// value falls back to the default rather than being treated as "off", because "off" must
+// be something an operator asked for.
+// Sealed transport on the gameplay hop. Two values, not three: a "preferred" mode is a
+// downgrade attack with a friendly name.
+//
+// DEFAULTS TO `require`. A stock server encrypts the gameplay hop and refuses every client
+// that cannot seal — which is every JSON client, and every protobuf client that does not
+// run the ClientHello/ServerHello exchange. That refusal is the point: an unencrypted
+// default is a default nobody chose, and the transport posture line at boot said so on
+// every boot for as long as it was `off`.
+//
+// `off` restores the pre-sealing server exactly. It is a deliberate, reviewable choice —
+// the local compose stack and the JSON interop tests set it explicitly — never a fallback
+// this code reaches on its own. There is no value that means "seal if the client can":
+// see the refusal below.
+string sealedMode = (GetArg(args, "--sealed") ?? Env("GAMESERVER_SEALED") ?? "require").Trim().ToLowerInvariant();
+
+int maxSnapshotBytes = int.TryParse(
+    GetArg(args, "--max-snapshot-bytes") ?? Env("GAMESERVER_MAX_SNAPSHOT_BYTES"), out var msb) && msb >= 0
+    ? msb : GameServer.Snapshot.SnapshotDeltaState.DefaultMaxSnapshotBytes;
 // Falls back to the shared constant, not to a literal. The client derives its own
 // integration step from the same constant, and it is compiled into both sides, so a
 // literal here means bumping GameConstants.DefaultTickRate moves the client and leaves
@@ -56,6 +111,11 @@ int backgroundHz = int.TryParse(GetArg(args, "--sim-background-hz") ?? Env("SIM_
 // (pre-delta behaviour), the escape hatch for a client that cannot merge deltas.
 int keyframeInterval = int.TryParse(GetArg(args, "--keyframe-interval") ?? Env("GAMESERVER_KEYFRAME_INTERVAL"), out var kf)
     ? kf : GameConstants.DefaultKeyframeInterval;
+// AOI-gather worker threads. 1 = serial, the default and the pre-pool behaviour.
+// Only takes effect above TickLoop.GatherParallelMinViewers viewers -- see
+// ServerOptions.GatherWorkers for why it is opt-in.
+int gatherWorkers = int.TryParse(GetArg(args, "--gather-workers") ?? Env("GAMESERVER_GATHER_WORKERS"), out var gw) && gw > 0
+    ? gw : 1;
 float mapWidth = float.TryParse(GetArg(args, "--map-width") ?? Env("GAMESERVER_MAP_WIDTH"),
     System.Globalization.CultureInfo.InvariantCulture, out var mw) && mw > 0f
     ? mw : GameConstants.DefaultMapWidth;
@@ -64,9 +124,17 @@ float mapHeight = float.TryParse(GetArg(args, "--map-height") ?? Env("GAMESERVER
     ? mh : GameConstants.DefaultMapHeight;
 bool useAgones = HasFlag(args, "--agones") || Env("AGONES_ENABLED") == "true";
 bool enableEnemySpawner = Env("GAMESERVER_ENEMIES") != "false"; // on by default, opt out with GAMESERVER_ENEMIES=false
+int loadTestEntities = int.TryParse(
+    GetArg(args, "--loadtest-entities") ?? Env("LOADTEST_ENTITIES"), out var lte) ? lte : 0;
 // Nakama integration: server-to-server RPC for economy + leaderboard
 string? nakamaUrl = Env("NAKAMA_URL"); // e.g. http://rpg-nakama:7350
 string nakamaHttpKey = Env("NAKAMA_HTTP_KEY") ?? "defaulthttpkey";
+// Path to a PEM certificate to PIN for the Nakama hop, when that hop runs Nakama's own
+// TLS with a certificate no CA signed (ADR-24). Unset means .NET's own validation, which
+// is right for http:// and for an https:// Nakama holding a CA-issued certificate -- and
+// which correctly refuses a self-signed one. There is no accept-anything setting, here or
+// anywhere else in this system (ADR-24 decision 4).
+string? nakamaTlsPinPath = Env("NAKAMA_TLS_PIN");
 string jwtSecret = GetArg(args, "--jwt-secret") ?? Env("JWT_SECRET") ?? "";
 // Secret the GATEWAY signs join tokens with. Deliberately NOT JWT_SECRET: this value
 // is distributed to every game-server pod, so a compromised pod must not be able to
@@ -99,6 +167,43 @@ string transportKey = Env(TransportKind.KeyEnvVar) ?? "";
 // the listen address whenever a container maps ports (listen :9000, clients reach
 // <host>:9200). Falls back to the listen address, which is correct for host mode.
 string publicAddr = GetArg(args, "--public-addr") ?? Env("GAMESERVER_PUBLIC_ADDR") ?? addr;
+// HOST ONLY, and Agones only. Replaces the host part of the address read from the Agones
+// GameServer status while the PORT still comes from that status, because under
+// portPolicy: Dynamic only Agones knows the port.
+//
+// Why this is not just GAMESERVER_PUBLIC_ADDR: status.address is the NODE address on the
+// cluster network. Measured on k3d — the status reports 172.20.0.3 and a client cannot
+// reach it (refused from WSL2, Test-NetConnection False from Windows), while 127.0.0.1,
+// which the k3d serverlb publishes, answers from both. The host is a deployment fact the
+// cluster cannot know; the port is one only the cluster knows. Hence two knobs:
+//
+//   GAMESERVER_PUBLIC_ADDR   full host:port, used when Agones is OFF
+//   GAMESERVER_ADVERTISE_HOST  host only,    used when Agones is ON and the status read worked
+//
+// Exactly one of them applies to any given deployment. Setting this one with Agones off
+// does nothing at all — see the start-up warning below.
+string? advertiseHost = GetArg(args, "--advertise-host") ?? Env("GAMESERVER_ADVERTISE_HOST");
+// Hold the registry entry back until Agones reports this GameServer Allocated, instead of
+// publishing it right after Ready. OFF by default: a fleet that has not been migrated must
+// behave exactly as it did before this option existed. Agones only — with no sidecar there
+// is no allocation to wait for, and gating on one would mean never registering (the server
+// logs and ignores it in that case).
+bool registerOnAllocated =
+    HasFlag(args, "--register-on-allocated") || Env("GAMESERVER_REGISTER_ON_ALLOCATED") == "true";
+
+// The bounded join deadline for an instanced dungeon (ADR-26). A dungeon pod that is
+// allocated and then never joined would otherwise sit Allocated forever — Agones does not
+// reclaim an Allocated pod — and the replica is lost until an operator releases it by hand.
+// Seconds; 0 disables it. Dungeon mode only; ignored on a map server. See
+// ServerOptions.DungeonJoinDeadline for why the default is 90s and not the 30s join-token TTL.
+TimeSpan joinDeadline =
+    double.TryParse(
+        GetArg(args, "--join-deadline-seconds") ?? Env("GAMESERVER_JOIN_DEADLINE_SECONDS"),
+        System.Globalization.NumberStyles.Float,
+        System.Globalization.CultureInfo.InvariantCulture,
+        out var jds) && jds >= 0
+        ? TimeSpan.FromSeconds(jds)
+        : ServerOptions.DefaultDungeonJoinDeadline;
 
 // ── Logging ──
 
@@ -109,8 +214,30 @@ using var loggerFactory = LoggerFactory.Create(builder =>
 });
 var logger = loggerFactory.CreateLogger("Program");
 
+// Resolved once so a bad AGONES_SDK_HTTP_PORT warns once rather than in both the
+// start-up banner and the SDK constructor. Meaningless when useAgones is false.
+int agonesPort = useAgones ? HttpAgonesSdk.ResolvePort(logger) : HttpAgonesSdk.DefaultPort;
+
 logger.LogInformation("GameServer .NET starting");
 logger.LogInformation("  Mode:      {Mode}", mode);
+if (GameServerHost.IsDungeonMode(mode) && explicitMapId == null)
+{
+    logger.LogWarning(
+        "  Dungeon mode with no map id configured, so the default '{MapId}' applies. This " +
+        "is expected on a dungeon fleet, which pins no GAMESERVER_MAP_ID: the value is " +
+        "recorded in this pod's servers:id: hash and NOWHERE ELSE. A dungeon server does " +
+        "not join servers:map:, so it cannot be found by map lookup and cannot become a " +
+        "second live server for '{MapId}' (ADR-26 decision 8).",
+        mapId, mapId);
+}
+if (GameServerHost.IsDungeonMode(mode))
+{
+    logger.LogInformation(
+        joinDeadline > TimeSpan.Zero
+            ? "  Join deadline: {Deadline}s — an instance whose party never arrives releases itself (ADR-26)"
+            : "  Join deadline: DISABLED — an instance whose party never arrives will hold its Agones allocation forever (ADR-26)",
+        joinDeadline.TotalSeconds);
+}
 logger.LogInformation("  Address:   {Addr}", addr);
 logger.LogInformation("  Transport: {Transport}{Encryption}", transport,
     transport == TransportKind.Kcp
@@ -119,19 +246,94 @@ logger.LogInformation("  Transport: {Transport}{Encryption}", transport,
 logger.LogInformation("  MapId:     {MapId}", mapId);
 logger.LogInformation("  ServerId:  {ServerId}", serverId);
 logger.LogInformation("  Capacity:  {Capacity}", capacity);
+logger.LogInformation("  Handshake: {Pending} pending max, {Timeout}ms deadline",
+    maxPendingHandshakes, handshakeTimeoutMs);
+logger.LogInformation("  Inputs:    {PerTick}/connection/tick, {Total} world-wide",
+    maxInputsPerTick, maxPendingInputs > 0 ? maxPendingInputs.ToString() : $"{capacity}x{maxInputsPerTick}");
 logger.LogInformation("  SimRates:  {Rates}", $"critical={criticalHz}Hz world={worldHz}Hz background={backgroundHz}Hz");
 logger.LogInformation("  Snapshots: {Mode}", keyframeInterval > 0
     ? $"delta, keyframe every {keyframeInterval} snapshots"
     : "full every tick (delta disabled)");
 logger.LogInformation("  MapSize:   {Width}x{Height} world units (centered on origin)", mapWidth, mapHeight);
-logger.LogInformation("  Agones:    {Agones}", useAgones);
+logger.LogInformation("  Agones:    {Agones}", useAgones
+    ? $"HTTP sidecar at localhost:{agonesPort}"
+    : "disabled (no-op SDK)");
 if (useAgones)
 {
-    logger.LogWarning("--agones/AGONES_ENABLED is set but has NO effect: the C# server " +
-                      "still uses the no-op Agones SDK (no Ready/Health/Shutdown is reported " +
-                      "to the sidecar). Do not rely on Agones health checks for this server yet.");
+    logger.LogInformation("  Advertise: {Advertise}",
+        string.IsNullOrWhiteSpace(advertiseHost)
+            ? "host from the Agones GameServer status (GAMESERVER_ADVERTISE_HOST unset), port from Agones"
+            : $"host '{advertiseHost}' (GAMESERVER_ADVERTISE_HOST), port from Agones");
 }
+logger.LogInformation("  Register:  {Register}",
+    registerOnAllocated && useAgones
+        ? "on Agones Allocated (a Ready-but-unallocated pod holds no registry entry)"
+        : registerOnAllocated
+            ? "at startup (GAMESERVER_REGISTER_ON_ALLOCATED set but Agones is disabled -- IGNORED)"
+            : "at startup, right after Ready (default)");
+// ── The Nakama hop's trust decision (ADR-24) ──
+//
+// Three settings have to agree and none of them implies another: whether Nakama
+// terminates TLS, whether NAKAMA_URL says https, and whether this server has the
+// certificate. Every disagreement below is refused or named out loud rather than
+// discovered as a reward RPC that silently stopped working.
+bool nakamaIsHttps = nakamaUrl is not null &&
+    nakamaUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+HttpMessageHandler? nakamaHttpHandler = null;
+string nakamaTrust = "n/a";
+
+if (!string.IsNullOrWhiteSpace(nakamaTlsPinPath))
+{
+    if (string.IsNullOrWhiteSpace(nakamaUrl))
+    {
+        logger.LogWarning("NAKAMA_TLS_PIN is set but NAKAMA_URL is not -- there is no Nakama hop to pin. Ignored.");
+    }
+    else if (!nakamaIsHttps)
+    {
+        // Refused, not downgraded. A pin against a plaintext URL is an operator who
+        // believes this hop is protected and is wrong about it, and the whole point of
+        // ADR-24's "set together or not at all" is that half-configured fails loudly.
+        logger.LogCritical(
+            "NAKAMA_TLS_PIN is set but NAKAMA_URL is '{Url}', which is not https -- refusing to start. " +
+            "Pinning a certificate on a plaintext hop protects nothing while reading as though it does. " +
+            "Move NAKAMA_URL to https:// (Nakama must be running NAKAMA_TLS_CERT/_KEY), or unset the pin.",
+            nakamaUrl);
+        return 2;
+    }
+    else
+    {
+        try
+        {
+            byte[] pin = GameServer.Nakama.NakamaTlsPin.LoadDerFromPemFile(nakamaTlsPinPath);
+            nakamaHttpHandler = GameServer.Nakama.NakamaTlsPin.CreatePinnedHandler(pin);
+            nakamaTrust = $"pinned to {nakamaTlsPinPath} (sha256:{GameServer.Nakama.NakamaTlsPin.Fingerprint(pin)})";
+        }
+        catch (Exception ex)
+        {
+            // Fatal rather than a fall back to platform validation. Falling back would be
+            // the safe DIRECTION -- it refuses a self-signed Nakama -- but it turns "your
+            // pin file is wrong" into "every reward RPC fails with a certificate error",
+            // which is a much longer walk to the same answer.
+            logger.LogCritical(ex,
+                "NAKAMA_TLS_PIN='{Path}' could not be loaded -- refusing to start.", nakamaTlsPinPath);
+            return 2;
+        }
+    }
+}
+else if (nakamaIsHttps)
+{
+    nakamaTrust = "platform trust store (no NAKAMA_TLS_PIN) -- a self-signed Nakama WILL be refused";
+}
+else if (!string.IsNullOrWhiteSpace(nakamaUrl))
+{
+    nakamaTrust = "none -- PLAINTEXT hop, the http_key crosses it in a URL query string";
+}
+
 logger.LogInformation("  Nakama:    {Nakama}", string.IsNullOrWhiteSpace(nakamaUrl) ? "disabled (NAKAMA_URL unset)" : nakamaUrl);
+if (!string.IsNullOrWhiteSpace(nakamaUrl))
+{
+    logger.LogInformation("  NakamaTLS: {Trust}", nakamaTrust);
+}
 logger.LogInformation("  Metrics:   {Metrics}", string.IsNullOrWhiteSpace(metricsAddr) ? "disabled" : metricsAddr);
 logger.LogInformation("  GameDB:    {GameDb}",
     string.IsNullOrWhiteSpace(gameDbUrl) ? "memory" : PostgresPlayerStore.MaskDsn(gameDbUrl));
@@ -139,6 +341,14 @@ logger.LogInformation("  Registry:  {Registry}",
     string.IsNullOrWhiteSpace(redisAddr)
         ? "disabled (REDIS_ADDR unset -- the gateway will NOT find this server)"
         : $"redis {redisAddr}, advertising '{publicAddr}' ({transport})");
+logger.LogInformation("  Events:    {Events}",
+    string.IsNullOrWhiteSpace(redisAddr)
+        ? "noop (REDIS_ADDR unset -- cross-server events are discarded)"
+        : $"redis streams {redisAddr} -> {RedisEventStream.KeyPrefix}{EventStreams.Game}");
+logger.LogInformation("  Kicks:     {Kicks}",
+    string.IsNullOrWhiteSpace(redisAddr)
+        ? "disabled (REDIS_ADDR unset -- duplicate-login supersede events are never acted on)"
+        : $"consuming {RedisKickConsumer.StreamKey} as group {RedisKickConsumer.GroupPrefix}{serverId}");
 // A HOSTLESS advertised address (empty, 0.0.0.0, :: or [::] as the host part) is
 // not dialable by a client: the gateway hands the value back verbatim, so only
 // clients that rewrite it to loopback themselves will connect (a C# TcpClient
@@ -151,7 +361,33 @@ logger.LogInformation("  Registry:  {Registry}",
 // Never fatal either way: the comment on publicAddr above documents that a bare
 // listen address IS correct for host mode, so refusing to start or to register
 // would break a supported topology.
-if (!string.IsNullOrWhiteSpace(redisAddr) && IsHostlessAddr(publicAddr))
+// Under Agones the hostless value is EXPECTED and is not the value that gets registered:
+// the host server reads the assigned address from the sidecar between Ready and
+// registration and advertises that instead (ADR-15 decision 2, option A). Saying
+// "clients will fail to connect" here would be wrong and would train operators to
+// ignore the line in the one topology where it still means something.
+// Set but inert: GAMESERVER_ADVERTISE_HOST only ever applies on the Agones path. Silence
+// here would leave an operator believing they had configured the advertised address while
+// the server advertised something else entirely.
+if (!string.IsNullOrWhiteSpace(advertiseHost) && !useAgones)
+{
+    logger.LogWarning(
+        "  GAMESERVER_ADVERTISE_HOST is set to '{Host}' but Agones is disabled, so it is " +
+        "IGNORED — it only replaces the host of an address read from the Agones GameServer " +
+        "status. Without Agones the advertised address is GAMESERVER_PUBLIC_ADDR " +
+        "(currently '{PublicAddr}'), which takes a full host:port.",
+        advertiseHost, publicAddr);
+}
+
+if (!string.IsNullOrWhiteSpace(redisAddr) && IsHostlessAddr(publicAddr) && useAgones)
+{
+    logger.LogInformation(
+        "  The advertised address '{Addr}' has no host part, which is expected under Agones: " +
+        "the address handed to clients is read from the GameServer status after Ready and " +
+        "registered in its place. If that read fails, this value is registered instead and " +
+        "clients will not be able to dial it.", publicAddr);
+}
+else if (!string.IsNullOrWhiteSpace(redisAddr) && IsHostlessAddr(publicAddr))
 {
     if (publicAddr == addr)
     {
@@ -215,6 +451,18 @@ if (!SimulationRates.TryCreate(criticalHz, worldHz, backgroundHz, out Simulation
 // compiler instead of asserting it at each use site.
 SimulationRates simulationRates = simRates!;
 
+if (sealedMode is not ("off" or "require"))
+{
+    logger.LogCritical(
+        "unknown GAMESERVER_SEALED value {Value} (want \"off\" or \"require\"). There is no " +
+        "\"preferred\" mode: a negotiable encryption setting is a downgrade attack with a " +
+        "friendly name.", sealedMode);
+    return 2;
+}
+var sealedRequirement = sealedMode == "require"
+    ? GameServer.Net.Sealed.SealedRequirement.Required
+    : GameServer.Net.Sealed.SealedRequirement.Disabled;
+
 if (!TransportKind.IsValid(transport))
 {
     logger.LogCritical("unknown transport {Transport} (want {Tcp} or {Kcp})",
@@ -222,22 +470,97 @@ if (!TransportKind.IsValid(transport))
     return 2;
 }
 
-// Mirror of the Go listener's warning (backend/shared/transport/transport.go): KCP
-// without a key puts the join token and every snapshot on the wire in cleartext UDP,
-// which is fine for local dev and not for anything reachable from the internet.
-if (transport == TransportKind.Kcp && string.IsNullOrWhiteSpace(transportKey))
+// Transport confidentiality posture, reported on EVERY boot rather than only on the two
+// combinations that used to warn.
+//
+// What this replaces logged nothing at all for the default configuration -- TCP with no
+// key, i.e. no encryption whatsoever -- because it only warned about KCP-without-a-key and
+// a key-set-on-TCP. The configuration most likely to be deployed by accident was the one
+// configuration that said nothing, which is exactly backwards. See TransportPosture.
+var transportPosture = TransportPosture.For(transport, transportKey, addr);
+
+if (transportPosture.Encrypted)
+{
+    // Still not silent when it is working: "encrypted but not authenticated" is a real
+    // limitation an operator needs in front of them, not a footnote in a design doc.
+    logger.LogInformation(
+        "Transport posture: {Transport}, {Summary} (cipher={Cipher}, encrypted={Encrypted}, authenticated={Authenticated}, addr={Addr})",
+        transportPosture.Transport, transportPosture.Summary, transportPosture.Cipher,
+        transportPosture.Encrypted, transportPosture.Authenticated, addr);
+}
+else if (sealedRequirement == GameServer.Net.Sealed.SealedRequirement.Required)
+{
+    // The transport IS plaintext and the summary above is accurate about it -- but
+    // "PLAINTEXT, set TRANSPORT_KEY" is the wrong thing to shout at an operator who has
+    // already solved gameplay confidentiality a layer up, and better: the sealed session
+    // is authenticated, which TRANSPORT_KEY's pre-shared key is not.
+    //
+    // Reported at Information rather than Warning for that reason, and it states what is
+    // still readable rather than implying nothing is. A boot line that said "encrypted"
+    // flat out would be the same overclaim as describing the client as verifying the
+    // server's binding.
+    logger.LogInformation(
+        "Transport posture: {Transport}, {Summary} (cipher={Cipher}, encrypted={Encrypted}, authenticated={Authenticated}, addr={Addr}) " +
+        "-- but a SEALED SESSION is required on the gameplay hop, so gameplay frames are encrypted and authenticated above this transport. " +
+        "Still readable on the wire: the join handshake before the sealed session exists (MsgJoinToken and its reply, and the sealed hello exchange), " +
+        "and the whole gateway hop.",
+        transportPosture.Transport, transportPosture.Summary, transportPosture.Cipher,
+        transportPosture.Encrypted, transportPosture.Authenticated, addr);
+}
+else
 {
     logger.LogWarning(
-        "KCP listener is UNENCRYPTED -- join tokens and gameplay traffic are in cleartext; set {KeyVar} " +
-        "(32-byte hex) before exposing this port (addr={Addr}, transport={Transport})",
-        TransportKind.KeyEnvVar, addr, TransportKind.Kcp);
+        "Transport posture: {Transport}, {Summary} (cipher={Cipher}, encrypted={Encrypted}, authenticated={Authenticated}, addr={Addr}). " +
+        "Set {KeyVar} (32-byte hex) and --transport kcp, or terminate TLS in front of this listener.",
+        transportPosture.Transport, transportPosture.Summary, transportPosture.Cipher,
+        transportPosture.Encrypted, transportPosture.Authenticated, addr, TransportKind.KeyEnvVar);
 }
-if (transport == TransportKind.Tcp && !string.IsNullOrWhiteSpace(transportKey))
+
+// The sealed posture is reported on EVERY boot, for the same reason the transport posture
+// is: the configuration most likely to be deployed by accident must not be the one that
+// says nothing. `off` is now a deliberate choice, so it gets a line saying what that
+// choice costs rather than silence.
+if (sealedRequirement == GameServer.Net.Sealed.SealedRequirement.Required)
+{
+    logger.LogInformation(
+        "Sealed session: REQUIRED (chacha20-poly1305 over authenticated X25519). Clients that cannot seal are refused: " +
+        "a JSON client is closed after the join reply and no setting fixes it, and a protobuf client that sends no " +
+        "sealed hello is closed at the handshake deadline. A Unity client must set NetworkSettings.RequireSealedSession.");
+}
+else
 {
     logger.LogWarning(
-        "{KeyVar} is set but the transport is TCP, which has no packet encryption -- the key is IGNORED. " +
-        "Use --transport kcp, or terminate TLS in front of this listener.", TransportKind.KeyEnvVar);
+        "Sealed session: OFF -- gameplay frames travel in the clear on this listener. This is not the default " +
+        "(GAMESERVER_SEALED defaults to \"require\"); something set it to \"off\" for this process.");
 }
+
+// ── Per-pod identity (ADR-25) ──
+//
+// Generated here, once, in memory. NOT read from configuration and NOT persisted: there is
+// deliberately no flag, no environment variable and no file path that can supply one,
+// because the moment such a path exists somebody mounts a fleet-wide private key into the
+// process most exposed to player-controlled input. Rotation is pod replacement -- the Fleet
+// already does it on every scale, rollout and crash -- so there is nothing to roll here.
+//
+// Unconditional, not gated on `sealedRequirement`. The key is cheap, and publishing it even
+// when this listener is not sealing keeps the registry entry uniform, so a gateway never has
+// to explain why one entry has the field and another does not.
+var serverIdentity = GameServer.Net.Sealed.ServerIdentity.Generate();
+
+// Logged at every boot, like the transport and sealed postures, because a claim about
+// identity that is not visible in the log is a claim nobody can check against a live pod.
+// The line states the limit as well as the fact: this key reaches the client over the
+// gateway hop, and while that hop is plaintext (ADR-23's TLS is implemented and off
+// everywhere) a client that checks the signature has learned that its peer holds THIS key,
+// not that this key is ours. An attacker on the client's path substitutes it in
+// enter_world_resp and forges a signature that verifies.
+logger.LogInformation(
+    "Server identity: ed25519 {IdentityKey} -- generated for THIS POD at startup, never persisted, dies with the " +
+    "process. Published to the registry as identity_key and handed to clients in enter_world_resp. A client can " +
+    "verify the sealed handshake signature with it, but that proves the gameplay peer holds this key -- it is only " +
+    "an identity guarantee once the gateway hop that delivers the key is itself authenticated (ADR-23 TLS, off " +
+    "everywhere today). See ADR-25 decision 6.",
+    serverIdentity.PublicKeyBase64);
 
 if (string.IsNullOrEmpty(jwtSecret))
 {
@@ -271,7 +594,63 @@ logger.LogInformation("  JoinToken: JOIN_TOKEN_SECRET, {Count} key(s){Rotating}"
 // ── Metrics (OpenTelemetry -> Prometheus) ──
 
 using var metrics = new GameMetrics(mapId);
+
+// Published as gauges as well as on /status: a scrape must be able to answer "is this
+// server encrypted" without a human reading a log line from boot time. Registered here,
+// immediately after the meter exists, so no scrape can observe the default-constructed
+// (unlabelled) state.
+metrics.SetTransportPosture(
+    transportPosture.Transport, transportPosture.Cipher,
+    transportPosture.Encrypted, transportPosture.Authenticated);
 await using var metricsEndpoint = MetricsEndpoint.TryStart(metricsAddr, metrics, serverId, logger);
+
+// AFTER TryStart, never before: TryStart is what builds the MeterProvider, and a
+// measurement recorded with nothing subscribed to the meter is silently dropped. Priming
+// in the GameMetrics constructor looked right, passed its tests, and produced no series at
+// all on a live scrape. See GameMetrics.PrimeCounters.
+metrics.PrimeCounters();
+
+// ── Game content (items, and whatever content types follow) ──
+//
+// Loaded and validated BEFORE the listener opens. A server that cannot vouch for its
+// content refuses to start rather than serving an unknowable subset of the intended
+// game: every downstream symptom — a missing item, a wrong stat, a loot table pointing
+// at nothing — would otherwise be attributed to whichever system noticed first instead
+// of to the file that was wrong.
+//
+// When nothing is configured the directory is found by walking up from the BINARY, not
+// from the working directory. A relative default is resolved against the working
+// directory, which belongs to whoever launched the process rather than to the deployment:
+// it works under `dotnet run` from the module directory and fails everywhere else. It
+// failed every integration test on first contact, because those launch the server from
+// their own directory.
+string? contentDir = GetArg(args, "--content-dir") ?? Env("CONTENT_DIR")
+    ?? ContentLoader.ResolveDefaultDirectory();
+LoadedContent content;
+if (contentDir == null)
+{
+    logger.LogCritical(
+        "No content directory was configured and none was found by searching upward from {Base}. " +
+        "Set --content-dir or CONTENT_DIR to the directory holding {File}.",
+        AppContext.BaseDirectory, ContentLoader.ItemsFileName);
+    return 1;
+}
+
+try
+{
+    content = ContentLoader.Load(contentDir);
+    logger.LogInformation(
+        "Content loaded from {Dir}: {Items} items, hash {Hash}",
+        contentDir, content.Database.ItemCount, content.Hash);
+}
+catch (ContentLoadException ex)
+{
+    // The message already enumerates every problem found, so it is logged as-is rather
+    // than wrapped: re-describing it here would push the detail an author needs down
+    // below a summary that says less.
+    logger.LogCritical("{Message}", ex.Message);
+    return 1;
+}
 
 // ── Player store (postgres when GAME_DB_URL is set, otherwise in-memory) ──
 
@@ -324,7 +703,10 @@ if (!string.IsNullOrWhiteSpace(redisAddr))
             PublicAddr = publicAddr,
             Transport = transport,
             Capacity = capacity,
-            Ttl = RegistryDefaults.HeartbeatTtl
+            Ttl = RegistryDefaults.HeartbeatTtl,
+            // ADR-25. Rebuilt into every registration AND every heartbeat repair, so an
+            // entry that Redis lost and the loop re-created is never missing the key.
+            IdentityKey = serverIdentity.PublicKeyBase64
         };
     }
     catch (Exception ex)
@@ -337,6 +719,45 @@ if (!string.IsNullOrWhiteSpace(redisAddr))
             "so the gateway will not hand any client to this server", redisAddr);
     }
 }
+
+// ── Event stream (cross-server events, ADR-5) ──
+//
+// Redis-backed when REDIS_ADDR is configured — the same selector as the registry above,
+// because it is the same Redis (deploy manifests pass one REDIS_ADDR/REDIS_PASSWORD pair
+// to the gameserver container). Noop otherwise. The stream holds its OWN multiplexer
+// rather than sharing the registry's: the registry deregisters during host drain while
+// the event stream flushes after it, and independent lifetimes cost one idle connection.
+// Like the registry, a failure here is deliberately non-fatal: events are telemetry/feed
+// (the authoritative reward path is the kill batcher), so the map must not stay offline
+// for want of them.
+
+RedisEventStream? redisEventStream = null;
+if (!string.IsNullOrWhiteSpace(redisAddr))
+{
+    try
+    {
+        redisEventStream = await RedisEventStream.ConnectAsync(
+            redisAddr, redisPassword,
+            loggerFactory.CreateLogger<RedisEventStream>(), metrics);
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex,
+            "Could not build the Redis event stream for {Addr}; falling back to Noop, " +
+            "so cross-server events from this server are DISCARDED", redisAddr);
+    }
+}
+
+// ── Agones SDK ──
+
+// ADR-14 decision 1: the real client speaks the sidecar's HTTP interface, not gRPC, so the
+// module keeps its NativeAOT and no-external-dependencies rules. Off by default and
+// selected only by --agones / AGONES_ENABLED=true; the no-op branch is byte-for-byte the
+// behaviour that shipped before, including no health loop (the host skips it when the SDK
+// reports IsEnabled == false).
+IAgonesSdk agonesSdk = useAgones
+    ? new HttpAgonesSdk(loggerFactory.CreateLogger<HttpAgonesSdk>(), $"http://localhost:{agonesPort}/")
+    : new NoopAgonesSdk();
 
 // ── Build server options ──
 
@@ -351,42 +772,51 @@ var options = new ServerOptions
     TickRate = tickRate,
     SimulationRates = simulationRates,
     KeyframeInterval = keyframeInterval,
+    GatherWorkers = gatherWorkers,
     MapBounds = MapBounds.FromSize(mapWidth, mapHeight),
     Capacity = capacity,
+    MaxPendingHandshakes = maxPendingHandshakes,
+    MinProtocolVersion = minProtocolVersion,
+    HandshakeTimeout = TimeSpan.FromMilliseconds(handshakeTimeoutMs),
+    MaxInputsPerConnection = maxInputsPerTick,
+    MaxPendingInputs = maxPendingInputs,
+    MaxSnapshotBytes = maxSnapshotBytes,
+    SealedTransport = sealedRequirement,
+    ServerIdentity = serverIdentity,
     JwtSecret = jwtSecret,
     JoinTokenSecret = joinTokenSecret,
     HoldTtl = mode == "dungeon" ? TimeSpan.FromSeconds(60) : TimeSpan.FromSeconds(30),
     SaveInterval = TimeSpan.FromSeconds(30),
     PlayerStore = playerStore,
-    // Both branches are intentionally Noop: no real Agones SDK client exists for
-    // the C# server yet, so --agones/AGONES_ENABLED currently changes nothing.
-    // The flag is kept so deployment manifests do not have to change when the
-    // real SDK lands. See backend/docs/ARCHITECTURE-DECISIONS.md, ADR-6.
-    AgonesSdk = new NoopAgonesSdk(),
-    // Always Noop: no Redis-backed IEventStream implementation exists yet, so
-    // cross-server events are generated (entity_killed) and then discarded.
-    // NOT for want of a Redis client — this process has one and uses it to
-    // self-register (Registry/RedisServerRegistry.cs, StackExchange.Redis).
-    // What is missing is the producer side of the stream; the gateway's relay
-    // subscribes to `events:game` and no live publisher feeds it. See ADR-5.
-    EventStream = new NoopEventStream(),
+    AgonesSdk = agonesSdk,
+    AdvertiseHost = advertiseHost,
+    RegisterOnAllocated = registerOnAllocated,
+    DungeonJoinDeadline = joinDeadline,
+    // Redis Streams when REDIS_ADDR is configured (RedisEventStream XADDs into
+    // `events:game`, the stream the gateway's relay consumes — ADR-5); Noop
+    // otherwise, and cross-server events are generated (entity_killed) and then
+    // discarded.
+    EventStream = (IEventStream?)redisEventStream ?? new NoopEventStream(),
     LoggerFactory = loggerFactory,
     Metrics = metrics,
     ServerRegistry = serverRegistry,
     Registration = registrationOptions,
     // The composition root decides what the game is. The core host only knows it has
     // a phase to tick; see ISimulationPhase.
-    SimulationPhaseFactory = enableEnemySpawner
-        ? (world, loggerFactory, onGroupRan) => new EnemySpawner(world, simulationRates, loggerFactory.CreateLogger<EnemySpawner>(), onGroupRan)
-        : null,
+    SimulationPhaseFactory = loadTestEntities > 0
+        ? (world, loggerFactory, onGroupRan) => new GameServer.Scaffolding.LoadTestSpawner(world, simulationRates, loadTestEntities, loggerFactory.CreateLogger<GameServer.Scaffolding.LoadTestSpawner>(), onGroupRan)
+        : enableEnemySpawner
+            ? (world, loggerFactory, onGroupRan) => new EnemySpawner(world, simulationRates, loggerFactory.CreateLogger<EnemySpawner>(), onGroupRan)
+            : null,
     // The composition root is the one place allowed to know what the game is, so it is
     // where the status endpoint's entity count comes from. The JSON field stays
     // `enemies_alive` — the Unity DOTS sample polls /status and reads it.
-    StatusEntityCount = enableEnemySpawner
+    StatusEntityCount = (loadTestEntities > 0 || enableEnemySpawner)
         ? static world => world.CountWith<GameServer.World.Components.EnemyAi>()
         : null,
     NakamaUrl = nakamaUrl,
-    NakamaHttpKey = nakamaHttpKey
+    NakamaHttpKey = nakamaHttpKey,
+    NakamaHttpHandler = nakamaHttpHandler
 };
 
 // ── Graceful shutdown on SIGINT / SIGTERM ──
@@ -417,20 +847,128 @@ using var sigTerm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, RequestS
 // ── Run ──
 
 var server = new GameServerHost(options);
-var startTime = DateTime.UtcNow;
+
+// ── Duplicate-login kick consumer (events:kick, ADR-5) ──
+//
+// The other half of the gateway's supersede publish: without it a user who logs in
+// again keeps their old game connection alive here forever. Same REDIS_ADDR selector
+// and same non-fatal failure policy as the registry and event stream above — a map
+// must not stay offline for want of the kick path, but the failure is loud because
+// running without it silently re-opens the two-live-logins gap.
+RedisKickConsumer? kickConsumer = null;
+if (!string.IsNullOrWhiteSpace(redisAddr))
+{
+    try
+    {
+        kickConsumer = await RedisKickConsumer.ConnectAsync(
+            redisAddr, redisPassword, serverId,
+            p => server.KickPlayerAsync(p.UserId, p.Jti),
+            loggerFactory.CreateLogger<RedisKickConsumer>());
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex,
+            "Could not start the duplicate-login kick consumer for {Addr}; supersede " +
+            "events for this server will NOT be acted on (a re-logging-in user keeps " +
+            "their old connection here)", redisAddr);
+    }
+}
+// Monotonic, not DateTime.UtcNow. `current_tick / uptime_seconds` is how an observer
+// derives an achieved tick rate, and the tick loop is paced by Stopwatch (CLOCK_MONOTONIC);
+// dividing it by a wall-clock duration measures the host's clock drift as well as the
+// server. On this box that drift is 10-17% and it already produced one filed-and-closed
+// non-defect (#147, diagnosed in #153). Both terms of that quotient now come from the same
+// clock. See ServerStatus.UptimeSeconds.
+var uptime = System.Diagnostics.Stopwatch.StartNew();
+
+// Serve the content set clients need. The canonical bytes are handed over verbatim —
+// see SetContentProvider for why this is not a re-serialisation.
+metricsEndpoint?.SetContentProvider(() => (content.CanonicalBytes, content.Hash));
 
 // Wire up the /status JSON endpoint with live server state.
-metricsEndpoint?.SetStatusProvider(() => new ServerStatus
+metricsEndpoint?.SetStatusProvider(() =>
 {
-    Ok = true,
-    TickRate = tickRate,
-    CurrentTick = server.CurrentTick,
-    PlayersOnline = metrics.PlayersOnline,
-    Entities = server.EntityCount,
-    EnemiesAlive = server.EnemiesAlive,
-    Redis = serverRegistry != null ? "connected" : "disconnected",
-    Postgres = postgresStore != null ? "connected" : "disconnected",
-    UptimeSeconds = (long)(DateTime.UtcNow - startTime).TotalSeconds
+    // Rates come from the RESOLVED SimulationRates, never from the legacy `tickRate`
+    // scalar. `tickRate` is `--tick-rate` / GAMESERVER_TICK_RATE, which no deployment
+    // sets, so reading it here reported the compiled-in default forever regardless of
+    // what the server was running — #144.
+    var status = new ServerStatus
+    {
+        Ok = true,
+        // MEASURED, from Stopwatch. Published alongside the configured rates precisely so
+        // that no reader has to divide current_tick by uptime_seconds to get one — that
+        // arithmetic mixed a monotonic counter with a wall clock and produced #147.
+        AchievedTickHz = server.AchievedTickHz,
+        CurrentTick = server.CurrentTick,
+        PlayersOnline = metrics.PlayersOnline,
+        Capacity = capacity,
+        Entities = server.EntityCount,
+        EnemiesAlive = server.EnemiesAlive,
+        AttacksReceived = server.AttackStats.Received,
+        AttacksUnresolved = server.AttackStats.Unresolved,
+        AttacksRejected = server.AttackStats.Rejected,
+        AttacksAccepted = server.AttackStats.Accepted,
+        AttackRateViolations = server.AttackRates.Violations,
+        AttackKills = server.AttackStats.Kills,
+        LastAttackRejection = server.AttackStats.LastRejection,
+        Redis = serverRegistry != null ? "connected" : "disconnected",
+        EventStream = redisEventStream != null ? "redis" : "noop",
+        EventsDropped = redisEventStream?.Dropped ?? 0,
+        EventPublishFailures = redisEventStream?.PublishFailures ?? 0,
+        KickConsumer = kickConsumer != null ? "redis" : "disabled",
+        PlayersKicked = metrics.PlayersKicked,
+        HandshakesPending = server.PendingHandshakes,
+        HandshakesRejected = metrics.HandshakesRejected,
+        InputsDropped = metrics.InputsDropped,
+        Transport = transportPosture.Transport,
+        TransportKeyConfigured = transportPosture.KeyConfigured,
+        TransportEncrypted = transportPosture.Encrypted,
+        TransportAuthenticated = transportPosture.Authenticated,
+        TransportCipher = transportPosture.Cipher,
+        TransportPostureSummary = transportPosture.Summary,
+        SealedRequired = sealedRequirement == GameServer.Net.Sealed.SealedRequirement.Required,
+        SealedCipher = sealedRequirement == GameServer.Net.Sealed.SealedRequirement.Required
+            ? "chacha20-poly1305"
+            : "none",
+        FrameOrderObserved = server.FrameOrder.FramesObserved,
+        FrameOrderInversions = server.FrameOrder.Inversions,
+        FrameOrderDuplicates = server.FrameOrder.Duplicates,
+        FrameOrderLargestBackwardJump = server.FrameOrder.LargestBackwardJump,
+        FrameOrderForwardGaps = server.FrameOrder.ForwardGaps,
+        InputsRejected = metrics.InputsRejectedTotal,
+        // Every reason, always, including the ones at zero. That is the whole point of the
+        // bounded enum: the healthy reading for these is zero, and a missing key would be
+        // indistinguishable from a build without the feature.
+        InputsRejectedByReason = GameServer.Input.InputRejection.All.ToDictionary(
+            GameServer.Input.InputRejection.Label,
+            metrics.InputsRejected),
+        AnomalyAccountsTracked = server.Anomalies.TrackedAccounts,
+        AnomalyAccountsOverThreshold = server.Anomalies.AccountsOverThreshold(),
+        AnomalyAlerts = metrics.AnomalyAlerts,
+        AnomalyAccountsDropped = server.Anomalies.DroppedAccounts,
+        AnomalyTopAccounts = server.Anomalies.TopByScore(10)
+            .Select(a => new GameServer.Observability.AnomalousAccount
+            {
+                UserId = a.UserId,
+                Rejections = a.Total,
+                Score = a.Score,
+                Alerts = a.Alerts,
+                ByReason = GameServer.Input.InputRejection.All.ToDictionary(
+                    GameServer.Input.InputRejection.Label,
+                    r => a.ByReason[(int)r]),
+            })
+            .ToList(),
+        MaxSnapshotBytes = maxSnapshotBytes,
+        SnapshotBytes = metrics.SnapshotBytes,
+        SnapshotEntitiesShed = metrics.SnapshotEntitiesShed,
+        SnapshotRemovalsDeferred = metrics.SnapshotRemovalsDeferred,
+        SnapshotMaxShedAge = metrics.MaxShedAge,
+        TransfersRejected = metrics.TransfersRejected,
+        Postgres = postgresStore != null ? "connected" : "disconnected",
+        UptimeSeconds = (long)uptime.Elapsed.TotalSeconds
+    };
+    status.ApplyRates(simulationRates);
+    return status;
 });
 
 try
@@ -448,8 +986,17 @@ catch (Exception ex)
 }
 finally
 {
-    // Order matters: drain the server (final save) before closing the DB pool.
+    // The kick consumer first: its handler calls into the server, so no supersede
+    // event may land mid-teardown. Graceful dispose also destroys this server's
+    // consumer group in Redis (see RedisKickConsumer).
+    if (kickConsumer is not null) await kickConsumer.DisposeAsync();
+    // Order matters: drain the server (final save) before closing the DB pool — and before
+    // disposing the Agones client, whose HttpClient the drain's ShutdownAsync still needs.
     await server.DisposeAsync();
+    // After the server: its dispose drains EventPublisher's queue INTO the event
+    // stream's queue, and this flushes that queue to Redis (bounded window).
+    if (redisEventStream is not null) await redisEventStream.DisposeAsync();
+    if (agonesSdk is IDisposable disposableAgones) disposableAgones.Dispose();
     if (postgresStore is not null) await postgresStore.DisposeAsync();
 }
 

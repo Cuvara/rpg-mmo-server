@@ -247,3 +247,79 @@ func (s *MemoryEventStream) Close() error {
 	s.closed = true
 	return nil
 }
+
+// MemoryDungeonIndex is an in-process storage.DungeonIndex for tests and for
+// the gateway's default (non-Redis) backend.
+//
+// TTLs are honoured, not ignored: the expiry is half the behaviour this index
+// has -- a claim that never expired would wedge a party permanently after one
+// gateway crash, and a test that cannot reach that case cannot pin it.
+type MemoryDungeonIndex struct {
+	mu      sync.Mutex
+	claims  map[string]memoryDungeonEntry
+	parties map[string]memoryDungeonEntry
+	now     func() time.Time
+}
+
+type memoryDungeonEntry struct {
+	value     string
+	expiresAt time.Time
+}
+
+// NewMemoryDungeonIndex creates an empty index.
+func NewMemoryDungeonIndex() *MemoryDungeonIndex {
+	return &MemoryDungeonIndex{
+		claims:  make(map[string]memoryDungeonEntry),
+		parties: make(map[string]memoryDungeonEntry),
+		now:     time.Now,
+	}
+}
+
+// SetClock replaces the clock, so a test can reach expiry without sleeping.
+func (m *MemoryDungeonIndex) SetClock(now func() time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.now = now
+}
+
+// ClaimAllocation returns true for the first caller and false while the claim
+// is unexpired.
+func (m *MemoryDungeonIndex) ClaimAllocation(_ context.Context, partyID, holder string, ttl time.Duration) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if e, ok := m.claims[partyID]; ok && m.now().Before(e.expiresAt) {
+		return false, nil
+	}
+	m.claims[partyID] = memoryDungeonEntry{value: holder, expiresAt: m.now().Add(ttl)}
+	return true, nil
+}
+
+// Publish records the instance for the party.
+func (m *MemoryDungeonIndex) Publish(_ context.Context, partyID, serverID string, ttl time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.parties[partyID] = memoryDungeonEntry{value: serverID, expiresAt: m.now().Add(ttl)}
+	return nil
+}
+
+// Lookup returns the recorded instance, or ErrNotFound once it has expired.
+func (m *MemoryDungeonIndex) Lookup(_ context.Context, partyID string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	e, ok := m.parties[partyID]
+	if !ok || !m.now().Before(e.expiresAt) {
+		return "", ErrNotFound
+	}
+	return e.value, nil
+}
+
+// Release drops both entries for the party.
+func (m *MemoryDungeonIndex) Release(_ context.Context, partyID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.claims, partyID)
+	delete(m.parties, partyID)
+	return nil
+}

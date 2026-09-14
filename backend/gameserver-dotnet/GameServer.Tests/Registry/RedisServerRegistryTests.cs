@@ -17,14 +17,25 @@ public class RedisServerRegistryTests
 
     public RedisServerRegistryTests(RedisFixture redis) => _redis = redis;
 
-    private static ServerInfo Info(string serverId, string mapId, int players = 0) =>
-        new(serverId, mapId, "10.0.0.5:9200", "tcp", 100, players);
+    /// <summary>A fixed, valid base64 Ed25519 public key, so the hash assertions can pin bytes.</summary>
+    private const string TestIdentityKey = "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=";
+
+    private static ServerInfo Info(string serverId, string mapId, int players = 0,
+        string identityKey = TestIdentityKey) =>
+        new(serverId, mapId, "10.0.0.5:9200", "tcp", 100, players, identityKey);
+
+    /// <summary>
+    /// The TTL <see cref="ConnectAsync"/> uses unless a test asks for another. Named rather
+    /// than inlined because the TTL assertions below assert on this exact value: a test that
+    /// pins the level Redis must report has to be able to say what that level is.
+    /// </summary>
+    private static readonly TimeSpan Ttl = TimeSpan.FromSeconds(15);
 
     private async Task<(RedisServerRegistry reg, IConnectionMultiplexer mux)> ConnectAsync(TimeSpan? ttl = null)
     {
         var options = RedisServerRegistry.BuildOptions(_redis.Addr, null);
         var mux = await ConnectionMultiplexer.ConnectAsync(options);
-        var reg = new RedisServerRegistry(mux, ttl ?? TimeSpan.FromSeconds(15), NullLogger.Instance);
+        var reg = new RedisServerRegistry(mux, ttl ?? Ttl, NullLogger.Instance);
         return (reg, mux);
     }
 
@@ -36,7 +47,7 @@ public class RedisServerRegistryTests
         await using var _ = reg;
 
         string serverId = $"gs-shape-{Guid.NewGuid():N}"[..16];
-        await reg.RegisterAsync(Info(serverId, "map_shape", players: 7), default);
+        await reg.RegisterAsync(Info(serverId, "map_shape", players: 7), RegistrationScope.MapIndexed, default);
 
         var db = mux.GetDatabase();
         var hash = (await db.HashGetAllAsync($"servers:id:{serverId}"))
@@ -49,42 +60,100 @@ public class RedisServerRegistryTests
         Assert.Equal("tcp", hash["transport"]);
         Assert.Equal("100", hash["capacity"]);
         Assert.Equal("7", hash["player_count"]);
-        Assert.Equal(6, hash.Count); // no extra fields the gateway would not expect
+        // ADR-25. The gateway reads this field with sealed.DecodeIdentityKey and hands the
+        // decoded bytes to the client; a rename or a different base64 alphabet here is a
+        // silent break, because the gateway would read an empty key and every client that
+        // requires identity would refuse a server that is perfectly capable of it.
+        Assert.Equal(TestIdentityKey, hash["identity_key"]);
+        Assert.Equal(7, hash.Count); // no extra fields the gateway would not expect
 
         // The map index is a plain SET of ids, with no TTL of its own.
         Assert.True(await db.SetContainsAsync("servers:map:map_shape", serverId));
         Assert.Equal(TimeSpan.Zero, await db.KeyTimeToLiveAsync("servers:map:map_shape") ?? TimeSpan.Zero);
 
-        // The hash carries the liveness TTL.
-        var ttl = await db.KeyTimeToLiveAsync($"servers:id:{serverId}");
-        Assert.NotNull(ttl);
-        Assert.InRange(ttl!.Value.TotalSeconds, 1, 15);
+        // The hash carries the liveness TTL, and this asserts its LEVEL from a single
+        // read — not decay between two reads.
+        //
+        // This used to compare two reads, on the stated grounds that decay is "immune to
+        // clock steps (see #161)". That is false, and #175 has the counter-example: a run
+        // wrote a 15s TTL and Redis reported 17.23s remaining. Redis computes PTTL as
+        // `expire_at_ms - now_ms` from its OWN wall clock, so a remaining TTL above the
+        // configured maximum is arithmetically impossible unless CLOCK_REALTIME stepped
+        // backwards between the two reads — which is #153, observed here twice. A
+        // Stopwatch cannot rescue the old form either: the quantity asserted on is computed
+        // inside Redis, where this process's monotonic clock does not reach.
+        //
+        // A single read is self-consistent no matter what the clock does afterwards, and it
+        // pins the thing the test actually names: the deploy script's 3600s TTL. It is the
+        // stronger assertion — decay only proved the number moved down, this proves the
+        // number is inside the window the gateway's liveness contract requires.
+        var ttl1 = await db.KeyTimeToLiveAsync($"servers:id:{serverId}");
+        Assert.NotNull(ttl1);
+        Assert.InRange(ttl1!.Value, TimeSpan.Zero, Ttl);
+    }
+
+    /// <summary>
+    /// A server that publishes no identity key still writes a complete, readable entry
+    /// (ADR-25), because an empty key must not take a map offline.
+    /// </summary>
+    /// <remarks>
+    /// The field is written EMPTY rather than omitted. Omitting it would make an old entry
+    /// and a new one differ in shape as well as in content, and the Go reader's
+    /// <c>f["identity_key"]</c> yields "" for both — so writing the empty string keeps one
+    /// shape for the gateway to parse and one meaning for it to act on.
+    /// </remarks>
+    [SkippableFact]
+    public async Task Register_WithNoIdentity_WritesAnEmptyFieldRatherThanOmittingIt()
+    {
+        _redis.SkipUnlessAvailable(nameof(Register_WithNoIdentity_WritesAnEmptyFieldRatherThanOmittingIt));
+        var (reg, mux) = await ConnectAsync();
+        await using var _ = reg;
+
+        string serverId = $"gs-noid-{Guid.NewGuid():N}"[..16];
+        await reg.RegisterAsync(Info(serverId, "map_noid", identityKey: ""), RegistrationScope.MapIndexed, default);
+
+        var db = mux.GetDatabase();
+        var hash = (await db.HashGetAllAsync($"servers:id:{serverId}"))
+            .ToDictionary(e => e.Name.ToString(), e => e.Value.ToString());
+
+        Assert.True(hash.ContainsKey("identity_key"));
+        Assert.Equal("", hash["identity_key"]);
+        Assert.Equal(7, hash.Count);
+        // Still findable: an identity-less server is a server, not a broken entry.
+        Assert.True(await db.SetContainsAsync("servers:map:map_noid", serverId));
     }
 
     [SkippableFact]
     public async Task Heartbeat_ReArmsTtl_AndReportsMissingEntry()
     {
         _redis.SkipUnlessAvailable(nameof(Heartbeat_ReArmsTtl_AndReportsMissingEntry));
-        var (reg, mux) = await ConnectAsync(TimeSpan.FromSeconds(10));
+        var hbTtl = TimeSpan.FromSeconds(10);
+        var (reg, mux) = await ConnectAsync(hbTtl);
         await using var _ = reg;
         var db = mux.GetDatabase();
 
         string serverId = $"gs-hb-{Guid.NewGuid():N}"[..16];
-        await reg.RegisterAsync(Info(serverId, "map_hb"), default);
+        await reg.RegisterAsync(Info(serverId, "map_hb"), RegistrationScope.MapIndexed, default);
 
-        // Let the TTL visibly decay, then prove the heartbeat pushes it back up.
+        // Let some of the TTL burn off, then prove the heartbeat re-arms it.
+        //
+        // There is deliberately no "the TTL decayed below 9s" precondition any more. That
+        // read asserted on a quantity Redis derives from its own wall clock, and on this
+        // host that clock steps (#153): a run measured 10.254s remaining on a 10s TTL after
+        // a 2.5s wait, which no monotonic clock can produce. The precondition was measuring
+        // the box, not the product.
+        //
+        // What replaces it is stronger, not weaker. `after > before` only proved the
+        // direction; asserting the LEVEL pins the value the product is required to write —
+        // a heartbeat must reset the key to the full configured TTL, so anything below
+        // ttl-1s is a real defect that the old comparison would have passed happily.
         await Task.Delay(2500);
-        var beforeTtl = await db.KeyTimeToLiveAsync($"servers:id:{serverId}");
-        Assert.NotNull(beforeTtl);
-        Assert.True(beforeTtl!.Value.TotalSeconds < 9,
-            $"expected the TTL to have decayed below 9s, was {beforeTtl.Value.TotalSeconds}s");
 
         Assert.True(await reg.HeartbeatAsync(serverId, default));
 
         var afterTtl = await db.KeyTimeToLiveAsync($"servers:id:{serverId}");
         Assert.NotNull(afterTtl);
-        Assert.True(afterTtl!.Value > beforeTtl.Value,
-            $"heartbeat did not re-arm the TTL ({beforeTtl.Value.TotalSeconds}s -> {afterTtl.Value.TotalSeconds}s)");
+        Assert.InRange(afterTtl!.Value, hbTtl - TimeSpan.FromSeconds(1), hbTtl);
 
         // A heartbeat for an entry that is gone must report false, not throw — that
         // is the signal RegistrationService re-registers on.
@@ -104,7 +173,7 @@ public class RedisServerRegistryTests
         var db = mux.GetDatabase();
 
         string serverId = $"gs-exp-{Guid.NewGuid():N}"[..16];
-        await reg.RegisterAsync(Info(serverId, "map_exp"), default);
+        await reg.RegisterAsync(Info(serverId, "map_exp"), RegistrationScope.MapIndexed, default);
         Assert.True(await db.KeyExistsAsync($"servers:id:{serverId}"));
 
         await Task.Delay(1800);
@@ -121,7 +190,7 @@ public class RedisServerRegistryTests
         var db = mux.GetDatabase();
 
         string serverId = $"gs-dereg-{Guid.NewGuid():N}"[..16];
-        await reg.RegisterAsync(Info(serverId, "map_dereg"), default);
+        await reg.RegisterAsync(Info(serverId, "map_dereg"), RegistrationScope.MapIndexed, default);
 
         await reg.DeregisterAsync(serverId, "map_dereg", default);
 
@@ -138,7 +207,7 @@ public class RedisServerRegistryTests
         var db = mux.GetDatabase();
 
         string serverId = $"gs-count-{Guid.NewGuid():N}"[..16];
-        await reg.RegisterAsync(Info(serverId, "map_count"), default);
+        await reg.RegisterAsync(Info(serverId, "map_count"), RegistrationScope.MapIndexed, default);
 
         Assert.True(await reg.UpdatePlayerCountAsync(serverId, 42, default));
         Assert.Equal("42", (await db.HashGetAsync($"servers:id:{serverId}", "player_count")).ToString());

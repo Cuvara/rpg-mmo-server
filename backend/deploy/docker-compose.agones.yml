@@ -1,0 +1,132 @@
+# Overlay: let the compose-run gateway allocate game servers from an Agones
+# fleet running in a k3d cluster.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.agones.yml \
+#     --profile realtime up -d gateway
+#
+# It is an OVERLAY and not part of the base file for two reasons, both of which
+# would otherwise break stacks that have no cluster at all:
+#   * the kubeconfig bind mount — compose creates a DIRECTORY in place of a bind
+#     source that does not exist, so a base-file mount would plant an empty
+#     ./kubeconfig.local directory in every stack;
+#   * the external network below — compose REFUSES TO START when an external
+#     network is missing, so naming it in the base file would make the entire
+#     stack depend on a k3d cluster existing.
+#
+# ---------------------------------------------------------------------------
+# WHY THE GATEWAY NEEDS A KUBECONFIG
+# ---------------------------------------------------------------------------
+# The deploy path is not moving to Kubernetes. The gateway stays in compose and
+# only the game servers run under Agones, so the gateway allocates
+# OUT-OF-CLUSTER, over the Kubernetes API (ADR-15 decision 3, item 6 — the
+# prerequisite most likely to be discovered late, because the allocator is
+# already written, already tested, and already works on a developer's
+# kubeconfig).
+#
+# gateway/registry/agones_allocator.go resolveRESTConfig tries, in order:
+# in-cluster ServiceAccount -> ALLOCATOR_KUBECONFIG -> $KUBECONFIG ->
+# ~/.kube/config. None of the four exists inside the gateway container, and
+# cmd/gateway/main.go treats a failed allocator construction as FATAL (exit 1).
+# So without this mount, ALLOCATOR=agones does not start degraded — it does not
+# start.
+#
+# ---------------------------------------------------------------------------
+# HOW IT REACHES THE API SERVER: join k3d's network, do NOT use
+# host.docker.internal
+# ---------------------------------------------------------------------------
+# client-go verifies the API server's certificate, and there is no supported way
+# to turn that off in a service holding allocation credentials. So the kubeconfig
+# must name a host that is BOTH routable from this container AND present as a SAN
+# on the k3d server certificate. Read off the live listener
+# (`openssl s_client -connect 127.0.0.1:<api-port> | openssl x509 -noout -text`),
+# k3d issues:
+#
+#   DNS:k3d-<cluster>-server-0, DNS:k3d-<cluster>-serverlb, DNS:kubernetes,
+#   DNS:kubernetes.default, DNS:kubernetes.default.svc,
+#   DNS:kubernetes.default.svc.cluster.local, DNS:localhost,
+#   IP:10.43.0.1, IP:127.0.0.1, IP:<node-ip>, IP:::1
+#
+# `host.docker.internal` is NOT among them. Both routes reach the API — /version
+# answers over either — but only one keeps verification intact:
+#
+#   ROUTE A (this file): attach the gateway to k3d's own Docker network and dial
+#     https://k3d-<cluster>-serverlb:6443. That name IS a SAN, so verification
+#     succeeds with no certificate changes and no cluster recreate. Verified:
+#       docker run --rm --network k3d-rpg-dev curlimages/curl \
+#         -s https://k3d-rpg-dev-serverlb:6443/version
+#     answers normally.
+#
+#   ROUTE B (rejected): https://host.docker.internal:<api-port>. Reachable, but
+#     only with TLS verification disabled — unacceptable here — or by recreating
+#     the cluster with `--k3s-arg '--tls-san=host.docker.internal@server:*'`.
+#     Recreating a cluster to avoid one sed is the wrong trade.
+#
+# NOTE the network name and the serverlb hostname are BOTH derived from the
+# cluster name: `k3d-<cluster>` and `k3d-<cluster>-serverlb`. They are
+# parameters, not constants — set K3D_CLUSTER/K3D_NETWORK for any cluster not
+# called `rpg-dev`.
+#
+# ---------------------------------------------------------------------------
+# PREPARING THE KUBECONFIG
+# ---------------------------------------------------------------------------
+#   cd backend/deploy
+#   K3D_CLUSTER=rpg-dev
+#   k3d kubeconfig get "$K3D_CLUSTER" > kubeconfig.local
+#   # k3d writes a HOST-side URL (0.0.0.0/127.0.0.1 on the published API port).
+#   # Inside a container 127.0.0.1 is the container, so rewrite it to the
+#   # serverlb name on its IN-NETWORK port 6443 (not the published host port):
+#   sed -i -E "s#server: https://[^[:space:]]+#server: https://k3d-${K3D_CLUSTER}-serverlb:6443#" \
+#     kubeconfig.local
+#
+#   # Verify BEFORE wiring the gateway to it — same network, same file.
+#   # RUN IT FROM backend/deploy WITH A CWD-RELATIVE MOUNT PATH. On this WSL2
+#   # box `docker` is Docker Desktop's shim and absolute /mnt/* paths do not
+#   # translate, so `-v "$PWD/kubeconfig.local:/kc:ro"` silently mounts a
+#   # DIRECTORY (kubectl then says `read /kc: is a directory`) — the same
+#   # missing-bind-source trap that keeps this mount out of the base file.
+#   docker run --rm --network "k3d-${K3D_CLUSTER}" \
+#     -v "./kubeconfig.local:/kc:ro" -e KUBECONFIG=/kc \
+#     bitnami/kubectl:latest get nodes
+#   # MEASURED, this worktree, k3d-rpg-dev:
+#   #   NAME                   STATUS   ROLES                  AGE   VERSION
+#   #   k3d-rpg-dev-server-0   Ready    control-plane,master   63m   v1.31.5+k3s1
+#   # No -k, no insecure-skip-tls-verify: the CA travels in the kubeconfig and
+#   # k3d-rpg-dev-serverlb is a SAN, so verification passes as itself.
+#
+#   # Then confirm from the gateway's own logs; it logs allocator mode + fleets:
+#   docker compose logs gateway | grep -i allocator
+#
+# ---------------------------------------------------------------------------
+# CREDENTIALS
+# ---------------------------------------------------------------------------
+# Mounted read-only, never baked into an image, never committed —
+# `kubeconfig.local` is git-ignored. A developer's full ~/.kube/config grants
+# every cluster they have; for anything beyond a laptop, mint a ServiceAccount
+# with `create` on `gameserverallocations.allocation.agones.dev` in
+# rpg-realtime and build a kubeconfig around that token instead.
+services:
+  gateway:
+    environment:
+      # Literal, not ${ALLOCATOR:-agones}: .env sets ALLOCATOR=none for the base
+      # stack, and a default only applies to an UNSET variable, so the
+      # interpolated form would leave the allocator off in the one file whose
+      # entire purpose is to turn it on. Using this overlay IS the opt-in.
+      ALLOCATOR: agones
+    volumes:
+      - ${KUBECONFIG_HOST:-./kubeconfig.local}:/etc/rpg/kubeconfig:ro
+    # BOTH networks, and `default` is not optional here: naming `networks:` on a
+    # service REPLACES its network list rather than adding to it, so listing only
+    # the k3d one would silently cut the gateway off from redis and the rest of
+    # the compose stack — an allocator that works and a gateway that cannot
+    # reach its own registry.
+    networks:
+      - default
+      - k3d
+
+networks:
+  k3d:
+    # Created by `k3d cluster create`, owned by k3d, never by this file — hence
+    # external. Compose fails fast with "network ... not found" when the cluster
+    # is not up, which is the right failure: the allocator has nothing to talk to.
+    external: true
+    name: ${K3D_NETWORK:-k3d-rpg-dev}

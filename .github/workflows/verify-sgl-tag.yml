@@ -1,0 +1,76 @@
+name: Verify Shared.GameLogic tag
+
+# A tag that disagrees with the package it points at is silent. UPM resolves
+# `#sgl-v0.1.5`, installs a package reporting `0.1.0`, and warns about nothing —
+# TEAM.md says so in as many words, and it happened anyway, five times.
+#
+# publish-shared-gamelogic.yml cannot produce that state: it DERIVES the tag from
+# package.json, so the two always agree. Every mismatch in this repository came
+# from a tag pushed by hand.
+#
+# This cannot prevent such a tag — the push has already happened by the time any
+# workflow runs, and GitHub offers no pre-receive hook here. It makes the
+# mismatch loud instead of silent, which is the difference between finding out
+# now and finding out from a client that predicts the wrong thing.
+
+on:
+  push:
+    tags: ['sgl-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'sgl tag to verify (e.g. sgl-v0.4.1)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Tag matches package.json
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: The tag and the package must say the same version
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag || github.ref_name }}"
+          EXPECTED="${TAG#sgl-v}"
+          PKG=backend/gameserver-dotnet/Shared.GameLogic/package.json
+
+          if [ ! -f "$PKG" ]; then
+            echo "::error::$PKG not found at ${TAG}. A tag that does not carry the package is worse than no tag."
+            exit 1
+          fi
+
+          ACTUAL=$(jq -r '.version' "$PKG")
+          echo "tag says      ${EXPECTED}"
+          echo "package says  ${ACTUAL}"
+
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            {
+              echo "## Shared.GameLogic tag mismatch"
+              echo ""
+              echo "| | |"
+              echo "|---|---|"
+              echo "| tag | \`${TAG}\` → \`${EXPECTED}\` |"
+              echo "| \`package.json\` | \`${ACTUAL}\` |"
+              echo ""
+              echo "A consumer pinning \`#${TAG}\` installs a package reporting"
+              echo "\`${ACTUAL}\`. UPM does not warn about this."
+              echo ""
+              echo "A published tag cannot be moved without breaking whoever already"
+              echo "pinned it. Cut a new tag from a commit where \`package.json\` says"
+              echo "\`${EXPECTED}\`, and leave this one alone."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Tag ${TAG} claims ${EXPECTED} but package.json says ${ACTUAL}."
+            exit 1
+          fi
+
+          echo "::notice::${TAG} and package.json agree on ${ACTUAL}."

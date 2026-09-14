@@ -30,13 +30,24 @@ type Config struct {
 	// (32-byte hex recommended). Empty means plaintext. See shared/transport.
 	TransportKey string
 
+	// GatewayTLSCert / GatewayTLSKey are PEM paths making the gateway
+	// terminate TLS on its own listener (ADR-23). BOTH empty means plaintext,
+	// which is the default and the state every deploy path pins today; exactly
+	// one set is a startup error rather than a silent fall back to plaintext.
+	//
+	// This covers the client<->gateway hop only. The client<->Nakama meta hop
+	// mints the auth token and is plain HTTP; it is fronted separately and is
+	// NOT addressed by these two variables.
+	GatewayTLSCert string
+	GatewayTLSKey  string
+
 	// Database
 	MetaDBURL      string
 	GameStateDBURL string
 	// GameDBURL is the DSN of the game-state PostgreSQL instance actually used
 	// at runtime. Empty (the default) means "no PostgreSQL configured" and
 	// services fall back to their in-memory stores — set GAME_DB_URL to switch
-	// the gameserver to pgstore.PostgresPlayerStore.
+	// the C# gameserver to PostgresPlayerStore.
 	// Example: postgres://game:localdev@localhost:5433/gamestate?sslmode=disable
 	GameDBURL string
 
@@ -74,6 +85,8 @@ func Load() Config {
 		JWTSecret:       envOrDefault("JWT_SECRET", "dev-secret-change-me"),
 		JoinTokenSecret: envOrDefault("JOIN_TOKEN_SECRET", ""),
 		TransportKey:    envOrDefault("TRANSPORT_KEY", ""),
+		GatewayTLSCert:  envOrDefault("GATEWAY_TLS_CERT", ""),
+		GatewayTLSKey:   envOrDefault("GATEWAY_TLS_KEY", ""),
 
 		MetaDBURL:      envOrDefault("META_DB_URL", "postgres://localhost:5432/rpg_meta?sslmode=disable"),
 		GameStateDBURL: envOrDefault("GAMESTATE_DB_URL", "postgres://localhost:5432/rpg_gamestate?sslmode=disable"),

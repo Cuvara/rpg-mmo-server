@@ -87,6 +87,28 @@ The inverse is equally wrong: never skip unconditionally, and never soften an
 assertion to make a test "pass" without its dependency. A test that skips when it
 could have run is the same lie in the other direction.
 
+### Not every missing dependency is an absent dependency
+
+`SkipUnlessAvailable` distinguishes **two** states, and only one of them skips:
+
+| State | Behaviour |
+|-------|-----------|
+| No docker daemon answers `docker version` | **Skip.** Genuinely absent — a box without docker cannot run these. |
+| Docker answered, but the container never became usable | **Fail.** Infrastructure failure, not a missing dependency. |
+
+The second used to skip, reporting `docker unavailable, no redis to test against`
+for runs where docker was plainly available and only the container readiness probe
+had timed out under load. The effect was 11 registry tests disappearing from a
+green run while naming a cause that had not happened — the same coverage hole a
+soft `return` produces, reached by a different route (issue #175). If the coverage
+was expected to run and nothing is actually absent, fail; do not launder it into a
+skip.
+
+Related: any readiness or liveness deadline in the test suite must be measured
+with `Stopwatch`, never `DateTime.UtcNow`. This host's `CLOCK_REALTIME` runs
+10-17% fast and has been observed stepping backwards (#153), so a wall-clock
+budget silently shrinks under exactly the load it exists to tolerate.
+
 Verify both directions when touching this: with docker up the suite reports
 `Skipped: 0`; with docker off `PATH` it reports a non-zero `Skipped:` and a
 correspondingly lower `Passed:`. CI (ubuntu-latest) always has docker, so any skip

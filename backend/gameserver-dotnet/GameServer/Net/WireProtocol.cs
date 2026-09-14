@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Text;
 using System.Text.Json;
 using Google.Protobuf;
+using GameServer.Net.Sealed;
 using RpgMmo.Wire.V1;
 
 namespace GameServer.Net;
@@ -74,6 +75,105 @@ public static class WireProtocol
     /// <summary>Maximum message size (1 MB).</summary>
     public const int MaxMessageSize = 1 << 20;
 
+    /// <summary>
+    /// Version of the wire schema this build implements. Mirrors
+    /// <c>shared/messages.WireProtocolVersion</c> (Go) and
+    /// <c>Runtime/Protocol/WireProtocolVersion.cs</c> (Unity client).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// It names the SEMANTICS of <c>shared/proto/wire.proto</c> — what the fields
+    /// mean — not its shape and not its encoding. Shape is self-describing
+    /// (proto3 skips unknown fields) and encoding is sniffed from byte 0; neither
+    /// catches two peers that parse every byte and then disagree about what a
+    /// field means. That is the failure this number makes loud.
+    /// </para>
+    /// <para>
+    /// <b>Bump it</b> for: reusing or renumbering a field, removing a field a
+    /// receiver acts on, changing the meaning/units/reference frame of an
+    /// existing field, changing the snapshot state machine (handle lifecycle,
+    /// keyframe reset, the delta "changed" rule, the merge algorithm), or adding
+    /// something a receiver MUST act on to stay correct. Do NOT bump for a purely
+    /// additive optional field covered by a documented "zero means not sent"
+    /// rule. Full contract: <c>wire.proto</c> under "Protocol version", and
+    /// normatively <c>docs/API.md</c>.
+    /// </para>
+    /// <para>
+    /// No language can be authoritative for the other two, so each pins the value
+    /// and tests assert it on its own side.
+    /// </para>
+    /// </remarks>
+    public const uint ProtocolVersion = 1;
+
+    /// <summary>
+    /// Wire value meaning "this peer does not advertise a version" — a peer built
+    /// before the field existed.
+    /// </summary>
+    /// <remarks>
+    /// proto3 elides a zero uint32, so an absent field and an explicit 0 are the
+    /// same bytes. Real versions therefore start at 1 and 0 is permanently
+    /// reserved for "unknown", exactly as <c>ENTITY_TYPE_UNSPECIFIED</c> reserves
+    /// 0. A receiver must not read 0 as "version zero".
+    /// </remarks>
+    public const uint ProtocolVersionUnversioned = 0;
+
+    /// <summary>
+    /// The named reason a peer is refused for speaking a different wire protocol
+    /// version. Travels in <c>JoinTokenResponse.Error</c>.
+    /// </summary>
+    /// <remarks>
+    /// Follows the existing machine-readable reason convention
+    /// (<c>duplicate_login</c>, <c>server_shutdown</c>). The point of the version
+    /// handshake is that this string appears instead of a parse error, a silent
+    /// close, or a successful connection that is confidently wrong.
+    /// </remarks>
+    public const string ReasonProtocolVersionMismatch = "protocol_version_mismatch";
+
+    /// <summary>Outcome of checking a peer's advertised protocol version.</summary>
+    public enum VersionVerdict
+    {
+        /// <summary>The peer advertised exactly this build's version.</summary>
+        Accepted,
+
+        /// <summary>
+        /// The peer advertised nothing and the configured minimum still tolerates
+        /// that. Admission on trust — callers MUST count it separately, because
+        /// the counter reaching zero is the only evidence that raising the
+        /// minimum will not lock out real players.
+        /// </summary>
+        AcceptedUnversioned,
+
+        /// <summary>The peer's version is one this build cannot serve.</summary>
+        Refused,
+    }
+
+    /// <summary>
+    /// Decide whether a peer advertising <paramref name="peerVersion"/> may be
+    /// admitted by a receiver whose configured floor is
+    /// <paramref name="minVersion"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The rule is EXACT MATCH against <see cref="ProtocolVersion"/>, with one
+    /// configured exemption for the unversioned case. Exact match, rather than
+    /// "peer >= min", is the honest rule for a single integer carrying no
+    /// compatibility range: a peer one version AHEAD is refused just as firmly as
+    /// one behind, because this build cannot know what a later version changed
+    /// and admitting it would be the guess the mechanism exists to prevent.
+    /// </para>
+    /// <para>
+    /// Mirrors <c>shared/messages.CheckProtocolVersion</c> in Go; the two are
+    /// asserted to agree by the interop tests.
+    /// </para>
+    /// </remarks>
+    public static VersionVerdict CheckProtocolVersion(uint peerVersion, uint minVersion)
+    {
+        if (peerVersion == ProtocolVersion) return VersionVerdict.Accepted;
+        if (peerVersion == ProtocolVersionUnversioned && minVersion == ProtocolVersionUnversioned)
+            return VersionVerdict.AcceptedUnversioned;
+        return VersionVerdict.Refused;
+    }
+
     /// <summary>First byte of a JSON body.</summary>
     private const byte JsonPrefix = (byte)'{';
 
@@ -106,6 +206,20 @@ public static class WireProtocol
         byte[] frame = new byte[4 + body.Length];
         BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(0, 4), body.Length);
         body.CopyTo(frame, 4);
+        return frame;
+    }
+
+    /// <summary>Add the 4-byte big-endian length prefix to an already-built body.</summary>
+    /// <remarks>
+    /// The prefix stays in the clear even when the body is sealed: it is what finds the
+    /// frame boundary, so a reader needs it before it can have a key. Its value leaks only
+    /// the frame's length, which traffic analysis already sees.
+    /// </remarks>
+    public static byte[] Frame(ReadOnlySpan<byte> body)
+    {
+        byte[] frame = new byte[4 + body.Length];
+        BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(0, 4), body.Length);
+        body.CopyTo(frame.AsSpan(4));
         return frame;
     }
 
@@ -149,7 +263,23 @@ public static class WireProtocol
     /// Envelope carrying only field 2, leaving the type at 0. Rejecting type 0 is
     /// what turns that from a silent half-parse into an error.
     /// </remarks>
-    public static Envelope DecodeBody(byte[] body)
+    public static Envelope DecodeBody(byte[] body) => DecodeBody(body.AsSpan());
+
+    /// <inheritdoc cref="DecodeBody(byte[])"/>
+    /// <remarks>
+    /// The span form is what the read loop calls, so the frame bytes can live in a
+    /// reused buffer. <b>The returned envelope never aliases <paramref name="body"/>:</b>
+    /// both decoders copy the payload region into a fresh array before returning
+    /// (the Protobuf path via <c>ToByteArray</c>, the JSON path via <c>ToArray</c>).
+    /// That copy is required, not an oversight — the envelope escapes the read-loop
+    /// iteration (the transfer handler retains it in a fire-and-forget task), so its
+    /// payload cannot point into a buffer the next frame will overwrite.
+    /// <c>FrameLifetimeTests</c> pins this.
+    /// <para>Parsing is span-based here for the same measured reason as
+    /// <see cref="GetPayload{T}"/>: <c>ParseFrom(byte[])</c> allocates a
+    /// <c>CodedInputStream</c> — 272 vs 104 B per outer envelope, measured.</para>
+    /// </remarks>
+    public static Envelope DecodeBody(ReadOnlySpan<byte> body)
     {
         if (body.Length == 0)
             throw new IOException("Empty envelope body");
@@ -176,22 +306,105 @@ public static class WireProtocol
     }
 
     /// <summary>Read one length-prefixed envelope from a stream. Returns null on EOF.</summary>
+    /// <remarks>
+    /// Allocates fresh header and body arrays per frame. Callers with a read loop
+    /// should hold a <see cref="FrameReadBuffer"/> and use the overload below; this
+    /// form remains for one-shot callers and tests.
+    /// </remarks>
     public static async Task<Envelope?> DecodeAsync(Stream stream, CancellationToken ct)
     {
-        byte[] header = new byte[4];
-        int read = await ReadExactAsync(stream, header, ct);
+        var scratch = new FrameReadBuffer();
+        return await DecodeAsync(stream, scratch, ct);
+    }
+
+    /// <summary>
+    /// Read one length-prefixed envelope from a stream into <paramref name="scratch"/>'s
+    /// reused buffers. Returns null on EOF.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why reuse is safe:</b> the frame bytes are consumed entirely inside
+    /// <see cref="DecodeBody(ReadOnlySpan{byte})"/>, whose contract is that the returned
+    /// envelope never aliases the input — the payload is copied out before return,
+    /// because envelopes escape the read-loop iteration (transfer handling). The scratch
+    /// is therefore dead the moment this method returns, and the next frame may
+    /// overwrite it. <c>FrameLifetimeTests</c> drives frames through one scratch,
+    /// clobbers it after every decode, and asserts every payload survived.</para>
+    /// <para><b>Why a pooled ValueTask:</b> the Task&lt;Envelope?&gt; overload above
+    /// allocates its Task per frame (72 B measured on a synchronously-completing
+    /// stream) and a state-machine box per suspension on a real socket. The pooling
+    /// builder recycles the state machine, which on the network threads is the
+    /// per-packet steady state. One caller per scratch at a time — the same
+    /// single-reader discipline the scratch itself already requires.</para>
+    /// <para><b>Not <see cref="System.Buffers.ArrayPool{T}"/>:</b> a shared pool would
+    /// need a return on every exit path and turns an early return into cross-connection
+    /// buffer corruption; a connection-owned grow-only buffer has no return to forget
+    /// and caps at <see cref="MaxMessageSize"/> like the frames themselves.</para>
+    /// </remarks>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(
+        typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
+    public static async ValueTask<Envelope?> DecodeAsync(
+        Stream stream, FrameReadBuffer scratch, CancellationToken ct)
+    {
+        int read = await ReadExactAsync(stream, scratch.Header, 4, ct);
         if (read == 0) return null; // clean EOF
         if (read < 4) throw new IOException("Incomplete length header");
 
-        int length = BinaryPrimitives.ReadInt32BigEndian(header);
+        int length = BinaryPrimitives.ReadInt32BigEndian(scratch.Header);
         if (length <= 0 || length > MaxMessageSize)
             throw new IOException($"Invalid message length: {length}");
 
-        byte[] body = new byte[length];
-        read = await ReadExactAsync(stream, body, ct);
+        scratch.EnsureBody(length);
+        read = await ReadExactAsync(stream, scratch.Body, length, ct);
         if (read < length) throw new IOException("Incomplete message body");
 
-        return DecodeBody(body);
+        return DecodeBody(scratch.Body.AsSpan(0, length));
+    }
+
+    /// <summary>
+    /// Read one frame, unsealing it first when a sealed session is in force.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// When <paramref name="inbound"/> is null this is exactly the cleartext path. When it
+    /// is not, a frame that is NOT sealed is refused rather than parsed: after the
+    /// handshake, cleartext where a sealed frame is required is either a confused peer or
+    /// an attacker stripping the encryption, and there is no third reading. Accepting it
+    /// would be a downgrade the protocol deliberately has no room for.
+    /// </para>
+    /// <para>
+    /// <see cref="SealedSession.Open"/> is what enforces authenticate-before-replay-check,
+    /// so nothing here may look at the sequence number.
+    /// </para>
+    /// </remarks>
+    public static async ValueTask<Envelope?> DecodeAsync(
+        Stream stream, FrameReadBuffer scratch, SealedSession? inbound, CancellationToken ct)
+    {
+        if (inbound is null) return await DecodeAsync(stream, scratch, ct);
+
+        int read = await ReadExactAsync(stream, scratch.Header, 4, ct);
+        if (read == 0) return null; // clean EOF
+        if (read < 4) throw new IOException("Incomplete length header");
+
+        int length = BinaryPrimitives.ReadInt32BigEndian(scratch.Header);
+        if (length <= 0 || length > MaxMessageSize)
+            throw new IOException($"Invalid message length: {length}");
+
+        scratch.EnsureBody(length);
+        read = await ReadExactAsync(stream, scratch.Body, length, ct);
+        if (read < length) throw new IOException("Incomplete message body");
+
+        SealedOpenResult result = inbound.Open(scratch.Body.AsSpan(0, length), out byte[] plaintext);
+        if (result != SealedOpenResult.Ok)
+        {
+            // ONE message to the peer, but a distinguishable one to US. A rejected sealed
+            // frame closes the connection, and without this it is indistinguishable in the
+            // log from an ordinary disconnect — which is the "a check nobody reads is not
+            // a check" failure, one layer down. The counts on the session say which rule
+            // fired; this says that one did.
+            throw new SealedFrameRejectedException();
+        }
+
+        return DecodeBody(plaintext);
     }
 
     // ─────────────────────── envelope construction ───────────────────────
@@ -205,6 +418,26 @@ public static class WireProtocol
     /// answers (see <c>Connection.Encoding</c>), never with a hard-coded one —
     /// that is what keeps a Protobuf server able to serve a JSON client.
     /// </remarks>
+    /// <summary>
+    /// Build a sealed-handshake reply. <b>Protobuf only</b>, deliberately: the handshake
+    /// fields are absent from the JSON message set so key material can never be rendered
+    /// into a human-readable payload, which is also why a JSON client cannot be encrypted
+    /// and must be refused rather than served in the clear.
+    /// </summary>
+    public static Envelope NewEnvelope(MsgType type, SealedServerHello payload, WireEncoding encoding)
+    {
+        if (encoding != WireEncoding.Proto)
+            throw new InvalidOperationException(
+                "the sealed handshake has no JSON encoding; a JSON client cannot be sealed");
+
+        return new Envelope
+        {
+            Type = RequireMsgType(type),
+            Payload = payload.ToByteArray(),
+            Encoding = WireEncoding.Proto,
+        };
+    }
+
     public static Envelope NewEnvelope(MsgType type, JoinTokenResponse payload, WireEncoding encoding) =>
         new()
         {
@@ -306,37 +539,53 @@ public static class WireProtocol
     // ─────────────────────────── payload access ───────────────────────────
 
     /// <summary>Deserialize the payload as <typeparamref name="T"/>, honouring the envelope's encoding.</summary>
+    /// <remarks>
+    /// The Protobuf branches parse from a <see cref="ReadOnlySpan{T}"/> over the payload,
+    /// not from the <c>byte[]</c> overload: <c>ParseFrom(byte[])</c> routes through a
+    /// <c>CodedInputStream</c> object while the span overload parses on the stack —
+    /// measured at 216 vs 48 B for an <see cref="InputMessage"/> (Release,
+    /// <c>GC.GetAllocatedBytesForCurrentThread</c> over 20 000 parses). This runs once
+    /// per received packet on the network threads, so the 168 B difference is steady
+    /// ingest churn, not a one-off.
+    /// </remarks>
     public static T GetPayload<T>(Envelope envelope) where T : class
     {
         bool proto = envelope.Encoding == WireEncoding.Proto;
+        ReadOnlySpan<byte> span = envelope.Payload;
         object? result = typeof(T) switch
         {
+            // Protobuf only. A JSON peer reaching here is a peer that cannot be
+            // sealed, and the refusal is the point rather than a gap.
+            var t when t == typeof(SealedClientHello) => proto
+                ? SealedClientHello.Parser.ParseFrom(span)
+                : throw new InvalidOperationException(
+                    "the sealed handshake has no JSON encoding; a JSON client cannot be sealed"),
             var t when t == typeof(JoinTokenRequest) => proto
-                ? JoinTokenRequest.Parser.ParseFrom(envelope.Payload)
+                ? JoinTokenRequest.Parser.ParseFrom(span)
                 : JsonReader.ReadJoinTokenRequest(envelope.Payload),
             var t when t == typeof(JoinTokenResponse) => proto
-                ? JoinTokenResponse.Parser.ParseFrom(envelope.Payload)
+                ? JoinTokenResponse.Parser.ParseFrom(span)
                 : JsonReader.ReadJoinTokenResponse(envelope.Payload),
             var t when t == typeof(InputMessage) => proto
-                ? InputMessage.Parser.ParseFrom(envelope.Payload)
+                ? InputMessage.Parser.ParseFrom(span)
                 : JsonReader.ReadInputMessage(envelope.Payload),
             var t when t == typeof(SnapshotMessage) => proto
-                ? SnapshotMessage.Parser.ParseFrom(envelope.Payload)
+                ? SnapshotMessage.Parser.ParseFrom(span)
                 : JsonReader.ReadSnapshotMessage(envelope.Payload),
             var t when t == typeof(TransferMapRequest) => proto
-                ? TransferMapRequest.Parser.ParseFrom(envelope.Payload)
+                ? TransferMapRequest.Parser.ParseFrom(span)
                 : JsonReader.ReadTransferMapRequest(envelope.Payload),
             var t when t == typeof(TransferMapResponse) => proto
-                ? TransferMapResponse.Parser.ParseFrom(envelope.Payload)
+                ? TransferMapResponse.Parser.ParseFrom(span)
                 : JsonReader.ReadTransferMapResponse(envelope.Payload),
             var t when t == typeof(PingMessage) => proto
-                ? PingMessage.Parser.ParseFrom(envelope.Payload)
+                ? PingMessage.Parser.ParseFrom(span)
                 : JsonReader.ReadPingMessage(envelope.Payload),
             var t when t == typeof(PongMessage) => proto
-                ? PongMessage.Parser.ParseFrom(envelope.Payload)
+                ? PongMessage.Parser.ParseFrom(span)
                 : JsonReader.ReadPongMessage(envelope.Payload),
             var t when t == typeof(KickMessage) => proto
-                ? KickMessage.Parser.ParseFrom(envelope.Payload)
+                ? KickMessage.Parser.ParseFrom(span)
                 : JsonReader.ReadKickMessage(envelope.Payload),
             _ => throw new NotSupportedException($"Unsupported payload type: {typeof(T).Name}")
         };
@@ -353,7 +602,7 @@ public static class WireProtocol
         return 1;
     }
 
-    private static Envelope DecodeJsonEnvelope(byte[] body)
+    private static Envelope DecodeJsonEnvelope(ReadOnlySpan<byte> body)
     {
         var reader = new Utf8JsonReader(body);
         byte type = 0;
@@ -387,7 +636,9 @@ public static class WireProtocol
                     long start = reader.TokenStartIndex;
                     reader.Skip();
                     long end = reader.BytesConsumed;
-                    payload = body.AsSpan((int)start, (int)(end - start)).ToArray();
+                    // ToArray, never a slice: the envelope may outlive the frame
+                    // buffer (see DecodeBody's span overload).
+                    payload = body.Slice((int)start, (int)(end - start)).ToArray();
                 }
             }
             else
@@ -400,15 +651,75 @@ public static class WireProtocol
     }
 
     /// <summary>Read exactly buffer.Length bytes from stream. Returns bytes actually read (0 = EOF).</summary>
-    private static async Task<int> ReadExactAsync(Stream stream, byte[] buffer, CancellationToken ct)
+    private static Task<int> ReadExactAsync(Stream stream, byte[] buffer, CancellationToken ct) =>
+        ReadExactAsync(stream, buffer, buffer.Length, ct).AsTask();
+
+    /// <summary>
+    /// Read exactly <paramref name="count"/> bytes into the front of
+    /// <paramref name="buffer"/>. Returns bytes actually read (0 = EOF). The count
+    /// parameter exists for the reused-scratch path, whose buffer is usually larger
+    /// than the frame it is reading.
+    /// </summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(
+        typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
+    private static async ValueTask<int> ReadExactAsync(
+        Stream stream, byte[] buffer, int count, CancellationToken ct)
     {
         int offset = 0;
-        while (offset < buffer.Length)
+        while (offset < count)
         {
-            int n = await stream.ReadAsync(buffer.AsMemory(offset, buffer.Length - offset), ct);
+            int n = await stream.ReadAsync(buffer.AsMemory(offset, count - offset), ct);
             if (n == 0) return offset; // EOF
             offset += n;
         }
         return offset;
     }
+}
+
+/// <summary>
+/// Reusable per-reader scratch for <see cref="WireProtocol.DecodeAsync(Stream, FrameReadBuffer, CancellationToken)"/>:
+/// the 4-byte length header and a grow-only body buffer.
+/// </summary>
+/// <remarks>
+/// <para><b>Ownership:</b> one reader at a time. A connection's read loop is the
+/// intended owner — reads on one connection are strictly sequential — and the
+/// handshake's one-shot reads use the same instance before the loop starts.</para>
+/// <para><b>Lifetime contract:</b> the buffers are valid only until the next
+/// DecodeAsync call on the same scratch. That is safe because
+/// <see cref="WireProtocol.DecodeBody(ReadOnlySpan{byte})"/> never lets a decoded
+/// envelope alias the frame bytes; see its remarks and <c>FrameLifetimeTests</c>.</para>
+/// </remarks>
+public sealed class FrameReadBuffer
+{
+    /// <summary>The 4-byte big-endian length prefix. Internal for the lifetime tests.</summary>
+    internal byte[] Header { get; } = new byte[4];
+
+    /// <summary>Grow-only frame body buffer. Internal for the lifetime tests.</summary>
+    internal byte[] Body { get; private set; } = new byte[512];
+
+    /// <summary>Grow <see cref="Body"/> to hold <paramref name="length"/> bytes, doubling
+    /// so a stream whose frames creep upward does not reallocate on every frame.</summary>
+    internal void EnsureBody(int length)
+    {
+        if (Body.Length >= length) return;
+        int capacity = Body.Length;
+        while (capacity < length) capacity *= 2;
+        Body = new byte[capacity];
+    }
+}
+
+/// <summary>
+/// A sealed frame did not authenticate, replayed, or arrived as cleartext where a sealed
+/// frame was required.
+/// </summary>
+/// <remarks>
+/// An <see cref="IOException"/> so the existing read-loop teardown handles it unchanged,
+/// but its own type so the log can say what happened. The peer learns nothing either way:
+/// the connection simply closes, exactly as it would for any other frame-level failure.
+/// </remarks>
+public sealed class SealedFrameRejectedException : IOException
+{
+    /// <summary>Build the exception.</summary>
+    public SealedFrameRejectedException()
+        : base("sealed frame rejected (not authenticated, replayed, or not sealed)") { }
 }

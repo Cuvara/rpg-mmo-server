@@ -66,13 +66,34 @@ load_env
 GATEWAY_ADDR="${GATEWAY_ADDR:-:8000}"
 GAMESERVER_ADDR="${GAMESERVER_ADDR:-:9000}"
 GAMESERVER_MAP_ID="${GAMESERVER_MAP_ID:-map_01}"
+# Sealed transport on the gameplay hop. PINNED OFF, deliberately: the game server
+# binary now defaults to `require`, so a deploy path that says nothing takes
+# encryption by default -- and no deploy path can survive that yet. `verify.sh`
+# layer 4 and post-deploy-smoke both run the Go smoketest against what was just
+# deployed, the smoketest speaks JSON, and a JSON client can NEVER seal, so a
+# `require` server refuses it at the join with `encoding_cannot_seal`. Measured on
+# a live stack. No value of SMOKE_SEALED makes that pass.
+#
+# Same shape as the other deploy config (ALLOCATOR=${ALLOCATOR:-none} in cd.yml):
+# off unless the environment opts in, so nothing takes down an environment that
+# never asked for it. Flip when the smoketest speaks protobuf.
+GAMESERVER_SEALED="${GAMESERVER_SEALED:-off}"
 # Exported so the gameserver process inherits the same values whether they came
 # from deploy/.env or from these defaults. REDIS_* and GAMESERVER_PUBLIC_ADDR go
 # with them: the server self-registers, so it needs the registry address and the
 # address to advertise. In host mode there is no port mapping, so falling back to
 # GAMESERVER_ADDR is correct.
-export GAMESERVER_ADDR GAMESERVER_MAP_ID
+export GAMESERVER_ADDR GAMESERVER_MAP_ID GAMESERVER_SEALED
 export REDIS_ADDR REDIS_PASSWORD GAMESERVER_PUBLIC_ADDR
+# Gateway-hop TLS (ADR-23). Same shape and same reason as GAMESERVER_SEALED
+# above: off unless the environment opts in, pinned explicitly so a reader can
+# see it was considered. Both must be set together — the gateway exits 1 on
+# exactly one, rather than starting plaintext.
+#
+# This is a bare-metal path with no container, so these are host paths.
+GATEWAY_TLS_CERT="${GATEWAY_TLS_CERT:-}"
+GATEWAY_TLS_KEY="${GATEWAY_TLS_KEY:-}"
+export GATEWAY_TLS_CERT GATEWAY_TLS_KEY
 # Both binaries refuse to start without JOIN_TOKEN_SECRET, and it must hold the
 # same value on the gateway and every game server. It is deliberately separate
 # from JWT_SECRET: a compromised game server must not be able to forge client
@@ -111,10 +132,18 @@ SERVICES=(
 )
 
 # --------------------------------------------------------------- systemd mode
+# Unit names are prefixed with COMPOSE_NAME_PREFIX, not the literal "rpg":
+# systemd unit names are GLOBAL to the host, and all three environments run on
+# one box. With a fixed prefix a host-mode staging deploy would restart dev's
+# rpg-gateway.service — the same class of collision the compose prefix exists to
+# prevent. Default stays "rpg", so an existing single-environment host is
+# unaffected.
+SYSTEMD_UNIT_PREFIX="${COMPOSE_NAME_PREFIX:-rpg}"
+
 has_systemd_unit() {
 	command -v systemctl >/dev/null 2>&1 || return 1
-	systemctl list-unit-files "rpg-$1.service" >/dev/null 2>&1 &&
-		systemctl cat "rpg-$1.service" >/dev/null 2>&1
+	systemctl list-unit-files "${SYSTEMD_UNIT_PREFIX}-$1.service" >/dev/null 2>&1 &&
+		systemctl cat "${SYSTEMD_UNIT_PREFIX}-$1.service" >/dev/null 2>&1
 }
 
 # ---------------------------------------------------------------- nohup mode
@@ -133,8 +162,8 @@ is_running() {
 stop_one() {
 	local name="$1"
 	if has_systemd_unit "$name"; then
-		info "systemctl stop rpg-$name"
-		sudo -n systemctl stop "rpg-$name" 2>/dev/null || systemctl stop "rpg-$name"
+		info "systemctl stop ${SYSTEMD_UNIT_PREFIX}-$name"
+		sudo -n systemctl stop "${SYSTEMD_UNIT_PREFIX}-$name" 2>/dev/null || systemctl stop "${SYSTEMD_UNIT_PREFIX}-$name"
 		return 0
 	fi
 	local pf pid
@@ -160,8 +189,8 @@ stop_one() {
 start_one() {
 	local name="$1" bin="$2" args="$3"
 	if has_systemd_unit "$name"; then
-		info "systemctl restart rpg-$name"
-		sudo -n systemctl restart "rpg-$name" 2>/dev/null || systemctl restart "rpg-$name"
+		info "systemctl restart ${SYSTEMD_UNIT_PREFIX}-$name"
+		sudo -n systemctl restart "${SYSTEMD_UNIT_PREFIX}-$name" 2>/dev/null || systemctl restart "${SYSTEMD_UNIT_PREFIX}-$name"
 		return 0
 	fi
 	local exe="$BIN_DIR/$bin"
@@ -287,7 +316,7 @@ do_status() {
 	for entry in "${SERVICES[@]}"; do
 		IFS='|' read -r name _ _ port <<<"$entry"
 		if has_systemd_unit "$name"; then
-			info "$name: systemd -> $(systemctl is-active "rpg-$name" 2>/dev/null || echo unknown)"
+			info "$name: systemd -> $(systemctl is-active "${SYSTEMD_UNIT_PREFIX}-$name" 2>/dev/null || echo unknown)"
 		elif is_running "$name"; then
 			info "$name: running (pid $(cat "$(pidfile "$name")"))"
 		else

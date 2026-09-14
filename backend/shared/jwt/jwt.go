@@ -151,3 +151,34 @@ func generateJTI() (string, error) {
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		buf[0:4], buf[4:6], buf[6:8], buf[8:10], buf[10:16]), nil
 }
+
+// ParseUnverified decodes a token's claims WITHOUT checking its signature.
+//
+// # Do not use this to decide anything
+//
+// It answers "what does this token say", never "is this token genuine". Anyone
+// can produce a token whose claims say anything at all, so a caller that
+// authorises on the result has no security at all — use Verify for that, and
+// note that every call site here is a place a reviewer should look twice.
+//
+// It exists for one legitimate case: a CLIENT reading the jti out of its own
+// join token. The jti anchors the sealed handshake transcript, and a client
+// cannot hold JOIN_TOKEN_SECRET — putting that secret in a client binary is the
+// pre-shared-key mistake ADR-22 supersedes. The client is not deciding anything
+// on these claims; it is naming the session it is already in, and the server
+// verifies the same token properly on its own side.
+func ParseUnverified(token string) (Claims, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return Claims{}, fmt.Errorf("jwt: malformed token: want 3 segments, got %d", len(parts))
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return Claims{}, fmt.Errorf("jwt: decode claims: %w", err)
+	}
+	var claims Claims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return Claims{}, fmt.Errorf("jwt: parse claims: %w", err)
+	}
+	return claims, nil
+}

@@ -1,0 +1,3 @@
+# Never commit a filled Secret. Templates only (30-secret-template.yaml).
+*.secret.yaml
+secret.generated.yaml

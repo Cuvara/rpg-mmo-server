@@ -40,7 +40,12 @@ public class EnemyAiCharacterizationTests
     private const int MaxEnemies = 30;
     private const float EnemySpeed = 2.5f;
     private const float DespawnRadius = 2.5f;
-    private const int EnemyHp = 30;
+    // 16, not 30: retuned so two 8-damage hits kill — a radial pass through the 3.0
+    // attack range at speed 2.5 yields 3-4 accepted hits at the 500ms cooldown, so 30 HP
+    // made kills require near-perfect alignment (measured live: 291 accepted hits, 0
+    // kills). The deliberate-duplication contract stands: this line was updated
+    // consciously, with the arithmetic, not by following the constant.
+    private const int EnemyHp = 16;
 
     /// <summary>Ticks until the spawn accumulator first reaches the wave interval.</summary>
     private static int TicksToFirstWave()

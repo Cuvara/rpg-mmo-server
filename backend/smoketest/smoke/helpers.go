@@ -17,10 +17,24 @@ import (
 // Config holds every endpoint and knob the smoke test needs. All values can be
 // set via environment variables and overridden with CLI flags.
 type Config struct {
-	NakamaURL     string        // NAKAMA_URL      — Nakama HTTP base URL
-	ServerKey     string        // NAKAMA_SERVER_KEY — Nakama socket server key
-	GatewayAddr   string        // GATEWAY_ADDR    — gateway listen addr
-	Transport     string        // TRANSPORT       — gateway hop transport: tcp or kcp
+	NakamaURL     string // NAKAMA_URL      — Nakama HTTP base URL
+	NakamaTLSCert string // NAKAMA_TLS_CERT — PEM of Nakama's certificate, required when NakamaURL is https (ADR-24)
+	ServerKey     string // NAKAMA_SERVER_KEY — Nakama socket server key
+	GatewayAddr   string // GATEWAY_ADDR    — gateway listen addr
+	Transport     string // TRANSPORT       — gateway hop transport: tcp or kcp
+
+	// Encoding is the wire encoding every frame this run sends is marshaled in.
+	// Configuration on BOTH ends is not needed — the server answers in whatever
+	// encoding it is addressed in — but a `require` game server REFUSES a JSON
+	// client outright (`encoding_cannot_seal`), because a JSON payload cannot
+	// carry a sealed frame. So a sealed run must be a protobuf run.
+	//
+	// Defaults to JSON, which is what every deploy verifies with today. It is
+	// not the encoding a real client speaks (ADR-9: the client is protobuf), so
+	// a JSON run proves the legacy arm still works and NOT that the shipped
+	// client's path does.
+	Encoding string // SMOKE_ENCODING  — json (default) or proto
+
 	JWTSecret     string        // JWT_SECRET      — shared secret for local JWT verify
 	MapID         string        // SMOKE_MAP_ID    — map to enter
 	Timeout       time.Duration // SMOKE_TIMEOUT   — per network operation
@@ -42,6 +56,43 @@ type Config struct {
 	// post-deploy smoke step sources, so no extra credential is needed there.
 	GameDBURL string // GAME_DB_URL
 
+	// StrictAddr fails the run when the gateway advertises a listen-style
+	// game-server address (":9000", "0.0.0.0:9000", "[::]:9200") instead of
+	// rewriting it to loopback. Default OFF: host-mode deploys and the CD
+	// post-deploy smoke step legitimately reach a bare ":9000" on the host.
+	// Turn it ON for any run whose purpose is to prove that a Kubernetes /
+	// Agones-allocated game server is reachable by a real client — there the
+	// rewrite would hide the very defect the run is meant to catch. It applies
+	// to the game-server hop only, never to GatewayAddr, which is operator
+	// config rather than something a server advertised.
+	StrictAddr bool // SMOKE_STRICT_ADDR
+
+	// Sealed runs the sealed-session handshake on the gameplay hop and encrypts
+	// every frame after it. Must match the server's GAMESERVER_SEALED: this is
+	// configuration on BOTH ends, never a negotiation on the wire, because a
+	// negotiable encryption setting is a downgrade attack with a friendly name.
+	Sealed bool // SMOKE_SEALED    — run the sealed-session handshake
+
+	// GatewayTLSCertPath pins the certificate the GATEWAY hop must present
+	// (ADR-23). Empty = plaintext, which is the default everywhere.
+	//
+	// The gateway hop and the gameplay hop are encrypted by different
+	// mechanisms and this covers only the first: the gateway terminates TLS in
+	// process, while the gameplay hop uses the sealed session above. Setting
+	// one says nothing about the other.
+	//
+	// A PIN, not a trust store. The dev and staging gateways present a
+	// self-signed certificate, so chain validation cannot succeed and must not
+	// be what decides: the presented certificate is compared byte-for-byte
+	// against this file. That is STRICTER than the trust store, not weaker --
+	// a certificate signed by any CA on earth is still refused unless it is
+	// this one.
+	//
+	// There is deliberately no "accept anything" setting. A flag that skipped
+	// verification would make a misconfigured hop look exactly like a working
+	// one, which is the failure this whole check exists to catch.
+	GatewayTLSCertPath string // SMOKE_GATEWAY_TLS_CERT
+
 	SkipDB          bool          // SMOKE_SKIP_DB    — skip every persistence check
 	RequireDB       bool          // SMOKE_REQUIRE_DB — a skipped persistence check fails the run
 	ExpectMigration int           // SMOKE_EXPECT_MIGRATION — required schema_migrations version
@@ -55,6 +106,11 @@ const (
 	DefaultNakamaURL   = "http://localhost:7350"
 	DefaultServerKey   = "defaultkey"
 	DefaultGatewayAddr = ":8000"
+	// DefaultEncoding keeps every existing run byte-identical: JSON is what the
+	// smoke test has always sent and what every deploy currently verifies with.
+	// Changing this default silently changes what CD proves, so it is a flag.
+	DefaultEncoding = "json"
+
 	// DefaultTransport keeps the CD smoke test on TCP unless TRANSPORT says
 	// otherwise. The game server hop is not configured here: it always follows
 	// EnterWorldResponse.Transport.
@@ -107,9 +163,11 @@ func EnvOr(getenv func(string) string, key, def string) string {
 func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	cfg := Config{
 		NakamaURL:     EnvOr(getenv, "NAKAMA_URL", DefaultNakamaURL),
+		NakamaTLSCert: EnvOr(getenv, "NAKAMA_TLS_CERT", ""),
 		ServerKey:     EnvOr(getenv, "NAKAMA_SERVER_KEY", DefaultServerKey),
 		GatewayAddr:   EnvOr(getenv, "GATEWAY_ADDR", DefaultGatewayAddr),
 		Transport:     EnvOr(getenv, "TRANSPORT", DefaultTransport),
+		Encoding:      EnvOr(getenv, "SMOKE_ENCODING", DefaultEncoding),
 		JWTSecret:     getenv("JWT_SECRET"),
 		MapID:         EnvOr(getenv, "SMOKE_MAP_ID", DefaultMapID),
 		Timeout:       DefaultTimeout,
@@ -117,14 +175,17 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 		InputInterval: DefaultInputInterval,
 		MinSnapshots:  DefaultMinSnapshots,
 
-		DeviceID:        getenv("SMOKE_DEVICE_ID"),
-		GameDBURL:       getenv("GAME_DB_URL"),
-		SkipDB:          isTruthy(getenv("SMOKE_SKIP_DB")),
-		RequireDB:       isTruthy(getenv("SMOKE_REQUIRE_DB")),
-		ExpectMigration: DefaultExpectMigration,
-		DBPollTimeout:   DefaultDBPollTimeout,
-		DBPollInterval:  DefaultDBPollInterval,
-		HoldTTL:         DefaultHoldTTL,
+		DeviceID:           getenv("SMOKE_DEVICE_ID"),
+		GameDBURL:          getenv("GAME_DB_URL"),
+		StrictAddr:         isTruthy(getenv("SMOKE_STRICT_ADDR")),
+		GatewayTLSCertPath: getenv("SMOKE_GATEWAY_TLS_CERT"),
+		Sealed:             isTruthy(getenv("SMOKE_SEALED")),
+		SkipDB:             isTruthy(getenv("SMOKE_SKIP_DB")),
+		RequireDB:          isTruthy(getenv("SMOKE_REQUIRE_DB")),
+		ExpectMigration:    DefaultExpectMigration,
+		DBPollTimeout:      DefaultDBPollTimeout,
+		DBPollInterval:     DefaultDBPollInterval,
+		HoldTTL:            DefaultHoldTTL,
 	}
 	for _, d := range []struct {
 		key string
@@ -155,9 +216,13 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 
 	fs := flag.NewFlagSet("smoketest", flag.ContinueOnError)
 	fs.StringVar(&cfg.NakamaURL, "nakama-url", cfg.NakamaURL, "Nakama HTTP base URL")
+	fs.StringVar(&cfg.NakamaTLSCert, "nakama-tls-cert", cfg.NakamaTLSCert,
+		"PEM of Nakama's certificate; required when -nakama-url is https (ADR-24)")
 	fs.StringVar(&cfg.ServerKey, "server-key", cfg.ServerKey, "Nakama server key")
 	fs.StringVar(&cfg.GatewayAddr, "gateway-addr", cfg.GatewayAddr, "Gateway address")
 	fs.StringVar(&cfg.Transport, "transport", cfg.Transport, "Transport for the gateway hop: tcp or kcp")
+	fs.BoolVar(&cfg.Sealed, "sealed", cfg.Sealed, "Run the sealed-session handshake on the gameplay hop and encrypt every frame after it (requires -encoding proto; must match the server's GAMESERVER_SEALED)")
+	fs.StringVar(&cfg.Encoding, "encoding", cfg.Encoding, "Wire encoding for every frame sent: json (default, the legacy arm) or proto (what the shipped client speaks, and the only one a sealed session can use)")
 	fs.StringVar(&cfg.JWTSecret, "jwt-secret", cfg.JWTSecret, "Shared JWT secret for local verification")
 	fs.StringVar(&cfg.MapID, "map-id", cfg.MapID, "Map ID to enter")
 	fs.DurationVar(&cfg.Timeout, "timeout", cfg.Timeout, "Per-operation network timeout")
@@ -166,6 +231,8 @@ func LoadConfig(getenv func(string) string, args []string) (Config, error) {
 	fs.IntVar(&cfg.MinSnapshots, "min-snapshots", cfg.MinSnapshots, "Minimum snapshots required to pass")
 	fs.StringVar(&cfg.DeviceID, "device-id", cfg.DeviceID, "Nakama device id to authenticate with (default: random per run)")
 	fs.StringVar(&cfg.GameDBURL, "game-db-url", cfg.GameDBURL, "Game-state PostgreSQL DSN; unset skips the game-state checks")
+	fs.BoolVar(&cfg.StrictAddr, "strict-addr", cfg.StrictAddr, "Fail when the gateway advertises a listen-style game server address instead of rewriting it to loopback")
+	fs.StringVar(&cfg.GatewayTLSCertPath, "gateway-tls-cert", cfg.GatewayTLSCertPath, "PEM certificate the GATEWAY hop must present, compared byte-for-byte (ADR-23). Empty = plaintext. Covers the gateway hop only; the gameplay hop is -sealed")
 	fs.BoolVar(&cfg.SkipDB, "skip-db", cfg.SkipDB, "Skip every persistence check (realtime flow only)")
 	fs.BoolVar(&cfg.RequireDB, "require-db", cfg.RequireDB, "Fail instead of skipping when a persistence check cannot run")
 	fs.IntVar(&cfg.ExpectMigration, "expect-migration-version", cfg.ExpectMigration, "Required schema_migrations version")
@@ -191,6 +258,37 @@ func (c Config) Validate() error {
 	}
 	if c.MinSnapshots <= 0 {
 		return fmt.Errorf("min-snapshots must be > 0, got %d", c.MinSnapshots)
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Encoding)) {
+	// Empty is UNSET, not wrong: a Config built in code rather than from the
+	// environment leaves it zero, and encodingFor maps that to JSON. A non-empty
+	// value that is neither is a typo, and those are different things.
+	case "", "json", "proto":
+	default:
+		// Refused rather than defaulted. A typo that silently becomes JSON is
+		// invisible against an `off` server and, against a `require` one, is
+		// refused at the join with `encoding_cannot_seal` -- which reads as a
+		// broken stack rather than as a misspelt flag.
+		return fmt.Errorf("encoding must be json or proto, got %q", c.Encoding)
+	}
+	// SEALING REQUIRES PROTOBUF, and the combination is refused rather than fixed.
+	//
+	// The JSON codec has no sealed frame, so a server with GAMESERVER_SEALED=require
+	// refuses a JSON client at the join with `encoding_cannot_seal` -- and the join
+	// is ACCEPTED first, so a log reading "join accepted" is not evidence the client
+	// works. Measured live, not inferred.
+	//
+	// This does not silently upgrade the encoding. Someone who wrote
+	// `-sealed -encoding json` believes one of those two things about the run, and
+	// choosing the other for them hides which -- the same reason the server has two
+	// sealing modes and not three.
+	//
+	// It lives here rather than only in stack.sh because a wrapper can be bypassed
+	// and the binary is what CD actually runs.
+	if c.Sealed && strings.ToLower(strings.TrimSpace(c.Encoding)) != "proto" {
+		return fmt.Errorf(
+			"sealed runs require -encoding proto, got %q: a JSON client cannot carry a sealed frame",
+			c.Encoding)
 	}
 	if err := transport.Validate(c.Transport); err != nil {
 		return fmt.Errorf("transport: %w", err)
@@ -232,12 +330,46 @@ func isTruthy(v string) bool {
 // "[::]:9200") into dialable loopback addresses. Real host:port pairs pass
 // through untouched.
 func NormalizeDialAddr(addr string) string {
-	host, port := splitHostPort(addr)
+	if !IsListenAddr(addr) {
+		return addr
+	}
+	_, port := splitHostPort(addr)
+	return "127.0.0.1:" + port
+}
+
+// IsListenAddr reports whether addr is listen-style — a bind address with no
+// host part (":9000", "0.0.0.0:9000", "[::]:9200") rather than something a
+// client can dial. The C# side keeps a matching helper (GameServer/Program.cs,
+// IsHostlessAddr) so both ends agree on which addresses are listen-style.
+// A loopback address a server deliberately advertised ("127.0.0.1:9000") is
+// NOT listen-style: under k3d that may be exactly where the client connects.
+func IsListenAddr(addr string) bool {
+	host, _ := splitHostPort(addr)
 	switch host {
 	case "", "0.0.0.0", "::", "[::]":
-		return "127.0.0.1:" + port
+		return true
 	}
-	return addr
+	return false
+}
+
+// ResolveServerDialAddr turns the ServerAddr a gateway advertised in
+// MsgEnterWorldResp into the address the smoke test dials.
+//
+// With strict off (the default) it is exactly NormalizeDialAddr: listen-style
+// addresses are rewritten to loopback, which is correct for host-mode deploys
+// where a bare ":9000" really is reachable on the host.
+//
+// With strict on a listen-style address is a hard failure. That rewrite would
+// otherwise connect to whatever else happens to sit on that port locally and
+// report PASS for a game server no real client could reach — precisely the
+// defect a Kubernetes/Agones run exists to catch.
+func ResolveServerDialAddr(addr string, strict bool) (string, error) {
+	if strict && IsListenAddr(addr) {
+		return "", fmt.Errorf("strict address mode: game server advertised %q, a listen-style address no client can dial; "+
+			"the game server never learned its externally-dialable address — under Agones that is the sidecar GameServer "+
+			"status read (allocated address + dynamic port), otherwise set GAMESERVER_PUBLIC_ADDR to the host:port clients reach", addr)
+	}
+	return NormalizeDialAddr(addr), nil
 }
 
 // splitHostPort is a forgiving split on the last colon; it tolerates the

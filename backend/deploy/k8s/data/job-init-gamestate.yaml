@@ -1,0 +1,75 @@
+# One-shot Job: apply init-gamestate.sql to the postgres-game instance.
+#
+# WHEN TO USE THIS:
+#   - Adopting an EXISTING postgres-game PVC that was created without the
+#     gamestate-initdb ConfigMap (so docker-entrypoint-initdb.d never ran).
+#   - Recovering from a restore where the schema is missing.
+#
+# WHEN NOT TO USE THIS:
+#   - Fresh deploys. apply.sh creates the ConfigMap before the StatefulSet,
+#     and postgres runs initdb.d on first boot automatically.
+#   - Normal upgrades. The game server's built-in migrator
+#     (GameServer/Persistence/Migrations/) runs at boot and is the
+#     authoritative schema-management path.
+#
+# The SQL is idempotent (CREATE TABLE IF NOT EXISTS, CREATE INDEX IF NOT
+# EXISTS), so running this against an already-initialised database is safe
+# and changes nothing.
+#
+# Usage:
+#   kubectl apply -f job-init-gamestate.yaml   # in rpg-k8s-data namespace
+#   kubectl -n rpg-k8s-data wait --for=condition=complete job/init-gamestate --timeout=60s
+#   kubectl -n rpg-k8s-data logs job/init-gamestate
+#   kubectl -n rpg-k8s-data delete job init-gamestate   # clean up
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: init-gamestate
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    rpg-mmo/tier: data
+spec:
+  # Do not retry on failure — a schema error needs human attention, not a
+  # retry loop that logs the same parse error 6 times.
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: rpg-mmo
+        rpg-mmo/tier: data
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: psql
+          image: postgres:16.4-alpine
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef: { name: postgres-game }
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              # Wait for postgres-game to be reachable. The StatefulSet has its
+              # own readiness probe, but nothing sequences a Job behind it.
+              for i in $(seq 1 30); do
+                if pg_isready -h postgres-game -U "${POSTGRES_USER}" -d "${POSTGRES_DB}"; then
+                  break
+                fi
+                echo "postgres-game not ready, retrying ($i/30)"; sleep 2
+              done
+
+              echo "==> applying init-gamestate.sql"
+              psql "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-game:5432/${POSTGRES_DB}" \
+                -v ON_ERROR_STOP=1 \
+                -f /initdb/10-init-gamestate.sql
+
+              echo "==> done"
+          volumeMounts:
+            - name: initdb
+              mountPath: /initdb
+              readOnly: true
+      volumes:
+        - name: initdb
+          configMap:
+            name: gamestate-initdb

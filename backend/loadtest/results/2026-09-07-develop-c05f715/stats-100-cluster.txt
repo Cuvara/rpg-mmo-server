@@ -1,0 +1,44 @@
+--- 2026-09-07T09:19:22+07:00 ---
+rpg-gameserver	5.80%	25.11MiB / 15.54GiB
+rpg-gateway	0.83%	15.1MiB / 15.54GiB
+rpg-redis	2.68%	7.023MiB / 15.54GiB
+57477  8.5  0.0 11760       00:01 loadtest
+--- 2026-09-07T09:19:27+07:00 ---
+rpg-gameserver	6.51%	25.12MiB / 15.54GiB
+rpg-gateway	0.70%	15.23MiB / 15.54GiB
+rpg-redis	0.47%	7.023MiB / 15.54GiB
+57477  8.2  0.0 13780       00:07 loadtest
+--- 2026-09-07T09:19:33+07:00 ---
+rpg-gameserver	4.98%	24.8MiB / 15.54GiB
+rpg-gateway	0.52%	15.33MiB / 15.54GiB
+rpg-redis	0.50%	7.023MiB / 15.54GiB
+57477  7.2  0.0 15120       00:13 loadtest
+--- 2026-09-07T09:19:43+07:00 ---
+rpg-gameserver	5.82%	24.56MiB / 15.54GiB
+rpg-gateway	0.13%	15.33MiB / 15.54GiB
+rpg-redis	0.65%	7.023MiB / 15.54GiB
+57477  6.7  0.0 15760       00:19 loadtest
+--- 2026-09-07T09:19:48+07:00 ---
+rpg-gameserver	5.38%	24.22MiB / 15.54GiB
+rpg-gateway	0.07%	15.33MiB / 15.54GiB
+rpg-redis	0.57%	7.023MiB / 15.54GiB
+57477  6.5  0.0 15412       00:25 loadtest
+--- 2026-09-07T09:19:55+07:00 ---
+rpg-gameserver	5.79%	24.16MiB / 15.54GiB
+rpg-gateway	0.05%	15.33MiB / 15.54GiB
+rpg-redis	2.38%	7.023MiB / 15.54GiB
+57477  6.3  0.0 15924       00:31 loadtest
+--- 2026-09-07T09:20:01+07:00 ---
+rpg-gameserver	5.49%	24.4MiB / 15.54GiB
+rpg-gateway	0.24%	15.33MiB / 15.54GiB
+rpg-redis	0.51%	7.027MiB / 15.54GiB
+57477  6.2  0.0 15504       00:37 loadtest
+--- 2026-09-07T09:20:06+07:00 ---
+rpg-gameserver	5.24%	24.21MiB / 15.54GiB
+rpg-gateway	0.12%	15.33MiB / 15.54GiB
+rpg-redis	0.61%	7.027MiB / 15.54GiB
+57477  6.1  0.0 15460       00:43 loadtest
+--- 2026-09-07T09:20:16+07:00 ---
+rpg-gameserver	1.10%	24.21MiB / 15.54GiB
+rpg-gateway	0.50%	15.41MiB / 15.54GiB
+rpg-redis	0.59%	7.031MiB / 15.54GiB

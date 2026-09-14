@@ -21,8 +21,14 @@ public static class RegistryDefaults
         TimeSpan.FromMilliseconds(Math.Max(1000, ttl.TotalMilliseconds / 3));
 }
 
-/// <summary>Everything the registration service needs to describe this server.</summary>
-public sealed class RegistrationOptions
+/// <summary>
+/// Everything the registration service needs to describe this server.
+///
+/// <para>A record so a host can derive one option set from another with <c>with</c> —
+/// the dungeon host narrows <see cref="Scope"/> that way, from the mode rather than from
+/// the composition root, so there is exactly one place that decides it.</para>
+/// </summary>
+public sealed record RegistrationOptions
 {
     public required string ServerId { get; init; }
     public required string MapId { get; init; }
@@ -39,6 +45,27 @@ public sealed class RegistrationOptions
     public string Transport { get; init; } = "tcp";
     public int Capacity { get; init; } = 100;
     public TimeSpan Ttl { get; init; } = RegistryDefaults.HeartbeatTtl;
+
+    /// <summary>
+    /// How far this server publishes itself: hash plus map index (the default, and what
+    /// every map server does), or hash only. A dungeon instance is
+    /// <see cref="RegistrationScope.HashOnly"/> — ADR-26 decision 8. See
+    /// <see cref="RegistrationScope"/> for why the hash is never optional.
+    /// </summary>
+    public RegistrationScope Scope { get; init; } = RegistrationScope.MapIndexed;
+
+    /// <summary>
+    /// This pod's Ed25519 identity public key in base64 (ADR-25), taken from
+    /// <see cref="GameServer.Net.Sealed.ServerIdentity.PublicKeyBase64"/>.
+    /// </summary>
+    /// <remarks>
+    /// Publishing it is what lets the gateway hand it to a client, and republishing it on
+    /// every heartbeat repair is what keeps a re-created entry complete — a repaired entry
+    /// missing this field would silently stop a client from requiring identity against a
+    /// server that is perfectly capable of it. That is why it lives on the options and is
+    /// rebuilt by <c>BuildInfo</c> rather than being written once at first registration.
+    /// </remarks>
+    public string IdentityKey { get; init; } = "";
 }
 
 /// <summary>
@@ -67,6 +94,12 @@ public sealed class RegistrationService : IAsyncDisposable
     private Task? _loop;
     private int _lastPublishedCount = -1;
 
+    /// <summary>
+    /// The address actually advertised. Seeded from <see cref="RegistrationOptions.PublicAddr"/>
+    /// and replaceable up to <see cref="StartAsync"/> — see <see cref="OverridePublicAddr"/>.
+    /// </summary>
+    private string _publicAddr;
+
     /// <summary>Successful (re)registrations. Exposed for tests.</summary>
     internal int RegisterCount => _registerCount;
     private int _registerCount;
@@ -83,15 +116,47 @@ public sealed class RegistrationService : IAsyncDisposable
         _playerCount = playerCount;
         _logger = logger;
         _interval = interval ?? RegistryDefaults.HeartbeatInterval(options.Ttl);
+        _publicAddr = options.PublicAddr;
+    }
+
+    /// <summary>The address this service advertises. Diagnostics, logging and tests.</summary>
+    public string PublicAddr => Volatile.Read(ref _publicAddr);
+
+    /// <summary>
+    /// Replace the advertised address before registration starts.
+    ///
+    /// <para>This exists for exactly one caller: under Agones with
+    /// <c>portPolicy: Dynamic</c> the dialable address is chosen by the scheduler and is
+    /// only readable from the GameServer status once the pod is scheduled — after the host
+    /// has been constructed, so it cannot come in through
+    /// <see cref="RegistrationOptions"/> (ADR-15 decision 2, option A).</para>
+    ///
+    /// <para>Only valid before <see cref="StartAsync"/>. Changing the address afterwards
+    /// would leave the entry already in Redis pointing at the old value until the next
+    /// heartbeat repaired it — a window in which the gateway hands clients an address
+    /// nothing is listening on — so it throws rather than half-applying.</para>
+    /// </summary>
+    /// <param name="addr">Non-empty <c>host:port</c> to advertise instead.</param>
+    /// <exception cref="InvalidOperationException">Registration has already started.</exception>
+    public void OverridePublicAddr(string addr)
+    {
+        if (string.IsNullOrWhiteSpace(addr))
+            throw new ArgumentException("advertised address must not be empty", nameof(addr));
+        if (_loop != null)
+            throw new InvalidOperationException(
+                $"{nameof(OverridePublicAddr)} must be called before {nameof(StartAsync)}");
+
+        Volatile.Write(ref _publicAddr, addr);
     }
 
     private ServerInfo BuildInfo() => new(
         _options.ServerId,
         _options.MapId,
-        _options.PublicAddr,
+        PublicAddr,
         _options.Transport,
         _options.Capacity,
-        _playerCount());
+        _playerCount(),
+        _options.IdentityKey);
 
     /// <summary>
     /// Register immediately, then start the heartbeat loop.
@@ -161,7 +226,7 @@ public sealed class RegistrationService : IAsyncDisposable
     {
         try
         {
-            await _registry.RegisterAsync(BuildInfo(), ct);
+            await _registry.RegisterAsync(BuildInfo(), _options.Scope, ct);
             Interlocked.Increment(ref _registerCount);
             _lastPublishedCount = _playerCount();
             return true;

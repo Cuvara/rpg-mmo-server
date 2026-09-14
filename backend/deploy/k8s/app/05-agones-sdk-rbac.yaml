@@ -1,0 +1,49 @@
+# NOT OPTIONAL, AND NOT DOCUMENTED WHERE YOU WILL LOOK FOR IT.
+#
+# Every namespace that runs GameServers needs a ServiceAccount named exactly
+# `agones-sdk`, bound to the cluster-scoped `agones-sdk` ClusterRole that the
+# Agones install created. The sidecar runs as it; without it the GameServer
+# never gets a pod at all and lands in State: Error with:
+#
+#   pods "map-servers-...-zs4cx" is forbidden: error looking up service
+#   account rpg-k8s-realtime/agones-sdk: serviceaccount "agones-sdk" not found
+#
+# MEASURED HERE, not anticipated — this brief's prerequisite list (ADR-15
+# decision 3) names the GATEWAY's allocation RBAC and says nothing about this
+# one, because in `rpg-realtime` the Agones Helm chart created it: the chart's
+# `gameservers.namespaces` value lists the namespaces it should provision, and
+# it was installed with `rpg-realtime` in that list. A NEW namespace gets
+# nothing. The alternatives are to add the namespace to that Helm value and
+# upgrade the release (which touches the cluster-wide Agones install and,
+# through it, the live dev fleet) or to create the two objects here. Here.
+#
+# The name is fixed by the controller and cannot be chosen: Agones stamps
+# `serviceAccountName: agones-sdk` onto the GameServer pod spec unless the
+# manifest overrides it, and overriding it would mean binding a differently
+# named SA to the same ClusterRole for no gain.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agones-sdk
+  namespace: rpg-k8s-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agones-sdk-access
+  namespace: rpg-k8s-realtime
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+subjects:
+  - kind: ServiceAccount
+    name: agones-sdk
+    namespace: rpg-k8s-realtime
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  # Cluster-scoped ROLE, namespaced BINDING: the sidecar gets list/patch/watch
+  # on gameservers and create/patch on events IN THIS NAMESPACE ONLY. The
+  # ClusterRole is the Agones install's; this does not modify it.
+  name: agones-sdk

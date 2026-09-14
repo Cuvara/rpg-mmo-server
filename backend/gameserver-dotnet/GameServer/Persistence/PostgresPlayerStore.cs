@@ -43,6 +43,24 @@ public sealed class PostgresPlayerStore : IPlayerStore, IAsyncDisposable
             updated_at = now()
         """;
 
+    /// <summary>
+    /// The map-independent half of a save (ADR-26 decision 5). The DO UPDATE clause
+    /// touches <c>hp</c> and <c>max_hp</c> and NOTHING else, so <c>map_id</c>, <c>x</c>
+    /// and <c>y</c> keep whatever the origin map's server last wrote. The INSERT half
+    /// covers a player with no row yet: it writes an EMPTY map id, which
+    /// <c>PlayerSpawn.SameMap</c> treats as unattributable, so the next join spawns them
+    /// at the spawn point — the same place a missing row would have put them, but with
+    /// their HP intact.
+    /// </summary>
+    private const string UpsertPlayerStatsSql = """
+        INSERT INTO player_states (user_id, map_id, x, y, hp, max_hp, updated_at)
+        VALUES (@user_id, '', 0, 0, @hp, @max_hp, now())
+        ON CONFLICT (user_id) DO UPDATE SET
+            hp         = EXCLUDED.hp,
+            max_hp     = EXCLUDED.max_hp,
+            updated_at = now()
+        """;
+
     private const string LoadPlayerSql = """
         SELECT user_id, map_id, x, y, hp, max_hp
         FROM player_states
@@ -141,6 +159,32 @@ public sealed class PostgresPlayerStore : IPlayerStore, IAsyncDisposable
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             throw new InvalidOperationException($"pgstore save player {state.UserId}: {ex.Message}", ex);
+        }
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// One statement, so the merge is atomic — no read-modify-write window in which a
+    /// concurrent full save could be lost. See <see cref="UpsertPlayerStatsSql"/>.
+    /// </remarks>
+    public async Task SavePlayerStatsAsync(string userId, int hp, int maxHp, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(userId))
+            throw new ArgumentException("empty user id", nameof(userId));
+
+        await using var cmd = _dataSource.CreateCommand(UpsertPlayerStatsSql);
+        cmd.CommandTimeout = _commandTimeoutSeconds;
+        cmd.Parameters.Add(new NpgsqlParameter("user_id", NpgsqlDbType.Text) { Value = userId });
+        cmd.Parameters.Add(new NpgsqlParameter("hp", NpgsqlDbType.Integer) { Value = hp });
+        cmd.Parameters.Add(new NpgsqlParameter("max_hp", NpgsqlDbType.Integer) { Value = maxHp });
+
+        try
+        {
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new InvalidOperationException($"pgstore save player stats {userId}: {ex.Message}", ex);
         }
     }
 

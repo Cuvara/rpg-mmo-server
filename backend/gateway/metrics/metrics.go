@@ -27,6 +27,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
 // DefaultAddr is the metrics listener address used when neither
@@ -59,6 +61,37 @@ type Metrics struct {
 	// with which limiter fired (see the RateLimitReason* constants).
 	RateLimitedTotal *prometheus.CounterVec
 
+	// UnversionedHandshakesTotal counts clients admitted on MsgAuth without
+	// advertising a wire protocol version.
+	//
+	// This is the migration instrument, not a health metric. Admitting an
+	// unversioned client is admission on trust: the gateway cannot tell a
+	// pre-versioning build from a non-conforming one. Raising
+	// --min-protocol-version to 1 refuses both, so this counter going flat at
+	// zero across a deploy window is the evidence that the flip will not lock
+	// out real players. An admission nobody can see is the silent fallback the
+	// tick_rate rule in gameserver-dotnet/docs/API.md forbids.
+	UnversionedHandshakesTotal prometheus.Counter
+
+	// ProtocolVersionRefusedTotal counts clients refused for speaking a wire
+	// protocol version this gateway cannot serve. A non-zero rate here after a
+	// deploy is a rollout skew, not an attack.
+	ProtocolVersionRefusedTotal prometheus.Counter
+
+	// TransportEncrypted is 1 when packets leave this gateway as ciphertext.
+	//
+	// A GaugeVec labelled by transport and cipher, set once at listen time. It
+	// replaces a log field that was actively wrong: the gateway used to report
+	// `encrypted` as `transportKey != ""`, which reads true on TCP where the key
+	// is ignored and the traffic is cleartext.
+	TransportEncrypted *prometheus.GaugeVec
+
+	// TransportAuthenticated is 1 when tampering with a packet in flight is
+	// detectable. Currently 0 on every supported configuration: the KCP path is
+	// AES-CFB with a CRC32, and a CRC32 is linear, not a MAC. Kept separate from
+	// TransportEncrypted so that encryption cannot be read as integrity.
+	TransportAuthenticated *prometheus.GaugeVec
+
 	// RedisUp is 1 when the last dependency probe reached Redis, 0 otherwise.
 	// A gauge rather than a counter because alerting wants "is it down right
 	// now", and because it is the series that explains a spike in
@@ -78,6 +111,12 @@ type Metrics struct {
 	// StreamGroupLossTotal counts consumer-group disappearances the relay had
 	// to recover from (NOGROUP after a Redis wipe/restore).
 	StreamGroupLossTotal prometheus.Counter
+
+	// KickPublishTotal counts session-supersede events published to the
+	// events:kick stream on duplicate login, labelled ok/fail. A fail is a
+	// duplicate login whose OLD game-server connection will NOT be kicked
+	// (the new login proceeds regardless), so it is worth alerting on.
+	KickPublishTotal *prometheus.CounterVec
 }
 
 // Reason label values for gateway_rate_limited_total.
@@ -130,6 +169,26 @@ func New(reg prometheus.Registerer) *Metrics {
 			Name: "gateway_rate_limited_total",
 			Help: "Requests rejected by a rate limiter, by reason.",
 		}, []string{"reason"}),
+		UnversionedHandshakesTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "gateway_unversioned_handshakes_total",
+			Help: "Clients admitted without advertising a wire protocol version.",
+		}),
+		ProtocolVersionRefusedTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "gateway_protocol_version_refused_total",
+			Help: "Clients refused for an unsupported wire protocol version.",
+		}),
+		// Gauges, not counters, and deliberately so: a counter that never
+		// increments is absent from /metrics entirely, and "is this gateway
+		// encrypted" must never be answered by a missing field. A gauge is
+		// present the moment it is set, including when it reads 0.
+		TransportEncrypted: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "gateway_transport_encrypted",
+			Help: "1 when packets leave this gateway as ciphertext, 0 when cleartext. 0 is the DEFAULT (transport=tcp has no packet encryption and TRANSPORT_KEY defaults to empty).",
+		}, []string{"transport", "cipher"}),
+		TransportAuthenticated: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "gateway_transport_authenticated",
+			Help: "1 when tampering with a packet in flight is detectable. Currently 0 on every supported configuration: the KCP path is AES-CFB with a CRC32, which is linear and not a MAC.",
+		}, []string{"transport", "cipher"}),
 		RedisUp: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "gateway_redis_up",
 			Help: "1 when the last Redis dependency probe succeeded, 0 otherwise.",
@@ -146,19 +205,28 @@ func New(reg prometheus.Registerer) *Metrics {
 			Name: "gateway_stream_group_loss_total",
 			Help: "Event-stream consumer groups found missing and re-created.",
 		}),
+		KickPublishTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gateway_kick_publish_total",
+			Help: "Duplicate-login supersede events published to events:kick, by result.",
+		}, []string{"result"}),
 	}
 	if reg != nil {
 		reg.MustRegister(
+			m.TransportEncrypted,
+			m.TransportAuthenticated,
 			m.ConnectionsActive,
 			m.AuthTotal,
 			m.EnterWorldTotal,
 			m.AllocationsTotal,
 			m.RelayEventsTotal,
 			m.RateLimitedTotal,
+			m.UnversionedHandshakesTotal,
+			m.ProtocolVersionRefusedTotal,
 			m.RedisUp,
 			m.RelayUp,
 			m.SessionChecksTotal,
 			m.StreamGroupLossTotal,
+			m.KickPublishTotal,
 		)
 		for _, v := range []string{SessionCheckOK, SessionCheckExpired, SessionCheckStoreError} {
 			m.SessionChecksTotal.WithLabelValues(v)
@@ -170,7 +238,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		// Pre-create both label values so a freshly started gateway exports
 		// `...{result="fail"} 0` instead of nothing — rate() over a series that
 		// only appears on the first failure produces misleading graphs.
-		for _, cv := range []*prometheus.CounterVec{m.AuthTotal, m.EnterWorldTotal, m.AllocationsTotal} {
+		for _, cv := range []*prometheus.CounterVec{m.AuthTotal, m.EnterWorldTotal, m.AllocationsTotal, m.KickPublishTotal} {
 			cv.WithLabelValues(ResultOK)
 			cv.WithLabelValues(ResultFail)
 		}
@@ -211,6 +279,14 @@ func (m *Metrics) AuthResult(ok bool) {
 		return
 	}
 	m.AuthTotal.WithLabelValues(result(ok)).Inc()
+}
+
+// KickPublishResult records one duplicate-login supersede publish outcome.
+func (m *Metrics) KickPublishResult(ok bool) {
+	if m == nil {
+		return
+	}
+	m.KickPublishTotal.WithLabelValues(result(ok)).Inc()
 }
 
 // EnterWorldResult records one map-assignment outcome.
@@ -268,6 +344,24 @@ func boolGauge(b bool) float64 {
 		return 1
 	}
 	return 0
+}
+
+// UnversionedHandshake records one client admitted without advertising a wire
+// protocol version.
+func (m *Metrics) UnversionedHandshake() {
+	if m == nil {
+		return
+	}
+	m.UnversionedHandshakesTotal.Inc()
+}
+
+// ProtocolVersionRefused records one client refused for an unsupported wire
+// protocol version.
+func (m *Metrics) ProtocolVersionRefused() {
+	if m == nil {
+		return
+	}
+	m.ProtocolVersionRefusedTotal.Inc()
 }
 
 // RateLimited records one request rejected by a rate limiter. reason must be
@@ -369,6 +463,28 @@ func (r *Readiness) snapshot() map[string]DependencyChecker {
 		out[k] = v
 	}
 	return out
+}
+
+// SetTransportPosture publishes the listener's confidentiality posture.
+//
+// Called once, at listen time, from the composition root: the posture is
+// configuration, not something the gateway discovers. Both gauges are set even
+// when they are 0 — that is the entire reason they are gauges rather than
+// counters, since a counter that never increments is absent from /metrics and a
+// security question must never be answered by a missing field.
+func (m *Metrics) SetTransportPosture(p transport.TransportPosture) {
+	if m == nil {
+		return
+	}
+	encrypted, authenticated := 0.0, 0.0
+	if p.Encrypted {
+		encrypted = 1
+	}
+	if p.Authenticated {
+		authenticated = 1
+	}
+	m.TransportEncrypted.WithLabelValues(p.Transport, p.Cipher).Set(encrypted)
+	m.TransportAuthenticated.WithLabelValues(p.Transport, p.Cipher).Set(authenticated)
 }
 
 // Handler builds the metrics mux with no dependency checks: /readyz then

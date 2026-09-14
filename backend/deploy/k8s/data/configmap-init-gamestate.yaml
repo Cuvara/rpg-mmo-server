@@ -1,0 +1,39 @@
+# ConfigMap carrying deploy/db/init-gamestate.sql for the postgres-game
+# StatefulSet's /docker-entrypoint-initdb.d mount.
+#
+# THIS FILE IS NOT APPLIED DIRECTLY. It exists as documentation of the
+# manifest shape that apply.sh generates at deploy time. apply.sh creates
+# this ConfigMap from the ORIGINAL SQL file (../../db/init-gamestate.sql)
+# so that the schema cannot drift between compose and k8s.
+#
+# Why not a kustomize configMapGenerator: the SQL lives in deploy/db/,
+# above the kustomization root, and kustomize refuses file sources outside
+# its root directory:
+#   security; file '.../db/init-gamestate.sql' is not in or below '.../k8s/data'
+# Copying the SQL here would create a third copy of a schema that two tests
+# already pin to two existing copies (MigratorTests.InitGamestateSql_Matches
+# FirstMigration in C#, TestSchemaMatchesDeployInitScript in Go).
+#
+# To apply manually (equivalent to what apply.sh does):
+#   kubectl -n rpg-k8s-data create configmap gamestate-initdb \
+#     --from-file=10-init-gamestate.sql=../../db/init-gamestate.sql \
+#     --dry-run=client -o yaml | kubectl -n rpg-k8s-data apply -f -
+#
+# The 10- prefix controls execution order inside /docker-entrypoint-initdb.d
+# (the postgres entrypoint sorts lexically). There is only one file today;
+# the prefix reserves space for future seed scripts without renaming this one.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gamestate-initdb
+  labels:
+    app.kubernetes.io/part-of: rpg-mmo
+    rpg-mmo/tier: data
+data:
+  # PLACEHOLDER — apply.sh injects the real content from db/init-gamestate.sql.
+  # The shape below is what the ConfigMap looks like after generation; it is
+  # kept here so `kubectl diff` and manifest review tooling can see the key
+  # name without running apply.sh.
+  10-init-gamestate.sql: |
+    -- This placeholder is overwritten by apply.sh.
+    -- See deploy/db/init-gamestate.sql for the real schema.

@@ -66,6 +66,29 @@ Two things the table makes obvious:
 
 ---
 
+### On k8s, the same blast radii — plus a planned one, every deploy
+
+The dev environment now runs entirely in `k3d-rpg-dev` (`backend/deploy/k8s/`). The
+table above still holds there: it describes what each dependency owns, and moving a
+process into a pod does not change that. Two things it does **not** cover:
+
+- **There is exactly one replica of everything** — `gateway`, `nakama`, `redis`,
+  `postgres-meta`, `postgres-game`, and the `map-servers-dotnet-k8s` Fleet. Kubernetes is
+  providing scheduling and lifecycle, not redundancy, and no row above becomes less severe
+  for being scheduled by a controller.
+- **`gateway` and `nakama` deploy with `strategy: Recreate`,** because both bind a
+  `hostPort` and a rolling update deadlocks on a single node. So every rollout of either is
+  a **planned** instance of its row in the table: nothing can authenticate or join until the
+  replacement pod is Ready, while in-progress gameplay carries on (ADR-3). It is not a
+  failure and there is nothing to recover; it is a window to schedule around. The duration
+  is unmeasured.
+
+Both are recorded as **ADR-17** in `backend/docs/ARCHITECTURE-DECISIONS.md`, with the full
+posture and the decisions that must precede any tier above dev in
+[`../k8s/README.md`](../k8s/README.md) §Availability posture.
+
+---
+
 ## Failure drill: Redis
 
 > **Status: EXECUTED 2026-08-06 10:03–10:11 UTC.** See
@@ -491,6 +514,7 @@ Config in effect (`docker-compose.yml:134-143`):
 --appendfsync everysec    # fsync once per second  -> worst-case loss window = 1s
 --save 60 1000            # RDB snapshot if >=1000 keys changed in 60s
 --maxmemory-policy noeviction   # ADR-4: this is a system of record, not a cache
+--maxmemory 128mb         # #202: refuse writes while alive, do not get OOM-killed
 ```
 
 Verify it is actually applied (config drift is real — the compose file is not
@@ -507,9 +531,18 @@ docker.exe exec rpg-redis redis-cli INFO persistence | grep -E 'aof_enabled|rdb_
 - **RPO on volume loss: total** → and total loss of the registry is the
   unbounded outage described at the top. Back Redis up (below).
 
-`maxmemory` is unset, so `noeviction` currently has nothing to enforce; it is
-set explicitly so that adding a memory cap later cannot silently turn this into
-an LRU cache and evict a live server out of matchmaking (ADR-4).
+`maxmemory` is set to `128mb` (#202), half the cluster pod's `limits.memory:
+256Mi`, and `noeviction` is what it enforces: at the ceiling Redis refuses writes
+with `OOM command not allowed when used memory > 'maxmemory'` and keeps serving
+reads, rather than being OOM-killed by the kernel and losing sessions, the
+registry and the stream together. **Treat that error as a capacity page, not an
+incident to silence** — the instance is healthy and the data is intact; what is
+full is the budget. Do not raise `maxmemory` on its own: the gap to the pod limit
+is the room a persistence fork needs for copy-on-write, so both move together.
+
+Until #202 this was unset, and `noeviction` therefore had nothing to enforce.
+If you are reading an older backup's config, expect no `maxmemory` line and no
+`MAXLEN` on the stream.
 
 ---
 

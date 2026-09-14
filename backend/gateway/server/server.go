@@ -2,10 +2,13 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,29 +26,15 @@ import (
 	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
-// KickPublisher publishes duplicate-login kick requests to other gateway
-// instances. The in-memory implementation is a no-op (single process); the
-// Redis implementation publishes to the gateway:kick Pub/Sub channel.
-type KickPublisher interface {
-	PublishKick(ctx context.Context, userID string) error
-}
-
-// KickSubscriber receives kick requests from other gateway instances.
-type KickSubscriber interface {
-	SubscribeKick(ctx context.Context, handler func(userID string)) error
-	Close() error
-}
-
-// noopKickPublisher is used when no cross-gateway kick channel is configured.
-type noopKickPublisher struct{}
-
-func (noopKickPublisher) PublishKick(context.Context, string) error { return nil }
-
 // Gateway is the main TCP server that handles client authentication
 // and map assignment before redirecting to game servers.
 type Gateway struct {
 	sessions  *session.SessionManager
 	registry  *registry.RegistryService
+	// dungeonIndex and partyMembers are nil on a deployment without dungeons.
+	// Nil is a supported state, not an oversight: see assignDungeon.
+	dungeonIndex storage.DungeonIndex
+	partyMembers transfer.PartyMembership
 	jwtSecret string
 	logger    *slog.Logger
 
@@ -64,11 +53,16 @@ type Gateway struct {
 	// transportKey is the pre-shared KCP encryption key ("" = plaintext).
 	transportKey string
 
-	// kickPub publishes kick requests to other gateway instances.
-	kickPub KickPublisher
-	// kickSub receives kick requests from other instances; nil when running
-	// single-process (in-memory backend).
-	kickSub KickSubscriber
+	// tlsConfig makes Run wrap the listener so this process terminates TLS
+	// itself (ADR-23). Nil is plaintext and is the default. Immutable after
+	// New, so Run reads it lock-free.
+	tlsConfig *tls.Config
+
+	// kickStream publishes duplicate-login supersede events for game servers
+	// to consume (events:kick, ADR-5 Streams). Nil only when the option was
+	// not passed; main.go always passes it, and publishSupersede logs loudly
+	// if it is missing so an unwired publisher cannot be silent again (#211).
+	kickStream storage.EventStream
 
 	relay      events.EventRelay
 	eventCount atomic.Int64
@@ -77,6 +71,11 @@ type Gateway struct {
 	// startRelayWithRetry), so readiness can reflect a degraded gateway.
 	relayUp atomic.Bool
 
+	// kickConsumer consumes gateway_superseded events from other gateway
+	// instances and closes the local socket for the superseded user.
+	// Nil when no kick stream is configured.
+	kickConsumer *KickConsumer
+
 	// metrics is nil when the gateway runs without instrumentation; every
 	// recording helper is nil-safe.
 	metrics *metrics.Metrics
@@ -84,6 +83,24 @@ type Gateway struct {
 	// transportKind is the realtime transport the gateway listens with
 	// ("tcp" or "kcp"); it is immutable after New, so Run reads it lock-free.
 	transportKind string
+
+	// enterWorldBudget caps how long one handleEnterWorld may block its
+	// connection's read loop; EnterWorldBudget by default, overridden only by
+	// tests that need the deadline to expire in milliseconds. Immutable after
+	// the gateway starts serving.
+	enterWorldBudget time.Duration
+
+	// minProtocolVersion is the lowest wire protocol version this gateway will
+	// admit on MsgAuth. Zero — the shipping default — also admits a client that
+	// advertises nothing, because proto3 elides a zero and every client built
+	// before the field is indistinguishable from one sending 0.
+	//
+	// Set it to messages.WireProtocolVersion once the fleet advertises and an
+	// unversioned client is refused through the same named path as a mismatched
+	// one. The gateway_unversioned_handshakes_total counter is what says that
+	// flip is safe; flipping it while the counter is still moving locks out real
+	// players. Immutable after the gateway starts serving.
+	minProtocolVersion uint32
 
 	mu        sync.Mutex
 	listener  net.Listener
@@ -102,6 +119,24 @@ func WithTransport(kind string) Option {
 	return func(g *Gateway) { g.transportKind = kind }
 }
 
+// WithDungeons enables dungeon entry: the party -> instance index and the
+// authority that answers "is this user in that party".
+//
+// Both or neither. A gateway with an index but no membership check would
+// allocate a pod for anyone who names a party id, which is the one thing
+// ADR-26 decision 3 exists to prevent; a gateway with a membership check and
+// no index has nowhere to record the answer, so four members would get four
+// instances. Passing one without the other is therefore a programming error
+// and is treated as "dungeons off" rather than half-on.
+func WithDungeons(index storage.DungeonIndex, party transfer.PartyMembership) Option {
+	return func(g *Gateway) {
+		if index == nil || party == nil {
+			return
+		}
+		g.dungeonIndex, g.partyMembers = index, party
+	}
+}
+
 // WithMetrics attaches the Prometheus metric set. Without it the gateway is
 // uninstrumented (all recording calls are no-ops).
 func WithMetrics(m *metrics.Metrics) Option {
@@ -113,6 +148,29 @@ func WithMetrics(m *metrics.Metrics) Option {
 func WithEventRelay(relay events.EventRelay) Option {
 	return func(g *Gateway) { g.relay = relay }
 }
+
+// WithKickStream sets the event stream the gateway publishes duplicate-login
+// supersede events to (logical stream constants.KickEventStream). The gateway
+// only publishes; game servers consume. Without it, a duplicate login still
+// evicts the local gateway socket but the old game-server connection stays —
+// and handleAuth logs a warning saying exactly that.
+func WithKickStream(stream storage.EventStream) Option {
+	return func(g *Gateway) { g.kickStream = stream }
+}
+
+// KickStreamConfigured reports whether a kick stream was wired in — the
+// wiring-level assertion handle (#204's shape): a test can prove the binary's
+// construction path passes WithKickStream without simulating a duplicate login.
+func (g *Gateway) KickStreamConfigured() bool { return g.kickStream != nil }
+
+// WithKickConsumer attaches a cross-gateway kick consumer. The gateway starts
+// it in Run and stops it in Shutdown.
+func WithKickConsumer(kc *KickConsumer) Option {
+	return func(g *Gateway) { g.kickConsumer = kc }
+}
+
+// KickConsumerConfigured reports whether a kick consumer was wired in.
+func (g *Gateway) KickConsumerConfigured() bool { return g.kickConsumer != nil }
 
 // WithJoinTokenSecret sets the secret (or comma-separated rotation list) used
 // to sign gateway -> game server join tokens. Without it the gateway falls back
@@ -130,6 +188,51 @@ func WithJoinTokenSecret(spec string) Option {
 // Ignored for TCP. Empty means plaintext (and Listen logs a warning).
 func WithTransportKey(key string) Option {
 	return func(g *Gateway) { g.transportKey = key }
+}
+
+// WithTLS makes the gateway terminate TLS on its own listener (ADR-23).
+//
+// A nil config means plaintext, which is the default and the shipped state.
+// There is deliberately no "prefer TLS" and no sniffing: a listener with a
+// certificate serves TLS only and closes a plaintext client. ADR-22 decision 3
+// applies unchanged — a protocol that can be talked down to cleartext will be,
+// and the only reliable defence is having nothing to downgrade to.
+//
+// TLS is meaningful only over TCP; over KCP it is ignored and the boot posture
+// says so. See LoadTLSConfig for how the certificate is read.
+func WithTLS(cfg *tls.Config) Option {
+	return func(g *Gateway) { g.tlsConfig = cfg }
+}
+
+// LoadTLSConfig builds a server TLS config from a certificate and key path.
+//
+// Both empty means "no TLS" and returns (nil, nil) — the default. Exactly one
+// of them set is a configuration ERROR rather than a silent fallback to
+// plaintext: an operator who set one and typo'd the other meant to have TLS,
+// and starting anyway would hand them the plaintext listener they were trying
+// to eliminate while their config file says otherwise.
+//
+// TLS 1.2 is the floor. It is not 1.3 because the client half is unwritten and
+// pinning 1.3 before knowing what Unity's TLS stack negotiates on Android would
+// be choosing a constraint blind; raise it once the client is measured.
+func LoadTLSConfig(certPath, keyPath string) (*tls.Config, error) {
+	certPath, keyPath = strings.TrimSpace(certPath), strings.TrimSpace(keyPath)
+	switch {
+	case certPath == "" && keyPath == "":
+		return nil, nil
+	case certPath == "":
+		return nil, fmt.Errorf("gateway tls: key is set but certificate is not; set both or neither")
+	case keyPath == "":
+		return nil, fmt.Errorf("gateway tls: certificate is set but key is not; set both or neither")
+	}
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("gateway tls: load keypair (%s, %s): %w", certPath, keyPath, err)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}, nil
 }
 
 // WithConnRateLimit bounds accepted connections per source IP: `burst`
@@ -156,16 +259,13 @@ func WithMsgRateLimit(ratePerSec, burst float64) Option {
 	}
 }
 
-// WithKickPublisher sets the publisher used to send duplicate-login kick
-// requests to other gateway instances.
-func WithKickPublisher(pub KickPublisher) Option {
-	return func(g *Gateway) { g.kickPub = pub }
-}
-
-// WithKickSubscriber sets the subscriber for receiving kick requests from
-// other instances. The gateway starts listening in Run.
-func WithKickSubscriber(sub KickSubscriber) Option {
-	return func(g *Gateway) { g.kickSub = sub }
+// WithMinProtocolVersion sets the lowest wire protocol version the gateway
+// admits. Zero (the default) additionally admits clients that advertise no
+// version at all; see Gateway.minProtocolVersion.
+func WithMinProtocolVersion(v uint32) Option {
+	return func(g *Gateway) {
+		g.minProtocolVersion = v
+	}
 }
 
 // New creates a new Gateway instance.
@@ -186,17 +286,17 @@ func New(
 	// rejects every token instead of accepting tokens signed with "".
 	authKeys, _ := sharedjwt.ParseKeyring(jwtSecret)
 	g := &Gateway{
-		transportKind: transport.KindTCP,
-		sessions:      sessions,
-		registry:      reg,
-		jwtSecret:     jwtSecret,
-		authKeys:      authKeys,
-		joinKeys:      authKeys,
-		kickPub:       noopKickPublisher{},
-		logger:        logger,
-		conns:         make(map[*ClientConn]struct{}),
-		userConns:     make(map[string]*ClientConn),
-		done:          make(chan struct{}),
+		transportKind:    transport.KindTCP,
+		sessions:         sessions,
+		registry:         reg,
+		jwtSecret:        jwtSecret,
+		authKeys:         authKeys,
+		joinKeys:         authKeys,
+		logger:           logger,
+		enterWorldBudget: EnterWorldBudget,
+		conns:            make(map[*ClientConn]struct{}),
+		userConns:        make(map[string]*ClientConn),
+		done:             make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(g)
@@ -260,10 +360,15 @@ func (g *Gateway) RelayUp() bool { return g.relayUp.Load() }
 // OnEvent implements events.Sink: it receives every cross-server event consumed
 // by the relay.
 //
+// One event type is acted on here: server_down (published by the registry
+// watcher) evicts the named server from the registry so FindServer stops
+// handing out a dead address immediately instead of waiting out the registry
+// TTL (#236).
+//
 // MVP limitation: shared/messages has no client-facing event message type, so
-// events are logged and counted instead of being pushed to connected clients.
-// Once agent-shared adds a MsgEvent, this method becomes the fan-out point
-// (iterate g.conns, cc.Send). See gateway/docs/DESIGN.md.
+// every other event is logged and counted instead of being pushed to connected
+// clients. Once agent-shared adds a MsgEvent, this method becomes the fan-out
+// point (iterate g.conns, cc.Send). See gateway/docs/DESIGN.md.
 func (g *Gateway) OnEvent(ev storage.Event) {
 	g.eventCount.Add(1)
 	g.metrics.RelayEvent()
@@ -272,6 +377,43 @@ func (g *Gateway) OnEvent(ev storage.Event) {
 		"bytes", len(ev.Payload),
 		"clients", g.ConnCount(),
 	)
+
+	if ev.Type == registry.ServerDownChannel {
+		g.handleServerDown(ev.Payload)
+	}
+}
+
+// serverDownEvictTimeout bounds the registry write an eviction performs. OnEvent
+// runs on the relay's consumer goroutine, so a hung store must not stall event
+// consumption indefinitely.
+const serverDownEvictTimeout = 5 * time.Second
+
+// handleServerDown consumes one server_down event: it evicts the named server
+// from the registry so the assignment path stops returning it. Eviction is
+// idempotent and a re-registering server becomes assignable again through the
+// normal path, so acting on a duplicate or stale event is harmless.
+func (g *Gateway) handleServerDown(payload []byte) {
+	var ev registry.ServerDownEvent
+	if err := json.Unmarshal(payload, &ev); err != nil {
+		g.logger.Warn("malformed server_down event", "err", err)
+		return
+	}
+	if ev.ServerID == "" {
+		g.logger.Warn("server_down event with empty server_id, ignoring")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), serverDownEvictTimeout)
+	defer cancel()
+	if err := g.registry.Evict(ctx, ev.ServerID); err != nil {
+		// The registry TTL remains the backstop: a failed eviction degrades to
+		// the pre-#236 behaviour instead of losing the event silently.
+		g.logger.Warn("failed to evict dead server from registry; its TTL is now the only removal path",
+			"server_id", ev.ServerID, "map_id", ev.MapID, "err", err)
+		return
+	}
+	g.logger.Info("evicted dead server from registry",
+		"server_id", ev.ServerID, "map_id", ev.MapID)
 }
 
 // EventCount returns how many events the relay has delivered so far.
@@ -292,11 +434,13 @@ func (g *Gateway) Run(addr string) error {
 		g.startRelayWithRetry()
 	}
 
-	// Start the kick subscriber so this gateway can receive cross-instance
-	// duplicate-login kick requests.
-	if g.kickSub != nil {
-		if err := g.kickSub.SubscribeKick(context.Background(), g.handleKickEvent); err != nil {
-			g.logger.Error("kick subscriber failed to start", "err", err)
+	// The kick consumer is started alongside the relay. It is also degradable:
+	// a gateway that cannot consume kick events still serves traffic -- the
+	// worst case is an old socket lingering until the player notices.
+	if g.kickConsumer != nil {
+		if err := g.kickConsumer.Start(context.Background()); err != nil {
+			g.logger.Error("kick consumer failed to start, cross-gateway kicks will not work",
+				"err", err)
 		}
 	}
 
@@ -305,16 +449,65 @@ func (g *Gateway) Run(addr string) error {
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
+
+	// TLS termination in THIS process (ADR-23), not at an edge. Wrapping the
+	// listener is the whole change: TLS hands Accept a net.Conn like any other,
+	// so the 4-byte-length framing, the codec and every handler below are
+	// untouched.
+	//
+	// TLS needs a reliable ordered byte stream, which KCP is not, so a cert on
+	// a KCP listener is refused at startup rather than ignored. Ignoring it
+	// would produce a gateway that was configured for TLS, is serving
+	// plaintext, and says "kcp" — the believed-protected state ADR-21 exists to
+	// prevent.
+	tlsActive := false
+	if g.tlsConfig != nil {
+		if transport.Normalize(g.transportKind) != transport.KindTCP {
+			ln.Close()
+			return fmt.Errorf("listen: TLS is configured but the transport is %q; TLS requires a reliable ordered stream, so use --transport tcp or unset the certificate",
+				transport.Normalize(g.transportKind))
+		}
+		ln = tls.NewListener(ln, g.tlsConfig)
+		tlsActive = true
+	}
+
 	g.mu.Lock()
 	g.listener = ln
 	g.mu.Unlock()
 	g.connLimiter.StartCleanup(time.Minute)
+
+	// Transport confidentiality posture, reported on every boot.
+	//
+	// The field this replaces was WRONG, not merely incomplete: it logged
+	// `encrypted` as `g.transportKey != ""`, so a gateway on TCP with a key set
+	// reported encrypted=true while putting every auth frame and join token on
+	// the wire in cleartext — TCP has no packet-crypt layer and the key is
+	// ignored. A security field that is confidently false is worse than one that
+	// is missing, because nobody goes looking behind it.
+	posture := transport.PostureTLS(g.transportKind, g.transportKey, addr, tlsActive)
+	if g.metrics != nil {
+		g.metrics.SetTransportPosture(posture)
+	}
+
 	g.logger.Info("gateway listening",
 		"addr", ln.Addr().String(),
-		"transport", transport.Normalize(g.transportKind),
-		"encrypted", g.transportKey != "",
+		"transport", posture.Transport,
+		"tls", posture.TLS,
+		"encrypted", posture.Encrypted,
+		"authenticated", posture.Authenticated,
+		"cipher", posture.Cipher,
 		"conn_limit", g.connLimiter.Enabled(),
 		"msg_limit", g.msgRate > 0)
+
+	if posture.Encrypted {
+		g.logger.Info("transport posture", "summary", posture.Summary)
+	} else {
+		// Warn, every boot, including for the default configuration. Before this
+		// the only cleartext case that warned was KCP-without-a-key, so plain TCP
+		// -- the default, and the one with no encryption at all -- was silent.
+		g.logger.Warn("transport posture", "summary", posture.Summary,
+			"remedy", "set "+transport.KeyEnvVar+" (32-byte hex) and --transport kcp, or terminate TLS in front of this listener")
+	}
 
 	for {
 		conn, err := ln.Accept()
@@ -369,9 +562,9 @@ func (g *Gateway) Shutdown() {
 			g.logger.Error("stop event relay", "err", err)
 		}
 	}
-	if g.kickSub != nil {
-		if err := g.kickSub.Close(); err != nil {
-			g.logger.Error("stop kick subscriber", "err", err)
+	if g.kickConsumer != nil {
+		if err := g.kickConsumer.Stop(); err != nil {
+			g.logger.Error("stop kick consumer", "err", err)
 		}
 	}
 }
@@ -426,6 +619,20 @@ func (g *Gateway) findUserConn(userID string) *ClientConn {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.userConns[userID]
+}
+
+// FindAndCloseConnection locates a user's local connection and evicts it with
+// MsgKick + MsgDisconnect (duplicate_login), then cleans up its session
+// tracking. This is the callback the KickConsumer uses when it receives a
+// gateway_superseded event from another gateway instance.
+func (g *Gateway) FindAndCloseConnection(userID string) {
+	cc := g.findUserConn(userID)
+	if cc == nil {
+		return
+	}
+	g.sendKickAndClose(cc, KickReasonDuplicateLogin)
+	cc.ClearIdentity()
+	g.untrackUser(userID, cc)
 }
 
 // authTimeout is how long an unauthenticated connection may idle before the
@@ -496,8 +703,9 @@ func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
 		g.logger.Warn("message rate limited",
 			"conn", cc.ID(), "ip", cc.RemoteIP(), "user", cc.UserID(), "type", env.Type)
 		resp, err := cc.Reply(messages.MsgAuthResp, messages.AuthResponse{
-			OK:    false,
-			Error: "rate limited",
+			OK:              false,
+			Error:           "rate limited",
+			ProtocolVersion: messages.WireProtocolVersion,
 		})
 		if err != nil {
 			cc.Close()
@@ -516,6 +724,7 @@ func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
 		return
 	case messages.MsgPong:
 		cc.RecordPong()
+		g.refreshSessionOnPong(cc)
 		return
 	}
 
@@ -541,6 +750,35 @@ func (g *Gateway) handleMessage(cc *ClientConn, env messages.Envelope) {
 		}
 		g.logger.Log(context.Background(), lvl, "unexpected message type",
 			"conn", cc.ID(), "user", cc.UserID(), "type", env.Type, "state", cc.State())
+	}
+}
+
+// refreshSessionOnPong re-arms the session TTL when a heartbeat MsgPong arrives
+// on an authenticated connection, so a client that holds the gateway socket
+// open sending only heartbeats keeps its session alive — the "refreshed by
+// activity" contract in gameserver-dotnet/docs/API.md (#231). Without this the
+// only refresh was checkSession on enter_world, so a player parked on one map
+// for over SessionTTL (1h) had the session expire under a live connection and
+// the next map transfer fail with "session expired".
+//
+// It is deliberately cheap and quiet:
+//   - it never sends anything and never closes the connection — a pong must
+//     stay side-effect-free from the client's point of view;
+//   - store writes are bounded to one per sessionRefreshInterval per
+//     connection, so a 10s heartbeat does not EXPIRE-spam the store;
+//   - store errors fail open, like checkSession: the refresh is skipped, the
+//     connection lives on, and a session actually gone is detected (and
+//     reported) by checkSession on the next real frame.
+func (g *Gateway) refreshSessionOnPong(cc *ClientConn) {
+	userID, state := cc.Identity()
+	if state == StateConnected || userID == "" {
+		return // unauthenticated: no session to keep alive
+	}
+	if !cc.shouldRefreshSession(time.Now()) {
+		return
+	}
+	if err := g.sessions.RefreshSession(context.Background(), session.SessionKey(userID)); err != nil {
+		g.logger.Warn("refresh session on pong", "conn", cc.ID(), "user", userID, "err", err)
 	}
 }
 
@@ -607,6 +845,45 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 		return
 	}
 
+	// The version check runs BEFORE the token is verified, deliberately. A peer
+	// that cannot speak this schema is refused whether or not its credential is
+	// good: the refusal is about the connection being unusable, not about who is
+	// on the far end, and answering "protocol_version_mismatch" to a valid token
+	// is more useful to an operator than answering "invalid token" to a client
+	// whose real problem is that it is a version behind. It also declines to
+	// spend an HMAC verification on a connection that is already refused.
+	switch messages.CheckProtocolVersion(req.ProtocolVersion, g.minProtocolVersion) {
+	case messages.VersionAccepted:
+		// Nothing to record: this is the expected path.
+
+	case messages.VersionAcceptedUnversioned:
+		// Admitted on trust. Counted, and logged once per connection, because an
+		// invisible fallback is behaviourally identical to having no check.
+		g.metrics.UnversionedHandshake()
+		// Debug, not Info: a healthy session has a documented per-session log
+		// budget (TestSessionVolumeIsBoundedPerSession) and this notice is not
+		// worth a line of it on every login during the whole migration window.
+		// gateway_unversioned_handshakes_total is the instrument that matters;
+		// this line only helps when someone is already looking at one connection.
+		if cc.firstUnversionedNotice() {
+			g.logger.Debug("client advertised no protocol version",
+				"conn", cc.ID(), "ip", cc.RemoteIP(),
+				"gateway_version", messages.WireProtocolVersion)
+		}
+
+	case messages.VersionRefused:
+		g.metrics.AuthResult(false)
+		g.metrics.ProtocolVersionRefused()
+		g.logAuthFailure(cc, slog.LevelWarn, "", messages.ReasonProtocolVersionMismatch,
+			messages.ProtocolVersionMismatchError(req.ProtocolVersion, g.minProtocolVersion))
+		// SendAndClose, not Send: unlike a bad token, this is not retryable on
+		// the same connection. Nothing the client can do without a new build
+		// will change the answer, so holding the socket open would only let it
+		// retry into the same refusal.
+		g.sendAuthRefusalAndClose(cc, messages.ReasonProtocolVersionMismatch)
+		return
+	}
+
 	userID, err := session.VerifyClientJWTKeyring(req.Token, g.authKeys)
 	if err != nil {
 		g.metrics.AuthResult(false)
@@ -621,18 +898,36 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 	existing, getErr := g.sessions.GetSession(ctx, userID)
 	if getErr == nil {
 		gwID := g.sessions.GatewayID()
+
+		// Re-auth on the same socket is not a duplicate: nothing to kick,
+		// locally or remotely.
+		sameConn := g.findUserConn(userID) == cc
+
+		// Same gateway: kick the old gateway socket (MsgKick + MsgDisconnect,
+		// reason duplicate_login). A gateway socket owned by a DIFFERENT
+		// replica cannot be reached from here and is still left alone (the
+		// remaining ADR-17 item; harmless at one replica).
 		if existing.GatewayID == gwID {
-			// Same gateway: kick the old connection, but only if it is a
-			// different socket (re-auth on the same conn is not a duplicate).
 			if old := g.findUserConn(userID); old != nil && old != cc {
 				g.kickLocalUser(userID)
 			}
-		} else {
-			// Different gateway: publish a kick request via Pub/Sub.
-			if perr := g.kickPub.PublishKick(ctx, userID); perr != nil {
-				g.logger.Warn("publish kick event", "conn", cc.ID(), "user", userID, "err", perr)
-			}
 		}
+
+		// The GAME-SERVER half of the eviction, which the local kick above
+		// cannot do: the client talks to the game server directly (ADR-3), so
+		// closing the gateway socket leaves the old gameplay connection alive.
+		// Publish a supersede event on the events:kick stream (Streams with
+		// consumer-group ACK per ADR-5 — the shape #211 said a rebuild must
+		// take, and deliberately NOT the Pub/Sub shape #211 deleted). The
+		// event names the old session's join-token jti, so the game server
+		// kicks exactly that connection and never the newer login's — newest
+		// login wins even when the event is delivered late. Published for
+		// sessions owned by ANY gateway instance: the stream, unlike the
+		// socket, is reachable regardless of which replica owns the session.
+		if !sameConn {
+			g.publishSupersede(userID, existing)
+		}
+
 		g.logger.Info("duplicate login detected",
 			"conn", cc.ID(),
 			"user", userID,
@@ -666,8 +961,9 @@ func (g *Gateway) handleAuth(cc *ClientConn, env messages.Envelope) {
 	}
 
 	resp, err := cc.Reply(messages.MsgAuthResp, messages.AuthResponse{
-		OK:     true,
-		UserID: userID,
+		OK:              true,
+		UserID:          userID,
+		ProtocolVersion: messages.WireProtocolVersion,
 	})
 	if err != nil {
 		g.logger.Error("marshal auth response", "err", err)
@@ -759,22 +1055,39 @@ func (g *Gateway) sendKickAndClose(cc *ClientConn, reason string) {
 	cc.SendAndClose(disc)
 }
 
-// handleKickEvent processes a kick request received from another gateway
-// instance via the Pub/Sub channel.
-func (g *Gateway) handleKickEvent(userID string) {
-	g.logger.Info("received kick event", "user", userID)
-	g.kickLocalUser(userID)
-}
-
 func (g *Gateway) sendAuthError(cc *ClientConn, msg string) {
 	resp, err := cc.Reply(messages.MsgAuthResp, messages.AuthResponse{
 		OK:    false,
 		Error: msg,
+		// Echoed on every failure, not only a version refusal: a client that
+		// cannot parse this frame's OTHER fields still learns which schema the
+		// gateway speaks, which is the one thing that tells it whether the
+		// failure is its credential or its build.
+		ProtocolVersion: messages.WireProtocolVersion,
 	})
 	if err != nil {
 		return
 	}
 	cc.Send(resp)
+}
+
+// sendAuthRefusalAndClose answers a version-refused client and hangs up.
+//
+// Send + Close would race: Close can RST the socket before the kernel has
+// flushed the frame, and the client would see a bare disconnect instead of the
+// named reason — which is precisely the failure this whole mechanism exists to
+// remove. SendAndClose flushes first.
+func (g *Gateway) sendAuthRefusalAndClose(cc *ClientConn, reason string) {
+	resp, err := cc.Reply(messages.MsgAuthResp, messages.AuthResponse{
+		OK:              false,
+		Error:           reason,
+		ProtocolVersion: messages.WireProtocolVersion,
+	})
+	if err != nil {
+		cc.Close()
+		return
+	}
+	cc.SendAndClose(resp)
 }
 
 // handleEnterWorld assigns a game server for the requested map and mints the
@@ -805,12 +1118,34 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 		return
 	}
 
-	ctx := context.Background()
-	result, err := transfer.AssignMapKeyring(ctx, userID, req.MapID, g.registry, g.joinKeys)
+	// One deadline over the WHOLE assignment path. Each leg beneath it —
+	// registry lookup retries, the Agones allocation call, the wait for the
+	// allocated pod to self-register — carries its own timeout, and stacked
+	// worst-case they exceed MaxHandlerBlockingWait, which means the heartbeat
+	// would kill this connection mid-allocation (issue #235). The budget keeps
+	// the block strictly inside the heartbeat window with margin for the
+	// write-back below; on expiry the client gets the retryable "server is
+	// starting, retry shortly" while the allocation leader carries on detached
+	// (registry.allocateOnce), so a later retry finds the server ready.
+	ctx, cancel := context.WithTimeout(context.Background(), g.enterWorldBudget)
+	defer cancel()
+
+	// One message, two things it can ask for (ADR-26 decision 1). A non-empty
+	// party id means "an instance of this content for this party"; empty means
+	// the map flow that has always existed. The branch is here rather than in a
+	// second handler so both share this budget, this auth check and these error
+	// paths -- two copies of them would drift.
+	var result transfer.AssignResult
+	var err error
+	if req.PartyID != "" {
+		result, err = g.assignDungeon(ctx, userID, req.PartyID, req.MapID)
+	} else {
+		result, err = transfer.AssignMapKeyring(ctx, userID, req.MapID, g.registry, g.joinKeys)
+	}
 	if err != nil {
 		g.metrics.EnterWorldResult(false)
 		g.logger.Error("enter world failed",
-			"conn", cc.ID(), "user", userID, "map", req.MapID,
+			"conn", cc.ID(), "user", userID, "map", req.MapID, "party", req.PartyID,
 			"reason", "no_assignment", "err", err,
 			"dur_ms", time.Since(start).Milliseconds())
 		g.sendEnterWorldError(cc, clientSafeAssignError(err))
@@ -825,15 +1160,28 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 	// also the only record anywhere of which server a client was sent to, so
 	// it carries the server id and address the client is about to dial.
 	g.logger.Info("enter world assigned",
-		"conn", cc.ID(), "user", userID, "map", req.MapID,
+		"conn", cc.ID(), "user", userID, "map", req.MapID, "party", req.PartyID,
 		"server", result.ServerID, "server_addr", result.ServerAddr,
 		"transport", result.Transport,
+		// Whether this assignment carried a server identity key (ADR-25), not
+		// the key itself: a public key in every enter-world line is noise, but
+		// its ABSENCE is the whole explanation for a client that refuses to
+		// seal, and that must be findable in the gateway's own log.
+		"server_key", len(result.ServerPublicKey) > 0,
 		"dur_ms", time.Since(start).Milliseconds())
 
-	// Update session with server and map association (task 2c).
-	if uerr := g.sessions.UpdateSession(ctx, userID, func(sd *session.SessionData) {
+	// Update session with server and map association (task 2c). On its own
+	// context, not the budget one: an assignment that resolved near the
+	// deadline must still record where the client went.
+	if uerr := g.sessions.UpdateSession(context.Background(), userID, func(sd *session.SessionData) {
 		sd.ServerID = result.ServerID
 		sd.MapID = req.MapID
+		// The jti of the token minted above. This is what a later duplicate
+		// login publishes in its supersede event, so the game server can kick
+		// exactly the connection this assignment produced (kick.go). Updated
+		// on every assignment — a map transfer re-enters this path, so the
+		// session always names the CURRENT game-server connection's jti.
+		sd.JoinTokenJTI = result.JTI
 	}); uerr != nil {
 		g.logger.Warn("update session server association",
 			"user", userID, "server", result.ServerID, "map", req.MapID, "err", uerr)
@@ -843,6 +1191,12 @@ func (g *Gateway) handleEnterWorld(cc *ClientConn, env messages.Envelope) {
 		ServerAddr: result.ServerAddr,
 		JoinToken:  result.JoinToken,
 		Transport:  result.Transport,
+		// ADR-25. Forwarded verbatim from the registry entry; the gateway never
+		// generates, stores or validates this key, it only relays the one the pod
+		// published. Empty when that pod predates ADR-25 — logged above as
+		// server_key=false so an operator can see WHY a client that requires
+		// identity refused, without having to read the registry by hand.
+		ServerPublicKey: result.ServerPublicKey,
 	})
 	if err != nil {
 		g.logger.Error("marshal enter world response", "err", err)
@@ -866,19 +1220,111 @@ func (g *Gateway) handleDisconnect(cc *ClientConn) {
 // Client-facing messages for EnterWorld failures.
 const (
 	msgNoServerAvailable = "no server available for map"
-	msgNotImplemented    = "not implemented"
-	msgInternalError     = "internal error"
+	// msgServerStarting is a retryable EnterWorld failure: a game server was
+	// allocated for the map but has not finished booting and registering
+	// itself. The client must be able to tell this apart from
+	// msgNoServerAvailable ("this map is full" — do not retry) and retry
+	// shortly instead. It names no internal detail. It is not the only
+	// retryable failure — see msgFleetBusy, which is the other one and means
+	// something different: there, no server was allocated at all.
+	msgServerStarting = "server is starting, retry shortly"
+	// msgUnknownMap is the terminal EnterWorld failure: no fleet or server in
+	// this deployment hosts the requested map. It must not read like
+	// msgServerStarting — a client that retries this one drives the very
+	// allocation leak registry.rememberMismatch exists to bound — and it must not
+	// read like msgNoServerAvailable either, which means "this map exists but is
+	// full". It names no fleet, namespace or server id.
+	msgUnknownMap = "map is not available"
+	// msgNotInParty is terminal and is the client's own fault: they asked for an
+	// instance of a party they are not in. It must not read like
+	// msgServerStarting, because retrying cannot change the answer, and it must
+	// not read like msgInternalError, because that is what an operator will
+	// search the logs for when something is actually broken here.
+	msgNotInParty = "not a member of that party"
+	// msgUnknownParty is the other client-fault case and is kept separate from
+	// the one above on purpose: "the party is gone" and "you are not in it" send
+	// a player to different places in a UI, and collapsing them would make a
+	// disbanded party look like a permissions bug.
+	msgUnknownParty = "party does not exist"
+	// msgFleetBusy is the second retryable EnterWorld failure: the map has no
+	// live server and the allocation API answered `UnAllocated` — every
+	// GameServer in the fleet is taken and none is Ready at this instant
+	// (registry.ErrNoCapacity). It is deliberately NOT msgNoServerAvailable:
+	// that one means "this map exists and is full", a stable condition ADR-2
+	// forbids growing out of, whereas this one routinely clears in seconds as
+	// the Fleet controller brings a replacement pod to Ready (measured 5.38s on
+	// k3d, ADR-18). It is also not msgServerStarting: nothing was allocated
+	// here, so there is no booting server of the client's to wait for.
+	//
+	// Retrying this one is safe in the way retrying the others is not. An
+	// `UnAllocated` answer is a decoded 2xx body stating that no GameServer was
+	// handed out, so a retry costs one allocation POST and leaks no pod — and
+	// the retry that finally succeeds usually costs not even that: pods
+	// self-register at startup before any allocation (ADR-18), so once the
+	// replacement is Ready the next EnterWorld resolves it straight from the
+	// registry with no allocator call at all. It names no fleet or namespace.
+	msgFleetBusy      = "all servers busy, retry shortly"
+	msgNotImplemented = "not implemented"
+	msgInternalError  = "internal error"
 )
 
 func clientSafeAssignError(err error) string {
 	switch {
+	// ErrServerStarting is checked first: it is the more specific condition and
+	// must not be flattened into the do-not-retry message.
+	case errors.Is(err, registry.ErrServerStarting):
+		return msgServerStarting
+	// A map the deployment cannot serve is terminal for this client: retrying
+	// cannot make a fleet host a different map, and every retry allocates.
+	case errors.Is(err, registry.ErrFleetMapMismatch):
+		return msgUnknownMap
+	// A momentarily exhausted fleet is checked before ErrNoServerAvailable and
+	// must stay ahead of it: allocateAndWait wraps both sentinels into one error
+	// (`"%w %s: allocate: %w"`), so the broader capacity sentinel would swallow
+	// this one and report a self-correcting condition as terminal. Narrow on
+	// purpose — only ErrNoCapacity, which proves nothing was allocated. Any
+	// other allocator failure (transport error, non-2xx, undecodable body) may
+	// have allocated a pod whose response was lost, and telling a client to
+	// retry that is exactly how un-reclaimable pods pile up.
+	case errors.Is(err, registry.ErrNoCapacity):
+		return msgFleetBusy
 	case errors.Is(err, registry.ErrNoServerAvailable):
 		return msgNoServerAvailable
+	// The two party failures are the client's own fault and terminal. They are
+	// checked before the generic cases so a membership refusal is never reported
+	// as an internal error -- which would send an operator hunting a fault that
+	// is not there, and a player retrying something that cannot succeed.
+	case errors.Is(err, transfer.ErrNotAPartyMember):
+		return msgNotInParty
+	case errors.Is(err, transfer.ErrPartyUnknown):
+		return msgUnknownParty
 	case gameerrors.Is(err, gameerrors.ErrNotImplemented):
 		return msgNotImplemented
 	default:
 		return msgInternalError
 	}
+}
+
+// assignDungeon resolves a dungeon entry, or explains why it cannot.
+//
+// The dependencies are assembled here rather than held on Gateway because two
+// of them are optional in a way the map path's are not: a deployment with no
+// dungeon fleet and no Nakama URL is a valid deployment today, and it must fail
+// a dungeon request legibly rather than panic on a nil field. That is the same
+// posture the allocator already takes for an unconfigured dungeon fleet.
+func (g *Gateway) assignDungeon(ctx context.Context, userID, partyID, contentID string) (transfer.AssignResult, error) {
+	if g.dungeonIndex == nil || g.partyMembers == nil {
+		return transfer.AssignResult{}, fmt.Errorf("assign dungeon: %w",
+			gameerrors.New(gameerrors.ErrNotImplemented,
+				"dungeons are not configured on this deployment (NAKAMA_URL and a dungeon fleet are required)"))
+	}
+
+	return transfer.AssignDungeon(ctx, userID, partyID, contentID, transfer.DungeonDeps{
+		Registry: g.registry,
+		Index:    g.dungeonIndex,
+		Party:    g.partyMembers,
+		JoinKeys: g.joinKeys,
+	})
 }
 
 func (g *Gateway) handlePing(cc *ClientConn, env messages.Envelope) {

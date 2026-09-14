@@ -5,6 +5,369 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`dungeonprobe` takes both pins too (`-gateway-tls-cert`, `-nakama-tls-cert`).** It is the
+  tool that proves C1 (dungeon instancing), and it could not run at all against a dev cluster
+  with either flag on. Its negative control — an outsider's refusal must **name the party** —
+  is what caught the gateway failing every dungeon entry with a bare "internal error".
+
+  `smoke.PinnedTLSConfig` is exported for it rather than copied; the gateway pin is a
+  package-level value because `enterWorld` is called from five places and threading it through
+  each invites one being missed, which is exactly the failure this class of bug keeps taking.
+
+- **`-nakama-tls-cert` / `NAKAMA_TLS_CERT`: the smoketest can reach a Nakama that terminates
+  its own TLS (ADR-24).** Without it the suite reported `context deadline exceeded` against a
+  perfectly healthy Nakama — **a plaintext GET to a TLS listener is not refused, it hangs**, and
+  the timeout then names Nakama rather than the scheme. That is worse than a clean failure: it
+  sends the reader to look at the wrong component.
+
+  The pin is the leaf, compared byte for byte, and `InsecureSkipVerify` disables only the
+  DEFAULT verifier so `VerifyPeerCertificate` is the sole decider — how Go spells "replace
+  verification", not "remove it". Pinning is **stricter** than the public trust store.
+
+  Two startup refusals rather than warnings, matching the game server's own rule: a pin against
+  a non-https URL is refused (a pin on a plaintext hop protects nothing while reading as though
+  it does), and an https URL with no pin is refused up front rather than failing deep inside an
+  x509 message.
+
+  `NewRunner` now returns an error instead of a bare `*Runner`, because these are configuration
+  faults that must stop the run rather than surface as a mid-flight failure.
+
+## [Unreleased]
+
+### Added
+- **`killprobe` can pin both TLS hops: `-gateway-tls-cert` (ADR-23) and `-nakama-tls-cert`
+  (ADR-24).** Without them the probe could not run at all against a dev cluster with either
+  flag on, so the one tool that proves the reward path end to end stopped working exactly when
+  the security work it was meant to validate landed.
+
+  **Both are pins, not CA trust, and pinning is stricter than the trust store** — a certificate
+  signed by any CA on earth is refused unless it is this exact one, compared leaf-only and byte
+  for byte. A pin that matched anywhere in the chain would accept a certificate *issued by* the
+  pinned one, which is a different guarantee. `InsecureSkipVerify` is set and that is not what
+  it sounds like: it disables the default verifier so `VerifyPeerCertificate` is the only thing
+  deciding, which is how Go spells "replace verification", not "remove it".
+
+  **Two startup refusals rather than warnings**, matching the game server's own rule: a pin
+  against a non-https `-nakama` is refused, because a pin on a plaintext hop protects nothing
+  while reading as though it does; and an https `-nakama` with no pin is refused up front
+  rather than failing several steps later inside an x509 message, because Nakama's meta-hop
+  certificate is self-signed by design and is never trusted through a CA.
+
+  There is no downgrade on the gateway hop either: a pin that fails to match ends the probe
+  instead of retrying in the clear, because a probe that quietly falls back measures the wrong
+  stack and reports success.
+
+  `smoke.WrapGatewayTLS` and `smoke.LoadPinnedCertificate` are exported for this (they were
+  unexported and reachable only from the smoke tests); no behaviour changed with the rename.
+
+## [Unreleased]
+
+### Added
+- **The smoke test verifies the game server's identity signature (ADR-25).** It passes the
+  `server_public_key` the real gateway handed it into the sealed handshake, so a forged or
+  missing signature now ends the run instead of being reported. This is the closest peer in
+  the repo to a shipped client -- it receives its join token rather than minting one -- so it
+  is the one that proves a REAL player can reach an authenticated state, which
+  `binding_verified` never could.
+
+  The game-server step reports **three** facts rather than one:
+  `identity_checked`, `key_hop_authenticated` and `server_identity_verified`. While the
+  gateway hop is plaintext a passing run prints `checked=true authenticated=false
+  verified=false`, and that is the honest result, not a degraded one: the key was delivered
+  over a hop an attacker could have owned. `KeyHopAuthenticated` is hard-coded false and is
+  the single line to change when ADR-23's gateway TLS is on AND this client validates the
+  certificate -- not before. A backend with no identity key still passes with
+  `identity_key=false`, so the suite stays green against a pre-ADR-25 deployment.
+- **`-gateway-tls-cert` / `SMOKE_GATEWAY_TLS_CERT`: the gateway hop's TLS, with the certificate
+  PINNED byte-for-byte (ADR-23).** Covers the gateway hop only; the gameplay hop is `-sealed`, and
+  setting one says nothing about the other.
+
+  A pin, not a trust store, and that is stricter rather than weaker: the dev and staging gateways are
+  self-signed so chain validation cannot succeed, leaving pinning or skipping -- and skipping is what
+  makes a misconfigured hop look exactly like a working one. A certificate signed by any CA on earth
+  is refused unless it is this exact one. `InsecureSkipVerify` is set and does not mean what it looks
+  like: it removes the DEFAULT verifier so the pin can be the only one that decides, which is how Go
+  expresses "replace verification". The C# client's `PinValidator` does the same and likewise ignores
+  the platform's chain result.
+
+  Measured against `k3d-rpg-dev` on 2026-09-13: correct pin -> `SMOKE=PASS` with `sealed=true`; a
+  different valid self-signed certificate -> refused by name; no pin at all -> `read length: EOF`,
+  which is the closed socket a TLS listener has no way to explain to a plaintext client.
+
+  Unit tests cover both directions, including that the refusal NAMES the pin -- a refusal nobody can
+  attribute costs as much as no refusal. Mutation-checked: deleting the comparison fails them. One
+  honest gap: the "peer presented no certificate" guard is unreachable from a real handshake, so no
+  test exercises it.
+
+### Added
+- **`cmd/dungeonprobe`: proves ADR-26 end to end against a running deployment.** A real party
+  created through Nakama's RPCs, entering a dungeon through the real gateway.
+
+  It exists because the unit tests on both sides can only prove their own halves: the
+  gateway's drive a fake party authority and a fake allocator, the Nakama module's drive an
+  in-process storage double. Neither can answer the question that matters -- do two players
+  who joined the same party through Nakama land on the **same pod**?
+
+  **The verdict is the address.** Not "both calls succeeded": two successful calls returning
+  two different pods is precisely the failure ADR-26 decision 2 exists to prevent, and it
+  looks like success from every angle except that one.
+
+  The negative control runs **first**, before the members enter. It is the security assertion,
+  and an assertion placed after everything else is the one that gets skipped on the day it
+  would have fired; it also needs no allocated pod, so it still runs and still means something
+  against a fleet scaled to zero. It asserts not just that the outsider is refused but that the
+  refusal **names the party** -- "all servers busy" there would be a pass-looking result from a
+  gateway that never checked at all.
+
+  **Measured on dev, 2026-09-12**, with the dungeon fleet at `replicas: 0`:
+  ```
+  party created: 0615e1c3faf6fb9bff4574a91b2518de (leader)
+  member joined the same party
+  outsider refused, and the reason names the party: "not a member of that party"
+  FAILED: enter world rejected: all servers busy, retry shortly
+  ```
+  The first three lines are the live proof that the party RPCs and the gateway's
+  membership check work against a real Nakama -- the Nakama module's own author could not
+  verify that, having never loaded the plugin. The fourth is the expected answer from an
+  empty fleet and is what the game-server half of ADR-26 unblocks.
+
+### Fixed
+- **`killprobe` spoke JSON, so turning sealing on broke it.** The day `GAMESERVER_SEALED`
+  flipped to `require` on dev, the reward acceptance harness stopped working:
+
+  ```
+  [killprobe] FAILED: join rejected: encoding_cannot_seal
+  ```
+
+  The refusal is clear — that part is the server fix working — but the tool that proves
+  rewards actually flow could no longer run against the environment it exists to prove. A
+  harness that stops running is worse than one that fails, because nothing reports its
+  absence.
+
+  It now speaks Protobuf and runs the ADR-22 handshake immediately after the join, before
+  any gameplay frame, with the sealed framing on both directions. Sealing is
+  **unconditional**: dev and staging both require it, and a flag to skip it would only be a
+  way to run a probe that no longer resembles the deployment.
+
+  `binding_verified` is reported, never asserted — a probe cannot hold `JOIN_TOKEN_SECRET`
+  for the same reason a shipped client cannot.
+
+  Verified against the live sealed fleet: `REWARDED: wallet map[] -> map[gold:10] after 30
+  attacks`.
+
+### Fixed
+- **`gamestate_reload` failed against a sealed server, and blamed persistence for it.** The
+  step rejoins on a second connection and never sealed it, so a `require` server refused the
+  rejoin and the step reported
+
+  ```
+  reload: player <id> never appeared in a snapshot after rejoin
+  ```
+
+  — a persistence symptom for an encryption cause, which is the most expensive kind of wrong
+  message. Measured on the k3d-rpg-dev deploy the day sealing was turned on: every other
+  step passed, `gamestate_player_row` included, and only the reload failed.
+
+- **`sealSession` sealed against the wrong join token, which is why the first fix did not
+  work.** It read `r.joinToken` — the token from the *original* `EnterWorld` — while the
+  rejoin carries a fresh one. The handshake is bound to the join token's `jti`, so the
+  second connection was sealed against the first token's `jti`, the server's binding check
+  failed, and the symptom was identical to not sealing at all. It now takes the token of the
+  connection it is sealing, passed by each caller.
+
+  Full sealed run against the live deploy after both fixes, `gamestate_reload` included:
+  `SMOKE=PASS`.
+
+### Fixed
+- **`sealSession`'s doc comment claimed the opposite of what the function does.** It read
+  "the smoke test holds the join-token secret, so unlike a shipped client it VERIFIES the
+  server's binding — which is what makes this a real check of the man-in-the-middle
+  defence". The function body, four lines below, says the reverse and is correct: the
+  smoketest goes through the REAL gateway, receives its join token, never holds
+  `JOIN_TOKEN_SECRET`, and calls `sealed.RunClientHandshake` with
+  `ClientHandshakeConfig{JTI: ...}` and no secret — which is exactly why every sealed run
+  reports `binding_verified=false`. Comment corrected. Nothing about the behaviour changed;
+  what changed is that a reader auditing "does CI prove the MITM defence?" now gets the
+  right answer (it does not — only the load generator, which mints its own tokens, does).
+
+- **`killprobe` claimed kills it had not made.** It treated "the mob is no longer in my
+  snapshot" as a death. A mob that walks out of the area of interest produces exactly those
+  bytes, and the probe duly reported `killed after 1 attacks (last HP seen 16)` — a
+  full-health mob that had wandered off. The wallet was `{}`, which is what exposed it.
+
+  Disappearance now decides nothing: the probe re-targets and keeps fighting. **The wallet
+  is the verdict** — read once before the fight for a baseline, then polled every two
+  seconds while fighting, because a reward is a *change* and without the baseline "10 gold"
+  could equally be yesterday's. It cannot be produced by an entity leaving the AOI.
+
+  Live run after the change, showing both halves working:
+
+  ```
+  enemy-358 left our view after 9 attacks (last HP seen 8); picking another
+  target enemy-359 at (6.2,-3.2) hp=16/16, me at (3.0,0.5)
+  REWARDED: wallet map[] -> map[gold:10] after 12 attacks
+  ```
+
+  Failure now names both possibilities rather than asserting one: nothing died, or the
+  reward path is broken.
+
+### Added
+- **`cmd/killprobe` — drives one REAL kill through a deployed stack**, so the reward path
+  can be observed rather than inferred. Everything up to the join is the smoketest's own
+  flow (device auth, `gateway_token`, `MsgAuth` + `MsgEnterWorld`, `MsgJoinToken`); what it
+  adds is the part no harness had — it walks to a mob and hits it until the mob leaves the
+  world, which is what makes `KillRewardBatcher` flush `reward_kills` to Nakama.
+
+  It answers `MsgPing`. Without that the server drops the connection mid-fight on a
+  heartbeat timeout, which arrives as a bare `EOF` and reads like the game server crashed;
+  the first run killed fast enough not to notice and the second did not.
+
+  First live run on `k3d-rpg-dev` found the reward path broken two layers deeper than the
+  wiring fixed alongside it — see `backend/deploy/CHANGELOG.md`. Proven afterwards from
+  Nakama's own database:
+
+  | user | what it did | wallet | `kills_alltime` |
+  |---|---|---|---|
+  | `bd63b16a` | killed a mob | `{"gold": 10}` | 1 |
+  | `6e1f43a8` | killed a mob; its batch retried across a Nakama restart | `{"gold": 10}` | 1 |
+  | `de119f3d` | dropped on a heartbeat timeout before killing anything | `{}` | absent |
+
+  The third row is the control: no kill, no reward. The second is exactly-once batching
+  surviving a restart, which is the behaviour #274 claims and had never demonstrated.
+
+### Added
+- **`TestNoJSONDefaultingEnvelopeConstructor` — a source scan, so there is no sixth site.**
+  `send-budget`'s design, taken verbatim from #303. It reads the package's non-test sources
+  and fails naming file and line if any `messages.NewEnvelope(` survives.
+
+  **Deliberately not behavioural**, and the reasoning is the useful part: the defect it
+  guards was not wrong behaviour, it was an **unvisited line**. A behavioural test would
+  have to reach the reload step, against a sealed server, with a live database, to notice —
+  which is precisely why two reviewers did not. A test that can only catch the bug under
+  the conditions that hid it is not a guard.
+
+  It also fails when it scans **zero** files, because a guard that checks nothing passes
+  for the wrong reason — the same class of defect it exists to catch.
+
+### Fixed
+- **A fifth `NewEnvelope` call site that `-encoding` did not reach.** `smoke/db.go`'s
+  disconnect at the end of the reload check was still hardcoded to JSON, so a
+  `-encoding proto` run against a `require` server would have had that one connection
+  refused. It survived because the change that introduced `-encoding` asserted "no
+  `NewEnvelope` call survived" against **`runner.go` only** — the file that happened to be
+  open — and the live run that proved the feature used `-skip-db`, which is the one mode
+  that never executes this path.
+
+  Found by `send-budget`, who did the same conversion independently and searched the whole
+  module. The scan is now module-wide and returns zero.
+
+### Added
+- **`-sealed` as a flag, and the impossible combination refused in the binary.**
+  `-sealed -encoding json` is rejected at startup rather than left to fail at the join,
+  where the symptom is a join that is *accepted* and a connection that then closes — so a
+  log reading "join accepted" is not evidence the client works.
+
+  It does not silently upgrade the encoding: someone who wrote that combination believes
+  one of the two things about their run, and choosing the other for them hides which. The
+  guard is in the binary and not only in `stack.sh`, because a wrapper can be bypassed and
+  the binary is what CD runs.
+
+  Both this and the documentation below are `send-budget`'s design, taken from #300.
+
+### Added
+- **`-encoding` / `SMOKE_ENCODING`: the smoke test can send protobuf, so it can check a
+  sealed stack.** Defaults to `json`, so every existing run is byte-identical and CD proves
+  exactly what it proved before.
+
+  **Why this was thought to be hard, and was not.** A `require` game server refused this
+  client at the join with `encoding_cannot_seal`, which was diagnosed — in this changelog,
+  in `ROADMAP-SECURITY.md`, and in a `stack.sh` comment — as "it hand-rolls `encoding/json`
+  with no encoding switch, and that independence is much of its value; protobuf is a
+  decision, not a chore". That was wrong. It calls `messages.NewEnvelope`, and `codec.go`
+  defines that as `NewEnvelopeAs(EncodingJSON, ...)` in the **shared** codec the gateway and
+  the load generator already use. There was no hand-rolled encoder and no independence to
+  lose. Four call sites in `runner.go`.
+
+  Verified live against a `require` server rather than in unit tests: JSON refused
+  (`encoding_cannot_seal`), protobuf + sealing **`SMOKE=PASS`** with
+  `sealed=true binding_verified=false` over 16 snapshots, protobuf without a hello refused
+  (`sealed handshake failed (NoHello)`) — three populations, three distinct reasons in the
+  server's own log.
+
+  `binding_verified=false` is correct and expected: this client receives its join token from
+  the real gateway and so holds no `JOIN_TOKEN_SECRET`. It behaves exactly like a shipped
+  client, which is the point of it.
+
+### Changed
+- **An unrecognised encoding is refused at startup, not defaulted.** Empty is *unset* and
+  maps to JSON — a `Config` built in code leaves it zero — but a non-empty value that is
+  neither `json` nor `proto` is a typo, and those are different things. Silently falling
+  back would be invisible against an `off` server and, against a `require` one, would be
+  refused at the join in a way that reads as a broken stack rather than a misspelt flag.
+
+### Added
+
+- **`SMOKE_SEALED`: the smoke test can speak a sealed session — but the path is UNREACHABLE
+  today, and this entry overstated it when it was written.**
+
+  **Correction (2026-09-10).** Measured live against a `require` server: the sealed arm
+  fails at `gameserver_join` with `sealed handshake: read server hello: read length: EOF`,
+  and the server log gives the cause — `encryption is required and this client's encoding
+  cannot seal (encoding_cannot_seal)`. **The smoke test speaks JSON, and a JSON client can
+  never carry a sealed frame.** It hand-rolls `encoding/json` and has no encoding switch at
+  all, so it is refused at the join before any of the code below runs.
+
+  The sealing code is not wrong — `RunClientHandshake` is shared with the load generator,
+  which does drive it live over protobuf. It is unreachable. The original claim that this
+  was "required before the game server's default can flip" was **the wrong way round**:
+  the default flipping is what exposes that the smoke test cannot connect at all, and the
+  real prerequisite is a smoke test that speaks protobuf.
+
+  That is a design decision rather than a chore: the smoke test's JSON-ness is much of its
+  value, because it makes it an *independent* second implementation of the wire rather than
+  a consumer of the same generated types the server uses. Vendoring the generated protobuf
+  types would cost that independence; hand-rolling protobuf is real work.
+
+  **Consequence, and it is the binding one:** `post-deploy-smoke` and `verify.sh`'s
+  `flow.smoke` both run this binary against the stack they just deployed, so **no
+  environment can be set to `GAMESERVER_SEALED=require` until this is resolved** — requiring
+  encryption currently deprecates the deploy verifier. The original entry follows, unchanged
+  except for this note, because what it describes is what the code does once it can connect.
+  - **It behaves like a shipped client, because it is the closest thing to one here.** It
+    goes through the real gateway and therefore *receives* its join token rather than
+    minting one, so it holds no `JOIN_TOKEN_SECRET` and **cannot verify the server's
+    binding**. It reads the `jti` with `jwt.ParseUnverified` and completes the handshake
+    unverified — confidentiality against a passive eavesdropper, nothing against an active
+    one.
+  - The step reports **both** facts: `sealed=true binding_verified=false`. Reporting only
+    the first would let a reader take confidentiality for authenticity, which is precisely
+    the conflation ADR-21 was written about.
+  - Only the game-server socket is sealed; sealing the gateway hop with these keys would be
+    meaningless, since they derive from a join token the gateway itself issues.
+
+### Added
+- **Strict address mode (`SMOKE_STRICT_ADDR` / `--strict-addr`, default off).** The
+  runner normalizes listen-style addresses (`:9000`, `0.0.0.0:9000`, `[::]:9200`)
+  to loopback before dialing. That is right for host-mode deploys, but it silently
+  hides the Agones failure mode it is about to be used to prove: with
+  `portPolicy: Dynamic` the game server must learn its scheduler-assigned address
+  from the sidecar and register that; if it does not it advertises the hostless
+  `:9000`, the gateway forwards it verbatim, and no real client can dial it — while
+  the smoke test rewrites it, connects to whatever else listens on port 9000 of the
+  local host, and reports PASS.
+  - With the flag on, a listen-style `ServerAddr` from `MsgEnterWorldResp` fails the
+    `gateway_auth` step with a message naming the address and the likely cause (the
+    Agones sidecar status read, or `GAMESERVER_PUBLIC_ADDR`).
+  - Applies to the **game-server hop only**. `GATEWAY_ADDR` is operator-supplied
+    local config (`:8000` by default), not an advertised address, and keeps the
+    rewrite in both modes.
+  - Rejects only *listen-style* addresses: a loopback address the server
+    deliberately advertised (`127.0.0.1:9000`, plausible under k3d) passes through.
+  - Default off, and strict-off is asserted byte-for-byte identical to
+    `NormalizeDialAddr` — CD's post-deploy smoke step and host-mode local dev are
+    unaffected.
+
 ### Fixed
 - **`gamestate_reload` could fail a deploy that did everything right.** It compared
   the reloaded spawn against the row snapshot `gamestate_player_row` took a step

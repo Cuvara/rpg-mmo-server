@@ -1,0 +1,89 @@
+# PostgreSQL "meta" instance — Nakama's own database (accounts, storage,
+# leaderboard). Owned and migrated by Nakama (`nakama migrate up`), never by us.
+# Kept separate from the gamestate instance per root CLAUDE.md and ADR-1
+# (one writer per datum).
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-meta
+  labels: { app.kubernetes.io/name: postgres-meta }
+spec:
+  # Headless: a single-replica StatefulSet needs no load balancing, and a
+  # headless service gives both `postgres-meta` and the stable per-pod name
+  # `postgres-meta-0.postgres-meta` in DNS.
+  clusterIP: None
+  selector: { app.kubernetes.io/name: postgres-meta }
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-meta
+spec:
+  serviceName: postgres-meta
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: postgres-meta }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: postgres-meta }
+    spec:
+      # postgres:16.4-alpine runs as uid 70 (the `postgres` user) after the
+      # entrypoint drops from root. local-path provisions the dir as root:root,
+      # so hand the volume to gid 70 or initdb fails with "permission denied".
+      securityContext:
+        fsGroup: 70
+      containers:
+        - name: postgres
+          image: postgres:16.4-alpine
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef: { name: postgres-meta }
+          env:
+            # The PVC is mounted at /var/lib/postgresql/data; PGDATA points one
+            # level deeper so anything the volume plugin leaves at the mount
+            # root (lost+found on some provisioners) cannot make initdb refuse
+            # a "not empty" directory.
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+            - { name: POSTGRES_INITDB_ARGS, value: "--data-checksums" }
+          ports:
+            - { name: postgres, containerPort: 5432 }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+          # Carries the compose healthcheck intent: pg_isready against the real
+          # user+database, not a TCP open. A listening socket during recovery is
+          # not a database that accepts queries.
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", 'exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1']
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            # -h 127.0.0.1 forces a TCP probe: the default unix-socket path
+            # answers while the server is still refusing network clients.
+            exec:
+              command: ["sh", "-c", 'exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1']
+            # Generous: a liveness kill mid-recovery on a 30s-loss budget store
+            # (ADR-6) turns a slow start into a crash loop.
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # No storageClassName: bind to the cluster default. On k3d that is
+        # `local-path` (rancher.io/local-path, WaitForFirstConsumer, reclaim
+        # Delete) — verified, see README.md §Storage.
+        resources:
+          requests: { storage: 2Gi }

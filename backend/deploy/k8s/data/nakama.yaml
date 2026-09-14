@@ -1,0 +1,276 @@
+# Nakama — meta services (auth, economy, leaderboard) plus OUR Go runtime
+# plugin, which is what serves the `gateway_token` RPC the realtime flow starts
+# from. A Deployment, not a StatefulSet: Nakama keeps no local state, all of it
+# is in the meta PostgreSQL.
+#
+# ---------------------------------------------------------------------------
+# PLUGIN DELIVERY: baked into an image, not an initContainer. See README.md
+# §Why the plugin is baked in for the full argument. Short version: the plugin
+# is ABI-locked to the exact server binary it loads into, so the plugin and the
+# server must be versioned as ONE artifact, and an image is the only way to say
+# that. deploy/nakama-plugin.Dockerfile already builds exactly this image
+# (target `runtime`) — it existed for compose and needed no change.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: nakama
+  labels: { app.kubernetes.io/name: nakama }
+spec:
+  type: ClusterIP
+  selector: { app.kubernetes.io/name: nakama }
+  ports:
+    - { name: grpc,    port: 7349, targetPort: grpc }
+    - { name: http,    port: 7350, targetPort: http }
+    - { name: console, port: 7351, targetPort: console }
+    - { name: metrics, port: 9100, targetPort: metrics }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nakama
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: nakama }
+  strategy:
+    # Nakama and its migrations share one database; two versions running at once
+    # during a rollout is not something this stack has been shown to survive.
+    #
+    # It is now load-bearing for a SECOND reason: this pod binds hostPort 7001,
+    # and a hostPort is a node-level resource. Under RollingUpdate on a single
+    # node the replacement cannot schedule until the outgoing pod frees the
+    # port, and the outgoing pod is not terminated until the replacement is
+    # Ready -- a permanent deadlock. Do not "modernise" this to RollingUpdate.
+    type: Recreate
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: nakama }
+    spec:
+      # Pull from a private registry when registry-creds exists in this
+      # namespace. Silently ignored when absent (k3d import, no registry).
+      imagePullSecrets:
+        - name: registry-creds
+      initContainers:
+        # Replaces compose's shell entrypoint, which ran `migrate up` and then
+        # exec'd the server in one command. As an initContainer the migration
+        # gets its own exit status: a failed migration leaves the pod in Init
+        # and never starts a server against a half-migrated schema.
+        - name: migrate
+          image: rpg-mmo/nakama:3.40.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef: { name: postgres-meta }
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              # postgres-meta has its own readiness probe, but nothing
+              # sequences a Deployment behind a StatefulSet, so retry here
+              # rather than crash-loop the whole pod for the first half-minute
+              # of a cold start. The retry is on `migrate up` itself and not on
+              # a `nc`/`pg_isready` reachability check, because the nakama image
+              # ships neither and `migrate up` is idempotent anyway.
+              for i in $(seq 1 60); do
+                if /nakama/nakama migrate up \
+                     --database.address "${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-meta:5432/${POSTGRES_DB}"; then
+                  echo "migrate up: ok"; exit 0
+                fi
+                echo "migrate up failed, retrying ($i/60)"; sleep 2
+              done
+              echo "migrate up: giving up after 60 attempts"; exit 1
+      containers:
+        - name: nakama
+          image: rpg-mmo/nakama:3.40.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef: { name: postgres-meta }
+            # Carries NAKAMA_SERVER_KEY and NAKAMA_HTTP_KEY. Both are STATIC and
+            # never expire; NAKAMA_HTTP_KEY gates the server-only reward_kill /
+            # submit_kill RPCs, and Nakama's published default for it
+            # ('defaulthttpkey') was measured to pass authentication. Not
+            # `optional` — a missing key must fail container creation visibly.
+            # ADR-24.
+            - secretRef: { name: nakama }
+          env:
+            # Meta-hop TLS (ADR-24) — OFF, pinned as literal empty strings rather
+            # than omitted, for the same reason GATEWAY_TLS_* is pinned in
+            # k8s/app/40-gateway.yaml: an absent variable is indistinguishable
+            # from an unconsidered one, and this is a security setting.
+            #
+            # To turn on: follow the recipe in README.md §"Turning the meta hop's
+            # TLS on". It is TWO kubectl commands and NO edit to this file -- an
+            # earlier draft of this comment said four coordinated edits, which was
+            # true of a mechanism that no longer exists. Create the `nakama-tls`
+            # Secret and set the two keys in the `nakama-config` ConfigMap; the
+            # mount below is already here and already optional. `nakama-url` in
+            # ../app/20-configmaps.yaml moves to https:// in the same act, with
+            # the game server's pin -- a plaintext NAKAMA_URL against a TLS-only
+            # Nakama fails every reward RPC, silently.
+            #
+            # The PROBES need no change: they were moved off :7350 onto the
+            # metrics listener precisely so this flag has one less thing to break.
+            # Per-CLUSTER, not per-manifest: this file is applied unchanged to dev
+            # and staging, so a hardcoded path here would turn TLS on in both or
+            # neither. `optional: true` means an absent ConfigMap or an absent key
+            # leaves these empty, which is the flag off -- the same shape the
+            # gateway's own TLS opt-in uses (ADR-23), and the reason neither needs
+            # a per-environment overlay.
+            - name: NAKAMA_TLS_CERT
+              valueFrom:
+                configMapKeyRef:
+                  name: nakama-config
+                  key: tls-cert-path
+                  optional: true
+            - name: NAKAMA_TLS_KEY
+              valueFrom:
+                configMapKeyRef:
+                  name: nakama-config
+                  key: tls-key-path
+                  optional: true
+          # Do NOT set LEADERBOARD_MIGRATE=recreate here: it deletes every
+          # kills_alltime record. If the plugin refuses to load with
+          # "leaderboard kills_alltime exists with authoritative=false", use
+          # RUNBOOK path A (SQL flip + restart) — backend/nakama/docs/RUNBOOK.md.
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              # Meta-hop TLS (ADR-24). Built with `set --` so an absent pair adds
+              # NO flags at all: an EMPTY --socket.ssl_certificate is not the same
+              # as an absent one, Nakama tries to read the empty path and exits.
+              # Half-configured is refused rather than silently plaintext, and a
+              # certificate path containing a space survives because the arguments
+              # are positional rather than a word-split string.
+              #
+              # MEASURED SCOPE: :7350 only, INCLUDING /ws, TLS-only. The console
+              # :7351 and metrics :9100 stay PLAINTEXT — they are cluster-internal
+              # here (no hostPort), which is why that is tolerable in this manifest
+              # and is NOT in compose, where all four ports publish on 0.0.0.0.
+              set --
+              if [ -n "${NAKAMA_TLS_CERT:-}" ] || [ -n "${NAKAMA_TLS_KEY:-}" ]; then
+                if [ -z "${NAKAMA_TLS_CERT:-}" ] || [ -z "${NAKAMA_TLS_KEY:-}" ]; then
+                  echo "NAKAMA_TLS_CERT and NAKAMA_TLS_KEY must be set together or not at all" >&2
+                  exit 1
+                fi
+                set -- --socket.ssl_certificate "${NAKAMA_TLS_CERT}" \
+                       --socket.ssl_private_key "${NAKAMA_TLS_KEY}"
+                echo "nakama: TLS ON for :7350 (console/metrics stay plaintext — ADR-24)"
+              fi
+              exec /nakama/nakama "$@" \
+                --name rpg-nakama-k8s \
+                --database.address "${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-meta:5432/${POSTGRES_DB}" \
+                --logger.level INFO \
+                --session.token_expiry_sec 7200 \
+                --session.encryption_key "${JWT_SECRET}" \
+                --session.refresh_encryption_key "${JWT_SECRET}-refresh" \
+                --runtime.path /nakama/data/modules \
+                --console.username "${NAKAMA_CONSOLE_USER}" \
+                --console.password "${NAKAMA_CONSOLE_PASSWORD}" \
+                --socket.server_key "${NAKAMA_SERVER_KEY}" \
+                --runtime.http_key "${NAKAMA_HTTP_KEY}" \
+                --metrics.prometheus_port 9100
+          ports:
+            # hostPort on http ONLY. The client authenticates to Nakama before
+            # it ever reaches the gateway, so with no host route to Nakama the
+            # very first hop of the flow is impossible from outside the cluster
+            # -- a ClusterIP Service is reachable by the gateway and by nothing
+            # a player runs.
+            #
+            # 7001 comes out of the infrastructure half of k3d's published
+            # 7000-7100 range; the Agones controller runs with MIN_PORT=7010 so
+            # its allocator can never hand this port to a GameServer. See the
+            # long note in ../app/40-gateway.yaml.
+            #
+            # grpc/console/metrics stay cluster-internal on purpose: nothing a
+            # player runs needs them, and the console especially should not be
+            # on the host.
+            - { name: grpc,    containerPort: 7349 }
+            - { name: http,    containerPort: 7350, hostPort: 7001 }
+            - { name: console, containerPort: 7351 }
+            - { name: metrics, containerPort: 9100 }
+          # THE PROBES DELIBERATELY DO NOT TOUCH :7350, BECAUSE :7350 IS THE ONE
+          # PORT WHOSE PROTOCOL CHANGES. They GET the Prometheus listener on
+          # :9100 instead, which `--socket.ssl_certificate` does not cover
+          # (ADR-24 §4) and which is therefore plain HTTP whether the meta hop
+          # is on or off. One spec, both modes, no overlay needed.
+          #
+          # This replaced `httpGet: { path: /healthcheck, port: http }`, which
+          # was HTTP against the port Nakama moves to TLS: with the flag on, all
+          # three probes failed with
+          #
+          #   http: TLS handshake error ... client sent an HTTP request to an HTTPS server
+          #
+          # and the pod NEVER became Ready -- measured on k3d-rpg-dev 2026-09-12,
+          # the rollout timing out with the container itself perfectly healthy.
+          #
+          # The three alternatives, and why each was rejected -- measured, not
+          # reasoned about, because two of them look obviously right:
+          #
+          #   * `scheme: HTTPS` on :7350. Correct with TLS on, WRONG with it off,
+          #     and off is the default at every deploy path. It would trade a
+          #     broken opt-in for a broken default.
+          #   * exec `/nakama/nakama healthcheck`. Nakama v3.40.0's healthcheck
+          #     subcommand is hardcoded to `http.Get("http://localhost:" + port)`
+          #     (main.go) -- it has NO TLS branch, so it breaks under TLS exactly
+          #     like the httpGet did. It also forks a 200MB binary every 10s.
+          #   * exec curl/wget. The image has neither. Measured inside the running
+          #     pod on k3d-rpg-dev 2026-09-13: heroiclabs/nakama:3.40.0 is Debian
+          #     12 with no curl, no wget, no nc, no python3 and no openssl.
+          #   * `tcpSocket`. Works in both modes, and answers a different question:
+          #     "is something accepting connections", not "is Nakama serving". A
+          #     probe that cannot tell a wedged Nakama from a healthy one is worse
+          #     than the bug it replaces.
+          #
+          # WHAT THIS GIVES UP, stated rather than glossed: :9100 is a different
+          # `http.Server` in the same process than the client API on :7350, so
+          # these probes prove the PROCESS is alive and serving HTTP, not that the
+          # client-API mux still answers. The gap is narrow because the old target
+          # was narrow too -- Nakama's /healthcheck is a static 200 (`{}` on the
+          # wire, measured) that checks no dependency, so the only failure now
+          # missed is a wedge confined to the API mux while the metrics mux still
+          # answers. A cert the operator got wrong is NOT in that gap: Nakama
+          # cannot read it, exits at startup, and the pod crash-loops visibly.
+          #
+          # `path: /` rather than `/metrics`: the Prometheus handler is mounted at
+          # the root of this listener and both answer 200 (measured through the
+          # API-server proxy, 2026-09-13); the root is the shorter promise.
+          startupProbe:
+            httpGet: { path: /, port: metrics }
+            periodSeconds: 5
+            failureThreshold: 24   # up to 2 min for migrate + plugin load
+          readinessProbe:
+            httpGet: { path: /, port: metrics }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /, port: metrics }
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 1Gi }
+          # Meta-hop TLS (ADR-24). Always mounted and never edited: the volume
+          # below is `optional`, so on a cluster with no `nakama-tls` Secret this
+          # is an empty directory that nothing reads. The paths the two
+          # NAKAMA_TLS_* ConfigMap keys name are the ones this mount creates.
+          volumeMounts:
+            - name: nakama-tls
+              mountPath: /nakama/tls
+              readOnly: true
+      # Meta-hop TLS (ADR-24). `secretName: nakama-tls` is created by the recipe;
+      # `defaultMode: 0400` keeps the private key unreadable by anything but the
+      # container's own user -- which is uid 0 here, with an empty securityContext,
+      # so 0400 is readable rather than a crash-loop (measured, not assumed).
+      volumes:
+        - name: nakama-tls
+          secret:
+            secretName: nakama-tls
+            # optional: an absent Secret mounts an empty directory instead of
+            # wedging the pod in ContainerCreating. With no Secret the two
+            # NAKAMA_TLS_* values are empty too, so nothing reads the directory
+            # and the flag is simply off.
+            optional: true
+            defaultMode: 0400

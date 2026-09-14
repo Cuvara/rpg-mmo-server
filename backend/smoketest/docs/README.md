@@ -100,11 +100,14 @@ All endpoints are overridable via env and/or flags (flags win):
 | `GAME_DB_URL` | `--game-db-url` | *(unset)* | Game-state DSN. Unset ⇒ the three `gamestate_*` checks **SKIP** |
 | `SMOKE_DEVICE_ID` | `--device-id` | *(random)* | Pin the Nakama device id (reuses the account) instead of generating one |
 | `SMOKE_SKIP_DB` | `--skip-db` | `false` | Skip every persistence check |
+| `SMOKE_ENCODING` | `--encoding` | `json` | Wire encoding for every frame this client **sends**: `json` or `proto`. The server answers in the encoding the client spoke, so there is nothing to set on the read side. An unrecognised value fails the run rather than falling back |
+| `SMOKE_SEALED` | `--sealed` | `false` | Run the sealed-session handshake on the gameplay hop and encrypt every frame after it. **Requires `--encoding proto`** and refuses the combination otherwise (see below). Must match the server's `GAMESERVER_SEALED` — configuration on both ends, never a wire negotiation |
 | `SMOKE_REQUIRE_DB` | `--require-db` | `false` | Fail instead of skipping when a persistence check cannot run |
 | `SMOKE_EXPECT_MIGRATION` | `--expect-migration-version` | `1` | Required `schema_migrations` version — **bump with every new migration** |
 | `SMOKE_DB_POLL_TIMEOUT` | `--db-poll-timeout` | `75s` | Deadline for the `player_states` row |
 | `SMOKE_DB_POLL_INTERVAL` | `--db-poll-interval` | `1s` | Gap between polls |
 | `SMOKE_HOLD_TTL` | `--hold-ttl` | `30s` | Game server reconnect hold, waited out before the reload check |
+| `SMOKE_STRICT_ADDR` | `--strict-addr` | `false` | Fail instead of rewriting when the advertised **game server** address is listen-style |
 
 The game server address is **not** configured — it comes from the
 `EnterWorldResponse`, exactly like a real client. Neither is the game server
@@ -112,10 +115,74 @@ The game server address is **not** configured — it comes from the
 (empty = `tcp`), so a gateway on TCP in front of KCP game servers works without
 any extra flag.
 
+### Strict address mode (`--strict-addr`)
+
+By default a listen-style `ServerAddr` — `:9000`, `0.0.0.0:9000`, `[::]:9200` —
+is rewritten to `127.0.0.1:<port>` before dialing. That is correct for host-mode
+deploys and local dev, where a bare `:9000` genuinely *is* where clients connect,
+and the C# side agrees on which addresses count as listen-style
+(`GameServer/Program.cs`, `IsHostlessAddr`).
+
+Under Kubernetes it is a trap. With Agones and `portPolicy: Dynamic` the game
+server must learn its scheduler-assigned address from the sidecar and register
+*that*. If it does not, it advertises the hostless `:9000`, the gateway forwards
+it to the client verbatim, and no real client can dial it — but the smoke test's
+rewrite would connect to whatever sits on port 9000 of the local host (quite
+possibly an unrelated compose-run game server), collect snapshots, and report
+**PASS**. The run would prove nothing while the real client fails.
+
+**Turn it on for any run whose purpose is to prove that a Kubernetes/Agones-
+allocated game server is reachable**, i.e. every allocation or fleet verification
+run. Then a listen-style `ServerAddr` fails the `gateway_auth` step outright:
+
+```
+FAIL  gateway_auth  ...  error: enter world: strict address mode: game server advertised ":9000",
+a listen-style address no client can dial; the game server never learned its externally-dialable
+address — under Agones that is the sidecar GameServer status read (allocated address + dynamic
+port), otherwise set GAMESERVER_PUBLIC_ADDR to the host:port clients reach
+```
+
+Strictness applies to the **game-server hop only**. `GATEWAY_ADDR` is
+operator-supplied local config (`:8000` by default), not an address a server
+advertised, so it keeps the loopback rewrite in both modes. Strict mode also
+rejects *only* listen-style addresses: a loopback address the server deliberately
+advertised (`127.0.0.1:9000`, plausible under k3d port-forwarding) passes through
+untouched.
+
+```bash
+# Proving an Agones-allocated server is really reachable
+JWT_SECRET=dev-secret-change-me GATEWAY_ADDR=127.0.0.1:8000 \
+  bin/smoketest --strict-addr
+```
+
 ```bash
 # Full flow with both hops on KCP
 JWT_SECRET=dev-secret-change-me TRANSPORT=kcp GATEWAY_ADDR=127.0.0.1:8200 \
   SMOKE_MAP_ID=map_kcp bin/smoketest
+```
+
+
+### Sealing requires protobuf, and the combination is refused rather than fixed
+
+`--sealed --encoding json` is rejected at startup. The JSON codec has **no sealed
+frame**, so a server with `GAMESERVER_SEALED=require` refuses a JSON client at the
+join with `encoding_cannot_seal` — the join is *accepted*, then the connection
+closes, so a log line reading "join accepted" is not evidence the client works.
+
+The smoke test does not upgrade the encoding for you. Someone who wrote
+`--sealed --encoding json` believes one of those two things about the run, and
+silently choosing the other hides which — the same reason the server has two
+sealing modes and not three.
+
+The refusal lives in the binary, not only in `stack.sh`: a wrapper can be bypassed,
+and the binary is what CD runs.
+
+```bash
+# Drive a sealed stack directly
+JWT_SECRET=... go run ./cmd/smoketest --sealed --encoding proto
+
+# Or let stack.sh derive both halves for you
+GAMESERVER_SEALED=require ./stack.sh check
 ```
 
 ## Run locally

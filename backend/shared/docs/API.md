@@ -189,8 +189,12 @@ func (r *ServerRegistry) Close() error
 func NewEventStream(addr, password, group, consumer string) *EventStream
 func NewEventStreamWithClient(client redis.UniversalClient, group, consumer string) *EventStream
 func (s *EventStream) SetBlockTimeout(d time.Duration)   // call before Subscribe; default 500ms
-func (s *EventStream) SetLogger(l *slog.Logger)          // call before Subscribe; logs group recovery
+func (s *EventStream) SetLogger(l *slog.Logger)          // call before Subscribe; logs group recovery + reclaim events
+func (s *EventStream) SetReclaimMinIdle(d time.Duration) // call before Subscribe; default 60s — idle before a pending entry may be claimed
+func (s *EventStream) SetReclaimInterval(d time.Duration)// call before Subscribe; default 30s — PEL scan cadence (also runs once on Subscribe)
+func (s *EventStream) SetMaxDeliveries(n int64)          // call before Subscribe; default 5 — deliveries before an entry is dead-lettered
 func (s *EventStream) GroupLosses() int64                // consumer groups found missing and re-created
+func (s *EventStream) DeadLetters() int64                // entries dropped (ACKed unhandled) by the delivery cap
 func (s *EventStream) Publish(ctx context.Context, stream string, event storage.Event) error
 func (s *EventStream) Subscribe(ctx context.Context, stream string, handler func(storage.Event)) error
 func (s *EventStream) Close() error

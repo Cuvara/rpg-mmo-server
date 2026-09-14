@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using Arch.Core;
 using GameServer.World.Components;
@@ -47,6 +48,53 @@ public readonly struct PendingInput
 }
 
 /// <summary>
+/// Outcome of <see cref="EcsWorld.PushInput(string, InputData, InputIngress?)"/>.
+/// </summary>
+public enum InputIngestResult
+{
+    /// <summary>Appended to the pending queue.</summary>
+    Enqueued,
+
+    /// <summary>
+    /// A movement-only input replaced this connection's previous movement-only input in
+    /// place: the queue did not grow, and the tick will integrate the newer direction.
+    /// </summary>
+    Coalesced,
+
+    /// <summary>Dropped: the connection had already queued its per-tick input budget.</summary>
+    DroppedConnectionBudget,
+
+    /// <summary>Dropped: the world-wide pending queue was full.</summary>
+    DroppedQueueFull,
+}
+
+/// <summary>
+/// Per-connection state for bounded input ingestion — owned by the connection, read and
+/// written only under the world's input lock.
+///
+/// <para>Every field is relative to a <i>drain epoch</i>: the queue is emptied once per
+/// base tick, and a counter that was not reset with it would throttle a client for the
+/// whole session after one burst. Stamping the epoch on the ingress state instead of
+/// clearing a dictionary of them per tick keeps the reset O(1) per connection and keeps
+/// the world free of a per-user map on the input path (workspace audit F04).</para>
+/// </summary>
+public sealed class InputIngress
+{
+    /// <summary>Drain epoch the counters below belong to.</summary>
+    internal long Epoch = -1;
+
+    /// <summary>Inputs this connection has in the queue since the last drain.</summary>
+    internal int Pending;
+
+    /// <summary>
+    /// Index in the queue of this connection's newest entry, when that entry is
+    /// movement-only and therefore replaceable; -1 otherwise (nothing queued, or the
+    /// newest entry carries an edge-triggered action that must stay distinct).
+    /// </summary>
+    internal int ReplaceableIndex = -1;
+}
+
+/// <summary>
 /// The server's entity store, backed by <see href="https://github.com/genaray/Arch">Arch</see>
 /// (ADR-10). Replaces the hand-rolled <c>GameWorld</c> dictionary: Arch owns entity
 /// identity, component storage, queries and iteration order. Nothing else stores
@@ -60,7 +108,10 @@ public readonly struct PendingInput
 /// and every caller looks entities up by that string.</description></item>
 /// <item><description>A <see cref="ReaderWriterLockSlim"/>. Arch's world is not
 /// thread-safe, and network threads spawn/despawn entities and push input while the
-/// tick loop reads. This is the same lock discipline <c>GameWorld</c> had.</description></item>
+/// tick loop reads. This is the same lock discipline <c>GameWorld</c> had — plus one
+/// rule the lock alone cannot express, because <b>Arch's read path is not a read</b>: a
+/// read path may only iterate a query out of <c>_readQueries</c>, refreshed by the write
+/// scope that preceded it. See that field and issue #176.</description></item>
 /// <item><description>A deferred structural-change phase. ADR-11 forbids
 /// <c>Arch.Buffer.CommandBuffer</c> — it throws under NativeAOT even with hints — so
 /// spawns and despawns requested while a query is being iterated are queued and
@@ -91,9 +142,66 @@ public sealed class EcsWorld : IDisposable
 {
     private readonly ArchWorld _arch = ArchWorld.Create();
     private readonly Dictionary<string, Entity> _index = new();
+
+    /// <summary>
+    /// Stable integer key per entity-id string — see <see cref="EntityIdRef.Stable"/>.
+    /// Entries are <b>never removed</b>: a despawn/respawn of the same id must get the
+    /// same key, or an int-keyed consumer would see a different entity where a
+    /// string-keyed one saw the same. Growth is bounded by distinct ids ever seen,
+    /// which the (string-keyed) delta states already paid for implicitly.
+    /// </summary>
+    private readonly Dictionary<string, int> _stableIds = new(StringComparer.Ordinal);
+
+    /// <summary>Next stable key. Starts at 1 so 0 stays "no key" in diagnostics.</summary>
+    private int _nextStableId = 1;
     private readonly List<PendingInput> _pendingInputs = new();
     private readonly ReaderWriterLockSlim _rwLock = new();
     private readonly object _inputLock = new();
+
+    /// <summary>Incremented on every drain; see <see cref="InputIngress"/>.</summary>
+    private long _drainEpoch;
+
+    /// <summary>Default for <see cref="MaxInputsPerConnection"/> (<c>GAMESERVER_MAX_INPUTS_PER_TICK</c>).</summary>
+    public const int DefaultMaxInputsPerConnection = 32;
+
+    /// <summary>
+    /// Most inputs one connection may have queued between two drains. A client that plays
+    /// by the rules sends one input per critical tick, so a handful per drain; the budget
+    /// is headroom for a burst of edge-triggered actions, not a rate a client should reach.
+    /// Movement-only inputs coalesce in place and never count against it more than once.
+    /// </summary>
+    public int MaxInputsPerConnection { get; private set; } = DefaultMaxInputsPerConnection;
+
+    /// <summary>
+    /// Most inputs the whole queue may hold between two drains, across every connection
+    /// (<c>GAMESERVER_MAX_PENDING_INPUTS</c>). The world-wide backstop for the per-connection
+    /// budget: what bounds the tick's drain and the memory behind it when many connections
+    /// all spend their budget at once.
+    /// </summary>
+    public int MaxPendingInputs { get; private set; } = int.MaxValue;
+
+    /// <summary>Inputs queued and not yet drained. Diagnostics and tests.</summary>
+    public int PendingInputCount
+    {
+        get { lock (_inputLock) return _pendingInputs.Count; }
+    }
+
+    /// <summary>
+    /// Set the ingestion bounds. Values below 1 fall back to the defaults (per-connection)
+    /// or to "unbounded" (world-wide), which is what a caller that does not configure them
+    /// gets — unit tests and benches push inputs straight into the queue and are not the
+    /// flood this guards against.
+    /// </summary>
+    public void ConfigureInputBounds(int maxInputsPerConnection, int maxPendingInputs)
+    {
+        lock (_inputLock)
+        {
+            MaxInputsPerConnection = maxInputsPerConnection < 1
+                ? DefaultMaxInputsPerConnection
+                : maxInputsPerConnection;
+            MaxPendingInputs = maxPendingInputs < 1 ? int.MaxValue : maxPendingInputs;
+        }
+    }
 
     /// <summary>
     /// The component-level write scope handed to <see cref="UpdateComponents"/>.
@@ -105,6 +213,143 @@ public sealed class EcsWorld : IDisposable
     /// <summary>The read scope handed to <see cref="ReadAll"/>. One per world, so
     /// entering the snapshot broadcast allocates nothing.</summary>
     private readonly WorldReader _reader;
+
+    /// <summary>
+    /// The <see cref="Query"/> objects the <b>read</b> paths iterate, resolved once and
+    /// refreshed only while the write lock is held.
+    ///
+    /// <para><b>Why this exists (issue #176).</b> Arch's read path is not a read. Two
+    /// things it does are writes to state shared by every concurrent reader:</para>
+    /// <list type="number">
+    /// <item><description><c>Arch.Core.World.Query(in QueryDescription)</c> memoises into
+    /// a plain <c>Dictionary&lt;QueryDescription, Query&gt;</c> and <b>inserts on a
+    /// miss</b>. Two readers running two different descriptions insert concurrently; a
+    /// <see cref="Dictionary{TKey,TValue}"/> torn that way does not throw at the tear —
+    /// measured, it silently ends up with more entries than were inserted — and the
+    /// corruption surfaces later, anywhere.</description></item>
+    /// <item><description>The returned <c>Query</c> lazily rebuilds its own matching
+    /// archetype list the first time it is used after the archetype <i>set</i> changed
+    /// (adding entities to an existing archetype does not invalidate it; creating a new
+    /// archetype does). The rebuild clears and refills a list that other readers are
+    /// enumerating — which is the reported
+    /// <c>NullReferenceException at Arch.Core.QueryArchetypeEnumerator.MoveNext()</c>.
+    /// </description></item>
+    /// </list>
+    ///
+    /// <para><b>What is safe.</b> Measured directly against Arch 2.1.0-beta: eight
+    /// threads iterating one shared <c>Query</c> whose memo is stale faulted in 20 of 200
+    /// attempts <b>with no writer running at all</b>; the same eight threads iterating the
+    /// same <c>Query</c> with the memo already up to date faulted 0 of 200. So iteration
+    /// of an up-to-date query is a genuine pure read, and the whole hazard is the lazy
+    /// refresh and the cache insert.</para>
+    ///
+    /// <para><b>The rule that follows.</b> A read path may only iterate a query out of
+    /// this list, and every write scope refreshes the list on its way out — see
+    /// <see cref="ExitWriteScope"/>. That keeps the reader/writer lock as the primitive
+    /// and keeps <see cref="ReadAllParallel"/> genuinely parallel, which a mutex over the
+    /// AOI gather would not: the gather is 77-83% of a 200-viewer tick.</para>
+    /// </summary>
+    /// <summary>
+    /// Spatial index over entity positions, rebuilt at the top of each gather scope and
+    /// queried once per viewer. See <see cref="SpatialGrid"/> for why this exists at all
+    /// given that BENCHMARK.md Part V reverted the first one, and what changed since.
+    ///
+    /// <para>Cell size is the default AOI radius: a query then covers at most a 3x3
+    /// neighbourhood, the smallest that can contain a circle of that radius. Smaller cells
+    /// mean more cell lookups per query for fewer candidates each; larger cells mean fewer
+    /// lookups over more candidates.</para>
+    /// </summary>
+    private readonly SpatialGrid _grid = new(GameConstants.DefaultAoiRadius);
+
+    /// <summary>
+    /// True when <see cref="_grid"/> was rebuilt inside the current read scope and may be
+    /// queried. Outside a gather scope the index is not maintained, so every other caller
+    /// takes the full scan — which is also what keeps the brute-force path live and
+    /// exercised rather than dead code behind a flag.
+    ///
+    /// <para>Written only by the scope owner, before any worker is dispatched and after
+    /// every worker has rendezvoused, so the parallel gather reads it without a race.</para>
+    /// </summary>
+    private volatile bool _gridFresh;
+
+    /// <summary>
+    /// Whether the last rebuild found the population spread out enough for the index to
+    /// beat the scan — see <see cref="SpatialGrid.IsWorthQuerying"/>. Starts true so a
+    /// fresh world probes on its first gather rather than waiting out an interval.
+    /// </summary>
+    private bool _gridUseful = true;
+
+    /// <summary>
+    /// Gathers since the last rebuild, while <see cref="_gridUseful"/> is false. Bounds how
+    /// long a world that has spread out keeps taking the scan.
+    /// </summary>
+    private int _gridProbeCountdown;
+
+    /// <summary>
+    /// How often to rebuild the index purely to re-measure occupancy while the gather is
+    /// taking the brute-force path. ~4 s at the 15 Hz simulation rate: long enough that the
+    /// wasted rebuild is under 2% of the gather, short enough that a map emptying out is
+    /// picked up well within a player's attention span. Being wrong for a few seconds costs
+    /// microseconds and never an entity.
+    /// </summary>
+    private const int ProbeIntervalTicks = 64;
+
+    /// <summary>
+    /// Per-thread query scratch: match ordinals and their views, before the sort that
+    /// restores brute-force order.
+    ///
+    /// <para><b>Thread-static, not instance fields.</b> The gather runs on several workers
+    /// inside one <see cref="ReadAllParallel"/> region and each issues its own queries;
+    /// instance scratch would be a straightforward data race. The grid itself is read-only
+    /// once rebuilt, so it needs no such treatment.</para>
+    /// </summary>
+    [ThreadStatic] private static int[]? _aoiScratchOrdinals;
+
+    /// <inheritdoc cref="_aoiScratchOrdinals"/>
+    [ThreadStatic] private static EntityView[]? _aoiScratchViews;
+
+    /// <summary>
+    /// Index permutation the match sort orders, so the sort swaps 4-byte slots rather than
+    /// whole <see cref="EntityView"/> structs. See <c>SpatialGrid.Emit</c>.
+    /// </summary>
+    [ThreadStatic] private static int[]? _aoiScratchSlots;
+
+    /// <summary>
+    /// Escape hatch for the differential test and the A/B benchmark: when false, gather
+    /// scopes do not build or consult the index and every AOI query takes the full scan.
+    /// Not a production switch — the two paths are required to agree, and
+    /// <c>AoiIndexDifferentialTests</c> is what enforces that.
+    /// </summary>
+    internal bool AoiIndexEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Occupied cell count from the last rebuild, for the benchmark's calibration of the
+    /// usefulness gate. Diagnostics only.
+    /// </summary>
+    internal int AoiIndexOccupiedCells => _grid.OccupiedCells;
+
+    /// <summary>
+    /// Occupancy threshold the gate compares against, overridable so the benchmark can
+    /// force the index on for populations the shipped gate rejects — which is the only way
+    /// to measure what the gate is giving up. Defaults to the shipped value; production
+    /// never sets it.
+    /// </summary>
+    internal int AoiIndexGateThreshold { get; set; } = SpatialGrid.MinOccupiedCellsToQuery;
+
+    /// <summary>
+    /// Mean fraction of the population a query has to examine, estimated from the cell
+    /// histogram — the benchmark's instrument for testing whether occupancy is the right
+    /// gate statistic on clustered populations. Diagnostics only.
+    /// </summary>
+    internal double AoiIndexCandidateFraction => _grid.EstimateCandidateFraction();
+
+    private readonly List<Query> _readQueries = new();
+
+    /// <summary>The AOI scan's query. Read paths only; refreshed under the write lock.</summary>
+    private readonly Query _allEntitiesQuery;
+
+    /// <summary>The player snapshot's query. Read paths only; refreshed under the write lock.</summary>
+    private readonly Query _playersQuery;
 
     public EcsWorld() : this(1) { }
 
@@ -128,9 +373,39 @@ public sealed class EcsWorld : IDisposable
         _writer = new WorldWriter(this);
         _reader = new WorldReader(this);
 
+        // Resolved here, on the only thread that can see this world, so the query cache
+        // is never written from a read path. See _readQueries.
+        _allEntitiesQuery = _arch.Query(in AllEntities);
+        _playersQuery = _arch.Query(in Players);
+        _readQueries.Add(_allEntitiesQuery);
+        _readQueries.Add(_playersQuery);
+
+        _regionFailures = new Exception?[maxWorkerSlots];
         _structuralSlots = new List<StructuralOp>[maxWorkerSlots];
         for (int i = 0; i < maxWorkerSlots; i++) _structuralSlots[i] = new List<StructuralOp>();
+
+        // No thread is started here: the pool starts a worker the first time a region
+        // actually asks for it, so a one-slot world -- and the many multi-slot worlds the
+        // tests build and drop -- own nothing.
+        _pool = new SimWorkerPool(this, maxWorkerSlots);
     }
+
+    /// <summary>The world's parked simulation workers. See <see cref="SimWorkerPool"/>.</summary>
+    private readonly SimWorkerPool _pool;
+
+    /// <summary>
+    /// Per-worker failure cells for the parallel regions, allocated once at the world's
+    /// slot capacity and cleared (over the slots a region uses) before each dispatch.
+    ///
+    /// <para>Allocating this per region read 72 B on the tick thread per
+    /// <see cref="ReadAllParallel"/> call — a per-tick allocation in exactly the
+    /// configuration (500+ viewers, <c>--gather-workers</c>) the parallel gather exists
+    /// for, measured by <c>TickAllocationBench.ParallelRegionAllocationMicro</c>. Sharing
+    /// one array is safe for the same reason the pool's own <c>_failures</c> field is:
+    /// regions are dispatched by one thread at a time — the write lock serialises write
+    /// regions, and the only read-region dispatcher is the tick thread.</para>
+    /// </summary>
+    private readonly Exception?[] _regionFailures;
 
     /// <summary>
     /// Queued structural changes, drained by <see cref="ApplyStructuralChanges"/>, one
@@ -152,6 +427,18 @@ public sealed class EcsWorld : IDisposable
     /// produce the same world on every run and on every core count.</para>
     /// </summary>
     private readonly List<StructuralOp>[] _structuralSlots;
+
+    /// <summary>
+    /// Number of ops queued across <see cref="_structuralSlots"/>, maintained with
+    /// <see cref="Interlocked"/> at the two enqueue sites and reset in the drain. Lets
+    /// <see cref="ApplyStructuralChanges"/> skip the exclusive lock in the normal case:
+    /// the queue is almost always empty, and taking a ReaderWriterLockSlim write lock
+    /// at 60 Hz blocks new readers and drains in-flight ones — the network threads,
+    /// which acquire the read lock on every inbound packet (#249). Workers that
+    /// enqueue do so inside a region the tick thread joins before draining, so the
+    /// count is never behind the slots when it is read here.
+    /// </summary>
+    private volatile int _queuedStructuralOps;
 
     /// <summary>
     /// Which structural slot THIS thread writes into. Zero — the slot the serial world
@@ -209,6 +496,44 @@ public sealed class EcsWorld : IDisposable
     private static readonly QueryDescription Players = new QueryDescription()
         .WithAll<EntityIdRef, EntityKind, Position, Health, Combat, Locomotion, InputCursor, PlayerTag>();
 
+    /// <summary>
+    /// Leave the write lock, refreshing the read-path queries first.
+    ///
+    /// <para><b>Every</b> write scope exits through here rather than calling
+    /// <c>_rwLock.ExitWriteLock()</c> directly, and that is the whole enforcement of the
+    /// rule in <see cref="_readQueries"/>: a write scope is the only place an archetype
+    /// can be created, and the exclusive lock is the only moment at which a query's
+    /// memoised archetype list can be rebuilt without another reader watching. Refreshing
+    /// anywhere else would be refreshing under the shared lock, which is the defect.</para>
+    /// </summary>
+    private void ExitWriteScope()
+    {
+        // The release is in a finally of its own: this runs from the finally of every
+        // write scope, and a throw here would leave the write lock held forever, which
+        // is a hung server rather than a failed operation.
+        try { RefreshReadQueriesLocked(); }
+        finally { _rwLock.ExitWriteLock(); }
+    }
+
+    /// <summary>
+    /// Force every read-path query to re-derive its matching archetypes now, while this
+    /// thread holds the write lock, so that no reader ever triggers the rebuild.
+    ///
+    /// <para>Constructing the chunk iterator is what performs the refresh — verified
+    /// against Arch 2.1.0-beta by watching <c>Query._allArchetypesHashCode</c> change on
+    /// the constructor alone — so the iterator is built and dropped without enumerating.
+    /// It is O(number of queries) when nothing changed, which is the normal case: the
+    /// memo is only invalidated by a <i>new archetype</i>, and this server creates a
+    /// handful of them in total.</para>
+    /// </summary>
+    private void RefreshReadQueriesLocked()
+    {
+        for (int i = 0; i < _readQueries.Count; i++)
+        {
+            _ = _readQueries[i].GetChunkIterator();
+        }
+    }
+
     /// <summary>Current entity count.</summary>
     public int EntityCount
     {
@@ -230,7 +555,7 @@ public sealed class EcsWorld : IDisposable
     {
         _rwLock.EnterWriteLock();
         try { AddEntityLocked(entity); }
-        finally { _rwLock.ExitWriteLock(); }
+        finally { ExitWriteScope(); }
     }
 
     /// <summary>
@@ -246,7 +571,7 @@ public sealed class EcsWorld : IDisposable
     {
         _rwLock.EnterWriteLock();
         try { AddEntityLocked(entity, tags); }
-        finally { _rwLock.ExitWriteLock(); }
+        finally { ExitWriteScope(); }
     }
 
     /// <summary>
@@ -255,12 +580,20 @@ public sealed class EcsWorld : IDisposable
     /// <para>Generic because the core must not name the gameplay: this replaced an
     /// <c>EnemyCount</c> property, which meant <c>World/</c> knew what an enemy was. The
     /// tag is supplied by whoever owns the content.</para>
+    ///
+    /// <para><b>Exclusive, not shared</b>, and deliberately so (issue #176). The tag set is
+    /// open — a closed generic first appears at its first call — so this query cannot be
+    /// resolved up front into <see cref="_readQueries"/> the way the AOI and player queries
+    /// are, and <c>Arch.Core.World.CountEntities</c> resolves it through the world's query
+    /// cache, which is a write. Nothing on the tick's hot path calls this: it answers a
+    /// diagnostics gauge and the scaffolding spawner's <c>AliveCount</c>. Taking the write
+    /// lock for it costs nothing measurable and removes the whole question.</para>
     /// </summary>
     public int CountWith<TTag>() where TTag : struct
     {
-        _rwLock.EnterReadLock();
+        _rwLock.EnterWriteLock();
         try { return _arch.CountEntities(in TaggedQuery<TTag>.Description); }
-        finally { _rwLock.ExitReadLock(); }
+        finally { ExitWriteScope(); }
     }
 
     /// <summary>Remove an entity by ID. A missing ID is a no-op.</summary>
@@ -268,7 +601,7 @@ public sealed class EcsWorld : IDisposable
     {
         _rwLock.EnterWriteLock();
         try { RemoveEntityLocked(id); }
-        finally { _rwLock.ExitWriteLock(); }
+        finally { ExitWriteScope(); }
     }
 
     /// <summary>
@@ -366,9 +699,24 @@ public sealed class EcsWorld : IDisposable
         float radiusSq = radius * radius;
         int matches = 0;
 
-        foreach (ref var chunk in _arch.Query(in AllEntities).GetChunkIterator())
+        // _allEntitiesQuery, never _arch.Query(...): this runs under the SHARED lock, and
+        // resolving or refreshing a query there is what issue #176 is.
+        foreach (ref var chunk in _allEntitiesQuery.GetChunkIterator())
         {
             var positions = chunk.GetSpan<Position>();
+            // Hoisted once per chunk rather than fetched per match. Composing through
+            // ComposeFromChunk did seven GetSpan lookups per matching entity, and the
+            // scan's cost is composing matches, not the distance tests (BENCHMARK.md
+            // Part V): an A/B at 200 entities / 20 matches measured the per-match form
+            // at 3.3-9.1 us/scan against 2.2-2.9 us/scan for this one — at least 1.5x,
+            // reproducibly. The gather is 77-83% of a 200-viewer tick, so the per-match
+            // lookups were the dominant cost of the tick's dominant phase.
+            var ids = chunk.GetSpan<EntityIdRef>();
+            var kinds = chunk.GetSpan<EntityKind>();
+            var healths = chunk.GetSpan<Health>();
+            var combats = chunk.GetSpan<Combat>();
+            var locomotions = chunk.GetSpan<Locomotion>();
+            var cursors = chunk.GetSpan<InputCursor>();
             int count = chunk.Count;
             for (int i = 0; i < count; i++)
             {
@@ -376,13 +724,26 @@ public sealed class EcsWorld : IDisposable
                 // client predicts with, not a second copy of it here.
                 if (Vec2.DistanceSq(center, positions[i].Value) > radiusSq) continue;
 
-                if (sink != null)
+                if (sink != null || matches < destination.Length)
                 {
-                    sink.Add(ComposeFromChunk(ref chunk, i));
-                }
-                else if (matches < destination.Length)
-                {
-                    destination[matches] = ComposeFromChunk(ref chunk, i);
+                    var composed = new EntityState
+                    {
+                        Id = ids[i].Value,
+                        Type = kinds[i].Value,
+                        Position = positions[i].Value,
+                        Hp = healths[i].Hp,
+                        MaxHp = healths[i].MaxHp,
+                        Dead = healths[i].Dead,
+                        Attack = combats[i].Attack,
+                        Defense = combats[i].Defense,
+                        CooldownUntilTick = combats[i].CooldownUntilTick,
+                        Speed = locomotions[i].Speed,
+                        FacingBrad = locomotions[i].FacingBrad,
+                        Action = locomotions[i].Action,
+                        LastInputTick = cursors[i].LastInputTick,
+                    };
+                    if (sink != null) sink.Add(composed);
+                    else destination[matches] = composed;
                 }
 
                 matches++;
@@ -390,6 +751,105 @@ public sealed class EcsWorld : IDisposable
         }
 
         return matches;
+    }
+
+    /// <summary>
+    /// The snapshot gather's AOI scan: same query, same iteration order and the same
+    /// distance predicate as <see cref="ScanRangeLocked"/>, composing the trimmed
+    /// <see cref="EntityView"/> per match instead of a full <see cref="EntityState"/>.
+    ///
+    /// <para><b>Why a second scan body exists.</b> The snapshot encoder consumes only
+    /// Id/Type/X/Y/Hp/MaxHp/Speed, so the full compose paid for the <c>Combat</c> and
+    /// <c>InputCursor</c> span fetches per chunk and five unread fields per match — on
+    /// the phase Part V measured as compose-bound and 77-83% of a 200-viewer tick
+    /// (issue #237). The predicate and iteration order are pinned to the full scan by
+    /// <c>TrimmedGatherByteIdentityTests</c>: if the two bodies ever diverge, the wire
+    /// digest moves and that test names the tick.</para>
+    ///
+    /// <para>Same count-don't-saturate overflow contract as
+    /// <see cref="GetEntitiesInRange(Vec2, float, Span{EntityState})"/>.</para>
+    /// </summary>
+    private int ScanRangeViewsLocked(Vec2 center, float radius, Span<EntityView> destination)
+    {
+        float radiusSq = radius * radius;
+        int matches = 0;
+
+        // _allEntitiesQuery, never _arch.Query(...): shared lock — see issue #176.
+        foreach (ref var chunk in _allEntitiesQuery.GetChunkIterator())
+        {
+            var positions = chunk.GetSpan<Position>();
+            var ids = chunk.GetSpan<EntityIdRef>();
+            var kinds = chunk.GetSpan<EntityKind>();
+            var healths = chunk.GetSpan<Health>();
+            var locomotions = chunk.GetSpan<Locomotion>();
+            // No Combat span, no InputCursor span: the two fetches the trimmed
+            // compose exists to drop. Nothing below reads them.
+            int count = chunk.Count;
+            for (int i = 0; i < count; i++)
+            {
+                // Identical predicate to ScanRangeLocked — Shared.GameLogic's, not a copy.
+                if (Vec2.DistanceSq(center, positions[i].Value) > radiusSq) continue;
+
+                if (matches < destination.Length)
+                {
+                    destination[matches] = new EntityView(
+                        ids[i].Stable,
+                        ids[i].Value,
+                        kinds[i].Value,
+                        positions[i].Value,
+                        healths[i].Hp,
+                        healths[i].MaxHp,
+                        locomotions[i].Speed,
+                        // Facing and action ride the Locomotion span that is already
+                        // fetched, which is exactly why they were put there rather than
+                        // in a component of their own — no extra GetSpan in this loop.
+                        locomotions[i].FacingBrad,
+                        locomotions[i].Action);
+                }
+
+                matches++;
+            }
+        }
+
+        return matches;
+    }
+
+    /// <summary>
+    /// Snapshot-view AOI scan for <see cref="WorldReader"/>; the read lock is already
+    /// held. The form <see cref="Net.Connection"/>'s gather uses.
+    /// </summary>
+    /// <remarks>
+    /// Takes the spatial index when a gather scope has rebuilt it, and the full scan
+    /// otherwise — so a future caller reaching the reader outside a gather scope gets
+    /// correct results rather than empty ones. The two paths are required to return the
+    /// same entities in the same order; <c>AoiIndexDifferentialTests</c> enforces it.
+    /// </remarks>
+    internal int ScanRangeViewsLockedForReader(Vec2 center, float radius, Span<EntityView> destination)
+    {
+        if (!_gridFresh) return ScanRangeViewsLocked(center, radius, destination);
+
+        RentAoiScratch(_grid.Count, out Span<int> ordinals, out Span<EntityView> views, out Span<int> slots);
+        return _grid.Query(in center, radius, destination, ordinals, views, slots);
+    }
+
+    /// <summary>
+    /// Fill <paramref name="destination"/> with the trimmed snapshot view of every
+    /// entity within <paramref name="radius"/> of <paramref name="center"/>. Same
+    /// overflow contract as the <see cref="EntityState"/> overload.
+    /// </summary>
+    public int GetEntitiesInRange(Vec2 center, float radius, Span<EntityView> destination)
+    {
+        _rwLock.EnterReadLock();
+        _iterationDepth++;
+        try
+        {
+            return ScanRangeViewsLocked(center, radius, destination);
+        }
+        finally
+        {
+            _iterationDepth--;
+            _rwLock.ExitReadLock();
+        }
     }
 
     /// <summary>
@@ -406,7 +866,7 @@ public sealed class EcsWorld : IDisposable
         finally
         {
             ApplyStructuralChangesLocked();
-            _rwLock.ExitWriteLock();
+            ExitWriteScope();
         }
     }
 
@@ -431,10 +891,218 @@ public sealed class EcsWorld : IDisposable
     {
         _rwLock.EnterReadLock();
         _iterationDepth++;
-        try { action(_reader); }
+        try
+        {
+            RebuildSpatialIndexLocked();
+            action(_reader);
+        }
         finally
         {
+            _gridFresh = false;
             _iterationDepth--;
+            _rwLock.ExitReadLock();
+        }
+    }
+
+    /// <summary>
+    /// Rebuild the spatial index from current component storage: one linear pass, no
+    /// distance tests, immediately before the queries that read it — so the index cannot
+    /// be stale and no position write anywhere needs to know it exists.
+    ///
+    /// <para>The pass composes each entity's <see cref="EntityView"/> as it goes, from the
+    /// same chunk spans and in the same order <see cref="ScanRangeViewsLocked"/> would.
+    /// That is the point of the whole change: composition happens once per entity per tick
+    /// here, instead of once per match per viewer in each of N per-viewer scans.</para>
+    /// </summary>
+    private void RebuildSpatialIndexLocked()
+    {
+        if (!AoiIndexEnabled) return;
+
+        // Do not build an index this tick is not going to query. A rebuild composes every
+        // entity, so building one and then falling back to the scan costs the gather a
+        // measured 10-18% for nothing — which would make this change a regression at
+        // exactly the density the game runs at today.
+        //
+        // The decision is therefore carried from the last rebuild rather than taken from
+        // this one, and re-probed every ProbeIntervalTicks so a population that spreads out
+        // is picked up again. Both directions of being wrong cost only microseconds: the
+        // two paths return identical results, and geometry moves slowly — a player travels
+        // Speed/tick, so occupancy cannot change materially inside a ~4 s probe interval.
+        if (!_gridUseful && ++_gridProbeCountdown < ProbeIntervalTicks)
+        {
+            _gridFresh = false;
+            return;
+        }
+
+        _gridProbeCountdown = 0;
+        _grid.Begin(_index.Count);
+
+        // _allEntitiesQuery, never _arch.Query(...): shared lock — see issue #176. Same
+        // query and therefore the same chunk order as the brute-force scan, which is what
+        // makes the scan ordinals mean what the index claims they mean.
+        foreach (ref var chunk in _allEntitiesQuery.GetChunkIterator())
+        {
+            var positions = chunk.GetSpan<Position>();
+            var ids = chunk.GetSpan<EntityIdRef>();
+            var kinds = chunk.GetSpan<EntityKind>();
+            var healths = chunk.GetSpan<Health>();
+            var locomotions = chunk.GetSpan<Locomotion>();
+            int count = chunk.Count;
+            for (int i = 0; i < count; i++)
+            {
+                _grid.Add(new EntityView(
+                    ids[i].Stable,
+                    ids[i].Value,
+                    kinds[i].Value,
+                    positions[i].Value,
+                    healths[i].Hp,
+                    healths[i].MaxHp,
+                    locomotions[i].Speed,
+                    // Same Locomotion span the scan arm reads, and it MUST be read here
+                    // too: the index composes once per entity at rebuild and a query then
+                    // copies the finished struct, so anything omitted here is omitted for
+                    // every viewer that goes through the index — and only for those. The
+                    // scan arm would still be right, so the two arms would disagree while
+                    // both looked healthy, which the differential tests catch by comparing
+                    // whole views rather than positions.
+                    locomotions[i].FacingBrad,
+                    locomotions[i].Action));
+            }
+        }
+
+        _grid.Finish();
+
+        // The usefulness gate. An index that is slower than the scan at the density the
+        // game actually runs at is a regression with a nice name — BENCHMARK.md Part V is
+        // the record of exactly that — so the gather takes the scan whenever the population
+        // is too clustered for a 3x3 neighbourhood to narrow anything. Purely a performance
+        // decision: both paths return identical results.
+        _gridUseful = _grid.OccupiedCells >= AoiIndexGateThreshold;
+        _gridFresh = _gridUseful;
+    }
+
+    /// <summary>
+    /// Borrow this thread's AOI query scratch, grown to hold <paramref name="needed"/>
+    /// matches. Amortises to no allocation once the population has stabilised.
+    /// </summary>
+    private static void RentAoiScratch(
+        int needed, out Span<int> ordinals, out Span<EntityView> views, out Span<int> slots)
+    {
+        if (_aoiScratchOrdinals is null || _aoiScratchOrdinals.Length < needed)
+        {
+            int capacity = Math.Max(needed, (_aoiScratchOrdinals?.Length ?? 0) * 2);
+            _aoiScratchOrdinals = new int[capacity];
+            _aoiScratchViews = new EntityView[capacity];
+            _aoiScratchSlots = new int[capacity];
+        }
+
+        ordinals = _aoiScratchOrdinals;
+        views = _aoiScratchViews!;
+        slots = _aoiScratchSlots!;
+    }
+
+    /// <summary>
+    /// Take the read lock <b>once</b> and run <paramref name="body"/> on
+    /// <paramref name="workerCount"/> workers against that one consistent view.
+    ///
+    /// <para>The read-side counterpart of <see cref="UpdateComponentsParallel"/>, and the
+    /// reason the worker pool exists at all: the AOI gather is N independent per-viewer
+    /// range queries, each writing into a buffer its own connection owns, and it is
+    /// 77-83% of a 200-viewer tick (docs/DESIGN.md, "Where the tick budget goes").</para>
+    ///
+    /// <para><b>No determinism machinery, deliberately.</b> The write-side region needs
+    /// per-slot structural queues and slot-ordered replay because <c>Arch.Create</c> order
+    /// decides chunk layout and therefore float accumulation order. A read region has no
+    /// structural ops to order: <see cref="WorldReader"/> exposes only
+    /// <see cref="WorldReader.TryGetSnapshotAnchor"/> and
+    /// <see cref="WorldReader.GetEntitiesInRange"/>, both pure reads, and the world is not
+    /// mutated at all while the read lock is held. Output therefore cannot depend on how
+    /// the workers interleaved, so <see cref="_parallelRegion"/> is <b>not</b> set here and
+    /// no drain follows. Adding the slot machinery anyway would cost time and imply a
+    /// hazard that does not exist.</para>
+    ///
+    /// <para><b>"Pure read" is a property of this class, not of Arch</b> (issue #176).
+    /// Arch's own read path writes: it resolves queries through a shared dictionary and
+    /// rebuilds a query's matching-archetype list lazily, both under whatever lock the
+    /// caller happens to hold. Several workers doing that at once corrupted the enumerator
+    /// and, twice, the heap. What makes this region safe is that <see cref="WorldReader"/>
+    /// only ever iterates a query out of <see cref="_readQueries"/>, already refreshed by
+    /// the write scope that preceded this one — see <see cref="ExitWriteScope"/>.</para>
+    ///
+    /// <para><b>The lock is held by the owner, not by the workers</b>, and that is
+    /// sufficient: the calling thread enters the read lock before any worker is woken and
+    /// does not leave the scope until every worker has rendezvoused, so the workers run
+    /// strictly inside a read-locked interval and no writer can enter. The scan path they
+    /// use takes no lock of its own.</para>
+    ///
+    /// <para><b>What the caller must still guarantee</b> is that the per-worker bodies do
+    /// not share mutable state with each other. That is a property of the callback, not of
+    /// this method, exactly as it is for the write-side region.</para>
+    /// </summary>
+    /// <param name="workerCount">1 to <c>maxWorkerSlots</c>. One runs inline on the
+    /// caller and starts no thread.</param>
+    /// <param name="body">Called once per worker with the shared reader and that worker's
+    /// index. Worker 0 runs on the calling thread.</param>
+    public void ReadAllParallel(int workerCount, Action<WorldReader, int> body)
+    {
+        ArgumentNullException.ThrowIfNull(body);
+
+        if (workerCount < 1 || workerCount > _structuralSlots.Length)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(workerCount), workerCount,
+                $"This world was built with {_structuralSlots.Length} worker slot(s).");
+        }
+
+        if (workerCount == 1)
+        {
+            // Identical to ReadAll, including the iteration-depth bookkeeping. Nothing is
+            // dispatched, so a one-worker read region costs what the serial one costs.
+            _rwLock.EnterReadLock();
+            _iterationDepth++;
+            try
+            {
+                RebuildSpatialIndexLocked();
+                body(_reader, 0);
+            }
+            finally
+            {
+                _gridFresh = false;
+                _iterationDepth--;
+                _rwLock.ExitReadLock();
+            }
+            return;
+        }
+
+        _rwLock.EnterReadLock();
+        try
+        {
+            // Rebuilt by the owner before any worker is woken, and torn down only after
+            // every worker has rendezvoused, so the workers see a grid that is complete
+            // and never mutated for the whole region. Each worker's query scratch is
+            // thread-static, so the shared structure is strictly read-only.
+            RebuildSpatialIndexLocked();
+
+            Exception?[] failures = _regionFailures;
+            Array.Clear(failures, 0, workerCount);
+            _pool.RunReadRegion(workerCount, body, failures);
+
+            List<Exception>? thrown = null;
+            for (int i = 0; i < workerCount; i++)
+            {
+                if (failures[i] is { } ex) (thrown ??= new List<Exception>()).Add(ex);
+            }
+
+            if (thrown is not null)
+            {
+                throw thrown.Count == 1
+                    ? thrown[0]
+                    : new AggregateException("One or more gather workers failed.", thrown);
+            }
+        }
+        finally
+        {
+            _gridFresh = false;
             _rwLock.ExitReadLock();
         }
     }
@@ -462,7 +1130,7 @@ public sealed class EcsWorld : IDisposable
         finally
         {
             ApplyStructuralChangesLocked();
-            _rwLock.ExitWriteLock();
+            ExitWriteScope();
         }
     }
 
@@ -477,7 +1145,7 @@ public sealed class EcsWorld : IDisposable
         finally
         {
             ApplyStructuralChangesLocked();
-            _rwLock.ExitWriteLock();
+            ExitWriteScope();
         }
     }
 
@@ -531,40 +1199,33 @@ public sealed class EcsWorld : IDisposable
         _parallelRegion = true;
         try
         {
-            var threads = workerCount > 1 ? new Thread[workerCount - 1] : Array.Empty<Thread>();
-            var failures = new Exception?[workerCount];
+            Exception?[] failures = _regionFailures;
+            Array.Clear(failures, 0, workerCount);
 
-            // Dedicated threads rather than the thread pool: a pool thread carries
-            // _workerSlot away with it after the region ends, and the pool is shared with
-            // the connection handlers, so borrowing from it here couples simulation
-            // latency to network load.
-            for (int i = 1; i < workerCount; i++)
+            if (workerCount == 1)
             {
-                int slot = i;
-                var t = new Thread(() =>
-                {
-                    _workerSlot = slot;
-                    try { body(_writer, slot); }
-                    catch (Exception ex) { failures[slot] = ex; }
-                    finally { _workerSlot = 0; }
-                })
-                { IsBackground = true, Name = $"sim-worker-{slot}" };
-
-                threads[i - 1] = t;
-                t.Start();
+                // No rendezvous, no pool, no thread: the single-worker region is the
+                // determinism harness's baseline and must stay exactly as cheap as a
+                // serial scope.
+                _workerSlot = 0;
+                try { body(_writer, 0); }
+                catch (Exception ex) { failures[0] = ex; }
+            }
+            else
+            {
+                // Dedicated, world-owned threads rather than the thread pool: a pool
+                // thread carries _workerSlot away with it after the region ends, and the
+                // pool is shared with the connection handlers, so borrowing from it here
+                // couples simulation latency to network load. The threads are parked
+                // between regions rather than created per region -- see SimWorkerPool.
+                _pool.RunWriteRegion(workerCount, body, failures);
             }
 
-            _workerSlot = 0;
-            try { body(_writer, 0); }
-            catch (Exception ex) { failures[0] = ex; }
-
-            for (int i = 0; i < threads.Length; i++) threads[i].Join();
-
-            // Rethrow only after every worker has been joined. Leaving a worker running
+            // Rethrow only after every worker has rendezvoused. Leaving a worker running
             // while the write lock unwinds would let it touch the world outside the
             // region, which is worse than the original fault.
             List<Exception>? thrown = null;
-            for (int i = 0; i < failures.Length; i++)
+            for (int i = 0; i < workerCount; i++)
             {
                 if (failures[i] is { } ex) (thrown ??= new List<Exception>()).Add(ex);
             }
@@ -580,7 +1241,330 @@ public sealed class EcsWorld : IDisposable
         {
             _parallelRegion = false;
             ApplyStructuralChangesLocked();
-            _rwLock.ExitWriteLock();
+            ExitWriteScope();
+        }
+    }
+
+    /// <summary>
+    /// The world's own simulation worker threads, parked between regions.
+    ///
+    /// <para><b>Why a pool at all.</b> The first shape of
+    /// <see cref="UpdateComponentsParallel"/> started a fresh <see cref="Thread"/> per
+    /// worker per region and joined it at the end. That is correct, and it is also the
+    /// whole cost: measured on this box, 165-225 microseconds per additional worker, paid
+    /// before a single component is touched, which put break-even against the serial path
+    /// near 70 000 entities. Parking N threads once and waking them per region removes
+    /// thread creation from the region entirely.</para>
+    ///
+    /// <para><b>What it must keep.</b> Two properties of the per-region-thread shape are
+    /// load-bearing and are preserved here. First, the threads are <i>dedicated</i>: a
+    /// thread-pool thread would carry <see cref="_workerSlot"/> away with it after the
+    /// region, and that pool is shared with the connection handlers, so borrowing from it
+    /// would couple simulation latency to network load. Second, slot identity is stable:
+    /// each thread sets <see cref="_workerSlot"/> once, at start, and never changes it, so
+    /// the mapping from worker to structural queue is fixed for the life of the world. It
+    /// can no longer drift with scheduling, which is what slot-ordered replay -- and
+    /// therefore the golden vectors -- depend on.</para>
+    ///
+    /// <para><b>Wake protocol.</b> One generation counter per worker, on its own cache
+    /// line, plus a <see cref="ManualResetEventSlim"/> used only when a worker gives up
+    /// spinning. A worker resets its event <i>before</i> re-reading its generation, so a
+    /// signal that lands in the gap is never lost: if the owner bumped the generation
+    /// before the reset, the read after the reset sees it; if the owner sets the event
+    /// after the reset, the event stays signalled and the following wait returns at once.
+    /// The owner bumps only the generations of the workers a region actually uses, so a
+    /// w=2 region does not wake six parked threads.</para>
+    ///
+    /// <para><b>Who spins.</b> The region owner spins while it waits for the rendezvous;
+    /// a finished worker parks immediately. That asymmetry is measured, not stylistic --
+    /// see <c>WorkerParkSpinMicros</c>, which records what a worker-side spin bought and
+    /// what it cost the code that ran next.</para>
+    ///
+    /// <para><b>What it costs now.</b> An empty region on this 12-core host: 24 / 44 / 103
+    /// microseconds at 2 / 4 / 8 workers, i.e. roughly 15-24 microseconds per additional
+    /// worker, against 156-178 microseconds per additional worker for the per-region
+    /// threads this replaced. Break-even against a serial pass over the same component
+    /// work moved from about 70 000 entities to about 8 000. Both are re-measurable with
+    /// <c>BENCH_PARALLEL=1</c>.</para>
+    /// </summary>
+    private sealed class SimWorkerPool : IDisposable
+    {
+        /// <summary>
+        /// How long the region owner spins waiting for its workers before blocking.
+        ///
+        /// <para>Free in the sense that matters: the owner has nothing else to do until the
+        /// rendezvous, and the spin ends the instant the last worker decrements. It does not
+        /// outlive the region, so it cannot inflate whatever the caller runs next.</para>
+        /// </summary>
+        private const double OwnerWaitSpinMicros = 100.0;
+
+        /// <summary>
+        /// How long a finished worker spins on its generation before parking. <b>Zero, and
+        /// that is a measured choice.</b>
+        ///
+        /// <para>A 25 microsecond worker spin made back-to-back regions ~1.7x cheaper
+        /// (w=4 empty region 31 us hot against 59 us parked). It also inflated whatever ran
+        /// in the following 25 microseconds by up to 6x: with the spin on, a serial pass
+        /// over 30 entities immediately after a region measured 12.5 us; with it off, the
+        /// same pass measured 1.9 us. The live tick dispatches at most one region per 66 ms
+        /// and then immediately serializes snapshots on the calling thread, so the spin
+        /// could only ever collect the cost and never the benefit. Restore it only with a
+        /// workload that actually issues regions back to back, and re-measure what runs
+        /// after them when you do.</para>
+        /// </summary>
+        private const double WorkerParkSpinMicros = 0.0;
+
+        /// <summary>Ints per generation cell, so two workers never share a cache line.</summary>
+        private const int Stride = 16;
+
+        private static readonly long OwnerSpinTicks =
+            (long)(OwnerWaitSpinMicros * Stopwatch.Frequency / 1_000_000.0);
+
+        private static readonly long WorkerSpinTicks =
+            (long)(WorkerParkSpinMicros * Stopwatch.Frequency / 1_000_000.0);
+
+        private readonly EcsWorld _world;
+        private readonly Thread?[] _threads;
+        private readonly ManualResetEventSlim?[] _wake;
+
+        /// <summary>Per-worker generation, strided one per cache line. The worker reads
+        /// its own cell; the owner writes it to publish a region.</summary>
+        private readonly int[] _generation;
+
+        /// <summary>The owner's copy of each generation, so publishing is a plain volatile
+        /// write rather than a read-modify-write on a shared cell.</summary>
+        private readonly int[] _published;
+
+        private readonly ManualResetEventSlim _done = new(false, 0);
+        private readonly object _startLock = new();
+
+        private Action<WorldWriter, int>? _writeBody;
+        private Action<WorldReader, int>? _readBody;
+        private Exception?[]? _failures;
+        private int _pending;
+        private volatile bool _shutdown;
+
+        internal SimWorkerPool(EcsWorld world, int maxWorkerSlots)
+        {
+            _world = world;
+            _threads = new Thread?[maxWorkerSlots];
+            _wake = new ManualResetEventSlim?[maxWorkerSlots];
+            _generation = new int[maxWorkerSlots * Stride];
+            _published = new int[maxWorkerSlots];
+        }
+
+        /// <summary>How many worker threads this world has started so far. The whole point
+        /// of the pool is that this stops growing, so the tests read it.</summary>
+        internal int StartedThreadCount
+        {
+            get
+            {
+                int n = 0;
+                lock (_startLock)
+                {
+                    for (int i = 0; i < _threads.Length; i++) if (_threads[i] is not null) n++;
+                }
+                return n;
+            }
+        }
+
+        /// <summary>
+        /// Run <paramref name="body"/> on slots 1..<paramref name="workerCount"/>-1 and
+        /// return only once every one of them has finished. Slot 0 belongs to the caller
+        /// and is run here on the calling thread, between publishing the work and waiting
+        /// for it, so the owner's own share overlaps the workers' wake-up.
+        /// </summary>
+        internal void RunWriteRegion(int workerCount, Action<WorldWriter, int> body, Exception?[] failures) =>
+            Dispatch(workerCount, body, null, failures);
+
+        /// <summary>
+        /// The read-side region. Same threads, same rendezvous, no slot machinery: a
+        /// <see cref="WorldReader"/> cannot request a structural change, so there is
+        /// nothing to queue and nothing whose replay order could matter.
+        /// </summary>
+        internal void RunReadRegion(int workerCount, Action<WorldReader, int> body, Exception?[] failures) =>
+            Dispatch(workerCount, null, body, failures);
+
+        private void Dispatch(
+            int workerCount,
+            Action<WorldWriter, int>? writeBody,
+            Action<WorldReader, int>? readBody,
+            Exception?[] failures)
+        {
+            EnsureStarted(workerCount);
+
+            _writeBody = writeBody;
+            _readBody = readBody;
+            _failures = failures;
+            _done.Reset();
+            Volatile.Write(ref _pending, workerCount - 1);
+
+            // Publishing the generation is the release that makes the body, _failures and
+            // _pending visible to a worker, which reads its generation first.
+            for (int slot = 1; slot < workerCount; slot++)
+            {
+                Volatile.Write(ref _generation[slot * Stride], ++_published[slot]);
+                _wake[slot]!.Set();
+            }
+
+            _workerSlot = 0;
+            try { Invoke(writeBody, readBody, 0); }
+            catch (Exception ex) { failures[0] = ex; }
+
+            WaitForWorkers();
+
+            _writeBody = null;
+            _readBody = null;
+            _failures = null;
+        }
+
+        private void Invoke(Action<WorldWriter, int>? writeBody, Action<WorldReader, int>? readBody, int slot)
+        {
+            if (writeBody is not null)
+            {
+                writeBody(_world._writer, slot);
+                return;
+            }
+
+            if (readBody is null) return;
+
+            // Mirror the serial ReadAll scope: every thread that iterates the world says
+            // so, so the deferral rule reads the same on a worker as on the tick thread.
+            _iterationDepth++;
+            try { readBody(_world._reader, slot); }
+            finally { _iterationDepth--; }
+        }
+
+        private void WaitForWorkers()
+        {
+            long deadline = Stopwatch.GetTimestamp() + OwnerSpinTicks;
+            while (Volatile.Read(ref _pending) != 0)
+            {
+                if (Stopwatch.GetTimestamp() >= deadline)
+                {
+                    // Park. The last worker out sets _done, and _done was reset before any
+                    // worker could run, so this cannot miss the signal.
+                    while (Volatile.Read(ref _pending) != 0) _done.Wait();
+                    return;
+                }
+                Thread.SpinWait(20);
+            }
+        }
+
+        private void EnsureStarted(int workerCount)
+        {
+            lock (_startLock)
+            {
+                ObjectDisposedException.ThrowIf(_shutdown, this);
+
+                for (int slot = 1; slot < workerCount; slot++)
+                {
+                    if (_threads[slot] is null) StartWorker(slot);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Start the worker for <paramref name="slot"/>. Caller holds <see cref="_startLock"/>.
+        ///
+        /// <para><b>Why this is a separate method and must stay one.</b> The lambda below
+        /// captures <paramref name="slot"/>, and the C# compiler allocates a closure's
+        /// display class at the entry of the <i>scope</i> that declares the captured
+        /// variable, not at the lambda expression. Written inline in
+        /// <see cref="EnsureStarted"/>'s loop, that scope was the loop body, so every
+        /// dispatch allocated a 32-byte display class per slot it checked and then
+        /// <c>continue</c>d past — a steady per-tick allocation on the tick thread in the
+        /// parallel-gather configuration, and the only one the dispatch had (measured by
+        /// <c>TickAllocationBench.ParallelRegionAllocationMicro</c>: 32 B/region before,
+        /// 0 after). Here the capturing scope is entered only when a thread is genuinely
+        /// being started, which happens once per slot per world.</para>
+        /// </summary>
+        private void StartWorker(int slot)
+        {
+            _wake[slot] = new ManualResetEventSlim(false, 0);
+            var t = new Thread(() => WorkerLoop(slot))
+            {
+                IsBackground = true,
+                Name = $"sim-worker-{slot}",
+            };
+            _threads[slot] = t;
+            t.Start();
+        }
+
+        private void WorkerLoop(int slot)
+        {
+            // Set once, for the life of the thread. This is the invariant the per-region
+            // threads could only re-establish on every region.
+            _workerSlot = slot;
+
+            ManualResetEventSlim wake = _wake[slot]!;
+            int cell = slot * Stride;
+            int seen = 0;
+
+            while (true)
+            {
+                // Reset before the read: a Set that lands after this reset survives to the
+                // Wait below, and a generation bump from before it is caught by the read
+                // that follows. The barrier stops the store and the load being reordered.
+                wake.Reset();
+                Interlocked.MemoryBarrier();
+
+                if (Volatile.Read(ref _generation[cell]) == seen)
+                {
+                    long deadline = Stopwatch.GetTimestamp() + WorkerSpinTicks;
+                    while (Volatile.Read(ref _generation[cell]) == seen)
+                    {
+                        if (Stopwatch.GetTimestamp() >= deadline)
+                        {
+                            wake.Wait();
+                            break;
+                        }
+                        Thread.SpinWait(20);
+                    }
+
+                    if (Volatile.Read(ref _generation[cell]) == seen) continue; // spurious
+                }
+
+                seen = Volatile.Read(ref _generation[cell]);
+                if (_shutdown) return;
+
+                var writeBody = _writeBody;
+                var readBody = _readBody;
+                var failures = _failures;
+                try { Invoke(writeBody, readBody, slot); }
+                catch (Exception ex) { if (failures is not null) failures[slot] = ex; }
+
+                // A full fence, so the body's writes and the failure cell are visible to
+                // the owner before it can observe the count reaching zero.
+                if (Interlocked.Decrement(ref _pending) == 0) _done.Set();
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (_startLock)
+            {
+                if (_shutdown) return;
+                _shutdown = true;
+
+                for (int slot = 1; slot < _threads.Length; slot++)
+                {
+                    if (_threads[slot] is null) continue;
+                    Volatile.Write(ref _generation[slot * Stride], ++_published[slot]);
+                    _wake[slot]!.Set();
+                }
+            }
+
+            for (int slot = 1; slot < _threads.Length; slot++)
+            {
+                // Bounded: the threads are background threads, so a worker wedged inside a
+                // caller's body must not turn disposing a world into a hang.
+                _threads[slot]?.Join(TimeSpan.FromSeconds(5));
+                _threads[slot] = null;
+            }
+
+            for (int slot = 1; slot < _wake.Length; slot++) _wake[slot]?.Dispose();
+            _done.Dispose();
         }
     }
 
@@ -625,16 +1609,80 @@ public sealed class EcsWorld : IDisposable
     /// the tick loop's own structural/update phase, so the cost is a barrier, not a
     /// wait for the simulation.
     /// </remarks>
-    public void PushInput(string userId, InputData input)
+    public void PushInput(string userId, InputData input) => PushInput(userId, input, null);
+
+    /// <summary>
+    /// Queue an input under the ingestion bounds, coalescing movement before the queue
+    /// grows.
+    /// </summary>
+    /// <remarks>
+    /// <para>The tick loop already coalesces movement to the newest input per player — but
+    /// it does so <i>after</i> every packet has been decoded, allocated and appended, so a
+    /// client sending thousands of inputs per tick grew the queue by thousands before the
+    /// tick threw all but one away (workspace audit F04). The coalescing now happens here,
+    /// at ingest, under the same lock: a movement-only input <b>replaces</b> this
+    /// connection's newest queued entry when that entry is also movement-only, so a
+    /// movement flood occupies one slot however fast it arrives.</para>
+    ///
+    /// <para><b>Edge-triggered actions stay distinct.</b> An input carrying an attack target
+    /// is never replaced and never replaces: it is appended, and it also ends the run of
+    /// replaceable movement behind it, so ordering — which the handler's monotonic tick
+    /// check depends on — is exactly what the client sent. Those are bounded instead by
+    /// <see cref="MaxInputsPerConnection"/> per drain, and the queue as a whole by
+    /// <see cref="MaxPendingInputs"/>; anything beyond is dropped and reported through the
+    /// return value so the caller can count it.</para>
+    ///
+    /// <para>Passing a null <paramref name="ingress"/> is the unbounded path: no
+    /// per-connection budget, no coalescing, only the world-wide bound — for callers that
+    /// have no connection (tests, benches, scaffolding).</para>
+    /// </remarks>
+    public InputIngestResult PushInput(string userId, InputData input, InputIngress? ingress)
     {
         EntityHandle handle;
         _rwLock.EnterReadLock();
         try { handle = ResolveLocked(userId); }
         finally { _rwLock.ExitReadLock(); }
 
+        var pending = new PendingInput(userId, handle, input);
+        bool movementOnly = string.IsNullOrEmpty(input.AttackTargetId);
+
         lock (_inputLock)
         {
-            _pendingInputs.Add(new PendingInput(userId, handle, input));
+            if (ingress == null)
+            {
+                if (_pendingInputs.Count >= MaxPendingInputs) return InputIngestResult.DroppedQueueFull;
+                _pendingInputs.Add(pending);
+                return InputIngestResult.Enqueued;
+            }
+
+            if (ingress.Epoch != _drainEpoch)
+            {
+                ingress.Epoch = _drainEpoch;
+                ingress.Pending = 0;
+                ingress.ReplaceableIndex = -1;
+            }
+
+            if (movementOnly && ingress.ReplaceableIndex >= 0)
+            {
+                // Newest wins, as the tick would decide anyway. An older tick arriving
+                // after a newer one (impossible on an ordered stream, but cheap to
+                // honour) is simply absorbed: the handler would reject it as
+                // non-monotonic if it were queued.
+                int i = ingress.ReplaceableIndex;
+                if (input.Tick >= _pendingInputs[i].Input.Tick)
+                {
+                    _pendingInputs[i] = pending;
+                }
+                return InputIngestResult.Coalesced;
+            }
+
+            if (ingress.Pending >= MaxInputsPerConnection) return InputIngestResult.DroppedConnectionBudget;
+            if (_pendingInputs.Count >= MaxPendingInputs) return InputIngestResult.DroppedQueueFull;
+
+            _pendingInputs.Add(pending);
+            ingress.Pending++;
+            ingress.ReplaceableIndex = movementOnly ? _pendingInputs.Count - 1 : -1;
+            return InputIngestResult.Enqueued;
         }
     }
 
@@ -657,6 +1705,9 @@ public sealed class EcsWorld : IDisposable
         {
             destination.AddRange(_pendingInputs);
             _pendingInputs.Clear();
+            // Every connection's per-drain budget and coalescing cursor is now stale;
+            // the next PushInput on each resets it against this value.
+            _drainEpoch++;
         }
     }
 
@@ -696,7 +1747,8 @@ public sealed class EcsWorld : IDisposable
         _iterationDepth++;
         try
         {
-            foreach (ref var chunk in _arch.Query(in Players).GetChunkIterator())
+            // _playersQuery, never _arch.Query(...) — see ScanRangeLocked and #176.
+            foreach (ref var chunk in _playersQuery.GetChunkIterator())
             {
                 int count = chunk.Count;
                 for (int i = 0; i < count; i++)
@@ -727,13 +1779,18 @@ public sealed class EcsWorld : IDisposable
     /// </summary>
     public void ApplyStructuralChanges()
     {
+        if (Volatile.Read(ref _queuedStructuralOps) == 0) return;
+
         _rwLock.EnterWriteLock();
         try { ApplyStructuralChangesLocked(); }
-        finally { _rwLock.ExitWriteLock(); }
+        finally { ExitWriteScope(); }
     }
 
     public void Dispose()
     {
+        // Before the lock and the Arch world go: a parked worker must never wake to find
+        // either of them disposed.
+        _pool.Dispose();
         _rwLock.Dispose();
         ArchWorld.Destroy(_arch);
     }
@@ -925,6 +1982,7 @@ public sealed class EcsWorld : IDisposable
     {
         int total = 0;
         for (int s = 0; s < _structuralSlots.Length; s++) total += _structuralSlots[s].Count;
+        Volatile.Write(ref _queuedStructuralOps, 0);
         if (total == 0) return;
 
         // Copy and clear first: applying an op must not observe the queue it is draining.
@@ -943,6 +2001,8 @@ public sealed class EcsWorld : IDisposable
             slot.Clear();
         }
 
+        _queuedStructuralOps = 0;
+
         foreach (var op in ops)
         {
             if (op.IsRemoval) RemoveEntityLocked(op.Id);
@@ -957,6 +2017,7 @@ public sealed class EcsWorld : IDisposable
         if (DeferStructural)
         {
             _structuralSlots[_workerSlot].Add(StructuralOp.Add(state, tags));
+            Interlocked.Increment(ref _queuedStructuralOps);
             return;
         }
 
@@ -978,9 +2039,16 @@ public sealed class EcsWorld : IDisposable
 
         bool isEnemy = (tags & EntityTags.EnemyAi) != 0;
 
+        // Assigned once per distinct id string, for the life of the world — see _stableIds.
+        if (!_stableIds.TryGetValue(state.Id, out int stable))
+        {
+            stable = _nextStableId++;
+            _stableIds[state.Id] = stable;
+        }
+
         Entity entity = isEnemy
             ? _arch.Create(
-                new EntityIdRef(state.Id),
+                new EntityIdRef(state.Id, stable),
                 new EntityKind(state.Type),
                 new Position(state.Position),
                 default(Health),
@@ -990,7 +2058,7 @@ public sealed class EcsWorld : IDisposable
                 default(EnemyAi))
             : isPlayer
             ? _arch.Create(
-                new EntityIdRef(state.Id),
+                new EntityIdRef(state.Id, stable),
                 new EntityKind(state.Type),
                 new Position(state.Position),
                 default(Health),
@@ -999,7 +2067,7 @@ public sealed class EcsWorld : IDisposable
                 new InputCursor(state.LastInputTick),
                 default(PlayerTag))
             : _arch.Create(
-                new EntityIdRef(state.Id),
+                new EntityIdRef(state.Id, stable),
                 new EntityKind(state.Type),
                 new Position(state.Position),
                 default(Health),
@@ -1016,6 +2084,7 @@ public sealed class EcsWorld : IDisposable
         if (DeferStructural)
         {
             _structuralSlots[_workerSlot].Add(StructuralOp.Remove(id));
+            Interlocked.Increment(ref _queuedStructuralOps);
             return;
         }
 
@@ -1069,6 +2138,8 @@ public sealed class EcsWorld : IDisposable
             Defense = combat.Defense,
             CooldownUntilTick = combat.CooldownUntilTick,
             Speed = locomotion.Speed,
+            FacingBrad = locomotion.FacingBrad,
+            Action = locomotion.Action,
             LastInputTick = cursor.LastInputTick,
         };
     }
@@ -1095,6 +2166,8 @@ public sealed class EcsWorld : IDisposable
             Defense = combats[i].Defense,
             CooldownUntilTick = combats[i].CooldownUntilTick,
             Speed = locomotions[i].Speed,
+            FacingBrad = locomotions[i].FacingBrad,
+            Action = locomotions[i].Action,
             LastInputTick = cursors[i].LastInputTick,
         };
     }
@@ -1122,6 +2195,8 @@ public sealed class EcsWorld : IDisposable
 
         ref var locomotion = ref _arch.Get<Locomotion>(entity);
         locomotion.Speed = state.Speed;
+        locomotion.FacingBrad = state.FacingBrad;
+        locomotion.Action = state.Action;
 
         ref var cursor = ref _arch.Get<InputCursor>(entity);
         cursor.LastInputTick = state.LastInputTick;

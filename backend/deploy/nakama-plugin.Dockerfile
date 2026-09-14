@@ -41,3 +41,22 @@ COPY --from=builder /out/nakama.so /nakama.so
 # Default target: nakama server with the plugin baked into the modules dir.
 FROM heroiclabs/nakama:${NAKAMA_VERSION} AS runtime
 COPY --from=builder /out/nakama.so /nakama/data/modules/nakama.so
+
+# Provenance. Declared AFTER the copy so a rebuild at a new revision does not
+# invalidate the layer above it -- the same reasoning as docker/Dockerfile.gateway.
+#
+# WITHOUT THIS, THE IMAGE LIES ABOUT ITSELF, and convincingly. Every label here is
+# inherited from heroiclabs/nakama, including
+# `org.opencontainers.image.revision`, so `docker image inspect` reports
+# d4d92f93f78bbbe62c7fc50a3f85c772ec121a09 -- which is a real commit, in
+# heroiclabs/nakama ("Prepare 3.40.0 release. (#2527)"), and says nothing at all
+# about the plugin baked in on the line above.
+#
+# That is worse than an unstamped image. An unstamped one reports `unknown` and
+# any check skips it; this one reports a plausible 40-char sha that resolves
+# nowhere in this repository, which reads as "built from a branch since deleted"
+# and sends you looking for a commit that never existed here.
+ARG GIT_REVISION=unknown
+LABEL org.opencontainers.image.revision="${GIT_REVISION}" \
+      org.opencontainers.image.title="rpg-mmo nakama (plugin baked in)" \
+      org.opencontainers.image.source="https://github.com/cuvara/rpg-mmo-server" 

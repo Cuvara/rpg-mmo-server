@@ -1,0 +1,105 @@
+{
+  "schema": "rpg-mmo.loadtest/v1",
+  "label": "n=100 movement=cluster",
+  "run_id": "37763af5",
+  "started": "2026-09-07T09:19:22.216428485+07:00",
+  "config": {
+    "players": 100,
+    "ramp_players_per_sec": 20,
+    "duration_sec": 35,
+    "client_tick_hz": 15,
+    "auth_mode": "presigned",
+    "movement": "cluster",
+    "encoding": "json",
+    "map_id": "map_01",
+    "transport": "tcp",
+    "hold_gateway": true,
+    "tick_budget_sec": 0.066666666
+  },
+  "client": {
+    "players_requested": 100,
+    "players_joined": 10,
+    "players_failed": 90,
+    "failures_by_phase": {
+      "gateway": 90
+    },
+    "sample_errors": [
+      "gateway: gateway auth: recv: EOF",
+      "gateway: gateway auth: recv: EOF",
+      "gateway: gateway auth: recv: EOF",
+      "gateway: gateway auth: recv: EOF",
+      "gateway: gateway auth: recv: EOF"
+    ],
+    "snapshot_interval": {
+      "count": 5260,
+      "mean_ms": 66.67,
+      "p50_ms": 66.8,
+      "p95_ms": 67.4,
+      "p99_ms": 68.2,
+      "max_ms": 71.27
+    },
+    "ack_latency": {
+      "count": 5253,
+      "mean_ms": 32.97,
+      "p50_ms": 29.41,
+      "p95_ms": 61.44,
+      "p99_ms": 61.99,
+      "max_ms": 64.24
+    },
+    "join_latency": {
+      "count": 10,
+      "mean_ms": 2.62,
+      "p50_ms": 2.23,
+      "p95_ms": 5.28,
+      "p99_ms": 5.28,
+      "max_ms": 5.28
+    },
+    "snapshots_total": 5260,
+    "keyframes_total": 170,
+    "deltas_total": 5090,
+    "inputs_total": 5253,
+    "heartbeats_total": 40,
+    "gateway_heartbeats_total": 40,
+    "rx_bytes_per_sec_per_player": 15240.73,
+    "tx_bytes_per_sec_per_player": 884.9,
+    "rx_bytes_per_sec_total": 152407.31,
+    "tx_bytes_per_sec_total": 8849.03,
+    "snapshots_received_ratio": 1
+  },
+  "server": {
+    "scraped": true,
+    "tick_p50_sec": 0.00025,
+    "tick_p95_sec": 0.000475,
+    "tick_p99_sec": 0.000495,
+    "tick_mean_sec": 0.000037,
+    "tick_count": 2101,
+    "tick_over_budget_ratio": 0,
+    "tick_over_budget_edge_sec": 0.05,
+    "ticks_per_sec": 60.01,
+    "players_online": 10,
+    "entities": 16,
+    "snapshots_sent_window": 5260,
+    "processed_inputs_window": 5252,
+    "gateway_connections_active": 10,
+    "gateway_auth_ok_window": 0,
+    "gateway_auth_fail_window": 0,
+    "gateway_enter_world_ok_window": 0,
+    "gateway_enter_world_fail_window": 0,
+    "gateway_rate_limited_window": 0
+  },
+  "host": {
+    "load_avg_1": 2.73,
+    "load_avg_5": 5.84,
+    "load_avg_15": 4,
+    "cpus": 12
+  },
+  "verdict": {
+    "tick_budget_ok": true,
+    "snapshot_cadence_ok": true,
+    "no_errors": false,
+    "no_frame_loss": true,
+    "invalid": true,
+    "degraded": true,
+    "reason": "INVALID: 90/100 players failed, so this level did not run at 100 players — rerun this level"
+  }
+}

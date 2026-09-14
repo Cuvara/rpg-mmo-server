@@ -81,6 +81,21 @@ type ClientConn struct {
 	loggedAuthFail   bool
 	loggedUnexpected bool
 
+	// loggedUnversioned latches the once-per-connection notice that this peer
+	// advertised no protocol version. It is a THIRD latch rather than a reuse of
+	// loggedAuthFail because the two events are unrelated: sharing one would let
+	// an admitted-but-unversioned client spend the auth-failure budget and
+	// silently suppress the line for a genuine auth rejection later on the same
+	// connection. Read-loop goroutine only, like the two above.
+	loggedUnversioned bool
+
+	// lastSessionRefresh is when a MsgPong last re-armed the session TTL, used
+	// to bound pong-driven store writes to one per sessionRefreshInterval. Zero
+	// means never, so the first pong on an authenticated connection refreshes.
+	// Read-loop goroutine only, like msgBucket above — every access is on
+	// handleMessage's call stack — so it needs no lock.
+	lastSessionRefresh time.Time
+
 	// enc is the wire encoding this connection speaks, latched from the first
 	// frame decoded on it and used for every reply.
 	//
@@ -126,6 +141,61 @@ const (
 	pingInterval = 10 * time.Second
 	pongTimeout  = 30 * time.Second
 )
+
+// sessionRefreshInterval bounds how often a heartbeat MsgPong re-arms the
+// session TTL in the store. Heartbeats arrive every pingInterval (10s), but the
+// session TTL is an hour — re-arming it on every pong would be one store write
+// per connection per 10s for no gain. Once a minute keeps the sliding window
+// accurate to well under 0.1% of the TTL at a sixth of the write rate.
+const sessionRefreshInterval = time.Minute
+
+// MaxHandlerBlockingWait is the longest a message handler may block before it
+// starves the heartbeat, and is exported so start-up can refuse a configuration
+// that exceeds it.
+//
+// A connection is served by ONE goroutine: the read loop dispatches a frame,
+// and the next frame — including the client's MsgPong — is not read until that
+// handler returns. A handler that blocks therefore stops this connection's
+// pongs from being recorded, and HeartbeatLoop closes the connection after
+// pongTimeout of silence. handleEnterWorld is the one handler that can block for
+// a configurable time (it waits for a freshly allocated game server to
+// register), which is exactly the case that must not exceed this.
+//
+// The margin is one full pingInterval: at pongTimeout-pingInterval a single lost
+// or delayed ping still leaves a whole ping period for a pong to arrive and be
+// processed before the connection is judged dead. Anything closer, and the
+// gateway drops the very client it is holding the socket open for — with a
+// symptom (client vanishes during a slow allocation) that points nowhere near
+// the cause.
+const MaxHandlerBlockingWait = pongTimeout - pingInterval
+
+// enterWorldWriteMargin is the slice of MaxHandlerBlockingWait reserved for
+// what handleEnterWorld does AFTER the assignment resolves: the session
+// update, the response encode, and the enqueue onto the send channel. Those are
+// cheap but not free — a Redis session store under load is the expensive one —
+// and a budget that spends the whole window on the assignment leaves the
+// write-back racing the heartbeat it was sized to protect.
+const enterWorldWriteMargin = 2 * time.Second
+
+// EnterWorldBudget is the single deadline handleEnterWorld puts over the whole
+// assignment path (registry lookup + retries, Agones allocation, wait for the
+// allocated pod to self-register).
+//
+// It exists because the legs of that path each carry their own timeout and,
+// stacked worst-case, exceed MaxHandlerBlockingWait — registry lookup retries
+// (registry.RetryTotalTimeout, 10s) + the Agones allocation call
+// (registry.DefaultTimeout, 10s) + the registration wait
+// (registry.DefaultAllocationWaitTimeout, 15s) ≈ 35s against a 20s window
+// (issue #235). No per-leg default can fix a sum, so the sum is capped here:
+// when the budget expires the client gets the retryable "server is starting,
+// retry shortly" while the allocation itself carries on detached
+// (registry.allocateOnce runs the leader on context.WithoutCancel), so the
+// client's retry finds the server ready instead of triggering a second
+// allocation.
+//
+// A guard test in enter_world_alloc_test.go pins the arithmetic against the
+// same constants.
+const EnterWorldBudget = MaxHandlerBlockingWait - enterWorldWriteMargin
 
 // halfCloser is the optional half-close capability of a net.Conn.
 // *net.TCPConn and *net.UnixConn implement it; kcp.UDPSession does not.
@@ -231,6 +301,31 @@ func (c *ClientConn) firstAuthFailure() bool {
 	first := !c.loggedAuthFail
 	c.loggedAuthFail = true
 	return first
+}
+
+// firstUnversionedNotice reports whether this is the first time this connection
+// has been seen to advertise no protocol version, latching for subsequent
+// calls. ReadLoop goroutine only.
+//
+// Deliberately a SEPARATE latch from firstAuthFailure. Sharing that one would
+// let an admitted-but-unversioned client consume the auth-failure budget and
+// silently suppress the log line for a genuine auth rejection later on the same
+// connection — two unrelated events competing for one "log this once" token.
+func (c *ClientConn) firstUnversionedNotice() bool {
+	first := !c.loggedUnversioned
+	c.loggedUnversioned = true
+	return first
+}
+
+// shouldRefreshSession reports whether at least sessionRefreshInterval has
+// passed since the last pong-driven session refresh, recording now as the new
+// mark when it has. ReadLoop goroutine only, like firstAuthFailure.
+func (c *ClientConn) shouldRefreshSession(now time.Time) bool {
+	if !c.lastSessionRefresh.IsZero() && now.Sub(c.lastSessionRefresh) < sessionRefreshInterval {
+		return false
+	}
+	c.lastSessionRefresh = now
+	return true
 }
 
 // firstUnexpectedMessage reports whether this is the first unroutable message

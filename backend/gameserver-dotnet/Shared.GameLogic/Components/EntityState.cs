@@ -49,5 +49,28 @@ namespace Shared.GameLogic.Components
 
         /// <summary>Last processed input tick. Go: LastInputTick uint64.</summary>
         public ulong LastInputTick;
+
+        /// <summary>
+        /// Facing as 16-bit binary radians BIASED BY ONE: 0 means "not sent / unknown",
+        /// and a real facing is <c>(FacingBrad - 1) * 2*PI / 65536</c> radians
+        /// counter-clockwise from +X.
+        /// </summary>
+        /// <remarks>
+        /// Stored in the wire's own biased integer form rather than as an angle. The
+        /// bias is what lets zero mean "unknown" without colliding with due east (0.0
+        /// radians), and keeping the stored form identical to the wire form means the
+        /// snapshot encoder does no conversion at all on the hot path. The conversion
+        /// itself is a wire concern and lives in each side's wire layer, not here:
+        /// producing an angle from a direction needs <c>MathF.Atan2</c>, which ADR-10
+        /// forbids in this library because it is implementation-defined across
+        /// NativeAOT x64 and IL2CPP ARM64.
+        /// </remarks>
+        public uint FacingBrad;
+
+        /// <summary>
+        /// What the entity is doing, for animation selection on a client.
+        /// <see cref="EntityAction.Unspecified"/> (0) means "not sent", never "idle".
+        /// </summary>
+        public EntityAction Action;
     }
 }

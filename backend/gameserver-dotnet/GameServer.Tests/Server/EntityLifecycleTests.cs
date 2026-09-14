@@ -260,6 +260,53 @@ public class EntityLifecycleTests
         }
     }
 
+    /// <summary>
+    /// The #229 regression. A client rejoins while its old TCP connection is still alive
+    /// (a mobile blip: the socket died client-side, the server's heartbeat has not noticed
+    /// yet). <c>ConnectionManager.Add</c> replaces and closes the old connection, whose
+    /// handler teardown then runs — and before the identity check, that teardown removed
+    /// whatever connection it found under the user id: the NEW one. The player was kicked
+    /// milliseconds after a successful rejoin and the online gauge under-counted.
+    /// </summary>
+    [Fact]
+    public async Task FastRejoin_WhileOldConnectionStillOpen_KeepsTheNewConnectionAlive()
+    {
+        using var metrics = new GameMetrics("map_lifecycle", $"test.{Guid.NewGuid():N}");
+        await using var h = await Harness.StartAsync(metrics, hold: TimeSpan.FromSeconds(10));
+
+        string userId = "user-fast-rejoin";
+
+        // First connection stays OPEN — this is the half-dead socket the server has not
+        // noticed losing. Disposing it here would turn the test into the ordinary
+        // disconnect-then-reconnect case, which was never broken.
+        var stale = await h.JoinAsync(userId);
+
+        // Rejoin under the same user while the stale connection is registered.
+        using var fresh = await h.JoinAsync(userId);
+
+        // The stale handler's teardown has now run (Add closed its transport). Give it a
+        // moment to do its damage, then require the world settled on exactly one player —
+        // the fresh one — with no hold scheduled: a hold parks the entity of a player who
+        // is present.
+        await h.WaitForAsync(() =>
+            metrics.PlayersOnline == 1 && h.Server.PendingHolds == 0);
+        Assert.Equal(1, h.Server.EntityCount);
+
+        // The proof the fresh connection survived: the server still answers on it. Under
+        // the bug it was closed by the stale teardown, so this read hits EOF instead.
+        var stream = fresh.GetStream();
+        var ping = WireProtocol.NewEnvelope(
+            MsgType.Ping, new PingMessage { Timestamp = 42 }, WireEncoding.Json);
+        await stream.WriteAsync(WireProtocol.Encode(ping));
+        await stream.FlushAsync();
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var env = await WireProtocol.DecodeAsync(stream, cts.Token);
+        Assert.NotNull(env); // any frame will do — snapshots and pongs both prove liveness
+
+        stale.Dispose();
+    }
+
     internal static async Task SendJoinAsync(Stream stream, string userId, string secret)
     {
         var env = WireProtocol.NewEnvelope(

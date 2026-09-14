@@ -42,6 +42,26 @@ type ServerInfo struct {
 	Transport   string `json:"transport,omitempty"`
 	Capacity    int    `json:"capacity"`
 	PlayerCount int    `json:"player_count"`
+
+	// IdentityKey is the server's Ed25519 identity public key (ADR-25), base64
+	// standard encoding with padding of exactly 32 raw bytes. The pod generates
+	// it at startup and publishes it here; the gateway forwards it to clients in
+	// EnterWorldResponse.ServerPublicKey.
+	//
+	// It is written by the C# game server and read by the Go gateway with NO
+	// translation layer, so the Redis hash field name ("identity_key") and this
+	// encoding are a cross-language contract — see
+	// GameServer.Registry.RedisServerRegistry and
+	// GameServer.Net.Sealed.ServerIdentity. Use sealed.EncodeIdentityKey /
+	// sealed.DecodeIdentityKey rather than calling base64 directly, so the two
+	// sides cannot drift on padding.
+	//
+	// Empty for a server older than ADR-25, which is why nothing may treat an
+	// empty value as an error. It is also why anything that can WRITE a registry
+	// entry can publish its own key and be believed: ADR-4's trusted backend
+	// network is load-bearing for this field, and ADR-25 §6 says so explicitly
+	// rather than leaving it assumed.
+	IdentityKey string `json:"identity_key,omitempty"`
 }
 
 // Event is a cross-server event message.
@@ -84,6 +104,44 @@ type ServerRegistry interface {
 	Heartbeat(ctx context.Context, serverID string) error
 	// GetServer returns a single server by ID.
 	GetServer(ctx context.Context, serverID string) (ServerInfo, error)
+}
+
+// DungeonIndex records which game server instance belongs to which party.
+//
+// ADR-26 decision 2: a dungeon instance is keyed by the PARTY, not by the
+// content id. The first member's EnterWorld allocates a pod and publishes it
+// here; every later member reads the same entry and is handed the same address.
+// Keying by content would give every party in the game one shared dungeon,
+// which is the opposite of instancing.
+//
+// Two keys rather than one, because allocation and lookup answer different
+// questions:
+//
+//   - ClaimAllocation elects ONE member to do the allocating. Without it, four
+//     members entering together allocate four pods and three of them are
+//     orphaned immediately -- nothing else would ever look them up, because the
+//     lookup below is keyed on a party that now points at the fourth.
+//   - Publish/Lookup carry the answer. Losers of the election poll Lookup
+//     rather than allocating.
+//
+// Entries expire: a party that never finishes entering must not pin a stale
+// server id forever, and a dungeon pod that dies takes its own
+// servers:id: hash with it, so a lookup that survived would resolve to nothing.
+type DungeonIndex interface {
+	// ClaimAllocation attempts to become the allocator for partyID. It returns
+	// true exactly once per party until the claim expires or is released.
+	ClaimAllocation(ctx context.Context, partyID, holder string, ttl time.Duration) (bool, error)
+
+	// Publish records the allocated instance for partyID.
+	Publish(ctx context.Context, partyID, serverID string, ttl time.Duration) error
+
+	// Lookup returns the instance recorded for partyID, or ErrNotFound.
+	Lookup(ctx context.Context, partyID string) (string, error)
+
+	// Release drops both the claim and the published entry. Called when the
+	// allocation fails, so the next member to arrive retries rather than
+	// polling for an entry that will never be published.
+	Release(ctx context.Context, partyID string) error
 }
 
 // EventStream publishes and consumes cross-server events.

@@ -489,11 +489,152 @@ All validation is server-authoritative:
 ## Disconnect and Reconnect
 
 - On TCP disconnect, the server holds the player entity for a grace period:
-  **30 seconds** on map servers, **60 seconds** on dungeon servers.
+  **30 seconds** on map servers, **60 seconds** on dungeon servers. The window is
+  `ServerOptions.HoldTtl` and nothing else — the composition root derives it from
+  `--mode`, so there is one place to read it and one place to change it.
 - During the hold, the entity is marked inactive (no AI targeting, no damage).
 - If the client reconnects with a valid session token within the window, it
   resumes with full state. Otherwise the entity is removed and the session is
   invalidated.
+
+## Dungeon mode
+
+`--mode=dungeon` selects an **instanced** server: one live world per party, not one per
+map id. Three behaviours besides the longer reconnect hold hang off it, all of them
+implementing ADR-26, and all of them gated in exactly one place each.
+
+### It does not appear in the map index (decision 8)
+
+The registry holds two keys. `servers:id:{server_id}` is a HASH and the source of truth:
+it carries the dialable composed address and the heartbeat TTL. `servers:map:{map_id}` is
+a SET, and it is the index the gateway's `FindServer` searches.
+
+A dungeon pod writes the **hash** — the gateway allocates the pod, learns its name, and
+then waits for exactly that hash to appear so it can read the address — and never joins
+the **index**. An indexed instance would be handed to an unrelated player as if it were a
+map, and a dungeon fleet pins no `GAMESERVER_MAP_ID`, so the key it wrote would be the
+empty one. Heartbeat, TTL and the re-register-on-wipe repair are unchanged: they all live
+on the hash.
+
+Expressed as `RegistrationScope` (`MapIndexed` / `HashOnly`), passed to
+`IServerRegistry.RegisterAsync`. `GameServerHost` narrows the scope itself from the mode,
+so a caller that builds `RegistrationOptions` without thinking about dungeons cannot get
+this wrong.
+
+**The map-id fallback is the hazard, not a missing map id.** A dungeon fleet pins no
+`GAMESERVER_MAP_ID`, and `Program.cs` resolves `--map-id ?? GAMESERVER_MAP_ID ?? "map_01"`
+— so a dungeon pod *carries* the map fleet's own id. Nothing in the registration scope
+reads the map id; it comes from the mode alone, so such a pod still registers no map and
+two dungeon replicas beside the map pod are **one** live server for `map_01`, not three.
+The server logs that fallback at Warning on boot, naming where the value goes (this pod's
+`servers:id:` hash) and where it does not (the map index), because a dungeon hash reading
+`map_01` is otherwise an alarming thing to find. Deregistration is safe for the same
+reason the index is: the registry removes only its own server id from the set, so a
+dungeon pod leaving cannot evict the real map server.
+
+### It does not persist `map_id` or position (decision 5)
+
+`player_states` holds **one row per player** with a single `map_id`, and
+`PlayerSpawn.Resolve` discards saved coordinates whose row belongs to another map. A
+dungeon server saving the row in full would therefore stamp the dungeon's id over the
+player's origin map, and their next join on that map would put them at its **spawn point**
+instead of where they left — a silent, permanent teleport as the price of a dungeon run.
+
+In dungeon mode `AsyncSaver` runs at `PlayerSaveScope.StatsOnly` and calls
+`IPlayerStore.SavePlayerStatsAsync`, which writes HP and max HP and leaves `map_id`, `x`
+and `y` untouched. `PostgresPlayerStore` expresses that as a single upsert whose
+`DO UPDATE` clause names only `hp` and `max_hp`, so the merge is atomic. A player with no
+row yet gets one with an **empty** map id, which `PlayerSpawn.SameMap` reads as
+unattributable — the same spawn-point outcome as no row at all, with the HP preserved.
+
+**The stated cost**: position inside a dungeon is not durable. A disconnect past the 60s
+hold returns the player to the origin map where they stood, not to the dungeon. There is
+deliberately no second row per player, and no encounter-level checkpoint — ADR-26
+decision 4 defers that until there is an encounter worth losing.
+
+### It shuts itself down when it empties (decision 6)
+
+After the last member leaves **and** that member's hold expires with no reconnect, the pod
+reports `Shutdown` to the Agones sidecar and ends its own run. Not on a timer and not by
+an external reaper: the pod is the only party that knows both facts, and a dungeon pod
+that outlives its party can never be allocated again, because the gateway keys allocation
+on a party that no longer exists.
+
+The rule is `GameServerHost.ShouldShutdownEmptyInstance`, and every term of it is there to
+stop a specific wrong shutdown:
+
+| Term | Without it |
+|------|-----------|
+| dungeon mode | a map server would end itself the moment it emptied |
+| has ever had a player | a freshly scheduled pod would shut down at boot, racing the party to its own instance |
+| no live connections | somebody is still playing |
+| no pending holds | two members leaving together: the first hold to expire would take the pod down while the second is still inside their reconnect window |
+
+It is evaluated after a hold expires and after a duplicate-login kick (which removes an
+entity outright and schedules no hold of its own, so nothing else would notice that the
+last member had gone).
+
+### It releases itself if its party never arrives (the join deadline)
+
+The `has ever had a player` term above has a cost, and it was **measured, not predicted**:
+a pod that is allocated and then **never joined** satisfies the rule forever. It sits
+`Allocated`, Agones does not reclaim an Allocated pod (ADR-16), and the replica is gone
+until an operator releases it by hand. Two runs of `backend/smoketest/cmd/dungeonprobe` on
+dev — which asks the gateway for an address and never dials the game server — consumed both
+replicas of a two-replica fleet permanently, after which every further party got
+`all servers busy, retry shortly`. In production the same shape is any client that receives
+`{ServerAddr, JoinToken}` and then crashes, is killed, or loses connectivity before dialling.
+
+The fix is **not** another term in decision 6's rule: the pod cannot tell "my party has not
+arrived yet" from "my party is never arriving" without a clock. So it gets one.
+
+`GameServerHost.ShouldShutdownUnjoinedInstance` is a second, separate rule:
+
+| Term | Without it |
+|------|-----------|
+| dungeon mode | a quiet map server would end itself; a map server is allocated for nobody in particular, so "nobody joined" is not a fault there |
+| has **never** had a player | it would kill a live party mid-run, and a pod that emptied after a real run, both of which are decision 6's business |
+| no handshake in flight | the party's join is already on the wire; an accepted socket still inside the handshake has not set `everHadPlayer` yet |
+| a positive deadline | there would be no way to opt out, and the mechanism could not be disabled without a second flag |
+
+**The two rules cannot both fire.** Decision 6 requires `everHadPlayer`; the deadline
+requires its negation. They partition the space on that one term, so the deadline cannot
+weaken decision 6 by construction rather than by care — `TheTwoShutdownRules_AreMutuallyExclusive`
+pins it over the cross product of their shared inputs.
+
+**Where the clock starts: `Allocated`, and the pod really can know.** Not boot. A dungeon
+fleet pins no `GAMESERVER_MAP_ID`, so it is the one fleet shape ADR-18 says *should* carry
+spare `Ready` replicas, and a pod parked in that buffer for an hour is not leaking — Agones
+can still scale it away. The sidecar's `GET /gameserver` carries `status.state`, surfaced as
+`IAgonesSdk.GetStateAsync()` and already polled by `AgonesAllocationGate` for the
+register-on-allocated gate; the deadline reuses that gate verbatim rather than
+re-implementing it. With Agones **disabled** — compose, a local run, every test — there is no
+allocation to observe and no allocator to leak a replica to, so the clock starts at start-up:
+a dungeon process started by hand was started for a party that is about to arrive.
+
+**Why 90s and not the 30s join-token TTL.** ADR-26 named `constants.JoinTokenTTL` as the
+natural candidate, reasoning that the allocation is unusable once the token expires. That is
+true of the token and false of the deadline, because **the two clocks do not start
+together**. This one starts at `Allocated`; the gateway mints the token *after* that — it
+allocates, waits up to `registry.DefaultAllocationWaitTimeout` (15s) for the pod to publish
+its registry entry, and only then signs a token that lives a further `constants.JoinTokenTTL`
+(30s). The last legitimate arrival is therefore **~45s after Allocated**, and a 30s deadline
+would kill pods out from under parties still holding a valid token. `GAMESERVER_JOIN_DEADLINE_SECONDS`
+/ `--join-deadline-seconds` defaults to **90s**, twice that worst case: long enough that no
+honest join loses its instance, short enough that a leaked pod is reclaimed within a fleet's
+scale-up latency rather than never. `0` disables it, and the start-up banner says so out loud.
+
+**`Stopwatch`, never `DateTime.UtcNow`.** This host's `CLOCK_REALTIME` runs 10-17% fast and
+has been observed stepping backwards (#153), so a wall-clock budget silently shrinks under
+exactly the load the deadline exists to tolerate.
+
+**A live party is protected twice, deliberately.** The watch loop consults the rule *first*
+and treats it as the sole authority on whether the pod dies; only once the rule has declined
+does it notice `EverHadPlayer` and stop polling. Mutation-testing the two separately shows
+each absorbs a single-point break in the other — the live mid-run and emptied-instance tests
+fail only when both the rule's `!everHadPlayer` term and the loop's exit leg are removed
+together. That is the intended shape for the one failure mode here that destroys a live
+party's dungeon; the pure rule tests still catch either break on its own.
 
 ### Measured constants (2026-08-12)
 
@@ -929,10 +1070,35 @@ Three things, none of which Arch provides:
    sites) and is deliberately **not** part of this change. Until it lands,
    `EntityIdRef` puts a managed reference in every chunk — the exact cost ADR-10 says
    the handle exists to remove.
-2. **The reader/writer lock.** Arch's `World` is not thread-safe, and network threads
-   spawn/despawn entities and push input while the tick loop reads. The lock discipline
-   is unchanged from `GameWorld`; it is now protecting something that genuinely
-   requires it.
+2. **The reader/writer lock, plus a rule the lock cannot express.** Arch's `World` is
+   not thread-safe, and network threads spawn/despawn entities and push input while the
+   tick loop reads. The lock discipline came over from `GameWorld` unchanged — and, as
+   issue #176 established, a reader/writer lock alone is **not sufficient**, because
+   Arch's read path performs two writes to state shared by every concurrent reader:
+   `World.Query(in QueryDescription)` inserts into a plain `Dictionary` on a cache miss,
+   and the `Query` it returns rebuilds its matching-archetype list lazily the first time
+   it is used after a **new archetype** appeared. Two readers hitting either at once
+   produced `NullReferenceException at Arch.Core.QueryArchetypeEnumerator.MoveNext()`
+   and, twice, heap corruption that killed the test host in an unrelated later test.
+
+   The rule that fixes it, and that anyone touching `EcsWorld` has to keep:
+
+   > **A read path may only iterate a query out of `_readQueries`. It must never call
+   > `_arch.Query(...)`.** Those queries are resolved in the constructor and refreshed
+   > by `ExitWriteScope()`, i.e. only ever while the write lock is held. Code that
+   > already holds the **write** lock may call `_arch.Query(...)` freely.
+
+   `CountWith<TTag>` takes the **write** lock rather than the read lock for exactly this
+   reason: the tag set is open, so its query only exists from its first call and cannot
+   be pre-resolved. It is a diagnostics/scaffolding call, not a tick-path one.
+
+   Measured, against Arch 2.1.0-beta: eight threads iterating one shared query with a
+   stale memo and **no writer at all** faulted in 20/200 attempts; the same eight
+   threads with the memo already refreshed faulted 0/200. That second row is why the
+   fix is a pre-refresh rather than a mutex — iteration of an up-to-date query is a
+   genuine pure read, so `ReadAllParallel` stays parallel, and the AOI gather (77-83%
+   of a 200-viewer tick) is not serialised. Reproducer:
+   `GameServer.Tests/World/EcsWorldConcurrencyStress.cs`, gated behind `ECS_STRESS=1`.
 3. **A deferred structural-change phase**, below.
 
 Everything else — lookup, mutation, range scan, player enumeration — goes through Arch
@@ -1092,9 +1258,20 @@ stage 1 had already removed its per-client list, so there was nothing left there
 tick. It could not be moved out while encoding was interleaved with locked world reads,
 because no point in the tick had a viewer's snapshot input standing free of the world.
 After phase A every connection holds a self-contained view — no world reference, no lock —
-so phase B can move to another thread without `EcsWorld` being involved. Whether to do
-that is BENCHMARK.md §9's outstanding item, and it is the one with a measured case behind
-it.
+so phase B can move to another thread without `EcsWorld` being involved. That move has
+since been made: encoding and serialization run on each connection's write task, and
+BENCHMARK.md §9 item 3 records it as done.
+
+What the gather composes has since been trimmed too (#237, BENCHMARK.md Part VII): the
+scan fills connection-owned `EntityView` buffers — the seven fields the snapshot encoder
+consumes plus a world-stable integer key (`EntityIdRef.Stable`, assigned once per id
+string, never reused) — instead of full 11-field `EntityState`s, and
+`SnapshotDeltaState` keys its per-connection delta maps on that integer instead of
+hashing the entity-id string per visible entity. Measured by paired A/B
+(`Bench/AoiComposeBench.cs`): gather 1.07–1.17× faster, delta encode 1.05–1.16× faster
+at 200 viewers/200 entities; wire bytes proven identical by
+`TrimmedGatherByteIdentityTests`. The `EntityState` scan and the string-input `Encode`
+overloads remain for cold paths.
 
 The trade: a join or leave arriving mid-broadcast waits for the whole gather rather than
 slipping between two viewers. The gather is position tests over chunk spans with no
@@ -1143,10 +1320,28 @@ encoded.
 **What this measured about the tick, which matters more than the change itself.** Splitting
 the old broadcast by hand at 200 players: AOI gather ~874–1177 µs/tick,
 `SnapshotDeltaState.Encode` ~998–1272 µs/tick, protobuf `ToByteArray` ~79–144 µs/tick.
-Serialization proper is 4–6% of the tick, not the 80% the original analysis assumed. The
-two real terms are the brute-force AOI scan (a spatial index is the standing production
-item) and `Encode`'s 134 699 B/tick of `EntitySnapshot` objects, which is a pooling
-problem. Neither is an ECS problem.
+Serialization proper is 4–6% of the tick, not the 80% the original analysis assumed.
+
+> **⚠️ Unverified attribution — order-of-magnitude only (#162).** The harness that produced
+> this split was never committed, so its clock cannot be read back, and this host's
+> `CLOCK_REALTIME` runs 10-17% fast with unstable skew (#153). A percentage is a µs
+> numerator over a tick-duration denominator, so unlike an A/B ratio a clock skew does not
+> cancel — and "serialization is not the bottleneck" is precisely the shape of claim a
+> skewed denominator can invert. Replace it by re-running the split with
+> `GameServer.Tests/Bench/TickBreakdownBench.cs`, which is committed and measures with
+> `Stopwatch.GetTimestamp` only (`BENCH_TICK=1`).
+
+The
+two real terms are the AOI gather and `Encode`'s 134 699 B/tick of `EntitySnapshot`
+objects, which is a pooling problem. Neither is an ECS problem.
+
+The AOI term is no longer a plain scan. A uniform spatial grid is rebuilt once per gather
+scope with each entity's `EntityView` composed into it, and queries take it when the
+population is spread over at least 96 cells — 1.9-2.4x on the stock 1000x1000 map at 200
+players, parity when the population clumps, never slower. The first attempt at this index
+was 2.8x *slower* and was reverted; what changed is issue #237's trimmed compose, which
+made the composed view small enough to live inside the index. `backend/docs/BENCHMARK.md`
+Part X has the numbers and Part V has the history.
 
 ### Systems, the schedule, and where simulation state lives
 
@@ -1480,10 +1675,23 @@ on how many input packets a client sends". That held only while the simulation r
 the client's send rate matched. At a 60 Hz base with a client sending at 10–15 Hz,
 integrating solely on packet arrival makes speed proportional to send rate. So
 `InputHandler.ApplyHeldMovement` integrates the newest held direction once per base tick
-for players who sent nothing that tick, bounded to `WorldEvery` base ticks — one world
-interval, 66 ms at 60/15 — after which the direction expires and the player coasts no
-further. With a single rate `WorldEvery` is 1, the pass returns immediately, and the old
-packet-driven model is reproduced exactly.
+for players who sent nothing that tick, bounded to `MaxBankedTicks` — 250 ms at every
+rate — after which the direction expires and the player coasts no further.
+
+The bound used to be `WorldEvery`, one world interval, and the pass was gated off entirely
+when every group ran at one rate. Both were wrong in the same way: they treated the expiry
+as a statement about the client's send rate. A 15 Hz client's packets were measured
+arriving 4.19 base ticks apart against a 4-tick window, so the average interval already
+overran it, and the single-rate configuration `staging` runs — where the pass did not run
+at all — was the worst case rather than the safe one. The expiry answers "has this client
+gone quiet", so its budget is a silence timeout.
+
+Every step is one tick, at both ends of the wire. That is what makes prediction hold: over
+any interval client and server each take one step per tick, so the distances are equal by
+construction. Recovering time lost to per-tick coalescing by growing a step — `dt =
+min(elapsed, cap)`, the shape this file specified until 2026-08-24 — restores the distance
+and destroys the agreement, because the client never took the oversized step and is snapped
+back by it.
 
 ### Replication is gated to the world rate, not the base rate
 
@@ -1560,3 +1768,475 @@ advance less than the elapsed clock, inputs in the dropped window are never appl
 whole world intervals vanish from the delta stream — but it is **visible, bounded and
 measurable**, which a spiral is not. Both counters and how to read them:
 `docs/METRICS.md`.
+
+## Where the tick budget goes, and when parallelism pays (2026-08-19)
+
+Read this **before** adding a system, and before reaching for a parallel anything. It is
+written for someone starting gameplay work who wants to know what a new system costs and
+whether it can be spread across threads. Every number below is measured on the 12-core
+developer box that also hosts the load generator (ADR-7); treat them as ratios and
+thresholds, not as absolutes for other hardware.
+
+### The budget is not where it looks like it is
+
+At 200 viewers, one `TickOnce`:
+
+| Phase | Cost | Share |
+|---|---|---|
+| AOI gather (`_world.ReadAll(_gatherViews)`) | ~95-110 µs | **77-83%** |
+| Input apply | ~15 µs | ~12% |
+| `ConnectionManager.CopyTo` | 3-9 µs | ~5% |
+| **`SimulationSchedule.RunDue` — every system, all of them** | **0.5-1.9 µs** | **<2%** |
+| Structural drain | 0.1 µs | ~0% |
+| **TickOnce total** | **121-135 µs** | |
+
+At 500 viewers `TickOnce` is ~897 µs and the gather is 79-88% of it.
+
+The consequence for anyone adding gameplay: **you are spending from the 0.5 µs line, not
+from the 121 µs one.** The entire current schedule — three enemy systems over at most
+`EnemyAiTuning.MaxEnemies` (30) entities — costs less than one percent of a tick. A new
+system has an enormous margin before it registers at all, and optimising the schedule
+before it does is optimising 2% of the tick.
+
+The gather is O(viewers × entities) with no spatial index, at a consistent **2.5-3.9 ns
+per entity examined**. A uniform grid was built and measured 2.8× *slower* at realistic
+density, because the cost is composing matches rather than testing distances
+(`backend/docs/BENCHMARK.md` Part V). Do not propose one again without reading that first.
+
+### Thresholds: check your workload against these before parallelising
+
+| Question | Threshold | Live workload today |
+|---|---|---|
+| Is component work worth `UpdateComponentsParallel`? | **~8 000 entities** at 4 workers | 30 enemies — 250× below |
+| Is the AOI gather worth `ReadAllParallel`? | **~500 viewers** | opt-in, off by default |
+| …at 200 viewers? | disputed — see below | |
+| …at 50 viewers? | **never** — the phase is 13-17 µs, dispatch is more | |
+
+Dispatching the parked worker pool costs **~13-18 µs per additional worker** (empty region:
+21 / 37 / 84 µs at 2 / 4 / 8 workers hot, 32-35 / 52-54 / 94-95 µs parked). Any phase you
+want to split has to be worth clearly more than that. Crossover sweep for component work,
+`w=4` against serial: 1.46× *slower* at 4 000 entities, parity at 8 000, 0.68× at 16 000,
+0.36-0.41× at 128 000-256 000.
+
+The AOI-gather figure at 200 viewers is **disputed between two measurements** and is
+recorded that way on purpose. The gather phase measured in isolation is 2.06-2.08× faster
+at four workers across three runs (inside 1% of each other); the same change measured
+through the whole tick read 1.27× and then 0.96×. At 500 viewers both agree on a gain
+(1.8-2.4× phase-level, 2.0-2.7× through the tick), which is why
+`TickLoop.GatherParallelMinViewers` is 500 rather than 200. If you move it, move it on a
+through-the-tick measurement.
+
+### What not to do: parallelising the system schedule
+
+**Do not.** At the live workload it is a **118× regression** — three enemy-sized passes
+over 30 entities cost 1.6 µs serial and 188 µs as three parallel regions. It was a
+782-824× regression before the worker pool; the pool improves the constant, not the verdict.
+Even at 1 000 entities it is still 5.5× slower. The schedule is 0.5-1.9 µs of a 121 µs
+tick; there is nothing there to win.
+
+### The condition under which that answer changes
+
+Two or more **non-structural** systems whose component sets are **disjoint**, over a
+workload past the ~8 000-entity threshold. Both halves are checkable rather than matters
+of judgement:
+
+- Disjointness: `Server.ComponentAccess.IsDisjointFrom`. Build the two systems' accesses
+  and assert it. It returns false for any structural system, which is why spawn and reap
+  can never be paired with anything.
+- Workload: the sweep in `ParallelPrimitiveBenchmark.Bench2b_CrossoverSweep`, re-run for
+  your body rather than the synthetic one.
+
+If either fails, the answer is still no.
+
+### How to measure your own change
+
+Two harnesses are committed. Neither runs in a normal `dotnet test`; both print their
+results rather than asserting them, because a timing assertion on a shared box is a flake
+generator (ADR-12 decision 7 wants a measurement, not a green check).
+
+```bash
+BENCH_PARALLEL=1 dotnet test -c Release --filter "FullyQualifiedName~ParallelPrimitiveBenchmark" -l "console;verbosity=detailed"
+BENCH_PARALLEL=1 dotnet test -c Release --filter "FullyQualifiedName~AoiGatherBenchmark"        -l "console;verbosity=detailed"
+BENCH_TICK=1     dotnet test -c Release --filter "FullyQualifiedName~TickBreakdownBench"        -l "console;verbosity=detailed"
+```
+
+The tick-breakdown figures in the table above come from `TickBreakdownBench`, which is on
+branch `bench/gameserver/tick-breakdown` and is **not merged yet** — the first two
+harnesses are on this branch, the third is not. Check before you rely on the command.
+
+Rules that are not optional, each one bought with a wrong number:
+
+1. **`Stopwatch`, never a wall clock.** This host's `CLOCK_REALTIME` runs 10-17% fast with
+   unstable skew (#153), so a `DateTime` figure is wrong by a double-digit percentage and
+   wrong by a *varying* amount.
+2. **Interleave the arms you are comparing, round-robin, within one run.** The 500-viewer
+   serial gather median moved 707 → 1244 µs between runs, a 76% swing — larger than most
+   of the deltas on this page. Quote ratios from same-run arms; never compare absolute
+   numbers across runs.
+3. **Warm the JIT before the first configuration.** The first configuration measured in a
+   process runs on tier-0 code and reads impossibly flat: one sweep timed 500 entities
+   slower than 2 000, and 30 entities at 103 ns/entity against 9.5 ns/entity for the same
+   body at 10 000. Per-arm warm-up rounds do not fix it. `ParallelPrimitiveBenchmark.WarmUpJit`
+   is the pattern — exercise the whole shape on a throwaway world, then sleep briefly so
+   the background tier-1 compiles land.
+4. **Beware a pool that spins between dispatches.** It inflates whatever is measured near
+   it. With a 25 µs worker-side spin, a serial pass over 30 entities measured 12.5 µs; with
+   the spin off, 1.9 µs — a 6× phantom. This is why `SimWorkerPool` parks its workers
+   immediately and only the region owner spins. A `Barrier`-based pool is worse again:
+   150 µs at 4 workers against 48 µs for a semaphore rendezvous.
+5. **Report median, p99, min and the run-to-run spread.** A median alone hides that the
+   p99 on this box is routinely 3-10× it.
+
+### This section describes core, not gameplay
+
+`backend/TEAM.md` holds the project to **core plumbing only, no gameplay content**,
+because gameplay written before the flows are proven has to be rewritten when a flow
+changes. The three enemy systems live under `Scaffolding/` and that directory name is the
+statement — they exist so the schedule has something to run, not as a design for enemies.
+
+The line to keep when you start real gameplay: **synthetic load inside a benchmark is
+fine; synthetic gameplay inside `GameServer/` is not.** If a performance change only looks
+good against a workload you invented to justify it, the measurement is the thing that is
+wrong.
+
+## Admission hardening: pre-join bounds, atomic capacity, bounded ingestion (2026-09-07)
+
+Three findings from the 2026-09-07 workspace audit (F03, F04 and "make capacity
+admission atomic"), fixed together because they are the same shape: work a peer
+could make the server do with no bound and no owner.
+
+### What it replaced
+
+- **Pre-join connections had no deadline and no bound.** The accept loop spawned a
+  handler per socket and awaited the first frame on the connection's own token, which
+  nothing ever cancelled. A peer that connected and sent nothing — or two bytes of a
+  length prefix, or a body cut off half-way — held a socket and a task indefinitely,
+  outside `GAMESERVER_CAPACITY` (authenticated players only) and outside the heartbeat
+  (started only after the join). The handler's `finally` disposed `conn`, which was still
+  null on every early failure, so a malformed frame that threw left the transport with
+  no owner at all.
+- **Capacity admission was read-then-await-then-add.** The handshake compared
+  `ConnectionManager.Count` to the limit, awaited the player-store load, then `Add`ed
+  the connection. Every join in flight during the load observed the same free slot, so
+  N concurrent joins against one remaining slot admitted N players. A user rejoining
+  over their own still-open connection (the #229 fast-rejoin case) was the opposite
+  failure: refused as a second player at a full server, when they were replacing one.
+- **Input and transfer work was unbounded.** Every decoded `MsgInput` was appended to
+  `EcsWorld._pendingInputs`; the tick coalesced movement to the newest input *after*
+  the whole burst had been decoded, allocated and queued. Every `MsgTransferMap`
+  started its own task, so two in a row ran two save-and-teardowns against one entity.
+
+### What it is now
+
+**Pre-join pool and deadline** (`HandshakeGate`, `GameServerHost.HandleConnectionAsync`).
+The accept loop takes a slot in a bounded pool (`GAMESERVER_MAX_PENDING_HANDSHAKES`,
+default 256) before starting the handler; beyond it the socket is closed on the spot
+with no reply and counted as `pool_full`. The handler reads the first frame under a
+deadline (`GAMESERVER_HANDSHAKE_TIMEOUT_MS`, default 5000) **linked to host shutdown**:
+an idle peer, a partial prefix and a partial body all unwind at the deadline
+(`timeout`); a complete frame that is not a well-formed `MsgJoinToken` is refused at
+once (`malformed`); and stopping the host cancels every pending read. The deadline
+covers what the peer controls — delivering the join frame and reading a rejection —
+and deliberately not the player-store load after verification, which is server-side
+work: a slow database is not the peer's fault, and cancelling it would tear down a
+player who had already been admitted. The `finally` disposes the accepted transport on
+every exit path, whether or not a `Connection` was ever constructed. The pool slot is
+released when the join commits (the socket is a player then, counted under capacity)
+or when the handler exits.
+
+**Atomic capacity** (`AdmissionController`). A slot is *reserved* under one lock before
+the awaited load and *committed* under the same lock when the connection is
+registered; the reservation is released on every failure path in between. Occupancy is
+the number of distinct users that are connected or hold a slot-consuming reservation.
+Two semantics were decided here and are worth stating:
+
+- A user who already holds a live connection is **replacing** it (the fast-rejoin
+  case): the reservation costs no slot and the commit swaps the connection out. The
+  one way that can fail is the connection being replaced disconnecting *during* the
+  join while another user takes the freed slot; the commit then refuses rather than
+  exceed the limit, and the entity goes to the ordinary reconnect hold.
+- A user inside the reconnect hold window is **not an occupant**. The hold keeps their
+  entity, not their slot — their rejoin is admitted like any other and takes exactly
+  one slot. The alternative (holds retain slots) was rejected because it would make
+  admission disagree with the `players_online` the registry publishes: a server that
+  lost fifty players to a network blip would advertise fifty free slots and refuse
+  every one of them for thirty seconds.
+
+**Bounded ingestion** (`EcsWorld.PushInput` with `InputIngress`). Coalescing moved from
+the tick to ingest, under the same input lock: a movement-only input **replaces** the
+sender's newest queued entry in place when that entry is also movement-only, so a
+movement flood occupies one slot however fast it arrives. Inputs carrying an attack
+target are never replaced and never replace — they are appended and they end the run
+of replaceable movement behind them, so the queue keeps the client's order, which the
+handler's monotonic tick check depends on. Those are budgeted per connection per
+drain (`GAMESERVER_MAX_INPUTS_PER_TICK`, default 32) and the queue as a whole is capped
+(`GAMESERVER_MAX_PENDING_INPUTS`, default capacity × budget). The per-connection state
+lives on the `Connection` and is stamped with a drain epoch rather than cleared per
+tick, so the world carries no per-user map on the input path. The tick's own
+coalescing stays as the backstop for the unbounded (no-ingress) path used by tests
+and scaffolding.
+
+**One transfer per connection.** `Connection.TryBeginTransfer` is a CAS; a second
+`MsgTransferMap` while one is running gets `TransferMapResp{ok:false, error:"transfer
+already in progress"}` from the send queue — never awaited on the read loop — and is
+counted.
+
+**Control messages cannot be starved by input.** Each connection's read loop is its
+own task and dispatches `Ping`/`Pong`/`Resync`/`TransferMap` inline; nothing they need
+passes through the input queue, and the input path itself neither awaits nor allocates
+beyond the decode, so a flood on one connection costs that connection's read task and
+a bounded slice of the shared queue, not the tick or anyone else's acknowledgements.
+`InputIngestionTests.InputFlood_FromOneConnection_StaysBounded_AndOthersStillAcked`
+is the live-path proof, per the rule in `backend/TEAM.md`.
+
+### Observability
+
+`gameserver_handshakes_pending` (gauge), `gameserver_handshakes_rejected_total{reason}`,
+`gameserver_inputs_dropped_total{reason}`, `gameserver_inputs_coalesced_total`,
+`gameserver_transfers_rejected_total`, and the `/status` fields `handshakes_pending`,
+`handshakes_rejected`, `inputs_dropped`, `transfers_rejected` — see `docs/METRICS.md`.
+All are separate from `players_online`, which was the point: the pre-join phase was
+invisible precisely because the only gauge counted authenticated players.
+
+### Not done here
+
+Source-IP controls with NAT allowance (also named in F03) are deliberately left out:
+the game server sits behind a gateway that already carries per-IP limiting, and a
+per-IP table here would need a design for shared NATs before it stops being a way to
+lock a whole campus out. The bounds above make a flood cost the flooder a bounded
+number of sockets for a bounded time, which is what the finding asked for.
+
+## Kill rewards are exactly-once per batch id (2026-09-07)
+
+`KillRewardBatcher` (`GameServer/Nakama/`) coalesces kills per killer and sends
+one `reward_kills` RPC per batch per flush (#233). Until audit F06/F07 it
+minted a new GUID on every send and **dropped** a batch whose answer never
+arrived, because Nakama did not deduplicate and retrying an unknown outcome was
+the double-gold path. That traded double gold for lost gold and, once a
+backlog passed Nakama's 1000-kill cap during an outage, for a backlog that
+could never be sent.
+
+### Where the guarantee lives
+
+Not here. Nakama's `reward_kills` now writes a receipt keyed by `batch_id` in
+the same transaction as the wallet update and replays a resent id from that
+receipt (`backend/nakama/docs/DESIGN.md`, same date). The game server's whole
+job is therefore to **never send two different ids for the same kills**:
+
+- a batch gets its id when it is cut from the per-killer pending count, and
+  keeps it for every retry;
+- kills that arrive while a batch is outstanding go into a *new* batch — they
+  are never merged into an id that may already be filed at Nakama with the
+  smaller count;
+- the only thing that mints new ids besides cutting is a `TooLarge` (code 11)
+  answer, which Nakama gives before touching the wallet.
+
+With that, every non-`Granted` outcome — `NotGranted`, `Unknown` (timeout or
+transport failure), `Partial` (gold landed, leaderboard did not) — is simply
+re-sent with per-killer exponential backoff, flush interval doubling to 60s.
+Nothing is dropped; `DroppedKills` no longer exists, `PendingKills` and
+`RequeuedBatches` are the diagnostics.
+
+### Splitting
+
+The pending count is cut into batches of at most `DefaultMaxKillsPerBatch`
+(1000, Nakama's `MaxKillsPerBatch`). 1001 kills become two batches, each with
+its own stable id; a partially delivered split (first batch granted, second
+timed out) retries only the second. Pending memory during an outage is one
+`long` per killer with unsent kills plus ⌈backlog/1000⌉ small records per
+killer with outstanding batches — bounded by *distinct killers since the
+outage began*, not by the current online count, as the old comment implied.
+
+### The crash window, stated honestly
+
+Pending counts and cut batches live in memory. If the game server process
+dies, whatever Nakama has not yet acknowledged is gone: at most one flush
+interval (3s) of kills per killer in steady state, plus everything backed off
+during a concurrent Nakama outage. That is gold and leaderboard score only —
+no position, HP or inventory — and it is the same class of loss as kills that
+land between the last save sweep and a crash.
+
+A durable sender-side pending record was considered and not built.
+`IPlayerStore` is a fixed `PlayerState(UserId, X, Y, Hp, MaxHp, MapId)` record
+over a migrated Postgres schema (`Persistence/Migrator.cs`); a pending-rewards
+table would mean a new migration, a new store method, a write per flush and a
+recovery read on boot, to close a window that is already bounded and gold-only.
+If that trade ever flips (real-money economy, or kill rewards that gate
+progression), the shape is: persist `(killerId, batchId, kills)` when a batch
+is cut, delete on `Granted`, replay the table on start-up — the receipts on
+Nakama's side already make that replay safe.
+
+## Downlink budget: bounding a snapshot by bytes, not by radius (2026-09-09)
+
+Wire-visible behaviour: `docs/API.md`, "Downlink budget". This section is the *why*.
+
+### The gap
+
+The AOI radius was the only thing bounding a snapshot, and a radius bounds **area,
+not population**. A town square, a world boss, a raid stack or a load test all put an
+arbitrary number of entities inside one observer's circle, and the frame grew with
+them — linearly, per client, per tick. There was an input-side flood guard
+(`GAMESERVER_MAX_INPUTS_PER_TICK`) and nothing at all on the downlink, which is the
+direction that scales with the *world* rather than with one client's keyboard.
+
+### The shape of the fix
+
+A per-connection byte cap on the snapshot payload (`GAMESERVER_MAX_SNAPSHOT_BYTES`),
+applied inside `SnapshotDeltaState` — deliberately not in front of it.
+
+**Why inside the delta encoder and nowhere else.** The dangerous version of this
+feature is a filter that decides what to send *after* the encoder has decided what
+the client knows. Do that and an entity is dropped from the wire while `_lastSent`
+records it as delivered: the client is then wrong about that entity until the next
+keyframe, with nothing on either side reporting an error. That is the same
+silent-desync class as the `Speed`-in-`SentView` bug and the handle-reuse hazard.
+Putting the budget inside the encoder makes the shedding decision and the
+"what does this client have" bookkeeping the same pass over the same data, and the
+rule is mechanical: `_lastSent` and `_handles` are written **only** on the line after
+the bytes are appended to the message. A deferred entity touches neither, so:
+
+- its old `SentView` stays in `_lastSent`, the next delta still sees it as changed,
+  and it is re-offered — deferred, never lost;
+- it is never given a handle, so no handle reaches the wire without the binding that
+  introduces it, and the `resync`-on-unknown-handle contract holds by construction.
+
+Despawns follow the same rule: a key leaves `_lastSent`/`_handles` only if its id was
+actually written into `removed`. A deferred despawn is re-offered next tick because
+the key is still in `_lastSent` and still absent from `_seen`.
+
+`GameServer.Tests/Snapshot/SnapshotBudgetTests.cs` asserts this against a real
+`SnapshotMerger` driven through a handle resolver that fails on an unbound handle,
+with keyframes disabled — a convergence test that allowed a keyframe would pass
+against an encoder that drops entities and marks them sent.
+
+### Priority order
+
+1. **The observer's own entity.** Everything else on screen can be interpolated or
+   dead-reckoned for a few ticks without the player being able to name what changed.
+   Their own character cannot: it is the reconciliation anchor, and a stale one reads
+   as rubber-banding.
+2. **Despawns.** A deferred despawn leaves a ghost — *wrong* state, not stale state.
+3. **Longest deferral first.** This is what makes the scheduler fair rather than
+   merely reasonable: an entity deferred on tick N outranks everything that became
+   dirty on tick N+1, so the deferred set drains before the fresh set. With at least
+   one entity admitted per snapshot — guaranteed, see the floor below — the longest
+   any visible dirty entity waits is bounded by the number of dirty entities in that
+   observer's AOI, and is **not** a function of session length.
+
+   **With one qualification, found by testing the floor rather than assuming it.** The
+   floor guarantees *one* candidate per snapshot, and priority 1 is the observer's own
+   entity — so when a non-entity cost competes for the budget, which in practice means
+   a large despawn backlog, that one slot goes to self every tick and everything else
+   waits for the backlog to stop eating the remainder. Measured at **63 ticks against a
+   dirty set of 6** in `UnderDespawnBacklog_AnEntityUpdateStillLandsEveryTick`. The wait
+   is then the dirty set *plus* the backlog's drain time. Still finite and still
+   independent of session length — the backlog is finite and draining, and the test
+   asserts the high-water mark stops moving once it has drained — but it is not the
+   dirty-set figure, and someone reading `max_shed_age` during heavy AOI churn should
+   expect the larger one.
+4. **Nearest first**, then AOI index as a deterministic tie-break.
+
+**The floor.** The top-priority candidate is emitted whatever it costs, before the
+despawn list. That makes the cap soft in exactly one place, and it buys two things:
+an entity larger than the whole budget cannot be deferred for ever, and a steady
+stream of despawns cannot consume the budget every tick and starve updates — which is
+the premise the deferral bound rests on.
+
+A premise with no test is not a premise. Deleting the floor outright left all ten of
+the budget tests and all 1016 tests in the suite green, because every other test runs
+with an empty or trivial despawn list and so never makes the floor the thing that
+admitted an entity. `UnderDespawnBacklog_AnEntityUpdateStillLandsEveryTick` builds a
+despawn backlog many times the budget and requires an entity update to land on every
+snapshot regardless; it fails on the first budgeted tick with the floor removed.
+
+### Two decisions that look arbitrary and are not
+
+**Keyframes are budgeted too.** Exempting them looks kinder — a keyframe repairs
+everything — but the crowd that makes a delta expensive makes the keyframe *more*
+expensive, so the exemption would leave the cap open on precisely the worst frame of
+the interval. The cost is honest and stated: `SnapshotMerger` clears its set on a
+full snapshot, so an entity omitted from a keyframe disappears client-side and is
+re-introduced by a following delta. Correct, never wrong state, but a visible pop —
+and because the order is nearest-first, it happens at the edge of the circle.
+
+**JSON connections are not budgeted.** Every byte figure in the encoder is a protobuf
+size, and a JSON frame for the same snapshot is several times larger. Enforcing a
+protobuf-derived cap on a JSON stream would report bytes that are not the bytes on
+that wire, and a counter nobody can trust is worse than no counter. JSON is the
+legacy encoding (ADR-9) and is expected to disappear; until it does, a JSON client's
+downlink is bounded only by the AOI radius. Stated limitation, not an oversight.
+
+### The default, and what it is derived from — corrected 2026-09-09 after a live run
+
+8192 bytes of payload.
+
+> **The original derivation of this number was wrong, and the first live run found it.**
+> It read: 45.9 KB/s per client at 200 players over a 15 Hz broadcast is a ~3.06 KB mean
+> snapshot (`backend/docs/BENCHMARK.md`), so 8 KiB is ~2.7× the mean and "must not engage
+> at a load the server is known to handle". Both halves of that are unsound.
+>
+> **A cap binds on the peak, and the peak is the keyframe.** 3.06 KB is a *delta-weighted*
+> mean — 29 snapshots in 30 are deltas, and a delta names an entity by a one-or-two-byte
+> handle. A keyframe names it by its id string. Measured, with 13-character ids:
+> **25.9 B/entity on a delta, 40.9 B/entity on a keyframe** — the keyframe is 1.6× the
+> delta, so it crosses the cap at 1.6× fewer entities. Sizing a peak-bounding cap against
+> a mean was the error.
+>
+> **What the default therefore actually does**, measured on a real server (see below):
+> it starts shedding at **~200 entities in one observer's AOI** — on keyframes only — and
+> starts clipping the steady delta stream at **~317**. 200 entities in one AOI is not an
+> exotic load; it is the population BENCHMARK.md's own 200-player figure implies. So the
+> claim that the default "should never engage at a load the server is known to handle" was
+> false at exactly that load.
+>
+> `TheKeyframeCrossesTheDefaultBudgetBeforeTheDeltaDoes` derives both thresholds from the
+> encoder rather than restating them, so this cannot silently rot again.
+
+**The consequence, stated plainly.** A shed keyframe is not free: `SnapshotMerger` clears
+its entity set on a full snapshot, so entities omitted from a keyframe disappear
+client-side and are re-introduced by the following delta. Live, deferral age on the shed
+keyframes was **1 snapshot** — so at ~200+ entities a stock server drops its outermost
+entities for ~67 ms, once per keyframe interval (2 s by default). Correct, never wrong
+state, but a visible flicker at the edge of the circle that the original note said would
+not happen.
+
+**8192 is left unchanged for now**, deliberately: the mechanism is sound, the artefact is
+bounded and at the edge of vision, and changing a default is a product decision rather
+than a correctness one. What has changed is that its behaviour is now measured and stated
+instead of asserted. Anyone raising it should note that a cap sized to clear a keyframe at
+population N needs ≈ 41 × N bytes.
+
+Measured live, 10 players, 300 load-test entities in one AOI, `-movement still`
+(2026-09-09, develop @ `0bc02a3`, image built from that commit):
+
+| `GAMESERVER_MAX_SNAPSHOT_BYTES` | downlink B/s/client | entities shed | max deferral | despawns deferred | client resyncs |
+|---|---|---|---|---|---|
+| 0 (off) | 118 033 | 0 | 0 | 0 | 0 |
+| 8192 (default) | 115 923 | 24 308 | 1 | 0 | 0 |
+| 4096 | 61 469 | 714 989 | 3 | 0 | 0 |
+| 2048 | 30 634 | 1 107 870 | 6 | 0 | 0 |
+| 1024 | 15 264 | 1 310 048 | 12 | 0 | 0 |
+| 512 | 7 570 | 1 422 288 | 25 | 0 | 0 |
+
+The cap controls the wire as intended — halving it roughly halves the downlink — and the
+default costs 1.8% of bandwidth at this population, all of it keyframe clipping.
+
+### Cost when it does not bite
+
+Zero when `GAMESERVER_MAX_SNAPSHOT_BYTES=0`: that path is the pre-budget encoder,
+unchanged. With a budget configured and not exceeded, the encoder pays one extra
+`CalculateSize()` per changed entity (the sizing pass) and emits in AOI order — the
+bytes are identical to the unbudgeted encoder, which `SnapshotBudgetTests` asserts
+tick by tick. Re-ordering happens only on a snapshot that actually sheds. That
+property is what lets the budget ship on by default without invalidating
+`SnapshotByteIdentityTests` or the golden vectors.
+
+### Counters
+
+A check nobody reads is not a check, so these surface both in Prometheus and on
+`/status`: `snapshot_bytes` (real bytes on the socket, envelope included — divide by
+players and uptime for the ADR-7 comparison), `snapshot_entities_shed`,
+`snapshot_removals_deferred` (should stay flat at zero), `snapshot_max_shed_age` (the
+observed deferral high-water mark, the number that says whether the bound above is
+holding) and `max_snapshot_bytes` (the cap that produced them — the others say nothing
+without it).

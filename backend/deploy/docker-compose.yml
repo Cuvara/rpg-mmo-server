@@ -89,13 +89,64 @@ services:
       # Nakama signs client session tokens with session.encryption_key, so the
       # gateway can verify them locally with no roundtrip.
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      # DEV ONLY. The nakama plugin now creates the kills_alltime leaderboard
+      # authoritative and refuses to load if an existing board is not (audit
+      # F02). Stacks created before that hold the old board; this makes the
+      # plugin delete and recreate it on start-up, DISCARDING its records —
+      # fine for a local stack, never for staging/prod, which flip the row with
+      # SQL instead (backend/nakama/docs/RUNBOOK.md, "Migrate a
+      # non-authoritative kills_alltime leaderboard", path A).
+      LEADERBOARD_MIGRATE: recreate
+      # ---------------------------------------------------------------------
+      # Meta-hop TLS (ADR-24) — OFF, and pinned explicitly.
+      # ---------------------------------------------------------------------
+      # In-CONTAINER paths to a PEM pair. Both empty = plaintext, the default.
+      # When set, Nakama terminates TLS itself on :7350.
+      #
+      # MEASURED SCOPE, because the flag's name is narrower than "Nakama has
+      # TLS": it covers the SOCKET listener :7350 only — including the /ws
+      # realtime socket, TLS-only, plaintext refused — and does NOT cover the
+      # console :7351 or metrics :9100, both of which are published below on
+      # 0.0.0.0 and stay in the clear.
+      #
+      # Nakama itself warns that direct SSL termination is not recommended and
+      # prefers a proxy. We take it anyway on a single-node box, where a
+      # terminator and Nakama are the same host so a proxy would report itself
+      # encrypted while buying nothing (ADR-23's argument, unchanged). The
+      # moment a real edge exists, front Nakama and turn this off.
+      #
+      # Mount the PEMs in via the volumes block below. Note a bind mount from a
+      # /tmp WSL path silently creates an empty DIRECTORY at the mount point
+      # ("is a directory" at startup) — put certs on a Windows-visible path or
+      # use a named volume.
+      NAKAMA_TLS_CERT: ${NAKAMA_TLS_CERT:-}
+      NAKAMA_TLS_KEY: ${NAKAMA_TLS_KEY:-}
     entrypoint:
       - /bin/sh
       - -ec
       - |
         /nakama/nakama migrate up \
           --database.address "${POSTGRES_USER:-nakama}:${POSTGRES_PASSWORD:-localdev}@postgres:5432/${POSTGRES_DB:-nakama}"
-        exec /nakama/nakama \
+        # Meta-hop TLS (ADR-24). Built here rather than interpolated by compose
+        # because compose has no conditionals and an EMPTY --socket.ssl_certificate
+        # is not the same as an ABSENT one: Nakama reads the empty path, fails to
+        # load it and exits. Half-configured is refused rather than falling back to
+        # plaintext, matching the gateway pair and the CD gate.
+        #
+        # Built with `set --` rather than a string, because an unquoted string
+        # word-splits and a certificate path may legitimately contain a space —
+        # the same distinction that made cd.yml trim these at the ends only.
+        set --
+        if [ -n "$${NAKAMA_TLS_CERT}" ] || [ -n "$${NAKAMA_TLS_KEY}" ]; then
+          if [ -z "$${NAKAMA_TLS_CERT}" ] || [ -z "$${NAKAMA_TLS_KEY}" ]; then
+            echo "NAKAMA_TLS_CERT and NAKAMA_TLS_KEY must be set together or not at all" >&2
+            exit 1
+          fi
+          set -- --socket.ssl_certificate "$${NAKAMA_TLS_CERT}" \
+                 --socket.ssl_private_key "$${NAKAMA_TLS_KEY}"
+          echo "nakama: TLS ON for :7350 (console :7351 and metrics :9100 stay PLAINTEXT — ADR-24)"
+        fi
+        exec /nakama/nakama "$$@" \
           --name rpg-nakama-local \
           --database.address "${POSTGRES_USER:-nakama}:${POSTGRES_PASSWORD:-localdev}@postgres:5432/${POSTGRES_DB:-nakama}" \
           --logger.level DEBUG \
@@ -116,8 +167,30 @@ services:
     volumes:
       # Compiled Go plugin (nakama.so) is dropped here by `make plugin`.
       - ./modules:/nakama/data/modules
+      # Meta-hop TLS (ADR-24). Uncomment together with NAKAMA_TLS_CERT/_KEY above
+      # and the matching mount on gameserver-dotnet; the paths those variables name
+      # are the ones this mount creates. `./tls` and NOT a /tmp path -- a bind mount
+      # from a /tmp WSL path silently creates an empty DIRECTORY at the mount point
+      # and Nakama exits with "is a directory".
+      # - ./tls:/nakama/tls:ro
     healthcheck:
-      test: ["CMD", "/nakama/nakama", "healthcheck"]
+      # THE PORT ARGUMENT IS LOAD-BEARING, AND IT IS 9100 ON PURPOSE.
+      #
+      # Nakama v3.40.0's healthcheck subcommand is
+      # `http.Get("http://localhost:" + port)` -- hardcoded http, no TLS branch,
+      # no config lookup (main.go). Bare `healthcheck` therefore defaults to 7350
+      # and, the moment NAKAMA_TLS_CERT/_KEY are set above, GETs plaintext HTTP
+      # against a listener that now speaks only TLS. It fails, the container is
+      # marked unhealthy, and every `depends_on: service_healthy` in this file
+      # blocks -- so the whole stack refuses to come up over a perfectly healthy Nakama.
+      # That breakage was NOT recorded when the flag landed; the k8s probes were.
+      #
+      # 9100 is the Prometheus listener, which `--socket.ssl_certificate` does
+      # not cover (ADR-24 §4). Its root path answers 200 in both modes, so this
+      # is one spec for both. Same trade as the k8s probes: it proves the process
+      # is serving HTTP, not that the client-API mux answers. The image ships no
+      # curl and no wget (Debian 12, measured), so there is no third option.
+      test: ["CMD", "/nakama/nakama", "healthcheck", "9100"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -139,8 +212,16 @@ services:
     # matchmaking, and trimming a stream drops unacked cross-server events.
     # Sessions are the only genuinely expendable keys and they carry their own
     # TTL. `noeviction` is already the Redis default, but it is set explicitly so
-    # that adding a `--maxmemory` limit later cannot silently turn this into an
-    # LRU cache. See backend/docs/ARCHITECTURE-DECISIONS.md, ADR-4.
+    # that a `--maxmemory` limit cannot silently turn this into an LRU cache.
+    # See backend/docs/ARCHITECTURE-DECISIONS.md, ADR-4.
+    #
+    # `--maxmemory 128mb` is the ceiling that makes `noeviction` safe rather than
+    # merely strict (#202): without it nothing bounds growth and the process is
+    # OOM-killed whole instead of refusing writes with `OOM command not allowed`.
+    # The value mirrors deploy/k8s/data/redis.conf, which carries the arithmetic
+    # against the cluster pod's 256Mi limit. Compose has no memory limit of its
+    # own, so here the flag exists to keep dev and cluster in step — a divergence
+    # is how "it worked locally" happens.
     command:
       - /bin/sh
       - -ec
@@ -150,6 +231,7 @@ services:
           --appendfsync everysec \
           --save 60 1000 \
           --maxmemory-policy noeviction \
+          --maxmemory 128mb \
           $${REDIS_PASSWORD:+--requirepass "$${REDIS_PASSWORD}"}
     ports:
       - "${REDIS_PORT:-6379}:6379"
@@ -198,9 +280,69 @@ services:
       JOIN_TOKEN_SECRET: ${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      # ---------------------------------------------------------------------
+      # Gateway-hop TLS (ADR-23) — OFF, and pinned explicitly.
+      # ---------------------------------------------------------------------
+      # The gateway hop carries the client's auth token: a ONE-HOUR REUSABLE
+      # bearer credential, measured crossing this hop in the clear. Setting
+      # both of these to PEM paths inside the container makes the gateway
+      # terminate TLS itself and closes that.
+      #
+      # It is empty here for one reason, and it is not caution: THE UNITY
+      # CLIENT CANNOT SPEAK TLS TO THE GATEWAY YET. Turning this on with the
+      # current client refuses every player — there is deliberately no
+      # plaintext fallback (ADR-23 decision 3), because a listener that accepts
+      # both is a downgrade attack with a friendly name.
+      #
+      # Setting exactly ONE of the two is a startup ERROR, not a fall back to
+      # plaintext.
+      #
+      # It does NOT cover the client→Nakama hop, which MINTS that auth token
+      # and is plain HTTP in this file (the nakama service has no
+      # --socket.ssl_certificate). That hop also carries a TWO-HOUR reusable
+      # Nakama session token, so it is the higher-value half and turning this
+      # on alone buys less than it looks like it does.
+      GATEWAY_TLS_CERT: ${GATEWAY_TLS_CERT:-}
+      GATEWAY_TLS_KEY: ${GATEWAY_TLS_KEY:-}
       # Prometheus endpoint (/metrics, /healthz). Scraped in-network by the
       # `monitoring` profile as gateway:9102; set to "off" to disable.
       METRICS_ADDR: ":9102"
+      # ---------------------------------------------------------------------
+      # Agones allocator — OPT-IN, and off by default on purpose.
+      # ---------------------------------------------------------------------
+      # The deploy path is NOT moving to Kubernetes: the gateway stays here in
+      # compose and only the game servers run under Agones (ADR-15 decision 4
+      # accepts that split for this one stage). So the gateway allocates
+      # OUT-OF-CLUSTER, over the Kubernetes API, and needs a kubeconfig — see
+      # the volumes block below and docs/K3S.md "Allocating from the
+      # compose-run gateway".
+      #
+      # Default `none`: with no allocator, an unserved map is simply an error,
+      # and the whole stack keeps working with no cluster present at all.
+      # Setting ALLOCATOR=agones without a reachable cluster is FATAL — the
+      # gateway exits 1 at construction rather than starting degraded.
+      ALLOCATOR: ${ALLOCATOR:-none}
+      # These must name the fleets that actually exist. The Go defaults
+      # (map-servers-dev / dungeon-servers-dev) name the RETIRED Go fleets, so
+      # leaving them unset points allocation at nothing.
+      ALLOCATOR_NAMESPACE: ${ALLOCATOR_NAMESPACE:-rpg-realtime}
+      ALLOCATOR_FLEET_MAP: ${ALLOCATOR_FLEET_MAP:-map-servers-dotnet-dev}
+      # No dungeon fleet exists (ADR-14 stage 6). Left at the Go default so it
+      # is obviously wrong if anything ever asks for one, rather than pointing
+      # at a plausible name that is equally absent.
+      ALLOCATOR_FLEET_DUNGEON: ${ALLOCATOR_FLEET_DUNGEON:-}
+      # What the FLEET's servers listen with, not what this gateway listens
+      # with. It is stamped onto the allocated ServerInfo and announced to the
+      # client BEFORE the pod's own registration lands, so a mismatch tells the
+      # client to speak the wrong protocol. The fleet is TCP today.
+      ALLOCATOR_TRANSPORT: ${ALLOCATOR_TRANSPORT:-tcp}
+      # Path INSIDE the container. The kubeconfig itself is mounted by the
+      # docker-compose.agones.yml overlay, NOT here: a bind mount of a file
+      # that does not exist makes compose create a DIRECTORY in its place, so
+      # putting it in the base file would break the default no-cluster stack
+      # for everyone who never wants an allocator.
+      #   docker compose -f docker-compose.yml -f docker-compose.agones.yml up -d
+      ALLOCATOR_KUBECONFIG: ${ALLOCATOR_KUBECONFIG:-/etc/rpg/kubeconfig}
     ports:
       - "${GATEWAY_CONTAINER_PORT:-8100}:8000"
       - "${GATEWAY_METRICS_PORT:-9102}:9102"
@@ -223,15 +365,47 @@ services:
         condition: service_healthy
       postgres-game:
         condition: service_healthy
-    # NOTE: the C# arg parser only matches SPACE-separated flags (`--addr :9000`,
-    # not `--addr=:9000`) — GameServer/Program.cs GetArg. Configuration is
-    # therefore done through the environment below, which works either way.
+    # NOTE: configuration is done through the environment below, not through
+    # args. (A previous version of this comment claimed the C# arg parser only
+    # matches space-separated flags — it does not: GameServer/Program.cs GetArg
+    # handles `--addr :9000` and `--addr=:9000` alike. The env block is used
+    # because one configuration channel is easier to read than two, and because
+    # agones/fleet-map-dotnet-dev.yaml uses the same one.)
     environment:
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
       # Verifies join tokens signed by the gateway. Same value as the gateway
       # service above, and NOT JWT_SECRET (see the comment there).
       JOIN_TOKEN_SECRET: ${JOIN_TOKEN_SECRET:-dev-join-secret-change-me}
       GAMESERVER_ADDR: ":9000"
+      # PINNED OFF ON PURPOSE — this is a decision, not an oversight.
+      #
+      # A stock game server defaults to `require`: it encrypts the gameplay hop
+      # and refuses every client that cannot seal. This stack does NOT inherit
+      # that default yet, because six Unity sample scenes in the client repo
+      # (DOTSNetworkBridge, the three E2ECertification scenes, ReconnectPolicyDemo
+      # and WorldView) construct NetworkSettings and dial a live backend, and none
+      # of them sets RequireSealedSession. Those scenes are the package's
+      # acceptance path, not demos — inheriting the default here would break all
+      # six with a refusal, and the fix lives in the other repo on a package
+      # release cadence (netcode change -> tag -> manifest + lock bump).
+      #
+      # To run this stack sealed on purpose — which you should, before shipping
+      # anything that depends on it:
+      #
+      #   GAMESERVER_SEALED=require ./stack.sh up
+      #   GAMESERVER_SEALED=require ./stack.sh check
+      #
+      # NOTE on verifying a sealed stack: the smoke test defaults to JSON, and a
+      # JSON client can never carry a sealed frame, so a `require` server refuses
+      # it at the join with `encoding_cannot_seal` -- measured live, not inferred.
+      # It CAN seal, over protobuf, and `stack.sh check` derives BOTH halves for
+      # you when the stack is sealed:
+      #   GAMESERVER_SEALED=require ./stack.sh check     (or: make flow-check-sealed)
+      #
+      # That is also why no ENVIRONMENT can be set to `require` yet: the deploy
+      # verifier is the same JSON smoke test, so requiring encryption currently
+      # deprecates the thing that gates every deploy.
+      GAMESERVER_SEALED: ${GAMESERVER_SEALED:-off}
       GAMESERVER_MODE: map
       GAMESERVER_MAP_ID: ${GAMESERVER_MAP_ID:-map_01}
       GAMESERVER_ID: ${GAMESERVER_ID:-gs-dotnet-${GAMESERVER_MAP_ID:-map_01}}
@@ -272,9 +446,31 @@ services:
       # NOTE: the default below is hostless, so it is only right for host mode.
       # Set GAMESERVER_PUBLIC_ADDR explicitly whenever ports are published.
       GAMESERVER_PUBLIC_ADDR: ${GAMESERVER_PUBLIC_ADDR:-:${GAMESERVER_CONTAINER_PORT:-9200}}
-      NAKAMA_URL: http://nakama:7350
+      # Follows the meta-hop TLS decision (ADR-24) rather than being configured
+      # independently. The C# game server is a SECOND consumer of this hop --
+      # NakamaClient.cs POSTs /v2/rpc/reward_kills?http_key=... -- so if Nakama
+      # moves to TLS and this stays http://, the reward path breaks silently.
+      # Two sources of truth for one hop is exactly how that happens.
+      NAKAMA_URL: ${NAKAMA_URL:-http://nakama:7350}
       NAKAMA_HTTP_KEY: ${NAKAMA_HTTP_KEY:-defaulthttpkey}
+      # The game server's end of the same decision: the certificate it PINS when
+      # NAKAMA_URL is https and Nakama's certificate is self-signed. Empty means
+      # .NET's own validation, which refuses a self-signed Nakama -- correctly.
+      # Set together with an https URL or the server refuses to start.
+      NAKAMA_TLS_PIN: ${NAKAMA_TLS_PIN:-}
       GAME_DB_URL: postgres://${POSTGRES_GAME_USER:-game}:${POSTGRES_GAME_PASSWORD:-localdev}@postgres-game:5432/${POSTGRES_GAME_DB:-gamestate}?sslmode=disable
+    # Meta-hop TLS (ADR-24): the file NAKAMA_TLS_PIN names. Uncomment with that
+    # variable. The certificate is PUBLIC and the key is not needed here -- do not
+    # mount the pair into a service that terminates no TLS.
+    #
+    # This block is a sibling of `environment:` and not a line inside it, which is
+    # not a formatting preference: `volumes:` indented into the mapping above
+    # closes it, and the next environment entry then fails to parse. A commented
+    # block is only as correct as the file it becomes when uncommented, and
+    # nothing in CI reads comments -- so this one was verified by uncommenting it
+    # and parsing the result, not by reading it.
+    # volumes:
+    #   - ./tls/tls.crt:/nakama/tls/tls.crt:ro
     ports:
       - "${GAMESERVER_CONTAINER_PORT:-9200}:9000"
       - "${GAMESERVER_METRICS_PORT:-9101}:9101"
@@ -325,6 +521,9 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./monitoring/prometheus.yaml:/otel-lgtm/prometheus.yaml:ro
+      # Alert rules, referenced by rule_files: in the file above. Mounted as a
+      # separate file rather than inlined so `promtool check rules` can read it.
+      - ./monitoring/alerts.yaml:/otel-lgtm/alerts.yaml:ro
       - ./monitoring/grafana-dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/rpg-dashboards.yaml:ro
       - ./monitoring/dashboards:/otel-lgtm/dashboards-rpg:ro
       # All bundled components write under /data — one volume keeps dashboards,

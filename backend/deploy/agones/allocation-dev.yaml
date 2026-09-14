@@ -1,13 +1,31 @@
-# Allocate one dev dungeon server on demand.
+# Allocate one dev map server by hand — the manual stand-in for the POST the
+# gateway's AgonesAllocator makes (gateway/registry/agones_allocator.go).
 #
 #   kubectl create -f agones/allocation-dev.yaml
 #
-# GameServerAllocation is a "create-only" virtual resource: the response object
-# carries status.state (Allocated/UnAllocated), the GameServer name and the
-# host address/port to hand back to the client. `kubectl apply` does NOT work.
+# `kubectl apply` does NOT work and never will: GameServerAllocation is a
+# create-only virtual resource served by the agones-allocator aggregated API,
+# not a CRD — which is also why k3s/validate-manifests.py has no schema for it
+# and reports it as skipped rather than checked.
 #
-# This is the manual stand-in for what the Gateway allocator will eventually
-# call through the Agones allocation API (gateway/registry).
+# The RESPONSE is the point. It carries status.state (Allocated/UnAllocated),
+# the GameServer name, and status.address + status.ports[] — and the port the
+# gateway uses is the one NAMED "game", which is why fleet-map-dotnet-dev.yaml
+# names it that.
+#
+# WHAT ALLOCATING A MAP SERVER ACTUALLY MEANS HERE, because it is not obvious:
+# the map fleet's pods are not spare capacity waiting to be handed out. Each one
+# self-registers into Redis under its GAMESERVER_MAP_ID as soon as it is up, and
+# the gateway finds it by that registry entry, not by allocating. Allocation is
+# the recovery path for a map with NO live server (ADR-14 gap 1), so allocating
+# by hand against a fleet that is already serving map_01 marks a healthy server
+# Allocated and changes nothing else. Useful for proving the allocation API
+# answers; not a way to add capacity.
+#
+# The previous selector targeted `dungeon-servers-dev`, a fleet whose manifest
+# and image are both deleted. There is no dungeon fleet: dungeon instancing is
+# ADR-14 stage 6 and `--mode=dungeon` in the C# server only widens the
+# disconnect hold window today.
 apiVersion: allocation.agones.dev/v1
 kind: GameServerAllocation
 metadata:
@@ -15,5 +33,13 @@ metadata:
 spec:
   selectors:
     - matchLabels:
-        agones.dev/fleet: dungeon-servers-dev
+        # `agones.dev/fleet` is the label Agones stamps on every GameServer of a
+        # Fleet, and the same label/value pair the gateway's allocator sends
+        # (const fleetLabel). The value must equal the Fleet's metadata.name.
+        #
+        # NOTE the gateway's compiled-in default is `map-servers-dev` (the
+        # retired Go fleet), NOT this one. Enabling ALLOCATOR=agones therefore
+        # also needs ALLOCATOR_FLEET_MAP=map-servers-dotnet-dev — see
+        # docs/K3S.md, "Enabling the allocator".
+        agones.dev/fleet: map-servers-dotnet-dev
   scheduling: Packed

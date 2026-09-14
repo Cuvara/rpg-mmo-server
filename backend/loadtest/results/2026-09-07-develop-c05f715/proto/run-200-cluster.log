@@ -1,0 +1,77 @@
+[loadtest] run 8e0b2529: ramping 50 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 2.476s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] cooldown 20s before the next level
+[loadtest] run fc61832a: ramping 100 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 5.003s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] cooldown 20s before the next level
+[loadtest] run 41dcc315: ramping 150 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 7.534s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] cooldown 20s before the next level
+[loadtest] run d991081c: ramping 200 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 10.053s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] cooldown 20s before the next level
+[loadtest] run d3530b71: ramping 50 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 2.476s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] cooldown 20s before the next level
+[loadtest] run e4a9c2e6: ramping 100 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 5.005s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] cooldown 20s before the next level
+[loadtest] run fbe99724: ramping 150 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 7.535s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] cooldown 20s before the next level
+[loadtest] run 78a968fd: ramping 200 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 10.069s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] cooldown 20s before the next level
+[loadtest] run 386a04a2: ramping 50 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 2.477s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] cooldown 20s before the next level
+[loadtest] run 9391b527: ramping 100 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 5.008s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] cooldown 20s before the next level
+[loadtest] run 37a1e7ec: ramping 150 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 7.536s; settling for 8s
+[loadtest] measuring for 35s
+[loadtest] cooldown 20s before the next level
+[loadtest] run b0b11585: ramping 200 players at 20.0/s (movement=cluster auth=presigned)
+[loadtest] ramp issued in 10.077s; settling for 8s
+[loadtest] measuring for 35s
+
+--- loadtest results (tick budget 66.67ms @ 15Hz) ---
+players  joined  move     tick p50  tick p99  tick mean  over budget  ticks/s  snap p50  snap p99  ack p50  ack p99  rx B/s/p  tx B/s/p  recv%    fail  verdict
+---------------------------------------------------------------------------------------------------------------------------------------------------------------
+50       50      cluster  0.25ms    0.49ms    0.06ms     0%           60.00    66.7ms    69.2ms    36.5ms   67.1ms   15682     240       100.00%  0     ok     
+100      100     cluster  0.25ms    0.68ms    0.10ms     0%           60.00    66.7ms    71.3ms    35.8ms   68.2ms   31144     240       100.00%  0     ok     
+150      150     cluster  0.31ms    2.25ms    0.22ms     0%           59.99    66.7ms    72.5ms    37.8ms   70.1ms   46944     240       100.00%  0     ok     
+200      200     cluster  0.33ms    3.17ms    0.35ms     0%           60.00    66.6ms    75.8ms    39.1ms   72.7ms   63148     240       100.00%  0     ok     
+50       50      cluster  0.25ms    0.50ms    0.06ms     0%           60.02    66.7ms    68.8ms    34.6ms   67.5ms   15727     240       100.00%  0     ok     
+100      100     cluster  0.25ms    0.77ms    0.11ms     0%           59.99    66.7ms    71.7ms    35.9ms   68.8ms   31151     240       100.00%  0     ok     
+150      150     cluster  0.30ms    2.10ms    0.20ms     0%           60.00    66.7ms    72.4ms    37.3ms   70.0ms   46963     240       100.00%  0     ok     
+200      200     cluster  0.33ms    2.84ms    0.35ms     0%           60.00    66.7ms    75.3ms    39.5ms   72.5ms   63160     240       100.00%  0     ok     
+50       50      cluster  0.25ms    0.49ms    0.06ms     0%           59.99    66.7ms    69.0ms    36.3ms   68.0ms   15698     240       100.00%  0     ok     
+100      100     cluster  0.25ms    0.71ms    0.11ms     0%           60.00    66.7ms    70.3ms    35.7ms   68.7ms   31157     240       100.00%  0     ok     
+150      150     cluster  0.30ms    1.88ms    0.19ms     0%           60.00    66.6ms    72.0ms    37.3ms   70.3ms   46958     240       100.00%  0     ok     
+200      200     cluster  0.33ms    3.52ms    0.35ms     0%           60.00    66.7ms    76.8ms    39.3ms   72.7ms   63156     240       100.00%  0     ok     
+
+
+HIGHEST PASSING LEVEL: 200 players on one game server
+
+--- capacity (3 valid run(s) per level) ---
+players  pass   invalid  p99 median  tick p99 min..max      tick mean min..max     KB/s/client
+50       3/3    0        0.5ms       0.5..0.5ms             0.1..0.1ms             15.3
+100      3/3    0        0.7ms       0.7..0.8ms             0.1..0.1ms             30.4
+150      3/3    0        2.1ms       1.9..2.2ms             0.2..0.2ms             45.9
+200      3/3    0        3.2ms       2.8..3.5ms             0.3..0.4ms             61.7
+
+CEILING: at least 200 — no level swept failed consistently, sweep higher
+
+[loadtest] JSON written to results/2026-09-07-develop-c05f715/proto/sweep-direct-proto.json

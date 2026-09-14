@@ -2,6 +2,8 @@ package smoke
 
 import (
 	"errors"
+
+	"github.com/duycuong/rpg-mmo/shared/messages"
 	"strings"
 	"testing"
 	"time"
@@ -237,6 +239,112 @@ func TestNormalizeDialAddr(t *testing.T) {
 	}
 }
 
+// Strict off must stay byte-for-byte NormalizeDialAddr: CD's post-deploy smoke
+// step and host-mode local dev depend on the rewrite.
+func TestResolveServerDialAddr_StrictOff(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{":9000", "127.0.0.1:9000"},
+		{"0.0.0.0:9000", "127.0.0.1:9000"},
+		{"[::]:9200", "127.0.0.1:9200"},
+		{"10.1.2.3:7306", "10.1.2.3:7306"},
+		{"127.0.0.1:9000", "127.0.0.1:9000"},
+		{"gs.example.com:9000", "gs.example.com:9000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			got, err := ResolveServerDialAddr(tt.in, false)
+			if err != nil {
+				t.Fatalf("ResolveServerDialAddr(%q, false) err = %v, want nil", tt.in, err)
+			}
+			if got != tt.want {
+				t.Errorf("ResolveServerDialAddr(%q, false) = %q, want %q", tt.in, got, tt.want)
+			}
+			if want := NormalizeDialAddr(tt.in); got != want {
+				t.Errorf("strict-off diverged from NormalizeDialAddr: %q vs %q", got, want)
+			}
+		})
+	}
+}
+
+func TestResolveServerDialAddr_StrictOn(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		wantErr bool
+		want    string // expected passthrough when wantErr is false
+	}{
+		{name: "no host", in: ":9000", wantErr: true},
+		{name: "wildcard v4", in: "0.0.0.0:9000", wantErr: true},
+		{name: "wildcard v6", in: "[::]:9200", wantErr: true},
+		// A routable address, and a loopback one a server deliberately
+		// advertised: under k3d the dialable address may well look like
+		// loopback, so strict mode rejects listen-style addresses only.
+		{name: "routable", in: "10.1.2.3:7306", want: "10.1.2.3:7306"},
+		{name: "loopback advertised on purpose", in: "127.0.0.1:9000", want: "127.0.0.1:9000"},
+		{name: "hostname", in: "gs.example.com:9000", want: "gs.example.com:9000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ResolveServerDialAddr(tt.in, true)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ResolveServerDialAddr(%q, true) err = %v, wantErr %v", tt.in, err, tt.wantErr)
+			}
+			if tt.wantErr {
+				// The failure line must name the offending address, or the
+				// operator reading only that line cannot act on it.
+				if !strings.Contains(err.Error(), tt.in) {
+					t.Errorf("error %q does not name the address %q", err, tt.in)
+				}
+				if !strings.Contains(err.Error(), "GAMESERVER_PUBLIC_ADDR") {
+					t.Errorf("error %q does not point at the likely cause", err)
+				}
+				if got != "" {
+					t.Errorf("got addr %q alongside an error, want empty", got)
+				}
+				return
+			}
+			if got != tt.want {
+				t.Errorf("ResolveServerDialAddr(%q, true) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_StrictAddr(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		args []string
+		want bool
+	}{
+		{name: "default off", env: map[string]string{"JWT_SECRET": "s"}, want: false},
+		{name: "env on", env: map[string]string{"JWT_SECRET": "s", "SMOKE_STRICT_ADDR": "1"}, want: true},
+		{name: "env true", env: map[string]string{"JWT_SECRET": "s", "SMOKE_STRICT_ADDR": "true"}, want: true},
+		{name: "env falsy", env: map[string]string{"JWT_SECRET": "s", "SMOKE_STRICT_ADDR": "off"}, want: false},
+		{name: "flag on", env: map[string]string{"JWT_SECRET": "s"}, args: []string{"--strict-addr"}, want: true},
+		{
+			name: "flag overrides env",
+			env:  map[string]string{"JWT_SECRET": "s", "SMOKE_STRICT_ADDR": "1"},
+			args: []string{"--strict-addr=false"},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := LoadConfig(fakeEnv(tt.env), tt.args)
+			if err != nil {
+				t.Fatalf("LoadConfig() err = %v", err)
+			}
+			if cfg.StrictAddr != tt.want {
+				t.Errorf("StrictAddr = %v, want %v", cfg.StrictAddr, tt.want)
+			}
+		})
+	}
+}
+
 func TestFormatStep(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -292,5 +400,98 @@ func TestFinalLineAndSummary(t *testing.T) {
 				t.Errorf("summary missing %q:\n%s", tt.wantLine, sb.String())
 			}
 		})
+	}
+}
+
+// TestEncodingValidation pins the distinction between UNSET and WRONG.
+//
+// Empty is a legitimate zero value — a Config built in code rather than from the
+// environment leaves it so, and encodingFor maps that to JSON. A non-empty value
+// that is neither json nor proto is a typo. Collapsing the two would make a
+// misspelt flag silently send JSON, which is invisible against an `off` server
+// and, against a `require` one, is refused at the join in a way that reads as a
+// broken stack rather than as a bad flag.
+func TestEncodingValidation(t *testing.T) {
+	base := func() Config {
+		return Config{
+			JWTSecret: "s", Timeout: time.Second, Inputs: 1, MinSnapshots: 1,
+			ExpectMigration: DefaultExpectMigration,
+			DBPollTimeout:   DefaultDBPollTimeout,
+			DBPollInterval:  DefaultDBPollInterval,
+			HoldTTL:         DefaultHoldTTL,
+		}
+	}
+
+	for _, tc := range []struct {
+		enc     string
+		wantErr bool
+	}{
+		{"", false}, // unset
+		{"json", false},
+		{"proto", false},
+		{"PROTO", false}, // case and spacing are tolerated
+		{" proto ", false},
+		{"protobuf", true}, // the plausible typo
+		{"jsn", true},
+		{"kcp", true}, // wrong axis entirely
+	} {
+		c := base()
+		c.Encoding = tc.enc
+		err := c.Validate()
+		if (err != nil) != tc.wantErr {
+			t.Errorf("Encoding=%q: err = %v, wantErr %v", tc.enc, err, tc.wantErr)
+		}
+	}
+}
+
+// TestEncodingForNeverGuessesProto pins the direction of the fallback.
+//
+// encodingFor is only reachable with a value Validate already accepted, so this
+// is about which way an unreachable case fails: JSON is what this client has
+// always sent, and choosing protobuf here would turn a configuration mistake
+// into a silently different wire format.
+func TestEncodingForNeverGuessesProto(t *testing.T) {
+	if got := encodingFor("proto"); got != messages.EncodingProto {
+		t.Errorf(`encodingFor("proto") = %v, want proto`, got)
+	}
+	for _, in := range []string{"", "json", "protobuf", "nonsense"} {
+		if got := encodingFor(in); got != messages.EncodingJSON {
+			t.Errorf("encodingFor(%q) = %v, want json", in, got)
+		}
+	}
+}
+
+// TestSealedRequiresProto pins the refusal in the BINARY, not only in stack.sh.
+//
+// A wrapper can be bypassed and the binary is what CD runs. The failure this
+// prevents is nastier than it looks: the join is ACCEPTED and the connection is
+// then closed, so a log line reading "join accepted" is not evidence the client
+// works.
+func TestSealedRequiresProto(t *testing.T) {
+	base := Config{
+		JWTSecret: "s", Timeout: time.Second, Inputs: 1, MinSnapshots: 1,
+		ExpectMigration: DefaultExpectMigration,
+		DBPollTimeout:   DefaultDBPollTimeout,
+		DBPollInterval:  DefaultDBPollInterval,
+		HoldTTL:         DefaultHoldTTL,
+	}
+
+	for _, tc := range []struct {
+		sealed  bool
+		enc     string
+		wantErr bool
+	}{
+		{true, "proto", false},
+		{true, "json", true},
+		{true, "", true},       // unset means JSON, which cannot seal
+		{false, "json", false}, // not sealing: JSON is fine
+		{false, "", false},
+	} {
+		c := base
+		c.Sealed = tc.sealed
+		c.Encoding = tc.enc
+		if err := c.Validate(); (err != nil) != tc.wantErr {
+			t.Errorf("Sealed=%v Encoding=%q: err = %v, wantErr %v", tc.sealed, tc.enc, err, tc.wantErr)
+		}
 	}
 }

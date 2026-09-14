@@ -34,7 +34,7 @@ Four stores are in play. Interfaces live in `backend/shared/storage/interfaces.g
 | `player_states` (position, HP, map) | Game-state PostgreSQL (`postgres-game` service) | **gameserver-dotnet only** | `GameServer/Persistence/AsyncSaver.cs:88-111` → `PostgresPlayerStore.cs:145-168`; schema `pgstore/schema.sql:12-23` |
 | `session:{user_id}` | Redis (TTL 1h) | **gateway only** | `gateway/session/manager.go:34-40,55-60,62-68` |
 | `servers:id:{id}`, `servers:map:{map}` | Redis (TTL 15s) | **gameserver-dotnet** (self-registration + heartbeat); the gateway also registers Agones-allocated servers | `GameServer/Registry/RedisServerRegistry.cs`, `GameServer/Registry/RegistrationService.cs`; `gateway/registry/registry.go:85,106,111-112` |
-| `events:game` | Redis Streams | nothing live (see ADR-5) | `gateway/events/relay.go:16` subscribes; no live publisher |
+| `events:game` | Redis Streams | **gameserver-dotnet** (`GameServer/Events/RedisEventStream.cs`, when `REDIS_ADDR` is set — see ADR-5) | `gateway/events/relay.go:16` subscribes; no live publisher |
 | Live world (entities, mobs, pending input) | C# process memory | gameserver-dotnet | `GameServer/World/GameWorld.cs:22-27` |
 
 Three findings the criticism is right about:
@@ -54,9 +54,14 @@ Three findings the criticism is right about:
    C# server has its own reimplementation in `PostgresPlayerStore.cs`. The two
    schemas are kept byte-identical by a test, but nothing enforces that at build time.
 
-Also dead: `constants.PlayerLocationKey` (`shared/constants/keys.go:7`) has no
+~~Also dead: `constants.PlayerLocationKey` (`shared/constants/keys.go:7`) has no
 consumer anywhere — the `player:{user_id}:location` index described in
-`backend/gateway/CLAUDE.md:37` was never built.
+`backend/gateway/CLAUDE.md:37` was never built.~~ **Resolved 2026-08-22 by
+deleting the constant** (#210). The index was never built and is not planned:
+cross-server player lookup is not on the roadmap, and the game server owns
+per-player position inside its own world. The declaration had already cost
+something — it is what put a `player:location:*` row in the client repo's
+multi-client checklist, a row no code could ever satisfy.
 
 ### Decision
 
@@ -91,7 +96,9 @@ backed up. Live world state is not recoverable (ADR-6).
 
 ### Follow-up work
 
-- **S** — Delete `constants.PlayerLocationKey` or implement the location index.
+- ~~**S** — Delete `constants.PlayerLocationKey` or implement the location index.~~
+  **Done** (#210): deleted. Implementing it was the other legal ending and was
+  rejected — nothing needs cross-server player lookup today.
 - **S** — Delete the orphaned Go `shared/storage/pgstore/` package, or add a build-time
   assertion tying its schema to the C# one instead of relying on a test.
 - ~~**M** — Give the C# server a Redis client so it self-registers and heartbeats,
@@ -119,9 +126,22 @@ Neither registry implementation enforces one server per map. `Register` is keyed
 - Redis: `redisstore/registry.go:69-86` (`HSET` + `SADD`), `FindByMapID` via
   `SMEMBERS` + `HGETALL` (`registry.go:135-163`), returns **all** matches.
 
-`FindByMapID` returns `[]ServerInfo`, and the gateway selects the least-loaded
-server with capacity (`gateway/registry/registry.go:55-94`) — **not** first-fit as
-CORE_FLOW.md:88 claims.
+`FindByMapID` returns `[]ServerInfo`, and the gateway selects a server with capacity
+(`gateway/registry/registry.go`, `FindServer`) — **not** first-fit as CORE_FLOW.md:88
+claims. The rule depends on how many servers came back, and since 2026-08-22 (#203) the
+two cases differ deliberately:
+
+- **one server** — least-loaded with a `ServerID` tie-break, which with a single
+  candidate just means "that server, if it has room".
+- **more than one** — the **lowest `ServerID`** among those with spare capacity;
+  `PlayerCount` is not a criterion at all. More than one server for a `map_id` is
+  this ADR's invariant being violated, and least-loaded selection there steers each
+  new joiner into whichever half is emptier — it load-balances players across a split
+  world, so both halves stay populated and the split never drains. Deterministic
+  selection sends every caller to the same half instead, so the accidental copy
+  empties as its players leave. It does not repair a split; it stops the gateway
+  widening one. Registration is deliberately **not** refused (that would break rolling
+  replacement while the health watcher is unwired, #204).
 
 The important finding: **the allocator deliberately creates a second server for a
 full map.** When no server has capacity and Agones is enabled,
@@ -172,7 +192,14 @@ flow, or the game server — which never learns it is one shard among several.
   each dungeon instance is a distinct logical world by design.
 - The dead heartbeat means a crashed server's registry entry lingers until its TTL
   expires (1 hour in dev), and the gateway keeps handing out join tokens for a
-  server that is gone. Clients fail at the game-server dial step.
+  server that is gone. Clients fail at the game-server dial step. *(Updated
+  2026-08-22: the heartbeat is alive — the C# server re-arms a 15s TTL every 5s —
+  and the gateway no longer waits for expiry either. `gateway/registry`'s
+  `RegistryWatcher`, which had no caller until #204, is now constructed and
+  started by `cmd/gateway`; it polls the servers the gateway has handed to clients
+  every 5s and publishes `server_down`, so the window in which a dead server is
+  still announced is bounded by the poll, not by the TTL. TTL expiry stays the
+  backstop.)*
 
 ### Follow-up work
 
@@ -228,9 +255,11 @@ token TTL is 30s (`constants.JoinTokenTTL`).
    token is what authorizes the direct connection, so bypassing the gateway gains
    an attacker nothing — they still need a signed token naming that exact server.
 
-Note the `sid` check is currently conditional: it is skipped when either the
+~~Note the `sid` check is currently conditional: it is skipped when either the
 server's configured id or the token's claim is empty (`GameServer.cs:225-228`).
-That is a soft spot worth closing.
+That is a soft spot worth closing.~~ **Resolved**: the check is now unconditional
+(`GameServer.cs:847`) and the server always generates a non-empty id
+(`Program.cs:19`).
 
 **Proxy mode is a documented future option, not a plan.** It becomes attractive
 only if we need client IP hiding / DDoS shielding of game-server pods, or strict
@@ -252,8 +281,10 @@ becoming a gameplay SPOF.
 
 ### Follow-up work
 
-- **S** — Make the `sid` check unconditional: refuse a token with no `sid`, and
-  refuse to start a server with no id, instead of skipping the comparison.
+- ~~**S** — Make the `sid` check unconditional: refuse a token with no `sid`, and
+  refuse to start a server with no id, instead of skipping the comparison.~~
+  **Done.** `GameServer.cs:847` rejects empty and mismatched `sid`
+  unconditionally; `Program.cs:19` always generates a non-empty server id.
 - **S** — Update the drawio diagram labels (pages 1, 2, 3, 8/9) to "Gateway
   (auth + redirect)". Page 4 is already correct — it has no gateway lifeline.
 - **M** — If pod exposure becomes a problem, prototype KCP proxy mode behind the
@@ -321,18 +352,36 @@ splitting is a change to that constructor block, not to any business logic.
   silently dropping data. That is the correct failure mode here — a failed
   registration is visible, an evicted one is not — but it means memory must be
   monitored, not left to self-manage.
-- Streams need explicit trimming (`XTRIM`/`MAXLEN`) once a real publisher exists,
-  or `events:game` grows without bound. Today nothing publishes (ADR-5), so this
-  is latent rather than live.
+- **`noeviction` without a `maxmemory` is not a weaker version of this decision,
+  it is the opposite one** (#202, fixed 2026-08-22). Nothing bounded growth, and
+  the ceiling that actually existed was the Redis pod's `limits.memory: 256Mi` —
+  enforced by the kernel, which kills the process *whole* and loses sessions, the
+  registry and the stream together. That is the outcome this ADR chose
+  `noeviction` to prevent, reached by a route the ADR did not close. Both halves
+  of the ceiling now exist: `maxmemory 128mb` in
+  `deploy/k8s/data/redis.conf` (and the mirrored compose flag), at half the pod
+  limit so the gap absorbs jemalloc fragmentation and copy-on-write during a
+  persistence fork; and `MAXLEN ~ 30_000` on every `XADD`
+  (`shared/storage/redisstore.DefaultStreamMaxLen`). Redis now refuses writes
+  with `OOM command not allowed` while still alive and serving reads.
+- Streams are trimmed at publish time — `XADD ... MAXLEN ~ 30_000`, sized from
+  the gateway relay's consumer-lag tolerance (~50 events/s x a 10-minute outage
+  window) rather than from a memory figure, and cross-checked at ~7MiB so the
+  stream cannot be the thing that fills the instance. Entries older than that
+  window are dropped rather than delivered: at-least-once is a promise to a
+  consumer that is running.
 - A Redis outage takes out login and map entry, but not sessions already in
   progress on game servers.
 
 ### Follow-up work
 
-- **S** — Set an explicit `maxmemory` and a Prometheus alert on Redis memory
-  utilisation and rejected writes, now that eviction cannot silently absorb growth.
-- **S** — Add `MAXLEN ~` trimming to `EventStream.Publish` before any real
-  publisher is wired.
+- ~~**S** — Set an explicit `maxmemory`~~ **done** (#202): `maxmemory 128mb`,
+  half the 256Mi pod limit. Still open: a Prometheus alert on Redis memory
+  utilisation and on `rejected_connections`/OOM write errors, now that eviction
+  cannot silently absorb growth and the refusal is the only signal.
+- ~~**S** — Add `MAXLEN ~` trimming to `EventStream.Publish` before any real
+  publisher is wired.~~ **done** (#202), and it landed before the publisher, as
+  this line asked.
 - **M** — Split `events:*` onto its own instance at the Soft Launch tier; the
   gateway constructor takes a second address.
 
@@ -359,14 +408,25 @@ The gateway's relay is real and wired, contradicting CORE_FLOW.md:158-159 which
 calls it an unimplemented stub: `events.NewRelay(...)` at
 `gateway/cmd/gateway/main.go:159-160`, passed in via `server.WithEventRelay`.
 
-**But the pipeline is not connected end to end.** The C# game server generates a
-real `entity_killed` event (`GameServer/Server/GameServer.cs:367-376`) and
-publishes it into `NoopEventStream`, which discards it — because
-`Program.cs:111` unconditionally supplies the noop, and no Redis-backed
-`IEventStream` exists in C# at all (the project has no Redis dependency). On the
-other end, the gateway's sink only logs and counts; it does not fan out to clients,
-because `shared/messages` has no client-facing `MsgEvent` type
-(`gateway/server/server.go:91-106`). So both halves are built and neither is joined.
+**The producer half is now connected** (2026-09-03). At the time this ADR was
+written the C# game server generated a real `entity_killed` event
+(`GameServer/Server/GameServer.cs:367-376`) and published it into
+`NoopEventStream`, which discarded it — `Program.cs` unconditionally supplied the
+noop, and no Redis-backed `IEventStream` existed in C# at all (the project then
+had no Redis dependency; ADR-1's self-registration work later added
+StackExchange.Redis). That gap is closed: `GameServer/Events/RedisEventStream.cs`
+publishes to `events:game` whenever `REDIS_ADDR` is configured — the same selector
+as the registry — with the Go publisher's exact contract (`XADD`, fields
+`type`/`payload`, `MAXLEN ~ 30000`) and a bounded drop-oldest queue so a Redis
+outage can never stall or grow inside the tick path (loss is counted:
+`gameserver_events_dropped_total` / `gameserver_events_publish_failures_total`,
+see `gameserver-dotnet/docs/METRICS.md`). The same change fixed the logical stream
+name: the C# publisher used the literal `"game_events"`, which would have XADDed
+into `events:game_events` — a key nothing reads — instead of `events:game`
+(`constants.GameEventStream`); it was harmless only while the sink was the noop.
+**The consumer half is still not joined to clients**: the gateway's sink only logs
+and counts; it does not fan out, because `shared/messages` has no client-facing
+`MsgEvent` type (`gateway/server/server.go:91-106`).
 
 ### Decision
 
@@ -391,16 +451,19 @@ this rule correctly; it is now consistent everywhere else.
   delivery, so a crash between handling and ACK replays the event.
 - Consumer groups need a naming convention and pending-entry monitoring; a
   consumer that dies mid-handle leaves entries in the PEL until claimed.
-- Today no event crosses a process boundary, so none of the cross-server features
-  that depend on it (world announcements, cross-map loot notifications) work,
-  regardless of what the diagrams show.
+- ~~Today no event crosses a process boundary~~ (closed 2026-09-03:
+  `entity_killed` now crosses game server → Redis → gateway relay when
+  `REDIS_ADDR` is set). The cross-server features that depend on events reaching
+  *clients* (world announcements, cross-map loot notifications) still do not work
+  — the relay's sink logs and counts, and no `MsgEvent` exists on the wire.
 
 ### Follow-up work
 
-- **M** — Add a Redis `IEventStream` to the C# server so `entity_killed` actually
+- ~~**M** — Add a Redis `IEventStream` to the C# server so `entity_killed` actually
   publishes. Requires taking a Redis dependency in a project that currently has
   none — coordinate with the ADR-1 self-registration work, which needs the same
-  client.
+  client.~~ **Done** (2026-09-03): `RedisEventStream` over the StackExchange.Redis
+  dependency ADR-1 introduced, selected by `REDIS_ADDR` like the registry.
 - **M** — Add `MsgEvent` to `shared/messages` and turn the gateway's log-only sink
   into a real client fan-out with interest filtering.
 - **S** — Document the consumer-group naming convention and add a Prometheus alert
@@ -738,9 +801,11 @@ A tier's CCU claim is only publishable once a run at that CCU holds every thresh
   serializes inline while `Connection.Send` merely enqueues; doing it in the
   writer task removes the dominant term from the critical path without changing
   the encoding.
-- **S** — Fix the entity leak on disconnect (BENCHMARK.md §7). Highest priority of
+- ~~**S** — Fix the entity leak on disconnect (BENCHMARK.md §7). Highest priority of
   all — it makes the O(n²) cost grow with cumulative joins rather than concurrent
-  players.
+  players.~~ **Done.** `entityAttached` flag + `finally` block in `GameServer.cs`
+  ensures every exit path calls `OnPlayerDisconnected`. BENCHMARK.md §16 re-ran
+  the sweep after this fix.
 - **S** — Stagger per-connection keyframe counters to stop the keyframe stampede.
 - **M** — Spatial-grid AOI. Measurement demotes this: it targets the ~20% term.
 - **⛔ BLOCKER** — Put the load generator on a **separate machine** from the
@@ -1272,6 +1337,57 @@ found here.
 > that introduces it. ADR-12 additionally rules out query shapes the reflection guard
 > cannot enumerate, `Arch.System`'s source generator among them.
 
+> **Amended 2026-08-19 — a third Arch hazard: the read path is not a read**
+> (issue #176, `fix/gameserver/ecs-concurrent-read`).
+>
+> `EcsWorld` had always assumed that `ReaderWriterLockSlim` was sufficient: writers
+> exclusive, readers shared, Arch untouched during a read. That assumption is wrong,
+> and the counter-evidence is measured against Arch `2.1.0-beta`, not argued:
+>
+> | probe (8 threads, 200 attempts each) | result |
+> |---|---|
+> | iterate one shared `Query` whose archetype memo is **stale**, **no writer running** | **20/200 faulted**, `NullReferenceException at Arch.Core.QueryArchetypeEnumerator.MoveNext()` |
+> | iterate the same `Query` with the memo **already up to date** | **0/200** |
+> | 8 threads calling `World.Query()` with 8 **distinct** descriptions on a cold cache | **61/400 faulted**; in one case the world's query-cache `Dictionary` ended up holding **9** entries after 8 inserts |
+>
+> Two mutations hide behind Arch's read API:
+>
+> 1. `Arch.Core.World.Query(in QueryDescription)` memoises into a plain
+>    `Dictionary<QueryDescription, Query>` and **inserts on a miss**. A `Dictionary`
+>    torn by concurrent inserts does not throw at the tear — that is the path from a
+>    managed `NullReferenceException` to the `AccessViolationException` that killed
+>    the test host in an unrelated later test.
+> 2. The returned `Query` rebuilds its own matching-archetype list **lazily**, the
+>    first time it is used after the archetype *set* changed. (Adding or removing
+>    entities of an archetype that already exists does **not** invalidate it —
+>    measured. Creating a new archetype does.) The rebuild clears and refills a list
+>    other readers are enumerating.
+>
+> So the exposure window is not "while writers run"; it is the moments the archetype
+> set grows — world start-up and each first-of-a-kind spawn, which is exactly when
+> players are joining.
+>
+> **Decision 5. A read path may only iterate a `Query` the world resolved in advance,
+> and every write scope refreshes those queries on its way out.** `EcsWorld` owns its
+> read-path queries (`_readQueries`), resolves them in its constructor, and refreshes
+> them in `ExitWriteScope()` — the write lock is the only moment at which a rebuild can
+> happen with no other reader watching. `_arch.Query(...)` may still be called freely
+> from code that holds the **write** lock. `EcsWorld.CountWith<TTag>` takes the write
+> lock for this reason: the tag set is open, so its query cannot be pre-resolved.
+>
+> A mutex over the read path would also have been correct and was rejected on cost,
+> not taste: the AOI gather is 77-83% of a 200-viewer tick, and serialising it would
+> have made `ReadAllParallel` pointless. Because iteration of an up-to-date query is a
+> genuine pure read (row 2 of the table), pre-refreshing keeps the parallel gather.
+>
+> **Re-run this on any Arch upgrade**, alongside the AOT spike. The committed reproducer
+> is `GameServer.Tests/World/EcsWorldConcurrencyStress.cs`, gated behind `ECS_STRESS=1`;
+> it exercises `EcsWorld`, and before decision 5 it faulted in every run (10-15/2000
+> rounds mixed readers+writers, 19-38/2000 parallel gather). The three raw-Arch probes in
+> the table above are **not** committed — they assert the absence of a defect Arch still
+> has, so they would be a permanently red test; the table is the record, and the probes
+> are a few dozen lines to rebuild from it against a bare `Arch.Core.World`.
+
 ---
 
 ## ADR-12 — The server goes to real ECS, staged, under the constraints ADR-10 and ADR-11 set
@@ -1412,6 +1528,26 @@ showed the ratio the analysis cited does not reproduce: at 200 players the AOI g
 ~874–1177 µs/tick, `SnapshotDeltaState.Encode` is ~998–1272 µs/tick, and protobuf
 `ToByteArray` is **~79–144 µs/tick — 4–6% of the tick, not 80%**.
 
+> **⚠️ That attribution is UNVERIFIED, and it is a stronger claim than Part V's
+> microseconds (#162).** The harness that produced this split was never committed, so its
+> clock cannot be read back — and this box's `CLOCK_REALTIME` runs 10-17% fast with
+> unstable skew (#153).
+>
+> Part V survives the same doubt because it supports a **ratio**: both arms share whatever
+> clock the harness used, so a proportional skew cancels. This is an **attribution** — a µs
+> numerator over a tick-duration denominator — and if those came from different timelines
+> the percentage moves and the conclusion moves with it. A claim of the form *"X is not the
+> bottleneck, Y is"* is exactly the shape a skewed denominator can invert, and this one is
+> load-bearing: it is the stated reason stage 4 stopped optimizing serialization.
+>
+> Read the numbers as **order-of-magnitude only**. Kept rather than deleted, because
+> deleting destroys the record of a measurement that was taken. What replaces them:
+> re-run the split with `GameServer.Tests/Bench/TickBreakdownBench.cs`, which **is**
+> committed and states its clock — `Stopwatch.GetTimestamp` throughout, reading no
+> wall clock — gated behind `BENCH_TICK=1`. Do not re-run it on a host sharing load with
+> a generator; that is the condition that made these figures unverifiable in the first
+> place.
+
 That reframes what is left. The two dominant terms are:
 
 1. **The brute-force AOI scan**, O(viewers × entities), which the extension-seam table has
@@ -1477,6 +1613,19 @@ by the change that first spawns a worker.
 >   completion order. The suite was verified to fire by reintroducing the shared queue —
 >   exactly the two order-sensitive tests fail and the other eight still pass.
 >
+>   **Correction, 2026-08-19: the count is wrong — it should be three fail / seven pass.**
+>   `WorkerCountDoesNotChangeTheResultingWorld` compares a 1-worker digest (which spawns in
+>   slot order) against a 4-worker one, and cannot survive a shared arrival-order queue
+>   either, because `SpawnPerWorker` sleeps `(4 - slot) * 12` ms before spawning and so
+>   arrives in reverse slot order. This is an inspection result, not a re-run of the
+>   experiment; either the original miscounted or the reintroduction was narrower than "the
+>   shared queue". Also worth recording:
+>   `ASpawnInsideAParallelRegionIsNotVisibleUntilTheRegionEnds` is **mislabelled** — its
+>   comment says deferral "has to hold for every worker", but it runs `workerCount: 1`,
+>   which by `ASingleWorkerRegionStartsNoThread`'s own contract starts no thread at all. It
+>   tests the world-level flag on the calling thread only; multi-worker deferral is covered
+>   indirectly by the three order-sensitive tests and nowhere directly.
+>
 > **The schedule still runs serially, and that is now a workload decision rather than a
 > safety one.** Of the three systems in it, two declare `Structural` and are excluded from
 > concurrency by `IsDisjointFrom`'s first line; the third has nothing to pair with. Every
@@ -1484,6 +1633,119 @@ by the change that first spawns a worker.
 > and decision 7 above forbids claiming speed without measurement. The condition to revisit
 > is two or more non-structural systems with disjoint component sets, which arrives with
 > gameplay content, not before it.
+>
+> **Measured 2026-08-19, so the paragraph above is no longer an argument.**
+> `GameServer.Tests/World/ParallelPrimitiveBenchmark.cs` is committed and re-runnable
+> (`BENCH_PARALLEL=1 dotnet test -c Release --filter ParallelPrimitiveBenchmark`), skipped
+> by default, `Stopwatch` only — never a wall clock, per #153. Arms are interleaved
+> round-robin inside one run so a load spike hits all of them; run-to-run drift on the
+> parallel medians is ±25%, so read the ratios, not the digits.
+>
+> | measurement | result |
+> |---|---|
+> | cost of one **additional** worker, empty body | **165–225 µs**, p99 3–7× the median |
+> | `workerCount: 1` | indistinguishable from a serial scope — starts no thread |
+> | peak speedup, realistic per-entity body | **1.28×**, at 100 000 entities, at `w=2` |
+> | `w=8` at 100 000 entities | **slower than serial** |
+> | break-even vs serial | **≈70 000 entities** |
+> | live workload | `EnemyAiTuning.MaxEnemies` = **30** — ~2 000× below break-even |
+> | **the three-system schedule, parallelised, at 30 entities** | **two orders of magnitude slower**, for zero overlap — see the note on precision below |
+>
+> Two results overturn assumptions worth naming, because both point future work away from
+> where it would naturally go:
+>
+> - **The read/write lock is not the constraint. It is not in the picture at all.**
+>   `UpdateComponentsParallel` takes the write lock **once, on the calling thread, before
+>   the first `new Thread`**; workers call `*Locked` internals and never touch `_rwLock`
+>   (one that tried would deadlock behind its own owner). Whole-region lock cost is
+>   **0.04 µs**. The corroboration is that the slowest and fastest worker bodies differ by
+>   only 1.05–1.4× — once running, workers proceed at the same rate, which is the signature
+>   of no serialisation. **The ceiling is thread lifecycle**, and it is a deliberate
+>   choice: dedicated threads rather than pool threads, because a pool thread carries
+>   `_workerSlot` away after the region and the pool is shared with the connection
+>   handlers, which would couple simulation latency to network load. If a workload ever
+>   justifies this, the thing to build is a **persistent worker pool parked on a barrier** —
+>   not anything to do with the lock.
+> - **Slot-ordered replay costs less than a shared queue, not more.** Determinism here is
+>   free. Queue-and-replay is ~1.5× an immediate `Arch.Create` (0.35 vs 0.23 µs/op at
+>   10 000 ops) and an empty region on an 8-slot world times identically to a 1-slot one
+>   (0.05 µs), so walking slots costs nothing observable. The saving is on the enqueue
+>   side: `_structuralSlots[_workerSlot].Add` is an unsynchronised add to a thread-private
+>   list, where a shared queue would need a lock or `Interlocked` per op.
+>
+> **On the precision of that multiplier, because it is not stable.** The serial arm is
+> 1-11 µs — small enough that the ratio is dominated by how clean it is, and this box is
+> shared with a load generator (ADR-7). Measured values for the same comparison have
+> ranged from **13× to 824×** across implementations and runs: 782-824× against the
+> original per-region-thread version, ~118× against the parked pool, and 13.6× on a run
+> whose serial arm was itself inflated to 10.97 µs by load (its own min was 0.86 µs).
+> Two effects account for the spread and both were found the hard way: the **first
+> configuration in a process runs on tier-0 JIT** and reads ~10× off, and **a spinning
+> parked worker inflates whatever is measured next by ~6×**.
+>
+> Quote this as **"one to two orders of magnitude slower, for zero overlap"**. The
+> direction is not in doubt across any run; the digits are. Anyone proposing to
+> parallelise the schedule should be asked which of two things changed: the workload
+> crossed the break-even entity count, or the per-region thread creation was replaced.
+
+> **Per-region thread creation was replaced on 2026-08-19. The verdict on the schedule did
+> not change; the phase that was worth parallelising turned out to be a different one.**
+>
+> The previous entry named the fix — "a persistent worker pool parked on a barrier" — and
+> it was built, with one correction to that sentence: **not a barrier.** A `Barrier`
+> rendezvous measured 150 µs at 4 workers and 339 µs at 8, against 48 µs and 104 µs for a
+> semaphore-style one. `EcsWorld.SimWorkerPool` uses a per-worker generation counter on its
+> own cache line, a `ManualResetEventSlim` per worker for the parked case, and an
+> interlocked countdown for the join. The two properties the previous shape was chosen for
+> are preserved and are the reason the .NET thread pool is still not used: threads are
+> dedicated and owned by the world, and each sets `_workerSlot` **once at start and never
+> again**, so slot identity is now more stable than it was, not less. Threads start lazily
+> on the first region that needs them, so `workerCount: 1` still starts nothing.
+>
+> | measurement | before (thread per region) | after (parked pool) |
+> |---|---|---|
+> | cost of one **additional** worker, empty body | 165–225 µs | **13–18 µs** (w≥4, workers parked) |
+> | empty region, w = 2 / 4 / 8, workers parked | 178 / 474 / 1094 µs | **32-35 / 52-54 / 94-95 µs** |
+> | break-even vs serial, component work at w=4 | ≈70 000 entities | **≈8 000 entities** |
+> | the three-system schedule at 30 entities | two orders of magnitude | **still one to two orders of magnitude** |
+> 
+> The last row is deliberately not given in digits. Its serial arm is 1-11 µs, so the
+> ratio moves with load and JIT tier while the direction never does — see the precision
+> note above. Measured instances: 782-824× (per-region threads), ~118× (parked pool),
+> 13.6× (parked pool, serial arm inflated to 10.97 µs by a busy box; its own min 0.86 µs).
+>
+> **So the schedule stays serial, and the question to ask has changed.** Thread creation is
+> gone and break-even fell by roughly 9×; the live workload is 30 entities, still 250×
+> below the new threshold, and three parallel regions over it still cost 188 µs against
+> 1.6 µs serial. The condition to revisit is unchanged and is now the *only* one: two or
+> more non-structural systems with disjoint component sets (`ComponentAccess.IsDisjointFrom`)
+> over a workload past ~8 000 entities.
+>
+> **What the pool was actually built for is the AOI gather, and that is a read region, not
+> a write one.** At 200 viewers the gather is 77–83% of `TickOnce` and the entire schedule
+> is 0.5–1.9 µs; the phase with work in it was never the schedule.
+> `EcsWorld.ReadAllParallel` splits the gather over the same threads and **deliberately
+> carries none of the determinism machinery above**: `WorldReader` exposes only pure reads,
+> so a read region has no structural ops whose replay order could matter, and each viewer
+> writes a buffer its own connection owns. That claim is tested, not asserted —
+> `PooledGatherEquivalenceTests` compares the pooled gather against the serial one
+> element-for-element at 2, 4 and 8 workers.
+>
+> It is **opt-in and off by default** (`--gather-workers`, default 1), and gated at 500
+> viewers, because the measurement is conditional and two measurements disagree in the
+> middle of the range: a loss at 50 viewers (0.51–1.05×), **disputed at 200** (2.06–2.08×
+> measured on the phase across three runs within 1% of each other, 0.96–1.27× measured
+> through the whole tick), a gain at 500 on both (1.8–2.4× phase-level, 2.0–2.7× through
+> the tick). Shipping it on by default would be claiming the phase-level number for the
+> tick, which decision 7 forbids. The disagreement is recorded rather than resolved; it
+> needs a host that is not also running the load generator (ADR-7).
+>
+> One measurement trap is worth carrying forward, because it produced a 6× phantom: a pool
+> whose workers **spin** between dispatches inflates whatever is measured next to it. With
+> a 25 µs worker-side spin, a serial pass over 30 entities read 12.5 µs; with the spin off,
+> 1.9 µs. `SimWorkerPool` therefore parks its workers immediately and lets only the region
+> owner spin — which also matches production, where regions are 66 ms apart and every
+> worker is blocked in the kernel when the next one arrives.
 
 One correctness result is worth separating from the performance story: moving encoding to
 the moment of writing **fixed a pre-existing data-loss bug**. The old order encoded on the
@@ -1591,6 +1853,1853 @@ it benefits, and it quadruples snapshot bandwidth, which the measured 45.9 KB/s 
 
 ---
 
+## ADR-14 — Agones owns the pod, Redis owns the lookup; the C# server's SDK is a stub and must be written over the HTTP sidecar
+
+**Status:** accepted 2026-08-17. **Superseded in part — stages 1-4 have since shipped and are proven; see ADR-16.** The line below said "not yet implemented, nothing in this ADR has shipped"; that was true when written and stopped being true the same day, which is exactly the staleness this document keeps warning about. `HttpAgonesSdk` exists and reports Ready/Health/Allocate/Shutdown, the address is read from the sidecar, and a real client has joined an Agones-managed server. **Stage 5 has since shipped too** (2026-09-12 audit): dev and staging gateways run `ALLOCATOR=agones`, a pod reaches `Allocated`, and `flow.smoke` joins a real client to it end to end -- which is this stage's own definition. **Stages 6-8 remain open**, and stage 6 (dungeon instancing) is one of the two items `CORE-COMPLETION.md` names as the gate before gameplay content.
+Extends ADR-2 (whose allocation branch this is the missing half of) and is constrained by
+ADR-1 (one writer per datum) and ADR-7 (the unknown player ceiling).
+
+**Context.** The gateway's Agones integration is real and tested. `AgonesAllocator` POSTs to
+`/apis/allocation.agones.dev/v1/namespaces/%s/gameserverallocations` through a Kubernetes REST
+client (`gateway/registry/agones_allocator.go`), with unit tests and an end-to-end
+`enter_world_alloc_test.go`; it is off by default (`--allocator none`) and opted into with
+`ALLOCATOR=agones`. ADR-2 already records what that allocator does when a map is full — the
+registry allocates a second instance and registers it under the same `map_id`
+(`gateway/registry/registry.go`, the `s.allocator != nil` branch; ADR-2 cites lines 77-91,
+which have since moved to ~237-249).
+
+The game server's half does not exist. `GameServer/Agones/AgonesSdk.cs` is 58 lines and
+contains an `IAgonesSdk` interface (`ReadyAsync`/`ShutdownAsync`/`AllocateAsync`/`HealthAsync`),
+a `NoopAgonesSdk` that returns `Task.CompletedTask` from all four, and an `AgonesHealthLoop`
+that dutifully pings the no-op. `grep -rn ": IAgonesSdk"` returns exactly one implementation
+across the whole solution, and it is the no-op. There is no HTTP client and no reference to the
+sidecar port anywhere in the module. `Program.cs` is honest about it and says so at startup:
+
+> `--agones/AGONES_ENABLED is set but has NO effect: the C# server still uses the no-op Agones
+> SDK (no Ready/Health/Shutdown is reported to the sidecar). Do not rely on Agones health checks
+> for this server yet.`
+
+That warning is the fact this ADR formalises. `--agones` parses (`Program.cs:65`), logs, and
+changes nothing.
+
+Four gaps follow from it, and they are the whole case for doing the work:
+
+1. **A map with no server means the client cannot enter.** `FindServer` returns
+   `ErrNoServerAvailable` and `MsgEnterWorld` fails. Someone has to start a process by hand.
+2. **A full map means rejection.** ADR-2's MVP policy is one live server per `map_id` and a
+   full map refuses joins. The allocation branch that would produce a second one is written and
+   tested — but with no game server able to report Ready, allocating produces a pod that never
+   becomes allocatable. The branch is a no-op in practice.
+3. **A crashed server is removed but not replaced.** `RegistrationService` re-arms a 15s Redis
+   TTL every 5s, so a dead server leaves the registry within seconds — that half works. Nothing
+   then brings a new one up.
+4. **Dungeon-per-party instancing cannot exist at all.** `--mode=dungeon` currently changes one
+   thing: the disconnect hold window, 60s instead of 30s (`Program.cs:358`). There is no
+   allocate-per-party, no instance lifecycle, no shutdown. Instanced dungeons are a headline
+   feature of the design and they are blocked on this, not on gameplay code.
+
+Two more facts belong in the record before any decision is read.
+
+**The manifests would currently kill the server.** `deploy/agones/` holds nine manifests (map
+and dungeon fleets, autoscaler, allocation, dev and prod variants). `fleet-map-dotnet-dev.yaml`
+sets `health: initialDelaySeconds: 10, periodSeconds: 5, failureThreshold: 3` and does **not**
+set `disabled: true` — no manifest in the directory sets it. Deploying that file today gives a
+pod that never pings, fails three checks, and is killed and restarted forever.
+
+**The cluster is running the deleted server.** `kubectl get fleets -n rpg-realtime` shows
+`map-servers-dev` and `dungeon-servers-dev`, both Ready, both 13 days old, both ALLOCATED 0, on
+image `rpg-mmo/gameserver:dev` — the **Go** game server, deleted from the repo in `670a803
+feat(migration): remove Go gameserver, C# .NET 10 is primary`. The cluster context is
+`docker-desktop`, not a VPS.
+
+**Decision.**
+
+1. **Implement `IAgonesSdk` against the Agones HTTP sidecar on `localhost:9358`, not against
+   the official Agones C# SDK.** That SDK is gRPC and would pull `Grpc.Net.Client` and its
+   transitive tree into a module whose `CLAUDE.md` states "NativeAOT compatible — no
+   reflection-based serialization" and "No other external dependencies (keep the dependency
+   tree minimal)". `System.Net.Http` is in-box, the sidecar's REST surface is four POSTs, and
+   this module's JSON path is already AOT-safe through source generators. A working reference
+   exists in this repo's own history — `git show 670a803^:backend/gameserver/agones/sdk.go`,
+   101 lines plus a 63-line test, implementing Ready/Shutdown/Allocate/Health and a health
+   loop over the official Go SDK. The shape is known; only the transport changes.
+2. **Agones owns pod lifecycle; Redis owns the `map_id -> server` lookup.** These are two
+   sources of truth about whether a server is available — Agones writes GameServer state, the
+   server writes its own Redis entry — and ADR-1 forbids two writers for one datum. They are
+   made to be two *different* data: Agones answers "does this pod exist and is it healthy",
+   Redis answers "which address serves this map". Neither reads the other's answer.
+3. **The server registers into Redis only after reporting Ready.** Registering first
+   advertises an address that Agones may still be about to kill, which is precisely the
+   ordering that would let the two writers disagree. Ready first, then register; on shutdown,
+   deregister first, then `ShutdownAsync`.
+
+   > **Narrowed 2026-08-18 by #151, opt-in.** Ready turned out to be necessary but not
+   > sufficient: on a fleet whose replicas all carry one `GAMESERVER_MAP_ID`, a second
+   > `Ready` pod is a second *live* server for that map with no allocation involved (ADR-18,
+   > measured). `GAMESERVER_REGISTER_ON_ALLOCATED=true` therefore holds the registry entry
+   > until `status.state` reads `Allocated`. The ordering this decision protects is intact —
+   > Ready still precedes registration, the address read still sits between them, and
+   > shutdown still deregisters before `ShutdownAsync`. **Default off**, so an unmigrated
+   > fleet behaves exactly as this decision describes; the flag is the migration.
+
+   > **Correction, same day: this one was already true in code.** Written as though it were
+   > work to do; it is not. `GameServer.RunAsync` completes the bind at
+   > `GameServer/Server/GameServer.cs:349`, calls `ReadyAsync()` at 356, and only then
+   > `_registration.StartAsync()` at 364 — and the descent already deregisters at 443 before
+   > `ShutdownAsync()` at 450. What was actually missing was decision 1 alone: `Program.cs:365`
+   > hardcoded `new NoopAgonesSdk()`, so the correctly ordered calls all went to the no-op.
+   >
+   > The decision stands as the rule; what it needs is a test pinning the order so a future
+   > refactor cannot quietly invert it, not a restructure. Recorded rather than edited away
+   > because "the ADR asked for work that was already done" is the error that sends someone
+   > looking for it.
+4. **The health loop only starts once a real SDK is wired.** `AgonesHealthLoop` running
+   against `NoopAgonesSdk` produces reassuring log lines about pings that were never sent, and
+   is worse than no loop. Until decision 1 lands, `disabled: true` goes on the dotnet fleet
+   manifest's health block rather than being left to the restart loop to discover.
+5. **The autoscaler is buffer-based on server count, not threshold-based on CCU.** ADR-7's
+   per-server ceiling is unknown and not measurable on this hardware — the load generator
+   shares the box and uses more CPU than the server under test. A buffer policy ("keep N ready
+   servers spare") needs no such number. Any policy keyed on players-per-server is a guess
+   until ADR-7's blocker is cleared, and must not be written as if it were measured.
+
+**Staged work.** Each stage is independently landable and the earlier ones change no runtime
+behaviour, which is deliberate — the SDK can be written and tested long before anything is
+deployed against it.
+
+| # | Stage | Size | Changes runtime? |
+|---|---|---|---|
+| 1 | `HttpAgonesSdk` over the sidecar, unit-tested against a fake HTTP handler | M | No — still selected only under `--agones` |
+| 2 | Lifecycle wiring: Ready on listen, Health loop, Shutdown on drain | M | Yes, under the flag |
+| 3 | Registration ordering per decisions 2-3, with a test that pins the order | S | Yes, under the flag |
+| 4 | Deploy `fleet-map-dotnet-dev.yaml` and prove no restart loop over a sustained run | S | Deployment only |
+| 5 | Enable `ALLOCATOR=agones` in dev and demonstrate an end-to-end allocation from `MsgEnterWorld` to a joined client | M | Yes |
+| 6 | Dungeon instancing: allocate per party, lifecycle, shutdown | L | Yes |
+| 7 | Buffer-based `FleetAutoscaler` per decision 5 | S | Yes |
+| 8 | Retire `map-servers-dev` and `dungeon-servers-dev`, and delete the Go-image manifests | S | Deployment only |
+
+> **Stages 7 and 8, 2026-09-13.**
+>
+> **Stage 7 is done, on the DUNGEON fleet and only there.** ADR-18 refused a buffer autoscaler
+> on a fleet that pins one `GAMESERVER_MAP_ID` for every replica and named the fleet shape that
+> would unlock it; the dungeon fleet (ADR-26) is that shape.
+> `deploy/k8s/app/70-fleetautoscaler-dungeon.yaml` is Buffer 2 / 2-6 on a 30s sync, applied
+> after the image pin because a `minReplicas` floor overrides the `replicas: 0` that protects
+> the pin. See the amendment on ADR-18. Decision 5 stands exactly as written: buffer on server
+> count, nothing keyed on players-per-server, because ADR-7's ceiling is still unknown.
+>
+> **Stage 8 was two jobs, and only one of them was still outstanding.** The Go-image manifests
+> (`fleet-map.yaml`, `fleet-dungeon.yaml`, `fleet-map-dev.yaml`, `fleet-dungeon-dev.yaml`,
+> `allocation.yaml`, `autoscaler.yaml`, `autoscaler-dev.yaml`) were deleted in `6281c72`, and
+> `map-servers-dev` / `dungeon-servers-dev` no longer exist on `k3d-rpg-dev` — verified
+> read-only, `kubectl get fleet -A` returns neither. What remains in `deploy/agones/` is
+> **not** a Go fleet: `fleet-map-dotnet-dev.yaml`, `allocation-dev.yaml` and
+> `secret-example.yaml` are the C# dev fleet in `rpg-realtime`, which `dev-up.sh` scales to
+> zero on every deploy and `rollback-to-compose.sh` scales **back to 1** as the documented
+> rollback out of the k8s app tier. Deleting them deletes that rollback, so they stay, and what
+> changed is the documentation that called them live: `deploy/k8s/app/README.md` no longer
+> claims "this does not replace anything", and `docs/K3S.md`'s manifest table — which listed
+> the deleted files twice, in two blocks that disagreed — now lists the three that exist. Stage
+> 8 closes as *retired and documented as the rollback target*, not as *deleted*.
+Stage 5 is the first point at which anything is *proved*. Stages 1-4 reduce risk; they do not
+demonstrate that the thing works.
+
+**Consequences.**
+
+- **Nothing here is demonstrated.** No C# server has ever reported Ready to an Agones sidecar
+  in this project. Every claim above about what will happen after stage 1 is a design
+  intention, and this ADR should not be cited as evidence that Agones works for the C# server.
+  The evidence, when it exists, is the stage-5 result.
+- **ADR-2's warning becomes reachable rather than theoretical.** Today the multi-instance
+  hazard it describes — two servers under one `map_id`, two disconnected copies of the world —
+  cannot occur, because allocation cannot produce a live server. Stage 5 makes it possible for
+  the first time. ADR-2's follow-up "decide the map-fleet allocator policy" therefore stops
+  being an M-sized cleanup and becomes a precondition of stage 5.
+- **What is NOT decided: whether the realtime tier moves to Kubernetes.** Dev, staging and
+  production all run `DEPLOY_MODE=containers` under docker compose today. Agones is a
+  parallel path, not the deploy path, and the only cluster it has ever run on is
+  `docker-desktop`. Adopting Agones for the realtime tier changes that tier's deploy story,
+  its runner requirements and its rollback procedure. That decision is deliberately left open
+  here — an SDK implementation does not commit the project to it, and the two should not be
+  bundled into one change.
+- **The health loop is a liveness contract, not a formality.** Once decision 4's `disabled:
+  true` comes off, a tick loop that stalls long enough to starve the ping task is a pod
+  restart. That is arguably the correct behaviour, but it is a new failure mode, and ADR-13's
+  overload path — which drops the backlog and resynchronises rather than chasing it — is what
+  keeps a merely-slow server from being killed as a dead one.
+
+**Revisit if** the official Agones C# SDK ships an AOT-friendly non-gRPC path (which would
+reopen decision 1), or if ADR-7's load-generator blocker clears and a real per-server ceiling
+makes a CCU-keyed autoscaler defensible (decision 5), or if the realtime tier moves to k3s for
+reasons unrelated to Agones — in which case the open question above is answered elsewhere and
+this ADR should record where.
+
+---
+
+## ADR-15 — What it would cost to run the realtime tier on Kubernetes, and the dynamic-address problem that blocks it
+
+**Status:** **proposed 2026-08-17, not accepted.** **Partly overtaken by ADR-16 (2026-08-17).** Decision 2 below — the server reads its address from the sidecar — was implemented and then found necessary but *not sufficient*: `status.address` is the node address and is not dialable by a client, so the advertised address is composed from the Agones-assigned port and a configured host. The blocking finding and decision-3 prerequisites stand as written; read ADR-16 before acting on this one. This ADR does not decide whether the
+realtime tier moves to Kubernetes. It exists to write down what answering that question
+costs, because ADR-14 left it open and nothing since has priced it. Extends ADR-14 (this is
+its "what is NOT decided" bullet, expanded); constrained by ADR-1 (one writer per datum),
+ADR-2 (one live server per `map_id`), ADR-3 (the gateway is a redirector) and ADR-7 (the
+unknown per-server ceiling).
+
+Only the recommendation in decision 2 is a recommendation. Everything else numbered below
+is a statement of what would have to be true before the go/no-go is answerable at all.
+
+**Context.** There are two deployment stories in this repo and they do not meet.
+
+The one that runs: push -> `.github/workflows/cd.yml` -> bundle -> self-hosted runner ->
+`docker compose up -d` -> smoke test. All three environments are on it — `gh api` reports
+`DEPLOY_MODE=containers` for `dev`, `staging` and `production` alike, and the workflow
+contains no `kubectl` invocation anywhere. Images are built on the runner as local tags
+(`rpg-mmo/gateway:<sha>`, `rpg-mmo/gameserver-dotnet:<sha>`); the `build-images` job that
+pushes to `ghcr.io/cuvara/` runs only for the `production` environment or on a manual
+`build_images` dispatch.
+
+The one that does not run: `kubectl apply` by hand into whatever context is current, then
+Agones fleets that nothing allocates from. Three facts about it are worth stating plainly,
+because the directory names suggest otherwise:
+
+- **There is no k3s.** `kubectl config current-context` is `docker-desktop`, the single node
+  is `docker-desktop` at `v1.34.1`, and there is no `k3s` binary on `PATH`.
+  `backend/deploy/k3s/` holds `lib.sh`, `namespaces.yaml`, `setup-dev.sh`,
+  `teardown-dev.sh` and `validate-manifests.py`; `setup-dev.sh` installs nothing and says so
+  itself — "Every step is `kubectl apply`". The directory is named for an intention.
+- **`backend/deploy/k8s/` does not exist.** The repo-root `CLAUDE.md` describes
+  `k8s/base/{nakama,gateway,redis,postgresql}` and `k8s/overlays/{dev,beta,launch,growth}`.
+  None of it has been written. The only Kubernetes manifests in the repo are the nine in
+  `deploy/agones/`, and they cover the game server only.
+- **The fleets that are up are unbuildable.** `map-servers-dev` and `dungeon-servers-dev`
+  are Ready, 13 days old, `ALLOCATED 0`, on image `rpg-mmo/gameserver:dev` — the Go server
+  deleted in `670a803`, whose `docker/Dockerfile.gameserver` went with it. PR #137 marked
+  those manifests superseded rather than deleting them; that image cannot be rebuilt.
+
+So Agones is not "half deployed". It is a parallel path that has never carried a player, and
+the reason is not only the no-op SDK that ADR-14 addresses.
+
+**The blocking finding: the game server cannot learn its own address.**
+`fleet-map-dotnet-dev.yaml:35` sets `portPolicy: Dynamic`, so Agones assigns a host port per
+GameServer and the real address exists only in the GameServer status. It is visible right
+now:
+
+```
+$ kubectl get gs -n rpg-realtime
+NAME                              STATE   ADDRESS        PORT   NODE
+dungeon-servers-dev-2kdvr-zzmxb   Ready   192.168.65.3   7101   docker-desktop
+map-servers-dev-kl485-gsmrh       Ready   192.168.65.3   7691   docker-desktop
+```
+
+Nothing in the game server can read those two columns. The fleet supplies eight environment
+variables — `POD_NAME`, `JWT_SECRET`, `JOIN_TOKEN_SECRET`, `SIM_CRITICAL_HZ`,
+`SIM_WORLD_HZ`, `SIM_BACKGROUND_HZ`, `REDIS_ADDR`, `LOG_LEVEL` — and `GAMESERVER_PUBLIC_ADDR`
+is not among them, because no static value could be correct for a port assigned at
+scheduling time. `IAgonesSdk` exposes `ReadyAsync`/`ShutdownAsync`/`AllocateAsync`/
+`HealthAsync` and no way to read GameServer status. `Program.cs:101` therefore resolves
+`publicAddr = --public-addr ?? GAMESERVER_PUBLIC_ADDR ?? addr`, and the manifest passes
+`--addr=:9000`, so the server would advertise the hostless `:9000`.
+
+Follow that value: `RegistrationService` writes it into Redis, `transfer/map_assign.go:49`
+copies `srv.Addr` into the assignment, and `server.go:843` hands it to the client as
+`MsgEnterWorldResp.ServerAddr`. The client dials `:9000` and fails. `Program.cs:154` detects
+the hostless address and logs a warning; it is deliberately never fatal, which is right for
+host mode and means Kubernetes gets no stop.
+
+**This is why `ALLOCATED` is 0 and the dotnet fleet has never been deployed** — not merely
+the health loop. PR #139, in flight, implements the four sidecar POSTs and adds no status
+read; the interface is unchanged at four methods. It is necessary and it is not sufficient.
+
+**The handshake, and where allocation sits inside it.** ADR-3's invariant is that the
+gateway authenticates and redirects, and gameplay traffic never passes through it. Nothing
+here changes that:
+
+```
+Client -> Gateway     MsgAuth { JWT }                     (JWT verified locally)
+Client -> Gateway     MsgEnterWorld { MapID }
+                      +-- registry lookup: which address serves MapID?
+                      +-- miss/full -> AgonesAllocator POST gameserverallocations   <-- k8s enters here, and only here
+                      +-- ...which returns a pod that must then register ITSELF
+Gateway -> Client     MsgEnterWorldResp { ServerAddr, JoinToken }
+Client -> GameServer  MsgJoinToken { Token }              (direct; gateway is gone)
+GameServer -> Client  MsgSnapshot ... per tick
+```
+
+The allocation sits inside step 2 and nowhere else. Under Kubernetes every hop is unchanged
+except one: `ServerAddr` stops being a value someone configured and becomes a value the
+scheduler chose. That single change is the whole of the problem, and it lands on the one
+step in the handshake that the gateway cannot verify — it forwards an address it never
+dials.
+
+**Decision.**
+
+1. **The go/no-go is not decided here, and must not be inferred from ADR-14.** Implementing
+   the Agones SDK does not commit the project to Kubernetes; deploying one fleet on
+   `docker-desktop` does not either. What follows is the price list, not the purchase.
+
+2. **The dynamic-address problem is decided, because it blocks either answer: the game
+   server learns its own address by reading GameServer status from the sidecar.** Three
+   options were considered.
+
+   - **(A) Read GameServer status.** The Agones sidecar's REST surface on `localhost:9358`
+     serves the GameServer object alongside the four POSTs PR #139 already implements. The
+     server reads it after `ReadyAsync`, composes `status.address` with the port named
+     `game`, and registers *that* into Redis. Cost is one more endpoint on `HttpAgonesSdk`,
+     one AOT-source-generated JSON model of the fields actually used, and a fallback to
+     today's resolution when the read fails or Agones is off — which is what running outside
+     a cluster must keep doing.
+   - **(B) `portPolicy: Static`.** `containerPort == hostPort`, so `:9000` becomes true and
+     a host part is all `GAMESERVER_PUBLIC_ADDR` needs. It gives up what `scheduling: Packed`
+     is for: one GameServer per port per node, and ADR-2's second-instance allocation branch
+     collides with the first the moment two map servers want one node.
+   - **(C) The gateway trusts the allocation response and writes the registry entry
+     itself.** The allocation POST already returns the address and ports, so the gateway
+     could skip the server's self-registration entirely. This is rejected on two counts.
+     It puts two writers on one datum, which ADR-1 forbids — `RegistrationService` still
+     writes its own entry — and it inverts ADR-14 decision 2, under which Redis answers
+     "which address serves this map" and Agones answers "does this pod exist and is it
+     healthy", with neither reading the other. It also discards the liveness signal:
+     the entry's 15s TTL re-armed every 5s is what makes a crashed server vanish, and an
+     entry the gateway wrote has nothing re-arming it.
+
+   **(A) is the recommendation.** It is the only one of the three that leaves ADR-1's
+   ownership and ADR-14's split intact: the server remains the sole writer of its own
+   registry entry, and it asks Agones only "what address did you give me", never "which
+   server serves this map".
+
+   > One limit belongs with the recommendation rather than after it. `status.address` is
+   > the **node** address — `192.168.65.3` above — routable from wherever the node is
+   > routable and no further. The status read produces the correct value inside the cluster
+   > and the correct *shape* outside it; making that address reachable by a phone on a
+   > mobile network is a deployment fact about ingress and node public IPs, not something
+   > the read solves.
+
+3. **Six prerequisites stand between "Agones works" and "Agones means anything", and all of
+   them are outside `deploy/agones/`.** They are what `docker compose up` currently provides
+   for free:
+
+   | # | What compose does today | What Kubernetes needs |
+   |---|---|---|
+   | 1 | `postgres`, `postgres-game`, `redis` on named volumes (`postgres-data`, `postgres-game-data`, `redis-data`) | StatefulSets and PVCs, plus a storage class that exists on the target node |
+   | 2 | `./db/init-gamestate.sql` mounted as an initdb script; `./monitoring/{prometheus.yaml,grafana-dashboards.yaml,dashboards}` mounted into `lgtm` | ConfigMaps, and a first-run story for the initdb script that a PVC's second boot does not re-run |
+   | 3 | `./modules` host-mounted into `nakama` for the `nakama.so` Go plugin | A host mount is not available; the plugin is baked into an image (`nakama-plugin.Dockerfile` exists) or delivered by an initContainer |
+   | 4 | Seven secrets in a `umask 077` / `chmod 600` `.env` written by CD — `JWT_SECRET`, `JOIN_TOKEN_SECRET`, `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `NAKAMA_CONSOLE_PASSWORD`, `NAKAMA_SERVER_KEY`, `GRAFANA_ADMIN_PASSWORD` | Kubernetes Secrets, and a way for CD to write them that is not "echo into a file on the runner" |
+   | 5 | Local image tags; `imagePullPolicy: IfNotPresent` resolves them because Docker Desktop shares the daemon's image store | A registry push per environment and pull credentials per namespace. A real node shares nothing with the runner's daemon |
+   | 6 | `AgonesAllocator` falls back to `$KUBECONFIG` then `~/.kube/config`, so it allocates as the developer | In-cluster it needs a ServiceAccount with `create` on `gameserverallocations.allocation.agones.dev`. Without it, allocation returns 403 and ADR-2's branch fails at the one moment it matters |
+
+   Item 6 is the one most likely to be discovered late, because `agones_allocator.go` is
+   already written, already tested, and already works — on a developer's kubeconfig.
+
+4. **Partial adoption is not a middle path, and would be the worst outcome available.**
+   Moving the realtime tier alone leaves the data tier in compose, so the game server reaches
+   PostgreSQL and Redis across the cluster boundary by `host.docker.internal` — which is
+   exactly what `fleet-map-dotnet-dev.yaml` does today and exactly why it works only on
+   Docker Desktop. Two orchestrators means two rollback procedures, two health stories, and
+   a smoke test that has to know which half it is testing.
+
+5. **No autoscaling policy in this ADR is keyed on players.** ADR-7's per-server ceiling is
+   unknown and not measurable on this hardware, and ADR-14 decision 5 already settled the
+   fleet autoscaler as buffer-based on server count for that reason. The same constraint
+   binds an HPA, a node count and a tier sizing: anything derived from players-per-server is
+   a guess until ADR-7's load-generator blocker clears.
+
+**Honest size.** This is larger than ADR-14's stages 1-8 put together, and it is a
+*precondition* for several of them rather than a follow-on. ADR-14 sizes stage 4 ("deploy
+`fleet-map-dotnet-dev.yaml` and prove no restart loop") at S and stage 5 ("enable
+`ALLOCATOR=agones` and demonstrate end-to-end allocation") at M. Those sizes are honest on
+`docker-desktop`, where the image store is shared, the kubeconfig is the developer's and the
+data tier is one `host.docker.internal` away. On any cluster that is not this laptop, stage 5
+inherits every row of decision 3's table plus decision 2's status read. Reading the ADR-14
+table as the cost of getting Agones into production would understate it by an order of
+magnitude.
+
+**What is explicitly not decided, and what would decide it.**
+
+- **Whether the realtime tier moves to Kubernetes at all.** The deciding evidence is a
+  reason compose cannot serve: a scaling need, a multi-node need, or a fleet lifecycle
+  need that a `docker compose up` on one VPS genuinely cannot meet. No such need has been
+  demonstrated. Dungeon-per-party instancing (ADR-14 stage 6) is the strongest candidate
+  and has not been costed against a non-Kubernetes implementation.
+- **Whether the whole stack moves or nothing does.** Decision 4 argues against a split;
+  it does not choose between the two remaining ends.
+- **Which cluster.** `docker-desktop` is a development artefact. k3s on a VPS, k3d, and a
+  managed cluster have not been compared, and the tier costs in the root `CLAUDE.md` are
+  ADR-7 estimates that assume neither.
+- **Whether `backend/deploy/k3s/` should be renamed now.** It describes no k3s and applies
+  into whatever context is current, which is a foot-gun independent of this decision.
+
+**Consequences.**
+
+- **Nothing here is demonstrated, and less is demonstrated than in ADR-14.** ADR-14 could at
+  least point at a tested Go SDK to port. This ADR describes work that has no precedent in
+  the repo at all: no StatefulSet, no ConfigMap, no Kubernetes Secret and no cluster-side
+  RBAC has ever been written here.
+- **ADR-14 stage 5 acquires a dependency it does not name.** On a real cluster it cannot
+  succeed without decision 2's status read, because an allocated pod that advertises `:9000`
+  is indistinguishable from no pod at all from the client's side.
+- **The address problem is worth fixing even if Kubernetes is rejected.** A server that can
+  be told its own reachable address is the general form of the bug, and `--public-addr`
+  already exists for the compose case. Decision 2 makes the Agones case work the same way
+  rather than adding a second mechanism.
+- **The `k3s` directory name will keep costing time.** Every reader who finds it assumes a
+  cluster provisioner and finds a `kubectl apply` wrapper.
+
+**Revisit if** a scaling or lifecycle need arrives that compose demonstrably cannot serve
+(dungeon instancing is the likeliest), or if ADR-7's blocker clears and a measured ceiling
+makes a fleet-sizing argument possible, or if the data tier moves to managed services — in
+which case decision 4's objection to a split largely dissolves and the realtime tier could
+move alone.
+## ADR-16 — The realtime tier runs on Agones, and the address it hands a client is measured, not configured
+
+**Status:** accepted 2026-08-17, **proven end to end on k3d**. Implements ADR-14 stages 1-4,
+supersedes ADR-15's decision 2 in one respect (the status read alone is not sufficient), and
+answers ADR-15's open "which cluster" question for local development. Constrained by ADR-1
+(one writer per datum), ADR-2 (one live server per `map_id`), ADR-3 (the gateway is a
+redirector) and ADR-7 (the unknown per-server ceiling).
+
+**What is proven.** A client completed the full production flow — Nakama device auth,
+`gateway_token` RPC, `MsgAuth`, `MsgEnterWorld`, direct dial, `MsgInput`/`MsgSnapshot` — against
+an **Agones-managed C# game server**, at an address only Agones could have supplied:
+
+```
+PASS  gateway_auth      map=map_01  server=127.0.0.1:7097 (tcp)
+PASS  gameserver_join   snapshots=15 (keyframes=1 deltas=14) final_x=4.83 ack_tick=10
+SMOKE=PASS
+```
+
+The run used `--strict-addr`, so the smoke test was forbidden from rewriting a listen-style
+address to loopback. That matters: without it the harness silently repairs the exact defect
+this ADR exists to fix, and reports PASS while a real client fails.
+
+A GameServer also reached `Allocated` **without any gateway allocation**, because the server
+reports `Allocate` to the sidecar on first player join (`NotifyAgonesAllocatedOnce`). "A pod is
+Allocated" is therefore not evidence that the gateway's allocation path ran.
+
+**Decision 1 — Docker Desktop's Kubernetes cannot host this architecture; k3d can.**
+Docker Desktop publishes *Docker* ports to the host and does **not** publish Kubernetes
+`hostPort`. Measured: an Agones GameServer with `portPolicy: Dynamic` received `hostPort: 7306`
+on its pod spec, answered from inside the cluster, and was unreachable from both Windows and
+WSL2, with a compose port reachable at the same moment as a control.
+
+| target | Windows | WSL2 | in-cluster |
+|---|---|---|---|
+| k8s hostPort `127.0.0.1:7306` | FAIL | FAIL | — |
+| node IP `192.168.65.3:7306` | FAIL | FAIL | PONG |
+| compose `127.0.0.1:8000` | OK | OK | — |
+
+Under ADR-3 the gateway hands `ServerAddr` to the client verbatim and the client dials the game
+server directly, so an address routable only inside the cluster means no client can ever join an
+Agones-managed server. k3d works because a k3d node is a Docker container and its published
+range goes through Docker's own port publishing. Cluster `rpg-dev` publishes **7000-7100**, and
+Agones' `MIN_PORT`/`MAX_PORT` are set to match — a mismatch there hands out ports outside the
+published range while every component still reports healthy.
+
+> **What that costs a measurement, and it is not small (#143).** The published range is served
+> by the `k3d-<cluster>-serverlb` container, an nginx TCP proxy, so on k3d **every gameplay
+> packet to an Agones pod traverses a proxy that does not exist on a real node**, where a client
+> dials the node directly. Measured with the same binary under the same load at 50 players:
+> snapshot interval p99 **211.9 ms** through the serverlb against **72.7 ms** direct to a
+> compose server — a third distinct local-measurement distortion, alongside ADR-7's co-located
+> load generator and #153's unusable host clock. The mechanism is the same one this decision
+> depends on, so it is a property of the local rig and not a regression; it does mean a capacity
+> sweep run through k3d reports a ceiling roughly 3x too low and looks like a game-server limit.
+> **Take capacity numbers on the compose path, or direct to a node — never through the
+> serverlb.** See [`BENCHMARK.md`](BENCHMARK.md) and
+> [`deploy/docs/K3S.md`](../deploy/docs/K3S.md).
+
+**Decision 2 — the advertised address is composed: port from Agones, host from configuration.**
+ADR-15 decided the server reads its address from the sidecar (`GET /gameserver`) and registers
+it. That is necessary and **not sufficient**: `status.address` is the *node* address
+(`172.20.0.3` on k3d) and is not dialable by a client. The port cannot come from configuration —
+it is assigned at scheduling time and only the status read can know it. So:
+
+> **host** = `GAMESERVER_ADVERTISE_HOST` if set, else `status.address`; **port** = always the
+> Agones-assigned port of the `game`-named port. On a failed read the override is ignored
+> entirely rather than composed with a configured port, because an address that was never
+> assigned to anything is worse than an obviously wrong one.
+
+The server remains the sole writer of its own registry entry (ADR-1); it asks Agones only "what
+address did you give me", never "which server serves this map".
+
+**This works because there is one node and one published range.** On a multi-node cluster the
+correct host differs per pod and a single fleet-level env var cannot express it; the answers are
+an ingress or a per-pod value via the downward API, and neither exists in this repo.
+
+**Decision 3 — ADR-2's invariant is now enforced in code, not merely warned about.**
+`FindServer` allocates **only when a map has zero live servers**. When servers exist but are all
+full it returns `ErrNoServerAvailable` without allocating. The previous behaviour — allocate a
+second instance for a full map — would have produced two disconnected copies of one world the
+first time Agones actually worked. Refusing a join is a loud, bounded failure; a silently split
+world is not.
+
+**Decision 4 — the join token is minted last.** It is single-use, `sid`-pinned and lives 30s.
+After allocating, the gateway waits (bounded, default 15s) for the pod to publish its **own**
+registry entry and mints from that entry, so the 30s starts when the address is real. The
+gateway never writes a server's entry: an entry it wrote would have nothing re-arming its 15s
+TTL, and that TTL is what makes a crashed server vanish. A timeout returns a distinct retryable
+error. The wait is refused at startup if it approaches `pongTimeout - pingInterval`, because it
+blocks the connection's read loop, which is also what records `MsgPong`.
+
+**Consequences.**
+
+- **Allocated pods are never reclaimed.** Agones has no un-allocate and this project has no
+  `Deallocate` path, so an Allocated GameServer leaves that state only by being shut down.
+  Observed directly: a fleet scaled to 0 kept its Allocated pod. Single-flight per `map_id`
+  bounds the leak per gateway instance; two gateway instances still allocate one pod each.
+- **The map-fleet allocator policy (ADR-2's open item) is still open**, and is now the binding
+  question rather than a theoretical one: fleet pods self-register at boot, so a Ready pod is
+  already in the registry and `FindServer` finds it without allocating; and a fleet hardcodes
+  `GAMESERVER_MAP_ID`, so an allocation for another map would hand back a server for the wrong
+  one. Whether the allocation branch can fire at all for map servers is under experiment.
+- **The deploy path does not change.** Dev, staging and production remain
+  `DEPLOY_MODE=containers`. Agones is proven, not adopted; ADR-15's decision-3 prerequisites
+  (StatefulSets, ConfigMaps, registry, RBAC) are untouched and still stand between this and a
+  real cluster.
+- **`--allocator-transport` is inert**, since the allocation response is now used only for its
+  `ServerID`.
+
+**Operational facts worth not re-deriving.** Pods reach the compose data tier as
+`host.k3d.internal`. The gateway container reaches the API server by joining network
+`k3d-<cluster>` and using `https://k3d-<cluster>-serverlb:6443`, which is in the API
+certificate's SAN list — `host.docker.internal` is not, and client-go verifies by default. k3d
+does **not** share the Docker image store, so local tags must be imported or
+`imagePullPolicy: IfNotPresent` silently falls through to a registry pull. Image tags here lag
+the branch routinely; verify `org.opencontainers.image.revision` against the commit under test
+before believing a deploy.
+
+**Revisit if** the tier moves to a multi-node cluster (decision 2's host override stops
+expressing the answer), if a `Deallocate`/reap story is needed, or if ADR-7's load-generator
+blocker clears and a measured per-server ceiling makes a CCU-keyed policy defensible.
+
+---
+
+## ADR-17 — On k8s, every component is one replica and every gateway rollout is a join outage; that is accepted for dev and must be re-decided above it
+
+**Status:** accepted 2026-08-18, as a **statement of posture**, not a change to any manifest.
+Nothing here alters the deployment; it records what the deployment already is, so that
+"the realtime tier runs on Kubernetes" (ADR-16) is not read as "Kubernetes is providing
+availability". It is providing scheduling and lifecycle. Constrained by ADR-1 (one writer
+per datum), ADR-2 (one live server per `map_id`), ADR-3 (the gateway is a redirector),
+ADR-4 (Redis is a system of record, not a cache) and ADR-6 (the ≤30s gameplay loss window).
+Extends ADR-16, which proved the tier works and did not price its availability.
+
+### Context
+
+ADR-16 proved a real client can join an Agones-managed server on k3d. What it did not
+state is that the resulting deployment has no redundancy anywhere, and that one of its
+correctness fixes — `strategy: Recreate` on the two `hostPort` workloads — converts every
+deploy into a planned outage of the join path. Both facts are individually deliberate.
+Together they are the availability story of the tier, and until now nothing wrote them
+down in one place, so the first reader of `backend/deploy/k8s/` could reasonably assume
+otherwise.
+
+### Current state
+
+Read from the manifests on `develop` and confirmed against the live cluster
+(`kubectl --context k3d-rpg-dev get deploy,sts -A`, 2026-08-18):
+
+```
+NS                 KIND          NAME             REPLICAS   READY   STRATEGY
+rpg-k8s-realtime   Deployment    gateway          1          1       Recreate
+rpg-k8s-data       Deployment    nakama           1          1       Recreate
+rpg-k8s-data       StatefulSet   redis            1          1       -
+rpg-k8s-data       StatefulSet   postgres-meta    1          1       -
+rpg-k8s-data       StatefulSet   postgres-game    1          1       -
+```
+
+Plus the Agones Fleet `map-servers-dotnet-k8s`, also at 1, for a reason of its own (ADR-2:
+every replica carries the same `GAMESERVER_MAP_ID`, so a second replica is a second live
+server for `map_01`).
+
+| Component | Owns | Loss of it |
+|---|---|---|
+| `gateway` (`app/40-gateway.yaml`) | Nothing durable — sessions and the registry live in Redis, so any replica could serve any client | No `MsgAuth`, no `MsgEnterWorld`. In-progress sessions untouched |
+| `nakama` (`data/nakama.yaml`) | Accounts, economy, leaderboards, and the `gateway_token` RPC that is the flow's first hop | No new `gateway_token`. JWTs already minted stay valid until expiry |
+| `redis` (`data/redis.yaml`, `data/redis.conf`) | Sessions (TTL), server registry `servers:*`, event stream `events:*`; `maxmemory-policy noeviction` set explicitly (ADR-4) | Joins fail. Gameplay does not: `RegistrationService` wraps every registry call, logs and retries off the tick loop, and **every heartbeat is also a repair**, so a wiped Redis self-heals within one heartbeat interval |
+| `postgres-game` (`data/postgres-game.yaml`) | `player_states` — authoritative position/HP, written only by the game server (ADR-1) | Gameplay continues; `AsyncSaver.SaveAllAsync` catches per-player, increments `gameserver.player.saves{status="error"}` and carries on, so the loss is **silent to the player and visible only in metrics** |
+| `postgres-meta` (`data/postgres-meta.yaml`) | Nakama's own database; migrated by `nakama migrate up`, never by us (ADR-1) | Nakama cannot authenticate |
+
+One PVC each, `ReadWriteOnce`, no standby, no replica.
+
+**Why `Recreate` is on the two `hostPort` workloads.** The gateway binds `hostPort: 7000`
+and Nakama binds `hostPort: 7001`, because k3d's serverlb publishes `7000-7100` onto the
+host and nothing in the default NodePort range `30000-32767` — a NodePort Service here is
+allocated, printed by `kubectl get svc`, and unreachable. A hostPort is a node-level
+resource, so under RollingUpdate on a single node the replacement pod cannot be scheduled
+until the outgoing one releases the port, while RollingUpdate will not terminate the
+outgoing one until the replacement is Ready: `kubectl rollout status` sits on
+`1 old replicas are pending termination` against a Pending pod whose event reads
+`node(s) didn't have free ports for the requested pod ports`. It passes the **first**
+deploy, when the old pod has no hostPort yet, and wedges every deploy after it.
+
+**Why in-progress gameplay survives a gateway restart.** Verified in code, not assumed.
+Under ADR-3 the gateway hands back `{ServerAddr, JoinToken}` and leaves the path; the
+client dials the game server directly. The game server verifies the join token itself —
+`JwtKeyring.Parse(options.JoinTokenSecret)`, then `Verify`, a server-id claim check and an
+in-process JTI replay tracker (`GameServer/Server/GameServer.cs`) — and makes no call to
+the gateway at any point in a session. The blast radius of a gateway restart is joins.
+
+### Decision
+
+**1. `Recreate` stays, and the outage it causes is accepted for dev.** It is the only
+strategy that terminates on a single node with a hostPort. Reversing it to RollingUpdate
+"because that is the default" reintroduces a deadlock that passes once and then blocks
+every subsequent deploy, including CD's.
+
+**2. The cost is stated where an operator will meet it, not left to be rediscovered.**
+Every gateway rollout drops the join path entirely; so does every Nakama rollout. A player
+whose connection drops during either window cannot reconnect, because a reconnect needs a
+fresh `gateway_token` **and** a fresh join token — join tokens are single-use and `sid`-pinned
+(ADR-16 decision 4). The prose lives in `backend/deploy/k8s/README.md` §Availability posture,
+next to the manifests it describes.
+
+**3. The window is not measured, and is not claimed to be small.** It is bounded below by
+the outgoing pod's termination and the incoming pod's readiness (`initialDelaySeconds: 2`,
+`periodSeconds: 5` on the gateway) and above by the default 30s termination grace period,
+plus an image pull when the tag is not already on the node. Under ADR-7's standing rule an
+unmeasured figure is not quoted as if measured, so no number is written down. Measure it by
+polling `127.0.0.1:7000` from the host across a `kubectl rollout restart`; not from
+`kubectl rollout status`, which reports the pod and not the port.
+
+**4. Nothing above dev inherits this shape by promotion.** Three questions must be answered
+before a tier that is not this one:
+
+- **The gateway's hostPort, before any multi-replica gateway.** The hostPort is what forced
+  `Recreate`, and it also pins the pod to a node, capping the Deployment at one replica per
+  node. The real-cluster answer is a LoadBalancer Service or an Ingress, at which point the
+  hostPort and `Recreate` both disappear. Removing it is **necessary and not sufficient**:
+  ADR-16 records that single-flight per `map_id` is per gateway instance, so two replicas
+  racing on a cold map allocate one GameServer each and Agones has no un-allocate. Answer
+  both, or the second gateway replica leaks a pod per cold map.
+  **A third item joins these two: cross-instance duplicate-login kick does not exist.**
+  `handleAuth` kicks a duplicate only when the existing session belongs to the same
+  gateway; a session owned by another instance is left running. Machinery for the
+  cross-instance case was declared but never constructed by `cmd/gateway/main.go`, and was
+  deleted in #211 rather than left reading as finished — deleted specifically because at
+  one replica it is neither observable nor end-to-end testable, and because it described a
+  Pub/Sub channel that ADR-5 rules out. At two replicas a user logging in against replica
+  B keeps their session on replica A, silently, with no error on either side. Rebuilding it
+  means a Redis Stream with a consumer group and explicit ACK per ADR-5, plus a
+  wiring-level test in `cmd/gateway` that fails when the construction is removed (#204's
+  shape). This is a consequence of the single-replica posture, so it is recorded with the
+  posture rather than in a backlog.
+  **Update 2026-09-04 (ADR-20):** the gateway→gameserver half of that kick is now built —
+  duplicate login publishes `session_superseded` on the `events:kick` Stream and the game
+  server evicts the old gameplay connection, for sessions owned by ANY gateway instance.
+  That half was observable and testable at one replica (the game-server connection was
+  never evicted before, even same-gateway), which is why it did not wait for a second
+  replica. What this item still tracks is only the gateway→gateway direction: the old
+  gateway *socket* on another replica is not evicted, and that part keeps the
+  one-replica reasoning above.
+- **Redis persistence and replication.** ADR-4 rules out treating this Redis as an evictable
+  cache, which also rules out the reflex answer of "add a read replica and let it lag": the
+  registry and the event stream are systems of record. The decision is which of ADR-4's
+  split path and a Sentinel/managed-Redis topology comes first, and it is a decision, not a
+  replica count.
+- **The two PostgreSQL instances.** One PVC each, no standby; recovery is restore-from-backup
+  at backup RPO (`backend/deploy/docs/DATABASE.md`, `DISASTER-RECOVERY.md`). Accepted for dev,
+  and the thing that most obviously does not survive contact with real accounts and economy,
+  which `postgres-meta` owns.
+
+**5. This ADR decides nothing about the deploy mode.** ADR-16's position stands: dev runs on
+k8s; staging and production remain `DEPLOY_MODE=containers` and reach none of this.
+
+### Consequences
+
+- **CD deploys are outages.** A push to `develop` with `vars.DEPLOY_MODE=k8s` runs `dev-up.sh`,
+  which restarts the gateway whenever the image pin changes. Any client-side or load
+  measurement running across a deploy will see connection refusals on the join path that are
+  not a defect.
+- **"Runs on k8s" cannot be cited as an availability property** of this project anywhere —
+  docs, issues, or a pitch. There is exactly one of everything.
+- **A rolling-update-shaped fix is not available while the hostPort is.** Anyone reaching for
+  `maxSurge`/`maxUnavailable` here is fixing the symptom of the port binding.
+- **The fleet's single replica is a separate constraint with a separate cause** (ADR-2, map
+  assignment is fleet-wide) and is not solved by anything in this ADR. It is load-bearing,
+  not a capacity dial: measured on k3d 2026-08-18, scaling `map-servers-dotnet-k8s` from 1 to
+  2 put the new GameServer in `Ready` at t=5.38s and **both** pods into `servers:map:map_01`
+  within a second of that, with no allocation involved, because the C# server self-registers
+  right after `ReadyAsync` rather than on allocation — and `FindServer` then hands clients the
+  least-loaded of the two, i.e. the second copy of the world. (5.38s is pod-start latency, not
+  a capacity figure.) *Since #203 that last step reads differently — `FindServer` now returns the
+  lowest `ServerID` of the two rather than the least-loaded, so joiners pile onto one half instead
+  of being split between them. The hazard is unchanged: there are still two copies of the world.* So the answer to "when does the single replica stop being necessary" is
+  **#151** — gate self-registration on `Allocated` rather than `Ready` — not a larger fleet.
+  #151 unlocks `replicas > 1` **for one map only**: allocation targets a fleet and every pod
+  in it still carries the same `GAMESERVER_MAP_ID`, so a second *map* remains unserved
+  (`ErrFleetMapMismatch`) until map id is per-pod. Two separate unlocks, not one.
+  Absent a FleetAutoscaler, a cold map does **not** make the first player *wait*: with no
+  `Ready` pod the allocation fails in milliseconds (`registry.ErrNoCapacity`,
+  `gateway/registry/registry.go:559`) and the client is refused, never held
+  (`clientSafeAssignError`, `gateway/server/server.go:906`). The cost is a wrong-looking
+  refusal, not latency — #148's "~9s on the player's path" was the premise measurement
+  removed, and #152 was the refusal being terminal where it should be retryable.
+  **Amended 2026-08-18 (#157):** that refusal is now the *retryable*
+  `all servers busy, retry shortly` rather than the terminal
+  `no server available for map`, keyed on `ErrNoCapacity` alone so the pod leak stays
+  bounded — an `UnAllocated` answer proves no GameServer was handed out, while any other
+  allocation failure may have allocated one whose response was lost and keeps the terminal
+  message. This changes what the client is *told*, not what the deployment *does*: the
+  gateway still refuses in milliseconds and puts no wait on the join path, so the reasoning
+  above and ADR-18's conclusion are unaffected. ADR-18 decides the autoscaler question; this
+  ADR does not.
+- **Known-adjacent:** #143 — k3d's serverlb sits in the gameplay data path and
+  triples snapshot jitter, so local capacity numbers measure the proxy; #147 — a reported 54 Hz
+  tick against an advertised 60 Hz base rate, which that investigation reports as a
+  measurement artifact — the loop paces on `CLOCK_MONOTONIC` while the observer timed it
+  against a `CLOCK_REALTIME` running ~10% fast on the WSL2 host — rather than a code defect.
+  #147 is **closed** on that basis and the host clock itself is filed as #153; #148 — no
+  FleetAutoscaler and `replicas: 1`, premises corrected on the issue itself and the autoscaler
+  refused (ADR-18).
+
+### Follow-up work
+
+- **S** — Measure the gateway rollout outage window with a host-side poll across
+  `kubectl rollout restart`, and record the number next to the posture section. Until then it
+  stays explicitly unmeasured.
+- **S** — Alert on `gameserver.player.saves{status="error"}` (`AsyncSaver`), so a `postgres-game` outage is not
+  a silent one; it is the only failure in the table that a player cannot see and an operator
+  currently would not either.
+- **M** — Answer the gateway exposure question (LoadBalancer/Ingress vs hostPort) together
+  with cross-instance single-flight **and the gateway→gateway half of the duplicate-login
+  kick**, as one decision. Any one alone makes the deployment worse: exposure without
+  single-flight leaks a GameServer per cold map, and without the gateway-socket eviction a
+  superseded user keeps a live *gateway* socket on the other replica (the gameplay
+  connection is already evicted everywhere — ADR-20).
+- **L** — Decide the Redis topology for the first tier above dev, against ADR-4's split path
+  rather than by adding replicas.
+## ADR-18 — A buffer FleetAutoscaler and `replicas > 1` unlock at the same moment, and it is not this one
+
+**Status:** accepted 2026-08-18, **measured on k3d**. Constrained by ADR-2 (one live server
+per `map_id`) and ADR-1 (one writer per datum). Narrows ADR-14 decision 5, which prescribed a
+buffer autoscaler in general terms; refuses the specific request in issue #148. Does not
+touch ADR-3 or ADR-7.
+
+**The question.** The map fleet `map-servers-dotnet-k8s` is pinned at `replicas: 1` and has no
+`FleetAutoscaler`. Once its one pod is `Allocated` the fleet reports `ready=0`, which looks
+like a fleet running out of capacity, and the obvious remedy — Agones' own buffer model, "keep
+N Ready spare" — was proposed on exactly that reading. It is the wrong remedy, and the reason
+is not capacity.
+
+**Decision 1 — no `FleetAutoscaler` may target a fleet that pins one `GAMESERVER_MAP_ID` for
+every replica.** On such a fleet a spare `Ready` pod is not spare. The C# server self-registers
+into Redis at **startup**, immediately after `ReadyAsync()` and before any allocation, keyed by
+the map id it was given (`GameServer.RunAsync`). Every `Ready` replica is therefore a *live
+server* for the same map. Measured on `k3d-rpg-dev`, 2026-08-18, scaling `1 -> 2` with one pod
+already `Allocated`:
+
+```
+t=0.42s  new GameServer appears   state=Scheduled
+t=5.38s  new GameServer           state=Ready
+         SCARD servers:map:map_01 = 2
+```
+
+Two registrants for one `map_id`, **with no allocation involved**. `registry.FindServer` then
+returned the *least loaded* of the two — the unallocated spare — so live players were handed the
+pod Agones is free to delete on the next scale-down, and the two halves of `map_01` cannot see
+each other. (Since #203 it returns the lowest `ServerID` instead, which is no longer reliably the
+spare, but which of the two copies is served was never the problem — that there are two is.) The autoscaler would be the thing that broke ADR-2. The fleet was restored to
+`replicas: 1` immediately.
+
+**Decision 2 — `ready=0` on this fleet is the correct steady state, and tooling must say so.**
+The previous `cluster.fleet` WARN ("no spare capacity") described the invariant holding as
+though it were a deficiency, and a warning that fires on the correct state is an instruction to
+break it — which is how #148 came to be filed. `verify.sh` now passes on `ready=0` for a fleet
+that pins a fleet-wide map id, and reserves the warning for fleets where spare capacity is
+meaningful.
+
+**Decision 3 — the prohibition is enforced, not documented.** It was already documented, in
+three places, in capitals, and was proposed anyway. `verify.sh` check `cluster.autoscaler`
+**FAILS** when any `FleetAutoscaler` targets a fleet whose pod template carries a literal
+fleet-wide `GAMESERVER_MAP_ID`, and **stands down** for a fleet that does not — so it stops
+being an error at exactly the moment the real fix lands, rather than becoming the next thing
+someone has to argue past. Proven both ways on 2026-08-18: PASS with none present, FAIL with
+one created against this fleet, then deleted.
+
+**Decision 4 — the unlock is a per-pod map id, and it unlocks both things at once.** `replicas
+> 1` and a buffer autoscaler are the same decision wearing two hats: both are safe exactly when
+a `Ready` pod is not yet claiming a world. Two mechanisms would do it, and neither exists:
+
+1. **Per-pod map id** — the pod learns its map from something other than the fleet spec. This
+   is the one that also fixes the second half of #148 (a second map cannot be served at all
+   today), because allocation targets a *fleet*: every pod of this fleet answers `map_01`
+   whatever the replica count, so an allocation for `map_02` is refused with
+   `ErrFleetMapMismatch` with or without an autoscaler (per-pod map id is tracked as part of
+   #151's "what it does not unblock"). **An autoscaler does nothing for this
+   half of the problem** — that is worth stating, because the two symptoms were filed together
+   and only one of them is about spare pods at all.
+2. **Register on `Allocated`, not on `Ready`** — the server watches its own GameServer state
+   and registers only once Agones has handed it out. Buffer pods then hold no registry entry,
+   the buffer becomes real spare capacity, and the cold start leaves the join path. This is a
+   game-server behaviour change with its own tests, not a manifest change, and is tracked as
+   #151.
+
+   > **Landed 2026-08-18 as an opt-in, #151.** `GAMESERVER_REGISTER_ON_ALLOCATED=true`
+   > (Agones only; ignored with a warning otherwise) polls `GET /gameserver` and registers
+   > only on `Allocated`. An unreadable state is "keep waiting", never "assume allocated",
+   > and the wait runs off the start-up path so the health loop keeps pinging. **Default
+   > off**, so decisions 1-3 above still describe the fleet as it is deployed: the
+   > prohibition and the `verify.sh` `cluster.autoscaler` check stand down per decision 3
+   > only for a fleet actually running with the flag on, and `verify.sh` layer 3 and
+   > `refusal.split_world` must first learn that a `Ready`-and-unregistered pod is
+   > legitimate. `replicas > 1` for a *second map* is untouched — that is mechanism 1.
+
+**What this ADR does not claim.** It does not claim the ~9 s cold start is on the player's
+path. It is not: with no `Ready` pod, `AllocateServer` fails immediately and `FindServer`
+returns `ErrNoServerAvailable` (`gateway/registry/registry.go:559`), which
+`clientSafeAssignError` maps to the terminal `no server available for map`
+(`gateway/server/server.go:886`), so the client gets a refusal in milliseconds rather than a
+wait. (Cold `Ready` measures 5.38 s today, not the 8.97 s in #148 — the image is warm in
+containerd; both numbers are pod-start latency, and neither is a capacity figure. ADR-7 is
+untouched.)
+
+**And it is not a claim that `EnterWorld` never waits.** It does, on a different branch: when
+the allocation *succeeds*, `awaitRegistration` blocks up to `--allocation-wait-timeout` (15 s)
+for the pod's own registry entry, and the client is told `server is starting, retry shortly`
+(`ErrServerStarting`). That wait is correct and deliberate — it is single-flight per `map_id`,
+so a hundred clients at one unserved map produce one pod and one wait. The no-wait property
+above is scoped to the case #148 was actually about: **the fleet having no `Ready` pod to
+allocate at all**, where there is nothing to wait *for* and the refusal is immediate. Confusing
+the two branches is how "add a buffer so the first player stops waiting" became a plausible
+sentence; they are separate paths with separate client messages, tabulated in
+`deploy/k8s/README.md`.
+
+**Revisit when** either mechanism in decision 4 lands. At that point `cluster.autoscaler` stops
+firing by construction, `replicas > 1` becomes a capacity question rather than a correctness
+one, and ADR-14 decision 5's buffer policy becomes the right thing to write — against a fleet
+whose spare pods are spare.
+
+> **Amendment, 2026-09-13 — the revisit happened, from the other direction (ADR-14 stage 7).**
+> Neither mechanism in decision 4 landed for the *map* fleet; what landed instead was a
+> **second fleet** that has the property decision 4 describes from birth. The dungeon fleet
+> (`rpg-k8s-realtime/dungeon-servers-dotnet-k8s`, ADR-26) pins **no** `GAMESERVER_MAP_ID` and
+> its pods register nothing into `servers:map:` (ADR-26 decision 8), so a `Ready` pod there is
+> not claiming a world. `deploy/k8s/app/70-fleetautoscaler-dungeon.yaml` is therefore the first
+> `FleetAutoscaler` in this project: Buffer, `bufferSize: 2`, `minReplicas: 2`,
+> `maxReplicas: 6`, 30s sync.
+>
+> **Nothing above is weakened, and decision 1 is untouched.** The map fleet still pins a
+> fleet-wide map id, still runs `replicas: 1`, and still may not have an autoscaler.
+> Decision 3's check needed **no loosening** to admit the dungeon one: `fleet_wide_map_id`
+> already returned empty for a template with no `GAMESERVER_MAP_ID`, which the check already
+> treated as "not pinned". What it needed was **reach** — it inspected only the single fleet a
+> verify target names, which was every fleet in the cluster when there was one fleet and is
+> half of them now. It sweeps every Fleet in `VERIFY_NAMESPACES` as of the same date.
+>
+> `maxReplicas: 6` is a **leak bound rather than a capacity figure**, and that is the one new
+> piece of reasoning here. ADR-26 records, measured, that a dungeon pod which is Allocated and
+> never joined is never reclaimed. A buffer autoscaler with no ceiling turns that from a
+> visible outage into an unbounded one, because it replaces each leaked pod. The cap is what
+> makes the leak hit a wall an operator can see, and it should not be raised before the bounded
+> join deadline ADR-26 asks for exists. ADR-7 is still untouched: nothing here is keyed on
+> players per server, because that number is still unknown.
+>
+> **A `minReplicas` floor overrides a manual scale, which is an operational rule, not a
+> footnote.** `60-fleet-dungeon.yaml` ships `replicas: 0` so `apply` cannot create a pod on the
+> moving `:develop` tag before `dev-up.sh` pins the image; an autoscaler applied in the same
+> breath defeats that within one sync interval. So the autoscaler is applied **after** the pin,
+> and `K8S_DUNGEON_REPLICAS=0` **deletes** it rather than scaling against it.
+
+---
+
+## ADR-19 — Game content is data on disk, served over HTTP, and never travels through the shared-code package
+
+**Status:** accepted 2026-08-22, **implemented and proven end to end** on the first content
+type (items). Extends ADR-10 (the pure-logic boundary) by adding a *second* shared thing —
+a schema — and deliberately declining to share the third, a parser. Does not touch ADR-3;
+content is fetched from the game server, not the gateway.
+
+**The question.** Both repos were about to start on gameplay content, and there was no
+channel to carry it. `Shared.GameLogic` is the only thing the two repos share, and it is a
+C# assembly pinned in the client by exact commit through `packages-lock.json`. Putting item
+stats or loot tables in it means that adding one item costs: edit, commit to
+`rpg-mmo-server`, cut an `sgl-v` tag, bump **both** `manifest.json` and `packages-lock.json`
+in the Unity repo, and wait for Unity to re-resolve. A full cross-repo release cycle for one
+number.
+
+That loop is correct for simulation rules, which change monthly and *must* change on both
+sides at once or prediction diverges. It is fatal for content, which changes hourly and
+whose whole value is iteration speed. Nothing about the existing pipeline was wrong; it was
+being asked to carry a load it was never shaped for.
+
+**Decision 1 — content is JSON files on disk in `backend/content/`, and the game server is
+their only source of truth.** Not a database: content is authored, reviewed and diffed like
+code, and a schema migration for every balance tweak is the cost of putting it in Postgres.
+Not in the client repo: the server validates and enforces every rule, so content that the
+server has not seen cannot mean anything.
+
+**Decision 2 — the server loads and validates content at boot, and refuses to start when it
+does not validate.** Every problem in the file is reported in one pass, so one restart
+clears them all rather than one per typo. Measured on a deliberately broken file, the server
+exits 1 and prints all four faults with the item id and the field against each.
+
+This is fail-fast rather than fail-soft on purpose. A server running on half-parsed content
+serves an unknowable subset of the intended game, and each downstream symptom — a missing
+item, a wrong stat, a loot table pointing at nothing — gets attributed to whichever system
+noticed it first instead of to the file that was wrong.
+
+**Decision 3 — clients fetch content over HTTP from the game server, at `/content`, keyed by
+a hash.** The endpoint sits on the existing metrics listener beside `/metrics`, `/healthz`
+and `/status`, so it costs no new port, no new protocol message and no change to the wire
+schema. A client that already holds the current set sends `?hash=` and receives `304 Not
+Modified` with no body, which keeps the fetch off the join path after the first time:
+content changes only when a server restarts, so the steady-state answer is always 304.
+
+The hash is returned in both `ETag` and `X-Content-Hash`. The second is not redundant —
+`UnityWebRequest` and several proxies rewrite or strip `ETag`, and a client that cannot read
+back the hash it was given has no way to ask for a 304 next time, silently turning every
+join into a full download.
+
+**Decision 4 — the schema is shared, the parser is not.** `Shared.GameLogic/Content/` holds
+the definition types and the validation rules, compiled into both sides exactly as the
+simulation logic is. Parsing is per-side: the server uses `System.Text.Json` with source
+generators, the client uses its own reader.
+
+This is forced, not preferred. Unity compiles `Shared.GameLogic` **as source** and has no
+`System.Text.Json`; the server publishes NativeAOT and cannot use reflection. There is no
+single parser that satisfies both. Sharing the schema and the validator keeps the two sides
+agreeing on what content *means* and on what "valid" means, which is the part that matters;
+two readers of the same document is a smaller risk than one reader that cannot be compiled
+on one of the two runtimes.
+
+Golden vectors stand where a shared parser would have, exactly as ADR-10 already does for
+the wire format.
+
+**Decision 5 — the client validates what it downloads, and this grants it nothing.** A
+truncated or half-written response is indistinguishable from a valid one until something
+checks it, and without a check the client discovers the problem as a null reference several
+screens later. Validation answers "is this content coherent", never "may this player have
+this item". The server still owns every gameplay decision; a client that edits its own copy
+changes only what it draws.
+
+**What this costs.** Content changes require a **server restart** — there is no hot reload,
+and the `ContentDatabase` is immutable for the life of the process. That is deliberate: a
+world whose rules changed underneath a running simulation would make every desync
+unreproducible. The iteration loop is edit → restart → clients pull, with no rebuild, no
+tag, and no package bump, which was the whole point.
+
+**What is not decided here.** Whether later content types (abilities, loot tables, NPCs,
+maps) each get their own file or share one; whether content is ever signed; and whether the
+gateway should serve content too, so a client can prefetch before it has a game server. The
+first is a naming question, the second only matters once content is delivered over an
+untrusted path, and the third is worth revisiting if the first-join fetch ever shows up in a
+join-latency measurement.
+
+## ADR-20 — Duplicate-login kick reaches the game server over one shared Stream, keyed by join-token jti
+
+**Status:** accepted 2026-09-04, **implemented and proven end to end**
+(`integration_test/duplicate_login_kick_e2e_test.go`). Closes the gap #211 left
+recorded in ADR-17: a user already *playing* was never evicted on a new login —
+the gateway's local kick closes only the gateway socket, and the client talks to
+the game server directly (ADR-3), so the old gameplay connection lived on. This
+was true even at one gateway replica, which is why this half did not wait for
+the multi-replica decision the way the gateway→gateway half does.
+
+**The mechanism.** On duplicate login (an existing session for the user, not a
+re-auth on the same socket), `handleAuth` publishes a `session_superseded` event
+onto the `events:kick` Redis Stream (`gateway/server/kick.go`), carrying the old
+session's **join-token jti** — recorded on the session at EnterWorld
+(`SessionData.JoinTokenJTI`). Every game server consumes the stream through its
+**own consumer group** (`gs:{server_id}`, consumer = server id, ACK after
+handling — ADR-5's shape, never the Pub/Sub shape #211 deleted), keeps the
+events whose `server_id` names it, and calls `KickPlayerAsync`: save, `MsgKick`
++ `MsgDisconnect` (both `reason=duplicate_login`, the gateway's two-frame
+eviction contract), remove the entity, close — and **no reconnect hold**,
+because the kicked login's token is spent and a newer login owns the user.
+
+**Why the jti is the key.** The event is published at auth time; the new login
+joins the game server later, possibly before the event is consumed. Any
+"kick user X" signal without a discriminator loses that race and kicks the NEW
+login. The jti names exactly one accepted connection (join tokens are single-use
+via JTI replay protection), so a late or redelivered event matches nothing once
+the old connection is gone — newest login wins by construction, and
+at-least-once delivery is idempotent with zero dedup state.
+
+**Why one shared stream, not a stream per server.** Server ids churn (dungeon
+instances, pod restarts) and this Redis runs `noeviction` (ADR-4): per-server
+keys would accumulate without bound, while one `events:kick` stays trimmed by
+the publisher's `MAXLEN ~`. A server that is down never ACKs — that strands only
+its own group's PEL, which stops growing when the process stops reading; the
+group starts at `$` (a kick for a connection that died with the old process is
+a no-op by definition, so history is worthless) and is destroyed on graceful
+shutdown, so retired ids leave nothing behind. A crash leaves the group; the
+next boot with the same id drains the stale PEL into jti-guarded no-ops.
+
+**Observability.** Gateway: `gateway_kick_publish_total{result}` + the
+`published session supersede` log line. Game server:
+`gameserver_players_kicked_total`, `/status` fields `players_kicked` and
+`kick_consumer`, and one info line per kick. A publish failure is loud (the old
+connection will NOT be kicked) but never fails the new login.
+
+**One implementation note that cost a day of debugging in miniature:** the C#
+consumer pins **RESP2** on its connection. SE.Redis v3 negotiates RESP3, and
+miniredis (the in-process Redis the E2E suite uses) accepts `HELLO 3` but
+answers `XREADGROUP` in the RESP2 array shape — which SE.Redis under RESP3
+silently parses as an *empty* result: the consumer polls forever, every kick is
+lost, and nothing errors. XREADGROUP reply parsing is the one thing this
+connection's correctness rides on, and RESP3 buys it nothing.
+
+**What this ADR does not decide.** The gateway→gateway eviction (a gateway
+socket held by another replica) stays with ADR-17's multi-replica bundle, and
+the client-visible vocabulary is unchanged — a kicked client sees exactly the
+frames the same-gateway eviction already defined.
+
+---
+
+## ADR-21 — Transport confidentiality: what exists is a pre-shared key on the non-default transport, and it is not a session key
+
+**Status:** **proposed 2026-09-09, NOT accepted.** Records the measured posture and the options; decides nothing. Raised because a survey of the remaining infrastructure gaps first reported "the game link is not encrypted", and that was **wrong** — encryption exists. The accurate finding is narrower and more specific, and it is written here so the next survey does not repeat the error in either direction.
+
+### What is actually there, verified 2026-09-09
+
+`GameServer/Net/Transport/KcpCrypto.cs` implements packet encryption compatible with `github.com/xtaci/kcp-go/v5`'s `NewAESBlockCrypt`, matching `backend/shared/transport/crypto.go` byte for byte, down to a shared HKDF domain-separation string (`rpg-mmo/transport/kcp/aes-256`). AES-256, CFB mode, kcp-go's fixed IV, a 16-byte random per-packet nonce ahead of the plaintext to make the first ciphertext block differ, and a CRC32 inside the encryption. The key comes from one environment variable, used verbatim at 64 hex chars and stretched with HKDF-SHA256 otherwise. A peer with the wrong key decrypts to noise, fails the CRC, and never forms a session — fail-closed, asserted by tests on both sides.
+
+That is real, it is symmetric across the Go and C# implementations, and it should not be described as absent.
+
+### The four things it is not
+
+1. **It is off by default, twice over.** The transport default is `tcp`, not `kcp` (`GameServer/Program.cs`, `--transport`), and TCP has no encryption path at all. Independently, the key variable defaults to `""`, and empty means plaintext. So the shipped default configuration carries gameplay traffic in the clear on both counts, and nothing reports that it is doing so.
+2. **A pre-shared key is not a session key.** Every client shares one static key, so it is a secret that ships inside the game binary. It resists a passive observer on the network path. It does not resist a *player*, who has the key by construction. There is no per-session key exchange, no forward secrecy, and no rotation story: changing the key is a simultaneous redeploy of every server and every client.
+3. **There is no negotiation and no key id.** The class says so itself. That is a deliberate and defensible choice — it removes the downgrade attack that negotiation invites — but it means a key rotation is a hard cutover, not a rollout, and it interacts directly with the protocol-versioning gap being closed separately.
+4. **CFB with a CRC32 is confidentiality, not authentication.** CFB is malleable and CRC32 is linear. The construction is inherited from kcp-go and compatibility with it is the reason to keep it; it is not a modern AEAD and should not be described as one. Anyone reasoning about an *active* attacker, as opposed to an eavesdropper, must not treat the CRC as a MAC.
+
+### Why this is deferred rather than fixed
+
+Every environment this system currently runs in is localhost or LAN: dev on the box, staging on `k3d-rpg-stg`. There is no public hop to protect yet, and ADR-15/16 record that the hosting shape above dev is not settled. Choosing an AEAD, a key-exchange, and a rotation story before knowing the deployment shape means choosing them twice.
+
+Deferral is also cheap to reverse *and* expensive to get wrong: this is the one gap on the list where a plausible-looking implementation that is subtly weak is worse than the honest plaintext default, because it moves the system from "known unprotected" to "believed protected".
+
+### What must happen before it is accepted, in order
+
+1. **A threat model, written down.** Passive network observer, active on-path attacker, and a malicious *player* are three different adversaries and the current design answers only the first. The third is the one a game actually faces, and no transport encryption addresses it — that is server-authority's job, which ADR-10 already assigns.
+2. **Stop defaulting to silence.** Independent of any crypto decision, the server should report its transport and whether a key is in force, at startup and in metrics. A deployment that believes it is encrypted and is not is the failure this repository keeps documenting under a different name. **This step is worth doing on its own merits and does not wait for the rest of this ADR.**
+3. **Then** choose the construction, against the deployment shape ADR-15/16 settle — and prefer a vetted implementation over anything hand-rolled. Note the constraint from the client side: a UPM package cannot declare a scoped registry, so any library must be source-only or a vendored assembly that survives Unity IL2CPP as well as NativeAOT on the server.
+
+### Decision
+
+None. This ADR is a record, not a change. Nothing in the code moves on it.
+
+---
+
+## ADR-22 — Transport crypto: ChaCha20-Poly1305 over an authenticated X25519 exchange, with the nonce as the replay counter
+
+**Status:** accepted 2026-09-10 as the target model, and **implemented on the server and in the Go clients** — the C# game server (`GameServer/Net/Sealed`), the Go implementation (`backend/shared/sealed`) and the Go load/smoke harnesses all speak it, with published RFC vectors and a shared cross-implementation vector pinning the bytes between them. **It is now the default**: `GAMESERVER_SEALED` defaults to `require`, so a stock server encrypts the gameplay hop and refuses every client that cannot seal. The Unity client half is written but not yet on the release cadence, which is why the local compose stack pins the flag off (see `backend/deploy/docker-compose.yml`). Normative wire format: `backend/docs/SEALED-FRAMING.md`.
+
+Supersedes the deferral in ADR-21 and supersedes the key-derivation scheme merged in #288, which is retained for the parts of it that carry forward.
+
+### The model
+
+```
+X25519 ephemeral exchange, authenticated by the join token
+        |
+        v
+HKDF-SHA256( ikm  = X25519(eph_priv, peer_pub) ‖ bind
+             salt = jti
+             info = "cuvara/session/v1" )
+        |
+        v
+ChaCha20-Poly1305 per frame, nonce = monotonic sequence number
+        |
+        v
+receiver rejects nonce <= highest seen  ->  replay protection
+```
+
+Where `bind` is material only a holder of `JOIN_TOKEN_SECRET` can produce.
+
+### Why each piece, and what it is not there for
+
+**None of this reduces cheating.** A cheater is a legitimate player holding the client, the session and any key inside it. This defends against a third party on the network path. The anti-cheat work is A1-A6 in `ROADMAP-SECURITY.md` §1. Anyone reading this ADR as an anti-cheat measure has misread it.
+
+**ChaCha20-Poly1305, not AES-GCM.** An AEAD rather than a cipher plus a MAC, so there is no encrypt-then-MAC ordering to get wrong, no "the MAC must cover the nonce" to forget, and no constant-time comparison to botch — the failure modes an earlier draft of the roadmap accepted when it recommended AES-CTR + HMAC. ChaCha20 is also designed to be fast **without** hardware AES, which is exactly the platform that lacks it (see the measurement below).
+
+**X25519, not derivation from a long-term secret.** #288 derived the session key as `HKDF(JOIN_TOKEN_SECRET, jti)`. That has no forward secrecy: the key is a pure function of a long-term secret and a `jti` that travels in the clear, so **anyone who later obtains `JOIN_TOKEN_SECRET` decrypts every recorded past session**. A DH exchange removes that, and removes the gateway-hop key delivery ADR-21 and #288 both had to record as a limitation.
+
+**The exchange MUST be authenticated, and echoing the token is not enough.** An unauthenticated X25519 on a plaintext hop is a clean man-in-the-middle: the attacker completes one exchange with each side and both ends see a perfectly healthy encrypted session, with nothing to observe. The binding must **prove possession of secret-derived material**, not merely present the token — an eavesdropper can read the token off the wire and replay it. This is the condition that makes the whole model safe; without it the model is worse than useless, because it produces confidence.
+
+**The rule has a forward half, and stating only the backward half is incomplete.** "Reject any
+nonce at or below the highest seen" says nothing about a large forward *jump*, which burns nonce
+space and forces an early rekey. The exposure is bounded — a forged frame cannot advance the counter
+because it will not authenticate, so only the genuine peer can do this, and only to itself — but the
+rule must say so rather than leave it unstated. **Bound the forward jump.**
+
+**Three conditions attach to choosing a bare counter**, because the ordering guarantee is *inherited
+rather than owned*: the C# KCP is a hand-port and this rests on roughly ten lines of
+`MoveRcvBufToQueue`.
+
+1. **Assert the ordering contract, do not assume it.** Refuse to operate over a transport that does
+   not declare ordered delivery, so a future QUIC-datagram or raw-UDP path **fails closed** instead
+   of silently reusing nonces.
+2. **Count rejections, do not merely perform them.** A replay validator that refuses silently is
+   indistinguishable from one that is never exercised.
+3. **Bound the forward jump**, per the paragraph above.
+
+**The nonce is the sequence number, and that is two problems solved by one mechanism.** ChaCha20-Poly1305 authenticates each frame but does **not** stop a valid frame being replayed. With a per-session key, using a monotonic counter as the nonce and rejecting any nonce at or below the highest seen gives replay protection for free — and simultaneously removes nonce reuse, which is the catastrophic failure mode of this AEAD. A sliding window is needed only if the layer below can reorder; KCP delivers reliably and in order, but **the crypto layer must not depend on that** and should enforce its own ordering.
+
+### What the client runtime actually provides — measured, not assumed
+
+Run in a **built IL2CPP player** (Windows, `ManagedStrippingLevel.Minimal`), not the Editor, because Mono and IL2CPP use different class-library profiles (`unityjit` vs `unityaot`) and the Editor's answer does not transfer:
+
+```
+platform : WindowsPlayer
+runtime  : Mono Unity IL2CPP
+
+AesGcm                     : THREW PlatformNotSupportedException
+ChaCha20Poly1305 (reflect) : TYPE ABSENT
+HKDF (reflect)             : TYPE ABSENT
+ECDiffieHellman (reflect)  : TYPE ABSENT
+Aes (raw block)            : OK
+HMACSHA256                 : OK
+RandomNumberGenerator      : OK
+```
+
+`AesGcm` **compiles and then throws** — the type is in the reference assembly and the implementation is not. That is the worst available failure mode: it type-checks, so an implementation written against it passes review, passes compilation, passes CI, and fails on a device.
+
+Measured on .NET 10.0.10 as well, because assuming the server side was the mistake that produced two of the superseded recommendations:
+
+```
+ChaCha20Poly1305           : OK -- round trip + rejects a tampered tag
+HKDF                       : OK
+X25519 via ECDiffieHellman : curve25519=no  X25519=no  Curve25519=no
+X25519 native type         : absent from System.Security.Cryptography
+```
+
+| | Go | .NET 10 (measured) | Unity IL2CPP (measured) |
+|---|---|---|---|
+| ChaCha20-Poly1305 | `x/crypto`, already a dependency in 5 modules | **built in** | **absent** |
+| X25519 | `x/crypto/curve25519`, same | **ABSENT** | **absent** |
+| HKDF-SHA256 | built in | **built in** | **absent** — build from `HMACSHA256` |
+
+**X25519 is missing from two of the three runtimes, not one.** That is worse than this ADR first assumed and it tightens the library requirement rather than loosening it: the client needs ChaCha20-Poly1305 **and** X25519, the .NET server needs X25519, and **the same pure-C# library should serve both** — solving two runtimes once. It must not be a native plugin, since a UPM package cannot declare a scoped registry and IL2CPP ships to platforms where a native binary is a per-platform build-matrix cost.
+
+Go needs nothing vendored on any of the three. A UPM package cannot declare a scoped registry, so it must be source or a vendored assembly, and it must be verified in an IL2CPP **player build** — AOT can break generics, `unsafe` and `Span` in ways the Editor never shows.
+
+### Alternatives rejected
+
+**GameNetworkingSockets (Valve).** Genuinely good and battle-tested, with real per-session crypto. Rejected because adopting it replaces the transport rather than adding crypto to it: ~950 lines of Go transport, ~3 700 of C#, ~2 000 of Unity netcode, plus the delta encoder, id interning, golden vectors and the protocol-version handshake that sit on top. It is C++, so it needs native bindings for three runtimes and has no official Go support — and `backend/loadtest` is Go and speaks the game protocol directly, so adopting GNS **deletes the harness that performed this project's live acceptance runs**. Revisit only if a measured need appears (NAT punching, relay, or transport cost shown to be a bottleneck); the migration cost will not have grown.
+
+**Hazel Networking.** C#-only, so no Go side at all, and its crypto story is thin — DTLS exists only in some forks. Strictly worse than GNS for the one thing being asked of it.
+
+**Terminate TLS at the edge (ADR-21 option D).** Still the right answer for the gateway hop eventually, and still blocked on the hosting shape ADR-15/16 leave unsettled.
+
+**Keeping AES-256-CFB and adding a MAC.** Rejected: CFB with a CRC32 is what exists today, the CRC is linear and is not a MAC, and bolting on an HMAC by hand reintroduces every composition error an AEAD removes.
+
+### Decisions
+
+1. **Target model is as above**: ChaCha20-Poly1305 over an authenticated X25519 exchange, HKDF-SHA256 for derivation, nonce-as-sequence for replay protection.
+2. **The DH exchange must be authenticated by proof of possession of `JOIN_TOKEN_SECRET`-derived material.** An implementation that merely echoes the join token is rejected at review.
+3. **No negotiation and no fallback.** "Client did not present a key" means *no session*, never *plaintext session*. A negotiable path is a downgrade attack. `KcpCrypto` already fails closed; match it.
+4. **Standard implementations only.** No hand-written cipher, MAC or curve on any side.
+5. **Cross-implementation test vectors are a deliverable, not an afterthought.** Each side generates, the other two decrypt and confirm. An implementation that is subtly wrong still round-trips against itself and reports no error anywhere.
+6. **`EnterWorldResponse.session_key` (field 5) is reserved, not reused**, once X25519 makes it dead weight. Reusing a field number is how two versions silently disagree about what a byte means.
+7. **The key is never printable**, enforced by a redacting type rather than by discipline — as shipped in #288 and to be carried forward. The realistic leak is a struct handed to a formatter by code that did not know it held a secret.
+8. **This does not ship until the gateway hop is also confidential.** Until then the model's guarantees are bounded by a plaintext hop, and saying otherwise would produce exactly the *believed protected* state ADR-21 was written to prevent.
+
+### What is carried forward from #288
+
+The redacting key type, the no-fallback rule, the shared cross-implementation vector and the `jti` plumbing all survive. What is superseded is only the derivation itself.
+
+### Open, and to be closed before implementation
+
+- ~~X25519 availability on .NET 10~~ — **CLOSED, measured: absent.** `ECDiffieHellman` rejects `curve25519`, `X25519` and `Curve25519` as friendly names, and no X25519 type exists in `System.Security.Cryptography`. The server must vendor it too.
+- ~~Which pure-C# library~~ — **CLOSED: `BouncyCastle.Cryptography` 2.7.0**, and it is the only
+  candidate that provides X25519 at all. `NaCl.Core` 2.2.0 is an excellent AEAD in 33 KB and has
+  **no curve**, so the lightweight two-library route dies on X25519 rather than on the cipher.
+  Verified against RFC 8439 §2.8.2, RFC 7748 §6.1 in both directions, and RFC 5869 A.1, plus
+  cross-checked against Go `x/crypto` over a real exchange with random keys — and then run **in a
+  built Windows IL2CPP player at both `Minimal` and `High` stripping**:
+
+  ```
+  [PASS] ChaCha20-Poly1305 (RFC 8439 s2.8.2)   [PASS] rejects a tampered tag
+  [PASS] X25519 (RFC 7748 s6.1)                [PASS] HKDF-SHA256 (RFC 5869 A.1)
+  [PASS] key generation uses a working RNG
+  Minimal and High produced identical output.
+  ```
+
+  The `High` run is not ceremony: a third-party report describes an **Android** IL2CPP CIL-Linker
+  failure on BouncyCastle 2.x, and only a `High` build exercises the linker question at all. It did
+  not reproduce here with the `link.xml` in the survey. **That result is Windows; the Android report
+  is not disproved by it** and should be confirmed on a device before shipping to Android.
+
+  Cost, stated because it is real: **4.7 MB and 2 350 public types** in a package that has almost no
+  dependencies today, and IL2CPP converts to C++ every type the linker keeps.
+
+- ~~Whether KCP's ordering removes the need for a sliding window~~ — **CLOSED: it does. Use a strict
+  counter, no window**, subject to the three conditions below. Measured with real `tc netem`
+  impairment on **both** transports: **zero inversions and zero duplicate frames across 22 374
+  frames**, under clean, `reorder 30%`, `loss 10%`, and a hostile `reorder 25% + loss 8% +
+  duplicate 5%` mix, plus a 20-player run and a reconnect. Duplicated *datagrams* never became
+  duplicated *frames* — both stacks discard them below the decode — and `ReadLoopAsync` is strictly
+  serial per connection, so there is no concurrency at the decode layer to reintroduce disorder.
+
+  **The recommendation does not rest on the number.** Zero measured is not zero possible, and the
+  deciding argument is the failure mode: **a strict counter that is wrong breaks the session loudly
+  and the client notices immediately; a window that is wrong accepts a frame it should have refused
+  — a silent replay.** In a layer whose entire job is refusing things, take the mechanism that fails
+  loudly.
+
+---
+
+## ADR-23 — The gateway hop gets TLS, not a second sealed handshake; and the credential it exposes leaks one hop earlier
+
+**Status:** accepted 2026-09-10 and **ON for dev from 2026-09-13**; still OFF for staging and production, which is a per-cluster decision rather than a manifest edit now. The gateway terminates TLS in process behind `GATEWAY_TLS_CERT`/`GATEWAY_TLS_KEY`, and those two env vars read from an **optional ConfigMap key** so one cluster can have it on while another does not -- the manifest is applied unchanged to dev and staging, and a literal path there would turn TLS on for both at once while the cluster without the Secret failed to start. **Measured on `k3d-rpg-dev` 2026-09-13**: the gateway logs `tls:true,encrypted:true,authenticated:true`, `openssl s_client` negotiates TLSv1.3, a pinned smoke run reaches `SMOKE=PASS` with `sealed=true` on the gameplay hop, a **different valid self-signed certificate is refused by name**, and an unpinned client gets `read length: EOF` -- the closed socket this ADR predicted, which names nothing. The asymmetry is the point: a wrong pin explains itself, a missing one cannot, which is why `verify.sh` now reads whether TLS is on from the CLUSTER and fails when the two disagree. The client half shipped in netcode v0.36.0. What is still undecided is **production**: a pin shipped in a player build makes rotation an app-store release, so production waits for a hostname and a trusted certificate.
+
+Follows ADR-22, which sealed the **gameplay** hop and whose decision 8 says the model "does not ship until the gateway hop is also confidential". This ADR is that work, and it changes what "that work" means.
+
+### 1. What was measured, and the measurement that was missing
+
+The 2026-09-10 two-hop tap recorded in `ROADMAP-SECURITY.md` was **reproduced and is correct**. A byte-logging TCP relay was placed on both hops of a fully sealed session and every JWT crossing either hop in the clear was decoded with no key:
+
+| hop | credential | lifetime | single-use | reproduced |
+|---|---|---|---|---|
+| gateway | auth token | 3600 s | no | ✅ |
+| gateway | join token | 30 s | yes | ✅ |
+| gameplay | join token (same `jti`) | 30 s | yes | ✅ |
+
+All four columns now have an executable form. `integration_test/hop_confidentiality_tap_test.go` taps both hops at once and reads the credentials out of the recording; the "single-use" column, which a tap cannot show, is measured by **replaying each captured credential from a fresh connection** — the auth token is accepted twice and mints a fresh join token on the second use; the join token is refused on replay by `JtiTracker`.
+
+**But the tap was pointed at the wrong end of the path.** The auth token does not originate on the gateway hop. It is *minted* one hop earlier, by Nakama's `gateway_token` RPC, and delivered to the client over **plain HTTP**. That hop was never tapped. It has been now, against the live dev stack:
+
+| hop | protocol | credentials readable in the clear |
+|---|---|---|
+| **client → Nakama (meta)** | **HTTP/1.1, no TLS** | **Nakama session token (2 h, reusable, mints gateway auth tokens on demand)**; Nakama refresh token (1 h); **the gateway auth token itself (1 h)**; the Nakama server key, as HTTP Basic |
+| client → gateway | raw TCP + protobuf | gateway auth token (1 h, reusable); join token (30 s) |
+| client → game server | raw TCP + protobuf | join token (30 s) — sent before the seal exists; everything after is ChaCha20-Poly1305 (ADR-22) |
+
+`docker-compose.yml` starts Nakama with no `--socket.ssl_certificate`, `NAKAMA_URL` is `http://` in compose and in the load harness, and `deploy/k8s/data/nakama.yaml` exposes port 7350 with no Ingress and no TLS. There is no environment in which this hop is encrypted today.
+
+**This inverts the conclusion the task was framed on.** Sealing the gateway hop while the meta hop is plaintext is precisely the error `ROADMAP-SECURITY.md` already caught once for the join token: *the same credential crosses an unprotected hop first, so closing the second hop leaves the value it was protecting already spent.* An attacker positioned to read the gateway hop is on the client's network path, and the meta hop is on the same path. Worse, the meta hop carries a **strictly more valuable** credential than the one the whole exercise is about: a two-hour Nakama session token that mints one-hour gateway auth tokens for as long as it lives. Capturing the auth token wins an hour; capturing the session token wins two hours *and* renewal.
+
+**A note on the instrument, because it was wrong first.** The first Nakama capture found no gateway auth token and it would have been easy to report that as good news. The token was there; the response was **gzip-encoded**, and a byte scan for `eyJ...` cannot see through gzip. Compression is not confidentiality — the finding was an artefact of the tap, not a property of the hop — and re-running with `Accept-Encoding` suppressed showed all four credentials. Any future tap on an HTTP hop must account for content coding, and a real Unity client sends `Accept-Encoding: gzip` too.
+
+### 2. Why "reuse the sealed machinery" is more expensive than it looks
+
+The gameplay-hop handshake anchors on the join token's `jti` plus `JOIN_TOKEN_SECRET`: the server proves possession of secret-derived material, and the client is authenticated by the token. **On the gateway hop none of that exists at connect time.** The client holds only its Nakama auth JWT, which is a *client* credential and cannot authenticate the *gateway* to the client. There is no shared secret a shipped player may carry — that is the pre-shared-key mistake ADR-21 records and ADR-22 supersedes.
+
+Three costs that are not visible from "we already have `shared/sealed`":
+
+1. **The Go server half of the sealed handshake does not exist.** `backend/shared/sealed` is a *client* implementation plus primitives. `RunClientHandshake` exists; there is no `RunServerHandshake`, and `ValidateClientHello` is called from nowhere in the repository, not even a test. The only server half ever written is C# (`GameServer/Net/Sealed/SealedHandshakeServer.cs`). Sealing the gateway hop means writing a **new server half of a security protocol, in a language where it has never been written**, and the failure mode of getting it subtly wrong is a session that round-trips perfectly and protects nothing.
+2. **`Transcript` refuses an empty `jti`, and the gateway hop has no `jti`.** A new anchor has to be invented, which means a second transcript shape inside a protocol whose entire safety argument is that both peers agree on one byte layout.
+3. **`messages.Decode` fuses the length prefix and the body decode**, and sealing has to happen between them. The gateway's read path (`connection.go:484`) and write path (`connection.go:535`) both have to be split.
+
+Against that, wrapping the listener in TLS is `tls.NewListener` around the `net.Listener` that `transport.Listen` already returns. **No framing change at all.**
+
+### 3. Options, with what each does not buy
+
+#### Option A — unauthenticated ephemeral X25519 on the gateway hop
+
+Reuse the sealed exchange with no binding, the way `ClientHandshakeConfig` already permits by leaving `JoinTokenSecret` empty (`BindingVerified=false`).
+
+- **Buys:** closes the *passive* capture that was measured on the gateway hop. Composes with anything better later.
+- **Does not buy:** any MITM protection — an active attacker completes one exchange with each side and both ends see a healthy encrypted session. Nothing on the meta hop.
+- **Cost:** items 1–3 above, plus client work.
+- **The hidden cost, and it is the reason to reject rather than defer.** On the gameplay hop `BindingVerified=false` is honest reporting of a *degraded* case: the verified case exists, the load harness runs it, and a shipped client that cannot check is told so. On the gateway hop there would be **no verified case, ever** — the field would report a distinction that does not exist. That permanently installs an unauthenticated mode inside a protocol whose ADR-22 decision 3 is "no negotiation and no fallback", and it converts an honest instrument into a decorative one. A boolean that is always false is worse than no boolean, because the next reader assumes the true case is reachable.
+
+#### Option B — pinned gateway identity key
+
+- **Buys:** real MITM protection on the gateway hop, with no CA.
+- **Does not buy:** anything on the meta hop. Nakama is a third-party binary; no bespoke key of ours goes in front of it.
+- **Cost:** key distribution and rotation, shipped in a built player.
+- **The hidden cost:** pinning makes rotation a client release. A compromised or lost gateway key is then repaired at **app-store review latency — days — not deploy latency**, and until then every installed client either fails closed (an outage) or falls back (a downgrade attack). This is ADR-21's complaint about the pre-shared key reappearing in a new place with a better cipher, and the PSK at least did not require a store submission to fix.
+
+#### Option C — TLS on the gateway hop
+
+- **Buys:** confidentiality *and* authentication with a real CA, no key in the player, standard rotation, a standard implementation (ADR-22 decision 4), and it is the mechanism the gateway's own posture warning has been recommending on every boot since the posture work landed. Uniquely among the options, **the identical mechanism closes the meta hop**, which carries the more valuable credential and where no bespoke protocol is available.
+- **Does not buy:** anything against a malicious *player* — see ADR-22, this is not anti-cheat. Nothing on the gameplay hop, which is already sealed and stays sealed: game servers are Agones-allocated pods reached by ephemeral address, and putting a CA-issued certificate in front of each is a problem TLS does not solve for us.
+- **Cost:** certificates, a DNS name, renewal, and the client must speak TLS. `SslStream` under IL2CPP is **not verified** — it is the go/no-go for this option and it is the same shape of risk that `AesGcm` turned out to be in ADR-22, so it must be tested in a **player build**, not the Editor.
+- **The hidden cost, stated because it is the one that decides where the terminator goes.** TLS *terminated at an edge* is confidential **to the edge, not to the gateway**: everything past the terminator is plaintext on the pod network, so an edge terminator moves the trust boundary rather than removing it. On the single-node k3d dev and staging boxes the terminator and the gateway are the same host, so an edge-terminated deployment there would buy **nothing at all** while reporting itself as encrypted — the "believed protected" state ADR-21 exists to prevent. **This is why the implementation terminates TLS in the gateway process itself** rather than recommending an ingress: it is the only placement whose guarantee does not depend on a hosting shape ADR-15/16 have not settled. An external terminator remains compatible and can be added in front later.
+
+#### Option D — shorten and single-use the auth token instead of hiding it
+
+Reduce `constants.SessionTTL` and give the gateway auth token a `jti` consumed once, mirroring the join token.
+
+- **Buys:** reduces the auth token from "one hour, reusable" to the join token's class on **every hop at once**, including the meta hop, with no protocol change, no client crypto and no ops change.
+- **Does not buy:** confidentiality. User ids, map ids and the flow stay readable. It reduces the value of one captured item; it encrypts nothing.
+- **Cost:** the client must fetch a token per gateway connection, so **every reconnect becomes a Nakama round trip — at exactly the moment the network is bad**. It also converts a Nakama outage from "connected players are fine" into "any reconnect fails", which is a worse availability posture than the one it improves on.
+- **And it misses the worst credential.** `constants.SessionTTL` is the gateway auth token's lifetime *and* the Redis session key TTL (`gateway/session/manager.go:73,117,141`) — two independent meanings on one constant, so shortening it shortens the session record too. Meanwhile the **two-hour Nakama session token** is set by Nakama's own `--session.token_expiry_sec` and is untouched by any of this.
+
+### 4. Decisions
+
+1. **Do not build a second sealed handshake for the gateway hop.** Option A is rejected on the always-false-`BindingVerified` argument above, not merely on cost. Option B is parked; revisit only if TLS is shown impossible on a target platform.
+2. **The gateway hop gets TLS, terminated in the gateway process**, behind `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY`. Unset means plaintext and is the default, matching how `GAMESERVER_SEALED` was rolled out. Every deploy path pins the default explicitly.
+3. **There is no negotiation.** A listener with a certificate configured serves TLS only; it does not accept a plaintext client and does not sniff. ADR-22 decision 3 applies unchanged — a protocol that can be talked down to cleartext will be.
+4. **The meta hop is in scope and is the higher-value half.** It is not fixed by this change and must not be described as fixed by it. It is an ops change — Nakama's own `--socket.ssl_certificate`, or a terminator in front — and it is tracked as the blocking item in `ROADMAP-SECURITY.md`. **Turning the gateway flag on while the meta hop is plaintext buys materially less than it appears to**, and the posture reporting says so at boot rather than leaving it to be inferred.
+5. **`TransportPosture.Authenticated` becomes reachable.** It has been hard-coded `false` with a comment saying so, precisely so that its becoming true is visible in a diff. TLS is the configuration that makes it true, and it is now computed rather than pinned.
+6. **The tap is a committed instrument, not a one-off.** `integration_test/hop_confidentiality_tap_test.go` is the acceptance mechanism for this ADR and for any future claim about what crosses a hop. A green unit suite is not acceptance; the before/after pair from this tap is.
+7. **The Unity client needs two things, in the other repo:** TLS on the gateway connection (`SslStream` or equivalent, verified in an IL2CPP **player build**, with certificate validation *on* — a client that accepts any certificate has Option A's guarantee with Option C's cost), and `https://` for the Nakama base URL. Neither is written.
+
+### What this ADR does not claim
+
+- It does not claim the gateway hop is confidential today. The flag defaults off and no deployment sets it.
+- It does not claim the measured exposure is closed. Two of the three hops remain plaintext in every environment that exists, and the one this ADR addresses cannot be turned on until the client speaks TLS.
+- It does not reduce cheating. See ADR-22 and `ROADMAP-SECURITY.md` §0.
+
+---
+
+## ADR-24 — The meta hop gets Nakama's own TLS, but the credential worth stealing there is a default-valued static key, not a token
+
+**Status:** accepted 2026-09-10. **Implemented behind a flag that defaults off** (`NAKAMA_TLS_CERT` / `NAKAMA_TLS_KEY`), plus a **CD gate on the two Nakama static keys**, which is the higher-value half and is the reason this ADR is not simply "ADR-23 again on another port".
+
+**Updated 2026-09-13: the two blockers measured on 2026-09-12 are closed, and the flag still defaults off.** Turning it on used to be impossible rather than merely undone — the k8s probes broke the pod and the Unity client refused the certificate. Both now have answers (§8), both sides pin instead of skipping verification, and the remaining work is a deploy, not code. Decision 4 changed shape as a result and is rewritten below rather than deleted: the rule (*no `InsecureSkipVerify`, anywhere, including dev*) is unchanged; what changed is that dev no longer has to choose between that and plaintext, because pinning now reaches a self-signed Nakama from both clients of the hop.
+
+Follows [ADR-23](#adr-23--the-gateway-hop-gets-tls-not-a-second-sealed-handshake-and-the-credential-it-exposes-leaks-one-hop-earlier), which closed the gateway hop and named this hop as the blocking item.
+
+### 1. What actually crosses the meta hop
+
+The earlier measurement scanned two REST calls and found four credentials. A tap exercising **everything a client does on that port** — auth, RPCs, account reads, session refresh, and the realtime WebSocket — finds more. Measured 2026-09-10 against the live dev stack, `Accept-Encoding` suppressed *and* every gzip member inflated before scanning:
+
+| what | where | lifetime | notes |
+|---|---|---|---|
+| Nakama session token | response body, **and the WebSocket URL** | 7200 s | mints gateway auth tokens on demand |
+| Nakama refresh token | response body | 3600 s | mints new session tokens |
+| gateway auth token | response body | 3600 s | the ADR-23 credential |
+| re-issued session + refresh pair | session refresh response | 7200 s / 3600 s | **every refresh re-exposes both** |
+| `NAKAMA_SERVER_KEY` | `Authorization: Basic` | **never expires** | static, in every client build |
+| `runtime.http_key` | **URL query string** | **never expires** | static, server-only RPCs |
+
+**Two things here were not previously recorded.**
+
+**The realtime WebSocket.** Nakama serves `/ws` on the same port; it upgrades (`101 Switching Protocols`) and takes the session token **in the query string**. Everything Nakama-realtime — chat, presence, party, notifications — rides it. A query-string credential is worse than a header one *even after TLS*, because it lands in access logs, proxy logs and referrers; TLS protects the wire, not the log. Nothing in this repo opens one, but the Unity client is the consumer of exactly those features.
+
+**Session refresh re-exposes.** A refresh returns a fresh session *and* refresh token on the same plaintext hop, so the exposure repeats for as long as the client runs rather than being a single login-time window.
+
+*Instrument caveat, again.* The first run of this tap reported **three** distinct JWTs where five were predicted. That was not a clean result: Nakama's `exp` has second granularity, so a refresh issued in the same second returns a **byte-identical** token and the distinct-count silently under-reports. A 2 s sleep produced five, with lifetimes of `2h0m2s`/`1h0m2s` — the offset is the sleep, which is what confirms it. The count disagreeing with a written-down prediction is the only reason it was caught.
+
+### 2. The finding that outranks confidentiality
+
+**Both Nakama static keys are at their published defaults, and both authenticate.** Verified with wrong-key controls rather than inferred from a status code:
+
+```
+reward_kill, no key            -> 401 "Auth token or HTTP key required"
+reward_kill, WRONG http_key    -> 401 "HTTP key invalid"
+reward_kill, DEFAULT http_key  -> 400 "user_id is required"   <- PASSED AUTH
+device auth, server_key=defaultkey -> 200      device auth, wrong key -> 401
+```
+
+`defaulthttpkey` reaches the handler for `reward_kill` and `submit_kill` — the **server-only reward-granting and leaderboard-submission RPCs**. `defaultkey` mints accounts and sessions.
+
+**And it is not just the dev box: `cd.yml` never writes `NAKAMA_HTTP_KEY` at all.** It writes `NAKAMA_SERVER_KEY=${NAKAMA_SERVER_KEY:-defaultkey}` (from a secret, defaulting) and no `NAKAMA_HTTP_KEY` line. `deploy/.env` is regenerated **wholesale** on every deploy, so the name is absent from the file, and compose's `${NAKAMA_HTTP_KEY:-defaulthttpkey}` resolves to the default **in every environment CD deploys** — for the Nakama flag and for the game server's client env alike. It fails **open and silently**: rewards flow, nothing warns except a Nakama startup line nobody reads.
+
+**This is why the framing needed adjusting.** Encrypting this hop defends the *path*. It does nothing about an attacker who simply connects to the port — published on `0.0.0.0` in compose — and presents a key from the Nakama documentation. Shipping TLS alone here would close the window while the door stays unlocked, and would do it in a way that reads, in every dashboard and boot log, as "the meta hop is now secure".
+
+**So: the keys first, then TLS.** Both are in this change; the ordering matters only in that the key gate must not be described as a nice-to-have alongside it.
+
+### 3. There is a second hop on this port, and it is ours
+
+The tap covered client → Nakama. Checked, rather than scoped out:
+
+- **Gateway → Nakama: does not exist.** No HTTP client, no URL, no `NAKAMA_*` config anywhere in `backend/gateway/`. Its only tie is the shared HS256 secret, verified locally. `gateway/CLAUDE.md`'s claim is accurate.
+- **The `nakama.so` plugin makes no outbound calls at all.** Inbound handlers only.
+- **The C# game server → Nakama is real, and it is on this hop.** `GameServer/Nakama/NakamaClient.cs:112` and `:204` build `{_baseUrl}/v2/rpc/...?http_key={_httpKey}` and POST it. So the reward path puts a never-expiring static key in a URL over plain HTTP, on the same port and the same network as the session tokens. **It exists in compose only** — `k8s/app/50-fleet-map.yaml` sets no `NAKAMA_URL`, so under Agones the game server does not call Nakama and the reward path is silently inert there. That asymmetry is a separate problem and is recorded, not fixed here.
+
+**Consequence for this change:** turning Nakama TLS on *requires* `NAKAMA_URL` to become `https://` for the game server too, or the reward path breaks. The two move together, which is why the flag is one setting and not two.
+
+### 4. Nakama's own TLS: measured, including what it does NOT cover
+
+`--socket.ssl_certificate` / `--socket.ssl_private_key` on `heroiclabs/nakama:3.40.0`, measured from a helper container against every listener:
+
+| port | plaintext | TLS | covered? |
+|---|---|---|---|
+| 7350 client API **and `/ws`** | `400` (refused) | `200` | **yes, and TLS-only — no plaintext fallback** |
+| 7351 console | **`200`** | fails | **no** |
+| 9100 metrics | **`200`** | fails | **no** |
+
+`/ws` over `wss` reaches the auth layer (`401` on a bogus token); over `ws` it is refused. So the WebSocket **is** covered, which is the part that mattered most.
+
+**The flag's name is accurate and its scope is narrower than "Nakama now has TLS."** It is the *socket* listener only. In compose all four ports publish on `0.0.0.0`, so an operator who enables it gets a TLS client port and a **plaintext console on 0.0.0.0** — with a real password — plus plaintext metrics. Anyone reading "SSL mode enabled" as "Nakama is encrypted" would be wrong in the direction that matters.
+
+**Nakama upstream explicitly discourages this option**, and says so at startup:
+
+```
+WARNING: enabling direct SSL termination is not recommended,
+use an SSL-capable proxy or load balancer for production!
+INFO  SSL mode enabled
+```
+
+That warning is a real cost and is not dismissed below.
+
+### 5. Options
+
+#### Option A — Nakama's own TLS (`--socket.ssl_certificate`) — **taken**
+
+- **Buys:** the client port and the WebSocket, TLS-only with no plaintext fallback, which matches ADR-22 decision 3 without us having to enforce it. No new component. ADR-23's in-process argument applies unchanged: on a single-node box a terminator and Nakama are the same host, so an edge terminator would report itself encrypted while buying nothing.
+- **Does not buy:** the console or metrics ports; anything about the default keys; anything about credentials in URLs surviving into logs.
+- **Cost, named:** **upstream recommends against it.** The honest reading is that the recommendation targets production fleets where a proxy is terminating anyway and Nakama's TLS stack is less exercised than a proxy's — not a correctness claim. We take it *because the alternative buys nothing in the only shapes we currently run*, and this ADR records that the moment a real edge exists, Option B is correct and this flag should go off.
+
+#### Option B — a reverse proxy in front of Nakama
+
+- **Buys:** what upstream recommends; can cover console and metrics too; standard certificate tooling.
+- **Does not buy:** anything on a single-node box, where it terminates on the same host it protects — ADR-23's hidden cost, unchanged.
+- **Cost:** a new component in a deploy path that is `DEPLOY_MODE=containers` and has no edge. Correct later; premature now.
+
+#### Option C — rotate the keys and leave the hop plaintext
+
+- **Buys:** removes the actual authentication bypass, for the price of two environment variables. This is the cheapest security win available anywhere in the system right now.
+- **Does not buy:** confidentiality. Every token above stays readable.
+- **Verdict: not an alternative to A — a prerequisite.** Doing A without C ships a misleading posture; doing C without A leaves the measured exposure. Both.
+
+#### Option D — move credentials out of URLs
+
+Considered and **rejected as not ours to make.** Nakama's WebSocket takes the token as a query parameter and `runtime.http_key` is query-only; both are upstream API shapes. We cannot fix them without forking Nakama or proxying it. **Recorded so it is not re-proposed as an oversight**, and because it is the one exposure TLS genuinely does not close: after TLS, those credentials still land in Nakama's own access logs.
+
+### 6. Decisions
+
+1. **Nakama terminates TLS itself**, behind `NAKAMA_TLS_CERT` / `NAKAMA_TLS_KEY`, **defaulting off**, pinned explicitly at every deploy path. Setting exactly one is a deploy failure, not a fall back to plaintext.
+2. **`NAKAMA_URL` moves to `https://` in the same change** wherever the flag is on, because `NakamaClient.cs` is a second consumer of this hop and would otherwise break silently.
+3. **CD fails the deploy when either Nakama static key is missing or left at its documented default.** `NAKAMA_HTTP_KEY` is now written at all, which it was not. This is the part of this ADR with the largest effect per line.
+4. **No `InsecureSkipVerify`, on any side, in any environment — including dev.** A client that accepts any certificate has the passive-eavesdropper guarantee at the price of the authenticated one (ADR-23 on the gateway hop, unchanged). **A dev convenience that trains an `InsecureSkipVerify` into the client is a worse outcome than dev staying plaintext**, because the flag ships in a player and the plaintext does not.
+
+   **Rewritten 2026-09-13.** This decision used to continue: *"Dev therefore runs the flag off rather than running it on with a self-signed certificate and a disabled check."* That conclusion was drawn from a false dichotomy — accept-anything or plaintext — and the third option was simply not built yet. It is now: **both consumers of this hop pin the certificate**, which is *stricter* than the public trust store, not looser, because an attacker must present that exact certificate rather than any certificate some CA will sign. The C# game server pins with `NAKAMA_TLS_PIN` (`GameServer/Nakama/NakamaTlsPin.cs`), the Unity player with `-cuvara-nakama-tls-cert` (`PinnedCertificateHandler`), and neither offers an accept-anything mode — the Unity handler refuses to construct with an empty pin, and the game server refuses to *start* when a pin is set against a plaintext `NAKAMA_URL`. So dev may now run the flag on with a self-signed certificate, and the rule this decision is actually about is untouched.
+5. **The console and metrics ports are NOT covered and must not be described as covered.** They are separately exposed on `0.0.0.0` in compose. Tracked as a follow-up, named in `ROADMAP-SECURITY.md`; not fixed here, because binding them is a deploy-topology change with its own blast radius.
+6. **The static keys' presence in the client binary is out of scope, with a reason.** `NAKAMA_SERVER_KEY` is architecturally a client credential — Nakama requires every client to present it — so it cannot be secret, and rotating it is a client release. Its value is therefore *bounded by what a client may do*, which is why the key that actually matters is `runtime.http_key`: that one is server-only, grants reward and leaderboard writes, and has no business being guessable. Decision 3 is aimed at it.
+7. **Credentials in URLs survive TLS.** Stated in the posture text rather than left to be discovered.
+
+
+### 8. Measured 2026-09-12/13: the two blockers, and what closed them
+
+The flag worked the day it landed — `https://` answered 200, plain `http://` got 400 — and was still unusable, for two reasons that were nobody's code being missing.
+
+#### 8.1 Nakama's own k8s probes broke, and every obvious fix is wrong
+
+All three probes were `httpGet` with no `scheme`, which means HTTP, against `:7350` — the one port the flag converts to TLS. With TLS on they failed with `client sent an HTTP request to an HTTPS server` and the pod never became Ready; the rollout timed out with the container perfectly healthy.
+
+There is no per-environment overlay to vary a probe in, so the fix had to be **one spec that works in both modes**. Four candidates, each rejected on a measurement:
+
+| Candidate | Verdict |
+|---|---|
+| `scheme: HTTPS` on `:7350` | Correct with TLS on, **wrong with it off** — and off is the default at every deploy path. It trades a broken opt-in for a broken default. |
+| exec `/nakama/nakama healthcheck` | **Nakama v3.40.0's healthcheck subcommand is `http.Get("http://localhost:" + port)`** — hardcoded plaintext, no TLS branch, no config lookup. It breaks under TLS exactly like the `httpGet` did, and forks a 200MB binary every 10s. This also means **compose's healthcheck had the same bug**, which nobody had recorded. |
+| exec `curl` / `wget` | The image has neither. `heroiclabs/nakama:3.40.0` is Debian 12 with no `curl`, no `wget`, no `nc`, no `python3`, no `openssl` — measured inside the running pod. |
+| `tcpSocket :7350` | Mode-independent, and answers a different question: *is something accepting connections*, not *is Nakama serving*. A probe that cannot tell a wedged Nakama from a healthy one is worse than the bug it replaces. |
+
+**Taken: probe the metrics listener.** `:9100` is measured in §4 as *not covered* by `--socket.ssl_certificate`, so it is plain HTTP whether the flag is on or off. All three probes are now `httpGet { path: /, port: metrics }`, and compose's healthcheck is `/nakama/nakama healthcheck 9100` — the same trick, using the subcommand's port argument.
+
+**What that gives up, stated rather than glossed:** `:9100` is a different `http.Server` in the same process than the client API, so the probes prove the *process* is alive and serving HTTP, not that the client-API mux still answers. The gap is narrow because the old target was narrow too — Nakama's `/healthcheck` is a static 200 (`{}` on the wire) that checks no dependency — so the only failure now missed is a wedge confined to the API mux while the metrics mux answers. A certificate the operator got wrong is **not** in that gap: Nakama cannot read it, exits, and the pod crash-loops visibly.
+
+**OPEN ITEM — the wedged API mux, and the automatic restart this trade cost.**
+
+The sentence above was first written as *"not a regression, because the old target checked nothing either"*. That is true of **dependency** checking and false of one thing that matters, and the correction belongs here rather than being re-derived by whoever hits it:
+
+> The old liveness probe would have **restarted the pod** when the `:7350` server itself stopped answering — a dead accept loop, a wedged listener — because that is exactly what it hit. **The new one will not.** A narrow class of failure has lost its automatic recovery. That is a real cost of this fix, accepted because every alternative in the table above is worse, and it is not the same statement as "the dependency coverage is unchanged".
+
+**And nothing else in the deployment closes it.** Checked, rather than assumed:
+
+- The **C# game server is the only in-cluster consumer of `:7350`** — the gateway makes no Nakama call at all (§3), so gateway health says nothing about this.
+- The game server's Nakama failures are **`LogWarning` only**: no counter, no gauge, nothing on `/metrics`. A wedge is log lines nobody is watching.
+- **No alert rules exist anywhere in `deploy/monitoring/`** — one Prometheus scrape config and one Grafana dashboard, no alerting. Prometheus does scrape `nakama:9100`, so Nakama's own API request counters would flatline *visibly*, but only to someone already looking.
+- `dev-up.sh`, `k8s/verify/lib/checks_flow.sh` and the smoketest all exercise the hop for real — **only at deploy time**, not continuously.
+
+**So the first notice in steady state is a human**, when players cannot authenticate.
+
+**CLOSED 2026-09-13, and the live failure came first.** This was written as "the cheapest close, named and deliberately not built here: a counter on the game server's Nakama call outcomes plus an alert on its failure rate". It is built, because the thing it describes happened the same day: turning the flag on in dev left one `Allocated` map GameServer running with the old plaintext `NAKAMA_URL` — Agones does not recreate an allocated GameServer on a fleet update, and env is fixed at pod creation — so **every reward RPC it made failed with `400 Client sent an HTTP request to an HTTPS server` while the game itself played perfectly**, as a `LogWarning` with nothing counting it. It was found by reading pod logs, which is this section's "first notice is a human", confirmed rather than predicted.
+
+`gameserver_nakama_reward_outcomes_total{map_id,outcome}` now counts every answer to `reward_kills`, and `deploy/monitoring/alerts.yaml` is this repository's **first alert rule**. Three properties are deliberate and each has a reason a reader would otherwise have to reconstruct:
+
+- **On the consumer's side, not Nakama's.** Nakama's own probes answer for `:9100` and structurally cannot see `:7350` be unreachable, untrusted or wedged. This counter records what happened when this process actually tried to use it, so it covers all three at once — including the API-mux wedge above, which arrives as a timeout.
+- **`granted` is counted too.** The alert is a ratio; a failure counter with no denominator cannot tell "the hop is broken" from "nobody killed anything", and the second is the normal state of an idle map.
+- **`too_large` is excluded from the failure side.** That outcome is the batcher splitting an oversized batch as designed, and folding it in would give the alert a routine background rate to hide in.
+
+**What is still not closed:** the lost automatic restart above. Nothing kills a pod whose API mux has wedged; the alert says a human should look. That is a smaller gap than the one this section opened with, and it is still a gap.
+
+#### 8.2 The Unity client refused the certificate, and `TlsOptions` does not reach this hop
+
+Pointed at `https://`, the player failed every request with `Curl error 60: Cert verify failed. Certificate is not correctly signed by a trusted CA. UnityTls error code: 7`. That refusal is *correct*. The gateway hop's answer does not transfer: that hop is `SslStream` inside `TcpTransport`, where `TlsOptions.PinnedCertificate` pins an exact DER, while this hop goes through Nakama's SDK on `UnityWebRequestAdapter` — Unity's own HTTP stack, which pins only through a `CertificateHandler`.
+
+**Taken: a pinning `CertificateHandler`, and a Nakama `IHttpAdapter` that installs it.** `UnityWebRequestAdapter` never sets `certificateHandler`, so the handler alone is not enough — the client ships its own `IHttpAdapter` (a copy of the stock adapter's behaviour plus the handler) and hands it to `new Client(...)`. `ValidateCertificate` compares the presented DER against the pinned DER byte for byte and returns false otherwise. **There is no accept-anything path**: the handler's constructor throws on an empty pin, `Matches` returns false for a null or empty pin, and nothing exposes a "trust all" flag to configuration.
+
+**The refusal tests were checked by mutation, not only by passing.** Run in the Unity Editor on 2026-09-13: `total=10 passed=10 failed=0`. `Matches` was then mutated to return `true` unconditionally, which produced `passed=5 failed=5` — exactly the five refusal tests and no others. A pin that accepts everything is invisible to a test suite that only ever presents the right certificate, so this is the check that says the suite would notice.
+
+**Two limits of `CertificateHandler`, recorded because they are not obvious:**
+
+- **WebGL cannot use it.** The browser performs the TLS handshake, so Unity never calls `ValidateCertificate`. A WebGL player therefore needs a CA-issued certificate on this hop; pinning is not available to it and must not be claimed for it.
+- **It pins the leaf only.** That is the intent — it is the same discipline as `TlsOptions` — but it means a certificate rotation is a client change, exactly as it is for the gateway hop.
+
+The C# game server is the third consumer and has the same problem for the same reason, solved the same way: `NAKAMA_TLS_PIN` builds an `HttpClientHandler` whose `ServerCertificateCustomValidationCallback` compares `cert.RawData` to the pinned DER with `CryptographicOperations.FixedTimeEquals`. Setting it against a non-`https` `NAKAMA_URL` is a **startup refusal**, not a warning, on the same "set together or not at all" principle as the certificate pair itself.
+
+---
+
+### What this ADR does not claim
+
+- It does not claim the meta hop is confidential today. The flag defaults off, and no deploy path sets it — what changed on 2026-09-13 is that turning it on is now a deploy rather than a blocked task (§8).
+- It does not make Nakama's console or metrics ports confidential.
+- It does not address the Nakama→Postgres hop, which specifies no `sslmode` in either deployment.
+- It does not fix the compose/k8s asymmetry that makes the reward path inert under Agones.
+- It does not reduce cheating. See ADR-22 and `ROADMAP-SECURITY.md` §0.
+
+---
+
+## ADR-25 — The game server proves its identity with an Ed25519 key it generates per pod; the client's trust in that key is the gateway hop's trust, not its own
+
+**Status:** accepted 2026-09-12 as the target model; **BACKEND IMPLEMENTED 2026-09-13** — decisions 1, 2, 3, 4 and 5 ship on the game server, the registry, the gateway and the Go client half. **Decision 6 is implemented as a REPORTING contract and currently resolves to the weaker truth on every environment**, which is the honest outcome and not a gap: `sealed.ClientResult` splits `IdentityChecked` (a signature verified under the key we were given) from `IdentityKeyHopAuthenticated` (whether that key arrived over an authenticated hop), and only their conjunction is `IdentityVerified`. ADR-23's gateway TLS is off everywhere, so a passing smoke run prints `identity_checked=true key_hop_authenticated=false server_identity_verified=false`. **Decision 8 is DONE and decision 7 is not**: nothing pins, by design; the Unity IL2CPP probe was run on 2026-09-13 and Ed25519 survives `High` stripping in a built Windows player — see decision 8 for the measurement and its exact scope. **The Unity client half shipped 2026-09-13** in `Cuvara/Netcode` v0.38.0-v0.38.2: `ServerIdentityVerifier` plus the plumbing that reads `server_public_key` off `enter_world_resp` and `server_signature` off the sealed hello, with `Verified` computed as the conjunction in one place. It closes the residual that ADR-22's sealed sessions left open and that `ROADMAP-SECURITY.md` step 5 names: every sealed session in dev and staging reports `binding_verified=false`, and no change to configuration can make it true. **That field is unchanged and still false**; the identity signature is the reachable replacement beside it, not a repair of it.
+
+**What shipped, concretely.** `GameServer/Net/Sealed/ServerIdentity.cs` generates an Ed25519 keypair per pod at startup, in memory, with no configuration path that could supply one. `SealedHandshakeServer` signs `"cuvara/sealed-identity/v1" ‖ 0x00 ‖ transcript ‖ 0x00 ‖ identity_public` and sends it as `SealedServerHello.server_signature = 4`; **the transcript bytes did not change**, so ADR-22's vectors still reproduce, and the new signature has vectors of its own asserted independently by `shared/sealed/interop_test.go` and `GameServer.Tests/Net/ServerIdentityInteropTests.cs`. The public half travels as the Redis hash field `identity_key` (standard padded base64) and reaches the client at `EnterWorldResponse.server_public_key = 6`. `binding` keeps field 2 and its meaning; field 5 stays reserved.
+
+Follows [ADR-22](#adr-22--transport-crypto-chacha20-poly1305-over-an-authenticated-x25519-exchange-with-the-nonce-as-the-replay-counter), which defined the binding, and [ADR-23](#adr-23--the-gateway-hop-gets-tls-not-a-second-sealed-handshake-and-the-credential-it-exposes-leaks-one-hop-earlier), which parked "Option B — pinned identity key" for the gateway hop. This is the same question on the *gameplay* hop, where the answer comes out differently because the peer being authenticated is an Agones pod rather than a stable service.
+
+### 1. The residual, verified rather than restated
+
+Four facts, each checked in the tree at `92f5fec`:
+
+1. **The server always signs a binding over a transcript covering both ephemeral public keys.** `GameServer/Net/Sealed/SealedHandshakeServer.cs:105-112` builds `SealedHandshake.Transcript(jti, clientPublic, server.Public)` and puts `signer.Sign(transcript)` into `SealedServerHello.Binding`. The transcript bytes are `"cuvara/sealed-handshake/v1" ‖ 0x00 ‖ jti ‖ 0x00 ‖ client_public(32) ‖ server_public(32)` — `shared/sealed/handshake.go:75-87`, mirrored in the schema comment at `shared/proto/wire.proto:547-556`.
+2. **The client verifies only when it holds a secret.** `shared/sealed/client.go:101-120`: `verified := false`, then `if cfg.JoinTokenSecret != ""` … `verified = true`. Empty means do not verify, and `ClientHandshakeConfig.JoinTokenSecret`'s own comment (`client.go:45-48`) says empty "is the correct configuration for a shipped client".
+3. **The signature is a symmetric HMAC-SHA256.** `GameServer/Net/Sealed/SealedTranscriptSigner.cs:21-32` is `HMac(new Sha256Digest())` under `SealedCrypto.DeriveBindingKey(joinTokenSecret, jti)` — `SealedCrypto.cs:98-107`, an HKDF of `JOIN_TOKEN_SECRET` salted by the `jti`.
+4. **`JOIN_TOKEN_SECRET` is the key the gateway mints join tokens with.** `shared/config/config.go:25-28` (`JoinTokenSecret` is "the HS256 secret … for the gateway -> game server join token"), read from the environment at `config.go:86`; `gateway/transfer/join_token.go:17-23` and `:28-37` sign with it.
+
+**Therefore the binding cannot be handed to a client, and this is a protocol residual rather than a configuration gap.** A client able to *verify* a binding holds `JOIN_TOKEN_SECRET`, and a client holding `JOIN_TOKEN_SECRET` can *forge* a join token for any user against any server — strictly worse than the man in the middle the binding defends against. There is no setting, no secret-splitting and no deploy change that reaches `binding_verified=true` for a real player. The fix is a different primitive.
+
+**What that costs today, stated in the direction that matters.** A sealed gameplay hop is confidential against a **passive** eavesdropper — the X25519 exchange provides that on its own — and offers **nothing** against an active one: an attacker who substitutes its own ephemeral key completes one exchange with each side and both ends see a healthy encrypted session (`shared/sealed/client.go:23-37`, `SealedHandshakeServer.cs:54-63`). "The gameplay hop is encrypted" must not be read as "the game server is authenticated". `deploy/k8s/app/50-fleet-map.yaml:171-172` pins `GAMESERVER_SEALED: "require"` for dev *and* staging, and `GAMESERVER_SEALED` defaults to `require` in code (`GameServer/Program.cs:63`), so this is the state of every session that exists.
+
+**Only the load generator exercises the defence.** `loadtest/load/player.go:194` mints its own join token and `:283-315` verifies the binding with the same secret, recording the result in `SealedBindingVerified` (`player.go:46-49`). The integration suite does the same (`integration_test/sealed_session_e2e_test.go:241-275`). Every one of those peers holds the secret because it *is* the server side wearing a client costume. The smoketest, which receives its token from the real gateway like a player does, reports `binding_verified=false` (`ROADMAP-SECURITY.md`, step 5 table).
+
+### 2. The shape of the peer decides most of this
+
+The thing being authenticated is not a service. It is a Fleet replica:
+
+- Its address is composed at scheduling time — port from the Agones status read, host from `GAMESERVER_ADVERTISE_HOST` — because `status.address` is the node address and is not dialable (ADR-16, and `deploy/k8s/app/50-fleet-map.yaml:185-188`).
+- It registers **itself** into Redis after reporting Ready, and the gateway mints a join token only from that entry (ADR-16). `storage.ServerInfo` (`shared/storage/interfaces.go:38-45`) carries `ServerID`, `MapID`, `Addr`, `Transport`, `Capacity`, `PlayerCount` — and **no key field**.
+- Its lifetime is a pod's. Scaling, a rollout or a crash replaces it, and ADR-18 already treats replacement as routine.
+
+Two consequences fall straight out. **A long-lived key mounted into the pod is the worst-isolated secret we have** — the game server is the process most exposed to player-controlled input, and a fleet-wide key extracted from one pod impersonates the whole fleet until someone notices. And **a key that lives as long as the pod needs no rotation procedure at all**, because the Fleet is the rotation procedure.
+
+### 3. How the client learns what to expect, and what that inherits
+
+The gateway already tells the client where to go, and the client already trusts that answer for the address: `gateway/server/server.go:1151-1155` fills `EnterWorldResponse{ServerAddr, JoinToken, Transport}` from the registry lookup. An expected server public key riding in the same message adds no new trust relationship — it reuses the one the client is already forced to have, since an attacker who can rewrite `ServerAddr` already redirects the player wherever it likes.
+
+**What it inherits must be stated plainly rather than left to be inferred.** The gateway hop is plaintext in every environment today. ADR-23's TLS is implemented and defaults off (`shared/config/config.go:33-36`), and it cannot be turned on without solving certificate distribution: on `k3d-rpg-dev` the gateway logged `"tls":true,"encrypted":true,"authenticated":true` and three Unity clients played through it **only because they were handed the certificate to pin** (`backend/deploy/CHANGELOG.md:17-28`, `ROADMAP-SECURITY.md` step 6). Unlike the sealed hop, a TLS mismatch there cannot name itself, so the escalate-on-refusal trick that made sealing work by default is unavailable.
+
+So a key delivered over that hop is **exactly as trustworthy as that hop**, and today that is not very. An attacker positioned to man-in-the-middle the gameplay hop is on the client's network path, and the gateway hop is the same client on the same path: he substitutes the key in `enter_world_resp` and the signature he then forges verifies. **This ADR alone changes nothing for that attacker.** What it does is convert a break that is currently free into one that requires owning the gateway hop as well, and compose so that turning ADR-23's flag on closes both at once. That is worth doing, and it is not worth overstating — which is why decision 6 below refuses to let the client report success it has not earned.
+
+### 4. Options
+
+#### Option A — Ed25519 signature over the sealed transcript, per-pod key, public half delivered in `enter_world_resp` — **taken**
+
+The pod generates an Ed25519 keypair at startup, publishes the public half in its own registry entry, and signs the handshake transcript with the private half. The gateway returns that public key alongside `ServerAddr` and `JoinToken`. The client checks the signature against the key it was given and refuses the session on a mismatch.
+
+- **Buys:** a `server_identity_verified` that a **real shipped player can reach**, with no secret in the binary. Real MITM protection on the gameplay hop *conditional on the gateway hop being authenticated*. No key at rest anywhere: the private half exists only in the pod's memory for the pod's lifetime. No rotation procedure, no key-distribution ops, no Secret to leak — the material the fleet already mounts (`rpg-app-secrets`, `50-fleet-map.yaml:200-203`) does not grow.
+- **Does not buy:** anything against a malicious *player* — this is not anti-cheat, see ADR-22 and `ROADMAP-SECURITY.md` §0. Nothing about the join token, which still crosses the gameplay hop in the clear before sealing begins. Nothing on the meta hop (ADR-24). And nothing at all while the gateway hop is plaintext, per §3.
+- **Cost:** a new signed input and a new wire field on both implementations plus Unity, cross-implementation vectors (ADR-22 decision 5), a registry field, and one gateway plumbing change. Ed25519 is `crypto/ed25519` in the Go standard library and is in BouncyCastle 2.7.0, which `GameServer/GameServer.csproj:14` already references — so the server side adds no dependency. **Unity IL2CPP is unverified**; see decision 8.
+- **The hidden cost, and it is the reason decision 6 exists.** The trust anchor moves rather than disappearing: it becomes the gateway hop *and* the registry write path. Anything that can write `servers:map:*` in Redis can publish its own public key and be believed. Redis sits on the trusted backend network (ADR-4) and that is an assumption this ADR leans on, not one it removes.
+
+#### Option B — TLS on the gameplay hop instead of sealing
+
+- **Buys:** confidentiality and authentication from a standard implementation with standard rotation, and it is the mechanism ADR-23 chose one hop over.
+- **Does not buy:** any of it cheaply here, and ADR-23 already says why in its own Option C: game servers "are Agones-allocated pods reached by ephemeral address, and putting a CA-issued certificate in front of each is a problem TLS does not solve for us" (ADR-23 §3, Option C). The address is composed at scheduling time from `GAMESERVER_ADVERTISE_HOST` plus an allocated port; there is no stable DNS name to issue a certificate for and no place to renew one.
+- **Cost, and why it is not merely "expensive":** it deletes machinery that is **live in production today**. Sealing is `require` on dev and staging and three real Unity players connect with no flags. Replacing it means re-doing the framing (`SEALED-FRAMING.md`), the replay counter, the cross-implementation vectors, and the Go harnesses — and TLS does not apply to the KCP transport at all, which ADR-21 keeps as the production target for this hop. `SslStream` under IL2CPP measured **GO on Windows only**, both stripping levels, with **Android still unanswered** (`ROADMAP-SECURITY.md` step 6, `backend/docs/tls-probe/README.md`).
+- **Verdict: rejected.** It is the right answer for the gateway and meta hops, which have stable addresses, and the wrong one here for the same reason ADR-22 chose sealing in the first place.
+
+#### Option C — pin a long-lived fleet or environment key in the client binary
+
+One keypair per fleet or per environment, the public half shipped inside the player, no gateway delivery at all.
+
+- **Buys:** MITM protection on the gameplay hop that does **not** depend on the gateway hop — the only option here with that property, and the reason it is not dismissed.
+- **Does not buy:** anything for a pod that is not in that fleet, so a second fleet or a new environment is a client release. Nothing on the other two hops.
+- **Cost:** the private half must be mounted into every game-server pod, which is exactly the "worst-isolated secret we have" from §2. One compromised pod compromises the fleet identity for as long as the pin stands.
+- **The hidden cost:** ADR-23's Option B argument, unchanged — **pinning makes rotation a client release**, so a compromised key is repaired at app-store review latency, days, not deploy latency. Until then every installed client either fails closed (an outage) or falls back (a downgrade attack, forbidden by ADR-22 decision 3). ADR-21 records this complaint against the pre-shared key; a pinned fleet key is the same complaint with a better primitive.
+- **Verdict: rejected as the default, retained as an operator option.** The key stays *pinnable* — it is an Ed25519 public key and a build that wants to pin one can — but the shipped client does not pin, because the thing worth pinning in this system is the gateway certificate (one stable endpoint, protecting both hops) and not an ephemeral pod.
+
+#### Option D — do nothing, and keep reporting `binding_verified=false`
+
+- **Buys:** nothing, at no cost. And it is not absurd today: while the gateway hop is plaintext, an attacker who could exploit this residual can already win on the hop that delivers the address, so the *exploitable* gap does not widen by waiting.
+- **Does not buy:** a way out. This is the deciding argument rather than the cost one. The symmetric binding can **never** be given to a shipped client, so `binding_verified` is a field that can never be true for a real player — the always-false boolean ADR-23 decision 1 rejected its Option A for, already installed and already shipping. A protocol that has no reachable authenticated state is not "waiting"; it is finished, in the wrong place.
+- **Verdict: rejected.** The residual is a dead end, not a backlog item.
+
+**Ranking:** A, then C, then D, then B. C above D because it at least reaches an authenticated state; D above B because doing nothing is cheaper than a migration that deletes working, deployed machinery and still has no certificate to issue.
+
+### 5. What changes on the wire
+
+`SealedServerHello` today is `public_key = 1`, `binding = 2`, `error = 3` (`shared/proto/wire.proto:543-573`).
+
+- **Add `bytes server_signature = 4`** — 64 bytes, Ed25519.
+- **Sign a new input, and leave the transcript byte-identical.** The signed input is `"cuvara/sealed-identity/v1" ‖ 0x00 ‖ transcript ‖ 0x00 ‖ identity_public(32)`, where `transcript` is exactly the bytes `shared/sealed/handshake.go:75-87` already produces. The transcript itself is **not** touched: key derivation (`DeriveDirectionKeys`) and the existing HMAC binding keep their current bytes and their current vectors. The identity key is inside the signed input because a signature that does not name its signer authenticates a statement about a key rather than a key, and the NUL separators are load-bearing for the reason the schema comment already gives (`wire.proto:558-561`).
+- **Do not reuse field 2.** `binding` stays what it is — the harness path, which is the only peer that proves the defence end to end today. Giving one field number two meanings discriminated by length is how two versions silently disagree about what a byte means; ADR-22 decision 6 reserved `EnterWorldResponse` field 5 rather than reuse it for the same reason. Field 2 may be reserved later, in its own change, once nothing verifies it.
+- **`EnterWorldResponse` gains `bytes server_public_key`** at a fresh field number, and `storage.ServerInfo` gains the matching field so the registry can carry it from the pod to the gateway.
+- **Old clients do not break.** Adding fields is backward-compatible in Protobuf, and a client that ignores field 4 behaves exactly as it does today. There is still **no negotiation and no fallback**: the server always signs, and a client that has been told to check and cannot is refused rather than downgraded (ADR-22 decision 3).
+- **Migration order is gateway-and-server first, client second** — the inverse of the sealing rollout, and it is the safe direction here precisely because the client change is the enforcing one. A client that requires an identity key against a gateway that does not publish one gets a closed door, which is the failure ADR-22's rollout produced when the order was wrong (`ROADMAP-SECURITY.md` step 5, "Migration order — the client ships first").
+
+### 6. Rotation and compromise
+
+- **Rotation is pod replacement.** There is no key to roll, no overlap window and no keyring, because the keypair is generated at startup and dies with the process. A Fleet rollout rotates every identity in the fleet as a side effect of something it already does.
+- **A leaked private key buys the pod's remaining lifetime, and only for sessions the gateway sends to that pod.** An attacker who can extract it is already executing in the pod, where he has the player data anyway — so the leak's marginal value is small, which is the point of not having a fleet-wide key.
+- **A compromised gateway is total**, unchanged from today: it chooses the address and now also the key. This ADR does not move that.
+- **A compromised Redis is equally total** for this mechanism, and that is new. Anything that can write a registry entry can publish a key and be believed. ADR-4's "Redis is on the trusted backend network" is load-bearing for this ADR and is named here rather than assumed.
+- **`JOIN_TOKEN_SECRET` keeps its current job and its current rotation story.** It signs join tokens; it stops being the thing a client would need in order to authenticate a server. Nothing about the keyring in `jwt.Keyring` changes.
+
+### 7. Decisions
+
+1. **The game server signs the sealed handshake with an Ed25519 key it generates per pod at startup.** Not per fleet, not per environment. The private half never leaves the process and is never written to a Secret, a ConfigMap or disk.
+2. **The public half travels pod → registry → gateway → `enter_world_resp`.** No new trust relationship: the client already takes `ServerAddr` from that message on the same authority.
+3. **The signed input is defined on top of the existing transcript, which does not change.** `"cuvara/sealed-identity/v1" ‖ 0x00 ‖ transcript ‖ 0x00 ‖ identity_public`. Derivation and the HMAC binding keep their current bytes, so ADR-22's cross-implementation vectors stay valid and the new signature gets vectors of its own — generated by each side, verified by the other two, as a deliverable rather than an afterthought.
+4. **New field numbers only. `SealedServerHello.binding` is not reused and is not removed in this change.**
+5. **No negotiation and no fallback.** A signature that does not verify is a closed connection, never a session. A client that requires identity and is not given a key is refused. ADR-22 decision 3 applies unchanged.
+6. **A client reports `server_identity_verified` as true only when the key it checked arrived over an *authenticated* hop** — that is, with ADR-23's gateway TLS in force and its certificate validated. Over a plaintext gateway hop the client has checked a signature against a key an attacker could have chosen, and it must report the weaker truth. **An instrument that reports the strong claim on the weak evidence is worse than no instrument**, and that is the whole of ADR-23's argument for rejecting its Option A, applied to ourselves.
+7. **The shipped client does not pin.** The key is pinnable and an operator-controlled build may pin it (Option C stays available for a fixed fleet), but the default path delivers it per session, because pinning an ephemeral pod's key would make the pin either useless or a client release per rollout.
+8. **Ed25519 under Unity IL2CPP is a go/no-go probe, and it runs before implementation, in a built player at `Minimal` and `High` stripping.**
+
+   > **MEASURED 2026-09-13 — GO, on Windows, at `High`.** A Windows Standalone IL2CPP
+   > player built at `ManagedStrippingLevel.High` from the Sealed Session Probe sample
+   > (`Cuvara/Netcode` v0.38.2) ran all eight of its self-checks and reported
+   > `VERDICT: ALL CHECKS PASSED`. The two that answer this decision:
+   >
+   > ```
+   > [SealedSessionProbe/selfcheck] Ed25519 signing produced 64 bytes: OK
+   > [SealedSessionProbe/selfcheck] Ed25519 verification of a genuine signature: OK
+   > [SealedSessionProbe/selfcheck] a flipped signature byte is refused: OK
+   > [SealedSessionProbe/selfcheck] the same signature reads as verified ONLY over an
+   >   authenticated hop: OK (plaintext: checked=True verified=False; TLS: checked=True verified=True)
+   > ```
+   >
+   > The negative case this decision demands is the third line, and it is a real
+   > refusal rather than an absence: one byte of a genuine signature flipped, and the
+   > verifier said no.
+   >
+   > **What this does NOT cover, stated so nobody reads it as more:**
+   >
+   > - **`Minimal` was not run separately.** `High` is the stricter of the two and it
+   >   passed, so a `Minimal` failure would be surprising — but "would be surprising"
+   >   is not a measurement, and this decision asked for both.
+   > - **Android is unmeasured**, as it is for `SslStream` in ADR-22's survey. The
+   >   BouncyCastle CIL-Linker failure that `link.xml` exists to guard against was
+   >   *reported on Android*, and this run was Windows.
+   > - **Whether `link.xml` is load-bearing here is untested.** The run had
+   >   `Ed25519Signer` and `Ed25519PublicKeyParameters` preserved; no control run was
+   >   made with them absent, because doing so means editing the resolved package under
+   >   `Library/PackageCache`, which the package rules forbid. So the honest claim is
+   >   "Ed25519 survives `High` **with those entries present**", not "the entries are
+   >   unnecessary" and not "the entries are what saved it".
+   >
+   > The probe had to grow a headless mode to produce this at all: a scene whose only
+   > output is on-screen labels cannot answer a question about a player build except
+   > through somebody reporting what they saw.
+
+ Go has `crypto/ed25519` in the standard library and the .NET server has BouncyCastle 2.7.0 already (`GameServer/GameServer.csproj:14`); the client runtime is the one that has surprised us twice — `AesGcm` compiled and threw, `ECDiffieHellman`/`HKDF`/`ChaCha20Poly1305` were absent (ADR-22). **Assert the negative case**: a signature over a tampered transcript must be REJECTED, not merely that a good one verifies. A verifier that accepts everything is indistinguishable from one that works.
+9. **This may be implemented before ADR-23's TLS is enabled, and must not be *reported* as man-in-the-middle protection until it is.** Decision 6 is the mechanism that keeps that honest; §3 is the reason.
+
+### What this ADR does not claim
+
+- It does not claim the gameplay hop is authenticated today, or that it becomes so the moment this is implemented. Over a plaintext gateway hop the key is attacker-choosable and the guarantee is unchanged from the current one.
+- It does not close the plaintext join token that crosses the gameplay hop before sealing begins, and does not touch the gateway or meta hops (ADR-23, ADR-24).
+- It does not make `JOIN_TOKEN_SECRET` less valuable or less in need of rotation.
+- It does not remove the trust placed in the registry write path; it adds to it.
+- It does not reduce cheating. See ADR-22 and `ROADMAP-SECURITY.md` §0.
+- ~~**It is not implemented.**~~ **Superseded 2026-09-13**: the backend half shipped, and the fields described in §5 are on the wire rather than proposed. The sentence is rewritten rather than deleted so that a reader who arrives from a link or a cached copy sees that it changed. What is *still* unimplemented is narrower and is listed in the status line above: the Unity client half, decision 8's IL2CPP probe, and the pinning path of decision 7.
+- **It does not become man-in-the-middle protection by having been implemented.** §3 is unchanged and is the reason decision 6 exists: while the gateway hop is plaintext, the key is attacker-choosable and a verified signature means only that the gameplay peer holds the key we were handed. The implementation reports exactly that and refuses to report more.
+
+---
+
+## ADR-26 — A dungeon instance is keyed by the party, and a "checkpoint" is the player at the boundary, not the encounter
+
+**Status:** accepted 2026-09-12 and **IMPLEMENTED 2026-09-12/13** -- the line below read "NOT
+implemented" for a day after it stopped being true, which is the staleness this document warns
+about in three other places. Shipped: decision 1 (`party_id` on `EnterWorld`), 2 (the
+party-keyed index), 3 (membership verified against Nakama), 5 (a dungeon server persists no
+`map_id` or position), 6 (self-shutdown when empty), 7 (return by map transfer) and 8 (a
+dungeon pod registers no map), on the backend and, from 2026-09-13, on the Unity client.
+**Proven on dev**: two members of one party handed the same instance address, an outsider
+refused by name, map entry unaffected (`smoketest/cmd/dungeonprobe`). **Decision 4 is the
+exception and is design-only by choice** -- a "checkpoint" here is the player at the boundary,
+and encounter checkpointing stays deferred until there is an encounter worth losing. The
+allocation leak this ADR recorded as an open consequence was closed on 2026-09-13 by a bounded
+join deadline. Implements ADR-14
+stage 6, the first of the two items `CORE-COMPLETION.md` names as the gate before gameplay
+content. Constrained by ADR-2 (one live server per `map_id`), ADR-3 (the gateway is a
+redirector), ADR-6 (the ≤30s crash-loss window) and ADR-16 (the advertised address is
+composed, not configured).
+
+### The state this replaces
+
+`--mode=dungeon` changes **one** thing: the reconnect hold TTL, 60s instead of 30s
+(`Program.cs:649`). Everything else a dungeon needs is absent, and absent in a way that
+reads as present:
+
+- `gateway/transfer/dungeon.go` defines a `DungeonTransfer` interface whose only
+  implementation is `StubDungeonTransfer`, which returns `ErrNotImplemented`. 32 lines, of
+  which 14 are a comment about map transfer.
+- `registry.KindDungeon` exists and the allocator will honour it, but
+  `ALLOCATOR_FLEET_DUNGEON` is **empty on every environment** and there is no dungeon fleet
+  manifest, so every dungeon allocation fails immediately — deliberately and legibly, which
+  is the one thing here that is already right.
+- The word **"checkpoint" appears in no `.cs` or `.go` file in this repository.** It appears
+  in `shared/CLAUDE.md` as a table name and in ADR-6's backlog as an M-sized item.
+
+So a dungeon today is a map server with a longer hold window. The project's one-line
+description is "open-world maps + instanced dungeons"; half of it has no plumbing.
+
+### Decisions
+
+1. **Entry reuses `MsgEnterWorld`. There is no `MsgEnterDungeon`.**
+   `EnterWorldRequest` gains `party_id = 2`; a **non-empty `party_id` means "an instance of
+   the content named by `map_id`, for this party"**. One flow, one set of failure modes, one
+   place where a client learns an address and a join token. A second message type would
+   duplicate the auth, budget, rate-limit and error paths that `handleEnterWorld` already
+   owns, and the two copies would drift — which is exactly what the comment at the top of
+   `dungeon.go` observed about map transfer needing no gateway change at all.
+
+2. **The instance is keyed by the PARTY, not by the content id.**
+   Redis holds `dungeon:party:{party_id} -> ServerInfo`. The first member's `EnterWorld`
+   allocates a pod and writes that key; every later member reads it and is handed the **same**
+   address. **ADR-2 does not apply here and must not be extended to cover this**: ADR-2's
+   one-live-server rule exists because two servers claiming one `map_id` split a shared world,
+   whereas each dungeon instance is a distinct logical world by design — a sentence already in
+   ADR-2 and now load-bearing. Keying by content id would give every party in the game one
+   shared dungeon, which is the opposite of instancing.
+
+3. **The gateway verifies party membership against Nakama, once per entry.**
+   It calls the `party_get` RPC over the internal HTTP key — the same server-to-server channel
+   the game server already uses for rewards (ADR-24) — and refuses the entry if the caller is
+   not a member of the party they named. Membership lives in Nakama because that is where
+   social state lives; **it is not mirrored into the gateway or Redis**, because a mirror of an
+   authority is a second authority that disagrees under partition. The cost is one internal
+   RPC per dungeon entry, never per tick, on a path that already blocks for an allocation.
+
+4. **A "dungeon checkpoint" in this ADR is the player's state at the instance boundary. It is
+   not encounter progress, and saying so is the point.**
+   The player is saved on the way in and on the way out. A crash mid-run therefore costs **the
+   run** — the instance, its mobs, its encounter progress — and costs **nothing of the
+   character**. Encounter-level checkpointing (the `dungeon_checkpoints` table named in
+   `shared/CLAUDE.md` and priced at M in ADR-6) is **explicitly deferred**, because it is only
+   worth building once there is an encounter worth losing, and today there is none. The name
+   is being claimed with a narrower meaning than the backlog item it shares a word with, so
+   the two must not be confused later: this one does not make a boss fight resumable.
+
+5. **A dungeon server does NOT overwrite the player's `map_id` or position.**
+   `player_states` holds **one row per player** with a single `MapId` (`AsyncSaver.cs:10`), and
+   `PlayerSpawn.Resolve` discards saved coordinates whose row belongs to another map. A
+   dungeon server that saved normally would therefore stamp the dungeon's id over the origin
+   map, and the player would return to the origin map's **spawn point** rather than where they
+   left — a silent, permanent teleport as the price of entering a dungeon. In dungeon mode the
+   server persists the map-independent fields (HP, and whatever later joins them) and leaves
+   `MapId`/position as the origin wrote them. The consequence is stated rather than hidden:
+   **position inside a dungeon is not durable**, and a disconnect past the 60s hold returns
+   the player to the origin map where they stood, not to the dungeon.
+
+6. **The instance shuts itself down when it empties.**
+   After the last member leaves and that member's 60s dungeon hold expires with no reconnect,
+   the server reports `Shutdown` to the Agones sidecar and exits. Not on a timer, not on a
+   reaper: the pod is the only party that knows both facts, and ADR-14 already gives it the
+   SDK to say so. A dungeon pod that outlives its party is a pod nobody will ever allocate
+   again, because decision 2 keys allocation on a party that no longer exists.
+
+7. **The return trip is the existing flow, and the client remembers the origin.**
+   Leaving a dungeon is `MsgTransferMap` to the origin map — the client-driven path that
+   already works and needs no gateway change. The gateway does not remember where a party came
+   from, because decision 5 means the durable record already says it.
+
+8. **A dungeon pod does not self-register into the map index.**
+   `RegistrationService` writes `servers:map:{map_id}` at startup for every server, and
+   nothing today gates that on mode (`--mode=dungeon` reaches exactly one line,
+   `GameServer.cs:1861`). A dungeon pod doing that is wrong twice: it advertises an instance
+   to `FindServer`, which would hand an unrelated player a dungeon as if it were a map, and on
+   a fleet that pins no `GAMESERVER_MAP_ID` it would write the empty key. The dungeon
+   lookup is decision 2's party key, written by the **gateway** at allocation, and a dungeon
+   server therefore reports `Ready` to Agones and registers **nothing**. This is the same
+   ordering ADR-14 decision 3 pins for map servers, with the second half removed.
+
+### Consequences
+
+- **A dungeon fleet must exist before any of this is testable.** `ALLOCATOR_FLEET_DUNGEON`
+  unset is a legible failure today and becomes a blocking one the moment a client can ask.
+- **`verify.sh` gains a layer, and `cluster.autoscaler` needs a second look.** ADR-18 forbids
+  an autoscaler on a fleet that pins one `GAMESERVER_MAP_ID` for every replica; a dungeon
+  fleet pins **no** map id — its replicas are interchangeable until allocated — so it is
+  exactly the fleet shape ADR-18 says unlocks `replicas > 1` and a buffer autoscaler. The
+  dungeon fleet is therefore the first fleet here that **should** have spare Ready pods, and
+  the check must not fail it for having them.
+
+  > **Second look taken, 2026-09-13 (ADR-14 stage 7).** The check did **not** fail a map-less
+  > fleet — it already read a template with no `GAMESERVER_MAP_ID` as unpinned and stood down.
+  > The real gap was narrower and would not have been found by reading the branch: it inspected
+  > only the one fleet a verify target names (`VERIFY_FLEET`), so an autoscaler placed on the
+  > *other* fleet in the namespace was neither refused nor noticed. It now sweeps every Fleet in
+  > `VERIFY_NAMESPACES`. The dungeon fleet's buffer autoscaler shipped with it, and the
+  > maximum is sized against the leak measured above rather than against a concurrency
+  > nobody has run.
+- **Party membership becomes a dependency of the realtime path.** A Nakama outage currently
+  stops new logins; after this it also stops dungeon entry, while map play continues. That is
+  the correct blast radius and it is worth writing down before someone is surprised by it.
+- **An allocation that never becomes a session leaks the instance. MEASURED, not predicted.
+  CLOSED 2026-09-13 by a bounded join deadline, and the fix is MEASURED on dev rather than
+  only unit-tested.**
+  Decision 6's rule is `isDungeon && everHadPlayer && connections == 0 && pendingHolds == 0`,
+  and `everHadPlayer` is there to stop a fresh pod shutting down at boot before its party
+  arrives. The cost of that term was that a pod which is **allocated and then never joined**
+  never satisfied it: it sat `Allocated` forever, and Agones does not reclaim an Allocated
+  pod (ADR-16). Two runs of `cmd/dungeonprobe` on dev -- which asks the gateway for an address
+  and never dials the game server -- consumed both replicas of a two-replica fleet
+  permanently, after which every further party got `all servers busy, retry shortly`. The
+  pods were released by hand. In production the same shape is a client that receives
+  `{ServerAddr, JoinToken}` and dies before dialling: crash, kill, lost connectivity. That is
+  not rare.
+
+  **The live proof, 2026-09-13 on `k3d-rpg-dev`.** The two probe runs that leaked the fleet
+  permanently the day before were repeated against the fix, watching the fleet every 20s:
+
+  ```
+  [t+20s]  4 gs | 4mj9f:Allocated  q8n49:Allocated  g4mmx:Ready  n8tz4:Ready
+  [t+80s]  4 gs | 4mj9f:Allocated  q8n49:Allocated  g4mmx:Ready  n8tz4:Ready
+  [t+100s] 2 gs | ml7ds:Ready      n8tz4:Ready
+  ```
+
+  Both leaked instances released themselves between t+80s and t+100s -- the 90s deadline --
+  and the fleet returned to its buffer. The same observation is the first live evidence for
+  ADR-18's autoscaler on this fleet: four GameServers at t+20s is two allocated plus the
+  **two Ready spares the buffer maintains**, converging back to two once the allocations went
+  away. Neither mechanism had been run on a cluster before this.
+
+  **What closed it.** A second rule, `GameServerHost.ShouldShutdownUnjoinedInstance`, and
+  **not** another term in decision 6's -- the pod cannot distinguish "my party has not arrived
+  yet" from "my party is never arriving" without a clock, so it was given one. The new rule is
+  `isDungeon && !everHadPlayer && pendingHandshakes == 0 && deadline > 0 && waited >= deadline`.
+  It is the **exact complement of decision 6 on `everHadPlayer`**, so the two partition the
+  space on that one term and can never both fire: a pod mid-run, and a pod that emptied after
+  a real run, stay decision 6's business exactly as before. That is pinned by a test over the
+  cross product of their shared inputs, not left to care.
+
+  Three things the ADR left open, now decided:
+
+  - **The clock starts at `Allocated`, and the pod really can observe that** -- the question
+    was open when this was written. The sidecar's `GET /gameserver` carries `status.state`,
+    already surfaced as `IAgonesSdk.GetStateAsync()` and already polled by
+    `AgonesAllocationGate` for the register-on-allocated gate (ADR-18); the deadline reuses
+    that gate rather than re-implementing it. **Not boot**: a dungeon fleet pins no map id and
+    is therefore the one fleet shape ADR-18 says should carry spare `Ready` replicas, and a
+    pod parked in that buffer is not leaking. With Agones disabled there is no allocation to
+    observe and no allocator to leak a replica to, so the clock starts at start-up.
+  - **The deadline is 90s, not `constants.JoinTokenTTL`.** The ADR's reasoning -- that the
+    allocation is unusable once the token expires -- is true of the token and false of the
+    deadline, because **the two clocks do not start together**. The gateway mints the token
+    *after* allocating: it waits up to `registry.DefaultAllocationWaitTimeout` (15s) for the
+    pod to register, and only then signs a token that lives a further 30s. The last legitimate
+    arrival is ~45s after `Allocated`, so a 30s deadline would kill pods out from under
+    parties still holding a valid token. 90s is twice the worst case.
+    `GAMESERVER_JOIN_DEADLINE_SECONDS` / `--join-deadline-seconds`; `0` disables it and the
+    start-up banner says so.
+  - **`Stopwatch`, never `DateTime.UtcNow`** (#153): this host's `CLOCK_REALTIME` runs 10-17%
+    fast and has been seen stepping backwards, so a wall-clock budget would shrink under
+    exactly the load the deadline exists to tolerate.
+
+  The operational advice that stood while this was open -- a dungeon fleet needs headroom over
+  its real concurrency, and an operator who knows this failure by sight -- is now a **90s**
+  window rather than an unbounded one, but headroom is still the right posture: the deadline
+  reclaims a leaked replica, it does not make one available sooner.
+
+- **This ADR does not make dungeons crash-safe** (decision 4) and does not give a party a
+  shared chat, a leader, or matchmaking beyond what the party RPCs provide. It makes a party
+  of players land in one instance together and get home afterwards.
+
+### Rejected
+
+- **A new `MsgEnterDungeon` message type.** Decision 1.
+- **Keying the instance by content id** — one shared dungeon per content for the whole game,
+  i.e. not instancing. Decision 2.
+- **Mirroring party membership into Redis** so the gateway need not call Nakama. Two
+  authorities that disagree under partition, to save one RPC on a path that already waits for
+  a pod allocation. Decision 3.
+- **Encounter-level checkpointing now.** Deferred with its name kept distinct. Decision 4.
+- **Letting the dungeon server save normally.** A silent teleport to the origin spawn point as
+  the price of a dungeon run. Decision 5.
+- **A reaper that sweeps idle dungeon pods.** The pod knows; a sweeper guesses. Decision 6.
+
+---
+
 ## Summary of decisions
 
 | # | Area | Decision |
@@ -1602,9 +3711,22 @@ it benefits, and it quadruples snapshot bandwidth, which the measured 45.9 KB/s 
 | 5 | Events | Redis Streams with ACK only; raw pub/sub reserved and currently unused |
 | 6 | Crash recovery | ≤30s loss window accepted for gameplay state, conditional on economy going through Nakama transactionally |
 | 7 | CCU/cost | All figures are unbenchmarked estimates; benchmark plan anchored to the 66ms tick budget |
-| 8 | Realtime security | Opt-in KCP PSK encryption (per-session keys deferred); `JOIN_TOKEN_SECRET` split from `JWT_SECRET`, both rotatable; token-bucket rate limits on accepts, frames and `gateway_token`. KCP is **not** reachable end to end — the C# game server has no KCP |
+| 8 | Realtime security | Opt-in KCP PSK encryption + **per-session keys implemented 2026-09-04**: gateway mints 32-byte session key via `transfer.GenerateSessionKey()`, returns it in `EnterWorldResponse.SessionKey` for KCP sessions; C# `KcpCrypto.TryCreateFromRawKey()` accepts raw keys. `JOIN_TOKEN_SECRET` split from `JWT_SECRET`, both rotatable; token-bucket rate limits on accepts, frames and `gateway_token` |
 | 9 | Wire encoding | Protobuf from one committed schema; JSON kept during migration and distinguished by the first body byte, so components upgrade in any order |
 | 10 | Shared simulation | Arch replaces `GameWorld` on the server; `Shared.GameLogic` stays ECS-free and ships to Unity as multi-targeted **source**; golden vectors run on both sides in CI; only IEEE-exact float ops permitted in shared code |
 | 11 | Arch under NativeAOT | Arch publishes clean and then throws at runtime without per-component AOT hints; hints are **generated or guarded, never hand-written**; `CommandBuffer` is broken under AOT and is not used; the `publish` CI job must **run** the binary, not just build it |
 | 12 | ECS migration | Server goes to **real ECS with Arch**, staged one PR at a time, over the analysis's objection and by owner decision; `CommandBuffer` stays banned and structural ops stay deferred to one phase per tick; every new component gets its AOT hint line in the same commit; no query shape the hint guard cannot see; `Shared.GameLogic` and the wire are frozen throughout |
 | 13 | Simulation rates | Three responsibility-named groups (`Critical`/`World`/`Background`) at configurable Hz (`SIM_*_HZ`, default 60/15/5) on one derived integer base-tick timeline; rates that do not divide the base are rejected at startup; each group integrates with its own dt; group order Critical->World->Background is the cross-rate write-ownership rule; **replication stays at the world rate**; overload drops the backlog and counts it; the background group ships empty because nothing currently tolerates 200ms |
+| 14 | Agones | **Stages 1-4 shipped 2026-08-17 and are proven — see ADR-16.** The decisions below stand; the status claim does not. Originally: the C# server's Agones SDK is a no-op and `--agones` changes nothing; implement it over the **HTTP sidecar on `localhost:9358`**, not the gRPC C# SDK, to hold the module's NativeAOT/no-dependencies rule. Agones owns pod lifecycle, Redis owns the `map_id -> server` lookup, and the server registers **only after** reporting Ready — an ordering `GameServer.RunAsync` already implements, so what it needs is a test pinning it, not a change. Health stays `disabled: true` until a real SDK is wired; the autoscaler is buffer-based on server count because ADR-7's CCU ceiling is unknown. Whether the realtime tier moves off `DEPLOY_MODE=containers` to k8s is **not** decided here |
+| 15 | Realtime tier on k8s | **Proposed, not accepted — prerequisites 1,2,3,4,5,6 now complete (2026-09-04).** StatefulSets/PVCs (done), ConfigMaps + initdb Job (done), Nakama plugin Dockerfile (done), Secrets (done), registry push script + `imagePullSecrets` (done), RBAC (done). The deploy path stays `DEPLOY_MODE=containers`; the manifests are ready but the acceptance decision (LoadBalancer vs hostPort, multi-replica gateway) is still open. ADR-3 is unchanged |
+| 16 | Agones on k3s | Realtime tier **proven** on Agones/k3d: a real client joined an Agones-managed server in strict-address mode. Docker Desktop k8s cannot host it (Kubernetes `hostPort` is never published to the host); k3d with a mapped port range can. The advertised address is **composed** — port from the Agones status read, host from `GAMESERVER_ADVERTISE_HOST` — because `status.address` is the node address and is not dialable. ADR-2 is now enforced in code (allocate only for a map with no live server); the join token is minted only after the pod self-registers. Allocated pods are never reclaimed; the map-fleet allocator policy stays open; the deploy path stays `DEPLOY_MODE=containers` |
+| 17 | Availability posture on k8s | **Statement of posture, not a manifest change.** Every workload in `deploy/k8s/` is **one replica**. `strategy: Recreate` on `hostPort` workloads is **required**. The **gateway→gateway half of the duplicate-login kick is now implemented (2026-09-04)**: `KickConsumer` in `server/kick_consumer.go` consumes `events:gateway_kick` via per-instance consumer group `gw:{gateway_id}`, closes the old user's socket when `old_gateway_id` matches. Remaining before multi-replica: answer the hostPort exposure question (LoadBalancer/Ingress), cross-instance single-flight (ADR-16), and Redis persistence/replication (ADR-4) |
+| 18 | Fleet autoscaling | **No `FleetAutoscaler` on a fleet that pins one `GAMESERVER_MAP_ID` for every replica.** The C# server self-registers at startup, not on allocation, so a "spare" Ready pod is a second live server for that map: measured on k3d 2026-08-18, scaling `1 -> 2` put two members into `servers:map:map_01` 5.4s later with no allocation involved, and `FindServer` hands clients one of them (the least-loaded then; the lowest `ServerID` since #203). `ready=0` is therefore the correct steady state and tooling says so instead of warning. Enforced by `verify.sh` check `cluster.autoscaler` (FAIL), which stands down for a fleet with a per-pod map id. `replicas > 1` and a buffer autoscaler unlock together, on a per-pod map id or on registering at `Allocated` rather than `Ready` — an autoscaler does nothing for the "second map cannot be served" symptom, which is a fleet-targeted-allocation problem. **Amended 2026-09-13:** the unlock arrived as a *second fleet* rather than as either mechanism — the dungeon fleet pins no map id, so it carries the project's first `FleetAutoscaler` (Buffer 2/2-6, 30s). The map fleet's prohibition is unchanged and the check was not loosened to allow it; it was widened to sweep **every** fleet in the target namespaces instead of only the one a target names. `maxReplicas` is a bound on ADR-26's measured instance leak, not a capacity figure |
+| 19 | Game content | **Content is JSON on disk in `backend/content/`, owned by the game server, served to clients over HTTP at `/content` and never carried by the `Shared.GameLogic` package.** The package is pinned by exact commit, so content in it costs a tag plus two file bumps per balance tweak — correct for simulation rules, fatal for content. The server loads and validates at boot and **refuses to start** on invalid content, reporting every fault in one pass. Clients send `?hash=` and get `304` once they hold the current set; the hash ships in both `ETag` and `X-Content-Hash` because `UnityWebRequest` and some proxies strip the former. The **schema and validator are shared** (`Shared.GameLogic/Content/`), the **parser is not** — Unity compiles the package as source and has no `System.Text.Json`, the server is NativeAOT and cannot reflect, so no single parser satisfies both; golden vectors cover the gap as in ADR-10. No hot reload: content changes need a restart, because rules changing under a running simulation makes every desync unreproducible |
+| 20 | Duplicate-login kick | **Gateway→gameserver eviction over one shared `events:kick` Stream, keyed by join-token jti** (ADR-5 consumer-group ACK, never Pub/Sub). On duplicate login the gateway publishes `session_superseded` with the old session's jti; each game server consumes via its own group (`gs:{server_id}`, created at `$`, destroyed on graceful shutdown), kicks only the connection holding that jti (newest login wins, redelivery idempotent), releases the entity with **no reconnect hold**, and sends the standard `MsgKick`+`MsgDisconnect` pair. One shared stream because server ids churn under a noeviction Redis (ADR-4). Counters: `gateway_kick_publish_total`, `gameserver_players_kicked_total`. The gateway→gateway socket eviction stays with ADR-17 |
+| 21 | Transport confidentiality | **Proposed, not accepted — a record of posture only.** KCP has real AES-256-CFB packet encryption, kcp-go-compatible and symmetric across Go and C# (`KcpCrypto.cs` / `shared/transport/crypto.go`), fail-closed on a wrong key. But it is **off by default twice** — the transport default is `tcp`, which has no encryption path, and the key variable defaults to empty, which means plaintext — and a **pre-shared key is not a session key**: every client shares one static secret that ships in the binary, so it resists a passive observer and not a player. No negotiation, no key id, no rotation without a hard cutover; CFB plus a linear CRC32 is confidentiality, not authentication, and the CRC is not a MAC. Deferred because every current environment is localhost/LAN and the hosting shape above dev is unsettled (ADR-15/16) — choosing an AEAD and a key exchange now means choosing them twice. **Reporting the transport and whether a key is in force does not wait for that decision.** Do not describe this link as "unencrypted"; describe it as unencrypted by default and unauthenticated when on |
+| 22 | Transport crypto | **Accepted 2026-09-10 as the target model; NOT implemented.** ChaCha20-Poly1305 over an **authenticated** X25519 exchange, HKDF-SHA256 derivation, **nonce as the replay counter** (one mechanism removing both replay and nonce reuse). Supersedes #288's `HKDF(JOIN_TOKEN_SECRET, jti)` derivation, which has **no forward secrecy** — obtaining the long-term secret later decrypts every recorded past session. **The DH must prove possession of secret-derived material, not echo the join token**, which an eavesdropper can read and replay; unauthenticated DH on a plaintext hop is a clean MITM that produces confidence rather than security. Measured in a built IL2CPP player: `AesGcm` **compiles then throws**, `ChaCha20Poly1305`/`HKDF`/`ECDiffieHellman` **absent**, only `Aes`/`HMACSHA256`/`RandomNumberGenerator` work; and measured on .NET 10, **X25519 is absent there too** while ChaCha20-Poly1305 and HKDF are built in — so **X25519 must be vendored on two runtimes**, ideally by one pure-C# library serving both. GNS rejected (replaces the transport and deletes the Go loadtest harness), Hazel rejected (no Go, thin crypto). No negotiation, no fallback, standard implementations only, cross-implementation vectors as a deliverable, field 5 reserved not reused. **Library settled: BouncyCastle 2.7.0** — the only candidate supplying X25519; RFC vectors pass in a built IL2CPP player at **both Minimal and High stripping**, at a cost of 4.7 MB and 2 350 types. **Replay: strict counter, no sliding window** — zero inversions in 22 374 frames across both transports under hostile `tc netem`, and chosen because a wrong counter fails loudly while a wrong window accepts a replay silently; three conditions attach, including bounding the forward jump, since the ordering guarantee is inherited from a hand-ported KCP rather than owned. **Does not ship until the gateway hop is confidential** |
+| 23 | Gateway-hop confidentiality | **TLS terminated in the gateway process**, behind `GATEWAY_TLS_CERT`/`GATEWAY_TLS_KEY`, **defaulting off** and pinned explicitly at every deploy site. A second sealed handshake for this hop is **rejected**: the Go server half of the sealed protocol does not exist, the hop has no `jti` to anchor a transcript, and an unauthenticated exchange would make `BindingVerified` a field that is always false. Terminating **in the process, not at an edge**, because an edge terminator is confidential only to the edge and buys nothing on the single-node dev/staging boxes. **The measurement that motivated this was incomplete**: the auth token is minted over a plaintext HTTP hop to Nakama that also carries a 2-hour reusable Nakama session token, so the meta hop is the higher-value half and is NOT fixed here. No negotiation, no plaintext fallback. The client half (TLS on the gateway connection, `https://` for Nakama) is unwritten, so the flag is off everywhere |
+| 24 | Meta-hop (Nakama) confidentiality | **Nakama terminates TLS itself** (`--socket.ssl_certificate`), behind `NAKAMA_TLS_CERT`/`NAKAMA_TLS_KEY`, **defaulting off** and pinned at every deploy path; `NAKAMA_URL` moves to `https://` in the same change because the **C# game server is a second consumer of this hop** (`NakamaClient.cs`, compose only — absent under Agones). Measured: the flag covers port 7350 **including the `/ws` realtime socket**, TLS-only, and does **NOT** cover the console (7351) or metrics (9100), both published on `0.0.0.0` in compose; upstream explicitly warns against direct SSL termination and we take it anyway because an edge terminator buys nothing on a single-node box. **The larger finding is not confidentiality**: both Nakama static keys sit at their published defaults and both authenticate — `defaulthttpkey` reaches the server-only reward and leaderboard RPCs — and `cd.yml` never wrote `NAKAMA_HTTP_KEY` at all, so every deployed compose environment ran the default. CD now fails on a missing or default key. **No `InsecureSkipVerify` anywhere, including dev**: dev runs the flag off rather than on with a disabled check. Credentials in URLs (the `/ws` token, `http_key`) survive TLS into access logs and are an upstream API shape we cannot fix |
+| 25 | Game-server identity | **Accepted 2026-09-12; BACKEND IMPLEMENTED 2026-09-13** (decisions 1-5; decision 6 as a reporting contract that resolves to the weaker truth everywhere, because ADR-23 TLS is off; decisions 7-8 outstanding, and the Unity IL2CPP probe has NOT been run). The game server signs the sealed handshake with an **Ed25519 key it generates per pod at startup**, whose public half travels pod -> registry -> gateway -> `enter_world_resp`. Replaces a residual that no configuration can close: the ADR-22 binding is a **symmetric** HMAC under `JOIN_TOKEN_SECRET` (`SealedTranscriptSigner.cs:21-32`, `SealedCrypto.cs:98-107`), which is the key the gateway **mints join tokens with** (`gateway/transfer/join_token.go:17-23`, `shared/config/config.go:25-28`) - so a client able to verify is a client able to forge, and `binding_verified=false` (`shared/sealed/client.go:101-120`) is permanent for every shipped player. Consequence today: the sealed hop is confidential against a **passive** eavesdropper and offers **nothing** against an active one. Per-pod, not per-fleet, because the peer is an Agones replica whose address is composed at scheduling time (ADR-16): rotation is pod replacement, and a fleet-wide private key mounted into the most player-exposed process is the worst-isolated secret available. **The key is delivered over the gateway hop, so it is exactly as trustworthy as that hop** - plaintext everywhere today, ADR-23's TLS implemented and off because it needs certificate distribution - therefore a client reports `server_identity_verified` only when the key arrived over an authenticated hop, and reports the weaker truth otherwise. New field numbers only (`server_signature = 4`); the transcript bytes do not change; old clients do not break; no negotiation, no fallback. **TLS on the gameplay hop rejected** (no stable address to certify, deletes machinery live in production, does not apply to KCP), **pinning a fleet key in the player rejected as the default** (rotation becomes an app-store release - ADR-23 Option B), **doing nothing rejected** (an always-false boolean is a dead end, not a backlog item). Ed25519 under Unity IL2CPP is an unrun go/no-go probe, asserting the NEGATIVE case |
+| 26 | Dungeon instancing | **Accepted 2026-09-12 as the target model; NOT implemented.** Implements ADR-14 stage 6. Entry reuses `MsgEnterWorld` with a new **`party_id`**; there is no `MsgEnterDungeon`, because a second message type duplicates the auth, budget, rate-limit and error paths `handleEnterWorld` already owns. **The instance is keyed by the PARTY, not the content id** (`dungeon:party:{party_id} -> ServerInfo`): the first member allocates, the rest are handed the same address. **ADR-2 does not apply and must not be extended to cover it** - two servers on one `map_id` split a shared world, whereas each dungeon instance is a distinct logical world by design; keying by content would give the whole game one shared dungeon. Membership is verified against Nakama's `party_get` over the internal HTTP key **once per entry, never per tick**, and is **not mirrored** into the gateway or Redis - a mirror of an authority is a second authority that disagrees under partition. **A "checkpoint" here is the player at the boundary, not encounter progress**: a crash costs the run and nothing of the character, and the `dungeon_checkpoints` table named in `shared/CLAUDE.md` stays deferred, because it is only worth building once there is an encounter worth losing. **A dungeon server must not save `map_id` or position** - `player_states` holds one row per player and `PlayerSpawn` discards another map's coordinates, so a normal save would stamp the dungeon over the origin and silently teleport the player to a spawn point as the price of entering; the cost of that choice is that **position inside a dungeon is not durable**. The pod **shuts itself down** when the last member's 60s hold expires, because the pod is the only party that knows both facts and a pod outliving its party can never be allocated again. Return is the existing `MsgTransferMap`. **The measured allocation leak is CLOSED (2026-09-13):** a pod allocated and then never joined never satisfied decision 6 (`everHadPlayer` stays false) and Agones does not reclaim an Allocated pod, so the instance leaked. A second rule, `ShouldShutdownUnjoinedInstance`, is the **exact complement of decision 6 on `everHadPlayer`** -- the two can never both fire -- and releases a dungeon pod that has been `Allocated` (read from the sidecar's `status.state`, not assumed) for longer than `GAMESERVER_JOIN_DEADLINE_SECONDS` with no player and no handshake in flight. **90s, not the 30s join-token TTL the ADR proposed**: the gateway mints that token *after* allocating and after a 15s registration wait, so the last legitimate arrival is ~45s past `Allocated`. `Stopwatch`, never wall clock (#153). **A dungeon pod self-registers NOTHING** - `RegistrationService` writes `servers:map:{map_id}` for every server today and nothing gates it on mode, which on a dungeon pod would both advertise an instance to `FindServer` and, on a fleet pinning no map id, write the empty key. Notable knock-on: a dungeon fleet pins **no** `GAMESERVER_MAP_ID`, so it is the first fleet here that **should** carry spare Ready pods and ADR-18's `cluster.autoscaler` check must not fail it. Rejected: a new message type, content-keyed instances, mirrored membership, encounter checkpoints now, saving normally, a sweeper |

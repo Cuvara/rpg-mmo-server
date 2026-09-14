@@ -44,6 +44,45 @@ namespace Shared.GameLogic.Components
         public readonly float Speed;
 
         /// <summary>
+        /// Facing as 16-bit binary radians BIASED BY ONE: 0 means "not sent", and a real
+        /// facing is <c>(FacingBrad - 1) * 2*PI / 65536</c> radians counter-clockwise
+        /// from +X.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Carried in its RAW WIRE FORM rather than as an angle, for the same reason
+        /// <see cref="Speed"/> is carried raw: this struct is a state carrier, and the
+        /// conversion is a wire concern. The codec lives in each side's wire layer
+        /// (<c>GameServer/Net/FacingCodec.cs</c> on the server,
+        /// <c>Runtime/Protocol/FacingCodec.cs</c> in the Unity client) and NOT in this
+        /// library, because encoding a direction vector needs <c>MathF.Atan2</c>, which
+        /// ADR-10 forbids here — it is implementation-defined across NativeAOT x64 and
+        /// IL2CPP ARM64. Entity-id interning is kept out of this library for the same
+        /// kind of reason.
+        /// </para>
+        /// <para>
+        /// <b>Zero means "not sent", not "facing east".</b> The +1 bias exists precisely
+        /// so those two are distinguishable: 0.0 radians is a perfectly ordinary facing,
+        /// so a plain float would make them identical bytes under proto3 elision.
+        /// Consumers must keep the entity's last known facing, or derive one from its
+        /// movement, rather than snapping to east — otherwise every entity from an old
+        /// server points the same way, which reads as a content bug.
+        /// </para>
+        /// </remarks>
+        public readonly uint FacingBrad;
+
+        /// <summary>
+        /// What the entity is doing, for animation selection.
+        /// </summary>
+        /// <remarks>
+        /// <see cref="EntityAction.Unspecified"/> (0) means "not sent", never "idle".
+        /// A consumer must keep whatever it was showing rather than falling back to
+        /// idle, or a sender predating the field freezes every entity in the world into
+        /// an idle pose — which looks like a broken animator, not a missing field.
+        /// </remarks>
+        public readonly EntityAction Action;
+
+        /// <summary>
         /// Constructs entity state without a speed, leaving <see cref="Speed"/> zero —
         /// which consumers read as "not sent".
         /// </summary>
@@ -59,7 +98,24 @@ namespace Shared.GameLogic.Components
         {
         }
 
+        /// <summary>
+        /// Constructs entity state without a facing or action, leaving both at their
+        /// "not sent" values.
+        /// </summary>
+        /// <remarks>
+        /// Kept for source compatibility for the same reason as the overload above: the
+        /// Unity client compiles this library from a pinned tag, so a signature change
+        /// breaks every call site at once the moment the tag moves, whereas an extra
+        /// overload costs nothing.
+        /// </remarks>
         public EntitySnapshotData(string id, string type, float x, float y, int hp, int maxHp, float speed)
+            : this(id, type, x, y, hp, maxHp, speed, 0u, EntityAction.Unspecified)
+        {
+        }
+
+        public EntitySnapshotData(
+            string id, string type, float x, float y, int hp, int maxHp, float speed,
+            uint facingBrad, EntityAction action)
         {
             Id = id;
             Type = type;
@@ -68,6 +124,8 @@ namespace Shared.GameLogic.Components
             Hp = hp;
             MaxHp = maxHp;
             Speed = speed;
+            FacingBrad = facingBrad;
+            Action = action;
         }
     }
 

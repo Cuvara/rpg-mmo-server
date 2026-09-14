@@ -46,10 +46,18 @@ deploy (depends on all above — build artifacts)
 
 ### Communication Channels
 - **Nakama <-> Gateway**: JWT shared secret for local verification (no roundtrip)
-- **Nakama <-> GameServer**: Internal RPC (signed) for reward granting
-- **Gateway (Go) <-> GameServer (C# .NET 10)**: no runtime connection. The gateway never talks to a game server; it issues a join token and the *client* dials the server directly (ADR-3). Both speak the same wire protocol (4-byte BE length prefix + JSON, `snake_case`), joined by an HS256 join token whose `sid` names the target server
+- **GameServer -> Nakama**: HTTP RPC for reward granting. **One direction only, and it is not
+  signed** — the previous wording here ("Nakama <-> GameServer: Internal RPC (signed)") was
+  backwards on both counts. The Nakama plugin makes **no outbound network calls at all**; the C#
+  game server calls Nakama (`GameServer/Nakama/NakamaClient.cs` -> `POST /v2/rpc/reward_kills`),
+  authenticating with `runtime.http_key` **in the query string** — a static, never-expiring bearer
+  secret in a URL, so it survives into access logs even once the hop is TLS (ADR-24). Present in
+  compose only: no `NAKAMA_URL` is set in `k8s/app/50-fleet-map.yaml`, so under Agones this call
+  does not happen and the reward path is silently inert
+- **Gateway (Go) <-> GameServer (C# .NET 10)**: no runtime connection. The gateway never talks to a game server; it issues a join token and the *client* dials the server directly (ADR-3). Both speak the same wire protocol (4-byte BE length prefix + Protobuf, legacy JSON still accepted — ADR-9), joined by an HS256 join token whose `sid` names the target server
 - **Gateway <-> Redis**: Session store (TTL), server registry, event-stream consumer
-- **GameServer <-> Redis**: ⬜ **not implemented** — the C# server has no Redis client. It cannot self-register or heartbeat (a deploy script does it) and its events go to a noop stream (ADR-1, ADR-5)
+- **The `servers:id:{server_id}` hash is a CROSS-LANGUAGE CONTRACT with no translation layer.** The C# game server writes it (`GameServer/Registry/RedisServerRegistry.cs`) and the Go gateway parses it directly (`shared/storage/redisstore/registry.go`, `infoFromFields`). Fields: `server_id`, `map_id`, `addr`, `transport`, `capacity`, `player_count`, `identity_key`. A rename or an encoding change on one side **must** land in the same commit as the other; there is nothing in between to catch a drift, and the symptom is not an error — the gateway reads an empty value and behaves as if the server had not published it. `identity_key` is ADR-25's per-pod Ed25519 public key as standard padded base64 of 32 raw bytes; use `sealed.EncodeIdentityKey`/`DecodeIdentityKey` and `ServerIdentity.PublicKeyBase64` rather than calling base64 by hand
+- **GameServer <-> Redis**: ✅ **implemented** — `GameServer/Registry/RedisServerRegistry.cs` (self-registration + 5s heartbeat against 15s TTL), `GameServer/Events/RedisEventStream.cs` (event publishing via StackExchange.Redis), `GameServer/Events/RedisKickConsumer.cs` (duplicate-login kick consumer). Enabled when `REDIS_ADDR` is set; noop fallback otherwise
 - **GameServer <-> PostgreSQL**: Async batch save every 30s + save on entity removal. No checkpoint-on-transfer yet (ADR-6)
 
 ### Shared Definitions (owned by agent-shared, Go)
@@ -82,6 +90,31 @@ Constraints: no Unity refs, **no ECS refs (`Arch.Core` included)**, no server-sp
 - `package.json`'s `version` is bumped in the same commit that gets tagged.
   Otherwise the client installs `sgl-v0.2.0` and gets a package reporting `0.1.0`,
   which UPM will not warn about.
+
+  This is enforced by `.github/workflows/verify-sgl-tag.yml`, which fails on any
+  pushed `sgl-v*` tag whose `package.json` disagrees with it. It **detects**
+  rather than prevents: the push has already happened by the time a workflow
+  runs, and there is no pre-receive hook here. `publish-shared-gamelogic.yml`
+  cannot produce a mismatch at all — it derives the tag from `package.json` — so
+  the automated path was never the risk. Every mismatch below came from a tag
+  pushed by hand.
+
+  **Five published tags are wrong and will stay wrong.** A tag that somebody has
+  already pinned cannot be moved without breaking them, so these are recorded
+  rather than repaired:
+
+  | tag | `package.json` actually reports |
+  |---|---|
+  | `sgl-v0.1.1` | `0.1.0` |
+  | `sgl-v0.1.2` | `0.1.0` |
+  | `sgl-v0.1.3` | `0.1.0` |
+  | `sgl-v0.1.4` | `0.1.0` |
+  | `sgl-v0.1.5` | `0.1.0` |
+
+  Anything pinned to one of those five resolves a package reporting `0.1.0`.
+  `sgl-v0.1.6` onward agree. Found by reading each tag's `package.json` while
+  backfilling the GitHub releases that these tags never had — not by any check,
+  because until now there was none.
 - **Tagging is a release action and belongs to the lead.** Do not create one.
 - No `.tgz`, no NuGet, no registry. UPM does not consume tarball URLs, and the
   client must compile *source* (Unity 6 is C# 9).

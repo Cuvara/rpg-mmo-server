@@ -5,7 +5,176 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Party, as four Nakama RPCs over the storage engine** (`social/`, roadmap item C2). `party_create`,
+  `party_join`, `party_leave`, `party_get`, registered from `main.go`. Capped at **4 members**
+  (`social.MaxPartyMembers`, the number the root `CLAUDE.md` states under Social); the 5th join is
+  refused with gRPC code `9` and a typed `party is full`, not a silent no-op.
+  - **Not** Nakama's realtime/socket Party API. This client talks to Nakama over HTTP for meta and
+    keeps its sockets for the gateway and the game server (ADR-3), and realtime party state is not
+    addressable from a `runtime.http_key` call — which it has to be, because the gateway verifies
+    party membership before allocating a dungeon instance. `party_get` is the one party RPC that
+    accepts **both** a client session and an `http_key` call, for exactly that; the three mutations
+    act on "the caller" and reject a subject-less `http_key` call with code `16`.
+  - **The member cap is held by a storage version check, not by a read.** Two players joining a
+    3-member party at the same moment both read 3, both compute 4, and a read-then-write check lets
+    both commit — 5 members. Every mutation is instead one `nk.MultiUpdate` carrying the party
+    record at the version read this attempt **and** the per-user membership index create-only
+    (`"*"`), so Nakama rejects the whole update if either check fails: one join commits, the other
+    re-reads a full party and is answered `party is full`. Bounded at 5 attempts, re-validating on
+    each; exhausting the budget returns code `10` (`ABORTED`), the one party error worth retrying.
+    A test drives real goroutines through a version-enforcing in-memory store with a barrier
+    holding every racer at the same version. Removing the cap check makes it report 6 members in a
+    4-member party; removing the `Version` field makes admitted joiners vanish from the party.
+  - **A user is in at most one party, and joining another one fails** (`already in a party`) rather
+    than silently moving them: auto-leaving turns an additive-looking call destructive — a mistyped
+    or replayed join by a party leader would transfer that leadership away, or delete the party if
+    they were its last member. Re-joining the party you are already in **is** idempotent success,
+    so a client retrying after a timeout is not told "already in a party" about its own party.
+  - Leader leaving transfers leadership to the longest-standing remaining member; the last member
+    leaving deletes the party record in the same update as their index, so a party never outlives
+    its members. Two torn states that would otherwise strand a player are cleared by `party_leave`:
+    an index whose party is gone, and an index pointing at a party that does not list the user.
+  - Party records are **system-owned** with permissions `0/0`, so no client can read or write party
+    state through Nakama's public storage API — only through these RPCs, which are what enforce the
+    cap and the leadership rules.
+  - The three mutations share one per-user token bucket (`PartyWriteRatePerSec` 0.5/s, burst 10),
+    because the abuse shape is a create/leave loop and per-RPC buckets would let it run at the sum
+    of the limits. `party_get` is **not** limited: the gateway's calls carry no user id to key on,
+    and keying them to the empty string would let one player throttle the cluster's dungeon
+    allocations. Same per-process caveat as `gateway_token`.
+  - `docs/API.md` gains the RPC reference (payloads, the full error/code table, the storage
+    records), `docs/DESIGN.md` the rationale, and `docs/README.md` no longer lists party as
+    Planned. Friends, chat, guild, presence and matchmaking remain not started.
+
+### Security
+
+- **`NAKAMA_HTTP_KEY` must now be set and non-default for any deployed environment** (ADR-24). It
+  authenticates `reward_kill`, `reward_kills` and `submit_kill` — the server-only RPCs
+  `economy/caller.go:requireServerCaller` guards — and it was running at Nakama's published default
+  everywhere, because CD never wrote the variable. See `backend/deploy/CHANGELOG.md` for the
+  measurement and the gate.
+
+### Documentation
+
+- **`backend/TEAM.md`'s "Nakama <-> GameServer: Internal RPC (signed) for reward granting" was
+  backwards on both counts and is corrected.** The plugin makes **no outbound network calls at
+  all**; the **C# game server calls Nakama** (`GameServer/Nakama/NakamaClient.cs`). And the call is
+  **not signed** — it authenticates with `runtime.http_key` in the **query string**, which is a
+  static bearer secret in a URL, so it lands in access logs even once the hop is TLS.
+
+### Security
+- **Economy mutation RPCs are server-only** (audit 2026-09-07 F01, P0). `reward_kill`,
+  `reward_kills` and `submit_kill` take the beneficiary `user_id` from the payload, and
+  Nakama exposes every registered RPC to authenticated clients as well as to
+  `runtime.http_key` callers — so any logged-in client could grant itself (or anyone)
+  gold and score. A shared guard, `economy.requireServerCaller`, now rejects any
+  invocation whose context carries a client-session marker (`RUNTIME_CTX_USER_ID`,
+  `RUNTIME_CTX_SESSION_ID` or `RUNTIME_CTX_USER_SESSION_EXP`) with gRPC code 7
+  (`PERMISSION_DENIED`, HTTP 403, message `server-only rpc`) **before the payload is
+  parsed** and before any `WalletUpdate`/`LeaderboardRecordWrite`. `runtime.http_key`
+  calls carry none of those markers, so the game server's `NakamaClient`
+  (`/v2/rpc/<id>?http_key=…`) is unaffected. `get_leaderboard` (read) and
+  `gateway_token` (client RPC by design) are unchanged.
+- **`kills_alltime` leaderboard is authoritative** (F02, P1). It was created with
+  `authoritative=false`, letting clients write their own scores through Nakama's public
+  `WriteLeaderboardRecord` regardless of the RPC guard. Because `LeaderboardCreate` is
+  idempotent and never alters an existing board, `SetupLeaderboards` now looks the
+  board up first (`LeaderboardsGetId`); an existing non-authoritative board makes
+  **InitModule fail** with the fix in the error message rather than deleting data or
+  silently leaving the hole open. Data-preserving migration is one SQL update plus a
+  Nakama restart (`UPDATE leaderboard SET authoritative = true WHERE id =
+  'kills_alltime'`, see `docs/RUNBOOK.md`); `LEADERBOARD_MIGRATE=recreate` in the
+  runtime env opts into delete-and-recreate for disposable dev/staging boards. Chosen
+  over auto-recreate because a start-up hook must not destroy player records on its
+  own, and over log-and-continue because that keeps a P1 open unnoticed.
+
+### Fixed
+- **`reward_kills` is exactly-once per `batch_id`** (audit 2026-09-07 F06, P1). The
+  batch id was only metadata; a retry under a new id after a post-commit connection
+  failure granted twice, and the game server's answer to that — dropping any batch whose
+  outcome was unknown — lost gold instead. A receipt (storage collection
+  `reward_receipts`, key = `batch_id`, owner = user, read/write 0) is now written
+  **create-only** in the same `nk.MultiUpdate` transaction as the wallet update, so gold
+  and receipt commit or roll back together. A resent id is replayed from the receipt
+  (`replayed: true`, no wallet change); a duplicate racing past the lookup loses the
+  version check and its whole transaction rolls back. Chosen over a separately written
+  dedupe marker because only the one-transaction form closes the crash window between
+  marker and grant. `batch_id` is now **required** (code 3 when empty).
+- **Leaderboard failure after the grant is no longer a silent success.** The response
+  carries `status: "granted" | "partial"`; `partial` means gold committed, score not.
+  A replay of the same batch id retries **only** the leaderboard until it lands
+  (`leaderboard_done` in the receipt), so score converges without a second grant. The
+  residual double fault (score written, receipt update failed, batch replayed) is a
+  bounded score over-count, logged as `receipt update failed for batch …` (ADR-6).
+- **Over-cap batches are rejected with a machine-readable code** (F07). `kills` outside
+  1..1000 returns gRPC code 11 `OUT_OF_RANGE` (`economy.CodeKillsOutOfRange`) instead of
+  the generic 3, so the game server can split rather than treat it as malformed. Nothing
+  is granted, so the parts may take new ids.
+
+### Added
+- `economy.ErrServerOnly`, `economy.LeaderboardMigrateEnv`.
+- `scripts/probe-economy.sh` — dependency-free (bash + curl + python3) live probe of
+  F01/F02/F06/F07 against a running Nakama: session calls → 403, `http_key` grant,
+  replay with unchanged wallet, code 11 over cap, missing `batch_id`, authoritative
+  board refusing client writes, server-side score = 3. Documented in `docs/RUNBOOK.md`
+  ("Live probe after deploy").
+- `economy.ReceiptCollection`, `CodeKillsOutOfRange`, `StatusGranted`, `StatusPartial`;
+  response fields `status`, `replayed`, `balance` (`gold` now means gold granted for the
+  batch, on original and replay alike).
+- Tests: same `batch_id` twice → one wallet update and one leaderboard write; racing
+  duplicate loses the create-only version check and is answered as a replay;
+  `MultiUpdate` failure leaves no receipt and the resend is granted fresh; receipt lookup
+  failure grants nothing; `partial` then replay converges the score with exactly one
+  grant; out-of-range kills → code 11 with zero calls; receipt write is create-only and
+  server-only.
+- Table-driven tests: guard accepts server (no-session) context and rejects user id /
+  session id / session expiry; all three mutation RPCs reject a client session before
+  parsing with zero granter calls; server caller still grants; `SetupLeaderboards`
+  creates `authoritative=true`, leaves an authoritative board alone, fails on a legacy
+  board by default, and deletes+recreates only on opt-in.
+
 ### Changed
+- `docs/API.md`, `docs/RUNBOOK.md`, `docs/DESIGN.md`, `docs/README.md` describe the
+  server-only contract, error code 7, the leaderboard migration, the exactly-once
+  receipt mechanics, `status`/`replayed`, code 11, receipt retention and how to audit
+  a disputed batch.
+
+## [0.9.0] - 2026-09-05
+
+### Added
+- **`reward_kills` RPC — gold and leaderboard score for a batch of kills in one call**
+  (rpg-mmo-server#233). The per-kill `reward_kill` + `submit_kill` pair cost 2 HTTP
+  requests and 2 separate meta-DB transactions per mob kill — ~133 commits/s at 200
+  players on the grindy end, the first thing to saturate a shared small-VPS Postgres.
+  Both operations are increments, so one call per killer per game-server flush is
+  semantically identical. The error contract is explicit and load-bearing: an error
+  means NOTHING was granted (safe to re-queue); once the wallet update succeeds the
+  call always reports success, surfacing a leaderboard failure in the response body
+  instead — an error there would invite a retry that grants the gold twice (ADR-6:
+  bounded score loss acceptable, double gold not). `kills` capped at 1000 per batch so
+  a corrupted payload cannot mint unbounded gold; `batch_id` recorded in wallet
+  metadata as the audit trail and future idempotency slot. Unit tests drive the core
+  through a two-method mock: single-call grant, all reject-before-grant shapes, and
+  both halves of the error contract.
+
+- **RUNBOOK: two silent leaderboard failure modes**, both found in one live
+  investigation where "the leaderboard is broken" was two deploy gaps and zero code
+  bugs: a stale `nakama.so` (module mtime predated the commit registering
+  `get_leaderboard`/`submit_kill`, so Nakama answered `RPC function not found` /
+  `Leaderboard not found` while every older RPC worked), and a game server launched
+  without `NAKAMA_URL` (it logs one `Nakama: disabled` line at startup and then skips
+  every kill submit with no further trace). The new troubleshooting rows carry the
+  exact symptoms, the mtime-vs-`git log` check, and the rebuild-with-container-stopped
+  sequence the bind-mount file lock forces on Windows/WSL hosts.
+
+### Changed
+- **`reward_kill`'s per-kill Info log demoted to Debug** — 20+ lines/s at 200 players,
+  part of the same per-kill amplification `reward_kills` removes. The RPC pair stays
+  registered for compatibility; `docs/API.md` documents all four economy RPCs and
+  marks the pair legacy.
+
 - **The repo-level `CLAUDE.md` listed this module as `Planned`** while `auth/` and
   `economy/` were both implemented and under test. That row is the first thing anyone
   reads when deciding where a piece of work belongs, so it was routing auth and economy

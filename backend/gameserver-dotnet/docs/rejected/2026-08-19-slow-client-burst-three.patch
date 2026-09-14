@@ -1,0 +1,22 @@
+diff --git a/backend/gameserver-dotnet/GameServer.Tests/Server/SlowClientMovementTests.cs b/backend/gameserver-dotnet/GameServer.Tests/Server/SlowClientMovementTests.cs
+index 99adcde..8c35e0d 100644
+--- a/backend/gameserver-dotnet/GameServer.Tests/Server/SlowClientMovementTests.cs
++++ b/backend/gameserver-dotnet/GameServer.Tests/Server/SlowClientMovementTests.cs
+@@ -105,7 +105,7 @@ public class SlowClientMovementTests
+     [Fact]
+     public async Task AClientWhosePacketsArriveInBursts_TravelsTheSameDistance()
+     {
+-        (float travelled, float speed) = await MeasureAsync(Rates(60, 15, 5), sendHz: 15, burst: 4);
++        (float travelled, float speed) = await MeasureAsync(Rates(60, 15, 5), sendHz: 15, burst: 3);
+ 
+         float expected = speed * (float)RunSeconds;
+ 
+@@ -125,7 +125,7 @@ public class SlowClientMovementTests
+     [Fact]
+     public async Task AClientWhosePacketsArriveInBursts_AgainstASingleRateServer_TravelsTheSameDistance()
+     {
+-        (float travelled, float speed) = await MeasureAsync(Rates(15, 15, 5), sendHz: 15, burst: 4);
++        (float travelled, float speed) = await MeasureAsync(Rates(15, 15, 5), sendHz: 15, burst: 3);
+ 
+         float expected = speed * (float)RunSeconds;
+ 

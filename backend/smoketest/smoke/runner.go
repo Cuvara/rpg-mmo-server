@@ -3,6 +3,9 @@ package smoke
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -10,11 +13,13 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/duycuong/rpg-mmo/shared/jwt"
 	"github.com/duycuong/rpg-mmo/shared/messages"
+	"github.com/duycuong/rpg-mmo/shared/sealed"
 	"github.com/duycuong/rpg-mmo/shared/transport"
 )
 
@@ -24,6 +29,12 @@ type Runner struct {
 	out io.Writer
 	hc  *http.Client
 
+	// enc is cfg.Encoding resolved once, at construction, so a typo is a startup
+	// error rather than a silent fall-through to JSON on every frame. Against a
+	// `require` server that fall-through would be refused at the join with
+	// `encoding_cannot_seal` and look like a broken stack rather than a typo.
+	enc messages.Encoding
+
 	sessionToken string // Nakama session token (step b)
 	deviceID     string // device id authenticated with (step b)
 	userID       string // Nakama user id (step c)
@@ -32,6 +43,38 @@ type Runner struct {
 	serverAddr   string // game server addr from EnterWorldResponse (step e)
 	serverTrans  string // game server transport from EnterWorldResponse (step e)
 	joinToken    string // join token from EnterWorldResponse (step e)
+
+	// Sealed sessions for the GAME-SERVER socket only, installed by the sealed
+	// handshake when Config.Sealed is set. The gateway hop is never sealed with
+	// these keys: they derive from a join token the gateway itself issues.
+	sealedConn net.Conn
+	sealedOut  *sealed.Session
+	sealedIn   *sealed.Session
+
+	// sealedBindingVerified is surfaced in the game-server step's detail line.
+	sealedBindingVerified bool
+
+	// serverPublicKey is the game server's Ed25519 identity key as the gateway
+	// delivered it in EnterWorldResponse (ADR-25). Empty against a pre-ADR-25
+	// gateway or game server, which is reported and NOT treated as a failure --
+	// the smoke test must stay green against an older backend.
+	serverPublicKey []byte
+
+	// sealedIdentityChecked records that the server's identity signature verified
+	// under serverPublicKey.
+	//
+	// It is deliberately NOT named "verified". The smoke test reaches the gateway
+	// over plaintext HTTP/TCP like every environment today, so the key it checked
+	// against is one an attacker on its path could have chosen. Checking the
+	// signature therefore proves the gameplay peer holds THAT key -- not that the
+	// key is the real server's. The strong claim needs ADR-23's gateway TLS, and
+	// sealedIdentityHopAuthenticated is the field that would carry it.
+	sealedIdentityChecked bool
+
+	// sealedIdentityHopAuthenticated is whether the hop that delivered the key was
+	// authenticated. False everywhere today; it is reported rather than omitted so
+	// that a green run says WHY the strong claim is absent.
+	sealedIdentityHopAuthenticated bool
 
 	// runStart is the wall clock at Run(); every persisted row this run asserts
 	// on must be newer than it, which is what stops a stale row from passing.
@@ -44,8 +87,53 @@ type Runner struct {
 }
 
 // NewRunner builds a Runner for cfg, writing progress to out.
-func NewRunner(cfg Config, out io.Writer) *Runner {
-	return &Runner{cfg: cfg, out: out, hc: &http.Client{Timeout: cfg.Timeout}}
+func NewRunner(cfg Config, out io.Writer) (*Runner, error) {
+	hc := &http.Client{Timeout: cfg.Timeout}
+
+	// The meta hop (ADR-24). Set together or refused: a pin against a plaintext
+	// URL protects nothing while reading as though it does, and an https URL with
+	// no pin fails deep inside an x509 message several steps from the cause --
+	// Nakama's certificate is self-signed BY DESIGN and is pinned, never trusted
+	// through a CA.
+	//
+	// This exists because the suite failed with "context deadline exceeded"
+	// against a perfectly healthy Nakama the first time the flag was on: a
+	// plaintext GET to a TLS listener does not get refused, it hangs, and the
+	// timeout names the wrong thing entirely.
+	if cfg.NakamaTLSCert != "" && !strings.HasPrefix(cfg.NakamaURL, "https://") {
+		return nil, fmt.Errorf(
+			"nakama-tls-cert was given but nakama-url is not https (%s): a pin on a "+
+				"plaintext hop protects nothing", cfg.NakamaURL)
+	}
+	if strings.HasPrefix(cfg.NakamaURL, "https://") {
+		if cfg.NakamaTLSCert == "" {
+			return nil, fmt.Errorf(
+				"nakama-url is https (%s) but no nakama-tls-cert was given; Nakama's "+
+					"meta-hop certificate is self-signed by design (ADR-24 decision 4) "+
+					"and is PINNED, never trusted through a CA", cfg.NakamaURL)
+		}
+		tlsConfig, err := PinnedTLSConfig(cfg.NakamaTLSCert, cfg.NakamaURL)
+		if err != nil {
+			return nil, fmt.Errorf("nakama pin: %w", err)
+		}
+		hc.Transport = &http.Transport{TLSClientConfig: tlsConfig}
+	}
+
+	return &Runner{cfg: cfg, out: out, hc: hc, enc: encodingFor(cfg.Encoding)}, nil
+}
+
+// encodingFor maps the configured name onto a wire encoding.
+//
+// An unrecognised value is JSON, deliberately and loudly: Validate rejects it
+// before a Runner is built, so reaching this default means the value bypassed
+// validation, and JSON is the encoding that has always been sent. Choosing
+// protobuf here instead would turn a configuration mistake into a silently
+// different wire format.
+func encodingFor(name string) messages.Encoding {
+	if strings.EqualFold(strings.TrimSpace(name), "proto") {
+		return messages.EncodingProto
+	}
+	return messages.EncodingJSON
 }
 
 // skip is returned by a step that could not run for want of configuration. The
@@ -266,8 +354,17 @@ func (r *Runner) stepGatewayAuthEnter() (string, error) {
 	if enterResp.ServerAddr == "" || enterResp.JoinToken == "" {
 		return "", fmt.Errorf("enter world: missing server_addr/join_token")
 	}
+	// Strict address mode rejects a listen-style ServerAddr here, at the hop
+	// that produced it, instead of dialing something else on that port.
+	if _, err := ResolveServerDialAddr(enterResp.ServerAddr, r.cfg.StrictAddr); err != nil {
+		return "", fmt.Errorf("enter world: %w", err)
+	}
 	r.serverAddr = enterResp.ServerAddr
 	r.joinToken = enterResp.JoinToken
+	// ADR-25. Kept even when empty: sealSession decides from its length whether to
+	// require identity, and an empty key against an older backend must leave the
+	// run green rather than refuse the join.
+	r.serverPublicKey = enterResp.ServerPublicKey
 	// The gateway tells us which transport the target game server speaks; an
 	// omitted field means TCP (servers registered before the field existed).
 	r.serverTrans = transport.Normalize(enterResp.Transport)
@@ -279,7 +376,7 @@ func (r *Runner) stepGatewayAuthEnter() (string, error) {
 // ---------------------------------------------------------------- steps f+g+h
 
 func (r *Runner) stepGameServerFlow() (string, error) {
-	conn, err := r.dial(r.serverTrans, r.serverAddr)
+	conn, err := r.dialServer(r.serverTrans, r.serverAddr)
 	if err != nil {
 		return "", err
 	}
@@ -294,6 +391,15 @@ func (r *Runner) stepGameServerFlow() (string, error) {
 	if !joinResp.OK {
 		return "", fmt.Errorf("join rejected: %s", joinResp.Error)
 	}
+	if r.cfg.Sealed {
+		// Immediately after the join reply and before any gameplay frame, which
+		// is where the server runs its half. Any failure aborts the step: there
+		// is no cleartext fallback on either side.
+		if err := r.sealSession(conn, r.joinToken); err != nil {
+			return "", fmt.Errorf("sealed handshake: %w", err)
+		}
+	}
+
 	if joinResp.UserID != r.userID {
 		return "", fmt.Errorf("join user %q != %q", joinResp.UserID, r.userID)
 	}
@@ -331,7 +437,7 @@ func (r *Runner) stepGameServerFlow() (string, error) {
 	// 5 u/s at 15Hz: N/3). The exact value depends on server config, so the assertion
 	// below only checks "moved forward, and not by a per-message teleport".
 	for i := 0; i < r.cfg.Inputs; i++ {
-		env, err := messages.NewEnvelope(messages.MsgInput, messages.InputMessage{
+		env, err := messages.NewEnvelopeAs(r.enc, messages.MsgInput, messages.InputMessage{
 			Tick:  uint64(i + 1),
 			MoveX: 1.0,
 			MoveY: 0.0,
@@ -405,7 +511,7 @@ drain:
 	// matters on KCP — UDP has no FIN, so without it the server only notices
 	// the client is gone when the reconnect hold expires. KCP flushes on its
 	// 10ms update tick and Close() does not drain, hence the short pause.
-	if env, err := messages.NewEnvelope(messages.MsgDisconnect, struct{}{}); err == nil {
+	if env, err := messages.NewEnvelopeAs(r.enc, messages.MsgDisconnect, struct{}{}); err == nil {
 		_ = r.send(conn, env)
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -414,16 +520,75 @@ drain:
 	r.disconnectAt = time.Now()
 	// ack_tick / keyframe counts are reported, not asserted: a server predating the
 	// delta protocol sends neither, and the smoke test must stay green against it.
-	return fmt.Sprintf("snapshots=%d (keyframes=%d deltas=%d) final_x=%.2f ack_tick=%d",
-		snapshots, state.Keyframes, state.Deltas, lastX, state.AckTick), nil
+	detail := fmt.Sprintf("snapshots=%d (keyframes=%d deltas=%d) final_x=%.2f ack_tick=%d",
+		snapshots, state.Keyframes, state.Deltas, lastX, state.AckTick)
+	if r.cfg.Sealed {
+		// Both facts, always. "sealed" alone would let a reader take
+		// confidentiality for authenticity, which is exactly the conflation
+		// ADR-21 was written about.
+		detail += fmt.Sprintf(" sealed=true binding_verified=%v", r.sealedBindingVerified)
+
+		// ADR-25, reported as THREE facts rather than one, because collapsing them
+		// is the exact mistake decision 6 forbids. "identity_checked" says a
+		// signature verified under the key we were given; "key_hop_authenticated"
+		// says whether that key arrived over a hop we could trust; and
+		// "server_identity_verified" -- the only one that means "this is the real
+		// game server" -- is their conjunction. While the gateway hop is plaintext
+		// a passing run prints checked=true, authenticated=false, verified=false,
+		// and that is the honest result, not a degraded one.
+		detail += fmt.Sprintf(
+			" identity_key=%v identity_checked=%v key_hop_authenticated=%v server_identity_verified=%v",
+			len(r.serverPublicKey) > 0, r.sealedIdentityChecked,
+			r.sealedIdentityHopAuthenticated,
+			r.sealedIdentityChecked && r.sealedIdentityHopAuthenticated)
+	}
+	return detail, nil
 }
 
 // ---------------------------------------------------------------- wire utils
 
 // dial connects over the given transport kind (empty means tcp), rewriting
-// listen-style addresses into dialable loopback ones.
+// listen-style addresses into dialable loopback ones. Used for the gateway hop,
+// whose address is operator-supplied local config (GATEWAY_ADDR, ":8000" by
+// default) rather than something a server advertised — strict address mode
+// therefore does not apply to it.
+// dial connects to the GATEWAY, wrapping the socket in TLS when a pin is
+// configured (ADR-23). Only this path does so: dialServer below reaches the game
+// server, whose hop is protected by the sealed session instead, and wrapping
+// that one in TLS as well would be two mechanisms claiming the same job.
 func (r *Runner) dial(kind, addr string) (net.Conn, error) {
 	target := NormalizeDialAddr(addr)
+	conn, err := r.dialTarget(kind, target)
+	if err != nil {
+		return nil, err
+	}
+	if r.cfg.GatewayTLSCertPath == "" {
+		return conn, nil
+	}
+
+	host, _, splitErr := net.SplitHostPort(target)
+	if splitErr != nil {
+		host = target
+	}
+	tlsConn, err := WrapGatewayTLS(conn, r.cfg.GatewayTLSCertPath, host, r.cfg.Timeout)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return tlsConn, nil
+}
+
+// dialServer connects to a game server address the gateway advertised. Under
+// --strict-addr a listen-style address fails here instead of being rewritten.
+func (r *Runner) dialServer(kind, addr string) (net.Conn, error) {
+	target, err := ResolveServerDialAddr(addr, r.cfg.StrictAddr)
+	if err != nil {
+		return nil, err
+	}
+	return r.dialTarget(kind, target)
+}
+
+func (r *Runner) dialTarget(kind, target string) (net.Conn, error) {
 	conn, err := transport.Dial(kind, target, r.cfg.Timeout)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s over %s: %w", target, transport.Normalize(kind), err)
@@ -432,7 +597,7 @@ func (r *Runner) dial(kind, addr string) (net.Conn, error) {
 }
 
 func (r *Runner) send(conn net.Conn, env messages.Envelope) error {
-	data, err := messages.Encode(env)
+	data, err := r.encodeFrame(conn, env)
 	if err != nil {
 		return err
 	}
@@ -443,11 +608,131 @@ func (r *Runner) send(conn net.Conn, env messages.Envelope) error {
 	return err
 }
 
+// encodeFrame seals only on the socket the handshake ran over.
+func (r *Runner) encodeFrame(conn net.Conn, env messages.Envelope) ([]byte, error) {
+	if r.sealedOut == nil || conn != r.sealedConn {
+		return messages.Encode(env)
+	}
+	body, err := messages.EncodeBody(env)
+	if err != nil {
+		return nil, err
+	}
+	frame, err := r.sealedOut.Seal(body)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 4+len(frame))
+	binary.BigEndian.PutUint32(out[:4], uint32(len(frame)))
+	copy(out[4:], frame)
+	return out, nil
+}
+
 func (r *Runner) recv(conn net.Conn) (messages.Envelope, error) {
 	if err := conn.SetReadDeadline(time.Now().Add(r.cfg.Timeout)); err != nil {
 		return messages.Envelope{}, err
 	}
-	return messages.Decode(conn)
+	if r.sealedIn == nil || conn != r.sealedConn {
+		return messages.Decode(conn)
+	}
+
+	var lenBuf [4]byte
+	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
+		return messages.Envelope{}, err
+	}
+	length := binary.BigEndian.Uint32(lenBuf[:])
+	if length == 0 || length > 1<<20 {
+		return messages.Envelope{}, fmt.Errorf("sealed frame length %d out of range", length)
+	}
+	body := make([]byte, length)
+	if _, err := io.ReadFull(conn, body); err != nil {
+		return messages.Envelope{}, err
+	}
+	plain, err := r.sealedIn.Open(body)
+	if err != nil {
+		// One error for every failure — cleartext where sealed is required, a
+		// forged tag, a replay. The caller aborts for all of them.
+		return messages.Envelope{}, fmt.Errorf("sealed frame rejected: %w", err)
+	}
+	return messages.DecodeBody(plain)
+}
+
+// sealSession runs the client half of the handshake and installs both
+// directions. Every failure aborts: there is no cleartext fallback, by design.
+//
+// The smoke test does NOT hold the join-token secret, so like a shipped client it
+// CANNOT verify the server's binding: it receives its join token from the real
+// gateway rather than minting one. This step therefore checks confidentiality and
+// the refusal rules, NOT the man-in-the-middle defence. The load generator, which
+// mints its own tokens, is the only peer in this repo that checks that.
+//
+// On success it records BindingVerified for the step's detail line. False is the
+// CORRECT state for a client holding no join-token secret — confidentiality
+// against a passive eavesdropper, nothing against an active one — but a run that
+// does not SAY so leaves "the session is encrypted" to be read as "the server is
+// authenticated", which is what ADR-21 exists to stop.
+func (r *Runner) sealSession(conn net.Conn, joinToken string) error {
+	// The smoke test goes through the REAL gateway, so it receives its join token
+	// rather than minting one and never holds JOIN_TOKEN_SECRET. That makes it
+	// the closest thing in this repo to a shipped client, and it behaves like
+	// one: it reads the jti without verifying (the server verifies the same
+	// token properly), and it cannot check the server's binding.
+	// The token of THIS connection, never r.joinToken. The sealed handshake is bound
+	// to the join token's jti, and a rejoin carries a different token: reading the
+	// runner's field sealed the second connection against the FIRST token's jti, the
+	// server's binding check failed, and the step reported "player never appeared in a
+	// snapshot after rejoin" -- a persistence symptom for an encryption cause.
+	claims, err := jwt.ParseUnverified(joinToken)
+	if err != nil {
+		return fmt.Errorf("read jti from join token: %w", err)
+	}
+
+	result, err := sealed.RunClientHandshake(
+		sealed.ClientHandshakeConfig{
+			JTI: claims.Jti,
+			// The key the real gateway just handed us, exactly as a shipped client
+			// gets it. Non-empty makes the handshake REQUIRE a verifying signature,
+			// so a forged or missing one ends the run rather than being reported.
+			ServerPublicKey: r.serverPublicKey,
+			// FALSE, hard-coded, and it must stay false until ADR-23's gateway TLS
+			// is on AND this client validates the certificate. The smoke test talks
+			// plaintext to the gateway, so asserting otherwise here would fabricate
+			// the one field anyone would trust. This is the line to change when the
+			// hop changes -- not before.
+			KeyHopAuthenticated: false,
+		},
+		func(pub []byte) error {
+			env, err := messages.NewEnvelopeAs(r.enc, messages.MsgSealedClientHello,
+				messages.SealedClientHello{PublicKey: pub})
+			if err != nil {
+				return err
+			}
+			return r.send(conn, env)
+		},
+		func() ([]byte, []byte, []byte, string, error) {
+			env, err := r.recv(conn)
+			if err != nil {
+				return nil, nil, nil, "", err
+			}
+			if env.Type != messages.MsgSealedServerHello {
+				return nil, nil, nil, "", fmt.Errorf("want server hello, got type %d", env.Type)
+			}
+			var hello messages.SealedServerHello
+			if err := env.UnmarshalPayload(&hello); err != nil {
+				return nil, nil, nil, "", err
+			}
+			return hello.PublicKey, hello.Binding, hello.ServerSignature, hello.Error, nil
+		},
+	)
+	if err != nil {
+		return err
+	}
+
+	r.sealedConn, r.sealedOut, r.sealedIn = conn, result.Outbound, result.Inbound
+
+	r.sealedBindingVerified = result.BindingVerified
+	r.sealedIdentityChecked = result.IdentityChecked
+	r.sealedIdentityHopAuthenticated = result.IdentityKeyHopAuthenticated
+	return nil
 }
 
 // roundTrip sends one request envelope and waits for a response of wantType,
@@ -455,7 +740,7 @@ func (r *Runner) recv(conn net.Conn) (messages.Envelope, error) {
 // snapshot) are skipped.
 func (r *Runner) roundTrip(conn net.Conn, reqType messages.MsgType, reqPayload any,
 	wantType messages.MsgType, out any) error {
-	env, err := messages.NewEnvelope(reqType, reqPayload)
+	env, err := messages.NewEnvelopeAs(r.enc, reqType, reqPayload)
 	if err != nil {
 		return fmt.Errorf("encode: %w", err)
 	}
@@ -481,4 +766,40 @@ func truncate(b []byte, n int) string {
 		return s[:n] + "..."
 	}
 	return s
+}
+
+// PinnedTLSConfig trusts exactly one certificate -- the leaf, compared byte for
+// byte against what Nakama presents.
+//
+// InsecureSkipVerify is true and is not what it sounds like: it disables the
+// DEFAULT verifier so VerifyPeerCertificate is the only thing that decides, which
+// is how Go expresses "replace verification", not "remove it". Pinning is
+// STRICTER than the public trust store: a certificate signed by any CA on earth
+// is refused unless it is this exact one.
+func PinnedTLSConfig(pemPath, nakamaURL string) (*tls.Config, error) {
+	pinned, err := LoadPinnedCertificate(pemPath)
+	if err != nil {
+		return nil, err
+	}
+	host := ""
+	if u, uerr := url.Parse(nakamaURL); uerr == nil {
+		host = u.Hostname()
+	}
+	return &tls.Config{
+		ServerName:         host,
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: true, //nolint:gosec // replaced by the pin below, not removed
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("nakama presented no certificate")
+			}
+			// The LEAF only: a pin that matched anywhere in the chain would accept a
+			// certificate ISSUED BY the pinned one, a different guarantee entirely.
+			if !bytes.Equal(rawCerts[0], pinned) {
+				return fmt.Errorf("nakama certificate does not match the pin (presented %d bytes, pinned %d)",
+					len(rawCerts[0]), len(pinned))
+			}
+			return nil
+		},
+	}, nil
 }

@@ -1,0 +1,95 @@
+{
+  "schema": "rpg-mmo.loadtest/v1",
+  "label": "n=10 movement=cluster",
+  "run_id": "3c58ccb2",
+  "started": "2026-09-07T09:16:52.826740308+07:00",
+  "config": {
+    "players": 10,
+    "ramp_players_per_sec": 20,
+    "duration_sec": 35,
+    "client_tick_hz": 15,
+    "auth_mode": "presigned",
+    "movement": "cluster",
+    "encoding": "json",
+    "map_id": "map_01",
+    "transport": "tcp",
+    "hold_gateway": true,
+    "tick_budget_sec": 0.066666666
+  },
+  "client": {
+    "players_requested": 10,
+    "players_joined": 10,
+    "players_failed": 0,
+    "snapshot_interval": {
+      "count": 5390,
+      "mean_ms": 66.67,
+      "p50_ms": 66.72,
+      "p95_ms": 82.14,
+      "p99_ms": 103.15,
+      "max_ms": 454.09
+    },
+    "ack_latency": {
+      "count": 5377,
+      "mean_ms": 42.42,
+      "p50_ms": 38.5,
+      "p95_ms": 73.58,
+      "p99_ms": 103.56,
+      "max_ms": 441.11
+    },
+    "join_latency": {
+      "count": 10,
+      "mean_ms": 2.92,
+      "p50_ms": 2.35,
+      "p95_ms": 5.17,
+      "p99_ms": 5.17,
+      "max_ms": 5.17
+    },
+    "snapshots_total": 5390,
+    "keyframes_total": 173,
+    "deltas_total": 5217,
+    "inputs_total": 5387,
+    "heartbeats_total": 40,
+    "gateway_heartbeats_total": 40,
+    "rx_bytes_per_sec_per_player": 15715.42,
+    "tx_bytes_per_sec_per_player": 883.1,
+    "rx_bytes_per_sec_total": 157154.18,
+    "tx_bytes_per_sec_total": 8831.01,
+    "snapshots_received_ratio": 1.0247
+  },
+  "server": {
+    "scraped": true,
+    "tick_p50_sec": 0.000252,
+    "tick_p95_sec": 0.000479,
+    "tick_p99_sec": 0.0005,
+    "tick_mean_sec": 0.000075,
+    "tick_count": 2105,
+    "tick_over_budget_ratio": 0,
+    "tick_over_budget_edge_sec": 0.05,
+    "ticks_per_sec": 59.99,
+    "players_online": 10,
+    "entities": 14,
+    "snapshots_sent_window": 5260,
+    "processed_inputs_window": 5262,
+    "gateway_connections_active": 10,
+    "gateway_auth_ok_window": 0,
+    "gateway_auth_fail_window": 0,
+    "gateway_enter_world_ok_window": 0,
+    "gateway_enter_world_fail_window": 0,
+    "gateway_rate_limited_window": 0
+  },
+  "host": {
+    "load_avg_1": 5.11,
+    "load_avg_5": 7.3,
+    "load_avg_15": 4.08,
+    "cpus": 12
+  },
+  "verdict": {
+    "tick_budget_ok": true,
+    "snapshot_cadence_ok": true,
+    "no_errors": true,
+    "no_frame_loss": true,
+    "invalid": true,
+    "degraded": true,
+    "reason": "INVALID: server reported 14 entities for a 10-player level; it was not empty when the level started — rerun this level"
+  }
+}

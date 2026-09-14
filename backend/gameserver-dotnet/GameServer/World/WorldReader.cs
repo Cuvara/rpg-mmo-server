@@ -56,4 +56,13 @@ public sealed class WorldReader
     /// </summary>
     public int GetEntitiesInRange(Vec2 center, float radius, Span<EntityState> destination) =>
         _world.ScanRangeLockedForReader(center, radius, destination);
+
+    /// <summary>
+    /// Trimmed snapshot-view form of the scan — the one the gather uses (issue #237):
+    /// composes only the seven fields the snapshot encoder consumes, plus the stable
+    /// key the delta state maps are keyed on. Same order, same predicate, same
+    /// count-don't-saturate contract as the <see cref="EntityState"/> overload.
+    /// </summary>
+    public int GetEntitiesInRange(Vec2 center, float radius, Span<EntityView> destination) =>
+        _world.ScanRangeViewsLockedForReader(center, radius, destination);
 }

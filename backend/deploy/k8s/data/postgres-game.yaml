@@ -1,0 +1,86 @@
+# PostgreSQL "gamestate" instance — player_states. Written only by the game
+# server (ADR-1). Separate instance, separate credentials, separate PVC from the
+# Nakama meta DB above.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-game
+  labels: { app.kubernetes.io/name: postgres-game }
+spec:
+  clusterIP: None
+  selector: { app.kubernetes.io/name: postgres-game }
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-game
+spec:
+  serviceName: postgres-game
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: postgres-game }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: postgres-game }
+    spec:
+      securityContext:
+        fsGroup: 70
+      containers:
+        - name: postgres
+          image: postgres:16.4-alpine
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef: { name: postgres-game }
+          env:
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+            - { name: POSTGRES_INITDB_ARGS, value: "--data-checksums" }
+          ports:
+            - { name: postgres, containerPort: 5432 }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            # FIRST-BOOT SEED ONLY. The postgres entrypoint runs
+            # /docker-entrypoint-initdb.d/* exactly once, when it has just run
+            # initdb — i.e. when $PGDATA was empty. A REUSED PVC SKIPS IT
+            # ENTIRELY, and so does a pod restart, a rescheduling, and every
+            # upgrade. It is therefore not a schema-management mechanism here
+            # any more than it is in compose: the authority is the numbered
+            # migrations in deploy/db/migrations/gamestate/, which the game
+            # server applies at boot (and CD applies explicitly beforehand).
+            # Mounted `optional: true` so the stack still comes up without the
+            # generated ConfigMap — you then get an empty database and the
+            # gameserver's migrator creates the schema, which is the same end
+            # state by the supported path.
+            - { name: initdb, mountPath: /docker-entrypoint-initdb.d, readOnly: true }
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", 'exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1']
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", 'exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1']
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+      volumes:
+        - name: initdb
+          configMap:
+            name: gamestate-initdb
+            optional: true
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests: { storage: 2Gi }

@@ -28,8 +28,30 @@ JWT_SECRET=dev-secret-change-me ./loadtest -sweep 1,10,50,100 -json sweep.json
    -> MsgAuth / MsgEnterWorld (gateway)   -join=gateway   (skipped by -join=direct)
    -> MsgJoinToken (game server)
    -> MsgInput every tick  +  consume MsgSnapshot, merging deltas
+   -> answer MsgPing with MsgPong on every socket it holds open
    -> MsgDisconnect
 ```
+
+### Heartbeat
+
+Both peers run the same heartbeat: they send `MsgPing` every 10s and close any
+connection that has not answered with `MsgPong` within 30s
+(`gameserver-dotnet/GameServer/Net/Connection.cs`, `gateway/server/connection.go`).
+Each virtual player answers on both hops — the game-server socket and, under
+`-hold-gateway`, the gateway socket — echoing the probe's own timestamp
+unchanged, in the connection's encoding. It never *initiates* a ping: answering
+is the whole of the eviction contract, and an outbound ping would only add
+generator-side traffic to a tool whose own overhead is already the constraint
+(ADR-7).
+
+The player does not answer for free measurement-wise, so it is kept out of the
+measurements entirely: `MsgPing`/`MsgPong` frames count toward neither
+`snapshots_total`, the snapshot-interval distribution, `recv%`, nor the byte
+counters. They are reported separately as `heartbeats_total` and
+`gateway_heartbeats_total`. A run longer than 10s reporting zero heartbeats
+means the peer is not pinging — or the harness has regressed to the behaviour of
+issue #142, where players were evicted mid-run and a *slower* ramp failed more
+because it kept the run alive past the 30s timeout.
 
 ## What it measures
 
@@ -40,6 +62,7 @@ JWT_SECRET=dev-secret-change-me ./loadtest -sweep 1,10,50,100 -json sweep.json
 | Join latency | client-side |
 | Bytes/sec per client, both directions | client-side, full wire frames incl. length prefix |
 | Connection failures by phase | client-side (`auth`, `gateway`, `join`, `run`) |
+| Heartbeats answered, per hop | client-side, `MsgPing` → `MsgPong`; excluded from every gameplay figure above |
 | Tick duration p50/p95/p99 + exact over-budget fraction | `gameserver_tick_duration_seconds`, bucket-differenced |
 | Achieved tick rate | `gameserver_tick_duration_seconds_count` / window |
 | players_online, entities, snapshots_sent | game server `/metrics` |
@@ -138,6 +161,8 @@ it is evidence that capacity is higher.
 | `-auth presigned\|nakama` | `presigned` | **Pre-signed is the default on purpose.** See below. |
 | `-join gateway\|direct` | `gateway` | `direct` skips the gateway. See below. |
 | `-movement cluster\|still\|spread` | `cluster` | The bottleneck experiment control. See below. |
+| `-encoding proto\|json` | `proto` | **Protobuf is the default because it is the wire the client speaks (ADR-9).** `json` is the legacy arm, kept for A/B sweeps (`scripts/encoding-sweep.sh`). The two differ ~5x in bytes per client from identical load, so the summary header always names the arm it drove. Until 2026-09-07 the default was `json`, and one full sweep measured the wrong wire before the header said so. |
+| `-baseline-entities N` | 0 | Entities the server holds with **no** players — its enemy spawner, 6 on a stock map server. The validity gate marks a level INVALID when the server reports more entities than players (a dirty server); this declares how many are there by design. Players never get an allowance. Recorded in the JSON as `config.baseline_entities`. Or start the bench server with `GAMESERVER_ENEMIES=false` and leave this at 0. |
 | `-tick-rate` | 15 | Client input rate. Matches the server; sending faster gains nothing (the tick loop coalesces to the newest input per player per tick). |
 | `-json`, `-label` | — | Machine-readable output. |
 | `-fail-on-degraded` | off | Exit 1 on a degraded level, for CI. |
@@ -178,8 +203,30 @@ depends on whether entities moved:
 - `still` — zero-vector input. Ack still advances, positions do not, so deltas
   come out empty and the serialization term collapses. Scan and diff stay at full
   cost.
-- `cluster` — everyone moves every tick and everyone is in everyone's AOI. All
-  three terms at full cost.
+- `cluster` — every **player** moves every tick and stays in every other player's
+  AOI. All three terms at full cost, in the players.
+
+> **⚠ `cluster` walks the players out of any crowd that does not march with them,
+> and it is the default.** Players leave the origin along +X at 5 u/s against a
+> 50-unit AOI radius: clear of an origin-centred population in ~10s, ~300 units away
+> by the end of a default 60s window. Against **server-side** entities —
+> `LOADTEST_ENTITIES`, which orbit the origin, or a stock map's enemy spawner — the
+> visible set collapses *during* the run while the report still names the population
+> it started with.
+>
+> Measured 2026-09-09, 1 player, 300 `LOADTEST_ENTITIES`, server-side snapshot
+> bytes/s sampled every 4s:
+>
+> | movement | bytes/s over the run |
+> |---|---|
+> | `still` | 117.6 kB/s, flat for the whole run |
+> | `cluster` | 113 → 80 → 50 → 17 → **0.6** kB/s by t=24s |
+>
+> So a default-configuration run longer than ~25s against a stationary entity
+> population measures a nearly empty AOI. **Use `-movement still` whenever the
+> density under test comes from server-side entities rather than from the players
+> themselves.** `cluster` remains correct for player-vs-player density, which is what
+> it was built for. Pinned by `TestClusterLeavesAStationaryCrowd`.
 
 The difference at equal player count is a direct measurement of serialization
 cost, with no server-side change. This is how BENCHMARK.md attributes ~80% of

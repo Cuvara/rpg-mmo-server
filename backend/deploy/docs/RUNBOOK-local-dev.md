@@ -503,3 +503,13 @@ running `up -d --remove-orphans`) puts you back on the host path.
 Every credential in `.env.example` (`localdev`, `admin/password`, `defaultkey`,
 `dev-secret-change-me`) is a **local-dev-only** default. Beta tier and above must
 source these from k8s Secrets — see `docs/README.md`.
+
+## The Nakama plugin is rebuilt when its sources are newer
+
+`./stack.sh up` compares `modules/nakama.so` against every `*.go` under `backend/nakama/` and
+`backend/shared/` (and `nakama-plugin.Dockerfile`); if any is newer, or the file is missing, it
+stops the `nakama` service, rebuilds the plugin into `./modules`, and the normal `up` restarts it.
+Until 2026-09-07 an existing `.so` was never rebuilt, which is how a mainline stack kept serving an
+eleven-day-old plugin. A git checkout touches files, so the first `up` after switching branches
+rebuilds once even when nothing changed — that is the intended, cheap side of the trade. To force a
+rebuild by hand: `rm modules/nakama.so && ./stack.sh up`. `--no-build` skips the check entirely.
