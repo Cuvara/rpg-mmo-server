@@ -90,6 +90,31 @@ Constraints: no Unity refs, **no ECS refs (`Arch.Core` included)**, no server-sp
 - `package.json`'s `version` is bumped in the same commit that gets tagged.
   Otherwise the client installs `sgl-v0.2.0` and gets a package reporting `0.1.0`,
   which UPM will not warn about.
+
+  This is enforced by `.github/workflows/verify-sgl-tag.yml`, which fails on any
+  pushed `sgl-v*` tag whose `package.json` disagrees with it. It **detects**
+  rather than prevents: the push has already happened by the time a workflow
+  runs, and there is no pre-receive hook here. `publish-shared-gamelogic.yml`
+  cannot produce a mismatch at all — it derives the tag from `package.json` — so
+  the automated path was never the risk. Every mismatch below came from a tag
+  pushed by hand.
+
+  **Five published tags are wrong and will stay wrong.** A tag that somebody has
+  already pinned cannot be moved without breaking them, so these are recorded
+  rather than repaired:
+
+  | tag | `package.json` actually reports |
+  |---|---|
+  | `sgl-v0.1.1` | `0.1.0` |
+  | `sgl-v0.1.2` | `0.1.0` |
+  | `sgl-v0.1.3` | `0.1.0` |
+  | `sgl-v0.1.4` | `0.1.0` |
+  | `sgl-v0.1.5` | `0.1.0` |
+
+  Anything pinned to one of those five resolves a package reporting `0.1.0`.
+  `sgl-v0.1.6` onward agree. Found by reading each tag's `package.json` while
+  backfilling the GitHub releases that these tags never had — not by any check,
+  because until now there was none.
 - **Tagging is a release action and belongs to the lead.** Do not create one.
 - No `.tgz`, no NuGet, no registry. UPM does not consume tarball URLs, and the
   client must compile *source* (Unity 6 is C# 9).
