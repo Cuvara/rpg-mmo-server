@@ -25,6 +25,65 @@ internal sealed class ItemFileDto
 {
     [JsonPropertyName("items")]
     public List<ItemDto>? Items { get; set; }
+
+    /// <summary>
+    /// Abilities, or null when the document has no <c>abilities</c> key.
+    /// </summary>
+    /// <remarks>
+    /// <b>Optional, unlike <see cref="Items"/>, and the asymmetry is deliberate.</b> A
+    /// missing <c>items</c> key is refused because it is indistinguishable from a misspelled
+    /// one and would load as a silently empty game. The same argument applies here, and is
+    /// outweighed by a concrete fact: every content document written before abilities existed
+    /// has no such key, and requiring it would turn adding this field into a migration of
+    /// every content set in every environment — for a field most sets will legitimately not
+    /// use. The cost is that a document spelling it <c>abilties</c> loads with no abilities
+    /// rather than being refused; the mitigation is that the first cast of any ability then
+    /// fails with "unknown ability", which names the content set in its message.
+    /// </remarks>
+    [JsonPropertyName("abilities")]
+    public List<AbilityDto>? Abilities { get; set; }
+}
+
+/// <summary>
+/// The on-disk shape of an ability. Separate from
+/// <see cref="Shared.GameLogic.Content.AbilityDefinition"/> for the reason
+/// <see cref="ItemDto"/> gives.
+/// </summary>
+internal sealed class AbilityDto
+{
+    /// <summary>
+    /// Nullable so an omitted id is distinguishable from an explicit 0 — and 0 is a value
+    /// the validator specifically refuses, so the two need different messages.
+    /// </summary>
+    [JsonPropertyName("id")]
+    public uint? Id { get; set; }
+
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    [JsonPropertyName("targeting")]
+    public string? Targeting { get; set; }
+
+    [JsonPropertyName("effect")]
+    public string? Effect { get; set; }
+
+    [JsonPropertyName("range")]
+    public float? Range { get; set; }
+
+    [JsonPropertyName("radius")]
+    public float? Radius { get; set; }
+
+    [JsonPropertyName("power")]
+    public int? Power { get; set; }
+
+    /// <summary>
+    /// Cooldown in SIMULATION TICKS, not milliseconds — see
+    /// <see cref="Shared.GameLogic.Content.AbilityDefinition.CooldownTicks"/>. Named with
+    /// the unit in the key so a content author cannot write a millisecond figure into it by
+    /// assumption.
+    /// </summary>
+    [JsonPropertyName("cooldownTicks")]
+    public int? CooldownTicks { get; set; }
 }
 
 internal sealed class ItemDto

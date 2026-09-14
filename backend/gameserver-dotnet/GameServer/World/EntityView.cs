@@ -3,9 +3,9 @@ using Shared.GameLogic.Components;
 namespace GameServer.World;
 
 /// <summary>
-/// The trimmed per-match compose for the snapshot gather path: exactly the nine
+/// The trimmed per-match compose for the snapshot gather path: exactly the ten
 /// fields the wire encoder consumes (<c>Id</c>/<c>Type</c>/<c>X</c>/<c>Y</c>/<c>Hp</c>/
-/// <c>MaxHp</c>/<c>Speed</c>/<c>FacingBrad</c>/<c>Action</c>) plus the world-stable integer key the delta encoder
+/// <c>MaxHp</c>/<c>Speed</c>/<c>FacingBrad</c>/<c>Action</c>/<c>ActionSeq</c>) plus the world-stable integer key the delta encoder
 /// keys its maps on.
 ///
 /// <para><b>Why this exists (issue #237).</b> The AOI scan used to compose a full
@@ -59,9 +59,15 @@ public readonly struct EntityView
     /// </summary>
     public readonly EntityAction Action;
 
+    /// <summary>
+    /// Retrigger counter for <see cref="Action"/>. 0 means "never set".
+    /// See <see cref="Components.Locomotion.ActionSeq"/>.
+    /// </summary>
+    public readonly uint ActionSeq;
+
     public EntityView(
         int key, string id, string type, Vec2 position, int hp, int maxHp, float speed,
-        uint facingBrad, EntityAction action)
+        uint facingBrad, EntityAction action, uint actionSeq)
     {
         Key = key;
         Id = id;
@@ -72,5 +78,6 @@ public readonly struct EntityView
         Speed = speed;
         FacingBrad = facingBrad;
         Action = action;
+        ActionSeq = actionSeq;
     }
 }

@@ -6,6 +6,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`GameEventData` / `GameEventType` / `GameEventFlags`** — edge-triggered occurrences in
+  SIMULATION terms, naming entities by id rather than by wire handle. Interning is a property
+  of a connection, not of the world: the simulation produces one event and the encoder turns
+  it into as many wire events as there are connections entitled to see it.
+- **`AbilityDefinition` / `AbilityTargeting` / `AbilityEffect`** — the shared content schema
+  for abilities. Ids are numeric, unlike an item's, because they travel on every cast event
+  and every ability input where a string would cost ~10 bytes on the hottest gameplay path.
+  Cooldowns are in SIMULATION TICKS, never milliseconds, so replaying an input sequence
+  resolves the same way on server and client.
+- **`AbilityLogic`** — cast validation, damage and heal resolution. Shared even though
+  abilities are not predicted: a client that greys out an out-of-range target or draws a
+  cooldown sweep is applying these rules, and its own copy would drift from the server's.
+  A local answer is a hint for presentation, never a substitute for the server's.
+- **`ActionStateLogic`** — the single rule for advancing `EntityAction` and its retrigger
+  counter together. One function rather than an assignment per call site, because the counter
+  is only useful if every writer agrees on when it moves.
+- **`EntityState.ActionSeq`** and **`EntityState.AbilityCooldownUntilTick`**.
+- **`InputData.AbilityId` / `AbilityTargetId` / `Aim`**, with the four-argument constructor
+  kept so existing call sites compile unchanged.
+
 ## [0.4.1] — 2026-09-09
 
 Released as `sgl-v0.4.1`. Patch, but it changes a golden vector, so it changes what a

@@ -7,6 +7,85 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Gameplay v2: an edge-triggered event channel, ability input, and an animation retrigger
+  counter.** Three additions to `wire.proto`, all purely additive optional fields with a
+  documented "zero means not sent" rule — so `WireProtocol.ProtocolVersion` is deliberately
+  **NOT** bumped, which is what that constant's own contract prescribes for this shape of
+  change. A peer of the previous version reads every one of them as absent and behaves
+  exactly as it did.
+
+  **`SnapshotMessage.events` (field 6) + `GameEvent` + `GameEventType`.** Everything the
+  server sent a client until now was level-triggered state, which is the right shape for
+  state and the wrong shape for occurrences. "This entity took 12 damage" is not recoverable
+  from two HP values a tick apart: a heal and a hit in the same tick net out, a delta may
+  omit the entity entirely, and an entity leaving the AOI simply stops reporting. A client
+  inferring damage numbers from HP deltas is wrong in exactly the cases a player notices,
+  and it is wrong silently. Events ride the snapshot rather than taking a `MsgType` of their
+  own, because entity ids are interned per connection and the table resets at every keyframe
+  — a separate message would either pay ~17 bytes per participant on the hottest path in
+  combat, or resolve handles against a table whose lifetime it does not share, which is a
+  race that misattributes damage to the wrong entity. Visibility reuses the AOI decision the
+  entity pass already made (`_lastSent`), rather than re-deriving it from positions and
+  disagreeing at the edge of the circle; `XpGain`/`LevelUp` are private to their subject.
+  Keyframes do **not** replay events: a keyframe restates state because a client may have
+  missed a delta, not history.
+
+  **`InputMessage.ability_id` / `ability_target_id` / `aim_x` / `aim_y` (fields 5-8).**
+  Abilities are validated in `Shared.GameLogic.Systems.AbilityLogic` and resolved
+  server-side. They are NOT predicted — prediction covers movement only, because movement is
+  a pure function of input the client already has while an ability outcome depends on
+  cooldowns, content and other entities' state. A mispredicted ability presents as a cast
+  that plays and then un-happens, which is worse than one that starts a round trip late.
+
+  **`EntitySnapshot.action_seq` (field 12).** `action` is level-triggered and says so at
+  length, so two attacks in a row are identical bytes and a renderer driving an animator
+  from it plays the swing once. No client-side edge detection fixes that, because the edge
+  is genuinely not in the data: only the server knows an action was re-entered. One shared
+  rule (`ActionStateLogic.Advance`) is what every writer goes through, so a continuous state
+  cannot retrigger a walk cycle per tick and an instantaneous one cannot fail to retrigger.
+  The counter wraps skipping zero, and consumers compare by **inequality**, never by
+  greater-than.
+
+- **`AbilityDefinition` in the content set.** `ContentDatabase` carries abilities beside
+  items; `ContentValidation` refuses id 0 (reserved for "no ability" on the wire), a non-self
+  ability with no range, and a ground ability with no radius. The `abilities` key is
+  OPTIONAL where `items` is required — every content document written before abilities
+  existed has no such key, and requiring it would make this a migration of every content set
+  in every environment.
+
+- **Telemetry:** `InputHandler.Abilities` counters on `/status`, seven new
+  `InputRejectionReason` values with metric labels and suspicion weights, and
+  `Connection.SnapshotEventsDropped` / `TickEventBuffer.Dropped` for the two places events
+  can be shed under load.
+
+### Changed
+- **Events survive snapshot coalescing.** Coalescing is documented as lossless and for state
+  it is — a newer gather already describes everything an unclaimed older one would have.
+  Events are the opposite, so they ACCUMULATE on the connection and are drained only when a
+  snapshot is actually claimed for encoding. Staging them like state would have dropped a
+  damage number every time a connection fell a tick behind, which is exactly the load under
+  which a player is most likely to be in combat. Bounded at
+  `Connection.MaxStagedEvents`, dropping the oldest.
+- **Both byte-identity fixtures rebaselined** for `action_seq`
+  (`SnapshotByteIdentityTests`). The evidence is recorded beside the constants: with the one
+  line writing the field commented out, the Protobuf digest came back as the previous value
+  EXACTLY, so the only bytes this change adds are that field. The JSON fixture moving is the
+  point of pinning it separately — when `action_seq` reached the Protobuf writer alone, the
+  Protobuf fixture failed and the JSON one PASSED, which looked like good news and was the
+  bug.
+
+### Known limitations
+- **Ability cooldowns are global, not per-ability.** One slot on `Combat`; a kit needing two
+  abilities usable in the same second cannot be expressed. Lifting it is a simulation-state
+  change, not a wire change.
+- **Ground abilities apply no effect.** They are validated, animated, charged and reported,
+  and no area query runs: the only index that answers "everything within radius" is the AOI
+  grid, which is not valid during input processing, and an O(all entities) scan per cast
+  would be the most expensive thing in the tick. Counted as
+  `InputHandler.Abilities.GroundCastsWithoutArea` rather than left to be rediscovered as
+  "ground abilities are broken".
+
+### Added
 - **`gameserver_nakama_reward_outcomes_total` — the reward path now counts its own answers,
   and ADR-24 §8.1's open item is closed.** The failure came first: turning the meta hop's
   TLS on in dev left one `Allocated` GameServer on the old plaintext `NAKAMA_URL`, so every

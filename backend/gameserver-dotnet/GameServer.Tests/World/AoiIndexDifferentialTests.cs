@@ -121,6 +121,12 @@ public class AoiIndexDifferentialTests
             // correctly placed, facing due east regardless of where it is walking.
             Assert.Equal(expected[i].FacingBrad, actual[i].FacingBrad);
             Assert.Equal(expected[i].Action, actual[i].Action);
+            // ActionSeq rides the same Locomotion span and therefore the same two paths.
+            // It is more dangerous than Action, not less: dropping it on one arm leaves the
+            // action itself correct, so an entity would animate its FIRST attack and then
+            // stop retriggering — for viewers served by that arm only, while every other
+            // field agreed.
+            Assert.Equal(expected[i].ActionSeq, actual[i].ActionSeq);
         }
 
         // Third opinion: the shared rule the client predicts with. Only for finite radii —
@@ -789,6 +795,7 @@ public class AoiIndexDifferentialTests
             nameof(EntityView.Id), nameof(EntityView.Key), nameof(EntityView.Type),
             nameof(EntityView.Position), nameof(EntityView.Hp), nameof(EntityView.MaxHp),
             nameof(EntityView.Speed), nameof(EntityView.FacingBrad), nameof(EntityView.Action),
+            nameof(EntityView.ActionSeq),
         };
 
         var actual = typeof(EntityView)

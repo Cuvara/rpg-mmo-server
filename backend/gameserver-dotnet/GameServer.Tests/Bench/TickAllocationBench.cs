@@ -476,7 +476,10 @@ public sealed class TickAllocationBench
                     // allocates nothing, and the fields that are always written are the
                     // ones that could introduce a boxing conversion.
                     GameServer.Net.FacingCodec.FromRadians(0.5f),
-                    global::Shared.GameLogic.Components.EntityAction.Moving);
+                    global::Shared.GameLogic.Components.EntityAction.Moving,
+                    // Non-zero for the same reason the facing is: a zero would be elided by
+                    // proto3 and this benchmark would stop measuring the field it writes.
+                    actionSeq: 1);
             }
         }
 

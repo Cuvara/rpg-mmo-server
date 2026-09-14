@@ -8,6 +8,7 @@ using Shared.GameLogic.Components;
 // import order so every use below says which layer it means - this file is where the two
 // meet, and that is exactly where an implicit choice would be a bug waiting to happen.
 using SimAction = Shared.GameLogic.Components.EntityAction;
+using WireEventType = RpgMmo.Wire.V1.GameEventType;
 using WireAction = RpgMmo.Wire.V1.EntityAction;
 using RpgMmo.Wire.V1;
 
@@ -54,6 +55,18 @@ public sealed class SnapshotDeltaState
         public readonly uint FacingBrad;
         public readonly SimAction Action;
 
+        /// <summary>
+        /// Retrigger counter for <see cref="Action"/>. In equality for a reason the other
+        /// fields do not have: it is the ONLY field that changes when an entity repeats an
+        /// action it is already in. An attacker swinging twice from a standstill has the
+        /// same position, the same HP, the same facing and the same action on both ticks,
+        /// so a SentView without this compares the second swing EQUAL to the first, the
+        /// delta suppresses it, and the retrigger the counter exists to deliver never
+        /// reaches the client. The feature would be dead on arrival and every test of the
+        /// keyframe path would still pass.
+        /// </summary>
+        public readonly uint ActionSeq;
+
         public SentView(in EntityView e)
         {
             Id = e.Id;
@@ -65,6 +78,7 @@ public sealed class SnapshotDeltaState
             Speed = e.Speed;
             FacingBrad = e.FacingBrad;
             Action = e.Action;
+            ActionSeq = e.ActionSeq;
         }
 
         public bool Equals(SentView other) =>
@@ -93,11 +107,12 @@ public sealed class SnapshotDeltaState
             // entity.
             FacingBrad == other.FacingBrad &&
             Action == other.Action &&
+            ActionSeq == other.ActionSeq &&
             string.Equals(Type, other.Type, StringComparison.Ordinal);
 
         public override bool Equals(object? obj) => obj is SentView v && Equals(v);
         public override int GetHashCode() =>
-            HashCode.Combine(Type, X, Y, Hp, MaxHp, Speed, FacingBrad, Action);
+            HashCode.Combine(Type, X, Y, Hp, MaxHp, Speed, FacingBrad, HashCode.Combine(Action, ActionSeq));
     }
 
     /// <summary>
@@ -160,6 +175,15 @@ public sealed class SnapshotDeltaState
     private int _poolUsed;
 
     private readonly Dictionary<int, SentView> _lastSent = new();
+
+    /// <summary>
+    /// Reused <see cref="GameEvent"/> instances, mirroring the entity pool. Events are rare
+    /// per tick but the pool is what keeps a burst of them — a wave of AoE deaths — from
+    /// allocating per event per observer.
+    /// </summary>
+    private readonly List<GameEvent> _eventPool = new();
+
+    private int _eventPoolUsed;
     private readonly HashSet<int> _seen = new();
 
     /// <summary>Scratch for the keys a delta despawns, reused so removal allocates nothing.</summary>
@@ -503,7 +527,8 @@ public sealed class SnapshotDeltaState
                 key = --_nextLegacyKey;
                 _legacyKeys[e.Id] = key;
             }
-            _legacyViews[i] = new EntityView(key, e.Id, e.Type, e.Position, e.Hp, e.MaxHp, e.Speed, e.FacingBrad, e.Action);
+            _legacyViews[i] = new EntityView(
+                key, e.Id, e.Type, e.Position, e.Hp, e.MaxHp, e.Speed, e.FacingBrad, e.Action, e.ActionSeq);
         }
         return Encode(tick, ackTick, _legacyViews.AsSpan(0, nearby.Length), keyframeInterval, intern, observer);
     }
@@ -519,7 +544,8 @@ public sealed class SnapshotDeltaState
     /// here is the branch the string-keyed code took.
     /// </remarks>
     public SnapshotMessage Encode(ulong tick, ulong ackTick, ReadOnlySpan<EntityView> nearby, int keyframeInterval,
-        bool intern = false, Vec2 observer = default)
+        bool intern = false, Vec2 observer = default,
+        ReadOnlySpan<PendingGameEvent> events = default, int observerKey = PendingGameEvent.NoKey)
     {
         _intern = intern;
         _observer = observer;
@@ -558,11 +584,142 @@ public sealed class SnapshotDeltaState
             {
                 _sinceKeyframe = 0;
             }
-            return EncodeFull(tick, ackTick, nearby);
+            // Events are appended AFTER the entity pass, never before, and that ordering is
+            // load-bearing: an event is addressed by handle, and a handle only exists once
+            // the entity pass has introduced it. Appending first would emit events naming
+            // handles the receiver has no binding for, which is the one failure the
+            // interning contract says a receiver must answer with a resync.
+            var fullMsg = EncodeFull(tick, ackTick, nearby);
+            AppendEvents(fullMsg, events, observerKey);
+            return fullMsg;
         }
 
         _sinceKeyframe++;
-        return EncodeDelta(tick, ackTick, nearby);
+        var deltaMsg = EncodeDelta(tick, ackTick, nearby);
+        AppendEvents(deltaMsg, events, observerKey);
+        return deltaMsg;
+    }
+
+    /// <summary>
+    /// Filters this tick's events down to the ones this connection may see and writes them
+    /// into <paramref name="msg"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Visibility is decided against what this connection has been told, not against
+    /// distance.</b> An entity is visible to this connection exactly when it is in
+    /// <see cref="_lastSent"/> — which is the encoder's model of what the client knows, and
+    /// is maintained by the AOI pass that just ran. Re-deriving visibility from positions
+    /// here would be a second, independently wrong answer to a question the entity pass has
+    /// already answered; the two would disagree at the edge of the circle, and the symptom
+    /// would be damage numbers for entities that are not on screen.
+    /// </para>
+    /// <para>
+    /// <b>Either participant is enough.</b> A player who sees the victim but not the
+    /// attacker still needs the damage number: the alternative is a health bar that drops
+    /// with no explanation. The attacker's handle is simply left at zero in that case, which
+    /// a receiver reads as "no source".
+    /// </para>
+    /// <para>
+    /// <b>Private events are addressed, not broadcast.</b> Experience and levels reach only
+    /// the connection whose own entity is the subject. An event channel that leaked another
+    /// player's progression would be an information disclosure shipped as a feature.
+    /// </para>
+    /// </remarks>
+    private void AppendEvents(SnapshotMessage msg, ReadOnlySpan<PendingGameEvent> events, int observerKey)
+    {
+        // The overwhelmingly common case: a tick in which nothing happened. Costs one
+        // length check per connection per tick.
+        if (events.Length == 0) return;
+
+        for (int i = 0; i < events.Length; i++)
+        {
+            ref readonly PendingGameEvent pending = ref events[i];
+
+            uint sourceHandle = 0;
+            uint targetHandle = 0;
+            bool sourceKnown = pending.HasSource && IsKnown(pending.SourceKey, out sourceHandle);
+            bool targetKnown = pending.HasTarget && IsKnown(pending.TargetKey, out targetHandle);
+
+            if (pending.Data.IsPrivate)
+            {
+                // Addressed to its subject alone. Compared by key rather than by id string
+                // because the observer is identified to this encoder by key everywhere else,
+                // and mixing the two would be one more place they could disagree.
+                if (observerKey == PendingGameEvent.NoKey || pending.TargetKey != observerKey) continue;
+            }
+            else if (!sourceKnown && !targetKnown)
+            {
+                continue;
+            }
+
+            var wire = RentEvent();
+            wire.Type = (WireEventType)pending.Data.Type;
+            wire.Amount = pending.Data.Amount;
+            wire.AbilityId = pending.Data.AbilityId;
+            wire.Flags = (uint)pending.Data.Flags;
+
+            if (_intern)
+            {
+                // A participant this connection does not know is reported as absent rather
+                // than by id: sending the id would name an entity the client has never been
+                // told about, which is a disclosure the AOI exists to prevent.
+                wire.Source = sourceKnown ? sourceHandle : 0u;
+                wire.Target = targetKnown ? targetHandle : 0u;
+            }
+            else
+            {
+                // JSON has no handle table, so the ids are the only names available. Same
+                // visibility rule: an unknown participant is omitted, not named.
+                wire.SourceId = sourceKnown ? (pending.Data.SourceId ?? "") : "";
+                wire.TargetId = targetKnown ? (pending.Data.TargetId ?? "") : "";
+            }
+
+            msg.Events.Add(wire);
+        }
+    }
+
+    /// <summary>
+    /// Whether this connection has been told about <paramref name="key"/>, and its handle
+    /// if it is interning.
+    /// </summary>
+    private bool IsKnown(int key, out uint handle)
+    {
+        handle = 0;
+        if (!_lastSent.ContainsKey(key)) return false;
+        if (_intern) _handles.TryGetValue(key, out handle);
+        return true;
+    }
+
+    /// <summary>
+    /// A cleared <see cref="GameEvent"/> from the pool. Every field is reset for the reason
+    /// <see cref="Rent"/> gives: a pooled message that kept a previous event's source would
+    /// attach it to whichever event rents the object next, which is a wrong value rather
+    /// than a missing one.
+    /// </summary>
+    private GameEvent RentEvent()
+    {
+        GameEvent e;
+        if (_eventPoolUsed < _eventPool.Count)
+        {
+            e = _eventPool[_eventPoolUsed];
+        }
+        else
+        {
+            e = new GameEvent();
+            _eventPool.Add(e);
+        }
+        _eventPoolUsed++;
+
+        e.Type = WireEventType.Unspecified;
+        e.Source = 0;
+        e.Target = 0;
+        e.Amount = 0;
+        e.AbilityId = 0;
+        e.Flags = 0;
+        e.SourceId = "";
+        e.TargetId = "";
+        return e;
     }
 
     /// <summary>
@@ -574,6 +731,8 @@ public sealed class SnapshotDeltaState
     {
         _message.Entities.Clear();
         _message.Removed.Clear();
+        _message.Events.Clear();
+        _eventPoolUsed = 0;
         _message.Tick = tick;
         _message.AckTick = ackTick;
         _message.Full = full;
@@ -617,6 +776,7 @@ public sealed class SnapshotDeltaState
         // wrong value rather than a missing one - far harder to notice.
         e.FacingBrad = 0;
         e.Action = WireAction.Unspecified;
+        e.ActionSeq = 0;
         return e;
     }
 
@@ -1120,6 +1280,10 @@ public sealed class SnapshotDeltaState
         // invisible at four entities and a whole entity's worth at eighty.
         msg.FacingBrad = e.FacingBrad;
         msg.Action = (WireAction)e.Action;
+        // Inside Fill with the rest, not beside it: Fill is the single writer of an
+        // EntitySnapshot precisely so the budget's dry sizing pass and the emit path
+        // cannot disagree about how large an entity is.
+        msg.ActionSeq = e.ActionSeq;
         msg.Handle = handle;
         msg.Id = introduceId ? e.Id : "";
         msg.TypeName = "";

@@ -117,6 +117,18 @@ public struct Combat
     /// never wall-clock — see <see cref="EntityState.CooldownUntilTick"/>.
     /// </summary>
     public ulong CooldownUntilTick;
+
+    /// <summary>
+    /// Simulation tick at which the ABILITY cooldown expires. Separate from
+    /// <see cref="CooldownUntilTick"/>, which governs the basic attack only.
+    /// </summary>
+    /// <remarks>
+    /// One slot for all abilities — a global cooldown, not a per-ability one. The reason
+    /// this is not a map is on <see cref="EntityState.AbilityCooldownUntilTick"/>: this
+    /// component is composed per entity per tick inside the world write lock, and a
+    /// dictionary here would put an allocation and a hash lookup on that path.
+    /// </remarks>
+    public ulong AbilityCooldownUntilTick;
 }
 
 /// <summary>Movement capability, and the presentation state derived from moving.</summary>
@@ -166,6 +178,20 @@ public struct Locomotion
     /// one that is genuinely standing still.
     /// </summary>
     public EntityAction Action;
+
+    /// <summary>
+    /// Retrigger counter for <see cref="Action"/>, 0 meaning "never set". Advanced only
+    /// through <c>ActionStateLogic.Advance</c>, never assigned directly.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Action"/> is level-triggered, so two attacks in a row are identical bytes
+    /// on the wire and a client animator plays the swing once. This counter is the edge the
+    /// action field cannot carry. The rule for when it moves is shared with the client in
+    /// <c>Shared.GameLogic.Systems.ActionStateLogic</c> — it lives there rather than here
+    /// because a client that disagreed about what counts as entering an action would
+    /// retrigger animations the server did not intend.
+    /// </remarks>
+    public uint ActionSeq;
 
     public Locomotion(float speed) => Speed = speed;
 }

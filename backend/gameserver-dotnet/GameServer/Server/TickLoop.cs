@@ -161,15 +161,37 @@ public sealed class TickLoop
         ISimulationPhase? simulationPhase = null,
         double achievedRateWindowSeconds = AchievedRateMeter.DefaultWindowSeconds,
         int gatherWorkers = 1)
-        : this(world, handler, connections, SimulationRates.Uniform(tickRate), aoiRadius,
+        : this(world, handler, null, connections, SimulationRates.Uniform(tickRate), aoiRadius,
                logger, metrics, keyframeInterval, simulationPhase, achievedRateWindowSeconds,
                gatherWorkers)
+    {
+    }
+
+    /// <summary>
+    /// Overload without an event buffer, for the tests and benchmarks that drive the loop
+    /// and discard occurrences.
+    /// </summary>
+    public TickLoop(
+        EcsWorld world,
+        InputHandler handler,
+        ConnectionManager connections,
+        SimulationRates rates,
+        float aoiRadius,
+        ILogger logger,
+        GameMetrics? metrics = null,
+        int keyframeInterval = GameConstants.DefaultKeyframeInterval,
+        ISimulationPhase? simulationPhase = null,
+        double achievedRateWindowSeconds = AchievedRateMeter.DefaultWindowSeconds,
+        int gatherWorkers = 1)
+        : this(world, handler, null, connections, rates, aoiRadius, logger, metrics,
+               keyframeInterval, simulationPhase, achievedRateWindowSeconds, gatherWorkers)
     {
     }
 
     public TickLoop(
         EcsWorld world,
         InputHandler handler,
+        GameServer.Snapshot.TickEventBuffer? tickEvents,
         ConnectionManager connections,
         SimulationRates rates,
         float aoiRadius,
@@ -183,6 +205,7 @@ public sealed class TickLoop
         _rateMeter = new AchievedRateMeter(achievedRateWindowSeconds);
         _world = world;
         _handler = handler;
+        _tickEvents = tickEvents;
         _connections = connections;
         _simulationPhase = simulationPhase;
         _rates = rates;
@@ -194,6 +217,11 @@ public sealed class TickLoop
         _gatherViewsSlice = GatherViewsSlice;
         _gatherWorkers = gatherWorkers < 1 ? 1 : gatherWorkers;
     }
+
+    /// <summary>
+    /// This tick's occurrences, or null when the host does not collect them.
+    /// </summary>
+    private readonly GameServer.Snapshot.TickEventBuffer? _tickEvents;
 
     /// <summary>The rate configuration this loop runs.</summary>
     public SimulationRates Rates => _rates;
@@ -212,7 +240,7 @@ public sealed class TickLoop
     {
         for (int i = 0; i < _viewerCount; i++)
         {
-            _viewers[i].GatherSnapshotView(reader, _aoiRadius, _currentTick, _keyframeInterval);
+            _viewers[i].GatherSnapshotView(reader, _aoiRadius, _currentTick, _keyframeInterval, _tickEvents);
         }
     }
 
@@ -239,7 +267,7 @@ public sealed class TickLoop
 
         for (int i = from; i < to; i++)
         {
-            _viewers[i].GatherSnapshotView(reader, _aoiRadius, _currentTick, _keyframeInterval);
+            _viewers[i].GatherSnapshotView(reader, _aoiRadius, _currentTick, _keyframeInterval, _tickEvents);
         }
     }
 
@@ -436,6 +464,12 @@ public sealed class TickLoop
 
         // Drain and process all pending inputs under one world Update. The drain reuses
         // _inputs, and every entry already carries the entity handle resolved at ingest.
+        // Cleared HERE, at the top of the tick that will produce the next set, rather than
+        // after the broadcast. Clearing afterwards would mean the buffer is empty for
+        // anything that runs between the broadcast and the next input phase, and it would
+        // put the lifetime of the events in two places — this one and whatever ran last.
+        _tickEvents?.Clear();
+
         var inputs = _inputs;
         _world.DrainInputs(inputs);
 

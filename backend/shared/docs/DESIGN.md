@@ -741,12 +741,16 @@ established idiom rather than a new one, and enum zero-elision costs nothing.
   would add 8–10 bytes per entity per tick to the hottest message to serve
   dead-reckoning, which is not implemented. Revisit it when dead reckoning is,
   and revisit it with a measurement.
-- **An action sequence number.** A renderer that wants to retrigger the *same*
-  action twice in a row (attack, attack) needs an edge, and a level-triggered
-  enum cannot give one. That is an animation-system concern; the goal here is
-  that a game can render facing and a discrete state, not that it has a full
-  animation pipeline. Named here so the limitation is known rather than
-  discovered.
+- **An action sequence number.** ~~Left out as an animation-system concern.~~
+  **SHIPPED as `action_seq` (field 12), 2026-09-14.** The reasoning that deferred
+  it was wrong, and it is left here struck through rather than deleted because
+  the mistake is instructive: calling it "an animation-system concern" implied an
+  animation system could supply it, and none can. Only the SERVER knows an action
+  was re-entered — `attack, attack` is identical bytes from the client's side of
+  the wire — so the edge has to be manufactured in the protocol or it does not
+  exist anywhere. It costs one varint, and it is in the delta comparison, without
+  which a second swing from a standstill compares equal to the first and is
+  suppressed. See `gameserver-dotnet/docs/API.md` › "`action_seq` — normative".
 - **Pitch / 3D orientation.** The simulation is 2D (`Vec2` throughout).
 
 ### It did NOT bump `protocol_version`

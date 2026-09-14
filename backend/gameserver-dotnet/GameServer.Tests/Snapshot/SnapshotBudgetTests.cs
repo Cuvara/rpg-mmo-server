@@ -525,6 +525,11 @@ public class SnapshotBudgetTests
             // with nothing else failing. They are written in Fill now.
             nameof(EntitySnapshot.FacingBrad),
             nameof(EntitySnapshot.Action),
+            // Added by the action_seq change, and written in Fill for the same reason the
+            // two above are: Fill is the single writer, so a field set beside it instead of
+            // inside it makes the budget's dry sizing pass disagree with the emit path by a
+            // few bytes per entity.
+            nameof(EntitySnapshot.ActionSeq),
         };
 
         string[] actual = typeof(EntitySnapshot)

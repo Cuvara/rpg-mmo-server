@@ -640,8 +640,8 @@ try
 {
     content = ContentLoader.Load(contentDir);
     logger.LogInformation(
-        "Content loaded from {Dir}: {Items} items, hash {Hash}",
-        contentDir, content.Database.ItemCount, content.Hash);
+        "Content loaded from {Dir}: {Items} items, {Abilities} abilities, hash {Hash}",
+        contentDir, content.Database.ItemCount, content.Database.AbilityCount, content.Hash);
 }
 catch (ContentLoadException ex)
 {
@@ -777,6 +777,10 @@ var options = new ServerOptions
     Capacity = capacity,
     MaxPendingHandshakes = maxPendingHandshakes,
     MinProtocolVersion = minProtocolVersion,
+    // The same database the /content endpoint serves. Abilities have to resolve against
+    // exactly the set the client downloaded, or a cast the client believes in is refused as
+    // "unknown ability" — the hash on both sides is what makes that checkable.
+    Content = content.Database,
     HandshakeTimeout = TimeSpan.FromMilliseconds(handshakeTimeoutMs),
     MaxInputsPerConnection = maxInputsPerTick,
     MaxPendingInputs = maxPendingInputs,
