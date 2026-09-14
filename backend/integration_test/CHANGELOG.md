@@ -6,6 +6,25 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`gameplay_v2_e2e_test.go`** — the event channel, ability input and `action_seq` over a
+  real socket against the real C# game server, in both encodings.
+
+  It found the defect it was written to rule out: events were being discarded on three ticks
+  in four (see the gameserver changelog). Unit tests on both sides had passed throughout,
+  because each half was correct on its own.
+
+  Two things in the harness are load-bearing and were each got wrong first:
+  the handle table lives per CONNECTION, not per read — an observer rebuilt between reads
+  resolves nothing and reports every participant as absent, which looks exactly like a
+  product bug; and the wait between two attacks reads THROUGH the socket rather than
+  sleeping, because the server's send queue is bounded and drops the oldest frame, so a
+  client that stops reading discards the frames it is about to assert on.
+
+- **`testdata/gameplayv2/items.json`** — content with two abilities, passed via
+  `--content-dir`. Deliberately not added to `backend/content`: the game ships no abilities
+  yet, and a test that needs one must not decide what the game ships.
+
+### Added
 
 - **ADR-25: updated for the new `readHello` signature.** The sealed client callback now
   returns the server's Ed25519 `server_signature` as a third `[]byte`. The suite still

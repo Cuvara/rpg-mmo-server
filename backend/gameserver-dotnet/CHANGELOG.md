@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Game events were discarded on three ticks in four, and nothing said so.** Input runs on
+  the CRITICAL group — every base tick, 60 Hz by default. Snapshots ship on the WORLD group —
+  every fourth one, 15 Hz. `TickEventBuffer` was cleared at the top of each base tick, so any
+  event produced on a tick that was not also a broadcast tick was thrown away before a
+  connection could be handed it. An attack landed, the victim's HP fell, and no damage event
+  reached anyone.
+
+  **Every unit test on both sides passed throughout.** The server's suite proved it produced
+  the event, the encoder's suite proved it would write one, and the client package's suite
+  proved it would decode one. Each half was correct in isolation and the halves were never
+  joined; it took the first end-to-end run over a real socket to see it.
+
+  The buffer is now cleared after the gather has staged events on every connection — one
+  broadcast interval rather than one tick — including on the path where there are no viewers,
+  so a server with nobody connected does not accumulate. `TickEventBroadcastTests` sweeps all
+  four phases of the broadcast cycle and fails on three of them if the clear moves back;
+  written that way because the first version of it pushed its input before the first tick,
+  landed on a broadcast tick by luck, and passed against the bug.
+
+### Added
+- **`TickEventBroadcastTests`** — the seam between producing an event and broadcasting one,
+  at split rates. A uniform-rate fixture broadcasts every tick and cannot see this class of
+  bug at all.
+
 ### Added
 - **Gameplay v2: an edge-triggered event channel, ability input, and an animation retrigger
   counter.** Three additions to `wire.proto`, all purely additive optional fields with a

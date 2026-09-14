@@ -1,0 +1,38 @@
+{
+  "$comment": [
+    "Content for the gameplay-v2 end-to-end test ONLY, passed with --content-dir.",
+    "",
+    "Deliberately NOT added to backend/content/items.json: the game has no abilities",
+    "yet, and a test that needs one must not decide what the game ships. Keeping it",
+    "here also means the assertions below can pin exact numbers without a content",
+    "change silently rewriting what the test proves.",
+    "",
+    "bolt: entity-targeted damage. power 20 on top of the caster's attack, before the",
+    "target's defense. Range 10 comfortably exceeds the 3.0 basic-attack range, so an",
+    "out-of-range refusal here would be a real failure rather than a positioning",
+    "accident. cooldownTicks 5 at 15 Hz is a third of a second."
+  ],
+  "items": [],
+  "abilities": [
+    {
+      "id": 1,
+      "name": "Bolt",
+      "targeting": "entity",
+      "effect": "damage",
+      "range": 10,
+      "radius": 0,
+      "power": 20,
+      "cooldownTicks": 5
+    },
+    {
+      "id": 2,
+      "name": "Mend",
+      "targeting": "self",
+      "effect": "heal",
+      "range": 0,
+      "radius": 0,
+      "power": 30,
+      "cooldownTicks": 5
+    }
+  ]
+}

@@ -464,12 +464,6 @@ public sealed class TickLoop
 
         // Drain and process all pending inputs under one world Update. The drain reuses
         // _inputs, and every entry already carries the entity handle resolved at ingest.
-        // Cleared HERE, at the top of the tick that will produce the next set, rather than
-        // after the broadcast. Clearing afterwards would mean the buffer is empty for
-        // anything that runs between the broadcast and the next input phase, and it would
-        // put the lifetime of the events in two places — this one and whatever ran last.
-        _tickEvents?.Clear();
-
         var inputs = _inputs;
         _world.DrainInputs(inputs);
 
@@ -634,6 +628,25 @@ public sealed class TickLoop
             // array until the next tick happens to overwrite that slot.
             Array.Clear(_viewers, 0, _viewerCount);
         }
+
+        // Cleared HERE — after the gather has staged them on every connection — and NOT at
+        // the top of each base tick.
+        //
+        // THE BUG THIS FIXES, because it is not visible from either half. Input runs on the
+        // CRITICAL group, every base tick (60 Hz by default). Snapshots ship on the WORLD
+        // group, every fourth one (15 Hz). Clearing at the top of each base tick therefore
+        // threw away every event produced on a tick that was not also a broadcast tick —
+        // three ticks in four — so an attack landed, the victim's HP fell, and no damage
+        // event ever reached anyone. Every unit test on both sides still passed, because
+        // each half was correct in isolation; only a real socket showed it.
+        // TickEventBroadcastTests sweeps all four phases and fails on three of them
+        // if this moves back.
+        //
+        // Bounded rather than unbounded: at worst the buffer holds one broadcast interval's
+        // events, and TickEventBuffer.Capacity caps it anyway. Reached on the viewerless
+        // path too, so a server with nobody connected does not accumulate forever.
+        _tickEvents?.Clear();
+
 
         // Metrics: recorded once per tick, no per-entity allocation.
         if (_metrics != null)

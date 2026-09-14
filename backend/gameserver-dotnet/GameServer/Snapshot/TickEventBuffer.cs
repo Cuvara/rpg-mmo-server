@@ -10,10 +10,16 @@ namespace GameServer.Snapshot;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Lifetime is exactly one tick.</b> <see cref="Clear"/> runs at the start of the input
-/// phase and the gather phase reads what accumulated. Nothing here survives into the next
-/// tick, because an event that outlived its tick would be delivered twice — once by the
-/// snapshot it belongs to and once by the next one.
+/// <b>Lifetime is one BROADCAST, not one tick</b>, and the difference is the whole of a bug
+/// that unit tests on both sides could not see. Input runs on the critical group, every base
+/// tick; snapshots ship on the world group, every fourth one. <see cref="Clear"/> therefore
+/// runs after the gather has staged these on every connection — clearing at the top of each
+/// base tick instead discarded every event produced on a non-broadcast tick, so an attack
+/// landed, HP fell, and no damage event reached anyone.
+/// </para>
+/// <para>
+/// Nothing here survives a broadcast, because an event delivered twice is a hit a player sees
+/// happen twice.
 /// </para>
 /// <para>
 /// <b>Threading.</b> Written by the tick thread during input processing (inside the world

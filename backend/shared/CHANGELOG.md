@@ -6,6 +6,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Gameplay v2 in `shared/messages`.** `InputMessage` gains `AbilityID`, `AbilityTargetID`,
+  `AimX`/`AimY`; `EntitySnapshot` gains `ActionSeq`; `SnapshotMessage` gains `Events`, with a
+  new `GameEvent` / `GameEventType`. Both directions of the Protobuf conversion in `proto.go`
+  carry them.
+
+  The gateway never reads a snapshot or an input, so production Go is unaffected — but the
+  integration and load harnesses drive the wire through this package, and a Go client that
+  silently dropped the fields could not have tested them. It was the missing third language
+  of a contract whose other two were already done.
+
+### Added
 - **ADR-25: the game server's per-pod Ed25519 identity, on the wire and in the registry.**
   `shared/sealed/identity.go` defines the signed input
   `"cuvara/sealed-identity/v1" || 0x00 || transcript || 0x00 || identity_public(32)` plus
