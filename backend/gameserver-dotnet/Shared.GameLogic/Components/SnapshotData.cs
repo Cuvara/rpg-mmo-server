@@ -83,6 +83,25 @@ namespace Shared.GameLogic.Components
         public readonly EntityAction Action;
 
         /// <summary>
+        /// Retrigger counter for <see cref="Action"/>. 0 means "not sent".
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>A consumer retriggers when this CHANGES, never when it increases.</b> The
+        /// counter wraps at 2^32 and resets when the server restarts or the entity respawns,
+        /// so a greater-than test stops retriggering for four billion actions after a single
+        /// wrap — with nothing reporting an error.
+        /// </para>
+        /// <para>
+        /// It is carried through the merge for the reason <see cref="FacingBrad"/> is: a
+        /// field that decodes correctly and is then dropped here reaches no view at all, and
+        /// the symptom is an entity that renders perfectly and never animates a second
+        /// swing.
+        /// </para>
+        /// </remarks>
+        public readonly uint ActionSeq;
+
+        /// <summary>
         /// Constructs entity state without a speed, leaving <see cref="Speed"/> zero —
         /// which consumers read as "not sent".
         /// </summary>
@@ -116,6 +135,13 @@ namespace Shared.GameLogic.Components
         public EntitySnapshotData(
             string id, string type, float x, float y, int hp, int maxHp, float speed,
             uint facingBrad, EntityAction action)
+            : this(id, type, x, y, hp, maxHp, speed, facingBrad, action, 0u)
+        {
+        }
+
+        public EntitySnapshotData(
+            string id, string type, float x, float y, int hp, int maxHp, float speed,
+            uint facingBrad, EntityAction action, uint actionSeq)
         {
             Id = id;
             Type = type;
@@ -126,6 +152,7 @@ namespace Shared.GameLogic.Components
             Speed = speed;
             FacingBrad = facingBrad;
             Action = action;
+            ActionSeq = actionSeq;
         }
     }
 

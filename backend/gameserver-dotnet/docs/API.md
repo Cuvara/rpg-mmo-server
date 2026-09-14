@@ -630,8 +630,12 @@ the death just happened. A death animation, a sound and a kill feed all need the
 2. **Resolve `source`/`target` against the same handle table as `EntitySnapshot.handle`.** A
    handle here may name an entity **not present in this snapshot's `entities` list** — a
    delta only carries entities whose state changed, and a killer need not have moved. That is
-   legal. A handle you have **no binding for** is not: that means lost interning state, and
-   the only correct response is `resync`, exactly as for an entity.
+   legal. A handle you have **no binding for** is a disagreement — report that participant
+   as absent, count it, and render the rest of the event. Do **not** `resync` on it. That is
+   a deliberate asymmetry with an entity, where an unresolvable handle must abort the
+   snapshot: a wrong entity state is a wrong world, while a missing damage number is a
+   missing damage number, and a keyframe costs every observer bandwidth exactly when the
+   link is already struggling. Guessing remains forbidden; only the escalation is.
 3. **`0` means "no such participant, or not visible to you."** Render accordingly: a player
    who can see the victim but not the attacker still gets the damage number, with no source.
 4. **Prefer the handle; fall back to `source_id`/`target_id`** when it is zero. Only a JSON
