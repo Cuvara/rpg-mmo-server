@@ -7,6 +7,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Attacks now reach the wire, and two in a row are distinguishable.** Two defects, one
+  cause, both invisible to every existing test.
+  - **The sampling gap.** Actions are written on the CRITICAL group (60 Hz) and sampled by
+    the snapshot gather on the WORLD group (15 Hz), so only one write in four is ever
+    observable. `InputHandler` set `Action = Attacking` on one base tick and the next tick
+    with movement input overwrote it, so an attack reached a client only when it happened
+    to land on a world tick — a one-in-four coin flip that reads as "the animation
+    sometimes does not play". `Locomotion.ActionHoldUntilTick` now LATCHES a one-shot
+    action for one world interval (`SimulationRates.WorldEvery`, passed by the host), so
+    at least one snapshot can always sample it. `EntityAction.Dead` is terminal and
+    overrides the latch: a corpse must not keep swinging.
+  - **The missing edge.** Even latched, a second attack was byte-identical to the first,
+    so the delta encoder classified it as unchanged and omitted it.
+    `Locomotion.ActionSeq` carries the retrigger edge, rides the `Locomotion` span the AOI
+    gather already fetches (no extra `GetSpan`, so the issue #237 trim is preserved), and
+    is part of `SentView`'s equality — which is what makes the encoder send it.
+  - **One writer, and the counter rule is the SHARED one.** `ActionTransitions.Enter` is
+    now the only place `Locomotion.Action` is written; the five direct assignments in
+    `InputHandler` are gone. A counter that some call sites remembered to bump would be
+    worse than none: a missed bump is a silently dropped animation, a spurious one a swing
+    that plays twice, and neither shows up in a compile or a tick timing.
+    - The advance rule itself is **`Shared.GameLogic.Systems.ActionStateLogic.Advance`**,
+      adopted verbatim rather than reimplemented. It already existed in the client's copy
+      of `Shared.GameLogic` (`com.rpgmmo.shared-gamelogic` 0.5.0) and was written against
+      this wire contract; a server-side copy would be two implementations of one contract
+      with no test able to see them diverge, because the client decides whether to
+      retrigger by comparing counters the server produced — a server advancing them under
+      different rules fails nothing, it just plays the wrong animations. This is the
+      defect class ADR-10's shared-logic boundary exists to remove.
+    - Re-asserting a CONTINUOUS action (Moving, Idle, Dead) does not advance the counter —
+      if it did, a walking entity would differ on the wire every snapshot and the delta
+      encoder's "omit unchanged entities" property would collapse for anything in motion.
+      `ActionStateLogic.IsRetriggerable` owns that distinction.
+    - `ActionTransitions` keeps only the **latch**, which is genuinely server-only: it is a
+      fact about this server's two-rate schedule, not about the simulation, and a client
+      has no schedule to apply it to. Putting it in `Shared.GameLogic` would export a
+      server implementation detail to every client and make changing a server tick rate an
+      `sgl` release.
+  - `InputHandler`'s new `oneShotHoldTicks` parameter defaults to **1, meaning no latch**,
+    so the sixteen fixtures that construct the handler directly observe exactly what they
+    observed before. The host passes `rates.WorldEvery`.
+  - Tests: `GameServer.Tests/Input/ActionSeqTests.cs` (11), including a **control arm**
+    that runs the identical scenario with the latch off and asserts the attack IS lost —
+    without it the test would pass against a build where the latch does nothing.
+  - `TrimmedGatherByteIdentityTests` now normalises `ActionSeq` out before comparing, and
+    asserts the scenario produced a non-zero one. The legacy arm composes `EntityState`,
+    which cannot carry the field (it is a `Shared.GameLogic` type compiled into the Unity
+    client as a UPM package), so the two arms are no longer expected to agree on it; issue
+    #237's claim — that the trimmed compose emits the same bytes as the full one — stays
+    provable rather than being retired.
+  - `SnapshotPipelineTests.ProductionBytesEqualTheReferenceEncoder` now feeds the reference
+    arm `EntityView`, which is the type production feeds it. Taking `EntityState` made the
+    reference a reference for a pipeline nobody runs.
 - **`gameserver_nakama_reward_outcomes_total` — the reward path now counts its own answers,
   and ADR-24 §8.1's open item is closed.** The failure came first: turning the meta hop's
   TLS on in dev left one `Allocated` GameServer on the old plaintext `NAKAMA_URL`, so every

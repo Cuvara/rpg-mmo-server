@@ -6,6 +6,29 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`Shared.GameLogic.Systems.ActionStateLogic` — the action/retrigger-counter rule, now
+  in the module both sides compile.** The type already existed in the client's copy of the
+  package (`com.rpgmmo.shared-gamelogic` 0.5.0) and is adopted here **byte-identically**,
+  rather than the server growing its own: the client decides whether to retrigger an
+  animation by comparing counters the server produced, so two implementations of the rule
+  would not fail anything — they would play the wrong animations, which no test on either
+  side can see. `Advance(ref action, ref seq, next)` moves the counter when an action is
+  ENTERED, where re-entering a retriggerable action (Attacking) counts and re-asserting a
+  continuous one (Idle, Moving, Dead) does not, and skips zero on wrap because zero is the
+  wire's "not sent".
+- **`EntitySnapshot.action_seq` (field 12) — the animation edge a level-triggered field
+  cannot carry.** `action` says what state an entity is in, never that a state was
+  entered, so two attacks in a row are identical bytes and an animator driven from it
+  alone plays the swing once and holds. The edge is genuinely not in the data and no
+  receiver-side detection recovers it; only the sender knows. The counter increments on
+  every action ENTRY, including re-entering the action already held.
+  **Receivers retrigger on inequality, never on increase** — it wraps at 2^32 and resets
+  across a restart or a respawn, so a greater-than test would stop retriggering for four
+  billion actions with nothing reporting an error. **Zero means "not sent"**, the same
+  rule as `facing_brad`, and the sender skips zero on wrap so a live counter never takes
+  it. The Unity client has consumed this field since before the server sent it
+  (`com.cuvara.netcode` `EntitySnapshot.ActionSeq`, same field number); this closes a
+  drift in which the client was ready and the server emitted nothing.
 - **ADR-25: the game server's per-pod Ed25519 identity, on the wire and in the registry.**
   `shared/sealed/identity.go` defines the signed input
   `"cuvara/sealed-identity/v1" || 0x00 || transcript || 0x00 || identity_public(32)` plus

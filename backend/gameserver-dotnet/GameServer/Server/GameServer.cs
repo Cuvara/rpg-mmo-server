@@ -698,7 +698,17 @@ public sealed class GameServerHost : IAsyncDisposable
                         userId, _attackRates.Permitted, _attackRates.WindowTicks);
                     _metrics?.RecordAttackRateViolation();
                 }
-            });
+            },
+            // How long a one-shot action stays latched, in BASE ticks: exactly one world
+            // interval. Actions are written on the critical group and sampled by the
+            // snapshot gather on the world group, so at the 60/15 default only one write
+            // in four can ever be observed. Without this an attack reaches the wire on a
+            // one-in-four coin flip and reads as "the animation sometimes does not play".
+            //
+            // Derived from the schedule rather than configured, for the same reason the
+            // cooldown is: the value that makes it correct is the sampling period, and a
+            // second knob that can disagree with the schedule is a knob that will.
+            rates.WorldEvery);
 
         // The observer is handed to the phase at construction rather than set afterwards:
         // a phase must hold no mutable instance state (ADR-12), and a settable observer is

@@ -135,6 +135,17 @@ public sealed class InputHandler
     /// Non-positive values fall back to <see cref="GameConstants.DefaultTickRate"/>.
     /// </param>
     /// <param name="bounds">Play area; defaults to <see cref="MapBounds.Default"/>.</param>
+    /// <param name="oneShotHoldTicks">
+    /// How many base ticks a one-shot action (today: <see cref="SimAction.Attacking"/>)
+    /// stays latched against being overwritten by a continuous one. The host passes the
+    /// world group's <c>WorldEvery</c>, so a one-shot always survives long enough for at
+    /// least one snapshot to sample it.
+    ///
+    /// <para><b>Default 1 is deliberate and means "no latch".</b> Sixteen test fixtures
+    /// construct this handler directly; defaulting to the latch would change what every
+    /// one of them observes, which is the opposite of what a default should do. The
+    /// behaviour under 1 is byte-for-byte the pre-latch behaviour.</para>
+    /// </param>
     public InputHandler(
         EcsWorld world,
         ILogger logger,
@@ -142,7 +153,8 @@ public sealed class InputHandler
         int tickRate = GameConstants.DefaultTickRate,
         MapBounds? bounds = null,
         Action<string, InputRejectionReason>? onRejected = null,
-        Action<string, ulong>? onAttackAccepted = null)
+        Action<string, ulong>? onAttackAccepted = null,
+        int oneShotHoldTicks = 1)
     {
         _world = world;
         _logger = logger;
@@ -155,7 +167,16 @@ public sealed class InputHandler
         _cooldownTicks = GameConstants.AttackCooldownTicks(tickRate);
         _maxBankedTicks = GameConstants.MaxBankedMovementTicks(
             tickRate > 0 ? tickRate : GameConstants.DefaultTickRate);
+        _oneShotHoldTicks = oneShotHoldTicks;
     }
+
+    /// <summary>
+    /// Base ticks a one-shot action stays latched. See the constructor parameter.
+    /// </summary>
+    private readonly int _oneShotHoldTicks;
+
+    /// <summary>Base ticks a one-shot action stays latched, for diagnostics and tests.</summary>
+    public int OneShotHoldTicks => _oneShotHoldTicks;
 
     /// <summary>
     /// How many base ticks a held direction keeps producing movement for after the last
@@ -337,7 +358,8 @@ public sealed class InputHandler
                 ref Locomotion locomotion = ref writer.LocomotionOf(in handle);
                 uint facing = FacingCodec.FromDirection(cursor.HeldMoveX, cursor.HeldMoveY);
                 if (facing != FacingCodec.NotSent) locomotion.FacingBrad = facing;
-                locomotion.Action = SimAction.Moving;
+                ActionTransitions.Enter(
+                    ref locomotion, SimAction.Moving, baseTick, _oneShotHoldTicks);
             }
         }
     }
@@ -495,7 +517,8 @@ public sealed class InputHandler
                 ref Locomotion locomotion = ref writer.LocomotionOf(self);
                 uint facing = FacingCodec.FromDirection(input.MoveX, input.MoveY);
                 if (facing != FacingCodec.NotSent) locomotion.FacingBrad = facing;
-                locomotion.Action = SimAction.Moving;
+                ActionTransitions.Enter(
+                    ref locomotion, SimAction.Moving, currentTick, _oneShotHoldTicks);
 
                 // Hold the direction so the critical group can keep integrating between
                 // packets (ApplyHeldMovement). Recorded after a successful step, so a
@@ -521,7 +544,9 @@ public sealed class InputHandler
                 //
                 // No Dead check needed - this method returned above if the entity is
                 // dead, so reaching here means it is alive and genuinely standing still.
-                writer.LocomotionOf(self).Action = SimAction.Idle;
+                ActionTransitions.Enter(
+                    ref writer.LocomotionOf(self), SimAction.Idle, currentTick,
+                    _oneShotHoldTicks);
             }
             else if (moveResult == MoveResult.Rejected)
             {
@@ -583,11 +608,19 @@ public sealed class InputHandler
                     writer.CombatOf(self).CooldownUntilTick = cooldownUntil;
 
                 // Attacking outranks moving for this tick: an attack is the thing a
-                // player is meant to see. It is level-triggered, so it lasts exactly one
-                // tick unless the next tick attacks again - a renderer that needs to
-                // retrigger the same attack twice needs an edge this field cannot give,
-                // which is documented on the enum.
-                writer.LocomotionOf(self).Action = SimAction.Attacking;
+                // player is meant to see.
+                //
+                // Entering it does two things a plain assignment could not. It bumps
+                // Locomotion.ActionSeq, which is the EDGE the level-triggered Action
+                // field cannot express - two attacks in a row are otherwise identical
+                // bytes and an animator plays the swing once. And it LATCHES the action
+                // for one world interval, so the next base tick's Moving cannot erase it
+                // before any snapshot has sampled it; at the 60/15 default only one base
+                // tick in four is ever observed, so without the latch an attack reaches
+                // the wire on a coin flip.
+                ActionTransitions.Enter(
+                    ref writer.LocomotionOf(self), SimAction.Attacking, currentTick,
+                    _oneShotHoldTicks);
                     attacker.CooldownUntilTick = cooldownUntil; // the killer state the callback sees
 
                     if (CombatLogic.HandleDeath(ref t))
@@ -628,7 +661,12 @@ public sealed class InputHandler
                         // Action - ApplyHeldMovement `continue`s on Health.Dead and
                         // ProcessInput returns on it - so a dead entity is never reached
                         // by the Moving or Attacking writers at all.
-                        if (t.Dead) writer.LocomotionOf(target).Action = SimAction.Dead;
+                        if (t.Dead)
+                        {
+                            ActionTransitions.Enter(
+                                ref writer.LocomotionOf(target), SimAction.Dead,
+                                currentTick, _oneShotHoldTicks);
+                        }
                     }
                 }
                 else

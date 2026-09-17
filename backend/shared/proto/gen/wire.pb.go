@@ -1007,7 +1007,31 @@ type EntitySnapshot struct {
 	// fall back to idle: an old server would otherwise freeze every entity in the
 	// world into an idle pose, which looks like a broken animator rather than a
 	// missing field.
-	Action        EntityAction `protobuf:"varint,11,opt,name=action,proto3,enum=rpgmmo.wire.v1.EntityAction" json:"action,omitempty"`
+	Action EntityAction `protobuf:"varint,11,opt,name=action,proto3,enum=rpgmmo.wire.v1.EntityAction" json:"action,omitempty"`
+	// Retrigger counter for `action`. Increments every time the entity ENTERS an
+	// action, including re-entering the one it is already in.
+	//
+	// WHY A LEVEL FIELD IS NOT ENOUGH. `action` says what state an entity is in,
+	// never that a state was entered. Two attacks in a row are identical bytes, so
+	// an animator driven from `action` alone plays the swing once and then holds.
+	// No receiver-side edge detection recovers that: the edge is genuinely not in
+	// the data, and only the server knows it happened.
+	//
+	// RETRIGGER ON INEQUALITY, NEVER ON INCREASE. The counter wraps at 2^32 and
+	// resets when the server restarts or the entity respawns, so a greater-than
+	// test stops retriggering for four billion actions after a single wrap, with
+	// nothing reporting an error. The sender SKIPS ZERO on wrap, so a live counter
+	// is never 0.
+	//
+	// ZERO MEANS "NOT SENT", NOT "NO ACTIONS YET" -- the same rule as `facing_brad`
+	// and for the same reason. A sender predating this field puts nothing here; a
+	// receiver MUST keep driving from `action` alone in that case and accept that
+	// repeats do not retrigger, rather than treating 0 as an edge, which would
+	// retrigger every animation on every snapshot.
+	//
+	// Sent on every mention of an entity, never interned: a receiver that resolves
+	// a handle expects complete state.
+	ActionSeq     uint32 `protobuf:"varint,12,opt,name=action_seq,json=actionSeq,proto3" json:"action_seq,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1117,6 +1141,13 @@ func (x *EntitySnapshot) GetAction() EntityAction {
 		return x.Action
 	}
 	return EntityAction_ENTITY_ACTION_UNSPECIFIED
+}
+
+func (x *EntitySnapshot) GetActionSeq() uint32 {
+	if x != nil {
+		return x.ActionSeq
+	}
+	return 0
 }
 
 // SnapshotMessage is a world state update sent to the client.
@@ -1757,7 +1788,7 @@ const file_wire_proto_rawDesc = "" +
 	"\x04tick\x18\x01 \x01(\x04R\x04tick\x12\x15\n" +
 	"\x06move_x\x18\x02 \x01(\x02R\x05moveX\x12\x15\n" +
 	"\x06move_y\x18\x03 \x01(\x02R\x05moveY\x12(\n" +
-	"\x10attack_target_id\x18\x04 \x01(\tR\x0eattackTargetId\"\xb5\x02\n" +
+	"\x10attack_target_id\x18\x04 \x01(\tR\x0eattackTargetId\"\xd4\x02\n" +
 	"\x0eEntitySnapshot\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\ttype_name\x18\x02 \x01(\tR\btypeName\x12\f\n" +
@@ -1771,7 +1802,9 @@ const file_wire_proto_rawDesc = "" +
 	"\vfacing_brad\x18\n" +
 	" \x01(\rR\n" +
 	"facingBrad\x124\n" +
-	"\x06action\x18\v \x01(\x0e2\x1c.rpgmmo.wire.v1.EntityActionR\x06action\"\xaa\x01\n" +
+	"\x06action\x18\v \x01(\x0e2\x1c.rpgmmo.wire.v1.EntityActionR\x06action\x12\x1d\n" +
+	"\n" +
+	"action_seq\x18\f \x01(\rR\tactionSeq\"\xaa\x01\n" +
 	"\x0fSnapshotMessage\x12\x12\n" +
 	"\x04tick\x18\x01 \x01(\x04R\x04tick\x12\x19\n" +
 	"\back_tick\x18\x02 \x01(\x04R\aackTick\x12\x12\n" +

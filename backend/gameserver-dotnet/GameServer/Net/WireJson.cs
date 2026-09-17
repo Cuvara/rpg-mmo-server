@@ -89,6 +89,10 @@ internal static class JsonWriter
                 if (e.FacingBrad > 0) w.WriteNumber("facing_brad"u8, e.FacingBrad);
                 if (e.Action != RpgMmo.Wire.V1.EntityAction.Unspecified)
                     w.WriteNumber("action"u8, (int)e.Action);
+                // Same omit-when-zero rule, for the same reason: zero is this field's
+                // reserved "not sent". Writing an explicit 0 would assert "there is a
+                // retrigger counter and it holds the reserved value".
+                if (e.ActionSeq > 0) w.WriteNumber("action_seq"u8, e.ActionSeq);
                 w.WriteEndObject();
             }
             w.WriteEndArray();
@@ -323,6 +327,7 @@ internal static class JsonReader
                 bool speed = r.ValueTextEquals("speed"u8);
                 bool facingBrad = r.ValueTextEquals("facing_brad"u8);
                 bool action = r.ValueTextEquals("action"u8);
+                bool actionSeq = r.ValueTextEquals("action_seq"u8);
                 if (!r.Read()) break;
                 if (id) e.Id = r.GetString() ?? "";
                 else if (type) EntityTypes.SetType(e, r.GetString());
@@ -335,6 +340,7 @@ internal static class JsonReader
                 // "not sent" - so the two encodings agree without a second rule.
                 else if (facingBrad) e.FacingBrad = r.GetUInt32();
                 else if (action) e.Action = (RpgMmo.Wire.V1.EntityAction)r.GetInt32();
+                else if (actionSeq) e.ActionSeq = r.GetUInt32();
                 else r.Skip();
             }
             m.Entities.Add(e);
