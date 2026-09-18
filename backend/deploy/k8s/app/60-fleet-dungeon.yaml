@@ -269,6 +269,39 @@ spec:
                 # diagonal logs a warning and disables interest filtering entirely.
                 - name: GAMESERVER_AOI_RADIUS
                   value: "50"
+                # Replication importance: which entities are emitted FIRST when the
+                # per-connection downlink budget bites. It never changes how many bytes
+                # go out (GAMESERVER_MAX_SNAPSHOT_BYTES) nor which entities are
+                # candidates at all (GAMESERVER_AOI_RADIUS).
+                # 
+                # "legacy" (default) is every factor zero, i.e. the ordering that shipped
+                # before importance existed: self, then longest-deferred, then nearest.
+                # "balanced" additionally ranks on visible-state change, combat, entity
+                # type and distance. Deferral age stays DOMINANT in both, because the
+                # starvation bound depends on it.
+                # 
+                # Per-factor overrides: GAMESERVER_IMPORTANCE_W_{DISTANCE,CHANGE,TYPE,
+                # COMBAT}. Weighting a factor this server has no data for (PARTY, PVP,
+                # BOSS, QUEST, VISIBILITY, ZONE, INTERACTION) exits 2 rather than being
+                # ignored. Read importance_profile off /status to see what a pod runs.
+                - name: GAMESERVER_IMPORTANCE
+                  value: "legacy"
+                # Per-importance send intervals: how often an entity of a given
+                # importance is RE-SENT. "off" (default) means every dirty entity is due
+                # every world tick. "tiered" withholds lower-importance entities for a
+                # configured interval (score>=8 every tick, >=3 for 133ms, else 266ms).
+                # 
+                # Intervals are configured in MILLISECONDS and converted through
+                # SIM_WORLD_HZ, so the same setting holds the same wall time at any world
+                # rate. "tiered" without GAMESERVER_IMPORTANCE weights exits 2.
+                # 
+                # Read replication_schedule, snapshot_deferred_by_interval and
+                # snapshot_max_state_age off /status. The last is NOT
+                # snapshot_max_shed_age: that counts byte-budget deferrals, this counts
+                # schedule ones, and a schedule deferral never touches the budget's
+                # bookkeeping. See ADR-27.
+                - name: GAMESERVER_REPLICATION_SCHEDULE
+                  value: "off"
                 # ADMISSION LIMIT -- a party, not a map.
                 #
                 # The map fleet's 100 is a measured figure about how many

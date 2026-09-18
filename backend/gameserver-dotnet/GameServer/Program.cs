@@ -236,6 +236,31 @@ if (!GameServer.Server.AoiSettings.TryCreate(
 
 GameServer.Server.AoiSettings aoi = aoiParsed!;
 
+if (!GameServer.Server.ImportanceSettings.TryCreate(
+        GetArg(args, "--importance") ?? Env(GameServer.Server.ImportanceSettings.EnvVar),
+        Env,
+        out GameServer.Server.ImportanceSettings? importanceParsed, out string? importanceError))
+{
+    // Fail fast for the same reason as the rates and the AOI radius: a server whose
+    // replication policy silently differs from the manifest that deployed it is a server
+    // nobody can reason about from the outside.
+    logger.LogCritical("invalid replication-importance configuration: {Error}", importanceError);
+    return 2;
+}
+
+GameServer.Server.ImportanceSettings importance = importanceParsed!;
+
+if (!GameServer.Server.ReplicationSchedule.TryCreate(
+        GetArg(args, "--replication-schedule") ?? Env(GameServer.Server.ReplicationSchedule.EnvVar),
+        importance.Enabled,
+        out GameServer.Server.ReplicationSchedule? scheduleParsed, out string? scheduleError))
+{
+    logger.LogCritical("invalid replication schedule: {Error}", scheduleError);
+    return 2;
+}
+
+GameServer.Server.ReplicationSchedule replicationSchedule = scheduleParsed!;
+
 
 // Resolved once so a bad AGONES_SDK_HTTP_PORT warns once rather than in both the
 // start-up banner and the SDK constructor. Meaningless when useAgones is false.
@@ -279,6 +304,8 @@ logger.LogInformation("  Snapshots: {Mode}", keyframeInterval > 0
     : "full every tick (delta disabled)");
 logger.LogInformation("  MapSize:   {Width}x{Height} world units (centered on origin)", mapWidth, mapHeight);
 logger.LogInformation("  AOI:       {Aoi}", aoi);
+logger.LogInformation("  Importance:{Importance}", " " + importance);
+logger.LogInformation("  Schedule:  {Schedule}", replicationSchedule.Describe(worldHz));
 if (aoi.CoversWholeMap)
 {
     // Not a refusal: legitimate in a small dungeon instance, a mistake on an open map, and
@@ -817,6 +844,8 @@ var options = new ServerOptions
     MaxPendingInputs = maxPendingInputs,
     MaxSnapshotBytes = maxSnapshotBytes,
     Aoi = aoi,
+    Importance = importance,
+    ReplicationSchedule = replicationSchedule,
     SealedTransport = sealedRequirement,
     ServerIdentity = serverIdentity,
     JwtSecret = jwtSecret,
@@ -997,6 +1026,11 @@ metricsEndpoint?.SetStatusProvider(() =>
         MaxSnapshotBytes = maxSnapshotBytes,
         AoiRadius = aoi.Radius,
         AoiCoversWholeMap = aoi.CoversWholeMap,
+        ImportanceProfile = importance.Profile,
+        ImportanceWeights = importance.ToString(),
+        ReplicationSchedule = replicationSchedule.Describe(worldHz),
+        SnapshotDeferredByInterval = metrics.SnapshotDeferredByInterval,
+        SnapshotMaxStateAge = metrics.MaxStateAge,
         SnapshotBytes = metrics.SnapshotBytes,
         SnapshotEntitiesShed = metrics.SnapshotEntitiesShed,
         SnapshotRemovalsDeferred = metrics.SnapshotRemovalsDeferred,

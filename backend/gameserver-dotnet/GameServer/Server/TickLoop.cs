@@ -46,6 +46,8 @@ public sealed class TickLoop
     private long _snapshotEntitiesShedDelta;
     private long _snapshotRemovalsDeferredDelta;
     private int _snapshotMaxShedAge;
+    private long _snapshotDeferredByIntervalDelta;
+    private int _snapshotMaxStateAge;
 
     /// <summary>
     /// Scratch map (entity -> index of the newest input in this tick's drained batch).
@@ -583,11 +585,17 @@ public sealed class TickLoop
             _snapshotEntitiesShedDelta = 0;
             _snapshotRemovalsDeferredDelta = 0;
             _snapshotMaxShedAge = 0;
+            _snapshotDeferredByIntervalDelta = 0;
+            _snapshotMaxStateAge = 0;
             for (int i = 0; i < _viewerCount; i++)
             {
                 _viewers[i].TakeSnapshotCounters(
                     out long c, out long w, out long b,
                     out long shed, out long deferred, out int shedAge);
+                _viewers[i].DeltaState.TakeScheduleCounters(
+                    out long byInterval, out int stateAge);
+                _snapshotDeferredByIntervalDelta += byInterval;
+                if (stateAge > _snapshotMaxStateAge) _snapshotMaxStateAge = stateAge;
                 _snapshotsCoalescedDelta += c;
                 _snapshotFramesWrittenDelta += w;
                 _snapshotBytesDelta += b;
@@ -614,6 +622,8 @@ public sealed class TickLoop
             _metrics.RecordSnapshotBudget(
                 _snapshotBytesDelta, _snapshotEntitiesShedDelta,
                 _snapshotRemovalsDeferredDelta, _snapshotMaxShedAge);
+            _metrics.RecordSnapshotSchedule(
+                _snapshotDeferredByIntervalDelta, _snapshotMaxStateAge);
             _metrics.RecordTickDuration(startTimestamp, Stopwatch.GetTimestamp());
         }
     }

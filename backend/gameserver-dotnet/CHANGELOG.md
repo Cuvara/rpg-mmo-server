@@ -7,6 +7,129 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`ImportanceIntervalBench` now runs the SHIPPED policy, and until it did it disagreed
+  with a live sweep by 47 percentage points.** It carried a hand-written interval policy
+  that gave a near player interval 1, so on a `cluster` population -- where every entity is
+  a near player -- it demoted nothing and reported **0.0%**, while the same server measured
+  **-47.3%** end to end. A bench that models a policy nobody runs answers a question nobody
+  asked. It now calls `ReplicationImportance.Score` and `ReplicationSchedule.Tiered`, the
+  same two types the encoder calls, and the two agree to within 2 points. See BENCHMARK.md
+  Part XIV §42.
+- **The replication schedule compared milliseconds-converted-to-WORLD-ticks against a
+  BASE-tick counter, so it deferred nothing at all.** Snapshots are built on the world
+  group, so "every 2 snapshots" is the natural way to think about an interval — but the
+  `tick` the encoder is handed is `TickLoop.CurrentTick`, the authoritative simulation tick,
+  which advances at the **critical** rate and therefore jumps by 4 between consecutive
+  snapshots at the 60/15 default. `tick - lastSent >= 2` was true every time, so every
+  entity was due on every snapshot.
+  - **Every unit test passed**, because they all fed the encoder a counter that advanced by
+    1 per snapshot — the very assumption the production path breaks. The only thing that
+    caught it was reading `snapshot_deferred_by_interval` off a running server and finding a
+    flat zero with the feature switched on.
+  - Fixed by converting into the unit the encoder is actually handed:
+    `SnapshotDeltaState.TickHz` is now the **base** rate, and the same configured
+    milliseconds come out right — 133ms is 8 base ticks, which is exactly 2 snapshots at
+    60/15, and 266ms is 16, which is 4.
+  - The tests now drive base ticks through a `Base(snapshot)` helper, and
+    `ScheduleOnTheLivePathTests` drives the real `InputHandler` and the real AOI gather so
+    the encoder sees exactly what `TickLoop` gives it.
+  - Measured on a running server before and after, same 40-player 12 s cluster run:
+    `snapshot_deferred_by_interval` 0 → **181,531**, `snapshot_max_state_age` 0 → **4** base
+    ticks (one snapshot period), snapshot bytes **10,046,697 → 5,445,866**.
+- **`GAMESERVER_REPLICATION_SCHEDULE` — per-importance send intervals (ADR-27).** `off`
+  (the default) is every dirty entity due every world tick; `tiered` withholds
+  lower-importance entities for a configured interval.
+  - **Intervals are milliseconds, never ticks**, converted through `SIM_WORLD_HZ`. The
+    conversion **rounds to nearest, and flooring was tried first and was wrong**: 133ms at
+    15Hz is 1.995 ticks, so the middle band floored to 1, became "every tick", and still
+    appeared in the banner and on `/status`. A policy whose middle band silently does not
+    exist is worse than one that is 0.3ms late — and it was caught by reading a running
+    server's `replication_schedule` line, not by any test. The ceiling is applied to the
+    interval an entity ACTUALLY waits rather than to the number someone typed.
+  - **An edge is never deferred.** Health and the action retrigger counter are occurrences,
+    not states; withholding one is a dropped event, because the next snapshot carries only
+    the state afterwards.
+  - **A keyframe never applies intervals.** The client discards anything a keyframe does not
+    list, so deferring there would make an entity vanish rather than arrive late.
+  - **The schedule applies on BOTH encoder paths.** Gating it on the byte budget was the
+    first implementation, and it meant `GAMESERVER_MAX_SNAPSHOT_BYTES=0` — documented as
+    disabling only the budget — silently disabled the schedule too.
+  - **`tiered` without importance weights exits 2**: every score would be zero, every entity
+    would land in the slowest band, and the result would be a uniform staleness increase
+    wearing the name of a policy.
+  - New `gameserver_snapshots_deferred_by_interval_total` and
+    `gameserver_snapshots_max_state_age`. The gauge is deliberately **not**
+    `max_shed_age`: a not-due entity is not a shed entity, so the budget's bookkeeping is
+    blind to schedule deferrals and reading one for the other reports a healthy zero while
+    entities go stale.
+  - Per-entity send-tick bookkeeping is pruned everywhere `_lastSent` is — despawn commit,
+    keyframe, and the deferral prune — so it cannot grow for the life of a connection.
+  - Tests: `ReplicationScheduleTests` (14), covering newly-visible bypass, keyframe
+    exemption, edge exemption, convergence after a deferral, the bounded staleness the
+    existing starvation test cannot see, and the bookkeeping leak.
+  - Verified against a running server: `tiered` without weights exits 2; at `SIM_WORLD_HZ=15`
+    the bands render `133ms = 2 ticks, 266ms = 4 ticks`, and at 30 they render `4` and `8` —
+    the same wall time at both rates.
+- **`GAMESERVER_IMPORTANCE` — the importance weights are now configurable, and the four
+  factors with a data source have a tuned profile.** `legacy` (the default) is every factor
+  zero and therefore the pre-importance ordering; `balanced` ranks on visible-state change
+  (10), combat (6), entity type (3) and distance (2).
+  - **The default stays off, deliberately.** Reordering which entity is shed first when the
+    downlink budget bites is a real behavioural change, and BENCHMARK.md Part XIII measured
+    the budget as a tail cap that does not engage at a load this server is known to handle —
+    so switching it on by default would change behaviour in a case nobody has measured, for
+    no measured benefit. Same rule the AOI radius and the downlink budget both shipped under.
+  - **Weighting a factor with no data source exits 2.** `GAMESERVER_IMPORTANCE_W_PARTY` and
+    its six siblings are refused rather than accepted and silently contributing zero:
+    accepting one would let a manifest describe a policy the server cannot run and leave
+    whoever wrote it reading their own configuration as if it had taken effect.
+  - `/status` publishes `importance_profile` and `importance_weights`, and the profile reads
+    **`custom`** whenever any weight was overridden — a server reporting `balanced` with a
+    replaced weight invites a reader to look up what balanced means.
+  - Weight ordering is an argument, not a tuning: change dominates because HP and action are
+    the only two fields a client can neither interpolate nor dead-reckon; distance is the
+    *smallest* because it is already the tie-break BELOW the score, so weighting it heavily
+    would duplicate a key that is already there.
+  - Overrides parse with `InvariantCulture`, so `2,5` is refused rather than read as 25.
+  - Tests: `ImportanceSettingsTests` (26). Verified against a running server: `legacy` and
+    `balanced` both reported correctly on `/status`, and `GAMESERVER_IMPORTANCE_W_PARTY=5`
+    exits 2 with a named reason.
+- **`ReplicationImportance` — per-connection entity importance, wired into the snapshot
+  scheduler and shipped switched off.** One scalar, computed where the scheduler already has
+  every input in hand, inserted as the **third** sort key in `CandidateComparer`.
+  - **Every weight defaults to zero, and that is the acceptance criterion.** With
+    `Weights.Legacy` the term is always 0, every comparison on that key ties, and the
+    ordering is the pre-importance one — proved by `SnapshotByteIdentityTests` and
+    `TrimmedGatherByteIdentityTests` passing with **no test file touched and no digest
+    rebaselined**. Wiring a new sort key into a shipped encoder is exactly the change that
+    looks correct and silently reorders the wire; this makes the migration provable instead
+    of argued.
+  - **`Self` and deferral `Age` are deliberately NOT in the score.** They stay as
+    lexicographic keys *ahead* of it, because the starvation bound — max deferral is the
+    size of the dirty set, independent of session length — is a consequence of the
+    comparison being strictly oldest-first. Folding age into a weighted sum makes fairness a
+    function of the weights, so a weight change would silently retune it.
+    `ImportanceOrderingTests.DeferralAge_OutranksEveryGameplayScore` pins this: the
+    lowest-scoring entity in the world, against a crowd of maximally important ones, is
+    still carried within a bounded gap.
+  - **Four factors have a data source; seven are named, reserved and zero.** Distance
+    (normalised by `GAMESERVER_AOI_RADIUS`, so weights do not silently retune when a
+    deployment changes its radius), visible-state change, entity type, and combat via
+    `EntityAction`. Party, PvP, boss/elite, quest, visibility, zone and interaction read
+    gameplay systems that **do not exist on this server** — there is no party here (parties
+    live in Nakama and the gateway consumes them), no PvP, no boss tier, no quests, no line
+    of sight, no intra-map zones. They are present so adding one later is a weight change
+    rather than a redesign, and `ReservedFactors_ContributeNothingBecauseNothingFeedsThem`
+    makes "someone weighted party and nothing happened" a red test rather than a silent
+    non-event.
+  - "Changed" is measured against `_lastSent` — what THIS connection was told — not against
+    a world-level dirty flag. Two connections seeing one entity legitimately disagree about
+    whether it is fresh, because one of them may have been shed last snapshot.
+  - `EntityTypes.IsPlayer` is an ordinal compare rather than a dictionary `Parse`: this runs
+    per AOI candidate per connection per snapshot, and the question is binary.
+  - Tests: `ReplicationImportanceTests` (20) and `ImportanceOrderingTests` (4). Both
+    ordering tests assert `EntitiesShed > 0` first — if the budget never bit, the sort never
+    ran and the assertion about its order proves nothing.
 - **Attacks now reach the wire, and two in a row are distinguishable.** Two defects, one
   cause, both invisible to every existing test.
   - **The sampling gap.** Actions are written on the CRITICAL group (60 Hz) and sampled by

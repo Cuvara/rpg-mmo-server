@@ -144,6 +144,23 @@ public class ServerOptions
     public AoiSettings Aoi { get; set; } = AoiSettings.Default;
 
     /// <summary>
+    /// Replication-importance weights (<c>GAMESERVER_IMPORTANCE</c>), validated by
+    /// <see cref="ImportanceSettings"/>. Defaults to the pre-importance ordering.
+    /// </summary>
+    /// <remarks>
+    /// Decides the ORDER entities are emitted in when the downlink budget bites; it never
+    /// decides how many bytes go out, which is <see cref="MaxSnapshotBytes"/>, nor which
+    /// entities are candidates at all, which is <see cref="Aoi"/>.
+    /// </remarks>
+    public ImportanceSettings Importance { get; set; } = ImportanceSettings.Default;
+
+    /// <summary>
+    /// Per-importance send intervals (<c>GAMESERVER_REPLICATION_SCHEDULE</c>), validated by
+    /// <see cref="ReplicationSchedule"/>. Defaults to off.
+    /// </summary>
+    public ReplicationSchedule ReplicationSchedule { get; set; } = ReplicationSchedule.Off;
+
+    /// <summary>
     /// Whether the gameplay hop requires a sealed session
     /// (<c>GAMESERVER_SEALED</c>: <c>off</c> or <c>require</c>).
     /// </summary>
@@ -1501,6 +1518,16 @@ public sealed class GameServerHost : IAsyncDisposable
                 SessionKey = Net.Security.SessionKey.Derive(_options.JoinTokenSecret, claims.Jti),
             };
             conn.DeltaState.MaxSnapshotBytes = _options.MaxSnapshotBytes;
+        conn.DeltaState.ImportanceWeights = _options.Importance.Weights;
+        // The distance factor normalises by this, so a connection scored against the wrong
+        // radius would weight distance wrongly on every candidate -- invisibly, because the
+        // ordering would still look plausible.
+        conn.DeltaState.AoiRadius = _options.Aoi.Radius;
+        conn.DeltaState.Schedule = _options.ReplicationSchedule;
+        // The BASE rate, not the world rate: the encoder compares against the tick it is
+        // handed, and that is TickLoop.CurrentTick, which advances at the critical rate even
+        // though snapshots are only built on world ticks. See SnapshotDeltaState.TickHz.
+        conn.DeltaState.TickHz = _tickLoop.Rates.BaseHz;
 
             // Register connection, retiring the reservation under the same lock it was
             // taken under. The one way this fails: the reservation was a replacement of a

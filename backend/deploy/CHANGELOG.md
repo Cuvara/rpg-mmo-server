@@ -124,6 +124,24 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`GAMESERVER_REPLICATION_SCHEDULE` wired into every game-server deployment**, set
+  explicitly to `off` — every dirty entity due every world tick — so **nothing changes
+  behaviourally**. It decides how often an entity of a given importance is re-sent; it
+  changes neither the byte cap nor the candidate set. `tiered` without
+  `GAMESERVER_IMPORTANCE` weights **exits 2 at startup** rather than degrading into a
+  uniform staleness increase. Intervals are configured in milliseconds and converted through
+  `SIM_WORLD_HZ`, so raising the world rate does not silently halve the staleness a manifest
+  asked for. Read `replication_schedule` off `/status` on the pod — a fleet update reaches
+  only NEW pods.
+- **`GAMESERVER_IMPORTANCE` wired into every game-server deployment**, set explicitly to
+  `legacy` — the pre-importance ordering — so **nothing changes behaviourally** and turning
+  it on is a one-line manifest edit. It decides which entities are emitted first when the
+  per-connection downlink budget bites; it changes neither the byte cap
+  (`GAMESERVER_MAX_SNAPSHOT_BYTES`) nor the candidate set (`GAMESERVER_AOI_RADIUS`). An
+  unknown profile, a malformed weight, or a weight on a factor the server has no data for
+  all **exit 2 at startup**. As with every other game-server env var, a fleet update reaches
+  only NEW pods — read `importance_profile` off `/status` on the pod rather than trusting
+  the manifest.
 - **`GAMESERVER_AOI_RADIUS` wired into every game-server deployment** — `.env.example`,
   `docker-compose.yml`, `docker-compose.override.yml`, `k8s/app/50-fleet-map.yaml`,
   `k8s/app/60-fleet-dungeon.yaml` and `agones/fleet-map-dotnet-dev.yaml` — set explicitly to

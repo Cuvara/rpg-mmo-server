@@ -276,6 +276,89 @@ public sealed class SnapshotDeltaState
     public string? SelfId { get; set; }
 
     /// <summary>
+    /// Per-factor importance weights for this connection
+    /// (<c>GAMESERVER_IMPORTANCE_*</c>). Default is
+    /// <see cref="ReplicationImportance.Weights.Legacy"/> — every factor zero, every score
+    /// zero, every comparison on that key a tie, and therefore the pre-importance ordering
+    /// byte for byte.
+    /// </summary>
+    public ReplicationImportance.Weights ImportanceWeights { get; set; } =
+        ReplicationImportance.Weights.Legacy;
+
+    /// <summary>
+    /// The AOI radius this connection is gathered with
+    /// (<see cref="Server.AoiSettings"/>), so the distance factor can be normalised by it.
+    /// </summary>
+    /// <remarks>
+    /// Carried here rather than passed per encode because it is a property of the
+    /// deployment, not of a snapshot, and threading it through <c>Encode</c> would put a
+    /// constant in the hot signature. Defaults to the compiled-in radius so a caller that
+    /// never sets it still normalises against something sane rather than dividing by zero.
+    /// </remarks>
+    public float AoiRadius { get; set; } = GameConstants.DefaultAoiRadius;
+
+    /// <summary>
+    /// Per-importance send intervals (<c>GAMESERVER_REPLICATION_SCHEDULE</c>). Default is
+    /// <see cref="Server.ReplicationSchedule.Off"/>: every dirty entity is due every world
+    /// tick, which is the pre-schedule behaviour.
+    /// </summary>
+    public Server.ReplicationSchedule Schedule { get; set; } = Server.ReplicationSchedule.Off;
+
+    /// <summary>
+    /// The rate of the tick counter this encoder is HANDED, for converting configured
+    /// milliseconds into that same unit. This is the BASE (critical) rate.
+    /// </summary>
+    /// <remarks>
+    /// <b>Base, not world, and the difference was a live defect.</b> Snapshots are built on
+    /// the world group, so "every 2 snapshots" is the natural way to think about an
+    /// interval — but the <c>tick</c> the encoder receives is <c>TickLoop.CurrentTick</c>,
+    /// the authoritative simulation tick, which advances at the CRITICAL rate. At the 60/15
+    /// default it therefore jumps by 4 between consecutive snapshots. Converting 133ms into
+    /// 2 world ticks and then comparing against a counter that moves 4 per snapshot makes
+    /// every entity due every time: the schedule reported zero deferrals on a live server
+    /// while every unit test passed, because the tests fed it a counter that advanced by 1.
+    ///
+    /// <para>Converting into base ticks instead makes the arithmetic come out right for the
+    /// same configured milliseconds: 133ms is 8 base ticks, which is exactly 2 snapshots at
+    /// 60/15, and 266ms is 16, which is 4.</para>
+    /// </remarks>
+    public int TickHz { get; set; } = Server.SimulationRates.DefaultCriticalHz;
+
+    /// <summary>
+    /// World tick each entity was last actually emitted on, keyed like
+    /// <see cref="_lastSent"/>. Absent means "never sent to this connection".
+    /// </summary>
+    /// <remarks>
+    /// Pruned everywhere <see cref="_lastSent"/> is: on despawn commit, on keyframe, and in
+    /// <see cref="PruneDeferrals"/>. Miss one and the map grows for the life of the
+    /// connection with entries for entities that left long ago -- a leak whose only symptom
+    /// is memory, on a per-connection object.
+    /// </remarks>
+    private readonly Dictionary<int, ulong> _lastSentTick = new();
+
+    /// <summary>Scores for the current candidate set, parallel to <see cref="_candidates"/>.</summary>
+    private readonly List<float> _candidateScores = new();
+
+    private long _entitiesDeferredByInterval;
+    private int _maxStateAge;
+    private long _reportedDeferredByInterval;
+
+    /// <summary>Entity updates withheld because their tier was not due.</summary>
+    public long EntitiesDeferredByInterval => Interlocked.Read(ref _entitiesDeferredByInterval);
+
+    /// <summary>
+    /// Longest gap, in world ticks, between an entity's state going stale for this client
+    /// and being re-sent. High-water mark.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately distinct from <see cref="MaxShedAge"/>, which counts BUDGET deferrals. A
+    /// schedule deferral never touches <c>_shedAge</c> -- a not-due entity is not a shed
+    /// entity -- so the existing gauge is blind to it, and reading one for the other would
+    /// report a healthy zero while entities went seconds without an update.
+    /// </remarks>
+    public int MaxStateAge => Volatile.Read(ref _maxStateAge);
+
+    /// <summary>
     /// Ticks each currently-deferred entity has been waiting, keyed like
     /// <see cref="_lastSent"/>. Absent means "nothing owed".
     /// </summary>
@@ -347,10 +430,20 @@ public sealed class SnapshotDeltaState
         _reportedRemovalsDeferred = r;
     }
 
+    /// <summary>Schedule counters since the last call, same delta discipline as above.</summary>
+    internal void TakeScheduleCounters(out long deferredByInterval, out int maxStateAge)
+    {
+        long d = EntitiesDeferredByInterval;
+        deferredByInterval = d - _reportedDeferredByInterval;
+        _reportedDeferredByInterval = d;
+        maxStateAge = MaxStateAge;
+    }
+
     /// <summary>One candidate's scheduling key. Struct, sorted in a reused array.</summary>
     private struct CandidateSort
     {
         public int Age;
+        public float Score;
         public float DistanceSq;
         public int Index;
         public bool Self;
@@ -401,6 +494,8 @@ public sealed class SnapshotDeltaState
         {
             if (a.Self != b.Self) return a.Self ? -1 : 1;
             if (a.Age != b.Age) return b.Age.CompareTo(a.Age); // older first
+            int g = b.Score.CompareTo(a.Score);                // higher score first
+            if (g != 0) return g;
             int d = a.DistanceSq.CompareTo(b.DistanceSq);      // nearer first
             if (d != 0) return d;
             return a.Index.CompareTo(b.Index);
@@ -414,6 +509,9 @@ public sealed class SnapshotDeltaState
     /// </summary>
     private readonly int _phaseSeed;
     private bool _phaseApplied;
+
+    /// <summary>Tick of the encode in flight, so the emit path can stamp send times.</summary>
+    private ulong _encodingTick;
 
     /// <summary>Unstaggered state — every keyframe cycle is exactly the full interval.</summary>
     public SnapshotDeltaState() : this(0) { }
@@ -535,6 +633,7 @@ public sealed class SnapshotDeltaState
     {
         _intern = intern;
         _observer = observer;
+        _encodingTick = tick;
         // Latched once per encode: MaxSnapshotBytes is a settable property and a change
         // landing between the sizing pass and the emit pass would let the two disagree
         // about the same snapshot.
@@ -636,10 +735,17 @@ public sealed class SnapshotDeltaState
     private SnapshotMessage EncodeFull(ulong tick, ulong ackTick, ReadOnlySpan<EntityView> nearby)
     {
         var msg = BeginMessage(tick, ackTick, full: true);
+
+        // Send intervals are NOT consulted on this path, and that is a correctness rule
+        // rather than an optimisation. A keyframe is the complete visible set by definition
+        // and the client DISCARDS anything it does not list (wire.proto), so withholding an
+        // entity here would not make it a beat late -- it would make it vanish until some
+        // later delta happened to carry it.
         _lastSent.Clear();
         // A keyframe is the synchronisation point for the handle space: both
         // sides drop every binding and start again from 1.
         _handles.Clear();
+        _lastSentTick.Clear();
         _nextHandle = 1;
 
         if (_budgetBytes <= 0)
@@ -653,6 +759,12 @@ public sealed class SnapshotDeltaState
                 ref readonly EntityView e = ref nearby[i];
                 msg.Entities.Add(ToMsg(in e));
                 _lastSent[e.Key] = new SentView(in e);
+                // Stamped here as well as in EmitEntity. This path does not go through it,
+                // and an entity introduced on an unbudgeted keyframe with no send tick looks
+                // to the schedule like one that was never sent -- so it would be due on the
+                // very next delta and the schedule would silently do nothing for any
+                // deployment running GAMESERVER_MAX_SNAPSHOT_BYTES=0.
+                _lastSentTick[e.Key] = tick;
             }
 
             LastPayloadBytes = 0;
@@ -672,10 +784,17 @@ public sealed class SnapshotDeltaState
         // The nearest entities are the ones that survive, so the pop happens at the edge
         // of the observer's circle where it is least noticeable.
         _candidates.Clear();
+        _candidateScores.Clear();
         _seen.Clear();
         for (int i = 0; i < nearby.Length; i++)
         {
             _candidates.Add(i);
+            // Scored here too, so _candidateScores is always parallel to _candidates
+            // whichever path built them. The keyframe path does not USE the score to decide
+            // anything -- intervals never apply to a keyframe -- but the budget sort runs on
+            // both paths, and a sort reading a list that is only populated on one of them is
+            // an index-out-of-range waiting for the first budgeted keyframe.
+            _candidateScores.Add(ScoreOf(in nearby[i], DistanceSqTo(in nearby[i])));
             // Filled on the keyframe path too, purely so the deferral bookkeeping can be
             // pruned against it below — a keyframe has no use for _seen otherwise.
             _seen.Add(nearby[i].Key);
@@ -699,11 +818,27 @@ public sealed class SnapshotDeltaState
             _seen.Add(e.Key);
 
             var view = new SentView(in e);
-            if (_lastSent.TryGetValue(e.Key, out var prev) && prev.Equals(view))
+            bool known = _lastSent.TryGetValue(e.Key, out var prev);
+            if (known && prev.Equals(view))
                 continue; // unchanged since last send -> omit
+
+            // The schedule applies on this path too. It is a SEPARATE concern from the byte
+            // budget -- that one answers "how much of this snapshot may I spend", this one
+            // answers "is this entity due at all" -- and gating it on the budget being
+            // enabled would mean GAMESERVER_MAX_SNAPSHOT_BYTES=0, documented as disabling
+            // only the budget, silently disabled the schedule as well. With the schedule off
+            // (the default) this branch is unreachable and the path is byte-for-byte what it
+            // was.
+            if (known && Schedule.Enabled && !DueNow(in e, in prev, tick, ScoreOf(in e, DistanceSqTo(in e))))
+            {
+                Interlocked.Increment(ref _entitiesDeferredByInterval);
+                NoteStateAge(e.Key, tick);
+                continue;
+            }
 
             msg.Entities.Add(ToMsg(in e));
             _lastSent[e.Key] = view;
+            _lastSentTick[e.Key] = tick;
         }
 
         // Anything previously sent but no longer in AOI is an explicit despawn.
@@ -750,13 +885,15 @@ public sealed class SnapshotDeltaState
         _seen.Clear();
         var msg = BeginMessage(tick, ackTick, full: false);
         _candidates.Clear();
+        _candidateScores.Clear();
 
         for (int i = 0; i < nearby.Length; i++)
         {
             ref readonly EntityView e = ref nearby[i];
             _seen.Add(e.Key);
 
-            if (_lastSent.TryGetValue(e.Key, out var prev) && prev.Equals(new SentView(in e)))
+            bool known = _lastSent.TryGetValue(e.Key, out var prev);
+            if (known && prev.Equals(new SentView(in e)))
             {
                 // Nothing owed on this entity: the client's copy already matches. That
                 // includes an entity which was deferred earlier and has since drifted
@@ -766,7 +903,25 @@ public sealed class SnapshotDeltaState
                 continue;
             }
 
+            float score = ScoreOf(in e, DistanceSqTo(in e));
+
+            // An entity this connection has NEVER been sent bypasses the schedule entirely:
+            // its "last sent" is never, and a client that receives a handle it has no
+            // binding for must ask for a keyframe (wire.proto) -- which costs far more than
+            // the update being withheld.
+            if (known && Schedule.Enabled && !DueNow(in e, in prev, tick, score))
+            {
+                // Withheld, NOT removed from the span and NOT recorded as sent. Leaving
+                // _lastSent untouched is what makes this safe: when the entity is next due
+                // it is compared against what the client actually holds, so the snapshot
+                // carries its CURRENT state rather than a queued intermediate one.
+                Interlocked.Increment(ref _entitiesDeferredByInterval);
+                NoteStateAge(e.Key, tick);
+                continue;
+            }
+
             _candidates.Add(i);
+            _candidateScores.Add(score);
         }
 
         // Despawns owed to this client. Collected, NOT applied: a despawn is only erased
@@ -855,14 +1010,29 @@ public sealed class SnapshotDeltaState
     /// </remarks>
     private void PruneDeferrals()
     {
-        if (_shedAge.Count == 0) return;
-
-        foreach (var kv in _shedAge)
+        if (_shedAge.Count > 0)
         {
-            if (!_seen.Contains(kv.Key)) _removedKeys.Add(kv.Key);
+            foreach (var kv in _shedAge)
+            {
+                if (!_seen.Contains(kv.Key)) _removedKeys.Add(kv.Key);
+            }
+            for (int i = 0; i < _removedKeys.Count; i++) _shedAge.Remove(_removedKeys[i]);
+            _removedKeys.Clear();
         }
-        for (int i = 0; i < _removedKeys.Count; i++) _shedAge.Remove(_removedKeys[i]);
-        _removedKeys.Clear();
+
+        // Send-tick records for entities that are no longer visible. Kept in step with
+        // _shedAge deliberately: both are per-entity bookkeeping bounded by the visible set,
+        // and one growing without bound while the other does not would be a leak whose only
+        // symptom is memory, on a per-connection object that lives as long as the session.
+        if (_lastSentTick.Count > _lastSent.Count)
+        {
+            foreach (var kv in _lastSentTick)
+            {
+                if (!_lastSent.ContainsKey(kv.Key)) _removedKeys.Add(kv.Key);
+            }
+            for (int i = 0; i < _removedKeys.Count; i++) _lastSentTick.Remove(_removedKeys[i]);
+            _removedKeys.Clear();
+        }
     }
 
     /// <summary>
@@ -886,10 +1056,16 @@ public sealed class SnapshotDeltaState
             float dx = e.Position.X - _observer.X;
             float dy = e.Position.Y - _observer.Y;
             _shedAge.TryGetValue(e.Key, out int age);
+            float distanceSq = (dx * dx) + (dy * dy);
             _sortBuffer[c] = new CandidateSort
             {
                 Age = age,
-                DistanceSq = (dx * dx) + (dy * dy),
+                // Reused, never recomputed. The candidate pass already scored this entity to
+                // decide whether it was due; scoring it again would be waste and, worse,
+                // could disagree with itself the day the two call sites drift apart -- which
+                // would defer an entity on one score and order it on another.
+                Score = _candidateScores[c],
+                DistanceSq = distanceSq,
                 Index = index,
                 Self = SelfId != null && string.Equals(e.Id, SelfId, StringComparison.Ordinal),
             };
@@ -960,6 +1136,83 @@ public sealed class SnapshotDeltaState
     /// the only place _lastSent and _handles may forget an entity, and it must not run
     /// for an id that stayed off the wire.
     /// </summary>
+    /// <summary>
+    /// Gameplay importance for one candidate, from state already in hand at the sort.
+    /// </summary>
+    /// <remarks>
+    /// Returns 0 without touching anything when every weight is zero, which is the shipped
+    /// default: the whole term then costs one struct field compare per candidate and the
+    /// comparison it feeds always ties.
+    ///
+    /// <para><b>The "changed" inputs are computed against <see cref="_lastSent"/>, not
+    /// against the previous tick.</b> What matters is whether THIS connection has been told,
+    /// and two connections seeing the same entity legitimately disagree about that — one may
+    /// have been shed last snapshot. Reading a world-level "changed this tick" flag would
+    /// score an entity as fresh for a client that never received the change.</para>
+    /// </remarks>
+    private float ScoreOf(in EntityView e, float distanceSq)
+    {
+        ReplicationImportance.Weights w = ImportanceWeights;
+        if (w.AllZero) return 0f;
+
+        bool hpChanged = true, actionChanged = true;
+        if (_lastSent.TryGetValue(e.Key, out SentView prev))
+        {
+            hpChanged = prev.Hp != e.Hp || prev.MaxHp != e.MaxHp;
+            actionChanged = prev.Action != e.Action || prev.ActionSeq != e.ActionSeq;
+        }
+
+        var inputs = new ReplicationImportance.Inputs(
+            distanceSq,
+            AoiRadius,
+            isPlayer: EntityTypes.IsPlayer(e.Type),
+            action: e.Action,
+            hpChanged: hpChanged,
+            actionChanged: actionChanged);
+
+        return ReplicationImportance.Score(in inputs, in w);
+    }
+
+    /// <summary>Squared distance from the observer to an entity.</summary>
+    private float DistanceSqTo(in EntityView e)
+    {
+        float dx = e.Position.X - _observer.X;
+        float dy = e.Position.Y - _observer.Y;
+        return (dx * dx) + (dy * dy);
+    }
+
+    /// <summary>
+    /// Whether a known, changed entity is due this world tick.
+    /// </summary>
+    /// <remarks>
+    /// <b>An edge is never deferred.</b> Health and the action retrigger counter are the two
+    /// things a client can neither interpolate nor dead-reckon, and the counter exists
+    /// precisely because an action is an occurrence rather than a state. Withholding either
+    /// is not a late update, it is a dropped event -- the client would never learn the hit
+    /// or the swing happened at all, because the next snapshot carries only the state
+    /// afterwards. Position and facing are safe to defer; these are not.
+    /// </remarks>
+    private bool DueNow(in EntityView e, in SentView prev, ulong tick, float score)
+    {
+        if (prev.Hp != e.Hp || prev.MaxHp != e.MaxHp) return true;
+        if (prev.Action != e.Action || prev.ActionSeq != e.ActionSeq) return true;
+
+        int interval = Schedule.IntervalTicksFor(score, TickHz);
+        if (interval <= 1) return true;
+
+        if (!_lastSentTick.TryGetValue(e.Key, out ulong last)) return true;
+        return tick - last >= (ulong)interval;
+    }
+
+    /// <summary>Track how long this entity has gone without the update it is owed.</summary>
+    private void NoteStateAge(int key, ulong tick)
+    {
+        if (!_lastSentTick.TryGetValue(key, out ulong last)) return;
+        ulong age = tick - last;
+        if (age > int.MaxValue) age = int.MaxValue;
+        if ((int)age > _maxStateAge) Volatile.Write(ref _maxStateAge, (int)age);
+    }
+
     private void CommitRemovals(SnapshotMessage msg, int count)
     {
         for (int r = 0; r < count; r++)
@@ -972,6 +1225,7 @@ public sealed class SnapshotDeltaState
             // this design exists to avoid.
             _handles.Remove(key);
             _shedAge.Remove(key);
+            _lastSentTick.Remove(key);
         }
     }
 
@@ -984,6 +1238,7 @@ public sealed class SnapshotDeltaState
         var ent = ToMsg(in e);
         msg.Entities.Add(ent);
         _lastSent[e.Key] = new SentView(in e);
+        _lastSentTick[e.Key] = _encodingTick;
         _shedAge.Remove(e.Key);
         return EntryBytes(ent);
     }
