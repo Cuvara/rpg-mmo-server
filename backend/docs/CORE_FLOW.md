@@ -152,7 +152,7 @@ net read goroutine (per conn)          tick goroutine (1/server)              sa
 | Validate | `input/validator.go:18` `ValidateMove` (speed hack: `dist > 5.0 * entity.Speed` → `ErrSpeedHack`), `input/validator.go:31` `ValidateAttack` (nil/dead target, `attackRange=3.0` → `ErrOutOfRange`, `CooldownUntil` → `ErrCooldown`) | Rejections are logged at Debug and silently dropped — no error frame to the client | ✅ |
 | Apply | `input/handler.go:26` `ProcessInput` | Movement is `X += MoveX` (delta, not a target position). Attack: `combat.CalculateDamage` (`Attack - Defense`, min 1) → `target.HP -= dmg` → `entity.CooldownUntil = now + 500ms` → `combat.HandleDeath` | ✅ |
 | World update | — | ⬜ **No separate simulation step**: no NPC/AI, no physics integration, no regen, no respawn, no timers. The world only changes as a direct result of player input | ⬜ |
-| AOI | `snapshot/aoi.go:8` → `game/world.go:52` `GetEntitiesInRange` | Brute-force O(n) scan per player per tick ⇒ O(n²)/tick. Radius hardcoded `50.0` at `server/tick.go:32` and `snapshot/aoi.go:5`. **[C#]** the radius now lives in `Shared.GameLogic` `GameConstants.DefaultAoiRadius`, still `50.0`, and is **measured** rather than only specified — see "Measured constants" in `gameserver-dotnet/docs/DESIGN.md` | 🟡 |
+| AOI | `snapshot/aoi.go:8` → `game/world.go:52` `GetEntitiesInRange` | Brute-force O(n) scan per player per tick ⇒ O(n²)/tick. Radius hardcoded `50.0` at `server/tick.go:32` and `snapshot/aoi.go:5`. **[C#]** the radius is now a deployment setting — `GAMESERVER_AOI_RADIUS`, validated at startup by `GameServer/Server/AoiSettings.cs`, defaulting to `GameConstants.DefaultAoiRadius` = `50.0`, published as `aoi_radius` on `/status`, and also the spatial index's cell size. **Measured** rather than only specified at the default — see "Measured constants" in `gameserver-dotnet/docs/DESIGN.md` | 🟢 |
 | Encode | `snapshot/encoder.go:8` `EncodeSnapshot` | Full state every tick — `{ID,Type,X,Y,HP,MaxHP}`. No delta/baseline, no interest-change events | ✅ full / ⬜ delta |
 | Send | `server/connection.go:34` `Send` → buffered chan (cap 64) → `WriteLoop` | Non-blocking w.r.t. the tick; a slow client silently drops nothing but blocks on the chan until `done` | ✅ |
 | Persist | `persistence/saver.go:35` `Run` | Interval hardcoded `30*time.Second` at `server/server.go:114`; final flush on `Stop()` and on every disconnect (`server.go:217`) | ✅ |
@@ -288,8 +288,10 @@ were resolved after this list was written** — re-verified 2026-08-05 against
    (#210, 2026-08-22) — no consumer ever existed and none is planned. Still dead
    here: `ServerRegistry.Heartbeat` exists but **has no caller**, so registry TTLs
    are armed once and never refreshed (ADR-2).
-9. 🟡 **Hardcoded values that CLAUDE.md presents as tunable:** AOI radius 50, save
-   interval 30s, attack cooldown 500 ms, spawn stats. (Go paths below are dead; the
+9. 🟡 **Hardcoded values that CLAUDE.md presents as tunable:** save
+   interval 30s, attack cooldown 500 ms, spawn stats. (**AOI radius is no longer
+   one of them**: `GAMESERVER_AOI_RADIUS`, refused at startup rather than defaulted
+   when unparseable, and reported on `/status`.) (Go paths below are dead; the
    C# equivalents are `Shared.GameLogic/Components/GameConstants.cs`,
    `GameServer/Program.cs` and `GameServer/Server/ServerDefaults.cs`.) The per-tick
    move cap is gone — movement is now `direction * speed * dt` with map bounds, and

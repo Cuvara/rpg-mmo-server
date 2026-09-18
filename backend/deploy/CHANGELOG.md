@@ -124,6 +124,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`GAMESERVER_AOI_RADIUS` wired into every game-server deployment** — `.env.example`,
+  `docker-compose.yml`, `docker-compose.override.yml`, `k8s/app/50-fleet-map.yaml`,
+  `k8s/app/60-fleet-dungeon.yaml` and `agones/fleet-map-dotnet-dev.yaml` — set explicitly to
+  `50`, which is the compiled-in default, so **nothing changes behaviourally** and tuning it
+  becomes a one-line manifest edit rather than a code change. It is the largest single lever
+  on downstream bandwidth (population inside a circle grows with the square of the radius).
+  Two operational notes: an unparseable or non-positive value **exits 2 at startup** rather
+  than falling back to the default, and because a GameServer's environment is fixed at pod
+  creation, a fleet update reaches only NEW pods — read `aoi_radius` off `/status` on the pod
+  rather than trusting the manifest.
 - **The first alert rule in this repository** (`monitoring/alerts.yaml`, wired via
   `rule_files:` in `monitoring/prometheus.yaml` and mounted in compose). Until now
   monitoring was one scrape config and one dashboard: every number was visible to someone
