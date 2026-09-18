@@ -6,7 +6,15 @@
 // It exists to replace the unbenchmarked CCU guesses called out in
 // backend/docs/ARCHITECTURE-DECISIONS.md ADR-7 with measurements. The headline
 // question it answers is: how many players does ONE game server hold before
-// gameserver_tick_duration_seconds p99 breaks the 66.67ms budget at 15Hz.
+// gameserver_tick_duration_seconds p99 breaks its budget.
+//
+// That budget is 1/SIM_CRITICAL_HZ and is read off the server's /status at the
+// start of every run, NOT the 66.67ms this comment used to name. 66.67ms was
+// 1/15s, correct for the single-rate server and wrong since ADR-13 made 60/15
+// the default: the histogram times a BASE tick, so at 60Hz the budget is 16.67ms
+// and comparing against 66.67ms passed a server running 3.6x over. Snapshot
+// cadence is judged separately against 1/SIM_WORLD_HZ, because replication is
+// gated to the world group and not to the base tick.
 //
 // Single run:
 //
