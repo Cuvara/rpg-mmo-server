@@ -304,8 +304,25 @@ public sealed class SnapshotDeltaState
     /// </summary>
     public Server.ReplicationSchedule Schedule { get; set; } = Server.ReplicationSchedule.Off;
 
-    /// <summary>World-group rate, for converting configured milliseconds into world ticks.</summary>
-    public int WorldHz { get; set; } = Server.SimulationRates.DefaultWorldHz;
+    /// <summary>
+    /// The rate of the tick counter this encoder is HANDED, for converting configured
+    /// milliseconds into that same unit. This is the BASE (critical) rate.
+    /// </summary>
+    /// <remarks>
+    /// <b>Base, not world, and the difference was a live defect.</b> Snapshots are built on
+    /// the world group, so "every 2 snapshots" is the natural way to think about an
+    /// interval — but the <c>tick</c> the encoder receives is <c>TickLoop.CurrentTick</c>,
+    /// the authoritative simulation tick, which advances at the CRITICAL rate. At the 60/15
+    /// default it therefore jumps by 4 between consecutive snapshots. Converting 133ms into
+    /// 2 world ticks and then comparing against a counter that moves 4 per snapshot makes
+    /// every entity due every time: the schedule reported zero deferrals on a live server
+    /// while every unit test passed, because the tests fed it a counter that advanced by 1.
+    ///
+    /// <para>Converting into base ticks instead makes the arithmetic come out right for the
+    /// same configured milliseconds: 133ms is 8 base ticks, which is exactly 2 snapshots at
+    /// 60/15, and 266ms is 16, which is 4.</para>
+    /// </remarks>
+    public int TickHz { get; set; } = Server.SimulationRates.DefaultCriticalHz;
 
     /// <summary>
     /// World tick each entity was last actually emitted on, keyed like
@@ -1180,7 +1197,7 @@ public sealed class SnapshotDeltaState
         if (prev.Hp != e.Hp || prev.MaxHp != e.MaxHp) return true;
         if (prev.Action != e.Action || prev.ActionSeq != e.ActionSeq) return true;
 
-        int interval = Schedule.IntervalTicksFor(score, WorldHz);
+        int interval = Schedule.IntervalTicksFor(score, TickHz);
         if (interval <= 1) return true;
 
         if (!_lastSentTick.TryGetValue(e.Key, out ulong last)) return true;

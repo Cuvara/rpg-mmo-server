@@ -8,14 +8,15 @@ namespace GameServer.Tests.Snapshot;
 
 public class ReplicationScheduleTests
 {
-    private const int WorldHz = SimulationRates.DefaultWorldHz;   // 15
+    private const int TickHz = SimulationRates.DefaultCriticalHz;   // 60, the BASE rate
+    private const int WorldEvery = TickHz / SimulationRates.DefaultWorldHz;   // 4
     private const int NoKeyframes = int.MaxValue;
 
     private static SnapshotDeltaState Tiered() => new()
     {
         ImportanceWeights = ImportanceSettings.Balanced.Weights,
         Schedule = ReplicationSchedule.Tiered,
-        WorldHz = WorldHz,
+        TickHz = TickHz,
         AoiRadius = GameConstants.DefaultAoiRadius,
     };
 
@@ -48,14 +49,14 @@ public class ReplicationScheduleTests
     [Fact]
     public void NoIntervalCanExceedTheCeiling()
     {
-        int max = ReplicationSchedule.TicksFor(int.MaxValue, WorldHz);
-        Assert.Equal(ReplicationSchedule.TicksFor(ReplicationSchedule.MaxIntervalMs, WorldHz), max);
+        int max = ReplicationSchedule.TicksFor(int.MaxValue, TickHz);
+        Assert.Equal(ReplicationSchedule.TicksFor(ReplicationSchedule.MaxIntervalMs, TickHz), max);
 
         foreach (ReplicationSchedule.Tier t in ReplicationSchedule.Tiered.Tiers)
         {
             Assert.True(t.IntervalMs <= ReplicationSchedule.MaxIntervalMs,
                 $"tier at score {t.MinScore} asks for {t.IntervalMs}ms");
-            Assert.True(ReplicationSchedule.Tiered.IntervalTicksFor(t.MinScore, WorldHz) >= 1);
+            Assert.True(ReplicationSchedule.Tiered.IntervalTicksFor(t.MinScore, TickHz) >= 1);
         }
     }
 
@@ -76,8 +77,8 @@ public class ReplicationScheduleTests
         Assert.True(ReplicationSchedule.TryCreate(null, importanceEnabled: true,
             out ReplicationSchedule? s, out _));
         Assert.False(s!.Enabled);
-        Assert.Equal(1, s.IntervalTicksFor(0f, WorldHz));
-        Assert.Equal(1, s.IntervalTicksFor(100f, WorldHz));
+        Assert.Equal(1, s.IntervalTicksFor(0f, TickHz));
+        Assert.Equal(1, s.IntervalTicksFor(100f, TickHz));
     }
 
     // ── The mandatory behavioural rules ──────────────────────────────────────────
@@ -92,11 +93,11 @@ public class ReplicationScheduleTests
     {
         SnapshotDeltaState state = Tiered();
         var world = new List<EntityState> { TestHelpers.CreatePlayer("p", 0f, 0f) };
-        state.Encode(1, 1, world, NoKeyframes, intern: true, observer: new Vec2(0, 0));
+        state.Encode(Base(1), Base(1), world, NoKeyframes, intern: true, observer: new Vec2(0, 0));
 
         // A distant mob appears on tick 2: lowest possible tier, but never sent before.
         world.Add(TestHelpers.CreateMob("newcomer", 45f, 0f));
-        SnapshotMessage msg = state.Encode(2, 2, world, NoKeyframes, intern: true,
+        SnapshotMessage msg = state.Encode(Base(2), Base(2), world, NoKeyframes, intern: true,
             observer: new Vec2(0, 0));
 
         Assert.Contains(msg.Entities, e => e.Id == "newcomer");
@@ -119,12 +120,12 @@ public class ReplicationScheduleTests
         for (ulong t = 1; t <= 10; t++)
         {
             Drift(world, t);
-            state.Encode(t, t, world, NoKeyframes, intern: true, observer: new Vec2(0, 0));
+            state.Encode(Base(t), Base(t), world, NoKeyframes, intern: true, observer: new Vec2(0, 0));
         }
         Assert.True(state.EntitiesDeferredByInterval > 0, "nothing was deferred, so this proves nothing");
 
         state.RequestFull();
-        SnapshotMessage key = state.Encode(11, 11, world, NoKeyframes, intern: true,
+        SnapshotMessage key = state.Encode(Base(11), Base(11), world, NoKeyframes, intern: true,
             observer: new Vec2(0, 0));
 
         Assert.True(key.Full);
@@ -142,25 +143,25 @@ public class ReplicationScheduleTests
         var mob = TestHelpers.CreateMob("mob", 45f, 0f);
         var world = new List<EntityState> { mob };
 
-        state.Encode(1, 1, world, NoKeyframes, intern: true, observer: new Vec2(0, 0));
+        state.Encode(Base(1), Base(1), world, NoKeyframes, intern: true, observer: new Vec2(0, 0));
 
         // Tick 2: only position moved -> bottom tier, not due.
         mob.Position = new Vec2(45.1f, 0f);
         world[0] = mob;
-        SnapshotMessage m2 = state.Encode(2, 2, world, NoKeyframes, intern: true, observer: new Vec2(0, 0));
+        SnapshotMessage m2 = state.Encode(Base(2), Base(2), world, NoKeyframes, intern: true, observer: new Vec2(0, 0));
         Assert.Empty(m2.Entities);
 
         // Tick 3: it takes a hit. HP is an edge and must go out immediately.
         mob.Hp -= 9;
         world[0] = mob;
-        SnapshotMessage m3 = state.Encode(3, 3, world, NoKeyframes, intern: true, observer: new Vec2(0, 0));
+        SnapshotMessage m3 = state.Encode(Base(3), Base(3), world, NoKeyframes, intern: true, observer: new Vec2(0, 0));
         Assert.Single(m3.Entities);
 
         // Tick 4: it swings. The action is an edge too.
         mob.Position = new Vec2(45.2f, 0f);
         mob.Action = SimAction.Attacking;
         world[0] = mob;
-        SnapshotMessage m4 = state.Encode(4, 4, world, NoKeyframes, intern: true, observer: new Vec2(0, 0));
+        SnapshotMessage m4 = state.Encode(Base(4), Base(4), world, NoKeyframes, intern: true, observer: new Vec2(0, 0));
         Assert.Single(m4.Entities);
     }
 
@@ -183,7 +184,7 @@ public class ReplicationScheduleTests
         for (ulong t = 1; t <= 300; t++)
         {
             Drift(world, t);
-            SnapshotMessage msg = state.Encode(t, t, world, NoKeyframes, intern: true,
+            SnapshotMessage msg = state.Encode(Base(t), Base(t), world, NoKeyframes, intern: true,
                 observer: new Vec2(0, 0));
 
             foreach (EntitySnapshot e in msg.Entities)
@@ -200,7 +201,7 @@ public class ReplicationScheduleTests
 
         // The slowest tier is 266ms; at 15Hz that is 3 world ticks. Headroom for the budget
         // sort interleaving, but bounded by the CONFIGURED interval rather than by luck.
-        int slowest = ReplicationSchedule.Tiered.IntervalTicksFor(0f, WorldHz);
+        int slowest = ReplicationSchedule.Tiered.IntervalTicksFor(0f, TickHz);
         Assert.True(worstGap <= (ulong)slowest + 2,
             $"worst gap {worstGap} ticks against a configured slowest tier of {slowest}");
         Assert.True(state.MaxStateAge <= slowest + 2,
@@ -217,7 +218,7 @@ public class ReplicationScheduleTests
         SnapshotDeltaState state = Tiered();
         var mob = TestHelpers.CreateMob("mob", 45f, 0f);
         var world = new List<EntityState> { mob };
-        state.Encode(1, 1, world, NoKeyframes, intern: true, observer: new Vec2(0, 0));
+        state.Encode(Base(1), Base(1), world, NoKeyframes, intern: true, observer: new Vec2(0, 0));
 
         // Move it every tick. Intermediate positions are skipped, never queued.
         //
@@ -230,7 +231,7 @@ public class ReplicationScheduleTests
         {
             mob.Position = new Vec2(45f + (t * 0.5f), 0f);
             world[0] = mob;
-            SnapshotMessage m = state.Encode(t, t, world, NoKeyframes, intern: true,
+            SnapshotMessage m = state.Encode(Base(t), Base(t), world, NoKeyframes, intern: true,
                 observer: new Vec2(0, 0));
             if (m.Entities.Count > 0 && carriedAt == 0)
             {
@@ -254,19 +255,32 @@ public class ReplicationScheduleTests
         for (ulong t = 1; t <= 20; t++)
         {
             Drift(world, t);
-            state.Encode(t, t, world, NoKeyframes, intern: true, observer: new Vec2(0, 0));
+            state.Encode(Base(t), Base(t), world, NoKeyframes, intern: true, observer: new Vec2(0, 0));
         }
 
         // Everything but self leaves.
         var alone = new List<EntityState> { world[0] };
         for (ulong t = 21; t <= 40; t++)
         {
-            state.Encode(t, t, alone, NoKeyframes, intern: true, observer: new Vec2(0, 0));
+            state.Encode(Base(t), Base(t), alone, NoKeyframes, intern: true, observer: new Vec2(0, 0));
         }
 
         Assert.True(state.DeferralRecords <= 1,
             $"{state.DeferralRecords} deferral records survived a full AOI turnover");
     }
+
+
+    /// <summary>
+    /// The BASE tick that snapshot number <paramref name="snapshot"/> is built on.
+    /// </summary>
+    /// <remarks>
+    /// Snapshots are built on world ticks, but the encoder is handed
+    /// <c>TickLoop.CurrentTick</c>, which advances at the CRITICAL rate -- four times faster
+    /// at the 60/15 default. Feeding these tests a counter that advanced by 1 per snapshot
+    /// is precisely why they all passed against a server whose schedule deferred nothing,
+    /// so the conversion is done here, once, in the same direction production does it.
+    /// </remarks>
+    private static ulong Base(ulong snapshot) => snapshot * (ulong)WorldEvery;
 
     private static void Drift(List<EntityState> world, ulong t)
     {

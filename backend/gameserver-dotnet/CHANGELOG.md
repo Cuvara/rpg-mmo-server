@@ -7,6 +7,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **The replication schedule compared milliseconds-converted-to-WORLD-ticks against a
+  BASE-tick counter, so it deferred nothing at all.** Snapshots are built on the world
+  group, so "every 2 snapshots" is the natural way to think about an interval — but the
+  `tick` the encoder is handed is `TickLoop.CurrentTick`, the authoritative simulation tick,
+  which advances at the **critical** rate and therefore jumps by 4 between consecutive
+  snapshots at the 60/15 default. `tick - lastSent >= 2` was true every time, so every
+  entity was due on every snapshot.
+  - **Every unit test passed**, because they all fed the encoder a counter that advanced by
+    1 per snapshot — the very assumption the production path breaks. The only thing that
+    caught it was reading `snapshot_deferred_by_interval` off a running server and finding a
+    flat zero with the feature switched on.
+  - Fixed by converting into the unit the encoder is actually handed:
+    `SnapshotDeltaState.TickHz` is now the **base** rate, and the same configured
+    milliseconds come out right — 133ms is 8 base ticks, which is exactly 2 snapshots at
+    60/15, and 266ms is 16, which is 4.
+  - The tests now drive base ticks through a `Base(snapshot)` helper, and
+    `ScheduleOnTheLivePathTests` drives the real `InputHandler` and the real AOI gather so
+    the encoder sees exactly what `TickLoop` gives it.
+  - Measured on a running server before and after, same 40-player 12 s cluster run:
+    `snapshot_deferred_by_interval` 0 → **181,531**, `snapshot_max_state_age` 0 → **4** base
+    ticks (one snapshot period), snapshot bytes **10,046,697 → 5,445,866**.
 - **`GAMESERVER_REPLICATION_SCHEDULE` — per-importance send intervals (ADR-27).** `off`
   (the default) is every dirty entity due every world tick; `tiered` withholds
   lower-importance entities for a configured interval.

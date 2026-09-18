@@ -1524,9 +1524,10 @@ public sealed class GameServerHost : IAsyncDisposable
         // ordering would still look plausible.
         conn.DeltaState.AoiRadius = _options.Aoi.Radius;
         conn.DeltaState.Schedule = _options.ReplicationSchedule;
-        // The schedule's milliseconds mean nothing without the rate that advances the ticks
-        // they convert to, and snapshots ship on the WORLD group, not the base tick.
-        conn.DeltaState.WorldHz = _tickLoop.Rates.WorldHz;
+        // The BASE rate, not the world rate: the encoder compares against the tick it is
+        // handed, and that is TickLoop.CurrentTick, which advances at the critical rate even
+        // though snapshots are only built on world ticks. See SnapshotDeltaState.TickHz.
+        conn.DeltaState.TickHz = _tickLoop.Rates.BaseHz;
 
             // Register connection, retiring the reservation under the same lock it was
             // taken under. The one way this fails: the reservation was a replacement of a
