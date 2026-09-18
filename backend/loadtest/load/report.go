@@ -92,6 +92,33 @@ func WriteTable(w io.Writer, results []*Result) {
 }
 
 // WriteSummary prints the table plus a per-run verdict line and the headline
+// configOf returns the rate configuration these results were measured against,
+// filling the pre-multi-rate defaults for a result file that predates the fields
+// so an old sweep still prints a coherent header.
+func configOf(results []*Result) ResultConfig {
+	for _, r := range results {
+		if r != nil && r.Config.TickBudgetSec > 0 {
+			c := r.Config
+			if c.SnapshotPeriodSec <= 0 {
+				c.SnapshotPeriodSec = c.TickBudgetSec
+			}
+			if c.SimCriticalHz <= 0 {
+				c.SimCriticalHz = 1 / c.TickBudgetSec
+			}
+			if c.SimWorldHz <= 0 {
+				c.SimWorldHz = 1 / c.SnapshotPeriodSec
+			}
+			return c
+		}
+	}
+	return ResultConfig{
+		TickBudgetSec:     TickBudget.Seconds(),
+		SnapshotPeriodSec: TickBudget.Seconds(),
+		SimCriticalHz:     DefaultTickRate,
+		SimWorldHz:        DefaultTickRate,
+	}
+}
+
 // finding: the highest player count that met every acceptance criterion.
 func WriteSummary(w io.Writer, results []*Result) {
 	if len(results) == 0 {
@@ -100,8 +127,21 @@ func WriteSummary(w io.Writer, results []*Result) {
 	// The encoding is in the header because the two arms differ ~5x in bytes per
 	// client from identical load, and a table that does not say which one it
 	// drove has already been read as the other one once.
-	fmt.Fprintf(w, "\n--- loadtest results (tick budget %.2fms @ %dHz, encoding=%s) ---\n",
-		TickBudget.Seconds()*1000, DefaultTickRate, encodingOf(results))
+	// Both rates, both periods, and where they came from. The header used to read
+	// "tick budget 66.67ms @ 15Hz" whatever the server was configured to, which
+	// at the 60/15 default named a budget four times too generous and a rate the
+	// server had not run at since ADR-13. A header that states the wrong
+	// configuration confidently is worse than one that states none.
+	cfg := configOf(results)
+	src := cfg.RatesSource
+	if src == "" {
+		src = "unrecorded (result predates rate reporting)"
+	}
+	fmt.Fprintf(w,
+		"\n--- loadtest results (tick budget %.2fms @ %gHz critical, snapshot period %.2fms @ %gHz world, rates from %s, encoding=%s) ---\n",
+		cfg.TickBudgetSec*1000, cfg.SimCriticalHz,
+		cfg.SnapshotPeriodSec*1000, cfg.SimWorldHz,
+		src, encodingOf(results))
 	WriteTable(w, results)
 
 	fmt.Fprintln(w)
