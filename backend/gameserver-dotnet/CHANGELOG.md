@@ -6,6 +6,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **The replication schedule deferred the observer's own entity, which is the one entity it
+  must never defer.** With `GAMESERVER_REPLICATION_SCHEDULE=tiered` and the `balanced`
+  profile, self scores 5 (distance 2 + type 3, no HP or action edge to add) and lands in the
+  133ms band — so a client predicting at 60Hz reconciled against an anchor arriving at
+  7.5Hz. Three clients in a live session reported `lastCorrection` going **0.0041 → 0.3333**
+  the moment the schedule was switched on, at fps 170–280 with `clamped=0`, `discarded=0`,
+  `resyncs=0`: not framerate, not loss.
+  - The rule already existed twice in prose — the priority sort's first comparison ("a stale
+    one reads as rubber-banding, the single most-noticed netcode artefact") and ADR-27
+    decision 2 ("`Self` stays above both") — and the schedule shipped without it. The two
+    halves of one policy disagreed; the byte budget guaranteed self a slot every tick while
+    the schedule withheld it.
+  - The exemption goes in `DueNow`, not at its two call sites, and both it and the priority
+    sort now read one `IsSelf` helper. A third call site cannot miss it, which was the
+    failure mode the file's own comment at the budget path warned about.
+  - `GAMESERVER_IMPORTANCE_W_TYPE=7` also stops the stutter and is **not** the fix: it lifts
+    every player over the top band, protecting a player 49 units away as much as the one
+    being predicted, and costs a third of the saving. Measured live over 60s per arm:
+    `off` 11.14 KB/s, `tiered` 4.76, `tiered`+`W_TYPE=7` 6.93.
+  - `SelfIsNeverDeferredTests` drives the real input handler and the real AOI gather and
+    runs **two arms**, because "self was sent on every world tick" is equally true of a
+    schedule that defers nothing: `Off` shows every entity at 200/200, `Tiered` shows self
+    at 200/200 and the median other at 100/200. With the exemption removed the same test
+    reports self at 100/200 — indistinguishable from any other entity — and fails.
+- **The slowest replication band was scheduled past the point the client can interpolate
+  through, and the constant that was supposed to prevent it was 3.3x too large.** With self
+  fixed the players were smooth and the **mobs** stepped. A mob scores under 3 — distance at
+  most 2, no `type` bonus, and `change` only fires on an HP or action edge — so it landed in
+  the 266ms band, against a client holding `TargetDelay` 100ms plus `MaxExtrapolation` 50ms.
+  Past 150ms the client is not showing slightly old state, it has none.
+  - `MaxIntervalMs` was `500`, and the remark justifying it read *"500ms is also the point
+    past which the client's 100ms interpolation buffer plus 50ms extrapolation stops
+    covering the gap at all"*. 100 + 50 is 150. The ceiling is now
+    `ClientInterpolationBudgetMs = 150`, named and derived where it can be grepped, because
+    the number it mirrors lives in the other repository and neither build fails when one of
+    them moves.
+  - `ReplicationSchedule.Tiered` drops to **two** bands (every tick, else 133ms). At a 15Hz
+    world rate and a 150ms budget those are the only intervals that fit; a third band needs
+    a faster world rate or a client that holds more.
+  - Measured live, same three clients: 7.03 KB/s against the control's 11.14 — **37%**,
+    where the three-band version bought 50% by exceeding what the client could absorb.
+    `snapshot_max_state_age` fell from 12 base ticks (200ms) to 4 (66ms).
+  - `ScheduleFitsTheClientBudgetTests` asserts no band exceeds the budget and that no two
+    bands round to the same tick count — the latter being ADR-27 decision 4's failure, where
+    a band that had silently ceased to exist went on printing in the banner.
+  - **`snapshot_max_state_age` counts BASE ticks, not world ticks.** Reading it as world
+    ticks overstates staleness 4x; it was first written up here as 800ms when it was 200ms.
+  - The three `TicksFor` rows covering 266ms and 500ms were **rewritten, not deleted**: what
+    changed is what those inputs mean, and a deleted row is a rule nobody can see was tested.
+
 ### Added
 - **`UnchangedFieldBytesBench` — 43.4 % of every entity on the wire is fields that did not
   change.** Measured over 35,462 real emissions: 25.25 B per emission, of which **10.96 B**

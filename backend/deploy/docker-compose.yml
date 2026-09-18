@@ -444,6 +444,16 @@ services:
       # BOSS, QUEST, VISIBILITY, ZONE, INTERACTION) exits 2 rather than being
       # ignored. Read importance_profile off /status to see what a pod runs.
       GAMESERVER_IMPORTANCE: ${GAMESERVER_IMPORTANCE:-legacy}
+      # The four overrides the comment above names. Compose passes only what it
+      # lists, so without these lines GAMESERVER_IMPORTANCE_W_TYPE=7 in .env never
+      # reached the container: no error, no warning, and /status went on reporting
+      # the unmodified profile -- the knob read as "tried it, made no difference".
+      # An empty value is an absent variable to the server, so an operator who sets
+      # none of them gets exactly the profile's own weights.
+      GAMESERVER_IMPORTANCE_W_DISTANCE: ${GAMESERVER_IMPORTANCE_W_DISTANCE:-}
+      GAMESERVER_IMPORTANCE_W_CHANGE: ${GAMESERVER_IMPORTANCE_W_CHANGE:-}
+      GAMESERVER_IMPORTANCE_W_TYPE: ${GAMESERVER_IMPORTANCE_W_TYPE:-}
+      GAMESERVER_IMPORTANCE_W_COMBAT: ${GAMESERVER_IMPORTANCE_W_COMBAT:-}
       # Per-importance send intervals: how often an entity of a given
       # importance is RE-SENT. "off" (default) means every dirty entity is due
       # every world tick. "tiered" withholds lower-importance entities for a

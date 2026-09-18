@@ -29,11 +29,16 @@ public class ReplicationScheduleTests
     /// it configured without editing it.
     /// </summary>
     [Theory]
-    [InlineData(266, 15, 4)]    // 266ms at 15Hz -> 4 ticks == 267ms
-    [InlineData(266, 30, 8)]    // same wall time at double the rate
     [InlineData(133, 15, 2)]    // 133ms -> 2 ticks; flooring made this 1 and deleted the tier
     [InlineData(133, 30, 4)]
-    [InlineData(500, 15, 7)]    // the ceiling binds on ACTUAL wait, not on the typed value
+    // The ceiling binds on the ACTUAL wait, not on the typed value, and the ceiling is now
+    // the client's 150ms interpolation budget rather than the 500ms that the remark
+    // justifying it never supported. Both rows below used to read 4/8 and 7: they are kept
+    // rather than deleted because what changed is what the numbers MEAN, and a deleted row
+    // is a rule nobody can see was ever tested.
+    [InlineData(266, 15, 2)]    // clamped: 150ms at 15Hz is 2 ticks
+    [InlineData(266, 30, 4)]    // clamped: 150ms at 30Hz is 4 ticks
+    [InlineData(500, 15, 2)]    // far past the ceiling, same clamp
     public void IntervalsAreConfiguredInMillisecondsAndConvertWithTheWorldRate(
         int ms, int worldHz, int expectedTicks)
     {
