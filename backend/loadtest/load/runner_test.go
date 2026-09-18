@@ -77,7 +77,7 @@ gameserver_tick_duration_seconds_sum{map_id="map_01"} 6.5
 gameserver_tick_duration_seconds_count{map_id="map_01"} 200
 `, time.Now())
 
-	got := aggregateServer(before, after, nil, nil, 10, nil, nil)
+	got := aggregateServer(before, after, nil, nil, 10, TickBudget.Seconds(), nil, nil)
 	if !got.Scraped {
 		t.Fatal("Scraped = false")
 	}

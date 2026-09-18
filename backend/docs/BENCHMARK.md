@@ -2474,3 +2474,156 @@ returns on `ackTick <= 0`, so the latency estimate is not poisoned by the gap ei
 > covered by the measurement above, but it is a local invariant, not a third-party one,
 > which is precisely why conditions 1 and 2 are not optional.
 
+---
+
+## Part XIII — the pre-importance baseline, and a harness that had been grading against the wrong number (2026-09-18)
+
+Taken on `develop@3378bc9` as the control for importance-driven replication work.
+Raw results: [`loadtest/results/2026-09-18-develop-3378bc9/`](../loadtest/results/2026-09-18-develop-3378bc9/).
+
+Dedicated bench server, Release build run directly rather than through a container:
+`GAMESERVER_ENEMIES=false`, capacity 2000, no registry, TCP, sealed off, `SIM 60/15/5`.
+`-join direct`, `-encoding proto`, 4 levels x 3 repeats per movement mode, 35 s measure
+after 8 s settle, ramp 20/s, `-cooldown 40s` between levels (it has to exceed the 30 s
+entity hold, or the next level starts against a world still holding the previous level's
+disconnected players and the validity gate trips).
+
+### 30. The harness was grading against a budget four times too generous
+
+Before any number below can be read, the instrument had to be fixed. One package constant,
+`TickBudget = 1/15s = 66.67ms`, served two independent rates:
+
+- `gameserver_tick_duration_seconds` times a **base** tick, which runs at
+  `SIM_CRITICAL_HZ`. At the 60 Hz default the budget is **16.67 ms**. A server spending
+  40 ms per base tick — 2.4x over — was reported as comfortably passing, and the header
+  printed `tick budget 66.67ms @ 15Hz` for a server that had not run at 15 Hz since the
+  default changed. Part VI recorded this on 2026-08-15 and nothing acted on it.
+- Narrowing that constant to 1/60 would have introduced a louder defect, because the same
+  number also bounded **snapshot cadence**, which is governed by `SIM_WORLD_HZ` —
+  replication is gated to the world group (ADR-13 decision 7). Every level in every sweep
+  would then have failed for delivering snapshots every 66.7 ms, which is exactly when they
+  are supposed to arrive. **The fix is two numbers, not a corrected one.**
+
+Both are now read off the game server's own `/status` at the start of each run and recorded
+in the result (`tick_budget_sec`, `snapshot_period_sec`, `sim_critical_hz`, `sim_world_hz`,
+`rates_source`). `Evaluate` reads them off the Result rather than a constant, so a sweep
+loaded from disk evaluates to the verdict it had when it was taken, and the 12 archived
+result files that predate the fields still evaluate exactly as they always did. A run that
+could not reach `/status` says `rates from ASSUMED (...)` in its header.
+
+**Every tick verdict in Parts I–XII was taken against the old constant.** Their bandwidth
+figures stand; their tick verdicts at any configuration other than single-rate do not.
+
+### 31. Measured — `cluster` (worst case: every entity in every other entity's AOI)
+
+| players | pass | tick p99 median | tick p99 min..max | **KB/s/client** | B/entity/snapshot |
+|---|---|---|---|---|---|
+| 50 | 3/3 | 0.5 ms | 0.5..0.5 | **18.7** | 24.92 |
+| 100 | 3/3 | 0.9 ms | 0.9..1.7 | **37.1** | 24.77 |
+| 150 | 3/3 | 2.4 ms | 2.4..2.5 | **56.0** | 24.87 |
+| 200 | 3/3 | 4.5 ms | 3.3..5.8 | **75.0** | 25.00 |
+
+### 32. Measured — `spread` (players dispersed over the map)
+
+| players | pass | tick p99 median | tick p99 min..max | **KB/s/client** |
+|---|---|---|---|---|
+| 50 | 3/3 | 0.5 ms | 0.5..0.5 | **10.7** |
+| 100 | 3/3 | 0.7 ms | 0.6..1.5 | **20.2** |
+| 150 | 3/3 | 2.1 ms | 2.0..2.5 | **28.6** |
+| 200 | 3/3 | 4.0 ms | 2.5..4.7 | **36.3** |
+
+24 of 24 runs valid, 24 of 24 passing. Ceiling: **at least 200** in both modes, unchanged
+from Part IX — but now measured against the real 16.67 ms base-tick budget, at which
+200 players in the worst case consumes **27 %** of it rather than the 5 % the old constant
+implied.
+
+### 33. Bytes per entity are flat, so downlink is exactly linear in AOI population
+
+24.77–25.00 B/entity/snapshot across a 4x population range in `cluster`, where every entity
+is in every AOI so the world population *is* the AOI population. That gives a model with no
+fitted terms:
+
+```
+KB/s per client  =  AOI population  x  24.9 B  x  SIM_WORLD_HZ / 1000
+```
+
+At 200 players: `200 x 24.9 x 15 = 74.7`, measured **75.0** — 0.4 % out.
+
+Three factors, and every possible saving has to come out of one of them. Nothing else on the
+server moves this number.
+
+The `spread` column is **half** the `cluster` column at 200 players (36.3 against 75.0),
+which is the same model with a smaller first term rather than a different effect.
+
+### 34. Bandwidth is up 19 % since Part IX, and the wire schema explains it
+
+| | Part IV (2026-08-07) | Part IX (2026-09-07) | this run |
+|---|---|---|---|
+| B/entity/snapshot | 15.7 | 21.0 | **24.9** |
+
+`29aa8d9 feat(wire): per-entity facing and action state` is reachable from `3378bc9` and not
+from Part IX's `c05f715`, and `SnapshotByteIdentityTests` records its digests being
+rebaselined for `facing_brad` and `action` on 2026-09-09 — two days after Part IX was
+measured. A `facing_brad` varint (tag + 1–3 bytes) plus an `action` varint (tag + 1) is the
+whole +3.9 B gap.
+
+**This is a correlation from the commit log with a mechanism that fits, not an isolated
+measurement** — the same standing Part IX gave its own +34 %. The honest test is a two-arm
+run of `c05f715` against `3378bc9` from one generator, and it has not been done.
+
+What is measured is the consequence. ADR-7's `< 50 KB/s` mobile threshold now sits at
+roughly **134 players** on a worst-case cluster (`50000 / (24.9 x 15)`), against the ~160
+Part IX reported. On `spread` it sits above 270 and the server is inside budget at 200.
+
+### 35. What importance-driven replication intervals would save, measured before building them
+
+`GameServer.Tests/Bench/ImportanceIntervalBench.cs` runs the **real** `SnapshotDeltaState`
+twice over one synthetic population — once as today, once with the candidate set filtered by
+a distance- and type-tiered interval policy. No production code changes; the policy lives in
+the bench. A deferred entity is **substituted with its last-sent values, never removed** from
+the gathered span: removing it would make the encoder conclude it left the AOI and emit a
+despawn, which is both wrong and more expensive than the update it was skipping.
+
+| shape | population | B/ent/snap today | tiered | **saving** | staleness max | tier mix 1/2/4 |
+|---|---|---|---|---|---|---|
+| cluster | 200 | 31.32 | 31.32 | **0.0 %** | 0 | 100/0/0 |
+| spread | 200 | 31.23 | 21.77 | **30.3 %** | 1 tick | 36/64/0 |
+| realistic | 360 | 14.56 | 8.10 | **44.4 %** | 3 ticks | 13/30/57 |
+| realistic | 720 | 14.65 | 7.86 | **46.3 %** | 3 ticks | 12/32/56 |
+
+Only within-bench ratios are quotable: the bench divides message bytes by AOI observations
+and §31 divides client receive bytes by world entities, so the absolute columns are not the
+same statistic.
+
+**`cluster` is 0.0 %, and that is the headline.** 200 players standing on each other are all
+near players, all tier 1; no weighting demotes any of them. **The shape that defines the
+published ceiling is the one shape an interval policy cannot improve.**
+
+**`realistic` is 44–46 %** at a bounded cost of 3 world ticks (200 ms) of staleness. Note its
+arm-A column is 14.6 B/entity against cluster's 31.3: two mobs in three stand still, and an
+idle entity is **already free** because the delta encoder omits anything unchanged. Roughly
+half of what looks like an importance win is delta suppression that already ships; the
+tiering halves what is left.
+
+`realistic` is a guess. This server's enemy AI is `Scaffolding/` — 30 mobs walking to the
+origin — so no measurement of this game's real population exists or can exist yet. The
+tier thresholds are one proposal.
+
+### 36. The conclusion the numbers force
+
+- **Where bandwidth binds, tiering does nothing.** Worst-case density is 75.0 KB/s and 0.0 %.
+- **Where tiering works, bandwidth does not bind.** `spread` is 36.3 KB/s at 200 players,
+  already inside ADR-7's budget before any change.
+- **The competing lever is bigger, already shipped, and free of staleness.**
+  `GAMESERVER_AOI_RADIUS` (Part XII's companion change) is a square law: 50 to 35 cuts the
+  population term by 51 %, with no scheduler, no per-connection state and no deferral.
+- **The untested lever is bigger still.** Of 24.9 B/entity, `hp`, `max_hp`, `speed` and
+  `type` are re-sent on every emission and change on none of them — roughly 11 B, or **44 %**,
+  on every entity in every population shape. That is an estimate from the schema, not a
+  measurement, and it is cheap to measure: count the bytes of unchanged fields in the
+  encoder without touching the wire.
+
+None of this says importance-driven replication is wrong. It says the case for it cannot be
+made from the bandwidth figure this document publishes, and that the work it justifies
+should be sequenced behind the two cheaper levers.
+

@@ -102,7 +102,21 @@ type LevelSummary struct {
 func (c Ceiling) Decided() bool { return c.Repeats >= 2 && len(c.Marginal) == 0 }
 
 // ComputeCeiling groups results by player count and derives the band.
+// budgetOf returns the tick budget the results were measured against, falling
+// back to the pre-multi-rate constant for a result file that predates the field.
+// Taken from the results rather than from the package constant so a sweep loaded
+// from disk is summarised against the server it actually ran on.
+func budgetOf(results []*Result) float64 {
+	for _, r := range results {
+		if r != nil && r.Config.TickBudgetSec > 0 {
+			return r.Config.TickBudgetSec
+		}
+	}
+	return TickBudget.Seconds()
+}
+
 func ComputeCeiling(results []*Result) Ceiling {
+	budget := budgetOf(results)
 	byLevel := map[int][]*Result{}
 	for _, r := range results {
 		byLevel[r.Config.Players] = append(byLevel[r.Config.Players], r)
@@ -134,7 +148,7 @@ func ComputeCeiling(results []*Result) Ceiling {
 		if s.Passed > 0 && s.Passed < s.Runs {
 			c.Marginal = append(c.Marginal, n)
 		}
-		if s.TickP99Median <= TickBudget.Seconds() {
+		if s.TickP99Median <= budget {
 			if n > c.Lower {
 				c.Lower = n
 			}
