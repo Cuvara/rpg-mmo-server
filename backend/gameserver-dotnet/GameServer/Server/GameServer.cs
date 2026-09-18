@@ -129,6 +129,21 @@ public class ServerOptions
     public int MaxSnapshotBytes { get; set; } = Snapshot.SnapshotDeltaState.DefaultMaxSnapshotBytes;
 
     /// <summary>
+    /// Area-of-interest radius in world units (<c>GAMESERVER_AOI_RADIUS</c>), validated by
+    /// <see cref="AoiSettings"/>.
+    /// </summary>
+    /// <remarks>
+    /// The other half of <see cref="MaxSnapshotBytes"/>, and the half that acts first. The
+    /// budget is a tail cap that deliberately does not engage during known-good play; the
+    /// radius decides how much there is to cap in the first place, and population inside a
+    /// circle grows with its SQUARE — halving the radius quarters the expected entity
+    /// count, which is a far larger lever on downstream bandwidth than anything downstream
+    /// of it. It also sets the spatial index's cell size (<c>EcsWorld</c>), so the two
+    /// cannot be configured apart.
+    /// </remarks>
+    public AoiSettings Aoi { get; set; } = AoiSettings.Default;
+
+    /// <summary>
     /// Whether the gameplay hop requires a sealed session
     /// (<c>GAMESERVER_SEALED</c>: <c>off</c> or <c>require</c>).
     /// </summary>
@@ -576,6 +591,20 @@ public sealed class GameServerHost : IAsyncDisposable
     /// <summary>Frame arrival-order measurement. See <see cref="Observability.FrameOrderProbe"/>.</summary>
     public Observability.FrameOrderProbe FrameOrder => _frameOrder;
 
+    /// <summary>
+    /// The AOI radius this host actually built its world and tick loop with. Tests.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ServerOptions.Aoi"/> has to reach TWO places — the spatial index's cell
+    /// size and the gather radius — and wiring only one of them produces a server that is
+    /// entirely correct and quietly slower, which no snapshot assertion can see. These
+    /// expose what was wired rather than what was asked for, so a test can compare them.
+    /// </remarks>
+    internal float WiredAoiRadius => _tickLoop.AoiRadius;
+
+    /// <summary>The spatial index cell size this host's world was built with. Tests.</summary>
+    internal float WiredAoiCellSize => _world.AoiIndexCellSize;
+
     public GameServerHost(ServerOptions options)
     {
         _options = options;
@@ -600,7 +629,7 @@ public sealed class GameServerHost : IAsyncDisposable
         // Worker slots exist for the gather; the simulation schedule is still serial.
         // One slot is the old world exactly.
         _gatherWorkers = options.GatherWorkers < 1 ? 1 : options.GatherWorkers;
-        _world = new EcsWorld(_gatherWorkers);
+        _world = new EcsWorld(_gatherWorkers, options.Aoi.Radius);
         _metrics?.SetEntityCountProvider(() => _world.EntityCount);
         _connections = new ConnectionManager();
         _admission = new AdmissionController(_connections, options.Capacity);
@@ -725,7 +754,7 @@ public sealed class GameServerHost : IAsyncDisposable
             _inputHandler,
             _connections,
             rates,
-            GameConstants.DefaultAoiRadius,
+            options.Aoi.Radius,
             _loggerFactory.CreateLogger<TickLoop>(),
             _metrics,
             options.KeyframeInterval,
