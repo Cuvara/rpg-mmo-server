@@ -7,6 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`ImportanceIntervalBench` now runs the SHIPPED policy, and until it did it disagreed
+  with a live sweep by 47 percentage points.** It carried a hand-written interval policy
+  that gave a near player interval 1, so on a `cluster` population -- where every entity is
+  a near player -- it demoted nothing and reported **0.0%**, while the same server measured
+  **-47.3%** end to end. A bench that models a policy nobody runs answers a question nobody
+  asked. It now calls `ReplicationImportance.Score` and `ReplicationSchedule.Tiered`, the
+  same two types the encoder calls, and the two agree to within 2 points. See BENCHMARK.md
+  Part XIV §42.
 - **The replication schedule compared milliseconds-converted-to-WORLD-ticks against a
   BASE-tick counter, so it deferred nothing at all.** Snapshots are built on the world
   group, so "every 2 snapshots" is the natural way to think about an interval — but the

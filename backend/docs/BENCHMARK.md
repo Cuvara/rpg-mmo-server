@@ -2627,3 +2627,126 @@ None of this says importance-driven replication is wrong. It says the case for i
 made from the bandwidth figure this document publishes, and that the work it justifies
 should be sequenced behind the two cheaper levers.
 
+---
+
+## Part XIV — what importance-driven replication actually costs and saves (2026-09-18)
+
+The A/B the previous part was taken as a control for. Same bench server, same generator,
+same protocol: 200 players, 3 repeats per arm, `-join direct -encoding proto`, TCP, 35 s
+measure after 8 s settle, `cooldown 40s`. Raw results:
+[`loadtest/results/2026-09-18-importance/`](../loadtest/results/2026-09-18-importance/).
+
+Two arms, one binary, one env var pair apart:
+
+```
+control:  GAMESERVER_IMPORTANCE=legacy    GAMESERVER_REPLICATION_SCHEDULE=off
+tiered:   GAMESERVER_IMPORTANCE=balanced  GAMESERVER_REPLICATION_SCHEDULE=tiered
+```
+
+### 37. The instrument was inert on the first attempt, and every test said it was fine
+
+The first run of this sweep reported `snapshot_deferred_by_interval = 0` on the tiered arm,
+with the banner and `/status` both printing the right bands. The schedule was converting
+configured milliseconds into **world** ticks and comparing them against
+`TickLoop.CurrentTick`, which advances at the **critical** rate — four times faster at
+60/15. `tick - lastSent >= 2` was true every time, so every entity was due on every
+snapshot and the feature did nothing.
+
+**All fourteen unit tests passed**, because every one of them fed the encoder a counter that
+advanced by 1 per snapshot: the exact assumption the production path breaks. So did an
+in-process probe, which deferred nearly twenty thousand entities from the same population
+shape. Two probes of one mechanism disagreeing is what exposed it; the number that was
+right was the one read off a running server.
+
+This is recorded here rather than only in the changelog because the failure shape is the
+point: **a rate conversion is only checkable against the clock the consumer actually
+reads**, and no amount of unit testing a converter finds a consumer reading a different
+clock.
+
+### 38. Measured
+
+| arm | KB/s/client | tick p99 | snapshot interval p99 | ack p99 | snapshots received |
+|---|---|---|---|---|---|
+| control · cluster | **80.9** | 7.38 ms | 79.1 ms | 73.2 ms | 100.1 % |
+| tiered · cluster | **42.6** | 4.56 ms | 76.1 ms | 71.0 ms | 100.0 % |
+| control · spread | **39.4** | 5.27 ms | 74.0 ms | 69.8 ms | 100.1 % |
+| tiered · spread | **20.8** | 3.96 ms | 73.7 ms | 68.8 ms | 100.0 % |
+
+```
+cluster   80.9 -> 42.6 KB/s   -47.3 %
+spread    39.4 -> 20.8 KB/s   -47.2 %
+```
+
+12 of 12 runs valid and passing in both arms.
+
+### 39. The cost is per-entity staleness, and it is NOT snapshot cadence
+
+Snapshot interval p99 is **unchanged** — 76.1 ms against 79.1 on cluster, 73.7 against 74.0
+on spread, all within run-to-run noise and all a clean 15 Hz. Ack latency likewise. The
+schedule does not skip snapshots; it omits entities from snapshots that ship anyway, so a
+client's clock, its interpolation buffer and its reconciliation anchor see exactly what they
+saw before.
+
+What does change is how stale one entity may be, and the server reports it:
+`snapshot_max_state_age` read **4 base ticks** — one snapshot period, 66.7 ms — on both
+tiered arms. Not four snapshot periods: an entity in the 133 ms band is deferred once, at
+age 4, and is due at 8.
+
+### 40. Read this before quoting the 47 %
+
+**The shipped `balanced` profile puts a merely-moving player in the 133 ms band.** Its score
+is distance 2 + type 3 = 5, under the 8 threshold that buys every-tick treatment, so
+**player positions replicate at 7.5 Hz rather than 15 Hz** unless the player's health or
+action changed — and those are edges, which are never deferred.
+
+That is where most of the 47 % comes from, and it is a **visual-quality decision**, not a
+technical detail. The client's interpolation buffer is 100 ms with 50 ms of extrapolation,
+so a 133 ms gap sits at its edge; the netcode `ImportanceIntervalProbe` shows the result is
+stair-stepping rather than freezing, but it shows it for distant mobs, not for the player
+two metres away.
+
+Raising `GAMESERVER_IMPORTANCE_W_TYPE` from 3 to 6 puts players back on every tick (5 → 8)
+and gives up most of the cluster saving. That is a one-line change and it is deliberately
+left to a human.
+
+### 41. Bandwidth is 8 % higher than Part XIII measured, and `action_seq` is why
+
+Part XIII's control read 75.0 KB/s on cluster and 36.3 on spread, against 80.9 and 39.4
+here. It was taken on `develop@3378bc9`, before `action_seq` (#365) merged; a `uint32`
+varint plus its tag on every entity of every snapshot is the whole gap. Consistent with
+Part XIII §34's own finding that `facing_brad` and `action` cost ~3.9 B/entity: this is the
+third such field and costs about 2.
+
+### 42. The in-process bench agrees, and did not until it was made to run the shipped policy
+
+`ImportanceIntervalBench` carried a **hand-written** interval policy, which gave a near
+player interval 1 — so on `cluster`, where every entity is a near player, it demoted nothing
+and reported **0.0 %**. The live sweep measured **−47.3 %** on the same server.
+
+Two measurements of one mechanism disagreeing by 47 points means at least one is measuring
+something else, and it was the bench: a policy nobody runs answers a question nobody asked.
+It now calls `ReplicationImportance.Score` and `ReplicationSchedule.Tiered` — the same two
+production types the encoder calls — and the two agree:
+
+| shape | bench | live sweep |
+|---|---|---|
+| cluster | 47.9 % | 47.3 % |
+| spread | 45.3 % | 47.2 % |
+| realistic (360) | 55.6 % | not measurable — this game has no such population |
+| realistic (720) | 57.8 % | — |
+
+The bench's tier histogram is the honest summary of what the profile does on a crowd:
+`cluster` is **0 / 100 / 0**. Every entity is in the middle band. Nothing is top tier,
+because nothing is changing health or swinging.
+
+### 43. Both still ship OFF
+
+Nothing here changes that. A 47 % bandwidth saving is worth having and the cost is bounded
+and measured — but the cost is player smoothness on a client whose interpolation this
+project has not re-measured since, and the two cheaper levers from Part XIII are untouched:
+the AOI radius is a square law that costs no staleness at all, and roughly 11 of every 24.9
+bytes is still `hp`, `max_hp`, `speed` and `type` re-sent unchanged on every emission.
+
+Turning it on is a one-line manifest edit, and it should follow a look at the game, not a
+table.
+

@@ -1,3 +1,5 @@
+using GameServer.Net;
+using GameServer.Server;
 using GameServer.Snapshot;
 using GameServer.World;
 using Shared.GameLogic.Components;
@@ -64,34 +66,52 @@ public sealed class ImportanceIntervalBench
     // ── The candidate policy, in one place ───────────────────────────────────────
 
     /// <summary>
-    /// Interval tiers, in WORLD ticks. Expressed here as ticks because the bench runs a
-    /// fixed 15 Hz world; the real thing must configure milliseconds and convert through
-    /// SimulationRates, or changing SIM_WORLD_HZ silently changes how stale everything is.
+    /// The SHIPPED policy: <see cref="ReplicationImportance.Score"/> under the
+    /// <c>balanced</c> weights, banded by <see cref="ReplicationSchedule.Tiered"/>.
     /// </summary>
+    /// <remarks>
+    /// <b>This was a hand-written policy until 2026-09-18, and the two disagreed by 47
+    /// percentage points.</b> The hand-written one gave a near player interval 1, so on a
+    /// `cluster` population -- where every entity is a near player -- it demoted nothing and
+    /// this bench reported 0.0%. The shipped policy scores a merely-moving player at
+    /// distance 2 + type 3 = 5, below the 8 threshold, so it lands in the 133ms band and
+    /// `cluster` halves. A live sweep measured -47.3%, and this bench said 0.0%, about the
+    /// same server.
+    ///
+    /// <para>Two measurements of one mechanism disagreeing by that much means at least one
+    /// is measuring something else, and here it was this one: a bench that models a policy
+    /// nobody runs answers a question nobody asked. It now calls the same two production
+    /// types the encoder calls, so the only way it can drift again is if those change.</para>
+    ///
+    /// <para>Intervals come back in BASE ticks, because that is the unit the encoder
+    /// compares against -- see <c>SnapshotDeltaState.TickHz</c>, where getting this wrong
+    /// made the whole schedule inert on a live server while every unit test passed.</para>
+    /// </remarks>
     private static int IntervalFor(in EntityView e, in Vec2 observer, bool isSelf)
     {
         if (isSelf) return 1;
 
-        // An edge must never be deferred: a state change the client would otherwise
-        // never see is not a bandwidth saving, it is a dropped event. Action is the only
-        // edge this population produces.
-        if (e.Action == EntityAction.Attacking || e.Action == EntityAction.Dead) return 1;
-
-        // Players outrank mobs at equal distance. Two entity types is the whole taxonomy
-        // the schema has, so this is a 2-level tier and not a hierarchy.
-        bool isPlayer = string.Equals(e.Type, "player", StringComparison.Ordinal);
-
         float dx = e.Position.X - observer.X;
         float dy = e.Position.Y - observer.Y;
-        float d2 = (dx * dx) + (dy * dy);
 
-        float near = Radius * 0.25f;   // 12.5 u
-        float mid = Radius * 0.55f;    // 27.5 u
+        // hp/action "changed" are false here: this bench moves entities and nothing else,
+        // so the change factor never fires and the score is distance + type, exactly as it
+        // is for a walking player on the live server.
+        var inputs = new ReplicationImportance.Inputs(
+            (dx * dx) + (dy * dy), Radius,
+            isPlayer: EntityTypes.IsPlayer(e.Type),
+            action: e.Action,
+            hpChanged: false, actionChanged: false);
 
-        if (d2 <= near * near) return 1;
-        if (d2 <= mid * mid) return isPlayer ? 1 : 2;
-        return isPlayer ? 2 : 4;
+        float score = ReplicationImportance.Score(in inputs, ImportanceSettings.Balanced.Weights);
+        return ReplicationSchedule.Tiered.IntervalTicksFor(score, SimulationRates.DefaultCriticalHz)
+               / WorldEveryAtDefault;
     }
+
+    /// <summary>Base ticks per world tick at the 60/15 default, so the base-tick intervals
+    /// the schedule returns can be compared against this bench's world-tick clock.</summary>
+    private const int WorldEveryAtDefault =
+        SimulationRates.DefaultCriticalHz / SimulationRates.DefaultWorldHz;
 
     // ── Population shapes ────────────────────────────────────────────────────────
 

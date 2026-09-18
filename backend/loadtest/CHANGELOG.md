@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`results/2026-09-18-importance/` — the importance A/B**, 200 players x 3 repeats per arm
+  on `cluster` and `spread`, one binary and one env-var pair apart. Measured **-47.3%** and
+  **-47.2%** downstream bytes with snapshot cadence and ack latency unchanged; the cost is
+  per-entity staleness of one snapshot period. Written up as BENCHMARK.md Part XIV, which
+  also records that the first attempt measured a schedule that was inert, that every unit
+  test passed against it, and that reading `snapshot_deferred_by_interval` off a running
+  server is what caught it.
+
 ### Fixed
 - **The harness judged every run against the wrong tick budget, and would have judged it
   against the wrong snapshot bound if that had been "corrected" naively.** One package
