@@ -53,7 +53,11 @@ public class ScheduleUnderBudgetPressureTests
     [Fact]
     public void UnderASaturatedBudget_TheScheduleDefersNothing()
     {
-        SnapshotDeltaState tight = State(budget: 8192);
+        // 512 bytes: roughly twenty entities of the two hundred in view, so the budget
+        // is genuinely saturated every snapshot. 8192 was tried first and shed NOTHING --
+        // two hundred delta entities are about five kilobytes -- so the test was named
+        // for a pressure it never applied.
+        SnapshotDeltaState tight = State(budget: 512);
         List<EntityState> world = Crowd(200);
 
         for (ulong t = 1; t <= 200; t++)
@@ -73,8 +77,17 @@ public class ScheduleUnderBudgetPressureTests
 
         // Reported, not asserted: this probe exists to find out which mechanism withheld
         // what, and an assertion would freeze whichever answer today happens to give.
-        Assert.True(tight.EntitiesShed + tight.EntitiesDeferredByInterval > 0,
-            "neither mechanism withheld anything; the scenario is wrong");
+        Assert.True(tight.EntitiesShed > 0,
+            $"the budget shed nothing ({tight.LastPayloadBytes} B last payload), so this is " +
+            "not the scenario the test is named for");
+
+        // Both mechanisms withhold, and they compose rather than one masking the other:
+        // the schedule decides whether an entity is offered at all, the budget decides how
+        // many of the offered ones fit. Recorded rather than asserted on an exact figure --
+        // the point is that neither number is zero.
+        Assert.True(tight.EntitiesDeferredByInterval > 0,
+            "the schedule withheld nothing under budget pressure, which would mean the two " +
+            "mechanisms do not compose");
     }
 
     /// <summary>
