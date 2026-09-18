@@ -2705,9 +2705,10 @@ so a 133 ms gap sits at its edge; the netcode `ImportanceIntervalProbe` shows th
 stair-stepping rather than freezing, but it shows it for distant mobs, not for the player
 two metres away.
 
-Raising `GAMESERVER_IMPORTANCE_W_TYPE` from 3 to 6 puts players back on every tick (5 → 8)
-and gives up most of the cluster saving. That is a one-line change and it is deliberately
-left to a human.
+Putting players back on every tick costs **the entire saving** on both measured shapes —
+see §44, which sweeps it. The correct value is `GAMESERVER_IMPORTANCE_W_TYPE=7`, not the 6
+this section first named: at 6 a player still scores under 8 at every distance and nothing
+changes.
 
 ### 41. Bandwidth is 8 % higher than Part XIII measured, and `action_seq` is why
 
@@ -2749,4 +2750,120 @@ bytes is still `hp`, `max_hp`, `speed` and `type` re-sent unchanged on every emi
 
 Turning it on is a one-line manifest edit, and it should follow a look at the game, not a
 table.
+
+### 44. Who actually pays for the 47 %
+
+§40 said player demotion was "where most of the saving comes from". Swept, it is where
+**all** of it comes from on both shapes this project can measure.
+
+Two ways to protect players, both measured on the probe that reproduces the encoder:
+
+| | cluster | spread | realistic (360) | cluster tier 1/2/4 |
+|---|---|---|---|---|
+| shipped (`W_TYPE=3`, top band ≥ 8) | **47.8 %** | 45.4 % | 55.9 % | 0/100/0 |
+| `W_TYPE=7` — players always top band | **0.0 %** | **0.0 %** | 40.0 % | 100/0/0 |
+| top band ≥ 4.5 | 0.0 % | 29.1 % | 49.4 % | 100/0/0 |
+
+- **`W_TYPE=6` does nothing.** A merely-moving player scores `type + distance`, and the
+  distance term is at most 2 and strictly under it at any real separation — so at 6 the
+  score stays under 8 everywhere. 7 is the first value that clears the band at every
+  distance. An earlier revision of §40 named 6; it was never swept.
+- **On `cluster` and `spread`, protecting players zeroes the saving.** Not reduces —
+  zeroes. Every entity in both populations is a player, so once players are top-band there
+  is nothing left to demote.
+- **Only `realistic` keeps anything: 40 of its 55.9 points survive.** That is the
+  mob-driven saving the original proposal was actually about, and it is the one number here
+  that describes a population this game does not have.
+
+So the honest statement of the result is narrower than §38's headline:
+
+> **Importance tiering halves the wire by replicating players at 7.5 Hz.** The part that
+> comes from demoting distant, idle mobs is worth about 40 % — and is unmeasurable on this
+> server until there are distant, idle mobs.
+
+That reframes the decision. It is not "47 % for 66.7 ms of staleness"; it is "**47 % for
+halving every player's position update rate**", with the mob half of the idea still
+untested because the content for it does not exist.
+
+---
+
+## Part XV — 43 % of every entity on the wire is fields that did not change (2026-09-18)
+
+Measured, not estimated: `GameServer.Tests/Bench/UnchangedFieldBytesBench.cs`, 120 players
+walking a random walk for 300 snapshots through the real encoder.
+
+### 45. What each field costs
+
+Per entity, on a handle-only mention, at the values this game produces:
+
+| group | fields | bytes |
+|---|---|---|
+| identity | `handle` | 3 |
+| **moves** | `x` 5, `y` 5, `facing_brad` 4 | **14** |
+| **event** | `hp` 2, `action` 2, `action_seq` 2 | **6** |
+| **constant** | `max_hp` 2, `speed` **5**, `type` 2 | **9** |
+
+### 46. Measured over a real stream
+
+```
+35,462 entity emissions, 895,298 bytes of snapshot payload
+  bytes per emission                     25.25
+  unchanged since this client was last told:
+    hp       99.7 % of emissions x 2 B
+    max_hp   99.7 %              x 2 B
+    speed    99.7 %              x 5 B
+    type     99.7 %              x 2 B
+  recoverable per emission               10.96   (43.4 % of the payload)
+```
+
+25.25 B/emission independently reproduces Part XIII's 24.9 B/entity/snapshot from a
+different instrument, which is the cross-check that makes the rest of the number worth
+reading.
+
+**The delta encoder is entity-granular.** It suppresses an entity only when *every* visible
+field matches what this connection was last told, so a player who merely moved re-sends its
+health, its maximum health, its speed and its type — none of which have changed since it
+spawned. `speed` alone is **5 bytes, 20 % of the payload**, a float that is written once and
+never again.
+
+### 47. Against the lever that shipped
+
+| | saving | cost | applies to |
+|---|---|---|---|
+| field-level delta | **43.4 %** | **none** — nothing is deferred | every population |
+| importance tiering (Part XIV) | 47.3 % | players at **7.5 Hz** | populations made of players |
+
+The two are **independent and compose**: one sends each entity less often, the other sends
+fewer bytes each time. Nothing here argues against the feature Part XIV measured; it argues
+that the cheaper lever was never priced, and now it is.
+
+### 48. What it would cost to build, honestly
+
+It is **not free**, and it needs a wire change, which is why this part stops at the number.
+
+- **proto3 cannot express "unchanged".** An omitted field and a zero-valued one are the same
+  bytes, which is the rule `speed` and `facing_brad` already document their way around. So
+  field-level delta needs explicit presence — proto3 `optional` on the constant fields, or a
+  per-entity presence mask — and a receiver rule that absent means *keep what you have*
+  rather than *this is zero*.
+- **It moves state into the receiver.** Today a resolved handle carries complete state and a
+  client that has lost track asks for a keyframe. Under field-level delta a client's view of
+  `speed` is only as good as the last snapshot that carried it, so the keyframe contract has
+  to say which fields a keyframe guarantees — and it already does say "complete", so the
+  work is in the deltas, not in the keyframes.
+- **It interacts with the budget, not with the schedule.** Shedding an entity already defers
+  all of its fields; making entities cheaper makes the budget bite later, which is strictly
+  good and needs no coordination with Part XIV's work.
+
+### 49. Where this leaves the three levers
+
+| lever | measured | staleness | population it needs | status |
+|---|---|---|---|---|
+| AOI radius | square law; 50 → 35 is −51 % | none | any | **shipped**, config |
+| field-level delta | **−43.4 %** | none | any | measured, not built |
+| importance tiering | −47.3 % (all of it player demotion, §44) | players at 7.5 Hz | players | shipped, off |
+
+Two of the three cost nothing in smoothness. The one that ships costs the most and needs a
+population this game does not have to earn the part of its case that was originally made
+for it.
 

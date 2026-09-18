@@ -57,7 +57,12 @@ services:
       SIM_WORLD_HZ: ${SIM_WORLD_HZ:-15}
       SIM_BACKGROUND_HZ: ${SIM_BACKGROUND_HZ:-5}
       GAMESERVER_AOI_RADIUS: ${GAMESERVER_AOI_RADIUS:-50}
-      GAMESERVER_IMPORTANCE: ${GAMESERVER_IMPORTANCE:-legacy}
+      # DEV ONLY, and only the ORDERING half. balanced changes which entities are emitted
+      # first when the downlink budget bites; it defers nothing and adds no staleness, so
+      # the worst case is that a different entity is a beat late than would have been.
+      # GAMESERVER_REPLICATION_SCHEDULE stays off -- that half halves player update rate
+      # (BENCHMARK.md Part XIV 44) and is not a dev-box decision.
+      GAMESERVER_IMPORTANCE: ${GAMESERVER_IMPORTANCE:-balanced}
       GAMESERVER_REPLICATION_SCHEDULE: ${GAMESERVER_REPLICATION_SCHEDULE:-off}
       METRICS_ADDR: ":9101"
       REDIS_ADDR: redis:6379
