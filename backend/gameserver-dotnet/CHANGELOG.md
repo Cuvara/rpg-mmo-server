@@ -7,6 +7,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`GAMESERVER_IMPORTANCE` — the importance weights are now configurable, and the four
+  factors with a data source have a tuned profile.** `legacy` (the default) is every factor
+  zero and therefore the pre-importance ordering; `balanced` ranks on visible-state change
+  (10), combat (6), entity type (3) and distance (2).
+  - **The default stays off, deliberately.** Reordering which entity is shed first when the
+    downlink budget bites is a real behavioural change, and BENCHMARK.md Part XIII measured
+    the budget as a tail cap that does not engage at a load this server is known to handle —
+    so switching it on by default would change behaviour in a case nobody has measured, for
+    no measured benefit. Same rule the AOI radius and the downlink budget both shipped under.
+  - **Weighting a factor with no data source exits 2.** `GAMESERVER_IMPORTANCE_W_PARTY` and
+    its six siblings are refused rather than accepted and silently contributing zero:
+    accepting one would let a manifest describe a policy the server cannot run and leave
+    whoever wrote it reading their own configuration as if it had taken effect.
+  - `/status` publishes `importance_profile` and `importance_weights`, and the profile reads
+    **`custom`** whenever any weight was overridden — a server reporting `balanced` with a
+    replaced weight invites a reader to look up what balanced means.
+  - Weight ordering is an argument, not a tuning: change dominates because HP and action are
+    the only two fields a client can neither interpolate nor dead-reckon; distance is the
+    *smallest* because it is already the tie-break BELOW the score, so weighting it heavily
+    would duplicate a key that is already there.
+  - Overrides parse with `InvariantCulture`, so `2,5` is refused rather than read as 25.
+  - Tests: `ImportanceSettingsTests` (26). Verified against a running server: `legacy` and
+    `balanced` both reported correctly on `/status`, and `GAMESERVER_IMPORTANCE_W_PARTY=5`
+    exits 2 with a named reason.
 - **`ReplicationImportance` — per-connection entity importance, wired into the snapshot
   scheduler and shipped switched off.** One scalar, computed where the scheduler already has
   every input in hand, inserted as the **third** sort key in `CandidateComparer`.

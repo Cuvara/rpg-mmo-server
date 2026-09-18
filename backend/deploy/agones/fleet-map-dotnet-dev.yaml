@@ -317,6 +317,23 @@ spec:
                 # diagonal logs a warning and disables interest filtering entirely.
                 - name: GAMESERVER_AOI_RADIUS
                   value: "50"
+                # Replication importance: which entities are emitted FIRST when the
+                # per-connection downlink budget bites. It never changes how many bytes
+                # go out (GAMESERVER_MAX_SNAPSHOT_BYTES) nor which entities are
+                # candidates at all (GAMESERVER_AOI_RADIUS).
+                # 
+                # "legacy" (default) is every factor zero, i.e. the ordering that shipped
+                # before importance existed: self, then longest-deferred, then nearest.
+                # "balanced" additionally ranks on visible-state change, combat, entity
+                # type and distance. Deferral age stays DOMINANT in both, because the
+                # starvation bound depends on it.
+                # 
+                # Per-factor overrides: GAMESERVER_IMPORTANCE_W_{DISTANCE,CHANGE,TYPE,
+                # COMBAT}. Weighting a factor this server has no data for (PARTY, PVP,
+                # BOSS, QUEST, VISIBILITY, ZONE, INTERACTION) exits 2 rather than being
+                # ignored. Read importance_profile off /status to see what a pod runs.
+                - name: GAMESERVER_IMPORTANCE
+                  value: "legacy"
                 # -----------------------------------------------------------
                 # ADMISSION LIMIT — 100 IS NOW A DECISION, NOT A DEFAULT.
                 # -----------------------------------------------------------

@@ -327,6 +327,23 @@ public sealed class ServerStatus
     public bool AoiCoversWholeMap { get; set; }
 
     /// <summary>
+    /// Replication-importance profile in force (<c>GAMESERVER_IMPORTANCE</c>):
+    /// <c>legacy</c>, <c>balanced</c>, or <c>custom</c> when a weight was overridden.
+    /// </summary>
+    /// <remarks>
+    /// Published for the same reason as <c>aoi_radius</c>: it is deployment-set, it is not
+    /// on the wire, and two servers running different profiles are indistinguishable from
+    /// any client or any other field here. The weights come with it because "balanced" is a
+    /// label, and a custom profile is only readable as its numbers.
+    /// </remarks>
+    [JsonPropertyName("importance_profile")]
+    public string ImportanceProfile { get; set; } = "legacy";
+
+    /// <summary>The four weights that have a data source, in force right now.</summary>
+    [JsonPropertyName("importance_weights")]
+    public string ImportanceWeights { get; set; } = "";
+
+    /// <summary>
     /// Bytes of snapshot frames written to client sockets since process start, envelope
     /// and length prefix included. With <see cref="UptimeSeconds"/> and
     /// <see cref="PlayersOnline"/> this is the per-client downlink rate ADR-7's
