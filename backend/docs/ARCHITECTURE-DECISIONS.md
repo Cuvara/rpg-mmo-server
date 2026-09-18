@@ -3814,6 +3814,12 @@ Before building it, it was measured. Two numbers decided the shape of this ADR:
 
 **Consequences.**
 
+- **The 47 % measured in Part XIV is entirely player demotion.** Swept in Part XIV §44:
+  protecting players (`GAMESERVER_IMPORTANCE_W_TYPE=7`) takes cluster and spread to
+  **0.0 %**, because every entity in both is a player. Only the `realistic` shape keeps
+  anything — 40 of 55.9 points — and that shape does not exist on this server. The feature
+  as shipped buys bandwidth by replicating player positions at 7.5 Hz; the mob-driven saving
+  the proposal was about remains untested for want of mobs.
 - **The case for this feature cannot be made from the bandwidth figure this project
   publishes.** 75.0 KB/s per client at 200 players is a worst-case-density number, and
   density is precisely where tiering has nothing to demote. Where tiering works — dispersed

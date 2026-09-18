@@ -124,6 +124,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`GAMESERVER_IMPORTANCE=balanced` on the DEV stack only, and only the ordering half.**
+  `docker-compose.override.yml` and the Agones **dev** fleet; the k8s manifests are
+  untouched because one manifest set serves dev and staging, so turning it on there would
+  turn it on for both.
+  - Ordering decides which entities are emitted FIRST when the per-connection downlink
+    budget bites. It defers nothing and adds no staleness — the worst case is that a
+    different entity is a beat late than would otherwise have been — and the budget does
+    bite at density: a 200-player cluster run shed hundreds of thousands of entity updates.
+  - `GAMESERVER_REPLICATION_SCHEDULE` stays **off** everywhere. That half buys its 47 % by
+    replicating player positions at 7.5 Hz (BENCHMARK.md Part XIV §44), which is not a
+    dev-box decision.
 - **`GAMESERVER_REPLICATION_SCHEDULE` wired into every game-server deployment**, set
   explicitly to `off` — every dirty entity due every world tick — so **nothing changes
   behaviourally**. It decides how often an entity of a given importance is re-sent; it

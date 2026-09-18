@@ -7,6 +7,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`UnchangedFieldBytesBench` — 43.4 % of every entity on the wire is fields that did not
+  change.** Measured over 35,462 real emissions: 25.25 B per emission, of which **10.96 B**
+  is `hp`, `max_hp`, `speed` and `type` re-sent identical to what that connection was last
+  told, 99.7 % of the time. `speed` alone is 5 bytes, a fifth of the payload, a float
+  written once at spawn and never again.
+  - The delta encoder is **entity-granular**: it suppresses an entity only when every
+    visible field matches, so a player who merely moved re-sends all four.
+  - 25.25 B/emission independently reproduces Part XIII's 24.9 B/entity/snapshot from a
+    different instrument, which is what makes the rest of the figure worth reading.
+  - **Measures; proposes nothing and changes nothing.** proto3 cannot express "unchanged" —
+    an omitted field and a zero one are the same bytes — so field-level delta needs a wire
+    change, and that is a decision to take with a number in hand. See BENCHMARK.md Part XV.
 - **`ImportanceIntervalBench` now runs the SHIPPED policy, and until it did it disagreed
   with a live sweep by 47 percentage points.** It carried a hand-written interval policy
   that gave a near player interval 1, so on a `cluster` population -- where every entity is

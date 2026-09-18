@@ -332,8 +332,12 @@ spec:
                 # COMBAT}. Weighting a factor this server has no data for (PARTY, PVP,
                 # BOSS, QUEST, VISIBILITY, ZONE, INTERACTION) exits 2 rather than being
                 # ignored. Read importance_profile off /status to see what a pod runs.
+                # DEV fleet only, and only the ORDERING half: balanced changes which
+                # entities are emitted first when the downlink budget bites, defers
+                # nothing, and adds no staleness. The schedule below stays off -- that
+                # half halves player update rate (BENCHMARK.md Part XIV 44).
                 - name: GAMESERVER_IMPORTANCE
-                  value: "legacy"
+                  value: "balanced"
                 # Per-importance send intervals: how often an entity of a given
                 # importance is RE-SENT. "off" (default) means every dirty entity is due
                 # every world tick. "tiered" withholds lower-importance entities for a
