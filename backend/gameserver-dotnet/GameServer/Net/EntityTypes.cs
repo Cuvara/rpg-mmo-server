@@ -55,6 +55,20 @@ public static class EntityTypes
     public static IReadOnlyCollection<string> KnownNames => ToEnum.Keys;
 
     /// <summary>
+    /// Whether a simulation type string names a player.
+    /// </summary>
+    /// <remarks>
+    /// An ordinal compare against <see cref="Player"/> rather than
+    /// <see cref="Parse(string?)"/>: this runs per AOI candidate per connection per
+    /// snapshot, and the dictionary lookup buys nothing when the question is binary. Case
+    /// sensitive on purpose — the simulation produces these strings, the dictionary above
+    /// is ordinal too, and a "Player" that matched here while failing to parse would be a
+    /// silent disagreement between two answers to the same question.
+    /// </remarks>
+    public static bool IsPlayer(string? typeName) =>
+        string.Equals(typeName, Player, StringComparison.Ordinal);
+
+    /// <summary>
     /// Populate an entity's type fields from a simulation type string, setting
     /// exactly one of <c>Type</c> or <c>TypeName</c>.
     /// </summary>

@@ -276,6 +276,28 @@ public sealed class SnapshotDeltaState
     public string? SelfId { get; set; }
 
     /// <summary>
+    /// Per-factor importance weights for this connection
+    /// (<c>GAMESERVER_IMPORTANCE_*</c>). Default is
+    /// <see cref="ReplicationImportance.Weights.Legacy"/> — every factor zero, every score
+    /// zero, every comparison on that key a tie, and therefore the pre-importance ordering
+    /// byte for byte.
+    /// </summary>
+    public ReplicationImportance.Weights ImportanceWeights { get; set; } =
+        ReplicationImportance.Weights.Legacy;
+
+    /// <summary>
+    /// The AOI radius this connection is gathered with
+    /// (<see cref="Server.AoiSettings"/>), so the distance factor can be normalised by it.
+    /// </summary>
+    /// <remarks>
+    /// Carried here rather than passed per encode because it is a property of the
+    /// deployment, not of a snapshot, and threading it through <c>Encode</c> would put a
+    /// constant in the hot signature. Defaults to the compiled-in radius so a caller that
+    /// never sets it still normalises against something sane rather than dividing by zero.
+    /// </remarks>
+    public float AoiRadius { get; set; } = GameConstants.DefaultAoiRadius;
+
+    /// <summary>
     /// Ticks each currently-deferred entity has been waiting, keyed like
     /// <see cref="_lastSent"/>. Absent means "nothing owed".
     /// </summary>
@@ -351,6 +373,7 @@ public sealed class SnapshotDeltaState
     private struct CandidateSort
     {
         public int Age;
+        public float Score;
         public float DistanceSq;
         public int Index;
         public bool Self;
@@ -401,6 +424,8 @@ public sealed class SnapshotDeltaState
         {
             if (a.Self != b.Self) return a.Self ? -1 : 1;
             if (a.Age != b.Age) return b.Age.CompareTo(a.Age); // older first
+            int g = b.Score.CompareTo(a.Score);                // higher score first
+            if (g != 0) return g;
             int d = a.DistanceSq.CompareTo(b.DistanceSq);      // nearer first
             if (d != 0) return d;
             return a.Index.CompareTo(b.Index);
@@ -886,10 +911,12 @@ public sealed class SnapshotDeltaState
             float dx = e.Position.X - _observer.X;
             float dy = e.Position.Y - _observer.Y;
             _shedAge.TryGetValue(e.Key, out int age);
+            float distanceSq = (dx * dx) + (dy * dy);
             _sortBuffer[c] = new CandidateSort
             {
                 Age = age,
-                DistanceSq = (dx * dx) + (dy * dy),
+                Score = ScoreOf(in e, distanceSq),
+                DistanceSq = distanceSq,
                 Index = index,
                 Self = SelfId != null && string.Equals(e.Id, SelfId, StringComparison.Ordinal),
             };
@@ -960,6 +987,43 @@ public sealed class SnapshotDeltaState
     /// the only place _lastSent and _handles may forget an entity, and it must not run
     /// for an id that stayed off the wire.
     /// </summary>
+    /// <summary>
+    /// Gameplay importance for one candidate, from state already in hand at the sort.
+    /// </summary>
+    /// <remarks>
+    /// Returns 0 without touching anything when every weight is zero, which is the shipped
+    /// default: the whole term then costs one struct field compare per candidate and the
+    /// comparison it feeds always ties.
+    ///
+    /// <para><b>The "changed" inputs are computed against <see cref="_lastSent"/>, not
+    /// against the previous tick.</b> What matters is whether THIS connection has been told,
+    /// and two connections seeing the same entity legitimately disagree about that — one may
+    /// have been shed last snapshot. Reading a world-level "changed this tick" flag would
+    /// score an entity as fresh for a client that never received the change.</para>
+    /// </remarks>
+    private float ScoreOf(in EntityView e, float distanceSq)
+    {
+        ReplicationImportance.Weights w = ImportanceWeights;
+        if (w.AllZero) return 0f;
+
+        bool hpChanged = true, actionChanged = true;
+        if (_lastSent.TryGetValue(e.Key, out SentView prev))
+        {
+            hpChanged = prev.Hp != e.Hp || prev.MaxHp != e.MaxHp;
+            actionChanged = prev.Action != e.Action || prev.ActionSeq != e.ActionSeq;
+        }
+
+        var inputs = new ReplicationImportance.Inputs(
+            distanceSq,
+            AoiRadius,
+            isPlayer: EntityTypes.IsPlayer(e.Type),
+            action: e.Action,
+            hpChanged: hpChanged,
+            actionChanged: actionChanged);
+
+        return ReplicationImportance.Score(in inputs, in w);
+    }
+
     private void CommitRemovals(SnapshotMessage msg, int count)
     {
         for (int r = 0; r < count; r++)

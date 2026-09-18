@@ -7,6 +7,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`ReplicationImportance` — per-connection entity importance, wired into the snapshot
+  scheduler and shipped switched off.** One scalar, computed where the scheduler already has
+  every input in hand, inserted as the **third** sort key in `CandidateComparer`.
+  - **Every weight defaults to zero, and that is the acceptance criterion.** With
+    `Weights.Legacy` the term is always 0, every comparison on that key ties, and the
+    ordering is the pre-importance one — proved by `SnapshotByteIdentityTests` and
+    `TrimmedGatherByteIdentityTests` passing with **no test file touched and no digest
+    rebaselined**. Wiring a new sort key into a shipped encoder is exactly the change that
+    looks correct and silently reorders the wire; this makes the migration provable instead
+    of argued.
+  - **`Self` and deferral `Age` are deliberately NOT in the score.** They stay as
+    lexicographic keys *ahead* of it, because the starvation bound — max deferral is the
+    size of the dirty set, independent of session length — is a consequence of the
+    comparison being strictly oldest-first. Folding age into a weighted sum makes fairness a
+    function of the weights, so a weight change would silently retune it.
+    `ImportanceOrderingTests.DeferralAge_OutranksEveryGameplayScore` pins this: the
+    lowest-scoring entity in the world, against a crowd of maximally important ones, is
+    still carried within a bounded gap.
+  - **Four factors have a data source; seven are named, reserved and zero.** Distance
+    (normalised by `GAMESERVER_AOI_RADIUS`, so weights do not silently retune when a
+    deployment changes its radius), visible-state change, entity type, and combat via
+    `EntityAction`. Party, PvP, boss/elite, quest, visibility, zone and interaction read
+    gameplay systems that **do not exist on this server** — there is no party here (parties
+    live in Nakama and the gateway consumes them), no PvP, no boss tier, no quests, no line
+    of sight, no intra-map zones. They are present so adding one later is a weight change
+    rather than a redesign, and `ReservedFactors_ContributeNothingBecauseNothingFeedsThem`
+    makes "someone weighted party and nothing happened" a red test rather than a silent
+    non-event.
+  - "Changed" is measured against `_lastSent` — what THIS connection was told — not against
+    a world-level dirty flag. Two connections seeing one entity legitimately disagree about
+    whether it is fresh, because one of them may have been shed last snapshot.
+  - `EntityTypes.IsPlayer` is an ordinal compare rather than a dictionary `Parse`: this runs
+    per AOI candidate per connection per snapshot, and the question is binary.
+  - Tests: `ReplicationImportanceTests` (20) and `ImportanceOrderingTests` (4). Both
+    ordering tests assert `EntitiesShed > 0` first — if the budget never bit, the sort never
+    ran and the assertion about its order proves nothing.
 - **Attacks now reach the wire, and two in a row are distinguishable.** Two defects, one
   cause, both invisible to every existing test.
   - **The sampling gap.** Actions are written on the CRITICAL group (60 Hz) and sampled by
