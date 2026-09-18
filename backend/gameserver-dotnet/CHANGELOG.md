@@ -7,6 +7,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`GameServer.Tests/Bench/ImportanceIntervalBench.cs` — what importance-driven
+  replication intervals would save, measured through the real encoder before any of it is
+  built.** Two `SnapshotDeltaState` instances over one synthetic population: one as today,
+  one with the candidate set filtered by a distance- and type-tiered interval policy. No
+  production code changes — the policy lives in the bench.
+  - A deferred entity is **substituted with its last-sent values, never removed** from the
+    gathered span. Removing it would make the encoder conclude it left the AOI and emit a
+    despawn, which is both wrong and more expensive than the update being skipped; the
+    substitution makes `SentView.Equals` report it unchanged, which is the same wire
+    outcome the real implementation would produce by not adding it to `_candidates`.
+  - **`cluster` saves 0.0 %**, and that is the point of running it: 200 players standing on
+    each other are all near players, all tier 1, and that is the shape BENCHMARK.md's
+    published ceiling was measured on. `realistic` saves 44–46 % at a bounded 3 world ticks
+    (200 ms) of staleness — but this server's enemy AI is `Scaffolding/`, so that shape is a
+    guess and the bench says so.
+  - The saving is reported **next to its cost**: max and p99 staleness in world ticks. A
+    policy that halves bytes by letting an entity go a second stale has not bought anything.
+  - Skipped unless `BENCH_TICK=1`, like the other benches; the output is the deliverable and
+    nothing asserts on the numbers. See BENCHMARK.md Part XIII §35.
 - **Attacks now reach the wire, and two in a row are distinguishable.** Two defects, one
   cause, both invisible to every existing test.
   - **The sampling gap.** Actions are written on the CRITICAL group (60 Hz) and sampled by

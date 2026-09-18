@@ -45,7 +45,24 @@ type ResultConfig struct {
 	MapID            string  `json:"map_id"`
 	Transport        string  `json:"transport"`
 	HoldGateway      bool    `json:"hold_gateway"`
-	TickBudgetSec    float64 `json:"tick_budget_sec"`
+	// TickBudgetSec is 1/SIM_CRITICAL_HZ: the budget for ONE BASE TICK, which is
+	// what gameserver_tick_duration_seconds times.
+	TickBudgetSec float64 `json:"tick_budget_sec"`
+	// SnapshotPeriodSec is 1/SIM_WORLD_HZ: the expected interval between
+	// snapshots, because replication is gated to the world group (ADR-13
+	// decision 7) and not to the base tick.
+	//
+	// Recorded separately from TickBudgetSec because the two were one number
+	// until the multi-rate scheduler and the harness kept treating them as one
+	// afterwards. At the 60/15 default they differ by 4x.
+	SnapshotPeriodSec float64 `json:"snapshot_period_sec"`
+	// SimCriticalHz / SimWorldHz are the rates the two periods above were derived
+	// from, and RatesSource says whether the server was asked or the harness
+	// assumed. A result judged against assumed rates is still a result; one that
+	// does not say which is a result nobody can check.
+	SimCriticalHz float64 `json:"sim_critical_hz"`
+	SimWorldHz    float64 `json:"sim_world_hz"`
+	RatesSource   string  `json:"rates_source"`
 }
 
 // ClientStats is everything the virtual clients observed themselves.
