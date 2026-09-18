@@ -21,6 +21,8 @@ namespace GameServer.Observability;
 /// gameserver.snapshots.entities_shed  -> gameserver_snapshots_entities_shed_total
 /// gameserver.snapshots.removals_deferred -> gameserver_snapshots_removals_deferred_total
 /// gameserver.snapshots.max_shed_age   -> gameserver_snapshots_max_shed_age
+/// gameserver.snapshots.deferred_by_interval -> gameserver_snapshots_deferred_by_interval_total
+/// gameserver.snapshots.max_state_age  -> gameserver_snapshots_max_state_age
 /// gameserver.transport.encrypted      -> gameserver_transport_encrypted{transport,cipher}
 /// gameserver.transport.authenticated  -> gameserver_transport_authenticated{transport,cipher}
 /// gameserver.player.saves             -> gameserver_player_saves_total
@@ -67,6 +69,10 @@ public sealed class GameMetrics : IDisposable
     private readonly string _mapId;
     private readonly Counter<long> _snapshotBytes;
     private readonly Counter<long> _snapshotEntitiesShed;
+    private readonly Counter<long> _snapshotDeferredByInterval;
+#pragma warning disable CS0414 // held so the gauge stays registered for the meter's lifetime
+    private readonly ObservableGauge<int> _snapshotMaxStateAge;
+#pragma warning restore CS0414
     private readonly Counter<long> _snapshotRemovalsDeferred;
     private readonly Counter<long> _playerSaves;
     private readonly Counter<long> _eventsPublished;
@@ -173,6 +179,27 @@ public sealed class GameMetrics : IDisposable
                          "length prefix included. Divide by players_online and by the scrape " +
                          "interval for per-client downlink KB/s, the figure ADR-7's < 50 KB/s " +
                          "mobile threshold is about.");
+
+        _snapshotDeferredByInterval = _meter.CreateCounter<long>(
+            "gameserver.snapshots.deferred_by_interval",
+            description: "Entity updates WITHHELD because the entity's importance tier was " +
+                         "not due this world tick (GAMESERVER_REPLICATION_SCHEDULE). " +
+                         "Distinct from entities_shed, which is the byte budget biting: this " +
+                         "is policy, that is pressure, and a deployment with the schedule off " +
+                         "reports zero here for ever. Read it with max_state_age -- a high " +
+                         "rate with a low age is the schedule doing exactly what it was " +
+                         "configured to do.");
+
+        _snapshotMaxStateAge = _meter.CreateObservableGauge(
+            "gameserver.snapshots.max_state_age",
+            ObserveMaxStateAge,
+            description: "Longest gap, in WORLD TICKS, between an entity's state going stale " +
+                         "for some client and being re-sent. The cost side of the replication " +
+                         "schedule. NOT the same number as max_shed_age: that counts budget " +
+                         "deferrals and this counts schedule deferrals, and a schedule " +
+                         "deferral never touches the budget's bookkeeping -- so reading one " +
+                         "for the other reports a healthy zero while entities go seconds " +
+                         "without an update.");
 
         _snapshotEntitiesShed = _meter.CreateCounter<long>(
             "gameserver.snapshots.entities_shed",
@@ -544,6 +571,8 @@ public sealed class GameMetrics : IDisposable
     }
 
     private int _maxShedAge;
+    private int _maxStateAge;
+    private long _snapshotDeferredByIntervalTotal;
     private long _snapshotBytesTotal;
     private long _snapshotEntitiesShedTotal;
     private long _snapshotRemovalsDeferredTotal;
@@ -561,6 +590,25 @@ public sealed class GameMetrics : IDisposable
     public int MaxShedAge => Volatile.Read(ref _maxShedAge);
 
     private Measurement<int> ObserveMaxShedAge() => new(Volatile.Read(ref _maxShedAge), _mapTags);
+
+    /// <summary>Entity updates withheld by the replication schedule since process start.</summary>
+    public long SnapshotDeferredByInterval => Interlocked.Read(ref _snapshotDeferredByIntervalTotal);
+
+    /// <summary>Longest schedule deferral, in world ticks, observed on this server.</summary>
+    public int MaxStateAge => Volatile.Read(ref _maxStateAge);
+
+    private Measurement<int> ObserveMaxStateAge() => new(Volatile.Read(ref _maxStateAge), _mapTags);
+
+    /// <summary>Record one tick's worth of replication-schedule deferrals.</summary>
+    public void RecordSnapshotSchedule(long deferredByInterval, int maxStateAge)
+    {
+        if (deferredByInterval > 0)
+        {
+            _snapshotDeferredByInterval.Add(deferredByInterval, _mapTags);
+            Interlocked.Add(ref _snapshotDeferredByIntervalTotal, deferredByInterval);
+        }
+        if (maxStateAge > Volatile.Read(ref _maxStateAge)) Volatile.Write(ref _maxStateAge, maxStateAge);
+    }
 
     private TagList _transportTags;
     private volatile bool _transportEncrypted;

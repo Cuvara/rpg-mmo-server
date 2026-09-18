@@ -444,6 +444,21 @@ services:
       # BOSS, QUEST, VISIBILITY, ZONE, INTERACTION) exits 2 rather than being
       # ignored. Read importance_profile off /status to see what a pod runs.
       GAMESERVER_IMPORTANCE: ${GAMESERVER_IMPORTANCE:-legacy}
+      # Per-importance send intervals: how often an entity of a given
+      # importance is RE-SENT. "off" (default) means every dirty entity is due
+      # every world tick. "tiered" withholds lower-importance entities for a
+      # configured interval (score>=8 every tick, >=3 for 133ms, else 266ms).
+      # 
+      # Intervals are configured in MILLISECONDS and converted through
+      # SIM_WORLD_HZ, so the same setting holds the same wall time at any world
+      # rate. "tiered" without GAMESERVER_IMPORTANCE weights exits 2.
+      # 
+      # Read replication_schedule, snapshot_deferred_by_interval and
+      # snapshot_max_state_age off /status. The last is NOT
+      # snapshot_max_shed_age: that counts byte-budget deferrals, this counts
+      # schedule ones, and a schedule deferral never touches the budget's
+      # bookkeeping. See ADR-27.
+      GAMESERVER_REPLICATION_SCHEDULE: ${GAMESERVER_REPLICATION_SCHEDULE:-off}
       # /metrics + /healthz. Binds the wildcard, so it answers on any Host —
       # scraped in-network as gameserver-dotnet:9101 and from the host as
       # 127.0.0.1:9101, with no `Host:` header trickery on either path.

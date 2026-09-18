@@ -250,6 +250,17 @@ if (!GameServer.Server.ImportanceSettings.TryCreate(
 
 GameServer.Server.ImportanceSettings importance = importanceParsed!;
 
+if (!GameServer.Server.ReplicationSchedule.TryCreate(
+        GetArg(args, "--replication-schedule") ?? Env(GameServer.Server.ReplicationSchedule.EnvVar),
+        importance.Enabled,
+        out GameServer.Server.ReplicationSchedule? scheduleParsed, out string? scheduleError))
+{
+    logger.LogCritical("invalid replication schedule: {Error}", scheduleError);
+    return 2;
+}
+
+GameServer.Server.ReplicationSchedule replicationSchedule = scheduleParsed!;
+
 
 // Resolved once so a bad AGONES_SDK_HTTP_PORT warns once rather than in both the
 // start-up banner and the SDK constructor. Meaningless when useAgones is false.
@@ -294,6 +305,7 @@ logger.LogInformation("  Snapshots: {Mode}", keyframeInterval > 0
 logger.LogInformation("  MapSize:   {Width}x{Height} world units (centered on origin)", mapWidth, mapHeight);
 logger.LogInformation("  AOI:       {Aoi}", aoi);
 logger.LogInformation("  Importance:{Importance}", " " + importance);
+logger.LogInformation("  Schedule:  {Schedule}", replicationSchedule.Describe(worldHz));
 if (aoi.CoversWholeMap)
 {
     // Not a refusal: legitimate in a small dungeon instance, a mistake on an open map, and
@@ -833,6 +845,7 @@ var options = new ServerOptions
     MaxSnapshotBytes = maxSnapshotBytes,
     Aoi = aoi,
     Importance = importance,
+    ReplicationSchedule = replicationSchedule,
     SealedTransport = sealedRequirement,
     ServerIdentity = serverIdentity,
     JwtSecret = jwtSecret,
@@ -1015,6 +1028,9 @@ metricsEndpoint?.SetStatusProvider(() =>
         AoiCoversWholeMap = aoi.CoversWholeMap,
         ImportanceProfile = importance.Profile,
         ImportanceWeights = importance.ToString(),
+        ReplicationSchedule = replicationSchedule.Describe(worldHz),
+        SnapshotDeferredByInterval = metrics.SnapshotDeferredByInterval,
+        SnapshotMaxStateAge = metrics.MaxStateAge,
         SnapshotBytes = metrics.SnapshotBytes,
         SnapshotEntitiesShed = metrics.SnapshotEntitiesShed,
         SnapshotRemovalsDeferred = metrics.SnapshotRemovalsDeferred,

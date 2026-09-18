@@ -344,6 +344,36 @@ public sealed class ServerStatus
     public string ImportanceWeights { get; set; } = "";
 
     /// <summary>
+    /// Per-importance send intervals in force (<c>GAMESERVER_REPLICATION_SCHEDULE</c>),
+    /// already converted to world ticks at this server's <c>SIM_WORLD_HZ</c>.
+    /// </summary>
+    /// <remarks>
+    /// Rendered rather than named because the configured value is milliseconds and the
+    /// behaviour is ticks: the same "266ms" is 4 ticks at 15Hz and 8 at 30Hz, and an
+    /// operator comparing two pods needs the number that actually applies.
+    /// </remarks>
+    [JsonPropertyName("replication_schedule")]
+    public string ReplicationSchedule { get; set; } = "";
+
+    /// <summary>Entity updates withheld because their importance tier was not due.</summary>
+    [JsonPropertyName("snapshot_deferred_by_interval")]
+    public long SnapshotDeferredByInterval { get; set; }
+
+    /// <summary>
+    /// Longest gap, in world ticks, between an entity's state going stale for a client and
+    /// being re-sent.
+    /// </summary>
+    /// <remarks>
+    /// The cost side of the schedule, and NOT the same number as
+    /// <c>snapshot_max_shed_age</c>: that one counts budget deferrals, this one counts
+    /// schedule deferrals, and a schedule deferral never touches the budget's bookkeeping.
+    /// Reading one for the other reports a healthy zero while entities go seconds without an
+    /// update.
+    /// </remarks>
+    [JsonPropertyName("snapshot_max_state_age")]
+    public int SnapshotMaxStateAge { get; set; }
+
+    /// <summary>
     /// Bytes of snapshot frames written to client sockets since process start, envelope
     /// and length prefix included. With <see cref="UptimeSeconds"/> and
     /// <see cref="PlayersOnline"/> this is the per-client downlink rate ADR-7's

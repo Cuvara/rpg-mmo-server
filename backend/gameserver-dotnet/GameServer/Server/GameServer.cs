@@ -155,6 +155,12 @@ public class ServerOptions
     public ImportanceSettings Importance { get; set; } = ImportanceSettings.Default;
 
     /// <summary>
+    /// Per-importance send intervals (<c>GAMESERVER_REPLICATION_SCHEDULE</c>), validated by
+    /// <see cref="ReplicationSchedule"/>. Defaults to off.
+    /// </summary>
+    public ReplicationSchedule ReplicationSchedule { get; set; } = ReplicationSchedule.Off;
+
+    /// <summary>
     /// Whether the gameplay hop requires a sealed session
     /// (<c>GAMESERVER_SEALED</c>: <c>off</c> or <c>require</c>).
     /// </summary>
@@ -1517,6 +1523,10 @@ public sealed class GameServerHost : IAsyncDisposable
         // radius would weight distance wrongly on every candidate -- invisibly, because the
         // ordering would still look plausible.
         conn.DeltaState.AoiRadius = _options.Aoi.Radius;
+        conn.DeltaState.Schedule = _options.ReplicationSchedule;
+        // The schedule's milliseconds mean nothing without the rate that advances the ticks
+        // they convert to, and snapshots ship on the WORLD group, not the base tick.
+        conn.DeltaState.WorldHz = _tickLoop.Rates.WorldHz;
 
             // Register connection, retiring the reservation under the same lock it was
             // taken under. The one way this fails: the reservation was a replacement of a

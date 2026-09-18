@@ -3730,3 +3730,100 @@ description is "open-world maps + instanced dungeons"; half of it has no plumbin
 | 24 | Meta-hop (Nakama) confidentiality | **Nakama terminates TLS itself** (`--socket.ssl_certificate`), behind `NAKAMA_TLS_CERT`/`NAKAMA_TLS_KEY`, **defaulting off** and pinned at every deploy path; `NAKAMA_URL` moves to `https://` in the same change because the **C# game server is a second consumer of this hop** (`NakamaClient.cs`, compose only — absent under Agones). Measured: the flag covers port 7350 **including the `/ws` realtime socket**, TLS-only, and does **NOT** cover the console (7351) or metrics (9100), both published on `0.0.0.0` in compose; upstream explicitly warns against direct SSL termination and we take it anyway because an edge terminator buys nothing on a single-node box. **The larger finding is not confidentiality**: both Nakama static keys sit at their published defaults and both authenticate — `defaulthttpkey` reaches the server-only reward and leaderboard RPCs — and `cd.yml` never wrote `NAKAMA_HTTP_KEY` at all, so every deployed compose environment ran the default. CD now fails on a missing or default key. **No `InsecureSkipVerify` anywhere, including dev**: dev runs the flag off rather than on with a disabled check. Credentials in URLs (the `/ws` token, `http_key`) survive TLS into access logs and are an upstream API shape we cannot fix |
 | 25 | Game-server identity | **Accepted 2026-09-12; BACKEND IMPLEMENTED 2026-09-13** (decisions 1-5; decision 6 as a reporting contract that resolves to the weaker truth everywhere, because ADR-23 TLS is off; decisions 7-8 outstanding, and the Unity IL2CPP probe has NOT been run). The game server signs the sealed handshake with an **Ed25519 key it generates per pod at startup**, whose public half travels pod -> registry -> gateway -> `enter_world_resp`. Replaces a residual that no configuration can close: the ADR-22 binding is a **symmetric** HMAC under `JOIN_TOKEN_SECRET` (`SealedTranscriptSigner.cs:21-32`, `SealedCrypto.cs:98-107`), which is the key the gateway **mints join tokens with** (`gateway/transfer/join_token.go:17-23`, `shared/config/config.go:25-28`) - so a client able to verify is a client able to forge, and `binding_verified=false` (`shared/sealed/client.go:101-120`) is permanent for every shipped player. Consequence today: the sealed hop is confidential against a **passive** eavesdropper and offers **nothing** against an active one. Per-pod, not per-fleet, because the peer is an Agones replica whose address is composed at scheduling time (ADR-16): rotation is pod replacement, and a fleet-wide private key mounted into the most player-exposed process is the worst-isolated secret available. **The key is delivered over the gateway hop, so it is exactly as trustworthy as that hop** - plaintext everywhere today, ADR-23's TLS implemented and off because it needs certificate distribution - therefore a client reports `server_identity_verified` only when the key arrived over an authenticated hop, and reports the weaker truth otherwise. New field numbers only (`server_signature = 4`); the transcript bytes do not change; old clients do not break; no negotiation, no fallback. **TLS on the gameplay hop rejected** (no stable address to certify, deletes machinery live in production, does not apply to KCP), **pinning a fleet key in the player rejected as the default** (rotation becomes an app-store release - ADR-23 Option B), **doing nothing rejected** (an always-false boolean is a dead end, not a backlog item). Ed25519 under Unity IL2CPP is an unrun go/no-go probe, asserting the NEGATIVE case |
 | 26 | Dungeon instancing | **Accepted 2026-09-12 as the target model; NOT implemented.** Implements ADR-14 stage 6. Entry reuses `MsgEnterWorld` with a new **`party_id`**; there is no `MsgEnterDungeon`, because a second message type duplicates the auth, budget, rate-limit and error paths `handleEnterWorld` already owns. **The instance is keyed by the PARTY, not the content id** (`dungeon:party:{party_id} -> ServerInfo`): the first member allocates, the rest are handed the same address. **ADR-2 does not apply and must not be extended to cover it** - two servers on one `map_id` split a shared world, whereas each dungeon instance is a distinct logical world by design; keying by content would give the whole game one shared dungeon. Membership is verified against Nakama's `party_get` over the internal HTTP key **once per entry, never per tick**, and is **not mirrored** into the gateway or Redis - a mirror of an authority is a second authority that disagrees under partition. **A "checkpoint" here is the player at the boundary, not encounter progress**: a crash costs the run and nothing of the character, and the `dungeon_checkpoints` table named in `shared/CLAUDE.md` stays deferred, because it is only worth building once there is an encounter worth losing. **A dungeon server must not save `map_id` or position** - `player_states` holds one row per player and `PlayerSpawn` discards another map's coordinates, so a normal save would stamp the dungeon over the origin and silently teleport the player to a spawn point as the price of entering; the cost of that choice is that **position inside a dungeon is not durable**. The pod **shuts itself down** when the last member's 60s hold expires, because the pod is the only party that knows both facts and a pod outliving its party can never be allocated again. Return is the existing `MsgTransferMap`. **The measured allocation leak is CLOSED (2026-09-13):** a pod allocated and then never joined never satisfied decision 6 (`everHadPlayer` stays false) and Agones does not reclaim an Allocated pod, so the instance leaked. A second rule, `ShouldShutdownUnjoinedInstance`, is the **exact complement of decision 6 on `everHadPlayer`** -- the two can never both fire -- and releases a dungeon pod that has been `Allocated` (read from the sidecar's `status.state`, not assumed) for longer than `GAMESERVER_JOIN_DEADLINE_SECONDS` with no player and no handshake in flight. **90s, not the 30s join-token TTL the ADR proposed**: the gateway mints that token *after* allocating and after a 15s registration wait, so the last legitimate arrival is ~45s past `Allocated`. `Stopwatch`, never wall clock (#153). **A dungeon pod self-registers NOTHING** - `RegistrationService` writes `servers:map:{map_id}` for every server today and nothing gates it on mode, which on a dungeon pod would both advertise an instance to `FindServer` and, on a fleet pinning no map id, write the empty key. Notable knock-on: a dungeon fleet pins **no** `GAMESERVER_MAP_ID`, so it is the first fleet here that **should** carry spare Ready pods and ADR-18's `cluster.autoscaler` check must not fail it. Rejected: a new message type, content-keyed instances, mirrored membership, encounter checkpoints now, saving normally, a sweeper |
+
+---
+
+## ADR-27 — Replication importance orders what is sent; it does not decide how much, and it is off by default
+
+**Status:** accepted 2026-09-18. Extends ADR-13 (which separated simulation rate from
+replication rate) and sits above the per-connection downlink budget. Constrained by ADR-7
+(the unknown player ceiling) and by the measurements in `BENCHMARK.md` Part XIII.
+
+**Context.** The snapshot encoder already had a per-connection byte budget and, when it bit,
+a priority order — self, then longest-deferred, then nearest. The proposal on the table was
+to generalise that into importance-driven adaptive replication: score every entity per
+connection, and let the score drive both the emission order and how often an entity is sent
+at all.
+
+Before building it, it was measured. Two numbers decided the shape of this ADR:
+
+1. **Downlink is exactly linear in AOI population.** Bytes per entity per snapshot are flat
+   at 24.77–25.00 across a 4× population range, so
+   `KB/s per client = AOI population × 24.9 B × SIM_WORLD_HZ / 1000`. At 200 players that
+   predicts 74.7 against a measured 75.0.
+2. **Tiering saves 0.0% on the population that defines the published ceiling.**
+   `ImportanceIntervalBench` runs the real encoder twice over one world. On `cluster` — 200
+   players standing on each other, the shape Part IX and Part XIII both measured the ceiling
+   on — every entity is a near player, every entity is top tier, and nothing is demoted. On a
+   `realistic` shape it saves 44–46% at a bounded 200ms of staleness, but this server has no
+   realistic population: its enemy AI is `Scaffolding/`, thirty mobs walking to the origin.
+
+**Decisions.**
+
+1. **Importance orders; it does not budget and it does not gate interest.** Three separate
+   concerns, three separate knobs: `GAMESERVER_AOI_RADIUS` decides whether an entity is a
+   candidate, `GAMESERVER_MAX_SNAPSHOT_BYTES` decides how much of one snapshot may be spent,
+   and `GAMESERVER_IMPORTANCE` decides the order among candidates. Importance **cannot**
+   rescue an entity that interest excluded — a boss telegraph outside the radius is a radius
+   problem, not a scoring problem.
+
+2. **Deferral age stays strictly above the score.** The starvation bound — max deferral is
+   the size of the dirty set, independent of session length — is a consequence of the
+   comparison being oldest-first. Folding age into a weighted sum would make fairness a
+   function of the weights, so a weight change would silently retune it while every existing
+   test kept passing, because they all run at zero. `Self` stays above both: it is the
+   reconciliation anchor and the one state a client cannot interpolate.
+
+3. **Eleven factors are named; four are implemented; seven are refused rather than ignored.**
+   Party, PvP, boss/elite, quest, visibility, zone and interaction read gameplay systems this
+   server does not have. Setting a weight on one **exits 2 at startup**: accepting it would
+   let a manifest describe a policy the server cannot run and leave whoever wrote it reading
+   their own configuration as if it had taken effect. Party is the sharpest case — parties
+   live in Nakama and are consumed by the gateway, and inside a dungeon instance every
+   occupant *is* the party, so the factor is degenerate exactly where the data would exist.
+
+4. **Send intervals are configured in milliseconds, never in ticks.** A tick count means
+   nothing without the rate that advances it, and that rate is deployment configuration. The
+   conversion **rounds to nearest**, and flooring was tried first and was wrong: 133ms at
+   15Hz is 1.995 ticks, so the middle band floored to 1, became "every tick", and still
+   appeared in the banner and on `/status`. A policy whose middle band silently does not
+   exist is worse than one that is 0.3ms late, and it was caught only by reading a running
+   server's `replication_schedule` line — not by any test.
+
+5. **An edge is never deferred.** Health and the action retrigger counter are occurrences,
+   not states. Withholding one is not a late update, it is a dropped event: the next snapshot
+   carries only the state afterwards, so the client never learns the hit or the swing
+   happened. Position and facing are safe to defer; these are not.
+
+6. **A keyframe never applies intervals.** A keyframe is the complete visible set and the
+   client discards anything it does not list. Deferring there would not make an entity late,
+   it would make it vanish until some later delta happened to carry it.
+
+7. **The schedule applies on both encoder paths.** `GAMESERVER_MAX_SNAPSHOT_BYTES=0` is
+   documented as disabling the budget; it must not also disable the schedule, which is a
+   different concern. Gating one on the other was the first implementation and it meant a
+   deployment could configure a policy that silently did nothing.
+
+8. **Both ship OFF.** `GAMESERVER_IMPORTANCE=legacy` and
+   `GAMESERVER_REPLICATION_SCHEDULE=off` are the defaults, and every deployment manifest sets
+   them explicitly. Reordering what is shed, and withholding updates, are real behavioural
+   changes; the measurement says they buy nothing on the only population this project has
+   ever measured, and the two cheaper levers — a smaller AOI radius (a square law, already
+   shipped) and field-level delta (an estimated 44% of every entity's bytes, unmeasured) —
+   are both larger. Turning these on is a decision a benchmark should make.
+
+**Consequences.**
+
+- **The case for this feature cannot be made from the bandwidth figure this project
+  publishes.** 75.0 KB/s per client at 200 players is a worst-case-density number, and
+  density is precisely where tiering has nothing to demote. Where tiering works — dispersed
+  populations — the server already sits at 36.3 KB/s, inside ADR-7's mobile budget.
+- **`snapshot_max_state_age` is a new and separate gauge from `snapshot_max_shed_age`.** A
+  not-due entity is not a shed entity, so the budget's bookkeeping is blind to schedule
+  deferrals; reading one for the other reports a healthy zero while entities go stale.
+- **Weights and intervals are only meaningful together.** `tiered` without importance weights
+  is refused, because every score would be zero, every entity would land in the slowest band,
+  and the result would be a uniform staleness increase wearing the name of a policy.
+- The scoring path costs one struct-field compare per candidate when disabled, and the score
+  is computed once per candidate and reused by the sort rather than recomputed.
+

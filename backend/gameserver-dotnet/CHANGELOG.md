@@ -7,6 +7,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`GAMESERVER_REPLICATION_SCHEDULE` — per-importance send intervals (ADR-27).** `off`
+  (the default) is every dirty entity due every world tick; `tiered` withholds
+  lower-importance entities for a configured interval.
+  - **Intervals are milliseconds, never ticks**, converted through `SIM_WORLD_HZ`. The
+    conversion **rounds to nearest, and flooring was tried first and was wrong**: 133ms at
+    15Hz is 1.995 ticks, so the middle band floored to 1, became "every tick", and still
+    appeared in the banner and on `/status`. A policy whose middle band silently does not
+    exist is worse than one that is 0.3ms late — and it was caught by reading a running
+    server's `replication_schedule` line, not by any test. The ceiling is applied to the
+    interval an entity ACTUALLY waits rather than to the number someone typed.
+  - **An edge is never deferred.** Health and the action retrigger counter are occurrences,
+    not states; withholding one is a dropped event, because the next snapshot carries only
+    the state afterwards.
+  - **A keyframe never applies intervals.** The client discards anything a keyframe does not
+    list, so deferring there would make an entity vanish rather than arrive late.
+  - **The schedule applies on BOTH encoder paths.** Gating it on the byte budget was the
+    first implementation, and it meant `GAMESERVER_MAX_SNAPSHOT_BYTES=0` — documented as
+    disabling only the budget — silently disabled the schedule too.
+  - **`tiered` without importance weights exits 2**: every score would be zero, every entity
+    would land in the slowest band, and the result would be a uniform staleness increase
+    wearing the name of a policy.
+  - New `gameserver_snapshots_deferred_by_interval_total` and
+    `gameserver_snapshots_max_state_age`. The gauge is deliberately **not**
+    `max_shed_age`: a not-due entity is not a shed entity, so the budget's bookkeeping is
+    blind to schedule deferrals and reading one for the other reports a healthy zero while
+    entities go stale.
+  - Per-entity send-tick bookkeeping is pruned everywhere `_lastSent` is — despawn commit,
+    keyframe, and the deferral prune — so it cannot grow for the life of a connection.
+  - Tests: `ReplicationScheduleTests` (14), covering newly-visible bypass, keyframe
+    exemption, edge exemption, convergence after a deferral, the bounded staleness the
+    existing starvation test cannot see, and the bookkeeping leak.
+  - Verified against a running server: `tiered` without weights exits 2; at `SIM_WORLD_HZ=15`
+    the bands render `133ms = 2 ticks, 266ms = 4 ticks`, and at 30 they render `4` and `8` —
+    the same wall time at both rates.
 - **`GAMESERVER_IMPORTANCE` — the importance weights are now configurable, and the four
   factors with a data source have a tuned profile.** `legacy` (the default) is every factor
   zero and therefore the pre-importance ordering; `balanced` ranks on visible-state change

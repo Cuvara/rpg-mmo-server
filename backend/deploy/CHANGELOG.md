@@ -124,6 +124,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`GAMESERVER_REPLICATION_SCHEDULE` wired into every game-server deployment**, set
+  explicitly to `off` — every dirty entity due every world tick — so **nothing changes
+  behaviourally**. It decides how often an entity of a given importance is re-sent; it
+  changes neither the byte cap nor the candidate set. `tiered` without
+  `GAMESERVER_IMPORTANCE` weights **exits 2 at startup** rather than degrading into a
+  uniform staleness increase. Intervals are configured in milliseconds and converted through
+  `SIM_WORLD_HZ`, so raising the world rate does not silently halve the staleness a manifest
+  asked for. Read `replication_schedule` off `/status` on the pod — a fleet update reaches
+  only NEW pods.
 - **`GAMESERVER_IMPORTANCE` wired into every game-server deployment**, set explicitly to
   `legacy` — the pre-importance ordering — so **nothing changes behaviourally** and turning
   it on is a one-line manifest edit. It decides which entities are emitted first when the
