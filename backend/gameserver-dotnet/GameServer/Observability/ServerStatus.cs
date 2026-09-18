@@ -305,6 +305,28 @@ public sealed class ServerStatus
     public int MaxSnapshotBytes { get; set; }
 
     /// <summary>
+    /// Effective area-of-interest radius in world units (<c>GAMESERVER_AOI_RADIUS</c>).
+    /// </summary>
+    /// <remarks>
+    /// Published because it is the one configuration value that is now both deployment-set
+    /// and impossible to infer from anything else on this endpoint: two servers with
+    /// identical rates, capacity and budget will show completely different
+    /// <c>snapshot_bytes</c> at the same population if their radii differ, and until this
+    /// field existed the only way to learn a pod's radius was to read the manifest that was
+    /// supposed to have produced it — which an already-allocated GameServer does not
+    /// necessarily reflect, since its environment is fixed at pod creation.
+    /// </remarks>
+    [JsonPropertyName("aoi_radius")]
+    public float AoiRadius { get; set; }
+
+    /// <summary>
+    /// True when <see cref="AoiRadius"/> reaches every corner of the map, so interest
+    /// management filters nothing and every entity is in every snapshot.
+    /// </summary>
+    [JsonPropertyName("aoi_covers_whole_map")]
+    public bool AoiCoversWholeMap { get; set; }
+
+    /// <summary>
     /// Bytes of snapshot frames written to client sockets since process start, envelope
     /// and length prefix included. With <see cref="UptimeSeconds"/> and
     /// <see cref="PlayersOnline"/> this is the per-client downlink rate ADR-7's

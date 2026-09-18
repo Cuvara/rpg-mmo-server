@@ -122,6 +122,14 @@ float mapWidth = float.TryParse(GetArg(args, "--map-width") ?? Env("GAMESERVER_M
 float mapHeight = float.TryParse(GetArg(args, "--map-height") ?? Env("GAMESERVER_MAP_HEIGHT"),
     System.Globalization.CultureInfo.InvariantCulture, out var mh) && mh > 0f
     ? mh : GameConstants.DefaultMapHeight;
+// Captured raw and validated below, once the map size it is reported against is known.
+// Deliberately NOT parsed with the "TryParse ? value : default" idiom the cheaper knobs
+// use: the radius is the largest single lever on downstream bandwidth (population inside a
+// circle grows with its square), so a typo that silently ran a fleet at the default while
+// its manifest said something else is exactly the divergence that gets debugged from a
+// bandwidth graph weeks later.
+string? aoiRadiusRaw = GetArg(args, "--aoi-radius") ?? Env(GameServer.Server.AoiSettings.EnvVar);
+
 bool useAgones = HasFlag(args, "--agones") || Env("AGONES_ENABLED") == "true";
 bool enableEnemySpawner = Env("GAMESERVER_ENEMIES") != "false"; // on by default, opt out with GAMESERVER_ENEMIES=false
 int loadTestEntities = int.TryParse(
@@ -214,6 +222,21 @@ using var loggerFactory = LoggerFactory.Create(builder =>
 });
 var logger = loggerFactory.CreateLogger("Program");
 
+if (!GameServer.Server.AoiSettings.TryCreate(
+        aoiRadiusRaw, mapWidth, mapHeight,
+        out GameServer.Server.AoiSettings? aoiParsed, out string? aoiError))
+{
+    // Same fail-fast rule as the simulation rates below, for the same reason.
+    // Validated here rather than beside the other parsing because it needs a logger and
+    // the startup banner needs it: a value refused after the banner has already claimed a
+    // configuration is a value the operator reads twice and believes the first time.
+    logger.LogCritical("invalid area-of-interest configuration: {Error}", aoiError);
+    return 2;
+}
+
+GameServer.Server.AoiSettings aoi = aoiParsed!;
+
+
 // Resolved once so a bad AGONES_SDK_HTTP_PORT warns once rather than in both the
 // start-up banner and the SDK constructor. Meaningless when useAgones is false.
 int agonesPort = useAgones ? HttpAgonesSdk.ResolvePort(logger) : HttpAgonesSdk.DefaultPort;
@@ -255,6 +278,18 @@ logger.LogInformation("  Snapshots: {Mode}", keyframeInterval > 0
     ? $"delta, keyframe every {keyframeInterval} snapshots"
     : "full every tick (delta disabled)");
 logger.LogInformation("  MapSize:   {Width}x{Height} world units (centered on origin)", mapWidth, mapHeight);
+logger.LogInformation("  AOI:       {Aoi}", aoi);
+if (aoi.CoversWholeMap)
+{
+    // Not a refusal: legitimate in a small dungeon instance, a mistake on an open map, and
+    // the server cannot tell which it is looking at. Said once, at the moment it becomes
+    // true, rather than left to be inferred from a bandwidth graph.
+    logger.LogWarning(
+        "AOI radius {Radius} reaches every corner of a {Width}x{Height} map, so interest " +
+        "management filters nothing: every entity appears in every snapshot for every " +
+        "client, and downstream bandwidth is O(entities x players).",
+        aoi.Radius, mapWidth, mapHeight);
+}
 logger.LogInformation("  Agones:    {Agones}", useAgones
     ? $"HTTP sidecar at localhost:{agonesPort}"
     : "disabled (no-op SDK)");
@@ -781,6 +816,7 @@ var options = new ServerOptions
     MaxInputsPerConnection = maxInputsPerTick,
     MaxPendingInputs = maxPendingInputs,
     MaxSnapshotBytes = maxSnapshotBytes,
+    Aoi = aoi,
     SealedTransport = sealedRequirement,
     ServerIdentity = serverIdentity,
     JwtSecret = jwtSecret,
@@ -959,6 +995,8 @@ metricsEndpoint?.SetStatusProvider(() =>
             })
             .ToList(),
         MaxSnapshotBytes = maxSnapshotBytes,
+        AoiRadius = aoi.Radius,
+        AoiCoversWholeMap = aoi.CoversWholeMap,
         SnapshotBytes = metrics.SnapshotBytes,
         SnapshotEntitiesShed = metrics.SnapshotEntitiesShed,
         SnapshotRemovalsDeferred = metrics.SnapshotRemovalsDeferred,

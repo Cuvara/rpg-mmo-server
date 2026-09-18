@@ -26,6 +26,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     policy that halves bytes by letting an entity go a second stale has not bought anything.
   - Skipped unless `BENCH_TICK=1`, like the other benches; the output is the deliverable and
     nothing asserts on the numbers. See BENCHMARK.md Part XIII §35.
+- **`GAMESERVER_AOI_RADIUS` / `--aoi-radius` — the AOI radius is a deployment setting, not
+  a compiled-in constant.** It was `GameConstants.DefaultAoiRadius` reached from exactly two
+  places in the server and from no flag at all, which made the **largest single lever on
+  downstream bandwidth** a code change. Population inside a circle grows with the SQUARE of
+  its radius, so halving it quarters the expected entity count per snapshot — a bigger
+  effect than anything downstream of it, including `GAMESERVER_MAX_SNAPSHOT_BYTES`, which is
+  a tail cap on what the radius has already selected. `BENCHMARK.md` Part IX puts bandwidth,
+  not tick time, as the binding constraint (61.7 KB/s per client at 200 players against a
+  tick p99 at 5% of budget), so this is the knob that acts on the thing that actually binds.
+  - **Refused at startup, never defaulted.** `GameServer/Server/AoiSettings.cs` validates and
+    exits 2 with a named reason for an unparseable, zero, negative, non-finite or
+    above-ceiling value. Deliberately NOT the `TryParse ? value : default` idiom the cheaper
+    knobs use: `GAMESERVER_AOI_RADIUS=5o` would then run a fleet at 50 while its manifest
+    said 5, and nothing would report it — the divergence would be discovered from a
+    bandwidth graph weeks later, if at all. Parsed with **InvariantCulture**, because a
+    container inherits whatever locale its base image carries and `12,5` must be refused
+    rather than reinterpreted as 125.
+  - **It is also the spatial index's cell size** (`EcsWorld`), so the two cannot be
+    configured apart. This is the half with no symptom: `SpatialGrid.Query` derives its cell
+    span from the radius it is handed rather than assuming a 3x3 neighbourhood, so a stale
+    cell size leaves every snapshot byte-correct and every differential test green while the
+    index quietly stops narrowing. `EcsWorld.AoiIndexCellSize` and
+    `AoiRadiusWiringTests.ConfiguredRadius_ReachesBothTheGatherAndTheIndex` exist only
+    because there is otherwise nothing to assert on.
+  - **A radius that reaches the map's diagonal logs a warning** at startup: interest
+    management then filters nothing and every entity is in every snapshot for every client.
+    Reported rather than refused — legitimate in a small dungeon instance, a mistake on an
+    open map, and the server cannot tell which it is looking at. Measured against the
+    diagonal and not the width: against the width it would call a radius "covering" while it
+    still excluded the far corners, which is where AOI does its most useful work.
+  - **`/status` publishes `aoi_radius` and `aoi_covers_whole_map`.** The radius is not on
+    the wire, so before this the only way to learn a pod's radius was to read the manifest
+    that was supposed to have produced it — which an **already-allocated** GameServer does
+    not necessarily reflect, since its environment is fixed at pod creation and a fleet
+    update reaches only new pods.
+  - Tests: `AoiSettingsTests` (21) and `AoiRadiusWiringTests` (11). The index/scan
+    differential is re-proved at cell sizes 15, 50 and 130 with the occupancy gate forced
+    open and an assertion that more than one cell is occupied — at 130 the production gate
+    would have sent both arms down the scan and the comparison would have compared the scan
+    against itself and passed.
 - **`gameserver_nakama_reward_outcomes_total` — the reward path now counts its own answers,
   and ADR-24 §8.1's open item is closed.** The failure came first: turning the meta hop's
   TLS on in dev left one `Allocated` GameServer on the old plaintext `NAKAMA_URL`, so every

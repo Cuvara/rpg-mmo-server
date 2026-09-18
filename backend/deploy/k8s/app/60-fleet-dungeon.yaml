@@ -258,6 +258,17 @@ spec:
                   value: "15"
                 - name: SIM_BACKGROUND_HZ
                   value: "5"
+                # Area-of-interest radius in world units. The largest single lever on
+                # downstream bandwidth: population inside a circle grows with the SQUARE
+                # of it, so halving this quarters the expected entity count per snapshot,
+                # which no budget downstream of it can match. 50 is the compiled-in
+                # default, set explicitly here so it is visible and so changing it is a
+                # one-line edit rather than a code change.
+                # An unparseable or non-positive value exits 2 at startup; it is NOT
+                # silently replaced by the default. A radius that reaches the map's
+                # diagonal logs a warning and disables interest filtering entirely.
+                - name: GAMESERVER_AOI_RADIUS
+                  value: "50"
                 # ADMISSION LIMIT -- a party, not a map.
                 #
                 # The map fleet's 100 is a measured figure about how many

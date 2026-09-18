@@ -912,8 +912,16 @@ absent by 62.2), and the hold at ~30 s (a removal arriving 30.1 s after a
 deliberate disconnect). See "Measured constants" in `DESIGN.md`. They matter to a
 client for a practical reason: **two players further apart than the AOI radius
 legitimately do not appear in each other's snapshots**, so a multiplayer test
-that spawns or drives clients more than 50 units apart will fail with a correct
-server. Check the distance before suspecting the netcode.
+that spawns or drives clients further apart than the radius will fail with a
+correct server. Check the distance before suspecting the netcode.
+
+> **The radius is a deployment setting, not a constant.** 50 units is the
+> compiled-in default (`GameConstants.DefaultAoiRadius`) and what the measurements
+> above were taken at, but `GAMESERVER_AOI_RADIUS` changes it per fleet, and it is
+> **not on the wire** — a client cannot ask a server what its radius is. So a test
+> that hard-codes 50 is asserting against one deployment's configuration. Read
+> `aoi_radius` from `/status` instead; the server publishes the effective value
+> precisely because nothing else on the connection reveals it.
 
 #### Worked example — mid-stream resync and the handle-space reset
 

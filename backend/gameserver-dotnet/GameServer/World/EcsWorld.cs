@@ -254,12 +254,16 @@ public sealed class EcsWorld : IDisposable
     /// queried once per viewer. See <see cref="SpatialGrid"/> for why this exists at all
     /// given that BENCHMARK.md Part V reverted the first one, and what changed since.
     ///
-    /// <para>Cell size is the default AOI radius: a query then covers at most a 3x3
-    /// neighbourhood, the smallest that can contain a circle of that radius. Smaller cells
-    /// mean more cell lookups per query for fewer candidates each; larger cells mean fewer
-    /// lookups over more candidates.</para>
+    /// <para>Cell size is the CONFIGURED AOI radius, not the compiled-in default: a query
+    /// then covers at most a 3x3 neighbourhood, the smallest that can contain a circle of
+    /// that radius. Smaller cells mean more cell lookups per query for fewer candidates
+    /// each; larger cells mean fewer lookups over more candidates. Both arms return
+    /// identical results at any cell size — <see cref="SpatialGrid.Query"/> derives the
+    /// cell span from the radius it is given rather than assuming 3x3 — so a stale cell
+    /// size would be a performance bug, not a correctness one, and correspondingly
+    /// invisible. Hence it is injected rather than read from the constant.</para>
     /// </summary>
-    private readonly SpatialGrid _grid = new(GameConstants.DefaultAoiRadius);
+    private readonly SpatialGrid _grid;
 
     /// <summary>
     /// True when <see cref="_grid"/> was rebuilt inside the current read scope and may be
@@ -329,6 +333,19 @@ public sealed class EcsWorld : IDisposable
     internal int AoiIndexOccupiedCells => _grid.OccupiedCells;
 
     /// <summary>
+    /// Cell size the spatial index was built with, which must be the deployment's AOI
+    /// radius. Diagnostics and tests.
+    /// </summary>
+    /// <remarks>
+    /// Exposed because a cell size that failed to follow the configured radius is a defect
+    /// with NO observable symptom: both arms return identical entities at any cell size, so
+    /// the differential tests stay green, the snapshots stay correct, and the only trace is
+    /// an index that narrows less than it should. There is nothing to assert on unless the
+    /// value itself is readable.
+    /// </remarks>
+    internal float AoiIndexCellSize => _grid.CellSize;
+
+    /// <summary>
     /// Occupancy threshold the gate compares against, overridable so the benchmark can
     /// force the index on for populations the shipped gate rejects — which is the only way
     /// to measure what the gate is giving up. Defaults to the shipped value; production
@@ -354,6 +371,12 @@ public sealed class EcsWorld : IDisposable
     public EcsWorld() : this(1) { }
 
     /// <summary>
+    /// Create a world with the default AOI cell size and room for
+    /// <paramref name="maxWorkerSlots"/> concurrent structural producers.
+    /// </summary>
+    public EcsWorld(int maxWorkerSlots) : this(maxWorkerSlots, GameConstants.DefaultAoiRadius) { }
+
+    /// <summary>
     /// Create a world whose deferred-structural queue has room for
     /// <paramref name="maxWorkerSlots"/> concurrent producers.
     ///
@@ -362,8 +385,15 @@ public sealed class EcsWorld : IDisposable
     /// <see cref="UpdateComponentsParallel"/>, and the slots are allocated up front
     /// because a worker must never allocate its queue on the hot path.</para>
     /// </summary>
-    public EcsWorld(int maxWorkerSlots)
+    /// <param name="aoiCellSize">
+    /// Spatial index cell size, which is the deployment's AOI radius
+    /// (<see cref="Server.AoiSettings"/>). Affects only how the index narrows a query;
+    /// both the index and the scan return the same entities at any value.
+    /// </param>
+    public EcsWorld(int maxWorkerSlots, float aoiCellSize)
     {
+        _grid = new SpatialGrid(aoiCellSize);
+
         if (maxWorkerSlots < 1)
         {
             throw new ArgumentOutOfRangeException(

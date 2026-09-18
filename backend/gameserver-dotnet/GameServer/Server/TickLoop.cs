@@ -198,6 +198,9 @@ public sealed class TickLoop
     /// <summary>The rate configuration this loop runs.</summary>
     public SimulationRates Rates => _rates;
 
+    /// <summary>AOI radius every gather on this loop uses. Diagnostics and tests.</summary>
+    internal float AoiRadius => _aoiRadius;
+
     /// <summary>
     /// Whether the world group — and therefore the snapshot broadcast — is due on the
     /// current base tick. Diagnostics and tests.
