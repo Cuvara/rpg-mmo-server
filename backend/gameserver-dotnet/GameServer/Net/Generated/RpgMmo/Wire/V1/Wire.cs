@@ -38,44 +38,44 @@ namespace RpgMmo.Wire.V1 {
             "CgoCb2sYASABKAgSDwoHdXNlcl9pZBgCIAEoCRINCgVlcnJvchgDIAEoCRIR",
             "Cgl0aWNrX3JhdGUYBCABKA0SGAoQcHJvdG9jb2xfdmVyc2lvbhgFIAEoDSJW",
             "CgxJbnB1dE1lc3NhZ2USDAoEdGljaxgBIAEoBBIOCgZtb3ZlX3gYAiABKAIS",
-            "DgoGbW92ZV95GAMgASgCEhgKEGF0dGFja190YXJnZXRfaWQYBCABKAki7QEK",
+            "DgoGbW92ZV95GAMgASgCEhgKEGF0dGFja190YXJnZXRfaWQYBCABKAkigQIK",
             "DkVudGl0eVNuYXBzaG90EgoKAmlkGAEgASgJEhEKCXR5cGVfbmFtZRgCIAEo",
             "CRIJCgF4GAMgASgCEgkKAXkYBCABKAISCgoCaHAYBSABKAUSDgoGbWF4X2hw",
             "GAYgASgFEigKBHR5cGUYByABKA4yGi5ycGdtbW8ud2lyZS52MS5FbnRpdHlU",
             "eXBlEg4KBmhhbmRsZRgIIAEoDRINCgVzcGVlZBgJIAEoAhITCgtmYWNpbmdf",
             "YnJhZBgKIAEoDRIsCgZhY3Rpb24YCyABKA4yHC5ycGdtbW8ud2lyZS52MS5F",
-            "bnRpdHlBY3Rpb24iggEKD1NuYXBzaG90TWVzc2FnZRIMCgR0aWNrGAEgASgE",
-            "EhAKCGFja190aWNrGAIgASgEEgwKBGZ1bGwYAyABKAgSMAoIZW50aXRpZXMY",
-            "BCADKAsyHi5ycGdtbW8ud2lyZS52MS5FbnRpdHlTbmFwc2hvdBIPCgdyZW1v",
-            "dmVkGAUgAygJIiMKEURpc2Nvbm5lY3RNZXNzYWdlEg4KBnJlYXNvbhgBIAEo",
-            "CSIPCg1SZXN5bmNSZXF1ZXN0IiQKElRyYW5zZmVyTWFwUmVxdWVzdBIOCgZt",
-            "YXBfaWQYASABKAkiMAoTVHJhbnNmZXJNYXBSZXNwb25zZRIKCgJvaxgBIAEo",
-            "CBINCgVlcnJvchgCIAEoCSIgCgtQaW5nTWVzc2FnZRIRCgl0aW1lc3RhbXAY",
-            "ASABKAMiNQoLUG9uZ01lc3NhZ2USEQoJdGltZXN0YW1wGAEgASgDEhMKC3Nl",
-            "cnZlcl90aW1lGAIgASgDIh0KC0tpY2tNZXNzYWdlEg4KBnJlYXNvbhgBIAEo",
-            "CSInChFTZWFsZWRDbGllbnRIZWxsbxISCgpwdWJsaWNfa2V5GAEgASgMImEK",
-            "EVNlYWxlZFNlcnZlckhlbGxvEhIKCnB1YmxpY19rZXkYASABKAwSDwoHYmlu",
-            "ZGluZxgCIAEoDBINCgVlcnJvchgDIAEoCRIYChBzZXJ2ZXJfc2lnbmF0dXJl",
-            "GAQgASgMKs8DCgdNc2dUeXBlEhgKFE1TR19UWVBFX1VOU1BFQ0lGSUVEEAAS",
-            "EQoNTVNHX1RZUEVfQVVUSBABEhYKEk1TR19UWVBFX0FVVEhfUkVTUBACEhgK",
-            "FE1TR19UWVBFX0VOVEVSX1dPUkxEEAMSHQoZTVNHX1RZUEVfRU5URVJfV09S",
-            "TERfUkVTUBAEEhcKE01TR19UWVBFX0pPSU5fVE9LRU4QBRIcChhNU0dfVFlQ",
-            "RV9KT0lOX1RPS0VOX1JFU1AQBhISCg5NU0dfVFlQRV9JTlBVVBAHEhUKEU1T",
-            "R19UWVBFX1NOQVBTSE9UEAgSFwoTTVNHX1RZUEVfRElTQ09OTkVDVBAJEhMK",
-            "D01TR19UWVBFX1JFU1lOQxAKEhkKFU1TR19UWVBFX1RSQU5TRkVSX01BUBAN",
-            "Eh4KGk1TR19UWVBFX1RSQU5TRkVSX01BUF9SRVNQEA4SEQoNTVNHX1RZUEVf",
-            "UElORxALEhEKDU1TR19UWVBFX1BPTkcQDBIRCg1NU0dfVFlQRV9LSUNLEA8S",
-            "IAocTVNHX1RZUEVfU0VBTEVEX0NMSUVOVF9IRUxMTxAQEiAKHE1TR19UWVBF",
-            "X1NFQUxFRF9TRVJWRVJfSEVMTE8QESqdAQoKRW50aXR5VHlwZRIbChdFTlRJ",
-            "VFlfVFlQRV9VTlNQRUNJRklFRBAAEhYKEkVOVElUWV9UWVBFX1BMQVlFUhAB",
-            "EhMKD0VOVElUWV9UWVBFX01PQhACEhMKD0VOVElUWV9UWVBFX05QQxADEhQK",
-            "EEVOVElUWV9UWVBFX0lURU0QBBIaChZFTlRJVFlfVFlQRV9QUk9KRUNUSUxF",
-            "EAUqlAEKDEVudGl0eUFjdGlvbhIdChlFTlRJVFlfQUNUSU9OX1VOU1BFQ0lG",
-            "SUVEEAASFgoSRU5USVRZX0FDVElPTl9JRExFEAESGAoURU5USVRZX0FDVElP",
-            "Tl9NT1ZJTkcQAhIbChdFTlRJVFlfQUNUSU9OX0FUVEFDS0lORxADEhYKEkVO",
-            "VElUWV9BQ1RJT05fREVBRBAEQkZaM2dpdGh1Yi5jb20vZHV5Y3VvbmcvcnBn",
-            "LW1tby9zaGFyZWQvcHJvdG8vZ2VuO3dpcmVwYqoCDlJwZ01tby5XaXJlLlYx",
-            "YgZwcm90bzM="));
+            "bnRpdHlBY3Rpb24SEgoKYWN0aW9uX3NlcRgMIAEoDSKCAQoPU25hcHNob3RN",
+            "ZXNzYWdlEgwKBHRpY2sYASABKAQSEAoIYWNrX3RpY2sYAiABKAQSDAoEZnVs",
+            "bBgDIAEoCBIwCghlbnRpdGllcxgEIAMoCzIeLnJwZ21tby53aXJlLnYxLkVu",
+            "dGl0eVNuYXBzaG90Eg8KB3JlbW92ZWQYBSADKAkiIwoRRGlzY29ubmVjdE1l",
+            "c3NhZ2USDgoGcmVhc29uGAEgASgJIg8KDVJlc3luY1JlcXVlc3QiJAoSVHJh",
+            "bnNmZXJNYXBSZXF1ZXN0Eg4KBm1hcF9pZBgBIAEoCSIwChNUcmFuc2Zlck1h",
+            "cFJlc3BvbnNlEgoKAm9rGAEgASgIEg0KBWVycm9yGAIgASgJIiAKC1BpbmdN",
+            "ZXNzYWdlEhEKCXRpbWVzdGFtcBgBIAEoAyI1CgtQb25nTWVzc2FnZRIRCgl0",
+            "aW1lc3RhbXAYASABKAMSEwoLc2VydmVyX3RpbWUYAiABKAMiHQoLS2lja01l",
+            "c3NhZ2USDgoGcmVhc29uGAEgASgJIicKEVNlYWxlZENsaWVudEhlbGxvEhIK",
+            "CnB1YmxpY19rZXkYASABKAwiYQoRU2VhbGVkU2VydmVySGVsbG8SEgoKcHVi",
+            "bGljX2tleRgBIAEoDBIPCgdiaW5kaW5nGAIgASgMEg0KBWVycm9yGAMgASgJ",
+            "EhgKEHNlcnZlcl9zaWduYXR1cmUYBCABKAwqzwMKB01zZ1R5cGUSGAoUTVNH",
+            "X1RZUEVfVU5TUEVDSUZJRUQQABIRCg1NU0dfVFlQRV9BVVRIEAESFgoSTVNH",
+            "X1RZUEVfQVVUSF9SRVNQEAISGAoUTVNHX1RZUEVfRU5URVJfV09STEQQAxId",
+            "ChlNU0dfVFlQRV9FTlRFUl9XT1JMRF9SRVNQEAQSFwoTTVNHX1RZUEVfSk9J",
+            "Tl9UT0tFThAFEhwKGE1TR19UWVBFX0pPSU5fVE9LRU5fUkVTUBAGEhIKDk1T",
+            "R19UWVBFX0lOUFVUEAcSFQoRTVNHX1RZUEVfU05BUFNIT1QQCBIXChNNU0df",
+            "VFlQRV9ESVNDT05ORUNUEAkSEwoPTVNHX1RZUEVfUkVTWU5DEAoSGQoVTVNH",
+            "X1RZUEVfVFJBTlNGRVJfTUFQEA0SHgoaTVNHX1RZUEVfVFJBTlNGRVJfTUFQ",
+            "X1JFU1AQDhIRCg1NU0dfVFlQRV9QSU5HEAsSEQoNTVNHX1RZUEVfUE9ORxAM",
+            "EhEKDU1TR19UWVBFX0tJQ0sQDxIgChxNU0dfVFlQRV9TRUFMRURfQ0xJRU5U",
+            "X0hFTExPEBASIAocTVNHX1RZUEVfU0VBTEVEX1NFUlZFUl9IRUxMTxARKp0B",
+            "CgpFbnRpdHlUeXBlEhsKF0VOVElUWV9UWVBFX1VOU1BFQ0lGSUVEEAASFgoS",
+            "RU5USVRZX1RZUEVfUExBWUVSEAESEwoPRU5USVRZX1RZUEVfTU9CEAISEwoP",
+            "RU5USVRZX1RZUEVfTlBDEAMSFAoQRU5USVRZX1RZUEVfSVRFTRAEEhoKFkVO",
+            "VElUWV9UWVBFX1BST0pFQ1RJTEUQBSqUAQoMRW50aXR5QWN0aW9uEh0KGUVO",
+            "VElUWV9BQ1RJT05fVU5TUEVDSUZJRUQQABIWChJFTlRJVFlfQUNUSU9OX0lE",
+            "TEUQARIYChRFTlRJVFlfQUNUSU9OX01PVklORxACEhsKF0VOVElUWV9BQ1RJ",
+            "T05fQVRUQUNLSU5HEAMSFgoSRU5USVRZX0FDVElPTl9ERUFEEARCRlozZ2l0",
+            "aHViLmNvbS9kdXljdW9uZy9ycGctbW1vL3NoYXJlZC9wcm90by9nZW47d2ly",
+            "ZXBiqgIOUnBnTW1vLldpcmUuVjFiBnByb3RvMw=="));
       descriptor = pbr::FileDescriptor.FromGeneratedCode(descriptorData,
           new pbr::FileDescriptor[] { },
           new pbr::GeneratedClrTypeInfo(new[] {typeof(global::RpgMmo.Wire.V1.MsgType), typeof(global::RpgMmo.Wire.V1.EntityType), typeof(global::RpgMmo.Wire.V1.EntityAction), }, null, new pbr::GeneratedClrTypeInfo[] {
@@ -87,7 +87,7 @@ namespace RpgMmo.Wire.V1 {
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenRequest), global::RpgMmo.Wire.V1.JoinTokenRequest.Parser, new[]{ "Token", "ProtocolVersion" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenResponse), global::RpgMmo.Wire.V1.JoinTokenResponse.Parser, new[]{ "Ok", "UserId", "Error", "TickRate", "ProtocolVersion" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.InputMessage), global::RpgMmo.Wire.V1.InputMessage.Parser, new[]{ "Tick", "MoveX", "MoveY", "AttackTargetId" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EntitySnapshot), global::RpgMmo.Wire.V1.EntitySnapshot.Parser, new[]{ "Id", "TypeName", "X", "Y", "Hp", "MaxHp", "Type", "Handle", "Speed", "FacingBrad", "Action" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EntitySnapshot), global::RpgMmo.Wire.V1.EntitySnapshot.Parser, new[]{ "Id", "TypeName", "X", "Y", "Hp", "MaxHp", "Type", "Handle", "Speed", "FacingBrad", "Action", "ActionSeq" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.SnapshotMessage), global::RpgMmo.Wire.V1.SnapshotMessage.Parser, new[]{ "Tick", "AckTick", "Full", "Entities", "Removed" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.DisconnectMessage), global::RpgMmo.Wire.V1.DisconnectMessage.Parser, new[]{ "Reason" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.ResyncRequest), global::RpgMmo.Wire.V1.ResyncRequest.Parser, null, null, null, null, null),
@@ -2696,6 +2696,7 @@ namespace RpgMmo.Wire.V1 {
       speed_ = other.speed_;
       facingBrad_ = other.facingBrad_;
       action_ = other.action_;
+      actionSeq_ = other.actionSeq_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -2943,6 +2944,43 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "action_seq" field.</summary>
+    public const int ActionSeqFieldNumber = 12;
+    private uint actionSeq_;
+    /// <summary>
+    /// Retrigger counter for `action`. Increments every time the entity ENTERS an
+    /// action, including re-entering the one it is already in.
+    ///
+    /// WHY A LEVEL FIELD IS NOT ENOUGH. `action` says what state an entity is in,
+    /// never that a state was entered. Two attacks in a row are identical bytes, so
+    /// an animator driven from `action` alone plays the swing once and then holds.
+    /// No receiver-side edge detection recovers that: the edge is genuinely not in
+    /// the data, and only the server knows it happened.
+    ///
+    /// RETRIGGER ON INEQUALITY, NEVER ON INCREASE. The counter wraps at 2^32 and
+    /// resets when the server restarts or the entity respawns, so a greater-than
+    /// test stops retriggering for four billion actions after a single wrap, with
+    /// nothing reporting an error. The sender SKIPS ZERO on wrap, so a live counter
+    /// is never 0.
+    ///
+    /// ZERO MEANS "NOT SENT", NOT "NO ACTIONS YET" -- the same rule as `facing_brad`
+    /// and for the same reason. A sender predating this field puts nothing here; a
+    /// receiver MUST keep driving from `action` alone in that case and accept that
+    /// repeats do not retrigger, rather than treating 0 as an edge, which would
+    /// retrigger every animation on every snapshot.
+    ///
+    /// Sent on every mention of an entity, never interned: a receiver that resolves
+    /// a handle expects complete state.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint ActionSeq {
+      get { return actionSeq_; }
+      set {
+        actionSeq_ = value;
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -2969,6 +3007,7 @@ namespace RpgMmo.Wire.V1 {
       if (!pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.Equals(Speed, other.Speed)) return false;
       if (FacingBrad != other.FacingBrad) return false;
       if (Action != other.Action) return false;
+      if (ActionSeq != other.ActionSeq) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -2987,6 +3026,7 @@ namespace RpgMmo.Wire.V1 {
       if (Speed != 0F) hash ^= pbc::ProtobufEqualityComparers.BitwiseSingleEqualityComparer.GetHashCode(Speed);
       if (FacingBrad != 0) hash ^= FacingBrad.GetHashCode();
       if (Action != global::RpgMmo.Wire.V1.EntityAction.Unspecified) hash ^= Action.GetHashCode();
+      if (ActionSeq != 0) hash ^= ActionSeq.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -3049,6 +3089,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(88);
         output.WriteEnum((int) Action);
       }
+      if (ActionSeq != 0) {
+        output.WriteRawTag(96);
+        output.WriteUInt32(ActionSeq);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -3103,6 +3147,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(88);
         output.WriteEnum((int) Action);
       }
+      if (ActionSeq != 0) {
+        output.WriteRawTag(96);
+        output.WriteUInt32(ActionSeq);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -3145,6 +3193,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (Action != global::RpgMmo.Wire.V1.EntityAction.Unspecified) {
         size += 1 + pb::CodedOutputStream.ComputeEnumSize((int) Action);
+      }
+      if (ActionSeq != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(ActionSeq);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -3190,6 +3241,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.Action != global::RpgMmo.Wire.V1.EntityAction.Unspecified) {
         Action = other.Action;
+      }
+      if (other.ActionSeq != 0) {
+        ActionSeq = other.ActionSeq;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -3254,6 +3308,10 @@ namespace RpgMmo.Wire.V1 {
             Action = (global::RpgMmo.Wire.V1.EntityAction) input.ReadEnum();
             break;
           }
+          case 96: {
+            ActionSeq = input.ReadUInt32();
+            break;
+          }
         }
       }
     #endif
@@ -3315,6 +3373,10 @@ namespace RpgMmo.Wire.V1 {
           }
           case 88: {
             Action = (global::RpgMmo.Wire.V1.EntityAction) input.ReadEnum();
+            break;
+          }
+          case 96: {
+            ActionSeq = input.ReadUInt32();
             break;
           }
         }

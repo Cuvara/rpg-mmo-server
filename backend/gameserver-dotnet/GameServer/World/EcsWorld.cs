@@ -834,7 +834,8 @@ public sealed class EcsWorld : IDisposable
                         // fetched, which is exactly why they were put there rather than
                         // in a component of their own — no extra GetSpan in this loop.
                         locomotions[i].FacingBrad,
-                        locomotions[i].Action);
+                        locomotions[i].Action,
+                        locomotions[i].ActionSeq);
                 }
 
                 matches++;
@@ -996,7 +997,8 @@ public sealed class EcsWorld : IDisposable
                     // both looked healthy, which the differential tests catch by comparing
                     // whole views rather than positions.
                     locomotions[i].FacingBrad,
-                    locomotions[i].Action));
+                    locomotions[i].Action,
+                    locomotions[i].ActionSeq));
             }
         }
 

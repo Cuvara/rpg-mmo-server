@@ -525,6 +525,10 @@ public class SnapshotBudgetTests
             // with nothing else failing. They are written in Fill now.
             nameof(EntitySnapshot.FacingBrad),
             nameof(EntitySnapshot.Action),
+            // Same story again for the retrigger counter: Fill writes it, and a Fill that
+            // did not would drop every animation edge from every snapshot while the
+            // action field itself kept arriving correctly.
+            nameof(EntitySnapshot.ActionSeq),
         };
 
         string[] actual = typeof(EntitySnapshot)

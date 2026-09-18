@@ -493,7 +493,7 @@ the reason recorded in `backend/TEAM.md`.
   "full": true,
   "entities": [
     { "id": "u1", "type": "player", "x": 12.5, "y": -3.0, "hp": 90, "max_hp": 100,
-      "speed": 5.0, "facing_brad": 16385, "action": 2 }
+      "speed": 5.0, "facing_brad": 16385, "action": 2, "action_seq": 7 }
   ],
   "removed": ["mob_7"]
 }
@@ -509,7 +509,7 @@ the reason recorded in `backend/TEAM.md`.
 
 `entities[]` element: `id` (string), `type` (a category string — see below),
 `x`, `y` (float32), `hp`, `max_hp` (int), `speed` (float32), `facing_brad` (uint32),
-`action` (enum). Visible state is exactly these fields — a change in any of them puts
+`action` (enum), `action_seq` (uint32). Visible state is exactly these fields — a change in any of them puts
 the entity in the next delta; a change in a field the client cannot see (e.g. cooldown)
 does not.
 
@@ -542,6 +542,40 @@ encoding, which is the one place JSON deliberately does *not* follow its usual
 |---|---|---|---|
 | `facing_brad` | 10 | `uint32` | Facing, as 16-bit binary radians **biased by one** |
 | `action` | 11 | `EntityAction` | What the entity is doing |
+| `action_seq` | 12 | `uint32` | Retrigger counter for `action` |
+
+#### `action_seq` carries the edge `action` cannot
+
+`action` is **level-triggered**: it says what state an entity is in, never that a state
+was *entered*. Two attacks in a row produce identical bytes, so an animator driven from
+`action` alone plays the swing once and then holds. No receiver-side edge detection
+recovers this — the edge is genuinely not in the data, and only the server knows it
+happened. `action_seq` increments on every action **entry**, including re-entering the
+action already held.
+
+Receiver rules, all three load-bearing:
+
+1. **Retrigger on INEQUALITY, never on increase.** The counter wraps at 2^32 and resets
+   when the server restarts or the entity respawns. A `>` test stops retriggering for
+   four billion actions after a single wrap, with nothing reporting an error.
+2. **Zero means "not sent"**, never "no actions yet" — the same rule as `facing_brad`. A
+   server predating this field sends nothing; a receiver MUST keep driving from `action`
+   alone in that case and accept that repeats do not retrigger. Treating 0 as an edge
+   would retrigger every animation on every snapshot. The sender **skips zero on wrap**,
+   so a live counter never takes it.
+3. Sent on **every** mention of an entity, never interned — a receiver that resolves a
+   handle expects complete state.
+
+> **Why the server latches a one-shot action, and why the counter alone would not be
+> enough.** Actions are written on the critical group (`SIM_CRITICAL_HZ`, 60 Hz by
+> default) and sampled by the snapshot gather on the world group (`SIM_WORLD_HZ`, 15 Hz),
+> so only one write in four is ever observable. Bumping the counter does not help on its
+> own: the counter changes, so the entity is dirty and is sent, but the *value* sent is
+> whatever `action` holds at the sample point — which is the state that clobbered the
+> attack. The server therefore holds a one-shot action for one world interval so at least
+> one snapshot can see it. `ENTITY_ACTION_DEAD` is terminal and overrides the hold.
+> Nothing about this reaches the wire; it is stated here because it is what makes the
+> field's guarantee true.
 
 #### `facing_brad` is biased, and that is the whole design
 

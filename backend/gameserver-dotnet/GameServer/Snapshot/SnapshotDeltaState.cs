@@ -53,6 +53,7 @@ public sealed class SnapshotDeltaState
         public readonly float Speed;
         public readonly uint FacingBrad;
         public readonly SimAction Action;
+        public readonly uint ActionSeq;
 
         public SentView(in EntityView e)
         {
@@ -65,6 +66,7 @@ public sealed class SnapshotDeltaState
             Speed = e.Speed;
             FacingBrad = e.FacingBrad;
             Action = e.Action;
+            ActionSeq = e.ActionSeq;
         }
 
         public bool Equals(SentView other) =>
@@ -93,11 +95,16 @@ public sealed class SnapshotDeltaState
             // entity.
             FacingBrad == other.FacingBrad &&
             Action == other.Action &&
+            // The retrigger counter is part of visible state, not metadata: two attacks
+            // in a row differ ONLY here, so omitting it would make the second identical
+            // to the first and the delta encoder would drop it -- reintroducing the exact
+            // missed animation this field exists to fix.
+            ActionSeq == other.ActionSeq &&
             string.Equals(Type, other.Type, StringComparison.Ordinal);
 
         public override bool Equals(object? obj) => obj is SentView v && Equals(v);
         public override int GetHashCode() =>
-            HashCode.Combine(Type, X, Y, Hp, MaxHp, Speed, FacingBrad, Action);
+            HashCode.Combine(Type, X, Y, Hp, MaxHp, Speed, FacingBrad, (Action, ActionSeq));
     }
 
     /// <summary>
@@ -503,7 +510,12 @@ public sealed class SnapshotDeltaState
                 key = --_nextLegacyKey;
                 _legacyKeys[e.Id] = key;
             }
-            _legacyViews[i] = new EntityView(key, e.Id, e.Type, e.Position, e.Hp, e.MaxHp, e.Speed, e.FacingBrad, e.Action);
+            // ActionSeq is 0 ("not sent") on this bridge by design. EntityState is a
+            // Shared.GameLogic type compiled into the Unity client as a UPM package, so
+            // adding a field to it means an sgl release plus a manifest and lock bump on
+            // the client -- for a path no production code takes. Connection.WriteLoopAsync
+            // encodes from EntityView; this overload exists for tests and benches.
+            _legacyViews[i] = new EntityView(key, e.Id, e.Type, e.Position, e.Hp, e.MaxHp, e.Speed, e.FacingBrad, e.Action, actionSeq: 0);
         }
         return Encode(tick, ackTick, _legacyViews.AsSpan(0, nearby.Length), keyframeInterval, intern, observer);
     }
@@ -617,6 +629,7 @@ public sealed class SnapshotDeltaState
         // wrong value rather than a missing one - far harder to notice.
         e.FacingBrad = 0;
         e.Action = WireAction.Unspecified;
+        e.ActionSeq = 0;
         return e;
     }
 
@@ -1120,6 +1133,7 @@ public sealed class SnapshotDeltaState
         // invisible at four entities and a whole entity's worth at eighty.
         msg.FacingBrad = e.FacingBrad;
         msg.Action = (WireAction)e.Action;
+        msg.ActionSeq = e.ActionSeq;
         msg.Handle = handle;
         msg.Id = introduceId ? e.Id : "";
         msg.TypeName = "";

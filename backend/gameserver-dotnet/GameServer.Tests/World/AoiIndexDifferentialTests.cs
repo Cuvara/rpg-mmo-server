@@ -121,6 +121,13 @@ public class AoiIndexDifferentialTests
             // correctly placed, facing due east regardless of where it is walking.
             Assert.Equal(expected[i].FacingBrad, actual[i].FacingBrad);
             Assert.Equal(expected[i].Action, actual[i].Action);
+
+            // ActionSeq rides the same span and the same two code paths, and dropping it
+            // on one arm is WORSE than dropping facing: the delta encoder treats it as
+            // visible state, so an index arm that returned 0 would make every repeated
+            // action look unchanged and the client would stop retriggering animations --
+            // with every position, hp and action value still agreeing.
+            Assert.Equal(expected[i].ActionSeq, actual[i].ActionSeq);
         }
 
         // Third opinion: the shared rule the client predicts with. Only for finite radii —
@@ -789,6 +796,7 @@ public class AoiIndexDifferentialTests
             nameof(EntityView.Id), nameof(EntityView.Key), nameof(EntityView.Type),
             nameof(EntityView.Position), nameof(EntityView.Hp), nameof(EntityView.MaxHp),
             nameof(EntityView.Speed), nameof(EntityView.FacingBrad), nameof(EntityView.Action),
+            nameof(EntityView.ActionSeq),
         };
 
         var actual = typeof(EntityView)
@@ -847,6 +855,19 @@ public class AoiIndexDifferentialTests
             world.AddEntity(e);
         }
 
+        // ActionSeq is not on EntityState -- it is server-only state, set by
+        // ActionTransitions rather than by a spawn -- so it is poked in directly here.
+        // Distinct and never zero, for the same reason facing above is: a counter that
+        // happened to be 0 is indistinguishable from "the index dropped it".
+        world.UpdateComponents(writer =>
+        {
+            for (int i = 0; i < 40; i++)
+            {
+                EntityHandle handle = writer.Resolve($"near{i}");
+                writer.LocomotionOf(handle).ActionSeq = (uint)(1 + i * 7);
+            }
+        });
+
         AssertIdentical(world, new Vec2(0, 0), 60f,
             "facing and action must compose identically on both arms");
 
@@ -857,7 +878,10 @@ public class AoiIndexDifferentialTests
             "fixture produced a single facing value, so this test cannot discriminate");
         Assert.True(seen.Select(v => v.Action).Distinct().Count() > 1,
             "fixture produced a single action value, so this test cannot discriminate");
+        Assert.True(seen.Select(v => v.ActionSeq).Distinct().Count() > 1,
+            "fixture produced a single action_seq value, so this test cannot discriminate");
         Assert.DoesNotContain(seen, v => v.FacingBrad == 0);
+        Assert.DoesNotContain(seen, v => v.ActionSeq == 0);
     }
 
 }

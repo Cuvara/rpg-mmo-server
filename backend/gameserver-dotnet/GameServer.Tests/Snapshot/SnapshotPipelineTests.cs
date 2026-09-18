@@ -390,6 +390,10 @@ public class SnapshotPipelineTests
         var expected = new List<byte[]>[players];
         for (int i = 0; i < players; i++) expected[i] = new List<byte[]>();
 
+        // Generously sized; the assertion below turns an undersized buffer into a named
+        // failure rather than a silently truncated comparison.
+        var nearby = new EntityView[64];
+
         for (int t = 0; t < ticks; t++)
         {
             for (int i = 0; i < players; i++)
@@ -401,10 +405,20 @@ public class SnapshotPipelineTests
             for (int i = 0; i < players; i++)
             {
                 rig.World.TryGetSnapshotAnchor($"p{i}", out Vec2 anchor, out ulong ack);
-                List<EntityState> nearby =
-                    rig.World.GetEntitiesInRange(anchor, GameConstants.DefaultAoiRadius);
+
+                // EntityView, not EntityState: the reference arm has to take the same
+                // input type production takes, or it is a reference for a pipeline nobody
+                // runs. The EntityState overload cannot carry action_seq (that type lives
+                // in Shared.GameLogic and is compiled into the Unity client), so using it
+                // here would report a mismatch on every moving player and blame the write
+                // path for a field the test itself dropped.
+                int count = rig.World.GetEntitiesInRange(
+                    anchor, GameConstants.DefaultAoiRadius, nearby.AsSpan());
+                Assert.True(count <= nearby.Length, "reference buffer undersized");
+
                 SnapshotMessage msg = reference[i].Encode(
-                    rig.Loop.CurrentTick, ack, nearby, GameConstants.DefaultKeyframeInterval,
+                    rig.Loop.CurrentTick, ack, nearby.AsSpan(0, count),
+                    GameConstants.DefaultKeyframeInterval,
                     intern: encoding == WireEncoding.Proto);
                 expected[i].Add(WireProtocol.Encode(
                     WireProtocol.NewEnvelope(MsgType.Snapshot, msg, encoding)));

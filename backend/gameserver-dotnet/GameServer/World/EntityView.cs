@@ -59,9 +59,16 @@ public readonly struct EntityView
     /// </summary>
     public readonly EntityAction Action;
 
+    /// <summary>
+    /// Retrigger counter for <see cref="Action"/>; 0 means "never set". Rides the same
+    /// <c>Locomotion</c> span as <see cref="Action"/> and <see cref="FacingBrad"/>, which
+    /// is why carrying it costs the gather nothing.
+    /// </summary>
+    public readonly uint ActionSeq;
+
     public EntityView(
         int key, string id, string type, Vec2 position, int hp, int maxHp, float speed,
-        uint facingBrad, EntityAction action)
+        uint facingBrad, EntityAction action, uint actionSeq = 0)
     {
         Key = key;
         Id = id;
@@ -72,5 +79,6 @@ public readonly struct EntityView
         Speed = speed;
         FacingBrad = facingBrad;
         Action = action;
+        ActionSeq = actionSeq;
     }
 }

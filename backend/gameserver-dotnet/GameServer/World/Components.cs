@@ -167,6 +167,49 @@ public struct Locomotion
     /// </summary>
     public EntityAction Action;
 
+    /// <summary>
+    /// Retrigger counter for <see cref="Action"/>, in the wire's own form: 0 means
+    /// "never set", and a live counter skips zero on wrap.
+    /// </summary>
+    /// <remarks>
+    /// Advanced by <c>Shared.GameLogic.Systems.ActionStateLogic.Advance</c> — the rule the
+    /// Unity client reads this counter under — whenever the entity ENTERS an action,
+    /// including re-entering the one it is already in. That is the whole point:
+    /// <see cref="Action"/> is level-triggered, so two attacks in a row are identical bytes
+    /// and an animator driven from it alone plays the swing once. The edge is not in the
+    /// level field and no receiver can recover it.
+    ///
+    /// <para>Never written directly. Every write to <see cref="Action"/> goes through
+    /// <see cref="ActionTransitions.Enter"/> so that the counter cannot drift away from
+    /// the field it describes.</para>
+    /// </remarks>
+    public uint ActionSeq;
+
+    /// <summary>
+    /// Base tick until which a one-shot <see cref="Action"/> is latched and may not be
+    /// overwritten by a continuous one. Zero means "nothing latched".
+    /// </summary>
+    /// <remarks>
+    /// <b>Why a latch is needed at all, and why the counter alone is not enough.</b>
+    /// Actions are written on the CRITICAL group (every base tick) and sampled by the
+    /// snapshot gather on the WORLD group (every <c>WorldEvery</c> base ticks). At the
+    /// 60/15 default that is one write in four that any client can observe. An attack
+    /// sets <see cref="EntityAction.Attacking"/> on one base tick and the next tick with
+    /// movement input overwrites it, so at 60/15 an attack already reaches the wire only
+    /// if it happens to land on a world tick — a one-in-four coin flip that reads as "the
+    /// animation sometimes does not play".
+    ///
+    /// <para>Bumping <see cref="ActionSeq"/> does not fix that on its own: the counter
+    /// changes, so the entity is dirty and is sent, but the value sent is whatever
+    /// <see cref="Action"/> holds at the sample point — which is the state that clobbered
+    /// the attack. The latch is what keeps the one-shot alive until at least one world
+    /// tick has been able to see it.</para>
+    ///
+    /// <para>Server-side only; it never reaches the wire. <see cref="EntityAction.Dead"/>
+    /// is terminal and overrides the latch, because a corpse must not keep swinging.</para>
+    /// </remarks>
+    public ulong ActionHoldUntilTick;
+
     public Locomotion(float speed) => Speed = speed;
 }
 
