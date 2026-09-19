@@ -529,6 +529,10 @@ public class SnapshotBudgetTests
             // did not would drop every animation edge from every snapshot while the
             // action field itself kept arriving correctly.
             nameof(EntitySnapshot.ActionSeq),
+            // Added by field-level delta (changed_fields = 13, protocol v2). Fill sets it
+            // to the computed mask in the partial path and to 0 in the full-replace path;
+            // both are explicit writes so budget sizing (which also calls Fill) stays exact.
+            nameof(EntitySnapshot.ChangedFields),
         };
 
         string[] actual = typeof(EntitySnapshot)

@@ -3,6 +3,7 @@ using Google.Protobuf;
 using GameServer.Net;
 using GameServer.World;
 using Shared.GameLogic.Components;
+using Shared.GameLogic.Systems;
 // Both layers legitimately have an EntityAction: the generated wire enum and the shared
 // simulation one, which mirror each other by design. Aliased rather than resolved by
 // import order so every use below says which layer it means - this file is where the two
@@ -131,6 +132,13 @@ public sealed class SnapshotDeltaState
 
     /// <summary>Whether this connection's encoding supports handles. See Encode.</summary>
     private bool _intern;
+
+    /// <summary>
+    /// Latched from <see cref="FieldDelta"/> at the start of each Encode. True when the
+    /// connection has negotiated protocol version 2+ AND uses Protobuf (interning is a
+    /// prerequisite, because <c>changed_fields</c> is a Protobuf-only field).
+    /// </summary>
+    private bool _fieldDelta;
 
     /// <summary>Observer position for the encode in progress. See the Encode parameter.</summary>
     private Vec2 _observer;
@@ -303,6 +311,26 @@ public sealed class SnapshotDeltaState
     /// tick, which is the pre-schedule behaviour.
     /// </summary>
     public Server.ReplicationSchedule Schedule { get; set; } = Server.ReplicationSchedule.Off;
+
+    /// <summary>
+    /// Whether this connection has negotiated field-level delta encoding (protocol version
+    /// 2+). When true, delta snapshots carry only the fields that changed since the last
+    /// send, and the wire's <c>EntitySnapshot.changed_fields</c> mask names which ones.
+    /// <para>
+    /// Set once after the join handshake, before any Encode call, alongside the other
+    /// per-connection delta-encoder flags (<see cref="MaxSnapshotBytes"/>,
+    /// <see cref="ImportanceWeights"/>, etc.). Defaults to false so a caller that never
+    /// sets it stays on the pre-version-2 encoding, exactly as <see cref="Schedule"/> and
+    /// <see cref="ImportanceWeights"/> default to their no-op values.
+    /// </para>
+    /// <para>
+    /// Field-level delta requires interning: <c>changed_fields</c> is a Protobuf-only field,
+    /// and an interned handle proves the receiver already holds the entity's last state to
+    /// merge against. Both conditions are checked in <see cref="Encode"/>; setting this flag
+    /// on a non-Protobuf connection has no effect.
+    /// </para>
+    /// </summary>
+    public bool FieldDelta { get; set; }
 
     /// <summary>
     /// The rate of the tick counter this encoder is HANDED, for converting configured
@@ -632,6 +660,11 @@ public sealed class SnapshotDeltaState
         bool intern = false, Vec2 observer = default)
     {
         _intern = intern;
+        // Field-level delta requires interning: changed_fields is a Protobuf-only field,
+        // and an interned handle proves the receiver already has the entity's last state.
+        // Gating it on intern rather than FieldDelta alone means a caller that sets the
+        // flag on a JSON connection still gets the safe (all-fields) path.
+        _fieldDelta = intern && FieldDelta;
         _observer = observer;
         _encodingTick = tick;
         // Latched once per encode: MaxSnapshotBytes is a settable property and a change
@@ -967,7 +1000,10 @@ public sealed class SnapshotDeltaState
                 if (introduce) handle = prospective++;
                 else handle = _handles[e.Key];
             }
-            Fill(_sizingScratch, in e, handle, introduce);
+            if (_fieldDelta && !introduce && _lastSent.TryGetValue(e.Key, out SentView prev))
+                Fill(_sizingScratch, in e, handle, introduce, fieldDelta: true, hasPrev: true, prev);
+            else
+                Fill(_sizingScratch, in e, handle, introduce);
             total += EntryBytes(_sizingScratch);
         }
         for (int r = 0; r < _pendingRemovals.Count; r++)
@@ -1286,7 +1322,9 @@ public sealed class SnapshotDeltaState
 
     /// <summary>
     /// Exact wire size of one candidate as the emit path would write it, measured through
-    /// the same <see cref="Fill"/>.
+    /// the same <see cref="Fill"/>. Must mirror <see cref="ToMsg"/> exactly, because the
+    /// budget spends the budget on this measurement and then emits at that size; any
+    /// divergence makes the byte-cap wrong by that many bytes per entity.
     /// </summary>
     private int MeasureEntity(in EntityView e)
     {
@@ -1304,7 +1342,11 @@ public sealed class SnapshotDeltaState
                 handle = _nextHandle;
             }
         }
-        Fill(_sizingScratch, in e, handle, introduce);
+
+        if (_fieldDelta && !introduce && _lastSent.TryGetValue(e.Key, out SentView prev))
+            Fill(_sizingScratch, in e, handle, introduce, fieldDelta: true, hasPrev: true, prev);
+        else
+            Fill(_sizingScratch, in e, handle, introduce);
         return EntryBytes(_sizingScratch);
     }
 
@@ -1360,11 +1402,20 @@ public sealed class SnapshotDeltaState
         if (_handles.TryGetValue(e.Key, out uint handle))
         {
             // Already introduced this interval: handle alone.
-            Fill(msg, in e, handle, introduceId: false);
+            // With field-level delta, look up the previous state to compute the mask.
+            // The lookup is always valid: _handles and _lastSent are updated in lockstep
+            // (EmitEntity writes both; keyframes clear both), so a present handle
+            // guarantees a present SentView.
+            if (_fieldDelta && _lastSent.TryGetValue(e.Key, out SentView prev))
+                Fill(msg, in e, handle, introduceId: false, fieldDelta: true, hasPrev: true, prev);
+            else
+                Fill(msg, in e, handle, introduceId: false);
         }
         else
         {
-            // First mention: carry both, so the receiver learns the binding.
+            // First mention: carry both id and all fields, so the receiver can construct
+            // a complete initial state. Field-level delta does NOT apply here: the client
+            // has no previous state to merge against.
             handle = _nextHandle++;
             _handles[e.Key] = handle;
             Fill(msg, in e, handle, introduceId: true);
@@ -1387,16 +1438,96 @@ public sealed class SnapshotDeltaState
     ///
     /// <para><paramref name="handle"/> is written even when it is being introduced, and
     /// the id is written only then — the interning contract in <c>wire.proto</c>. Speed is
-    /// written on every mention, including handle-only ones: a client that resolves a
-    /// handle expects complete state for that entity, and sending speed only with the id
-    /// would leave it correct once per keyframe interval and stale in between.</para>
+    /// written on every mention, including handle-only ones on the full-field path: a
+    /// client that resolves a handle expects complete state for that entity, and sending
+    /// speed only with the id would leave it correct once per keyframe interval and stale
+    /// in between.</para>
     ///
     /// <para>Every field is assigned unconditionally so the scratch instance carries no
     /// residue from the previous candidate it measured. <see cref="Rent"/> makes the same
     /// guarantee for pooled instances, for the same reason.</para>
+    ///
+    /// <para><b>Field-level delta path</b> (<paramref name="hasPrev"/> = true, not
+    /// introducing). Only the fields that changed since <paramref name="prev"/> are
+    /// written; <c>changed_fields</c> is set to the corresponding mask. Unset fields stay
+    /// at their <see cref="Rent"/>-reset proto3 defaults and are elided by the serialiser.
+    /// The receiver keeps its last-known values for those fields. This path is unreachable
+    /// on a first introduction: a new entity always travels the full-field path so the
+    /// client can construct a complete initial state.</para>
     /// </remarks>
-    private static void Fill(EntitySnapshot msg, in EntityView e, uint handle, bool introduceId)
+    /// <param name="hasPrev">
+    /// True when <paramref name="prev"/> contains the previously sent state for this
+    /// entity (i.e. the entity is already known to the client). Only meaningful when
+    /// <paramref name="fieldDelta"/> is also true.
+    /// </param>
+    private static void Fill(EntitySnapshot msg, in EntityView e, uint handle, bool introduceId,
+        bool fieldDelta = false, bool hasPrev = false, in SentView prev = default)
     {
+        if (fieldDelta && hasPrev && !introduceId)
+        {
+            // Field-level delta: write only the fields that differ from what the client
+            // was last told, and record which ones via changed_fields. The fields that do
+            // NOT change are left at the Rent()-reset proto3 defaults (zero / empty /
+            // Unspecified) so the serialiser elides them — they cost zero bytes.
+            uint mask = 0;
+
+            if (e.Position.X != prev.X)
+            {
+                mask |= SnapshotFieldBits.X;
+                msg.X = e.Position.X;
+            }
+            if (e.Position.Y != prev.Y)
+            {
+                mask |= SnapshotFieldBits.Y;
+                msg.Y = e.Position.Y;
+            }
+            if (e.Hp != prev.Hp)
+            {
+                mask |= SnapshotFieldBits.Hp;
+                msg.Hp = e.Hp;
+            }
+            if (e.MaxHp != prev.MaxHp)
+            {
+                mask |= SnapshotFieldBits.MaxHp;
+                msg.MaxHp = e.MaxHp;
+            }
+            if (!string.Equals(e.Type, prev.Type, StringComparison.Ordinal))
+            {
+                mask |= SnapshotFieldBits.Type;
+                EntityTypes.SetType(msg, e.Type);
+            }
+            if (e.Speed != prev.Speed)
+            {
+                mask |= SnapshotFieldBits.Speed;
+                msg.Speed = e.Speed;
+            }
+            if (e.FacingBrad != prev.FacingBrad)
+            {
+                mask |= SnapshotFieldBits.FacingBrad;
+                msg.FacingBrad = e.FacingBrad;
+            }
+            if (e.Action != prev.Action)
+            {
+                mask |= SnapshotFieldBits.Action;
+                msg.Action = (WireAction)e.Action;
+            }
+            if (e.ActionSeq != prev.ActionSeq)
+            {
+                mask |= SnapshotFieldBits.ActionSeq;
+                msg.ActionSeq = e.ActionSeq;
+            }
+
+            msg.Handle = handle;
+            msg.Id = ""; // never introducing — handle already known to the client
+            msg.ChangedFields = mask;
+            // TypeName and Type are at their Rent()-reset defaults (empty/"Unspecified")
+            // if the type bit is absent. msg.TypeName = ""; msg.Type = Unspecified; are
+            // already guaranteed by Rent().
+            return;
+        }
+
+        // Full entity snapshot: keyframe entity, first introduction, or non-field-delta
+        // connection. Every field is written; changed_fields stays 0 (proto3 default).
         msg.X = e.Position.X;
         msg.Y = e.Position.Y;
         msg.Hp = e.Hp;
@@ -1421,5 +1552,6 @@ public sealed class SnapshotDeltaState
         msg.TypeName = "";
         msg.Type = EntityType.Unspecified;
         EntityTypes.SetType(msg, e.Type);
+        msg.ChangedFields = 0;
     }
 }
