@@ -6,6 +6,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`docker-compose.yml` never passed `GAMESERVER_IMPORTANCE_W_{DISTANCE,CHANGE,TYPE,COMBAT}`
+  to the game server**, while the comment directly above `GAMESERVER_IMPORTANCE` documented
+  all four. Compose forwards only what the service lists, so setting one in `.env` reached
+  nothing: no error, no warning, and `/status` went on reporting the profile's own weights.
+  The knob read as "tried it, made no difference" — which is how it was found, while
+  measuring `W_TYPE=7` against a live play session. Now listed with empty defaults, and an
+  empty value is an absent variable to the server, so an operator who sets none of them gets
+  exactly the profile's weights as before.
 - **The verification suite could not verify a deployment with the meta hop's TLS on — three more
   consumers that had not moved with the flag.** Found by running `verify.sh` against the dev
   cluster after `dev-up.sh` finally succeeded:

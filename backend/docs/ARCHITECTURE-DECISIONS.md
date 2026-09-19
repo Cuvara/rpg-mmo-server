@@ -3793,7 +3793,8 @@ Before building it, it was measured. Two numbers decided the shape of this ADR:
 5. **An edge is never deferred.** Health and the action retrigger counter are occurrences,
    not states. Withholding one is not a late update, it is a dropped event: the next snapshot
    carries only the state afterwards, so the client never learns the hit or the swing
-   happened. Position and facing are safe to defer; these are not.
+   happened. Position and facing are safe to defer; these are not — **except on the
+   observer's own entity, which decision 9 exempts outright.**
 
 6. **A keyframe never applies intervals.** A keyframe is the complete visible set and the
    client discards anything it does not list. Deferring there would not make an entity late,
@@ -3812,6 +3813,51 @@ Before building it, it was measured. Two numbers decided the shape of this ADR:
    shipped) and field-level delta (an estimated 44% of every entity's bytes, unmeasured) —
    are both larger. Turning these on is a decision a benchmark should make.
 
+9. **The observer's own entity is never deferred, and that is a rule rather than a weight.**
+   Amended 2026-09-18 after the first three-client play session on this feature. "Position is
+   safe to defer" (decision 5) rests on the client interpolating or dead-reckoning it, which
+   is true of every entity except the one the client is *predicting*. For self the position
+   **is** the reconciliation anchor: withholding it does not delay a remote body by an
+   interval, it lets the local prediction diverge for that interval and then corrects it in
+   one visible step. Under `balanced` self scores 5 — distance 2 + type 3, with no HP or
+   action edge to add — which is the 133ms band: predicting at 60Hz against an anchor
+   arriving at 7.5Hz. Three clients reported `lastCorrection` going **0.0041 → 0.3333** the
+   moment `tiered` was switched on, with fps at 170–280, `clamped=0`, `discarded=0` and
+   `resyncs=0`, so it was neither framerate nor loss.
+
+   The exemption lives in `DueNow`, not at the two call sites, and reuses the same `IsSelf`
+   the priority sort uses — the sort has carried this rule since it was written ("a stale one
+   reads as rubber-banding, the single most-noticed netcode artefact") and decision 2 above
+   restates it, so the schedule shipping without it was the two halves of one policy
+   disagreeing, not a missing idea.
+
+   **`GAMESERVER_IMPORTANCE_W_TYPE=7` is not the fix**, though it also stops the stutter: it
+   lifts *every* player over the top band, so it protects a player 49 units away exactly as
+   much as the one being predicted, and gives back a third of the saving to do it (measured
+   below).
+
+10. **No band may be slower than the client can interpolate through, and that bound is a
+    named constant.** Amended 2026-09-18, same session as decision 9 and found by the same
+    three people: with self exempt the players were smooth and the mobs still stepped. A mob
+    scores under 3, so it sat in the slowest band — 266ms — against a client holding
+    `TargetDelay` 100ms plus `MaxExtrapolation` 50ms. Past 150ms the client has nothing left
+    to interpolate towards, so the entity holds and then jumps.
+
+    The ceiling meant to prevent this was `MaxIntervalMs = 500`, and the remark justifying it
+    named 150 and wrote 500 — **the constant was 3.3x the number its own reasoning derived**,
+    with the shipped band sitting between them. It is now
+    `ClientInterpolationBudgetMs = 150`, and `Tiered` drops to two bands, because at a 15Hz
+    world rate those are the only intervals that fit. A third band is available only from a
+    faster world rate or a client that holds more; picking one anyway moves the cost to where
+    nothing measures it. Measured price: 50% saving becomes 37% (Part XVI §48).
+
+    **The budget lives in the other repository** (`InterpolationConfig` in the netcode
+    package). Nothing in this build fails when a band is widened past what the client can
+    absorb, and nothing in the client's build fails when its buffer is narrowed, so the
+    constant is asserted here rather than assumed — `ScheduleFitsTheClientBudgetTests`. A
+    failure there means the two moved apart; reconcile them rather than relaxing the bound.
+
+
 **Consequences.**
 
 - **The 47 % measured in Part XIV is entirely player demotion.** Swept in Part XIV §44:
@@ -3824,6 +3870,21 @@ Before building it, it was measured. Two numbers decided the shape of this ADR:
   publishes.** 75.0 KB/s per client at 200 players is a worst-case-density number, and
   density is precisely where tiering has nothing to demote. Where tiering works — dispersed
   populations — the server already sits at 36.3 KB/s, inside ADR-7's mobile budget.
+- **Measured live, three clients on one map, 60s per arm** (2026-09-18, develop @ `0008cc7`
+  plus the decision-9 fix). `off`: 11.14 KB/s total, 3.71 per client, `lastCorrection`
+  0.000–0.004. `balanced`+`tiered` before the fix: 4.76 / 1.59, `lastCorrection` **0.333** —
+  57% cheaper and visibly stuttering. `tiered` + `W_TYPE=7`: 6.93 / 2.31, `lastCorrection`
+  0.000–0.012 — smooth, but only 38% cheaper. With decision 9 the profile needs no weight
+  override to stay smooth — and with decision 10's two bands it measures 7.03 / 2.34, a 37%
+  saving that the client can actually absorb. Three players and five mobs is not a population
+  to publish a figure from; it is a shape that exposed two rules, which is what it is
+  recorded for.
+- **A documented knob that compose never passed.** `GAMESERVER_IMPORTANCE_W_*` was described
+  in `docker-compose.yml` for the whole life of the feature and never listed in the
+  service's `environment:`, so setting one in `.env` was a silent no-op and `/status` went on
+  reporting the unmodified profile. It read as "tried the knob, made no difference" — the
+  same class of failure as decision 4's vanished middle band, and again invisible to every
+  test, because the tests configure the server in-process and never go through compose.
 - **`snapshot_max_state_age` is a new and separate gauge from `snapshot_max_shed_age`.** A
   not-due entity is not a shed entity, so the budget's bookkeeping is blind to schedule
   deferrals; reading one for the other reports a healthy zero while entities go stale.

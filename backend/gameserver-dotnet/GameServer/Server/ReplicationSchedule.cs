@@ -34,10 +34,32 @@ public sealed class ReplicationSchedule
     /// to be FINITE: an entity that is dirty but never due would never enter the candidate
     /// list, and therefore never age, and therefore never be promoted by the aging order —
     /// it would be starved by a mechanism the existing starvation test cannot see, because a
-    /// not-due entity is not a shed entity. 500ms is also the point past which the client's
-    /// 100ms interpolation buffer plus 50ms extrapolation stops covering the gap at all.
+    /// not-due entity is not a shed entity.
+    ///
+    /// <para><b>It was 500, and the sentence justifying it named 150.</b> The original
+    /// remark read "500ms is also the point past which the client's 100ms interpolation
+    /// buffer plus 50ms extrapolation stops covering the gap at all" — and 100 + 50 is 150.
+    /// The ceiling was set 3.3x above the number its own reasoning derived, and the slowest
+    /// shipped band (266ms) sat in between, so a distant mob was scheduled to arrive
+    /// 116ms after the client had run out of anything to interpolate towards. Three people
+    /// playing saw exactly that, as mobs moving in visible steps while players moved
+    /// smoothly.</para>
     /// </remarks>
-    public const int MaxIntervalMs = 500;
+    public const int MaxIntervalMs = ClientInterpolationBudgetMs;
+
+    /// <summary>
+    /// How long a client can cover a gap with no new state: <c>TargetDelay</c> (100ms) plus
+    /// <c>MaxExtrapolation</c> (50ms), the shipped defaults in the netcode package's
+    /// <c>InterpolationConfig</c>.
+    /// </summary>
+    /// <remarks>
+    /// This is the number that decides whether a deferral is invisible or is a stutter, and
+    /// it lives on the CLIENT. Naming it here, with its derivation, is the smallest honest
+    /// version of a shared constant: a server interval above it is not "slightly stale", it
+    /// is a gap the client has nothing to fill. If the client's config changes, this must
+    /// change with it — grep <c>ClientInterpolationBudgetMs</c>.
+    /// </remarks>
+    public const int ClientInterpolationBudgetMs = 150;
 
     private readonly Tier[] _tiers;
 
@@ -82,18 +104,25 @@ public sealed class ReplicationSchedule
     /// <item><description><b>score ≥ 8 → every tick.</b> Any untold HP or action change
     /// alone clears this (change is 10), as does an attacking player. These are the updates
     /// a client cannot reconstruct.</description></item>
-    /// <item><description><b>score ≥ 3 → 133ms.</b> A player at any distance, or a nearby
+    /// <item><description><b>everything else → 133ms.</b> A player at any distance, or any
     /// mob. Two world ticks at 15Hz: one held frame, then a catch-up.</description></item>
-    /// <item><description><b>otherwise → 266ms.</b> A distant mob that is merely moving.
-    /// Four world ticks at 15Hz, which is the band BENCHMARK.md Part XIII measured at
-    /// 44-46% on a realistic population.</description></item>
     /// </list>
+    ///
+    /// <para><b>Two bands, not three, and that is a consequence rather than a preference.</b>
+    /// The third band was 266ms, chosen because BENCHMARK.md Part XIII measured 44-46% on a
+    /// realistic population at four world ticks. It is above
+    /// <see cref="ClientInterpolationBudgetMs"/>, so what it actually bought was a distant
+    /// mob arriving 116ms after the client had stopped having anything to interpolate
+    /// towards. At a 15Hz world rate and a 150ms client budget, the only intervals that fit
+    /// are one tick (66ms) and two (133ms) — a third band needs a faster world rate or a
+    /// client that holds more, and inventing one here just moves the cost somewhere it is
+    /// not measured. The measured price of dropping it is 13 points of saving —
+    /// BENCHMARK.md Part XVI §48.</para>
     /// </remarks>
     public static ReplicationSchedule Tiered { get; } = new("tiered", new[]
     {
         new Tier(8f, 0),
-        new Tier(3f, 133),
-        new Tier(float.NegativeInfinity, 266),
+        new Tier(float.NegativeInfinity, 133),
     });
 
     /// <summary>

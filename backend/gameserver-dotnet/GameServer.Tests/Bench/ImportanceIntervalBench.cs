@@ -104,6 +104,15 @@ public sealed class ImportanceIntervalBench
             hpChanged: false, actionChanged: false);
 
         float score = ReplicationImportance.Score(in inputs, ImportanceSettings.Balanced.Weights);
+
+        // NOT modelled here: the encoder exempts the viewer's OWN entity outright
+        // (ADR-27 decision 9), so on the live path one entity per viewer is always due
+        // regardless of score. This bench has no notion of which population member is the
+        // viewer — the observer is a position, not an entity — so it counts that one as
+        // banded like any other. At 200-720 entities per viewer the difference is under
+        // half a percent of the saving, which is why it is recorded rather than fixed; what
+        // must not happen is someone reading this number as the encoder's and concluding
+        // self is deferred. It is not.
         return ReplicationSchedule.Tiered.IntervalTicksFor(score, SimulationRates.DefaultCriticalHz)
                / WorldEveryAtDefault;
     }

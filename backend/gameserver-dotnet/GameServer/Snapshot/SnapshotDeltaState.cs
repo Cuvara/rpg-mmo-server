@@ -1067,7 +1067,7 @@ public sealed class SnapshotDeltaState
                 Score = _candidateScores[c],
                 DistanceSq = distanceSq,
                 Index = index,
-                Self = SelfId != null && string.Equals(e.Id, SelfId, StringComparison.Ordinal),
+                Self = IsSelf(in e),
             };
         }
 
@@ -1191,9 +1191,28 @@ public sealed class SnapshotDeltaState
     /// is not a late update, it is a dropped event -- the client would never learn the hit
     /// or the swing happened at all, because the next snapshot carries only the state
     /// afterwards. Position and facing are safe to defer; these are not.
+    ///
+    /// <b>Nor is the observer's own entity, ever.</b> "Position is safe to defer" holds
+    /// because the client interpolates or dead-reckons it -- true of every entity except
+    /// the one the client is PREDICTING. For self the position IS the reconciliation
+    /// anchor: withholding it does not delay a remote body by an interval, it lets the
+    /// local prediction diverge for that interval and then corrects it in one step. The
+    /// priority sort has said so since it was written (rule 1 of
+    /// <see cref="CandidateComparer"/>: "a stale one reads as rubber-banding, the single
+    /// most-noticed netcode artefact") -- the schedule shipped without the same rule, and a
+    /// three-client play session measured the result as a 0.0041 -> 0.3333 jump in the
+    /// client's reported lastCorrection. Self scores 5 under the "balanced" profile
+    /// (distance 2 + type 3, with no HP or action edge to add), which lands in the 133ms
+    /// tier: predicting at 60Hz against an anchor arriving at 7.5Hz.
+    ///
+    /// This is a rule, not a weight. <c>GAMESERVER_IMPORTANCE_W_TYPE=7</c> also stops the
+    /// stutter, by lifting EVERY player over the top tier -- which protects a player 49
+    /// units away exactly as much as the one being predicted, and gives back a third of
+    /// the saving to do it.
     /// </remarks>
     private bool DueNow(in EntityView e, in SentView prev, ulong tick, float score)
     {
+        if (IsSelf(in e)) return true;
         if (prev.Hp != e.Hp || prev.MaxHp != e.MaxHp) return true;
         if (prev.Action != e.Action || prev.ActionSeq != e.ActionSeq) return true;
 
@@ -1203,6 +1222,14 @@ public sealed class SnapshotDeltaState
         if (!_lastSentTick.TryGetValue(e.Key, out ulong last)) return true;
         return tick - last >= (ulong)interval;
     }
+
+    /// <summary>
+    /// Whether <paramref name="e"/> is the entity belonging to the connection this state
+    /// encodes for. One definition, read by both the priority sort and the schedule: they
+    /// disagreeing about what "self" means is the failure this replaces.
+    /// </summary>
+    private bool IsSelf(in EntityView e) =>
+        SelfId != null && string.Equals(e.Id, SelfId, StringComparison.Ordinal);
 
     /// <summary>Track how long this entity has gone without the update it is owed.</summary>
     private void NoteStateAge(int key, ulong tick)

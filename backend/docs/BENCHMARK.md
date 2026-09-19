@@ -2867,3 +2867,85 @@ Two of the three cost nothing in smoothness. The one that ships costs the most a
 population this game does not have to earn the part of its case that was originally made
 for it.
 
+
+---
+
+## Part XVI — three real clients, and the one entity the schedule must not defer (2026-09-18)
+
+Everything above is synthetic: a bench that drives the encoder, or a load generator that
+speaks the wire without rendering anything. This is the first time the feature was **played**
+— three Windows players built from the netcode DOTS sample, on one map, against the compose
+stack at `develop@0008cc7`. It took under a minute to find something no bench had.
+
+### §46 — tiering on, and the game visibly stutters
+
+| arm | KB/s total | KB/s per client | client `lastCorrection` |
+|---|---|---|---|
+| `legacy` / `off` (control) | 11.14 | 3.71 | 0.000–0.004 |
+| `balanced` / `tiered` | **4.76** | **1.59** | **0.333** |
+| `tiered` + `W_TYPE=7` | 6.93 | 2.31 | 0.000–0.012 |
+| `balanced` / `tiered`, **with the decision-9 fix** | **5.54** | **1.85** | **0.000–0.008** |
+
+Three players, five mobs, 60s per arm, bytes read as a delta of `snapshot_bytes` off
+`/status` and normalised by the tick delta from the same document.
+
+`lastCorrection` is the client's own reported reconciliation step. An **80× jump** in it, at
+fps 170–280 with `clamped=0`, `discarded=0` and `resyncs=0`, is not framerate and not loss:
+the server was telling each client where it was at 7.5Hz while the client predicted at 60Hz.
+Self scores 5 under `balanced` — distance 2 plus type 3, with no HP or action edge to add —
+and 5 lands in the 133ms band. **The observer's own entity was being deferred.** ADR-27
+decision 9 now exempts it; see the gameserver changelog for why the rule existed in prose in
+two places before the code had it.
+
+### §47 — why `W_TYPE=7` is a worse answer than it looks
+
+§44 found `W_TYPE=7` is the first value that lifts a player clear of the top band, and it
+does stop the stutter — third row above. It is still the wrong fix, for a reason the
+synthetic sweep could not show: it protects **every** player, so the one being predicted and
+one at 49 units get identical treatment, and 38% is all that is left of the 57%.
+
+The fourth row is the same three clients against the fixed server, `balanced`/`tiered` with
+no weight override at all: `lastCorrection` back at control levels (0.000–0.008 against the
+control's 0.000–0.004) and **50% cheaper** than the control, with `deferred=13135` in the
+window proving the schedule is still doing its work. Exempting one entity per connection
+costs 3 points of the 57; exempting every player costs 19.
+
+### §48 — the mobs stuttered too, and that one was arithmetic
+
+With self exempt the players were smooth and the **mobs** were not. A mob scores under 3
+(distance at most 2, no type bonus, and `change` only fires on an HP or action edge), so it
+landed in the slowest band — which was **266ms**, against a client that holds
+`TargetDelay` 100ms + `MaxExtrapolation` 50ms = **150ms**. Past that the client is not
+looking at old state, it has none: the entity holds and then jumps.
+
+The ceiling above that band was `MaxIntervalMs = 500`, and the remark justifying it read
+*"500ms is also the point past which the client's 100ms interpolation buffer plus 50ms
+extrapolation stops covering the gap at all"* — 100 + 50 is 150. **The constant was 3.3x the
+number its own sentence derived**, and 266 sat between the two. The ceiling is now
+`ClientInterpolationBudgetMs = 150` and the 266ms band is gone: at a 15Hz world rate and a
+150ms budget, the only intervals that fit are one tick and two.
+
+| arm | KB/s total | KB/s per client | max deferral | clients |
+|---|---|---|---|---|
+| `off` (control) | 11.14 | 3.71 | 0 | smooth |
+| three bands, self exempt | 5.54 | 1.85 | 12 base ticks = **200ms** | players smooth, **mobs step** |
+| two bands, ≤ budget | **7.03** | **2.34** | 4 base ticks = **66ms** | smooth |
+
+**`snapshot_max_state_age` counts BASE ticks, not world ticks** — the encoder is handed
+`TickLoop`'s tick, which advances at 60Hz. Reading it as world ticks overstates every
+staleness figure by 4x, which is how the three-band arm first got written up as 800ms of
+deferral rather than 200ms. The argument was unchanged; the number was wrong by the ratio
+between two rates that ADR-13 exists to keep apart.
+
+Dropping the band costs **13 points**: 50% saving becomes 37%. That is the honest price of
+the slowest band having been outside what the shipped client can absorb.
+
+### §49 — do not read these as capacity numbers
+
+Three players and five mobs is not a population. The absolute KB/s here are an order of
+magnitude below Part XIII's, and nothing in this Part revises a ceiling, a per-client budget
+or a saving percentage — Part XIV's −47.3% is still the measurement of record. What this
+Part is for is the class of defect it caught: a policy that every unit test, both benches and
+a 200-client load run had agreed was correct, and that one person moving a character noticed
+in seconds. The instrument that found it was a human eye; the instrument that *confirmed* it
+was a counter the client had been printing all along and nobody had read.
