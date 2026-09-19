@@ -494,11 +494,11 @@ func (x *AuthResponse) GetProtocolVersion() uint32 {
 // `party_id` selects between the two things this one message can ask for, and
 // ADR-26 decision 1 is the reason there is only one message:
 //
-//	empty     -> a MAP server for `map_id`, the flow that has always existed.
-//	non-empty -> a DUNGEON INSTANCE of the content named by `map_id`, for this
-//	             party. The first member's request allocates a pod; every later
-//	             member is handed the SAME address, because the instance is
-//	             keyed by the party and not by the content (ADR-26 decision 2).
+//   empty     -> a MAP server for `map_id`, the flow that has always existed.
+//   non-empty -> a DUNGEON INSTANCE of the content named by `map_id`, for this
+//                party. The first member's request allocates a pod; every later
+//                member is handed the SAME address, because the instance is
+//                keyed by the party and not by the content (ADR-26 decision 2).
 //
 // The gateway verifies the caller really is a member of the named party against
 // Nakama, once per entry (ADR-26 decision 3). A client that names a party it is
