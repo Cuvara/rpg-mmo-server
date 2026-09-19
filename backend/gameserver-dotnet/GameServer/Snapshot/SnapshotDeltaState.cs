@@ -54,7 +54,6 @@ public sealed class SnapshotDeltaState
         public readonly float Speed;
         public readonly uint FacingBrad;
         public readonly SimAction Action;
-        public readonly uint ActionSeq;
 
         /// <summary>
         /// Retrigger counter for <see cref="Action"/>. In equality for a reason the other
