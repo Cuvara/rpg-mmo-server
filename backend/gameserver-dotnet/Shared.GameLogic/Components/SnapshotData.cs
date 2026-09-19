@@ -83,6 +83,17 @@ namespace Shared.GameLogic.Components
         public readonly EntityAction Action;
 
         /// <summary>
+        /// Field-level delta mask from <c>EntitySnapshot.changed_fields</c> (wire.proto field 13,
+        /// protocol version 2+). Zero means "all fields present" (full entity state). Non-zero
+        /// means this is a partial update: only the bits that are set have valid data; the
+        /// <see cref="SnapshotMerger"/> keeps its last-known value for every unset bit.
+        /// </summary>
+        /// <remarks>
+        /// Bit assignments are in <see cref="Systems.SnapshotFieldBits"/>.
+        /// </remarks>
+        public readonly uint ChangedFields;
+
+        /// <summary>
         /// Constructs entity state without a speed, leaving <see cref="Speed"/> zero —
         /// which consumers read as "not sent".
         /// </summary>
@@ -116,6 +127,20 @@ namespace Shared.GameLogic.Components
         public EntitySnapshotData(
             string id, string type, float x, float y, int hp, int maxHp, float speed,
             uint facingBrad, EntityAction action)
+            : this(id, type, x, y, hp, maxHp, speed, facingBrad, action, changedFields: 0)
+        {
+        }
+
+        /// <summary>
+        /// Full constructor including the field-level delta mask.
+        /// </summary>
+        /// <param name="changedFields">
+        /// Zero for a complete entity snapshot; non-zero for a partial update — see
+        /// <see cref="ChangedFields"/> and <see cref="Systems.SnapshotFieldBits"/>.
+        /// </param>
+        public EntitySnapshotData(
+            string id, string type, float x, float y, int hp, int maxHp, float speed,
+            uint facingBrad, EntityAction action, uint changedFields)
         {
             Id = id;
             Type = type;
@@ -126,6 +151,7 @@ namespace Shared.GameLogic.Components
             Speed = speed;
             FacingBrad = facingBrad;
             Action = action;
+            ChangedFields = changedFields;
         }
     }
 

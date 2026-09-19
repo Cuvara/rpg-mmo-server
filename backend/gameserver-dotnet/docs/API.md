@@ -243,11 +243,12 @@ then disagree about what a field *means*. That is the failure this number exists
 to make loud: it compiles, it connects, and the numbers are consistent about the
 wrong thing. Before this field, client and server agreed by convention alone.
 
-**Current version: `1`.**
+**Current version: `2`.**
 
 | Version | Introduced | What it covers |
 |---|---|---|
 | `1` | 2026-09-09 | The schema as of `wire.proto` at the introduction of this field, including `facing_brad` and `action` on `EntitySnapshot`. |
+| `2` | 2026-09-19 | Field-level delta encoding. `EntitySnapshot.changed_fields` (field 13, `uint32`) carries a bitmask of fields that are present in a delta entity; zero means "all fields present" (protocol v1 behaviour). The snapshot merge algorithm changes: a partial update (`changed_fields != 0`) on an entity already in world state keeps the receiver's last-known value for every unset bit. A client that cannot implement this must send `--min-protocol-version=0` and accept keyframe-only mode, or remain on v1. |
 
 #### Where it rides, and why on both hops
 
@@ -509,9 +510,40 @@ the reason recorded in `backend/TEAM.md`.
 
 `entities[]` element: `id` (string), `type` (a category string — see below),
 `x`, `y` (float32), `hp`, `max_hp` (int), `speed` (float32), `facing_brad` (uint32),
-`action` (enum), `action_seq` (uint32). Visible state is exactly these fields — a change in any of them puts
-the entity in the next delta; a change in a field the client cannot see (e.g. cooldown)
-does not.
+`action` (enum), `action_seq` (uint32), `changed_fields` (uint32, protocol v2+).
+Visible state is exactly these fields — a change in any of them puts the entity in the
+next delta; a change in a field the client cannot see (e.g. cooldown) does not.
+
+**`changed_fields` — field-level delta mask (protocol version 2+, field 13)**
+
+On a protocol-v2 connection the server suppresses individual fields that have not
+changed, rather than suppressing only whole entities. `changed_fields` carries the
+bitmask of fields present in a given entity update:
+
+| Bit | Value | Field |
+|-----|-------|-------|
+| 0 | `0x0001` | `x` |
+| 1 | `0x0002` | `y` |
+| 2 | `0x0004` | `hp` |
+| 3 | `0x0008` | `max_hp` |
+| 4 | `0x0010` | `type` / `type_name` |
+| 5 | `0x0020` | `speed` |
+| 6 | `0x0040` | `facing_brad` |
+| 7 | `0x0080` | `action` |
+| 8 | `0x0100` | `action_seq` |
+
+**Zero means "all fields present"** — the protocol-v1 rule, kept for backwards
+compatibility and for proto3 zero-elision: a sender that omits this field is
+indistinguishable from one that sets it to zero. **Non-zero means partial update**:
+only the bits that are set carry valid data; a receiver MUST keep its last-known value
+for every unset bit rather than reading zero from the missing field.
+
+`changed_fields` is **never set on a keyframe** (`full = true`), and **never set on
+the first introduction of an entity** (i.e. when the receiver has no prior state to
+merge against). In both those cases the field is omitted (zero), meaning all fields
+are present. The server encodes this at the wire layer; clients MUST also follow it:
+a delta entity whose id is not yet in `world` is a full replace even when
+`changed_fields != 0`. See the updated merge algorithm below.
 
 **`speed`** is movement speed in world units per second, as the server is integrating it
 for that entity *right now* — not the spawn default. It exists so a client can predict
@@ -1010,7 +1042,10 @@ on snapshot s:
     # STEP 3 — apply.
     for e in resolved:
         if e.handle != 0:  handles[e.handle] = e.id   # record/refresh binding
-        world[e.id] = e                               # upsert
+        if e.changed_fields != 0 and e.id in world:   # protocol v2: partial update
+            world[e.id] = merge_field_delta(world[e.id], e, e.changed_fields)
+        else:
+            world[e.id] = e                           # full replace (v1 or new entity)
     for id in s.removed:   world.remove(id)           # despawn — by ID, not handle
 
     # STEP 4 — clocks.
@@ -1018,8 +1053,32 @@ on snapshot s:
     ack_tick = max(ack_tick, s.ack_tick)   # monotonic; a 0 never lowers it
 ```
 
+```
+def merge_field_delta(existing, delta, mask):
+    # Return a new entity whose fields come from delta where the bit is set,
+    # and from existing where it is not. The id always comes from delta.
+    return Entity(
+        id           = delta.id,
+        x            = delta.x            if mask & 0x0001 else existing.x,
+        y            = delta.y            if mask & 0x0002 else existing.y,
+        hp           = delta.hp           if mask & 0x0004 else existing.hp,
+        max_hp       = delta.max_hp       if mask & 0x0008 else existing.max_hp,
+        type         = delta.type         if mask & 0x0010 else existing.type,
+        speed        = delta.speed        if mask & 0x0020 else existing.speed,
+        facing_brad  = delta.facing_brad  if mask & 0x0040 else existing.facing_brad,
+        action       = delta.action       if mask & 0x0080 else existing.action,
+        action_seq   = delta.action_seq   if mask & 0x0100 else existing.action_seq,
+        changed_fields = 0,   # the merged result is a full snapshot, not a delta
+    )
+```
+
+`changed_fields` is only meaningful while applying a single incoming frame; the merged
+result stored in `world` always has it cleared to zero.
+
 On a JSON connection `handles` stays empty and steps 1 and 3's handle lines are
-no-ops, so this is one algorithm for both encodings — not two.
+no-ops, so this is one algorithm for both encodings — not two. `changed_fields` is
+always absent in JSON (the JSON encoder does not implement field-level delta), so the
+`merge_field_delta` branch in step 3 is also a no-op there.
 
 Three details in that ordering are load-bearing:
 
@@ -1139,6 +1198,15 @@ ack of tick 0.
 `ack_tick`, `full` and `removed` are all omitted when default, so a keyframe-only
 stream (`--keyframe-interval 0`) is byte-identical to the pre-delta protocol. A
 client that reads only `tick` and `entities` still works against such a server.
+
+`changed_fields` (protocol v2) is zero when absent, and zero means "all fields
+present" — the v1 rule. A v1 client that ignores field 13 is therefore correct for
+v1 servers. A v2 server sends `changed_fields = 0` on every keyframe and on every
+entity delta sent to a client that proved `protocol_version < 2`, so a v1 client
+on a v2 server also continues to work — it never receives a partial entity. Field-level
+delta is only activated per-connection when the client's `join_token.protocol_version`
+exactly matches the server's `WireProtocol.ProtocolVersion` **and** the connection
+is using Protobuf encoding (the JSON path never sets `changed_fields`).
 
 ## `resync` (10) — client → gameserver
 

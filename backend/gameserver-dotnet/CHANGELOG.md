@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Field-level delta encoding (protocol version 2, issue #373): 43.4% of entity bytes were
+  unchanged fields re-sent on every dirty entity.** The delta encoder was entity-granular: if
+  a player moved, all of `hp`, `max_hp`, `speed`, `type`, `facing_brad`, `action`, and
+  `action_seq` were re-sent even though they are static 99.7% of the time. `speed` alone was
+  5 bytes — a fifth of the mean 25 B/entity payload, written once at spawn and never again.
+  - `EntitySnapshot.changed_fields` (proto field 13, `uint32`) carries a per-entity bitmask on
+    delta frames: one bit per field (x 0x0001, y 0x0002, hp 0x0004, max_hp 0x0008, type 0x0010,
+    speed 0x0020, facing_brad 0x0040, action 0x0080, action_seq 0x0100). Zero means "all fields
+    present" — the old protocol rule, so an old receiver reading a zero mask behaves unchanged.
+    Non-zero means partial update: the receiver keeps its last value for every unset bit.
+  - `SnapshotDeltaState` grows a `FieldDelta` property (set per-connection after the version
+    handshake). `Fill()` now takes `fieldDelta`/`hasPrev`/`prev` parameters and, when active,
+    writes only the fields that changed. The sizing pass (`EncodeBudgeted`) and
+    `MeasureEntity()` use the same parameters so the byte-budget measurement never diverges
+    from the emission.
+  - `SnapshotMerger` (`Shared.GameLogic`) grows `MergeFieldDelta()`: when a delta entity
+    carries a non-zero mask, the merger combines changed fields from the wire with kept fields
+    from its last-known state. Zero-mask entities are applied unchanged (old rule preserved).
+  - `SnapshotFieldBits` (`Shared.GameLogic.Systems`) defines the bit assignments once; both the
+    encoder and the merger read from it so a disagreement is a compile error rather than a
+    silent desync.
+  - **Protocol version bumped 1 → 2.** A client that advertises version 1 (or unversioned) is
+    admitted by the existing version-check rules but does not receive field-level deltas (its
+    `FieldDelta = false`). A pre-v2 receiver ignoring `changed_fields` via proto3 unknown-field
+    skip would zero every unset field, producing entities at the origin with 0 HP — which is
+    exactly the silent failure the version bump exists to prevent.
+  - Six new golden vectors in `snapshot_merger.json` prove the merge rule: partial position
+    update keeps static fields, partial HP update keeps position, zero mask applies the full
+    old rule, and a new entity arriving with a non-zero mask is treated as a full update.
+
 ### Fixed
 - **The replication schedule deferred the observer's own entity, which is the one entity it
   must never defer.** With `GAMESERVER_REPLICATION_SCHEDULE=tiered` and the `balanced`

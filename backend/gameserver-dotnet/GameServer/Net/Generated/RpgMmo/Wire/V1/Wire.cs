@@ -87,7 +87,7 @@ namespace RpgMmo.Wire.V1 {
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenRequest), global::RpgMmo.Wire.V1.JoinTokenRequest.Parser, new[]{ "Token", "ProtocolVersion" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.JoinTokenResponse), global::RpgMmo.Wire.V1.JoinTokenResponse.Parser, new[]{ "Ok", "UserId", "Error", "TickRate", "ProtocolVersion" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.InputMessage), global::RpgMmo.Wire.V1.InputMessage.Parser, new[]{ "Tick", "MoveX", "MoveY", "AttackTargetId" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EntitySnapshot), global::RpgMmo.Wire.V1.EntitySnapshot.Parser, new[]{ "Id", "TypeName", "X", "Y", "Hp", "MaxHp", "Type", "Handle", "Speed", "FacingBrad", "Action", "ActionSeq" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.EntitySnapshot), global::RpgMmo.Wire.V1.EntitySnapshot.Parser, new[]{ "Id", "TypeName", "X", "Y", "Hp", "MaxHp", "Type", "Handle", "Speed", "FacingBrad", "Action", "ActionSeq", "ChangedFields" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.SnapshotMessage), global::RpgMmo.Wire.V1.SnapshotMessage.Parser, new[]{ "Tick", "AckTick", "Full", "Entities", "Removed" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.DisconnectMessage), global::RpgMmo.Wire.V1.DisconnectMessage.Parser, new[]{ "Reason" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::RpgMmo.Wire.V1.ResyncRequest), global::RpgMmo.Wire.V1.ResyncRequest.Parser, null, null, null, null, null),
@@ -2697,6 +2697,7 @@ namespace RpgMmo.Wire.V1 {
       facingBrad_ = other.facingBrad_;
       action_ = other.action_;
       actionSeq_ = other.actionSeq_;
+      changedFields_ = other.changedFields_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -2981,6 +2982,25 @@ namespace RpgMmo.Wire.V1 {
       }
     }
 
+    /// <summary>Field number for the "changed_fields" field.</summary>
+    public const int ChangedFieldsFieldNumber = 13;
+    private uint changedFields_;
+    /// <summary>
+    /// Field-level delta mask (protocol version 2+). Non-zero on a DELTA snapshot means
+    /// only the bits that are set have their wire fields present; the receiver MUST keep
+    /// its last-known value for every unset bit. Zero means all fields present (full entity
+    /// state — same rule as a keyframe). See wire.proto EntitySnapshot.changed_fields and
+    /// Shared.GameLogic.Systems.SnapshotFieldBits for bit assignments.
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public uint ChangedFields {
+      get { return changedFields_; }
+      set {
+        changedFields_ = value;
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -3008,6 +3028,7 @@ namespace RpgMmo.Wire.V1 {
       if (FacingBrad != other.FacingBrad) return false;
       if (Action != other.Action) return false;
       if (ActionSeq != other.ActionSeq) return false;
+      if (ChangedFields != other.ChangedFields) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -3027,6 +3048,7 @@ namespace RpgMmo.Wire.V1 {
       if (FacingBrad != 0) hash ^= FacingBrad.GetHashCode();
       if (Action != global::RpgMmo.Wire.V1.EntityAction.Unspecified) hash ^= Action.GetHashCode();
       if (ActionSeq != 0) hash ^= ActionSeq.GetHashCode();
+      if (ChangedFields != 0) hash ^= ChangedFields.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -3093,6 +3115,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(96);
         output.WriteUInt32(ActionSeq);
       }
+      if (ChangedFields != 0) {
+        output.WriteRawTag(104);
+        output.WriteUInt32(ChangedFields);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -3151,6 +3177,10 @@ namespace RpgMmo.Wire.V1 {
         output.WriteRawTag(96);
         output.WriteUInt32(ActionSeq);
       }
+      if (ChangedFields != 0) {
+        output.WriteRawTag(104);
+        output.WriteUInt32(ChangedFields);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -3196,6 +3226,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (ActionSeq != 0) {
         size += 1 + pb::CodedOutputStream.ComputeUInt32Size(ActionSeq);
+      }
+      if (ChangedFields != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeUInt32Size(ChangedFields);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -3244,6 +3277,9 @@ namespace RpgMmo.Wire.V1 {
       }
       if (other.ActionSeq != 0) {
         ActionSeq = other.ActionSeq;
+      }
+      if (other.ChangedFields != 0) {
+        ChangedFields = other.ChangedFields;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -3312,6 +3348,10 @@ namespace RpgMmo.Wire.V1 {
             ActionSeq = input.ReadUInt32();
             break;
           }
+          case 104: {
+            ChangedFields = input.ReadUInt32();
+            break;
+          }
         }
       }
     #endif
@@ -3377,6 +3417,10 @@ namespace RpgMmo.Wire.V1 {
           }
           case 96: {
             ActionSeq = input.ReadUInt32();
+            break;
+          }
+          case 104: {
+            ChangedFields = input.ReadUInt32();
             break;
           }
         }

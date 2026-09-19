@@ -103,7 +103,7 @@ public static class WireProtocol
     /// and tests assert it on its own side.
     /// </para>
     /// </remarks>
-    public const uint ProtocolVersion = 1;
+    public const uint ProtocolVersion = 2;
 
     /// <summary>
     /// Wire value meaning "this peer does not advertise a version" — a peer built

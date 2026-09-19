@@ -6,6 +6,22 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+
+- **`EntitySnapshot.changed_fields` (proto field 13, `uint32`) — field-level delta mask
+  (protocol version 2+).** Non-zero on a delta entity means only the bits that are set have
+  their wire fields present; the receiver keeps its last-known value for every unset bit. Zero
+  means "all fields present" — preserving the pre-v2 rule so a sender that never sets the field
+  is a supported configuration (an old receiver ignoring it via proto3 unknown-field skip is
+  exactly the same bytes it always saw). Bit assignments:
+  `x=0x0001, y=0x0002, hp=0x0004, max_hp=0x0008, type=0x0010, speed=0x0020,
+  facing_brad=0x0040, action=0x0080, action_seq=0x0100`.
+  NEVER set on keyframes; NEVER set on a first introduction.
+- **`WireProtocolVersion` bumped 1 → 2.** The merge algorithm changed: a delta entity with a
+  non-zero mask is a partial update, not a full replace. A pre-v2 receiver ignoring the mask
+  and zeroing every absent field would produce entities at the origin with 0 HP — the silent
+  failure the version number exists to make loud.
+
+### Added
 - **`Shared.GameLogic.Systems.ActionStateLogic` — the action/retrigger-counter rule, now
   in the module both sides compile.** The type already existed in the client's copy of the
   package (`com.rpgmmo.shared-gamelogic` 0.5.0) and is adopted here **byte-identically**,
