@@ -3,9 +3,9 @@ using Shared.GameLogic.Components;
 namespace GameServer.World;
 
 /// <summary>
-/// The trimmed per-match compose for the snapshot gather path: exactly the nine
+/// The trimmed per-match compose for the snapshot gather path: exactly the ten
 /// fields the wire encoder consumes (<c>Id</c>/<c>Type</c>/<c>X</c>/<c>Y</c>/<c>Hp</c>/
-/// <c>MaxHp</c>/<c>Speed</c>/<c>FacingBrad</c>/<c>Action</c>) plus the world-stable integer key the delta encoder
+/// <c>MaxHp</c>/<c>Speed</c>/<c>FacingBrad</c>/<c>Action</c>/<c>ActionSeq</c>) plus the world-stable integer key the delta encoder
 /// keys its maps on.
 ///
 /// <para><b>Why this exists (issue #237).</b> The AOI scan used to compose a full

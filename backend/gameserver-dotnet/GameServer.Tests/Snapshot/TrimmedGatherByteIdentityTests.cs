@@ -102,29 +102,10 @@ public class TrimmedGatherByteIdentityTests
                     $"t{t} {ids[i]}: match counts diverged (old {oldCount}, new {newCount})");
                 Assert.True(oldCount <= stateBuffer.Length, "scenario buffer undersized");
 
-                // ActionSeq is normalised OUT of the new arm before the comparison, and
-                // this is the one field where the two arms are not expected to agree.
-                //
-                // EntityState cannot carry it: it is a Shared.GameLogic type compiled into
-                // the Unity client as a UPM package, so adding a field means an sgl release
-                // plus a manifest and lock bump on the client, for a path no production
-                // code takes. The legacy arm therefore structurally reports 0 while the
-                // real one reports the counter — which is correct on both sides and is not
-                // what this test is about. #237's claim is that the TRIMMED COMPOSE emits
-                // the same bytes as the full one, and zeroing the field it cannot reach
-                // keeps that claim provable instead of retiring the test.
-                //
-                // sawActionSeq below is what stops this from becoming a way to hide a
-                // regression: if the scenario ever stops producing a non-zero counter, the
-                // normalisation is masking nothing and the assertion at the end says so.
+                // Verify the scenario produces non-zero ActionSeq values so we know the
+                // retrigger counter is actually exercised.
                 for (int e = 0; e < newCount; e++)
-                {
-                    ref readonly EntityView v = ref viewBuffer[e];
-                    sawActionSeq |= v.ActionSeq != 0;
-                    viewBuffer[e] = new EntityView(
-                        v.Key, v.Id, v.Type, v.Position, v.Hp, v.MaxHp, v.Speed,
-                        v.FacingBrad, v.Action, actionSeq: 0);
-                }
+                    sawActionSeq |= viewBuffer[e].ActionSeq != 0;
 
                 SnapshotMessage oldMsg = oldStates[i].Encode(
                     loop.CurrentTick, ackTick, stateBuffer.AsSpan(0, oldCount),

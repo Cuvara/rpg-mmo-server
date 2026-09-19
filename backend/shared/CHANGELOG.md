@@ -6,7 +6,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Gameplay v2 in `shared/messages`.** `InputMessage` gains `AbilityID`, `AbilityTargetID`,
+  `AimX`/`AimY`; `EntitySnapshot` gains `ActionSeq`; `SnapshotMessage` gains `Events`, with a
+  new `GameEvent` / `GameEventType`. Both directions of the Protobuf conversion in `proto.go`
+  carry them.
 
+  The gateway never reads a snapshot or an input, so production Go is unaffected — but the
+  integration and load harnesses drive the wire through this package, and a Go client that
+  silently dropped the fields could not have tested them. It was the missing third language
+  of a contract whose other two were already done.
 - **`EntitySnapshot.changed_fields` (proto field 13, `uint32`) — field-level delta mask
   (protocol version 2+).** Non-zero on a delta entity means only the bits that are set have
   their wire fields present; the receiver keeps its last-known value for every unset bit. Zero
@@ -20,8 +28,6 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   non-zero mask is a partial update, not a full replace. A pre-v2 receiver ignoring the mask
   and zeroing every absent field would produce entities at the origin with 0 HP — the silent
   failure the version number exists to make loud.
-
-### Added
 - **`Shared.GameLogic.Systems.ActionStateLogic` — the action/retrigger-counter rule, now
   in the module both sides compile.** The type already existed in the client's copy of the
   package (`com.rpgmmo.shared-gamelogic` 0.5.0) and is adopted here **byte-identically**,

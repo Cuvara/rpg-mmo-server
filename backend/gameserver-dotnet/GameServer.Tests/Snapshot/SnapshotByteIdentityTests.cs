@@ -139,8 +139,21 @@ public class SnapshotByteIdentityTests
     [Fact]
     public void ProtobufSnapshotStream_IsByteIdenticalToThePreRefactorFixture()
     {
-        // Rebaselined 2026-09-09 for `facing_brad` (field 10) and `action` (field 11).
-        // Previous: 7AADCC48A2ADCE07DE60C9775CEF45AE28783CC117032781203B5997A2C531C0
+        // Rebaselined 2026-09-14 for `action_seq` (field 12), the retrigger counter.
+        // Previous: 7D47D5A005CDC8F2334085D89FE5B649FA63D4FDC0BF2575D2AF7144B0537998
+        //   (2026-09-09, `facing_brad` field 10 and `action` field 11).
+        //
+        // THE EVIDENCE FOR THIS REBASELINE, because "the digest moved and I updated it" is
+        // exactly what this constant exists to prevent. The one line writing action_seq in
+        // SnapshotDeltaState.Fill was commented out and the scenario re-run: the digest came
+        // back as 7D47D5A0... — the previous value, EXACTLY. So the only bytes this change
+        // adds are that field. Ordering, keyframe phase, despawn timing and handle
+        // allocation are all provably untouched, and the new `events` field (field 6 on
+        // SnapshotMessage) contributes nothing here because this scenario produces no
+        // combat and proto3 elides an empty repeated field.
+        //
+        // Reproduce that control before accepting any future rebaseline of this constant.
+        // Before that: 7AADCC48A2ADCE07DE60C9775CEF45AE28783CC117032781203B5997A2C531C0
         // Before that: 5E31830689214B517284D7D9C5E9336B9ADBAD681B11EAF896980D60686C61CB
         //   (2026-08-14, the `speed` field — wire.proto field 9, rpg-mmo-server#91).
         //
@@ -152,7 +165,7 @@ public class SnapshotByteIdentityTests
         // If you are reading this because the test failed again, the question to answer
         // first is whether YOUR change was supposed to alter the wire. If it was not,
         // do not touch the constant.
-        const string expected = "7D47D5A005CDC8F2334085D89FE5B649FA63D4FDC0BF2575D2AF7144B0537998";
+        const string expected = "DBB6FC812284FED37975AE96E45A25C7056BDA74A8FB8EBEA554744500F3D66B";
 
         (string digest, string head) = RunScenario(WireEncoding.Proto);
 
@@ -181,7 +194,18 @@ public class SnapshotByteIdentityTests
         // "not sent" value rather than a legitimate reading. Writing `"facing_brad":0`
         // would assert "there is a facing and it is the reserved value", which is not a
         // thing — so here the JSON and Protobuf encodings agree.
-        const string expected = "77C0F2543E1FABF651C69CAF2FC882E7BBFDEE24ECBC65DC1FB77F7A98D7E914";
+        //
+        // Rebaselined 2026-09-14 for `action_seq`, which this writer omits when zero for the
+        // same reason it omits the other two. Previous:
+        // 77C0F2543E1FABF651C69CAF2FC882E7BBFDEE24ECBC65DC1FB77F7A98D7E914
+        //
+        // This digest moving IS the point of pinning JSON separately. When action_seq was
+        // first added to the Protobuf writer alone, the Protobuf fixture failed and this one
+        // PASSED — which looked like good news and was the bug: a JSON client would have
+        // driven the same animator from the same level-triggered action field and never
+        // retriggered a repeated attack, while every test stayed green. The two encodings
+        // carry the same protocol or one of them is quietly a different game.
+        const string expected = "A40A9B86CD45998BC85562E29D9E7138F8C708B703F10D7286B52397D481DED5";
 
         (string digest, string head) = RunScenario(WireEncoding.Json);
 

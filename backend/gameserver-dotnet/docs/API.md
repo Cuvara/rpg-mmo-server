@@ -313,6 +313,16 @@ configuration, which is the entire point of writing that rule down.
 > old client skips two unknown fields. Neither direction diverges. A rule that
 > fired on every change would be a build counter, not a compatibility contract.
 
+> **Worked example 2 — why gameplay v2 did not bump it either.** `action_seq`
+> (field 12), `SnapshotMessage.events` (field 6) and the four ability fields on
+> `InputMessage` (5-8) were all added at version `1` and left it there. Each is
+> additive and optional with a documented zero/empty meaning "not sent": an old
+> client skips them, and an old **server** sending none of them leaves a new
+> client in exactly its pre-feature behaviour — no retriggered animations, no
+> damage numbers, and abilities that are refused rather than silently mis-resolved.
+> The test is not "did the schema change" but "can a conforming peer of one
+> version misread a conforming peer of the other", and here neither can.
+
 #### When it is absent or zero
 
 **`protocol_version` absent or `0` means "this peer does not advertise a
@@ -416,7 +426,8 @@ message handler.
 ## `input` (7) — client → gameserver, once per client tick
 
 ```json
-{ "tick": 41, "move_x": 1.0, "move_y": 0.0, "attack_target_id": "mob_3" }
+{ "tick": 41, "move_x": 1.0, "move_y": 0.0, "attack_target_id": "mob_3",
+  "ability_id": 1, "ability_target_id": "mob_3", "aim_x": 0.0, "aim_y": 0.0 }
 ```
 
 - `tick` — the client's own monotonically increasing input sequence number. It is
@@ -428,6 +439,42 @@ message handler.
   normalized; magnitude > 1.5 is dropped. Sending more packets does not move further.
 - `attack_target_id` — optional entity ID to attack this tick. Gated by range and by
   a tick-based cooldown (see below).
+- `ability_id` — optional content id of an ability to use this tick. **Zero means "no
+  ability"**, which is why ability ids are allocated from 1: proto3 elides a zero, so id 0
+  and "this client sent no ability" would be identical bytes.
+- `ability_target_id` — target entity for an entity-targeted ability. Same id space as
+  `attack_target_id`: a server-side entity id, **never a handle**. Interning is built by the
+  server for its own outbound snapshots, so a client has no handle the server would
+  recognise.
+- `aim_x` / `aim_y` — aim **point** in world coordinates for a ground-targeted ability,
+  unlike `move_x`/`move_y` which are a direction. Read only when `ability_id` is non-zero;
+  the world origin is a legitimate aim point, so `(0,0)` does not mean "not aimed".
+
+### Abilities — normative
+
+An ability input is a **request**. The server resolves it against the content set served at
+`/content`, the caster's state and a cooldown, and the only thing a client learns about the
+outcome is what comes back in the snapshot: a `GAME_EVENT_TYPE_ABILITY_CAST` event if it
+resolved, nothing if it did not. There is deliberately no per-input acknowledgement — an
+input that failed is already described by the world not changing.
+
+**Abilities are NOT predicted.** Prediction covers movement only. Movement is a pure function
+of input the client already has; an ability outcome depends on cooldowns, content and other
+entities' state the client can only guess at. A mispredicted ability is visible as a cast
+that plays and then un-happens, which is worse than a cast that starts one round trip late.
+A client may use `Shared.GameLogic.Systems.AbilityLogic.ValidateCast` locally to grey out an
+out-of-range target or draw a cooldown sweep — that is **presentation**, and the server still
+decides. A client sees positions one interpolation delay late, so a cast it believes legal
+can still be refused.
+
+**Two limitations, stated rather than discovered:**
+
+1. **Cooldowns are global, not per-ability.** Casting anything blocks casting anything else
+   until it expires. A UI must not draw independent per-ability sweeps yet.
+2. **Ground-targeted abilities apply no effect.** They are validated, animated, charged and
+   reported via the cast event; no damage or healing is applied, because the only index that
+   answers "everything within radius" is the AOI grid and it is not valid during input
+   processing. The server counts these as `ability_ground_casts_without_area` on `/status`.
 
 ### The movement model a predicting client must reproduce
 
@@ -563,6 +610,89 @@ never interned: a client that resolves a handle expects complete state, and send
 only alongside the id would leave it correct once per keyframe interval and stale in
 between.
 
+### Game events — normative
+
+`SnapshotMessage.events` (field 6) carries the **edge-triggered** occurrences the reported
+tick produced, in the order the simulation produced them. Empty on most snapshots.
+
+```json
+{ "tick": 512, "entities": [ ... ],
+  "events": [ { "type": 1, "source": 3, "target": 7, "amount": 25, "ability_id": 1 } ] }
+```
+
+| Field | № | Type | Meaning |
+|---|---|---|---|
+| `type` | 1 | enum | 1 DAMAGE, 2 HEAL, 3 DEATH, 4 ABILITY_CAST, 5 XP_GAIN, 6 LEVEL_UP. `0` = not sent. |
+| `source` | 2 | `uint32` | Interned handle of the causer. `0` = none / not visible. |
+| `target` | 3 | `uint32` | Interned handle of the subject. `0` = none / not visible. |
+| `amount` | 4 | `sint32` | Damage dealt, health restored, XP gained, level reached. |
+| `ability_id` | 5 | `uint32` | Ability involved, `0` for none. |
+| `flags` | 6 | `uint32` | bit 0 critical, bit 1 immune/fully mitigated, bit 2 periodic. |
+| `source_id` | 7 | `string` | Full id — **JSON only**, empty on Protobuf. |
+| `target_id` | 8 | `string` | Full id — **JSON only**, empty on Protobuf. |
+
+#### Why this exists, and why it is not derivable
+
+Everything else in a snapshot is level-triggered state. State is the wrong shape for an
+occurrence: "took 12 damage" is **not** recoverable from two HP values a tick apart. A heal
+and a hit in the same tick net out; a delta may omit the entity entirely if it also
+regenerated back; an entity that leaves the AOI mid-fight simply stops reporting. A client
+inferring damage numbers from HP deltas is wrong in exactly the cases a player notices, and
+it is wrong silently.
+
+`DEATH` is likewise not redundant with `ENTITY_ACTION_DEAD`. `DEAD` is a state that persists
+as long as the corpse does, so a client arriving afterwards sees it and cannot tell whether
+the death just happened. A death animation, a sound and a kill feed all need the edge.
+
+#### Why events ride the snapshot instead of a message of their own
+
+1. **Handles.** Entity ids are interned per connection and the table **resets at every
+   keyframe**. A separate message would either carry full string ids — ~17 bytes per
+   participant, on the message class that fires hardest during combat — or resolve handles
+   against a table whose lifetime it does not share, which is a race that attributes damage
+   to the **wrong entity**. A wrong number is far worse than a missing one.
+2. **Tick.** Every event belongs to the tick that produced it, and the snapshot already
+   carries it.
+3. **Ordering.** One stream, one order, already reliable. No new connection state.
+
+#### Receiver rules
+
+1. **Ignore an unrecognised `type`.** Events are presentation: dropping an unknown one costs
+   a missing number, guessing costs a wrong one.
+2. **Resolve `source`/`target` against the same handle table as `EntitySnapshot.handle`.** A
+   handle here may name an entity **not present in this snapshot's `entities` list** — a
+   delta only carries entities whose state changed, and a killer need not have moved. That is
+   legal. A handle you have **no binding for** is a disagreement — report that participant
+   as absent, count it, and render the rest of the event. Do **not** `resync` on it. That is
+   a deliberate asymmetry with an entity, where an unresolvable handle must abort the
+   snapshot: a wrong entity state is a wrong world, while a missing damage number is a
+   missing damage number, and a keyframe costs every observer bandwidth exactly when the
+   link is already struggling. Guessing remains forbidden; only the escalation is.
+3. **`0` means "no such participant, or not visible to you."** Render accordingly: a player
+   who can see the victim but not the attacker still gets the damage number, with no source.
+4. **Prefer the handle; fall back to `source_id`/`target_id`** when it is zero. Only a JSON
+   connection ever sees those populated.
+5. **Events are never re-sent, and a keyframe does not replay them.** A keyframe restates
+   the world's *state* because you may have missed a delta; it does not restate its
+   *history*. A client that missed the snapshot carrying an event has missed the event,
+   permanently and by design — a damage number arriving late is worse than one that never
+   arrives.
+
+#### Visibility
+
+Filtered per connection exactly as entities are: you are sent an event only when you can see
+at least one participant. `XP_GAIN` and `LEVEL_UP` are **private** — sent only to the
+connection whose own entity is the subject. An event channel that leaked another player's
+progression would be an information disclosure shipped as a feature.
+
+#### Shedding
+
+Two bounded places can drop events under load, both counted on `/status`: a tick producing
+more than 512 events (`TickEventBuffer.Dropped`), and a connection whose write task has
+stalled with more than 256 staged (`snapshot_events_dropped`, oldest discarded first). A
+non-zero count presents to a player as missing damage numbers rather than as a stall, which
+is why each has its own counter.
+
 ### Facing and action — normative
 
 Two per-entity fields describe orientation and animation state. Both reserve **zero for
@@ -672,9 +802,38 @@ idle pose, which looks like a broken animator rather than a missing field.
 
 **This field is level-triggered, not edge-triggered.** It reports the state an entity is
 in, not that a state was entered. A renderer that needs to retrigger the *same* action
-twice in a row (attack, attack) cannot get that edge from this field alone — that needs
-a sequence number, which is an animation-system concern and is deliberately not in the
-schema. This limitation is known, not overlooked.
+twice in a row (attack, attack) cannot get that edge from this field alone.
+
+**That edge is now carried by `action_seq` (field 12).** This paragraph previously ended
+"which is an animation-system concern and is deliberately not in the schema" — that is no
+longer true, and the reasoning that made it look true was wrong: only the server knows an
+action was re-entered, so the edge has to be manufactured on the wire or it does not exist
+anywhere, and no amount of client-side edge detection on `action` recovers it.
+
+#### `action_seq` — normative
+
+| Field | № | Type | Meaning |
+|---|---|---|---|
+| `action_seq` | 12 | `uint32` | Retrigger counter for `action`. `0` means **not sent**. |
+
+The server advances it every time an entity **enters** an action, including re-entering the
+one it is already in — but only for actions that are instantaneous. `ATTACKING` is
+instantaneous: each swing is its own occurrence. `IDLE`, `MOVING` and `DEAD` are continuous:
+an entity still walking has not started walking again.
+
+Receiver rules:
+
+1. **Retrigger when the value CHANGES, not when it increases.** The counter wraps at 2³² and
+   resets on server restart or respawn, so `>` is not a safe test — a receiver using one
+   stops retriggering for four billion actions after a single wrap. Inequality has no such
+   failure mode. (The server skips zero on wrap, so a live counter is never 0.)
+2. **`0` means the sender does not send a counter.** Keep the old behaviour — drive the
+   animator from `action` alone and accept that repeats do not retrigger. Treating 0 as an
+   edge would retrigger every animation on every snapshot from an old server.
+3. It rides **every** mention including handle-only ones, like `speed` and `facing_brad`.
+4. It is part of the delta "changed" comparison. It has to be: an attacker swinging twice
+   from a standstill has identical position, HP, facing and action on both ticks, so without
+   it the second swing compares equal to the first and the delta suppresses it entirely.
 
 #### Both ride every mention, and both are in the delta comparison
 

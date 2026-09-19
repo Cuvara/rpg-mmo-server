@@ -163,15 +163,37 @@ public sealed class TickLoop
         ISimulationPhase? simulationPhase = null,
         double achievedRateWindowSeconds = AchievedRateMeter.DefaultWindowSeconds,
         int gatherWorkers = 1)
-        : this(world, handler, connections, SimulationRates.Uniform(tickRate), aoiRadius,
+        : this(world, handler, null, connections, SimulationRates.Uniform(tickRate), aoiRadius,
                logger, metrics, keyframeInterval, simulationPhase, achievedRateWindowSeconds,
                gatherWorkers)
+    {
+    }
+
+    /// <summary>
+    /// Overload without an event buffer, for the tests and benchmarks that drive the loop
+    /// and discard occurrences.
+    /// </summary>
+    public TickLoop(
+        EcsWorld world,
+        InputHandler handler,
+        ConnectionManager connections,
+        SimulationRates rates,
+        float aoiRadius,
+        ILogger logger,
+        GameMetrics? metrics = null,
+        int keyframeInterval = GameConstants.DefaultKeyframeInterval,
+        ISimulationPhase? simulationPhase = null,
+        double achievedRateWindowSeconds = AchievedRateMeter.DefaultWindowSeconds,
+        int gatherWorkers = 1)
+        : this(world, handler, null, connections, rates, aoiRadius, logger, metrics,
+               keyframeInterval, simulationPhase, achievedRateWindowSeconds, gatherWorkers)
     {
     }
 
     public TickLoop(
         EcsWorld world,
         InputHandler handler,
+        GameServer.Snapshot.TickEventBuffer? tickEvents,
         ConnectionManager connections,
         SimulationRates rates,
         float aoiRadius,
@@ -185,6 +207,7 @@ public sealed class TickLoop
         _rateMeter = new AchievedRateMeter(achievedRateWindowSeconds);
         _world = world;
         _handler = handler;
+        _tickEvents = tickEvents;
         _connections = connections;
         _simulationPhase = simulationPhase;
         _rates = rates;
@@ -196,6 +219,11 @@ public sealed class TickLoop
         _gatherViewsSlice = GatherViewsSlice;
         _gatherWorkers = gatherWorkers < 1 ? 1 : gatherWorkers;
     }
+
+    /// <summary>
+    /// This tick's occurrences, or null when the host does not collect them.
+    /// </summary>
+    private readonly GameServer.Snapshot.TickEventBuffer? _tickEvents;
 
     /// <summary>The rate configuration this loop runs.</summary>
     public SimulationRates Rates => _rates;
@@ -217,7 +245,7 @@ public sealed class TickLoop
     {
         for (int i = 0; i < _viewerCount; i++)
         {
-            _viewers[i].GatherSnapshotView(reader, _aoiRadius, _currentTick, _keyframeInterval);
+            _viewers[i].GatherSnapshotView(reader, _aoiRadius, _currentTick, _keyframeInterval, _tickEvents);
         }
     }
 
@@ -244,7 +272,7 @@ public sealed class TickLoop
 
         for (int i = from; i < to; i++)
         {
-            _viewers[i].GatherSnapshotView(reader, _aoiRadius, _currentTick, _keyframeInterval);
+            _viewers[i].GatherSnapshotView(reader, _aoiRadius, _currentTick, _keyframeInterval, _tickEvents);
         }
     }
 
@@ -611,6 +639,25 @@ public sealed class TickLoop
             // array until the next tick happens to overwrite that slot.
             Array.Clear(_viewers, 0, _viewerCount);
         }
+
+        // Cleared HERE — after the gather has staged them on every connection — and NOT at
+        // the top of each base tick.
+        //
+        // THE BUG THIS FIXES, because it is not visible from either half. Input runs on the
+        // CRITICAL group, every base tick (60 Hz by default). Snapshots ship on the WORLD
+        // group, every fourth one (15 Hz). Clearing at the top of each base tick therefore
+        // threw away every event produced on a tick that was not also a broadcast tick —
+        // three ticks in four — so an attack landed, the victim's HP fell, and no damage
+        // event ever reached anyone. Every unit test on both sides still passed, because
+        // each half was correct in isolation; only a real socket showed it.
+        // TickEventBroadcastTests sweeps all four phases and fails on three of them
+        // if this moves back.
+        //
+        // Bounded rather than unbounded: at worst the buffer holds one broadcast interval's
+        // events, and TickEventBuffer.Capacity caps it anyway. Reached on the viewerless
+        // path too, so a server with nobody connected does not accumulate forever.
+        _tickEvents?.Clear();
+
 
         // Metrics: recorded once per tick, no per-entity allocation.
         if (_metrics != null)

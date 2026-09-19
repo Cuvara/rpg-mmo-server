@@ -47,6 +47,35 @@ namespace Shared.GameLogic.Components
         /// </summary>
         public ulong CooldownUntilTick;
 
+        /// <summary>
+        /// Simulation tick at which the ABILITY cooldown expires. Separate from
+        /// <see cref="CooldownUntilTick"/>, which governs the basic attack only.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>One slot for all abilities, deliberately.</b> This is a global cooldown, not
+        /// a per-ability one: casting anything blocks casting anything else until it
+        /// expires. Per-ability cooldowns need a map from ability id to tick carried per
+        /// entity, and <see cref="EntityState"/> is a flat struct composed on the tick
+        /// thread inside the world write lock — adding a dictionary to it would put an
+        /// allocation and a hash lookup on the hottest path in the simulation, per entity,
+        /// per tick.
+        /// </para>
+        /// <para>
+        /// That is a real gameplay limit and it is stated rather than hidden: a kit where
+        /// two abilities must be usable in the same second cannot be expressed yet. Lifting
+        /// it is a simulation-state change (a side table keyed by entity, walked only for
+        /// entities that cast), not a wire change — <c>InputMessage.ability_id</c> and the
+        /// cast event already carry everything a per-ability cooldown would need.
+        /// </para>
+        /// <para>
+        /// A simulation tick, never wall-clock, for the same reason as
+        /// <see cref="CooldownUntilTick"/>: replaying an input sequence must produce the
+        /// same outcome on the server and on a client.
+        /// </para>
+        /// </remarks>
+        public ulong AbilityCooldownUntilTick;
+
         /// <summary>Last processed input tick. Go: LastInputTick uint64.</summary>
         public ulong LastInputTick;
 
@@ -72,5 +101,34 @@ namespace Shared.GameLogic.Components
         /// <see cref="EntityAction.Unspecified"/> (0) means "not sent", never "idle".
         /// </summary>
         public EntityAction Action;
+
+        /// <summary>
+        /// Retrigger counter for <see cref="Action"/>, incremented every time the entity
+        /// ENTERS an action — including re-entering the one it is already in. 0 means
+        /// "not sent".
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <see cref="Action"/> is level-triggered: it reports the state an entity is in,
+        /// not that a state was entered. Two attacks in a row therefore produce identical
+        /// bytes, and a renderer driving an animator from <c>Action</c> alone plays the
+        /// attack once and then holds — the second swing never fires. No amount of
+        /// client-side edge detection fixes that, because the edge genuinely is not in the
+        /// data. The server is the only party that knows an action was re-entered, so the
+        /// edge has to be manufactured here or it does not exist anywhere.
+        /// </para>
+        /// <para>
+        /// <b>A consumer retriggers when this CHANGES, not when it increases.</b> The
+        /// counter wraps at 2^32 and resets on restart or respawn, so "greater than" is not
+        /// a safe test — a consumer using one stops retriggering for four billion actions
+        /// after a single wrap. Inequality has no such failure mode.
+        /// </para>
+        /// <para>
+        /// Allocated from 1, so zero can mean "a sender that predates this field". A
+        /// consumer seeing zero keeps its old behaviour rather than treating it as an edge,
+        /// which would retrigger every animation on every snapshot from an old server.
+        /// </para>
+        /// </remarks>
+        public uint ActionSeq;
     }
 }

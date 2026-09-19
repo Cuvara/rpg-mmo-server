@@ -55,6 +55,11 @@ namespace Shared.GameLogic.Content
                 ValidateItem(item, errors);
             }
 
+            foreach (var ability in database.Abilities)
+            {
+                ValidateAbility(ability, errors);
+            }
+
             return errors.Count == before;
         }
 
@@ -139,6 +144,95 @@ namespace Shared.GameLogic.Content
             // suspicious, and even that is a design choice rather than a data fault, so it
             // is left alone deliberately.
         }
+
+        private static void ValidateAbility(AbilityDefinition ability, List<string> errors)
+        {
+            uint id = ability.Id;
+
+            // Zero is "no ability" on the wire (InputMessage.ability_id, GameEvent.ability_id
+            // both use it that way). An ability that claimed it would be indistinguishable
+            // from a client sending no ability at all, so it is refused at content time —
+            // the one place the mistake is cheap to find.
+            if (id == 0)
+            {
+                errors.Add("ability: id is 0, which is reserved for \"no ability\" on the wire. " +
+                           "Ability ids start at 1.");
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(ability.Name))
+            {
+                errors.Add(AbilityLine(id, "name is empty. It is what the player sees."));
+            }
+            else if (ability.Name.Length > MaxNameLength)
+            {
+                errors.Add(AbilityLine(id, $"name is {ability.Name.Length} characters, limit is {MaxNameLength}."));
+            }
+
+            if (!Enum.IsDefined(typeof(AbilityTargeting), ability.Targeting))
+            {
+                errors.Add(AbilityLine(id, $"targeting '{(int)ability.Targeting}' is not a known targeting mode."));
+            }
+
+            if (!Enum.IsDefined(typeof(AbilityEffect), ability.Effect))
+            {
+                errors.Add(AbilityLine(id, $"effect '{(int)ability.Effect}' is not a known effect."));
+            }
+
+            if (ability.Power < 0)
+            {
+                errors.Add(AbilityLine(id, $"power is {ability.Power}; negative power is not supported. " +
+                                           "An ability that harms its caster is a damage ability aimed at self, " +
+                                           "not a heal with a negative number."));
+            }
+
+            if (ability.CooldownTicks < 0)
+            {
+                errors.Add(AbilityLine(id, $"cooldownTicks is {ability.CooldownTicks}; it cannot be negative."));
+            }
+
+            // Range and radius are checked against what the targeting mode actually reads,
+            // not in the abstract. A Self ability with a range is harmless noise; a Ground
+            // ability with a zero radius affects nothing and looks like a broken cast to a
+            // player, which is the kind of content fault that gets reported as a bug.
+            if (ability.Targeting != AbilityTargeting.Self && !(ability.Range > 0f))
+            {
+                errors.Add(AbilityLine(id, $"targeting is {ability.Targeting} but range is {Fmt(ability.Range)}. " +
+                                           "A non-self ability with no range can never reach anything."));
+            }
+
+            if (ability.Targeting == AbilityTargeting.Ground && !(ability.Radius > 0f))
+            {
+                errors.Add(AbilityLine(id, $"targeting is Ground but radius is {Fmt(ability.Radius)}. " +
+                                           "A ground ability with no radius affects nothing, which presents to a " +
+                                           "player as a cast that does not work rather than as bad data."));
+            }
+
+            if (ability.Range < 0f)
+            {
+                errors.Add(AbilityLine(id, $"range is {Fmt(ability.Range)}; it cannot be negative."));
+            }
+
+            if (ability.Radius < 0f)
+            {
+                errors.Add(AbilityLine(id, $"radius is {Fmt(ability.Radius)}; it cannot be negative."));
+            }
+
+            // NaN deserves its own line rather than being swallowed by the comparisons
+            // above: every comparison against NaN is false, so `range > 0` already reports
+            // it, but it reports it as "no range" and an author reading that goes looking
+            // for a missing field instead of a malformed one.
+            if (float.IsNaN(ability.Range) || float.IsNaN(ability.Radius))
+            {
+                errors.Add(AbilityLine(id, "range or radius is NaN. Every comparison against NaN is false, " +
+                                           "so this would present as a missing value rather than a malformed one."));
+            }
+        }
+
+        private static string Fmt(float v) => v.ToString("0.###", CultureInfo.InvariantCulture);
+
+        private static string AbilityLine(uint id, string problem) =>
+            string.Format(CultureInfo.InvariantCulture, "ability {0}: {1}", id, problem);
 
         /// <summary>
         /// Ids are lowercase ASCII, digits and underscore. Hand-rolled rather than a regex:

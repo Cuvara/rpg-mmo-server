@@ -46,6 +46,27 @@ public sealed class WorldReader
     }
 
     /// <summary>
+    /// The world-stable key of <paramref name="userId"/>'s entity, if it has one.
+    /// </summary>
+    /// <remarks>
+    /// Exists so a connection can recognise events addressed to its own entity without
+    /// comparing id strings per event per tick. See
+    /// <see cref="Components.EntityIdRef.Stable"/> for why the key is interchangeable with
+    /// the id: it is assigned once per id string for the life of the world and never
+    /// reused, so a despawn and respawn of the same player resolves to the same key.
+    /// </remarks>
+    public bool TryGetStableKey(string userId, out int stable)
+    {
+        stable = 0;
+
+        EntityHandle handle = _world.ResolveLocked(userId);
+        if (!handle.IsValid) return false;
+
+        stable = _world.ArchInternal.Get<EntityIdRef>(handle.Value).Stable;
+        return true;
+    }
+
+    /// <summary>
     /// Fill <paramref name="destination"/> with the entities within
     /// <paramref name="radius"/> of <paramref name="center"/>.
     ///
