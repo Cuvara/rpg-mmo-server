@@ -968,9 +968,9 @@ type EntitySnapshot struct {
 	Speed float32 `protobuf:"fixed32,9,opt,name=speed,proto3" json:"speed,omitempty"`
 	// Facing direction, as 16-bit BINARY RADIANS BIASED BY ONE.
 	//
-	//	wire 0                -> NOT SENT: this sender has no facing to report.
-	//	wire v in [1, 65536]  -> angle = (v - 1) * 2*PI / 65536 radians,
-	//	                         counter-clockwise from +X (due east).
+	//   wire 0                -> NOT SENT: this sender has no facing to report.
+	//   wire v in [1, 65536]  -> angle = (v - 1) * 2*PI / 65536 radians,
+	//                            counter-clockwise from +X (due east).
 	//
 	// WHY THE BIAS, AND WHY NOT A FLOAT. `float facing` is the obvious encoding and
 	// it is wrong here, because proto3 elides a zero float and 0.0 radians is a
@@ -1031,7 +1031,45 @@ type EntitySnapshot struct {
 	//
 	// Sent on every mention of an entity, never interned: a receiver that resolves
 	// a handle expects complete state.
-	ActionSeq     uint32 `protobuf:"varint,12,opt,name=action_seq,json=actionSeq,proto3" json:"action_seq,omitempty"`
+	ActionSeq uint32 `protobuf:"varint,12,opt,name=action_seq,json=actionSeq,proto3" json:"action_seq,omitempty"`
+	// Field-level delta mask. Non-zero on a DELTA (full=false) snapshot means this
+	// entity entry is a PARTIAL UPDATE: only the fields whose bit is set are
+	// present, and the receiver MUST keep its last-known value for every unset
+	// field rather than resetting it to the proto3 default (zero).
+	//
+	// Bit assignments:
+	//   0x0001 → x          (field 3)
+	//   0x0002 → y          (field 4)
+	//   0x0004 → hp         (field 5)
+	//   0x0008 → max_hp     (field 6)
+	//   0x0010 → type / type_name (fields 7 / 2)
+	//   0x0020 → speed      (field 9)
+	//   0x0040 → facing_brad (field 10)
+	//   0x0080 → action     (field 11)
+	//   0x0100 → action_seq (field 12)
+	//
+	// ZERO MEANS "ALL FIELDS PRESENT". A sender that does not implement field-level
+	// delta never sets this field; a receiver that sees 0 MUST apply the same rule
+	// as on a keyframe — every field takes its wire value (including proto3 defaults
+	// of zero). That is the safe, backwards-compatible direction: an old sender
+	// never sets the field, the new receiver treats zero as "all present", and
+	// behaviour is unchanged. An old receiver ignores the field (proto3 unknown
+	// fields) and zeros every unset field, which is wrong — that failure is why
+	// this field is gated behind a protocol version bump (version 2).
+	//
+	// NEVER SET ON KEYFRAMES (full=true). A keyframe always carries complete state
+	// for every entity; the receiver re-establishes its view from scratch on a
+	// keyframe and field masking would be meaningless.
+	//
+	// NEVER SET ON A FIRST INTRODUCTION. When `id` is present (first mention of an
+	// entity to this connection), the server MUST send all fields so the client can
+	// construct a complete initial state. A receiver that sees a non-zero mask with
+	// `id` non-empty is receiving a server-side bug; it SHOULD treat it as a full
+	// update (mask = 0) rather than attempting to merge against an entity it never
+	// received.
+	//
+	// Introduced in protocol version 2.
+	ChangedFields uint32 `protobuf:"varint,13,opt,name=changed_fields,json=changedFields,proto3" json:"changed_fields,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1146,6 +1184,13 @@ func (x *EntitySnapshot) GetAction() EntityAction {
 func (x *EntitySnapshot) GetActionSeq() uint32 {
 	if x != nil {
 		return x.ActionSeq
+	}
+	return 0
+}
+
+func (x *EntitySnapshot) GetChangedFields() uint32 {
+	if x != nil {
+		return x.ChangedFields
 	}
 	return 0
 }
@@ -1629,8 +1674,8 @@ type SealedServerHello struct {
 	PublicKey []byte `protobuf:"bytes,1,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
 	// HMAC-SHA256 over the handshake transcript, 32 bytes:
 	//
-	//	"cuvara/sealed-handshake/v1" || 0x00 || jti || 0x00
-	//	  || client_public (32) || server_public (32)
+	//   "cuvara/sealed-handshake/v1" || 0x00 || jti || 0x00
+	//     || client_public (32) || server_public (32)
 	//
 	// BOTH EPHEMERAL PUBLIC KEYS ARE IN THE TRANSCRIPT, and that is what stops a
 	// man in the middle: an attacker who substitutes its own key changes the
@@ -1663,8 +1708,8 @@ type SealedServerHello struct {
 	//
 	// The signed input is NOT the transcript. It is:
 	//
-	//	"cuvara/sealed-identity/v1" || 0x00 || transcript || 0x00
-	//	  || identity_public (32)
+	//   "cuvara/sealed-identity/v1" || 0x00 || transcript || 0x00
+	//     || identity_public (32)
 	//
 	// where `transcript` is EXACTLY the bytes described on `binding` above,
 	// unchanged byte for byte. That is deliberate: key derivation
@@ -1788,7 +1833,7 @@ const file_wire_proto_rawDesc = "" +
 	"\x04tick\x18\x01 \x01(\x04R\x04tick\x12\x15\n" +
 	"\x06move_x\x18\x02 \x01(\x02R\x05moveX\x12\x15\n" +
 	"\x06move_y\x18\x03 \x01(\x02R\x05moveY\x12(\n" +
-	"\x10attack_target_id\x18\x04 \x01(\tR\x0eattackTargetId\"\xd4\x02\n" +
+	"\x10attack_target_id\x18\x04 \x01(\tR\x0eattackTargetId\"\xfb\x02\n" +
 	"\x0eEntitySnapshot\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\ttype_name\x18\x02 \x01(\tR\btypeName\x12\f\n" +
@@ -1804,7 +1849,8 @@ const file_wire_proto_rawDesc = "" +
 	"facingBrad\x124\n" +
 	"\x06action\x18\v \x01(\x0e2\x1c.rpgmmo.wire.v1.EntityActionR\x06action\x12\x1d\n" +
 	"\n" +
-	"action_seq\x18\f \x01(\rR\tactionSeq\"\xaa\x01\n" +
+	"action_seq\x18\f \x01(\rR\tactionSeq\x12%\n" +
+	"\x0echanged_fields\x18\r \x01(\rR\rchangedFields\"\xaa\x01\n" +
 	"\x0fSnapshotMessage\x12\x12\n" +
 	"\x04tick\x18\x01 \x01(\x04R\x04tick\x12\x19\n" +
 	"\back_tick\x18\x02 \x01(\x04R\aackTick\x12\x12\n" +

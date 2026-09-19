@@ -38,44 +38,45 @@ namespace RpgMmo.Wire.V1 {
             "CgoCb2sYASABKAgSDwoHdXNlcl9pZBgCIAEoCRINCgVlcnJvchgDIAEoCRIR",
             "Cgl0aWNrX3JhdGUYBCABKA0SGAoQcHJvdG9jb2xfdmVyc2lvbhgFIAEoDSJW",
             "CgxJbnB1dE1lc3NhZ2USDAoEdGljaxgBIAEoBBIOCgZtb3ZlX3gYAiABKAIS",
-            "DgoGbW92ZV95GAMgASgCEhgKEGF0dGFja190YXJnZXRfaWQYBCABKAkigQIK",
+            "DgoGbW92ZV95GAMgASgCEhgKEGF0dGFja190YXJnZXRfaWQYBCABKAkimQIK",
             "DkVudGl0eVNuYXBzaG90EgoKAmlkGAEgASgJEhEKCXR5cGVfbmFtZRgCIAEo",
             "CRIJCgF4GAMgASgCEgkKAXkYBCABKAISCgoCaHAYBSABKAUSDgoGbWF4X2hw",
             "GAYgASgFEigKBHR5cGUYByABKA4yGi5ycGdtbW8ud2lyZS52MS5FbnRpdHlU",
             "eXBlEg4KBmhhbmRsZRgIIAEoDRINCgVzcGVlZBgJIAEoAhITCgtmYWNpbmdf",
             "YnJhZBgKIAEoDRIsCgZhY3Rpb24YCyABKA4yHC5ycGdtbW8ud2lyZS52MS5F",
-            "bnRpdHlBY3Rpb24SEgoKYWN0aW9uX3NlcRgMIAEoDSKCAQoPU25hcHNob3RN",
-            "ZXNzYWdlEgwKBHRpY2sYASABKAQSEAoIYWNrX3RpY2sYAiABKAQSDAoEZnVs",
-            "bBgDIAEoCBIwCghlbnRpdGllcxgEIAMoCzIeLnJwZ21tby53aXJlLnYxLkVu",
-            "dGl0eVNuYXBzaG90Eg8KB3JlbW92ZWQYBSADKAkiIwoRRGlzY29ubmVjdE1l",
-            "c3NhZ2USDgoGcmVhc29uGAEgASgJIg8KDVJlc3luY1JlcXVlc3QiJAoSVHJh",
-            "bnNmZXJNYXBSZXF1ZXN0Eg4KBm1hcF9pZBgBIAEoCSIwChNUcmFuc2Zlck1h",
-            "cFJlc3BvbnNlEgoKAm9rGAEgASgIEg0KBWVycm9yGAIgASgJIiAKC1BpbmdN",
-            "ZXNzYWdlEhEKCXRpbWVzdGFtcBgBIAEoAyI1CgtQb25nTWVzc2FnZRIRCgl0",
-            "aW1lc3RhbXAYASABKAMSEwoLc2VydmVyX3RpbWUYAiABKAMiHQoLS2lja01l",
-            "c3NhZ2USDgoGcmVhc29uGAEgASgJIicKEVNlYWxlZENsaWVudEhlbGxvEhIK",
-            "CnB1YmxpY19rZXkYASABKAwiYQoRU2VhbGVkU2VydmVySGVsbG8SEgoKcHVi",
-            "bGljX2tleRgBIAEoDBIPCgdiaW5kaW5nGAIgASgMEg0KBWVycm9yGAMgASgJ",
-            "EhgKEHNlcnZlcl9zaWduYXR1cmUYBCABKAwqzwMKB01zZ1R5cGUSGAoUTVNH",
-            "X1RZUEVfVU5TUEVDSUZJRUQQABIRCg1NU0dfVFlQRV9BVVRIEAESFgoSTVNH",
-            "X1RZUEVfQVVUSF9SRVNQEAISGAoUTVNHX1RZUEVfRU5URVJfV09STEQQAxId",
-            "ChlNU0dfVFlQRV9FTlRFUl9XT1JMRF9SRVNQEAQSFwoTTVNHX1RZUEVfSk9J",
-            "Tl9UT0tFThAFEhwKGE1TR19UWVBFX0pPSU5fVE9LRU5fUkVTUBAGEhIKDk1T",
-            "R19UWVBFX0lOUFVUEAcSFQoRTVNHX1RZUEVfU05BUFNIT1QQCBIXChNNU0df",
-            "VFlQRV9ESVNDT05ORUNUEAkSEwoPTVNHX1RZUEVfUkVTWU5DEAoSGQoVTVNH",
-            "X1RZUEVfVFJBTlNGRVJfTUFQEA0SHgoaTVNHX1RZUEVfVFJBTlNGRVJfTUFQ",
-            "X1JFU1AQDhIRCg1NU0dfVFlQRV9QSU5HEAsSEQoNTVNHX1RZUEVfUE9ORxAM",
-            "EhEKDU1TR19UWVBFX0tJQ0sQDxIgChxNU0dfVFlQRV9TRUFMRURfQ0xJRU5U",
-            "X0hFTExPEBASIAocTVNHX1RZUEVfU0VBTEVEX1NFUlZFUl9IRUxMTxARKp0B",
-            "CgpFbnRpdHlUeXBlEhsKF0VOVElUWV9UWVBFX1VOU1BFQ0lGSUVEEAASFgoS",
-            "RU5USVRZX1RZUEVfUExBWUVSEAESEwoPRU5USVRZX1RZUEVfTU9CEAISEwoP",
-            "RU5USVRZX1RZUEVfTlBDEAMSFAoQRU5USVRZX1RZUEVfSVRFTRAEEhoKFkVO",
-            "VElUWV9UWVBFX1BST0pFQ1RJTEUQBSqUAQoMRW50aXR5QWN0aW9uEh0KGUVO",
-            "VElUWV9BQ1RJT05fVU5TUEVDSUZJRUQQABIWChJFTlRJVFlfQUNUSU9OX0lE",
-            "TEUQARIYChRFTlRJVFlfQUNUSU9OX01PVklORxACEhsKF0VOVElUWV9BQ1RJ",
-            "T05fQVRUQUNLSU5HEAMSFgoSRU5USVRZX0FDVElPTl9ERUFEEARCRlozZ2l0",
-            "aHViLmNvbS9kdXljdW9uZy9ycGctbW1vL3NoYXJlZC9wcm90by9nZW47d2ly",
-            "ZXBiqgIOUnBnTW1vLldpcmUuVjFiBnByb3RvMw=="));
+            "bnRpdHlBY3Rpb24SEgoKYWN0aW9uX3NlcRgMIAEoDRIWCg5jaGFuZ2VkX2Zp",
+            "ZWxkcxgNIAEoDSKCAQoPU25hcHNob3RNZXNzYWdlEgwKBHRpY2sYASABKAQS",
+            "EAoIYWNrX3RpY2sYAiABKAQSDAoEZnVsbBgDIAEoCBIwCghlbnRpdGllcxgE",
+            "IAMoCzIeLnJwZ21tby53aXJlLnYxLkVudGl0eVNuYXBzaG90Eg8KB3JlbW92",
+            "ZWQYBSADKAkiIwoRRGlzY29ubmVjdE1lc3NhZ2USDgoGcmVhc29uGAEgASgJ",
+            "Ig8KDVJlc3luY1JlcXVlc3QiJAoSVHJhbnNmZXJNYXBSZXF1ZXN0Eg4KBm1h",
+            "cF9pZBgBIAEoCSIwChNUcmFuc2Zlck1hcFJlc3BvbnNlEgoKAm9rGAEgASgI",
+            "Eg0KBWVycm9yGAIgASgJIiAKC1BpbmdNZXNzYWdlEhEKCXRpbWVzdGFtcBgB",
+            "IAEoAyI1CgtQb25nTWVzc2FnZRIRCgl0aW1lc3RhbXAYASABKAMSEwoLc2Vy",
+            "dmVyX3RpbWUYAiABKAMiHQoLS2lja01lc3NhZ2USDgoGcmVhc29uGAEgASgJ",
+            "IicKEVNlYWxlZENsaWVudEhlbGxvEhIKCnB1YmxpY19rZXkYASABKAwiYQoR",
+            "U2VhbGVkU2VydmVySGVsbG8SEgoKcHVibGljX2tleRgBIAEoDBIPCgdiaW5k",
+            "aW5nGAIgASgMEg0KBWVycm9yGAMgASgJEhgKEHNlcnZlcl9zaWduYXR1cmUY",
+            "BCABKAwqzwMKB01zZ1R5cGUSGAoUTVNHX1RZUEVfVU5TUEVDSUZJRUQQABIR",
+            "Cg1NU0dfVFlQRV9BVVRIEAESFgoSTVNHX1RZUEVfQVVUSF9SRVNQEAISGAoU",
+            "TVNHX1RZUEVfRU5URVJfV09STEQQAxIdChlNU0dfVFlQRV9FTlRFUl9XT1JM",
+            "RF9SRVNQEAQSFwoTTVNHX1RZUEVfSk9JTl9UT0tFThAFEhwKGE1TR19UWVBF",
+            "X0pPSU5fVE9LRU5fUkVTUBAGEhIKDk1TR19UWVBFX0lOUFVUEAcSFQoRTVNH",
+            "X1RZUEVfU05BUFNIT1QQCBIXChNNU0dfVFlQRV9ESVNDT05ORUNUEAkSEwoP",
+            "TVNHX1RZUEVfUkVTWU5DEAoSGQoVTVNHX1RZUEVfVFJBTlNGRVJfTUFQEA0S",
+            "HgoaTVNHX1RZUEVfVFJBTlNGRVJfTUFQX1JFU1AQDhIRCg1NU0dfVFlQRV9Q",
+            "SU5HEAsSEQoNTVNHX1RZUEVfUE9ORxAMEhEKDU1TR19UWVBFX0tJQ0sQDxIg",
+            "ChxNU0dfVFlQRV9TRUFMRURfQ0xJRU5UX0hFTExPEBASIAocTVNHX1RZUEVf",
+            "U0VBTEVEX1NFUlZFUl9IRUxMTxARKp0BCgpFbnRpdHlUeXBlEhsKF0VOVElU",
+            "WV9UWVBFX1VOU1BFQ0lGSUVEEAASFgoSRU5USVRZX1RZUEVfUExBWUVSEAES",
+            "EwoPRU5USVRZX1RZUEVfTU9CEAISEwoPRU5USVRZX1RZUEVfTlBDEAMSFAoQ",
+            "RU5USVRZX1RZUEVfSVRFTRAEEhoKFkVOVElUWV9UWVBFX1BST0pFQ1RJTEUQ",
+            "BSqUAQoMRW50aXR5QWN0aW9uEh0KGUVOVElUWV9BQ1RJT05fVU5TUEVDSUZJ",
+            "RUQQABIWChJFTlRJVFlfQUNUSU9OX0lETEUQARIYChRFTlRJVFlfQUNUSU9O",
+            "X01PVklORxACEhsKF0VOVElUWV9BQ1RJT05fQVRUQUNLSU5HEAMSFgoSRU5U",
+            "SVRZX0FDVElPTl9ERUFEEARCRlozZ2l0aHViLmNvbS9kdXljdW9uZy9ycGct",
+            "bW1vL3NoYXJlZC9wcm90by9nZW47d2lyZXBiqgIOUnBnTW1vLldpcmUuVjFi",
+            "BnByb3RvMw=="));
       descriptor = pbr::FileDescriptor.FromGeneratedCode(descriptorData,
           new pbr::FileDescriptor[] { },
           new pbr::GeneratedClrTypeInfo(new[] {typeof(global::RpgMmo.Wire.V1.MsgType), typeof(global::RpgMmo.Wire.V1.EntityType), typeof(global::RpgMmo.Wire.V1.EntityAction), }, null, new pbr::GeneratedClrTypeInfo[] {
@@ -2986,11 +2987,43 @@ namespace RpgMmo.Wire.V1 {
     public const int ChangedFieldsFieldNumber = 13;
     private uint changedFields_;
     /// <summary>
-    /// Field-level delta mask (protocol version 2+). Non-zero on a DELTA snapshot means
-    /// only the bits that are set have their wire fields present; the receiver MUST keep
-    /// its last-known value for every unset bit. Zero means all fields present (full entity
-    /// state — same rule as a keyframe). See wire.proto EntitySnapshot.changed_fields and
-    /// Shared.GameLogic.Systems.SnapshotFieldBits for bit assignments.
+    /// Field-level delta mask. Non-zero on a DELTA (full=false) snapshot means this
+    /// entity entry is a PARTIAL UPDATE: only the fields whose bit is set are
+    /// present, and the receiver MUST keep its last-known value for every unset
+    /// field rather than resetting it to the proto3 default (zero).
+    ///
+    /// Bit assignments:
+    ///   0x0001 → x          (field 3)
+    ///   0x0002 → y          (field 4)
+    ///   0x0004 → hp         (field 5)
+    ///   0x0008 → max_hp     (field 6)
+    ///   0x0010 → type / type_name (fields 7 / 2)
+    ///   0x0020 → speed      (field 9)
+    ///   0x0040 → facing_brad (field 10)
+    ///   0x0080 → action     (field 11)
+    ///   0x0100 → action_seq (field 12)
+    ///
+    /// ZERO MEANS "ALL FIELDS PRESENT". A sender that does not implement field-level
+    /// delta never sets this field; a receiver that sees 0 MUST apply the same rule
+    /// as on a keyframe — every field takes its wire value (including proto3 defaults
+    /// of zero). That is the safe, backwards-compatible direction: an old sender
+    /// never sets the field, the new receiver treats zero as "all present", and
+    /// behaviour is unchanged. An old receiver ignores the field (proto3 unknown
+    /// fields) and zeros every unset field, which is wrong — that failure is why
+    /// this field is gated behind a protocol version bump (version 2).
+    ///
+    /// NEVER SET ON KEYFRAMES (full=true). A keyframe always carries complete state
+    /// for every entity; the receiver re-establishes its view from scratch on a
+    /// keyframe and field masking would be meaningless.
+    ///
+    /// NEVER SET ON A FIRST INTRODUCTION. When `id` is present (first mention of an
+    /// entity to this connection), the server MUST send all fields so the client can
+    /// construct a complete initial state. A receiver that sees a non-zero mask with
+    /// `id` non-empty is receiving a server-side bug; it SHOULD treat it as a full
+    /// update (mask = 0) rather than attempting to merge against an entity it never
+    /// received.
+    ///
+    /// Introduced in protocol version 2.
     /// </summary>
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
