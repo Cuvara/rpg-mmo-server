@@ -2949,3 +2949,59 @@ Part is for is the class of defect it caught: a policy that every unit test, bot
 a 200-client load run had agreed was correct, and that one person moving a character noticed
 in seconds. The instrument that found it was a human eye; the instrument that *confirmed* it
 was a counter the client had been printing all along and nobody had read.
+
+---
+
+## Part XVII — the enemy frozen-frame baseline is spawn churn, not the instrument (2026-09-19)
+
+Part XVI §48–49 left an enemy figure unexplained, and #372's ship/no-ship decision waited on
+it. `RenderMotionProbe` (Cuvara/Netcode#154) rendered ~360–390k frames per arm across three
+clients against `develop@0cc3b16` and counted **frozen frames** — a frame where an entity
+that moved during the window rendered zero displacement:
+
+| class | schedule `off` | schedule `tiered` |
+|---|---|---|
+| local player | 0.0–0.2 % | 0.0–0.1 % |
+| remote player | **0.0 %** (p90 0.0 %) | 0.0 % (p90 2.1 %) |
+| enemy | **3.9 %** (p90 6.3 %, worst/median 4.64) | 5.9 % (p90 11.1 %, worst/median 7.74) |
+
+The `tiered` column is expected: mobs demote to the 133ms band and a coarser send renders
+coarser. The puzzle was the `off` column. With the schedule off, every dirty entity is sent
+every world tick, so an enemy and a remote player are replicated **identically** — yet
+enemies froze 3.9 % against remote players' 0.0 %.
+
+### 50. It is churn, and the arithmetic closes
+
+The gap is the enemy respawn rate, not the send rate. Verified against `EnemyAiTuning.cs`:
+
+- Enemy lifetime = `(SpawnRadius 13 − DespawnRadius 2.5) / EnemySpeed 2.5` = **4.2 s**.
+- Spawn rate = `EnemiesPerWave 2 / WaveIntervalSec 1.5` = **1.33/s** → steady-state alive
+  ≈ `1.33 × 4.2` ≈ **5.6**, matching the `/status` 4↔6 oscillation (`MaxEnemies 30` never
+  binds, `attack_kills = 0`).
+
+Every fresh entity id starts with **one** interpolation sample, and one sample cannot be
+interpolated — the view holds it still until the second snapshot arrives (one send interval,
+66.7ms at schedule `off`) and the 2–3 sample buffer fills. A persistent remote player pays
+that hold **once** and amortises it to ~0 over a 6-min window; an enemy pays it every ~4.2 s.
+That asymmetry is the whole 3.9 % vs 0.0 % gap. "Replicated identically per tick" is true;
+the churn rate is not.
+
+The instrument-artefact hypothesis (a decelerating enemy miscounted as frozen while it parks)
+is **dead code under this tuning, not a live risk**. `EnemyReapSystem` despawns at radius 2.5
+while `EnemyMoveSystem` stops at radius 0.1 (`distSq <= 0.01f`), and reap runs the same tick
+after move — so an enemy is destroyed at full speed and never reaches the stop branch. There
+are no legitimately-still enemy frames to miscount. `EnemyMoveSystem.cs:174` is unreachable
+under `EnemyAiTuning` as shipped. Speed (enemy median frame step 0.0063 vs a player's 0.0112)
+is a minor amplifier — a hold is a larger share of a smaller step — not the driver.
+
+### 51. Consequence for #372
+
+The 3.9 % baseline is **real frozen frames** — churn-induced interpolation holds — not a
+measurement artefact. So tiering's 3.9 % → 5.9 % is genuine coarser-render cost stacked on
+genuine churn cost, and neither is discountable. This does not move #372's recommendation
+(`tiered` stays `off` by default; the two cheaper, staleness-free levers still dominate), but
+it removes the "cost is untrustworthy" caveat that decision was carrying: the cost is
+trustworthy, and it is a cost. A quantitative confirmation splitting each class's frozen
+frames by entity lifetime — `fresh` (first 0.25 s) vs `steady` — is Cuvara/Netcode#157;
+the prediction is that enemy chop concentrates in `fresh` and `steady` sits near the remote
+player's ~0 %.

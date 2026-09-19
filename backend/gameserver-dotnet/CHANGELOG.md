@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documented
+- **The 3.9% enemy frozen-frame baseline (schedule `off`) is spawn/despawn churn, not a
+  measurement artefact** — `BENCHMARK.md` Part XVII (§50–51), the gate #371 held on #372's
+  ship decision. Verified against `EnemyAiTuning.cs`: enemy lifetime `(SpawnRadius 13 −
+  DespawnRadius 2.5) / EnemySpeed 2.5` = 4.2s, spawn rate `2 / 1.5` = 1.33/s → steady alive
+  ≈ 5.6 (matches `/status` 4↔6). Each fresh entity id holds still for one send interval until
+  its second interpolation sample arrives; a persistent remote player pays that once, an enemy
+  every ~4.2s — the whole 3.9% vs 0.0% gap. The classifier-artefact hypothesis is dead code
+  under this tuning: reap radius 2.5 is 25× the move-stop radius 0.1 and reap runs the same
+  tick after move, so `EnemyMoveSystem`'s `distSq <= 0.01f` stop branch is never reached.
+  Consequence: the cost side of #372 is real, not artefact, and does not move that decision
+  (`tiered` stays `off`; the cheaper staleness-free levers still dominate).
+
 ### Fixed
 - **The replication schedule deferred the observer's own entity, which is the one entity it
   must never defer.** With `GAMESERVER_REPLICATION_SCHEDULE=tiered` and the `balanced`
