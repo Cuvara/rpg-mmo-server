@@ -26,6 +26,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`EntityState.ActionSeq`** and **`EntityState.AbilityCooldownUntilTick`**.
 - **`InputData.AbilityId` / `AbilityTargetId` / `Aim`**, with the four-argument constructor
   kept so existing call sites compile unchanged.
+- **`SnapshotFieldBits` — bit assignments for `EntitySnapshot.changed_fields` (wire field 13,
+  protocol version 2+).** Defines `X = 0x0001`, `Y = 0x0002`, `Hp = 0x0004`, `MaxHp = 0x0008`,
+  `Type = 0x0010`, `Speed = 0x0020`, `FacingBrad = 0x0040`, `Action = 0x0080`,
+  `ActionSeq = 0x0100`. One definition shared by the server encoder and the client merger; a
+  disagreement between the two is now a compile error rather than a silent wrong world.
+- **`EntitySnapshotData.ActionSeq` and `EntitySnapshotData.ChangedFields` (both uint, default 0).**
+  `ActionSeq` is the retrigger counter carried through the merge so the client can distinguish
+  repeated identical actions. `ChangedFields` carries the field-level delta mask from the wire
+  into the merger. Both are zero in the pre-v0.5.0 sense. The full 11-arg constructor accepts
+  `actionSeq` and `changedFields` as the last two arguments; all existing overloads chain
+  through it with both zeroed. A 10-arg compatibility overload accepts `changedFields` only
+  (with `actionSeq` defaulting to 0) for callers that decoded partial updates before `ActionSeq`
+  was defined.
+- **`SnapshotMerger.Apply` now handles partial entity updates.** When a delta entity's
+  `ChangedFields != 0` and the entity is already in the merger's set, `MergeFieldDelta()`
+  combines changed fields from the wire with kept fields from the last-known state, including
+  `ActionSeq`. The old full-replace path runs when `ChangedFields == 0` (old protocol) or when
+  the entity is being introduced for the first time (no prior state to merge against). Six new
+  golden vectors in `snapshot_merger.json` drive both paths, including the trap case:
+  `changedFields != 0` on a brand-new entity falls through to the full-replace path rather than
+  merging against nothing.
 
 ## [0.4.1] — 2026-09-09
 

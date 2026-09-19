@@ -378,6 +378,161 @@
       "expectedEntityIds": ["p1"],
       "expectedCount": 1,
       "expectedEntityState": {"id": "p1", "hp": 100, "x": "0x3F800000", "y": "0x40000000", "speed": "0x40A00000", "facingBrad": 0, "action": 0}
+    },
+    {
+      "name": "field_delta_position_only_keeps_static_fields",
+      "description": "Protocol version 2 field-level delta: changedFields=0x0003 (x|y). Only x and y are in the partial update. hp, maxHp, speed, type, facingBrad, action must be kept from the keyframe.",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100, "speed": "0x40A00000", "facingBrad": 16385, "action": 2}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 11,
+          "ackTick": 5,
+          "full": false,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41A00000", "y": "0x41A00000", "hp": 0, "maxHp": 0, "speed": "0x00000000", "changedFields": 3}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 11,
+      "expectedAckTick": 5,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 1,
+      "expectedEntityIds": ["p1"],
+      "expectedCount": 1,
+      "expectedEntityState": {"id": "p1", "hp": 100, "x": "0x41A00000", "y": "0x41A00000", "speed": "0x40A00000", "facingBrad": 16385, "action": 2}
+    },
+    {
+      "name": "field_delta_hp_only_keeps_position",
+      "description": "changedFields=0x0004 (hp only). Position and all other fields must be kept from the keyframe.",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "m1", "type": "mob", "x": "0x42480000", "y": "0x42480000", "hp": 50, "maxHp": 50, "speed": "0x40000000", "facingBrad": 8193, "action": 3}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 11,
+          "ackTick": 0,
+          "full": false,
+          "entities": [
+            {"id": "m1", "type": "mob", "x": "0x00000000", "y": "0x00000000", "hp": 30, "maxHp": 0, "speed": "0x00000000", "changedFields": 4}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 11,
+      "expectedAckTick": 0,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 1,
+      "expectedEntityIds": ["m1"],
+      "expectedCount": 1,
+      "expectedEntityState": {"id": "m1", "hp": 30, "x": "0x42480000", "y": "0x42480000", "speed": "0x40000000", "facingBrad": 8193, "action": 3}
+    },
+    {
+      "name": "field_delta_zero_changed_fields_is_full_update",
+      "description": "changedFields=0 means all fields present — same as old protocol. Missing facingBrad/action SHOULD be zeroed (old rule applies).",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100, "speed": "0x40A00000", "facingBrad": 16385, "action": 2}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 11,
+          "ackTick": 0,
+          "full": false,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41A00000", "y": "0x41A00000", "hp": 90, "maxHp": 100, "speed": "0x40A00000", "changedFields": 0}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 11,
+      "expectedAckTick": 0,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 1,
+      "expectedEntityIds": ["p1"],
+      "expectedCount": 1,
+      "expectedEntityState": {"id": "p1", "hp": 90, "x": "0x41A00000", "y": "0x41A00000", "speed": "0x40A00000", "facingBrad": 0, "action": 0}
+    },
+    {
+      "name": "field_delta_new_entity_in_delta_ignores_mask",
+      "description": "An entity arriving for the first time in a delta with changedFields set is a server-side bug. The merger treats it as a full update (no existing state to merge against).",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41200000", "hp": 100, "maxHp": 100}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 11,
+          "ackTick": 0,
+          "full": false,
+          "entities": [
+            {"id": "m1", "type": "mob", "x": "0x42480000", "y": "0x42480000", "hp": 50, "maxHp": 50, "changedFields": 3}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 11,
+      "expectedAckTick": 0,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 1,
+      "expectedEntityIds": ["m1", "p1"],
+      "expectedCount": 2,
+      "expectedEntityState": {"id": "m1", "hp": 50, "x": "0x42480000", "y": "0x42480000"}
+    },
+    {
+      "name": "field_delta_facing_and_action_kept",
+      "description": "changedFields=0x0003 (x|y only). facing_brad and action present in the keyframe must be kept; the partial update carries zeros for them but the mask says they are absent.",
+      "steps": [
+        {
+          "tick": 10,
+          "ackTick": 0,
+          "full": true,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41200000", "y": "0x41A00000", "hp": 100, "maxHp": 100, "speed": "0x40A00000", "facingBrad": 16385, "action": 2}
+          ],
+          "removed": []
+        },
+        {
+          "tick": 11,
+          "ackTick": 5,
+          "full": false,
+          "entities": [
+            {"id": "p1", "type": "player", "x": "0x41A00000", "y": "0x41E00000", "hp": 0, "maxHp": 0, "speed": "0x00000000", "facingBrad": 0, "action": 0, "changedFields": 3}
+          ],
+          "removed": []
+        }
+      ],
+      "expectedTick": 11,
+      "expectedAckTick": 5,
+      "expectedKeyframes": 1,
+      "expectedDeltas": 1,
+      "expectedEntityIds": ["p1"],
+      "expectedCount": 1,
+      "expectedEntityState": {"id": "p1", "hp": 100, "x": "0x41A00000", "y": "0x41E00000", "speed": "0x40A00000", "facingBrad": 16385, "action": 2}
     }
   ]
 }

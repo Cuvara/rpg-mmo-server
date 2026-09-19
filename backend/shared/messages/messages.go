@@ -231,7 +231,7 @@ func (e Envelope) UnmarshalPayload(v any) error {
 // GameServer/Net/WireProtocol.cs and the Unity client in
 // Runtime/Protocol/WireProtocolVersion.cs; no language can be authoritative for
 // the other two, so each pins the value and tests assert it here.
-const WireProtocolVersion uint32 = 1
+const WireProtocolVersion uint32 = 2
 
 // ProtocolVersionUnversioned is the wire value meaning "this peer does not
 // advertise a version" — a peer built before the field existed.
