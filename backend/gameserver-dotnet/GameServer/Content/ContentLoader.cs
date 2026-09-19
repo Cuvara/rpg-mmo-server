@@ -175,6 +175,28 @@ public static class ContentLoader
             }
         }
 
+        // Absent rather than empty is legal here, unlike items — see ItemFileDto.Abilities
+        // for why the two keys are treated differently.
+        var abilities = new List<AbilityDefinition>(file.Abilities?.Count ?? 0);
+        if (file.Abilities != null)
+        {
+            for (int i = 0; i < file.Abilities.Count; i++)
+            {
+                var dto = file.Abilities[i];
+                if (dto == null)
+                {
+                    errors.Add($"abilities[{i}] is null.");
+                    continue;
+                }
+
+                var ability = ConvertAbility(dto, i, errors);
+                if (ability != null)
+                {
+                    abilities.Add(ability);
+                }
+            }
+        }
+
         // Duplicate ids throw out of the ContentDatabase constructor rather than being
         // collected here, so catch and fold that into the same report instead of letting
         // one class of content error escape as a different exception type.
@@ -182,7 +204,7 @@ public static class ContentLoader
         string hash = ComputeHash(bytes);
         try
         {
-            database = new ContentDatabase(definitions, hash);
+            database = new ContentDatabase(definitions, abilities, hash);
         }
         catch (ArgumentException ex)
         {
@@ -243,6 +265,86 @@ public static class ContentLoader
             dto.Attack ?? 0,
             dto.Defense ?? 0,
             dto.LevelRequirement ?? 0);
+    }
+
+    /// <summary>
+    /// Turns one ability DTO into a definition, appending a diagnosis per bad field.
+    /// Returns null when the entry cannot be built at all.
+    /// </summary>
+    private static AbilityDefinition? ConvertAbility(AbilityDto dto, int index, List<string> errors)
+    {
+        // Reported as the index when there is no id to name it by. An ability's id is a
+        // number, so there is no readable name to fall back on the way an item's id string
+        // provides one — the name field is display text and may be absent too.
+        string where = dto.Id != null ? dto.Id.Value.ToString(CultureInfo.InvariantCulture) : $"abilities[{index}]";
+
+        if (dto.Id == null)
+        {
+            errors.Add($"abilities[{index}]: 'id' is missing. Every ability needs one, and ids start at 1.");
+            return null;
+        }
+
+        if (!TryParseEnum(dto.Targeting, out AbilityTargeting targeting))
+        {
+            errors.Add($"ability {where}: targeting '{dto.Targeting}' is not recognised. " +
+                       "Valid: self, entity, ground.");
+            return null;
+        }
+
+        if (!TryParseEnum(dto.Effect, out AbilityEffect effect))
+        {
+            errors.Add($"ability {where}: effect '{dto.Effect}' is not recognised. " +
+                       "Valid: damage, heal.");
+            return null;
+        }
+
+        if (dto.Power == null)
+        {
+            errors.Add($"ability {where}: 'power' is missing. Write 0 for an ability with no magnitude.");
+            return null;
+        }
+
+        if (dto.CooldownTicks == null)
+        {
+            errors.Add($"ability {where}: 'cooldownTicks' is missing. Write 0 for no cooldown. " +
+                       "The unit is SIMULATION TICKS, not milliseconds.");
+            return null;
+        }
+
+        // Range and radius default to 0 rather than being required, because whether either
+        // is meaningful depends on the targeting mode. ContentValidation is what decides
+        // that a Ground ability with no radius is an error; repeating the rule here would
+        // give it two homes that can disagree.
+        return new AbilityDefinition(
+            dto.Id.Value,
+            dto.Name ?? string.Empty,
+            targeting,
+            effect,
+            dto.Range ?? 0f,
+            dto.Radius ?? 0f,
+            dto.Power.Value,
+            dto.CooldownTicks.Value);
+    }
+
+    private static bool TryParseEnum(string? text, out AbilityTargeting targeting)
+    {
+        switch (text)
+        {
+            case "self": targeting = AbilityTargeting.Self; return true;
+            case "entity": targeting = AbilityTargeting.Entity; return true;
+            case "ground": targeting = AbilityTargeting.Ground; return true;
+            default: targeting = AbilityTargeting.Self; return false;
+        }
+    }
+
+    private static bool TryParseEnum(string? text, out AbilityEffect effect)
+    {
+        switch (text)
+        {
+            case "damage": effect = AbilityEffect.Damage; return true;
+            case "heal": effect = AbilityEffect.Heal; return true;
+            default: effect = AbilityEffect.Damage; return false;
+        }
     }
 
     /// <summary>

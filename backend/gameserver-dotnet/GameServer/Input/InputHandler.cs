@@ -4,6 +4,8 @@ using Shared.GameLogic.Systems;
 using GameServer.World;
 using GameServer.World.Components;
 using GameServer.Net;
+using GameServer.Snapshot;
+using Shared.GameLogic.Content;
 // Disambiguated from the generated wire enum of the same name: the two mirror each
 // other by design, and this file means the simulation one.
 using SimAction = Shared.GameLogic.Components.EntityAction;
@@ -18,6 +20,20 @@ public sealed class InputHandler
 {
     /// <summary>Callback invoked when an entity is killed.</summary>
     public delegate void DeathHandler(EntityState victim, EntityState killer);
+
+    /// <summary>
+    /// Where edge-triggered occurrences are recorded for this tick, or null when the host
+    /// does not collect them (tests and benchmarks that only exercise the simulation).
+    /// </summary>
+    /// <remarks>
+    /// Null-checked at every emit rather than defaulted to an empty buffer, because an
+    /// empty buffer would still pay a list append and a key resolution per event on the
+    /// tick thread inside the world write lock for a host that is going to discard them.
+    /// </remarks>
+    private readonly TickEventBuffer? _events;
+
+    /// <summary>The content set abilities are resolved against. Never null.</summary>
+    private readonly ContentDatabase _content;
 
     private readonly EcsWorld _world;
     private readonly ILogger _logger;
@@ -71,6 +87,42 @@ public sealed class InputHandler
 
     /// <summary>Attack-path counters. See <see cref="AttackTelemetry"/> for the contract.</summary>
     public AttackTelemetry Attacks { get; } = new();
+
+    /// <summary>
+    /// Running counters for the ability path, exposed on <c>/status</c>. Same contract and
+    /// same threading as <see cref="AttackTelemetry"/>.
+    /// </summary>
+    public sealed class AbilityTelemetry
+    {
+        /// <summary>Inputs that carried a non-zero ability id.</summary>
+        public long Received;
+
+        /// <summary>Casts refused by <see cref="AbilityLogic.ValidateCast"/>.</summary>
+        public long Rejected;
+
+        /// <summary>Casts that resolved.</summary>
+        public long Accepted;
+
+        /// <summary>
+        /// Accepted Ground casts that applied no effect because the area query does not
+        /// exist yet.
+        /// </summary>
+        /// <remarks>
+        /// Counted rather than left implicit: this is the one place where an accepted cast
+        /// does nothing, and a number that can be read off /status is what stops it being
+        /// rediscovered as "ground abilities are broken" by whoever authors the first one.
+        /// </remarks>
+        public long GroundCastsWithoutArea;
+
+        /// <summary>
+        /// Reason string of the most recent rejection, verbatim from
+        /// <see cref="AbilityLogic.ValidateCast"/> and therefore an interned constant.
+        /// </summary>
+        public string? LastRejection;
+    }
+
+    /// <summary>Ability-path counters. See <see cref="AbilityTelemetry"/> for the contract.</summary>
+    public AbilityTelemetry Abilities { get; } = new();
 
     /// <summary>
     /// Called once per refused input with the account and the reason.
@@ -154,11 +206,19 @@ public sealed class InputHandler
         MapBounds? bounds = null,
         Action<string, InputRejectionReason>? onRejected = null,
         Action<string, ulong>? onAttackAccepted = null,
+        TickEventBuffer? events = null,
+        ContentDatabase? content = null,
         int oneShotHoldTicks = 1)
     {
         _world = world;
         _logger = logger;
         _onDeath = onDeath;
+        _events = events;
+        // Empty rather than null: every ability lookup then goes through the same
+        // TryGetAbility miss path whether the server was built with content or without,
+        // so "no content set" cannot take a different branch than "ability not in the
+        // content set" and hide a content-loading failure as a per-input rejection.
+        _content = content ?? ContentDatabase.Empty;
         _onRejected = onRejected;
         _onAttackAccepted = onAttackAccepted;
         _deltaTime = MovementSystem.DeltaTimeForTickRate(
@@ -604,6 +664,17 @@ public sealed class InputHandler
                     int damage = CombatLogic.CalculateDamage(in attacker, in t);
                     t.Hp -= damage;
 
+                    // Emitted with the damage APPLIED, which is the number a player sees
+                    // float off a head — not the pre-defense roll. A client cannot derive
+                    // this from the HP it receives: a delta may not carry the target at all
+                    // if something healed it back in the same tick, and an entity leaving
+                    // the AOI mid-fight simply stops reporting. Inferring damage from HP
+                    // deltas is wrong in exactly the cases a player notices.
+                    EmitEvent(
+                        GameEventData.Damage(attacker.Id, t.Id, damage),
+                        writer.IdRefOf(self).Stable,
+                        writer.IdRefOf(target).Stable);
+
                     ulong cooldownUntil = currentTick + (ulong)_cooldownTicks;
                     writer.CombatOf(self).CooldownUntilTick = cooldownUntil;
 
@@ -626,6 +697,16 @@ public sealed class InputHandler
                     if (CombatLogic.HandleDeath(ref t))
                     {
                         Attacks.Kills++;
+
+                        // Not redundant with the Dead action the victim is about to get:
+                        // Dead is a state that persists as long as the corpse does, so a
+                        // client arriving later sees it and cannot tell the death just
+                        // happened. A death animation, a sound and a kill feed all need the
+                        // edge, and only the server has it.
+                        EmitEvent(
+                            GameEventData.Death(attacker.Id, t.Id),
+                            writer.IdRefOf(self).Stable,
+                            writer.IdRefOf(target).Stable);
                         // Debug, guarded: this fires per kill on the tick thread inside
                         // the world write lock, and at Information the console sink
                         // formats and writes synchronously — a wave of AoE kills wrote
@@ -698,5 +779,221 @@ public sealed class InputHandler
                 }
             }
         }
+
+        // --- Ability ---
+        //
+        // Composed after movement and after the basic attack, so range is measured against
+        // this tick's position and an ability cannot be spent on a tick the attack already
+        // killed the target on.
+        if (input.HasAbility)
+        {
+            ProcessAbility(userId, in input, self, writer, currentTick);
+        }
+    }
+
+    /// <summary>
+    /// Validates and resolves one ability cast. Split out of <c>ProcessInput</c> because it
+    /// is cold relative to movement — most inputs carry no ability — and inlining it would
+    /// put its locals in the frame of the method every input pays for.
+    /// </summary>
+    private void ProcessAbility(
+        string userId, in InputData input, in EntityHandle self, WorldWriter writer, ulong currentTick)
+    {
+        Abilities.Received++;
+
+        _content.TryGetAbility(input.AbilityId, out AbilityDefinition? ability);
+
+        EntityState caster = writer.Compose(self);
+
+        // Resolved before validation so the validator sees a target or a definite absence,
+        // never an unresolved maybe. An unresolvable id is reported as a missing target,
+        // which is what it is from the caster's point of view.
+        EntityHandle target = default;
+        EntityState targetState = default;
+        bool hasTarget = false;
+        if (!string.IsNullOrEmpty(input.AbilityTargetId))
+        {
+            target = writer.Resolve(input.AbilityTargetId!);
+            if (target.IsValid)
+            {
+                targetState = writer.Compose(target);
+                hasTarget = true;
+            }
+        }
+
+        string? error = AbilityLogic.ValidateCast(
+            in caster, ability, in targetState, hasTarget, in input.Aim, currentTick);
+
+        if (error != null || ability == null)
+        {
+            Abilities.Rejected++;
+            Abilities.LastRejection = error;
+            Reject(userId, ClassifyAbilityRejection(error));
+
+            // Guarded for the reason every other log on this path is: a client holding a
+            // cast button generates rejections continuously while closing distance, on the
+            // tick thread inside the world write lock.
+            if (_logger.IsEnabled(LogLevel.Debug))
+            {
+                _logger.LogDebug(
+                    "Ability {AbilityId} from {UserId} refused: {Error}", input.AbilityId, userId, error);
+            }
+            return;
+        }
+
+        Abilities.Accepted++;
+
+        // The cooldown is charged BEFORE the effect is applied, and it is charged whatever
+        // the effect turns out to be worth. A heal that lands on a full-health target
+        // restores nothing, and if the cooldown depended on the outcome that cast would be
+        // free — which is a rate limit a client can defeat by aiming badly on purpose.
+        writer.CombatOf(self).AbilityCooldownUntilTick = AbilityLogic.CooldownUntil(ability, currentTick);
+
+        // Casting is an action, and a repeated cast of the same ability must retrigger:
+        // Advance, never assign.
+        ref Locomotion casterLocomotion = ref writer.LocomotionOf(self);
+        ActionStateLogic.Advance(
+            ref casterLocomotion.Action, ref casterLocomotion.ActionSeq, SimAction.Attacking);
+
+        int casterKey = writer.IdRefOf(self).Stable;
+
+        EmitEvent(
+            GameEventData.AbilityCast(caster.Id, hasTarget ? targetState.Id : null, ability.Id),
+            casterKey,
+            hasTarget ? writer.IdRefOf(target).Stable : PendingGameEvent.NoKey);
+
+        switch (ability.Targeting)
+        {
+            case AbilityTargeting.Self:
+                ApplyAbilityEffect(ability, in caster, self, casterKey, self, casterKey, writer);
+                break;
+
+            case AbilityTargeting.Entity:
+                ApplyAbilityEffect(
+                    ability, in caster, self, casterKey, target, writer.IdRefOf(target).Stable, writer);
+                break;
+
+            case AbilityTargeting.Ground:
+                // Deliberately NOT implemented as a world query here. A ground ability needs
+                // every entity within its radius, and the only index that answers that is the
+                // AOI spatial grid, which is rebuilt in the gather phase and is not valid
+                // during input processing. Running an O(all entities) scan instead would be
+                // correct and would also be the most expensive thing in the tick, per cast.
+                //
+                // The cast is accepted, the cooldown is charged and the cast event is sent —
+                // so a client shows the cast and the cooldown truthfully — and no damage is
+                // applied. That is a stated gap, not a silent one: Ground abilities are
+                // validated and animated but inert until the area query lands. The content
+                // validator permits them because the wire and the event channel already
+                // carry everything one needs.
+                Abilities.GroundCastsWithoutArea++;
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Applies one ability's effect to one entity and emits the matching event.
+    /// </summary>
+    private void ApplyAbilityEffect(
+        AbilityDefinition ability,
+        in EntityState caster,
+        in EntityHandle casterHandle,
+        int casterKey,
+        in EntityHandle targetHandle,
+        int targetKey,
+        WorldWriter writer)
+    {
+        // Recomposed rather than reusing the state ValidateCast saw: for a self-cast that
+        // state IS the caster, and the caster's own component may have been written since
+        // (the cooldown, the action). Composing again is a few field reads and removes a
+        // class of bug that only appears when the caster and the target are the same entity.
+        EntityState targetState = writer.Compose(targetHandle);
+
+        ref Health health = ref writer.HealthOf(targetHandle);
+
+        switch (ability.Effect)
+        {
+            case AbilityEffect.Damage:
+            {
+                int damage = AbilityLogic.CalculateAbilityDamage(in caster, ability, in targetState);
+                targetState.Hp -= damage;
+                health.Hp = targetState.Hp;
+
+                EmitEvent(
+                    GameEventData.Damage(caster.Id, targetState.Id, damage, ability.Id),
+                    casterKey, targetKey);
+
+                if (CombatLogic.HandleDeath(ref targetState))
+                {
+                    health.Hp = targetState.Hp;
+                    health.Dead = targetState.Dead;
+
+                    EmitEvent(GameEventData.Death(caster.Id, targetState.Id), casterKey, targetKey);
+
+                    ref Locomotion victimLocomotion = ref writer.LocomotionOf(targetHandle);
+                    ActionStateLogic.Advance(
+                        ref victimLocomotion.Action, ref victimLocomotion.ActionSeq, SimAction.Dead);
+
+                    _onDeath?.Invoke(targetState, caster);
+                }
+
+                break;
+            }
+
+            case AbilityEffect.Heal:
+            {
+                // Clamped inside CalculateHeal, and the clamped value is what both the HP
+                // write and the event carry. A full-health target healed for 500 that showed
+                // "500" beside an unmoved HP bar reads to a player as the heal being eaten
+                // by something; the number shown and the number applied have to be one
+                // number, which means one place computes it.
+                int healed = AbilityLogic.CalculateHeal(ability, in targetState);
+                if (healed <= 0)
+                {
+                    // Still an event: a heal that landed on a full-health target is a thing
+                    // that happened, and a client that shows nothing for it looks broken.
+                    // Immune carries "this did nothing", which is the honest report.
+                    EmitEvent(
+                        new GameEventData(
+                            GameEventType.Heal, caster.Id, targetState.Id, 0, ability.Id,
+                            GameEventFlags.Immune),
+                        casterKey, targetKey);
+                    break;
+                }
+
+                health.Hp = targetState.Hp + healed;
+
+                EmitEvent(
+                    GameEventData.Heal(caster.Id, targetState.Id, healed, ability.Id),
+                    casterKey, targetKey);
+                break;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Records an event for this tick, if the host collects them.
+    /// </summary>
+    private void EmitEvent(in GameEventData data, int sourceKey, int targetKey)
+    {
+        // The null check is the whole cost for a host that does not collect events, which is
+        // every test and benchmark that only drives the simulation.
+        _events?.Add(in data, sourceKey, targetKey);
+    }
+
+    /// <summary>
+    /// Maps an <see cref="AbilityLogic"/> rejection reason onto the bounded enum, by
+    /// reference rather than by string comparison — the constants are the only source of
+    /// those values, exactly as on the attack path.
+    /// </summary>
+    private static InputRejectionReason ClassifyAbilityRejection(string? reason)
+    {
+        if (ReferenceEquals(reason, AbilityLogic.CooldownRejection)) return InputRejectionReason.AbilityOnCooldown;
+        if (ReferenceEquals(reason, AbilityLogic.OutOfRangeRejection)) return InputRejectionReason.AbilityOutOfRange;
+        if (ReferenceEquals(reason, AbilityLogic.MissingTargetRejection)) return InputRejectionReason.AbilityTargetUnresolved;
+        if (ReferenceEquals(reason, AbilityLogic.TargetDeadRejection)) return InputRejectionReason.AbilityTargetDead;
+        if (ReferenceEquals(reason, AbilityLogic.CasterDeadRejection)) return InputRejectionReason.AbilityCasterDead;
+        if (ReferenceEquals(reason, AbilityLogic.UnknownAbilityRejection)) return InputRejectionReason.AbilityUnknown;
+        return InputRejectionReason.AbilityOther;
     }
 }

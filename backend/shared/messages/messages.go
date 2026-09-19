@@ -360,6 +360,27 @@ type InputMessage struct {
 	MoveX          float32 `json:"move_x"`
 	MoveY          float32 `json:"move_y"`
 	AttackTargetID string  `json:"attack_target_id,omitempty"`
+
+	// AbilityID is the content id of the ability the player is using this tick,
+	// or 0 for none. Ability ids are allocated from 1 by the content validator
+	// for exactly that reason: proto3 elides a zero, so id 0 and "sent no
+	// ability" would be identical bytes.
+	//
+	// This is a REQUEST. The server validates it against the content set, the
+	// caster and its cooldown, and the only report of the outcome is what comes
+	// back in the snapshot.
+	AbilityID uint32 `json:"ability_id,omitempty"`
+
+	// AbilityTargetID is the target entity for an entity-targeted ability. Same
+	// id space as AttackTargetID — a server-side entity id, never a handle.
+	AbilityTargetID string `json:"ability_target_id,omitempty"`
+
+	// AimX/AimY are an aim POINT in world coordinates for a ground-targeted
+	// ability, unlike MoveX/MoveY which are a direction. Read only when AbilityID
+	// is non-zero; the world origin is a legitimate aim point, so (0,0) does not
+	// mean "not aimed".
+	AimX float32 `json:"aim_x,omitempty"`
+	AimY float32 `json:"aim_y,omitempty"`
 }
 
 // SnapshotMessage is a world state update sent to the client.
@@ -385,6 +406,64 @@ type SnapshotMessage struct {
 	// Removed lists entity IDs that left the AOI (or the world) since the last
 	// snapshot. Only meaningful on deltas; always empty on keyframes.
 	Removed []string `json:"removed,omitempty"`
+
+	// Events are the edge-triggered occurrences the reported tick produced, in
+	// the order the simulation produced them. Empty on most snapshots.
+	//
+	// They ride the snapshot rather than taking a message type of their own
+	// because entity ids are interned PER CONNECTION and the table resets at
+	// every keyframe: a separate message would either carry full string ids on
+	// the hottest message class in combat, or resolve handles against a table
+	// whose lifetime it does not share — a race that attributes damage to the
+	// wrong entity.
+	//
+	// Sent on deltas and keyframes alike and NEVER re-sent. A keyframe restates
+	// the world's state because a client may have missed a delta; it does not
+	// restate its history.
+	Events []GameEvent `json:"events,omitempty"`
+}
+
+// GameEventType is the kind of an edge-triggered occurrence. Numbers are FROZEN
+// and mirror the wire enum; 0 means "not sent" and a receiver must ignore an
+// event whose type it does not recognise rather than guess.
+type GameEventType int
+
+const (
+	GameEventUnspecified GameEventType = 0
+	GameEventDamage      GameEventType = 1
+	GameEventHeal        GameEventType = 2
+	GameEventDeath       GameEventType = 3
+	GameEventAbilityCast GameEventType = 4
+	GameEventXPGain      GameEventType = 5
+	GameEventLevelUp     GameEventType = 6
+)
+
+// GameEvent is one occurrence, addressed by the same interned handles the
+// surrounding snapshot uses.
+//
+// Source/Target are 0 for "no such participant, or not visible to you" — a
+// player who can see the victim but not the attacker still gets the number, and
+// the alternative is a health bar that drops with no explanation. SourceID and
+// TargetID carry full ids and are populated ONLY by a non-interning sender (the
+// legacy JSON encoding), mirroring EntitySnapshot's own ID/Handle duality.
+type GameEvent struct {
+	Type GameEventType `json:"type,omitempty"`
+
+	Source uint32 `json:"source,omitempty"`
+	Target uint32 `json:"target,omitempty"`
+
+	SourceID string `json:"source_id,omitempty"`
+	TargetID string `json:"target_id,omitempty"`
+
+	// Amount is the magnitude: damage dealt, health restored, experience gained,
+	// level reached. Meaning is per Type.
+	Amount int32 `json:"amount,omitempty"`
+
+	// AbilityID is the ability involved, 0 for none.
+	AbilityID uint32 `json:"ability_id,omitempty"`
+
+	// Flags: bit 0 critical, bit 1 immune/fully mitigated, bit 2 periodic.
+	Flags uint32 `json:"flags,omitempty"`
 }
 
 // EntitySnapshot is a single entity's visible state.
@@ -433,6 +512,20 @@ type EntitySnapshot struct {
 	// has no pre-enum string form to stay compatible with, so both encodings carry
 	// the same value and there is no second convention to remember.
 	Action EntityAction `json:"action,omitempty"`
+
+	// ActionSeq is the retrigger counter for Action. It CHANGES every time the
+	// entity enters an action, including re-entering the one it is already in;
+	// 0 means "not sent".
+	//
+	// Action is level-triggered, so two attacks in a row are identical bytes and
+	// an animator driven from it alone plays the swing once. Only the server
+	// knows an action was re-entered, so the edge is manufactured here or it does
+	// not exist anywhere.
+	//
+	// A receiver retriggers on INEQUALITY, never on increase: the counter wraps
+	// at 2^32 and resets on restart or respawn, so a greater-than test stops
+	// retriggering for four billion actions after a single wrap.
+	ActionSeq uint32 `json:"action_seq,omitempty"`
 }
 
 // DisconnectMessage ends a session politely. Both encodings accept an empty

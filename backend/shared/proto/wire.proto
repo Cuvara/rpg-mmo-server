@@ -306,6 +306,52 @@ message InputMessage {
   float move_x = 2;
   float move_y = 3;
   string attack_target_id = 4;
+
+  // --- Ability input (gameplay v2) ---
+
+  // Content id of the ability the player is trying to use this tick, as defined
+  // in the content set served at /content (ADR-19). ZERO MEANS "NO ABILITY",
+  // which is why ability ids are allocated from 1 in the content validator: a
+  // proto3 zero is elided, so id 0 and "this client sent no ability" would be
+  // the same bytes and the server could not tell a missing field from a real
+  // ability.
+  //
+  // This is a REQUEST, not a result. The server validates it against the
+  // content set, the caster's state and its cooldown, and the only thing the
+  // client learns about the outcome is what comes back in the snapshot: a
+  // GAME_EVENT_TYPE_ABILITY_CAST event if it resolved, nothing if it did not.
+  // There is deliberately no per-input acknowledgement — an input that failed
+  // is already described by the world not changing, and a rejection channel
+  // would be a second, contradictable account of the same fact.
+  //
+  // Abilities are NOT client-predicted. Prediction covers movement only
+  // (Documentation~/PREDICTION.md): movement is a pure function of input the
+  // client already has, while an ability outcome depends on cooldowns, content
+  // and other entities' state that the client can only guess at. A mispredicted
+  // ability is visible as a cast that plays and then un-happens, which is worse
+  // than a cast that starts one round trip late.
+  uint32 ability_id = 5;
+
+  // Target entity for a targeted ability, empty for self- and ground-targeted
+  // ones. Same id space as `attack_target_id` — the server-side entity id, not
+  // a handle, because input travels client -> server and the interning table is
+  // built by the SERVER for its own outbound snapshots. A client has no handle
+  // to send that the server would recognise.
+  string ability_target_id = 6;
+
+  // Aim point in world coordinates for a ground-targeted ability. Ignored for
+  // self- and entity-targeted ones.
+  //
+  // Sent as a plain pair of floats rather than being folded into move_x/move_y:
+  // they are different quantities (a POINT in world space against a DIRECTION),
+  // and an input that both moves and aims elsewhere is ordinary — a player
+  // strafing while dropping an area effect behind them.
+  //
+  // Zero is a legitimate aim point (world origin), so a receiver must not read
+  // (0,0) as "not aimed". `ability_id` is what says whether any of this is
+  // meaningful: aim fields are only read when it is non-zero.
+  float aim_x = 7;
+  float aim_y = 8;
 }
 
 // EntityType enumerates the entity kinds the simulation knows about.
@@ -482,30 +528,189 @@ message EntitySnapshot {
   // missing field.
   EntityAction action = 11;
 
-  // Retrigger counter for `action`. Increments every time the entity ENTERS an
-  // action, including re-entering the one it is already in.
+  // Retrigger counter for `action`, incremented by the server every time the
+  // entity ENTERS an action, including re-entering the one it is already in.
   //
-  // WHY A LEVEL FIELD IS NOT ENOUGH. `action` says what state an entity is in,
-  // never that a state was entered. Two attacks in a row are identical bytes, so
-  // an animator driven from `action` alone plays the swing once and then holds.
-  // No receiver-side edge detection recovers that: the edge is genuinely not in
-  // the data, and only the server knows it happened.
+  // WHY THIS EXISTS. `action` is level-triggered and says so at length above: it
+  // reports the state an entity is in, not that a state was entered. Two attacks
+  // in a row therefore put identical bytes on the wire for both of them, and a
+  // renderer driving an animator from `action` alone plays the attack once and
+  // then holds — the second swing never fires. That is not a renderer bug and no
+  // amount of client-side edge detection on `action` can fix it, because the
+  // edge genuinely is not in the data.
   //
-  // RETRIGGER ON INEQUALITY, NEVER ON INCREASE. The counter wraps at 2^32 and
-  // resets when the server restarts or the entity respawns, so a greater-than
-  // test stops retriggering for four billion actions after a single wrap, with
-  // nothing reporting an error. The sender SKIPS ZERO on wrap, so a live counter
-  // is never 0.
+  // The enum's own documentation calls this out and defers it as "an animation
+  // system concern". It is not: the server is the only party that knows an
+  // action was re-entered, so the edge has to be MANUFACTURED here or it does
+  // not exist anywhere. This field is that edge, in one varint.
   //
-  // ZERO MEANS "NOT SENT", NOT "NO ACTIONS YET" -- the same rule as `facing_brad`
-  // and for the same reason. A sender predating this field puts nothing here; a
-  // receiver MUST keep driving from `action` alone in that case and accept that
-  // repeats do not retrigger, rather than treating 0 as an edge, which would
-  // retrigger every animation on every snapshot.
+  // SEMANTICS. A receiver retriggers when the value CHANGES, not when it
+  // increases. It is a per-entity counter that wraps at 2^32 and is reset when
+  // the server restarts or the entity respawns, so "greater than" is not a safe
+  // test and a receiver that uses one stops retriggering for 4 billion actions
+  // after a single wrap. Inequality has no such failure mode.
   //
-  // Sent on every mention of an entity, never interned: a receiver that resolves
-  // a handle expects complete state.
+  // ZERO MEANS "NOT SENT". The counter is allocated from 1 for the same reason
+  // as every other zero-reserving field in this file: a server that predates
+  // this field and an entity whose counter happens to be zero must not look the
+  // same. A receiver seeing zero keeps its existing behaviour — drive the
+  // animator from `action` alone and accept that repeats do not retrigger —
+  // rather than treating it as an edge, which would retrigger every animation on
+  // every snapshot from an old server.
+  //
+  // Sent on every mention of an entity, never interned, for the same reason as
+  // `speed` and `facing_brad`: a receiver that resolves a handle expects
+  // complete state.
   uint32 action_seq = 12;
+}
+
+// --- Game events (gameplay v2) ---
+
+// GameEventType enumerates the EDGE-TRIGGERED things that happen in the world.
+//
+// Numbers are FROZEN once shipped. Append only; never renumber.
+//
+// WHY AN EVENT CHANNEL EXISTS AT ALL. Everything else the server sends a client
+// is LEVEL-triggered state: where an entity is, how much HP it has, what it is
+// doing. That is the right shape for state, and it is the wrong shape for
+// occurrences. "This entity took 12 damage" is not recoverable from two HP
+// values a tick apart — a heal and a hit in the same tick net out, a delta
+// snapshot may not carry the entity at all if it also regenerated back, and an
+// entity that leaves the AOI mid-fight simply stops reporting. A client that
+// infers damage numbers from HP deltas is wrong in exactly the cases a player
+// notices, and it is wrong silently.
+//
+// ZERO IS RESERVED and means "not sent / unknown", following the same rule as
+// EntityType and EntityAction. A receiver MUST ignore an event it does not
+// recognise rather than guessing: events are presentation, so dropping an
+// unknown one costs a missing damage number, while guessing costs a wrong one.
+enum GameEventType {
+  GAME_EVENT_TYPE_UNSPECIFIED = 0;
+
+  // `target` took `amount` damage from `source`. `amount` is the damage
+  // APPLIED, after mitigation — the number a player expects to see float off a
+  // head, not the pre-defense roll.
+  GAME_EVENT_TYPE_DAMAGE = 1;
+
+  // `target` was healed `amount` by `source`.
+  GAME_EVENT_TYPE_HEAL = 2;
+
+  // `target` died. `source` is the killer, or 0 when nothing killed it (a
+  // despawn, a zone, a disconnect).
+  //
+  // This is NOT redundant with EntityAction.Dead, and the difference is the
+  // whole reason the event channel exists: `Dead` is a state that persists for
+  // as long as the corpse does, so a client joining afterwards sees Dead and
+  // cannot tell whether the death just happened. The event says it happened
+  // now, which is what a death animation, a sound and a kill feed all need.
+  GAME_EVENT_TYPE_DEATH = 3;
+
+  // `source` successfully cast `ability_id`. Emitted when the cast RESOLVES on
+  // the server, which is the only moment both sides agree on.
+  GAME_EVENT_TYPE_ABILITY_CAST = 4;
+
+  // `target` gained `amount` experience. Sent only to the entity's own
+  // connection — see the visibility note on GameEvent.
+  GAME_EVENT_TYPE_XP_GAIN = 5;
+
+  // `target` reached level `amount`.
+  GAME_EVENT_TYPE_LEVEL_UP = 6;
+}
+
+// GameEvent is one edge-triggered occurrence, addressed to entities by the SAME
+// interned handles the surrounding snapshot uses.
+//
+// WHY THIS RIDES SnapshotMessage RATHER THAN BEING ITS OWN MsgType. Three
+// reasons, and the first is the load-bearing one:
+//
+//  1. HANDLES. Entity ids are interned per connection and the table RESETS AT
+//     EVERY KEYFRAME (see EntitySnapshot.handle). An event in a separate
+//     message would either have to carry full string ids — ~17 bytes per
+//     participant, on the one message class that fires hardest during combat —
+//     or resolve handles against a table whose lifetime it does not share,
+//     which is a race that produces events attributed to the WRONG ENTITY. A
+//     wrong damage number is far worse than a missing one. Riding the snapshot
+//     makes the handle table and the events that use it the same message, so
+//     they cannot disagree.
+//
+//  2. TICK. Every event belongs to the tick that produced it. The snapshot
+//     already carries that tick, so nesting costs zero bytes to say when an
+//     event happened, where a separate message pays a uint64 per batch and
+//     still has to be ordered against the snapshot stream by the receiver.
+//
+//  3. ORDERING. One stream, one order, already reliable. No new connection
+//     state, no new MsgType, no second thing to reconnect.
+//
+// The cost is that events only travel when a snapshot does, which for a
+// connection receiving snapshots every tick is not a delay anyone can perceive.
+//
+// VISIBILITY. Events are filtered per connection exactly like entities are: a
+// connection is sent an event only when it can see at least one of the
+// participants, and private events (XP, level) only when the receiver IS the
+// subject. This is the same AOI rule the entity set already obeys, applied to
+// occurrences — an event channel that leaked the whole world would be a
+// wallhack shipped as a feature.
+message GameEvent {
+  GameEventType type = 1;
+
+  // Interned handle of the entity that CAUSED this, or 0 for "none / the
+  // world". Resolved against the same table as EntitySnapshot.handle in the
+  // snapshot carrying this event.
+  //
+  // A handle here may name an entity NOT present in this snapshot's `entities`
+  // list: a delta only carries entities whose state changed, and the killer of
+  // something in your AOI need not have moved. That is legal and expected. It
+  // may NOT name an entity the connection has no binding for — a receiver that
+  // sees one has lost interning state and must ask for a keyframe, the same
+  // recovery path EntitySnapshot.id documents.
+  uint32 source = 2;
+
+  // Interned handle of the entity this HAPPENED TO. 0 for events with no
+  // subject.
+  uint32 target = 3;
+
+  // Magnitude: damage dealt, health restored, experience gained, level reached.
+  // Meaning is per `type` and is documented on each value above.
+  //
+  // SIGNED, and sint32 rather than int32, because the zigzag encoding keeps a
+  // small negative cheap. Damage and healing are both reported POSITIVE under
+  // their own event types rather than as one signed quantity — a client that
+  // colours a number by its sign would show mitigated-to-zero damage and a
+  // zero heal identically. The sign is available for the cases that genuinely
+  // need it (an absorb, a level lost) without overloading the common ones.
+  sint32 amount = 4;
+
+  // Content id of the ability involved, 0 when none. Same id space as
+  // InputMessage.ability_id, so a damage event can say which ability dealt it.
+  uint32 ability_id = 5;
+
+  // Presentation flags: bit 0 = critical, bit 1 = the target was immune or the
+  // effect was fully mitigated, bit 2 = the effect came from a periodic source
+  // rather than a direct one.
+  //
+  // A bitfield rather than more enum values because these COMBINE — a critical
+  // periodic tick is one event, not two — and because a receiver that does not
+  // understand a bit ignores it and still shows a correct number, where an
+  // unrecognised enum value means the whole event is dropped.
+  uint32 flags = 6;
+
+  // Full entity ids, used ONLY by a receiver that is not interning — the legacy JSON
+  // encoding, which has no handle table and for which `source`/`target` are always
+  // zero. Empty on every Protobuf connection.
+  //
+  // This mirrors EntitySnapshot's own id/handle duality exactly, and for the same
+  // reason: the two encodings share one schema, and an encoding without interning
+  // still has to be able to name an entity. The alternative considered was to send no
+  // events at all on a JSON connection. It was rejected because a silently
+  // encoding-dependent feature is the kind of difference that is discovered by a
+  // player on the wrong client, not by a test — and because "JSON is legacy" is a
+  // reason to keep it simple, not a licence to make it wrong.
+  //
+  // A receiver prefers the handle when it is non-zero and falls back to these
+  // otherwise, which is the same precedence rule EntitySnapshot documents for
+  // `type`/`type_name`.
+  string source_id = 7;
+  string target_id = 8;
 }
 
 // SnapshotMessage is a world state update sent to the client.
@@ -523,6 +728,19 @@ message SnapshotMessage {
   bool full = 3;
   repeated EntitySnapshot entities = 4;
   repeated string removed = 5;
+
+  // Edge-triggered occurrences produced by the tick this snapshot reports, in
+  // the order the simulation produced them. Empty on most snapshots.
+  //
+  // Sent on DELTAS AND KEYFRAMES ALIKE, and never re-sent. A keyframe restates
+  // the world's STATE because a client may have missed a delta; it does not
+  // restate its HISTORY, because an event that has already been shown must not
+  // be shown twice. A client that missed the snapshot carrying an event has
+  // missed the event — permanently, by design. Events are presentation, and a
+  // damage number arriving late is worse than one that never arrives.
+  //
+  // See GameEvent for why these live here rather than in a message of their own.
+  repeated GameEvent events = 6;
 }
 
 // DisconnectMessage is sent by either side to end the session politely.

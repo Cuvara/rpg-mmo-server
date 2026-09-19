@@ -141,8 +141,8 @@ public class FacingAndActionTests
     // ---- The delta encoder -------------------------------------------------
 
     private static EntityView View(
-        int key, float x, uint facingBrad, SimAction action, float speed = 4f) =>
-        new(key, $"e{key}", "player", new Vec2(x, 0f), 100, 100, speed, facingBrad, action);
+        int key, float x, uint facingBrad, SimAction action, float speed = 4f, uint actionSeq = 0) =>
+        new(key, $"e{key}", "player", new Vec2(x, 0f), 100, 100, speed, facingBrad, action, actionSeq);
 
     private static SnapshotMessage Encode(
         SnapshotDeltaState state, ulong tick, params EntityView[] views) =>

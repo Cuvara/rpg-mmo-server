@@ -226,6 +226,17 @@ public class ServerOptions
     public MapBounds MapBounds { get; set; } = MapBounds.Default;
 
     /// <summary>
+    /// The content set abilities resolve against, or null to run with none.
+    /// </summary>
+    /// <remarks>
+    /// Null is a legitimate configuration and is what every test that does not care about
+    /// abilities passes: <c>InputHandler</c> substitutes
+    /// <see cref="Shared.GameLogic.Content.ContentDatabase.Empty"/>, so a cast then fails as
+    /// "unknown ability" rather than as a null reference.
+    /// </remarks>
+    public Shared.GameLogic.Content.ContentDatabase? Content { get; set; }
+
+    /// <summary>
     /// Delta snapshots between full keyframes. 0 or less disables delta encoding
     /// (every snapshot is a full keyframe).
     /// </summary>
@@ -418,6 +429,13 @@ public sealed class GameServerHost : IAsyncDisposable
     private readonly TickLoop _tickLoop;
     private readonly AsyncSaver _saver;
     private readonly InputHandler _inputHandler;
+
+    /// <summary>
+    /// Events produced by the current tick. Cleared by the tick loop before input runs and
+    /// read by every connection's gather in the same tick — see
+    /// <see cref="Snapshot.TickEventBuffer"/> for why its lifetime is exactly one tick.
+    /// </summary>
+    private readonly Snapshot.TickEventBuffer _tickEvents = new();
     private readonly IPlayerStore _playerStore;
     private readonly IAgonesSdk _agonesSdk;
     private readonly EventPublisher? _publisher;
@@ -597,6 +615,14 @@ public sealed class GameServerHost : IAsyncDisposable
     /// </summary>
     public Input.InputHandler.AttackTelemetry AttackStats => _inputHandler.Attacks;
 
+    /// <summary>Ability-path counters, for <c>/status</c>.</summary>
+    public Input.InputHandler.AbilityTelemetry AbilityStats => _inputHandler.Abilities;
+
+    /// <summary>
+    /// Events dropped because one tick produced more than <see cref="Snapshot.TickEventBuffer.Capacity"/>.
+    /// </summary>
+    public long TickEventsDropped => _tickEvents.Dropped;
+
     /// <summary>
     /// Per-account refused-input counts and anomaly scores. Observation only.
     /// </summary>
@@ -745,6 +771,8 @@ public sealed class GameServerHost : IAsyncDisposable
                     _metrics?.RecordAttackRateViolation();
                 }
             },
+            _tickEvents,
+            options.Content,
             // How long a one-shot action stays latched, in BASE ticks: exactly one world
             // interval. Actions are written on the critical group and sampled by the
             // snapshot gather on the world group, so at the 60/15 default only one write
@@ -754,7 +782,7 @@ public sealed class GameServerHost : IAsyncDisposable
             // Derived from the schedule rather than configured, for the same reason the
             // cooldown is: the value that makes it correct is the sampling period, and a
             // second knob that can disagree with the schedule is a knob that will.
-            rates.WorldEvery);
+            oneShotHoldTicks: rates.WorldEvery);
 
         // The observer is handed to the phase at construction rather than set afterwards:
         // a phase must hold no mutable instance state (ADR-12), and a settable observer is
@@ -769,6 +797,7 @@ public sealed class GameServerHost : IAsyncDisposable
         _tickLoop = new TickLoop(
             _world,
             _inputHandler,
+            _tickEvents,
             _connections,
             rates,
             options.Aoi.Radius,
@@ -1794,7 +1823,14 @@ public sealed class GameServerHost : IAsyncDisposable
                     input.Tick,
                     input.MoveX,
                     input.MoveY,
-                    input.AttackTargetId), conn.Ingress);
+                    input.AttackTargetId,
+                    input.AbilityId,
+                    input.AbilityTargetId,
+                    // Read unconditionally rather than only when AbilityId is non-zero: the
+                    // aim is meaningless without an ability and the simulation says so, and
+                    // a branch here would be a second place that has to agree about which
+                    // field gates which. Two float copies cost less than that agreement.
+                    new Vec2(input.AimX, input.AimY)), conn.Ingress);
                 switch (ingest)
                 {
                     case InputIngestResult.Coalesced:
