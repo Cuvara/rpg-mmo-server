@@ -355,6 +355,19 @@ public sealed class ServerStatus
     [JsonPropertyName("replication_schedule")]
     public string ReplicationSchedule { get; set; } = "";
 
+    /// <summary>
+    /// Whether field-level delta encoding is permitted on this server
+    /// (<c>GAMESERVER_FIELD_DELTA</c>). False means every entity carries every field, which
+    /// is the control arm for any bandwidth claim about the feature — see #381.
+    /// </summary>
+    /// <remarks>
+    /// Says what the SERVER allows, not what a given connection got: a connection also has
+    /// to have joined with an exact protocol version match and be speaking Protobuf. A
+    /// client on protocol 1 sees whole entities regardless of this flag.
+    /// </remarks>
+    [JsonPropertyName("field_delta")]
+    public bool FieldDelta { get; set; }
+
     /// <summary>Entity updates withheld because their importance tier was not due.</summary>
     [JsonPropertyName("snapshot_deferred_by_interval")]
     public long SnapshotDeferredByInterval { get; set; }

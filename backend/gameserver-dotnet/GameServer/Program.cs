@@ -261,6 +261,30 @@ if (!GameServer.Server.ReplicationSchedule.TryCreate(
 
 GameServer.Server.ReplicationSchedule replicationSchedule = scheduleParsed!;
 
+// Field-level delta kill switch. Parsed strictly rather than with the usual
+// `Env("X") != "false"` shape, because that idiom reads every typo as ON: an operator who
+// writes GAMESERVER_FIELD_DELTA=off gets the feature they were trying to disable, and the
+// measurement they took to compare against it is quietly of the same arm twice. This is a
+// toggle whose entire purpose is producing an honest control, so a value it does not
+// understand is a configuration error, not a default.
+string? fieldDeltaRaw = GetArg(args, "--field-delta") ?? Env("GAMESERVER_FIELD_DELTA");
+bool fieldDelta;
+switch (fieldDeltaRaw?.Trim().ToLowerInvariant())
+{
+    case null or "":
+    case "1" or "true" or "on" or "yes":
+        fieldDelta = true;
+        break;
+    case "0" or "false" or "off" or "no":
+        fieldDelta = false;
+        break;
+    default:
+        logger.LogCritical(
+            "invalid GAMESERVER_FIELD_DELTA {Value}: expected one of on/true/1/yes or off/false/0/no",
+            fieldDeltaRaw);
+        return 2;
+}
+
 
 // Resolved once so a bad AGONES_SDK_HTTP_PORT warns once rather than in both the
 // start-up banner and the SDK constructor. Meaningless when useAgones is false.
@@ -306,6 +330,11 @@ logger.LogInformation("  MapSize:   {Width}x{Height} world units (centered on or
 logger.LogInformation("  AOI:       {Aoi}", aoi);
 logger.LogInformation("  Importance:{Importance}", " " + importance);
 logger.LogInformation("  Schedule:  {Schedule}", replicationSchedule.Describe(worldHz));
+logger.LogInformation(
+    "  FieldDelta: {FieldDelta}",
+    fieldDelta
+        ? "on — unchanged fields suppressed for protocol-2 protobuf clients"
+        : "OFF — every field sent on every entity (GAMESERVER_FIELD_DELTA)");
 if (aoi.CoversWholeMap)
 {
     // Not a refusal: legitimate in a small dungeon instance, a mistake on an open map, and
@@ -850,6 +879,7 @@ var options = new ServerOptions
     Aoi = aoi,
     Importance = importance,
     ReplicationSchedule = replicationSchedule,
+    FieldDelta = fieldDelta,
     SealedTransport = sealedRequirement,
     ServerIdentity = serverIdentity,
     JwtSecret = jwtSecret,
@@ -1033,6 +1063,7 @@ metricsEndpoint?.SetStatusProvider(() =>
         ImportanceProfile = importance.Profile,
         ImportanceWeights = importance.ToString(),
         ReplicationSchedule = replicationSchedule.Describe(worldHz),
+        FieldDelta = fieldDelta,
         SnapshotDeferredByInterval = metrics.SnapshotDeferredByInterval,
         SnapshotMaxStateAge = metrics.MaxStateAge,
         SnapshotBytes = metrics.SnapshotBytes,

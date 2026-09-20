@@ -3885,6 +3885,13 @@ Before building it, it was measured. Two numbers decided the shape of this ADR:
   reporting the unmodified profile. It read as "tried the knob, made no difference" — the
   same class of failure as decision 4's vanished middle band, and again invisible to every
   test, because the tests configure the server in-process and never go through compose.
+- **Field-level delta has a kill switch, and it exists for measurement rather than policy.**
+  `GAMESERVER_FIELD_DELTA` (default on) is the only way to obtain a control arm: the feature
+  is otherwise gated by protocol version match alone, and the server refuses a peer whose
+  version differs, so the control would be a client that cannot connect. Off emits valid
+  protocol-2 frames — `changed_fields == 0` means "every field present" — so one client
+  measures both arms. Without it the −73% measured live sat 30 points above the 43.4%
+  ceiling its own bench establishes, unexplained and unexplainable.
 - **`snapshot_max_state_age` is a new and separate gauge from `snapshot_max_shed_age`.** A
   not-due entity is not a shed entity, so the budget's bookkeeping is blind to schedule
   deferrals; reading one for the other reports a healthy zero while entities go stale.

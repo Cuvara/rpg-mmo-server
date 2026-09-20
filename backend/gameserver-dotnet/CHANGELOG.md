@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`GAMESERVER_FIELD_DELTA` (`--field-delta`), a kill switch for field-level delta
+  encoding.** Defaults to on; nothing changes for anyone who does not set it.
+
+  Field-delta is otherwise enabled per connection purely by protocol version match, and the
+  server refuses a peer whose version is not an exact match — so **the control arm required
+  a client the server will not admit**, and every bandwidth figure for the feature was a
+  before/after across two builds. A measured 11.14 → 3.02 KB/s (−73%) sat 30 points above
+  the 43.4% ceiling `UnchangedFieldBytesBench` establishes for it, with no way to find out
+  why. That is what this switch is for (#381).
+
+  Turning it off emits valid protocol-2 frames: `changed_fields == 0` is specified to mean
+  "every field present", which is exactly what a sender without the feature produces. So a
+  v2 client needs no knowledge of the setting and **one client measures both arms minutes
+  apart**, in one build.
+
+  - Parsed strictly (`on/true/1/yes` | `off/false/0/no`), and an unrecognised value **exits
+    2** rather than defaulting. The repo's usual `Env("X") != "false"` idiom reads every
+    typo as ON: an operator writing `GAMESERVER_FIELD_DELTA=off` would get the feature they
+    were disabling, and the control they then measured would be the same arm twice. For a
+    toggle whose only purpose is an honest control, that failure mode is the whole risk.
+  - Reported in the boot banner and as `field_delta` on `/status`, because it says what the
+    **server** permits, not what a given connection got — a client on protocol 1 sees whole
+    entities regardless.
+  - `FieldDeltaToggleTests` runs two arms over the same world: OFF must never emit a
+    non-zero mask, ON must emit some, ON must cost fewer bytes, and — the property that
+    matters more than the saving — every field ON's mask claims is present must equal what
+    OFF sent for the same entity on the same tick. If those can disagree the switch is not a
+    control but a second encoder. Verified against a deliberately broken toggle
+    (`_fieldDelta = intern`), which fails the OFF arm on 30 of 30 entities.
+
+
 ### Documented
 
 - **The 3.9% enemy frozen-frame baseline (schedule `off`) is spawn/despawn churn, not a
