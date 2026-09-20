@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documented
+
+- **The 3.9% enemy frozen-frame baseline (schedule `off`) is spawn/despawn churn, not a
+  measurement artefact** — `backend/docs/BENCHMARK.md` Part XVII (§50–51), the gate #371 held
+  on #372's ship decision. The instrument-artefact hypothesis (#371 hyp 3) is ruled out from
+  the code, not by preference: `EnemyReapSystem` despawns at radius 2.5 while
+  `EnemyMoveSystem` stops at radius 0.1 (`distSq <= 0.01f`), enemies move at constant
+  `EnemySpeed` with no deceleration, and the tick order is Spawn → Move → Reap — so an enemy
+  is destroyed at full speed and the stop branch is unreachable under `EnemyAiTuning` as
+  shipped. There are no legitimately-still enemy frames to miscount.
+- Churn is established as the driver — enemy lifetime `(SpawnRadius 13 − DespawnRadius 2.5) /
+  EnemySpeed 2.5` = 4.2s, spawn rate `2 / 1.5` = 1.33/s → steady alive ≈ 5.6, matching the
+  `/status` 4↔6 oscillation — but **the 3.9% is not fully partitioned**. A per-spawn hold of
+  one 66.7ms send interval predicts only 1.6%; the measured 3.9% implies a ~164ms hold
+  (~2.5 intervals), consistent with a 2–3 sample interpolation buffer but not with the
+  single-interval reading. The quantitative `fresh` vs `steady` split is Cuvara/Netcode#157.
+- Consequence for #372: the cost side is real rather than artefact, which removes the "cost
+  is untrustworthy" caveat, and does not move the recommendation (`tiered` stays `off`; the
+  cheaper staleness-free levers still dominate).
+
 ### Added
 
 - **Field-level delta encoding (protocol version 2, issue #373): 43.4% of entity bytes were
