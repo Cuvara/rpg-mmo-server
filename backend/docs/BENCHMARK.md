@@ -2928,6 +2928,11 @@ number its own sentence derived**, and 266 sat between the two. The ceiling is n
 | arm | KB/s total | KB/s per client | max deferral | clients |
 |---|---|---|---|---|
 | `off` (control) | 11.14 | 3.71 | 0 | smooth |
+
+> **These rows are the OLD wire.** They predate protocol 2 and field-level delta, and the
+> client that produced them announced protocol 1 — which the current server refuses
+> outright. Do not compare them against Part XVIII's 3.188 baseline as if the difference
+> were one feature: two builds separated them. Part XVIII is the controlled measurement.
 | three bands, self exempt | 5.54 | 1.85 | 12 base ticks = **200ms** | players smooth, **mobs step** |
 | two bands, ≤ budget | **7.03** | **2.34** | 4 base ticks = **66ms** | smooth |
 
@@ -3025,3 +3030,66 @@ trustworthy, and it is a cost. A quantitative confirmation splitting each class'
 frames by entity lifetime — `fresh` (first 0.25 s) vs `steady` — is Cuvara/Netcode#157;
 the prediction is that enemy chop concentrates in `fresh` and `steady` sits near the remote
 player's ~0 %.
+
+---
+
+## Part XVIII — field-level delta, measured against a control at last (2026-09-20)
+
+Part XVI measured with the client on protocol 1 and Part XVII's numbers were taken the same
+way. Both predate `GAMESERVER_FIELD_DELTA`, and neither could isolate the feature: it
+activates on protocol version match alone, and the server refuses a peer whose version is
+not an exact match, so the control arm required a client that cannot connect.
+
+The switch exists now (#382). This Part is the first measurement of the feature against
+itself.
+
+### §52 — the three-arm sweep
+
+`develop@4866a89`, three clients, 9 entities (3 players, 6 mobs), ~116s per arm, only the
+named setting moved:
+
+| arm | KB/s total | KB/s per client | vs baseline |
+|---|---|---|---|
+| field-delta **off**, schedule off | 3.188 | 1.063 | baseline |
+| field-delta **on**, schedule off | **2.160** | **0.720** | **−32.2%** |
+| field-delta on + **tiered** | **1.889** | **0.630** | **−40.7%** |
+
+Two figures fall out, and the second is the one that decides anything:
+
+- **Field-level delta saves 32.2%.** Under the 43.4% ceiling `UnchangedFieldBytesBench`
+  establishes in Part XV, which is what a believable number looks like.
+- **Tiering's marginal contribution is 12.5%** — `1 − 1.889/2.160`, 0.271 KB/s across three
+  clients — against a cost of every mob replicating at 7.5Hz.
+
+### §53 — the −73% that never reached this document was an artefact
+
+A figure of 11.14 → 3.02 KB/s, reported as −73%, circulated in #372 and #381 on 2026-09-20.
+It was **never written into this file**, and that was deliberate: it is thirty points above
+the ceiling the feature's own bench establishes in Part XV, and a number nobody can explain
+does not belong in the record of what this project has measured. It was flagged in the
+issues rather than resolved, because there was no way to resolve it without a control.
+
+With a control the figure is 32.2%. So roughly 40 of those 73 points came from something
+else that moved between the 2026-09-18 and 2026-09-20 builds. **This Part does not identify
+what.** It establishes only that it was not field-level delta — which was the actual risk,
+since the number was about to be quoted as the feature's.
+
+Every tiering figure published before this one was measured against a baseline that
+field-delta has since moved: 37% on the old wire, then 23% against the cross-build 3.02.
+Both are superseded by the 12.5% above. A saving quoted against a baseline that is itself
+moving is not a saving, and three of them were published here before anyone could tell.
+
+### §54 — the first use of the switch produced a silent false control
+
+The first attempt at the off-arm reported bytes **identical** to the on-arm — a control that
+was a second copy of the treatment. `/status` said `field_delta = True` while `.env` said
+`off`.
+
+Cause: the deploy directory in use was an older worktree whose `docker-compose.yml`
+predated the variable, and **compose passes only what it lists**. Exactly the shape of the
+`GAMESERVER_IMPORTANCE_W_*` gap recorded in Part XVI.
+
+It was caught by reading `field_delta` back off `/status` instead of trusting the `.env`
+that was edited. For a measurement whose entire value is the difference between two arms,
+reading the flag back off the running server is not a nicety — it is the only thing standing
+between a real control and two copies of one number.

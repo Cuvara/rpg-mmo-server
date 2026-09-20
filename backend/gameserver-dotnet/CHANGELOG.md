@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Measured
+
+- **Field-level delta saves 32.2%, not the 73% that was circulating** —
+  `backend/docs/BENCHMARK.md` Part XVIII (§52–54), the first measurement of the feature
+  against a control rather than against a different build.
+
+  Three arms, `develop@4866a89`, three clients, ~116s each, only the named setting moved:
+  field-delta off 3.188 KB/s → on **2.160** (−32.2%) → on + tiered **1.889** (−40.7%).
+
+  - 32.2% sits under the 43.4% ceiling Part XV establishes, which is what a believable
+    number looks like. Roughly 40 of the earlier 73 points came from something else that
+    moved between two builds; Part XVIII establishes only that it was not this feature.
+  - **Tiering's marginal contribution is 12.5%**, not the 37% measured on the old wire nor
+    the 23% measured against the cross-build baseline. Both were taken against a baseline
+    field-delta has since moved. A saving quoted against a moving baseline is not a saving.
+  - The first attempt at the control arm produced bytes **identical** to the treatment arm:
+    `/status` reported `field_delta = True` while `.env` said `off`, because the deploy
+    directory in use had a `docker-compose.yml` predating the variable and compose passes
+    only what it lists. Caught by reading the flag back off the running server. Same shape
+    as the `GAMESERVER_IMPORTANCE_W_*` gap in Part XVI.
+  - Part XVI's `11.14 KB/s` control rows are now marked as old-wire, so they are not read as
+    the baseline Part XVIII measures against.
+
+
 ### Added
 
 - **`GAMESERVER_FIELD_DELTA` (`--field-delta`), a kill switch for field-level delta
