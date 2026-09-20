@@ -81,6 +81,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   field reads as an empty key and is **not** an error: that is a pre-ADR-25 server, and
   failing there would take a whole map offline for an un-upgraded pod.
 
+### Fixed
+- **Committed Protobuf bindings regenerated from `wire.proto`.** `proto/gen/wire.pb.go` was
+  stale relative to the gameplay-v2 schema: it carried no `AbilityId`, `AbilityTargetId`,
+  `AimX`/`AimY` on `InputMessage` and no `Events` on `SnapshotMessage`, while the hand-written
+  `messages/proto.go` already referenced all of them. The module therefore did not compile
+  (`pb.AbilityId undefined (type wirepb.InputMessage has no field or method AbilityId)`), which
+  also broke every downstream consumer that builds this package — including the `kcpprobe` Go
+  harness the C# KCP interop tests shell out to. Regenerated with the versions CI pins,
+  protoc 29.3 and protoc-gen-go v1.36.6; no hand edits, and `wire.proto` itself is unchanged.
+
 ### Changed
 - **`sealed.RunClientHandshake` reports THREE facts about identity, not one, and the split
   is the point (ADR-25 decision 6).** `IdentityChecked` means a signature verified under the

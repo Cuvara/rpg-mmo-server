@@ -39,6 +39,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     old rule, and a new entity arriving with a non-zero mask is treated as a full update.
 
 ### Fixed
+- **`Shared.GameLogic/Systems/SnapshotFieldBits.cs` had no `.cs.meta`, and the generated
+  `Wire.cs` was stale.** The package is consumed by the Unity client as an immutable UPM
+  dependency, so a source file with no committed `.meta` is not imported at all: every
+  server-side build stays green while the client fails to compile against a type that
+  plainly exists here — the same failure mode as the 0.2.0 `Content/` regression. Added the
+  meta with a fresh, collision-checked GUID (the file is new in `b3b0ca7` and never had one,
+  so no existing GUID was available to preserve). Separately, `GameServer/Net/Generated`
+  was regenerated from `wire.proto` alongside the Go bindings.
 - **Game events were discarded on three ticks in four, and nothing said so.** Input runs on
   the CRITICAL group — every base tick, 60 Hz by default. Snapshots ship on the WORLD group —
   every fourth one, 15 Hz. `TickEventBuffer` was cleared at the top of each base tick, so any
