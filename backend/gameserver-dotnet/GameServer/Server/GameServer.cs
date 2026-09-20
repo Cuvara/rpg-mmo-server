@@ -161,6 +161,27 @@ public class ServerOptions
     public ReplicationSchedule ReplicationSchedule { get; set; } = ReplicationSchedule.Off;
 
     /// <summary>
+    /// Whether field-level delta encoding may be used at all
+    /// (<c>GAMESERVER_FIELD_DELTA</c>). Defaults to on.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is a KILL SWITCH, not a policy knob. Field-delta is otherwise enabled per
+    /// connection purely by protocol version match, which makes the feature impossible to
+    /// measure against itself: the control arm needs a client on version 1, and the server
+    /// refuses one. Every bandwidth figure for this feature was therefore a before/after
+    /// across two builds — see #381.
+    /// </para>
+    /// <para>
+    /// Turning it off produces valid version-2 frames. <c>changed_fields == 0</c> is
+    /// specified to mean "every field present", which is exactly what a sender that does
+    /// not implement the feature emits, so a v2 client needs no knowledge of this setting
+    /// and the same client can measure both arms minutes apart.
+    /// </para>
+    /// </remarks>
+    public bool FieldDelta { get; set; } = true;
+
+    /// <summary>
     /// Whether the gameplay hop requires a sealed session
     /// (<c>GAMESERVER_SEALED</c>: <c>off</c> or <c>require</c>).
     /// </summary>
@@ -1560,7 +1581,8 @@ public sealed class GameServerHost : IAsyncDisposable
         // Field-level delta requires the client to have proved it speaks protocol version 2
         // (exact match, not AcceptedUnversioned) AND to be using Protobuf, which the encoder
         // re-checks via intern. An unversioned client cannot merge partial entities safely.
-        conn.DeltaState.FieldDelta = joinReq.ProtocolVersion == WireProtocol.ProtocolVersion;
+        conn.DeltaState.FieldDelta =
+            _options.FieldDelta && joinReq.ProtocolVersion == WireProtocol.ProtocolVersion;
 
             // Register connection, retiring the reservation under the same lock it was
             // taken under. The one way this fails: the reservation was a replacement of a
