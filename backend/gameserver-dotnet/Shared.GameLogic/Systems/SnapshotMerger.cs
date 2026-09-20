@@ -131,6 +131,7 @@ namespace Shared.GameLogic.Systems
                 (mask & SnapshotFieldBits.Speed)      != 0 ? delta.Speed      : existing.Speed,
                 (mask & SnapshotFieldBits.FacingBrad) != 0 ? delta.FacingBrad : existing.FacingBrad,
                 (mask & SnapshotFieldBits.Action)     != 0 ? delta.Action     : existing.Action,
+                actionSeq:     (mask & SnapshotFieldBits.ActionSeq) != 0 ? delta.ActionSeq : existing.ActionSeq,
                 changedFields: 0  // merged result is complete state; mask is no longer meaningful
             );
         }

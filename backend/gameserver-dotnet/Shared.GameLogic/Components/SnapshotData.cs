@@ -83,6 +83,25 @@ namespace Shared.GameLogic.Components
         public readonly EntityAction Action;
 
         /// <summary>
+        /// Retrigger counter for <see cref="Action"/>. 0 means "not sent".
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>A consumer retriggers when this CHANGES, never when it increases.</b> The
+        /// counter wraps at 2^32 and resets when the server restarts or the entity respawns,
+        /// so a greater-than test stops retriggering for four billion actions after a single
+        /// wrap — with nothing reporting an error.
+        /// </para>
+        /// <para>
+        /// It is carried through the merge for the reason <see cref="FacingBrad"/> is: a
+        /// field that decodes correctly and is then dropped here reaches no view at all, and
+        /// the symptom is an entity that renders perfectly and never animates a second
+        /// swing.
+        /// </para>
+        /// </remarks>
+        public readonly uint ActionSeq;
+
+        /// <summary>
         /// Field-level delta mask from <c>EntitySnapshot.changed_fields</c> (wire.proto field 13,
         /// protocol version 2+). Zero means "all fields present" (full entity state). Non-zero
         /// means this is a partial update: only the bits that are set have valid data; the
@@ -127,13 +146,18 @@ namespace Shared.GameLogic.Components
         public EntitySnapshotData(
             string id, string type, float x, float y, int hp, int maxHp, float speed,
             uint facingBrad, EntityAction action)
-            : this(id, type, x, y, hp, maxHp, speed, facingBrad, action, changedFields: 0)
+            : this(id, type, x, y, hp, maxHp, speed, facingBrad, action, actionSeq: 0u, changedFields: 0u)
         {
         }
 
         /// <summary>
-        /// Full constructor including the field-level delta mask.
+        /// Constructs entity state including the field-level delta mask but without a
+        /// retrigger counter, leaving <see cref="ActionSeq"/> zero.
         /// </summary>
+        /// <remarks>
+        /// Kept for source compatibility with callers that predated <see cref="ActionSeq"/>:
+        /// the Unity client compiles this library from a pinned tag.
+        /// </remarks>
         /// <param name="changedFields">
         /// Zero for a complete entity snapshot; non-zero for a partial update — see
         /// <see cref="ChangedFields"/> and <see cref="Systems.SnapshotFieldBits"/>.
@@ -141,6 +165,23 @@ namespace Shared.GameLogic.Components
         public EntitySnapshotData(
             string id, string type, float x, float y, int hp, int maxHp, float speed,
             uint facingBrad, EntityAction action, uint changedFields)
+            : this(id, type, x, y, hp, maxHp, speed, facingBrad, action, actionSeq: 0u, changedFields: changedFields)
+        {
+        }
+
+        /// <summary>
+        /// Full constructor including both the retrigger counter and the field-level delta mask.
+        /// </summary>
+        /// <param name="actionSeq">
+        /// Retrigger counter — 0 means "not sent". See <see cref="ActionSeq"/>.
+        /// </param>
+        /// <param name="changedFields">
+        /// Zero for a complete entity snapshot; non-zero for a partial update — see
+        /// <see cref="ChangedFields"/> and <see cref="Systems.SnapshotFieldBits"/>.
+        /// </param>
+        public EntitySnapshotData(
+            string id, string type, float x, float y, int hp, int maxHp, float speed,
+            uint facingBrad, EntityAction action, uint actionSeq, uint changedFields)
         {
             Id = id;
             Type = type;
@@ -151,6 +192,7 @@ namespace Shared.GameLogic.Components
             Speed = speed;
             FacingBrad = facingBrad;
             Action = action;
+            ActionSeq = actionSeq;
             ChangedFields = changedFields;
         }
     }

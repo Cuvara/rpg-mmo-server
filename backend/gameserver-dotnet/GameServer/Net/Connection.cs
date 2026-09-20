@@ -240,6 +240,56 @@ public sealed class Connection : IDisposable
     private int _pendingKeyframeInterval;
 
     /// <summary>
+    /// Events staged for this connection, ACCUMULATED across gathers rather than replaced.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is where the coalescing policy stops being lossless.</b> Overwriting a
+    /// staged snapshot loses nothing because state is level-triggered: the newer gather
+    /// already describes everything the older one would have. Events are the opposite —
+    /// they are the occurrences that produced that state, and the newer gather does not
+    /// contain the older one's. Staging them the same way would silently drop a damage
+    /// number every time a connection fell a tick behind, which is exactly the load under
+    /// which a player is most likely to be in combat.
+    /// </para>
+    /// <para>
+    /// So they append. The list is drained only by <see cref="TakePendingSnapshot"/>, which
+    /// runs when a snapshot is actually claimed for encoding, so an event survives as many
+    /// coalesced gathers as it takes for a frame to be sent.
+    /// </para>
+    /// <para>
+    /// <b>Bounded.</b> A connection whose write task has stalled would otherwise accumulate
+    /// events without limit. Past <see cref="MaxStagedEvents"/> the OLDEST are dropped, not
+    /// the newest: a client catching up needs the recent world, and a damage number from
+    /// four seconds ago has no one left to inform.
+    /// </para>
+    /// </remarks>
+    private readonly List<GameServer.Snapshot.PendingGameEvent> _pendingEvents = new();
+
+    /// <summary>
+    /// Most events one connection may have staged. Beyond this the oldest are discarded and
+    /// counted in <see cref="SnapshotEventsDropped"/>.
+    /// </summary>
+    public const int MaxStagedEvents = 256;
+
+    private long _snapshotEventsDropped;
+
+    /// <summary>
+    /// Events discarded because this connection had more staged than
+    /// <see cref="MaxStagedEvents"/>. Non-zero means a write task fell far enough behind
+    /// that occurrences were lost — which presents to a player as missing damage numbers,
+    /// not as a stall, so it needs its own counter to be attributable at all.
+    /// </summary>
+    public long SnapshotEventsDropped => Interlocked.Read(ref _snapshotEventsDropped);
+
+    /// <summary>
+    /// World-stable key of this connection's own entity, or
+    /// <see cref="GameServer.Snapshot.PendingGameEvent.NoKey"/> before it is known.
+    /// Latched at gather time and used to address private events.
+    /// </summary>
+    private int _observerKey = GameServer.Snapshot.PendingGameEvent.NoKey;
+
+    /// <summary>
     /// Read everything this connection needs for its snapshot out of the world, into
     /// buffers this connection owns, and stage it for the write task to encode.
     ///
@@ -258,7 +308,8 @@ public sealed class Connection : IDisposable
     /// the next keyframe.</para>
     /// </summary>
     internal void GatherSnapshotView(
-        GameServer.World.WorldReader reader, float radius, ulong tick, int keyframeInterval)
+        GameServer.World.WorldReader reader, float radius, ulong tick, int keyframeInterval,
+        GameServer.Snapshot.TickEventBuffer? tickEvents = null)
     {
         reader.TryGetSnapshotAnchor(UserId, out var anchor, out ulong ackTick);
 
@@ -311,6 +362,15 @@ public sealed class Connection : IDisposable
             count = reader.GetEntitiesInRange(anchor, radius, _aoiBuffers[index]);
         }
 
+        // Latched every gather rather than once at join: an entity that despawned and
+        // respawned keeps its stable key (EntityIdRef.Stable is never reassigned), but a
+        // connection that joined before its entity existed would otherwise hold NoKey
+        // forever and never receive a private event.
+        if (reader.TryGetStableKey(UserId, out int observerKey))
+        {
+            _observerKey = observerKey;
+        }
+
         lock (_snapshotLock)
         {
             _pendingBuffer = index;
@@ -320,6 +380,13 @@ public sealed class Connection : IDisposable
             _pendingAckTick = ackTick;
             _pendingKeyframeInterval = keyframeInterval;
             _snapshotPending = true;
+
+            // Appended under the same lock that publishes the job, so the write task never
+            // sees a job whose events are half written.
+            if (tickEvents != null && tickEvents.Count > 0)
+            {
+                StageEventsLocked(tickEvents);
+            }
         }
 
         // A marker every gather, never conditionally.
@@ -341,6 +408,24 @@ public sealed class Connection : IDisposable
         out GameServer.World.EntityView[] buffer, out int count,
         out ulong tick, out ulong ackTick, out int keyframeInterval,
         out Shared.GameLogic.Components.Vec2 anchor)
+        => TakePendingSnapshot(out buffer, out count, out tick, out ackTick, out keyframeInterval,
+                               out anchor, out _, out _, out _);
+
+    /// <summary>
+    /// Claim the staged snapshot and DRAIN its events, if there is one. Called only by the
+    /// write task.
+    /// </summary>
+    /// <remarks>
+    /// The events are handed out into a buffer this connection owns and are cleared from the
+    /// staging list in the same locked step. Draining anywhere else — before the encode, or
+    /// after the write — would either lose them when the claim turns out to be a surplus
+    /// marker, or deliver them twice when two markers race.
+    /// </remarks>
+    internal bool TakePendingSnapshot(
+        out GameServer.World.EntityView[] buffer, out int count,
+        out ulong tick, out ulong ackTick, out int keyframeInterval,
+        out Shared.GameLogic.Components.Vec2 anchor,
+        out GameServer.Snapshot.PendingGameEvent[] events, out int eventCount, out int observerKey)
     {
         lock (_snapshotLock)
         {
@@ -348,6 +433,9 @@ public sealed class Connection : IDisposable
             {
                 buffer = Array.Empty<GameServer.World.EntityView>();
                 count = 0; tick = 0; ackTick = 0; keyframeInterval = 0; anchor = default;
+                events = Array.Empty<GameServer.Snapshot.PendingGameEvent>();
+                eventCount = 0;
+                observerKey = GameServer.Snapshot.PendingGameEvent.NoKey;
                 return false;
             }
 
@@ -357,9 +445,60 @@ public sealed class Connection : IDisposable
             ackTick = _pendingAckTick;
             keyframeInterval = _pendingKeyframeInterval;
             anchor = _pendingAnchor;
+            observerKey = _observerKey;
+
+            eventCount = _pendingEvents.Count;
+            if (eventCount == 0)
+            {
+                events = Array.Empty<GameServer.Snapshot.PendingGameEvent>();
+            }
+            else
+            {
+                if (_eventDrain.Length < eventCount)
+                {
+                    // Headroom, not exact size, for the reason the AOI buffer gives: growing
+                    // to exactly the count reallocates again at count+1, during precisely the
+                    // bursts this path exists to survive.
+                    _eventDrain = new GameServer.Snapshot.PendingGameEvent[eventCount + (eventCount >> 2)];
+                }
+                _pendingEvents.CopyTo(_eventDrain);
+                events = _eventDrain;
+                _pendingEvents.Clear();
+            }
 
             _snapshotPending = false;
             return true;
+        }
+    }
+
+    /// <summary>
+    /// Reused drain buffer for staged events. Owned by this connection and handed only to
+    /// its own write task, exactly like the AOI buffers.
+    /// </summary>
+    private GameServer.Snapshot.PendingGameEvent[] _eventDrain =
+        Array.Empty<GameServer.Snapshot.PendingGameEvent>();
+
+    /// <summary>
+    /// Copy this tick's events into the staging list, dropping the oldest past the cap.
+    /// Caller holds <see cref="_snapshotLock"/>.
+    /// </summary>
+    private void StageEventsLocked(GameServer.Snapshot.TickEventBuffer tickEvents)
+    {
+        var produced = tickEvents.Events;
+        for (int i = 0; i < produced.Count; i++)
+        {
+            if (_pendingEvents.Count >= MaxStagedEvents)
+            {
+                // Drop the OLDEST, not this one. A client catching up needs the recent
+                // world; an occurrence from four seconds ago has no one left to inform.
+                // RemoveAt(0) is O(n) and that is acceptable precisely because reaching this
+                // branch at all means the connection is already failing to keep up — the
+                // copy is not what is wrong with it.
+                _pendingEvents.RemoveAt(0);
+                Interlocked.Increment(ref _snapshotEventsDropped);
+            }
+
+            _pendingEvents.Add(produced[i]);
         }
     }
 
@@ -656,14 +795,16 @@ public sealed class Connection : IDisposable
                     // is nothing to do and the marker is simply dropped.
                     if (!TakePendingSnapshot(out var buffer, out int count, out ulong tick,
                                              out ulong ackTick, out int keyframeInterval,
-                                             out var anchor))
+                                             out var anchor, out var stagedEvents,
+                                             out int stagedEventCount, out int observerKey))
                     {
                         continue;
                     }
 
                     SnapshotMessage snapshot = DeltaState.Encode(
                         tick, ackTick, buffer.AsSpan(0, count), keyframeInterval,
-                        intern: Encoding == WireEncoding.Proto, observer: anchor);
+                        intern: Encoding == WireEncoding.Proto, observer: anchor,
+                        events: stagedEvents.AsSpan(0, stagedEventCount), observerKey: observerKey);
 
                     if (Encoding == WireEncoding.Proto && !IsSealed)
                     {

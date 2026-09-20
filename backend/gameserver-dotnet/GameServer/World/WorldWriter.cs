@@ -173,6 +173,16 @@ public sealed class WorldWriter
     public ref InputCursor InputCursorOf(in EntityHandle handle) => ref _world.ArchInternal.Get<InputCursor>(handle.Value);
 
     /// <summary>
+    /// The entity's id reference, including the world-stable integer key.
+    /// </summary>
+    /// <remarks>
+    /// Exposed for the event path: an event names its participants by id string, but every
+    /// per-connection map downstream keys on <see cref="EntityIdRef.Stable"/>, so the key is
+    /// resolved once at emit time rather than by hashing the string again per observer.
+    /// </remarks>
+    public ref EntityIdRef IdRefOf(in EntityHandle handle) => ref _world.ArchInternal.Get<EntityIdRef>(handle.Value);
+
+    /// <summary>
     /// Materialise a full <see cref="EntityState"/> for the entity.
     ///
     /// <para>This is the round-trip the rest of the migration is meant to delete, and it

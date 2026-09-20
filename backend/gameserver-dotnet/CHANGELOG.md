@@ -39,6 +39,116 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     old rule, and a new entity arriving with a non-zero mask is treated as a full update.
 
 ### Fixed
+- **`Shared.GameLogic/Systems/SnapshotFieldBits.cs` had no `.cs.meta`, and the generated
+  `Wire.cs` was stale.** The package is consumed by the Unity client as an immutable UPM
+  dependency, so a source file with no committed `.meta` is not imported at all: every
+  server-side build stays green while the client fails to compile against a type that
+  plainly exists here — the same failure mode as the 0.2.0 `Content/` regression. Added the
+  meta with a fresh, collision-checked GUID (the file is new in `b3b0ca7` and never had one,
+  so no existing GUID was available to preserve). Separately, `GameServer/Net/Generated`
+  was regenerated from `wire.proto` alongside the Go bindings.
+- **Game events were discarded on three ticks in four, and nothing said so.** Input runs on
+  the CRITICAL group — every base tick, 60 Hz by default. Snapshots ship on the WORLD group —
+  every fourth one, 15 Hz. `TickEventBuffer` was cleared at the top of each base tick, so any
+  event produced on a tick that was not also a broadcast tick was thrown away before a
+  connection could be handed it. An attack landed, the victim's HP fell, and no damage event
+  reached anyone.
+
+  **Every unit test on both sides passed throughout.** The server's suite proved it produced
+  the event, the encoder's suite proved it would write one, and the client package's suite
+  proved it would decode one. Each half was correct in isolation and the halves were never
+  joined; it took the first end-to-end run over a real socket to see it.
+
+  The buffer is now cleared after the gather has staged events on every connection — one
+  broadcast interval rather than one tick — including on the path where there are no viewers,
+  so a server with nobody connected does not accumulate. `TickEventBroadcastTests` sweeps all
+  four phases of the broadcast cycle and fails on three of them if the clear moves back;
+  written that way because the first version of it pushed its input before the first tick,
+  landed on a broadcast tick by luck, and passed against the bug.
+
+### Added
+- **`TickEventBroadcastTests`** — the seam between producing an event and broadcasting one,
+  at split rates. A uniform-rate fixture broadcasts every tick and cannot see this class of
+  bug at all.
+
+### Added
+- **Gameplay v2: an edge-triggered event channel, ability input, and an animation retrigger
+  counter.** Three additions to `wire.proto`, all purely additive optional fields with a
+  documented "zero means not sent" rule — so `WireProtocol.ProtocolVersion` is deliberately
+  **NOT** bumped, which is what that constant's own contract prescribes for this shape of
+  change. A peer of the previous version reads every one of them as absent and behaves
+  exactly as it did.
+
+  **`SnapshotMessage.events` (field 6) + `GameEvent` + `GameEventType`.** Everything the
+  server sent a client until now was level-triggered state, which is the right shape for
+  state and the wrong shape for occurrences. "This entity took 12 damage" is not recoverable
+  from two HP values a tick apart: a heal and a hit in the same tick net out, a delta may
+  omit the entity entirely, and an entity leaving the AOI simply stops reporting. A client
+  inferring damage numbers from HP deltas is wrong in exactly the cases a player notices,
+  and it is wrong silently. Events ride the snapshot rather than taking a `MsgType` of their
+  own, because entity ids are interned per connection and the table resets at every keyframe
+  — a separate message would either pay ~17 bytes per participant on the hottest path in
+  combat, or resolve handles against a table whose lifetime it does not share, which is a
+  race that misattributes damage to the wrong entity. Visibility reuses the AOI decision the
+  entity pass already made (`_lastSent`), rather than re-deriving it from positions and
+  disagreeing at the edge of the circle; `XpGain`/`LevelUp` are private to their subject.
+  Keyframes do **not** replay events: a keyframe restates state because a client may have
+  missed a delta, not history.
+
+  **`InputMessage.ability_id` / `ability_target_id` / `aim_x` / `aim_y` (fields 5-8).**
+  Abilities are validated in `Shared.GameLogic.Systems.AbilityLogic` and resolved
+  server-side. They are NOT predicted — prediction covers movement only, because movement is
+  a pure function of input the client already has while an ability outcome depends on
+  cooldowns, content and other entities' state. A mispredicted ability presents as a cast
+  that plays and then un-happens, which is worse than one that starts a round trip late.
+
+  **`EntitySnapshot.action_seq` (field 12).** `action` is level-triggered and says so at
+  length, so two attacks in a row are identical bytes and a renderer driving an animator
+  from it plays the swing once. No client-side edge detection fixes that, because the edge
+  is genuinely not in the data: only the server knows an action was re-entered. One shared
+  rule (`ActionStateLogic.Advance`) is what every writer goes through, so a continuous state
+  cannot retrigger a walk cycle per tick and an instantaneous one cannot fail to retrigger.
+  The counter wraps skipping zero, and consumers compare by **inequality**, never by
+  greater-than.
+
+- **`AbilityDefinition` in the content set.** `ContentDatabase` carries abilities beside
+  items; `ContentValidation` refuses id 0 (reserved for "no ability" on the wire), a non-self
+  ability with no range, and a ground ability with no radius. The `abilities` key is
+  OPTIONAL where `items` is required — every content document written before abilities
+  existed has no such key, and requiring it would make this a migration of every content set
+  in every environment.
+
+- **Telemetry:** `InputHandler.Abilities` counters on `/status`, seven new
+  `InputRejectionReason` values with metric labels and suspicion weights, and
+  `Connection.SnapshotEventsDropped` / `TickEventBuffer.Dropped` for the two places events
+  can be shed under load.
+
+### Changed
+- **Events survive snapshot coalescing.** Coalescing is documented as lossless and for state
+  it is — a newer gather already describes everything an unclaimed older one would have.
+  Events are the opposite, so they ACCUMULATE on the connection and are drained only when a
+  snapshot is actually claimed for encoding. Staging them like state would have dropped a
+  damage number every time a connection fell a tick behind, which is exactly the load under
+  which a player is most likely to be in combat. Bounded at
+  `Connection.MaxStagedEvents`, dropping the oldest.
+- **Both byte-identity fixtures rebaselined** for `action_seq`
+  (`SnapshotByteIdentityTests`). The evidence is recorded beside the constants: with the one
+  line writing the field commented out, the Protobuf digest came back as the previous value
+  EXACTLY, so the only bytes this change adds are that field. The JSON fixture moving is the
+  point of pinning it separately — when `action_seq` reached the Protobuf writer alone, the
+  Protobuf fixture failed and the JSON one PASSED, which looked like good news and was the
+  bug.
+
+### Known limitations
+- **Ability cooldowns are global, not per-ability.** One slot on `Combat`; a kit needing two
+  abilities usable in the same second cannot be expressed. Lifting it is a simulation-state
+  change, not a wire change.
+- **Ground abilities apply no effect.** They are validated, animated, charged and reported,
+  and no area query runs: the only index that answers "everything within radius" is the AOI
+  grid, which is not valid during input processing, and an O(all entities) scan per cast
+  would be the most expensive thing in the tick. Counted as
+  `InputHandler.Abilities.GroundCastsWithoutArea` rather than left to be rediscovered as
+  "ground abilities are broken".
 - **The replication schedule deferred the observer's own entity, which is the one entity it
   must never defer.** With `GAMESERVER_REPLICATION_SCHEDULE=tiered` and the `balanced`
   profile, self scores 5 (distance 2 + type 3, no HP or action edge to add) and lands in the
@@ -54,10 +164,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - The exemption goes in `DueNow`, not at its two call sites, and both it and the priority
     sort now read one `IsSelf` helper. A third call site cannot miss it, which was the
     failure mode the file's own comment at the budget path warned about.
-  - `GAMESERVER_IMPORTANCE_W_TYPE=7` also stops the stutter and is **not** the fix: it lifts
-    every player over the top band, protecting a player 49 units away as much as the one
-    being predicted, and costs a third of the saving. Measured live over 60s per arm:
-    `off` 11.14 KB/s, `tiered` 4.76, `tiered`+`W_TYPE=7` 6.93.
   - `SelfIsNeverDeferredTests` drives the real input handler and the real AOI gather and
     runs **two arms**, because "self was sent on every world tick" is equally true of a
     schedule that defers nothing: `Off` shows every entity at 200/200, `Tiered` shows self

@@ -767,9 +767,11 @@ public sealed class EcsWorld : IDisposable
                         Attack = combats[i].Attack,
                         Defense = combats[i].Defense,
                         CooldownUntilTick = combats[i].CooldownUntilTick,
+                        AbilityCooldownUntilTick = combats[i].AbilityCooldownUntilTick,
                         Speed = locomotions[i].Speed,
                         FacingBrad = locomotions[i].FacingBrad,
                         Action = locomotions[i].Action,
+                        ActionSeq = locomotions[i].ActionSeq,
                         LastInputTick = cursors[i].LastInputTick,
                     };
                     if (sink != null) sink.Add(composed);
@@ -2169,9 +2171,11 @@ public sealed class EcsWorld : IDisposable
             Attack = combat.Attack,
             Defense = combat.Defense,
             CooldownUntilTick = combat.CooldownUntilTick,
+            AbilityCooldownUntilTick = combat.AbilityCooldownUntilTick,
             Speed = locomotion.Speed,
             FacingBrad = locomotion.FacingBrad,
             Action = locomotion.Action,
+            ActionSeq = locomotion.ActionSeq,
             LastInputTick = cursor.LastInputTick,
         };
     }
@@ -2197,9 +2201,11 @@ public sealed class EcsWorld : IDisposable
             Attack = combats[i].Attack,
             Defense = combats[i].Defense,
             CooldownUntilTick = combats[i].CooldownUntilTick,
+            AbilityCooldownUntilTick = combats[i].AbilityCooldownUntilTick,
             Speed = locomotions[i].Speed,
             FacingBrad = locomotions[i].FacingBrad,
             Action = locomotions[i].Action,
+            ActionSeq = locomotions[i].ActionSeq,
             LastInputTick = cursors[i].LastInputTick,
         };
     }
@@ -2224,11 +2230,16 @@ public sealed class EcsWorld : IDisposable
         combat.Attack = state.Attack;
         combat.Defense = state.Defense;
         combat.CooldownUntilTick = state.CooldownUntilTick;
+        combat.AbilityCooldownUntilTick = state.AbilityCooldownUntilTick;
 
         ref var locomotion = ref _arch.Get<Locomotion>(entity);
         locomotion.Speed = state.Speed;
         locomotion.FacingBrad = state.FacingBrad;
         locomotion.Action = state.Action;
+        // Assigned rather than advanced: this is a RESTORE of a composed state, not the
+        // entity entering an action. Advancing here would manufacture a retrigger every
+        // time a state round-tripped through components and back.
+        locomotion.ActionSeq = state.ActionSeq;
 
         ref var cursor = ref _arch.Get<InputCursor>(entity);
         cursor.LastInputTick = state.LastInputTick;

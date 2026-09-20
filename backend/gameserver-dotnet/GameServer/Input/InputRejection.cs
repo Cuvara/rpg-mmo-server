@@ -140,6 +140,39 @@ public enum InputRejectionReason
     /// unclassified reason must never manufacture suspicion.
     /// </remarks>
     AttackOther = 8,
+
+    /// <summary><c>AbilityLogic.ValidateCast</c>: the ability id is not in the content set.</summary>
+    /// <remarks>
+    /// Ordinary for a client to produce: a stale hotbar after a content change, or a client
+    /// newer than the server it connected to. Benign for that reason — it says the two sides
+    /// disagree about content, which is an operational fact, not a player's doing.
+    /// </remarks>
+    AbilityUnknown = 9,
+
+    /// <summary><c>AbilityLogic.ValidateCast</c>: the global ability cooldown had not expired.</summary>
+    AbilityOnCooldown = 10,
+
+    /// <summary><c>AbilityLogic.ValidateCast</c>: the target was outside the ability's range.</summary>
+    AbilityOutOfRange = 11,
+
+    /// <summary>
+    /// <c>AbilityLogic.ValidateCast</c>: an entity-targeted ability arrived without a target
+    /// that resolved to a live entity.
+    /// </summary>
+    AbilityTargetUnresolved = 12,
+
+    /// <summary><c>AbilityLogic.ValidateCast</c>: the target was already dead.</summary>
+    AbilityTargetDead = 13,
+
+    /// <summary><c>AbilityLogic.ValidateCast</c>: the caster was dead.</summary>
+    AbilityCasterDead = 14,
+
+    /// <summary>
+    /// <c>AbilityLogic.ValidateCast</c> refused the cast for a reason this build does not
+    /// classify. Exists for the reason <see cref="AttackOther"/> does: a non-zero counter
+    /// here is a bug report about this file, never a statement about a player.
+    /// </summary>
+    AbilityOther = 15,
 }
 
 /// <summary>
@@ -202,6 +235,13 @@ public static class InputRejection
         InputRejectionReason.AttackOutOfRange,
         InputRejectionReason.AttackOnCooldown,
         InputRejectionReason.AttackOther,
+        InputRejectionReason.AbilityUnknown,
+        InputRejectionReason.AbilityOnCooldown,
+        InputRejectionReason.AbilityOutOfRange,
+        InputRejectionReason.AbilityTargetUnresolved,
+        InputRejectionReason.AbilityTargetDead,
+        InputRejectionReason.AbilityCasterDead,
+        InputRejectionReason.AbilityOther,
     };
 
     /// <summary>
@@ -220,6 +260,13 @@ public static class InputRejection
         InputRejectionReason.AttackOutOfRange => "attack_out_of_range",
         InputRejectionReason.AttackOnCooldown => "attack_on_cooldown",
         InputRejectionReason.AttackOther => "attack_other",
+        InputRejectionReason.AbilityUnknown => "ability_unknown",
+        InputRejectionReason.AbilityOnCooldown => "ability_on_cooldown",
+        InputRejectionReason.AbilityOutOfRange => "ability_out_of_range",
+        InputRejectionReason.AbilityTargetUnresolved => "ability_target_unresolved",
+        InputRejectionReason.AbilityTargetDead => "ability_target_dead",
+        InputRejectionReason.AbilityCasterDead => "ability_caster_dead",
+        InputRejectionReason.AbilityOther => "ability_other",
         _ => "unknown",
     };
 
@@ -243,6 +290,22 @@ public static class InputRejection
 
         // Unclassified: it says this classifier is stale, not that a player misbehaved.
         InputRejectionReason.AttackOther => RejectionWeight.Benign,
+
+        // Every ability rejection a well-behaved client can produce is latency-explicable
+        // for the same reason its attack counterpart is: the client acts on a world it sees
+        // one interpolation delay late, so a target that was in range when it pressed the
+        // button may not be by the time the input lands.
+        InputRejectionReason.AbilityOnCooldown => RejectionWeight.LatencyExplicable,
+        InputRejectionReason.AbilityOutOfRange => RejectionWeight.LatencyExplicable,
+        InputRejectionReason.AbilityTargetUnresolved => RejectionWeight.LatencyExplicable,
+        InputRejectionReason.AbilityTargetDead => RejectionWeight.LatencyExplicable,
+        InputRejectionReason.AbilityCasterDead => RejectionWeight.Benign,
+
+        // Content disagreement, not misbehaviour. See the enum member.
+        InputRejectionReason.AbilityUnknown => RejectionWeight.Benign,
+
+        // Unclassified: says this classifier is stale, not that a player misbehaved.
+        InputRejectionReason.AbilityOther => RejectionWeight.Benign,
 
         InputRejectionReason.InvalidDirection => RejectionWeight.Forged,
 
