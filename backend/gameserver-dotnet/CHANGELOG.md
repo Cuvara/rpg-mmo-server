@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`snapshot_entities_gathered`, `snapshot_max_gather` and `snapshot_anchor_missing` could
+  only ever report 0.** All three were accumulated during the gather and then zeroed a few
+  lines later by a per-tick reset block that sat *between* the code writing them and the call
+  recording them.
+
+  The other deltas in that block are filled by the viewer loop that runs **after** it, so
+  their position was correct; these three are filled by the gather, which runs **before** it.
+  Grouping them together for tidiness is what broke them. They now reset immediately ahead of
+  the gather, and the comment there says why they are not with the others.
+
+  **Found by reading `/status` on a live server** carrying 165 enemies and 3 players: 15MB of
+  snapshots sent, `snapshot_bytes` climbing, and every gather counter reading zero.
+
+  **No test caught it, and the tests were not wrong.** They assert at the `Connection`
+  boundary — `LastGatherCount`, and the bool `GatherSnapshotView` returns — and that boundary
+  was correct throughout. Nothing asserted what reached `GameMetrics`, which is the only place
+  an operator can see any of it. The new test drives a real `TickLoop` and asserts on the
+  metrics, with a no-viewer control arm so that "the counter moved" cannot be satisfied by a
+  counter that moved for an unrelated reason. Mutation-verified: restoring the original
+  ordering fails it and leaves the control green.
+
+  The irony is the point. A counter whose failure mode is a healthy-looking zero is precisely
+  what `snapshot_anchor_missing` was added to expose, and it had that failure itself.
+
 ### Added
 
 - **Enemies chase players, and the fight scales with the crowd** — the enemy AI is now a
