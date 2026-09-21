@@ -95,6 +95,17 @@ set. Flags are **space-separated** (`--addr :9000`).
 | `--gather-workers` | `GAMESERVER_GATHER_WORKERS` | `1` | Threads the AOI gather may use. `1` is serial. Above `1` it applies only from 500 viewers up — measured gain is 2.0-2.7x at 500 viewers / 4 workers, inside the noise at 200, a loss at 50 (see `docs/DESIGN.md`, "Where the tick budget goes") |
 | `--map-width` | `GAMESERVER_MAP_WIDTH` | `1000` | Map width in world units |
 | `--map-height` | `GAMESERVER_MAP_HEIGHT` | `1000` | Map height in world units |
+| *(none)* | `GAMESERVER_ENEMIES` | on | Enemy AI on/off. `false` disables the spawner entirely; `/status` then reports `enemy_ai: "off"` and `enemies_alive: 0` |
+| *(none)* | `GAMESERVER_ENEMY_CHASE` | `on` | **Enemies chase the nearest LIVE player.** `off` restores the pre-change AI in full: every enemy walks to the origin and despawns on arrival. Same vocabulary as `GAMESERVER_FIELD_DELTA` (`on/true/1/yes`, `off/false/0/no`); anything else **exits 2** |
+| *(none)* | `GAMESERVER_ENEMY_MAX` | `30` | Enemy population cap with **nobody online**. The pre-change cap, unchanged |
+| *(none)* | `GAMESERVER_ENEMY_MAX_PER_PLAYER` | `45` | Extra enemies allowed **per live player**, added to `GAMESERVER_ENEMY_MAX`. The cap in force is `MAX + MAX_PER_PLAYER × livePlayers`, bounded at 20 000. Additive rather than multiplicative so an empty server is exactly the pre-change server while a four-player group gets a 210-enemy world |
+| *(none)* | `GAMESERVER_ENEMY_WAVE_SIZE` | `2` | Enemies per wave with nobody online |
+| *(none)* | `GAMESERVER_ENEMY_WAVE_SIZE_PER_PLAYER` | `6` | Extra enemies per wave per live player, bounded at 2 000. Scales **with the cap, not by taste**: filling a 75-enemy cap two at a time takes 56s, so a bigger cap without a bigger wave is decoration |
+| *(none)* | `GAMESERVER_ENEMY_WAVE_INTERVAL` | `1.5` | Seconds between waves |
+| *(none)* | `GAMESERVER_ENEMY_SPAWN_DISTANCE` | `13` | World units from the anchor an enemy is placed at — a **randomly chosen live player**, or the origin when nobody is online (which is the ring the pre-change spawner always used). Choosing the anchor per enemy is what spreads a wave across the whole player population instead of onto one ring |
+| *(none)* | `GAMESERVER_ENEMY_MIN_SPAWN_DISTANCE` | `8` | Closest an enemy is placed to **any** live player. The spawn distance only guarantees separation from the anchor; in a crowd a placement can land in a bystander's lap, and map-edge clamping can pull one back across it. Best-effort: 6 samples of the circle, then the last candidate is taken anyway, because a wave that silently spawns fewer entities the tighter the crowd gets is the threadbare fight returning through the door marked "safety check". **Must be strictly less than `GAMESERVER_ENEMY_SPAWN_DISTANCE`** or the server exits 2 — at or above it, every candidate including the one it was measured from is rejected |
+| *(none)* | `GAMESERVER_ENEMY_CONTACT_RANGE` | `1` | How close a chaser closes before it stops advancing. Inside `GameConstants.AttackRange` (3.0) so the player can hit what is standing on them, and non-zero so a ring of chasers does not jitter across the target every tick |
+| *(none)* | `GAMESERVER_ENEMY_HP` / `_ATTACK` / `_DEFENSE` / `_SPEED` | `16` / `5` / `2` / `2.5` | Per-enemy stats, unchanged from the compiled-in values |
 | `--jwt-secret` | `JWT_SECRET` | *(empty)* | HS256 secret for the Nakama→client auth token. Only used here as the `JOIN_TOKEN_SECRET` fallback |
 | `--join-token-secret` | `JOIN_TOKEN_SECRET` | *(empty → `JWT_SECRET`)* | HS256 secret the **gateway** signs join tokens with. Comma-separated (`current,previous`) to rotate — see below |
 | `--metrics-addr` | `METRICS_ADDR` | `:9101` | Prometheus `/metrics` + `/healthz`. Empty, `off`, `none` or `disabled` turns it off — same vocabulary as the Go gateway. An address that parses as none of those disables the endpoint and logs an error; it does not stop the server |
@@ -109,6 +120,18 @@ set. Flags are **space-separated** (`--addr :9000`).
 | `--register-on-allocated` | `GAMESERVER_REGISTER_ON_ALLOCATED=true` | off | Hold the registry entry back until Agones reports this GameServer **Allocated**, instead of publishing it right after Ready. Agones-only; ignored (with a warning) when Agones is off — see below |
 | `--redis` | `REDIS_ADDR` | *(unset)* | Registry Redis; unset disables self-registration, the `events:game` publisher, and the duplicate-login kick consumer on `events:kick` (ADR-20) |
 | `--redis-password` | `REDIS_PASSWORD` | *(unset)* | Registry Redis password |
+
+**Every `GAMESERVER_ENEMY_*` value is parsed strictly**, the same rule as
+`GAMESERVER_AOI_RADIUS` and `GAMESERVER_FIELD_DELTA`: an unparseable, out-of-range or
+unrecognised value **exits 2 with a named reason** rather than falling back to the
+default. These knobs decide how many entities exist and where they go, so a typo that
+silently ran a fleet at the default while its manifest said something else is a fight
+nobody configured — and no counter, log line or wire field would report it. Decimals are
+InvariantCulture, so `12.5` and never `12,5`. The values actually in force are published
+as `enemy_ai` (and the derived `enemy_ai_max_now`) on `/status`, because an
+already-allocated Agones GameServer keeps the environment it was created with and a fleet
+update reaches only new pods.
+
 
 #### Realtime transport (`--transport`, `TRANSPORT_KEY`)
 

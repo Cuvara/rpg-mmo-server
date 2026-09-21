@@ -23,12 +23,36 @@ namespace GameServer.Scaffolding;
 /// </remarks>
 internal sealed class EnemySpawnSystem : IEcsSystem
 {
+    /// <summary>
+    /// Attempts made to place an enemy clear of every live player before the placement is
+    /// accepted anyway.
+    ///
+    /// <para>Bounded, and small, because the loop has to terminate on a world where no
+    /// clear placement exists — a lobby where twenty players stand on the same tile has no
+    /// point at the spawn distance from any of them that is clear of all of them, and an
+    /// unbounded retry would spin the tick loop forever looking for one. Six samples of a
+    /// circle is enough that an ordinary spread of players almost always yields a clear
+    /// point on the first or second, and the fallback is not a failure: an enemy at the
+    /// full spawn distance from the player it was anchored to is still a fair spawn for
+    /// that player, it is merely closer than preferred to somebody else.</para>
+    /// </summary>
+    private const int PlacementAttempts = 6;
+
     private readonly ILogger _logger;
     private readonly float _dt;
+    private readonly EnemyAiSettings _settings;
 
-    public EnemySpawnSystem(float dt, ILogger logger)
+    /// <summary>
+    /// Live players, refilled from the world on every wave. See
+    /// <see cref="PlayerTargetBuffer"/> for why this is re-read rather than cached.
+    /// </summary>
+    [SimulationScratch]
+    private PlayerTargetBuffer _players = new();
+
+    public EnemySpawnSystem(float dt, EnemyAiSettings settings, ILogger logger)
     {
         _dt = dt;
+        _settings = settings;
         _logger = logger;
     }
 
@@ -43,7 +67,14 @@ internal sealed class EnemySpawnSystem : IEcsSystem
     /// </summary>
     public SimulationGroup Group => SimulationGroup.World;
 
+    /// <summary>
+    /// Reads <see cref="Position"/> and <see cref="Health"/> now, because placement is
+    /// anchored to where the live players are. Declared rather than left implicit: the
+    /// whole point of these sets is that a reader — and eventually the scheduler — can see
+    /// what a system touches without reading its body.
+    /// </summary>
     public ComponentAccess Access => new(
+        reads: new[] { typeof(Position), typeof(Health) },
         writes: new[] { typeof(EnemySpawnState) },
         structural: true);
 
@@ -52,15 +83,21 @@ internal sealed class EnemySpawnSystem : IEcsSystem
         ref EnemySpawnState state = ref writer.Singleton<EnemySpawnState>();
 
         state.Accumulator += _dt;
-        if (state.Accumulator < EnemyAiTuning.WaveIntervalSec) return;
+        if (state.Accumulator < _settings.WaveIntervalSec) return;
 
         // Subtract rather than reset: the accumulator carries its remainder so the wave
         // cadence does not drift against wall time at tick rates that do not divide the
         // interval evenly.
-        state.Accumulator -= EnemyAiTuning.WaveIntervalSec;
+        state.Accumulator -= _settings.WaveIntervalSec;
+
+        // Read once per wave, before any structural change. Both the cap and the wave size
+        // scale on it, and the placement anchors on it.
+        int livePlayers = _settings.Chase ? _players.Refresh(writer) : 0;
 
         int alive = writer.QueryWith<EnemyAi>(Span<EntityHandle>.Empty);
-        int toSpawn = Math.Min(EnemyAiTuning.EnemiesPerWave, EnemyAiTuning.MaxEnemies - alive);
+        int toSpawn = Math.Min(
+            _settings.EffectiveWaveSize(livePlayers),
+            _settings.EffectiveMaxEnemies(livePlayers) - alive);
         if (toSpawn <= 0) return;
 
         for (int i = 0; i < toSpawn; i++)
@@ -73,21 +110,23 @@ internal sealed class EnemySpawnSystem : IEcsSystem
             s.NextEnemyNumber++;
             string id = $"enemy-{s.NextEnemyNumber}";
 
-            float angle = Random.Shared.NextSingle() * MathF.Tau;
-            float x = MathF.Cos(angle) * EnemyAiTuning.SpawnRadius;
-            float y = MathF.Sin(angle) * EnemyAiTuning.SpawnRadius;
+            // NOT re-read inside the loop, deliberately. The players this wave is placed
+            // around are the ones that were there when the wave began; refreshing per
+            // enemy would re-query the world once per spawned entity for a set that cannot
+            // have changed, since nothing between here and the drain moves a player.
+            Vec2 position = ChoosePosition(livePlayers);
 
             writer.Spawn(
                 new EntityState
                 {
                     Id = id,
                     Type = "mob",
-                    Position = new Vec2(x, y),
-                    Hp = EnemyAiTuning.EnemyHp,
-                    MaxHp = EnemyAiTuning.EnemyHp,
-                    Speed = EnemyAiTuning.EnemySpeed,
-                    Attack = EnemyAiTuning.EnemyAttack,
-                    Defense = EnemyAiTuning.EnemyDefense,
+                    Position = position,
+                    Hp = _settings.Hp,
+                    MaxHp = _settings.Hp,
+                    Speed = _settings.Speed,
+                    Attack = _settings.Attack,
+                    Defense = _settings.Defense,
                 },
                 EntityTags.EnemyAi);
 
@@ -96,9 +135,62 @@ internal sealed class EnemySpawnSystem : IEcsSystem
             // even with Debug off — inside the world write scope (#249).
             if (_logger.IsEnabled(LogLevel.Debug))
             {
-                _logger.LogDebug("Spawned enemy {Id} at ({X:F1}, {Y:F1})", id, x, y);
+                _logger.LogDebug(
+                    "Spawned enemy {Id} at ({X:F1}, {Y:F1})", id, position.X, position.Y);
             }
         }
+    }
+
+    /// <summary>
+    /// Where one enemy of this wave goes.
+    ///
+    /// <para>With no live player to anchor to this is the pre-change placement
+    /// character-for-character — a uniform angle on a circle of
+    /// <see cref="EnemyAiSettings.SpawnDistance"/> about the origin — which is what keeps
+    /// an empty server identical to the one that shipped and lets the characterization
+    /// tests stay untouched.</para>
+    ///
+    /// <para>With players, the anchor is a <b>uniformly chosen</b> one of them rather than
+    /// the centroid or the nearest. The centroid is a single point, so it reproduces the
+    /// one small ring that made the fight a conveyor belt as soon as the group is spread
+    /// out; choosing per enemy spreads the wave across everybody who is playing, which is
+    /// the difference between a crowd converging on one spot and a crowd everywhere.</para>
+    /// </summary>
+    private Vec2 ChoosePosition(int livePlayers)
+    {
+        float angle = Random.Shared.NextSingle() * MathF.Tau;
+
+        if (livePlayers <= 0)
+        {
+            return new Vec2(
+                MathF.Cos(angle) * _settings.SpawnDistance,
+                MathF.Sin(angle) * _settings.SpawnDistance);
+        }
+
+        Vec2 candidate = default;
+        for (int attempt = 0; attempt < PlacementAttempts; attempt++)
+        {
+            Vec2 anchor = _players[Random.Shared.Next(livePlayers)];
+            candidate = _settings.Bounds.Clamp(new Vec2(
+                anchor.X + (MathF.Cos(angle) * _settings.SpawnDistance),
+                anchor.Y + (MathF.Sin(angle) * _settings.SpawnDistance)));
+
+            // Clamping is what makes the check necessary rather than paranoid: a spawn
+            // measured at the full distance from its anchor can be pulled back across the
+            // map edge to within arm's reach of a player standing in the corner.
+            if (!_players.AnyWithin(candidate, _settings.MinSpawnDistanceSq))
+            {
+                return candidate;
+            }
+
+            angle = Random.Shared.NextSingle() * MathF.Tau;
+        }
+
+        // Exhausted: every sample landed near somebody. Take the last one rather than
+        // giving up on the enemy — a wave that silently spawns fewer entities the tighter
+        // the crowd gets is the threadbare fight coming back through the door marked
+        // "safety check".
+        return candidate;
     }
 }
 
@@ -122,8 +214,21 @@ internal sealed class EnemySpawnSystem : IEcsSystem
 internal sealed class EnemyMoveSystem : IEcsSystem
 {
     private readonly float _dt;
+    private readonly EnemyAiSettings _settings;
 
-    public EnemyMoveSystem(float dt) => _dt = dt;
+    /// <summary>
+    /// Live players, refilled from the world at the top of every run. See
+    /// <see cref="PlayerTargetBuffer"/> for why this is re-read rather than cached, and
+    /// why the nearest-player search is a scan.
+    /// </summary>
+    [SimulationScratch]
+    private PlayerTargetBuffer _players = new();
+
+    public EnemyMoveSystem(float dt, EnemyAiSettings settings)
+    {
+        _dt = dt;
+        _settings = settings;
+    }
 
     public string Name => "enemy.move";
 
@@ -143,7 +248,12 @@ internal sealed class EnemyMoveSystem : IEcsSystem
 
     public void Run(WorldWriter writer, ulong currentTick)
     {
-        var body = new Body(_dt);
+        // Gathered before the chunk walk, not inside it. Reading the player set per enemy
+        // would be an archetype query per entity per tick, and the set cannot change
+        // during the walk: nothing in this system writes a player's position.
+        int livePlayers = _settings.Chase ? _players.Refresh(writer) : 0;
+
+        var body = new Body(_dt, _settings, livePlayers > 0 ? _players : null);
         writer.VisitChunks<EnemyAi, Body>(ref body);
     }
 
@@ -154,8 +264,22 @@ internal sealed class EnemyMoveSystem : IEcsSystem
     private struct Body : ISimChunkVisitor
     {
         private readonly float _dt;
+        private readonly EnemyAiSettings _settings;
 
-        public Body(float dt) => _dt = dt;
+        /// <summary>
+        /// The live players, or null when there are none and every enemy falls back to the
+        /// origin. Holding the buffer by reference costs nothing — it is the system's own
+        /// scratch, already filled, and copying its contents into the struct is what an
+        /// allocation would look like here.
+        /// </summary>
+        private readonly PlayerTargetBuffer? _players;
+
+        public Body(float dt, EnemyAiSettings settings, PlayerTargetBuffer? players)
+        {
+            _dt = dt;
+            _settings = settings;
+            _players = players;
+        }
 
         public void Visit(in SimChunk chunk)
         {
@@ -167,24 +291,43 @@ internal sealed class EnemyMoveSystem : IEcsSystem
                 // A dead enemy does not move. It is still reaped, by the reap system.
                 if (healths[i].Dead) continue;
 
-                float dx = -positions[i].Value.X;
-                float dy = -positions[i].Value.Y;
+                // The target, and the whole behaviour change: the nearest live player when
+                // there is one, and otherwise the origin — which is the only target the AI
+                // ever had. A world with no live players therefore runs the pre-change step
+                // on the pre-change floats, which is why EnemyAiCharacterizationTests still
+                // pins this arithmetic bit-exactly.
+                // `target` starts at the origin, so the no-player path computes
+                // `0f - x` where the pre-change code wrote `-x`. Those differ for exactly
+                // one input, x == +0.0, and that input is caught by the `distSq <= 0.01f`
+                // guard two lines down before either result is used.
+                Vec2 target = default;
+                bool hasTarget = _players != null
+                    && _players.TryNearest(positions[i].Value, out target);
+
+                float dx = target.X - positions[i].Value.X;
+                float dy = target.Y - positions[i].Value.Y;
                 float distSq = dx * dx + dy * dy;
 
-                if (distSq <= 0.01f) continue; // already at center
+                if (distSq <= 0.01f) continue; // already on top of the target
+
+                // Stop at contact rather than walking into the target and jittering across
+                // it every tick. Only when chasing: at the origin there is nothing to stand
+                // off from, and applying a stand-off there would leave a ring of enemies
+                // circling the centre forever instead of reaching the despawn zone.
+                if (hasTarget && distSq <= _settings.ContactRangeSq) continue;
 
                 float invDist = 1.0f / MathF.Sqrt(distSq);
                 positions[i].Value = new Vec2(
-                    positions[i].Value.X + dx * invDist * EnemyAiTuning.EnemySpeed * _dt,
-                    positions[i].Value.Y + dy * invDist * EnemyAiTuning.EnemySpeed * _dt);
+                    positions[i].Value.X + dx * invDist * _settings.Speed * _dt,
+                    positions[i].Value.Y + dy * invDist * _settings.Speed * _dt);
             }
         }
     }
 }
 
 /// <summary>
-/// <see cref="EnemyAiPhase.Reap"/> — destroys enemies that are dead or that have reached
-/// the centre zone.
+/// <see cref="EnemyAiPhase.Reap"/> — destroys enemies that are dead, and enemies that
+/// have reached the centre zone <b>while there is nothing to chase</b>.
 /// </summary>
 /// <remarks>
 /// <para><b>Not per-entity-linear, and therefore still handle-based.</b> The decision is
@@ -203,6 +346,15 @@ internal sealed class EnemyMoveSystem : IEcsSystem
 internal sealed class EnemyReapSystem : IEcsSystem
 {
     private readonly ILogger _logger;
+    private readonly EnemyAiSettings _settings;
+
+    /// <summary>
+    /// Live players, refilled from the world at the top of every run. Only the count is
+    /// used: centre-despawn applies to an enemy with nothing to chase, and "nothing to
+    /// chase" is a property of the world, not of the individual enemy.
+    /// </summary>
+    [SimulationScratch]
+    private PlayerTargetBuffer _players = new();
 
     /// <summary>
     /// Reusable handle buffer, refilled from a query before every read. Resetting it at
@@ -212,7 +364,11 @@ internal sealed class EnemyReapSystem : IEcsSystem
     [SimulationScratch]
     private EntityHandle[] _handles = Array.Empty<EntityHandle>();
 
-    public EnemyReapSystem(ILogger logger) => _logger = logger;
+    public EnemyReapSystem(EnemyAiSettings settings, ILogger logger)
+    {
+        _settings = settings;
+        _logger = logger;
+    }
 
     public string Name => "enemy.reap";
 
@@ -233,6 +389,12 @@ internal sealed class EnemyReapSystem : IEcsSystem
 
     public void Run(WorldWriter writer, ulong currentTick)
     {
+        // Whether anything is being chased at all. When it is, an enemy standing near the
+        // origin is standing where the fight is and must not be deleted for it; when it is
+        // not, the origin is the destination and arriving there is the end of the enemy's
+        // life, exactly as before this change.
+        bool centreDespawn = !_settings.Chase || _players.Refresh(writer) == 0;
+
         int count = writer.QueryWith<EnemyAi>(_handles);
         if (count > _handles.Length)
         {
@@ -253,8 +415,10 @@ internal sealed class EnemyReapSystem : IEcsSystem
                 continue;
             }
 
+            if (!centreDespawn) continue;
+
             Vec2 p = writer.PositionOf(in handle).Value;
-            if (p.X * p.X + p.Y * p.Y <= EnemyAiTuning.DespawnRadiusSq)
+            if (p.X * p.X + p.Y * p.Y <= _settings.DespawnRadiusSq)
             {
                 if (_logger.IsEnabled(LogLevel.Debug))
                 {

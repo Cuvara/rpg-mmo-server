@@ -236,6 +236,22 @@ if (!GameServer.Server.AoiSettings.TryCreate(
 
 GameServer.Server.AoiSettings aoi = aoiParsed!;
 
+// Enemy AI. Same fail-fast rule, and for the sharpest version of the reason: these knobs
+// decide how many entities exist and where they go, so a value that silently fell back to
+// its default gives the operator the fight they were trying to change while every counter
+// on /status reports a healthy server. Parsed here, before the banner, so the banner
+// cannot claim a configuration that was refused.
+if (!GameServer.Scaffolding.EnemyAiSettings.TryCreate(
+        Env,
+        Shared.GameLogic.Components.MapBounds.FromSize(mapWidth, mapHeight),
+        out GameServer.Scaffolding.EnemyAiSettings? enemyAiParsed, out string? enemyAiError))
+{
+    logger.LogCritical("invalid enemy AI configuration: {Error}", enemyAiError);
+    return 2;
+}
+
+GameServer.Scaffolding.EnemyAiSettings enemyAi = enemyAiParsed!;
+
 if (!GameServer.Server.ImportanceSettings.TryCreate(
         GetArg(args, "--importance") ?? Env(GameServer.Server.ImportanceSettings.EnvVar),
         Env,
@@ -328,6 +344,9 @@ logger.LogInformation("  Snapshots: {Mode}", keyframeInterval > 0
     : "full every tick (delta disabled)");
 logger.LogInformation("  MapSize:   {Width}x{Height} world units (centered on origin)", mapWidth, mapHeight);
 logger.LogInformation("  AOI:       {Aoi}", aoi);
+logger.LogInformation(
+    "  Enemies:   {Enemies}",
+    enableEnemySpawner ? enemyAi.ToString() : "OFF (GAMESERVER_ENEMIES=false)");
 logger.LogInformation("  Importance:{Importance}", " " + importance);
 logger.LogInformation("  Schedule:  {Schedule}", replicationSchedule.Describe(worldHz));
 logger.LogInformation(
@@ -905,7 +924,7 @@ var options = new ServerOptions
     SimulationPhaseFactory = loadTestEntities > 0
         ? (world, loggerFactory, onGroupRan) => new GameServer.Scaffolding.LoadTestSpawner(world, simulationRates, loadTestEntities, loggerFactory.CreateLogger<GameServer.Scaffolding.LoadTestSpawner>(), onGroupRan)
         : enableEnemySpawner
-            ? (world, loggerFactory, onGroupRan) => new EnemySpawner(world, simulationRates, loggerFactory.CreateLogger<EnemySpawner>(), onGroupRan)
+            ? (world, loggerFactory, onGroupRan) => new EnemySpawner(world, simulationRates, loggerFactory.CreateLogger<EnemySpawner>(), onGroupRan, enemyAi)
             : null,
     // The composition root is the one place allowed to know what the game is, so it is
     // where the status endpoint's entity count comes from. The JSON field stays
@@ -1063,6 +1082,8 @@ metricsEndpoint?.SetStatusProvider(() =>
         ImportanceProfile = importance.Profile,
         ImportanceWeights = importance.ToString(),
         ReplicationSchedule = replicationSchedule.Describe(worldHz),
+        EnemyAi = enableEnemySpawner ? enemyAi.ToString() : "off",
+        EnemyAiMaxNow = enableEnemySpawner ? enemyAi.EffectiveMaxEnemies(metrics.PlayersOnline) : 0,
         FieldDelta = fieldDelta,
         SnapshotDeferredByInterval = metrics.SnapshotDeferredByInterval,
         SnapshotMaxStateAge = metrics.MaxStateAge,
