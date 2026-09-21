@@ -66,6 +66,78 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the reason the enum documents: "arrived" is a fact produced by Move earlier in the same
   tick, so Reap must not run before it.
 
+- **Synthetic players (`GAMESERVER_BOTS`, default OFF)** — bots that move and fight, so a
+  map with three real clients still reads as a crowd.
+
+  A battle royale is a crowd of *players* as much as of enemies, and this project can put
+  three real clients on a map. `BotPlayerSpawner` creates N player-type entities scattered
+  over a configurable disc; each one seeks the nearest enemy inside
+  `GAMESERVER_BOT_ENGAGE_RANGE`, closes, and attacks, or wanders when there is nothing to
+  fight. Enemies chase them, clients render them with no client change, and a real player
+  can attack them.
+
+  **Bots drive the real input path.** The brain emits an `InputData` and pushes it through
+  `EcsWorld.PushInput` with a null ingress — the door that method already documents for
+  "callers that have no connection (tests, benches, scaffolding)". The ordinary
+  `InputHandler` then validates and applies it: real movement integration, real map
+  clamping, real `CombatLogic` validation, cooldowns, damage, death and kill events.
+  **No combat logic is duplicated**, which is deliberate — a second damage path that
+  drifted from the first would surface as bots doing things players cannot. The decision
+  is made inside the world write scope and the input is pushed after it closes, because
+  `PushInput` takes the read lock and the world's lock is not recursive; the resulting
+  one-tick delay is exactly the delay a real client has.
+
+  **`EntityTags.Bot` and `PersistablePlayerStates()`.** A bot is a player in the archetype
+  on purpose, so every default treats it as one — right for AOI, snapshots, rendering and
+  the enemy AI, and **catastrophic for the save sweep**, which writes a row per player
+  entity keyed by id and reports success. `AsyncSaver.SaveAllAsync` now reads
+  `PersistablePlayerStates()`, which excludes bots **by archetype tag, never by id
+  prefix**: a prefix convention is enforced by nothing and fails silently, in the
+  database, the first time a bot is named differently or a real user id collides with it.
+
+  **Why not `LoadTestSpawner`.** It was read first and is unsuitable for three structural
+  reasons. It spawns `Type = "mob"` entities tagged `EnemyAi`, so they would be chased and
+  reaped by the enemy systems and counted in `enemies_alive`; it is **mutually exclusive**
+  with the enemy spawner in the composition root, so turning it on turns the fight off;
+  and its motion is a rigid rotation about the world origin at fixed radius, which is
+  precisely the everything-at-(0,0) shape this work removes. It is a bandwidth load
+  generator and a good one — worst-case delta pressure, every entity dirty every tick —
+  and bending it into a player simulator would have cost more than the new file and left
+  the load-test tool worse.
+
+  `CompositeSimulationPhase` lets the enemy and bot phases run together;
+  `ServerOptions.SimulationPhaseFactory` produces one phase, and widening that contract
+  was rejected in favour of composing on the content side, where `ISimulationPhase` says
+  knowledge of the game belongs. Order is load-bearing: enemies first, so the bot brain
+  aims at this tick's world.
+
+  **Operational note, logged as a startup warning.** Bots are players to the enemy
+  spawner, so they buy population: `GAMESERVER_BOTS=24` at the default allowance is a
+  1110-enemy world before a real client connects. The server computes that number at
+  startup rather than leaving it to be found in a snapshot size.
+
+- **`bots` and `bots_alive` on `/status`** — the synthetic-player configuration in force
+  and the live count.
+
+  Published because a bot is indistinguishable from a player in every other field on the
+  endpoint and on the wire. That is what makes them useful and it is also the trap: a
+  reader seeing a busy map and `players_online: 3` concludes the counter is broken. These
+  two fields are the line that says it is not, and the only signal that a server holds
+  entities which will never be persisted.
+
+### Fixed
+
+- **`enemy_ai_max_now` counted connections, not player entities** — found by running a
+  probe server rather than by a test.
+
+  The field was derived from `players_online`. The enemy cap scales on player *entities*,
+  and bots are entities without connections, so a server with 24 bots and nobody logged in
+  published a cap of **30 while actually running 1110** — wrong by a factor of 37, on the
+  endpoint that exists so an operator can ask a pod what it is doing. It is now
+  `ServerOptions.StatusEnemyCap`, a function of the world. The residual is stated rather
+  than papered over: it still counts a dead player awaiting respawn, which the spawner does
+  not, so it can read one allowance high during a wipe.
+
 - **`enemy_ai` and `enemy_ai_max_now` on `/status`** — the tuning in force, rendered as one
   line, and the population cap that applies right now.
 

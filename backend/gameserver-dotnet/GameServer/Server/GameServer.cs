@@ -401,6 +401,30 @@ public class ServerOptions
     /// </summary>
     public Func<EcsWorld, int>? StatusEntityCount { get; set; }
 
+    /// <summary>
+    /// The number the status endpoint publishes as <c>bots_alive</c>: synthetic players in
+    /// the world. Null means the server publishes 0.
+    /// </summary>
+    /// <remarks>
+    /// A second function rather than a second use of <see cref="StatusEntityCount"/>,
+    /// because they count different things and the endpoint publishes both. That is the
+    /// composing the old single-int phase member could not do.
+    /// </remarks>
+    public Func<EcsWorld, int>? StatusBotCount { get; set; }
+
+    /// <summary>
+    /// The enemy population cap in force right now, published as <c>enemy_ai_max_now</c>.
+    /// Null means the server publishes 0.
+    /// </summary>
+    /// <remarks>
+    /// A function of the <b>world</b>, not of the connection count, and that distinction
+    /// is the whole reason it exists. The cap scales on player entities; connections are a
+    /// different number, and they differ by every synthetic player on the map. Deriving
+    /// this from <c>players_online</c> reported a cap of 30 on a server actually running
+    /// 1110 — a field that looked precise and was wrong by 37x.
+    /// </remarks>
+    public Func<EcsWorld, int>? StatusEnemyCap { get; set; }
+
     /// <summary>Nakama HTTP API base URL (e.g. <c>http://rpg-nakama:7350</c>). Null disables economy integration.</summary>
     public string? NakamaUrl { get; set; }
 
@@ -629,6 +653,15 @@ public sealed class GameServerHost : IAsyncDisposable
     /// name is a wire contract; what fills it is not.</para>
     /// </summary>
     public int EnemiesAlive => _options.StatusEntityCount?.Invoke(_world) ?? 0;
+
+    /// <summary>
+    /// The number the status endpoint publishes as <c>bots_alive</c>. Supplied by the
+    /// composition root for the same reason <see cref="EnemiesAlive"/> is.
+    /// </summary>
+    public int BotsAlive => _options.StatusBotCount?.Invoke(_world) ?? 0;
+
+    /// <summary>The number the status endpoint publishes as <c>enemy_ai_max_now</c>.</summary>
+    public int EnemyCapNow => _options.StatusEnemyCap?.Invoke(_world) ?? 0;
 
     /// <summary>
     /// Attack-path counters for <c>/status</c>. Single-writer (tick thread), read

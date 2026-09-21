@@ -252,6 +252,19 @@ if (!GameServer.Scaffolding.EnemyAiSettings.TryCreate(
 
 GameServer.Scaffolding.EnemyAiSettings enemyAi = enemyAiParsed!;
 
+// Synthetic players. Default OFF (GAMESERVER_BOTS unset or 0), so a normal deployment is
+// untouched; same strict parse as everything else here.
+if (!GameServer.Scaffolding.BotSettings.TryCreate(
+        Env,
+        Shared.GameLogic.Components.MapBounds.FromSize(mapWidth, mapHeight),
+        out GameServer.Scaffolding.BotSettings? botsParsed, out string? botsError))
+{
+    logger.LogCritical("invalid bot configuration: {Error}", botsError);
+    return 2;
+}
+
+GameServer.Scaffolding.BotSettings bots = botsParsed!;
+
 if (!GameServer.Server.ImportanceSettings.TryCreate(
         GetArg(args, "--importance") ?? Env(GameServer.Server.ImportanceSettings.EnvVar),
         Env,
@@ -347,6 +360,33 @@ logger.LogInformation("  AOI:       {Aoi}", aoi);
 logger.LogInformation(
     "  Enemies:   {Enemies}",
     enableEnemySpawner ? enemyAi.ToString() : "OFF (GAMESERVER_ENEMIES=false)");
+logger.LogInformation("  Bots:      {Bots}", bots);
+if (bots.Enabled)
+{
+    // Said once, loudly, at the moment it becomes true. Bots are player-type entities, and
+    // somebody reading a player count or a snapshot without knowing they are on will
+    // conclude the server has users it does not have.
+    logger.LogWarning(
+        "{Count} SYNTHETIC PLAYERS are active (GAMESERVER_BOTS). They are real player " +
+        "entities in the world and in every snapshot — enemies chase them, clients render " +
+        "them, and they attack. They are NOT persisted, hold no connection and occupy no " +
+        "capacity, so `players_online` counts real clients only and will read lower than " +
+        "the map looks. This is a development and demo setting.",
+        bots.Count);
+
+    if (enableEnemySpawner)
+    {
+        // The compounding effect, computed rather than left to be discovered from a
+        // snapshot size: bots are players to the enemy spawner, so the cap they buy is the
+        // per-player allowance times the whole synthetic population.
+        logger.LogWarning(
+            "With those bots the enemy population cap is {Cap} before a single real player " +
+            "joins ({Base} + {PerPlayer} x {Bots}). Lower GAMESERVER_ENEMY_MAX_PER_PLAYER if " +
+            "that is more world than this box or this map should carry.",
+            enemyAi.EffectiveMaxEnemies(bots.Count), enemyAi.MaxEnemies,
+            enemyAi.MaxEnemiesPerPlayer, bots.Count);
+    }
+}
 logger.LogInformation("  Importance:{Importance}", " " + importance);
 logger.LogInformation("  Schedule:  {Schedule}", replicationSchedule.Describe(worldHz));
 logger.LogInformation(
@@ -921,16 +961,43 @@ var options = new ServerOptions
     Registration = registrationOptions,
     // The composition root decides what the game is. The core host only knows it has
     // a phase to tick; see ISimulationPhase.
+    // Enemies and bots compose; the load-test spawner still does not, because it tags its
+    // entities EnemyAi and would be chased and reaped by the enemy systems it replaces.
     SimulationPhaseFactory = loadTestEntities > 0
         ? (world, loggerFactory, onGroupRan) => new GameServer.Scaffolding.LoadTestSpawner(world, simulationRates, loadTestEntities, loggerFactory.CreateLogger<GameServer.Scaffolding.LoadTestSpawner>(), onGroupRan)
-        : enableEnemySpawner
-            ? (world, loggerFactory, onGroupRan) => new EnemySpawner(world, simulationRates, loggerFactory.CreateLogger<EnemySpawner>(), onGroupRan, enemyAi)
+        : (enableEnemySpawner || bots.Enabled)
+            ? (world, loggerFactory, onGroupRan) =>
+            {
+                var phases = new List<GameServer.Server.ISimulationPhase>(2);
+                if (enableEnemySpawner)
+                {
+                    phases.Add(new EnemySpawner(world, simulationRates, loggerFactory.CreateLogger<EnemySpawner>(), onGroupRan, enemyAi));
+                }
+                if (bots.Enabled)
+                {
+                    // After the enemies, so the brain aims at this tick's world — see
+                    // CompositeSimulationPhase.
+                    phases.Add(new GameServer.Scaffolding.BotPlayerSpawner(world, simulationRates, bots, loggerFactory.CreateLogger<GameServer.Scaffolding.BotPlayerSpawner>(), onGroupRan));
+                }
+                return phases.Count == 1
+                    ? phases[0]
+                    : new GameServer.Scaffolding.CompositeSimulationPhase(phases.ToArray());
+            }
             : null,
     // The composition root is the one place allowed to know what the game is, so it is
     // where the status endpoint's entity count comes from. The JSON field stays
     // `enemies_alive` — the Unity DOTS sample polls /status and reads it.
     StatusEntityCount = (loadTestEntities > 0 || enableEnemySpawner)
         ? static world => world.CountWith<GameServer.World.Components.EnemyAi>()
+        : null,
+    StatusBotCount = bots.Enabled
+        ? static world => world.CountWith<GameServer.Scaffolding.BotTag>()
+        : null,
+    // From the WORLD's player entities, never from the connection count: bots are player
+    // entities the cap scales on and connections they are not, so the two differ by the
+    // whole synthetic population.
+    StatusEnemyCap = enableEnemySpawner
+        ? world => enemyAi.EffectiveMaxEnemies(world.CountWith<GameServer.World.Components.PlayerTag>())
         : null,
     NakamaUrl = nakamaUrl,
     NakamaHttpKey = nakamaHttpKey,
@@ -1083,7 +1150,9 @@ metricsEndpoint?.SetStatusProvider(() =>
         ImportanceWeights = importance.ToString(),
         ReplicationSchedule = replicationSchedule.Describe(worldHz),
         EnemyAi = enableEnemySpawner ? enemyAi.ToString() : "off",
-        EnemyAiMaxNow = enableEnemySpawner ? enemyAi.EffectiveMaxEnemies(metrics.PlayersOnline) : 0,
+        EnemyAiMaxNow = server.EnemyCapNow,
+        Bots = bots.ToString(),
+        BotsAlive = server.BotsAlive,
         FieldDelta = fieldDelta,
         SnapshotDeferredByInterval = metrics.SnapshotDeferredByInterval,
         SnapshotMaxStateAge = metrics.MaxStateAge,
