@@ -323,6 +323,127 @@ public class EnemyAiSettingsTests
         }
     }
 
+    // ── Enemy-side combat ────────────────────────────────────────────────────
+
+    /// <summary>The defaults of the combat knobs, against literals for the reason above.</summary>
+    [Fact]
+    public void NothingConfigured_HasEnemyCombatOnAndCapped()
+    {
+        EnemyAiSettings s = ParseOk();
+
+        Assert.True(s.AttacksEnabled);
+        Assert.Equal(3, s.AttackersPerTarget);
+        Assert.Equal(0.5f, s.AttackIntervalSec);
+        Assert.True(s.RespawnPlayers);
+    }
+
+    /// <summary>
+    /// Every combat knob refuses a value it does not recognise, rather than falling back.
+    ///
+    /// <para>This is the table that tells a strict parser from a lenient one, and the
+    /// consequence is not cosmetic for two of these rows in particular:
+    /// <c>ATTACKERS_PER_TARGET=3O</c> silently running at 3 is survivable, but
+    /// <c>ATTACKS=of</c> silently running with attacks ON is an operator who disabled the
+    /// feature for a demo and did not, and <c>PLAYER_RESPAWN=no1</c> silently running with
+    /// respawn on is a rule the operator believes is off deciding what happens to a dead
+    /// player.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(EnemyAiSettings.EnvAttacksEnabled, "of")]
+    [InlineData(EnemyAiSettings.EnvAttacksEnabled, "yes please")]
+    [InlineData(EnemyAiSettings.EnvRespawnPlayers, "no1")]
+    [InlineData(EnemyAiSettings.EnvRespawnPlayers, "maybe")]
+    [InlineData(EnemyAiSettings.EnvAttackersPerTarget, "3O")]
+    [InlineData(EnemyAiSettings.EnvAttackersPerTarget, "-1")]
+    [InlineData(EnemyAiSettings.EnvAttackersPerTarget, "1001")]
+    [InlineData(EnemyAiSettings.EnvAttackIntervalSec, "half")]
+    [InlineData(EnemyAiSettings.EnvAttackIntervalSec, "0,5")]
+    [InlineData(EnemyAiSettings.EnvAttackIntervalSec, "0")]
+    [InlineData(EnemyAiSettings.EnvAttackIntervalSec, "NaN")]
+    public void ACombatKnobWithAnUnrecognisedValue_IsRefused(string name, string value)
+    {
+        var env = new Dictionary<string, string?> { [name] = value };
+
+        Assert.False(Parse(env, out EnemyAiSettings? s, out string? err));
+        Assert.Null(s);
+        Assert.NotNull(err);
+        Assert.Contains(name, err);
+    }
+
+    /// <summary>
+    /// The combat knobs accept the values they document, including a cap of zero — which
+    /// is a meaningful setting ("enemies never land a hit") and not a mistake to refuse.
+    /// </summary>
+    [Fact]
+    public void CombatKnobsAcceptTheirDocumentedValues()
+    {
+        EnemyAiSettings s = ParseOk(
+            (EnemyAiSettings.EnvAttacksEnabled, "off"),
+            (EnemyAiSettings.EnvAttackersPerTarget, "0"),
+            (EnemyAiSettings.EnvAttackIntervalSec, "2.5"),
+            (EnemyAiSettings.EnvRespawnPlayers, "no"));
+
+        Assert.False(s.AttacksEnabled);
+        Assert.Equal(0, s.AttackersPerTarget);
+        Assert.Equal(2.5f, s.AttackIntervalSec);
+        Assert.False(s.RespawnPlayers);
+    }
+
+    /// <summary>
+    /// The survivability arithmetic, computed by the type rather than by the reader.
+    ///
+    /// <para>This is the number an operator has to get right before a demo and the number
+    /// the feature is answerable for, so it is a function with a table rather than a
+    /// paragraph in a document that cannot be run.</para>
+    /// </summary>
+    [Theory]
+    // cap, interval, damage per hit  ->  damage per second
+    [InlineData(3, 0.5f, 1, 6f)]        // the defaults against a default player: 100 HP / 6 = 16.7s
+    [InlineData(3, 0.5f, 15, 90f)]      // GAMESERVER_ENEMY_ATTACK=20 against defense 5: 1.1s
+    [InlineData(1, 1.0f, 1, 1f)]        // the gentlest useful setting: 100s
+    [InlineData(20, 0.5f, 1, 40f)]      // a cap raised without thinking: 2.5s
+    [InlineData(0, 0.5f, 1, 0f)]        // the cap off
+    public void WorstCaseDamagePerSecond_IsWhatTheKnobsSay(
+        int cap, float interval, int damagePerHit, float expected)
+    {
+        EnemyAiSettings s = ParseOk(
+            (EnemyAiSettings.EnvAttackersPerTarget, cap.ToString(CultureInfo.InvariantCulture)),
+            (EnemyAiSettings.EnvAttackIntervalSec, interval.ToString(CultureInfo.InvariantCulture)));
+
+        Assert.Equal(expected, s.WorstCaseDamagePerSecond(damagePerHit), 3);
+    }
+
+    /// <summary>With attacks off the worst case is zero, whatever the cap says.</summary>
+    [Fact]
+    public void WorstCaseDamagePerSecond_IsZeroWithAttacksOff()
+    {
+        EnemyAiSettings s = ParseOk(
+            (EnemyAiSettings.EnvAttacksEnabled, "off"),
+            (EnemyAiSettings.EnvAttackersPerTarget, "50"));
+
+        Assert.Equal(0f, s.WorstCaseDamagePerSecond(15));
+    }
+
+    /// <summary>
+    /// The status line carries the combat tuning, both ways round. An operator reading
+    /// <c>/status</c> on an already-allocated pod has no other honest source for whether
+    /// enemies fight back on it — the manifest describes the fleet, not the pod.
+    /// </summary>
+    [Fact]
+    public void ToStringCarriesTheCombatTuning()
+    {
+        Assert.Contains("attacks=4/target every 0.25s",
+            ParseOk(
+                (EnemyAiSettings.EnvAttackersPerTarget, "4"),
+                (EnemyAiSettings.EnvAttackIntervalSec, "0.25")).ToString());
+
+        Assert.Contains("attacks=off",
+            ParseOk((EnemyAiSettings.EnvAttacksEnabled, "off")).ToString());
+
+        Assert.Contains("respawn=off",
+            ParseOk((EnemyAiSettings.EnvRespawnPlayers, "off")).ToString());
+    }
+
     /// <summary>
     /// Rendered under a comma-decimal culture too: the status line is read by operators
     /// and scraped by tooling, and a server whose base image sets de-DE must not publish

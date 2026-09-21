@@ -911,6 +911,13 @@ IAgonesSdk agonesSdk = useAgones
 
 // ── Build server options ──
 
+// The enemy phase, once the factory below has built it. Captured so /status can publish
+// what enemy-side combat has actually done: the counters live on the phase, and the phase
+// is created inside the server's constructor because it needs the world the server owns.
+// Null while the server is being constructed and for a build with GAMESERVER_ENEMIES=false,
+// which the status assembly reads as zero rather than as a missing field.
+GameServer.Scaffolding.EnemySpawner? enemyPhase = null;
+
 var options = new ServerOptions
 {
     ServerAddr = addr,
@@ -963,6 +970,9 @@ var options = new ServerOptions
     // a phase to tick; see ISimulationPhase.
     // Enemies and bots compose; the load-test spawner still does not, because it tags its
     // entities EnemyAi and would be chased and reaped by the enemy systems it replaces.
+    // Captured so /status can publish what enemy-side combat has actually done. The phase
+    // is built by the factory below, inside the server's constructor, so there is no
+    // instance to read until then — and nothing reads this before the server is running.
     SimulationPhaseFactory = loadTestEntities > 0
         ? (world, loggerFactory, onGroupRan) => new GameServer.Scaffolding.LoadTestSpawner(world, simulationRates, loadTestEntities, loggerFactory.CreateLogger<GameServer.Scaffolding.LoadTestSpawner>(), onGroupRan)
         : (enableEnemySpawner || bots.Enabled)
@@ -971,7 +981,8 @@ var options = new ServerOptions
                 var phases = new List<GameServer.Server.ISimulationPhase>(2);
                 if (enableEnemySpawner)
                 {
-                    phases.Add(new EnemySpawner(world, simulationRates, loggerFactory.CreateLogger<EnemySpawner>(), onGroupRan, enemyAi));
+                    enemyPhase = new EnemySpawner(world, simulationRates, loggerFactory.CreateLogger<EnemySpawner>(), onGroupRan, enemyAi);
+                    phases.Add(enemyPhase);
                 }
                 if (bots.Enabled)
                 {
@@ -1151,6 +1162,9 @@ metricsEndpoint?.SetStatusProvider(() =>
         ReplicationSchedule = replicationSchedule.Describe(worldHz),
         EnemyAi = enableEnemySpawner ? enemyAi.ToString() : "off",
         EnemyAiMaxNow = server.EnemyCapNow,
+        EnemyAttacksDecided = enemyPhase?.Attacks.Decided ?? 0,
+        EnemyAttacksThrottled = enemyPhase?.Attacks.Throttled ?? 0,
+        PlayerRespawns = enemyPhase?.Attacks.Respawns ?? 0,
         Bots = bots.ToString(),
         BotsAlive = server.BotsAlive,
         FieldDelta = fieldDelta,

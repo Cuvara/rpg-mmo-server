@@ -144,8 +144,9 @@ public class SystemScheduleTests
             world, 15, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
 
         var systems = phase.Systems;
-        Assert.Equal(3, systems.Count);
-        Assert.Equal(new[] { "enemy.spawn", "enemy.move", "enemy.reap" },
+        Assert.Equal(5, systems.Count);
+        Assert.Equal(
+            new[] { "enemy.spawn", "enemy.move", "enemy.attack", "player.respawn", "enemy.reap" },
             systems.Select(s => s.Name));
 
         for (int i = 0; i < systems.Count; i++)
