@@ -307,11 +307,40 @@ public sealed class Connection : IDisposable
     /// that drops the oldest under load — so a dropped frame's updates were gone until
     /// the next keyframe.</para>
     /// </summary>
-    internal void GatherSnapshotView(
+    /// <returns>
+    /// False when this connection's own entity could not be resolved, in which case
+    /// NOTHING was staged and the caller should count the tick as skipped for this viewer.
+    /// </returns>
+    internal bool GatherSnapshotView(
         GameServer.World.WorldReader reader, float radius, ulong tick, int keyframeInterval,
         GameServer.Snapshot.TickEventBuffer? tickEvents = null)
     {
-        reader.TryGetSnapshotAnchor(UserId, out var anchor, out ulong ackTick);
+        if (!reader.TryGetSnapshotAnchor(UserId, out var anchor, out ulong ackTick))
+        {
+            // The result used to be discarded. On failure the anchor is default(Vec2) —
+            // (0, 0) — so the AOI centred on the world ORIGIN, which on this map is the
+            // single most populated point: enemies spawn on a ring of radius 13 about it
+            // and walk inward (Scaffolding/EnemyAiSystems.cs). The connection therefore
+            // received a busy, plausible world of six mobs animating correctly, none of
+            // it anywhere near the player, with every counter clean — a failure that
+            // produces a believable result instead of an error (#385).
+            //
+            // Skipping is right rather than merely safe: a connection whose own entity
+            // cannot be resolved has nothing meaningful to be told about where it is, and
+            // the next tick retries. Returning before the buffer swap below means no job
+            // is staged and no marker is enqueued, so the write task is undisturbed.
+            if (Interlocked.Exchange(ref _anchorMissingLogged, 1) == 0)
+            {
+                _logger.LogWarning(
+                    "Snapshot anchor unresolved for user {UserId} at tick {Tick}; skipping this " +
+                    "viewer's gather. Logged once per connection — the count is in " +
+                    "snapshot_anchor_missing. Expected briefly around join and despawn; " +
+                    "sustained means the connection outlived its entity.",
+                    UserId, tick);
+            }
+
+            return false;
+        }
 
         int index;
         lock (_snapshotLock)
@@ -398,6 +427,7 @@ public sealed class Connection : IDisposable
         // permanently. Surplus markers are free — the claim returns false and the write
         // task moves on.
         _sendChannel.Writer.TryWrite(SendItem.Snapshot);
+        return true;
     }
 
     /// <summary>
@@ -617,6 +647,13 @@ public sealed class Connection : IDisposable
 
     private readonly Channel<SendItem> _sendChannel;
     private readonly CancellationTokenSource _cts;
+    /// <summary>
+    /// 0 until the first unresolved snapshot anchor is logged for this connection. The
+    /// gather runs at tick rate, so logging every occurrence would bury the log under a
+    /// condition that is one event, not thousands.
+    /// </summary>
+    private int _anchorMissingLogged;
+
     private readonly ILogger _logger;
     // Close lifecycle, three states rather than a bool.
     //

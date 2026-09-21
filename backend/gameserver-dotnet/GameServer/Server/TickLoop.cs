@@ -44,6 +44,12 @@ public sealed class TickLoop
     private long _snapshotFramesWrittenDelta;
     private long _snapshotBytesDelta;
     private long _snapshotEntitiesShedDelta;
+
+    /// <summary>
+    /// Viewer gathers skipped this tick because the viewer's own entity could not be
+    /// resolved (#385). Written from the gather workers, so every update is interlocked.
+    /// </summary>
+    private long _snapshotAnchorMissingDelta;
     private long _snapshotRemovalsDeferredDelta;
     private int _snapshotMaxShedAge;
     private long _snapshotDeferredByIntervalDelta;
@@ -245,7 +251,10 @@ public sealed class TickLoop
     {
         for (int i = 0; i < _viewerCount; i++)
         {
-            _viewers[i].GatherSnapshotView(reader, _aoiRadius, _currentTick, _keyframeInterval, _tickEvents);
+            if (!_viewers[i].GatherSnapshotView(reader, _aoiRadius, _currentTick, _keyframeInterval, _tickEvents))
+            {
+                Interlocked.Increment(ref _snapshotAnchorMissingDelta);
+            }
         }
     }
 
@@ -272,7 +281,12 @@ public sealed class TickLoop
 
         for (int i = from; i < to; i++)
         {
-            _viewers[i].GatherSnapshotView(reader, _aoiRadius, _currentTick, _keyframeInterval, _tickEvents);
+            // Interlocked because this slice runs on a gather worker: the parallel path
+            // is the one where several viewers can fail in the same tick.
+            if (!_viewers[i].GatherSnapshotView(reader, _aoiRadius, _currentTick, _keyframeInterval, _tickEvents))
+            {
+                Interlocked.Increment(ref _snapshotAnchorMissingDelta);
+            }
         }
     }
 
@@ -611,6 +625,7 @@ public sealed class TickLoop
             _snapshotFramesWrittenDelta = 0;
             _snapshotBytesDelta = 0;
             _snapshotEntitiesShedDelta = 0;
+            _snapshotAnchorMissingDelta = 0;
             _snapshotRemovalsDeferredDelta = 0;
             _snapshotMaxShedAge = 0;
             _snapshotDeferredByIntervalDelta = 0;
@@ -671,6 +686,7 @@ public sealed class TickLoop
                 _snapshotRemovalsDeferredDelta, _snapshotMaxShedAge);
             _metrics.RecordSnapshotSchedule(
                 _snapshotDeferredByIntervalDelta, _snapshotMaxStateAge);
+            _metrics.RecordSnapshotAnchorMissing(_snapshotAnchorMissingDelta);
             _metrics.RecordTickDuration(startTimestamp, Stopwatch.GetTimestamp());
         }
     }

@@ -69,6 +69,7 @@ public sealed class GameMetrics : IDisposable
     private readonly string _mapId;
     private readonly Counter<long> _snapshotBytes;
     private readonly Counter<long> _snapshotEntitiesShed;
+    private readonly Counter<long> _snapshotAnchorMissing;
     private readonly Counter<long> _snapshotDeferredByInterval;
 #pragma warning disable CS0414 // held so the gauge stays registered for the meter's lifetime
     private readonly ObservableGauge<int> _snapshotMaxStateAge;
@@ -200,6 +201,16 @@ public sealed class GameMetrics : IDisposable
                          "deferral never touches the budget's bookkeeping -- so reading one " +
                          "for the other reports a healthy zero while entities go seconds " +
                          "without an update.");
+
+        _snapshotAnchorMissing = _meter.CreateCounter<long>(
+            "gameserver.snapshots.anchor_missing",
+            description: "Viewer gathers SKIPPED because the viewer's own entity could not " +
+                         "be resolved, so there was no position to centre its area of " +
+                         "interest on. Brief non-zero around join and despawn is normal; " +
+                         "sustained growth means a connection has outlived its entity. " +
+                         "Before #385 this case was silent and centred the AOI on (0,0) -- " +
+                         "the most populated point on the map -- so the client was sent a " +
+                         "busy, plausible view of somewhere it was not.");
 
         _snapshotEntitiesShed = _meter.CreateCounter<long>(
             "gameserver.snapshots.entities_shed",
@@ -550,6 +561,16 @@ public sealed class GameMetrics : IDisposable
     /// nobody reads is not a check -- so these also surface on <c>/status</c>, not only in
     /// a Prometheus scrape.
     /// </remarks>
+    /// <summary>
+    /// Records viewer gathers skipped this tick for want of a resolvable anchor (#385).
+    /// </summary>
+    public void RecordSnapshotAnchorMissing(long count)
+    {
+        if (count <= 0) return;
+        _snapshotAnchorMissing.Add(count, _mapTags);
+        Interlocked.Add(ref _snapshotAnchorMissingTotal, count);
+    }
+
     public void RecordSnapshotBudget(long bytes, long entitiesShed, long removalsDeferred, int maxShedAge)
     {
         if (bytes > 0)
@@ -575,6 +596,7 @@ public sealed class GameMetrics : IDisposable
     private long _snapshotDeferredByIntervalTotal;
     private long _snapshotBytesTotal;
     private long _snapshotEntitiesShedTotal;
+    private long _snapshotAnchorMissingTotal;
     private long _snapshotRemovalsDeferredTotal;
 
     /// <summary>Snapshot bytes written to sockets since start. Mirrors the counter for <c>/status</c>.</summary>
@@ -582,6 +604,17 @@ public sealed class GameMetrics : IDisposable
 
     /// <summary>Entity updates deferred by the downlink budget since start.</summary>
     public long SnapshotEntitiesShed => Interlocked.Read(ref _snapshotEntitiesShedTotal);
+
+    /// <summary>
+    /// Viewer gathers skipped because the viewer's own entity could not be resolved.
+    /// </summary>
+    /// <remarks>
+    /// Non-zero briefly around join and despawn is normal. Sustained growth means a
+    /// connection has outlived its entity and is being sent nothing — which before #385
+    /// instead centred its area of interest on the world origin and sent it a plausible
+    /// view of somewhere else entirely.
+    /// </remarks>
+    public long SnapshotAnchorMissing => Interlocked.Read(ref _snapshotAnchorMissingTotal);
 
     /// <summary>Despawn notifications deferred by the downlink budget since start.</summary>
     public long SnapshotRemovalsDeferred => Interlocked.Read(ref _snapshotRemovalsDeferredTotal);

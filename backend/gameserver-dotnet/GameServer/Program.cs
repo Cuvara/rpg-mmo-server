@@ -1068,6 +1068,7 @@ metricsEndpoint?.SetStatusProvider(() =>
         SnapshotMaxStateAge = metrics.MaxStateAge,
         SnapshotBytes = metrics.SnapshotBytes,
         SnapshotEntitiesShed = metrics.SnapshotEntitiesShed,
+        SnapshotAnchorMissing = metrics.SnapshotAnchorMissing,
         SnapshotRemovalsDeferred = metrics.SnapshotRemovalsDeferred,
         SnapshotMaxShedAge = metrics.MaxShedAge,
         TransfersRejected = metrics.TransfersRejected,

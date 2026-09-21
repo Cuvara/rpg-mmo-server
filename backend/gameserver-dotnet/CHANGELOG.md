@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A connection whose own entity cannot be resolved is now skipped and counted, instead of
+  being sent a snapshot centred on the world origin** (#385).
+
+  `Connection.GatherSnapshotView` discarded the result of `WorldReader.TryGetSnapshotAnchor`.
+  On failure that leaves `anchor` at `default(Vec2)` — `(0, 0)` — and the connection's entire
+  area of interest was then centred there.
+
+  The origin is the worst possible place for that to happen: enemies spawn on a ring of
+  radius 13 about it and walk inward, so it is the single most populated point on a
+  1000x1000 map. The affected connection therefore received a **busy, plausible** world —
+  six mobs animating correctly, snapshots at full rate, `snapshot_entities_shed` at zero —
+  in which the only thing wrong was that none of it was near the player. Nothing on either
+  side reported anything.
+
+  The gather now returns `false` and stages nothing, before the buffer swap, so the write
+  task is undisturbed and the next tick retries. The condition is logged once per connection
+  (the gather runs at tick rate) and counted in **`snapshot_anchor_missing`**, new on
+  `/status` and as `gameserver.snapshots.anchor_missing`.
+
+  **The other `Try*` call sites in this path were audited and are correct**: in
+  `InputHandler`, `AsyncSaver`, `ConnectionManager` and `SnapshotDeltaState` a null or zero
+  default genuinely means "not found", and each caller handles it. This one was the only
+  site where the default was both meaningful and wrong.
+
+
 ### Measured
 
 - **The enemy frozen-frame baseline is fully partitioned: churn is all of it** —

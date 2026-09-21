@@ -405,6 +405,14 @@ public sealed class ServerStatus
     public long SnapshotEntitiesShed { get; set; }
 
     /// <summary>
+    /// Viewer gathers skipped because the viewer's own entity could not be resolved.
+    /// Brief non-zero around join/despawn is normal; sustained growth means a connection
+    /// has outlived its entity (#385).
+    /// </summary>
+    [JsonPropertyName("snapshot_anchor_missing")]
+    public long SnapshotAnchorMissing { get; set; }
+
+    /// <summary>
     /// Despawn notifications deferred by the downlink budget since start. Should stay at
     /// zero: despawns outrank every non-self update, so this moves only when the budget is
     /// too small for the despawn list alone.
