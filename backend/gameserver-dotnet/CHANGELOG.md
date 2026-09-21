@@ -8,6 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The enemy-AI and bot environment variables were not passed to the container.** Compose's
+  `environment:` block is the whole list — a variable absent from it is not forwarded however
+  carefully it is set in `.env` or the shell. The server then silently takes its built-in
+  default and `/status` reports a configuration nobody chose.
+
+  Found by setting `GAMESERVER_ENEMY_MAX_PER_PLAYER=25` in `.env`, restarting, and reading
+  `/status` back: it still said `max=30+45/player`. Both `gameserver-dotnet` and
+  `gameserver-dotnet-map02` are fixed; **map_02 declares its own `environment:` block and
+  inherits nothing**, so omitting it there would have recreated the same trap on one service.
+
+  This has happened on this project before, with `GAMESERVER_IMPORTANCE_W_*` — an entire
+  measurement arm ran against defaults while the operator believed the weights applied. The
+  comment now says so next to the list, because the failure is invisible from the compose
+  file alone.
+
+### Fixed
+
 - **`snapshot_entities_gathered`, `snapshot_max_gather` and `snapshot_anchor_missing` could
   only ever report 0.** All three were accumulated during the gather and then zeroed a few
   lines later by a per-tick reset block that sat *between* the code writing them and the call
