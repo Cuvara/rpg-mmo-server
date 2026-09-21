@@ -3093,3 +3093,81 @@ It was caught by reading `field_delta` back off `/status` instead of trusting th
 that was edited. For a measurement whose entire value is the difference between two arms,
 reading the flag back off the running server is not a nicety — it is the only thing standing
 between a real control and two copies of one number.
+
+---
+
+## Part XIX — the enemy frozen-frame baseline, partitioned (2026-09-21)
+
+Part XVII established spawn churn as the mechanism behind the 3.9% enemy frozen-frame
+figure and said plainly that the magnitude did not close: a one-interval hold predicted
+1.6%, and the measurement implied ~164ms. §51 deferred the quantitative test.
+
+This is that test. It also required fixing the measurement protocol first, for a reason
+Part XVII could not have known.
+
+### §55 — the protocol, and why the old runs could not have answered this
+
+Enemies spawn on a ring of radius 13 about the **world origin** and despawn at 2.5, while
+the area of interest is radius 50 about the **player**. An observer beyond ~63 units
+therefore sees **zero enemies, permanently and correctly**, with every counter on both
+sides clean — and the probe prints no enemy rows at all, which reads as an instrument
+fault rather than an empty AOI.
+
+Player position is persisted, so a device id replayed across sessions drifts out of the only
+populated region of the map and never returns. Three long-running test clients measured
+**215 units** out. A fresh device id measured **5.9** and saw all six mobs on the first
+frame.
+
+So every enemy figure published before this Part was conditional on a variable nobody was
+recording. The protocol now is: **a fresh device id per run**, and the observer's distance
+from origin logged on every line (Cuvara/Netcode#162).
+
+### §56 — fresh versus steady
+
+Fresh device ids, observer median distance **10.8**, field-delta on, schedule `off`. 119
+enemy report windows across three clients, **333,587 enemy frames**.
+
+| class | frozen, FRESH (first 0.25s) | frozen, STEADY | n steady |
+|---|---|---|---|
+| local player | 0.00% (n=9) | **0.02%** | 97,925 |
+| remote player | 16.67% (n=18) | **0.56%** | 132,346 |
+| **enemy** | **38.16%** (n=21,624) | **0.42%** | 311,963 |
+
+**Enemy steady-state is 0.42% against the remote player's 0.56%** — indistinguishable, and
+if anything lower. All of the enemy chop lives in the first quarter-second of each mob's
+life.
+
+The outcome that would have been interesting did not happen. Had `steady` come out near
+2.3% there would have been a second, steady-state source that none of the hypotheses in
+#371 covered. There is not one. Established entities are as smooth as any other remote
+entity.
+
+### §57 — the magnitude closes, three ways
+
+| check | predicted | observed |
+|---|---|---|
+| fresh share of a 4.2s life | `0.25 / 4.2` = 5.95% | `21,624 / 333,587` = **6.48%** |
+| overall frozen share | `0.0648 × 38.16% + 0.9352 × 0.42%` = 2.86% | median **2.40%** |
+| implied hold | — | `0.3816 × 0.25s` = **95ms**, or `0.0286 × 4.2s` = **120ms** |
+
+**The hold is 1.4–1.8 send intervals** (66.7ms at 15Hz), not the ~164ms Part XVII inferred.
+That inference attributed the whole 3.9% to one hold spread across the lifetime, with no
+fresh/steady split to constrain it, and landed in the 2–3 sample buffer range by coincidence
+of that assumption. Measured directly, the hold is one interval plus part of a second —
+which is what "wait for a second sample before you can interpolate" predicts without a full
+buffer fill.
+
+Part XVII's 3.9% is superseded rather than contradicted: it came from a build and a
+population whose observer position was not recorded. The controlled figure is **2.40%
+median**.
+
+### §58 — what is not claimed
+
+That 38% fresh-frame chop is acceptable. It is **not a defect** — a freshly spawned entity
+has exactly one sample and cannot be interpolated — but with mobs churning every 4.2s it is
+visible, and reducing it is a design question (introduce entities carrying two samples, or
+hold them unrendered for one interval) rather than a bug fix.
+
+Nor does this Part say anything about a population where mobs outnumber players. Three
+players and six mobs is the shape available; the churn rate that drives the whole result is
+`EnemiesPerWave 2 / WaveIntervalSec 1.5` on a scaffolding spawner.
