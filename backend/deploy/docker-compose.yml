@@ -515,8 +515,25 @@ services:
       GAMESERVER_BOTS: ${GAMESERVER_BOTS:-}
       GAMESERVER_BOT_SPREAD: ${GAMESERVER_BOT_SPREAD:-}
       GAMESERVER_BOT_ENGAGE_RANGE: ${GAMESERVER_BOT_ENGAGE_RANGE:-}
+      # Per-bot stats. These four were declared, documented and strictly parsed but
+      # reached NEITHER service until the compose passthrough gate found them
+      # (ComposeEnvPassthroughTests) -- settable in .env and silently ignored, with
+      # the server running its compiled default and /status reporting that default
+      # truthfully. That gate is now what keeps this list in step; the comment is a
+      # courtesy, not the mechanism.
+      GAMESERVER_BOT_HP: ${GAMESERVER_BOT_HP:-}
+      GAMESERVER_BOT_ATTACK: ${GAMESERVER_BOT_ATTACK:-}
+      GAMESERVER_BOT_DEFENSE: ${GAMESERVER_BOT_DEFENSE:-}
+      GAMESERVER_BOT_SPEED: ${GAMESERVER_BOT_SPEED:-}
       GAMESERVER_ENEMY_ATTACKS: ${GAMESERVER_ENEMY_ATTACKS:-}
       GAMESERVER_ENEMY_ATTACKERS_PER_TARGET: ${GAMESERVER_ENEMY_ATTACKERS_PER_TARGET:-}
+      # NOT a knob that goes below 0.5s. An enemy attack travels the ordinary input
+      # path, so InputHandler charges it the same GameConstants.AttackCooldownMs
+      # (500ms) it charges a player: the effective interval is max(this, 0.5s) and a
+      # smaller value buys nothing. GAMESERVER_ENEMY_ATTACKERS_PER_TARGET is the lever
+      # for a deadlier fight -- worst case is
+      # `ATTACKERS_PER_TARGET x max(1, ENEMY_ATTACK - player defense) / interval`
+      # damage per second, i.e. 6/s and ~17s to die at these defaults.
       GAMESERVER_ENEMY_ATTACK_INTERVAL: ${GAMESERVER_ENEMY_ATTACK_INTERVAL:-}
       GAMESERVER_PLAYER_RESPAWN: ${GAMESERVER_PLAYER_RESPAWN:-}
       # /metrics + /healthz. Binds the wildcard, so it answers on any Host —

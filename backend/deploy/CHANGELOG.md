@@ -6,6 +6,41 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **Four bot-stat knobs reached neither game-server service.** `GAMESERVER_BOT_HP`,
+  `GAMESERVER_BOT_ATTACK`, `GAMESERVER_BOT_DEFENSE` and `GAMESERVER_BOT_SPEED` are declared
+  by the server, documented in `gameserver-dotnet/docs/README.md` and strictly parsed, and
+  were absent from the `environment:` block of both `gameserver-dotnet` (in
+  `docker-compose.yml`) and `gameserver-dotnet-map02` (in `docker-compose.override.yml`) —
+  so setting any of them in `.env` reached nothing and the bots ran compiled defaults while
+  the manifest said otherwise. Added to both.
+
+  This is the **fourth** instance of the same failure in this file's history, after the
+  `GAMESERVER_IMPORTANCE_W_*` weights and the `GAMESERVER_ENEMY_ATTACK*` family. It was not
+  found by review: it was found by the new
+  `gameserver-dotnet` test `ComposeEnvPassthroughTests` on its first run, which is the point
+  of that test. A comment above each block has now failed four times, so the link between
+  "add a knob" and "list it in two services" is mechanical from here.
+
+- **`gameserver-dotnet-map02` never received the four importance weights.**
+  `GAMESERVER_IMPORTANCE_W_{DISTANCE,CHANGE,TYPE,COMBAT}` were added to `docker-compose.yml`
+  when that gap was first found and never to `docker-compose.override.yml`, so setting one
+  in `.env` changed map_01's replication policy and silently left map_02 running the
+  profile's own weights. **Two maps running different policies from one file is worse than
+  the original gap**, because the knob demonstrably works and only works somewhere — the
+  exact reason the passthrough gate checks both services rather than one. Added to map_02.
+
+  This is the **fifth** instance, and it only became visible once the four names were
+  declared as `const string` in `ImportanceSettings`: they had been assembled from a prefix
+  and a suffix, so nothing — no reflection, no grep — could enumerate them.
+
+- **`GAMESERVER_ENEMY_ATTACK_INTERVAL` now carries its floor where an operator will read
+  it.** An enemy attack travels the ordinary input path, so `InputHandler` charges it the
+  same 500 ms `GameConstants.AttackCooldownMs` it charges a player: the effective interval
+  is `max(knob, 0.5s)` and a smaller value buys nothing. The knob reads like it would work,
+  which makes it look like a broken setting rather than a documented floor, so both compose
+  files now say so beside the variable along with the worst-case damage-per-second
+  arithmetic and a pointer to `GAMESERVER_ENEMY_ATTACKERS_PER_TARGET` as the actual lever.
+
 - **`docker-compose.yml` never passed `GAMESERVER_IMPORTANCE_W_{DISTANCE,CHANGE,TYPE,COMBAT}`
   to the game server**, while the comment directly above `GAMESERVER_IMPORTANCE` documented
   all four. Compose forwards only what the service lists, so setting one in `.env` reached

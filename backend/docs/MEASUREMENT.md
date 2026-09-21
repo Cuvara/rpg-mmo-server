@@ -60,6 +60,23 @@ Incidents:
 same second are silently tested against the *previous* binary. A mutation pass that reported
 three survivors was entirely false for this reason. Force a rebuild between mutations.
 
+**Assert what the failure message SAYS, not just that the test went red.** A diagnostic can
+survive a mutation by naming the *wrong* reason, and that is worse than one that fails —
+it sends the next reader to look at something that is not there.
+
+- The compose-passthrough gate's parser raises a distinct exception for each of four
+  failure modes (service absent, `environment:` block absent, block parsed as empty, list
+  form). Its test asserted that the message contained `"environment"`. Deleting the
+  *missing-block* throw left that test **green**: the *empty-block* throw caught the same
+  input and reported "has an `environment:` block this reader parsed as empty" — for a
+  service that had no such block at all. The substring matched; the sentence was false.
+  Fixed by asserting the phrase that **distinguishes** each mode. Found only because the
+  mutation pass read the message rather than the red/green.
+
+The general form: when a mutation is expected to kill a test and does, check it killed it
+*for the reason you intended*. A test that goes red down an unrelated path is a test you do
+not have.
+
 ---
 
 ## 3. Measure the object you are talking about

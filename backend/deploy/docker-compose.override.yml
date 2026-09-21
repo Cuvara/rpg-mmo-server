@@ -63,6 +63,19 @@ services:
       # GAMESERVER_REPLICATION_SCHEDULE stays off -- that half halves player update rate
       # (BENCHMARK.md Part XIV 44) and is not a dev-box decision.
       GAMESERVER_IMPORTANCE: ${GAMESERVER_IMPORTANCE:-balanced}
+      # The four per-factor overrides. docker-compose.yml gained these when the gap
+      # was first found; map_02 did not, so for as long as they have existed an
+      # operator setting GAMESERVER_IMPORTANCE_W_TYPE in .env changed map_01's
+      # replication policy and silently left map_02 on the profile's own weights --
+      # the two maps running different policies from one file, which is harder to
+      # find than the original gap because the knob demonstrably WORKS, just not
+      # everywhere. Found by ComposeEnvPassthroughTests once these names were
+      # declared as constants; they are assembled from a prefix and a suffix in
+      # ImportanceSettings, so until then no reflection or grep could see them.
+      GAMESERVER_IMPORTANCE_W_DISTANCE: ${GAMESERVER_IMPORTANCE_W_DISTANCE:-}
+      GAMESERVER_IMPORTANCE_W_CHANGE: ${GAMESERVER_IMPORTANCE_W_CHANGE:-}
+      GAMESERVER_IMPORTANCE_W_TYPE: ${GAMESERVER_IMPORTANCE_W_TYPE:-}
+      GAMESERVER_IMPORTANCE_W_COMBAT: ${GAMESERVER_IMPORTANCE_W_COMBAT:-}
       GAMESERVER_REPLICATION_SCHEDULE: ${GAMESERVER_REPLICATION_SCHEDULE:-off}
       METRICS_ADDR: ":9101"
       REDIS_ADDR: redis:6379
@@ -101,8 +114,25 @@ services:
       GAMESERVER_BOTS: ${GAMESERVER_BOTS_MAP02:-${GAMESERVER_BOTS:-}}
       GAMESERVER_BOT_SPREAD: ${GAMESERVER_BOT_SPREAD:-}
       GAMESERVER_BOT_ENGAGE_RANGE: ${GAMESERVER_BOT_ENGAGE_RANGE:-}
+      # Per-bot stats. These four were declared, documented and strictly parsed but
+      # reached NEITHER service until the compose passthrough gate found them
+      # (ComposeEnvPassthroughTests) -- settable in .env and silently ignored, with
+      # the server running its compiled default and /status reporting that default
+      # truthfully. That gate is now what keeps this list in step; the comment is a
+      # courtesy, not the mechanism.
+      GAMESERVER_BOT_HP: ${GAMESERVER_BOT_HP:-}
+      GAMESERVER_BOT_ATTACK: ${GAMESERVER_BOT_ATTACK:-}
+      GAMESERVER_BOT_DEFENSE: ${GAMESERVER_BOT_DEFENSE:-}
+      GAMESERVER_BOT_SPEED: ${GAMESERVER_BOT_SPEED:-}
       GAMESERVER_ENEMY_ATTACKS: ${GAMESERVER_ENEMY_ATTACKS:-}
       GAMESERVER_ENEMY_ATTACKERS_PER_TARGET: ${GAMESERVER_ENEMY_ATTACKERS_PER_TARGET:-}
+      # NOT a knob that goes below 0.5s. An enemy attack travels the ordinary input
+      # path, so InputHandler charges it the same GameConstants.AttackCooldownMs
+      # (500ms) it charges a player: the effective interval is max(this, 0.5s) and a
+      # smaller value buys nothing. GAMESERVER_ENEMY_ATTACKERS_PER_TARGET is the lever
+      # for a deadlier fight -- worst case is
+      # `ATTACKERS_PER_TARGET x max(1, ENEMY_ATTACK - player defense) / interval`
+      # damage per second, i.e. 6/s and ~17s to die at these defaults.
       GAMESERVER_ENEMY_ATTACK_INTERVAL: ${GAMESERVER_ENEMY_ATTACK_INTERVAL:-}
       GAMESERVER_PLAYER_RESPAWN: ${GAMESERVER_PLAYER_RESPAWN:-}
     ports:
