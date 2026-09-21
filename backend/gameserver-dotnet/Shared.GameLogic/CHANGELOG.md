@@ -6,6 +6,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+- **BREAKING (0.6.0): the ten-argument `EntitySnapshotData` constructor taking
+  `changedFields` positionally.** Pass `changedFields:` by name, or use the eleven-argument
+  constructor with `actionSeq:` as well.
+
+  Its doc comment claimed source compatibility "with callers that predated `ActionSeq`" —
+  but those callers passed **nine** arguments, and that overload still exists. The
+  ten-argument form was new API introduced in the *same release* as the field it served, so
+  it had no caller to be compatible with. What it actually did was capture every
+  pre-existing ten-argument call, whose tenth argument was `ActionSeq`.
+
+  `WorldState.Apply` in the Unity client was one such call. It compiled clean, and the
+  counter landed in `changedFields` — where **a counter of 12 is a mask asserting
+  `Hp|MaxHp` are the only fields present**, so the next merge reconstructed the entity from
+  stale X, Y, Speed, Facing and Action while believing it was correct. Nothing validates a
+  mask for plausibility, and nothing should: a mask comes from an encoder, not from a
+  mis-bound argument. Only an action-repeat test objected (Cuvara/Netcode#159; the call
+  site was fixed in Netcode#156).
+
+  Removing it turns that mistake into a compile error. Verified: the removal broke exactly
+  one call site in this repo — the snapshot-merger golden test — which now names its
+  arguments. The Unity client's single call site already names them.
+
+  **Known gap this surfaced**: the golden-vector corpus does not exercise `ActionSeq` at
+  all, which is why the field could be lost at the merge without the conformance gate
+  noticing. Worth a vector, tracked separately rather than folded in here — changing the
+  shared corpus changes what both sides must agree on.
+
 ### Added
 - **`GameEventData` / `GameEventType` / `GameEventFlags`** — edge-triggered occurrences in
   SIMULATION terms, naming entities by id rather than by wire handle. Interning is a property
