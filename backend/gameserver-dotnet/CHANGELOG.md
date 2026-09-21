@@ -8,6 +8,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Measured
 
+- **The enemy frozen-frame baseline is fully partitioned: churn is all of it** —
+  `backend/docs/BENCHMARK.md` Part XIX (§55–58), closing #371.
+
+  119 enemy report windows, **333,587 enemy frames**, fresh device ids with the observer
+  inside the enemy disc (median distance 10.8):
+
+  | class | frozen FRESH (first 0.25s) | frozen STEADY |
+  |---|---|---|
+  | local player | 0.00% | **0.02%** |
+  | remote player | 16.67% | **0.56%** |
+  | enemy | **38.16%** | **0.42%** |
+
+  - **Enemy steady-state (0.42%) is indistinguishable from a remote player's (0.56%).** The
+    second steady-state source that would have been the interesting outcome does not exist;
+    established mobs are as smooth as any other remote entity.
+  - The magnitude closes three ways: fresh share predicted 5.95% vs observed 6.48%; overall
+    predicted 2.86% vs observed median 2.40%; implied hold **95–120ms**, i.e. 1.4–1.8 send
+    intervals — **not** the ~164ms Part XVII inferred without a fresh/steady split.
+  - Part XVII's 3.9% is superseded, not contradicted: it was measured without recording
+    observer position, which turned out to be the variable that mattered most.
+  - **Protocol change, and it was a prerequisite.** Enemies are origin-anchored (ring of
+    radius 13 about (0,0)) while AOI is 50 about the player, so an observer beyond ~63 units
+    correctly sees none and the probe prints no enemy rows at all — indistinguishable from
+    an instrument fault. Player position is persisted, so replayed device ids drift out and
+    never return; three test clients measured 215 units out. Every enemy-related measurement
+    now uses a fresh device id per run with observer distance logged (Cuvara/Netcode#162).
+
+
+### Measured
+
 - **Field-level delta saves 32.2%, not the 73% that was circulating** —
   `backend/docs/BENCHMARK.md` Part XVIII (§52–54), the first measurement of the feature
   against a control rather than against a different build.
