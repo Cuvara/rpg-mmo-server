@@ -206,6 +206,37 @@ as `enemy_ai` (and the derived `enemy_ai_max_now`) on `/status`, because an
 already-allocated Agones GameServer keeps the environment it was created with and a fleet
 update reaches only new pods.
 
+### Adding a knob: strict parsing is only half of it
+
+A `GAMESERVER_*` knob is **two** things — the constant the server parses, and a line in the
+`environment:` block of **every** compose service that runs the game server. Docker forwards
+nothing a service did not declare, so a knob with only the first half is documented,
+strictly parsed, settable in `deploy/.env` and **silently ignored**: the server runs its
+compiled default, `/status` reports that default truthfully, and the strict parser cannot
+help because it never sees a value to refuse. There is no log line, no counter and no wire
+field that differs.
+
+That has happened three times here. `GameServer.Tests/Deploy/ComposeEnvPassthroughTests.cs`
+is now the mechanical link: it reflects over every `GAMESERVER_*` constant the assembly
+declares and fails `dotnet test` if any is missing from `gameserver-dotnet` in
+`backend/deploy/docker-compose.yml` or from `gameserver-dotnet-map02` in
+`backend/deploy/docker-compose.override.yml`. **Both**, because map_02 declares its own block
+and inherits nothing — a one-service fix leaves the two maps reading the same `.env`
+differently, which is harder to find than the original gap. Write each entry as
+`NAME: ${NAME:-}` so an unset variable stays unset. A knob that genuinely should not be
+passed through goes in that file's `Excluded` dictionary **with a reason**; it is empty
+today.
+
+**The gate's scope is narrower than it sounds.** It covers names declared as
+`const string` (27 today). It does **not** cover names read from an inline literal (25
+today, including `GAMESERVER_FIELD_DELTA` and `GAMESERVER_TICK_RATE` — several of those are
+per-service values set literally in compose, not forwarded from `.env`), it does not cover
+names built by concatenation such as `GAMESERVER_IMPORTANCE_W_{DISTANCE,CHANGE,TYPE,COMBAT}`
+(which exist nowhere as a whole string, so the gate would *not* have caught the first of the
+three incidents), and it does not read `deploy/k8s/app/50-fleet-map.yaml`, which has the
+same shape of gap. Declaring a new knob's name as a constant is what brings it under the
+gate.
+
 
 **Bots count as players everywhere the simulation asks the world**, which is the point and
 also the thing to know before turning them on. The enemy population cap is

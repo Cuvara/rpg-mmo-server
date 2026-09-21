@@ -21,6 +21,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reached a container, three times.
 
   `backend/TEAM.md` now carries the short form as a mandatory standard and links both.
+- **A test that fails when a `GAMESERVER_*` knob is not plumbed into both compose
+  services** — `GameServer.Tests/Deploy/ComposeEnvPassthroughTests.cs`.
+
+  A knob is two things: the constant the server parses, and a line in each service's
+  `environment:` block. Docker forwards nothing a service did not declare, so a knob with
+  only the first half is documented, strictly parsed, settable in `deploy/.env` and
+  **silently ignored** — the server runs its compiled default and `/status` reports that
+  default truthfully. The strict parser cannot help, because it never sees a value to
+  refuse, and there is no log line, counter or wire field that differs.
+
+  That had happened three times, each caught by hand after the fact, and each file carries
+  a comment telling the next person to keep the list in step. **On its first run the gate
+  found a fourth nobody had noticed**: `GAMESERVER_BOT_HP`, `_ATTACK`, `_DEFENSE` and
+  `_SPEED` reached *neither* service and had not since they were added. Fixed in the same
+  change.
+
+  Both services, because `gameserver-dotnet-map02` declares its own block and inherits
+  nothing — a one-service fix leaves the two maps reading the same `.env` differently,
+  which is harder to find than the original gap.
+
+  **It is a test rather than a CI job**, deliberately: it runs on every `dotnet test` and
+  fails for the person who just added the knob, who is the one who can fix it in one line.
+  A CI job reports the same thing after a push, to a pipeline that is per-module and might
+  not even run for a gameserver change. The cost is that the test project reads two files
+  outside its own directory; it resolves them by walking up from the test assembly, the
+  same way `GoldenVectors` already does, and **throws naming the path** if they are not
+  there. It never skips: those files are committed to this repository, so their absence is
+  this test being broken, not an environment that cannot run it.
+
+  **It cannot pass vacuously.** The declared set comes from reflection over the assembly,
+  and `DeclaredEnvNames_IsNotEmpty_AndStillFindsEveryKnownSettingsType` fails if that set
+  is empty or has lost any of three sentinels from three different settings types. This is
+  the load-bearing assertion: mutation-verified, a build where the reflection matches
+  nothing leaves both gate arms **passing** and only that test red. The compose reader
+  likewise throws rather than returning an empty or partial answer — missing service,
+  missing `environment:` block, block parsed as empty, and list form each raise a distinct
+  message, and the test asserts the *distinguishing* phrase for each. A looser expectation
+  let a mutation survive by reporting the wrong cause.
+
+  **Scope, stated because a partial gate that reads as a total one is worse than none.** It
+  covers the 27 names declared as `const string`. It does not cover the 25 read from inline
+  literals, nor names built by concatenation — `GAMESERVER_IMPORTANCE_W_*` is assembled
+  from a prefix and four suffixes and exists nowhere as a whole string, so **this gate would
+  not have caught the first of the three incidents**. It does not read the k8s manifests,
+  which have the same shape of gap. Declaring a knob's name as a constant is what brings it
+  under the gate.
+
+  Exclusions are an explicit `name -> reason` dictionary, empty today, validated so a stale
+  entry for a renamed knob fails instead of quietly widening the hole. Not a name pattern:
+  a pattern excludes knobs nobody considered.
+
 
 ### Fixed
 
