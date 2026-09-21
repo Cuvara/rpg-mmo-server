@@ -51,6 +51,8 @@ public static class ArchAotHints
         // [EcsComponent] wherever they are declared.
         new GameServer.Scaffolding.EnemySpawnState[1],
         new GameServer.Scaffolding.LoadTestState[1],
+        new GameServer.Scaffolding.BotTag[1],
+        new GameServer.Scaffolding.BotSpawnState[1],
 
         // Arch stores the chunk's entity handles in an Entity[] alongside the
         // component arrays, allocated the same Type-driven way.

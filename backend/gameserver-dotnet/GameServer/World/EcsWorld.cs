@@ -136,6 +136,26 @@ public enum EntityTags
 
     /// <summary>Driven by the enemy AI systems. Adds <see cref="EnemyAi"/>.</summary>
     EnemyAi = 1,
+
+    /// <summary>
+    /// A synthetic player driven by <c>BotPlayerSpawner</c>. Adds
+    /// <see cref="GameServer.Scaffolding.BotTag"/> <b>on top of</b> the player archetype,
+    /// so a bot is a player everywhere it should be — it is in <see cref="PlayerTag"/>
+    /// queries, it appears in snapshots, enemies chase it, and it is a target a real
+    /// player can attack.
+    ///
+    /// <para><b>The tag exists for the one place a bot must NOT be a player:
+    /// persistence.</b> <see cref="PlayerStates"/> is swept by <c>AsyncSaver</c> and every
+    /// entry is written to the game database keyed by its id, so without this tag a
+    /// development server with bots on would quietly create a player row per bot, per
+    /// restart, for ever. That is the kind of defect that compiles, passes CI, and is
+    /// found months later in the data — see <see cref="PersistablePlayerStates"/>.</para>
+    ///
+    /// <para>A tag rather than an id-prefix test, deliberately: a prefix convention is
+    /// enforced by nothing, and the failure when someone spawns a bot with the wrong id
+    /// is silent and in the database.</para>
+    /// </summary>
+    Bot = 2,
 }
 
 public sealed class EcsWorld : IDisposable
@@ -1801,6 +1821,52 @@ public sealed class EcsWorld : IDisposable
     }
 
     /// <summary>
+    /// Player-type entities that may be written to the player store: every
+    /// <see cref="PlayerStates"/> entry except the synthetic ones carrying
+    /// <see cref="GameServer.Scaffolding.BotTag"/>.
+    ///
+    /// <para><b>Why this is a separate method and not a filter at the call site.</b>
+    /// <c>AsyncSaver.SaveAllAsync</c> persists every entry it is handed, keyed by id. A
+    /// bot is a player in the archetype — deliberately, so enemies chase it and clients
+    /// render it — which means the periodic save and the shutdown save would both create a
+    /// player row per bot. Nothing would fail: the saves succeed, the metrics count them
+    /// as successes, and the rows are only ever noticed by somebody reading the table.
+    /// Putting the exclusion behind a named method means the persistence path cannot
+    /// acquire the bug by forgetting a predicate.</para>
+    /// </summary>
+    public List<EntityState> PersistablePlayerStates()
+    {
+        var result = new List<EntityState>();
+
+        _rwLock.EnterReadLock();
+        _iterationDepth++;
+        try
+        {
+            // _playersQuery, never _arch.Query(...) — see ScanRangeLocked and #176. The bot
+            // exclusion is a per-entity Has<> rather than a second WithNone query, because a
+            // new read-path query has to be pre-resolved into _readQueries and refreshed on
+            // every write-scope exit; this needs neither and cannot fall out of step with the
+            // archetype it filters.
+            foreach (ref var chunk in _playersQuery.GetChunkIterator())
+            {
+                int count = chunk.Count;
+                for (int i = 0; i < count; i++)
+                {
+                    if (_arch.Has<GameServer.Scaffolding.BotTag>(chunk.Entity(i))) continue;
+                    result.Add(ComposeFromChunk(ref chunk, i));
+                }
+            }
+        }
+        finally
+        {
+            _iterationDepth--;
+            _rwLock.ExitReadLock();
+        }
+
+        return result;
+    }
+
+    /// <summary>
     /// Apply any structural changes (spawn, despawn, archetype move) that were
     /// requested while a query was being iterated.
     ///
@@ -2072,6 +2138,7 @@ public sealed class EcsWorld : IDisposable
         }
 
         bool isEnemy = (tags & EntityTags.EnemyAi) != 0;
+        bool isBot = (tags & EntityTags.Bot) != 0;
 
         // Assigned once per distinct id string, for the life of the world — see _stableIds.
         if (!_stableIds.TryGetValue(state.Id, out int stable))
@@ -2090,6 +2157,17 @@ public sealed class EcsWorld : IDisposable
                 new Locomotion(state.Speed),
                 new InputCursor(state.LastInputTick),
                 default(EnemyAi))
+            : isBot
+            ? _arch.Create(
+                new EntityIdRef(state.Id, stable),
+                new EntityKind(state.Type),
+                new Position(state.Position),
+                default(Health),
+                default(Combat),
+                new Locomotion(state.Speed),
+                new InputCursor(state.LastInputTick),
+                default(PlayerTag),
+                default(GameServer.Scaffolding.BotTag))
             : isPlayer
             ? _arch.Create(
                 new EntityIdRef(state.Id, stable),

@@ -106,6 +106,10 @@ set. Flags are **space-separated** (`--addr :9000`).
 | *(none)* | `GAMESERVER_ENEMY_MIN_SPAWN_DISTANCE` | `8` | Closest an enemy is placed to **any** live player. The spawn distance only guarantees separation from the anchor; in a crowd a placement can land in a bystander's lap, and map-edge clamping can pull one back across it. Best-effort: 6 samples of the circle, then the last candidate is taken anyway, because a wave that silently spawns fewer entities the tighter the crowd gets is the threadbare fight returning through the door marked "safety check". **Must be strictly less than `GAMESERVER_ENEMY_SPAWN_DISTANCE`** or the server exits 2 — at or above it, every candidate including the one it was measured from is rejected |
 | *(none)* | `GAMESERVER_ENEMY_CONTACT_RANGE` | `1` | How close a chaser closes before it stops advancing. Inside `GameConstants.AttackRange` (3.0) so the player can hit what is standing on them, and non-zero so a ring of chasers does not jitter across the target every tick |
 | *(none)* | `GAMESERVER_ENEMY_HP` / `_ATTACK` / `_DEFENSE` / `_SPEED` | `16` / `5` / `2` / `2.5` | Per-enemy stats, unchanged from the compiled-in values |
+| *(none)* | `GAMESERVER_BOTS` | `0` (**off**) | **Synthetic players.** `N > 0` spawns N bots: real player-type entities that move and attack through the ordinary input path, so clients render them, enemies chase them, and they are legitimate targets. A battle royale is a crowd of *players* as much as of enemies, and this project can only put three real clients on a map. **They are development/demo scaffolding**: not persisted, no connection, no capacity, and not an AI to ship to players. Logged as a startup WARNING whenever non-zero, because a busy map with `players_online: 3` otherwise reads as a broken counter |
+| *(none)* | `GAMESERVER_BOT_SPREAD` | `120` | Radius of the disc bots are scattered over at startup. Deliberately wide: bots are what the enemy spawner anchors on, so where the bots are is where the fight is, and clustering them rebuilds the conveyor belt with extra steps |
+| *(none)* | `GAMESERVER_BOT_ENGAGE_RANGE` | `40` | How far a bot travels to engage an enemy. Beyond it the bot wanders — a "nearest enemy anywhere" rule collapses every bot onto whichever corner is busiest |
+| *(none)* | `GAMESERVER_BOT_HP` / `_ATTACK` / `_DEFENSE` / `_SPEED` | `100` / `10` / `5` / `4` | Per-bot stats. The defaults match a real player's except for speed, which is higher so bots visibly circulate |
 | `--jwt-secret` | `JWT_SECRET` | *(empty)* | HS256 secret for the Nakama→client auth token. Only used here as the `JOIN_TOKEN_SECRET` fallback |
 | `--join-token-secret` | `JOIN_TOKEN_SECRET` | *(empty → `JWT_SECRET`)* | HS256 secret the **gateway** signs join tokens with. Comma-separated (`current,previous`) to rotate — see below |
 | `--metrics-addr` | `METRICS_ADDR` | `:9101` | Prometheus `/metrics` + `/healthz`. Empty, `off`, `none` or `disabled` turns it off — same vocabulary as the Go gateway. An address that parses as none of those disables the endpoint and logs an error; it does not stop the server |
@@ -131,6 +135,18 @@ InvariantCulture, so `12.5` and never `12,5`. The values actually in force are p
 as `enemy_ai` (and the derived `enemy_ai_max_now`) on `/status`, because an
 already-allocated Agones GameServer keeps the environment it was created with and a fleet
 update reaches only new pods.
+
+
+**Bots count as players everywhere the simulation asks the world**, which is the point and
+also the thing to know before turning them on. The enemy population cap is
+`GAMESERVER_ENEMY_MAX + GAMESERVER_ENEMY_MAX_PER_PLAYER × players`, and a bot is one of
+those players — so `GAMESERVER_BOTS=24` at the default allowance is a **1110-enemy world
+before a single real client connects**. The server computes that number and logs it at
+startup rather than leaving it to be discovered from a snapshot size; lower
+`GAMESERVER_ENEMY_MAX_PER_PLAYER` alongside it. The one place a bot is deliberately *not*
+a player is **persistence**: the save sweep reads `PersistablePlayerStates()`, which
+excludes them by archetype tag (not by id), so a development server with bots on never
+writes a player row for one.
 
 
 #### Realtime transport (`--transport`, `TRANSPORT_KEY`)

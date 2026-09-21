@@ -211,7 +211,10 @@ public sealed class AsyncSaver
     /// <summary>Save all current player entities to the store.</summary>
     public async Task SaveAllAsync()
     {
-        var players = _world.PlayerStates();
+        // PersistablePlayerStates, not PlayerStates: a synthetic bot is a player in the
+        // archetype on purpose, and persisting one would create a player row per bot per
+        // restart, successfully and silently. See EntityTags.Bot.
+        var players = _world.PersistablePlayerStates();
         if (players.Count == 0) return;
 
         int saved = 0;

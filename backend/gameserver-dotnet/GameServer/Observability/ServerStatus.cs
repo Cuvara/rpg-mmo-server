@@ -384,14 +384,38 @@ public sealed class ServerStatus
     /// and the behaviour is a number — and an operator comparing <c>enemies_alive</c>
     /// against a cap needs the one that actually applies right now.
     ///
-    /// <para><b>Derived from <see cref="PlayersOnline"/>, which is connections, while the
-    /// spawner itself counts live player entities.</b> The two differ for as long as a
-    /// player is dead and awaiting respawn, so this can read slightly high during a wipe.
-    /// It is the closest number this endpoint has, and saying which number it is beats
-    /// publishing one that looks exact.</para>
+    /// <para><b>Counted from the world's player entities, not from
+    /// <see cref="PlayersOnline"/>.</b> Those are different numbers and the difference is
+    /// not academic: synthetic players (see <see cref="Bots"/>) are entities the cap scales
+    /// on and are not connections, so a server with 24 bots and nobody logged in published
+    /// a cap of 30 while actually running 1110 when this field was derived from the
+    /// connection count. It still counts a dead player awaiting respawn, which the spawner
+    /// does not, so it can read one allowance high during a wipe — that residual is stated
+    /// rather than papered over.</para>
     /// </remarks>
     [JsonPropertyName("enemy_ai_max_now")]
     public int EnemyAiMaxNow { get; set; }
+
+    /// <summary>
+    /// Synthetic-player configuration in force (<c>GAMESERVER_BOTS</c> and the
+    /// <c>GAMESERVER_BOT_*</c> family), or <c>off</c>, which is the default.
+    /// </summary>
+    /// <remarks>
+    /// Published because bots are <b>indistinguishable from players in every other field
+    /// on this endpoint and on the wire</b> — that is the point of them, and it is also
+    /// the trap. A reader who sees a busy map and <c>players_online: 3</c> will conclude
+    /// the count is broken; this field is the line that says it is not. It is also the
+    /// only signal that a server has entities in it that will never be persisted.
+    /// </remarks>
+    [JsonPropertyName("bots")]
+    public string Bots { get; set; } = "off";
+
+    /// <summary>
+    /// Synthetic players currently in the world. <b>Not</b> included in
+    /// <see cref="PlayersOnline"/>, which counts connections — a bot holds none.
+    /// </summary>
+    [JsonPropertyName("bots_alive")]
+    public int BotsAlive { get; set; }
 
     /// <summary>
     /// Whether field-level delta encoding is permitted on this server
