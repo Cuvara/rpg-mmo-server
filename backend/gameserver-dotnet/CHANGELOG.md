@@ -26,6 +26,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   A skipped gather (#385) leaves the count at zero rather than holding the last good value —
   a count that keeps reporting the previous number reads as a healthy view during precisely
   the failure it exists to reveal.
+### Changed
+
+- **ADR-27 decision 8 re-decided (#372): `GAMESERVER_REPLICATION_SCHEDULE` stays OFF by
+  default — but on different grounds, because the original ones are now false.**
+
+  The decision text claimed the features "buy nothing on the only population this project has
+  ever measured" and that field-level delta was "an estimated 44%, unmeasured". Both have
+  been overtaken:
+
+  - "They buy nothing" was measured on a build where the schedule deferred the observer's own
+    reconciliation anchor and the client manufactured an interpolation sample for every
+    omitted entity (#370, Cuvara/Netcode#153). With those fixed, `tiered` saves something
+    real.
+  - Field-level delta is built and measured at a controlled **32.2%**, not 44% — and tiering's
+    **marginal** contribution on top of it is **12.5%**, not the 37% it showed against a
+    baseline without field delta.
+
+  The decision survives because the cost side moved further than the saving side. #371
+  resolved the unexplained 3.9% enemy frozen-frame baseline this was waiting on: it is
+  **spawn churn, not replication** (38.16% of frames in an entity's first 0.25s against 0.42%
+  once established). 12.5% does not justify a default that withholds state when a deployment
+  that wants it sets one environment variable, and three players and five mobs remains a
+  shape rather than a population — a realistic measurement is still blocked on ADR-7.
+
+  The superseded rationale is quoted in place rather than deleted, because it is cited
+  elsewhere and a silently rewritten reason is unfalsifiable.
 
 ### Fixed
 

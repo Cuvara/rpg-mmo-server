@@ -3808,10 +3808,41 @@ Before building it, it was measured. Two numbers decided the shape of this ADR:
 8. **Both ship OFF.** `GAMESERVER_IMPORTANCE=legacy` and
    `GAMESERVER_REPLICATION_SCHEDULE=off` are the defaults, and every deployment manifest sets
    them explicitly. Reordering what is shed, and withholding updates, are real behavioural
-   changes; the measurement says they buy nothing on the only population this project has
-   ever measured, and the two cheaper levers — a smaller AOI radius (a square law, already
-   shipped) and field-level delta (an estimated 44% of every entity's bytes, unmeasured) —
-   are both larger. Turning these on is a decision a benchmark should make.
+   changes, and turning them on is a decision a benchmark should make.
+
+   **Re-decided 2026-09-21, and the original rationale below it is superseded rather than
+   deleted, because it is quoted elsewhere.** It read: *"the measurement says they buy
+   nothing on the only population this project has ever measured, and the two cheaper levers
+   — a smaller AOI radius (a square law, already shipped) and field-level delta (an estimated
+   44% of every entity's bytes, unmeasured) — are both larger."* **Both halves of that are
+   now false**, and the decision survives them anyway:
+
+   - *"They buy nothing"* was measured on a build where the feature did not work. Two defects
+     (#370, Cuvara/Netcode#153) meant the schedule deferred the observer's own reconciliation
+     anchor and the client manufactured an interpolation sample for every omitted entity.
+     Fixed, `tiered` measures a real saving.
+   - *"Field-level delta, an estimated 44%, unmeasured"* — it is **built and measured**: a
+     controlled **32.2%**, not 44%, and the first `−73%` reading of it was a cross-build
+     artefact. Tiering's **marginal** contribution on top of it is **12.5%**, not the 37% it
+     showed against a no-field-delta baseline.
+
+   **The decision is unchanged: OFF by default, supported per deployment.** The reasons are
+   now different ones:
+
+   - **The cost side moved more than the saving side.** #371 resolved the unexplained 3.9%
+     enemy frozen-frame baseline that this issue was waiting on: it is **spawn churn, not
+     replication** — 38.16% of frames in an entity's first 0.25s against 0.42% once
+     established. So tiering's true marginal cost is smaller than `5.9 − 3.9` suggested, and
+     its marginal *benefit* is also far smaller than 37%. Both numbers shrank.
+   - **12.5% is not worth a behavioural default** that withholds state, when the deployment
+     that wants it can set one environment variable.
+   - **The population is still three players and five mobs.** `BENCHMARK.md` Part XVI §49
+     already says this is a shape, not a capacity figure. Changing a default on it would be
+     publishing a number this project has not earned, and a realistic measurement remains
+     blocked on ADR-7's separate load-generator machine.
+
+   Revisit when ADR-7 unblocks — with a population, not a shape. Nothing else about this
+   decision needs to change first.
 
 9. **The observer's own entity is never deferred, and that is a rule rather than a weight.**
    Amended 2026-09-18 after the first three-client play session on this feature. "Position is
