@@ -397,6 +397,47 @@ public sealed class ServerStatus
     public int EnemyAiMaxNow { get; set; }
 
     /// <summary>
+    /// Enemy attacks decided and emitted as input since start. 0 when enemy combat is off
+    /// or when nothing has been in range.
+    /// </summary>
+    /// <remarks>
+    /// This counts DECISIONS, not landed hits — the pair to look at is this against
+    /// <c>attacks_accepted</c>, which counts what the input handler then allowed. The gap
+    /// is the target that another enemy killed between the world tick that decided and the
+    /// critical tick that resolved, and it is expected to be small and non-zero during a
+    /// wipe.
+    /// </remarks>
+    [JsonPropertyName("enemy_attacks_decided")]
+    public long EnemyAttacksDecided { get; set; }
+
+    /// <summary>
+    /// Enemy attacks NOT emitted because the target had already taken
+    /// <c>GAMESERVER_ENEMY_ATTACKERS_PER_TARGET</c> hits in the current window.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The field that says whether the survivability cap is doing anything.</b>
+    /// "Enemies are attacking and the cap is holding" and "enemies are not attacking" are
+    /// indistinguishable from a player's HP bar, from <c>enemies_alive</c> and from every
+    /// other field here; they differ in exactly this counter. A crowd standing on a player
+    /// with this at zero means the cap is not what is limiting the fight, and the limit is
+    /// somewhere the operator has not looked.</para>
+    /// </remarks>
+    [JsonPropertyName("enemy_attacks_throttled")]
+    public long EnemyAttacksThrottled { get; set; }
+
+    /// <summary>
+    /// Players returned to the map after their HP reached 0 (<c>GAMESERVER_PLAYER_RESPAWN</c>).
+    /// </summary>
+    /// <remarks>
+    /// Includes synthetic players. A demo whose crowd is bots will show this climbing
+    /// while <c>bots_alive</c> stays flat, which is the intended reading: without the
+    /// respawn rule that population drains permanently and silently, because a dead bot
+    /// stops acting for the life of the process.
+    /// </remarks>
+    [JsonPropertyName("player_respawns")]
+    public long PlayerRespawns { get; set; }
+
+    /// <summary>
     /// Synthetic-player configuration in force (<c>GAMESERVER_BOTS</c> and the
     /// <c>GAMESERVER_BOT_*</c> family), or <c>off</c>, which is the default.
     /// </summary>

@@ -55,6 +55,24 @@ public class EnemyBattleRoyaleTests
         return s!;
     }
 
+    /// <summary>
+    /// <see cref="EnemyAiSettings.Default"/> with the respawn rule off, for the tests
+    /// whose subject is a player that stays dead.
+    /// </summary>
+    private static EnemyAiSettings NoRespawn()
+    {
+        var lookup = new Dictionary<string, string?>
+        {
+            [EnemyAiSettings.EnvRespawnPlayers] = "off",
+        };
+
+        Assert.True(
+            EnemyAiSettings.TryCreate(n => lookup.GetValueOrDefault(n), MapBounds.Default,
+                out EnemyAiSettings? s, out string? err),
+            err);
+        return s!;
+    }
+
     private static List<EntityState> Enemies(EcsWorld world) =>
         world.GetEntitiesInRange(new Vec2(0, 0), 10_000f).FindAll(e => e.Type == "mob");
 
@@ -413,7 +431,15 @@ public class EnemyBattleRoyaleTests
         corpse.Dead = true;
         world.AddEntity(corpse);
 
-        var ai = new EnemySpawner(world, TickRate, EnemyAiSettings.Default, NullLogger.Instance);
+        // Respawn OFF, deliberately: this test's premise is a player who STAYS dead, and
+        // PlayerRespawnSystem's whole job is to abolish that state. With the default
+        // settings the corpse is revived on the first world tick and buys the full
+        // per-player allowance — correctly, because it is alive again. Turning the rule
+        // off is what keeps this test about the spawner's dead-player rule rather than
+        // about the respawn rule, and the spawner's rule still has a job: a player is dead
+        // for up to one world tick before the revival, and any future timed respawn widens
+        // that window rather than closing it.
+        var ai = new EnemySpawner(world, TickRate, NoRespawn(), NullLogger.Instance);
 
         int peak = 0;
         for (ulong t = 1; t < 15 * 200; t++)
@@ -433,7 +459,7 @@ public class EnemyBattleRoyaleTests
         // so the assertion above is discriminating rather than merely satisfiable.
         using var living = new EcsWorld();
         living.AddEntity(TestHelpers.CreatePlayer("alive", 300f, 0f));
-        var liveAi = new EnemySpawner(living, TickRate, EnemyAiSettings.Default, NullLogger.Instance);
+        var liveAi = new EnemySpawner(living, TickRate, NoRespawn(), NullLogger.Instance);
         Run(liveAi, 15 * 200);
 
         Assert.Equal(75, liveAi.AliveCount);

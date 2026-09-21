@@ -106,6 +106,10 @@ set. Flags are **space-separated** (`--addr :9000`).
 | *(none)* | `GAMESERVER_ENEMY_MIN_SPAWN_DISTANCE` | `8` | Closest an enemy is placed to **any** live player. The spawn distance only guarantees separation from the anchor; in a crowd a placement can land in a bystander's lap, and map-edge clamping can pull one back across it. Best-effort: 6 samples of the circle, then the last candidate is taken anyway, because a wave that silently spawns fewer entities the tighter the crowd gets is the threadbare fight returning through the door marked "safety check". **Must be strictly less than `GAMESERVER_ENEMY_SPAWN_DISTANCE`** or the server exits 2 — at or above it, every candidate including the one it was measured from is rejected |
 | *(none)* | `GAMESERVER_ENEMY_CONTACT_RANGE` | `1` | How close a chaser closes before it stops advancing. Inside `GameConstants.AttackRange` (3.0) so the player can hit what is standing on them, and non-zero so a ring of chasers does not jitter across the target every tick |
 | *(none)* | `GAMESERVER_ENEMY_HP` / `_ATTACK` / `_DEFENSE` / `_SPEED` | `16` / `5` / `2` / `2.5` | Per-enemy stats, unchanged from the compiled-in values |
+| *(none)* | `GAMESERVER_ENEMY_ATTACKS` | `on` | **Enemies attack back.** `off` restores the one-directional fight: enemies close to the contact range and stand there while players hit them. Same vocabulary as `GAMESERVER_FIELD_DELTA`; anything else **exits 2**. Enemy attacks go through the ordinary input path (`EcsWorld.PushInput` → `InputHandler` → `CombatLogic`), exactly as bot attacks do, so damage, range, cooldown, the `Damage`/`Death` game events and the kill reward are all the one combat path this server has — there is no second damage formula |
+| *(none)* | `GAMESERVER_ENEMY_ATTACKERS_PER_TARGET` | `3` | **The survivability cap, and the only thing that bounds what one player can take.** At most this many enemy attacks LAND on one player per `GAMESERVER_ENEMY_ATTACK_INTERVAL`, however many enemies are standing on them — a player surrounded by 327 enemies takes exactly what a player surrounded by 3 takes. Bounded at 1 000. `0` means enemies never land a hit (a valid setting, not a refused one). **Read the arithmetic below before raising it** |
+| *(none)* | `GAMESERVER_ENEMY_ATTACK_INTERVAL` | `0.5` | Seconds between one player's incoming-damage windows. The period the cap above is expressed over, rounded **up** to a whole number of world ticks (at the default 15Hz world rate, 0.5s → 8 world ticks → 0.533s). Values below the server's own 500ms attack cooldown (`GameConstants.AttackCooldownMs`) do **not** produce more damage — the enemy's own cooldown is charged by the same `InputHandler` a player's is — so the effective interval is `max(this, 0.5s)` |
+| *(none)* | `GAMESERVER_PLAYER_RESPAWN` | `on` | **A player whose HP reaches 0 is returned to the map spawn point at full HP on the next world tick.** Named for the player rather than the enemy because it governs a player rule; it lives in this family because enemy attacks are what make player death reachable. `off` restores the pre-existing behaviour, which is not a design but an absence — see "Death and respawn" below |
 | *(none)* | `GAMESERVER_BOTS` | `0` (**off**) | **Synthetic players.** `N > 0` spawns N bots: real player-type entities that move and attack through the ordinary input path, so clients render them, enemies chase them, and they are legitimate targets. A battle royale is a crowd of *players* as much as of enemies, and this project can only put three real clients on a map. **They are development/demo scaffolding**: not persisted, no connection, no capacity, and not an AI to ship to players. Logged as a startup WARNING whenever non-zero, because a busy map with `players_online: 3` otherwise reads as a broken counter |
 | *(none)* | `GAMESERVER_BOT_SPREAD` | `120` | Radius of the disc bots are scattered over at startup. Deliberately wide: bots are what the enemy spawner anchors on, so where the bots are is where the fight is, and clustering them rebuilds the conveyor belt with extra steps |
 | *(none)* | `GAMESERVER_BOT_ENGAGE_RANGE` | `40` | How far a bot travels to engage an enemy. Beyond it the bot wanders — a "nearest enemy anywhere" rule collapses every bot onto whichever corner is busiest |
@@ -124,6 +128,72 @@ set. Flags are **space-separated** (`--addr :9000`).
 | `--register-on-allocated` | `GAMESERVER_REGISTER_ON_ALLOCATED=true` | off | Hold the registry entry back until Agones reports this GameServer **Allocated**, instead of publishing it right after Ready. Agones-only; ignored (with a warning) when Agones is off — see below |
 | `--redis` | `REDIS_ADDR` | *(unset)* | Registry Redis; unset disables self-registration, the `events:game` publisher, and the duplicate-login kick consumer on `events:kick` (ADR-20) |
 | `--redis-password` | `REDIS_PASSWORD` | *(unset)* | Registry Redis password |
+
+### Enemy combat: the survivability arithmetic
+
+**327 enemies attacking is not a fight, it is an instant delete**, and lowering the
+per-enemy damage does not fix it: `CombatLogic.CalculateDamage` floors at
+`GameConstants.MinDamage` (1), so three hundred enemies deal at least three hundred
+damage per round however weak each one is. A per-enemy cooldown does not fix it either —
+three hundred enemies each respecting the same 500ms cooldown still deliver three hundred
+hits every 500ms. The bound has to be expressed on the **target**, which is what
+`GAMESERVER_ENEMY_ATTACKERS_PER_TARGET` is.
+
+Worst case a player can take:
+
+```
+damage per hit  = max(1, GAMESERVER_ENEMY_ATTACK - player defense)
+damage per sec  = GAMESERVER_ENEMY_ATTACKERS_PER_TARGET x damage per hit
+                  / GAMESERVER_ENEMY_ATTACK_INTERVAL
+time to die     = player HP / damage per sec
+```
+
+At the shipped defaults and a default player (HP 100, defense 5, enemy attack 5):
+
+| Setting | Damage/hit | Damage/sec | Time to die from full |
+|---|---|---|---|
+| **defaults** (`3` per `0.5s`) | 1 | 6 | **16.7 s** |
+| `ATTACKERS_PER_TARGET=1`, `INTERVAL=1` | 1 | 1 | 100 s |
+| `ENEMY_ATTACK=20` (defaults otherwise) | 15 | 90 | 1.1 s |
+| `ATTACKERS_PER_TARGET=20` | 1 | 40 | 2.5 s |
+
+The number is **independent of the enemy population**, which is the property the cap
+exists to give: 16.7 seconds surrounded by twenty enemies, and 16.7 seconds surrounded by
+three hundred. `EnemyAiSettings.WorstCaseDamagePerSecond` computes it in code, and
+`EnemyAiSettingsTests.WorstCaseDamagePerSecond_IsWhatTheKnobsSay` is the table above as a
+test.
+
+Rounding, stated because it moves the third decimal: the interval is rounded up to whole
+world ticks, so the default 0.5s is really 8/15 = 0.533s and the default worst case is
+5.63 damage/second, i.e. 17.8 seconds. The table uses the configured interval.
+
+`/status` publishes `enemy_attacks_decided` and `enemy_attacks_throttled`. The second is
+the one that matters: a crowd on a player with `enemy_attacks_throttled` at zero means the
+cap is **not** what is limiting the fight, and the limit is somewhere you have not looked.
+
+### Death and respawn
+
+Before enemy attacks existed, a player's HP could not reach 0 in normal play, and what
+happens when it does was never designed. What the code does is: nothing reaps a dead
+player (`EnemyReapSystem` only queries the enemy archetype), `InputHandler` refuses every
+input from it for the life of the process, the enemy AI stops counting it as somebody to
+fight, and `AsyncSaver` persists `hp = 0`. There is no `dead` column in `player_states`,
+so `PlayerSpawn.Resolve` restores that 0 verbatim on the next join — **on any server** —
+and the character is dead permanently.
+
+`GAMESERVER_PLAYER_RESPAWN=on` (the default) gives that a defined end and nothing more:
+the player is dead for at most one world tick — long enough for the `Death` game event and
+the `Dead` action to be sampled by a snapshot, so the death is observable — and is then
+back at the map's spawn point with its own `MaxHp`. There is no death screen, no timed
+respawn, no corpse, no penalty and no schema change; a timed respawn needs a per-entity
+tick to count down to, which is a component field and a wire consideration, and is
+deliberately not done here.
+
+It applies to **every** cause of death, not just enemies: the system asks the world who is
+dead rather than being told by whatever killed them. It applies to synthetic players
+(`GAMESERVER_BOTS`) too, which matters more than it sounds — a dead bot never acts again
+for the life of the process, so without this a demo silently drains its own crowd while
+`bots_alive` still reports the full count.
 
 **Every `GAMESERVER_ENEMY_*` value is parsed strictly**, the same rule as
 `GAMESERVER_AOI_RADIUS` and `GAMESERVER_FIELD_DELTA`: an unparseable, out-of-range or

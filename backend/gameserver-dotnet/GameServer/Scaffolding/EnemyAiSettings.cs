@@ -46,6 +46,22 @@ public sealed class EnemyAiSettings
     public const string EnvSpeed = "GAMESERVER_ENEMY_SPEED";
     public const string EnvChase = "GAMESERVER_ENEMY_CHASE";
 
+    /// <summary>Master switch for enemy-side combat. Off restores the one-directional fight.</summary>
+    public const string EnvAttacksEnabled = "GAMESERVER_ENEMY_ATTACKS";
+
+    /// <summary>Seconds between a player's incoming-damage windows.</summary>
+    public const string EnvAttackIntervalSec = "GAMESERVER_ENEMY_ATTACK_INTERVAL";
+
+    /// <summary>Enemy attacks allowed to land on one player per window.</summary>
+    public const string EnvAttackersPerTarget = "GAMESERVER_ENEMY_ATTACKERS_PER_TARGET";
+
+    /// <summary>
+    /// Whether a player at 0 HP is returned to the map. Named for the player because it
+    /// governs a player rule, and it lives in this family because enemy attacks are what
+    /// make player death reachable — see <see cref="RespawnPlayers"/>.
+    /// </summary>
+    public const string EnvRespawnPlayers = "GAMESERVER_PLAYER_RESPAWN";
+
     /// <summary>
     /// Ceiling on the <i>effective</i> population, i.e. on
     /// <see cref="EffectiveMaxEnemies"/> however it was reached. Not a gameplay limit — a
@@ -56,6 +72,15 @@ public sealed class EnemyAiSettings
 
     /// <summary>Largest wave accepted, for the same reason.</summary>
     public const int WaveCeiling = 2_000;
+
+    /// <summary>
+    /// Largest <see cref="AttackersPerTarget"/> accepted. Not a gameplay limit — the same
+    /// class of bound as <see cref="PopulationCeiling"/>: it turns a misplaced zero into a
+    /// startup failure instead of into a cap so high that it is not a cap, which is the
+    /// one setting of this knob that silently reinstates the instant delete it exists to
+    /// prevent.
+    /// </summary>
+    public const int AttackersCeiling = 1_000;
 
     /// <summary>
     /// Largest distance accepted for any of the radial knobs. Bounds the same class of
@@ -69,7 +94,9 @@ public sealed class EnemyAiSettings
         float waveIntervalSec,
         float spawnDistance, float minSpawnDistance, float contactRange,
         int hp, int attack, int defense, float speed,
-        bool chase, MapBounds bounds)
+        bool chase, MapBounds bounds,
+        bool attacksEnabled, float attackIntervalSec, int attackersPerTarget,
+        bool respawnPlayers)
     {
         MaxEnemies = maxEnemies;
         MaxEnemiesPerPlayer = maxEnemiesPerPlayer;
@@ -85,6 +112,10 @@ public sealed class EnemyAiSettings
         Speed = speed;
         Chase = chase;
         Bounds = bounds;
+        AttacksEnabled = attacksEnabled;
+        AttackIntervalSec = attackIntervalSec;
+        AttackersPerTarget = attackersPerTarget;
+        RespawnPlayers = respawnPlayers;
         ContactRangeSq = contactRange * contactRange;
         MinSpawnDistanceSq = minSpawnDistance * minSpawnDistance;
         DespawnRadiusSq = EnemyAiTuning.DespawnRadius * EnemyAiTuning.DespawnRadius;
@@ -149,6 +180,46 @@ public sealed class EnemyAiSettings
     /// <summary>Play area, used to keep a player-anchored spawn on the map.</summary>
     public MapBounds Bounds { get; }
 
+    // ── Enemy-side combat ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Whether enemies attack. Off is the pre-change fight in full: enemies close to
+    /// <see cref="ContactRange"/> and stand there.
+    /// </summary>
+    public bool AttacksEnabled { get; }
+
+    /// <summary>
+    /// Seconds between one target's incoming-damage windows. See
+    /// <see cref="EnemyAiTuning.AttackIntervalSec"/> for why the effective value is never
+    /// below the server's own attack cooldown.
+    /// </summary>
+    public float AttackIntervalSec { get; }
+
+    /// <summary>
+    /// Enemy attacks allowed to LAND on one player per <see cref="AttackIntervalSec"/>.
+    /// The survivability bound; see <see cref="EnemyAiTuning.AttackersPerTarget"/> for the
+    /// arithmetic it produces.
+    /// </summary>
+    public int AttackersPerTarget { get; }
+
+    /// <summary>Whether a player at 0 HP is returned to the map at the spawn point.</summary>
+    public bool RespawnPlayers { get; }
+
+    /// <summary>
+    /// Worst-case damage per second one player can take, given the damage a single hit
+    /// deals. Published rather than left to the reader because it is the number that
+    /// decides whether the demo is a fight or a death screen, and it is the one an
+    /// operator has to recompute every time they touch either knob.
+    /// </summary>
+    /// <param name="damagePerHit">
+    /// What <c>CombatLogic.CalculateDamage</c> yields for this enemy against the player in
+    /// question — <c>max(GameConstants.MinDamage, Attack − playerDefense)</c>.
+    /// </param>
+    public float WorstCaseDamagePerSecond(int damagePerHit) =>
+        AttacksEnabled && AttackIntervalSec > 0f
+            ? AttackersPerTarget * damagePerHit / AttackIntervalSec
+            : 0f;
+
     public float ContactRangeSq { get; }
     public float MinSpawnDistanceSq { get; }
     public float DespawnRadiusSq { get; }
@@ -168,7 +239,11 @@ public sealed class EnemyAiSettings
         defense: EnemyAiTuning.EnemyDefense,
         speed: EnemyAiTuning.EnemySpeed,
         chase: EnemyAiTuning.ChaseByDefault,
-        bounds: MapBounds.Default);
+        bounds: MapBounds.Default,
+        attacksEnabled: EnemyAiTuning.AttacksByDefault,
+        attackIntervalSec: EnemyAiTuning.AttackIntervalSec,
+        attackersPerTarget: EnemyAiTuning.AttackersPerTarget,
+        respawnPlayers: EnemyAiTuning.RespawnPlayersByDefault);
 
     /// <summary>
     /// Population cap in force for <paramref name="livePlayers"/> players.
@@ -234,7 +309,8 @@ public sealed class EnemyAiSettings
             !TryInt(lookup, EnvWaveSizePerPlayer, EnemyAiTuning.EnemiesPerWavePerPlayer, 0, WaveCeiling, out int wavePerPlayer, out error) ||
             !TryInt(lookup, EnvHp, EnemyAiTuning.EnemyHp, 1, 1_000_000, out int hp, out error) ||
             !TryInt(lookup, EnvAttack, EnemyAiTuning.EnemyAttack, 0, 1_000_000, out int attack, out error) ||
-            !TryInt(lookup, EnvDefense, EnemyAiTuning.EnemyDefense, 0, 1_000_000, out int defense, out error))
+            !TryInt(lookup, EnvDefense, EnemyAiTuning.EnemyDefense, 0, 1_000_000, out int defense, out error) ||
+            !TryInt(lookup, EnvAttackersPerTarget, EnemyAiTuning.AttackersPerTarget, 0, AttackersCeiling, out int attackers, out error))
         {
             return false;
         }
@@ -243,12 +319,15 @@ public sealed class EnemyAiSettings
             !TryFloat(lookup, EnvSpawnDistance, EnemyAiTuning.SpawnRadius, 0.01f, MaxDistance, out float spawnDistance, out error) ||
             !TryFloat(lookup, EnvMinSpawnDistance, EnemyAiTuning.MinSpawnDistance, 0f, MaxDistance, out float minSpawn, out error) ||
             !TryFloat(lookup, EnvContactRange, EnemyAiTuning.ContactRange, 0f, MaxDistance, out float contact, out error) ||
-            !TryFloat(lookup, EnvSpeed, EnemyAiTuning.EnemySpeed, 0.01f, MaxDistance, out float speed, out error))
+            !TryFloat(lookup, EnvSpeed, EnemyAiTuning.EnemySpeed, 0.01f, MaxDistance, out float speed, out error) ||
+            !TryFloat(lookup, EnvAttackIntervalSec, EnemyAiTuning.AttackIntervalSec, 0.01f, 3_600f, out float attackInterval, out error))
         {
             return false;
         }
 
-        if (!TryBool(lookup, EnvChase, EnemyAiTuning.ChaseByDefault, out bool chase, out error))
+        if (!TryBool(lookup, EnvChase, EnemyAiTuning.ChaseByDefault, out bool chase, out error) ||
+            !TryBool(lookup, EnvAttacksEnabled, EnemyAiTuning.AttacksByDefault, out bool attacks, out error) ||
+            !TryBool(lookup, EnvRespawnPlayers, EnemyAiTuning.RespawnPlayersByDefault, out bool respawn, out error))
         {
             return false;
         }
@@ -272,7 +351,8 @@ public sealed class EnemyAiSettings
         settings = new EnemyAiSettings(
             maxEnemies, maxPerPlayer, waveSize, wavePerPlayer, interval,
             spawnDistance, minSpawn, contact,
-            hp, attack, defense, speed, chase, bounds);
+            hp, attack, defense, speed, chase, bounds,
+            attacks, attackInterval, attackers, respawn);
         return true;
     }
 
@@ -293,6 +373,16 @@ public sealed class EnemyAiSettings
         sb.Append(CultureInfo.InvariantCulture, $" min={MinSpawnDistance}");
         sb.Append(CultureInfo.InvariantCulture, $" contact={ContactRange}");
         sb.Append(CultureInfo.InvariantCulture, $" hp={Hp} atk={Attack} def={Defense} speed={Speed}");
+        if (AttacksEnabled)
+        {
+            sb.Append(CultureInfo.InvariantCulture,
+                $" attacks={AttackersPerTarget}/target every {AttackIntervalSec}s");
+        }
+        else
+        {
+            sb.Append(" attacks=off");
+        }
+        sb.Append(CultureInfo.InvariantCulture, $" respawn={(RespawnPlayers ? "on" : "off")}");
         return sb.ToString();
     }
 

@@ -24,7 +24,7 @@ public class BotPlayerTests
 {
     private const int TickRate = 15;
 
-    private static BotSettings Bots(int count, float spread = 30f, float engage = 40f)
+    private static BotSettings Bots(int count, float spread = 30f, float engage = 40f, int? hp = null)
     {
         var env = new Dictionary<string, string?>
         {
@@ -32,6 +32,11 @@ public class BotPlayerTests
             [BotSettings.EnvSpread] = spread.ToString(System.Globalization.CultureInfo.InvariantCulture),
             [BotSettings.EnvEngageRange] = engage.ToString(System.Globalization.CultureInfo.InvariantCulture),
         };
+
+        if (hp is not null)
+        {
+            env[BotSettings.EnvHp] = hp.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
 
         Assert.True(
             BotSettings.TryCreate(n => env.GetValueOrDefault(n), MapBounds.Default,
@@ -46,8 +51,16 @@ public class BotPlayerTests
         var world = new EcsWorld();
         var connections = new ConnectionManager();
         var handler = new InputHandler(world, NullLogger.Instance, null, TickRate, MapBounds.Default);
+        // Peaceful enemies by default, and that is a deliberate isolation rather than a
+        // convenience. Every test in this file is about where entities ARE — bot spread,
+        // player-relative spawning, the drift trap, the population cap. With enemy attacks
+        // on, a player parked for thirty seconds of simulated time and never fighting back
+        // dies and respawns at the spawn point, so the position under assertion stops being
+        // the position the test placed and the failure reads as a placement bug. The tests
+        // whose subject IS enemy combat pass their own settings, and
+        // EnemyAttackTests covers the rule itself.
         var enemyPhase = new EnemySpawner(
-            world, TickRate, enemies ?? EnemyAiSettings.Default, NullLogger.Instance);
+            world, TickRate, enemies ?? Peaceful(), NullLogger.Instance);
         var botPhase = new BotPlayerSpawner(
             world, SimulationRates.Uniform(TickRate), bots, NullLogger.Instance);
         var composite = new CompositeSimulationPhase(enemyPhase, botPhase);
@@ -57,6 +70,75 @@ public class BotPlayerTests
             keyframeInterval: GameConstants.DefaultKeyframeInterval, simulationPhase: composite);
 
         return (world, loop, botPhase, enemyPhase);
+    }
+
+    /// <summary>
+    /// <see cref="EnemyAiSettings.Default"/> with enemy-side combat off — see
+    /// <c>NewWorld</c> for why that is this file's default.
+    /// </summary>
+    private static EnemyAiSettings Peaceful()
+    {
+        var lookup = new Dictionary<string, string?>
+        {
+            [EnemyAiSettings.EnvAttacksEnabled] = "off",
+        };
+
+        Assert.True(
+            EnemyAiSettings.TryCreate(n => lookup.GetValueOrDefault(n), MapBounds.Default,
+                out EnemyAiSettings? s, out string? err),
+            err);
+        return s!;
+    }
+
+    /// <summary>
+    /// Bots are killable now, and a demo whose crowd drains away is a demo that ends
+    /// empty. A dead bot never acts again for the life of the process — nothing reaps it,
+    /// nothing revives it and <c>BotBrainSystem</c> skips it — so without the respawn rule
+    /// the synthetic population is a slowly emptying room with <c>bots_alive</c> still
+    /// reporting its full count.
+    ///
+    /// <para>Asserted as a pair, because the count alone cannot tell "nothing died" from
+    /// "everything died and came back": the control arm has to show bots actually dying
+    /// when the rule is off, and the live arm has to show the respawn counter moving.</para>
+    /// </summary>
+    [Fact]
+    public void BotsUnderAttackAreRespawnedRatherThanDrainingAway()
+    {
+        (int Living, long Respawns) Run(bool respawn)
+        {
+            var lookup = new Dictionary<string, string?>
+            {
+                // A lethal fight on purpose: enough attackers and a short enough window
+                // that bots at 6 HP die inside the run, so both arms reach the state the
+                // rule is about.
+                [EnemyAiSettings.EnvAttackersPerTarget] = "8",
+                [EnemyAiSettings.EnvAttackIntervalSec] = "0.1",
+                [EnemyAiSettings.EnvRespawnPlayers] = respawn ? "on" : "off",
+            };
+            Assert.True(
+                EnemyAiSettings.TryCreate(n => lookup.GetValueOrDefault(n), MapBounds.Default,
+                    out EnemyAiSettings? enemies, out string? err),
+                err);
+
+            var (world, loop, _, phase) = NewWorld(Bots(8, spread: 5f, hp: 6), enemies);
+            using (world)
+            {
+                for (int t = 0; t < 15 * 40; t++) loop.TickOnce();
+
+                int living = BotStates(world).FindAll(b => !b.Dead).Count;
+                return (living, phase.Attacks.Respawns);
+            }
+        }
+
+        (int Living, long Respawns) dead = Run(respawn: false);
+        (int Living, long Respawns) alive = Run(respawn: true);
+
+        Assert.True(dead.Living < 8,
+            "no bot died even with the rule off, so this test never reached its subject");
+        Assert.Equal(0, dead.Respawns);
+
+        Assert.Equal(8, alive.Living);
+        Assert.True(alive.Respawns > 0, "bots died but nothing was counted as a respawn");
     }
 
     private static float Dist(in Vec2 a, in Vec2 b)

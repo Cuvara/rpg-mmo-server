@@ -30,6 +30,18 @@ internal sealed class PlayerTargetBuffer
 {
     private EntityHandle[] _handles = Array.Empty<EntityHandle>();
     private Vec2[] _positions = Array.Empty<Vec2>();
+
+    /// <summary>
+    /// Handles of the LIVE players, compacted to match <see cref="_positions"/>.
+    ///
+    /// <para>A second array rather than compacting <see cref="_handles"/> in place: that
+    /// one is the raw query destination and is overwritten wholesale by the next
+    /// <see cref="Refresh"/>, so compacting it would make the query result and the live
+    /// set the same storage and the indices would silently stop meaning the same thing.
+    /// Two arrays is one extra copy per live player per refresh and no ambiguity.</para>
+    /// </summary>
+    private EntityHandle[] _live = Array.Empty<EntityHandle>();
+
     private int _count;
 
     /// <summary>Live players found by the last <see cref="Refresh"/>.</summary>
@@ -37,6 +49,12 @@ internal sealed class PlayerTargetBuffer
 
     /// <summary>Position of live player <paramref name="index"/>.</summary>
     public Vec2 this[int index] => _positions[index];
+
+    /// <summary>
+    /// Handle of live player <paramref name="index"/>, for a caller that has to write to
+    /// the target rather than only measure against it.
+    /// </summary>
+    public EntityHandle HandleAt(int index) => _live[index];
 
     /// <summary>
     /// Re-read the world. Returns the number of <b>live</b> players found, which is what
@@ -59,6 +77,11 @@ internal sealed class PlayerTargetBuffer
             _positions = new Vec2[_handles.Length];
         }
 
+        if (_live.Length < _handles.Length)
+        {
+            _live = new EntityHandle[_handles.Length];
+        }
+
         int n = Math.Min(matches, _handles.Length);
         _count = 0;
         for (int i = 0; i < n; i++)
@@ -67,6 +90,7 @@ internal sealed class PlayerTargetBuffer
             if (!writer.IsAlive(in handle)) continue;
             if (writer.HealthOf(in handle).Dead) continue;
 
+            _live[_count] = handle;
             _positions[_count++] = writer.PositionOf(in handle).Value;
         }
 
@@ -110,6 +134,40 @@ internal sealed class PlayerTargetBuffer
     /// True when any live player is within <paramref name="radiusSq"/> of
     /// <paramref name="point"/>. The spawn placement's rejection test.
     /// </summary>
+    /// <summary>
+    /// Index of the nearest live player to <paramref name="from"/>, and the squared
+    /// distance to it; false when there is none.
+    /// </summary>
+    /// <remarks>
+    /// The same scan as <see cref="TryNearest"/>, returning the index instead of a copy of
+    /// the position. A caller that has to act ON the target — attack it, write to it —
+    /// needs the identity, and re-finding it from the position would be a second scan
+    /// plus a float equality test on coordinates two players can legitimately share.
+    /// <paramref name="distanceSq"/> is handed back because every caller of this overload
+    /// immediately range-tests, and recomputing it is the one part of the scan that was
+    /// already done.
+    /// </remarks>
+    public bool TryNearestIndex(in Vec2 from, out int index, out float distanceSq)
+    {
+        index = -1;
+        distanceSq = float.MaxValue;
+        if (_count == 0) return false;
+
+        for (int i = 0; i < _count; i++)
+        {
+            float dx = _positions[i].X - from.X;
+            float dy = _positions[i].Y - from.Y;
+            float d = (dx * dx) + (dy * dy);
+            if (d < distanceSq)
+            {
+                distanceSq = d;
+                index = i;
+            }
+        }
+
+        return index >= 0;
+    }
+
     public bool AnyWithin(in Vec2 point, float radiusSq)
     {
         for (int i = 0; i < _count; i++)

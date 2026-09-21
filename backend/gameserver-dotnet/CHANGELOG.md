@@ -34,6 +34,100 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Enemies fight back, and a player can survive being surrounded by three hundred of
+  them.** Enemy-side combat existed nowhere in the codebase: enemies chased the nearest
+  live player, stopped at `ContactRange` and stood there while players hit them. They now
+  attack, on a server-authoritative schedule, with a cap that decides whether a crowd is a
+  fight or a death screen.
+
+  **No combat is implemented in the AI.** `EnemyAttackSystem` decides *which* enemies swing
+  and *at whom*; the decision becomes an ordinary `InputData` carrying an attack target,
+  pushed through `EcsWorld.PushInput` and resolved by `InputHandler` on the next tick —
+  the same route `BotBrainSystem` takes and for the same stated reason. So the damage, the
+  range and cooldown validation, the `Damage` and `Death` game events, the `Attacking`
+  action, the `/status` attack counters, the death callback and the Nakama kill reward are
+  all the one combat path this server has, and `CombatLogic.CalculateDamage` is reached by
+  exactly the route a player's attack reaches it. A second damage formula here would be a
+  server that disagreed with the client compiling the first (ADR-10).
+
+  **The constraint, and why it is not a smaller number.** 327 enemies attacking is an
+  instant delete, and lowering `GAMESERVER_ENEMY_ATTACK` does not bound it:
+  `CombatLogic.CalculateDamage` floors at `GameConstants.MinDamage`, so three hundred
+  enemies deal at least three hundred damage per round however weak each one is. A
+  per-enemy cooldown does not bound it either — three hundred enemies each respecting the
+  same 500ms cooldown still deliver three hundred hits every 500ms. The bound is therefore
+  expressed on the **target**: at most `GAMESERVER_ENEMY_ATTACKERS_PER_TARGET` (3) attacks
+  land on one player per `GAMESERVER_ENEMY_ATTACK_INTERVAL` (0.5s), whatever the
+  population.
+
+  **The arithmetic, at the defaults and against a default player** (HP 100, defense 5,
+  enemy attack 5): damage per hit is `max(1, 5 - 5) = 1`, so the worst case is 3 damage per
+  0.5s window = **6 damage/second**, and a player surrounded on every side survives
+  **16.7 seconds** — the same 16.7 seconds whether three enemies are on them or three
+  hundred. Rounded to whole world ticks the window is really 8/15 = 0.533s, so the measured
+  worst case is 5.63/second and 17.8 seconds. `EnemyAiSettings.WorstCaseDamagePerSecond`
+  computes it, and a table test pins it for five settings including
+  `GAMESERVER_ENEMY_ATTACK=20` (90/second, 1.1s to die).
+
+  **The window is counted in WORLD ticks**, derived the way `SimulationRates.RunsOn`
+  derives its own schedule (`(baseTick - 1) / worldEvery`). Counting base ticks would make
+  a 60Hz server four times deadlier than a 15Hz one on identical settings; getting the
+  `- 1` wrong puts the uniform and multi-rate timelines a whole window out of phase, which
+  is invisible on either one alone. Both are asserted.
+
+  **A fourth and fifth phase in `EnemyAiPhase`.** A previous change considered a fourth and
+  declined — but that was about a "centre-zone damage" step the old comments claimed and no
+  code implemented: deleting a phantom, not refusing a real one. The enum's ordering
+  argument does not forbid an attack step, it *places* it: range is measured against a
+  position, so the decision runs after `Move`, and it runs before `Reap` for the reason
+  `Reap` already gives — reaping never runs before the thing that kills. Order is now
+  Spawn, Move, Attack, Respawn, Reap.
+
+  **New configuration** (strict-parse, unrecognised values exit 2, same rule as
+  `GAMESERVER_FIELD_DELTA`): `GAMESERVER_ENEMY_ATTACKS`,
+  `GAMESERVER_ENEMY_ATTACKERS_PER_TARGET`, `GAMESERVER_ENEMY_ATTACK_INTERVAL`,
+  `GAMESERVER_PLAYER_RESPAWN`. `/status` gains `enemy_attacks_decided`,
+  `enemy_attacks_throttled` and `player_respawns`, and `enemy_ai` renders the combat
+  tuning. `enemy_attacks_throttled` is the load-bearing one: "enemies are attacking and the
+  cap is holding" and "enemies are not attacking" are indistinguishable from an HP bar and
+  from every other field, and differ in exactly that counter.
+
+  **Known residue, stated rather than hidden.** An enemy that decides to attack a player
+  another enemy kills in the same batch has its input refused on arrival, which is counted
+  as an input rejection against an id of the form `enemy-N` and feeds the anomaly tracker —
+  bots already do this, it is bounded by the cap, and the gap between
+  `enemy_attacks_decided` and `attacks_accepted` is where it is visible. Which `N` enemies
+  of a crowd spend the budget is archetype order, so it is the same ones each window;
+  damage is identical either way.
+
+- **Player death has a defined end** (`GAMESERVER_PLAYER_RESPAWN`, on by default). Enemy
+  attacks make a player's HP reaching 0 reachable in normal play for the first time, and
+  what this codebase did at that point was not a design, it was an absence: nothing reaps a
+  dead player (`EnemyReapSystem` queries the enemy archetype only), `InputHandler` refuses
+  every input from it for the life of the process, the enemy AI stops counting it as
+  somebody to fight, and `AsyncSaver` persists `hp = 0` — which `PlayerSpawn.Resolve`
+  restores verbatim on the next join, on any server, because `player_states` has no `dead`
+  column. `docs/DESIGN.md` has carried that as a known gap since 2026-08. Shipping enemy
+  attacks without addressing it would have made a permanently dead character reachable from
+  a demo.
+
+  **The smallest correct behaviour, not a death system.** `PlayerRespawnSystem` returns a
+  dead player to the map's spawn point with its own `MaxHp` on the next world tick — so the
+  player is dead for at most one world tick, long enough for the `Death` event and the
+  `Dead` action to be sampled by a snapshot, which is what keeps the death observable. No
+  death screen, no timed respawn, no corpse, no penalty, no schema change. A timed respawn
+  needs a per-entity tick to count down to, which is a component field and a wire
+  consideration, and is deliberately left out. It restores the entity's own maximum rather
+  than `ServerDefaults.DefaultPlayerHp`, so a character whose maximum is not the default is
+  not silently re-statted by dying.
+
+  It covers **every** cause of death, not only enemies — it asks the world who is dead
+  rather than being told by whatever killed them. That includes synthetic players, which
+  matters more than it sounds: a dead bot never acts again for the life of the process, so
+  a demo would otherwise drain its own crowd while `bots_alive` still reported the full
+  count. `BotPlayerTests.BotsUnderAttackAreRespawnedRatherThanDrainingAway` asserts both
+  arms of that.
+
 - **Enemies chase players, and the fight scales with the crowd** — the enemy AI is now a
   fight rather than a conveyor belt, and every number in it is set by environment variable.
 
