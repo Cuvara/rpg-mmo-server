@@ -400,6 +400,12 @@ public sealed class Connection : IDisposable
             _observerKey = observerKey;
         }
 
+        // Published for the tick loop to aggregate. This is what the server CONSIDERED
+        // in-interest for this connection, which is a different number from what the client
+        // merged, and the two differing is its own defect class (#161). Without it, "the
+        // wire is delivering nine" is an inference on both sides at once.
+        Volatile.Write(ref _lastGatherCount, count);
+
         lock (_snapshotLock)
         {
             _pendingBuffer = index;
@@ -653,6 +659,23 @@ public sealed class Connection : IDisposable
     /// condition that is one event, not thousands.
     /// </summary>
     private int _anchorMissingLogged;
+
+    /// <summary>
+    /// Entities the last gather found in this connection's area of interest — what the
+    /// server considered in-interest, before any budget or schedule shed anything.
+    /// </summary>
+    private int _lastGatherCount;
+
+    /// <summary>
+    /// Entities the last gather found in this connection's area of interest.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from what the client received. The budget defers, the schedule withholds,
+    /// and the encoder can fail; a client reporting fewer entities than this means loss
+    /// somewhere in that chain, and a client reporting the same number means the area of
+    /// interest genuinely contained that many (#161).
+    /// </remarks>
+    internal int LastGatherCount => Volatile.Read(ref _lastGatherCount);
 
     private readonly ILogger _logger;
     // Close lifecycle, three states rather than a bool.

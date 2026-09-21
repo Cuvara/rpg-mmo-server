@@ -70,6 +70,7 @@ public sealed class GameMetrics : IDisposable
     private readonly Counter<long> _snapshotBytes;
     private readonly Counter<long> _snapshotEntitiesShed;
     private readonly Counter<long> _snapshotAnchorMissing;
+    private readonly Counter<long> _snapshotEntitiesGathered;
     private readonly Counter<long> _snapshotDeferredByInterval;
 #pragma warning disable CS0414 // held so the gauge stays registered for the meter's lifetime
     private readonly ObservableGauge<int> _snapshotMaxStateAge;
@@ -201,6 +202,16 @@ public sealed class GameMetrics : IDisposable
                          "deferral never touches the budget's bookkeeping -- so reading one " +
                          "for the other reports a healthy zero while entities go seconds " +
                          "without an update.");
+
+        _snapshotEntitiesGathered = _meter.CreateCounter<long>(
+            "gameserver.snapshots.entities_gathered",
+            description: "Entities found in viewers' areas of interest, summed across every " +
+                         "viewer every world tick -- what the server CONSIDERED in-interest, " +
+                         "before the byte budget or the replication schedule withheld " +
+                         "anything. Its pair is what a client reports merging: the two " +
+                         "differing localises a loss to encode/decode, and the two agreeing " +
+                         "means the area of interest genuinely held that many. Without it, " +
+                         "'the wire is delivering N' is an inference on both sides at once.");
 
         _snapshotAnchorMissing = _meter.CreateCounter<long>(
             "gameserver.snapshots.anchor_missing",
@@ -562,6 +573,31 @@ public sealed class GameMetrics : IDisposable
     /// a Prometheus scrape.
     /// </remarks>
     /// <summary>
+    /// Records this tick's gather sizes: the total across viewers, and the largest single
+    /// viewer's.
+    /// </summary>
+    /// <remarks>
+    /// The maximum is kept as well as the total because an average hides the case that
+    /// matters — one client with an empty view among many full ones, which is exactly the
+    /// shape an anchor or interest bug makes.
+    /// </remarks>
+    public void RecordSnapshotGather(long entitiesGathered, int maxGather)
+    {
+        if (entitiesGathered > 0)
+        {
+            _snapshotEntitiesGathered.Add(entitiesGathered, _mapTags);
+            Interlocked.Add(ref _snapshotEntitiesGatheredTotal, entitiesGathered);
+        }
+        if (maxGather > Volatile.Read(ref _maxGather)) Volatile.Write(ref _maxGather, maxGather);
+    }
+
+    /// <summary>Entities gathered into viewers' areas of interest since process start.</summary>
+    public long SnapshotEntitiesGathered => Interlocked.Read(ref _snapshotEntitiesGatheredTotal);
+
+    /// <summary>Largest single-viewer gather observed on this server.</summary>
+    public int MaxGather => Volatile.Read(ref _maxGather);
+
+    /// <summary>
     /// Records viewer gathers skipped this tick for want of a resolvable anchor (#385).
     /// </summary>
     public void RecordSnapshotAnchorMissing(long count)
@@ -597,6 +633,8 @@ public sealed class GameMetrics : IDisposable
     private long _snapshotBytesTotal;
     private long _snapshotEntitiesShedTotal;
     private long _snapshotAnchorMissingTotal;
+    private long _snapshotEntitiesGatheredTotal;
+    private int _maxGather;
     private long _snapshotRemovalsDeferredTotal;
 
     /// <summary>Snapshot bytes written to sockets since start. Mirrors the counter for <c>/status</c>.</summary>

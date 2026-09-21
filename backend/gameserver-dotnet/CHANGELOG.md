@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`snapshot_entities_gathered` and `snapshot_max_gather`** — what the server considered
+  in-interest per viewer, on `/status` and as `gameserver.snapshots.entities_gathered`
+  (Cuvara/Netcode#161).
+
+  The server half of a pair. The client now reports the entities it merged; this reports the
+  entities the gather found, **before** the byte budget or the replication schedule withheld
+  anything. Server gathered 8 and client merged 1 localises a loss to encode/decode; both
+  reading 1 means the area of interest genuinely contained one. Neither number alone
+  supports either conclusion, which is why "the wire is delivering nine" was an inference on
+  both sides at once and cost a day on Cuvara/IndieRPGMMOAdventure#126.
+
+  The maximum is kept alongside the total because an **average hides the case that matters**:
+  one client with an empty view among many full ones is exactly the shape an anchor or
+  interest defect makes, and it averages away to nothing.
+
+  A skipped gather (#385) leaves the count at zero rather than holding the last good value —
+  a count that keeps reporting the previous number reads as a healthy view during precisely
+  the failure it exists to reveal.
+
 ### Fixed
 
 - **A connection whose own entity cannot be resolved is now skipped and counted, instead of

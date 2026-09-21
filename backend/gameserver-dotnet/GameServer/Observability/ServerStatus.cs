@@ -413,6 +413,20 @@ public sealed class ServerStatus
     public long SnapshotAnchorMissing { get; set; }
 
     /// <summary>
+    /// Entities found in viewers' areas of interest since start — what the server
+    /// CONSIDERED in-interest, before the budget or the schedule withheld anything (#161).
+    /// </summary>
+    [JsonPropertyName("snapshot_entities_gathered")]
+    public long SnapshotEntitiesGathered { get; set; }
+
+    /// <summary>
+    /// Largest single-viewer gather observed. Kept alongside the total because an average
+    /// hides one client with an empty view among many full ones.
+    /// </summary>
+    [JsonPropertyName("snapshot_max_gather")]
+    public int SnapshotMaxGather { get; set; }
+
+    /// <summary>
     /// Despawn notifications deferred by the downlink budget since start. Should stay at
     /// zero: despawns outrank every non-self update, so this moves only when the budget is
     /// too small for the despawn list alone.
