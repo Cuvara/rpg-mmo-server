@@ -8,6 +8,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The four combat variables from #396 were not passed to the containers either.** Added to
+  both `gameserver-dotnet` and `gameserver-dotnet-map02`: `GAMESERVER_ENEMY_ATTACKS`,
+  `GAMESERVER_ENEMY_ATTACKERS_PER_TARGET`, `GAMESERVER_ENEMY_ATTACK_INTERVAL`,
+  `GAMESERVER_PLAYER_RESPAWN`.
+
+  This is the same omission #395 fixed one change earlier, and it recurred immediately —
+  which says the comment added there is not enough on its own. Adding a strictly-parsed knob
+  is two edits, not one, and nothing links them: the server compiles and runs perfectly with
+  a variable the operator can never set, and `/status` reports a default nobody chose.
+
+  The defaults meant the feature still worked (`AttacksByDefault = true`), so nothing looked
+  broken — the knobs were simply inert. That is the whole difficulty: a passthrough gap is
+  invisible until someone sets a value and reads it back.
+
+### Fixed
+
 - **The enemy-AI and bot environment variables were not passed to the container.** Compose's
   `environment:` block is the whole list — a variable absent from it is not forwarded however
   carefully it is set in `.env` or the shell. The server then silently takes its built-in
