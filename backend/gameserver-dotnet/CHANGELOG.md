@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`backend/docs/MEASUREMENT.md`** and the **`verify-a-result` skill** — the measurement and
+  verification discipline this project has paid for, written down.
+
+  Every expensive defect here had one shape: it produced **a plausible number instead of an
+  error**. The document is not general advice; every entry is an incident that happened, with
+  its cost, and most happened more than once — an empty CI result read as green and a broken
+  build declared ready to merge; three gather counters reading zero for two days while 15MB of
+  snapshots went out; a reflection guard that queried public constructors while the bug was a
+  private one, validated by a mutation drawn from the same wrong assumption; a `-73%`
+  improvement that was a cross-build artefact; environment variables set in `.env` that never
+  reached a container, three times.
+
+  `backend/TEAM.md` now carries the short form as a mandatory standard and links both.
+
 ### Fixed
 
 - **The four combat variables from #396 were not passed to the containers either.** Added to

@@ -198,6 +198,31 @@ Rules:
 - Complex logic: inline comments explaining WHY (not what)
 - Package-level doc.go for each package
 
+## Mandatory: verify a result before reporting it
+
+Every expensive defect this project has shipped produced **a plausible number instead of an
+error** — a believable result about the wrong thing, or about nothing at all. Not a crash,
+not a red test.
+
+Before reporting any measurement, benchmark, CI verdict, counter reading or "it works now":
+
+- **Count passes, never the absence of failures.** `gh pr checks` prints nothing at all for a
+  CONFLICTING pull request, and a loop asking "are there zero failures" reads that as green.
+- **Get a non-empty result out of an instrument before trusting it.** A gate that matches
+  nothing must fail, not pass. A counter reading zero must be shown capable of being non-zero.
+- **Mutation-test anything that matters** — revert the logic, watch that specific test go
+  red, restore. Force a rebuild between mutations: MSBuild resolves timestamps to one second
+  and will silently test the previous binary.
+- **A control must differ in exactly one thing**, and must actually exercise the code.
+- **Verify remote and live state, not exit codes.** After a push, `git ls-remote`. After a
+  config change, read it back off `/status`.
+
+The full incident list, with what each one cost, is **`backend/docs/MEASUREMENT.md`**. The
+working checklist is the `verify-a-result` skill in `.claude/skills/`.
+
+Ask of every green result: *what would this look like if the thing I am measuring were
+broken?* If the answer is "the same", it is not evidence yet.
+
 ## Development Standards
 
 ### Go Agents (gateway, shared, nakama, legacy gameserver)
