@@ -626,6 +626,25 @@ public sealed class TickLoop
 
         if (_viewerCount > 0)
         {
+            // Reset HERE, before the gather, and not with the other per-tick deltas
+            // further down. These three are filled BY the gather; the others are filled by
+            // the viewer loop that follows it. Resetting all of them in one tidy block put
+            // these three after the thing that writes them, so they were zeroed every tick
+            // between being accumulated and being recorded, and
+            // `snapshot_entities_gathered`, `snapshot_max_gather` and
+            // `snapshot_anchor_missing` could only ever report 0.
+            //
+            // That is the failure both counters exist to expose, in the counters
+            // themselves: a healthy-looking zero that means "not measured" rather than
+            // "nothing happened". Caught by reading /status on a live server carrying 165
+            // enemies and 3 players — 15MB of snapshots sent, every gather counter zero.
+            // No test caught it because the tests assert at the Connection boundary
+            // (LastGatherCount, and the bool GatherSnapshotView returns), which was correct
+            // the whole time. Nothing asserted what reached the metrics.
+            _snapshotAnchorMissingDelta = 0;
+            _snapshotEntitiesGatheredDelta = 0;
+            _snapshotMaxGather = 0;
+
             // Phase A — gather. One read lock for the whole broadcast.
             //
             // Parallel only above a measured viewer count, and only when the server was
@@ -659,9 +678,6 @@ public sealed class TickLoop
             _snapshotFramesWrittenDelta = 0;
             _snapshotBytesDelta = 0;
             _snapshotEntitiesShedDelta = 0;
-            _snapshotAnchorMissingDelta = 0;
-            _snapshotEntitiesGatheredDelta = 0;
-            _snapshotMaxGather = 0;
             _snapshotRemovalsDeferredDelta = 0;
             _snapshotMaxShedAge = 0;
             _snapshotDeferredByIntervalDelta = 0;
