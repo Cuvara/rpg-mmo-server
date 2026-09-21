@@ -50,6 +50,14 @@ public sealed class TickLoop
     /// resolved (#385). Written from the gather workers, so every update is interlocked.
     /// </summary>
     private long _snapshotAnchorMissingDelta;
+
+    /// <summary>
+    /// Entities gathered across every viewer this tick, and the largest single viewer's
+    /// gather. The total gives a rate; the max is what a single client could have seen,
+    /// and averaging alone would hide one client with an empty view among many full ones.
+    /// </summary>
+    private long _snapshotEntitiesGatheredDelta;
+    private int _snapshotMaxGather;
     private long _snapshotRemovalsDeferredDelta;
     private int _snapshotMaxShedAge;
     private long _snapshotDeferredByIntervalDelta;
@@ -254,7 +262,30 @@ public sealed class TickLoop
             if (!_viewers[i].GatherSnapshotView(reader, _aoiRadius, _currentTick, _keyframeInterval, _tickEvents))
             {
                 Interlocked.Increment(ref _snapshotAnchorMissingDelta);
+                continue;
             }
+
+            RecordGather(_viewers[i].LastGatherCount);
+        }
+    }
+
+    /// <summary>
+    /// Accumulate one viewer's gather size. Interlocked throughout because the parallel
+    /// slice path calls this from the gather workers.
+    /// </summary>
+    private void RecordGather(int count)
+    {
+        Interlocked.Add(ref _snapshotEntitiesGatheredDelta, count);
+
+        // Compare-exchange loop rather than a plain compare-and-write: two workers reading
+        // the same stale maximum would otherwise both decide they are the largest and the
+        // smaller of them could land last.
+        int observed = Volatile.Read(ref _snapshotMaxGather);
+        while (count > observed)
+        {
+            int prior = Interlocked.CompareExchange(ref _snapshotMaxGather, count, observed);
+            if (prior == observed) break;
+            observed = prior;
         }
     }
 
@@ -286,7 +317,10 @@ public sealed class TickLoop
             if (!_viewers[i].GatherSnapshotView(reader, _aoiRadius, _currentTick, _keyframeInterval, _tickEvents))
             {
                 Interlocked.Increment(ref _snapshotAnchorMissingDelta);
+                continue;
             }
+
+            RecordGather(_viewers[i].LastGatherCount);
         }
     }
 
@@ -626,6 +660,8 @@ public sealed class TickLoop
             _snapshotBytesDelta = 0;
             _snapshotEntitiesShedDelta = 0;
             _snapshotAnchorMissingDelta = 0;
+            _snapshotEntitiesGatheredDelta = 0;
+            _snapshotMaxGather = 0;
             _snapshotRemovalsDeferredDelta = 0;
             _snapshotMaxShedAge = 0;
             _snapshotDeferredByIntervalDelta = 0;
@@ -687,6 +723,7 @@ public sealed class TickLoop
             _metrics.RecordSnapshotSchedule(
                 _snapshotDeferredByIntervalDelta, _snapshotMaxStateAge);
             _metrics.RecordSnapshotAnchorMissing(_snapshotAnchorMissingDelta);
+            _metrics.RecordSnapshotGather(_snapshotEntitiesGatheredDelta, _snapshotMaxGather);
             _metrics.RecordTickDuration(startTimestamp, Stopwatch.GetTimestamp());
         }
     }
