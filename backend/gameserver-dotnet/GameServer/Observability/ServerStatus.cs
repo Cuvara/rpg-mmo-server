@@ -356,6 +356,44 @@ public sealed class ServerStatus
     public string ReplicationSchedule { get; set; } = "";
 
     /// <summary>
+    /// The enemy AI tuning in force (the <c>GAMESERVER_ENEMY_*</c> family), rendered as
+    /// one line, or <c>off</c> when the spawner is disabled.
+    /// </summary>
+    /// <remarks>
+    /// <para>Published for the same reason as <c>aoi_radius</c> and
+    /// <c>importance_profile</c>: it is deployment-set, it is not on the wire, and two
+    /// servers running different enemy tuning are indistinguishable from any client and
+    /// from every other field here — <c>enemies_alive</c> answers "how many are there
+    /// now", which is the same number on a server capped at 30 that has filled up and a
+    /// server capped at 300 that has not.</para>
+    ///
+    /// <para>It is also the field that answers a question a manifest cannot: an
+    /// already-allocated Agones GameServer keeps the environment it was created with, so
+    /// a fleet update changes the manifest and not the pod, and the only honest source for
+    /// what a running pod is doing is the running pod.</para>
+    /// </remarks>
+    [JsonPropertyName("enemy_ai")]
+    public string EnemyAi { get; set; } = "off";
+
+    /// <summary>
+    /// Enemy population cap in force at this instant, i.e. the base cap plus the
+    /// per-player allowance times the players online. 0 when the spawner is disabled.
+    /// </summary>
+    /// <remarks>
+    /// Rendered as well as configured, because the configuration is "30 + 45 per player"
+    /// and the behaviour is a number — and an operator comparing <c>enemies_alive</c>
+    /// against a cap needs the one that actually applies right now.
+    ///
+    /// <para><b>Derived from <see cref="PlayersOnline"/>, which is connections, while the
+    /// spawner itself counts live player entities.</b> The two differ for as long as a
+    /// player is dead and awaiting respawn, so this can read slightly high during a wipe.
+    /// It is the closest number this endpoint has, and saying which number it is beats
+    /// publishing one that looks exact.</para>
+    /// </remarks>
+    [JsonPropertyName("enemy_ai_max_now")]
+    public int EnemyAiMaxNow { get; set; }
+
+    /// <summary>
     /// Whether field-level delta encoding is permitted on this server
     /// (<c>GAMESERVER_FIELD_DELTA</c>). False means every entity carries every field, which
     /// is the control arm for any bandwidth claim about the feature — see #381.

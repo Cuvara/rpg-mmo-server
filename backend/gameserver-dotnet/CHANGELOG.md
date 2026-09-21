@@ -8,6 +8,77 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Enemies chase players, and the fight scales with the crowd** — the enemy AI is now a
+  fight rather than a conveyor belt, and every number in it is set by environment variable.
+
+  **What was wrong.** `EnemySpawner` spawned on a ring of radius 13 about the world origin,
+  walked every enemy to the centre, and despawned it on arrival. There was **no player
+  targeting anywhere in it** — players were incidental to a stream of mobs crossing the
+  middle of the map — and the cap of 30 was the whole world's budget however many players
+  shared it, so every player who joined made the fight thinner. The owner's report after
+  playing the DOTS sample ("a player hitting a few enemies that trickle into the middle")
+  is a precise description of those four facts.
+
+  **What it does now.** `EnemyMoveSystem` steps each enemy toward the **nearest live
+  player**; `EnemySpawnSystem` anchors each spawn on a **randomly chosen live player** at
+  `GAMESERVER_ENEMY_SPAWN_DISTANCE`, rejecting a placement that lands within
+  `GAMESERVER_ENEMY_MIN_SPAWN_DISTANCE` of any player (6 samples, then the last candidate
+  anyway — a wave that silently thins as the crowd tightens is the old problem wearing a
+  safety check as a costume); and the population and wave size are
+  `base + perPlayer × livePlayers`. `EnemyReapSystem` despawns on **death**, and at the
+  centre only when there is nothing to chase.
+
+  **The defaults are today's behaviour at zero players and an improvement at one or more.**
+  This is the shape of the whole change: `30 + 45/player` and `2 + 6/player` are exactly
+  the pre-change `30` and `2` on an empty server, an enemy with no player to chase falls
+  back to the pre-change walk-to-origin step bit for bit, and the centre despawn is
+  unchanged on that path. So `EnemyAiCharacterizationTests` — 16 assertions written before
+  the system split and never edited since — **still passes unmodified**, and the new
+  behaviour is confined to the worlds where the old AI and the new one genuinely differ:
+  the ones with players in them. A solo player now fights in a 75-enemy world and a
+  four-player group in a 210-enemy one.
+
+  **Tuning (`GAMESERVER_ENEMY_*`, 13 knobs), strictly parsed.** Max, per-player max, wave
+  size, per-player wave size, wave interval, spawn distance, minimum separation, contact
+  range, HP, attack, defense, speed, and `GAMESERVER_ENEMY_CHASE` to restore the old AI in
+  full as a control arm. Every one follows the `GAMESERVER_FIELD_DELTA` rule rather than
+  the cheap `TryParse ? value : default` idiom: an unparseable, out-of-range or
+  unrecognised value **exits 2 with a named reason**. These knobs decide how many entities
+  exist and where they go, so a typo that silently ran a fleet at the default is a fight
+  nobody configured, and no counter, log line or wire field would report it.
+  `GAMESERVER_ENEMY_MIN_SPAWN_DISTANCE >= GAMESERVER_ENEMY_SPAWN_DISTANCE` is refused as a
+  pair, because at or above it every candidate placement — including the one it was
+  measured from — is rejected, and the knob set to keep enemies off players would instead
+  have disabled the check that does.
+
+  **No allocation in the tick loop.** `PlayerTargetBuffer` holds the handle and position
+  arrays for the life of the process and is refilled, never reallocated, in steady state;
+  the nearest-player search is a linear scan rather than a spatial-grid query, because a
+  query object is an allocation per enemy per tick and the scan is `enemies × players` of
+  float comparisons already in cache. Each system owns its buffer as a
+  `[SimulationScratch]` field and refills it per run rather than caching across ticks — a
+  cross-tick cache would be simulation state in a class (ADR-12), and it would save one
+  archetype query per world tick. Guarded by
+  `EnemyBattleRoyaleTests.SteadyStateChaseDoesNotAllocatePerTick`, measured at a saturated
+  population with 8 players online.
+
+  `EnemyAiSchedule` ordering (Spawn=0, Move=1, Reap=2) is unchanged, and still correct for
+  the reason the enum documents: "arrived" is a fact produced by Move earlier in the same
+  tick, so Reap must not run before it.
+
+- **`enemy_ai` and `enemy_ai_max_now` on `/status`** — the tuning in force, rendered as one
+  line, and the population cap that applies right now.
+
+  Published for the reason `aoi_radius` and `importance_profile` are: deployment-set, not
+  on the wire, and two servers running different enemy tuning are indistinguishable from
+  any client and from every other field on the endpoint — `enemies_alive` answers "how many
+  are there now", which reads the same on a server capped at 30 that has filled and one
+  capped at 300 that has not. It also answers a question a manifest cannot: an
+  already-allocated Agones GameServer keeps the environment it was created with, so a fleet
+  update changes the manifest and not the pod. `enemy_ai_max_now` is derived from
+  `players_online` (connections) while the spawner counts live player entities, so it reads
+  slightly high during a wipe; that is documented on the field rather than smoothed over.
+
 - **`snapshot_entities_gathered` and `snapshot_max_gather`** — what the server considered
   in-interest per viewer, on `/status` and as `gameserver.snapshots.entities_gathered`
   (Cuvara/Netcode#161).
