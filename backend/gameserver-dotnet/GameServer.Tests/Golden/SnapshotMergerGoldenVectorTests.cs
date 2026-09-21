@@ -94,7 +94,15 @@ public class SnapshotMergerGoldenVectorTests
                     e.Speed == null ? 0f : GoldenVectors.Float(e.Speed),
                     e.FacingBrad,
                     (EntityAction)e.Action,
-                    e.ChangedFields);
+                    // NAMED, not positional. The ten-argument overload that used to accept
+                    // this positionally was removed in Shared.GameLogic 0.6.0 precisely
+                    // because a positional uint here binds to whatever the overload set
+                    // offers -- which is how a retrigger counter once became a field mask
+                    // (Cuvara/Netcode#159). actionSeq is stated rather than defaulted: the
+                    // golden corpus does not exercise it, and 0 here is that absence, not a
+                    // value under test.
+                    actionSeq: 0u,
+                    changedFields: e.ChangedFields);
             }
 
             var snapshot = new SnapshotData(

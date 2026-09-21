@@ -150,24 +150,26 @@ namespace Shared.GameLogic.Components
         {
         }
 
-        /// <summary>
-        /// Constructs entity state including the field-level delta mask but without a
-        /// retrigger counter, leaving <see cref="ActionSeq"/> zero.
-        /// </summary>
-        /// <remarks>
-        /// Kept for source compatibility with callers that predated <see cref="ActionSeq"/>:
-        /// the Unity client compiles this library from a pinned tag.
-        /// </remarks>
-        /// <param name="changedFields">
-        /// Zero for a complete entity snapshot; non-zero for a partial update — see
-        /// <see cref="ChangedFields"/> and <see cref="Systems.SnapshotFieldBits"/>.
-        /// </param>
-        public EntitySnapshotData(
-            string id, string type, float x, float y, int hp, int maxHp, float speed,
-            uint facingBrad, EntityAction action, uint changedFields)
-            : this(id, type, x, y, hp, maxHp, speed, facingBrad, action, actionSeq: 0u, changedFields: changedFields)
-        {
-        }
+        // REMOVED in 0.6.0: the ten-argument overload taking `changedFields` positionally.
+        //
+        // Its doc comment claimed source compatibility "with callers that predated
+        // ActionSeq" -- but those callers passed NINE arguments, and that overload is still
+        // here. The ten-argument form was new API introduced in the same release as the
+        // field it served, so it had no caller to be compatible with. What it actually did
+        // was capture every pre-existing ten-argument call, whose tenth argument was
+        // ActionSeq.
+        //
+        // WorldState.Apply in the Unity client was one such call. It compiled clean, and
+        // the counter landed in `changedFields`: a counter of 12 is a mask asserting
+        // Hp|MaxHp are the ONLY fields present, so the next merge reconstructed the entity
+        // from stale X, Y, Speed, Facing and Action while believing it was correct. Nothing
+        // validates a mask for plausibility, and nothing should -- a mask comes from an
+        // encoder, not from a mis-bound argument (Cuvara/Netcode#159, fixed at the call
+        // site in #156).
+        //
+        // Removing it makes that mistake a compile error. Callers that want a mask without
+        // a counter pass `actionSeq: 0u, changedFields: mask` to the full constructor, or
+        // name the argument.
 
         /// <summary>
         /// Full constructor including both the retrigger counter and the field-level delta mask.
