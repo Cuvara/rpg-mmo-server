@@ -228,14 +228,22 @@ passed through goes in that file's `Excluded` dictionary **with a reason**; it i
 today.
 
 **The gate's scope is narrower than it sounds.** It covers names declared as
-`const string` (27 today). It does **not** cover names read from an inline literal (25
+`const string` (31 today). It does **not** cover names read from an inline literal (25
 today, including `GAMESERVER_FIELD_DELTA` and `GAMESERVER_TICK_RATE` — several of those are
 per-service values set literally in compose, not forwarded from `.env`), it does not cover
-names built by concatenation such as `GAMESERVER_IMPORTANCE_W_{DISTANCE,CHANGE,TYPE,COMBAT}`
-(which exist nowhere as a whole string, so the gate would *not* have caught the first of the
-three incidents), and it does not read `deploy/k8s/app/50-fleet-map.yaml`, which has the
-same shape of gap. Declaring a new knob's name as a constant is what brings it under the
-gate.
+names built by concatenation **at runtime**, which exist nowhere as a whole string, and it
+does not read `deploy/k8s/app/50-fleet-map.yaml`, which has the same shape of gap.
+
+Declaring a new knob's name as a constant is what brings it under the gate, and that is
+worth doing deliberately: `GAMESERVER_IMPORTANCE_W_{DISTANCE,CHANGE,TYPE,COMBAT}` were
+assembled from a prefix and four suffixes, which is why the gate could not see the *first*
+of the incidents above. Written as `const string` — `EnvVar + "_W_DISTANCE"` is a
+compile-time constant, so each is a real literal in the assembly — they came under the gate
+and it found a fifth instance at once: all four had been added to `gameserver-dotnet` when
+that gap was first fixed and never to `gameserver-dotnet-map02`, so setting a weight changed
+map_01's replication policy and silently left map_02 on the profile's own. The seven
+*refused* `_W_` factors stay assembled from suffixes on purpose — a knob the server exits 2
+on must not be demanded in compose.
 
 
 **Bots count as players everywhere the simulation asks the world**, which is the point and

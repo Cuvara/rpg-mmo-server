@@ -19,6 +19,33 @@ public sealed class ImportanceSettings
 {
     public const string EnvVar = "GAMESERVER_IMPORTANCE";
 
+    // ── The four live weight overrides, as constants ─────────────────────────
+    //
+    // Declared rather than built from a suffix at each call site, and the reason is not
+    // tidiness. These four are the FIRST instance of the knob-that-never-reaches-the-
+    // container failure this repository has now hit four times, and they are the one
+    // instance ComposeEnvPassthroughTests could not have caught: that gate reflects over
+    // the assembly's `const string` fields, and a name assembled from a prefix and a
+    // suffix at runtime exists nowhere as a whole string for reflection — or for a grep —
+    // to find. Written as constants they are ordinary declared knobs, and the gate covers
+    // them like any other.
+    //
+    // `EnvVar + "_W_…"` is a compile-time constant expression, so each of these IS a
+    // literal in the assembly; the concatenation is a readability device and not a
+    // runtime one.
+
+    /// <summary>Overrides the distance weight.</summary>
+    public const string EnvWeightDistance = EnvVar + "_W_DISTANCE";
+
+    /// <summary>Overrides the state-change weight.</summary>
+    public const string EnvWeightChange = EnvVar + "_W_CHANGE";
+
+    /// <summary>Overrides the entity-type weight.</summary>
+    public const string EnvWeightType = EnvVar + "_W_TYPE";
+
+    /// <summary>Overrides the combat weight.</summary>
+    public const string EnvWeightCombat = EnvVar + "_W_COMBAT";
+
     private ImportanceSettings(string profile, ReplicationImportance.Weights weights)
     {
         Profile = profile;
@@ -105,14 +132,19 @@ public sealed class ImportanceSettings
         float distance = basis.Distance, change = basis.Change, type = basis.Type, combat = basis.Combat;
         bool overridden = false;
 
-        if (!TryOverride(getOverride, "DISTANCE", ref distance, ref overridden, out error)) return false;
-        if (!TryOverride(getOverride, "CHANGE", ref change, ref overridden, out error)) return false;
-        if (!TryOverride(getOverride, "TYPE", ref type, ref overridden, out error)) return false;
-        if (!TryOverride(getOverride, "COMBAT", ref combat, ref overridden, out error)) return false;
+        if (!TryOverride(getOverride, EnvWeightDistance, ref distance, ref overridden, out error)) return false;
+        if (!TryOverride(getOverride, EnvWeightChange, ref change, ref overridden, out error)) return false;
+        if (!TryOverride(getOverride, EnvWeightType, ref type, ref overridden, out error)) return false;
+        if (!TryOverride(getOverride, EnvWeightCombat, ref combat, ref overridden, out error)) return false;
 
         // Refused rather than ignored: a manifest that sets one of these is describing a
         // policy this server cannot run, and silently dropping it would leave an operator
         // reading their own configuration as if it had taken effect.
+        // These stay assembled from suffixes, deliberately, and are NOT constants. A
+        // constant here would be picked up by ComposeEnvPassthroughTests and demanded in
+        // both compose services — which would be exactly backwards, since setting any of
+        // them is a configuration this server refuses to start on. A knob that must not be
+        // passed through is not a knob.
         foreach (string dead in new[] { "PARTY", "PVP", "BOSS", "QUEST", "VISIBILITY", "ZONE", "INTERACTION" })
         {
             if (getOverride($"{EnvVar}_W_{dead}") != null)
@@ -138,11 +170,10 @@ public sealed class ImportanceSettings
     }
 
     private static bool TryOverride(
-        Func<string, string?> getOverride, string factor, ref float value,
+        Func<string, string?> getOverride, string key, ref float value,
         ref bool overridden, out string? error)
     {
         error = null;
-        string key = $"{EnvVar}_W_{factor}";
         string? raw = getOverride(key);
         if (raw == null) return true;
         overridden = true;

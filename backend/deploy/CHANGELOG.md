@@ -21,6 +21,18 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   of that test. A comment above each block has now failed four times, so the link between
   "add a knob" and "list it in two services" is mechanical from here.
 
+- **`gameserver-dotnet-map02` never received the four importance weights.**
+  `GAMESERVER_IMPORTANCE_W_{DISTANCE,CHANGE,TYPE,COMBAT}` were added to `docker-compose.yml`
+  when that gap was first found and never to `docker-compose.override.yml`, so setting one
+  in `.env` changed map_01's replication policy and silently left map_02 running the
+  profile's own weights. **Two maps running different policies from one file is worse than
+  the original gap**, because the knob demonstrably works and only works somewhere — the
+  exact reason the passthrough gate checks both services rather than one. Added to map_02.
+
+  This is the **fifth** instance, and it only became visible once the four names were
+  declared as `const string` in `ImportanceSettings`: they had been assembled from a prefix
+  and a suffix, so nothing — no reflection, no grep — could enumerate them.
+
 - **`GAMESERVER_ENEMY_ATTACK_INTERVAL` now carries its floor where an operator will read
   it.** An enemy attack travels the ordinary input path, so `InputHandler` charges it the
   same 500 ms `GameConstants.AttackCooldownMs` it charges a player: the effective interval

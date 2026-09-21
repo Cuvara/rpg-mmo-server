@@ -72,6 +72,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   entry for a renamed knob fails instead of quietly widening the hole. Not a name pattern:
   a pattern excludes knobs nobody considered.
 
+- **`GAMESERVER_IMPORTANCE_W_{DISTANCE,CHANGE,TYPE,COMBAT}` are now `const string`** in
+  `ImportanceSettings`, which brings them under the gate above.
+
+  They were assembled from a prefix and a suffix at each call site, so they existed nowhere
+  as a whole string and neither reflection nor a grep could enumerate them — which is why
+  that family, the **first** of the passthrough incidents, was the one the gate admitted it
+  could not see. `EnvVar + "_W_DISTANCE"` is a compile-time constant expression, so each is
+  a real literal in the assembly and the concatenation is now a readability device rather
+  than a runtime one.
+
+  **It found a fifth instance immediately, and it is the half-fix case:** all four had been
+  added to `gameserver-dotnet` when the gap was first fixed and **never** to
+  `gameserver-dotnet-map02`. So for as long as they have existed, setting
+  `GAMESERVER_IMPORTANCE_W_TYPE` in `.env` changed map_01's replication policy and silently
+  left map_02 on the profile's own weights — two maps running different policies from one
+  file, which is harder to find than the original gap because the knob demonstrably works,
+  just not everywhere.
+
+  The seven **refused** `_W_` factors (`PARTY`, `PVP`, `BOSS`, …) stay assembled from
+  suffixes on purpose and are commented as such: the server exits 2 when one is set, so a
+  constant would have the gate demand them in compose — exactly backwards.
+
+  Guarded by a fourth sentinel in the gate. Mutation-verified: rewriting
+  `EnvWeightDistance` as a *runtime* concatenation leaves both gate arms **passing** — the
+  whole family silently dropped — and only the sentinel assertion red. That is the precise
+  shape that hid this family for three incidents.
+
+### Changed
+
+- `backend/docs/MEASUREMENT.md` section 2 gains **"assert what the failure message says,
+  not just that the test went red"**. A diagnostic can survive a mutation by naming the
+  *wrong* reason, which is worse than one that fails: the compose reader's parser test
+  asserted the substring `"environment"`, and deleting the missing-block throw left it green
+  while the empty-block throw reported "has an `environment:` block this reader parsed as
+  empty" for a service that had no such block at all. The substring matched; the sentence
+  was false. Found only because the mutation pass read the message rather than the
+  red/green.
+
 
 ### Fixed
 

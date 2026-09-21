@@ -28,7 +28,7 @@ namespace GameServer.Tests.Deploy;
 ///
 /// <para><b>What this gate does NOT cover, stated because a partial gate that reads as a
 /// total one is worse than none.</b> It checks variable names the assembly declares as
-/// <c>const string</c> — 27 of them today. It does not check:</para>
+/// <c>const string</c> — 31 of them today. It does not check:</para>
 /// <list type="bullet">
 ///   <item><description><b>Names read from an inline string literal</b> rather than a
 ///     constant (25 today, including <c>GAMESERVER_FIELD_DELTA</c>,
@@ -37,12 +37,19 @@ namespace GameServer.Tests.Deploy;
 ///     <c>.env</c>, so sweeping them in would demand a dozen exclusions whose reasons
 ///     nobody had actually decided. Declaring a knob's name as a constant is what brings it
 ///     under this gate, which makes the right shape the rewarded one.</description></item>
-///   <item><description><b>Names built by concatenation</b>, which no reflection or grep
-///     can enumerate. <c>GAMESERVER_IMPORTANCE_W_{DISTANCE,CHANGE,TYPE,COMBAT}</c> are
-///     assembled from a prefix and four suffixes, so they exist nowhere as a whole string —
-///     <b>this gate would not have caught the first of the three incidents above.</b> It
-///     catches the second and the third, and it caught a fourth nobody had noticed. That is
-///     the honest scope.</description></item>
+///   <item><description><b>Names built by concatenation at runtime</b>, which neither
+///     reflection nor a grep can enumerate — they exist nowhere as a whole string. That was
+///     true of <c>GAMESERVER_IMPORTANCE_W_{DISTANCE,CHANGE,TYPE,COMBAT}</c>, the *first* of
+///     the incidents above and the one this gate therefore could not see. They are now
+///     declared as <c>const string</c> in <c>ImportanceSettings</c> and are covered like any
+///     other knob — which found a fifth instance immediately: the four had been added to
+///     <c>gameserver-dotnet</c> when the gap was first fixed and never to
+///     <c>gameserver-dotnet-map02</c>, so setting a weight changed map_01's replication
+///     policy and silently left map_02 on the profile's own. Declaring a knob's name as a
+///     constant is what brings it under this gate, which makes the right shape the rewarded
+///     one. The seven refused <c>_W_</c> factors in <c>ImportanceSettings</c> stay assembled
+///     from suffixes on purpose: a knob the server refuses to start on must NOT be demanded
+///     in compose.</description></item>
 ///   <item><description><b>The Kubernetes manifests.</b> <c>deploy/k8s/app/50-fleet-map.yaml</c>
 ///     has the same shape of gap and is not read here.</description></item>
 /// </list>
@@ -106,6 +113,13 @@ public class ComposeEnvPassthroughTests
         "GAMESERVER_ENEMY_MAX",   // EnemyAiSettings
         "GAMESERVER_BOTS",        // BotSettings
         "GAMESERVER_AOI_RADIUS",  // AoiSettings
+
+        // ImportanceSettings, and specifically a name written as `EnvVar + "_W_…"`. It is
+        // here rather than `GAMESERVER_IMPORTANCE` because the compile-time concatenation is
+        // the fragile part: rewritten as a runtime concatenation it would vanish from the
+        // assembly's constants and from this gate without anything else changing, which is
+        // the exact shape that hid this family for the first three incidents.
+        "GAMESERVER_IMPORTANCE_W_DISTANCE",
     };
 
     // ── The gate ─────────────────────────────────────────────────────────────
