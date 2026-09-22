@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **The player-save failure ratio is now visible on `/status` and in the log.** `/metrics`
+  read `gameserver_player_saves_total{status="ok"} 27` against `{status="error"} 239` — a
+  90% failure rate — for 7.8 hours, and nothing said so anywhere a person looks (#402).
+
+  **The cause was benign and is worth stating plainly: the dev stack's own
+  `rpg-postgres-game` container was stopped and never brought back.** Every failure reads
+  `pgstore save player <id>: Name does not resolve` — Docker's embedded DNS returning
+  NXDOMAIN for a container that no longer exists — bracketed by a single
+  `57P01: terminating connection due to administrator command` at the moment of shutdown.
+  Not bot rows, not a constraint, not the schema. `PersistablePlayerStates()` was already
+  correct and already guarded in both directions by `BotPlayerTests`.
+
+  What the incident actually exposed is that **nothing surfaced the ratio**, and that the
+  shape of the counter misleads: it is cumulative over process lifetime, so an outage that
+  starts and never ends freezes `ok` and grows `error` without bound. The 9:1 ratio was
+  therefore not a steady-state failure rate at all — it was one outage, still running,
+  averaged against the healthy period before it. Anyone reasoning "a restart would give a
+  burst, not a steady ratio" is led to the wrong candidate by the metric itself.
+
+  - `/status` gains `player_saves_ok`, `player_saves_error` and `player_save_error_ratio`.
+    `GameMetrics` mirrors both outcomes into `Interlocked` counters, because a
+    `Counter<T>` is write-only and that is the mechanical reason the ratio had nowhere to
+    appear — the same dual-surface pattern as `RecordPlayerKicked`.
+  - `AsyncSaver` raises one `Error` line, `Player save sweep DEGRADED`, when a sweep's
+    failure ratio crosses 50%, and one `Information` line when it recovers. Edge
+    triggered, so a healthy server stays silent, with a restatement every 20 degraded
+    sweeps so a long outage does not look like recovery once the first line scrolls away.
+    The pre-existing per-player `LogWarning` is not this signal: it fires once per player
+    per sweep, states no ratio, and sits at warning level among routine noise.
+  - `SaveAllAsync` no longer returns early on an empty sweep. "Nobody was online" and
+    "everybody failed" are different facts, and letting a zero-player sweep reach
+    `EvaluateSweepHealth` keeps one place deciding what a sweep meant — a second zero-check
+    upstream would shadow that guard, and a shadowed guard is one no test can hold.
+
 ### Fixed
 
 - **Enemies visibly disappeared and reappeared while the player moved.** `GAMESERVER_MAX_SNAPSHOT_BYTES`

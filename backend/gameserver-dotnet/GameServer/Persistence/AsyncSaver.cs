@@ -116,6 +116,18 @@ public sealed class AsyncSaver
     private readonly ILogger _logger;
     private readonly GameMetrics? _metrics;
     private readonly PlayerSaveScope _scope;
+    private readonly double _degradedThreshold;
+
+    /// <summary>
+    /// Sweeps a degraded saver waits before restating the condition. Re-logging matters:
+    /// the failure that prompted this (#402) lasted 33 minutes and counting, and an
+    /// edge-triggered line alone scrolls out of a busy log and is then indistinguishable
+    /// from a saver that recovered.
+    /// </summary>
+    private const int RelogEverySweeps = 20;
+
+    private bool _degraded;
+    private int _degradedSweeps;
 
     /// <summary>Build a saver over <paramref name="world"/>.</summary>
     /// <param name="store">Where player rows are written.</param>
@@ -137,7 +149,8 @@ public sealed class AsyncSaver
         TimeSpan interval,
         ILogger logger,
         GameMetrics? metrics = null,
-        PlayerSaveScope scope = PlayerSaveScope.Full)
+        PlayerSaveScope scope = PlayerSaveScope.Full,
+        double degradedThreshold = 0.5)
     {
         _store = store;
         _world = world;
@@ -146,7 +159,20 @@ public sealed class AsyncSaver
         _logger = logger;
         _metrics = metrics;
         _scope = scope;
+        _degradedThreshold = degradedThreshold;
     }
+
+    /// <summary>
+    /// Whether the most recent sweep that attempted anything failed at or above
+    /// <see cref="DegradedThreshold"/>. Diagnostics and tests; the operator-facing signal
+    /// is the log line raised on the transition.
+    /// </summary>
+    public bool IsDegraded => _degraded;
+
+    /// <summary>
+    /// Per-sweep failure ratio at or above which the sweep is reported as degraded.
+    /// </summary>
+    public double DegradedThreshold => _degradedThreshold;
 
     /// <summary>Which fields this saver writes. Diagnostics and tests.</summary>
     public PlayerSaveScope Scope => _scope;
@@ -215,9 +241,14 @@ public sealed class AsyncSaver
         // archetype on purpose, and persisting one would create a player row per bot per
         // restart, successfully and silently. See EntityTags.Bot.
         var players = _world.PersistablePlayerStates();
-        if (players.Count == 0) return;
 
+        // No early return on an empty sweep. "Nobody was online" and "everybody failed" are
+        // different facts and exactly one place decides what a sweep meant for the saver's
+        // health: EvaluateSweepHealth. A second zero-check here would shadow that one, and a
+        // shadowed guard is a guard no test can hold.
         int saved = 0;
+        int failed = 0;
+        Exception? lastError = null;
         foreach (var p in players)
         {
             try
@@ -228,11 +259,68 @@ public sealed class AsyncSaver
             }
             catch (Exception ex)
             {
+                failed++;
+                lastError = ex;
                 _metrics?.RecordPlayerSaveError();
                 _logger.LogWarning(ex, "Failed to save player {UserId}", p.Id);
             }
         }
 
         _logger.LogDebug("Saved {Count} players", saved);
+        EvaluateSweepHealth(players.Count, failed, lastError);
+    }
+
+    /// <summary>
+    /// Raise an operator-visible line when the sweep's failure ratio crosses
+    /// <see cref="DegradedThreshold"/>, and another when it recovers.
+    ///
+    /// <para>The per-player <c>LogWarning</c> above is not this signal. It fires once per
+    /// player per sweep, says nothing about the ratio, and at warning level it sits in the
+    /// same stream as routine noise — which is how a saver failing 9 attempts in 10 was
+    /// noticed only by someone reading <c>/metrics</c> by hand (#402). This is edge
+    /// triggered, so a healthy server is silent and a transition is one line at
+    /// <c>Error</c>.</para>
+    ///
+    /// <para>Called only for sweeps that attempted at least one player: a sweep with
+    /// nobody online is not evidence of health either way, so it must not clear a
+    /// standing degraded state.</para>
+    /// </summary>
+    private void EvaluateSweepHealth(int attempted, int failed, Exception? lastError)
+    {
+        if (attempted == 0) return;
+
+        double ratio = (double)failed / attempted;
+
+        if (ratio >= _degradedThreshold)
+        {
+            _degradedSweeps++;
+            if (!_degraded)
+            {
+                _degraded = true;
+                _logger.LogError(
+                    lastError,
+                    "Player save sweep DEGRADED: {Failed}/{Attempted} saves failed ({Ratio:P0} >= {Threshold:P0}). "
+                    + "Position and HP are not being persisted; the ADR-6 crash-loss window no longer holds.",
+                    failed, attempted, ratio, _degradedThreshold);
+            }
+            else if (_degradedSweeps % RelogEverySweeps == 0)
+            {
+                _logger.LogError(
+                    lastError,
+                    "Player save sweep still DEGRADED after {Sweeps} sweeps: {Failed}/{Attempted} saves failed ({Ratio:P0}).",
+                    _degradedSweeps, failed, attempted, ratio);
+            }
+
+            return;
+        }
+
+        if (_degraded)
+        {
+            _logger.LogInformation(
+                "Player save sweep recovered after {Sweeps} degraded sweeps: {Failed}/{Attempted} saves failed ({Ratio:P0}).",
+                _degradedSweeps, failed, attempted, ratio);
+            _degraded = false;
+            _degradedSweeps = 0;
+        }
     }
 }
