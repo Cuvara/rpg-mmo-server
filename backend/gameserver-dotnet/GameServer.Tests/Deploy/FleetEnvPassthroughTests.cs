@@ -158,24 +158,29 @@ public class FleetEnvPassthroughTests
         };
 
     /// <summary>
-    /// Exclusions that apply to SOME fleets. Keyed by manifest, because a knob that is
-    /// meaningless on one deployment is required on another — and collapsing the two into a
-    /// single global exclusion would silently stop checking the fleet that needs it.
+    /// The exclusions in force for one fleet: the global ones, plus the set chosen by the
+    /// fleet's mode.
     /// </summary>
-    private static readonly IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>
-        ExcludedPerFleet = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal)
-        {
-            ["agones/fleet-map-dotnet-dev.yaml"] = MapFleetExclusions,
-            ["k8s/app/50-fleet-map.yaml"] = MapFleetExclusions,
-            ["k8s/app/60-fleet-dungeon.yaml"] = DungeonFleetExclusions,
-        };
-
-    private static IReadOnlyDictionary<string, string> ExclusionsFor(string file)
+    /// <remarks>
+    /// The mode picks the set rather than the filename, so <see cref="GatedFleets"/>'s
+    /// <c>Dungeon</c> flag is load-bearing: get it wrong and the gate demands
+    /// GAMESERVER_MAP_ID of a dungeon fleet, or excuses GAMESERVER_JOIN_DEADLINE_SECONDS on
+    /// the one deployment where it does something.
+    /// <see cref="TheDungeonFlag_MatchesWhatTheManifestActuallyRuns"/> checks the flag against
+    /// the manifest for that reason — a flag nothing consults would be a claim, not a guard.
+    /// </remarks>
+    private static IReadOnlyDictionary<string, string> ExclusionsFor(bool dungeon)
     {
         var all = new Dictionary<string, string>(ExcludedEverywhere, StringComparer.Ordinal);
-        foreach ((string name, string reason) in ExcludedPerFleet[file]) all[name] = reason;
+        foreach ((string name, string reason) in dungeon ? DungeonFleetExclusions : MapFleetExclusions)
+        {
+            all[name] = reason;
+        }
         return all;
     }
+
+    private static bool IsDungeon(string file) =>
+        GatedFleets.Single(f => f.File == file).Dungeon;
 
     // ── The gate ─────────────────────────────────────────────────────────────
 
@@ -191,7 +196,7 @@ public class FleetEnvPassthroughTests
     public void EveryDeclaredKnob_ReachesTheFleet(string file)
     {
         IReadOnlyCollection<string> declared = DeclaredKnobs.Names();
-        IReadOnlyDictionary<string, string> excluded = ExclusionsFor(file);
+        IReadOnlyDictionary<string, string> excluded = ExclusionsFor(IsDungeon(file));
         string path = DeclaredKnobs.DeployPath(file);
         IReadOnlyCollection<string> present = FleetEnvironment.NamesIn(
             File.ReadAllText(path), path);
@@ -442,12 +447,12 @@ public class FleetEnvPassthroughTests
     {
         IReadOnlyCollection<string> declared = DeclaredKnobs.Names();
 
-        foreach ((string file, _) in GatedFleets)
+        foreach ((string file, bool dungeon) in GatedFleets)
         {
             IReadOnlyCollection<string> present =
                 FleetEnvironment.NamesIn(File.ReadAllText(DeclaredKnobs.DeployPath(file)), file);
 
-            foreach ((string name, string reason) in ExclusionsFor(file))
+            foreach ((string name, string reason) in ExclusionsFor(dungeon))
             {
                 Assert.True(declared.Contains(name),
                     $"{name} is excluded from the fleet gate for {file} but is no longer " +
@@ -457,42 +462,10 @@ public class FleetEnvPassthroughTests
                     $"{name} is excluded for {file} with no reason given.");
                 Assert.False(present.Contains(name),
                     $"{name} is excluded from the fleet gate for {file} — on the grounds that " +
-                    "it does not belong there — and yet {file} declares it. One of the two is " +
+                    $"it does not belong there — and yet {file} declares it. One of the two is " +
                     "wrong. Delete the exclusion if the knob belongs, or the env entry if it " +
                     "does not.");
             }
-        }
-    }
-
-    /// <summary>
-    /// Every per-fleet exclusion dictionary belongs to a fleet this gate actually reads, and
-    /// every gated fleet has one.
-    /// </summary>
-    /// <remarks>
-    /// Without this, renaming a manifest in <see cref="GatedFleets"/> and forgetting its
-    /// entry throws a KeyNotFoundException from inside the gate — which reads as the test
-    /// being broken rather than as the configuration error it is — and a leftover entry for
-    /// a fleet nobody reads any more sits there looking like coverage.
-    /// </remarks>
-    [Fact]
-    public void EveryGatedFleet_HasAnExclusionDictionary_AndViceVersa()
-    {
-        var gated = GatedFleets.Select(f => f.File).ToHashSet(StringComparer.Ordinal);
-
-        foreach (string file in gated)
-        {
-            Assert.True(ExcludedPerFleet.ContainsKey(file),
-                $"{file} is gated but has no per-fleet exclusion dictionary. Add one (empty " +
-                "is a valid answer) so the gate fails with this sentence rather than a " +
-                "KeyNotFoundException.");
-        }
-
-        foreach (string file in ExcludedPerFleet.Keys)
-        {
-            Assert.True(gated.Contains(file),
-                $"{file} has a per-fleet exclusion dictionary but is not in GatedFleets, so " +
-                "nothing reads it. Either gate that fleet or delete the entry — a dictionary " +
-                "nobody consults looks like coverage and is not.");
         }
     }
 
