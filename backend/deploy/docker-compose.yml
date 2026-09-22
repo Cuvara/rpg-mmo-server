@@ -506,6 +506,24 @@ services:
       # "enemies disappear and come back" the owner reported.
       GAMESERVER_MAX_SNAPSHOT_BYTES: ${GAMESERVER_MAX_SNAPSHOT_BYTES:-}
       GAMESERVER_KEYFRAME_INTERVAL: ${GAMESERVER_KEYFRAME_INTERVAL:-}
+      # ── Admission, pre-join and ingestion bounds ──────────────────────────
+      # Forwarded from .env rather than written as literals: every one of these is a
+      # limit an operator tunes per deployment, and every one of them ran on a
+      # compiled-in default that nothing in deploy/.env could reach until now (#404).
+      # Empty stays empty on purpose -- Env() in Program.cs maps "" back to null, so an
+      # unset variable means "not configured" and the server keeps its own default
+      # rather than parsing the empty string as a value.
+      GAMESERVER_CAPACITY: ${GAMESERVER_CAPACITY:-}
+      GAMESERVER_MAX_PENDING_HANDSHAKES: ${GAMESERVER_MAX_PENDING_HANDSHAKES:-}
+      GAMESERVER_HANDSHAKE_TIMEOUT_MS: ${GAMESERVER_HANDSHAKE_TIMEOUT_MS:-}
+      GAMESERVER_MIN_PROTOCOL_VERSION: ${GAMESERVER_MIN_PROTOCOL_VERSION:-}
+      GAMESERVER_MAX_INPUTS_PER_TICK: ${GAMESERVER_MAX_INPUTS_PER_TICK:-}
+      GAMESERVER_MAX_PENDING_INPUTS: ${GAMESERVER_MAX_PENDING_INPUTS:-}
+      GAMESERVER_GATHER_WORKERS: ${GAMESERVER_GATHER_WORKERS:-}
+      # tcp (default) or kcp. The value is advertised to clients through the registry,
+      # so it must describe what the listener actually speaks. The KCP pre-shared key
+      # is TRANSPORT_KEY, which carries no GAMESERVER_ prefix and is not gated here.
+      GAMESERVER_TRANSPORT: ${GAMESERVER_TRANSPORT:-}
       GAMESERVER_ENEMIES: ${GAMESERVER_ENEMIES:-true}
       GAMESERVER_ENEMY_CHASE: ${GAMESERVER_ENEMY_CHASE:-}
       GAMESERVER_ENEMY_MAX: ${GAMESERVER_ENEMY_MAX:-}

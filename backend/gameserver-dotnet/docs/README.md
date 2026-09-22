@@ -216,7 +216,7 @@ compiled default, `/status` reports that default truthfully, and the strict pars
 help because it never sees a value to refuse. There is no log line, no counter and no wire
 field that differs.
 
-That has happened three times here. `GameServer.Tests/Deploy/ComposeEnvPassthroughTests.cs`
+That has now happened **seven** times here. `GameServer.Tests/Deploy/ComposeEnvPassthroughTests.cs`
 is now the mechanical link: it reflects over every `GAMESERVER_*` constant the assembly
 declares and fails `dotnet test` if any is missing from `gameserver-dotnet` in
 `backend/deploy/docker-compose.yml` or from `gameserver-dotnet-map02` in
@@ -224,15 +224,49 @@ declares and fails `dotnet test` if any is missing from `gameserver-dotnet` in
 and inherits nothing — a one-service fix leaves the two maps reading the same `.env`
 differently, which is harder to find than the original gap. Write each entry as
 `NAME: ${NAME:-}` so an unset variable stays unset. A knob that genuinely should not be
-passed through goes in that file's `Excluded` dictionary **with a reason**; it is empty
-today.
+passed through goes in that file's `Excluded` dictionary **with a reason**. That dictionary
+held nothing until #404 and now holds seven entries — not because the bar dropped, but
+because the gate's input widened to the names `Program.cs` used to read from inline
+literals, and seven of those are genuinely not compose knobs: two are Agones-only
+(`GAMESERVER_ADVERTISE_HOST`, `GAMESERVER_REGISTER_ON_ALLOCATED`, and compose runs no
+sidecar), two are per-map and are written as literals in each service block like
+`GAMESERVER_MAP_ID` (`GAMESERVER_MAP_WIDTH`/`_HEIGHT`), one is a one-shot invocation mode
+that would stop every server in the stack from serving if it were forwarded
+(`GAMESERVER_MIGRATE_ONLY`), and two cannot take effect because of values compose itself
+pins — `GAMESERVER_TICK_RATE` is overridden by the `SIM_*` rates compose always sets, and
+`GAMESERVER_JOIN_DEADLINE_SECONDS` is dungeon-only while both compose services pin
+`GAMESERVER_MODE: map`. Each entry says which.
 
-**The gate's scope is narrower than it sounds.** It covers names declared as
-`const string` (31 today). It does **not** cover names read from an inline literal (25
-today, including `GAMESERVER_FIELD_DELTA` and `GAMESERVER_TICK_RATE` — several of those are
-per-service values set literally in compose, not forwarded from `.env`), it does not cover
-names built by concatenation **at runtime**, which exist nowhere as a whole string, and it
-does not read `deploy/k8s/app/50-fleet-map.yaml`, which has the same shape of gap.
+**The gate's scope, and the two holes that used to be in it.** It covers names declared as
+`const string` — **56** today, up from 31. It still does **not** cover names built by
+concatenation *at runtime*, which exist nowhere as a whole string and which neither
+reflection nor a grep can enumerate.
+
+The other two gaps this paragraph used to list are closed, and the same mechanism closed
+both. *Names read from an inline literal* (25 of them, including
+`GAMESERVER_MAX_SNAPSHOT_BYTES` — the knob whose absence produced the only passthrough
+defect a player could see) are declared in `GameServer/ServerEnv.cs` as of #404 and are
+gated like any other; that change immediately exposed a **seventh** instance,
+`GAMESERVER_FIELD_DELTA`, which had been added to `gameserver-dotnet` and never to
+`gameserver-dotnet-map02`. *The Kubernetes manifests* are read as of #400 by
+`GameServer.Tests/Deploy/FleetEnvPassthroughTests.cs`, which gates all **three** fleets —
+`deploy/agones/fleet-map-dotnet-dev.yaml`, `deploy/k8s/app/50-fleet-map.yaml` and
+`deploy/k8s/app/60-fleet-dungeon.yaml`. Before it, those manifests declared 9
+`GAMESERVER_*` names against compose's 41, so the entire enemy-AI, combat and bot surface
+was unreachable on a cluster; they declare 48 now, each as a `configMapKeyRef` against
+`gameserver-config` with `optional: true`, so a cluster that sets nothing keeps the
+defaults. Both gates take their list of knobs from one `DeclaredKnobs` helper, so neither
+can drift from the other.
+
+Unlike the compose gate, the fleet gate's exclusions are not and cannot be empty: a fleet is
+not a machine with a config file. `GAMESERVER_ID` is **forbidden** there (it beats
+`POD_NAME`, and every pod would then register under one id and reject every join),
+`GAMESERVER_PUBLIC_ADDR` cannot carry a port only known at scheduling time, and
+`GAMESERVER_TRANSPORT` is coupled to the port's `protocol:`, which no environment variable
+can change. Two more are per-fleet rather than global: `GAMESERVER_JOIN_DEADLINE_SECONDS` is
+excluded on the two *map* fleets and **required** on the dungeon one, and `GAMESERVER_MAP_ID`
+is the reverse — which is why those exclusions are keyed by manifest. A single global entry
+would have excused the one deployment where the knob does something.
 
 Declaring a new knob's name as a constant is what brings it under the gate, and that is
 worth doing deliberately: `GAMESERVER_IMPORTANCE_W_{DISTANCE,CHANGE,TYPE,COMBAT}` were

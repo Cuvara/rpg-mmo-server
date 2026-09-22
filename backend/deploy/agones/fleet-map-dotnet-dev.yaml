@@ -463,6 +463,317 @@ spec:
                       name: rpg-realtime-secrets
                       key: game-db-url
                       optional: true
+
+                # ===========================================================================
+                # TUNING KNOBS -- forwarded from the `gameserver-config` ConfigMap.
+                # ===========================================================================
+                # Every entry below is `optional: true`, so an absent key is not an error: the
+                # container starts and the server keeps its own compiled-in default. That is
+                # deliberate, and it is what lets ONE manifest set serve dev and staging while
+                # each cluster opts in to only the values it wants to change -- a cluster that
+                # sets nothing behaves exactly as it did before this block existed.
+                #
+                # WHY EACH NAME IS WRITTEN OUT rather than pulled in wholesale with `envFrom`.
+                # A container receives nothing its spec did not name, so the NAME is the
+                # passthrough. `envFrom` would forward whatever the ConfigMap happens to hold,
+                # which reads as more flexible and is strictly worse here: nothing in the
+                # repository would then state which knobs a fleet supports, FleetEnvPassthroughTests
+                # would have no list to check against, and a key misspelled in the ConfigMap would
+                # be silently dropped rather than failing. It would also add a precedence trap,
+                # since an explicit `env:` entry overrides an `envFrom` value without saying so.
+                #
+                # An empty ConfigMap value means NOT CONFIGURED, not "set to empty": Env() in
+                # Program.cs maps "" back to null, so clearing a key restores the default.
+                #
+                # Adding a knob to the server means adding it here AND to both compose services in
+                # the same change. That is not a convention anyone has to remember -- declaring its
+                # name as a const in ServerEnv makes both gates demand it.
+
+                # ------------------------------------------------------------
+                # REPLICATION AND DOWNLINK BUDGET
+                # ------------------------------------------------------------
+                # GAMESERVER_MAX_SNAPSHOT_BYTES is the knob whose absence from compose was the
+                # sixth passthrough instance and the first to produce a VISIBLE defect: the
+                # compiled-in 8192 truncated every keyframe at the shipped enemy population,
+                # and because SnapshotMerger clears its entity set on a full snapshot the whole
+                # crowd blinked out and back every two seconds (#404). It was unreachable on a
+                # cluster for the same reason it was unreachable under compose.
+                #
+                # The four _W_ weights appeared in this file only as the PREFIX FRAGMENT
+                # `GAMESERVER_IMPORTANCE_W_` inside a comment, never as four complete names.
+                # That is the same concealment that hid them from reflection through three
+                # incidents (#398): a fragment is not a declaration and forwards nothing.
+                - name: GAMESERVER_MAX_SNAPSHOT_BYTES
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: max-snapshot-bytes
+                      optional: true
+                - name: GAMESERVER_KEYFRAME_INTERVAL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: keyframe-interval
+                      optional: true
+                - name: GAMESERVER_FIELD_DELTA
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: field-delta
+                      optional: true
+                - name: GAMESERVER_IMPORTANCE_W_DISTANCE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: importance-w-distance
+                      optional: true
+                - name: GAMESERVER_IMPORTANCE_W_CHANGE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: importance-w-change
+                      optional: true
+                - name: GAMESERVER_IMPORTANCE_W_TYPE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: importance-w-type
+                      optional: true
+                - name: GAMESERVER_IMPORTANCE_W_COMBAT
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: importance-w-combat
+                      optional: true
+
+                # ------------------------------------------------------------
+                # ADMISSION, PRE-JOIN AND INGESTION BOUNDS
+                # ------------------------------------------------------------
+                # GAMESERVER_CAPACITY above bounds AUTHENTICATED players; these bound the phase
+                # before that -- how many accepted sockets may sit in the handshake, and how long
+                # each may take to deliver a complete join frame -- plus the input-ingestion and
+                # AOI-gather limits. Every one ran on a compiled-in default no cluster could change.
+                - name: GAMESERVER_MAX_PENDING_HANDSHAKES
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: max-pending-handshakes
+                      optional: true
+                - name: GAMESERVER_HANDSHAKE_TIMEOUT_MS
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: handshake-timeout-ms
+                      optional: true
+                - name: GAMESERVER_MIN_PROTOCOL_VERSION
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: min-protocol-version
+                      optional: true
+                - name: GAMESERVER_MAX_INPUTS_PER_TICK
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: max-inputs-per-tick
+                      optional: true
+                - name: GAMESERVER_MAX_PENDING_INPUTS
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: max-pending-inputs
+                      optional: true
+                - name: GAMESERVER_GATHER_WORKERS
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: gather-workers
+                      optional: true
+
+                # ------------------------------------------------------------
+                # REGISTRATION LIFECYCLE
+                # ------------------------------------------------------------
+                # Agones only, and therefore meaningful HERE and excluded from the compose gate:
+                # it holds the registry entry back until Agones reports this GameServer
+                # Allocated, instead of publishing it right after Ready. OFF by default, so a
+                # fleet that has not been migrated behaves exactly as it did before.
+                - name: GAMESERVER_REGISTER_ON_ALLOCATED
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: register-on-allocated
+                      optional: true
+
+                # ------------------------------------------------------------
+                # ENEMY AI AND COMBAT (Scaffolding)
+                # ------------------------------------------------------------
+                # The whole enemy-AI and combat surface. None of it was reachable on a cluster:
+                # a staging or production fleet ran the built-in defaults -- enemies attacking,
+                # respawn on, and a 30 + 45/player population -- with no way to change any of it
+                # short of editing this file (#400).
+                #
+                # GAMESERVER_ENEMY_MAX_PER_PLAYER is one half of the pair behind #404: it sets
+                # how many entities an observer's AOI can hold, and GAMESERVER_MAX_SNAPSHOT_BYTES
+                # above sets how many of them fit in a keyframe. The two defaults were each
+                # reasonable when set and were never reconciled. Change either with the other in
+                # view, and read backend/docs/MEASUREMENT.md before raising the budget.
+                - name: GAMESERVER_ENEMIES
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemies
+                      optional: true
+                - name: GAMESERVER_ENEMY_MAX
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-max
+                      optional: true
+                - name: GAMESERVER_ENEMY_MAX_PER_PLAYER
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-max-per-player
+                      optional: true
+                - name: GAMESERVER_ENEMY_WAVE_SIZE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-wave-size
+                      optional: true
+                - name: GAMESERVER_ENEMY_WAVE_SIZE_PER_PLAYER
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-wave-size-per-player
+                      optional: true
+                - name: GAMESERVER_ENEMY_WAVE_INTERVAL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-wave-interval
+                      optional: true
+                - name: GAMESERVER_ENEMY_SPAWN_DISTANCE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-spawn-distance
+                      optional: true
+                - name: GAMESERVER_ENEMY_MIN_SPAWN_DISTANCE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-min-spawn-distance
+                      optional: true
+                - name: GAMESERVER_ENEMY_CONTACT_RANGE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-contact-range
+                      optional: true
+                - name: GAMESERVER_ENEMY_CHASE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-chase
+                      optional: true
+                - name: GAMESERVER_ENEMY_HP
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-hp
+                      optional: true
+                - name: GAMESERVER_ENEMY_ATTACK
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-attack
+                      optional: true
+                - name: GAMESERVER_ENEMY_DEFENSE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-defense
+                      optional: true
+                - name: GAMESERVER_ENEMY_SPEED
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-speed
+                      optional: true
+                - name: GAMESERVER_ENEMY_ATTACKS
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-attacks
+                      optional: true
+                - name: GAMESERVER_ENEMY_ATTACK_INTERVAL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-attack-interval
+                      optional: true
+                - name: GAMESERVER_ENEMY_ATTACKERS_PER_TARGET
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: enemy-attackers-per-target
+                      optional: true
+                - name: GAMESERVER_PLAYER_RESPAWN
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: player-respawn
+                      optional: true
+
+                # ------------------------------------------------------------
+                # BOTS (Scaffolding)
+                # ------------------------------------------------------------
+                # Synthetic players. GAMESERVER_BOT_{HP,ATTACK,DEFENSE,SPEED} were the THIRD
+                # passthrough instance -- they reached neither compose service and had not done
+                # so since the day they were added.
+                - name: GAMESERVER_BOTS
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: bots
+                      optional: true
+                - name: GAMESERVER_BOT_SPREAD
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: bot-spread
+                      optional: true
+                - name: GAMESERVER_BOT_ENGAGE_RANGE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: bot-engage-range
+                      optional: true
+                - name: GAMESERVER_BOT_HP
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: bot-hp
+                      optional: true
+                - name: GAMESERVER_BOT_ATTACK
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: bot-attack
+                      optional: true
+                - name: GAMESERVER_BOT_DEFENSE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: bot-defense
+                      optional: true
+                - name: GAMESERVER_BOT_SPEED
+                  valueFrom:
+                    configMapKeyRef:
+                      name: gameserver-config
+                      key: bot-speed
+                      optional: true
                 # KCP is not enabled on this fleet (protocol: TCP above), so
                 # TRANSPORT_KEY is unused — and the server WARNS if it is set
                 # while the transport is TCP, because the key is then ignored.

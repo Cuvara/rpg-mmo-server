@@ -5,6 +5,80 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **The three Agones fleet manifests now declare 48 `GAMESERVER_*` names instead of 9, and a
+  test keeps them that way.** Closes #400.
+
+  `50-fleet-map.yaml`, `agones/fleet-map-dotnet-dev.yaml` and `60-fleet-dungeon.yaml` each
+  declared nine `GAMESERVER_*` names against compose's 41. A container receives nothing its
+  spec did not name, so **24 gameplay knobs were unreachable on a cluster** — the whole enemy
+  AI, combat and bot surface. A staging or production fleet ran the built-in defaults
+  (enemies attacking, respawn on, `30 + 45/player`, an 8192-byte snapshot budget) with no way
+  to change any of it short of editing the manifest.
+
+  Each added knob is a `configMapKeyRef` against the existing `gameserver-config` ConfigMap
+  with `optional: true`, so an absent key is not an error and a cluster that sets nothing
+  behaves exactly as it did before. That matters here specifically: this manifest set is
+  applied **unchanged to dev and staging**, so a required key would wedge every pod in the
+  cluster that had not opted in. No new ConfigMap and no new apply step — operators add only
+  the keys they actually set.
+
+  Names are written out one per entry rather than pulled in with `envFrom`. `envFrom` reads
+  as more flexible and is worse here: nothing in the repository would state which knobs a
+  fleet supports, the gate would have no list to check, a key misspelled in the ConfigMap
+  would be silently dropped instead of failing, and an explicit `env:` entry silently
+  overrides an `envFrom` value — a precedence trap in the exact area this change is
+  hardening.
+
+  `GAMESERVER_JOIN_DEADLINE_SECONDS` was added to the **dungeon** fleet only, and it had
+  never been passed to it. That is the one fleet running `GAMESERVER_MODE: dungeon` and
+  therefore the only deployment where the knob does anything: without it an allocated dungeon
+  pod that is never joined sits Allocated forever, because Agones does not reclaim an
+  Allocated pod, and the replica is lost until an operator releases it by hand (ADR-26).
+
+  **Three fleets, not the one the issue names.** Each declares its own `env:` list and
+  inherits nothing from the others, so a fix applied to one leaves the rest on different
+  configurations from the same ConfigMap — the fleet-side version of the `map02` divergence
+  that has now happened twice under compose. The gate reads all three.
+
+  Exclusions here are real, unlike the compose gate's empty dictionary, and each says what
+  would happen if the name *were* declared: `GAMESERVER_ID` is forbidden (it beats
+  `POD_NAME`, so every pod registers under one hardcoded id and every join is rejected with
+  `Token is for a different server`); `GAMESERVER_PUBLIC_ADDR` cannot carry a port assigned
+  at scheduling time under `portPolicy: Dynamic`; `GAMESERVER_TRANSPORT` is coupled to the
+  port's `protocol:`, so forwarding it alone would advertise KCP through the registry while
+  the port still speaks TCP and every client would fail against a fleet that is Ready and
+  healthy; `GAMESERVER_MIGRATE_ONLY` would make a pod exit at boot and present as a
+  CrashLoopBackOff whose logs show a successful migration.
+
+### Changed
+
+- **Eight more knobs are forwarded to both compose game-server services**
+  (`GAMESERVER_CAPACITY`, `_MAX_PENDING_HANDSHAKES`, `_HANDSHAKE_TIMEOUT_MS`,
+  `_MIN_PROTOCOL_VERSION`, `_MAX_INPUTS_PER_TICK`, `_MAX_PENDING_INPUTS`, `_GATHER_WORKERS`,
+  `_TRANSPORT`). Part 2 of #404.
+
+  Fifteen names were missing; seven were deliberately **not** added and are excluded by name
+  with a reason, because a list assembled to make a gate pass is how a gate stops gating:
+
+  | Name | Why it is not forwarded from `.env` |
+  |---|---|
+  | `GAMESERVER_ADVERTISE_HOST` | Agones only; compose declares no `AGONES_ENABLED`. Its compose counterpart `GAMESERVER_PUBLIC_ADDR` is forwarded, and exactly one of the two ever applies. |
+  | `GAMESERVER_REGISTER_ON_ALLOCATED` | Agones only, same reason. Gated on the three fleets instead. |
+  | `GAMESERVER_TICK_RATE` | Cannot take effect: the legacy scalar applies only when no `SIM_*` rate is set, and compose sets all three unconditionally. Set the `SIM_*` rates. |
+  | `GAMESERVER_JOIN_DEADLINE_SECONDS` | Dungeon mode only; compose has no dungeon service — both game-server services pin `GAMESERVER_MODE: map`. Gated on the dungeon fleet. |
+  | `GAMESERVER_MIGRATE_ONLY` | A one-shot invocation mode, not configuration. The one entry here that would be actively harmful: set once in a shared `.env`, every long-running server exits at boot instead of serving. |
+  | `GAMESERVER_MAP_WIDTH` | A property of the map. The two services are two different maps, and one shared value would resize both — and `GAMESERVER_AOI_RADIUS` is validated against it. Set as a literal in the service's own block, next to `GAMESERVER_MAP_ID`. |
+  | `GAMESERVER_MAP_HEIGHT` | As above; the two are set together, since `MapBounds.FromSize` takes both. |
+
+- **`GAMESERVER_FIELD_DELTA` now reaches `gameserver-dotnet-map02`.** The seventh passthrough
+  instance, and the second of exactly this shape: it had been added to `gameserver-dotnet`
+  and never here, so field-level delta encoding was on for the map anyone would test on and
+  off for the other, for as long as the knob had existed. Found automatically by
+  `ComposeEnvPassthroughTests` the moment #404 declared the name as a constant; as an inline
+  literal in `Program.cs` it was invisible to the gate.
+
 ### Fixed
 - **Four bot-stat knobs reached neither game-server service.** `GAMESERVER_BOT_HP`,
   `GAMESERVER_BOT_ATTACK`, `GAMESERVER_BOT_DEFENSE` and `GAMESERVER_BOT_SPEED` are declared

@@ -28,15 +28,8 @@ namespace GameServer.Tests.Deploy;
 ///
 /// <para><b>What this gate does NOT cover, stated because a partial gate that reads as a
 /// total one is worse than none.</b> It checks variable names the assembly declares as
-/// <c>const string</c> — 31 of them today. It does not check:</para>
+/// <c>const string</c> — 56 of them today, up from 31 before #404. It does not check:</para>
 /// <list type="bullet">
-///   <item><description><b>Names read from an inline string literal</b> rather than a
-///     constant (25 today, including <c>GAMESERVER_FIELD_DELTA</c>,
-///     <c>GAMESERVER_TICK_RATE</c> and <c>GAMESERVER_KEYFRAME_INTERVAL</c>). Several of
-///     those are per-service values set literally in compose rather than forwarded from
-///     <c>.env</c>, so sweeping them in would demand a dozen exclusions whose reasons
-///     nobody had actually decided. Declaring a knob's name as a constant is what brings it
-///     under this gate, which makes the right shape the rewarded one.</description></item>
 ///   <item><description><b>Names built by concatenation at runtime</b>, which neither
 ///     reflection nor a grep can enumerate — they exist nowhere as a whole string. That was
 ///     true of <c>GAMESERVER_IMPORTANCE_W_{DISTANCE,CHANGE,TYPE,COMBAT}</c>, the *first* of
@@ -45,14 +38,25 @@ namespace GameServer.Tests.Deploy;
 ///     other knob — which found a fifth instance immediately: the four had been added to
 ///     <c>gameserver-dotnet</c> when the gap was first fixed and never to
 ///     <c>gameserver-dotnet-map02</c>, so setting a weight changed map_01's replication
-///     policy and silently left map_02 on the profile's own. Declaring a knob's name as a
-///     constant is what brings it under this gate, which makes the right shape the rewarded
-///     one. The seven refused <c>_W_</c> factors in <c>ImportanceSettings</c> stay assembled
-///     from suffixes on purpose: a knob the server refuses to start on must NOT be demanded
-///     in compose.</description></item>
-///   <item><description><b>The Kubernetes manifests.</b> <c>deploy/k8s/app/50-fleet-map.yaml</c>
-///     has the same shape of gap and is not read here.</description></item>
+///     policy and silently left map_02 on the profile's own. The seven refused <c>_W_</c>
+///     factors in <c>ImportanceSettings</c> stay assembled from suffixes on purpose: a knob
+///     the server refuses to start on must NOT be demanded in compose.</description></item>
+///   <item><description><b>Values.</b> Only the presence of the NAME in the
+///     <c>environment:</c> block, because that is what decides whether a value can reach the
+///     process at all. What the value should be is a deployment's business.</description></item>
 /// </list>
+///
+/// <para><b>Two holes this list used to name are now closed, and the mechanism is the same
+/// one both times.</b> <i>Names read from an inline string literal</i> — 25 of them, which
+/// is where the sixth passthrough instance lived — are declared in <c>ServerEnv</c> as of
+/// #404 and are gated like any other. That change immediately exposed a seventh:
+/// <c>GAMESERVER_FIELD_DELTA</c> had been added to <c>gameserver-dotnet</c> and never to
+/// <c>gameserver-dotnet-map02</c>. Declaring a knob's name as a constant is what brings it
+/// under this gate, which makes the right shape the rewarded one; it has now found a fresh
+/// instance on each of the two occasions it was applied. <i>The Kubernetes manifests</i> had
+/// the same shape of gap and were not read here; they are read by
+/// <see cref="FleetEnvPassthroughTests"/> as of #400, and both gates take their list of
+/// knobs from <see cref="DeclaredKnobs"/> so that neither can drift from the other.</para>
 ///
 /// <para><b>Both services, not one.</b> <c>gameserver-dotnet-map02</c> declares its own
 /// <c>environment:</c> block and inherits nothing from <c>gameserver-dotnet</c>, so a fix
@@ -83,9 +87,23 @@ public class ComposeEnvPassthroughTests
     /// Knobs deliberately NOT passed through compose, each with the reason.
     /// </summary>
     /// <remarks>
-    /// <para><b>Empty today, and that is the honest state</b> — every
-    /// <c>GAMESERVER_*</c> constant the server declares is something an operator may want
-    /// to set per deployment, so every one of them belongs in both blocks.</para>
+    /// <para><b>Empty until #404, and no longer.</b> While that issue was open this gate
+    /// only saw names declared as <c>const string</c>, and every such name was one an
+    /// operator may want to set, so the honest exclusion list was the empty one. #404
+    /// widened the input: the 25 names <c>Program.cs</c> used to read from inline literals
+    /// are now declared in <c>ServerEnv</c> and are gated like any other. Seven of them do
+    /// NOT belong in a compose <c>environment:</c> block, and the reason is never "it is
+    /// awkward to add" — it is that forwarding them from a shared <c>.env</c> would be
+    /// inert or actively wrong. Each entry below says which.</para>
+    ///
+    /// <para>The seven divide into three kinds. <b>Agones-only</b>: compose sets no
+    /// <c>AGONES_ENABLED</c>, so the sidecar-dependent knobs have nothing to act on.
+    /// <b>Structurally inert under this file</b>: compose pins values that make the knob
+    /// unreachable, and the entry names the pin rather than the knob. <b>Per-map, not
+    /// per-deployment</b>: one shared value would configure both map servers identically,
+    /// which for a map's own dimensions is the bug and not the feature — compose already
+    /// writes that class of value as a literal in each service block (<c>GAMESERVER_MAP_ID</c>
+    /// is <c>map_01</c> here and <c>map_02</c> there), and that is how these are set too.</para>
     ///
     /// <para>It exists as a dictionary rather than as a name pattern because a pattern
     /// excludes knobs nobody considered. An entry here is a decision somebody made, with a
@@ -95,32 +113,69 @@ public class ComposeEnvPassthroughTests
     /// widening the hole.</para>
     /// </remarks>
     private static readonly IReadOnlyDictionary<string, string> Excluded =
-        new Dictionary<string, string>(StringComparer.Ordinal);
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            // ── Agones-only: compose declares no AGONES_ENABLED ──────────────
+            ["GAMESERVER_ADVERTISE_HOST"] =
+                "Agones only, and compose runs no Agones sidecar (no AGONES_ENABLED in " +
+                "either file). Program.cs reads it ONLY when the Agones status read " +
+                "succeeded, because it replaces the host half of an address whose port only " +
+                "Agones knows; with the sidecar off the server logs a start-up warning and " +
+                "ignores it. The compose equivalent is GAMESERVER_PUBLIC_ADDR, which is the " +
+                "full host:port and IS forwarded. Exactly one of the two applies to any " +
+                "deployment, so passing both here would guarantee one is always inert.",
 
-    /// <summary>
-    /// Names that must be found by reflection whatever else changes.
-    ///
-    /// <para>The point of <see cref="DeclaredEnvNames"/> failing loudly on an empty result
-    /// is that a gate which checks nothing still reports green. A bare non-empty assertion
-    /// is weaker than it looks: a reflection change that matched one constant out of
-    /// twenty-seven would satisfy it. These three come from three different settings types,
-    /// so losing any one type is caught rather than averaged away. They are spelled out
-    /// rather than read from the constants, because reading them from the same source the
-    /// assertion is checking proves nothing.</para>
-    /// </summary>
-    private static readonly string[] Sentinels =
-    {
-        "GAMESERVER_ENEMY_MAX",   // EnemyAiSettings
-        "GAMESERVER_BOTS",        // BotSettings
-        "GAMESERVER_AOI_RADIUS",  // AoiSettings
+            ["GAMESERVER_REGISTER_ON_ALLOCATED"] =
+                "Agones only, same reason. It holds the registry entry back until Agones " +
+                "reports the GameServer Allocated; with no sidecar there is no allocation to " +
+                "wait for, and Program.cs logs and ignores it rather than never registering. " +
+                "It IS gated on the three fleets, where it means something — see " +
+                "FleetEnvPassthroughTests.",
 
-        // ImportanceSettings, and specifically a name written as `EnvVar + "_W_…"`. It is
-        // here rather than `GAMESERVER_IMPORTANCE` because the compile-time concatenation is
-        // the fragile part: rewritten as a runtime concatenation it would vanish from the
-        // assembly's constants and from this gate without anything else changing, which is
-        // the exact shape that hid this family for the first three incidents.
-        "GAMESERVER_IMPORTANCE_W_DISTANCE",
-    };
+            // ── Structurally inert under THIS file's own pinned values ───────
+            ["GAMESERVER_TICK_RATE"] =
+                "Cannot take effect under compose, and the cause is this file rather than the " +
+                "knob. Program.cs applies the legacy scalar only when `tickRateSet && " +
+                "!anySimVar`, and both compose services set SIM_CRITICAL_HZ, SIM_WORLD_HZ and " +
+                "SIM_BACKGROUND_HZ unconditionally (`${SIM_WORLD_HZ:-15}` is never unset), so " +
+                "anySimVar is always true. The resolved SimulationRates is also always " +
+                "non-null, so ServerOptions.TickRate never reaches " +
+                "SimulationRates.Uniform either. Forwarding it would add a knob that reads as " +
+                "settable and provably does nothing — worse than its absence. Set the three " +
+                "SIM_* rates, which are already forwarded.",
+
+            ["GAMESERVER_JOIN_DEADLINE_SECONDS"] =
+                "Dungeon mode only (ADR-26: it reclaims a dungeon pod that is allocated and " +
+                "then never joined), and compose has no dungeon service — both game-server " +
+                "services pin `GAMESERVER_MODE: map` as a literal. Program.cs ignores it on a " +
+                "map server. It IS gated on the dungeon fleet, which is the deployment that " +
+                "runs `GAMESERVER_MODE: dungeon` and where it had never been passed.",
+
+            // ── One-shot invocation mode, not a deployment setting ───────────
+            ["GAMESERVER_MIGRATE_ONLY"] =
+                "A one-shot invocation mode, not configuration: it applies pending migrations " +
+                "and exits WITHOUT listening. CD runs it as its own `--migrate-only` " +
+                "invocation at a deterministic point before the deploy step. Forwarding it " +
+                "from a shared .env is the one entry here that would be actively harmful " +
+                "rather than merely inert — setting it once would make every long-running " +
+                "game server in the stack exit at boot instead of serving, and the symptom " +
+                "(containers that start, log a migration, and stop) names nothing.",
+
+            // ── Per-map, not per-deployment ──────────────────────────────────
+            ["GAMESERVER_MAP_WIDTH"] =
+                "A property of the map, not of the deployment. The two compose services are " +
+                "two DIFFERENT maps, so a single ${GAMESERVER_MAP_WIDTH} from a shared .env " +
+                "would resize both to the same dimensions — and map size is not cosmetic: " +
+                "GAMESERVER_AOI_RADIUS is validated against it, and a radius reaching the " +
+                "map's diagonal disables interest filtering altogether. Set it the way this " +
+                "file already sets per-map values, as a literal in the service's own block " +
+                "next to GAMESERVER_MAP_ID.",
+
+            ["GAMESERVER_MAP_HEIGHT"] =
+                "A property of the map, not of the deployment — see GAMESERVER_MAP_WIDTH " +
+                "above; the two are set together or not at all, since MapBounds.FromSize " +
+                "takes both.",
+        };
 
     // ── The gate ─────────────────────────────────────────────────────────────
 
@@ -191,9 +246,9 @@ public class ComposeEnvPassthroughTests
             "No GAMESERVER_* constants were found by reflection at all. The gate below " +
             "would have passed vacuously. Either every settings type moved out of the " +
             "GameServer assembly, or the constants stopped being `const string` fields — " +
-            "fix DeclaredEnvNames, do not delete this assertion.");
+            "fix DeclaredKnobs.Names, do not delete this assertion.");
 
-        foreach (string sentinel in Sentinels)
+        foreach (string sentinel in DeclaredKnobs.Sentinels)
         {
             Assert.True(declared.Contains(sentinel),
                 $"{sentinel} was not found by reflection. Its settings type has moved, been " +
@@ -321,64 +376,15 @@ public class ComposeEnvPassthroughTests
     // ── Reflection over the declared knobs ───────────────────────────────────
 
     /// <summary>
-    /// Every <c>GAMESERVER_*</c> variable name the server declares as a constant.
+    /// Delegates to <see cref="DeclaredKnobs.Names"/> — deliberately NOT a second copy of
+    /// the reflection. There are two gates and there must be one answer to "which knobs
+    /// exist": two lists drift, and the drift is invisible, because the gate that still
+    /// knows about a knob goes on passing while the one that forgot it stops checking.
     /// </summary>
-    /// <remarks>
-    /// <para>Reflection over the assembly rather than a grep of the source, and rather
-    /// than a hand-kept list. A list is the thing that just failed three times. A grep
-    /// would be tied to the exact spelling <c>public const string Env… = "GAMESERVER_…"</c>
-    /// and would quietly stop matching the day somebody writes the field differently — the
-    /// same silent-miss this gate exists to remove. Reflection asks the compiled assembly
-    /// what it actually declares.</para>
-    ///
-    /// <para><c>NonPublic</c> is included deliberately: a knob declared <c>internal</c> is
-    /// still a knob an operator sets, and its visibility to C# has nothing to do with
-    /// whether Docker forwards it.</para>
-    /// </remarks>
-    private static IReadOnlyCollection<string> DeclaredEnvNames()
-    {
-        var names = new SortedSet<string>(StringComparer.Ordinal);
+    private static IReadOnlyCollection<string> DeclaredEnvNames() => DeclaredKnobs.Names();
 
-        foreach (Type type in typeof(EnemyAiSettings).Assembly.GetTypes())
-        {
-            foreach (FieldInfo field in type.GetFields(
-                         BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
-            {
-                if (!field.IsLiteral || field.IsInitOnly) continue;
-                if (field.FieldType != typeof(string)) continue;
-                if (field.GetRawConstantValue() is not string value) continue;
-                if (!value.StartsWith("GAMESERVER_", StringComparison.Ordinal)) continue;
-
-                names.Add(value);
-            }
-        }
-
-        return names;
-    }
-
-    // ── Locating the compose files ───────────────────────────────────────────
-
-    /// <summary>
-    /// Absolute path to a compose file, resolved by walking up from the test assembly —
-    /// the same shape <c>GoldenVectors.Directory</c> uses, and for the same reason: the
-    /// test binary's location relative to the repository is the one thing a test can rely
-    /// on without a build-time constant.
-    /// </summary>
-    private static string ComposePath(string file)
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir != null)
-        {
-            string candidate = Path.Combine(dir.FullName, "backend", "deploy", file);
-            if (File.Exists(candidate)) return candidate;
-            dir = dir.Parent;
-        }
-
-        throw new FileNotFoundException(
-            $"backend/deploy/{file} not found above {AppContext.BaseDirectory}. The compose " +
-            "files have moved and this gate is no longer checking anything — fix the path, " +
-            "do not delete the test.");
-    }
+    /// <summary>Absolute path to a compose file. See <see cref="DeclaredKnobs.DeployPath"/>.</summary>
+    private static string ComposePath(string file) => DeclaredKnobs.DeployPath(file);
 }
 
 /// <summary>
