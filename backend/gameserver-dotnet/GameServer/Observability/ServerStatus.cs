@@ -114,6 +114,30 @@ public sealed class ServerStatus
     [JsonPropertyName("enemies_alive")]
     public int EnemiesAlive { get; set; }
 
+    /// <summary>Player save attempts that succeeded since process start.</summary>
+    [JsonPropertyName("player_saves_ok")]
+    public long PlayerSavesOk { get; set; }
+
+    /// <summary>Player save attempts that threw since process start.</summary>
+    [JsonPropertyName("player_saves_error")]
+    public long PlayerSavesError { get; set; }
+
+    /// <summary>
+    /// Failed share of all player save attempts since start, in <c>[0,1]</c>.
+    ///
+    /// <para>The save sweep is the only thing that persists position and HP, and ADR-6
+    /// accepts a &lt;=30s crash-loss window <em>on the assumption that the sweep works</em>.
+    /// When it does not, the real window is "since the last success", which is unbounded.
+    /// This field exists because that distinction was previously visible only in a
+    /// Prometheus counter nobody scrapes on a dev box (#402).</para>
+    ///
+    /// <para>Cumulative over process lifetime — see
+    /// <see cref="GameMetrics.PlayerSaveErrorRatio"/> for why the ok/error pair must be
+    /// read alongside it rather than this ratio alone.</para>
+    /// </summary>
+    [JsonPropertyName("player_save_error_ratio")]
+    public double PlayerSaveErrorRatio { get; set; }
+
     /// <summary>Inputs that carried an attack target id, since process start.</summary>
     [JsonPropertyName("attacks_received")]
     public long AttacksReceived { get; set; }

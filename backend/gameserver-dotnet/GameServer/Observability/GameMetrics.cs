@@ -752,11 +752,57 @@ public sealed class GameMetrics : IDisposable
     /// <summary>Duplicate-login kicks executed since start (see <see cref="RecordPlayerKicked"/>).</summary>
     public long PlayersKicked => Interlocked.Read(ref _playersKickedCount);
 
-    /// <summary>Record a successful player save.</summary>
-    public void RecordPlayerSaveOk() => _playerSaves.Add(1, _saveOkTags);
+    /// <summary>
+    /// Record a successful player save. Mirrored into <see cref="PlayerSavesOk"/> for the
+    /// same reason as <see cref="RecordPlayerKicked"/>: a <see cref="Counter{T}"/> is
+    /// write-only, so without the mirror the save outcome is readable only by scraping
+    /// <c>/metrics</c>. That is precisely how a 90% failure rate stayed invisible on a dev
+    /// box for 7.8 hours (#402) — nothing scrapes it there, and <c>/status</c>, which
+    /// people do open, did not carry it.
+    /// </summary>
+    public void RecordPlayerSaveOk()
+    {
+        Interlocked.Increment(ref _playerSavesOkCount);
+        _playerSaves.Add(1, _saveOkTags);
+    }
 
-    /// <summary>Record a failed player save.</summary>
-    public void RecordPlayerSaveError() => _playerSaves.Add(1, _saveErrorTags);
+    /// <summary>Record a failed player save. Mirrored into <see cref="PlayerSavesError"/>.</summary>
+    public void RecordPlayerSaveError()
+    {
+        Interlocked.Increment(ref _playerSavesErrorCount);
+        _playerSaves.Add(1, _saveErrorTags);
+    }
+
+    private long _playerSavesOkCount;
+    private long _playerSavesErrorCount;
+
+    /// <summary>Player save attempts that succeeded since process start.</summary>
+    public long PlayerSavesOk => Interlocked.Read(ref _playerSavesOkCount);
+
+    /// <summary>Player save attempts that threw since process start.</summary>
+    public long PlayerSavesError => Interlocked.Read(ref _playerSavesErrorCount);
+
+    /// <summary>
+    /// Failed share of all player save attempts since start, in <c>[0,1]</c>; <c>0</c>
+    /// when nothing has been attempted yet.
+    ///
+    /// <para>Read the pair, not just this ratio, before concluding anything: the counters
+    /// are cumulative over process lifetime, so a store that is down <em>right now</em>
+    /// drives this towards 1 without bound while <see cref="PlayerSavesOk"/> stays frozen
+    /// at whatever it reached before the outage. A high lifetime ratio therefore does not
+    /// distinguish "failing steadily" from "was fine, then the database went away and
+    /// never came back" — which was the actual answer in #402.</para>
+    /// </summary>
+    public double PlayerSaveErrorRatio
+    {
+        get
+        {
+            long ok = PlayerSavesOk;
+            long err = PlayerSavesError;
+            long total = ok + err;
+            return total == 0 ? 0d : (double)err / total;
+        }
+    }
 
     /// <summary>Record a published game event of the given type.</summary>
     public void RecordEventPublished(string type)

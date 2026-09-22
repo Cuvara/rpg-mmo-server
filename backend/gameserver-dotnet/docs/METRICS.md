@@ -50,6 +50,9 @@ human inspection and for the Unity DOTS sample, which polls it.
   "enemy_ai_max_now": 570,
   "bots": "off",
   "bots_alive": 0,
+  "player_saves_ok": 27,
+  "player_saves_error": 239,
+  "player_save_error_ratio": 0.8985,
   "attacks_received": 4210,
   "attacks_unresolved": 12,
   "attacks_rejected": 3980,
@@ -87,6 +90,7 @@ so it reported the compiled-in default of 15 on servers whose prediction rate wa
 | `sim_world_hz` | World-group Hz — AI, spawning, **and the snapshot broadcast cadence**. This, not `tick_rate`, is what a client's interpolation buffer is sized against and what governs bandwidth per client |
 | `sim_background_hz` | Background-group Hz |
 | `capacity` | The admission limit (`GAMESERVER_CAPACITY`) this server enforces and publishes into the registry |
+| `player_saves_ok` / `player_saves_error` / `player_save_error_ratio` | Outcome of every player-state save attempt since process start, and the failed share of them in `[0,1]`. Same values as `gameserver_player_saves_total`, published here because **a ratio nobody can see is not a signal**: this endpoint is what people open on a dev box, and a sweep failing 9 attempts in 10 sat undetected for 7.8 hours behind a Prometheus counter nothing was scraping (#402). The save sweep is the only thing that persists position and HP, so a non-zero ratio means ADR-6's "≤30s of loss on a crash" is no longer true — the real window is *since the last success*, which is unbounded. **Read the pair, not the ratio alone.** The counters are cumulative over process lifetime, so a store that is down *right now* drives the ratio towards 1 without bound while `player_saves_ok` stays frozen at whatever it reached before the outage; a high lifetime ratio cannot by itself distinguish "failing steadily" from "was fine, then the database went away". The example above is the #402 reading, which was the second of those |
 | `attacks_received` / `attacks_unresolved` / `attacks_rejected` / `attacks_accepted` / `attack_kills` | Attack-path counters since process start. Every input carrying an attack target lands in exactly one of *unresolved* (target id no longer resolves — despawned or bogus), *rejected* (refused by `CombatLogic.ValidateAttack`: range, cooldown, dead attacker or target), or *accepted* (dealt damage); `attack_kills` counts accepted attacks that killed. These exist because a rejected attack is dropped with a Debug-level log on servers running at Information — without the counters, a client attacking out of range is indistinguishable from a client not attacking at all, which is precisely the ambiguity that stalled a live zero-kills investigation |
 | `last_attack_rejection` | Verbatim reason of the most recent rejection (e.g. `target out of range` — an interned constant since #249; the measured distance moved to the Debug-guarded rejection log), `null` until something is rejected. One string, most-recent-wins — a breadcrumb naming *why* attacks are being refused, not a log |
 | `event_stream` | Which `IEventStream` backs cross-server events: `redis` (publishing into `events:game`, the stream the gateway relay consumes — ADR-5) or `noop` (`REDIS_ADDR` unset, or the connection could not be built at startup — events are discarded) |
@@ -180,7 +184,7 @@ The same value is exported as the Prometheus gauge `gameserver_achieved_tick_hz`
 | `gameserver_transport_encrypted` | gauge | `map_id`, `transport`, `cipher` | 1 when packets leave this server as ciphertext, 0 when they are cleartext. **0 is the default** — `transport=tcp` has no packet encryption and `TRANSPORT_KEY` defaults to empty — so alert on this being 0 rather than assuming it is 1. A **gauge** on purpose: a never-incremented counter is absent from `/metrics`, and "is this server encrypted" must never answer by being missing |
 | `gameserver_transport_authenticated` | gauge | `map_id`, `transport`, `cipher` | 1 when tampering with a packet in flight is detectable. **Currently 0 on every supported configuration**: the KCP path is AES-CFB with a CRC32, and a CRC32 is linear, not a MAC. Separate from `transport_encrypted` so encryption cannot be read as integrity; published while 0 so that its becoming 1 is a visible event |
 | `gameserver_snapshots_max_shed_age` | gauge | `map_id` | Longest deferral, in snapshots, any entity on any live connection has reached. **High-water mark** — it does not fall while a connection lives, so read the rate of climb, not the level. The scheduler is strictly oldest-first, so it is bounded by the number of dirty entities in one observer's AOI and not by session length; a value that keeps climbing means the budget is too small for the crowd |
-| `gameserver_player_saves_total` | counter | `status=ok\|error` | Persistence results from the async saver |
+| `gameserver_player_saves_total` | counter | `status=ok\|error` | Persistence results from the async saver, **one increment per player per sweep** — not per sweep. A single stuck player therefore contributes an increment every sweep for as long as it is online, so read this against `players_online` before reading a large `error` total as a large number of distinct victims. Mirrored onto `/status` as `player_saves_ok` / `player_saves_error` / `player_save_error_ratio`, and crossing a per-sweep failure ratio of 50% also raises one `Error` log line (`Player save sweep DEGRADED`), because on a dev box this counter is not scraped by anything (#402) |
 | `gameserver_events_published_total` | counter | `type` | Cross-server events handed to the event stream by `EventPublisher`. With the Redis backend this counts hand-offs into the publish queue, not confirmed `XADD`s — subtract the two counters below for what actually reached the stream |
 | `gameserver_events_dropped_total` | counter | — | Events dropped **oldest-first** because the Redis event stream's bounded publish queue (4096) was full — i.e. Redis was unreachable long enough to fill it — or the event was offered after shutdown. Zero forever on a healthy server; any non-zero rate means the gateway relay is missing events |
 | `gameserver_events_publish_failures_total` | counter | — | Events dropped after exhausting the `XADD` retry budget (3 attempts with short backoff). Distinct from `dropped`: these reached the head of the queue and still could not be written. Sustained increments alongside a flat `dropped` means Redis is up but refusing writes (e.g. OOM under `noeviction`) |
@@ -444,6 +448,8 @@ Useful queries:
 ```promql
 histogram_quantile(0.99, rate(gameserver_tick_duration_seconds_bucket[5m]))  # tick p99
 rate(gameserver_player_saves_total{status="error"}[5m])                      # save error rate
+sum(rate(gameserver_player_saves_total{status="error"}[5m]))
+  / sum(rate(gameserver_player_saves_total[5m]))                             # save FAILURE RATIO - alert >0.1
 sum(gameserver_players_online)                                               # CCU
 rate(gameserver_resyncs_total[5m])                                           # interning health
 rate(gameserver_tick_overruns_total[5m])                                     # base rate sustainable?
