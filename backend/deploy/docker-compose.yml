@@ -498,6 +498,14 @@ services:
       # GAMESERVER_BOTS=24 at the default allowance is a 1110-enemy world before a single
       # client connects. The server computes that number and logs it at startup rather
       # than leaving it to be discovered in a snapshot size.
+      # Snapshot sizing. NOT previously passed through: the server took its built-in
+      # 8192 and .env could not change it. At ~316 entities in one AOI that is ~26 bytes
+      # per entity, so KEYFRAMES WERE BEING TRUNCATED -- and SnapshotMerger clears its
+      # entity set on a full snapshot, so every truncated keyframe made the omitted
+      # entities vanish on the client and reappear on the next delta. That is the
+      # "enemies disappear and come back" the owner reported.
+      GAMESERVER_MAX_SNAPSHOT_BYTES: ${GAMESERVER_MAX_SNAPSHOT_BYTES:-}
+      GAMESERVER_KEYFRAME_INTERVAL: ${GAMESERVER_KEYFRAME_INTERVAL:-}
       GAMESERVER_ENEMIES: ${GAMESERVER_ENEMIES:-true}
       GAMESERVER_ENEMY_CHASE: ${GAMESERVER_ENEMY_CHASE:-}
       GAMESERVER_ENEMY_MAX: ${GAMESERVER_ENEMY_MAX:-}

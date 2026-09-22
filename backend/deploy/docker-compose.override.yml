@@ -97,6 +97,14 @@ services:
       # Enemy AI and synthetic players. Repeated here rather than inherited: this service
       # declares its OWN environment block, so anything absent from it is not passed to
       # map_02 however it is set. Bots are per-server, so map_02 needs its own count.
+      # Snapshot sizing. NOT previously passed through: the server took its built-in
+      # 8192 and .env could not change it. At ~316 entities in one AOI that is ~26 bytes
+      # per entity, so KEYFRAMES WERE BEING TRUNCATED -- and SnapshotMerger clears its
+      # entity set on a full snapshot, so every truncated keyframe made the omitted
+      # entities vanish on the client and reappear on the next delta. That is the
+      # "enemies disappear and come back" the owner reported.
+      GAMESERVER_MAX_SNAPSHOT_BYTES: ${GAMESERVER_MAX_SNAPSHOT_BYTES:-}
+      GAMESERVER_KEYFRAME_INTERVAL: ${GAMESERVER_KEYFRAME_INTERVAL:-}
       GAMESERVER_ENEMIES: ${GAMESERVER_ENEMIES:-true}
       GAMESERVER_ENEMY_CHASE: ${GAMESERVER_ENEMY_CHASE:-}
       GAMESERVER_ENEMY_MAX: ${GAMESERVER_ENEMY_MAX:-}

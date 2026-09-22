@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Enemies visibly disappeared and reappeared while the player moved.** `GAMESERVER_MAX_SNAPSHOT_BYTES`
+  was not in either compose service's `environment:` block, so the server always took its
+  built-in **8192** and `.env` could not change it.
+
+  That default is no longer compatible with the enemy population this server now ships.
+  A single observer's area of interest carries up to **316 entities** at the default
+  `30 + 25/player`, which is **~26 bytes per entity** inside 8192 — right at the edge, so
+  keyframes were being truncated continuously.
+
+  A truncated keyframe is not a partial update. `SnapshotMerger` **clears its entity set on
+  a full snapshot**, so every entity the budget dropped vanished from the client's world and
+  was re-introduced by a following delta. `SnapshotDeltaState` documents this as the
+  accepted cost of a hard byte cap — the client is never told anything false — but at this
+  population it fires on every keyframe, roughly every two seconds, which reads as the whole
+  crowd blinking out and back.
+
+  Measured on the live stack, 2 clients and 9 bots at ~300 entities:
+  `snapshot_entities_shed` **11,827 → 0** with the budget at 32768, at an unchanged
+  `snapshot_max_gather` of 316.
+
+  `GAMESERVER_KEYFRAME_INTERVAL` is passed through in the same change, because it is the
+  other half of the same lever and was missing for the same reason.
+
+  **The two defaults are still inconsistent** and that is not fixed here: the shipped
+  snapshot budget cannot carry a keyframe at the shipped enemy population. Raising one or
+  lowering the other is a product decision with a bandwidth cost either way, so it is filed
+  rather than decided in a passthrough fix.
+
 ### Added
 
 - **`backend/docs/MEASUREMENT.md`** and the **`verify-a-result` skill** — the measurement and
