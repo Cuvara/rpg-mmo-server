@@ -27,7 +27,21 @@ public class ScheduleOnTheLivePathTests
     public ScheduleOnTheLivePathTests(ITestOutputHelper output) => _out = output;
 
     private const int CriticalHz = 60;
-    private const int WorldEvery = 4;          // 60/15
+    // 60/30, not the shipped 60/15, and that is deliberate (#413).
+    //
+    // The interval ceiling now reserves ReplicationSchedule.LinkSpreadAllowanceMs of the
+    // client's cover for the network, which leaves 105ms for deferral. Emission happens on
+    // world ticks, so at 60/15 the only waits that exist are 66.7ms and 133.3ms: 105 sits
+    // between them and every band collapses to "every tick". The schedule defers NOTHING at
+    // the shipped rate, which is asserted on purpose by
+    // ScheduleFitsTheClientBudgetTests.TieringBuysNothingAtTheShippedWorldRate_AndNeedsAFasterOne.
+    //
+    // These cases are about the schedule's MECHANICS — aging, self-exemption, edges, keyframe
+    // coverage, convergence after a deferral — which are rate-independent. Running them where
+    // the feature is inert would leave every one of them passing vacuously; their own guards
+    // ("nothing was deferred, so this proves nothing") caught exactly that when the ceiling
+    // changed, which is why they are re-homed rather than relaxed.
+    private const int WorldEvery = 2;          // 60/30
     private const int Players = 24;
 
     [Fact]
@@ -54,6 +68,7 @@ public class ScheduleOnTheLivePathTests
             Schedule = ReplicationSchedule.Tiered,
             // The BASE rate, as the host passes it: the encoder is handed a base tick.
             TickHz = CriticalHz,
+            WorldEvery = WorldEvery,
             AoiRadius = GameConstants.DefaultAoiRadius,
             SelfId = ids[0],
         };

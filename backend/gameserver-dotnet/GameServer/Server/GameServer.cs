@@ -1629,6 +1629,7 @@ public sealed class GameServerHost : IAsyncDisposable
         // handed, and that is TickLoop.CurrentTick, which advances at the critical rate even
         // though snapshots are only built on world ticks. See SnapshotDeltaState.TickHz.
         conn.DeltaState.TickHz = _tickLoop.Rates.BaseHz;
+        conn.DeltaState.WorldEvery = _tickLoop.Rates.WorldEvery;
         // Field-level delta requires the client to have proved it speaks protocol version 2
         // (exact match, not AcceptedUnversioned) AND to be using Protobuf, which the encoder
         // re-checks via intern. An unversioned client cannot merge partial entities safely.
