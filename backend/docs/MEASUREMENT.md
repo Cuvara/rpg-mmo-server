@@ -33,6 +33,51 @@ Incidents:
 - **`dotnet test` exits 0 when it matched no tests.** The headless CI step reads the `.trx`
   counters instead, and fails on `total == 0`.
 
+### An exit code cannot tell a pass from a skip
+
+`dotnet test` exits **0** when every selected test passed, and **0** when it selected
+nothing, and **0** when everything it selected was skipped. The three are the same reading.
+
+This nearly went into a report as a clean result. Two Redis-backed tests failed in a full
+suite run, so they were re-run in isolation to decide whether they were the known flakes:
+
+```
+exit=0
+Skipped! - Failed: 0, Passed: 0, Skipped: 9, Total: 9
+```
+
+The exit code said what a pass says. The Redis container had gone away between the two runs,
+so every case skipped itself, and "I re-ran them alone and they passed" was one line from
+being written down. What gave it away was reading the **summary counters** rather than `$?` —
+`Skipped: 9`, and a `Passed:` of zero.
+
+The counter-check is the other half, and it is what makes this actionable. A flaky wall-clock
+test in the same session was cleared deliberately, by running it alone and reading the same
+line:
+
+```
+Passed! - Failed: 0, Passed: 10, Skipped: 0
+```
+
+Ten ran, none skipped. **That** is a re-run that cleared something. The two commands differ
+in nothing an exit code can see.
+
+So: after any `--filter`, assert on `Passed:` being what you expected and `Skipped:` being
+zero. A dependency-gated test that skips is behaving correctly — it is the *conclusion drawn
+from its silence* that is wrong, and a filter that matches nothing is the same failure with
+no dependency involved.
+
+**CI had the same hole, and this entry found it.** The first draft of this section asserted
+that the CI step already read the `.trx` counters and failed on `total == 0`. It did not:
+`ci-dotnet.yml` ran `dotnet test`, wrote the `.trx`, and uploaded it with
+`if-no-files-found: warn` — so a run that selected nothing would have gone green, and the
+missing results file would have produced a warning rather than a failure. The sentence was
+worse than no sentence, because it told a reader the automated side was covered and only a
+human at a terminal had to be careful. A `Verify test counters` step now parses the
+`Counters` element of every `.trx` and fails on `total == 0`, on a missing results file, and
+on `executed == 0`; `if-no-files-found` is `error`. The rule below applies to the instrument
+that checks the instrument.
+
 **The rule:** before trusting an instrument, get a **non-empty** result out of it. A gate
 that matches nothing must fail, not pass.
 

@@ -45,6 +45,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`MEASUREMENT.md` §1: an exit code cannot tell a pass from a skip.** `dotnet test` exits 0
+  when everything passed, when it selected nothing, and when everything it selected was
+  skipped — three readings an exit code cannot separate.
+
+  Written from a near-miss during #413. Two Redis-backed failures were re-run in isolation to
+  decide whether they were the known flakes, and the re-run returned `exit=0` having reported
+  `Skipped! - Failed: 0, Passed: 0, Skipped: 9`: the container had gone away between runs.
+  "Re-ran them alone and they passed" was one line from being reported. The summary counters
+  are what caught it. The entry pairs that with the counter-check that did clear a different
+  flaky test in the same session — `Passed: 10, Skipped: 0` — because the contrast is what
+  makes it a procedure rather than a warning.
+
+- **CI now fails when a test run selected or executed nothing.** The entry above originally
+  asserted that the CI step already read the `.trx` counters and failed on `total == 0`. It
+  did not: `ci-dotnet.yml` ran `dotnet test`, wrote the `.trx` and uploaded it with
+  `if-no-files-found: warn`, so a run that selected nothing would have gone green and a run
+  that produced no results file at all would have warned. The false sentence was worse than
+  no sentence, because it told a reader the automated side was covered.
+
+  A `Verify test counters` step now parses the `Counters` element of every `.trx`
+  (`.github/scripts/verify-test-counters.py`) and fails on a missing results file, on
+  `total == 0`, and on `executed == 0`; `if-no-files-found` is now `error`. Verified against
+  four fixtures before wiring it in — a healthy run (exit 0, `total=10 executed=10`), an
+  empty selection, an all-skipped run, and a missing file — so the gate is known to produce a
+  non-empty pass as well as the three failures it exists for.
+
 - **The replication ceiling now reserves budget for the network (#413).**
 
   `ReplicationSchedule.MaxIntervalMs` was `ClientInterpolationBudgetMs` — the scheduler was
