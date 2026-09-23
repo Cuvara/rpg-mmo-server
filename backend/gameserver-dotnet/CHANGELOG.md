@@ -44,6 +44,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`snapshot_bytes` climbed at ~16.4 KB/s on a server with `players_online: 0`** (#401), twenty
+  minutes after the last client was killed and far outside the 30 s reconnect hold.
+
+  Not a leaked connection. **Nothing was being sent at all** — the counters were replaying one
+  old tick. Every per-tick snapshot delta (`_snapshotBytesDelta`,
+  `_snapshotEntitiesGatheredDelta`, `_snapshotAnchorMissingDelta`, the coalesced, frames-written,
+  shed, removals-deferred and schedule deltas) was reset **inside** `if (_viewerCount > 0)` in
+  `TickLoop`, while the `RecordSnapshot*` calls at the bottom of the tick ran unconditionally. On a
+  world tick with no viewers each delta therefore kept the value the last tick *with* a viewer had
+  left in it, and was recorded again, 15 times a second, forever.
+
+  This is the same range of lines as the earlier gather-counter defect, failing at the other end:
+  that fix moved the resets *into* the guard to get them ahead of the gather. They are now
+  unconditional, before the gather and outside the guard — a world tick with no viewers records a
+  zero, because zero is what happened.
+
+  Observed on the live stack, `map_01`: `players_online: 0`, **no established socket on the game
+  port** (`/proc/net/tcp` showed only the listener), and the climb bit-exact at **+1140
+  `snapshot_bytes` and +279 `snapshot_entities_gathered` per world tick** across three samples —
+  real traffic varies per tick, a constant increment is a replayed value. `snapshots_sent` stayed
+  frozen at 150008 throughout, because `_snapshotsThisTick` is the one delta reset at the top of the
+  tick rather than inside the guard; that disagreement between two counters recorded three lines
+  apart is what located it. Control arm: `map_02`, same build, same 9 bots and ~250 enemies, which
+  had never carried a client, read **0** for both.
+
+### Added
+
+- **`connections` on `/status` and `gameserver_connections` on `/metrics`** — the number of
+  connections registered on this server, which is the set the snapshot broadcast iterates and
+  therefore what snapshot bandwidth is paid per.
+
+  Deliberately **not** derived from `players_online`: that is an independently balanced counter, so
+  the two disagreeing is the only local evidence that one of them is wrong. `connections >
+  players_online` means connections are outliving their players and the server is gathering,
+  encoding and writing for sockets nobody owns; `connections < players_online` means the join/leave
+  balance has drifted, and `players_online` is what capacity and allocation decisions read.
+
+  Added because its absence cost the whole of #401: with `players_online` alone, distinguishing "a
+  connection is leaking" from "the counters are lying" needed three 30 s samples, a read of the
+  broadcast source and a socket table pulled out of the container. `docs/METRICS.md` documents how
+  to read the pair.
+
 - **Enemies visibly disappeared and reappeared while the player moved.** `GAMESERVER_MAX_SNAPSHOT_BYTES`
   was not in either compose service's `environment:` block, so the server always took its
   built-in **8192** and `.env` could not change it.

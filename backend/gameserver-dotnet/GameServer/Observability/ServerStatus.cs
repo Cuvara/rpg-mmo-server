@@ -100,6 +100,31 @@ public sealed class ServerStatus
     public int PlayersOnline { get; set; }
 
     /// <summary>
+    /// Connections registered on this server: the set the snapshot broadcast iterates, and
+    /// therefore the number snapshot bandwidth is paid per.
+    ///
+    /// <para><b>Read it next to <see cref="PlayersOnline"/>, and treat a disagreement as a
+    /// defect.</b> They are different measurements of the same thing by different means:
+    /// <c>players_online</c> is a counter balanced by hand on join and leave, this is the
+    /// live size of the connection registry. In a healthy server they are equal. If this is
+    /// non-zero while <c>players_online</c> reads 0, connections are outliving their
+    /// players and the server is gathering, encoding and writing for sockets nobody owns;
+    /// if the reverse, the join/leave balance has drifted and the number an operator uses
+    /// to decide a pod is idle is wrong.</para>
+    ///
+    /// <para>Bots hold no connection, so they appear in neither (see
+    /// <see cref="Bots"/>). Transports still inside the handshake appear in neither either
+    /// — those are <see cref="HandshakesPending"/>.</para>
+    ///
+    /// <para>Published because its absence cost a whole investigation: #401's snapshot
+    /// traffic on an empty server had to be diagnosed from three 30s samples of
+    /// <c>snapshot_bytes</c> and a read of the broadcast source, when one request would
+    /// have answered it.</para>
+    /// </summary>
+    [JsonPropertyName("connections")]
+    public int Connections { get; set; }
+
+    /// <summary>
     /// The admission limit this server enforces (<c>GAMESERVER_CAPACITY</c>). Published
     /// because it is a limit an operator otherwise cannot observe: a client refused for
     /// capacity is refused on this number, and the same number is what the gateway reads

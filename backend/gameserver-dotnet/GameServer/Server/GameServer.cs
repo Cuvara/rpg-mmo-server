@@ -613,6 +613,23 @@ public sealed class GameServerHost : IAsyncDisposable
     /// </summary>
     public int EntityCount => _world.EntityCount;
 
+    /// <summary>
+    /// Connections currently registered in <see cref="ConnectionManager"/> — the set the
+    /// snapshot broadcast iterates, and the exact value the <c>gameserver_connections</c>
+    /// gauge and <c>/status</c>'s <c>connections</c> publish.
+    /// </summary>
+    /// <remarks>
+    /// <b>Deliberately distinct from <c>players_online</c>, and the two disagreeing is the
+    /// diagnostic signal.</b> <c>players_online</c> is an independently balanced counter
+    /// (<see cref="GameMetrics.PlayerJoined"/>/<see cref="GameMetrics.PlayerLeft"/>), not
+    /// derived from this set, so a leaked registration or a missed balance shows up as a
+    /// gap between them and nowhere else. Broadcast cost is paid per CONNECTION, so this is
+    /// the number that explains snapshot bandwidth; <c>players_online</c> is the number an
+    /// operator reads to decide a pod is idle. #401 was diagnosed from three 30s samples
+    /// and a source read precisely because this number was not published.
+    /// </remarks>
+    public int Connections => _connections.Count;
+
     /// <summary>Reconnect holds currently pending. Diagnostics and tests.</summary>
     public int PendingHolds => _holds.Count;
 
@@ -732,6 +749,7 @@ public sealed class GameServerHost : IAsyncDisposable
         _admission = new AdmissionController(_connections, options.Capacity);
         _handshakes = new HandshakeGate(options.MaxPendingHandshakes);
         _metrics?.SetPendingHandshakesProvider(() => _handshakes.Pending);
+        _metrics?.SetConnectionCountProvider(() => _connections.Count);
 
         // Ingestion bounds (F04). The world-wide bound defaults to "every admitted player
         // spending their whole per-tick budget at once", which is the largest drain a
