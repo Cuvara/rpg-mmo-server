@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`event_stream_health` and `event_stream_consecutive_failures` on `/status`** — a
+  dependency signal that can say **failing** (#407).
+
+  `redis`, `event_stream` and `kick_consumer` are null checks on objects built at startup:
+  once the handle exists they answer the same thing for the life of the process, whatever
+  happens to the dependency. The endpoint was observed reporting `"redis": "connected"` while
+  the Redis container was `Exited (0)`, with `events_dropped` past 22,000 and climbing — the
+  endpoint contradicting itself, because the two numbers that measure the thing disagreed
+  with the field that names it.
+
+  The knowledge already existed and had no route out: `RedisEventStream` maintained a
+  consecutive-failure count for its recovery log line, resetting it on success. That is now
+  public and published. **No I/O is performed per status request** — a health endpoint that
+  probes its dependencies on every scrape becomes a way to hammer them.
+
+  `redis` and `event_stream` are kept, with their documentation rewritten to say they report
+  the **configured** backend rather than its health. A field answering "which backend is
+  wired" is legitimate; it was only dangerous while it was the one an operator would read as
+  health.
+
+  The test asserts the **failing** direction and then recovery, because asserting the signal
+  reads healthy on a working stream passes today with the defect live — equally true of a
+  correct implementation and of a constant. Mutation-verified: replacing the signal with a
+  literal `0`, the constant a null check amounts to, fails that test and leaves the other
+  four green.
+
 ### Changed
 
 - **`backend/docs/MEASUREMENT.md` gains section 2b: a stopped instrument and a quiet one read

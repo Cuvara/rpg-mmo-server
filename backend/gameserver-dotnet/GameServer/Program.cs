@@ -1115,8 +1115,18 @@ metricsEndpoint?.SetStatusProvider(() =>
         AttackRateViolations = server.AttackRates.Violations,
         AttackKills = server.AttackStats.Kills,
         LastAttackRejection = server.AttackStats.LastRejection,
+        // CONFIGURED, not reachable -- see the note on EventStream below and #407.
         Redis = serverRegistry != null ? "connected" : "disconnected",
+        // CONFIGURED, not healthy. These two are null checks on objects built at startup:
+        // once the handle exists they answer the same thing for the life of the process,
+        // whatever happens to the dependency. Read `event_stream_health` for health (#407).
         EventStream = redisEventStream != null ? "redis" : "noop",
+        EventStreamHealth =
+            redisEventStream == null ? "disabled"
+            : redisEventStream.ConsecutiveFailures > 0 ? "failing"
+            : redisEventStream.Published > 0 ? "ok"
+            : "idle",
+        EventStreamConsecutiveFailures = redisEventStream?.ConsecutiveFailures ?? 0,
         EventsDropped = redisEventStream?.Dropped ?? 0,
         EventPublishFailures = redisEventStream?.PublishFailures ?? 0,
         KickConsumer = kickConsumer != null ? "redis" : "disabled",

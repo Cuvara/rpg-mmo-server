@@ -32,6 +32,47 @@ public sealed class RedisEventStreamQueueTests
         return done();
     }
 
+    /// <summary>
+    /// The health signal must be able to say FAILING (#407).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>/status</c> reported <c>"redis": "connected"</c> while the Redis container was
+    /// <c>Exited (0)</c>, because that field is a null check on a handle built at startup.
+    /// A field with no failure value is not a health field.
+    /// </para>
+    /// <para>
+    /// <b>The assertion is on the failing direction, deliberately.</b> Asserting the signal
+    /// reads healthy on a working stream passes today, with the defect live — it is true of
+    /// a correct implementation and of a constant. Only the failing case distinguishes them.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ConsecutiveFailures_RisesWhileFailing_AndClearsOnRecovery()
+    {
+        bool fail = true;
+        await using var stream = new RedisEventStream(
+            (_, _) => fail ? throw new InvalidOperationException("redis is dead") : Task.CompletedTask,
+            NullLogger.Instance, retryDelays: []);
+
+        for (int i = 0; i < 5; i++) await stream.PublishAsync(EventStreams.Game, Evt(), CancellationToken.None);
+
+        Assert.True(await EventuallyAsync(() => stream.ConsecutiveFailures > 0),
+            "the signal stayed at zero while every publish was failing, so it cannot " +
+            "report a dead dependency and is worth nothing as health");
+
+        // Control: nothing published successfully yet, so a caller must not read this as ok.
+        Assert.Equal(0, stream.Published);
+
+        fail = false;
+        for (int i = 0; i < 5; i++) await stream.PublishAsync(EventStreams.Game, Evt(), CancellationToken.None);
+
+        Assert.True(await EventuallyAsync(() => stream.ConsecutiveFailures == 0),
+            "the signal did not clear after the sink recovered, so it reports the process's " +
+            "history rather than its present state");
+        Assert.True(stream.Published > 0);
+    }
+
     [Fact]
     public async Task PublishNeverThrows_WhenEverySinkCallFails()
     {
