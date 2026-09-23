@@ -8,6 +8,75 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The replication ceiling now reserves budget for the network (#413).**
+
+  `ReplicationSchedule.MaxIntervalMs` was `ClientInterpolationBudgetMs` — the scheduler was
+  permitted to spend the client's **entire** 150ms of cover on deferral, on the implicit
+  assumption that the wire contributes zero. It does not. `MaxIntervalMs` is now
+  `ClientInterpolationBudgetMs - LinkSpreadAllowanceMs` = **105ms**.
+
+  Measured by `EntityIntervalUnderAdversityTests` — a real client through `AdversityProxy`,
+  timing the gap between consecutive snapshots **carrying a given entity**, arrival-timed
+  with no rate fit in it. Two runs, per-entity p99 in ms:
+
+  | profile | clean | ±25ms | ±60ms | ±100ms |
+  |---|---|---|---|---|
+  | off (shipped) | 74–79 | 111–115 | 161–162 | 215 |
+  | tiered | **148–150** | 176–178 | 218–223 | — |
+
+  The `tiered` row is the finding: it reached **148–150ms on loopback**, against 150ms of
+  cover, before a single millisecond of network. The 17ms of headroom its 133ms band was
+  meant to leave did not survive tick quantisation. Snapshot **cadence** over the same runs
+  stayed at 66–78ms p99 — perfectly healthy, and blind to all of it, which is why no cadence
+  number this project has could ever have found this.
+
+  This is the same defect that already shipped once. The ceiling was 500ms while the remark
+  justifying it derived 150, and three people play-testing saw mobs stepping. That fix
+  corrected the constant and kept the assumption underneath it. The superseded reasoning is
+  quoted in place in `ReplicationSchedule.cs` rather than deleted.
+
+- **`ReplicationSchedule.IntervalTicksFor(score, baseHz, worldEvery)`** — the ceiling is in
+  base ticks and emission is on world ticks, so an interval of N base ticks is served on the
+  next world tick at or after N. A ceiling landing between two world periods therefore
+  rounded **up** and bought nothing.
+
+  Invisible while the ceiling was 150ms, because the band under it was 133ms — exactly 2
+  periods at 60/15, so the rounding had nothing to do. Tightening the ceiling to 105ms (6
+  base ticks, still served at 8) changed the constant and **not the behaviour**: the live
+  measurement went on reading 133ms while the unit test read 105. Caught only because the
+  two disagreed; a ceiling change validated by unit tests alone would have shipped as a
+  no-op. `SnapshotDeltaState.WorldEvery` carries the emission cadence, defaulted to the
+  shipped rates rather than to 1 so a caller that forgets it cannot silently get the
+  unquantised behaviour.
+
+### Changed
+
+- **`tiered` buys nothing at the shipped 60/15 rate, and that is now asserted.** At 60/15 the
+  only waits that exist are 66.7ms and 133.3ms; 105ms sits between them, so every band
+  collapses to "every tick". `ScheduleFitsTheClientBudgetTests.TieringBuysNothingAtTheShippedWorldRate_AndNeedsAFasterOne`
+  asserts the collapse at 15Hz **and** that the bands separate again at 30Hz — because the
+  alternative is ADR-27 decision 4 all over again, a tier that silently stopped existing
+  while `replication_schedule` went on printing it. Keeping tiering alive at 60/15 would need
+  the link allowance at or under 17ms, i.e. a link with under ~10ms one-way jitter. **This
+  bears on ADR-27 and the ADR is not edited here.**
+
+- **Six deferral tests re-homed from 60/15 to 60/30** (`ReplicationScheduleTests`,
+  `SelfIsNeverDeferredTests`, `ScheduleOnTheLivePathTests`). They cover the schedule's
+  mechanics — aging, self-exemption, edges, keyframe coverage, convergence after a deferral —
+  which are rate-independent, and at 60/15 there is no longer any deferral to exercise. Their
+  own guards caught this rather than passing vacuously: *"nothing was deferred, so this
+  proves nothing"*, *"the tiered arm deferred nothing"*, *"the schedule deferred nothing on
+  the real input path"*.
+
+### Fixed
+
+- **`ScheduleFitsTheClientBudgetTests.AtTheShippedWorldRate_EveryBandIsStillDistinct` measured
+  the wrong rate.** It computed `worldHz * 4` from a constant named `worldHz` set to 15, so a
+  test named for the shipped world rate asserted at 60Hz, four times it. Renamed
+  `AtAWorldRateFastEnoughForThem_…` with the rate spelled out; the shipped rate now has its
+  own case, where the bands do **not** stay distinct — the thing the old name claimed to
+  cover.
+
 - **`NetworkAdversityTests` and `AdversityProxy` — the server measured under a bad network.**
 
   Every latency and loss number this project had was taken on loopback on one box, where

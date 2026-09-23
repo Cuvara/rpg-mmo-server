@@ -151,6 +151,36 @@ A comparison needs both arms to differ in **exactly one** thing.
 builds: a percentage is only comparable against the same scene, the same spawner and the
 same observer position.
 
+### What a valid control still cannot see
+
+A control arm answers **"did this change anything"**. It does not answer **"is either arm
+right"**, and a defect that degrades both arms equally is invisible to the first question and
+obvious to the second.
+
+That is not hypothetical. Deleting `ApplyHeldMovement` — three quarters of a 15Hz client's
+movement — left the jittered/clean travel ratio at **1.0**. The control was valid, the arms
+differed in exactly one thing, and the comparison was worthless. What caught it was the
+absolute bound in the same test: the control arm had travelled 7.500 units against 30.000
+owed, **25.0%**, which is precisely the one-tick-in-four a 15Hz client gets on a 60Hz group.
+
+So: **a control arm and an absolute bound, not one or the other.** Every arm comparison
+should carry a statement of what the arm should be in its own right — `speed × seconds`, a
+rate against its configured value, a count against what was sent. Where a mutation table
+exists, record which of the two killed each mutation; if every kill came from the control
+arm, the absolute bound is untested and may be wrong.
+
+The same shape appears whenever the two arms share a common factor: two benchmark projects
+sharing one `obj/`, two runs of a starved tick loop, two clients behind the same broken
+proxy. The ratio is 1.0 and the system is broken.
+
+### And a control taken at a different time is not always a control
+
+Ambient load moves whole runs. The downstream-stall case in the adversity suite first
+compared total distance between a stalled arm and a clean one: **0.2%** apart when run
+alone, **5.4%** apart under the full suite, on the same binary. Neither number was about the
+link. Where the effect can be measured *across* the adversity inside one arm — sample before,
+sample after — prefer that to a second run that has to be commensurable with the first.
+
 ---
 
 ## 5. Verify remote and live state, not the exit code

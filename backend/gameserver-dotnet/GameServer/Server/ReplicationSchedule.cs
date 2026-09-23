@@ -44,8 +44,63 @@ public sealed class ReplicationSchedule
     /// 116ms after the client had run out of anything to interpolate towards. Three people
     /// playing saw exactly that, as mobs moving in visible steps while players moved
     /// smoothly.</para>
+    ///
+    /// <para><b>And then it was 150, and that was still the whole budget (#413).</b> The
+    /// paragraph above is kept as it stood because it is the reasoning this replaces: it
+    /// corrected the constant from 500 and kept the assumption underneath it, that the
+    /// scheduler may spend the client's cover down to the last millisecond because the wire
+    /// costs nothing. Measured over a relay, the wire costs 33-41ms at ±25ms one-way jitter
+    /// and 83-87ms at ±60ms, and the shipped <c>tiered</c> profile reached 148-150ms
+    /// <b>on loopback</b> — the budget exhausted with no network in the picture. The ceiling
+    /// is now the budget minus <see cref="LinkSpreadAllowanceMs"/>, so the same mobs cannot
+    /// step for the same reason by a different route.</para>
     /// </remarks>
-    public const int MaxIntervalMs = ClientInterpolationBudgetMs;
+    public const int MaxIntervalMs = ClientInterpolationBudgetMs - LinkSpreadAllowanceMs;
+
+    /// <summary>
+    /// How much of the client's cover is reserved for the <b>network</b>, leaving the rest
+    /// for deferral. 45ms, measured, at a link of ±25ms one-way jitter.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why this exists.</b> Without it the scheduler spends the client's entire
+    /// budget on deferral and assumes the wire is instantaneous. It is not: the gap a client
+    /// waits for news of one entity is the scheduler's interval <i>plus</i> however much the
+    /// link spread the two arrivals apart, and both come out of the same 150ms.</para>
+    ///
+    /// <para><b>Measured, not derived</b>, by <c>EntityIntervalUnderAdversityTests</c> — a
+    /// real client over a relay, timing the gap between consecutive snapshots carrying a
+    /// given entity. Two runs, per-entity p99 in ms:</para>
+    ///
+    /// <code>
+    /// profile  link      p99        the link's share
+    /// off      clean     74-79      -
+    /// off      ±25ms     111-115    33-41
+    /// off      ±60ms     161-162    83-87
+    /// tiered   clean     148-150    -          &lt;- at the budget with NO network
+    /// tiered   ±25ms     176-178    28
+    /// tiered   ±60ms     218-223    67-75
+    /// </code>
+    ///
+    /// <para>45 is the ±25ms column rounded up, and it is a statement about the worst link
+    /// this schedule claims to serve. The row that matters most is the fourth: the shipped
+    /// <c>tiered</c> profile reached <b>148-150ms on loopback</b>, exhausting the budget
+    /// before a single millisecond of network. The 17ms of headroom its 133ms band was
+    /// supposed to leave did not survive tick quantisation.</para>
+    ///
+    /// <para><b>±60ms one-way is outside what this design can serve at all.</b> At a 15Hz
+    /// world rate one interval alone is 66.7ms and the link adds 83-87, so the budget is
+    /// exceeded with the scheduler deferring nothing. No ceiling fixes that; closing it means
+    /// a larger <c>TargetDelay</c> on the client, which costs input latency for everyone in
+    /// order to serve the worst link.</para>
+    ///
+    /// <para><b>The consequence at the shipped world rate, stated rather than discovered.</b>
+    /// 105ms at 60/15 is one world tick, so <see cref="Tiered"/>'s slow band no longer defers
+    /// and the profile buys nothing there — asserted by
+    /// <c>ScheduleFitsTheClientBudgetTests.TieringBuysNothingAtTheShippedWorldRate_AndNeedsAFasterOne</c>
+    /// rather than left to be found in a banner. Tiering needs a world rate around 30Hz
+    /// before any band both fits the budget and differs from every tick.</para>
+    /// </remarks>
+    public const int LinkSpreadAllowanceMs = 45;
 
     /// <summary>
     /// How long a client can cover a gap with no new state: <c>TargetDelay</c> (100ms) plus
@@ -104,9 +159,19 @@ public sealed class ReplicationSchedule
     /// <item><description><b>score ≥ 8 → every tick.</b> Any untold HP or action change
     /// alone clears this (change is 10), as does an attacking player. These are the updates
     /// a client cannot reconstruct.</description></item>
-    /// <item><description><b>everything else → 133ms.</b> A player at any distance, or any
-    /// mob. Two world ticks at 15Hz: one held frame, then a catch-up.</description></item>
+    /// <item><description><b>everything else → <see cref="MaxIntervalMs"/>.</b> A player at
+    /// any distance, or any mob. It is the ceiling itself rather than a number of its own, so
+    /// the band can never declare a wait longer than it is allowed to take: a band that says
+    /// 133ms and behaves as 66ms is the "one band wearing two names" failure this file
+    /// already records, arriving from the other direction.</description></item>
     /// </list>
+    ///
+    /// <para><b>It was 133ms, and #413 is why it is not.</b> 133 was two world ticks at 15Hz,
+    /// chosen to sit inside the client's 150ms of cover with 17ms to spare. Measured over a
+    /// relay, the shipped profile reached a per-entity p99 of <b>148-150ms on loopback</b>:
+    /// quantisation had eaten the 17ms before any network. With
+    /// <see cref="LinkSpreadAllowanceMs"/> reserved for the wire the ceiling is 105ms, and at
+    /// 60/15 that is one world tick — so this band no longer defers at the shipped rate.</para>
     ///
     /// <para><b>Two bands, not three, and that is a consequence rather than a preference.</b>
     /// The third band was 266ms, chosen because BENCHMARK.md Part XIII measured 44-46% on a
@@ -122,7 +187,7 @@ public sealed class ReplicationSchedule
     public static ReplicationSchedule Tiered { get; } = new("tiered", new[]
     {
         new Tier(8f, 0),
-        new Tier(float.NegativeInfinity, 133),
+        new Tier(float.NegativeInfinity, MaxIntervalMs),
     });
 
     /// <summary>
@@ -137,6 +202,56 @@ public sealed class ReplicationSchedule
             if (score >= _tiers[i].MinScore) return TicksFor(_tiers[i].IntervalMs, worldHz);
         }
         return 1;
+    }
+
+    /// <summary>
+    /// Interval in BASE ticks for a score, clamped so the wait an entity <b>actually</b>
+    /// takes stays inside <see cref="MaxIntervalMs"/>.
+    /// </summary>
+    /// <param name="score">Importance score.</param>
+    /// <param name="baseHz">Base (critical) tick rate — the counter intervals are in.</param>
+    /// <param name="worldEvery">Base ticks per world tick, i.e. per emission.</param>
+    /// <remarks>
+    /// <para><b>The ceiling is in base ticks and emission is not.</b> Snapshots go out on
+    /// world ticks, so an interval of N base ticks is served on the next world tick at or
+    /// after N: the real wait is <c>ceil(N / worldEvery)</c> world periods, always a whole
+    /// number of them. A ceiling landing between two periods therefore rounds UP and buys
+    /// nothing at all.</para>
+    ///
+    /// <para>This was invisible while the ceiling was 150ms, because the band under it was
+    /// 133ms — 8 base ticks at 60/15, exactly 2 periods, so the rounding had nothing to do.
+    /// #413 tightened the ceiling to 105ms, which is 6 base ticks, which is still served at
+    /// 8: the constant changed and the behaviour did not, and the live measurement went on
+    /// reading 133ms while the unit test read 105. It was caught only because the two
+    /// disagreed — a ceiling change validated by unit tests alone would have shipped as a
+    /// no-op.</para>
+    /// </remarks>
+    public int IntervalTicksFor(float score, int baseHz, int worldEvery)
+    {
+        int ticks = IntervalTicksFor(score, baseHz);
+        if (worldEvery <= 1 || baseHz <= 0) return ticks;
+
+        int worldHz = baseHz / worldEvery;
+        if (worldHz <= 0) return ticks;
+
+        int periods = (ticks + worldEvery - 1) / worldEvery;
+        while (periods > 1 && periods * 1000 / worldHz > MaxIntervalMs) periods--;
+        return periods * worldEvery;
+    }
+
+    /// <summary>
+    /// The wait an entity actually takes, in milliseconds, for an interval of
+    /// <paramref name="baseTicks"/> at these rates — the number the client's budget is spent
+    /// against, and the one <see cref="MaxIntervalMs"/> is a bound on.
+    /// </summary>
+    public static int EffectiveIntervalMs(int baseTicks, int baseHz, int worldEvery)
+    {
+        if (baseHz <= 0) return 0;
+        if (worldEvery <= 1) return baseTicks * 1000 / baseHz;
+        int worldHz = baseHz / worldEvery;
+        if (worldHz <= 0) return baseTicks * 1000 / baseHz;
+        int periods = Math.Max(1, (baseTicks + worldEvery - 1) / worldEvery);
+        return periods * 1000 / worldHz;
     }
 
     /// <summary>

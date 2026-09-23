@@ -374,6 +374,16 @@ public sealed class SnapshotDeltaState
     public int TickHz { get; set; } = Server.SimulationRates.DefaultCriticalHz;
 
     /// <summary>
+    /// Base ticks per emission, i.e. <c>SimulationRates.WorldEvery</c>. Snapshots go out on
+    /// world ticks, so this is what turns an interval in base ticks into the wait an entity
+    /// actually takes — see <see cref="Server.ReplicationSchedule.IntervalTicksFor(float,int,int)"/>.
+    /// <para>Defaulted to the shipped rates rather than to 1, because 1 means "no
+    /// quantisation" and would let a caller that forgot to set it silently get the
+    /// unquantised behaviour, which is the failure this field exists to remove.</para>
+    /// </summary>
+    public int WorldEvery { get; set; } = Server.SimulationRates.Default.WorldEvery;
+
+    /// <summary>
     /// World tick each entity was last actually emitted on, keyed like
     /// <see cref="_lastSent"/>. Absent means "never sent to this connection".
     /// </summary>
@@ -1403,7 +1413,7 @@ public sealed class SnapshotDeltaState
         if (prev.Hp != e.Hp || prev.MaxHp != e.MaxHp) return true;
         if (prev.Action != e.Action || prev.ActionSeq != e.ActionSeq) return true;
 
-        int interval = Schedule.IntervalTicksFor(score, TickHz);
+        int interval = Schedule.IntervalTicksFor(score, TickHz, WorldEvery);
         if (interval <= 1) return true;
 
         if (!_lastSentTick.TryGetValue(e.Key, out ulong last)) return true;

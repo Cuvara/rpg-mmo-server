@@ -9,7 +9,21 @@ namespace GameServer.Tests.Snapshot;
 public class ReplicationScheduleTests
 {
     private const int TickHz = SimulationRates.DefaultCriticalHz;   // 60, the BASE rate
-    private const int WorldEvery = TickHz / SimulationRates.DefaultWorldHz;   // 4
+    // 60/30, not the shipped 60/15, and that is deliberate (#413).
+    //
+    // The interval ceiling now reserves ReplicationSchedule.LinkSpreadAllowanceMs of the
+    // client's cover for the network, which leaves 105ms for deferral. Emission happens on
+    // world ticks, so at 60/15 the only waits that exist are 66.7ms and 133.3ms: 105 sits
+    // between them and every band collapses to "every tick". The schedule defers NOTHING at
+    // the shipped rate, which is asserted on purpose by
+    // ScheduleFitsTheClientBudgetTests.TieringBuysNothingAtTheShippedWorldRate_AndNeedsAFasterOne.
+    //
+    // These cases are about the schedule's MECHANICS — aging, self-exemption, edges, keyframe
+    // coverage, convergence after a deferral — which are rate-independent. Running them where
+    // the feature is inert would leave every one of them passing vacuously; their own guards
+    // ("nothing was deferred, so this proves nothing") caught exactly that when the ceiling
+    // changed, which is why they are re-homed rather than relaxed.
+    private const int WorldEvery = 2;   // 60/30
     private const int NoKeyframes = int.MaxValue;
 
     private static SnapshotDeltaState Tiered() => new()
@@ -17,6 +31,7 @@ public class ReplicationScheduleTests
         ImportanceWeights = ImportanceSettings.Balanced.Weights,
         Schedule = ReplicationSchedule.Tiered,
         TickHz = TickHz,
+        WorldEvery = WorldEvery,
         AoiRadius = GameConstants.DefaultAoiRadius,
     };
 
@@ -29,16 +44,26 @@ public class ReplicationScheduleTests
     /// it configured without editing it.
     /// </summary>
     [Theory]
-    [InlineData(133, 15, 2)]    // 133ms -> 2 ticks; flooring made this 1 and deleted the tier
-    [InlineData(133, 30, 4)]
-    // The ceiling binds on the ACTUAL wait, not on the typed value, and the ceiling is now
-    // the client's 150ms interpolation budget rather than the 500ms that the remark
-    // justifying it never supported. Both rows below used to read 4/8 and 7: they are kept
-    // rather than deleted because what changed is what the numbers MEAN, and a deleted row
-    // is a rule nobody can see was ever tested.
-    [InlineData(266, 15, 2)]    // clamped: 150ms at 15Hz is 2 ticks
-    [InlineData(266, 30, 4)]    // clamped: 150ms at 30Hz is 4 ticks
-    [InlineData(500, 15, 2)]    // far past the ceiling, same clamp
+    // ROUNDING, where the ceiling does not reach. This is the lesson the 133/15 row used to
+    // carry: 99ms at 30Hz is 2.97 ticks, so nearest gives 3 and flooring gives 2 — and a
+    // band that floors to the tick below is the tier that silently stopped existing while
+    // still printing in the banner (ADR-27 decision 4).
+    [InlineData(99, 30, 3)]
+    [InlineData(66, 15, 1)]
+    // THE CEILING, which binds on the actual wait rather than on the typed value. These rows
+    // have now been rewritten twice and are kept rather than deleted, because what changed
+    // both times is what the numbers MEAN and a deleted row is a rule nobody can see was
+    // ever tested:
+    //   originally  500ms ceiling  ->  133/15 = 2,  133/30 = 4,  266/15 = 4,  266/30 = 8
+    //   then #?     150ms ceiling  ->  133/15 = 2,  133/30 = 4,  266/15 = 2,  266/30 = 4
+    //   now  #413   105ms ceiling  ->  133/15 = 1,  133/30 = 3,  266/15 = 1,  266/30 = 3
+    // The third line is the link allowance arriving: 105ms at 15Hz is ONE world tick, so
+    // every interval anyone can type collapses to "every tick" at the shipped rate.
+    [InlineData(133, 15, 1)]
+    [InlineData(133, 30, 3)]
+    [InlineData(266, 15, 1)]
+    [InlineData(266, 30, 3)]
+    [InlineData(500, 15, 1)]
     public void IntervalsAreConfiguredInMillisecondsAndConvertWithTheWorldRate(
         int ms, int worldHz, int expectedTicks)
     {
@@ -204,8 +229,10 @@ public class ReplicationScheduleTests
         Assert.True(state.EntitiesDeferredByInterval > 0, "nothing was deferred, so this proves nothing");
         Assert.Equal(world.Count, lastCarried.Count);
 
-        // The slowest tier is 266ms; at 15Hz that is 3 world ticks. Headroom for the budget
-        // sort interleaving, but bounded by the CONFIGURED interval rather than by luck.
+        // Bounded by the CONFIGURED slowest tier rather than by luck, whatever that tier is
+        // — it is read off the schedule here rather than written as a number, so the bound
+        // followed the ceiling from 266ms to 150ms to #413's 105ms without this assertion
+        // having to be re-derived each time.
         int slowest = ReplicationSchedule.Tiered.IntervalTicksFor(0f, TickHz);
         Assert.True(worstGap <= (ulong)slowest + 2,
             $"worst gap {worstGap} ticks against a configured slowest tier of {slowest}");
