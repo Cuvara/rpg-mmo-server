@@ -94,6 +94,36 @@ public class ReplicationScheduleTests
     }
 
     /// <summary>
+    /// The quantisation arithmetic itself: an interval of N base ticks is served on the next
+    /// world tick at or after N, so the wait is always a whole number of world periods.
+    /// </summary>
+    /// <remarks>
+    /// <para>Pinned directly because the refusal gate cannot pin it. A mutation making
+    /// <c>EffectiveIntervalWorldTicks</c> read the DECLARED interval instead of the effective
+    /// one <b>survived</b>: <see cref="ReplicationSchedule.Tiered"/>'s slow band is declared
+    /// as <see cref="ReplicationSchedule.MaxIntervalMs"/> itself, so declared and effective
+    /// coincide by construction at every rate, and no assertion through that schedule can
+    /// tell the two apart. The arithmetic is still worth a guard, so here it is on its own.
+    /// </para>
+    ///
+    /// <para>6 base ticks at 60/15 is the case that matters: 100ms if you divide by the base
+    /// rate, 133ms once you notice it is served on a world tick. The second is what the
+    /// client waits, and the first is what #413 was briefly told.</para>
+    /// </remarks>
+    [Theory]
+    [InlineData(6, 60, 4, 133)]     // rounds UP to 2 world periods; naive base-rate maths says 100
+    [InlineData(4, 60, 4, 66)]      // exactly 1 period
+    [InlineData(1, 60, 4, 66)]      // less than a period still costs a whole one
+    [InlineData(8, 60, 4, 133)]     // exactly 2 periods
+    [InlineData(9, 60, 4, 200)]     // one tick over 2 periods costs a third
+    [InlineData(6, 60, 1, 100)]     // worldEvery 1: no quantisation, straight base-rate maths
+    public void AnIntervalIsServedOnTheNextWorldTick_NotOnTheBaseTickItNames(
+        int baseTicks, int baseHz, int worldEvery, int expectedMs)
+    {
+        Assert.Equal(expectedMs, ReplicationSchedule.EffectiveIntervalMs(baseTicks, baseHz, worldEvery));
+    }
+
+    /// <summary>
     /// The server refuses to start with a schedule whose bands all collapse to one wait at
     /// the configured rates (#413).
     ///
