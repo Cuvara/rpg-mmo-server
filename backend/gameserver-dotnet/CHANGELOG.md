@@ -41,6 +41,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     "everybody failed" are different facts, and letting a zero-player sweep reach
     `EvaluateSweepHealth` keeps one place deciding what a sweep meant — a second zero-check
     upstream would shadow that guard, and a shadowed guard is one no test can hold.
+- **Every `GAMESERVER_*` name `Program.cs` reads is now declared as a constant
+  (`GameServer/ServerEnv.cs`), and a second gate reads the Agones fleet manifests**
+  (`GameServer.Tests/Deploy/FleetEnvPassthroughTests.cs`). Closes #400 and part 2 of #404.
+
+  The compose gate added in #398 enumerates knobs by reflecting over the assembly's
+  `const string` fields. Twenty-five names were read from **inline string literals** inside
+  `Program.cs` expressions, so they existed nowhere reflection could reach and were invisible
+  to it — which is exactly where the sixth passthrough instance lived
+  (`GAMESERVER_MAX_SNAPSHOT_BYTES`, the first of the seven to produce a defect a player could
+  see). Declaring them in `ServerEnv` widened the gate's input from 31 names to 56.
+
+  **That immediately exposed a seventh instance**, which is the second time this mechanism
+  has found one on the day it was applied: `GAMESERVER_FIELD_DELTA` had been added to
+  `gameserver-dotnet` and never to `gameserver-dotnet-map02`, so field-level delta encoding
+  was on for the map anyone would test on and off for the other. Two maps replicating
+  differently from one `.env`, for as long as the knob had existed.
+
+  Not every widened name was swept into the manifests. Fifteen were missing from compose and
+  **eight** were added; the other seven are excluded **by name, with a reason**, because
+  forwarding them would be inert or actively wrong — see `Excluded` in
+  `ComposeEnvPassthroughTests`. The seven divide into Agones-only knobs (compose runs no
+  sidecar), values compose's own pinned settings make unreachable (`GAMESERVER_TICK_RATE`
+  cannot take effect while the `SIM_*` rates are always set), per-map dimensions, and
+  `GAMESERVER_MIGRATE_ONLY` — a one-shot invocation mode that would stop every server in the
+  stack from serving if a shared `.env` set it.
+
+  The fleet gate covers **three** manifests, not the one #400 names: `50-fleet-map.yaml`, its
+  dev sibling `agones/fleet-map-dotnet-dev.yaml`, and `60-fleet-dungeon.yaml`. Each declares
+  its own `env:` list and inherits nothing, which is the same property that produced both
+  map02 divergences. Its exclusions are keyed **per fleet**, because
+  `GAMESERVER_JOIN_DEADLINE_SECONDS` is meaningless on a map fleet and required on the
+  dungeon one — the only fleet that runs `GAMESERVER_MODE: dungeon`, and the one it had never
+  been passed to — while `GAMESERVER_MAP_ID` is the reverse. A single global exclusion would
+  have excused the one deployment where each knob does something.
+
+  Both gates now take their knob list from one `DeclaredKnobs` helper. Two gates with two
+  definitions of "covered" drift invisibly: the one that still knows about a knob keeps
+  passing while the one that forgot it stops checking, and nothing compares them.
+
+  The fleet reader is scoped to the container's `env:` list rather than scanning for
+  `- name:`. These manifests put `- name:` entries under `ports:`, `imagePullSecrets:`,
+  `containers:`, `volumeMounts:` and `volumes:`, several at the **same indentation** as an env
+  entry, so a naive scan reports names nobody declared and goes green on a fleet whose env
+  list is empty as long as it has ports. A test asserts the decoys are not counted, and
+  another asserts a **prefix fragment** does not satisfy the gate for the names it names —
+  `GAMESERVER_IMPORTANCE_W_` appeared in `50-fleet-map.yaml` as exactly that, which is the
+  concealment that hid that family through three incidents.
+
 
 ### Fixed
 

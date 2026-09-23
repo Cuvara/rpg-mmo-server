@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging;
 using Shared.GameLogic.Components;
+using GameServer;
 using GameServer.Agones;
 using GameServer.Content;
 using GameServer.Events;
@@ -13,9 +14,9 @@ using GameServer.Server;
 
 // ── Parse command-line args and environment variables ──
 
-string mode = GetArg(args, "--mode") ?? Env("GAMESERVER_MODE") ?? "map";
-string addr = GetArg(args, "--addr") ?? Env("GAMESERVER_ADDR") ?? ":9000";
-string? explicitMapId = GetArg(args, "--map-id") ?? Env("GAMESERVER_MAP_ID");
+string mode = GetArg(args, "--mode") ?? Env(ServerEnv.Mode) ?? "map";
+string addr = GetArg(args, "--addr") ?? Env(ServerEnv.Addr) ?? ":9000";
+string? explicitMapId = GetArg(args, "--map-id") ?? Env(ServerEnv.MapId);
 // The fallback is the hazard, not a missing value: a dungeon fleet pins NO map id on
 // purpose, so every pod from it lands on "map_01" here. What stops that becoming three
 // live servers for one map (ADR-2) is the registration scope -- a dungeon server writes
@@ -23,30 +24,30 @@ string? explicitMapId = GetArg(args, "--map-id") ?? Env("GAMESERVER_MAP_ID");
 // string. The warning below says so out loud, because a dungeon pod whose registry hash
 // reads map_01 is otherwise a genuinely alarming thing to find.
 string mapId = explicitMapId ?? "map_01";
-string serverId = GetArg(args, "--server-id") ?? Env("GAMESERVER_ID") ?? Env("POD_NAME") ?? $"gs-{Guid.NewGuid():N}"[..12];
-int capacity = int.TryParse(GetArg(args, "--capacity") ?? Env("GAMESERVER_CAPACITY"), out var cap) ? cap : 100;
+string serverId = GetArg(args, "--server-id") ?? Env(ServerEnv.Id) ?? Env("POD_NAME") ?? $"gs-{Guid.NewGuid():N}"[..12];
+int capacity = int.TryParse(GetArg(args, "--capacity") ?? Env(ServerEnv.Capacity), out var cap) ? cap : 100;
 // Pre-join bounds (workspace audit F03). Capacity counts authenticated players only; these
 // two bound the phase before that — how many accepted sockets may sit in the handshake at
 // once, and how long each may take to deliver a complete join frame.
 int maxPendingHandshakes = int.TryParse(
-    GetArg(args, "--max-pending-handshakes") ?? Env("GAMESERVER_MAX_PENDING_HANDSHAKES"), out var mph) && mph > 0
+    GetArg(args, "--max-pending-handshakes") ?? Env(ServerEnv.MaxPendingHandshakes), out var mph) && mph > 0
     ? mph : ServerOptions.DefaultMaxPendingHandshakes;
 // Wire protocol version floor. 0 (default) also admits a client that advertises no
 // version at all -- see ServerOptions.MinProtocolVersion for why that is the shipping
 // default and what has to be true before raising it.
 uint minProtocolVersion = uint.TryParse(
-    GetArg(args, "--min-protocol-version") ?? Env("GAMESERVER_MIN_PROTOCOL_VERSION"), out var mpv)
+    GetArg(args, "--min-protocol-version") ?? Env(ServerEnv.MinProtocolVersion), out var mpv)
     ? mpv : 0u;
 int handshakeTimeoutMs = int.TryParse(
-    GetArg(args, "--handshake-timeout-ms") ?? Env("GAMESERVER_HANDSHAKE_TIMEOUT_MS"), out var hto) && hto > 0
+    GetArg(args, "--handshake-timeout-ms") ?? Env(ServerEnv.HandshakeTimeoutMs), out var hto) && hto > 0
     ? hto : (int)ServerOptions.DefaultHandshakeTimeout.TotalMilliseconds;
 // Ingestion bounds (workspace audit F04): inputs one connection may queue between two tick
 // drains, and the world-wide queue cap (0 = capacity x per-connection budget).
 int maxInputsPerTick = int.TryParse(
-    GetArg(args, "--max-inputs-per-tick") ?? Env("GAMESERVER_MAX_INPUTS_PER_TICK"), out var mipt) && mipt > 0
+    GetArg(args, "--max-inputs-per-tick") ?? Env(ServerEnv.MaxInputsPerTick), out var mipt) && mipt > 0
     ? mipt : GameServer.World.EcsWorld.DefaultMaxInputsPerConnection;
 int maxPendingInputs = int.TryParse(
-    GetArg(args, "--max-pending-inputs") ?? Env("GAMESERVER_MAX_PENDING_INPUTS"), out var mpi) && mpi > 0
+    GetArg(args, "--max-pending-inputs") ?? Env(ServerEnv.MaxPendingInputs), out var mpi) && mpi > 0
     ? mpi : 0;
 // Downlink bound: bytes of snapshot payload one connection may be sent per snapshot.
 // The counterpart to --max-inputs-per-tick, on the other direction of the wire, and the
@@ -67,10 +68,10 @@ int maxPendingInputs = int.TryParse(
 // the local compose stack and the JSON interop tests set it explicitly — never a fallback
 // this code reaches on its own. There is no value that means "seal if the client can":
 // see the refusal below.
-string sealedMode = (GetArg(args, "--sealed") ?? Env("GAMESERVER_SEALED") ?? "require").Trim().ToLowerInvariant();
+string sealedMode = (GetArg(args, "--sealed") ?? Env(ServerEnv.Sealed) ?? "require").Trim().ToLowerInvariant();
 
 int maxSnapshotBytes = int.TryParse(
-    GetArg(args, "--max-snapshot-bytes") ?? Env("GAMESERVER_MAX_SNAPSHOT_BYTES"), out var msb) && msb >= 0
+    GetArg(args, "--max-snapshot-bytes") ?? Env(ServerEnv.MaxSnapshotBytes), out var msb) && msb >= 0
     ? msb : GameServer.Snapshot.SnapshotDeltaState.DefaultMaxSnapshotBytes;
 // Falls back to the shared constant, not to a literal. The client derives its own
 // integration step from the same constant, and it is compiled into both sides, so a
@@ -80,7 +81,7 @@ int maxSnapshotBytes = int.TryParse(
 // move the server alone, but that is no longer silent: the critical rate now rides the
 // join response (`JoinTokenResponse.tick_rate`), so a client is told what to predict at
 // instead of assuming — #93.
-int tickRate = int.TryParse(GetArg(args, "--tick-rate") ?? Env("GAMESERVER_TICK_RATE"), out var tr)
+int tickRate = int.TryParse(GetArg(args, "--tick-rate") ?? Env(ServerEnv.TickRate), out var tr)
     ? tr : GameConstants.DefaultTickRate;
 // Multi-rate simulation. The three groups are named for what they do, not for how fast
 // they run, because how fast they run is configuration: SIM_CRITICAL_HZ / SIM_WORLD_HZ /
@@ -97,7 +98,7 @@ int tickRate = int.TryParse(GetArg(args, "--tick-rate") ?? Env("GAMESERVER_TICK_
 bool anySimVar = GetArg(args, "--sim-critical-hz") != null || Env("SIM_CRITICAL_HZ") != null
               || GetArg(args, "--sim-world-hz") != null || Env("SIM_WORLD_HZ") != null
               || GetArg(args, "--sim-background-hz") != null || Env("SIM_BACKGROUND_HZ") != null;
-bool tickRateSet = (GetArg(args, "--tick-rate") ?? Env("GAMESERVER_TICK_RATE")) != null;
+bool tickRateSet = (GetArg(args, "--tick-rate") ?? Env(ServerEnv.TickRate)) != null;
 int criticalHz = int.TryParse(GetArg(args, "--sim-critical-hz") ?? Env("SIM_CRITICAL_HZ"), out var chz)
     ? chz
     : (tickRateSet && !anySimVar ? tickRate : SimulationRates.DefaultCriticalHz);
@@ -109,17 +110,17 @@ int backgroundHz = int.TryParse(GetArg(args, "--sim-background-hz") ?? Env("SIM_
     : (tickRateSet && !anySimVar ? tickRate : SimulationRates.DefaultBackgroundHz);
 // Delta snapshots between full keyframes. 0 or less = send a full snapshot every tick
 // (pre-delta behaviour), the escape hatch for a client that cannot merge deltas.
-int keyframeInterval = int.TryParse(GetArg(args, "--keyframe-interval") ?? Env("GAMESERVER_KEYFRAME_INTERVAL"), out var kf)
+int keyframeInterval = int.TryParse(GetArg(args, "--keyframe-interval") ?? Env(ServerEnv.KeyframeInterval), out var kf)
     ? kf : GameConstants.DefaultKeyframeInterval;
 // AOI-gather worker threads. 1 = serial, the default and the pre-pool behaviour.
 // Only takes effect above TickLoop.GatherParallelMinViewers viewers -- see
 // ServerOptions.GatherWorkers for why it is opt-in.
-int gatherWorkers = int.TryParse(GetArg(args, "--gather-workers") ?? Env("GAMESERVER_GATHER_WORKERS"), out var gw) && gw > 0
+int gatherWorkers = int.TryParse(GetArg(args, "--gather-workers") ?? Env(ServerEnv.GatherWorkers), out var gw) && gw > 0
     ? gw : 1;
-float mapWidth = float.TryParse(GetArg(args, "--map-width") ?? Env("GAMESERVER_MAP_WIDTH"),
+float mapWidth = float.TryParse(GetArg(args, "--map-width") ?? Env(ServerEnv.MapWidth),
     System.Globalization.CultureInfo.InvariantCulture, out var mw) && mw > 0f
     ? mw : GameConstants.DefaultMapWidth;
-float mapHeight = float.TryParse(GetArg(args, "--map-height") ?? Env("GAMESERVER_MAP_HEIGHT"),
+float mapHeight = float.TryParse(GetArg(args, "--map-height") ?? Env(ServerEnv.MapHeight),
     System.Globalization.CultureInfo.InvariantCulture, out var mh) && mh > 0f
     ? mh : GameConstants.DefaultMapHeight;
 // Captured raw and validated below, once the map size it is reported against is known.
@@ -131,7 +132,7 @@ float mapHeight = float.TryParse(GetArg(args, "--map-height") ?? Env("GAMESERVER
 string? aoiRadiusRaw = GetArg(args, "--aoi-radius") ?? Env(GameServer.Server.AoiSettings.EnvVar);
 
 bool useAgones = HasFlag(args, "--agones") || Env("AGONES_ENABLED") == "true";
-bool enableEnemySpawner = Env("GAMESERVER_ENEMIES") != "false"; // on by default, opt out with GAMESERVER_ENEMIES=false
+bool enableEnemySpawner = Env(ServerEnv.Enemies) != "false"; // on by default, opt out with GAMESERVER_ENEMIES=false
 int loadTestEntities = int.TryParse(
     GetArg(args, "--loadtest-entities") ?? Env("LOADTEST_ENTITIES"), out var lte) ? lte : 0;
 // Nakama integration: server-to-server RPC for economy + leaderboard
@@ -157,7 +158,7 @@ string metricsAddr = GetArg(args, "--metrics-addr")
 string? gameDbUrl = GetArg(args, "--game-db-url") ?? Env("GAME_DB_URL");
 // Migrate-only mode: apply pending schema migrations, then exit without listening.
 // CD runs this before the deploy step so migrations happen at a deterministic point.
-bool migrateOnly = HasFlag(args, "--migrate-only") || Env("GAMESERVER_MIGRATE_ONLY") == "true";
+bool migrateOnly = HasFlag(args, "--migrate-only") || Env(ServerEnv.MigrateOnly) == "true";
 // Redis holding the server registry the gateway reads. Unset -> no self-registration
 // (single-process / test default), and the gateway will not find this server.
 string? redisAddr = GetArg(args, "--redis") ?? Env("REDIS_ADDR");
@@ -165,7 +166,7 @@ string? redisPassword = GetArg(args, "--redis-password") ?? Env("REDIS_PASSWORD"
 // Realtime transport for the gameplay hop: "tcp" (default) or "kcp". Matches Go's
 // --transport flag; the value is also what gets advertised to clients through the
 // registry, so it must describe what the listener actually speaks.
-string transport = TransportKind.Normalize(GetArg(args, "--transport") ?? Env("GAMESERVER_TRANSPORT"));
+string transport = TransportKind.Normalize(GetArg(args, "--transport") ?? Env(ServerEnv.Transport));
 // Pre-shared AES-256 key for KCP. The SAME variable and the same derivation as the
 // Go side (backend/shared/transport): 64 hex chars are used verbatim, anything else
 // is stretched with HKDF-SHA256. Empty = plaintext.
@@ -174,7 +175,7 @@ string transportKey = Env(TransportKind.KeyEnvVar) ?? "";
 // MsgEnterWorldResp.ServerAddr, so it must be dialable BY THE CLIENT — which is not
 // the listen address whenever a container maps ports (listen :9000, clients reach
 // <host>:9200). Falls back to the listen address, which is correct for host mode.
-string publicAddr = GetArg(args, "--public-addr") ?? Env("GAMESERVER_PUBLIC_ADDR") ?? addr;
+string publicAddr = GetArg(args, "--public-addr") ?? Env(ServerEnv.PublicAddr) ?? addr;
 // HOST ONLY, and Agones only. Replaces the host part of the address read from the Agones
 // GameServer status while the PORT still comes from that status, because under
 // portPolicy: Dynamic only Agones knows the port.
@@ -190,14 +191,14 @@ string publicAddr = GetArg(args, "--public-addr") ?? Env("GAMESERVER_PUBLIC_ADDR
 //
 // Exactly one of them applies to any given deployment. Setting this one with Agones off
 // does nothing at all — see the start-up warning below.
-string? advertiseHost = GetArg(args, "--advertise-host") ?? Env("GAMESERVER_ADVERTISE_HOST");
+string? advertiseHost = GetArg(args, "--advertise-host") ?? Env(ServerEnv.AdvertiseHost);
 // Hold the registry entry back until Agones reports this GameServer Allocated, instead of
 // publishing it right after Ready. OFF by default: a fleet that has not been migrated must
 // behave exactly as it did before this option existed. Agones only — with no sidecar there
 // is no allocation to wait for, and gating on one would mean never registering (the server
 // logs and ignores it in that case).
 bool registerOnAllocated =
-    HasFlag(args, "--register-on-allocated") || Env("GAMESERVER_REGISTER_ON_ALLOCATED") == "true";
+    HasFlag(args, "--register-on-allocated") || Env(ServerEnv.RegisterOnAllocated) == "true";
 
 // The bounded join deadline for an instanced dungeon (ADR-26). A dungeon pod that is
 // allocated and then never joined would otherwise sit Allocated forever — Agones does not
@@ -206,7 +207,7 @@ bool registerOnAllocated =
 // ServerOptions.DungeonJoinDeadline for why the default is 90s and not the 30s join-token TTL.
 TimeSpan joinDeadline =
     double.TryParse(
-        GetArg(args, "--join-deadline-seconds") ?? Env("GAMESERVER_JOIN_DEADLINE_SECONDS"),
+        GetArg(args, "--join-deadline-seconds") ?? Env(ServerEnv.JoinDeadlineSeconds),
         System.Globalization.NumberStyles.Float,
         System.Globalization.CultureInfo.InvariantCulture,
         out var jds) && jds >= 0
@@ -296,7 +297,7 @@ GameServer.Server.ReplicationSchedule replicationSchedule = scheduleParsed!;
 // measurement they took to compare against it is quietly of the same arm twice. This is a
 // toggle whose entire purpose is producing an honest control, so a value it does not
 // understand is a configuration error, not a default.
-string? fieldDeltaRaw = GetArg(args, "--field-delta") ?? Env("GAMESERVER_FIELD_DELTA");
+string? fieldDeltaRaw = GetArg(args, "--field-delta") ?? Env(ServerEnv.FieldDelta);
 bool fieldDelta;
 switch (fieldDeltaRaw?.Trim().ToLowerInvariant())
 {

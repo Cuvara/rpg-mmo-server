@@ -77,6 +77,31 @@ services:
       GAMESERVER_IMPORTANCE_W_TYPE: ${GAMESERVER_IMPORTANCE_W_TYPE:-}
       GAMESERVER_IMPORTANCE_W_COMBAT: ${GAMESERVER_IMPORTANCE_W_COMBAT:-}
       GAMESERVER_REPLICATION_SCHEDULE: ${GAMESERVER_REPLICATION_SCHEDULE:-off}
+      # THE SEVENTH PASSTHROUGH INSTANCE, and the second of exactly this shape: added
+      # to the map_01 service in docker-compose.yml and never here, so field-level
+      # delta encoding was ON for the map anyone would test on and OFF for the other
+      # -- two maps replicating differently from one file. Found by
+      # ComposeEnvPassthroughTests the moment the name was declared as a constant in
+      # ServerEnv; as an inline literal in Program.cs it was invisible to the gate.
+      GAMESERVER_FIELD_DELTA: ${GAMESERVER_FIELD_DELTA:-on}
+      # ── Admission, pre-join and ingestion bounds ──────────────────────────
+      # Forwarded from .env rather than written as literals: every one of these is a
+      # limit an operator tunes per deployment, and every one of them ran on a
+      # compiled-in default that nothing in deploy/.env could reach until now (#404).
+      # Empty stays empty on purpose -- Env() in Program.cs maps "" back to null, so an
+      # unset variable means "not configured" and the server keeps its own default
+      # rather than parsing the empty string as a value.
+      GAMESERVER_CAPACITY: ${GAMESERVER_CAPACITY:-}
+      GAMESERVER_MAX_PENDING_HANDSHAKES: ${GAMESERVER_MAX_PENDING_HANDSHAKES:-}
+      GAMESERVER_HANDSHAKE_TIMEOUT_MS: ${GAMESERVER_HANDSHAKE_TIMEOUT_MS:-}
+      GAMESERVER_MIN_PROTOCOL_VERSION: ${GAMESERVER_MIN_PROTOCOL_VERSION:-}
+      GAMESERVER_MAX_INPUTS_PER_TICK: ${GAMESERVER_MAX_INPUTS_PER_TICK:-}
+      GAMESERVER_MAX_PENDING_INPUTS: ${GAMESERVER_MAX_PENDING_INPUTS:-}
+      GAMESERVER_GATHER_WORKERS: ${GAMESERVER_GATHER_WORKERS:-}
+      # tcp (default) or kcp. The value is advertised to clients through the registry,
+      # so it must describe what the listener actually speaks. The KCP pre-shared key
+      # is TRANSPORT_KEY, which carries no GAMESERVER_ prefix and is not gated here.
+      GAMESERVER_TRANSPORT: ${GAMESERVER_TRANSPORT:-}
       METRICS_ADDR: ":9101"
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
