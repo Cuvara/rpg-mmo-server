@@ -119,6 +119,14 @@ public class ReplicationScheduleTests
         // reader to look for a band that is missing rather than at the rate that removed it.
         Assert.Contains("60/15", error);
         Assert.Contains($"{ReplicationSchedule.MaxIntervalMs}ms", error);
+
+        // The resulting TICK COUNTS, not only the wait in milliseconds. Two bands reading
+        // "0ms" and "105ms" look like a policy; the same two reading "1, 1 world ticks" are
+        // visibly one band, and that is the sentence an operator needs.
+        Assert.Contains("world ticks", error);
+        Assert.Contains(
+            string.Join(", ", ReplicationSchedule.Tiered.EffectiveIntervalWorldTicks(60, 15)),
+            error);
         Assert.Contains("SIM_WORLD_HZ", error);
 
         // The rate the message RECOMMENDS must actually work. Asserting that the message

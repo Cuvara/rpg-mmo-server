@@ -304,14 +304,33 @@ public sealed class ReplicationSchedule
     /// </summary>
     public int[] EffectiveIntervalsMs(int criticalHz, int worldHz)
     {
+        int[] periods = EffectiveIntervalWorldTicks(criticalHz, worldHz);
+        var result = new int[periods.Length];
+        for (int i = 0; i < periods.Length; i++) result[i] = periods[i] * 1000 / worldHz;
+        return result;
+    }
+
+    /// <summary>
+    /// The wait each band actually produces, in WORLD TICKS — one entry per band, in
+    /// declaration order.
+    /// </summary>
+    /// <remarks>
+    /// The tick count is what makes a collapse legible: two bands reading "0ms" and "105ms"
+    /// look like a policy, and the same two reading "1 world tick" and "1 world tick" do not.
+    /// It is the number the refusal message leads with for that reason.
+    /// </remarks>
+    public int[] EffectiveIntervalWorldTicks(int criticalHz, int worldHz)
+    {
         if (_tiers.Length == 0 || criticalHz <= 0 || worldHz <= 0 || criticalHz % worldHz != 0)
             return Array.Empty<int>();
 
         int worldEvery = criticalHz / worldHz;
         var result = new int[_tiers.Length];
         for (int i = 0; i < _tiers.Length; i++)
-            result[i] = EffectiveIntervalMs(IntervalTicksFor(_tiers[i].MinScore, criticalHz, worldEvery),
-                                            criticalHz, worldEvery);
+        {
+            int baseTicks = IntervalTicksFor(_tiers[i].MinScore, criticalHz, worldEvery);
+            result[i] = Math.Max(1, (baseTicks + worldEvery - 1) / worldEvery);
+        }
         return result;
     }
 
@@ -411,10 +430,12 @@ public sealed class ReplicationSchedule
                 {
                     int[] effective = Tiered.EffectiveIntervalsMs(criticalHz, worldHz);
                     int separating = Tiered.SeparatingWorldRate(criticalHz, worldHz);
+                    int[] worldTicks = Tiered.EffectiveIntervalWorldTicks(criticalHz, worldHz);
                     error =
                         $"{EnvVar}=tiered has no usable band at {criticalHz}/{worldHz}. " +
                         $"Configured intervals {string.Join("ms, ", Tiered.Tiers.Select(t => t.IntervalMs))}ms " +
-                        $"all resolve to the same {effective[0]}ms wait, because snapshots are " +
+                        $"all resolve to {string.Join(", ", worldTicks)} world ticks — the same " +
+                        $"{effective[0]}ms wait for every band — because snapshots are " +
                         $"emitted every {1000.0 / worldHz:F1}ms and the ceiling is " +
                         $"{MaxIntervalMs}ms ({ClientInterpolationBudgetMs}ms of client cover " +
                         $"minus {LinkSpreadAllowanceMs}ms reserved for the link). The policy " +
