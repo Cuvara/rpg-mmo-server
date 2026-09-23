@@ -8,6 +8,72 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`NetworkAdversityTests` and `AdversityProxy` — the server measured under a bad network.**
+
+  Every latency and loss number this project had was taken on loopback on one box, where
+  there is no loss and the physical RTT floor is zero. The behaviours written to survive a
+  bad mobile network — held movement's 250ms silence budget, the outbound send channel, the
+  reconnect hold — had therefore never met one. They were green under conditions that cannot
+  test them.
+
+  **Where the adversity is injected.** `GameServer.Tests/Infrastructure/AdversityProxy.cs` is
+  a seeded TCP relay that sits between a real client socket and the real game server
+  listener and adds one-way latency, jitter, a directional blackout and an RST. The server
+  runs its own listener and tick loop; the client is a real `TcpClient` speaking the real
+  `WireProtocol` framing. Nothing is stubbed, so shipping code is on **both** sides of the
+  injection point — a hand-written transport returning canned frames would have measured the
+  fixture instead.
+
+  Four cases, each against a control arm over the same proxy with a clean link, and each
+  with an **absolute** bound as well as the ratio. The ratio alone is not enough: deleting
+  held movement shortens both arms equally and leaves the ratio at 1.0, which the mutation
+  pass confirmed — the control arm travelled 25.0% of what it was owed and only the absolute
+  assertion caught it.
+
+  Measured, at 60/15/5 with a player speed of 5 u/s:
+
+  | Case | Clean | Adverse |
+  |---|---|---|
+  | Travel over 6s, 80±60ms both ways | 29.750 | 29.833 |
+  | Travel with a 1200ms upstream blackout | 29.667 | 24.667 (−5.000; 250ms budget predicts −4.750) |
+  | Snapshot p99 inter-arrival | 72.8ms | 164.2ms, gaps all 4, rate 14.977/s |
+  | Travel with a 4000ms downstream blackout | 44.500 | 44.583; 23.000 units gained across the 4.6s dark window, 4056ms arrival gap |
+
+### Findings
+
+- **What a downstream stall costs is load-dependent, and is therefore reported rather than
+  asserted.** Idle, a 4s blackout drops nothing at all: loopback send buffers absorb the
+  backlog and `Connection._sendChannel`'s 64-frame drop-the-oldest path is never reached — a
+  mutation shrinking that channel to **4** frames still dropped nothing. The same binary
+  under a full-suite run dropped **18 frames and opened a 12-tick gap**. An earlier draft of
+  this entry claimed the drop path was unreachable at one player, on the strength of the idle
+  runs; the loaded run disproved it. `DownstreamBlackoutDoesNotStopTheSimulation` now asserts
+  the load-independent thing — the player advanced by the blackout's worth of movement across
+  the blackout itself, and by no more — and prints the frame counts.
+
+- **Ambient load moves whole runs, so a cross-run ratio is not always a control.** The stall
+  case first compared total distance between a stalled run and a clean one: 0.2% apart in
+  isolation, 5.4% apart under the full suite, on the same binary. It now samples the player's
+  position on each side of the blackout within the one arm. The class is also pinned to a
+  `DisableParallelization` collection, because every assertion in it is about wall-clock
+  behaviour.
+
+- **±60ms of one-way jitter puts snapshot arrivals past what the client can render through.**
+  Measured p99 spacing was 164.2ms against the client's 150ms of cover (100ms target delay +
+  50ms max extrapolation, `Packages/com.cuvara.netcode`). The send period itself is 66.7ms,
+  so the budget tolerates roughly **±42ms** one way before a remote entity freezes rather
+  than interpolating through the gap. This is a property of the link a deployment runs over,
+  not a defect in the server, and it is asserted as "the server adds no spread of its own on
+  top of the link's" rather than as a p99 ceiling — the first version asserted the ceiling
+  and failed at 165.3ms having found nothing but the jitter constant it was given.
+
+- **A reconnecting player's position cannot distinguish a held entity from a rebuilt one.**
+  The player store persists position on disconnect and restores it on rejoin, so a re-created
+  entity lands exactly where a held one would. The first version of
+  `BlackoutThenResetThenReconnect` asserted a return to spawn past the hold window and failed
+  at 8.500 — the reading was right and the assertion was wrong. The discriminator is
+  `EntityCount` polled **across** the gap: never zero inside the window, zero outside it.
+
 - **`event_stream_health` and `event_stream_consecutive_failures` on `/status`** — a
   dependency signal that can say **failing** (#407).
 
