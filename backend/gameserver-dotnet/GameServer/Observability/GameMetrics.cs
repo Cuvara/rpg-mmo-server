@@ -461,6 +461,15 @@ public sealed class GameMetrics : IDisposable
             description: "Players currently connected to this server.");
 
         _meter.CreateObservableGauge(
+            "gameserver.connections",
+            ObserveConnectionCount,
+            description: "Connections registered on this server — the set the snapshot " +
+                         "broadcast iterates, and therefore what snapshot bandwidth is " +
+                         "paid per. Deliberately distinct from players_online, which is an " +
+                         "independently balanced counter and not derived from this set: the " +
+                         "two disagreeing is the signal that one of them is lying (#401).");
+
+        _meter.CreateObservableGauge(
             "gameserver.entities",
             ObserveEntities,
             description: "Entities currently present in the world.");
@@ -787,6 +796,26 @@ public sealed class GameMetrics : IDisposable
 
     private Measurement<int> ObservePendingHandshakes()
         => new(_pendingHandshakesProvider?.Invoke() ?? 0, _mapTags);
+
+    private Func<int>? _connectionCountProvider;
+
+    /// <summary>
+    /// Register the callback used by the <c>gameserver_connections</c> gauge: connections
+    /// registered in the ConnectionManager, which is the set the snapshot broadcast
+    /// iterates. Separate from <c>players_online</c> on purpose — see the gauge's
+    /// description and <see cref="ConnectionCount"/>.
+    /// </summary>
+    public void SetConnectionCountProvider(Func<int> provider) => _connectionCountProvider = provider;
+
+    /// <summary>
+    /// Connections registered on this server, or 0 when no provider has been registered.
+    /// Read by <c>/status</c> so the number there and the number in a scrape come from the
+    /// same place.
+    /// </summary>
+    public int ConnectionCount => _connectionCountProvider?.Invoke() ?? 0;
+
+    private Measurement<int> ObserveConnectionCount()
+        => new(_connectionCountProvider?.Invoke() ?? 0, _mapTags);
 
     /// <summary>
     /// Record a handshake refused before authentication. Mirrored into the

@@ -43,6 +43,7 @@ human inspection and for the Unity DOTS sample, which polls it.
   "sim_background_hz": 5,
   "current_tick": 726335,
   "players_online": 12,
+  "connections": 12,
   "capacity": 100,
   "entities": 34,
   "enemies_alive": 22,
@@ -93,6 +94,7 @@ so it reported the compiled-in default of 15 on servers whose prediction rate wa
 | `events_dropped` / `event_publish_failures` | Loss counters of the Redis event stream, since process start — the same values as `gameserver_events_dropped_total` / `gameserver_events_publish_failures_total` above. Always `0` under `"event_stream": "noop"` |
 | `kick_consumer` | State of the duplicate-login kick consumer on `events:kick` (ADR-20): `redis` (consuming as group `gs:{server_id}`) or `disabled` (`REDIS_ADDR` unset, or the consumer failed to start — supersede events for this server are then never acted on, so a re-logging-in user keeps their old connection here) |
 | `players_kicked` | Duplicate-login kicks executed since process start — connections force-closed because a `session_superseded` event named their join-token jti. Same value as `gameserver_players_kicked_total`. Always `0` under `"kick_consumer": "disabled"` |
+| `connections` | Connections registered on this server: **the set the snapshot broadcast iterates**, and therefore what snapshot bandwidth is paid per. Same value as `gameserver_connections`. **Read it next to `players_online` and treat a disagreement as a defect** — see "`connections` vs `players_online`" below. Bots hold no connection and appear in neither; sockets still inside the handshake are `handshakes_pending`, also neither |
 | `handshakes_pending` | Accepted sockets currently inside the join handshake — **not** in `players_online` and **not** under `capacity`; bounded by `GAMESERVER_MAX_PENDING_HANDSHAKES` instead. Same value as `gameserver_handshakes_pending`. A number that sits at the bound is a pre-join flood (or a client fleet that connects and never joins) |
 | `handshakes_rejected` | Handshakes refused **before authentication** since process start, every reason summed: pool full at accept, no complete join frame by `GAMESERVER_HANDSHAKE_TIMEOUT_MS`, or a first frame that was not a well-formed `MsgJoinToken`. Same value as `sum(gameserver_handshakes_rejected_total)`. A capacity refusal is not one of these — that is an authenticated join, logged at Warning |
 | `aoi_radius` | Effective area-of-interest radius in world units (`GAMESERVER_AOI_RADIUS`, default 50). **Published because nothing else reveals it.** Two servers with identical rates, capacity and snapshot budget report completely different `snapshot_bytes` at the same population if their radii differ, and the radius is not on the wire — so before this field the only way to learn a pod's radius was to read the manifest that was supposed to have produced it, which an **already-allocated** GameServer does not necessarily reflect: its environment is fixed at pod creation and a fleet update reaches only new pods. |
@@ -172,6 +174,7 @@ The same value is exported as the Prometheus gauge `gameserver_achieved_tick_hz`
 | `gameserver_tick_backlog_dropped_total` | counter | `map_id` | Base ticks discarded because the loop fell too far behind the wall clock — see below |
 | `gameserver_achieved_tick_hz` | gauge | `map_id` | **Measured** base-tick rate over a 2s window, from the monotonic clock. Compare with the configured `SIM_CRITICAL_HZ` — a healthy server has them equal. Never derived from wall time: a wall-clock rate on a host with a fast `CLOCK_REALTIME` reports a healthy loop as slow (#147/#153). `0` = not measured yet |
 | `gameserver_players_online` | gauge | `map_id` | Connected players |
+| `gameserver_connections` | gauge | `map_id` | Connections registered on this server — the set the snapshot broadcast iterates. Deliberately **not** derived from `players_online`, which is an independently balanced counter: the two disagreeing is the signal that one of them is lying (#401). This is the right denominator for `gameserver_snapshots_bytes_total` when they disagree |
 | `gameserver_entities` | gauge | — | Entities in the world |
 | `gameserver_snapshots_sent_total` | counter | `map_id` | Snapshot messages sent |
 | `gameserver_snapshots_bytes_total` | counter | `map_id` | Bytes of snapshot frames written to client sockets, envelope and 4-byte length prefix included. Divide by `gameserver_players_online` and by the scrape interval for the per-client downlink rate — the figure ADR-7's `< 50 KB/s` mobile threshold is about, and the one measured at 45.9 KB/s at 200 players |
@@ -553,6 +556,53 @@ is not keeping up and needs either a lower `SIM_CRITICAL_HZ` or fewer players.
 **Capacity figures measured while this is non-zero are invalid**, in the same way
 and for the same reason as figures measured under a high resync rate: the server
 was not doing the work the numbers claim to describe.
+
+### `connections` vs `players_online` — disagreement is a DEFECT
+
+Unlike the pair below, these two must be **equal** at all times. They are two
+measurements of the same quantity by different means: `players_online` is a counter
+balanced by hand on join and on leave, `connections` is the live size of the
+registry the snapshot broadcast iterates. Neither is derived from the other, on
+purpose — that is the only reason a gap between them is observable at all.
+
+| Reading | Meaning |
+|---|---|
+| `connections == players_online` | healthy |
+| `connections > players_online` (e.g. `connections: 1`, `players_online: 0`) | connections are outliving their players. The server pays a full AOI scan, delta encode and socket write **per phantom viewer per world tick** for sockets nobody owns, while reporting a pod an operator would read as idle |
+| `connections < players_online` | the join/leave balance has drifted. `players_online` is what feeds capacity and allocation decisions, so this is the more dangerous direction |
+
+Bots (`GAMESERVER_BOTS`) are player entities holding no connection: they appear in
+neither number. Sockets still inside the join handshake appear in neither either —
+those are `handshakes_pending`.
+
+**Why the field exists.** #401 reported `snapshot_bytes` climbing at ~16.4 KB/s on a
+server reporting `players_online: 0`. With no connection count published, deciding
+between "a connection is leaking" and "`players_online` is lying" took three 30 s
+samples, a read of the broadcast source and a socket table out of the container. One
+request answers it now.
+
+### `snapshot_*` counters on an empty server — they must stand still
+
+With no connection registered, every `snapshot_*` counter must be **flat**: no
+viewer means no gather, no encode and no write. A steady climb with
+`connections: 0` is the #401 defect — the per-tick deltas were reset inside the
+"are there any viewers" branch while the recording calls ran unconditionally, so a
+world tick with no viewers recorded the **last connected client's tick, again**, at
+the world rate, for the life of the process.
+
+Two properties of that reading are worth keeping, because they are what identified
+it and would identify a recurrence:
+
+- **The climb was bit-exact.** `snapshot_bytes` rose by exactly 1140 and
+  `snapshot_entities_gathered` by exactly 279 every world tick. Real traffic varies
+  per tick because the delta varies; a perfectly constant per-tick increment is a
+  replayed value, not work.
+- **`snapshots_sent` stayed still while the others climbed.** It is the one counter
+  whose delta is reset at the top of the tick rather than inside the branch. Two
+  counters recorded three lines apart disagreeing is what located the bug.
+
+A second map on the same build, same bots and same enemies, that had never carried a
+client read 0 for all of them — the control arm that ruled out the bots.
 
 ### `gameserver_entities` vs `gameserver_players_online` — disagreement is CORRECT
 

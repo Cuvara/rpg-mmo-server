@@ -624,27 +624,51 @@ public sealed class TickLoop
         }
         _viewerCount = Math.Min(viewers, _viewers.Length);
 
+        // Reset EVERY per-tick snapshot delta HERE: on every world tick, before the
+        // gather, and OUTSIDE the viewer-count guard below.
+        //
+        // WHY BEFORE THE GATHER. These are filled by the gather and by the viewer loop
+        // that follows it, and recorded at the bottom of the tick. Resetting them in one
+        // tidy block down there put the reset AFTER the thing that writes them, so they
+        // were zeroed every tick between being accumulated and being recorded, and
+        // `snapshot_entities_gathered`, `snapshot_max_gather` and `snapshot_anchor_missing`
+        // could only ever report 0. That is the failure those counters exist to expose,
+        // in the counters themselves: a healthy-looking zero meaning "not measured"
+        // rather than "nothing happened". Caught by reading /status on a live server
+        // carrying 165 enemies and 3 players — 15MB of snapshots sent, every gather
+        // counter zero.
+        //
+        // WHY OUTSIDE THE GUARD (#401). The fix for that first failure moved the resets
+        // INSIDE `if (_viewerCount > 0)`, which broke the other end of the same range: the
+        // recording calls at the bottom of this method are unconditional, so on a world
+        // tick with NO viewers every delta kept the value the last tick WITH a viewer left
+        // behind, and was recorded again. The last connected client's final tick was then
+        // replayed into the counters 15 times a second for the life of the process.
+        // Observed on map_01 with players_online=0 and no established socket on the game
+        // port: snapshot_bytes climbing by exactly 1140 and entities_gathered by exactly
+        // 279 per world tick, forever — ~16.4 KB/s of snapshots that were never gathered,
+        // never encoded and never written. `snapshots_sent` was the one counter that stayed
+        // still, because `_snapshotsThisTick` is the one field reset at the top of the tick
+        // rather than inside the guard; that disagreement is what identified the mechanism.
+        //
+        // So: unconditional reset, unconditional record. A world tick with no viewers must
+        // record a zero, because zero is what happened. Do not move these back inside the
+        // guard, and do not make the recording conditional instead — a counter that stops
+        // being written is indistinguishable from a server that stopped ticking.
+        _snapshotAnchorMissingDelta = 0;
+        _snapshotEntitiesGatheredDelta = 0;
+        _snapshotMaxGather = 0;
+        _snapshotsCoalescedDelta = 0;
+        _snapshotFramesWrittenDelta = 0;
+        _snapshotBytesDelta = 0;
+        _snapshotEntitiesShedDelta = 0;
+        _snapshotRemovalsDeferredDelta = 0;
+        _snapshotMaxShedAge = 0;
+        _snapshotDeferredByIntervalDelta = 0;
+        _snapshotMaxStateAge = 0;
+
         if (_viewerCount > 0)
         {
-            // Reset HERE, before the gather, and not with the other per-tick deltas
-            // further down. These three are filled BY the gather; the others are filled by
-            // the viewer loop that follows it. Resetting all of them in one tidy block put
-            // these three after the thing that writes them, so they were zeroed every tick
-            // between being accumulated and being recorded, and
-            // `snapshot_entities_gathered`, `snapshot_max_gather` and
-            // `snapshot_anchor_missing` could only ever report 0.
-            //
-            // That is the failure both counters exist to expose, in the counters
-            // themselves: a healthy-looking zero that means "not measured" rather than
-            // "nothing happened". Caught by reading /status on a live server carrying 165
-            // enemies and 3 players — 15MB of snapshots sent, every gather counter zero.
-            // No test caught it because the tests assert at the Connection boundary
-            // (LastGatherCount, and the bool GatherSnapshotView returns), which was correct
-            // the whole time. Nothing asserted what reached the metrics.
-            _snapshotAnchorMissingDelta = 0;
-            _snapshotEntitiesGatheredDelta = 0;
-            _snapshotMaxGather = 0;
-
             // Phase A — gather. One read lock for the whole broadcast.
             //
             // Parallel only above a measured viewer count, and only when the server was
@@ -674,14 +698,8 @@ public sealed class TickLoop
 
             // Each connection reports its own delta. Summing running totals over the
             // tick's scratch viewers is not a delta -- see Connection.TakeSnapshotCounters.
-            _snapshotsCoalescedDelta = 0;
-            _snapshotFramesWrittenDelta = 0;
-            _snapshotBytesDelta = 0;
-            _snapshotEntitiesShedDelta = 0;
-            _snapshotRemovalsDeferredDelta = 0;
-            _snapshotMaxShedAge = 0;
-            _snapshotDeferredByIntervalDelta = 0;
-            _snapshotMaxStateAge = 0;
+            // The accumulators were zeroed above, with the gather counters, so that a
+            // viewerless tick zeroes them too.
             for (int i = 0; i < _viewerCount; i++)
             {
                 _viewers[i].TakeSnapshotCounters(

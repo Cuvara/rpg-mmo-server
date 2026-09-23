@@ -1097,6 +1097,10 @@ metricsEndpoint?.SetStatusProvider(() =>
         AchievedTickHz = server.AchievedTickHz,
         CurrentTick = server.CurrentTick,
         PlayersOnline = metrics.PlayersOnline,
+        // From the ConnectionManager, NOT from PlayersOnline: publishing a derived copy
+        // would make the two agree by construction and destroy the only signal that says
+        // one of them is wrong (#401).
+        Connections = server.Connections,
         Capacity = capacity,
         Entities = server.EntityCount,
         EnemiesAlive = server.EnemiesAlive,
