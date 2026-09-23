@@ -215,6 +215,42 @@ public sealed class ServerStatus
     /// shutdown), since process start. Non-zero means Redis was unreachable long enough
     /// to fill the bound. Same value as <c>gameserver_events_dropped_total</c>.
     /// </summary>
+    /// <summary>
+    /// Whether the event stream is working <b>right now</b>: <c>"ok"</c>, <c>"failing"</c>,
+    /// <c>"idle"</c> (configured, nothing published yet) or <c>"disabled"</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Read this, not <see cref="EventStream"/> or <see cref="Redis"/>, to decide whether
+    /// the dependency is healthy.</b> Those two report which backend was <i>configured</i> at
+    /// startup — they are null checks on objects constructed once and never consulted again,
+    /// so they answer "healthy" for the life of the process no matter what happens to Redis
+    /// afterwards.
+    /// </para>
+    /// <para>
+    /// That is not a hypothetical. This endpoint was observed reporting
+    /// <c>"redis": "connected"</c> while the Redis container was <c>Exited (0)</c>, with
+    /// <c>events_dropped</c> past 22,000 and climbing — the endpoint contradicting itself,
+    /// because the two numbers that measured the thing disagreed with the field that named
+    /// it (#407).
+    /// </para>
+    /// <para>
+    /// Derived from the publisher's consecutive-failure count, which resets on success, so it
+    /// describes the present rather than the process's whole history. No I/O is performed to
+    /// answer a status request: a health endpoint that probes its dependencies per scrape
+    /// becomes a way to hammer them.
+    /// </para>
+    /// </remarks>
+    [JsonPropertyName("event_stream_health")]
+    public string EventStreamHealth { get; set; } = "disabled";
+
+    /// <summary>
+    /// Publish failures since the last success. Zero means the last attempt worked.
+    /// Distinct from <see cref="EventPublishFailures"/>, which is cumulative and cannot fall.
+    /// </summary>
+    [JsonPropertyName("event_stream_consecutive_failures")]
+    public long EventStreamConsecutiveFailures { get; set; }
+
     [JsonPropertyName("events_dropped")]
     public long EventsDropped { get; set; }
 

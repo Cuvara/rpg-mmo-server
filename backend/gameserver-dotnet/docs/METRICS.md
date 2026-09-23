@@ -62,6 +62,8 @@ human inspection and for the Unity DOTS sample, which polls it.
   "last_attack_rejection": "target out of range",
   "redis": "connected",
   "event_stream": "redis",
+  "event_stream_health": "ok",
+  "event_stream_consecutive_failures": 0,
   "events_dropped": 0,
   "event_publish_failures": 0,
   "kick_consumer": "redis",
@@ -74,6 +76,29 @@ human inspection and for the Unity DOTS sample, which polls it.
   "uptime_seconds": 12105
 }
 ```
+
+### `redis`, `event_stream` and `kick_consumer` are CONFIGURATION, not health
+
+Those three are null checks on objects constructed at startup. Once the handle exists they
+answer the same thing for the life of the process, whatever happens to the dependency
+afterwards. This endpoint was observed reporting `"redis": "connected"` while the Redis
+container was `Exited (0)`, with `events_dropped` past 22,000 and climbing — the endpoint
+contradicting itself, because the two numbers that measure the thing disagreed with the field
+that names it (#407).
+
+They are kept, because "which backend is wired" is a legitimate question. They were only
+dangerous while they were the fields an operator would read as health.
+
+**Read `event_stream_health` for health.** It is `ok`, `failing`, `idle` (configured, nothing
+published yet) or `disabled`, derived from the publisher's consecutive-failure count — which
+resets on success, so it describes the present rather than the process's whole history.
+`event_stream_consecutive_failures` is that count; `event_publish_failures` is cumulative and
+cannot fall, so a stream that failed a thousand times last week and works today reports the
+same large number as one failing this second.
+
+**No I/O is performed to answer a status request.** A health endpoint that probes its
+dependencies on every scrape becomes a way to hammer them.
+
 
 **Every rate field names its group.** The server runs three simulation groups at
 three frequencies (ADR-13), so an unqualified "tick rate" is a question with three
