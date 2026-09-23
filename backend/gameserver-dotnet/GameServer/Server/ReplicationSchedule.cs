@@ -1,3 +1,4 @@
+using System.Linq;
 using System;
 using System.Globalization;
 using System.Text;
@@ -81,8 +82,21 @@ public sealed class ReplicationSchedule
     /// tiered   ±60ms     218-223    67-75
     /// </code>
     ///
-    /// <para>45 is the ±25ms column rounded up, and it is a statement about the worst link
-    /// this schedule claims to serve. The row that matters most is the fourth: the shipped
+    /// <para><b>45 is a choice, not a measurement.</b> It is the ±25ms column rounded up, so
+    /// it is a statement about which link this schedule promises to serve — and, just as
+    /// importantly, which it does not. It covers ±25ms one-way comfortably. It does
+    /// <b>not</b> cover ±60ms, whose share measured 83–87ms: on that link the budget is
+    /// exceeded with the scheduler deferring nothing at all, and no value of this constant
+    /// changes that. Whoever raises it is promising a worse link and must re-measure the
+    /// column they are promising.</para>
+    ///
+    /// <para>The corresponding client-side reading, from a real Unity client over a relay at
+    /// 40ms one-way plus ±60ms jitter: <c>snapshotsApplied</c> 14.8/s, unchanged from clean,
+    /// with resyncs, rejected, dropped and clamped all zero and <c>rtt</c> 110ms median /
+    /// 179ms p95. The client survives a link far worse than the one tiering needs, so the
+    /// constraint here is this budget arithmetic and not client robustness.</para>
+    ///
+    /// <para>The row that matters most is the fourth: the shipped
     /// <c>tiered</c> profile reached <b>148-150ms on loopback</b>, exhausting the budget
     /// before a single millisecond of network. The 17ms of headroom its 133ms band was
     /// supposed to leave did not survive tick quantisation.</para>
@@ -284,8 +298,86 @@ public sealed class ReplicationSchedule
         return ticks < 1 ? 1 : ticks;
     }
 
+    /// <summary>
+    /// The wait each band actually produces, in milliseconds, at these rates — one entry per
+    /// band, in declaration order. What the operator is really configuring.
+    /// </summary>
+    public int[] EffectiveIntervalsMs(int criticalHz, int worldHz)
+    {
+        if (_tiers.Length == 0 || criticalHz <= 0 || worldHz <= 0 || criticalHz % worldHz != 0)
+            return Array.Empty<int>();
+
+        int worldEvery = criticalHz / worldHz;
+        var result = new int[_tiers.Length];
+        for (int i = 0; i < _tiers.Length; i++)
+            result[i] = EffectiveIntervalMs(IntervalTicksFor(_tiers[i].MinScore, criticalHz, worldEvery),
+                                            criticalHz, worldEvery);
+        return result;
+    }
+
+    /// <summary>
+    /// Whether every band produces the same wait at these rates, i.e. the policy is a no-op
+    /// wearing the name of a policy.
+    /// </summary>
+    /// <remarks>
+    /// Computed with the SAME arithmetic the live path uses —
+    /// <see cref="IntervalTicksFor(float,int,int)"/> then
+    /// <see cref="EffectiveIntervalMs"/> — rather than from the declared millisecond values.
+    /// Reading the declared values is how this stayed invisible: the bands say 0 and 105 and
+    /// look distinct, while both are served on every world tick at 60/15.
+    /// </remarks>
+    public bool BandsCollapseAt(int criticalHz, int worldHz)
+    {
+        int[] effective = EffectiveIntervalsMs(criticalHz, worldHz);
+        if (effective.Length < 2) return false;
+        for (int i = 1; i < effective.Length; i++)
+            if (effective[i] != effective[0]) return false;
+        return true;
+    }
+
+    /// <summary>
+    /// The slowest world rate at or above <paramref name="fromWorldHz"/> that divides
+    /// <paramref name="criticalHz"/> and separates the bands, or 0 if none does.
+    /// </summary>
+    private int SeparatingWorldRate(int criticalHz, int fromWorldHz)
+    {
+        for (int w = fromWorldHz + 1; w <= criticalHz; w++)
+        {
+            if (criticalHz % w != 0) continue;
+            if (!BandsCollapseAt(criticalHz, w)) return w;
+        }
+        return 0;
+    }
+
     public static bool TryCreate(
         string? profile, bool importanceEnabled,
+        out ReplicationSchedule? schedule, out string? error)
+        => TryCreate(profile, importanceEnabled, criticalHz: 0, worldHz: 0, out schedule, out error);
+
+    /// <summary>
+    /// Parse and validate, including against the rates the server will actually run at.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why the rates belong in the gate.</b> A schedule is a set of waits in
+    /// milliseconds and the rates decide which of them exist. At 60/15 the only waits are
+    /// 66.7ms and 133.3ms, and with a 105ms ceiling every band rounds to the first — so
+    /// <c>tiered</c> parses, prints two bands in the startup banner, and behaves as one.
+    /// </para>
+    ///
+    /// <para>That exact failure is already recorded twice in this file: 133ms flooring to
+    /// "every tick" while the tier went on appearing in the banner and in <c>/status</c>, and
+    /// a third band at 266ms whose only effect was arriving after the client had stopped
+    /// being able to use it. Both were found by reading a running server. A comment did not
+    /// stop the second, so this is a refusal: the server will not start rather than start
+    /// with a policy that does nothing.</para>
+    ///
+    /// <para><paramref name="criticalHz"/> and <paramref name="worldHz"/> are the raw
+    /// configured values, read before <see cref="SimulationRates"/> has validated them. The
+    /// check is skipped when they are unusable, so a bad rate is reported by the rate
+    /// validator rather than by a confusing message from here.</para>
+    /// </remarks>
+    public static bool TryCreate(
+        string? profile, bool importanceEnabled, int criticalHz, int worldHz,
         out ReplicationSchedule? schedule, out string? error)
     {
         schedule = null;
@@ -314,6 +406,27 @@ public sealed class ReplicationSchedule
                             $"{ImportanceSettings.EnvVar}=balanced.";
                     return false;
                 }
+                if (criticalHz > 0 && worldHz > 0 && criticalHz % worldHz == 0
+                    && Tiered.BandsCollapseAt(criticalHz, worldHz))
+                {
+                    int[] effective = Tiered.EffectiveIntervalsMs(criticalHz, worldHz);
+                    int separating = Tiered.SeparatingWorldRate(criticalHz, worldHz);
+                    error =
+                        $"{EnvVar}=tiered has no usable band at {criticalHz}/{worldHz}. " +
+                        $"Configured intervals {string.Join("ms, ", Tiered.Tiers.Select(t => t.IntervalMs))}ms " +
+                        $"all resolve to the same {effective[0]}ms wait, because snapshots are " +
+                        $"emitted every {1000.0 / worldHz:F1}ms and the ceiling is " +
+                        $"{MaxIntervalMs}ms ({ClientInterpolationBudgetMs}ms of client cover " +
+                        $"minus {LinkSpreadAllowanceMs}ms reserved for the link). The policy " +
+                        "would print two bands and behave as one, which is the failure this " +
+                        "refusal exists to prevent. " +
+                        (separating > 0
+                            ? $"Raise SIM_WORLD_HZ to {separating} to separate them, or set " +
+                              $"{EnvVar}=off."
+                            : $"No world rate dividing {criticalHz} separates them; set {EnvVar}=off.");
+                    return false;
+                }
+
                 schedule = Tiered;
                 return true;
 

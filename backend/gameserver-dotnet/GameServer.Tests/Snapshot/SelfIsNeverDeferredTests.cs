@@ -54,7 +54,7 @@ public class SelfIsNeverDeferredTests
     private const int NoKeyframes = int.MaxValue;
 
     [Fact]
-    public void UnderTheTieredSchedule_SelfAppearsEveryWorldTickAndOthersDoNot()
+    public void UnderTheTieredScheduleAt60Over30_SelfAppearsEveryWorldTickAndOthersDoNot()
     {
         Run(ReplicationSchedule.Tiered, out int selfSends, out int medianOtherSends,
             out long deferred);

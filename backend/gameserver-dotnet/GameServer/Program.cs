@@ -283,6 +283,12 @@ GameServer.Server.ImportanceSettings importance = importanceParsed!;
 if (!GameServer.Server.ReplicationSchedule.TryCreate(
         GetArg(args, "--replication-schedule") ?? Env(GameServer.Server.ReplicationSchedule.EnvVar),
         importance.Enabled,
+        // The raw configured rates: a schedule's bands only mean something next to the rate
+        // that serves them, and at some rates they collapse into one. SimulationRates has
+        // not validated these yet, so the gate skips unusable values rather than shadowing
+        // the rate validator's own message.
+        criticalHz,
+        worldHz,
         out GameServer.Server.ReplicationSchedule? scheduleParsed, out string? scheduleError))
 {
     logger.LogCritical("invalid replication schedule: {Error}", scheduleError);

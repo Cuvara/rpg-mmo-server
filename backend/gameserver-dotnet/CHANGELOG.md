@@ -35,6 +35,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   corrected the constant and kept the assumption underneath it. The superseded reasoning is
   quoted in place in `ReplicationSchedule.cs` rather than deleted.
 
+- **The server refuses to start with a schedule whose bands all collapse into one.**
+  `ReplicationSchedule.TryCreate` now takes the configured rates and rejects `tiered` when
+  every band resolves to the same wait, alongside the existing refusal of `tiered` without
+  importance weights. At 60/15:
+
+  ```
+  GAMESERVER_REPLICATION_SCHEDULE=tiered has no usable band at 60/15. Configured intervals
+  0ms, 105ms all resolve to the same 66ms wait, because snapshots are emitted every 66.7ms
+  and the ceiling is 105ms (150ms of client cover minus 45ms reserved for the link). The
+  policy would print two bands and behave as one, which is the failure this refusal exists
+  to prevent. Raise SIM_WORLD_HZ to 20 to separate them, or set
+  GAMESERVER_REPLICATION_SCHEDULE=off.
+  ```
+
+  The collapse is computed with the **same arithmetic the live path uses**, not from the
+  declared millisecond values — reading the declared values is how this stayed invisible,
+  since `0ms` and `105ms` look distinct while both are served on every world tick at 60/15.
+  The recommended rate is asserted to be actionable rather than merely present: the test
+  parses it out of the message and re-runs the gate at it.
+
+  This failure has already happened twice in this file's history — a tier flooring to "every
+  tick" while still appearing in the banner and in `/status`, and a 266ms band whose only
+  effect was arriving after the client could use it. Both were found by reading a running
+  server, and a comment did not prevent the second.
+
 - **`ReplicationSchedule.IntervalTicksFor(score, baseHz, worldEvery)`** — the ceiling is in
   base ticks and emission is on world ticks, so an interval of N base ticks is served on the
   next world tick at or after N. A ceiling landing between two world periods therefore
@@ -48,6 +73,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   no-op. `SnapshotDeltaState.WorldEvery` carries the emission cadence, defaulted to the
   shipped rates rather than to 1 so a caller that forgets it cannot silently get the
   unquantised behaviour.
+
+  **Behaviour-neutral at the old ceiling**, which is what makes this reviewable as a separate
+  change from the ceiling itself: at `MaxIntervalMs = 150` the slow band was 133ms = 8 base
+  ticks = exactly 2 world periods at 60/15, so the quantisation has nothing to round and
+  `IntervalTicksFor(score, baseHz, worldEvery)` returns what `IntervalTicksFor(score, baseHz)`
+  returned. It changes behaviour only for a ceiling that lands between two world periods,
+  which is the case this commit introduces.
 
 ### Changed
 
