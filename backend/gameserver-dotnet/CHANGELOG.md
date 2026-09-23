@@ -45,6 +45,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`MEASUREMENT.md` §1: an exit code cannot tell a pass from a skip.** `dotnet test` exits 0
+  when everything passed, when it selected nothing, and when everything it selected was
+  skipped — three readings an exit code cannot separate.
+
+  Written from a near-miss during #413. Two Redis-backed failures were re-run in isolation to
+  decide whether they were the known flakes, and the re-run returned `exit=0` having reported
+  `Skipped! - Failed: 0, Passed: 0, Skipped: 9`: the container had gone away between runs.
+  "Re-ran them alone and they passed" was one line from being reported. The summary counters
+  are what caught it. The entry pairs that with the counter-check that did clear a different
+  flaky test in the same session — `Passed: 10, Skipped: 0` — because the contrast is what
+  makes it a procedure rather than a warning.
+
 - **The replication ceiling now reserves budget for the network (#413).**
 
   `ReplicationSchedule.MaxIntervalMs` was `ClientInterpolationBudgetMs` — the scheduler was
