@@ -8,6 +8,9 @@ namespace GameServer.Tests.Snapshot;
 
 public class ReplicationScheduleTests
 {
+    private readonly Xunit.Abstractions.ITestOutputHelper _out;
+    public ReplicationScheduleTests(Xunit.Abstractions.ITestOutputHelper output) => _out = output;
+
     private const int TickHz = SimulationRates.DefaultCriticalHz;   // 60, the BASE rate
     // 60/30, not the shipped 60/15, and that is deliberate (#413).
     //
@@ -90,6 +93,101 @@ public class ReplicationScheduleTests
         }
     }
 
+    /// <summary>
+    /// The server refuses to start with a schedule whose bands all collapse to one wait at
+    /// the configured rates (#413).
+    ///
+    /// <para>At 60/15 with a 105ms ceiling the only wait that exists is one world tick, so
+    /// <c>tiered</c> would parse, print two bands in the banner, and behave as one. This file
+    /// already records that exact failure twice — a tier flooring to "every tick" while still
+    /// appearing in the banner and in <c>/status</c>, and a 266ms band whose only effect was
+    /// arriving after the client could use it. Both were found by reading a running server.
+    /// A comment did not stop the second, so it is a boot failure now.</para>
+    /// </summary>
+    [Fact]
+    public void TieredIsRefused_WhenTheWorldRateCollapsesEveryBandIntoOne()
+    {
+        Assert.False(ReplicationSchedule.TryCreate(
+            "tiered", importanceEnabled: true,
+            criticalHz: 60, worldHz: SimulationRates.DefaultWorldHz,
+            out ReplicationSchedule? schedule, out string? error));
+        Assert.Null(schedule);
+        Assert.NotNull(error);
+        _out.WriteLine(error);
+
+        // The message has to carry the numbers, because "no usable band" alone sends the
+        // reader to look for a band that is missing rather than at the rate that removed it.
+        Assert.Contains("60/15", error);
+        Assert.Contains($"{ReplicationSchedule.MaxIntervalMs}ms", error);
+        Assert.Contains("SIM_WORLD_HZ", error);
+
+        // The rate the message RECOMMENDS must actually work. Asserting that the message
+        // names some number proves nothing; asserting the advice is actionable is the point,
+        // and it is the assertion that would catch a search returning a rate that does not
+        // divide the base rate or does not in fact separate the bands.
+        var recommended = System.Text.RegularExpressions.Regex.Match(
+            error!, @"Raise SIM_WORLD_HZ to (\d+)");
+        Assert.True(recommended.Success, $"the message gave no rate to raise to: {error}");
+        int rate = int.Parse(recommended.Groups[1].Value);
+
+        // It has to be a rate the server can actually run. This is not belt and braces: a
+        // mutation returning `fromWorldHz + 1` unchecked recommended 16Hz, and the weaker
+        // version of this block PASSED on it. 16 does not divide 60, so the collapse gate
+        // skipped itself and BandsCollapseAt answered false on an empty array — two vacuous
+        // trues in a row, and a message sending an operator to a rate SimulationRates would
+        // then reject.
+        Assert.True(60 % rate == 0,
+            $"the message recommends SIM_WORLD_HZ={rate}, which does not divide the 60Hz base " +
+            $"rate; SimulationRates will refuse it and the operator is sent in a circle. {error}");
+
+        Assert.True(ReplicationSchedule.TryCreate(
+            "tiered", importanceEnabled: true, criticalHz: 60, worldHz: rate,
+            out ReplicationSchedule? atRecommended, out string? stillWrong), stillWrong);
+        Assert.NotNull(atRecommended);
+
+        // Asserted on the effective intervals themselves rather than through
+        // BandsCollapseAt, which returns false both when the bands differ and when there is
+        // nothing to compare.
+        int[] effective = atRecommended!.EffectiveIntervalsMs(60, rate);
+        Assert.True(effective.Length >= 2,
+            $"no bands to compare at the recommended SIM_WORLD_HZ={rate}: [{string.Join(", ", effective)}]");
+        Assert.True(effective.Distinct().Count() > 1,
+            $"the message recommends SIM_WORLD_HZ={rate}, at which every band still resolves " +
+            $"to the same wait: [{string.Join("ms, ", effective)}ms]");
+    }
+
+    /// <summary>
+    /// And it is accepted at a rate where the bands are real, so the refusal above is a
+    /// statement about the rate rather than about the profile.
+    /// </summary>
+    [Fact]
+    public void TieredIsAccepted_AtAWorldRateThatSeparatesTheBands()
+    {
+        Assert.True(ReplicationSchedule.TryCreate(
+            "tiered", importanceEnabled: true, criticalHz: 60, worldHz: 30,
+            out ReplicationSchedule? schedule, out string? error), error);
+        Assert.NotNull(schedule);
+
+        int[] effective = schedule!.EffectiveIntervalsMs(60, 30);
+        Assert.Equal(effective.Length, effective.Distinct().Count());
+    }
+
+    /// <summary>
+    /// Unusable rates are the rate validator's business, not this gate's. A zero or
+    /// non-dividing rate must not produce a confusing message about bands.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(60, 0)]
+    [InlineData(60, 7)]     // does not divide
+    public void TheCollapseGate_IsSkippedForRatesTheRateValidatorWillReject(int criticalHz, int worldHz)
+    {
+        Assert.True(ReplicationSchedule.TryCreate(
+            "tiered", importanceEnabled: true, criticalHz, worldHz,
+            out ReplicationSchedule? schedule, out string? error), error);
+        Assert.NotNull(schedule);
+    }
+
     /// <summary>Tiering without importance weights would defer everything equally — a
     /// uniform staleness increase wearing the name of a policy.</summary>
     [Fact]
@@ -140,7 +238,7 @@ public class ReplicationScheduleTests
     /// vanish until some later delta happened to carry it.
     /// </summary>
     [Fact]
-    public void Keyframe_CarriesEveryVisibleEntity_WhateverTheirTier()
+    public void At60Over30_KeyframeCarriesEveryVisibleEntityWhateverTheirTier()
     {
         SnapshotDeltaState state = Tiered();
         var world = new List<EntityState> { TestHelpers.CreatePlayer("self", 0f, 0f) };
@@ -167,7 +265,7 @@ public class ReplicationScheduleTests
     /// is a dropped event, because the next snapshot carries only the state afterwards.
     /// </summary>
     [Fact]
-    public void AnEdgeIsNeverDeferred()
+    public void At60Over30_AnEdgeIsNeverDeferred()
     {
         SnapshotDeltaState state = Tiered();
         var mob = TestHelpers.CreateMob("mob", 45f, 0f);
@@ -202,7 +300,7 @@ public class ReplicationScheduleTests
     /// client actually holds instead.
     /// </summary>
     [Fact]
-    public void ScheduleStarvation_IsBoundedByTheConfiguredInterval()
+    public void At60Over30_ScheduleStarvationIsBoundedByTheConfiguredInterval()
     {
         SnapshotDeltaState state = Tiered();
         var world = new List<EntityState> { TestHelpers.CreatePlayer("self", 0f, 0f) };
@@ -245,7 +343,7 @@ public class ReplicationScheduleTests
     /// a queued intermediate one.
     /// </summary>
     [Fact]
-    public void AfterADeferral_TheNextSendCarriesTheLatestState()
+    public void At60Over30_AfterADeferralTheNextSendCarriesTheLatestState()
     {
         SnapshotDeltaState state = Tiered();
         var mob = TestHelpers.CreateMob("mob", 45f, 0f);

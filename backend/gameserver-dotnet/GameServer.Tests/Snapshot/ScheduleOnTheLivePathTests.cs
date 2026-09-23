@@ -45,7 +45,7 @@ public class ScheduleOnTheLivePathTests
     private const int Players = 24;
 
     [Fact]
-    public void DrivenThroughTheRealInputPath_TheScheduleStillDefers()
+    public void DrivenThroughTheRealInputPathAt60Over30_TheScheduleStillDefers()
     {
         using var world = new EcsWorld();
         var handler = new InputHandler(
