@@ -65,8 +65,18 @@ in nothing an exit code can see.
 So: after any `--filter`, assert on `Passed:` being what you expected and `Skipped:` being
 zero. A dependency-gated test that skips is behaving correctly — it is the *conclusion drawn
 from its silence* that is wrong, and a filter that matches nothing is the same failure with
-no dependency involved. The CI step already knows this and reads the `.trx` counters, failing
-on `total == 0`; the lesson is that a human at a terminal has to do the same thing by hand.
+no dependency involved.
+
+**CI had the same hole, and this entry found it.** The first draft of this section asserted
+that the CI step already read the `.trx` counters and failed on `total == 0`. It did not:
+`ci-dotnet.yml` ran `dotnet test`, wrote the `.trx`, and uploaded it with
+`if-no-files-found: warn` — so a run that selected nothing would have gone green, and the
+missing results file would have produced a warning rather than a failure. The sentence was
+worse than no sentence, because it told a reader the automated side was covered and only a
+human at a terminal had to be careful. A `Verify test counters` step now parses the
+`Counters` element of every `.trx` and fails on `total == 0`, on a missing results file, and
+on `executed == 0`; `if-no-files-found` is `error`. The rule below applies to the instrument
+that checks the instrument.
 
 **The rule:** before trusting an instrument, get a **non-empty** result out of it. A gate
 that matches nothing must fail, not pass.

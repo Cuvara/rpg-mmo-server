@@ -77,6 +77,19 @@ jobs:
           --blame-hang-timeout 8m
           --blame-hang-dump-type none
 
+      # `dotnet test` exits 0 when every selected test passed, when it selected
+      # nothing, and when everything it selected was skipped -- all three are the
+      # same reading. Without this step a suite that stopped selecting tests (a
+      # csproj that no longer references the runner, a filter that matches
+      # nothing, a service dependency gone away) would go green. See
+      # backend/docs/MEASUREMENT.md, "An exit code cannot tell a pass from a skip".
+      - name: Verify test counters
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: >-
+          python3 .github/scripts/verify-test-counters.py
+          "backend/gameserver-dotnet/**/test-results.trx"
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
@@ -85,7 +98,7 @@ jobs:
           path: |
             backend/gameserver-dotnet/**/test-results.trx
             backend/gameserver-dotnet/**/Sequence_*.xml
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 7
 
   publish:

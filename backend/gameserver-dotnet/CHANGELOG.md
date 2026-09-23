@@ -57,6 +57,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   flaky test in the same session — `Passed: 10, Skipped: 0` — because the contrast is what
   makes it a procedure rather than a warning.
 
+- **CI now fails when a test run selected or executed nothing.** The entry above originally
+  asserted that the CI step already read the `.trx` counters and failed on `total == 0`. It
+  did not: `ci-dotnet.yml` ran `dotnet test`, wrote the `.trx` and uploaded it with
+  `if-no-files-found: warn`, so a run that selected nothing would have gone green and a run
+  that produced no results file at all would have warned. The false sentence was worse than
+  no sentence, because it told a reader the automated side was covered.
+
+  A `Verify test counters` step now parses the `Counters` element of every `.trx`
+  (`.github/scripts/verify-test-counters.py`) and fails on a missing results file, on
+  `total == 0`, and on `executed == 0`; `if-no-files-found` is now `error`. Verified against
+  four fixtures before wiring it in — a healthy run (exit 0, `total=10 executed=10`), an
+  empty selection, an all-skipped run, and a missing file — so the gate is known to produce a
+  non-empty pass as well as the three failures it exists for.
+
 - **The replication ceiling now reserves budget for the network (#413).**
 
   `ReplicationSchedule.MaxIntervalMs` was `ClientInterpolationBudgetMs` — the scheduler was
