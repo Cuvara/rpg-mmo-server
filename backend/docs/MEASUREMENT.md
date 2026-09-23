@@ -79,6 +79,40 @@ not have.
 
 ---
 
+## 2b. A stopped instrument and a quiet one read the same
+
+"The counter stopped moving" is the shape of a fix working **and** the shape of the process
+that writes it having died. Both produce an identical flat line.
+
+This was published as a verification before it was noticed. #401's fix was confirmed by
+sampling `snapshot_bytes` and `snapshot_entities_gathered` twice, 120 seconds apart, at
+`connections: 0`, and finding them byte-identical — which is exactly what a game server with
+a dead tick loop would also have produced. The reading could not distinguish *nothing to
+count* from *nothing counting*.
+
+**Assert a liveness signal in the same window as the flat one.** The complete shape is all
+three together:
+
+```
+current_tick        45968 -> 48671   (+2703 over 45s = 60.1 Hz)   <- alive
+snapshot_bytes      33018915 -> 33018915   (0)                    <- quiet
+entities_gathered    4582843 ->  4582843   (0)                    <- quiet
+connections         0                                             <- and here is why
+```
+
+Two related traps in the same family:
+
+- **Flat is not zero.** After the last client leaves, an accumulated total stays large and
+  legitimately so; the fix means it stops *growing*. Asserting zero fails on a correct
+  server, which is how a correct fix gets reverted.
+- **The mirror-image bug looks identical on an idle server.** #401 was fixed by making the
+  per-tick resets unconditional. Making the *recording* calls conditional instead would also
+  produce a flat counter at rest — while hiding a stopped tick loop under load. Only the
+  liveness signal separates them.
+
+The same reasoning applies to any "it stopped" claim: a queue that drains, a log that goes
+silent, an error rate that falls to zero. Ask what else produces this exact reading.
+
 ## 3. Measure the object you are talking about
 
 Five wrong-object failures happened in one session. All produced internally consistent
