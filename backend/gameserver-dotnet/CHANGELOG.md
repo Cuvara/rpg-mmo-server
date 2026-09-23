@@ -24,6 +24,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (which is deployment configuration and may move) rather than of the feature, and that it was
   already OFF by default everywhere, so nothing shipped regresses.
 
+  Records the startup refusal shipped in #416 as part of the same decision: a test asserting
+  the collapse does not stop a deployment from configuring it, so `tiered` now fails at boot
+  when the rates leave it no usable band. The ADR names the two load-bearing properties of
+  that refusal, both established by a surviving mutation rather than by review - the collapse
+  is computed with the arithmetic the live path uses rather than from declared ms values, and
+  the recommended world rate is checked to be one `SimulationRates` accepts. 20Hz, not 30, is
+  the slowest rate that separates the bands.
+
   Decision 10 is marked superseded in part rather than rewritten, because its reasoning - a
   band slower than the client can interpolate through is a stutter, and the constant belongs
   to the netcode package - is unchanged; only the arithmetic moved.

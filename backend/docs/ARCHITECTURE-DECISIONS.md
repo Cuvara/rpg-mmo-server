@@ -3927,7 +3927,9 @@ Before building it, it was measured. Two numbers decided the shape of this ADR:
     them, so every band clamps to one world tick and the profile collapses into `off`. This
     is forced by the world rate, not by the allowance: keeping two distinct bands under a
     105ms ceiling needs an allowance ≤17ms, i.e. a link under ~10ms of one-way jitter —
-    loopback. At 30Hz the bands separate again (1 and 3 ticks) and the feature is usable.
+    loopback. **20Hz is the slowest world rate that separates them**, and 30Hz separates them
+    more widely (1 and 3 ticks); the re-homed tests use 60/30 for margin, while the startup
+    refusal below computes and recommends the true threshold rather than a round number.
 
     **`tiered` therefore stays in the tree, gated, rather than being removed.** The
     constraint is a property of the world rate, and `SIM_WORLD_HZ` is deployment
@@ -3938,6 +3940,19 @@ Before building it, it was measured. Two numbers decided the shape of this ADR:
     The six deferral tests moved to a 60/30 rate where the mechanics they cover are live, and
     `TieringBuysNothingAtTheShippedWorldRate_AndNeedsAFasterOne` asserts the collapse
     deliberately instead of leaving it to be discovered on a running server.
+
+    **A test asserting the collapse is not the same as a server that refuses it**, so
+    `tiered` now **fails at startup** when the configured rates leave it no usable band —
+    the same shape decision 3 uses for an unimplemented weight. The message names the
+    configured intervals, the rates, the single wait they all resolve to, the ceiling with
+    its derivation, and the world rate that would separate them. Two properties of it are
+    load-bearing and both were established by a surviving mutation rather than by review:
+    the collapse is computed with **the arithmetic the live path uses**, never from the
+    declared millisecond values — `0ms` and `105ms` look distinct while both are served
+    every world tick — and the recommended rate is checked to be one `SimulationRates`
+    will actually accept. An unchecked version recommended `SIM_WORLD_HZ=16`, which does
+    not divide 60, so the gate skipped itself and the collapse check answered false on an
+    empty array: two vacuous trues, and an operator sent to a rate the server then rejects.
 
     **A second defect, found only because a live arm disagreed with a unit test.** The
     ceiling is in **base** ticks and emission is on **world** ticks, so an interval of N base
