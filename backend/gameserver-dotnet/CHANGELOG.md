@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`backend/docs/MEASUREMENT.md` gains section 2b: a stopped instrument and a quiet one read
+  the same.** "The counter stopped moving" is the shape of a fix working *and* of the process
+  that writes it having died.
+
+  Written because it was published as a verification before it was noticed: #401's fix was
+  confirmed by two samples 120s apart at `connections: 0` showing byte-identical totals —
+  which a server with a dead tick loop would have produced identically. The complete shape
+  asserts a liveness signal in the same window (`current_tick` advancing at 60.1 Hz) alongside
+  the flat counters and the zero connection count.
+
+  Also records the two adjacent traps: **flat is not zero** (an accumulated total stays large
+  after the last client leaves, so asserting zero fails on a correct server), and the
+  mirror-image bug — making the *recording* calls conditional instead of the resets — produces
+  the same flat counter at rest while hiding a stopped tick loop under load.
+
 ### Added
 
 - **The player-save failure ratio is now visible on `/status` and in the log.** `/metrics`
