@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **ADR-27 decision 11 — the client's interpolation budget is shared with the network, and
+  at the shipped world rate that leaves `tiered` nothing to buy.**
+
+  Records the decision behind the `MaxIntervalMs = 105` / `LinkSpreadAllowanceMs = 45` change
+  that closed #413. Decision 10 had set the scheduler's ceiling to the client's *entire*
+  cover (150ms), which is only correct on a link that costs nothing; measurement put `tiered`
+  at 148-150ms per-entity p99 **on loopback**, with the link adding 33-41ms at +/-25ms of
+  jitter and 83-87ms at +/-60ms.
+
+  The consequence needed a decision rather than a constant: emission is on world ticks, so at
+  60/15 the only intervals that exist are 66.7ms and 133.3ms, and a 105ms ceiling sits between
+  them - every band clamps to one tick and `tiered` collapses into `off`. The ADR records that
+  `tiered` stays in the tree, gated, because the constraint is a property of `SIM_WORLD_HZ`
+  (which is deployment configuration and may move) rather than of the feature, and that it was
+  already OFF by default everywhere, so nothing shipped regresses.
+
+  Decision 10 is marked superseded in part rather than rewritten, because its reasoning - a
+  band slower than the client can interpolate through is a stutter, and the constant belongs
+  to the netcode package - is unchanged; only the arithmetic moved.
+
+  Also recorded: the base-tick/world-tick quantisation defect found while applying the first
+  fix, where `MaxIntervalMs = 105` changed the constant and not the behaviour and only the
+  live arm disagreed; that this was measured on arrival gaps rather than the client's
+  staleness estimator, which is in its known-bad regime on the development box; and that a
+  real Unity client held `snapshotsApplied` at 14.8/s unchanged with zero resyncs on a 40ms
+  +/-60ms link, so the bound is the scheduler's arithmetic and not client robustness.
+
 ### Added
 
 - **The replication ceiling now reserves budget for the network (#413).**
