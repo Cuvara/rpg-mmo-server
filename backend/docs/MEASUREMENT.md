@@ -229,3 +229,79 @@ Specific to this development box, and each has cost real time:
 
 Ask of every green result: **what would this look like if the thing I am measuring were
 broken?** If the answer is "the same", the measurement is not evidence yet.
+
+---
+
+## 9. Adversity that never happened reads exactly like adversity survived
+
+Added when the first tests of the server under a degraded network landed
+(`GameServer.Tests/Server/NetworkAdversityTests.cs`). Every trap below cost a run.
+
+**A test that degrades a fake transport measures the fake.** The adversity has to sit
+between two real endpoints. `AdversityProxy` is a TCP relay between a real client socket and
+the real server listener: both peers are shipping code and the relay only decides *when* a
+byte already produced by one is handed to the other.
+
+**Assert that the adversity arrived, before asserting what it cost.** Measured at the client
+socket, not asked of the injector — a relay that believes it is blacking out while bytes
+flow anyway reports a blackout and changes nothing. A blackout that did not reach the peer
+produces a green run of a test that tested nothing, which is §1 wearing a new hat.
+
+**A ratio between two arms survives a defect that shortens both.** Deleting `ApplyHeldMovement`
+left the jittered/clean travel ratio at **1.0** while both arms travelled **25%** of what they
+were owed — exactly the one-in-four a 15Hz client sees on a 60Hz group. Only the absolute
+assertion (`control ≈ speed × seconds`) caught it. Every arm comparison here carries an
+absolute bound as well, and the mutation table in the pull request records which of the two
+killed which mutation.
+
+**Do not assert a budget the injector's own constant decides.** The first snapshot-cadence
+test asserted that p99 inter-arrival stayed inside the client's 150ms interpolation cover,
+and failed at 165.3ms on a ±60ms link. At ±60ms one way, arrivals can legitimately be
+66.7 + 120 = 187ms apart whatever the server does: the assertion was a test of the jitter
+constant. What the server owes is that it **adds no spread of its own** on top of the link's,
+plus an absolute bound on the clean arm. The tolerable one-way jitter that follows — about
+**±42ms**, from 150ms of cover against a 66.7ms send period — is a property of the link a
+deployment may run over, and belongs in a document rather than in an assertion.
+
+**Measure across the adversity, inside one arm, when ambient load moves whole runs.** The
+first version of the downstream-stall case compared the stalled run's total distance with a
+clean run's; the two were 0.2% apart in isolation and 5.4% apart under the full suite, on the
+same binary. The replacement samples the player's position the instant the link goes dark and
+again once the buffered burst has drained, so nothing outside the blackout enters the number
+and no second run has to be commensurable with the first.
+
+**Persistence hides entity identity.** A player who reconnects after the hold window expired
+comes back at the position the store saved, which is where a *held* entity would also have
+been. Position therefore cannot distinguish "the entity survived" from "the entity was
+rebuilt", and a test asserting the position passes either way. The discriminator is
+`EntityCount` polled **across** the gap, not read once at the end.
+
+**Reading a keyframe from an undrained socket returns the front of the backlog.** A client
+that sends for 1.5s without reading fills its receive buffer; the first `Full` snapshot
+decoded afterwards is seconds old. One run reported a player at 3.333 whom the server had
+already walked to 7.5, and the 4.25-unit gap looked exactly like an entity being rebuilt at
+the wrong position. Drain concurrently, then resync.
+
+### What a bad network does that loopback still cannot show
+
+- **How much a stall costs depends on how loaded the box is, so it must not be asserted.**
+  Idle, a 4s downstream blackout drops **nothing**: every tick gap stays 4, loopback send
+  buffers absorb the backlog, and `Connection._sendChannel`'s 64-frame drop-the-oldest path is
+  never reached — a mutation shrinking that channel to **4** frames still dropped nothing.
+  The same binary under a full-suite run dropped **18 frames and opened a 12-tick gap**, and
+  travel came out 5.4% short where an isolated run had it 0.2% short. Both readings are true
+  and neither is about the link. This was very nearly written up as "the drop path is
+  unreachable at one player" on the strength of the idle runs alone — the loaded run arrived
+  afterwards and disproved it. An assertion on frame counts here is an assertion about this
+  box's spare capacity; the counts are printed instead, and the class is pinned to a
+  `DisableParallelization` collection so the numbers that *are* asserted mean something.
+- **Reordering and duplication are not modelled.** TCP and KCP both present a reliable
+  ordered stream, so the relay keeps release times non-decreasing. A datagram path would not,
+  and nothing here would notice.
+- **Loss is not modelled as loss.** On a reliable transport a lost packet becomes delay plus
+  head-of-line blocking, which is what these tests inject. The client's tolerance of a
+  genuine *gap* in the snapshot sequence is still only covered by unit tests in the netcode
+  package.
+- **One client, one map, no contention.** Everything here is a single player on an otherwise
+  empty server. Adversity interacting with AOI pressure, the importance scheduler or the
+  downlink budget is untested.
