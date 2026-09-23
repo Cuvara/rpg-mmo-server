@@ -130,12 +130,30 @@ public class ReplicationScheduleTests
         Assert.True(recommended.Success, $"the message gave no rate to raise to: {error}");
         int rate = int.Parse(recommended.Groups[1].Value);
 
+        // It has to be a rate the server can actually run. This is not belt and braces: a
+        // mutation returning `fromWorldHz + 1` unchecked recommended 16Hz, and the weaker
+        // version of this block PASSED on it. 16 does not divide 60, so the collapse gate
+        // skipped itself and BandsCollapseAt answered false on an empty array — two vacuous
+        // trues in a row, and a message sending an operator to a rate SimulationRates would
+        // then reject.
+        Assert.True(60 % rate == 0,
+            $"the message recommends SIM_WORLD_HZ={rate}, which does not divide the 60Hz base " +
+            $"rate; SimulationRates will refuse it and the operator is sent in a circle. {error}");
+
         Assert.True(ReplicationSchedule.TryCreate(
             "tiered", importanceEnabled: true, criticalHz: 60, worldHz: rate,
             out ReplicationSchedule? atRecommended, out string? stillWrong), stillWrong);
         Assert.NotNull(atRecommended);
-        Assert.False(atRecommended!.BandsCollapseAt(60, rate),
-            $"the message recommends SIM_WORLD_HZ={rate}, at which the bands still collapse");
+
+        // Asserted on the effective intervals themselves rather than through
+        // BandsCollapseAt, which returns false both when the bands differ and when there is
+        // nothing to compare.
+        int[] effective = atRecommended!.EffectiveIntervalsMs(60, rate);
+        Assert.True(effective.Length >= 2,
+            $"no bands to compare at the recommended SIM_WORLD_HZ={rate}: [{string.Join(", ", effective)}]");
+        Assert.True(effective.Distinct().Count() > 1,
+            $"the message recommends SIM_WORLD_HZ={rate}, at which every band still resolves " +
+            $"to the same wait: [{string.Join("ms, ", effective)}ms]");
     }
 
     /// <summary>
