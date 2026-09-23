@@ -3888,6 +3888,99 @@ Before building it, it was measured. Two numbers decided the shape of this ADR:
     constant is asserted here rather than assumed — `ScheduleFitsTheClientBudgetTests`. A
     failure there means the two moved apart; reconcile them rather than relaxing the bound.
 
+    **Superseded in part by decision 11 (2026-09-23).** The ceiling is no longer the whole
+    budget: `MaxIntervalMs` is now `ClientInterpolationBudgetMs − LinkSpreadAllowanceMs`
+    = 105, because the paragraph above spends the client's entire cover on the scheduler and
+    leaves the network none. The reasoning here — that a band slower than the client can
+    interpolate through is a stutter, and that the constant belongs to the other repository —
+    stands unchanged; only the arithmetic moved.
+
+
+11. **The client's budget is shared with the network, so the schedule may spend only part of
+    it — and at the shipped world rate that leaves tiering nothing to buy.** Amended
+    2026-09-23, closing #413, which decision 10 created. Decision 10 set
+    `MaxIntervalMs = ClientInterpolationBudgetMs = 150` and thereby asserted that the
+    server may defer an entity for the client's **entire** cover. That is only true on a link
+    that costs nothing. Every millisecond the network adds to the gap between two snapshots
+    carrying one entity comes out of the same 150ms, and the scheduler had already spent all
+    of it.
+
+    Measured per-entity p99, arrival-timed, two runs each, no rate fit (see below on why not):
+
+    | profile | clean | ±25ms | ±60ms | ±100ms |
+    |---|---|---|---|---|
+    | `off` (shipped) | 74–79 | 111–115 | 161–162 | 215 |
+    | `tiered` | **148–150** | 176–178 | 218–223 | — |
+
+    `tiered` reaches **148–150ms on loopback**, against 150ms of cover, before any network at
+    all — the 17ms its 133ms band was meant to leave does not survive tick quantisation. The
+    link's own share is 33–41ms at ±25 and 83–87ms at ±60. Hence
+    `LinkSpreadAllowanceMs = 45` and `MaxIntervalMs = 150 − 45 = 105`.
+
+    **The allowance is a choice about which link this server promises to serve, not a
+    measured constant.** 45ms covers ±25ms of jitter and does not cover ±60ms. The server has
+    no per-connection jitter estimate to adapt it with — ping/pong is 10s and liveness-only —
+    so one conservative constant is the honest form until it has one.
+
+    **The consequence is that `tiered` is inert at 60/15.** Emission is on world ticks, so at
+    a 15Hz world rate the only intervals that exist are 66.7ms and 133.3ms. 105 sits between
+    them, so every band clamps to one world tick and the profile collapses into `off`. This
+    is forced by the world rate, not by the allowance: keeping two distinct bands under a
+    105ms ceiling needs an allowance ≤17ms, i.e. a link under ~10ms of one-way jitter —
+    loopback. **20Hz is the slowest world rate that separates them**, and 30Hz separates them
+    more widely (1 and 3 ticks); the re-homed tests use 60/30 for margin, while the startup
+    refusal below computes and recommends the true threshold rather than a round number.
+
+    **`tiered` therefore stays in the tree, gated, rather than being removed.** The
+    constraint is a property of the world rate, and `SIM_WORLD_HZ` is deployment
+    configuration that may move; a feature that is correct at 30Hz and inert at 15Hz is not a
+    feature to delete, it is one to bound. It was already OFF by default everywhere
+    (decision 8), so nothing shipped regresses. What must not happen is the decision-4 failure
+    repeating: a deployment sets `tiered`, reads a banner listing two bands, and gets one.
+    The six deferral tests moved to a 60/30 rate where the mechanics they cover are live, and
+    `TieringBuysNothingAtTheShippedWorldRate_AndNeedsAFasterOne` asserts the collapse
+    deliberately instead of leaving it to be discovered on a running server.
+
+    **A test asserting the collapse is not the same as a server that refuses it**, so
+    `tiered` now **fails at startup** when the configured rates leave it no usable band —
+    the same shape decision 3 uses for an unimplemented weight. The message names the
+    configured intervals, the rates, the single wait they all resolve to, the ceiling with
+    its derivation, and the world rate that would separate them. Two properties of it are
+    load-bearing and both were established by a surviving mutation rather than by review:
+    the collapse is computed with **the arithmetic the live path uses**, never from the
+    declared millisecond values — `0ms` and `105ms` look distinct while both are served
+    every world tick — and the recommended rate is checked to be one `SimulationRates`
+    will actually accept. An unchecked version recommended `SIM_WORLD_HZ=16`, which does
+    not divide 60, so the gate skipped itself and the collapse check answered false on an
+    empty array: two vacuous trues, and an operator sent to a rate the server then rejects.
+
+    **A second defect, found only because a live arm disagreed with a unit test.** The
+    ceiling is in **base** ticks and emission is on **world** ticks, so an interval of N base
+    ticks is really served on the next world tick at or after N — the true wait is always a
+    whole number of world periods, and a ceiling landing between two of them rounds **up** and
+    buys nothing. Setting `MaxIntervalMs = 105` changed the constant and **not the
+    behaviour**: the unit tests read 105 while the server went on behaving as 133. It was
+    invisible before because 133ms is exactly two periods at 60/15, so at a 150ms ceiling the
+    rounding had nothing to do. `IntervalTicksFor` now takes `WorldEvery` and clamps on the
+    wait an entity actually takes. Mutation N2 — quantisation removed, ceiling left at 105 —
+    was killed by **1 of 9** tests, and that one was the live arm: **a ceiling change
+    validated by unit tests alone ships as a no-op.**
+
+    **This was measured on arrival gaps, not on the client's staleness estimator.** That
+    estimator's two-anchor rate fit is in its known-bad regime on the development box
+    (`skew` 25,448 ppm against `clockRatio` 1.0000 — the starved-frame-loop artefact recorded
+    in `MEASUREMENT.md`), and a staleness reading taken from it here was on the point of being
+    published as evidence for this very decision before the contradiction was noticed. The
+    instrument is the gap between consecutive snapshots **carrying a given entity**, timed at
+    arrival, independent of any fit. Its own guard is that an idle entity's gap runs to
+    2076ms while snapshot cadence p99 stays at 75ms — 27× apart — so a run that has silently
+    fallen back to timing the stream fails instead of agreeing.
+
+    **The client is not the limit here.** A real Unity client on a 40ms one-way link with
+    ±60ms of jitter held `snapshotsApplied` at 14.8/s, unchanged from a clean link, with
+    `resyncs`, `rejected`, `dropped` and `clamped` all 0 and `rtt` 110ms median / 179ms p95.
+    It survives a link far worse than the one tiering needs. The bound is the scheduler's
+    budget arithmetic, not client robustness.
 
 **Consequences.**
 
