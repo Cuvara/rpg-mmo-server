@@ -7,6 +7,40 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Backups of dev and staging backed up nothing, and a restore of the meta database did
+  not work.** Found by the first PostgreSQL restore drill ever run (`docs/DISASTER-RECOVERY.md`,
+  "Failure drill: PostgreSQL restore"):
+  - `db/backup.sh` only knew the compose containers. Dev and staging keep their databases in
+    k3d, and the k8s deploy stops the compose containers, so CD's `Back up databases` skipped
+    both, printed `done` and went green -- the checkpoint that gates migrations covered
+    nothing. Both `backup.sh` and `restore.sh` take `--kube-context`; CD passes it when
+    `vars.DEPLOY_MODE == 'k8s'`; `backup.sh` reports how many databases it dumped and raises
+    a `::warning::` when it is zero.
+  - `restore.sh` staged the archive through `kubectl exec -i`, which truncates uploads at 32
+    KiB multiples (measured 32768 / 98304 / 131072 of 133030 bytes). The meta restore failed
+    with 0 users. k8s mode now uses `kubectl cp`, and every staged copy is md5-checked.
+  - Both scripts verified with `pg_restore --list`, which reads only the table of contents
+    and **accepted an archive truncated to 131072 of 133030 bytes**. They now read every data
+    block (`pg_restore -f /dev/null`); the same archive is rejected and `restore.sh` stops
+    before creating anything.
+
+  After the fixes: meta restored with all 20 tables' exact row counts and a user+wallet
+  checksum identical to live (500 users, 25 wallet-ledger entries); gamestate identical row
+  for row.
+
+### Added
+
+- **An issue opens itself when CD on develop goes red, and closes on recovery.** CD failed on
+  every develop run from 2026-09-13 to 2026-09-24 and nobody noticed: CI stayed green beside
+  it and a red run notifies no one. The new `alert` job in `cd.yml`
+  (`.github/scripts/cd-red-alert.sh`) keeps one `cd-red` issue open while it is red,
+  comments on each further red run, and closes it on the next green one; it also posts to
+  Discord if `DISCORD_WEBHOOK_URL` is set, but needs no secret. Push to develop only.
+  A superseded (cancelled) run says nothing either way; a skipped deploy (an upstream job
+  failed) counts as red. All seven verdict branches exercised against a stubbed `gh`.
+
+### Fixed
+
 - **CD on `develop` was red on every run for eleven days, for four independent reasons.**
   The last green `CD — Build & Deploy` on `develop` was 2026-09-13 05:52 (`14522e9`); every
   run since failed or was cancelled. The dev cluster's `nakama-config` TLS opt-in was created

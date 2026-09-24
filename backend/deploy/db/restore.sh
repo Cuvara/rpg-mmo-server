@@ -23,6 +23,12 @@
 #
 # Environment overrides:
 #   META_CONTAINER / GAME_CONTAINER, POSTGRES_USER/DB, POSTGRES_GAME_USER/DB
+#   BACKUP_KUBE_CONTEXT / BACKUP_KUBE_NAMESPACE   (same as --kube-context; see below)
+#
+#   --kube-context CTX   restore into the IN-CLUSTER StatefulSet (postgres-meta /
+#                        postgres-game in rpg-k8s-data) through `kubectl exec`, instead of
+#                        a compose container. Dev and staging keep their data on k3d; a
+#                        restore that can only reach compose cannot recover them.
 #
 # Exit codes: 0 ok, 1 failure, 2 bad usage.
 #
@@ -37,6 +43,8 @@ TARGET=""
 CONFIRMED=0
 CREATE=0
 JOBS=2
+KUBE_CTX="${BACKUP_KUBE_CONTEXT:-}"
+KUBE_NS="${BACKUP_KUBE_NAMESPACE:-rpg-k8s-data}"
 
 # ---------------------------------------------------------------- arg parsing
 while [ $# -gt 0 ]; do
@@ -55,6 +63,10 @@ while [ $# -gt 0 ]; do
 		;;
 	--jobs)
 		JOBS="${2:?--jobs needs a number}"
+		shift 2
+		;;
+	--kube-context)
+		KUBE_CTX="${2:?--kube-context needs a context name}"
 		shift 2
 		;;
 	--create)
@@ -108,6 +120,13 @@ gamestate)
 	;;
 esac
 
+if [ -n "$KUBE_CTX" ]; then
+	case "$WHICH_DB" in
+	meta) CONTAINER="${META_STATEFULSET:-postgres-meta}" ;;
+	gamestate) CONTAINER="${GAME_STATEFULSET:-postgres-game}" ;;
+	esac
+fi
+
 TARGET="${TARGET:-$LIVE_DB}"
 [ "$TARGET" = "$LIVE_DB" ] || CREATE=1
 
@@ -124,10 +143,62 @@ detect_docker() {
 	return 1
 }
 
-DOCKER="$(detect_docker)" || die "docker not available (tried docker, docker.exe)"
+# db_exec [-i] <target> <command...> -- kubectl exec into a StatefulSet in k8s mode,
+# docker exec into a compose container otherwise. See backup.sh for why both exist.
+db_exec() {
+	local interactive=""
+	if [ "$1" = "-i" ]; then
+		interactive="-i"
+		shift
+	fi
+	local target="$1"
+	shift
+	if [ -n "$KUBE_CTX" ]; then
+		kubectl --context "$KUBE_CTX" -n "$KUBE_NS" exec $interactive "statefulset/$target" -- "$@"
+	else
+		"$DOCKER" exec $interactive "$target" "$@"
+	fi
+}
 
-[ "$("$DOCKER" inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ] ||
-	die "container '$CONTAINER' is not running"
+# db_put <target> <local file> <path inside the target> -- stage a file, VERIFIED.
+#
+# k8s mode uses `kubectl cp`, never `kubectl exec -i ... cat >`. Measured on k3d-rpg-dev:
+# streaming a 133030-byte archive through `kubectl exec -i` stdin arrived as 32768,
+# 98304 and 131072 bytes on three tries -- always a multiple of 32 KiB, never complete --
+# while `kubectl cp` was exact 5/5 and `docker exec -i` was exact 5/5. It is why the
+# first restore drill of the meta database failed with "could not read from input file:
+# end of file" and left 0 users in the scratch copy. A 16 KiB archive fits in one chunk,
+# which is why the game-state drill passed and hid it.
+#
+# Either way the staged copy is compared to the local file by md5 before anything reads
+# it: a transport that can drop bytes silently must not be trusted to have not.
+db_put() {
+	local target="$1" src="$2" dest="$3" want got
+	if [ -n "$KUBE_CTX" ]; then
+		kubectl --context "$KUBE_CTX" -n "$KUBE_NS" cp "$src" "${target}-0:${dest}" -c postgres >/dev/null ||
+			return 1
+	else
+		db_exec -i "$target" sh -c "cat > '$dest'" <"$src" || return 1
+	fi
+	want="$(md5sum <"$src" | cut -c1-32)"
+	got="$(db_exec "$target" md5sum "$dest" 2>/dev/null | cut -c1-32)"
+	if [ "$want" != "$got" ]; then
+		echo "staged copy of $(basename "$src") in $target differs from the local file (md5 $got, want $want)" >&2
+		return 1
+	fi
+}
+
+if [ -n "$KUBE_CTX" ]; then
+	command -v kubectl >/dev/null 2>&1 || die "--kube-context given but kubectl is not on PATH"
+	[ "$(kubectl --context "$KUBE_CTX" -n "$KUBE_NS" get statefulset "$CONTAINER" \
+		-o jsonpath='{.status.readyReplicas}' 2>/dev/null)" = "1" ] ||
+		die "statefulset '$CONTAINER' in $KUBE_NS ($KUBE_CTX) is not ready"
+	log "mode: k8s (context $KUBE_CTX, namespace $KUBE_NS)"
+else
+	DOCKER="$(detect_docker)" || die "docker not available (tried docker, docker.exe)"
+	[ "$("$DOCKER" inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ] ||
+		die "container '$CONTAINER' is not running"
+fi
 
 # ------------------------------------------------------------ safety gate
 if [ "$TARGET" = "$LIVE_DB" ]; then
@@ -143,26 +214,30 @@ fi
 
 # --------------------------------------------------------------- verify input
 log "archive: $FILE ($(du -h "$FILE" | cut -f1))"
-"$DOCKER" exec -i "$CONTAINER" pg_restore --list >/dev/null 2>&1 <"$FILE" ||
-	die "not a readable pg_restore archive: $FILE"
 
 # pg_restore refuses to parallelise when the archive arrives on stdin, so stage
 # the file inside the container and restore from there.
 REMOTE_DUMP="/tmp/rpg-restore-$$.dump"
-cleanup() { "$DOCKER" exec "$CONTAINER" rm -f "$REMOTE_DUMP" >/dev/null 2>&1 || true; }
+cleanup() { db_exec "$CONTAINER" rm -f "$REMOTE_DUMP" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
-# Streamed rather than `docker cp`: the shell does the reading, so this works
-# regardless of whether the docker CLI can resolve the host path (Docker Desktop
-# on WSL cannot see /tmp paths that the Linux side hands it).
+# Staged by db_put: streamed through `docker exec` in compose mode (Docker Desktop on
+# WSL cannot see /tmp paths the Linux side hands `docker cp`), `kubectl cp` in k8s mode,
+# and md5-verified either way. The archive is checked AFTER staging, against the staged
+# copy -- checking the local file and then trusting the transport is what let a
+# truncated upload through.
 log "staging archive into $CONTAINER:$REMOTE_DUMP"
-"$DOCKER" exec -i "$CONTAINER" sh -c "cat > '$REMOTE_DUMP'" <"$FILE" ||
-	die "could not stage the archive inside '$CONTAINER'"
+db_put "$CONTAINER" "$FILE" "$REMOTE_DUMP" ||
+	die "could not stage the archive inside '$CONTAINER' intact"
+
+# The whole archive, not its head: `--list` reads only the table of contents.
+db_exec "$CONTAINER" pg_restore -f /dev/null "$REMOTE_DUMP" >/dev/null 2>&1 ||
+	die "not a complete, readable pg_restore archive: $FILE"
 
 # ------------------------------------------------------------ create target
 psql_admin() {
 	# Connect to the maintenance DB so the target can be created/dropped.
-	"$DOCKER" exec -i "$CONTAINER" psql -U "$PGUSER_NAME" -d postgres -tAc "$1"
+	db_exec -i "$CONTAINER" psql -U "$PGUSER_NAME" -d postgres -tAc "$1"
 }
 
 if [ "$CREATE" -eq 1 ]; then
@@ -180,7 +255,7 @@ log "restoring into '$TARGET' (jobs=$JOBS)"
 
 # --clean --if-exists so a repeat restore is deterministic rather than colliding
 # with objects left by the previous attempt. --exit-on-error to fail loudly.
-if ! "$DOCKER" exec "$CONTAINER" pg_restore \
+if ! db_exec "$CONTAINER" pg_restore \
 	-U "$PGUSER_NAME" -d "$TARGET" \
 	--clean --if-exists --no-owner --no-privileges \
 	--jobs "$JOBS" --exit-on-error "$REMOTE_DUMP"; then
@@ -189,7 +264,7 @@ fi
 
 # ---------------------------------------------------------------- verify out
 log "restore complete; table row counts in '$TARGET':"
-"$DOCKER" exec -i "$CONTAINER" psql -U "$PGUSER_NAME" -d "$TARGET" -c "
+db_exec -i "$CONTAINER" psql -U "$PGUSER_NAME" -d "$TARGET" -c "
     SELECT relname AS table, n_live_tup AS approx_rows
     FROM pg_stat_user_tables
     ORDER BY n_live_tup DESC, relname

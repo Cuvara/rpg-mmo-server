@@ -88,6 +88,14 @@ any flow content sits on: an Android client joins the same way a Windows one doe
 not assumed — and an autoscaler changes how many servers exist, not what a server does.
 **Every C item is closed.**
 
+**RESOLVED 2026-09-13 (`9f7bae8`), demonstrated 2026-09-24.** The paragraph below is kept
+as it was written. A dungeon instance now releases itself when nobody joins within
+`GAMESERVER_JOIN_DEADLINE_SECONDS` (default 90 s) of being Allocated. On `k3d-rpg-dev` an
+allocation nobody used went `Allocated` 06:38:29 → `Shutdown: Pod is in Succeeded state`
+06:40:08, and the fleet replaced it. This paragraph outlived the fix by eleven days and an
+issue (#424) was filed from it — which is why a status line belongs next to the gap it
+closes.
+
 **One known gap, found by running it rather than by reading it.** A dungeon pod that is
 allocated and then never joined never shuts itself down -- decision 6 requires
 `everHadPlayer`, which is what stops a fresh pod dying at boot, and Agones never reclaims an

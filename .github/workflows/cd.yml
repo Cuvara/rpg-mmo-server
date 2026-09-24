@@ -435,10 +435,17 @@ jobs:
           META_CONTAINER: ${{ vars.COMPOSE_NAME_PREFIX || 'rpg' }}-postgres
           GAME_CONTAINER: ${{ vars.COMPOSE_NAME_PREFIX || 'rpg' }}-postgres-game
           REDIS_CONTAINER: ${{ vars.COMPOSE_NAME_PREFIX || 'rpg' }}-redis
+          # k8s environments keep their databases in the cluster, not in compose. Without
+          # this the dump targeted the compose containers -- which the k8s deploy STOPS --
+          # skipped both, printed "done" and passed: dev and staging were backed up by
+          # nothing on every deploy, the exact wrong-target-green-result shape the comment
+          # above describes. Same context resolution as the k8s deploy step.
+          BACKUP_KUBE_CONTEXT: ${{ vars.DEPLOY_MODE == 'k8s' && (vars.KUBE_CONTEXT || 'k3d-rpg-dev') || '' }}
         run: |
           set -euo pipefail
-          # --skip-missing: on a first-ever deploy the postgres containers do not
-          # exist yet, and "nothing to back up" must not block the first deploy.
+          # --skip-missing: on a first-ever deploy the databases do not exist yet, and
+          # "nothing to back up" must not block the first deploy. backup.sh now says so
+          # loudly (a ::warning:: annotation) when it skipped everything.
           bash backend/deploy/db/backup.sh --skip-missing
           # Redis is a system of record too (server registry + event stream, see
           # ADR-4), so it gets the same pre-deploy checkpoint. Same --skip-missing
@@ -1595,6 +1602,37 @@ jobs:
           "$RPG_DEPLOY_DIR/bin/smoketest"
 
   # ----------------------------------------------------------------- summary
+  # Keeps one issue open while CD on develop is red and closes it on recovery. CD failed
+  # on every develop run from 2026-09-13 to 2026-09-24 without anyone noticing -- CI was
+  # green beside it, and a red run notifies nobody -- and those eleven days hid a gameplay
+  # defect behind the deploy failures. Push to develop only: a dispatch is a deliberate
+  # experiment, and staging/production have their own owners. Posts to Discord too when
+  # DISCORD_WEBHOOK_URL is set; the issue alone needs no secret.
+  alert:
+    name: Alert on red CD (develop)
+    needs: [resolve, deploy, post-deploy-smoke]
+    if: always() && github.event_name == 'push' && github.ref_name == 'develop'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+      - name: Open, update or close the cd-red issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          SMOKE_RESULT: ${{ needs['post-deploy-smoke'].result }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: bash .github/scripts/cd-red-alert.sh
+
   summary:
     name: Pipeline summary
     needs: [resolve, deploy, post-deploy-smoke]
