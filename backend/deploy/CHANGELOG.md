@@ -44,6 +44,25 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
      runner, and the PostgreSQL dump it gates is deliberately fatal. Retried in `backup.sh`,
      `redis-backup.sh` and `redis-restore.sh`.
 
+- **Every re-deploy briefly ran five-week-old game servers, and one split the world.**
+  `dev-up.sh` applied the raw manifests, which name the moving `:develop` image, and pinned
+  the real image afterwards. `:develop` is hand-retagged and lags the branch: in the dev node
+  it was `307f1e8`, 2026-08-17, older than dungeon-mode registration (ADR-26). The dungeon
+  manifest's `replicas: 0` exists to stop exactly this, but only works on a **first** deploy
+  -- once the fleet and its Buffer autoscaler exist, the autoscaler holds the floor and Agones
+  rolled real pods onto `:develop` before the pin. A five-week-old dungeon pod registers
+  `map_01` like a map server, and its registry entry outlives the pod until its heartbeat
+  expires. CD caught it once: the smoke test was routed to `dungeon-servers-...-7vh8n` on
+  `map_01`, its join died with EOF, and the entry expired three seconds later -- a previous
+  run had passed only by timing. The gateway manifest had the same shape.
+
+  `apply` is now image-neutral: each manifest is rendered with the image the cluster is
+  already running (the pinned one on a first deploy), and refused if the line to pin is
+  missing or a moving image survives. The existing drain-and-pin logic still owns every
+  image change. Checked on the live cluster: `kubectl diff` of the raw dungeon manifest shows
+  the image going `42e484a -> :develop`; the rendered one shows no image change at all, and a
+  server-side dry run accepts all three objects.
+
 - **`cluster.restarts` failed forever on a completed init container.** The classifier read
   every container that is not `running` as a crash loop, "at any age". An init container is
   *supposed* to end `terminated` with exit 0, so any pod whose init container had restarted

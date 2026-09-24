@@ -405,6 +405,40 @@ fi
 # including a no-op one.
 pre_gs=$($K get fleet "$K8S_FLEET" -n rpg-k8s-realtime \
   -o jsonpath='{.spec.template.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+pre_dungeon=$($K get fleet "$K8S_FLEET_DUNGEON" -n rpg-k8s-realtime \
+  -o jsonpath='{.spec.template.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+pre_gw=$($K get deploy gateway -n rpg-k8s-realtime \
+  -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+
+# Render a manifest with its moving `:develop` image replaced by the image the cluster
+# is ALREADY running (or the pinned one, on a first deploy), so `apply` is image-neutral.
+#
+# Applying the raw manifests wrote `:develop` into the LIVE objects on every re-deploy,
+# and `:develop` is a hand-retagged image that lags the branch -- in the node it was
+# 307f1e8, 2026-08-17, five weeks old and older than dungeon-mode registration. The
+# dungeon manifest's `replicas: 0` only guards a FIRST deploy: once the fleet and its
+# Buffer autoscaler exist, the autoscaler holds the floor, so Agones rolled real pods
+# onto that image before the pin below. A five-week-old dungeon pod registers map_01
+# like a map server, and its registry entry outlives the pod until the heartbeat
+# expires -- a split world during every deploy. CD caught it once: the smoke test was
+# routed to dungeon-servers-...-7vh8n on map_01 and its join died with EOF, three
+# seconds before that entry expired. The gateway had the same shape.
+#
+# The pin logic below is unchanged and still owns every image CHANGE; this only stops
+# `apply` from making one of its own.
+render_image() {  # render_image <manifest> <moving-image> <image-to-use>
+  local out
+  out=$(sed "s|image: $2\$|image: $3|" "$1")
+  if ! grep -q "image: $3\$" <<<"$out"; then
+    echo "ERROR: $1 has no 'image: $2' line to pin; refusing to apply it unpinned." >&2
+    return 1
+  fi
+  if [ "$2" != "$3" ] && grep -q "image: $2\$" <<<"$out"; then
+    echo "ERROR: $1 still names $2 after pinning; refusing to apply a second moving image." >&2
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
 
 say "apply the app tier (rpg-k8s-realtime)"
 # The Secret is NOT in the repo. It must already exist, or be applied from a
@@ -663,7 +697,12 @@ else
   echo "checked: the meta hop is plaintext (no TLS paths in nakama-config) -- ADR-24's default"
 fi
 
-$K apply -f "$HERE/app/40-gateway.yaml" -f "$HERE/app/50-fleet-map.yaml" -f "$HERE/app/60-fleet-dungeon.yaml"
+render_image "$HERE/app/40-gateway.yaml" "rpg-mmo/gateway:develop" "${pre_gw:-$GATEWAY_IMAGE}" \
+  | $K apply -f -
+render_image "$HERE/app/50-fleet-map.yaml" "rpg-mmo/gameserver-dotnet:develop" "${pre_gs:-$GAMESERVER_IMAGE}" \
+  | $K apply -f -
+render_image "$HERE/app/60-fleet-dungeon.yaml" "rpg-mmo/gameserver-dotnet:develop" "${pre_dungeon:-$GAMESERVER_IMAGE}" \
+  | $K apply -f -
 
 # Pin the resolved images over whatever the manifests carry. The Fleet is
 # scaled to 0 across the image change on purpose: every replica registers the
