@@ -191,7 +191,12 @@ because there is no PvP content to exercise it.
   listed here from a stale document. Demonstrated on 2026-09-24: allocated at 06:38:29, the
   pod exited cleanly (`Succeeded`) at 06:40:08 and the fleet replaced it.
 
-Plus two owner decisions (gateway-hop and meta-hop TLS, both written and off by default).
+**TLS on both client hops — decided 2026-09-24:** self-signed, **pinned** by every client
+of the hop, one pair per environment. ON for dev and staging, and staging's own CD proves it
+end to end (pinned TLS gateway, pinned https Nakama, sealed gameplay). Pinned because there
+is no domain for a CA-issued certificate; the cost (ADR-23 option B) is that rotating a
+pinned certificate is a client release. Production follows when it has a host (#425), and
+that is the moment to reconsider a CA.
 
 ---
 
