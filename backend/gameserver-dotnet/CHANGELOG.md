@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two wall-clock tests flaked on a loaded CI runner** (#426).
+  `SnapshotPipelineTests.StalledClient_CoalescesToNewest_AndLosesNoState` slept a fixed 500 ms
+  for the send loop to drain and then asserted convergence; on a starved runner the drain took
+  longer and the merge was compared against a snapshot still in flight. It now polls (up to
+  10 s) until the merged client view converges on the server's truth, then runs the original
+  asserts unchanged. `SlowClientMovementTests` measures send cadence against the wall clock and
+  ran in parallel with CPU-heavy classes (bursty case measured 1.67 vs the expected 6.00 under
+  load); it now sits in a new non-parallel `wall-clock` collection (`WallClockCollection`).
+  Measured on 2 cores with 6 pinned busy-loops: the stalled-client test failed 5 of 20 before and passed 20 of 20 after.
+
 ### Added
 
 - **`backend/docs/CORE-BASELINE-V1.md` — what gameplay may build on.**

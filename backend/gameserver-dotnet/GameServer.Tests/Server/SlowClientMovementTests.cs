@@ -33,7 +33,13 @@ namespace GameServer.Tests.Server;
 /// <para>These are wall-clock tests — the server runs its own tick loop, the test sends on
 /// a timer — so the tolerance is wide enough to absorb a tick or two of scheduling jitter
 /// and no wider. The distinction it has to make is 4x.</para>
+///
+/// <para><b>Run alone</b> (<see cref="WallClockCollection"/>). With the rest of the suite
+/// running beside it on a 2-core CI runner, the bursty case measured 1.67 units against 6.00
+/// expected on a PR that could not have touched it, and passed on a re-run of the same commit
+/// (#426). The tolerance is meant to absorb scheduling jitter, not a starved tick loop.</para>
 /// </summary>
+[Collection(WallClockCollection.Name)]
 public class SlowClientMovementTests
 {
     private const string JwtSecret = "slow-client-secret-32-bytes-aaaaa";
